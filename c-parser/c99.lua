@@ -309,17 +309,20 @@ storageClassSpecifier <- { "typedef"  } _
                        / { "register" } _
 
 typeSpecifier <- typedefName
-               / { "void"     } _
-               / { "char"     } _
-               / { "short"    } _
-               / { "int"      } _
-               / { "long"     } _
-               / { "float"    } _
-               / { "double"   } _
-               / { "signed"   } _
-               / { "unsigned" } _
-               / { "_Bool"    } _
-               / { "_Complex" } _
+               / { "void"        } _
+               / { "char"        } _
+               / { "short"       } _
+               / { "int"         } _
+               / { "long"        } _
+               / { "float"       } _
+               / { "double"      } _
+               / { "signed"      } _
+               / { "unsigned"    } _
+               / { "_Bool"       } _
+               / { "_Complex"    } _
+               / { "__int128_t"  } _
+               / { "__uint128_t" } _
+               / { "__int128"    } _
                / structOrUnionSpecifier
                / enumSpecifier
 

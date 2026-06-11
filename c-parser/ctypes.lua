@@ -283,6 +283,9 @@ local base_types = {
     ["volatile"] = true,
     ["_Bool"] = true,
     ["_Complex"] = true,
+    ["__int128"] = true,
+    ["__int128_t"] = true,
+    ["__uint128_t"] = true,
     ["*"] = true,
 }
 
