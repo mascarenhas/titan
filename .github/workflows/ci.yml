@@ -41,6 +41,10 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-lua-
 
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libreadline-dev
+
       - name: Install hererocks and set up Lua 5.5
         run: |
           if [ ! -f lua_install/bin/luarocks ]; then
