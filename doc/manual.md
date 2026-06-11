@@ -403,6 +403,11 @@ Casts from `float` to `integer` fail if it is not an integral value, and if
 this value is outside the allowable range for integers. Casts from `value`
 fail if the value does not have the target type, or cannot be converted to it.
 
+Conversions from numbers to `string` (including the implicit conversion done
+by the `..` concatenation operator) follow the same format as Lua's
+`tostring`: in particular, a `float` with an integral value converts with a
+`.0` suffix (`3.0` becomes `"3.0"`, not `"3"`).
+
 ## The Complete Syntax of Titan
 
 Here is the complete syntax of Titan in extended BNF. As usual in extended BNF, {A} means 0 or more As, and \[A\] means an optional A.

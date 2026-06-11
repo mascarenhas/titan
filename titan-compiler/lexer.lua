@@ -116,8 +116,14 @@ do
         (P("\"") / "\"") +
         (linebreak / "\n") +
         C(decimal_escape) / tonumber / string.char +
-        (P("u") * (P("{") * C(R("09", "af", "AF")^0) * P("}") * Cc(16) + T("MalformedEscape_u")))
-             / tonumber / utf8.char +
+        (P("u") * (P("{") * Cmt(C(R("09", "af", "AF")^1) * P("}"),
+            -- the 5.5 host's utf8.char accepts codepoints beyond Unicode
+            -- (up to 0x7FFFFFFF), so enforce the real Unicode range here
+            function(_, pos, digits)
+                local n = tonumber(digits, 16)
+                if n > 0x10FFFF then return false end
+                return pos, utf8.char(n)
+            end) + T("MalformedEscape_u"))) +
         (P("x") * (C(R("09", "af", "AF") * R("09", "af", "AF")) * Cc(16) + T("MalformedEscape_x"))) / tonumber / string.char +
         (P("z") * lpeg.space^0) +
         T("InvalidEscape")

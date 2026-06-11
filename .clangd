@@ -1,0 +1,45 @@
+# .clangd configuration file
+
+# 1. Lua sources
+If:
+  PathMatch: ".*lua-5\\.5\\.0/src/.*"
+CompileFlags:
+  Add:
+    - "-std=gnu99"
+    - "-O2"
+    - "-Wall"
+    - "-Wextra"
+    - "-DLUA_USE_LINUX"
+    - "-fPIC"
+
+---
+# 2. Titan Runtime files
+If:
+  PathMatch: ".*titan-runtime/.*"
+CompileFlags:
+  Add:
+    - "-I"
+    - "titan-runtime"
+    - "-I"
+    - "../lua-5.5.0/src"
+    - "--std=c99"
+    - "-O2"
+    - "-Wall"
+    - "-fPIC"
+
+---
+# 3. Default rule for all other files (e.g. Titan-generated modules at the workspace root)
+If:
+  PathExclude:
+    - ".*lua-5\\.5\\.0/src/.*"
+    - ".*titan-runtime/.*"
+CompileFlags:
+  Add:
+    - "-I"
+    - "titan-runtime"
+    - "-I"
+    - "lua-5.5.0/src"
+    - "--std=c99"
+    - "-O2"
+    - "-Wall"
+    - "-fPIC"

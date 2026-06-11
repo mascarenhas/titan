@@ -25,38 +25,46 @@
 
 #define TITAN_LUAINTEGER_NBITS cast_int(sizeof(lua_Integer) * CHAR_BIT)
 
-#define titan_pushmodule(L, c) setclCvalue(L, L->top++, c)
+#define titan_pushmodule(L, c) { setclCvalue(L, s2v(L->top.p), (c)); L->top.p++; }
+
+/*
+** Lua 5.5 removed setbvalue (booleans carry no payload; truth lives in
+** the tag). This sets a boolean TValue from a C int.
+*/
+#define titan_setbvalue(obj,x) \
+    do { if (x) { setbtvalue(obj); } else { setbfvalue(obj); } } while (0)
 
 /*
 ** Macro to convert pointer-to-void* to pointer-to-function. This cast
 ** is undefined according to ISO C, but POSIX assumes that it works.
 ** (The '__extension__' in gnu compilers is only to avoid warnings.)
+** Named titan_cast_func because Lua 5.5's llimits.h defines its own
+** single-argument cast_func.
 */
 #if defined(__GNUC__)
-#define cast_func(t,p) (__extension__ (t)(p))
+#define titan_cast_func(t,p) (__extension__ (t)(p))
 #else
-#define cast_func(t,p) ((t)(p))
+#define titan_cast_func(t,p) ((t)(p))
 #endif
 
-#define MAXNUMBER2STR 50
-
 inline static TString* _integer2str (lua_State *L, lua_Integer i) {
+    char _cvtbuff[LUA_N2SBUFFSZ];
     size_t len;
-    static char _cvtbuff[MAXNUMBER2STR];
-    len = lua_integer2str(_cvtbuff, sizeof(_cvtbuff), i);
+    len = (size_t)lua_integer2str(_cvtbuff, sizeof(_cvtbuff), i);
     return luaS_newlstr(L, _cvtbuff, len);
 }
 
 inline static TString* _float2str (lua_State *L, lua_Number f) {
-    size_t len;
-    static char _cvtbuff[MAXNUMBER2STR];
-    len = lua_number2str(_cvtbuff, sizeof(_cvtbuff), f);
+    char _cvtbuff[LUA_N2SBUFFSZ];
+    TValue _v;
+    unsigned len;
+    setfltvalue(&_v, f);
+    len = luaO_tostringbuff(&_v, _cvtbuff);
     return luaS_newlstr(L, _cvtbuff, len);
 }
 
 LUAI_FUNC void *loadlib (lua_State *L, const char *file);
 LUAI_FUNC void *loadsym (lua_State *L, void *lib, const char *sym);
-LUAI_FUNC const TValue *getgeneric (Table *t, const TValue *key);
 
 int errorhandler(lua_State *L);
 

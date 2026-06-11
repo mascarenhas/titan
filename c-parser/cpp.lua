@@ -199,7 +199,9 @@ cpp.initial_processing = typed("FILE* -> LineList", function(fd)
     local state = "any"
     local output = {}
     local linenr = 0
-    for line in fd:lines() do
+    for input_line in fd:lines() do
+        -- for-loop control variables are read-only in Lua 5.5
+        local line = input_line
         linenr = linenr + 1
         local len = #line
         if line:find("\\", len, true) then

@@ -51,7 +51,7 @@ local function generate_modules(modules, main, forapp)
 end
 
 local function call(modname, code)
-    local cmd = string.format("lua-5.3.5/src/lua -l %s -e \"print(pcall(function () %s end))\"",
+    local cmd = string.format("lua-5.5.0/src/lua -l %s -e \"print(pcall(function () %s end))\"",
         modname, code)
     local f = io.popen(cmd)
     local out = f:read()
@@ -142,6 +142,47 @@ describe("Titan code generator", function()
         assert.truthy(ok, err)
         local ok, err = call("titan_test", "arr={1,2,3};titan_test.delete(arr,3);assert(#arr==2)")
         assert.truthy(ok, err)
+    end)
+
+    it("handles array indices beyond the unsigned int range", function()
+        local code = [[
+            function setget(xs: {integer}, i: integer, v: integer): integer
+                xs[i] = v
+                return xs[i]
+            end
+        ]]
+        local ast, err = parse(code)
+        assert.truthy(ast, err)
+        local ok, err = checker.check("test", ast, code, "test.titan")
+        assert.equal(0, #err, table.concat(err, "\n"))
+        local ok, err = compile("titan_test", ast)
+        assert.truthy(ok, err)
+        -- (i - 1) truncated to 32 bits lands inside the array part, so a
+        -- narrow index computation in the write path clobbers arr[1]/arr[2]
+        local ok, err = call("titan_test", [[
+            local arr = {10, 20, 30}
+            local i = (1 << 32) + 1
+            assert(titan_test.setget(arr, i, 99) == 99)
+            assert(arr[1] == 10)
+            assert(arr[i] == 99)
+            local j = -((1 << 32) - 2)
+            assert(titan_test.setget(arr, j, 55) == 55)
+            assert(arr[2] == 20)
+            assert(arr[j] == 55)
+        ]])
+        assert.truthy(ok, err)
+    end)
+
+    it("formats integral floats with a .0 suffix like Lua", function()
+        run_coder([[
+            function fmt(x: float): string
+                return "" .. x
+            end
+        ]], [[
+            assert(test.fmt(3.0) == '3.0')
+            assert(test.fmt(2.5) == '2.5')
+            assert(test.fmt(3.0) == tostring(3.0))
+        ]])
     end)
 
     it("tests nil element", function()

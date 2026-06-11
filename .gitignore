@@ -2,7 +2,5 @@
 *.a
 *.so
 
-# lua
-lua/src/lua
-lua/src/luac
-lua-5.3.5
+# lua source trees (downloaded from lua.org)
+/lua-5.*/

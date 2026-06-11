@@ -8,14 +8,13 @@ Titan is a statically-typed, ahead-of-time-compiled sister language to Lua. This
 
 ## Prerequisites (important — the suite cannot run without these)
 
-- **Lua 5.3 specifically.** Under Lua 5.4+ `c-parser/cpp.lua` fails to even load (it assigns to a for-loop control variable), which takes down `checker.lua`, `driver.lua`, `titanc`, and the checker/coder specs. CI (`.travis.yml`) uses hererocks to build a Lua 5.3 + LuaRocks environment.
-- **A built Lua 5.3.5 source tree at `./lua-5.3.5`** (gitignored). Generated C includes Lua *internal* headers (`lobject.h`, `lgc.h`, `lvm.h`, ...) and links `lua-5.3.5/src/liblua.a`:
+- **Lua 5.5.** Both the compiler's own Lua code and the generated C target Lua 5.5 (rockspec: `lua ~> 5.5`). CI (`.github/workflows/ci.yml`) uses hererocks (installed from git master — the PyPI release does not know Lua 5.5) to build a Lua 5.5 + LuaRocks environment.
+- **A built Lua 5.5.0 source tree at `./lua-5.5.0`** (gitignored). Generated C includes Lua *internal* headers (`lobject.h`, `lgc.h`, `lvm.h`, ...) and links `lua-5.5.0/src/liblua.a`:
   ```
-  wget http://www.lua.org/ftp/lua-5.3.5.tar.gz && tar zxvf lua-5.3.5.tar.gz
-  cd lua-5.3.5 && make linux MYCFLAGS=-fPIC    # 'make macosx' on Darwin
+  wget http://www.lua.org/ftp/lua-5.5.0.tar.gz && tar zxvf lua-5.5.0.tar.gz
+  cd lua-5.5.0 && make linux MYCFLAGS=-fPIC    # 'make macosx' on Darwin
   ```
-  (README's `cd lua; make linux` is stale; the path used by the driver and CI is `lua-5.3.5/`. README's `titan-scm-1.rockspec` is also stale — the rockspec is `titan-dev-1.rockspec`.)
-- **Lua deps**: `luarocks make titan-dev-1.rockspec` installs lpeglabel, inspect, argparse, luafilesystem. Tests need `luarocks install busted`.
+- **Lua deps**: `luarocks make titan-dev-1.rockspec` installs lpeglabel, inspect, argparse, luafilesystem, plus the `titan` runtime-support module (`titan.backtrace()`) that one coder spec requires. Tests need `luarocks install busted`.
 - **C toolchain**: `cc` for compilation; the C FFI also shells out to `gcc -dM -E` and `cpp -v` at compile time (POSIX only).
 
 ## Commands
@@ -25,11 +24,18 @@ busted                                              # full test suite — MUST r
 busted spec/parser_spec.lua                         # single spec file
 busted spec/coder_spec.lua --filter='for loop'      # single test (Lua pattern on test name)
 busted -c -o gtest -v spec/                         # what CI runs (with luacov coverage)
+LUA_CPATH="./?.so;$HOME/.luarocks/lib/lua/5.5/?.so;;" busted   # if the 'titan' rock lives in a local rocks tree
 
 ./titanc [--print-ast] [-v] [--lua <luasrc>] [--tree <srcroot>] [-l lib1,lib2] <module>...
 ```
 
-`titanc` takes dot-separated **module names**, not file paths (dots map to directory separators under `--tree`, default `.`). Compiled-module lookup uses `TITAN_PATH_0_5`/`TITAN_PATH` (default `.;/usr/local/lib/titan/0.5`). `-v` prints the exact `cc` command lines. Without the `lua-5.3.5` build, only the pure specs pass (lexer, location, parser, symtab, types, util); `checker_spec` and `coder_spec` need the full setup.
+`titanc` takes dot-separated **module names**, not file paths (dots map to directory separators under `--tree`, default `.`). Compiled-module lookup uses `TITAN_PATH_0_5`/`TITAN_PATH` (default `.;/usr/local/lib/titan/0.5`). `-v` prints the exact `cc` command lines. Without the `lua-5.5.0` build, only the pure specs pass (lexer, location, parser, symtab, types, util); `checker_spec` and `coder_spec` need the full setup.
+
+**Gotcha — the installed rock shadows the working tree under busted.** The busted launcher prepends the rocks tree to `package.path` and uses `luarocks.loader`, so once `luarocks make` has installed the `titan` rock, `require "titan-compiler.X"` inside specs resolves to the *installed snapshot*, not your edited files — edits silently don't take effect. Re-run `luarocks make --local titan-dev-1.rockspec` after changing compiler sources, before running busted. (CI does the same: `luarocks make` then `busted`.)
+
+### Lua 5.5 internals conventions in generated C
+
+The coder targets Lua 5.5 internals; keep these idioms when touching templates: stack fields are unions (`L->top.p`, `L->ci->func.p`, `StkId` + `s2v()` to view a slot as `TValue*`); the table array part has no `TValue` slots (read via `luaH_fastgeti`/`luaH_getint` into a local `TValue` holder testing `tagisempty(tag)`, write via `obj2arr`/`luaH_setint`/`luaH_set` — `luaO_nilobject` and `luaH_newkey` no longer exist); booleans carry no payload (`ttistrue`, `titan_setbvalue` from titan.h); `ttypetag()`/`LUA_V*` are the variant tags (old `ttnov` is now `ttype`); records store their backing `CClosure` in the Udata's user value (`uv[0].uv`, created with `luaS_newudata(L, sz, 1)`). Stores of collectable values into `CClosure` upvalues need `luaC_barrier`, table stores need `luaC_barrierback(L, obj2gco(t), v)` — the generational GC makes missing barriers near-deterministic corruption, not a rare race.
 
 ## Architecture
 
@@ -70,7 +76,7 @@ Lexing and parsing are fused in one LPegLabel/relabel grammar; `lexer.lua` expor
 
 ## Test suite notes
 
-- `coder_spec.lua` is end-to-end: it generates C, compiles with the real `cc`, and runs the result under `lua-5.3.5/src/lua` via `io.popen`. Artifacts (`test.c`, `test.so`, `./test`, `*.o`) land in the repo root; `after_each` cleans them. Its `setup()` deletes `titan-runtime/titan.o` to force a runtime rebuild. Flip `local verbose = false` at the top to see `cc` command lines and keep generated `.c` files.
+- `coder_spec.lua` is end-to-end: it generates C, compiles with the real `cc`, and runs the result under `lua-5.5.0/src/lua` via `io.popen`. Artifacts (`test.c`, `test.so`, `./test`, `*.o`) land in the repo root; `after_each` cleans them. Its `setup()` deletes `titan-runtime/titan.o` to force a runtime rebuild. Flip `local verbose = false` at the top to see `cc` command lines and keep generated `.c` files.
 - Test helpers that touch the checker/coder must reset shared state first: `types.registry = {}` (and `driver.imported = {}` where imports are involved) — see `run_checker`/`run_coder`.
 - Parser/checker specs compare ASTs with a subset assertion (`restrict` + `assert_is_subset`): only fields present in the expected table are compared, so adding new AST decorations doesn't break existing tests. Follow this pattern.
 - `TableFormatLevel` (luassert's table-printing depth) is global across spec files, and post-checker ASTs are self-referential — printing one in a failure diff at unlimited depth hangs busted. `parser_spec.lua` raises the depth in `setup()` and restores it in `teardown()`, but a stray `assert:set_parameter("TableFormatLevel", -1)` in its describe body (runs at collection time) partially defeats this. If a full-suite run hangs while printing a failing diff, that line is the suspect.

@@ -1,5 +1,5 @@
 # Titan
-[![Build Status](https://travis-ci.org/titan-lang/titan.svg?branch=master)](https://travis-ci.org/titan-lang/titan)
+[![CI](https://github.com/mascarenhas/titan/actions/workflows/ci.yml/badge.svg)](https://github.com/mascarenhas/titan/actions/workflows/ci.yml)
 [![Coverage Status](https://codecov.io/gh/titan-lang/titan/coverage.svg?branch=master)](https://codecov.io/gh/titan-lang/titan/branch/master)
 
 Titan is a new programming language, designed to be a statically-typed,
@@ -8,15 +8,16 @@ application programming language with a focus on performance.
 
 # Install
 
-First you need to download, extract and build the [sources to Lua 5.3.5](http://www.lua.org/ftp/lua-5.3.5.tar.gz)
+First you need to download, extract and build the [sources to Lua 5.5.0](http://www.lua.org/ftp/lua-5.5.0.tar.gz)
 inside the folder where you cloned this repository. The Lua tarball will extract
-to a `lua-5.3.5` folder. Enter it and build Lua with `make linux MYCFLAGS=-fPIC`.
+to a `lua-5.5.0` folder. Enter it and build Lua with `make linux MYCFLAGS=-fPIC`.
 
 You can install the Titan compiler itself using  [LuaRocks](http://luarocks.org)
-this will also install all dependencies automatically.
+this will also install all dependencies automatically. The compiler itself
+runs on Lua 5.5.
 
         $ [install luarocks]
-        $ luarocks make titan-scm-1.rockspec
+        $ luarocks make titan-dev-1.rockspec
 To install without `sudo` permissions.
 
         $ [cd into titan folder]
@@ -63,20 +64,31 @@ The test suite es written using Busted, which can be installed using LuaRocks:
 
         $ luarocks install busted
 
-Then, you need to bulid the local copy of Lua, and run `busted` from the root directory
+Then, you need to build the local copy of Lua, and run `busted` from the root directory
 of this repository:
 
-        $ cd lua
-        $ make linux
+        $ cd lua-5.5.0
+        $ make linux MYCFLAGS=-fPIC
         $ cd ..
         $ busted
 
 You may need to adapt the invocation of `make` above to your platform.
 
+A few tests need the `titan` runtime support module (for `titan.backtrace()`),
+which `luarocks make` installs; make sure the in-tree `lua-5.5.0/src/lua`
+interpreter can find it by including your rocks tree in `LUA_CPATH`, e.g.:
+
+        $ LUA_CPATH="./?.so;$HOME/.luarocks/lib/lua/5.5/?.so;;" busted
+
+Note that once the `titan` rock is installed, busted loads the compiler
+modules from the *installed* rock, not from your checkout — re-run
+`luarocks make` after changing compiler sources so the tests see your
+changes.
+
 # Compiler options
 
         --print-ast                     Print the AST.
-        --lua <path>                    Path to the Lua sources (default 'lua-5.3.5/src')
+        --lua <path>                    Path to the Lua sources (default 'lua-5.5.0/src')
         --tree <path>                   Path to the source tree for your Titan modules (default '.')
         -h, --help                      Show this help message and exit.
         

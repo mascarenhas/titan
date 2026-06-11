@@ -44,8 +44,9 @@ function pretty.reindent_c(input)
     local out = {}
     local indent = 0
     local previous_is_blank = true
-    for line in input:gmatch("([^\n]*)") do
-        line = line:match("^[ \t]*(.-)[ \t]*$")
+    for raw_line in input:gmatch("([^\n]*)") do
+        -- for-loop control variables are read-only in Lua 5.5
+        local line = raw_line:match("^[ \t]*(.-)[ \t]*$")
 
         local is_blank = (#line == 0)
         local do_print =

@@ -61,7 +61,7 @@ local function getslot(typ --[[:table]], dst --[[:string?]], src --[[:string]])
     local tmpl
     if typ._tag == "Type.Integer" then tmpl = "$DST ivalue($SRC)"
     elseif typ._tag == "Type.Float" then tmpl = "$DST fltvalue($SRC)"
-    elseif typ._tag == "Type.Boolean" then tmpl = "$DST bvalue($SRC)"
+    elseif typ._tag == "Type.Boolean" then tmpl = "$DST ttistrue($SRC)"
     elseif typ._tag == "Type.Nil" then tmpl = "$DST 0"
     elseif typ._tag == "Type.String" then tmpl = "$DST tsvalue($SRC)"
     elseif typ._tag == "Type.Array" then tmpl = "$DST hvalue($SRC)"
@@ -195,7 +195,7 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
             LINE = c_integer_literal(loc.line),
             COL = c_integer_literal(loc.col),
             THROWFLOAT = codethrow(ctx, "%s:%d:%d: type error, number '%f' has no integer representation", { "$FILE", "$LINE", "$COL", "_v" }),
-            THROWINTEGER = codethrow(ctx, "%s:%d:%d: type error, expected integer but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttnov($EXP))" })
+            THROWINTEGER = codethrow(ctx, "%s:%d:%d: type error, expected integer but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($EXP))" })
         })
     elseif typ._tag == "Type.Float" then
         return render([[
@@ -212,7 +212,7 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
             FILE = c_string_literal(loc.filename),
             LINE = c_integer_literal(loc.line),
             COL = c_integer_literal(loc.col),
-            THROW = codethrow(ctx, "%s:%d:%d: type error, expected float but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttnov($EXP))" })
+            THROW = codethrow(ctx, "%s:%d:%d: type error, expected float but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($EXP))" })
         })
     elseif typ._tag == "Type.Boolean" then
         return render([[
@@ -254,11 +254,11 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
               Udata* _ud = uvalue($EXP);
               void *_tag = *((void**)(getudatamem(_ud)));
               if (TITAN_LIKELY($TAG == _tag)) {
-                $VAR = gco2ccl(_ud->user_.gc);
+                $VAR = clCvalue(&_ud->uv[0].uv);
               } else {
                 lua_pushlightuserdata(L, _tag);
                 if(lua_rawget(L, LUA_REGISTRYINDEX) == LUA_TNIL) {
-                    setuvalue(L, L->top, _ud);
+                    setuvalue(L, s2v(L->top.p), _ud);
                     $THROWNIL
                 } else {
                     $THROWUD
@@ -277,7 +277,7 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
             NAME = types.tostring(typ),
             THROWNIL = codethrow(ctx, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "luaL_tolstring(L, -1, NULL)" }),
             THROWUD = codethrow(ctx, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "lua_tostring(L, -1)" }),
-            THROWPRIM = codethrow(ctx, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "lua_typename(L, ttnov($EXP))" })
+            THROWPRIM = codethrow(ctx, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "lua_typename(L, ttype($EXP))" })
         })
     else
         error("invalid type " .. types.tostring(typ))
@@ -296,7 +296,7 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
         FILE = c_string_literal(loc.filename),
         LINE = c_integer_literal(loc.line),
         COL = c_integer_literal(loc.col),
-        THROW = codethrow(ctx, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", "$TAG", "lua_typename(L, ttnov($EXP))" })
+        THROW = codethrow(ctx, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", "$TAG", "lua_typename(L, ttype($EXP))" })
     })
 end
 
@@ -311,7 +311,7 @@ function checkandset(ctx, typ --[[:table]], dst --[[:string]], src --[[:string]]
                 setfltvalue($DST, ((lua_Number)ivalue($SRC)));
             } else {
                 $THROW
-                luaL_error(L, "%s:%d:%d: type error, expected float but found %s", $FILE, $LINE, $COL, lua_typename(L, ttnov($SRC)));
+                luaL_error(L, "%s:%d:%d: type error, expected float but found %s", $FILE, $LINE, $COL, lua_typename(L, ttype($SRC)));
             }
         ]], {
             SRC = src,
@@ -319,7 +319,7 @@ function checkandset(ctx, typ --[[:table]], dst --[[:string]], src --[[:string]]
             FILE = c_string_literal(loc.filename),
             LINE = c_integer_literal(loc.line),
             COL = c_integer_literal(loc.col),
-            THROW = codethrow(ctx, "%s:%d:%d: type error, expected float but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttnov($SRC))" })
+            THROW = codethrow(ctx, "%s:%d:%d: type error, expected float but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($SRC))" })
         })
     elseif typ._tag == "Type.Boolean" then tag = "boolean"
     elseif typ._tag == "Type.Nil" then tag = "nil"
@@ -373,7 +373,7 @@ function checkandset(ctx, typ --[[:table]], dst --[[:string]], src --[[:string]]
         FILE = c_string_literal(loc.filename),
         LINE = c_integer_literal(loc.line),
         COL = c_integer_literal(loc.col),
-        THROW = codethrow(ctx, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", "$TAG", "lua_typename(L, ttnov($SRC))" })
+        THROW = codethrow(ctx, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", "$TAG", "lua_typename(L, ttype($SRC))" })
     })
 end
 
@@ -381,7 +381,7 @@ local function setslot(typ --[[:table]], dst --[[:string]], src --[[:string]])
     local tmpl
     if typ._tag == "Type.Integer" then tmpl = "setivalue($DST, $SRC);"
     elseif typ._tag == "Type.Float" then tmpl = "setfltvalue($DST, $SRC);"
-    elseif typ._tag == "Type.Boolean" then tmpl = "setbvalue($DST, $SRC);"
+    elseif typ._tag == "Type.Boolean" then tmpl = "titan_setbvalue($DST, $SRC);"
     elseif typ._tag == "Type.Nil" then tmpl = "setnilvalue($DST); ((void)$SRC);"
     elseif typ._tag == "Type.String" then tmpl = "setsvalue(L, $DST, $SRC);"
     elseif typ._tag == "Type.Array" then tmpl = "sethvalue(L, $DST, $SRC);"
@@ -541,7 +541,7 @@ local function newslot(ctx --[[:table]], name --[[:string]])
     ctx.allocations = ctx.allocations + 1
     if ctx.depth > ctx.nslots then ctx.nslots = ctx.depth end
     return render([[
-        TValue *$NAME = _base + $SDEPTH;
+        TValue *$NAME = s2v(_base + $SDEPTH);
     ]], {
         NAME = name,
         SDEPTH = c_integer_literal(sdepth),
@@ -803,42 +803,60 @@ local function codefor(ctx, node)
     })
 end
 
-local function get_table_key(keytype, t, k, slot, newkey)
+-- Reads the entry for key $K (a boxed TValue*) of table $T into a local
+-- TValue holder and points $SLOT at it. Lua 5.5's luaH_get* functions
+-- copy the value out and return its tag (leaving the holder untouched
+-- when the key is absent), so the holder is set to nil on a miss.
+local function get_table_key(keytype, t, k, slot)
     local tgetkey
     if keytype._tag == "Type.String" then
         tgetkey = [[
-            if (ttype($K) == LUA_TSHRSTR) {
-                $SLOT = (TValue *) luaH_getshortstr($T, tsvalue($K));
+            TValue ${SLOT}_v;
+            lu_byte ${SLOT}_tag;
+            if (ttypetag($K) == LUA_VSHRSTR) {
+                ${SLOT}_tag = luaH_getshortstr($T, tsvalue($K), &${SLOT}_v);
             } else {
-                $SLOT = (TValue *) getgeneric($T, $K);
+                ${SLOT}_tag = luaH_get($T, $K, &${SLOT}_v);
             }
+            if (tagisempty(${SLOT}_tag)) {
+                setnilvalue(&${SLOT}_v);
+            }
+            $SLOT = &${SLOT}_v;
         ]]
     elseif keytype._tag == "Type.Integer" then
         tgetkey = [[
-            $SLOT = (TValue *) luaH_getint($T, ivalue($K));
+            TValue ${SLOT}_v;
+            lu_byte ${SLOT}_tag = luaH_getint($T, ivalue($K), &${SLOT}_v);
+            if (tagisempty(${SLOT}_tag)) {
+                setnilvalue(&${SLOT}_v);
+            }
+            $SLOT = &${SLOT}_v;
         ]]
     elseif keytype._tag == "Type.Float" then
         tgetkey = [[
+            TValue ${SLOT}_v;
+            lu_byte ${SLOT}_tag;
             {
                 lua_Integer _ik;
-                if (luaV_tointeger($K, &_ik, 0)) {
-                    $SLOT = (TValue *) luaH_getint($T, _ik);
+                if (luaV_tointeger($K, &_ik, F2Ieq)) {
+                    ${SLOT}_tag = luaH_getint($T, _ik, &${SLOT}_v);
                 } else {
-                    $SLOT = (TValue *) getgeneric($T, $K);
+                    ${SLOT}_tag = luaH_get($T, $K, &${SLOT}_v);
                 }
             }
+            if (tagisempty(${SLOT}_tag)) {
+                setnilvalue(&${SLOT}_v);
+            }
+            $SLOT = &${SLOT}_v;
         ]]
     else
         tgetkey = [[
-            $SLOT = (TValue *) getgeneric($T, $K);
-        ]]
-    end
-    if newkey then
-        tgetkey = tgetkey .. [[
-            if ($SLOT == luaO_nilobject) {
-                /* create new entry if no previous one */
-                $SLOT = luaH_newkey(L, $T, $K);
+            TValue ${SLOT}_v;
+            lu_byte ${SLOT}_tag = luaH_get($T, $K, &${SLOT}_v);
+            if (tagisempty(${SLOT}_tag)) {
+                setnilvalue(&${SLOT}_v);
             }
+            $SLOT = &${SLOT}_v;
         ]]
     end
     return render(tgetkey, {
@@ -848,22 +866,62 @@ local function get_table_key(keytype, t, k, slot, newkey)
     })
 end
 
+-- Stores the TValue $V into table $T at key $K (a boxed TValue*).
+-- Lua 5.5 removed the "get a writable slot" API (luaH_newkey is gone);
+-- raw stores go through luaH_set/luaH_setint, which take the value.
+-- The GC barrier for the stored value is the caller's responsibility;
+-- new keys are barriered internally by the insertion code.
+local function set_table_entry(keytype, t, k, v)
+    local tsetkey
+    if keytype._tag == "Type.Integer" then
+        tsetkey = [[
+            luaH_setint(L, $T, ivalue($K), $V);
+        ]]
+    elseif keytype._tag == "Type.Float" then
+        tsetkey = [[
+            {
+                lua_Integer _ik;
+                if (luaV_tointeger($K, &_ik, F2Ieq)) {
+                    luaH_setint(L, $T, _ik, $V);
+                } else {
+                    luaH_set(L, $T, $K, $V);
+                }
+            }
+        ]]
+    else
+        tsetkey = [[
+            luaH_set(L, $T, $K, $V);
+            invalidateTMcache($T);
+        ]]
+    end
+    return render(tsetkey, {
+        T = t,
+        K = k,
+        V = v,
+    })
+end
+
 local function codeassignment(ctx, var, cexp, etype)
     local vtag = var._tag
     if vtag == "Ast.VarName" or (vtag == "Ast.VarDot" and var._decl) then
         if vtag == "Ast.VarDot" and var._decl._tag == "Type.Field" then
             local lstats, lexp = codeexp(ctx, var.exp)
             local index = var._decl.index
-            local slot = render([[&(($RECORD)->upvalue[$INDEX])]], {
-                RECORD = lexp,
-                INDEX = index
-            })
             return render([[
                 $STATS
-                $SETSLOT
+                {
+                    CClosure *_recobj = $RECORD;
+                    TValue *_fieldslot = &(_recobj->upvalue[$INDEX]);
+                    $SETSLOT
+                    $BARRIER
+                }
             ]], {
                 STATS = lstats,
-                SETSLOT = setslot(var._type, slot, cexp)
+                RECORD = lexp,
+                INDEX = index,
+                SETSLOT = setslot(var._type, "_fieldslot", cexp),
+                BARRIER = types.is_gc(var._type)
+                          and "luaC_barrier(L, _recobj, _fieldslot);" or ""
             })
         elseif vtag == "Ast.VarDot" then -- module variable
             assert(var._decl._tag == "Type.ModuleVariable")
@@ -877,14 +935,21 @@ local function codeassignment(ctx, var, cexp, etype)
                     CClosure *_imod = clCvalue(&_mod->upvalue[$MODINDEX]);
                     TValue *_varslot = &_imod->upvalue[$VARINDEX];
                     $SETSLOT;
+                    $BARRIER
                 }
             ]], {
                 SETSLOT = setslot(var._type, "_varslot", cexp),
+                BARRIER = types.is_gc(var._type)
+                          and "luaC_barrier(L, _imod, _varslot);" or "",
                 MODINDEX = c_integer_literal(var.exp.var._decl._upvalue),
                 VARINDEX = c_integer_literal(var._decl._upvalue)
             })
         elseif var._decl._tag == "Ast.TopLevelVar" then
-            return setslot(var._type, var._decl._slot, cexp)
+            local cset = setslot(var._type, var._decl._slot, cexp)
+            if types.is_gc(var._type) then
+                cset = cset .. "\nluaC_barrier(L, _mod, " .. var._decl._slot .. ");"
+            end
+            return cset
         elseif var._decl._used and cexp ~= var._decl._cvar then
             local cset = ""
             if types.is_gc(var._type) then
@@ -912,72 +977,40 @@ local function codeassignment(ctx, var, cexp, etype)
             local idx = var.exp2
             local castats, caexp = codeexp(ctx, arr)
             local cistats, ciexp = codeexp(ctx, idx)
-            local cset
-            if types.is_gc(arr._type.elem) then
-                -- write barrier
-                cset = render([[
-                    TValue _vv;
-                    $SETSLOT
-                    setobj2t(L, _slot, &_vv);
-                    luaC_barrierback(L, _t, &_vv);
-                ]], {
-                    SETSLOT = setwrapped(etype, "&_vv", cexp)
-                })
-            else
-                cset = setslot(etype, "_slot", cexp)
-            end
             return render([[
                 {
                     $CASTATS
                     $CISTATS
                     Table *_t = $CAEXP;
                     lua_Integer _k = $CIEXP;
-                    unsigned int _actual_i = l_castS2U(_k) - 1;
-                    unsigned int _asize = _t->sizearray;
-                    TValue *_slot;
+                    TValue _vv;
+                    $SETVV
+                    lua_Unsigned _actual_i = l_castS2U(_k) - 1u;
+                    unsigned int _asize = _t->asize;
                     if (_actual_i < _asize) {
-                        _slot = &_t->array[_actual_i];
-                    } else if (_actual_i < 2*_asize) {
-                        unsigned int _hsize = sizenode(_t);
-                        luaH_resize(L, _t, 2*_asize, _hsize);
-                        _slot = &_t->array[_actual_i];
+                        obj2arr(_t, cast_uint(_actual_i), &_vv);
+                    } else if (_asize <= (UINT_MAX/2) && _actual_i < 2*(lua_Unsigned)_asize) {
+                        luaH_resizearray(L, _t, cast_uint(2*(lua_Unsigned)_asize));
+                        obj2arr(_t, cast_uint(_actual_i), &_vv);
                     } else {
-                        _slot = (TValue *)luaH_getint(_t, _k);
-                        TValue _vk; setivalue(&_vk, _k);
-                        if (_slot == luaO_nilobject) {
-                            /* create new entry if no previous one */
-                            _slot = luaH_newkey(L, _t, &_vk);
-                        }
+                        luaH_setint(L, _t, _k, &_vv);
                     }
-                    $CSET
+                    $BARRIER
                 }
             ]], {
                 CASTATS = castats,
                 CISTATS = cistats,
                 CAEXP = caexp,
                 CIEXP = ciexp,
-                CSET = cset
+                SETVV = setwrapped(etype, "&_vv", cexp),
+                BARRIER = types.is_gc(arr._type.elem)
+                          and "luaC_barrierback(L, obj2gco(_t), &_vv);" or ""
             })
         elseif exp1type == "Type.Map" then
             local map = var.exp1
             local key = var.exp2
             local cmstats, cmexp = codeexp(ctx, map)
             local ckstats, ckexp = codeexp(ctx, key)
-            local cset
-            if types.is_gc(map._type.values) then
-                -- write barrier
-                cset = render([[
-                    TValue _vv;
-                    $SETSLOT
-                    setobj2t(L, _slot, &_vv);
-                    luaC_barrierback(L, _t, &_vv);
-                ]], {
-                    SETSLOT = setwrapped(etype, "&_vv", cexp)
-                })
-            else
-                cset = setslot(etype, "_slot", cexp)
-            end
-
             local ctmpk, tmpkname, tmpkslot = newtmp(ctx, key._type, true)
 
             return render([[
@@ -989,9 +1022,10 @@ local function codeassignment(ctx, var, cexp, etype)
                     $TMPKNAME = $CKEXP;
                     $SETSLOTK
 
-                    TValue *_slot;
-                    $CTABLEKEY
-                    $CSET
+                    TValue _vv;
+                    $SETVV
+                    $STORE
+                    $BARRIER
                 }
             ]], {
                 CMSTATS = cmstats,
@@ -1001,8 +1035,10 @@ local function codeassignment(ctx, var, cexp, etype)
                 TMPKNAME = tmpkname,
                 CKEXP = ckexp,
                 SETSLOTK = setwrapped(key._type, tmpkslot, tmpkname),
-                CTABLEKEY = get_table_key(key._type, "_t", tmpkslot, "_slot", true),
-                CSET = cset,
+                SETVV = setwrapped(etype, "&_vv", cexp),
+                STORE = set_table_entry(key._type, "_t", tmpkslot, "&_vv"),
+                BARRIER = types.is_gc(map._type.values)
+                          and "luaC_barrierback(L, obj2gco(_t), &_vv);" or ""
             })
         end
     else
@@ -1269,7 +1305,7 @@ local function codereturn(ctx, node)
     if ctx.nslots > 0 then
         tmpl = [[
             $CSTATS
-            L->top = _base;
+            L->top.p = _base;
             return $CEXP;
         ]]
     else
@@ -1428,10 +1464,12 @@ local function codearray(ctx, node, target)
     local cinit, ctmp, tmpname, tmpslot
     if target and target._cvar then
         ctmp, tmpname, tmpslot = "", target._cvar, target._slot
-    elseif target and target._slot then
-        ctmp, tmpname = newtmp(ctx, node._type, false)
-        tmpslot = target._slot
     else
+        -- always build the array anchored in a stack slot; a target slot
+        -- such as a module-global upvalue is not scanned by minor
+        -- collections, so the fresh table could be swept while a callee
+        -- in the fill loop triggers the GC (caller stores + barriers
+        -- after we return)
         ctmp, tmpname, tmpslot = newtmp(ctx, node._type, true)
     end
     cinit = render([[
@@ -1477,7 +1515,7 @@ local function codearray(ctx, node, target)
     end
     for i, slot in ipairs(slots) do
         table.insert(stats, render([[
-            setobj2t(L, &$TMPNAME->array[$INDEX], $SLOT);
+            obj2arr($TMPNAME, $INDEX, $SLOT);
         ]], {
             TMPNAME = tmpname,
             INDEX = i-1,
@@ -1485,7 +1523,7 @@ local function codearray(ctx, node, target)
         }))
         if types.is_gc(node._type.elem) then
             table.insert(stats, render([[
-                luaC_barrierback(L, $TMPNAME, $SLOT);
+                luaC_barrierback(L, obj2gco($TMPNAME), $SLOT);
             ]], {
                 TMPNAME = tmpname,
                 SLOT = slot,
@@ -1500,10 +1538,8 @@ local function codemap(ctx, node, target)
     local cinit, ctmp, tmpname, tmpslot
     if target and target._cvar then
         ctmp, tmpname, tmpslot = "", target._cvar, target._slot
-    elseif target and target._slot then
-        ctmp, tmpname = newtmp(ctx, node._type, false)
-        tmpslot = target._slot
     else
+        -- always build the map anchored in a stack slot (see codearray)
         ctmp, tmpname, tmpslot = newtmp(ctx, node._type, true)
     end
     cinit = render([[
@@ -1556,25 +1592,14 @@ local function codemap(ctx, node, target)
     for _, slot in ipairs(slots) do
         table.insert(stats, render([[
             {
-                TValue *_slot;
-                $CTABLEKEY
-                setobj2t(L, _slot, $SLOT);
+                $STORE
             }
         ]], {
-            CTABLEKEY = get_table_key(node._type.keys, tmpname, slot.k, "_slot", true),
-            SLOT = slot.v,
+            STORE = set_table_entry(node._type.keys, tmpname, slot.k, slot.v),
         }))
-        if types.is_gc(node._type.keys) then
-            table.insert(stats, render([[
-                luaC_barrierback(L, $TMPNAME, $SLOTK);
-            ]], {
-                TMPNAME = tmpname,
-                SLOTK = slot.k,
-            }))
-        end
         if types.is_gc(node._type.values) then
             table.insert(stats, render([[
-                luaC_barrierback(L, $TMPNAME, $SLOTV);
+                luaC_barrierback(L, obj2gco($TMPNAME), $SLOTV);
             ]], {
                 TMPNAME = tmpname,
                 SLOTV = slot.v,
@@ -1597,15 +1622,17 @@ local function coderecord(ctx, node, target)
         $CTMP
         $TMPNAME = luaF_newCclosure(L, $NFIELDS);
         memset($TMPNAME->upvalue, 0, sizeof(TValue) * $NFIELDS);
+        setclCvalue(L, $TMPSLOT, $TMPNAME);
         {
-            Udata* _ud = luaS_newudata(L, sizeof(void*));
+            Udata* _ud = luaS_newudata(L, sizeof(void*), 1);
             *((void**)(getudatamem(_ud))) = (void*)$TAG;
             _ud->metatable = hvalue(&_mod->upvalue[$META]);
-            _ud->user_.gc = (GCObject*)$TMPNAME;
-            _ud->ttuv_ = ctb(LUA_TCCL);
+            setclCvalue(L, &_ud->uv[0].uv, $TMPNAME);
             setuvalue(L, &($TMPNAME->upvalue[0]), _ud);
+            /* an emergency GC inside luaS_newudata can blacken the
+               closure, so this store needs a forward barrier */
+            luaC_barrier(L, $TMPNAME, &($TMPNAME->upvalue[0]));
         }
-        setclCvalue(L, $TMPSLOT, $TMPNAME);
     ]], {
         CTMP = ctmp,
         TMPNAME = tmpname,
@@ -1657,7 +1684,7 @@ local function codeunaryop(ctx, node, iscondition)
     elseif op == "#" then
         local estats, ecode = codeexp(ctx, node.exp)
         if node.exp._type._tag == "Type.Array" then
-            return estats, "luaH_getn(" .. ecode .. ")"
+            return estats, "luaH_getn(L, " .. ecode .. ")"
         else
             return estats, "tsslen(" .. ecode .. ")"
         end
@@ -1993,14 +2020,13 @@ local function codeindexarray(ctx, node)
             Table *_t = $CAEXP;
             lua_Integer _k = $CIEXP;
 
-            unsigned int _actual_i = l_castS2U(_k) - 1;
-
-            const TValue *_s;
-            if (_actual_i < _t->sizearray) {
-                _s = &_t->array[_actual_i];
-            } else {
-                _s = luaH_getint(_t, _k);
+            TValue _av;
+            lu_byte _atag;
+            luaH_fastgeti(_t, _k, &_av, _atag);
+            if (tagisempty(_atag)) {
+                setnilvalue(&_av);
             }
+            const TValue *_s = &_av;
 
             $CFINISH
     }]], {
@@ -2070,7 +2096,7 @@ local function codeindexmap(ctx, node)
         TMPKNAME = tmpkname,
         CKEXP = ckexp,
         SETSLOTK = setwrapped(ktyp, tmpkslot, tmpkname),
-        CTABLEKEY = get_table_key(ktyp, "_t", tmpkslot, "_s", false),
+        CTABLEKEY = get_table_key(ktyp, "_t", tmpkslot, "_s"),
         CFINISH = cfinish
     })
     return stats, tmpname
@@ -2378,7 +2404,7 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
     end
     for i, param in ipairs(params) do
         local pname = "_param_" .. tostring(i)
-        local slot = "(func+ " .. i .. ")"
+        local slot = "s2v(func + " .. i .. ")"
         table.insert(pnames, pname)
         table.insert(stats, ctype(param) .. " " .. pname .. " = " .. initval(param) .. ";")
         table.insert(stats, checkandget(tlcontext, param, pname, slot, loc))
@@ -2399,8 +2425,8 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
     end
     table.insert(stats, render([[
         lua_checkstack(L, $NRET);
-        TValue *_firstret = L->top;
-        L->top += $NRET;
+        StkId _firstret = L->top.p;
+        L->top.p += $NRET;
         $TYPE res = $NAME($PARAMS);
         $SETSLOT;
         _firstret++;
@@ -2408,7 +2434,7 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
         TYPE = ctype(rettype),
         NAME = titan_entry,
         PARAMS = table.concat(pnames, ", "),
-        SETSLOT = setwrapped(rettype, "_firstret", "res"),
+        SETSLOT = setwrapped(rettype, "s2v(_firstret)", "res"),
         NRET = #typ.rettypes
     }))
     for i = 2, #typ.rettypes do
@@ -2416,7 +2442,7 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
             $SETSLOT;
             _firstret++;
         ]], {
-            SETSLOT = setwrapped(typ.rettypes[i], "_firstret", "_outparam_" .. i)
+            SETSLOT = setwrapped(typ.rettypes[i], "s2v(_firstret)", "_outparam_" .. i)
         }))
     end
     table.insert(stats, render([[
@@ -2427,15 +2453,15 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
     }))
     return render([[
     static int $LUANAME(lua_State *L) {
-        TValue *func = L->ci->func;
-        if((L->top - func - 1) != $EXPECTED) {
-            luaL_error(L, "calling Titan function %s with %d arguments, but expected %d", $NAME, L->top - func - 1, $EXPECTED);
+        StkId func = L->ci->func.p;
+        if((L->top.p - func - 1) != $EXPECTED) {
+            luaL_error(L, "calling Titan function %s with %d arguments, but expected %d", $NAME, (int)(L->top.p - func - 1), $EXPECTED);
         }
         $ERRORSLOT
-        int __save_errfunc = L->errfunc;
+        ptrdiff_t __save_errfunc = L->errfunc;
         lua_pushcclosure(L, errorhandler, 0);
-        L->errfunc = savestack(L, L->top-1);
-        CClosure *_mod = clCvalue(&clCvalue(func)->upvalue[0]);
+        L->errfunc = savestack(L, L->top.p - 1);
+        CClosure *_mod = clCvalue(&clCvalue(s2v(func))->upvalue[0]);
         $BODY
     }]], {
         LUANAME = lua_name,
@@ -2500,15 +2526,15 @@ local function codefuncdec(tlcontext, node)
         table.insert(stats, 1, render([[
         luaC_checkGC(L);
         /* function preamble: reserve needed stack space */
-        if (L->stack_last - L->top > $NSLOTS) {
-            if (L->ci->top < L->top + $NSLOTS) L->ci->top = L->top + $NSLOTS;
+        if (L->stack_last.p - L->top.p > $NSLOTS) {
+            if (L->ci->top.p < L->top.p + $NSLOTS) L->ci->top.p = L->top.p + $NSLOTS;
         } else {
             lua_checkstack(L, $NSLOTS);
         }
-        TValue *_base = L->top;
-        L->top += $NSLOTS;
-        for(TValue *_s = L->top - 1; _base <= _s; _s--) {
-            setnilvalue(_s);
+        StkId _base = L->top.p;
+        L->top.p += $NSLOTS;
+        for(StkId _s = L->top.p - 1; _base <= _s; _s--) {
+            setnilvalue(s2v(_s));
         }
         ]], {
             NSLOTS = c_integer_literal(nslots),
@@ -2518,7 +2544,7 @@ local function codefuncdec(tlcontext, node)
     if rettype._tag == "Type.Nil" then
         if nslots > 0 then
             table.insert(stats, [[
-            L->top = _base;
+            L->top.p = _base;
             return 0;]])
         else
             table.insert(stats, "        return 0;")
@@ -2554,12 +2580,15 @@ local function codevardec(ctx, initvars, switch_get, switch_set, gvar_map, node)
         {
             $CTYPE _var = $CEXP;
             $SETSLOT
+            $BARRIER
         }
     ]], {
         CSTATS = cstats,
         CEXP = cexp,
         CTYPE = ctype(node._type),
         SETSLOT = setslot(node._type, node._slot, "_var"),
+        BARRIER = types.is_gc(node._type)
+                  and "luaC_barrier(L, _mod, " .. node._slot .. ");" or ""
     }))
     if not node.islocal then
         table.insert(gvar_map, render([[
@@ -2576,16 +2605,19 @@ local function codevardec(ctx, initvars, switch_get, switch_set, gvar_map, node)
             }
         ]], {
             I = c_integer_literal(node._upvalue),
-            COPYSLOT = copyslotwrapped(node._type, "L->top-1", node._slot)
+            COPYSLOT = copyslotwrapped(node._type, "s2v(L->top.p - 1)", node._slot)
         }))
         table.insert(switch_set, render([[
             case $I: {
                 $SETSLOT;
+                $BARRIER
                 break;
             }
         ]], {
             I = c_integer_literal(node._upvalue),
-            SETSLOT = checkandset(ctx, node._type, node._slot, "_value", node.loc)
+            SETSLOT = checkandset(ctx, node._type, node._slot, "_value", node.loc),
+            BARRIER = types.is_gc(node._type)
+                      and "luaC_barrier(L, _mod, " .. node._slot .. ");" or ""
         }))
     end
 end
@@ -2599,6 +2631,7 @@ local preamble = [[
 #include "lauxlib.h"
 #include "lgc.h"
 #include "ltable.h"
+#include "ltm.h"
 #include "lfunc.h"
 #include "lstring.h"
 #include "lvm.h"
@@ -2623,7 +2656,8 @@ $SIGS
 local postamble = [[
 int $LUAOPEN_NAME(lua_State *L) {
     CClosure *mod = $INITNAME(L);
-    setobj2s(L, L->top++, &mod->upvalue[0]);
+    setobj2s(L, L->top.p, &mod->upvalue[0]);
+    L->top.p++;
     return 1;
 }
 ]]
@@ -2649,14 +2683,15 @@ CClosure *$INITNAME(lua_State *L) {
         $INITRECORDS
         $INITVARS
         lua_newtable(L);
-        setobj2t(L, &_mod->upvalue[0], L->top-1);
+        setobj2t(L, &_mod->upvalue[0], s2v(L->top.p - 1));
+        luaC_barrier(L, _mod, &_mod->upvalue[0]);
         $FUNCS
         lua_pop(L, 1);
         $CREATEMETA
         $INITTAGS
         return _mod;
     } else {
-        CClosure *_mod = clCvalue(L->top-1);
+        CClosure *_mod = clCvalue(s2v(L->top.p - 1));
         lua_pop(L, 1);
         if(!_initialized) {
             _initialized = 1;
@@ -2690,7 +2725,7 @@ local function import_module(loadmods, initmods, sigs, mprefixes, dynamic, node)
         ]], { HANDLE = mprefix .. "handle", FILE = file }))
         table.insert(initmods, render([[
             {
-                CClosure* (*$INIT)(lua_State *L) = cast_func(CClosure* (*)(lua_State*), loadsym(L, $HANDLE, "$INIT"));
+                CClosure* (*$INIT)(lua_State *L) = titan_cast_func(CClosure* (*)(lua_State*), loadsym(L, $HANDLE, "$INIT"));
                 CClosure *_m = $INIT(L);
                 setclCvalue(L, &_mod->upvalue[$INDEX], _m);
             }
@@ -2738,7 +2773,7 @@ local function init_data_from_other_modules(tlcontext, includes, loadmods, initm
                 ]], { HANDLE = mprefix .. "handle", FILE = file }))
             end
             table.insert(loadmods, render([[
-                $NAME = cast_func($TYPE, loadsym(L, $HANDLE, "$NAME"));
+                $NAME = titan_cast_func($TYPE, loadsym(L, $HANDLE, "$NAME"));
             ]], { NAME = fname, TYPE = function_sig("", func.type, true), HANDLE = mprefix .. "handle" }))
         end
     end
@@ -2758,7 +2793,7 @@ local function init_data_from_other_modules(tlcontext, includes, loadmods, initm
     for fqtn, upvalue in pairs(tlcontext.metatables) do
         table.insert(initmetas, render([[
             luaL_getmetatable(L, "Titan record $TYPE metatable");
-            setobj2t(L, &_mod->upvalue[$INDEX], L->top-1);
+            setobj2t(L, &_mod->upvalue[$INDEX], s2v(L->top.p - 1));
             lua_pop(L, 1);
         ]], {
             INDEX = c_integer_literal(upvalue),
@@ -2769,7 +2804,7 @@ local function init_data_from_other_modules(tlcontext, includes, loadmods, initm
     for module, upvalue in pairs(tlcontext.modules) do
         table.insert(initmetas, render([[
             lua_getfield(L, LUA_REGISTRYINDEX, "Titan module $MODULE");
-            setobj2t(L, &_mod->upvalue[$INDEX], L->top-1);
+            setobj2t(L, &_mod->upvalue[$INDEX], s2v(L->top.p - 1));
             lua_pop(L, 1);
         ]], {
             INDEX = c_integer_literal(upvalue),
@@ -2798,8 +2833,8 @@ local function coderecorddec(ctx, code, initrecs, inittags, node)
         ]], {
             INDEX = c_integer_literal(field.index),
             SETWRAPPED = field.type._tag == "Type.Nominal" and
-                "setobj2t(L, L->top-1, &((clCvalue(_slot))->upvalue[0]));" or
-                "setobj2t(L, L->top-1, _slot);"
+                "setobj2s(L, L->top.p - 1, &((clCvalue(_slot))->upvalue[0]));" or
+                "setobj2s(L, L->top.p - 1, _slot);"
         }))
         table.insert(setswitch, render([[
             case $INDEX: {
@@ -2826,16 +2861,18 @@ local function coderecorddec(ctx, code, initrecs, inittags, node)
     if #node._type.fields > 0 then
         table.insert(code, render([[
             static int __index_$RECNAME(lua_State *L) {
-                TValue *_recslot = L->ci->func + 1;
+                TValue *_recslot = s2v(L->ci->func.p + 1);
                 CClosure *_rec = NULL;
                 $CHECKANDGET;
-                TValue *_fieldslot = L->ci->func + 2;
-                CClosure *_func = clCvalue(L->ci->func);
+                TValue *_fieldslot = s2v(L->ci->func.p + 2);
+                CClosure *_func = clCvalue(s2v(L->ci->func.p));
                 Table *_fieldmap = hvalue(&(_func->upvalue[0]));
-                const TValue *_fieldidx = luaH_get(_fieldmap, _fieldslot);
-                if(TITAN_LIKELY(_fieldidx != luaO_nilobject)) {
+                TValue _fieldidxv;
+                lu_byte _fieldtag = luaH_get(_fieldmap, _fieldslot, &_fieldidxv);
+                if(TITAN_LIKELY(!tagisempty(_fieldtag))) {
+                    const TValue *_fieldidx = &_fieldidxv;
                     if(ttisCclosure(_fieldidx)) {
-                        setobj2t(L, L->top-1, _fieldidx);
+                        setobj2s(L, L->top.p - 1, _fieldidx);
                     } else {
                         TValue *_slot = &_rec->upvalue[ivalue(_fieldidx)];
                         switch(ivalue(_fieldidx)) {
@@ -2848,19 +2885,21 @@ local function coderecorddec(ctx, code, initrecs, inittags, node)
                 }
             }
             static int __newindex_$RECNAME(lua_State *L) {
-                TValue *_recslot = L->ci->func + 1;
+                TValue *_recslot = s2v(L->ci->func.p + 1);
                 CClosure *_rec = NULL;
                 $CHECKANDGET;
-                TValue *_fieldslot = L->ci->func + 2;
-                CClosure *_func = clCvalue(L->ci->func);
+                TValue *_fieldslot = s2v(L->ci->func.p + 2);
+                CClosure *_func = clCvalue(s2v(L->ci->func.p));
                 Table *_fieldmap = hvalue(&(_func->upvalue[0]));
-                const TValue *_fieldidx = luaH_get(_fieldmap, _fieldslot);
-                if(TITAN_LIKELY(_fieldidx != luaO_nilobject && ttisinteger(_fieldidx))) {
-                    TValue* _dst = &(_rec->upvalue[ivalue(_fieldidx)]);
-                    TValue* _src = L->ci->func + 3;
-                    switch(ivalue(_fieldidx)) {
+                TValue _fieldidxv;
+                lu_byte _fieldtag = luaH_get(_fieldmap, _fieldslot, &_fieldidxv);
+                if(TITAN_LIKELY(!tagisempty(_fieldtag) && ttisinteger(&_fieldidxv))) {
+                    TValue* _dst = &(_rec->upvalue[ivalue(&_fieldidxv)]);
+                    TValue* _src = s2v(L->ci->func.p + 3);
+                    switch(ivalue(&_fieldidxv)) {
                         $SETCASES
                     }
+                    luaC_barrier(L, _rec, _dst);
                     return 0;
                 } else {
                     return luaL_error(L, "%s:%d:%d: field '%s' not found in record '%s'", $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
@@ -3067,31 +3106,33 @@ function coder.generate(modname, ast, static_deps)
     if #switch_get > 0 then
         table.insert(code, render([[
             static int __index(lua_State *L) {
-                CClosure *_me = clCvalue(L->ci->func);
+                CClosure *_me = clCvalue(s2v(L->ci->func.p));
                 CClosure *_mod = clCvalue(&_me->upvalue[0]);
-                const TValue *_index = luaH_get(hvalue(&_me->upvalue[1]), L->ci->func+2);
-                if(TITAN_UNLIKELY(ttisnil(_index))) {
+                TValue _indexv;
+                lu_byte _indextag = luaH_get(hvalue(&_me->upvalue[1]), s2v(L->ci->func.p + 2), &_indexv);
+                if(TITAN_UNLIKELY(tagisempty(_indextag))) {
                     return luaL_error(L,
                         "global variable '%s' does not exist in Titan module '%s'",
                         lua_tostring(L, 2), $MODSTR);
                 }
-                switch(ivalue(_index)) {
+                switch(ivalue(&_indexv)) {
                     $SWITCH_GET
                 }
                 return 1;
             }
 
             static int __newindex(lua_State *L) {
-                CClosure *_me = clCvalue(L->ci->func);
+                CClosure *_me = clCvalue(s2v(L->ci->func.p));
                 CClosure *_mod = clCvalue(&_me->upvalue[0]);
-                TValue *_value = L->ci->func + 3;
-                const TValue *_index = luaH_get(hvalue(&_me->upvalue[1]), L->ci->func+2);
-                if(TITAN_UNLIKELY(ttisnil(_index))) {
+                TValue *_value = s2v(L->ci->func.p + 3);
+                TValue _indexv;
+                lu_byte _indextag = luaH_get(hvalue(&_me->upvalue[1]), s2v(L->ci->func.p + 2), &_indexv);
+                if(TITAN_UNLIKELY(tagisempty(_indextag))) {
                     return luaL_error(L,
                         "global variable '%s' does not exist in Titan module '%s'",
                         lua_tostring(L, 2), $MODSTR);
                 }
-                switch(ivalue(_index)) {
+                switch(ivalue(&_indexv)) {
                     $SWITCH_SET
                 }
                 return 1;
@@ -3121,7 +3162,8 @@ function coder.generate(modname, ast, static_deps)
             lua_pushcclosure(L, __newindex, 2);
             lua_setfield(L, -3, "__newindex");
             /* Set metatable */
-            setobj2s(L, L->top++, &_mod->upvalue[0]);
+            setobj2s(L, L->top.p, &_mod->upvalue[0]);
+            L->top.p++;
             lua_pushvalue(L, -3);
             lua_setmetatable(L, -2);
             /* Pop module, varmap, and metatable */
@@ -3138,10 +3180,15 @@ function coder.generate(modname, ast, static_deps)
     if nslots > 0 then
         table.insert(initvars, 1, render([[
             lua_checkstack(L, $NSLOTS);
-            TValue *_base = L->top;
+            StkId _base = L->top.p;
+            L->top.p += $NSLOTS;
+            for(StkId _s = L->top.p - 1; _base <= _s; _s--) {
+                setnilvalue(s2v(_s));
+            }
         ]], {
             NSLOTS = c_integer_literal(nslots),
         }))
+        table.insert(initvars, "L->top.p = _base;")
     end
 
     table.insert(code, render(modtypes, {
