@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Titan is a statically-typed, ahead-of-time-compiled sister language to Lua. This repo is the prototype compiler, written in Lua, that translates `.titan` modules to C and invokes the system C compiler — producing either a shared library per module (loadable from Lua via `require` and from Titan via `import`) or, when exactly one requested module defines `main(args: {string}): integer`, a standalone executable bundling all modules. The language reference is `doc/manual.md`.
+Titan is a statically-typed, ahead-of-time-compiled sister language to Lua. This repo is the prototype compiler, written in Lua, that translates `.titan` modules to C and invokes the system C compiler — producing either a shared library per module (loadable from Lua via `require` and from Titan via `import`) or, when exactly one requested module defines `main(args: {string}): integer`, a standalone executable bundling all modules. The language reference is `doc/language/index.md`; the implementation documentation (lexer/parser, checker, code generator, interop machinery) is `doc/implementation/index.md`.
 
 ## Prerequisites (important — the suite cannot run without these)
 

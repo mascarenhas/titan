@@ -1,0 +1,404 @@
+# Lua interoperability
+
+A compiled Titan module is, from Lua's point of view, an ordinary module:
+you `require` it, call its functions, read and write its exported
+variables, and pass values back and forth. There is no marshalling layer
+and no copying — Titan operates directly on Lua values. What the boundary
+adds is *checking*: every value that enters typed Titan code is validated
+once, at the edge, and a mismatch is a run-time error with a descriptive
+message rather than silent corruption. This chapter describes the boundary
+from the Lua programmer's side: what `require` returns, what each Titan
+type looks like in Lua, exactly where the run-time checks happen, and what
+does and does not work in each direction.
+
+## Requiring a Titan module
+
+Compiling a module produces a shared library that a stock Lua interpreter
+can load with `require` (see [Modules](modules.md) for the compilation
+model and search paths). `require` returns a plain Lua table containing:
+
+* **one function per exported Titan function** (and nothing for functions
+  declared `local` — they are invisible to Lua);
+* **one subtable per record type**, holding the record's static functions —
+  in particular the automatically generated constructor, so
+  `mod.Point.new(2, 3)` works from Lua (see [Records](records.md));
+* **exported module variables**, which are *not* stored in the table
+  itself but served through its metatable, so that reads always see the
+  current value and writes are type-checked (see
+  [Module variables from Lua](#module-variables-from-lua) below).
+
+```lua
+-- counter.titan          -- Titan
+count: integer = 0
+
+function bump(n: integer): integer
+    count = count + n
+    return count
+end
+```
+
+```sh
+./titanc counter          # produces counter.so next to counter.titan
+```
+
+```lua
+-- Lua
+local counter = require "counter"
+print(counter.bump(10))   --> 10
+print(counter.count)      --> 10
+counter.count = 100
+print(counter.bump(1))    --> 101
+```
+
+The module table's metatable is protected: `getmetatable` on it returns
+the string `"Titan module counter"`, and `setmetatable` on it fails.
+
+## How values map between the two languages
+
+Titan values *are* Lua values; nothing is converted on the way out of
+Titan. Entering Titan, each value is checked (and, for numbers, possibly
+converted) against the declared type:
+
+| Titan type | A Lua caller may pass | Lua receives back |
+| --- | --- | --- |
+| `integer` | a Lua integer, or a Lua float with an integral value (converted) | a Lua integer (`math.type` is `"integer"`) |
+| `float` | a Lua float, or a Lua integer (converted to float) | a Lua float |
+| `boolean` | **any value**, converted by truthiness — see below | `true` or `false` |
+| `string` | a Lua string only — numbers are *not* coerced | the same string |
+| `nil` | only `nil` | `nil` |
+| `{T}` (array) | any table; the contents are **not** checked here | the *same* table — aliased, not copied |
+| `{K:V}` (map) | any table; the contents are **not** checked here | the *same* table — aliased, not copied |
+| record type | a userdata created by that same record type (from any module instance) | a userdata carrying the record's metatable |
+| `T?` (option) | `nil`, or a value of type `T` — stricter than plain `T`, see below | `nil`, or whatever `T` produces |
+| `value` | anything | the value, unchanged |
+
+Notes on the entries that deserve them:
+
+* **Numbers follow Lua's own conversion rules.** Passing `2.0` where an
+  `integer` is expected works; passing `2.5` raises a run-time error of
+  the shape `file:line:col: type error, number '2.5' has no integer
+  representation`. Passing an integer where a `float` is expected converts
+  it silently, just as Lua arithmetic would. The integer-to-float
+  direction works everywhere, but the float-to-integer conversion is for
+  *function arguments only*: writing an integral float to an `integer`
+  module variable or record field from Lua is a run-time error
+  (`type error, expected integer but found number`).
+* **Boolean parameters accept anything, by truthiness.** A Titan
+  `boolean` parameter never raises a type error: the argument is converted
+  the way a Lua `if` would treat it — `false` and `nil` become `false`,
+  *everything else* (including `0` and the empty string, as in Lua)
+  becomes `true`:
+
+  ```lua
+  -- test.titan           -- Titan
+  function pick(c: boolean, a: integer, b: integer): integer
+      if c then return a else return b end
+  end
+  ```
+
+  ```lua
+  -- Lua
+  test.pick(true, 1, 2)  --> 1
+  test.pick(nil, 1, 2)   --> 2   (nil is falsy)
+  test.pick(42, 1, 2)    --> 1   (any other value silently counts as true)
+  ```
+
+  This is the one place where the boundary coerces rather than checks.
+  Asymmetrically, *writing* a non-boolean to a `boolean` module variable
+  or record field from Lua is a run-time error
+  (`type error, expected boolean but found ...`) — only function
+  arguments get the truthiness treatment.
+* **Strings are not coerced from numbers.** Where Lua's standard library
+  often accepts a number and converts it, a Titan `string` parameter
+  raises `type error, expected string but found number`.
+* **Arrays and maps are the very same Lua table** on both sides of the
+  boundary — see [Sharing arrays and maps](#sharing-arrays-and-maps-with-lua).
+* **Records are userdata, not tables** — see
+  [Records from Lua](#records-from-lua).
+* **`nil` and options.** A `T?` parameter accepts `nil` or a value of
+  type `T`, but is *stricter* than a plain `T` parameter: the
+  argument-only coercions above do not apply, so `integer?` rejects an
+  integral float (`type error, expected integer but found number`) and
+  `boolean?` rejects non-boolean values instead of converting by
+  truthiness. (`float?` still accepts an integer — that conversion works
+  everywhere.) A `T?` result reaches Lua as `nil` or a plain `T` value.
+  Since reading a missing array or map element in Titan produces an
+  option (see [Option types](option-types.md)), `nil` flows across the
+  boundary exactly as a Lua programmer would expect.
+* **`value` is the deliberate escape hatch**: it accepts any Lua value
+  and hands it back unchanged. Checking is deferred to the point where
+  Titan code converts the `value` to a concrete type (see
+  [the type system](types.md)).
+
+## Where the run-time checks happen
+
+The boundary checks run at exactly these places:
+
+1. **Function entry, once per argument** — including the receiver of a
+   method call (`self` is checked like any other record-typed argument).
+2. **Writes to exported module variables from Lua** (`mod.x = v`).
+3. **Writes to record fields from Lua** (`rec.x = v`).
+4. **Inside Titan**, whenever a `value` is converted to a concrete type
+   and whenever an array or map element is read (see below).
+
+And, just as importantly, where they do *not* happen:
+
+* **Never inside containers.** A `{string:integer}` parameter only
+  requires *a table*; what is stored under its keys is not inspected when
+  the table crosses the boundary. Instead, every element read inside
+  Titan re-checks the element type, so a wrongly-typed element produces a
+  run-time error *later*, deterministically, at the Titan code that reads
+  it — never silent misbehavior. The same applies in reverse: Lua can
+  freely (and type-incorrectly) mutate a table it got from Titan, and the
+  error surfaces at the next Titan read.
+* **Never between Titan functions.** A Titan-to-Titan call, including
+  across Titan modules, is a direct native call with no checks — the
+  compiler has already proven the types match.
+
+When an argument check fails, the error message is prefixed with a source
+location of the shape `file:line:col:` — note that this is the location of
+the *Titan function's declaration* in the `.titan` source, not the Lua
+call site. (As for any error raised from a C function, Lua prepends its
+own `chunk:line:` call-site position on top of that when the failing
+operation runs inside a Lua function — though not when the Titan function
+is passed directly to `pcall`. The example outputs in this chapter omit
+that prefix.) The Lua-side traceback identifies the call site as usual.
+
+*Implementation note:* the per-type checks and the wrapper that runs them
+are described in
+[the interop internals](../implementation/lua-interop-internals.md).
+
+## Calling Titan functions: arity and multiple returns
+
+Titan functions are strict about argument count. When Titan code calls a
+Titan function with the wrong number of arguments, that is a compile-time
+error (see [Functions](functions.md)); when *Lua* calls a Titan function,
+the same strictness is enforced at run time. There is no Lua-style
+adjustment — missing arguments are not padded with `nil`, and extra
+arguments are not dropped. The error message has the shape:
+
+```
+calling Titan function f with 2 arguments, but expected 1
+```
+
+Multiple return values work exactly as in Lua — a Titan function declared
+with several return types returns that many values to Lua:
+
+```lua
+-- test.titan             -- Titan
+function f(x: integer): (integer, string)
+    return x * 2, "foo"
+end
+```
+
+```lua
+-- Lua
+local test = require "test"
+local x, y = test.f(2)
+assert(x == 4 and y == "foo")
+assert(pcall(test.f, 2, "extra") == false)  -- wrong arity: run-time error
+```
+
+## Sharing arrays and maps with Lua
+
+A Titan array or map *is* a Lua table — passing one in either direction
+passes a reference to the same object, with no copying. Mutations made on
+one side are immediately visible on the other:
+
+```lua
+-- test.titan             -- Titan
+function f(m: {string:integer}): {string:integer}
+    m["foo"] = m["foo"] + 10
+    return m
+end
+```
+
+```lua
+-- Lua
+local test = require "test"
+local m = { foo = 10 }
+local m2 = test.f(m)
+assert(m2 == m)           -- the same table came back, not a copy
+assert(m.foo == 20)       -- Titan's write is visible in Lua
+test.f(m)
+assert(m.foo == 30)
+```
+
+Because the contents are not checked at the boundary, Lua can put a
+wrongly-typed value into a shared table; the error is raised later, when
+Titan reads that element:
+
+```lua
+-- Lua (continuing)
+m.foo = "wat"
+test.f(m)  --> error: test.titan:...: type error, expected integer but found string
+```
+
+This deferred check is a deliberate trade-off: checking a whole table on
+every crossing would make the boundary cost proportional to the table's
+size, defeating the point of sharing. The guarantee Titan keeps is that
+the bad element can never be *used* at the wrong type — every read is
+checked. See [Arrays and maps](arrays-maps.md) for the container types
+themselves.
+
+## Records from Lua
+
+A Titan record arrives in Lua as a **userdata**, not a table — records
+are nominal, fixed-shape values and do not have a table representation
+(see [Records](records.md)). The userdata carries a metatable, shared by
+all instances of the record type in the Lua state, that makes it behave
+like an object:
+
+* **Field reads** (`p.x`) return the field's value; record-typed fields
+  arrive as their own userdata.
+* **Field writes** (`p.x = v`) are type-checked against the declared
+  field type, with the standard
+  `file:line:col: type error, expected X but found Y` message on
+  mismatch.
+* **Methods** are called with the usual colon syntax (`p:move(2, 3)`).
+  Method names are not assignable fields: `p.move = 2` raises the
+  "field not found" error.
+* **Unknown fields** raise
+  `file:line:col: field 'name' not found in record 'mod.Rec'` on both
+  read and write — there is no Lua-style `nil` for missing fields.
+* **Statics**, including the generated `new`, are reached through the
+  module table: `mod.Point.new(2, 3)`.
+
+```lua
+-- test.titan             -- Titan
+record Point
+    x: float
+    y: float
+end
+
+function Point:move(dx: float, dy: float)
+    self.x, self.y = self.x + dx, self.y + dy
+end
+```
+
+```lua
+-- Lua
+local test = require "test"
+local p = test.Point.new(2, 3)
+assert(type(p) == "userdata")     -- not a table!
+p:move(2, 3)
+assert(p.x == 4.0 and p.y == 6.0)
+p.x = 10                          -- type-checked write (10 converts to float)
+print(pcall(function () p.z = 1 end))
+--> false   test.titan:...: field 'z' not found in record 'test.Point'
+```
+
+Record identity is userdata identity: the same record instance always
+appears as the same userdata, two distinct instances compare `~=`, and
+there is no structural equality. The metatable is protected —
+`getmetatable(p)` returns the string `"Titan record test.Point"` — so Lua
+code cannot swap it; and even if it could, the type check on re-entry to
+Titan does not rely on the metatable, so a record of one type can never be
+passed off as another. Passing the wrong record type (or a non-record)
+where a record is expected is a run-time error naming both types:
+`type error, expected test.Rec but found test.Point`, or
+`... but found number`.
+
+## Module variables from Lua
+
+Exported (non-`local`) module variables are readable and writable from
+Lua through the module table, as in the `counter` example above. Reads
+always observe the current value — including changes made by Titan code —
+and writes made from Lua are immediately visible to Titan, because both
+sides share one storage location. Writes are type-checked at run time:
+
+```lua
+-- counter.titan          -- Titan
+count: integer = 0
+```
+
+```lua
+-- Lua
+local counter = require "counter"
+counter.count = 2          -- fine
+counter.count = 2.0
+--> error: counter.titan:...: type error, expected integer but found number
+--  (writes do not get the integral-float conversion that arguments do)
+counter.count = "lots"
+--> error: counter.titan:...: type error, expected integer but found string
+```
+
+Accessing a module member that does not exist raises
+`global variable 'name' does not exist in Titan module 'counter'` rather
+than returning `nil`. (Exception: a module that exports *no* variables
+has no metatable on its table, so unknown reads return `nil`, Lua-style.)
+
+Module variables declared `local` do not appear in the module table at
+all; they are private to the module (see [Modules](modules.md)).
+
+## Calling Lua from Titan
+
+In the current prototype, calls cross the boundary in **one direction
+only: Lua calls Titan.** There is no mechanism for Titan code to call a
+Lua function:
+
+* `import` only loads other Titan modules (compiled or from source), and
+  `foreign import` only binds C headers (see [the C FFI](ffi.md)) — a Lua
+  module cannot be imported.
+* Function types appear in the grammar, but functions are not first-class
+  values: a function cannot be stored in a variable or passed as an
+  argument, and calling through a function-typed value is a compile-time
+  error (`first-class functions are not supported in this version of
+  Titan`).
+
+A Lua function *can* travel through Titan opaquely — as a `value`, or
+inside a shared table — and be handed back to Lua intact, but Titan code
+cannot invoke it.
+
+*Limitation:* the old manual stated that a Titan variable of function
+type may refer to a dynamically-typed Lua function. That describes the
+design intent, not the implementation; none of it works today. First-class
+functions (and with them, calling Lua from Titan) are the most prominent
+item on the [roadmap](index.md#status-and-limitations).
+
+## Errors cross the boundary as Lua errors
+
+Every run-time error raised by Titan code — boundary check failures,
+failed casts, arithmetic errors — is an ordinary Lua error. It propagates
+to the Lua caller and is catchable with `pcall`, like an error from any
+Lua or C function:
+
+```lua
+-- test.titan             -- Titan
+function double(x: integer): integer
+    return x * 2
+end
+```
+
+```lua
+-- Lua
+local test = require "test"
+local ok, err = pcall(test.double, "not a number")
+print(ok)   --> false
+print(err)  --> test.titan:...: type error, expected integer but found string
+```
+
+In addition, whenever an error is raised inside a Titan call, an extended
+traceback (the Lua traceback plus the C-level call stack) is recorded and
+can be retrieved afterwards with `titan.backtrace()` from the optional
+`titan` Lua module. The error value seen by `pcall` is unchanged. See
+[Error handling](error-handling.md) for the full error model and the
+option-type idiom for recoverable failures.
+
+## Multiple Lua states
+
+A Titan module keeps no instance state in C globals: everything a module
+instance owns (its variables, its module table, its record metatables)
+lives inside one Lua state. Consequently:
+
+* The same compiled module can be loaded into **several Lua states in the
+  same process**, each getting its own fully independent instance —
+  module variables in one state are invisible to the others.
+* Within one Lua state there is exactly **one instance of each module**,
+  no matter how it is reached: requiring it again, or loading two Titan
+  modules that both import it, always yields the same instance with its
+  state preserved.
+* Record types keep their identity across all of this: a record created
+  by one module instance is accepted by any other code in the same state
+  that knows the same record type, even when the modules were loaded
+  separately.

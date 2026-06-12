@@ -1,0 +1,581 @@
+# Code generator: constructs
+
+This chapter walks construct by construct through how `coder.lua`
+translates Titan into C, with trimmed excerpts of **real compiler
+output** (`$VAR` placeholders appear only where a template is quoted).
+The translation-unit anatomy, calling convention and module protocol are
+in the [overview](codegen-overview.md); value representation, stack-slot
+anchoring and write barriers in [values and the GC](values-and-gc.md).
+
+Two contracts shape every generator: **statement generators** take
+`(ctx, node)` and return a string of C statements, while **expression
+generators** return *two* strings — preliminary C statements plus a C
+expression (`""` statements for trivial expressions). And every value
+has the **dual representation**: a C variable of its unboxed native type
+plus, when GC-able, a paired Lua stack slot (`s2v(_base + k)`) that
+keeps it visible to the collector; code computes with the C variable and
+refreshes the slot after every store. `codeexp(ctx, node, iscondition,
+target)` also threads `target` — a `VarName` lvalue's `_decl`, letting
+constructors build directly into the lvalue's `_cvar`/`_slot` — and
+`iscondition`, which no generator currently consumes: truth conversion
+happens only in `codeif` and the `as boolean` cast, via `toboolean`.
+
+## Locals and assignment
+
+`Ast.StatDecl` (in `codestat`) gives a used local a C variable
+`_local_<name>_<n>` (the `localname` suffix keeps shadowing valid C)
+and, for GC-able types, a shadow slot refreshed at declaration and at
+every later assignment:
+
+```c
+TString* _local_t_1;
+TValue *_localslot_t_2 = s2v(_base + 0);
+_local_t_1 = _param_s;
+/* update slot */
+setsvalue(L, _localslot_t_2, _local_t_1);
+```
+
+A local the checker marked unused generates only `$CSTATS ((void)$CEXP);`
+— the initializer still runs. Parameters (`_param_<name>`) rely on the
+*caller's* anchoring and get a `_paramslot_<name>` only if assigned to
+inside the function (`param._assigned`). Module variables live in `_mod`
+upvalues: reads are `getslot` from `&_mod->upvalue[i]`, writes add
+`luaC_barrier(L, _mod, <slot>);` for GC-able types; imported-module
+variables go through the import's closure
+(`clCvalue(&_mod->upvalue[MOD])->upvalue[VAR]`) with the same barrier.
+
+**Multiple assignment is two-phase** (`codemultiassignment`): every
+right-hand side is evaluated into a fresh temporary first, then all
+assignments happen — which is what gives `x, y = y, x` swap semantics:
+
+```c
+_tmp_1 = _local_y_1;
+_tmp_2 = _local_x_1;
+_local_x_1 = _tmp_1;
+_local_y_1 = _tmp_2;
+```
+
+These phase-one temps get no shadow slots: the sources stay anchored at
+their original homes for the duration.
+
+## Control flow: `if`, `while`, `repeat`
+
+The recurring problem is **condition statement-hoisting**: a Titan
+condition may need preliminary C statements (a table read, a call) that
+cannot live in a C `while(...)` head.
+
+`codeif` builds a recursive `if / else if` chain, putting each arm's
+preliminary statements in an enclosing block and wrapping the condition
+with `toboolean(type, cexp)`, so option- and `value`-typed conditions
+become real C truth tests (`!l_isfalse(...)`, `!ttisnil(...)`).
+
+`codewhile` emits a plain `while($CEXP) { $CBLK $CHECKGC }` when the
+condition needs no statements; otherwise it hoists them into the body:
+
+```c
+while(1) {
+    $CSTATS
+    if(!($CEXP)) {
+        break;
+    }
+    $CBLK
+    $CHECKGC
+}
+```
+
+`coderepeat` is the same trick with the test at the bottom:
+`while(1) { $CBLK $CSTATS if($CEXP) { break; } $CHECKGC }`.
+
+`$CHECKGC` is `luaC_checkGC(L);` **only when the condition plus body
+created stack slots** — the generators diff `ctx.allocations` (bumped by
+every `newslot`) across the body. Pure-arithmetic loops carry no GC
+polling; allocating loops poll once per iteration, since native code
+never passes through `luaD_call` and would otherwise starve the collector.
+
+*Limitation:* unlike `codeif`, `codewhile`/`coderepeat` do **not** apply
+`toboolean`. A directly option- or `value`-typed condition such as
+`while t[i] do` generates `if(!(<TValue>))`, which does not compile, and
+an `integer` or `float` condition compiles to a C truth test, so `0` and
+`0.0` count as false where Lua truthiness would say true; the spec suite
+only uses boolean-typed `while`/`repeat` conditions. (The user-facing
+consequences are documented in [the type system](../language/types.md)
+and [statements](../language/statements.md).)
+
+## The numeric `for`
+
+`codefor` precomputes `_forstart`/`_forlimit` and specializes on the
+step via `node2literal` (a small constant-folding helper whose comment
+notes "A constant-folding optimization pass would obsolete this"):
+
+* **Positive literal step**: integer loops step with
+  `$CVAR = l_castU2S(l_castS2U($CVAR) + $LIT)` — unsigned arithmetic, so
+  stepping past `maxinteger` wraps instead of invoking C signed-overflow
+  undefined behavior — and compare `$CVAR <= _forlimit`; float loops use
+  `$CVAR += $LIT`.
+* **Negative literal step**: `l_castS2U($CVAR) - $NEGLIT`, comparison
+  flipped to `_forlimit <= $CVAR`.
+* **Dynamic step**: `_forstep` is computed once; stepping adds
+  `l_castS2U(_forstep)` and the comparison tests direction every
+  iteration: `0 < _forstep ? ($CVAR <= _forlimit) : (_forlimit <= $CVAR)`.
+
+Real output for `for i = 1, n, 2`:
+
+```c
+lua_Integer _forstart = 1;
+lua_Integer _forlimit = _param_n;
+for(lua_Integer _local_i = _forstart; _local_i <= _forlimit;
+    _local_i = l_castU2S(l_castS2U(_local_i) + 2)) {
+    ...
+}
+```
+
+The body tail gets the same allocation-gated `luaC_checkGC(L);` as
+`while`. `codereturn` stores returns 2..n through `*_outparam_<i>`,
+then emits `L->top.p = _base;` when the frame reserved slots, and
+returns the first value in C (see [Calls](#calls)).
+
+## Arrays
+
+These paths are written against Lua 5.5's table internals, where the
+array part no longer holds full `TValue` slots: reads copy values out
+through tag-returning functions, and the old writable-slot API
+(`luaH_newkey`) is gone — the comments above `get_table_key` and
+`set_table_entry` in `coder.lua` document both.
+
+### Constructor (`codearray`)
+
+`{ a, b }` allocates with `luaH_new(L)` and **immediately anchors** the
+table. The comment in `codearray` is load-bearing: "always build the
+array anchored in a stack slot; a target slot such as a module-global
+upvalue is not scanned by minor collections, so the fresh table could be
+swept while a callee in the fill loop triggers the GC". Each element is
+evaluated into its own anchored temp, the array part is pre-sized once,
+then filled with the raw `obj2arr` macro (0-based):
+
+```c
+_tmp_1 = luaH_new(L);
+sethvalue(L, _tmp_1_slot, _tmp_1);
+_tmp_2 = _param_a;
+setivalue(_tmp_2_slot, _tmp_2);
+_tmp_3 = _param_b;
+setivalue(_tmp_3_slot, _tmp_3);
+luaH_resizearray(L, _tmp_1, 2);
+obj2arr(_tmp_1, 0, _tmp_2_slot);
+obj2arr(_tmp_1, 1, _tmp_3_slot);
+```
+
+GC-able element types add `luaC_barrierback(L, obj2gco(_tmp_1), $SLOT);`
+per store; elements are written with `setwrapped`, so records enter as
+their Lua-visible userdata. Each element temp keeps its slot for the
+whole constructor, so a collection in a later element expression cannot
+sweep an earlier one.
+
+### Read (`codeindexarray`)
+
+```c
+Table *_t = _param_t;
+lua_Integer _k = _param_i;
+TValue _av;
+lu_byte _atag;
+luaH_fastgeti(_t, _k, &_av, _atag);
+if (tagisempty(_atag)) {
+    setnilvalue(&_av);
+}
+const TValue *_s = &_av;
+/* checkandget(elem-type, result, _s, loc) follows */
+```
+
+`luaH_fastgeti` (an `ltable.h` macro) does the in-bounds array check
+inline and falls back to `luaH_getint`; an empty tag is normalized to
+nil in the local holder. `checkandget` then lands the holder in the
+typed result — for `{integer}` the `ttisinteger`/`ttisfloat` chain with
+the run-time errors of [the cast section](#casts-every-expcast-variant);
+option element types get a `ttisnil` shortcut yielding nil first (the
+output keeps a harmless redundant nested `ttisnil` from `checkandget`'s
+Option case). Contrast with C-API code: `lua_geti` would push the table,
+box the index, dispatch metamethods, and leave the result on the Lua
+stack; even `lua_rawgeti` keeps the stack traffic. Here a read is a
+bounds check, a copy, and a type test.
+
+### Write (`codeassignment`, VarBracket on an array)
+
+```c
+TValue _vv;
+setobj2t(L, &_vv, &_tmp_1);                /* setwrapped of the value */
+lua_Unsigned _actual_i = l_castS2U(_k) - 1u;
+unsigned int _asize = _t->asize;
+if (_actual_i < _asize) {
+    obj2arr(_t, cast_uint(_actual_i), &_vv);
+} else if (_asize <= (UINT_MAX/2) && _actual_i < 2*(lua_Unsigned)_asize) {
+    luaH_resizearray(L, _t, cast_uint(2*(lua_Unsigned)_asize));
+    obj2arr(_t, cast_uint(_actual_i), &_vv);
+} else {
+    luaH_setint(L, _t, _k, &_vv);
+}
+```
+
+Three tiers: raw in-bounds store; doubling growth then store; generic
+`luaH_setint` for everything else (huge or negative indices, hash-part
+keys). The index math is deliberately **full-width** (`lua_Unsigned`
+compared against `2*(lua_Unsigned)_asize`): a 32-bit truncation would
+make an index like `(1 << 32) + 1` alias `arr[1]` — the spec "handles
+array indices beyond the unsigned int range" pins this. GC-able element
+types append `luaC_barrierback(L, obj2gco(_t), &_vv);` — `luaH_set*`
+barrier new *keys* internally, but the stored *value* is the caller's
+responsibility. Writing `nil` deletes the element. A C-API `lua_rawseti`
+pays the generic path on every store; here the common case is one
+comparison and a value copy. `#arr` compiles to `luaH_getn(L, t)`, and
+`#str` to `tsslen(s)` (`codeunaryop`).
+
+## Maps
+
+Map access dispatches on the **static key type**; the key is boxed into
+an anchored temp slot and passed as a `TValue*`.
+
+### Read (`codeindexmap` + `get_table_key`)
+
+**String** keys test for the interned-short-string fast path; **integer**
+keys call `luaH_getint(t, ivalue(k), ...)`; **float** keys are first
+normalized with `luaV_tointeger(k, &ik, F2Ieq)` so `m[1.0]` and `m[1]`
+hit the same entry; anything else takes plain `luaH_get`. All variants
+normalize an empty tag to nil and finish with the same `checkandget` (or
+option-nil shortcut) as arrays. Real output for `m: {string:integer}`:
+
+```c
+_tmp_2 = _param_k;
+setsvalue(L, _tmp_2_slot, _tmp_2);         /* anchored key slot */
+TValue _s_v;
+lu_byte _s_tag;
+if (ttypetag(_tmp_2_slot) == LUA_VSHRSTR) {
+    _s_tag = luaH_getshortstr(_t, tsvalue(_tmp_2_slot), &_s_v);
+} else {
+    _s_tag = luaH_get(_t, _tmp_2_slot, &_s_v);
+}
+if (tagisempty(_s_tag)) {
+    setnilvalue(&_s_v);
+}
+```
+
+A value Lua smuggled in with the wrong type surfaces here as a deferred
+run-time error, e.g. `expected integer but found string`.
+
+### Write (`set_table_entry`) and constructor (`codemap`)
+
+Writes box the value with `setwrapped` into a local `TValue _vv`, then:
+integer keys use `luaH_setint`; float keys normalize via
+`luaV_tointeger(..., F2Ieq)` then `luaH_setint` or `luaH_set`; all other
+keys — including strings; the read-side short-string split has no write
+analogue — take the generic path:
+
+```c
+luaH_set(L, _t, _tmp_2_slot, &_vv);
+invalidateTMcache(_t);
+```
+
+The `invalidateTMcache` on generic stores mirrors Lua's own API split: a
+raw store under a string key could shadow a metamethod name, so
+`lua_rawset` flushes the table's metamethod-absence cache while
+`lua_rawseti` does not, and the coder reproduces exactly that. The
+caller emits `luaC_barrierback(L, obj2gco(_t), &_vv);` when the map's
+*value* type is GC-able. `codemap` builds constructors like arrays —
+`luaH_new` anchored immediately, every key and value in its own anchored
+slot, `set_table_entry` per entry plus the back barrier — but with no
+`luaH_resizearray` pre-sizing.
+
+## Records
+
+### Construction (`coderecord`)
+
+Two allocations in a fixed sequence (real output for `Point.new`; the
+layout's rationale is in [values and the GC](values-and-gc.md)):
+
+```c
+_tmp_1 = luaF_newCclosure(L, 3);               /* #fields + 1 upvalues */
+memset(_tmp_1->upvalue, 0, sizeof(TValue) * 3);
+setclCvalue(L, _tmp_1_slot, _tmp_1);           /* anchor closure FIRST */
+{
+    Udata* _ud = luaS_newudata(L, sizeof(void*), 1);
+    *((void**)(getudatamem(_ud))) = (void*)test_Point_typetag;
+    _ud->metatable = hvalue(&_mod->upvalue[1]);
+    setclCvalue(L, &_ud->uv[0].uv, _tmp_1);    /* user value -> closure */
+    setuvalue(L, &(_tmp_1->upvalue[0]), _ud);  /* upvalue[0] -> udata  */
+    /* an emergency GC inside luaS_newudata can blacken the
+       closure, so this store needs a forward barrier */
+    luaC_barrier(L, _tmp_1, &(_tmp_1->upvalue[0]));
+}
+```
+
+The closure is anchored *before* `luaS_newudata` can collect, and the
+quoted comment explains the barrier on a store into a brand-new object.
+Field initializers each go through an anchored temp and
+`setobj2t(L, &(_tmp_1->upvalue[i]), $SLOT);`, plus
+`luaC_barrier(L, _tmp_1, $SLOT);` for GC-able field types.
+
+### Field access
+
+A read is an indexed load from the closure — no hashing, no metatable:
+`return fltvalue(&((__self__)->upvalue[1]));`. A write is the upvalue
+store plus a *forward* barrier (CClosure owner, unlike table stores):
+
+```c
+CClosure *_recobj = _param_p;
+TValue *_fieldslot = &(_recobj->upvalue[1]);
+setfltvalue(_fieldslot, _param_v);
+/* + luaC_barrier(L, _recobj, _fieldslot); for GC-able fields */
+```
+
+### Method and static calls
+
+Within a module, `p:getx()` is a **direct C call** under the native
+convention, self passed as the raw `CClosure*` right after `_mod`:
+
+```c
+return test_Point_getx_titanmethod(L, _mod, _param_p);
+```
+
+(naming: `<mangled-fqtn>_<name>_titanmethod` / `..._titanstatic`).
+Cross-module calls are still direct C calls — the caller holds the
+target module's closure in one of its own upvalues and passes
+`clCvalue(&_mod->upvalue[i])` as the callee's `_mod`; statically linked
+dependencies become `extern` prototypes, while `.so`-only dependencies
+become `static` **function pointers** stitched in `_init` from the
+dlopened library:
+
+```c
+static CClosure* (*dep_mk_titan)(lua_State *L, CClosure *_mod, lua_Integer);
+/* in _init: */
+dep_mk_titan = titan_cast_func(CClosure* (*)(lua_State *L, CClosure *_mod, lua_Integer),
+                               loadsym(L, dep_handle, "dep_mk_titan"));
+```
+
+Records cross the Lua boundary as their Udata (`setwrapped`); coming
+back, `checkandget` verifies the embedded tag pointer and recovers the
+closure from `uv[0].uv` ([Lua interop internals](lua-interop-internals.md)).
+
+## Strings
+
+**Literals** compile to `luaS_new(L, "<escaped>")` (`makestring`,
+escaping by `c_string_literal`); short strings are interned, so repeated
+evaluation of a short literal yields the same `TString*`. Without a
+`target` the result is anchored in a temp slot; with one, the local's
+own slot refresh anchors it.
+
+**Concatenation** (`Ast.ExpConcat`) flattens n-ary `..` chains into one
+operation and never calls `luaV_concat`: the total length is precomputed,
+then a short result is assembled in a C stack buffer and interned, while
+a long result allocates the string first and is filled in place. Real
+output for `a .. b .. "x"`, trimmed:
+
+```c
+size_t _len = 0;
+size_t _tl = 0;
+TString *_str1 = _param_a;
+size_t _len1 = tsslen(_str1);
+_len += _len1;
+/* ... _str2, _str3 likewise; literal anchored in its own slot ... */
+if(_len <= LUAI_MAXSHORTLEN) {
+    char _buff[LUAI_MAXSHORTLEN];
+    memcpy(_buff + _tl, getstr(_str1), _len1 * sizeof(char));
+    /* ... */
+    _tmp_1 = luaS_newlstr(L, _buff, _len);
+} else {
+    _tmp_1 = luaS_createlngstrobj(L, _len);
+    char *_buff = getstr(_tmp_1);
+    /* same memcpy sequence into the string's own payload */
+}
+setsvalue(L, _tmp_1_slot, _tmp_1);
+```
+
+`LUAI_MAXSHORTLEN` is 40 in this Lua build; at or below it the result
+must be interned (`luaS_newlstr`), above it `luaS_createlngstrobj`
+allocates up front so the copy happens exactly once.
+
+**Number-to-string** coercions call the `inline static` helpers in
+`titan-runtime/titan.h`: `_integer2str(L, i)` (`lua_integer2str` then
+`luaS_newlstr`) and `_float2str(L, f)` (`luaO_tostringbuff`), so the
+formatting is bit-for-bit Lua's — integral floats print with `.0`.
+
+## Operators with inlined Lua semantics
+
+Most operators on native types are the plain C operator —
+`"(" .. lhs .. op .. rhs .. ")"` — but where Lua and C disagree, the
+algorithm is inlined and shaped so constant operands let the C compiler
+delete the branches.
+
+**Shifts** (`generate_binop_shift`). The rationale comment in `coder.lua`:
+
+> Most of the time, the shift amount should be a constant, which will
+> allow the C compiler to eliminate all of these branches as dead code
+> and generate code that is just as good as a raw C bitshift without the
+> extra Lua semantics.
+>
+> For the dynamic case, we gain a bit of performance (~20%) compared to
+> the algorithm in luaV_shiftl by reordering the branches to put the
+> common case (shift amount is a small positive integer) under only one
+> level of branching and with a TITAN_LIKELY annotation.
+
+(The ~20% is the comment's claim; no benchmark lives in the repository.)
+Real output for `x << y` (`>>` swaps the operator pair):
+
+```c
+if (TITAN_LIKELY(l_castS2U(_param_y) < TITAN_LUAINTEGER_NBITS)) {
+    _tmp_1 = intop(<<, _param_x, _param_y);
+} else {
+    if (l_castS2U(-_param_y) < TITAN_LUAINTEGER_NBITS) {
+        _tmp_1 = intop(>>, _param_x, -_param_y);
+    } else {
+        _tmp_1 = 0;
+    }
+}
+```
+
+**Integer `//`** (`generate_binop_idiv_int`; comment: "Lua/Titan integer
+division rounds to negative infinity instead of towards zero. We inline
+luaV_div here to give the C compiler more optimization opportunities"):
+
+```c
+if (l_castS2U(_param_b) + 1u <= 1u) {      /* n == 0 or n == -1 */
+    if (_param_b == 0){
+        luaL_error(L, "error at line %d, divide by zero", 41);
+    } else {
+        _tmp_1 = intop(-, 0, _param_a);    /* m // -1 == -m, overflow-safe */
+    }
+} else {
+    _tmp_1 = _param_a / _param_b;
+    if ((_param_a ^ _param_b) < 0 && _param_a % _param_b != 0) {
+        _tmp_1 -= 1;                       /* fix C's round-toward-zero */
+    }
+}
+```
+
+**Integer `%`** (`generate_binop_mod_int`, preserving Lua's invariant
+`m == n*(m//n) + m%n`): the same branch-free `n == 0 or -1` test, raising
+`error at line %d, % by zero` for zero, yielding `0` for `-1`, otherwise
+correcting C's remainder sign with
+`if (r != 0 && (m ^ n) < 0) { r += n; }`. Float `//` is `floor(x / y)`.
+*Limitation:* float `%` is `error("not implemented yet")` in
+`codebinaryop` — a compiler crash, not a diagnostic.
+
+**`^`** always produces a float: `pow(l, r)`. **Equality on dynamic
+values**: when both operands are `TValue`-represented (`value` or
+options), `==`/`~=` compile to `luaV_rawequalobj(&l, &r)` and its
+negation. **`and`/`or`** specialize on static truthiness: boolean
+operands become C `&&`/`||`; statically truthy/falsy sides short-circuit
+at compile time; `TValue` operands get a lazy `l_isfalse` branch; and the
+`t? or default` shape unwraps the option on the truthy side — the
+generated form of the `t[i] or v` idiom.
+
+*Limitation:* integer `+ - *` and unary `-` are plain C operators with no
+overflow handling, and `driver.CFLAGS` does not pass `-fwrapv`; the spec
+suite nonetheless asserts Lua's wraparound at `mininteger`/`maxinteger`,
+which holds with current gcc/clang but is not guaranteed by C99.
+
+## Casts: every `ExpCast` variant
+
+The checker materializes every implicit coercion as an `Ast.ExpCast`
+([the type checker](checker.md)), so this dispatch in `codeexp` is the
+complete inventory of conversions:
+
+1. **Cast of an array/map index expression** is folded into the read:
+   the `VarBracket`'s `_type` is temporarily replaced by the cast target
+   so the read's `checkandget` lands directly in the target type.
+2. **`value` → T**: copy the `TValue` to a temp, then
+   `checkandget(typ, dst, &src, loc)`. The errors are the boundary
+   shapes: `%s:%d:%d: type error, expected %s but found %s` (Lua's tag
+   name for primitives, the registry-mapped record name for foreign
+   records), and for integer targets fed a fractional float,
+   `%s:%d:%d: type error, number '%f' has no integer representation`.
+3. **T → `value`**: `setwrapped` into a `TValue` temp — records wrapped
+   as their Udata. No new slot: the source stays anchored where it was.
+4. **integer → float**: `((lua_Number)<exp>)`.
+5. **anything → boolean**: `toboolean(type, exp)`.
+6. **float → integer**: an exactness check with `lua_Number` temps —
+   `$TMP2 = l_floor($TMP1);` then
+   `if ($TMP1 != $TMP2) { luaL_error(L, "type error at line %d, number '%f' has no integer representation", ...); } else { lua_numbertointeger($TMP2, &$TMP3); }`
+   — so an integer coerced from `2.0` is `2` and one coerced from `2.5`
+   raises at run time. This variant is only ever checker-synthesized:
+   an explicit `2.0 as integer` is a *compile-time* error (`cannot cast
+   'float' to 'integer'`), because the checker's cast rule demands the
+   pair also be `types.compatible`, which float/integer is not.
+7. **integer/float → string**: `_integer2str` / `_float2str` (see
+   [Strings](#strings)), anchored unless built into a target.
+8. **nil → `t?`**: `setnilvalue(&$TMP);`.
+9. **t → `t?`** (wrap): `setslot(base-type, &$TMP, exp)` — box the
+   native value into a `TValue`.
+10. **`t?` → t** (unwrap): intended shape
+    `if(TITAN_UNLIKELY(ttisnil(&$CEXP))) { luaL_error(L, "%s:%d:%d: type error, expected %s but found nil", ...); } else { $GETSLOT }`.
+    *Limitation (latent bug):* the template is rendered with
+    `node.loc.file`, but location objects carry `filename`, so
+    `util.render` aborts with `Internal compiler error: missing template
+    variable FILE` whenever this path is reached — the run-time message
+    is currently unreachable, and no spec exercises it.
+11. **→ foreign pointer**: a plain C cast `(($CTYPE)($CEXP))` via
+    `nativetoforeignexp` ([FFI internals](ffi-internals.md)).
+
+`Ast.ExpAdjust` (truncating a multi-value expression to one value, the
+`(f())` form) is a pass-through to the inner expression.
+
+## Calls
+
+`codecall` implements the caller's half of the native calling convention
+([overview](codegen-overview.md)). Argument marshaling is minimal: each
+argument's preliminary statements run, then the bare C expressions are
+passed — already native, already anchored at their sources; there is no
+per-call pushing. For multiple returns the caller allocates one temp per
+extra return (with a shadow slot iff GC-able) and passes its address;
+the temp names are recorded in `node._extras` so the
+checker-synthesized `Ast.ExpExtra` nodes read them directly. If *any*
+return type is GC-able, the first result also goes through a temp and
+every GC-able result is stored to its reserved slot right after the call
+— the callee never pushes results, so this re-anchoring is what makes
+them collector-visible before the next allocation. Real output for
+`local a, b = two()` where `two(): (integer, string)`, caller then
+callee:
+
+```c
+TString* _tmp_1 = 0;                /* paired with _tmp_1_slot */
+lua_Integer _tmp_2 = 0;
+_tmp_2 = test_two_titan(L, _mod, &_tmp_1);
+setsvalue(L, _tmp_1_slot, _tmp_1);  /* re-anchor the GC-able result */
+```
+
+```c
+_tmp_1 = luaS_new(L, "a");
+setsvalue(L, _tmp_1_slot, _tmp_1);
+*_outparam_2 = _tmp_1;
+L->top.p = _base;
+return 1;
+```
+
+A call used as a statement just gets `";"` appended — results are
+simply discarded (the `((void)...)` wrapping belongs to assignments to
+unused locals, not to statement calls). Calls *from Lua* go through
+the generated entry wrappers, which check arity and argument types and
+install the error handler — see
+[Lua interop internals](lua-interop-internals.md).
+
+## Run-time errors: `codethrow` and message conventions
+
+Every run-time error in generated code is a `luaL_error(L, ...)` emitted
+by `codethrow` or its callers. Two prefix conventions coexist:
+
+* **`%s:%d:%d:` — `filename:line:col`** (the `.titan` path given to the
+  checker). Used by all `checkandget`/`checkandset` sites: boundary
+  argument checks, `value` casts, array/map element checks, record tag
+  mismatches (`expected test.Rec but found test.Point`), the unreachable
+  option unwrap above, and the record `__index`/`__newindex`
+  field-not-found errors (`field '%s' not found in record '%s'`).
+* **`at line %d` — line only.** Used by the inlined arithmetic and the
+  float→integer coercion: `error at line %d, divide by zero`,
+  `error at line %d, % by zero` (Lua 5.5's `pushvfstring` passes the
+  unknown `%` sequence through literally), and
+  `type error at line %d, number '%f' has no integer representation`.
+
+Boolean and `value` targets never throw — every Lua value converts.
+Wrapper arity errors use
+`calling Titan function %s with %d arguments, but expected %d`, and the
+module metatable raises
+`global variable '%s' does not exist in Titan module '%s'`. Whenever an
+error crosses a Lua entry wrapper, the runtime's `errorhandler` records
+a C-level backtrace retrievable via `titan.backtrace()`
+([error handling](../language/error-handling.md)).
