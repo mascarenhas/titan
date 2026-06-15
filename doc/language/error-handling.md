@@ -158,15 +158,13 @@ Titan-internal cast (say, `return x` from a function returning `integer`
 when `x: float`) raises the same complaint without file or column:
 `type error at line N, number 'N' has no integer representation`.
 
-*Limitation:* only integrality is checked, not range. A float that is
-integral but too large for an integer (such as `2.0^64`) does **not**
-raise; the conversion silently produces an unspecified integer (observed:
-`0`). Lua, by contrast, raises "number has no integer representation" for
-these too. A second hole: the boundary and container-element checks test
-integrality through a single-precision C `float`, so a fractional value
-whose fraction is beyond float precision (such as `16777216.5`) is
-silently accepted and truncated; the Titan-internal cast checks in full
-precision and raises for it.
+Both integrality and range are checked, in full double precision. A float
+that is integral but too large for an integer (such as `2.0^64`) raises
+`number has no integer representation`, exactly as Lua does, and a
+fractional value whose fraction is beyond float precision (such as
+`16777216.5`) is likewise rejected. The same rules apply to an `integer?`
+parameter, which converts an integral float just like a plain `integer`
+parameter.
 
 ### Integer division and modulo by zero
 
@@ -435,11 +433,10 @@ would instead unwrap immediately and raise on `nil` — see
 presence instead. From Lua, an option return is simply the value or
 `nil`, the natural Lua convention for "no result".
 
-*Limitation:* the `or`-default must currently go through a variable, as in
-`find_or_first`. Writing `return find(xs, v) or 1` directly — the
-option-returning call as the left operand of `or` — produces invalid C and
-fails compilation in the current prototype. Defaulting an indexing
-expression directly (`return xs[i] or 0`) works fine.
+The `or`-default can also be applied to the option-returning call
+directly, without going through a variable: `return find(xs, v) or 1`
+collapses the call's `integer?` result to `integer` with a default,
+exactly as defaulting an indexing expression (`return xs[i] or 0`) does.
 
 ## Design outlook
 

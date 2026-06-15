@@ -46,11 +46,14 @@ Second, the failure paths are asymmetric: if preprocessing or parsing fails,
 `checker.typeerror` at the import's location — the shape is
 `foo.titan:1:1: type error: failed preprocessing 'does_not_exist.h':
 does_not_exist.h: No such file or directory` (the spec checks the
-`failed preprocessing '...'` part). The per-member failure path reports a
-clean type error at the import's location too; it triggers on the
-`"FIXME unconverted ..."` fallback of `foreigntypes.convert` (for example a
-header declaring `extern restrict x;`, whose type reduces to an empty token
-array).
+`failed preprocessing '...'` part). The per-member failure path is different:
+when `foreigntypes.convert` returns a conversion failure — its
+`"FIXME unconverted ..."` fallback (for example a header declaring
+`extern restrict x;`, whose type reduces to an empty token array) or an
+unsupported C type — that member is **skipped** and the rest of the header
+still imports. Referencing a skipped member is then a clean
+`member '...' not found` error, never a checker or codegen crash on an
+unhandled type.
 
 ## The preprocessor (`c-parser/cpp.lua`)
 
@@ -284,9 +287,10 @@ decl; `void` → `types.Nil()`; `int` or `long` → Integer; `double` → Float;
 exactly `{"char","*"}` → String; any other trailing `*` → ad-hoc
 `{ _tag = "Type.Pointer", type = <recursive> }` (so `void*` is
 `Pointer(Nil)`, `FILE*` is `Pointer(Typedef FILE)`); anything else →
-`{ _tag = "Type.Unknown", data = typename }`. Note what falls to
-`Type.Unknown`: a lone `char`, `float`, `short`, and every spelled-out
-`unsigned` variant.
+a conversion failure (`nil, "unsupported C type: ..."`), which the importer
+skips so the member is simply omitted. Note what is unsupported and therefore
+skipped: a lone `char`, `float`, `short`, and every spelled-out `unsigned`
+variant.
 
 Typedef resolution (`convert_typedef`) scans the definition tokens: nested
 tables convert recursively, known foreign-type names resolve through the
@@ -297,8 +301,8 @@ error), and — only here, unlike in `type_from_name` — `int`, `char` and
 `_type`, and uses of it fail downstream.
 
 Two cross-cutting caveats. First, **none of these tags are
-typedecl-registered**: `Type.Pointer`, `Type.Typedef`, `Type.Unknown`,
-`Struct` and `Union` are plain table literals with no constructors in
+typedecl-registered**: `Type.Pointer`, `Type.Typedef`, `Struct` and `Union`
+are plain table literals with no constructors in
 `types.lua` and no arity checking (see [AST and typedecl](ast-typedecl.md));
 code that switches exhaustively on official `Type.*` tags will not see them
 coming. Second, `types.tostring` knows just enough to render errors:
@@ -410,14 +414,16 @@ the string from C.
 
 `foreigntonativeexp` converts results back: scalars and pointers pass
 through; `Nil` (a `void` return) becomes `"0"` (discarded); a `Type.Typedef`
-result recurses on its resolved `_type`; a `char*` result goes through
+result recurses on its resolved `_type`; a `char*` result is first
+NULL-checked (a NULL pointer — e.g. `getenv` of an unset variable — raises a
+clean run-time error rather than dereferencing NULL), then goes through
 `makestring`, which renders `luaS_new(L, $VALUE)` — `luaS_new` *copies* the
 C bytes into a fresh heap `TString` — and, when not immediately consumed by
 an assignment, anchors it in a stack slot
 (`$TMPNAME = $CSTR; setsvalue(L, $TMPSLOT, $TMPNAME);`) so the GC cannot
 collect it before use. The copy direction explains the ownership story:
-Titan never frees the C pointer, and a NULL `char*` return reaches
-`luaS_new` unchecked. From the `strcpy` spec module:
+Titan never frees the C pointer. (A nullable `char*` still maps to `string`,
+not `string?`; that modeling gap stays.) From the `strcpy` spec module:
 
 ```c
 void* _local_mem_1;
@@ -435,7 +441,7 @@ Two more integration points: an `Ast.ExpCast` whose *result* type is
 (Titan-value-to-pointer casts), and a foreign call in statement position
 just emits its statements plus `fexp .. ";"`.
 
-### `#include` emission and a verified failure mode
+### `#include` emission
 
 In `coder.generate`'s first toplevel pass, each `Ast.TopLevelForeignImport`
 contributes an include: absolute header paths (`headername:match("^/")`)
@@ -445,16 +451,14 @@ headers and `titan.h` (see [the overview](codegen-overview.md)). The C
 compiler thus re-parses the same header the Lua-side toolchain parsed, and
 disagreements surface as C compiler errors.
 
-One failure mode is worth knowing precisely. The converted type of
-`fwrite`'s return is `Type.Typedef` (`size_t`), and `ctype` has **no**
-`Type.Typedef` case. Storing such a result in a local is fine *as long as
-the local is never used* — `codestat` only declares C variables for decls
-marked `_used`, which is exactly the shape of the passing spec test. Add a
-use (`return n`) and code generation aborts with the raw Lua error
-`invalid type size_t` from `ctype` (verified by execution against glibc's
-`stdio.h`). The same gating explains why `Type.Unknown`-typed members are
-importable but unusable: the failure happens at the first real use,
-generally as an internal compiler error rather than a clean diagnostic.
+The converted type of `fwrite`'s return is `Type.Typedef` (`size_t`), and
+`ctype` handles it through its `Type.Typedef` case, emitting the C type of
+the resolved underlying scalar — so storing such a result in a local and
+using it (e.g. `return n`) compiles and runs (verified by execution against
+glibc's `stdio.h`). Unsupported C types never reach this point: they are
+skipped at conversion time (above), so referencing such a member is a clean
+`member '...' not found` compile-time error rather than a code-generation
+failure.
 
 ## Platform constraints and failure modes, summarized
 
@@ -466,8 +470,7 @@ generally as an internal compiler error rather than a clean diagnostic.
   compile-time errors at the import location. But several conditions escape
   as **raw Lua errors** that crash the compiler instead: `unimplemented
   operator` (in `#if`), `unterminated function-like macro`,
-  `NYI long double`, `FIXME unknown foreign c type` and `invalid type ...`
-  (in the coder).
+  `NYI long double` and `FIXME unknown foreign c type` (in the coder).
 * Struct/union contents are stubs; enum values are not stored
   (bare-enum constants are not registered at all); static C
   functions are invisible; `extern inline` definitions are demoted to

@@ -174,8 +174,8 @@ type pairs:
 
 * **Numbers** compare across `integer`/`float` with Lua's numeric
   equality (the integer side is promoted to float).
-* **Strings** compare by content for ordinary (short) strings — but see
-  the limitation below.
+* **Strings** compare by content (lexicographically for the relational
+  operators), exactly as in Lua.
 * **Arrays, maps and records** compare by identity, exactly like Lua's
   raw table and userdata equality; metamethods are never involved.
 * **Two `value`s** (or a `value` and anything else, which is promoted to
@@ -211,11 +211,9 @@ function in_range(x: integer, lo: float, hi: float): boolean
 end
 ```
 
-*Limitation:* the current compiler compiles string comparisons to
-pointer comparisons. For `==` this is right for short strings (Lua
-interns strings up to 40 bytes) but two separately created equal *long*
-strings can compare unequal; for `<` the result is not lexicographic
-order at all. Do not rely on either for long strings or ordering.
+String comparisons are by content: `==` and `~=` test byte-for-byte
+equality regardless of length, and `<` `<=` `>` `>=` order strings
+lexicographically, exactly as in Lua.
 
 ## `and`, `or` and `not`
 
@@ -254,29 +252,24 @@ and the static type of the result depends on what the checker knows:
   in that case a falsy left operand makes the whole `and` evaluate to
   `nil` at run time — even when the falsy value was `false`, where Lua
   would produce `false`: with `c: value`, `c and a` returns `nil`, not
-  `false`, when `c` holds `false`. (A plain `boolean` left operand
-  typechecks the same way but trips the codegen limitation below, so
-  the nil-not-false behavior is only observable through option and
-  `value` operands.)
+  `false`, when `c` holds `false`. A plain `boolean` left operand
+  typechecks and behaves the same way.
 * Any other combination in `or` is the compile-time error
   `left hand side of 'or' is a T1 but right hand side is a T2`.
 
 The Lua ternary idiom `cond and a or b` works as expected when `a`
-cannot be falsy *and* `cond` is an option or a `value`; with a
-`boolean`-typed condition — a comparison, say — the nested `and` trips
-the limitation below and the module fails to compile.
+cannot be falsy, including with a `boolean`-typed condition — a
+comparison, say:
 
-*Limitation:* the boolean context reaches only the *outermost*
-`and`/`or` — their operands are typechecked without it. For `or` this is
-harmless (an `or` with a boolean on either side is treated as boolean
-anyway), but an `and` whose left operand is boolean-typed and which does
-not itself see the boolean context — because it is used for its value,
-or sits nested inside a longer chain — generates invalid C in the
-current compiler. Concretely: `x == 1 and y == 2` works as a condition,
-as do `or` chains and `and` chains over never-falsy operands, but the
-three-clause `x == 1 and y == 2 and z == 3` fails to compile, as do
-`return b and x` with `b: boolean` and the ternary `x == 1 and a or b`.
-Split long conjunctions into nested `if`s for now.
+```lua
+function pick(use_first: boolean, a: integer, b: integer): integer
+    return use_first and a or b
+end
+```
+
+Long all-boolean `and`/`or` chains and `and`/`or` used for their value —
+`x == 1 and y == 2 and z == 3` as a condition, `return b and x` with
+`b: boolean` — compile and run as expected.
 
 ## Concatenation: `..`
 

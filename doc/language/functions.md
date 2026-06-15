@@ -48,10 +48,9 @@ The pieces:
   the same name is a compile-time error (`duplicate declaration for f,
   previous one at line N`).
 
-*Limitation:* in a function that returns `nil`, an early exit must be
-written `return nil` — a bare `return` with no expression, although it
-parses, crashes the current compiler with an internal error instead of
-being accepted or reported as a type error.
+In a function that returns `nil`, an early exit may be written either as
+a bare `return` with no expression or as `return nil` — both mean the
+same thing.
 
 ## Exported and `local` functions
 
@@ -261,12 +260,11 @@ are reserved for the planned first-class functions and closures, the
 most prominent item on the project roadmap (see the
 [status section](index.md#status-and-limitations)).
 
-*Limitation:* a written function type must have exactly one parameter
-type. Using a type like `() -> integer` or
-`(integer, integer) -> integer` in a declaration aborts the current
-compiler with the internal error `functions with 0 or 2+ return values
-are not yet implemented` (the message says "return values" but the check
-is on parameters).
+Because first-class function values are not implemented, writing a
+function type in an annotation (whatever its parameter and return
+arity — `integer -> integer`, `() -> integer`,
+`(integer, integer) -> integer`) is a clean compile-time error,
+`first-class function types are not supported yet`.
 
 ## Recursion and declaration order
 

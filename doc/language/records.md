@@ -49,12 +49,20 @@ never construct the first cell. Walking such a list reads the `next`
 field as a plain `List`, which [unwraps](#records-and-nil) the option
 with a run-time nil check.
 
-*Limitation:* a field type that mentions a record declared *later* in
-the module — including mutually recursive records — passes the type
-checker but does not build: the generated C refers to the later record's
-type tag before it is declared, and the C compiler rejects it. Only
-self-references work; order declarations so field types only mention
-records already declared.
+A field type may also mention a record declared *later* in the module,
+and mutually recursive records work as well:
+
+```lua
+record Tree
+    value: integer
+    branch: Branch?
+end
+
+record Branch
+    left: Tree
+    right: Tree
+end
+```
 
 ## Records are nominal
 
@@ -137,19 +145,11 @@ constructor, and elements of array or map constructors whose element
 type is the record. Without such a context the constructor is a
 compile-time error (`no context to provide type for record constructor`).
 
-*Limitation:* some of those contexts are accepted by the checker but
-broken in the code generator. A constructor expression as the right-hand
-side of a single-assignment *statement* whose target is a module variable
-(`g = { ... }` inside a function), a record field (`o.i = { ... }`), or
-a local that is never read anywhere in the function (the code generator
-elides never-read locals) aborts `titanc` with an internal compiler
-error (a Lua error reading
-`Internal compiler error: missing template variable TMPNAME`, followed
-by a traceback) — no C is produced. Assignments to locals that are read,
-and to array or map elements, work; a *multiple* assignment
-(`g, n = { ... }, 0`) goes through a temporary and works even for module
-variables and record fields; and `RecName.new(...)` works for every
-target.
+A constructor expression works in every one of those contexts. In
+particular, assigning one as the right-hand side of a single-assignment
+*statement* — to a module variable (`g = { ... }` inside a function), a
+record field (`o.i = { ... }`), or a local — behaves exactly like the
+initializer form, just as `RecName.new(...)` does.
 
 The field list is checked strictly, all at compile time:
 
@@ -173,14 +173,12 @@ origin: Point = Point.new(0.0, 0.0)
 ```
 
 Both initializer forms compile and work at run time. *Reassigning* the
-variable from inside a function is another matter: `Point.new(...)`
-works, but a constructor expression hits the compiler crash described
-[above](#constructor-expressions):
+variable from inside a function works the same way, with either form:
 
 ```lua
 function recenter()
-    p = Point.new(30.0, 40.0)    -- fine
-    p = { x = 30.0, y = 40.0 }   -- internal compiler error
+    p = Point.new(30.0, 40.0)
+    p = { x = 30.0, y = 40.0 }
 end
 ```
 

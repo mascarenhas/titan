@@ -110,11 +110,9 @@ function f(x: integer): integer
 end
 ```
 
-*Limitation:* in a multi-declaration, the bare-`?` option-inference marker
-is honored only for names whose value comes from an explicitly written
-expression. For names filled from the extra results of a trailing
-multi-return call (`local a, b? = f()`), the `?` on `b` is currently
-ignored and the base type is inferred.
+The bare-`?` option-inference marker is honored for every name in a
+multi-declaration, including names filled from the extra results of a
+trailing multi-return call (`local a, b? = f()` gives `b` an option type).
 
 ## Assignment
 
@@ -241,14 +239,9 @@ end
 
 The body runs at least once, and the loop exits when the `until` condition
 is true. As in Lua, the condition is scoped as part of the loop body, so
-the type checker accepts a condition that refers to locals declared inside
-the body.
-
-*Limitation:* although the checker accepts it, the current code generator
-crashes with an internal compiler error when the `until` condition
-actually references a local declared inside the loop body. In practice,
-write the condition in terms of variables from the enclosing scope, as in
-the example above.
+the condition may refer to locals declared inside the body — for example,
+the loop above could end with `local done = n <= 0` followed by
+`until done`.
 
 ## The numeric `for`
 
@@ -290,28 +283,14 @@ expressions are evaluated once, before the loop, and they see the
 enclosing scope — the control variable does not shadow them
 (`for i = 1, #i do` is legal when an outer `i` exists).
 
-The control variable is scoped to the loop body. The current compiler does
-not make it read-only: an assignment to it inside the body is accepted and
-changes the iteration, because the variable *is* the loop counter. This
-differs from Lua, where the loop's internal counter is unaffected by
-assignments to the visible variable. Do not rely on it; treat the control
-variable as read-only.
+The control variable is scoped to the loop body and is read-only, as in
+Lua 5.4+: assigning to it inside the body is a compile-time error
+(`cannot assign to 'for' control variable`).
 
-Two more places where the prototype diverges from Lua's numeric `for`,
-both following from the loop being compiled to a plain C `for` with a
-condition test on every iteration:
-
-* *Limitation:* **a step of zero is not a run-time error** (Lua raises
-  `'for' step is zero`). Titan treats a zero step like a negative step:
-  the loop runs zero iterations when `start < limit`, and loops forever
-  when `start >= limit`.
-* *Limitation:* **the integer loop counter wraps around** instead of
-  stopping at the integer limits. Lua precomputes the number of
-  iterations, so `for i = 1, math.maxinteger` terminates; the equivalent
-  Titan loop wraps the counter past the maximum integer (yielding negative
-  values for `i`) and never terminates. The increment uses Lua's
-  wrap-around integer arithmetic, so nothing worse than the wrap happens —
-  but keep integer loop bounds away from the 64-bit limits.
+A step of zero is a run-time error (`'for' step is zero`), as in Lua.
+Integer loops are Lua-faithful at the integer limits: the number of
+iterations is bounded so that `for i = 1, math.maxinteger` terminates
+rather than wrapping the counter past the maximum integer.
 
 ## Function calls as statements
 
@@ -361,17 +340,15 @@ understands `if`/`elseif`/`else` chains where every arm returns, but it
 does not credit loops — a `return` inside a `while` body does not count as
 "always returns".
 
-*Limitation:* a completely bare `return` (zero expressions) crashes the
-prototype compiler instead of being parsed or rejected cleanly. In a
-nil-returning function, either omit the `return` statement entirely or
-write `return nil` explicitly:
+A completely bare `return` (zero expressions) is allowed in a
+nil-returning function and means `return nil`:
 
 ```lua
 local count: integer = 0
 
 function bump(n: integer)    -- no annotation: returns nil
     if n <= 0 then
-        return nil           -- not a bare 'return'
+        return               -- bare return: means 'return nil'
     end
     count = count + n
 end

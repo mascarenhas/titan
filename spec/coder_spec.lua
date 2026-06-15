@@ -392,6 +392,163 @@ describe("Titan code generator", function()
         ]])
     end)
 
+    it("compares strings by content and lexicographically", function()
+        run_coder([[
+            function eq(a: string, b: string): boolean return a == b end
+            function lt(a: string, b: string): boolean return a < b end
+            function ge(a: string, b: string): boolean return a >= b end
+        ]], [[
+            local l1 = string.rep('0123456789', 5)
+            local l2 = string.rep('0123456789', 5)
+            assert(test.eq(l1, l2) == true)
+            assert(test.lt('Z', 'a') == true)
+            assert(test.lt('abc', 'abcd') == true)
+            assert(test.lt('abc', 'abc') == false)
+            assert(test.ge('b', 'a') == true)
+        ]])
+    end)
+
+    it("evaluates and/or for their value", function()
+        run_coder([[
+            function tern(a: integer, b: integer): integer
+                local x: integer = (a > b) and a or b
+                return x
+            end
+            function chain(a: integer, b: integer, c: integer): boolean
+                return a == 1 and b == 2 and c == 3
+            end
+            function find(xs: {integer}, v: integer): integer?
+                for i = 1, #xs do if xs[i] == v then return i end end
+                return nil
+            end
+            function findor(xs: {integer}, v: integer): integer
+                return find(xs, v) or 0
+            end
+        ]], [[
+            assert(test.tern(3, 5) == 5)
+            assert(test.tern(5, 3) == 5)
+            assert(test.chain(1, 2, 3) == true)
+            assert(test.chain(1, 2, 4) == false)
+            assert(test.findor({10, 20, 30}, 20) == 2)
+            assert(test.findor({10, 20, 30}, 99) == 0)
+        ]])
+    end)
+
+    it("compiles a Lua-faithful numeric for (overflow-safe, copy semantics)", function()
+        run_coder([[
+            function up(): integer local s: integer = 0 for i = 1, 10 do s = s + i end return s end
+            function down(): integer local s: integer = 0 for i = 5, 1, -1 do s = s + i end return s end
+            function ov(hi: integer): integer local n: integer = 0 for i = hi - 2, hi do n = n + 1 end return n end
+        ]], [[
+            assert(test.up() == 55)
+            assert(test.down() == 15)
+            assert(test.ov(9223372036854775807) == 3)
+        ]])
+    end)
+
+    it("raises on a zero for step like Lua", function()
+        run_coder([[
+            function f(): integer
+                local s: integer = 0
+                for i = 1, 10, 0 do s = s + 1 end
+                return s
+            end
+        ]], [[
+            test.f()
+        ]], "'for' step is zero")
+    end)
+
+    it("lets the until condition see body-local variables", function()
+        run_coder([[
+            function f(xs: {integer}): integer
+                local i: integer = 0
+                repeat
+                    i = i + 1
+                    local v: integer = xs[i]
+                until v > 5 or i >= #xs
+                return i
+            end
+        ]], [[
+            assert(test.f({1, 2, 8, 9}) == 3)
+        ]])
+    end)
+
+    it("assigns a record constructor to a module variable in a function", function()
+        run_coder([[
+            record Point x: float y: float end
+            g: Point = Point.new(0.0, 0.0)
+            function setg() g = { x = 1.0, y = 2.0 } end
+            function getg(): float setg() return g.x + g.y end
+        ]], [[
+            assert(test.getg() == 3.0)
+        ]])
+    end)
+
+    it("resets the stack top on an early return", function()
+        run_coder([[
+            function f(): integer
+                if 1 == 1 then return 1 end
+                local y: string = "x"
+                return #y
+            end
+        ]], [[
+            assert(test.f() == 1)
+        ]])
+    end)
+
+    it("accepts a bare return in a nil-returning function", function()
+        run_coder([[
+            function f(x: integer) if x > 0 then return end end
+            function g(): integer f(1) f(-1) return 42 end
+        ]], [[
+            assert(test.g() == 42)
+        ]])
+    end)
+
+    it("builds forward-referenced records", function()
+        run_coder([[
+            record A b: B end
+            record B v: integer end
+            function mk(n: integer): integer
+                local a: A = { b = { v = n } }
+                return a.b.v
+            end
+        ]], [[
+            assert(test.mk(7) == 7)
+        ]])
+    end)
+
+    it("range-checks an out-of-range float-to-integer conversion", function()
+        run_coder([[
+            function toi(x: float): integer local y: integer = x return y end
+        ]], [[
+            assert(test.toi(3.0) == 3)
+            assert(pcall(function() return test.toi(2.0 ^ 64) end) == false)
+        ]])
+    end)
+
+    it("converts an integral float for an integer? parameter", function()
+        run_coder([[
+            function f(x: integer?): integer return x end
+        ]], [[
+            assert(test.f(3.0) == 3)
+            assert(test.f(5) == 5)
+        ]])
+    end)
+
+    it("converts a cross-base option (t1? -> t2?), propagating nil", function()
+        run_coder([[
+            function i2f(x: integer?): float? return x end
+            function f2i(x: float?): integer? return x end
+        ]], [[
+            assert(test.i2f(5) == 5.0)
+            assert(test.i2f(nil) == nil)
+            assert(test.f2i(5.0) == 5)
+            assert(test.f2i(nil) == nil)
+            assert(pcall(function() return test.f2i(1.5) end) == false)
+        ]])
+    end)
+
     it("tests integer step value in 'for'", function()
         local code = [[
             function forstep(f: integer, t: integer, s: integer): integer

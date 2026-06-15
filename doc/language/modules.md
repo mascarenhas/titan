@@ -142,13 +142,10 @@ n = -(2 * 3)       -- ok: constant expression
 Record constructors are accepted by this rule, so
 `p: Point = { x = 1.0, y = 2.0 }` and `p = Point.new(1.0, 2.0)` both
 work as module-variable declarations, at compile time and at run time.
-*Limitation:* what does not work is *reassigning* such a variable with
-a constructor expression from inside a function — `p = { x = 30.0,
-y = 40.0 }` as a statement passes the typechecker but aborts code
-generation with an internal compiler error; assign the result of
-`Point.new(...)` instead. See
-[Records in module variables](records.md#records-in-module-variables)
-and the [status section of the index](index.md#status-and-limitations).
+*Reassigning* such a variable with a constructor expression from inside
+a function works the same way — `p = { x = 30.0, y = 40.0 }` as a
+statement is equivalent to the initializer form. See
+[Records in module variables](records.md#records-in-module-variables).
 
 ## Importing other modules
 

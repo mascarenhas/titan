@@ -57,10 +57,9 @@ Start with the [design philosophy](philosophy.md) if you want to know
 ## Status and limitations
 
 Titan is a working prototype, version 0.5. The language documented here is
-implemented and covered by the compiler's test suite, but the prototype
-has boundaries — some are missing features, others are constructs that
-pass the typechecker yet crash code generation or miscompile. They are
-grouped below; each links to the chapter that documents it in full.
+implemented and covered by the compiler's test suite. Its boundaries are
+mostly missing features, plus a handful of constructs the compiler rejects
+with a clean error; each links to the chapter that documents it in full.
 
 ### The biggest missing feature
 
@@ -72,83 +71,47 @@ grouped below; each links to the chapter that documents it in full.
   [type system](types.md#function-types)). This (with closures) is the
   most prominent roadmap item. A consequence: there is **no way to call a
   Lua function from Titan**
-  ([Lua interop](lua-interop.md#calling-lua-from-titan)). Written
-  function-type *annotations* are themselves unusable — a zero- or
-  two-or-more-parameter type stops the typechecker and a one-parameter
-  type aborts code generation
-  ([type system](types.md#function-types),
-  [grammar](grammar.md#declarations-and-types)).
+  ([Lua interop](lua-interop.md#calling-lua-from-titan)). Writing a
+  function *type* in an annotation is itself a clean compile-time error
+  ("first-class function types are not supported yet")
+  ([type system](types.md#function-types)).
 
-### Constructs that pass the typechecker but crash code generation
-
-* **Record constructor expressions in some assignment targets.** Assigning
-  a constructor (`g = { ... }`, `o.f = { ... }`) to a module variable, a
-  record field, or a never-read local *inside a function* aborts code
-  generation; `local record` is also a syntax error and records are
-  always exported
-  ([records](records.md#constructor-expressions),
-  [modules](modules.md#initializers-must-be-constant)). Use
-  `RecName.new(...)`, a read local, or a multiple assignment. A record
-  field that mentions a record declared *later* in the file likewise
-  fails to build ([records](records.md#declaring-a-record)).
-* **`and` with a plain boolean left operand outside a boolean context**
-  (including the ternary `cond and a or b` with a boolean `cond`, and long
-  `and` chains) generates invalid C; split into nested `if`s
-  ([expressions](expressions.md#and-or-and-not)).
-* **A bare `return`** (zero expressions) crashes the compiler instead of
-  being accepted or rejected; write `return nil` or omit the statement in
-  nil-returning functions
-  ([statements](statements.md#return),
-  [functions](functions.md#declaring-functions)).
-* **Method calls do not unwrap an option receiver:** `p:m()` on a `Point?`
-  is a compile-time error — unwrap into a plain record first
-  ([records](records.md#records-and-nil),
-  [option types](option-types.md#limitations)).
-* **Other internal-error corners:** a wrong-arity call to a callee with
-  multiple return types ([functions](functions.md#strict-arity)); a
-  `repeat`/`until` condition that references a body-local local
-  ([statements](statements.md#repeat--until)); and field selection on a
-  call result, `f().x` ([grammar](grammar.md#statements)).
-
-### Miscompilations (compile cleanly, wrong at run time)
-
-* **`return f(...) or default`** with an option-returning call as the left
-  operand of `or` produces invalid C; route the default through a variable
-  ([error handling](error-handling.md#recoverable-failures-without-errors-the-option-idiom)).
-* **String comparisons compile to pointer comparisons:** `==` is wrong for
-  separately-created equal *long* strings and `<` is not lexicographic at
-  all ([expressions](expressions.md#comparisons)).
-* **Float→integer conversion checks integrality but not range**, and the
-  boundary/container check uses single precision, so an out-of-range or
-  sub-float-precision value is silently accepted/truncated
-  ([error handling](error-handling.md#float-to-integer-conversion-failures)).
-* **Numeric `for` diverges from Lua:** a zero step is not an error, the
-  integer counter wraps past the 64-bit limit instead of terminating, and
-  the control variable is not read-only
-  ([statements](statements.md#the-numeric-for)).
-
-### Missing language features and known gaps
+### Smaller gaps and rough edges
 
 * **No `break`, no `goto`, no `for ... in`** — these words are reserved but
   unused; restructure the loop or `return` from it
   ([statements](statements.md#no-break-no-goto)).
-* **The C FFI handles functions, scalars, strings and opaque pointers**,
-  but struct/union fields are inaccessible (structs usable only behind
-  opaque pointers), bare (non-typedef) enum constants are not imported,
-  and there is no mapping for C arrays, function pointers, by-value
-  structs, or bare `char`/`short`/C `float`/explicit `unsigned`. Foreign
-  variables are effectively read-only, the C namespace is flat with no
-  conflict detection, inference from a typedef-returning call crashes,
-  pointers never cross into Lua, and the FFI carries no memory safety and
-  a compile-time POSIX dependency
+* **An option receiver is not auto-unwrapped for a method call:** `p:m()`
+  on a `Point?` is a compile-time error — unwrap into a plain record first
+  ([records](records.md#records-and-nil),
+  [option types](option-types.md#limitations)).
+* **There are no explicit option `as` casts:** `e as T` when `e: T?` is a
+  compile-time error — unwrap with `or` or a truthiness check instead
+  ([option types](option-types.md#limitations)). (Implicit `t1? → t2?`
+  conversion does work when `t1` is coercible to `t2`, propagating `nil`.)
+* **Two constructs still crash the compiler rather than erroring cleanly:**
+  a wrong-arity call to a callee with *multiple* return types (the message
+  formatter crashes; [functions](functions.md#strict-arity)) and field
+  selection on a call result, `f().x` ([grammar](grammar.md#statements)).
+  These are the last known internal-error corners.
+
+### The C FFI
+
+* **The FFI handles functions, scalars, strings and opaque pointers**, and
+  is the one place Titan's safety guarantees end — a C function can misuse
+  memory and crash the process, and a Titan `string` handed to a C
+  function that frees or stores it corrupts the heap. Struct/union fields
+  are inaccessible (structs usable only behind opaque pointers), bare
+  (non-typedef) enum constants are not imported, and C arrays, function
+  pointers, by-value structs and bare `char`/`short`/C `float`/`unsigned`
+  have no Titan type — a foreign function using one is simply skipped, so
+  referencing it is a clean "not a member" error. Foreign variables are
+  read-only, the C namespace is flat with no conflict detection, pointers
+  never cross into Lua, and the FFI carries a compile-time POSIX dependency
   ([the full list](ffi.md#summary-of-current-limitations)).
-* **The `?` option-inference marker is silently ignored** on module-level
-  variables and on declarations bound to extra multiple-return values;
-  annotate with `T?` there
-  ([option types](option-types.md#limitations),
-  [type system](types.md#type-inference)). Cross-base option conversions
-  also force rather than pass `nil` through, and there are no explicit
-  option `as` conversions ([option types](option-types.md#limitations)).
+
+### Other
+
 * **Error handling stops at the first step of its plan.** Titan has no
   raise/catch construct of its own, and `titan.backtrace()` and the merged
   Titan+Lua trace are experimental — Titan frames show mangled C names and

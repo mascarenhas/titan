@@ -147,7 +147,7 @@ raised as run-time errors via `luaL_error`:
 | `string` | only strings (`ttisstring`); no number→string coercion | `type error, expected string but found %s` |
 | `{T}` / `{K:V}` | **any table** (`ttistable`); element types are *not* checked here | `type error, expected table but found %s` |
 | `value` | anything, copied with `setobj2t` | never fails |
-| `T?` | nil (stores nil), else delegates to `checkandset` on the base — stricter than bare `T` for `integer` (no integral-float conversion) and `boolean` (a real boolean required) | the base type's message |
+| `T?` | nil (stores nil), else delegates to `checkandset` on the base — an `integer?` accepts an integral float just like a plain `integer`, but `boolean?` is stricter than a bare `boolean` parameter (a real boolean required) | the base type's message |
 | record | a full userdata whose payload pointer equals the record's tag | three-way message, below |
 
 The record case compares the pointer stored in the userdata body against
@@ -166,7 +166,7 @@ registry lookup left behind and the message actually reads
 (`expected test.Rec but found number`). The spec asserts the two
 working shapes.
 
-### The integer check and the `float` narrowing hazard
+### The integer check
 
 The integer branch as generated for `fmod`'s second parameter:
 
@@ -174,43 +174,45 @@ The integer branch as generated for `fmod`'s second parameter:
 if (TITAN_LIKELY(ttisinteger(s2v(func + 2)))) {
     _param_2 = ivalue(s2v(func + 2));
 } else if (ttisfloat(s2v(func + 2))) {
-    float _v = fltvalue(s2v(func + 2));
-    float _flt = l_floor(_v);
+    lua_Number _v = fltvalue(s2v(func + 2));
+    lua_Number _flt = l_floor(_v);
     if (TITAN_UNLIKELY(_v != _flt)) {
         luaL_error(L, "%s:%d:%d: type error, number '%f' has no integer representation", "interop.titan",13,1,_v);
-    } else {
-        lua_numbertointeger(_flt, &_param_2);
+    } else if (TITAN_UNLIKELY(!lua_numbertointeger(_flt, &_param_2))) {
+        luaL_error(L, "%s:%d:%d: type error, number '%f' has no integer representation", "interop.titan",13,1,_v);
     }
 } else {
     luaL_error(L, "%s:%d:%d: type error, expected integer but found %s", "interop.titan",13,1,lua_typename(L, ttype(s2v(func + 2))));
 }
 ```
 
-Note the temporaries' C type: `float`, not `lua_Number` (a double). The
-incoming double is narrowed to single precision *before* the
-integrality test, so a non-integral double that loses its fraction in
-the narrowing is accepted and rounded instead of raising: calling such
-a function from Lua with `1000000000000000.5` returns `999999986991104`.
-This is observed behavior, not evident design — the explicit
-`float`→`integer` cast inside Titan uses `lua_Number` temporaries
-correctly, and no spec exercises the narrowing.
+The temporaries are `lua_Number` (a double), so the integrality test
+runs at full double precision: an integral-valued float is accepted and
+its exact value handed to `lua_numbertointeger`, which range-checks the
+conversion and raises `number '%f' has no integer representation` when
+the value has a fractional part *or* falls outside the integer range.
+The explicit `float`→`integer` cast inside Titan uses the same
+double-precision, range-checked conversion.
 
 ### `checkandset`, the `TValue`-destination twin
 
 `checkandset(ctx, typ, dst, src, loc)` is the same idea writing into a
 `TValue*` destination instead of a native C variable; it serves
 module-variable writes from Lua, record-field writes from Lua, and the
-option base case. Three differences matter:
+option base case. Three points matter:
 
 * **Booleans are strict here.** `checkandset` requires an actual boolean
   (`ttisboolean`), failing with `type error, expected boolean but found
   %s` — whereas a boolean *function parameter* accepts anything by
   truthiness. The asymmetry is observable: `mod.flag = 42` errors,
   `mod.setflag(42)` silently stores `true`.
-* **Integers are strict here too.** `checkandset` requires an actual Lua
-  integer (`ttisinteger`) — no integral-float conversion — so
-  `mod.x = 2.0` raises `type error, expected integer but found number`,
-  while an integer *function parameter* accepts `2.0` as `2`.
+* **Integers match `checkandget` here.** `checkandset` performs the same
+  integral-float coercion as the integer entry check: an integral float
+  is accepted (`mod.x = 2.0` stores `2`), a non-integral or out-of-range
+  one raises `number '%f' has no integer representation`, and a
+  non-number raises `type error, expected integer but found %s` — so an
+  `integer?` slot or parameter behaves exactly like a plain `integer` at
+  the boundary.
 * **A cosmetic bug in the float case**: the generated C contains two
   consecutive `luaL_error` calls (visible in the `__newindex` excerpt
   below); the second is unreachable dead code.
@@ -538,12 +540,9 @@ Known soft spots, all verified in code:
 2. **Container aliasing** means Titan-exported tables can be corrupted
    from Lua after the fact; the per-read checks contain the damage to a
    run-time error, never type confusion.
-3. **The integer entry check narrows doubles to C `float`** before
-   testing integrality, so some non-integral doubles slip through
-   rounded instead of raising (see above).
-4. **`value` is a free pass-through by design**, but every `value`→`T`
+3. **`value` is a free pass-through by design**, but every `value`→`T`
    conversion is checked, so it is not a laundering hole.
-5. **Forged userdata from C** can defeat the tag check (and undersized
+4. **Forged userdata from C** can defeat the tag check (and undersized
    userdata cause an out-of-bounds payload read); pure Lua cannot
    construct full userdata, so the trust boundary holds against Lua
    code — which is the boundary Titan promises to defend.

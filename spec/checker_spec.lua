@@ -451,6 +451,64 @@ describe("Titan type checker", function()
         assert.match("called with 2 arguments but expects 3", err)
     end)
 
+    it("rejects a written function-type annotation cleanly", function ()
+        local ok, err = run_checker([[
+            function f(g: (integer) -> integer): integer return 0 end
+        ]])
+        assert.falsy(ok)
+        assert.match("function types are not supported", err)
+    end)
+
+    it("rejects assignment to a foreign variable cleanly", function ()
+        local ok, err = run_checker([[
+            local errno = foreign import "errno.h"
+            function f() errno.errno = 0 end
+        ]])
+        assert.falsy(ok)
+        assert.match("cannot assign to foreign variable", err)
+    end)
+
+    it("rejects assignment to the for control variable", function ()
+        local ok, err = run_checker([[
+            function f(): integer
+                local s: integer = 0
+                for i = 1, 3 do i = 10 s = s + 1 end
+                return s
+            end
+        ]])
+        assert.falsy(ok)
+        assert.match("'for' control variable", err)
+    end)
+
+    it("accepts a cross-base option conversion (t1? -> t2?)", function ()
+        local ok, err = run_checker([[
+            function f(x: integer?): float? return x end
+        ]])
+        assert.truthy(ok, err)
+    end)
+
+    it("rejects coercing an option to a non-coercible base", function ()
+        local ok, err = run_checker([[
+            function f(b: boolean?): integer return b end
+        ]])
+        assert.falsy(ok)
+        assert.match("expected integer but found boolean%?", err)
+    end)
+
+    it("honors the ? inference marker on module and multi-return declarations", function ()
+        local ok, err = run_checker([[
+            y? = 18
+            function setnil() y = nil end
+            function two(): (integer, integer) return 1, 2 end
+            function md(): integer?
+                local a, b? = two()
+                b = nil
+                return b
+            end
+        ]])
+        assert.truthy(ok, err)
+    end)
+
     it("catches named init list assigned to an array", function()
         local code = [[
             function fn(x: integer)
@@ -1708,19 +1766,28 @@ describe("Titan type checker", function()
         assert.match("expected string but found integer", err)
     end)
 
-    it("reports a clean error for unconvertible foreign types instead of crashing", function ()
-        local foreigntypes = require 'titan-compiler.foreigntypes'
-        local orig = foreigntypes.convert
-        -- Force the convert failure path; the '%' in the message also
-        -- exercises the safe "%s"-routed error formatting.
-        foreigntypes.convert = function() return nil, "FIXME unconverted %thing" end
-        local ok, clean, joined = pcall(run_checker, [[
-            local stdio = foreign import "stdio.h"
+    it("skips foreign members with unsupported C types instead of crashing", function ()
+        -- 'frob' uses a bare C float, which Titan does not support, so the
+        -- importer skips that member while the rest of the header still
+        -- imports; referencing the skipped member is a clean "not found"
+        -- error, never a checker/codegen crash.
+        local header = os.tmpname() .. ".h"
+        local fd = assert(io.open(header, "w"))
+        fd:write("float frob(float x);\nint dbl(int x);\n")
+        fd:close()
+        local ok, err = run_checker([[
+            local c = foreign import "]] .. header .. [["
+            function f(x: integer): integer return c.dbl(x) end
         ]])
-        foreigntypes.convert = orig
-        assert.truthy(ok, "checker crashed on foreign-import error path: " .. tostring(clean))
-        assert.falsy(clean)
-        assert.match("FIXME unconverted", joined)
+        assert.truthy(ok, err)
+        local ok2, err2 = run_checker([[
+            local c = foreign import "]] .. header .. [["
+            function f(x: integer): integer return c.frob(x) end
+        ]])
+        os.remove(header)
+        assert.falsy(ok2)
+        assert.match("frob", err2)
+        assert.match("not found", err2)
     end)
 
     it("does not crash choosing a compiled module with no source present", function ()

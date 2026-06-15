@@ -181,12 +181,12 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
             if (TITAN_LIKELY(ttisinteger($EXP))) {
                 $VAR = ivalue($EXP);
             } else if (ttisfloat($EXP)) {
-                float _v = fltvalue($EXP);
-                float _flt = l_floor(_v);
+                lua_Number _v = fltvalue($EXP);
+                lua_Number _flt = l_floor(_v);
                 if (TITAN_UNLIKELY(_v != _flt)) {
                     $THROWFLOAT
-                } else {
-                    lua_numbertointeger(_flt, &$VAR);
+                } else if (TITAN_UNLIKELY(!lua_numbertointeger(_flt, &$VAR))) {
+                    $THROWFLOAT
                 }
             } else {
                 $THROWINTEGER
@@ -305,7 +305,36 @@ end
 
 function checkandset(ctx, typ --[[:table]], dst --[[:string]], src --[[:string]], loc --[[:table]])
     local tag
-    if typ._tag == "Type.Integer" then tag = "integer"
+    if typ._tag == "Type.Integer" then
+        -- Accept an integral float (and reject a non-integral or out-of-range
+        -- one) exactly like checkandget, so an integer? slot/parameter is
+        -- consistent with a plain integer at the Lua boundary.
+        return render([[
+            if (TITAN_LIKELY(ttisinteger($SRC))) {
+                setobj2t(L, $DST, $SRC);
+            } else if (ttisfloat($SRC)) {
+                lua_Number _v = fltvalue($SRC);
+                lua_Number _flt = l_floor(_v);
+                lua_Integer _i;
+                if (TITAN_UNLIKELY(_v != _flt)) {
+                    $THROWFLOAT
+                } else if (TITAN_UNLIKELY(!lua_numbertointeger(_flt, &_i))) {
+                    $THROWFLOAT
+                } else {
+                    setivalue($DST, _i);
+                }
+            } else {
+                $THROWINT
+            }
+        ]], {
+            SRC = src,
+            DST = dst,
+            FILE = c_string_literal(loc.filename),
+            LINE = c_integer_literal(loc.line),
+            COL = c_integer_literal(loc.col),
+            THROWFLOAT = codethrow(ctx, "%s:%d:%d: type error, number '%f' has no integer representation", { "$FILE", "$LINE", "$COL", "_v" }),
+            THROWINT = codethrow(ctx, "%s:%d:%d: type error, expected integer but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($SRC))" })
+        })
     elseif typ._tag == "Type.Float" then
         return render([[
             if (TITAN_LIKELY(ttisfloat($SRC))) {
@@ -486,6 +515,9 @@ local function ctype(typ --[[:table]])
     elseif typ._tag == "Type.Nominal" then return "CClosure*"
     elseif typ._tag == "Type.Pointer" then return foreignctype(typ)
     elseif typ._tag == "Type.Option" then return "TValue"
+    -- A foreign typedef of a supported scalar (e.g. size_t -> integer) can
+    -- leak in via inference; use the C type of its resolved underlying type.
+    elseif typ._tag == "Type.Typedef" then return ctype(typ._type)
     else error("invalid type " .. types.tostring(typ))
     end
 end
@@ -657,8 +689,16 @@ end
 local function coderepeat(ctx, node)
     pushd(ctx)
     local nallocs = ctx.allocations
+    -- In Lua the `until` condition is in the scope of the body, so it may
+    -- reference body-local variables. Code the body's statements INLINE (not
+    -- wrapped in a nested C block) and then the condition, so both share one
+    -- C scope and the body locals' C names are bound and still visible.
+    local stats = {}
+    for _, stat in ipairs(node.block.stats) do
+        table.insert(stats, codestat(ctx, stat))
+    end
+    local cblk = table.concat(stats, "\n")
     local cstats, cexp = codeexp(ctx, node.condition, true)
-    local cblk = codestat(ctx, node.block)
     nallocs = ctx.allocations - nallocs
     popd(ctx)
     return render([[
@@ -708,102 +748,93 @@ end
 local function codefor(ctx, node)
     pushd(ctx)
     node.decl._cvar = "_local_" .. node.decl.name
-    local cdecl = ctype(node.decl._type) .. " " .. node.decl._cvar
     local csstats, csexp = codeexp(ctx, node.start)
     local cfstats, cfexp = codeexp(ctx, node.finish)
-    local cinc = ""
-    local cvtyp
-    if node.decl._type._tag == "Type.Integer" then
-        cvtyp = "lua_Integer"
-    else
-        cvtyp = "lua_Number"
-    end
-    local cstart = render([[
-        $CSSTATS
-        $CVTYP _forstart = $CSEXP;
-    ]], {
-        CSSTATS = csstats,
-        CSEXP = csexp,
-        CVTYP = cvtyp,
-    })
-    local cfinish = render([[
-        $CFSTATS
-        $CVTYP _forlimit = $CFEXP;
-    ]], {
-        CFSTATS = cfstats,
-        CFEXP = cfexp,
-        CVTYP = cvtyp,
-    })
-    local cstep, ccmp
-    local subs = {
-        CVAR = node.decl._cvar,
-    }
-    local ilit = node2literal(node.inc)
-    if ilit then
-        if ilit > 0 then
-            local tmpl
-            if node.decl._type._tag == "Type.Integer" then
-                subs.ILIT = c_integer_literal(ilit)
-                tmpl = "$CVAR = l_castU2S(l_castS2U($CVAR) + $ILIT)"
-            else
-                subs.ILIT = c_float_literal(ilit)
-                tmpl = "$CVAR += $ILIT"
-            end
-            cstep = render(tmpl, subs)
-            ccmp = render("$CVAR <= _forlimit", subs)
-        else
-            if node.decl._type._tag == "Type.Integer" then
-                subs.NEGILIT = c_integer_literal(-ilit)
-                cstep = render("$CVAR = l_castU2S(l_castS2U($CVAR) - $NEGILIT)", subs)
-            else
-                subs.NEGILIT = c_float_literal(-ilit)
-                cstep = render("$CVAR -= $NEGILIT", subs)
-            end
-            ccmp = render("_forlimit <= $CVAR", subs)
-        end
-    else
-        local cistats, ciexp = codeexp(ctx, node.inc)
-        cinc = render([[
-            $CISTATS
-            $CVTYP _forstep = $CIEXP;
-        ]], {
-            CISTATS = cistats,
-            CIEXP = ciexp,
-            CVTYP = cvtyp,
-        })
-        local tmpl
-        if node.decl._type._tag == "Type.Integer" then
-            tmpl = "$CVAR = l_castU2S(l_castS2U($CVAR) + l_castS2U(_forstep))"
-        else
-            tmpl = "$CVAR += _forstep"
-        end
-        cstep = render(tmpl, subs)
-        ccmp = render("0 < _forstep ? ($CVAR <= _forlimit) : (_forlimit <= $CVAR)", subs)
-    end
+    local cistats, ciexp = codeexp(ctx, node.inc)
     local nallocs = ctx.allocations
     local cblock = codestat(ctx, node.block)
     nallocs = ctx.allocations - nallocs
     popd(ctx)
-    return render([[
-        {
-            $CSTART
-            $CFINISH
-            $CINC
-            for($CDECL = _forstart; $CCMP; $CSTEP) {
-                $CBLOCK
-                $CHECKGC
-            }
-        }
-    ]], {
-        CSTART = cstart,
-        CFINISH = cfinish,
-        CINC = cinc,
-        CDECL = cdecl,
-        CCMP = ccmp,
-        CSTEP = cstep,
+    -- Lua-faithful numeric for (see lvm.c forprep/forloop/floatforloop):
+    -- a zero step raises a run-time error; the integer loop is driven by an
+    -- unsigned iteration count so it cannot overflow past the integer limits
+    -- into a non-terminating loop; and the visible control variable is a
+    -- fresh copy each iteration (a separate internal index advances), so it
+    -- is independent of the iteration and read-only.
+    local cvtyp = node.decl._type._tag == "Type.Integer" and "lua_Integer" or "lua_Number"
+    local subs = {
+        CVAR = node.decl._cvar,
+        -- declare the visible control variable only if the body uses it
+        CVARDECL = node.decl._used
+            and (cvtyp .. " " .. node.decl._cvar .. " = _foridx;") or "",
+        CSSTATS = csstats, CSEXP = csexp,
+        CFSTATS = cfstats, CFEXP = cfexp,
+        CISTATS = cistats, CIEXP = ciexp,
         CBLOCK = cblock,
-        CHECKGC = nallocs > 0 and "luaC_checkGC(L);" or ""
-    })
+        CHECKGC = nallocs > 0 and "luaC_checkGC(L);" or "",
+        FILE = c_string_literal(node.loc.filename),
+        LINE = node.loc.line,
+        COL = node.loc.col,
+        STEP0 = codethrow(ctx, "%s:%d:%d: 'for' step is zero",
+                          { "$FILE", "$LINE", "$COL" }),
+    }
+    if node.decl._type._tag == "Type.Integer" then
+        return render([[
+            {
+                $CSSTATS
+                lua_Integer _forstart = $CSEXP;
+                $CFSTATS
+                lua_Integer _forlimit = $CFEXP;
+                $CISTATS
+                lua_Integer _forstep = $CIEXP;
+                if (_forstep == 0) {
+                    $STEP0
+                }
+                if (_forstep > 0 ? (_forstart <= _forlimit) : (_forstart >= _forlimit)) {
+                    lua_Unsigned _forcount = (_forstep > 0)
+                        ? (l_castS2U(_forlimit) - l_castS2U(_forstart)) / l_castS2U(_forstep)
+                        : (l_castS2U(_forstart) - l_castS2U(_forlimit)) / (l_castS2U(-(_forstep + 1)) + 1u);
+                    lua_Integer _foridx = _forstart;
+                    while (1) {
+                        $CVARDECL
+                        $CBLOCK
+                        $CHECKGC
+                        if (_forcount == 0) {
+                            break;
+                        }
+                        _forcount--;
+                        _foridx = l_castU2S(l_castS2U(_foridx) + l_castS2U(_forstep));
+                    }
+                }
+            }
+        ]], subs)
+    else
+        return render([[
+            {
+                $CSSTATS
+                lua_Number _forstart = $CSEXP;
+                $CFSTATS
+                lua_Number _forlimit = $CFEXP;
+                $CISTATS
+                lua_Number _forstep = $CIEXP;
+                if (_forstep == 0) {
+                    $STEP0
+                }
+                if (_forstep > 0 ? (_forstart <= _forlimit) : (_forstart >= _forlimit)) {
+                    lua_Number _foridx = _forstart;
+                    while (1) {
+                        $CVARDECL
+                        $CBLOCK
+                        $CHECKGC
+                        _foridx += _forstep;
+                        if (!(_forstep > 0 ? (_foridx <= _forlimit) : (_foridx >= _forlimit))) {
+                            break;
+                        }
+                    }
+                }
+            }
+        ]], subs)
+    end
 end
 
 -- Reads the entry for key $K (a boxed TValue*) of table $T into a local
@@ -1147,7 +1178,19 @@ local function foreigntonativeexp(ctx, exp, cexp, target)
     end
 
     if exp._type._tag == "Type.String" then
-        return makestring(ctx, cexp, target)
+        -- A C function may return NULL (e.g. getenv of an unset variable); a
+        -- Titan `string` has no nil representation, so raise a clean run-time
+        -- error instead of letting luaS_new dereference NULL.
+        local texp, tmp = newforeigntmp(ctx, exp._type)
+        local guard = render([[
+            $TEXP
+            $TMP = $CEXP;
+            if ($TMP == NULL) {
+                luaL_error(L, "foreign function returned a NULL string");
+            }
+        ]], { TEXP = texp, TMP = tmp, CEXP = cexp })
+        local mkstats, mkexp = makestring(ctx, tmp, target)
+        return guard .. "\n" .. mkstats, mkexp
     end
 
     if exp._type._tag == "Type.Typedef" then
@@ -1335,20 +1378,17 @@ local function codereturn(ctx, node)
         table.insert(cstats, cs)
         table.insert(cstats, "*_outparam_" .. i .. " = " .. ce .. ";")
     end
-    local tmpl
-    if ctx.nslots > 0 then
-        tmpl = [[
-            $CSTATS
-            L->top.p = _base;
-            return $CEXP;
-        ]]
-    else
-        tmpl = [[
-            $CSTATS
-            return $CEXP;
-        ]]
-    end
-    return render(tmpl, {
+    -- Always reset the stack top to _base on return. Whether the function
+    -- ends up reserving slots is not known when an early return is coded
+    -- (a later statement can bump ctx.nslots), and the preamble always
+    -- declares _base, so an unconditional reset keeps every return path
+    -- consistent with the preamble (otherwise an early return could leave
+    -- L->top.p one or more slots too high).
+    return render([[
+        $CSTATS
+        L->top.p = _base;
+        return $CEXP;
+    ]], {
         CSTATS = table.concat(cstats, "\n"),
         CEXP = cexp,
     })
@@ -1647,7 +1687,7 @@ local function coderecord(ctx, node, target)
     local stats = {}
     local cinit, ctmp, tmpname, tmpslot
     local record = types.registry[node._type.fqtn]
-    if target then
+    if target and target._cvar then
         ctmp, tmpname, tmpslot = "", target._cvar, target._slot
     else
         ctmp, tmpname, tmpslot = newtmp(ctx, node._type, true)
@@ -1914,10 +1954,16 @@ local function codebinaryop(ctx, node, iscondition)
             local rstats, rcode = codeexp(ctx, node.rhs)
             local ctmp, tmpname, tmpslot = newtmp(ctx, node._type, types.is_gc(node._type))
             local tmpset = types.is_gc(node._type) and setslot(node._type, tmpslot, tmpname) or ""
+            -- Materialize the lhs into a temp of its own type so the
+            -- truthiness test works for any lhs (boolean C value, a
+            -- comparison rvalue, an option, a value) — never &<rawCode>.
+            local lctmp, lcname = newtmp(ctx, node.lhs._type)
             local code = render([[
                 $LSTATS
+                $LCTMP
+                $LCNAME = $LCODE;
                 $CTMP
-                if(l_isfalse(&$LCODE)) {
+                if(!($COND)) {
                     setnilvalue(&$TMPNAME);
                 } else {
                     $RSTATS;
@@ -1927,6 +1973,9 @@ local function codebinaryop(ctx, node, iscondition)
             ]], {
                 CTMP = ctmp,
                 TMPNAME = tmpname,
+                LCTMP = lctmp,
+                LCNAME = lcname,
+                COND = toboolean(node.lhs._type, lcname),
                 LSTATS = lstats,
                 LCODE = lcode,
                 RSTATS = rstats,
@@ -1952,10 +2001,16 @@ local function codebinaryop(ctx, node, iscondition)
             local rstats, rcode = codeexp(ctx, node.rhs)
             local ctmp, tmpname, tmpslot = newtmp(ctx, node._type, types.is_gc(node._type))
             local tmpset = types.is_gc(node._type) and setslot(node._type, tmpslot, tmpname) or ""
+            -- Materialize the option lhs into a TValue temp ONCE: the lhs may
+            -- be a non-lvalue (e.g. a direct call returning t?), and it must
+            -- be evaluated exactly once, not in both the test and the extract.
+            local lctmp, lcname = newtmp(ctx, node.lhs._type)
             local code = render([[
                 $LSTATS
+                $LCTMP
+                $LCNAME = $LCODE;
                 $CTMP
-                if(l_isfalse(&$LCODE)) {
+                if(!($COND)) {
                     $RSTATS;
                     $TMPNAME = $RCODE;
                 } else {
@@ -1965,12 +2020,15 @@ local function codebinaryop(ctx, node, iscondition)
             ]], {
                 CTMP = ctmp,
                 TMPNAME = tmpname,
+                LCTMP = lctmp,
+                LCNAME = lcname,
+                COND = toboolean(node.lhs._type, lcname),
                 LSTATS = lstats,
                 LCODE = lcode,
                 RSTATS = rstats,
                 RCODE = rcode,
                 TMPSET = tmpset,
-                GETL = getslot(node._type, tmpname, "&" .. lcode),
+                GETL = getslot(node._type, tmpname, "&" .. lcname),
             })
             return code, tmpname
         else
@@ -2026,6 +2084,43 @@ local function codebinaryop(ctx, node, iscondition)
             return generate_binop_idiv_flt(node, ctx)
         else
             error("impossible: " .. ltyp .. " " .. rtyp)
+        end
+    elseif node.lhs._type._tag == "Type.String"
+           and node.rhs._type._tag == "Type.String"
+           and (op == "==" or op == "!=" or op == "<"
+                or op == "<=" or op == ">" or op == ">=") then
+        -- String comparison must be by content, not by TString* pointer:
+        -- equality via luaS_eqstr, ordering via the VM's lexicographic
+        -- comparators (which call l_strcmp). Pointer comparison is wrong for
+        -- long (non-interned) strings and never lexicographic.
+        local lstats, lcode = codeexp(ctx, node.lhs)
+        local rstats, rcode = codeexp(ctx, node.rhs)
+        local cstats = lstats .. rstats
+        if op == "==" then
+            return cstats, "luaS_eqstr(" .. lcode .. ", " .. rcode .. ")"
+        elseif op == "!=" then
+            return cstats, "(!luaS_eqstr(" .. lcode .. ", " .. rcode .. "))"
+        else
+            local ltmp, ltn = newtmp(ctx, types.Value())
+            local rtmp, rtn = newtmp(ctx, types.Value())
+            cstats = cstats .. render([[
+                $LTMP
+                setsvalue(L, &$LTN, $LCODE);
+                $RTMP
+                setsvalue(L, &$RTN, $RCODE);
+            ]], { LTMP = ltmp, LTN = ltn, RTMP = rtmp, RTN = rtn,
+                  LCODE = lcode, RCODE = rcode })
+            local cmp
+            if op == "<" then
+                cmp = "luaV_lessthan(L, &" .. ltn .. ", &" .. rtn .. ")"
+            elseif op == "<=" then
+                cmp = "luaV_lessequal(L, &" .. ltn .. ", &" .. rtn .. ")"
+            elseif op == ">" then
+                cmp = "luaV_lessthan(L, &" .. rtn .. ", &" .. ltn .. ")"
+            else
+                cmp = "luaV_lessequal(L, &" .. rtn .. ", &" .. ltn .. ")"
+            end
+            return cstats, cmp
         end
     elseif (op == "==" or op == "!=") and
             ctype(node.lhs._type) == "TValue" and
@@ -2282,8 +2377,8 @@ function codeexp(ctx, node, iscondition, target)
             $TMPNAME2 = l_floor($TMPNAME1);
             if ($TMPNAME1 != $TMPNAME2) {
                 $THROW_WRONG_INT
-            } else {
-                lua_numbertointeger($TMPNAME2, &$TMPNAME3);
+            } else if (!lua_numbertointeger($TMPNAME2, &$TMPNAME3)) {
+                $THROW_WRONG_INT
             }
         ]], {
             CSTAT = cstat,
@@ -2335,6 +2430,48 @@ function codeexp(ctx, node, iscondition, target)
             CTMP = ctmp,
             TMPNAME = tmpname
         }), tmpname
+    elseif tag == "Ast.ExpCast" and node._type._tag == "Type.Option"
+           and node.exp._type._tag == "Type.Option" then
+        -- t1? -> t2? (coerceable bases): propagate nil; for a present value,
+        -- unwrap the base, convert it base-to-base, and re-wrap. The base
+        -- conversion reuses the ordinary cast codegen via a synthetic cast of
+        -- the extracted value (so e.g. float->integer keeps its range check).
+        local sbase = node.exp._type.base
+        local tbase = node._type.base
+        local cstats, cexp = codeexp(ctx, node.exp)
+        local csrc, srcname = newtmp(ctx, node.exp._type)
+        local cbase, basename = newtmp(ctx, sbase)
+        local cdst, dstname = newtmp(ctx, node._type)
+        local synthvar = { _tag = "Ast.VarName", _type = sbase,
+                           _decl = { _cvar = basename } }
+        local synthcast = { _tag = "Ast.ExpCast", loc = node.loc,
+                            exp = synthvar, target = tbase, _type = tbase }
+        local convstats, convexp = codeexp(ctx, synthcast)
+        return render([[
+            $CSTATS
+            $CSRC
+            $SRCNAME = $CEXP;
+            $CDST
+            if (TITAN_UNLIKELY(ttisnil(&$SRCNAME))) {
+                setnilvalue(&$DSTNAME);
+            } else {
+                $CBASE
+                $GETBASE;
+                $CONVSTATS
+                $SETDST
+            }
+        ]], {
+            CSTATS = cstats,
+            CSRC = csrc,
+            SRCNAME = srcname,
+            CEXP = cexp,
+            CBASE = cbase,
+            GETBASE = getslot(sbase, basename, "&" .. srcname),
+            CONVSTATS = convstats,
+            CDST = cdst,
+            DSTNAME = dstname,
+            SETDST = setslot(tbase, "&" .. dstname, convexp),
+        }), dstname
     elseif tag == "Ast.ExpCast" and node._type._tag == "Type.Option" then
         -- cast from t to t?
         assert(types.equals(node._type.base, node.exp._type))
@@ -2618,16 +2755,16 @@ local function codefuncdec(tlcontext, node)
         ]], {
             NSLOTS = c_integer_literal(nslots),
         }))
+    else
+        -- No reserved slots, but still anchor _base so every return path can
+        -- reset L->top.p uniformly (the reset is then a no-op).
+        table.insert(stats, 1, "        StkId _base = L->top.p;")
     end
     table.insert(stats, body)
     if rettype._tag == "Type.Nil" then
-        if nslots > 0 then
-            table.insert(stats, [[
+        table.insert(stats, [[
             L->top.p = _base;
             return 0;]])
-        else
-            table.insert(stats, "        return 0;")
-        end
     end
     node._body = render([[
     $ISLOCAL $RETTYPE $NAME($PARAMS) {
@@ -2893,7 +3030,8 @@ local function init_data_from_other_modules(tlcontext, includes, loadmods, initm
 end
 
 local function coderecorddec(ctx, code, initrecs, inittags, node)
-    table.insert(code, "static const void *" .. tagname(node._type.name) .. ";")
+    -- (the type tag is forward-declared up front in generate(), so that
+    -- forward/mutually-recursive record field types resolve)
     local fieldmap, getswitch, setswitch = {}, {}, {}
     for i, field in ipairs(node._type.fields) do
         table.insert(fieldmap, render([[
@@ -3112,6 +3250,16 @@ function coder.generate(modname, ast, static_deps)
     local initctx = newcontext(tlcontext)
 
     allocate_upvalues(tlcontext, ast)
+
+    -- Forward-declare every record's type tag up front, before any record
+    -- body is emitted, so a record field whose type is a record declared
+    -- LATER (or mutually recursive) does not reference an as-yet-undeclared
+    -- tag in the generated C.
+    for _, node in pairs(ast) do
+        if not node._ignore and node._tag == "Ast.TopLevelRecord" then
+            table.insert(code, "static const void *" .. tagname(node._type.name) .. ";")
+        end
+    end
 
     for _, node in pairs(ast) do
         if not node._ignore then

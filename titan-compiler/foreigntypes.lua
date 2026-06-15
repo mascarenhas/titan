@@ -29,12 +29,21 @@ local function type_from_name(st, typename)
         return types.String()
     elseif typename[#typename] == "*" then
         table.remove(typename)
+        local inner, err = type_from_name(st, typename)
+        if not inner then return nil, err end
         return {
             _tag = "Type.Pointer",
-            type = type_from_name(st, typename)
+            type = inner
         }
     end
-    return { _tag = "Type.Unknown", data = typename }
+    -- Unsupported C type: signal a conversion failure so the importer can
+    -- skip this member (referencing it is then a clean "member not found",
+    -- never a checker/codegen crash on an unhandled type).
+    local parts = {}
+    for _, tok in ipairs(typename) do
+        parts[#parts + 1] = type(tok) == "string" and tok or "?"
+    end
+    return nil, "unsupported C type: " .. table.concat(parts, " ")
 end
 
 local function convert_function(st, ftype)
@@ -45,10 +54,13 @@ local function convert_function(st, ftype)
     }
     local ptypes = {}
     for _, pdecl in ipairs(ftype.params) do
-        table.insert(ptypes, foreigntypes.convert(st, pdecl))
+        local pt, err = foreigntypes.convert(st, pdecl)
+        if not pt then return nil, err end
+        table.insert(ptypes, pt)
     end
-    local rettypes = {}
-    table.insert(rettypes, foreigntypes.convert(st, ftype.ret))
+    local rt, err = foreigntypes.convert(st, ftype.ret)
+    if not rt then return nil, err end
+    local rettypes = { rt }
     decl._type = types.Function(ptypes, rettypes, ftype.vararg)
     decl.params = ptypes
     decl.rettypes = rettypes

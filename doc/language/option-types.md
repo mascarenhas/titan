@@ -84,12 +84,10 @@ The subtle difference: *with* a type, `x?:` is pure sugar for writing `T?`;
 *without* one, `x?` is an inference directive — the only way to say
 "infer, but keep it nullable".
 
-*Limitation:* the `?` name marker is accepted by the parser in two places
-where the checker currently ignores it: on a module-level variable
-(`local x? = 17` at the top level still infers plain `integer`), and on a
-declaration that receives one of the *extra* values of a multiple-return
-call (`local a, b? = f()` does not optionize `b`). Use an explicit `T?`
-annotation in those positions.
+The `?` name marker works in every position the parser accepts it,
+including on a module-level variable (`y? = 18` at the top level infers
+`integer?`) and on a declaration that receives one of the *extra* values of
+a multiple-return call (`local a, b? = f()` optionizes `b`).
 
 ## What an option value is
 
@@ -180,31 +178,15 @@ raises the `expected <T> but found nil` error shown above.
 
 ### Conversions between different option types
 
-The numeric coercions lift over options, but **by forcing**, not by
-letting nil through. Converting `integer?` to `float?` (or to `float`, or
-`float?` to `integer`, ...) unwraps the value, converts it, and — when the
-target is an option — re-wraps: if the value is nil, the conversion raises
-the unwrap error above instead of producing nil.
-
-```lua
-function tofloat(t: {integer}): float?
-    return t[1]
-end
--- tofloat({3})  --> 3.0
--- tofloat({})   --> run-time error: ... expected integer but found nil
-```
-
-Only conversions between `T` and `T?` *of the same base type* (and
-`nil → T?`) are nil-preserving.
-
-*Unverified (intent only):* the clause in `types.coerceable`
-(types.lua:143–145) that admits the option-to-bare cross-base cases
-tests `coerceable(target, source.base)` with swapped arguments; it was
-added in commit 244c4b9 with no explanation, so whether the swap is
-deliberate is unknown. The behavior described above is empirically
-confirmed, and the swap is invisible in pure Titan: boolean and `value`
-targets are caught by earlier clauses, and the only remaining
-cross-base pair, integer/float, is symmetric.
+Options interconvert across base types: `t1?` converts to `t2?` whenever
+`t1` is coercible to `t2` (for example `integer?` to `float?`). The
+conversion is **nil-preserving** — `nil` flows straight through as `nil`,
+and a present value is unwrapped, converted base-to-base, and re-wrapped.
+Same-base conversions (`T` ↔ `T?`, and `nil → T?`) are implicit and
+nil-preserving too. As with the underlying base conversion, a *narrowing*
+one can still fail at run time on a present value — converting a `float?`
+that holds a non-integral or out-of-range number to `integer?` raises the
+usual "no integer representation" error, while `nil` is unaffected.
 
 ### No explicit `as` casts
 
@@ -338,15 +320,11 @@ end
 (As in Lua, the idiom requires that `v1` itself cannot be false or nil —
 with `v1: integer` it cannot.)
 
-*Limitation:* an option-producing `and` only survives code generation when
-its left operand is an option or a `value`. With a plain `boolean` left
-operand — including any comparison result, so `b and 1.0` above and
-`(a > b) and v1 or v2` alike — the checker accepts the expression but the
-emitted C is rejected by the C compiler (the coder treats the unboxed
-boolean as a tagged value); `titanc` fails with `cc` errors, not a type
-error. Booleans work fine when the `and` sits in a boolean context
-(`if a and b then`, `x and y` returned as a `boolean`), where both sides
-are coerced to `boolean` instead.
+An option-producing `and` works with any left operand, including a plain
+`boolean` and any comparison result, so both `b and 1.0` above and
+`(a > b) and v1 or v2` compile and run. The `and` also works in a boolean
+context (`if a and b then`, `x and y` returned as a `boolean`), where both
+sides are coerced to `boolean` instead.
 
 ## Options in conditions
 
@@ -383,13 +361,11 @@ loops while the element is present), and `not` yields a `boolean`; see
 
 Options cross the Lua boundary as plain Lua values. A Titan function with a
 `T?` parameter accepts nil from Lua, and otherwise checks the value as a
-`T` parameter would — with one numeric asymmetry: a `float?` parameter
-still converts a Lua integer the way `float` does, but an `integer?`
-parameter rejects every float outright (`expected integer but found
-number`), including integral ones like `3.0` that a plain `integer`
-parameter would convert. A wrong, non-nil value raises the usual boundary
-error (see [Lua interoperability](lua-interop.md)). A `T?` return value
-simply arrives in Lua as nil or as the value.
+`T` parameter would: a `float?` parameter converts a Lua integer the way
+`float` does, and an `integer?` parameter converts an integral float like
+`3.0` exactly as a plain `integer` parameter would. A wrong, non-nil value
+raises the usual boundary error (see [Lua interoperability](lua-interop.md)).
+A `T?` return value simply arrives in Lua as nil or as the value.
 
 ```lua
 -- Titan (greet.titan)
@@ -418,19 +394,10 @@ rough edges:
 * **No explicit option casts.** `e as T` when `e: T?` (and the reverse) is
   a compile-time error `cannot cast 'T?' to 'T'`; only the implicit
   coercions exist.
-* **Cross-base option conversions force.** `integer? → float?` and friends
-  unwrap (raising on nil) rather than passing nil through.
 * **Option function types cannot be written.** `?` suffixes simple types
   only, and there is no parenthesized type syntax to attach it to a
   function type — moot for now, since
   [functions are not first-class values](functions.md) in this version.
-* **The `?` inference marker is ignored** for module-level variables and
-  for the trailing declarations bound to extra multiple-return values;
-  annotate with `T?` explicitly there.
-* **`and` with a plain `boolean` left operand does not compile** outside a
-  boolean context: the expression typechecks as an option, but the
-  generated C is rejected by the C compiler. Use an option or `value` on
-  the left, or put the `and` in a boolean context.
 * **Method calls do not unwrap their receiver.** With `p: Point?`,
   `p:move(1, 2)` is a compile-time error — `expected record in receiver of
   method call but found 'mod.Point?'`, followed by `expected a record

@@ -128,29 +128,17 @@ One big disjunction. True iff any of:
 9. Nil → any `t?`.
 10. `s? → t?` when `coerceable(s, t)` (option-to-option lifting).
 11. non-option `s → t?` when `coerceable(s, t)` (coerce, then wrap).
-12. option `s?` → non-option `t` when… read it carefully:
-
-    ```lua
-    (source._tag == "Type.Option" and
-     target._tag ~= "Type.Option" and
-     types.coerceable(target, source.base))
-    ```
-
-    The recursive call is `coerceable(target, source.base)` — the arguments
-    are **swapped** relative to every other clause. The clause itself is
-    load-bearing: it is what admits, e.g., `float? → integer` (force, then
-    narrow — initializing an `integer` local from a `{float}` element
-    compiles and runs). For numeric bases the swap is invisible, since
-    `coerceable` holds in both directions; it bites on asymmetric pairs:
-    `coerceable(boolean?, integer)` is true (because `coerceable(integer,
-    boolean)` is — truthiness), so the checker accepts `local i: integer = b`
-    with `b: boolean?`, and `trycoerce` builds a cast node whose target is
-    `boolean` but whose `_type` claims `integer`; the coder then dies on one
-    of its `types.equals` assertions (all verified empirically). No spec
-    test pins any of this down. *Unverified (intent only):* whether the
-    swapped argument order is intended is unknown — it dates to commit
-    244c4b9 with no test or comment; the behavior itself is verified as
-    described above.
+12. option `s?` → non-option `t` when `coerceable(source.base, target)` — the
+    base must itself coerce to the target. This is what admits, e.g.,
+    `float? → integer` (force, then narrow — initializing an `integer` local
+    from a `{float}` element compiles and runs). It is correctly directional:
+    `boolean? → integer` is rejected, since `coerceable(boolean, integer)` is
+    false (truthiness only goes *to* Boolean), so `local i: integer = b` with
+    `b: boolean?` is a clean type error rather than a coercion the coder
+    cannot honor. A cross-base option conversion such as `integer? → float?`
+    likewise does not slip through this clause; it is a compile-time type
+    error (unwrap and rebuild explicitly), while same-base option types still
+    interconvert freely.
 
 Note that `coerceable` is **irreflexive**: no clause matches two equal
 non-Value types. That matters for `as` casts and `checkmatch`, both below.
@@ -269,15 +257,12 @@ local a, b = f()   -- f(): (integer, integer)
 ```
 
 The coder compiles `ExpExtra` by reading the corresponding out-parameter of
-the call (see [the calling convention](codegen-overview.md)). Two
-asymmetries: map initializers have no expansion code, so extra values there
-are silently truncated; and in a declaration's multi-return tail the `?`
-inference marker (`local a, b? = f()`) is ignored — `b` is forced, not
-optionized (verified: a later `b = nil` errors expecting `integer`).
-*Unverified (intent only):* whether ignoring the `?` marker for extras is
-intended is unknown — the option-syntax commit (244c4b9) only added
-`decl.option` handling to the head path, and no spec covers extras; the
-behavior itself is verified.
+the call (see [the calling convention](codegen-overview.md)). One asymmetry
+remains: map initializers have no expansion code, so extra values there are
+silently truncated. The `?` inference marker carries through to the extras of
+a multi-return declaration, just as on the head: `local a, b? = f()` makes
+`b` an option (`optionize(exp._type)`), while a marker-less tail variable is
+forced like any inferred local.
 
 ### Default `for` step
 
@@ -354,15 +339,17 @@ specified case-by-case in [option types](../language/option-types.md).
   (bracketed keys → map, named fields → record error, otherwise array; an
   empty `{}` defaults to `{integer}`). A Boolean context also switches
   `and`/`or` into plain boolean mode.
-* **First-class function rejection points.** Two: reading a name whose type
-  is Function (or Module, or a record type) as a value errors in `Ast.ExpVar`
-  (`trying to access a function as a first-class value`), and a call whose
-  callee is not a `VarName`/`VarDot` resolving to a top-level function,
-  module member or static errors in `Ast.ExpCall` (`first-class functions
-  are not supported in this version of Titan`). Written function *types* are
-  accepted, but `typefromnode` raises a raw Lua `error` (not a type error)
-  unless there is exactly one parameter type — and its message confusingly
-  says "return values".
+* **First-class function rejection points.** Three, all clean type errors:
+  reading a name whose type is Function (or Module, or a record type) as a
+  value errors in `Ast.ExpVar` (`trying to access a function as a first-class
+  value`); a call whose callee is not a `VarName`/`VarDot` resolving to a
+  top-level function, module member or static errors in `Ast.ExpCall`
+  (`first-class functions are not supported in this version of Titan`); and
+  writing a function *type* in an annotation (e.g. `g: (integer) -> integer`)
+  errors in `typefromnode`'s `Ast.TypeFunction` handler (`first-class
+  function types are not supported yet`), which logs through `invalid` and
+  returns `Type.Invalid()` so checking continues. First-class function values
+  remain unimplemented; these are the points that reject them.
 * **Conditions are not coerced.** `if`/`while`/`repeat` conditions are
   checked with a Boolean context but never `trycoerce`d or `checkmatch`ed:
   any type is a legal condition, and truthiness is the coder's problem.
@@ -388,10 +375,9 @@ short-circuit: once `ret` is true, **later statements in the block are not
 visited at all**. A plain `return` can only be a block's final statement (the
 grammar enforces it), but an always-returning `if`/`else` mid-block makes the
 case reachable. *Limitation:* statements after such an `if` are dead code and
-go completely unchecked — a type error placed there is not reported, and
-because the skipped nodes carry no checker annotations the coder then
-crashes on them (`attempt to index a nil value`) even when the dead code is
-well-typed (both verified experimentally).
+go completely unchecked — a type error placed there is not reported (verified
+experimentally). The checker performs no dead-code analysis to flag or prune
+them.
 
 `checkfunc` consumes the result: if the body does not always return and
 `rettypes[1]` is not `Type.Nil`, it reports `function can return nil but
@@ -410,15 +396,16 @@ loader(modname)  -->  ok, moduletype_or_error, errors
 
 On success, the import node's `_type` is the returned `Type.Module`, and
 errors found while checking the dependency propagate into this module's
-error list. `checkimport` also contains a loop that *looks like* it
-registers imported record members into `types.registry` — but its condition
-tests the member wrapper's tag (always `Type.ModuleMember`/
-`Type.ModuleVariable`) against `"Type.Record"`, so it never fires (verified:
-the registry stays empty after `checkimport` on a module with a record
-member). Cross-module nominal types work anyway because registration is a
-side effect of the dependency's *own* `checker.check`, which the loader runs
-recursively: the `TopLevelRecord` visitor writes into the process-global
-`types.registry`. A `Type.Nominal` carries *only* its fqtn string and
+error list. `checkimport` then walks the module's members and registers each
+imported record into `types.registry`: it unwraps the `Type.ModuleMember`
+wrapper and, when the underlying type is a `Type.Record` (or
+`Type.Interface`), stores it under its fqtn. This is what makes a record
+imported from a `.so`-only dependency — one with no `.titan` source to
+re-check — usable by nominal type. For a dependency *with* source the same
+registration also happens as a side effect of the dependency's own
+`checker.check`, which the loader runs recursively: the `TopLevelRecord`
+visitor writes into the process-global `types.registry`. A `Type.Nominal`
+carries *only* its fqtn string and
 resolves through the registry at every use, so the qualified type
 `geo.Point` (parsed as `Ast.TypeQualName`, converted by `typefromnode` to
 `types.Nominal("geo.Point")`) means something only because checking module

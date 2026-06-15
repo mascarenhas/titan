@@ -132,18 +132,10 @@ typefromnode = util.make_visitor({
     end,
 
     ["Ast.TypeFunction"] = function(node, st, errors)
-        if #node.argtypes ~= 1 then
-            error("functions with 0 or 2+ return values are not yet implemented")
-        end
-        local ptypes = {}
-        for _, ptype in ipairs(node.argtypes) do
-            table.insert(ptypes, typefromnode(ptype, st, errors))
-        end
-        local rettypes = {}
-        for _, rettype in ipairs(node.rettypes) do
-            table.insert(rettypes, typefromnode(rettype, st, errors))
-        end
-        return types.Function(ptypes, rettypes, false)
+        -- First-class function values are not implemented; writing a
+        -- function type in an annotation is a clean compile-time error
+        -- rather than a checker/codegen crash.
+        return invalid(errors, node.loc, "first-class function types are not supported yet")
     end,
 
     ["Ast.TypeOption"] = function(node, st, errors)
@@ -158,7 +150,12 @@ typefromnode = util.make_visitor({
 local function trycoerce(source, target, errors)
     if types.coerceable(source._type, target) then
         local n
-        if source._type._tag == "Type.Option" and
+        if source._type._tag == "Type.Option" and target._tag == "Type.Option" then
+            -- t1? -> t2?: a single cast that propagates nil and converts a
+            -- present value (the coder emits the nil-check + base conversion);
+            -- do NOT unwrap, which would raise on nil.
+            n = ast.ExpCast(source.loc, source, target)
+        elseif source._type._tag == "Type.Option" and
            target._tag ~= "Type.Boolean" and
            target._tag ~= "Type.Value" then
             local inner = ast.ExpCast(source.loc, source, source._type.base)
@@ -252,6 +249,9 @@ local function checkfor(node, st, errors)
     end
     checkdecl(node.decl, st, errors)
     declare(node.decl, st)
+    -- The numeric-for control variable is read-only (as in Lua 5.4+):
+    -- assigning to it is a clean compile-time error, not a silent miscompile.
+    node.decl._forcontrol = true
 
     local loop_type_is_valid
     if node.decl._type._tag == "Type.Integer" then
@@ -340,6 +340,9 @@ checkstat = util.make_visitor({
                     if decl.type then
                         checkdecl(decl, st, errors)
                         exp = trycoerce(exp, decl._type, errors)
+                    elseif decl.option then
+                        decl._type = optionize(exp._type)
+                        exp = trycoerce(exp, decl._type, errors)
                     else
                         exp = tryforce(exp) -- never infer option type
                         decl._type = exp._type
@@ -411,9 +414,17 @@ checkstat = util.make_visitor({
                     checker.typeerror(errors, var.loc, "trying to assign to a module")
                 elseif texp._tag == "Type.Function" then
                     checker.typeerror(errors, var.loc, "trying to assign to a function")
+                elseif var._tag == "Ast.VarDot" and var._decl
+                       and var._decl._tag == "Type.ModuleMember" then
+                    checker.typeerror(errors, var.loc, "cannot assign to foreign variable '%s'", var.name)
                 else
                     -- mark this declared variable as assigned to
                     if var._tag == "Ast.VarName" and var._decl then
+                        if var._decl._forcontrol then
+                            checker.typeerror(errors, var.loc,
+                                "cannot assign to 'for' control variable '%s'",
+                                var._decl.name)
+                        end
                         var._decl._assigned = true
                     end
                     exp = trycoerce(exp, var._type, errors)
@@ -433,8 +444,15 @@ checkstat = util.make_visitor({
         for i, exp in ipairs(node.exps) do
             checkexp(exp, st, errors, ftype.rettypes[i])
         end
+        if #node.exps == 0 and #ftype.rettypes == 1
+           and ftype.rettypes[1]._tag == "Type.Nil" then
+            -- A bare `return` in a nil-returning function means `return nil`.
+            local nilexp = ast.ExpNil(node.loc)
+            nilexp._type = types.Nil()
+            table.insert(node.exps, nilexp)
+        end
         local lastexp = node.exps[#node.exps]
-        if lastexp._types and #lastexp._types > 1 then
+        if lastexp and lastexp._types and #lastexp._types > 1 then
             for i = 2, #lastexp._types do
                 table.insert(node.exps, ast.ExpExtra(lastexp.loc, lastexp, i, lastexp._types[i]))
             end
@@ -1402,13 +1420,14 @@ local toplevel_visitor = util.make_visitor({
             for _, item in ipairs(ftypes) do
                 local fname = item.name
                 local ftype = item.type
-                local decl, err = foreigntypes.convert(st, ftype)
+                local decl = foreigntypes.convert(st, ftype)
                 if decl then
                     members[fname] = types.ModuleMember(name, fname, decl)
                     st:add_foreign_type(fname, decl)
-                else
-                    checker.typeerror(errors, node.loc, "%s", err)
                 end
+                -- else: the member uses an unsupported C type; skip it so the
+                -- rest of the header still imports. Referencing a skipped
+                -- member is then a clean "not a member" error, never a crash.
             end
             local modtype = types.ForeignModule(name, members)
             node._type = modtype
@@ -1426,6 +1445,10 @@ local toplevel_visitor = util.make_visitor({
             node.value = trycoerce(node.value, node._type, errors)
             checkmatch("declaration of module variable " .. node.decl.name,
                        node._type, node.value._type, errors, node.loc)
+        elseif node.decl.option then
+            checkexp(node.value, st, errors)
+            node._type = optionize(node.value._type)
+            node.value = trycoerce(node.value, node._type, errors)
         else
             checkexp(node.value, st, errors)
             node.value = tryforce(node.value)
@@ -1620,9 +1643,13 @@ end
 function checker.checkimport(modname, loader)
     local ok, type_or_error, errors = loader(modname)
     if not ok then return nil, type_or_error end
-    for name, type in pairs(type_or_error.members) do
-        if type._tag == "Type.Record" or type._tag == "Type.Interface" then
-            types.registry[modname .. "." .. name] = type
+    for _, member in ipairs(type_or_error.members) do
+        -- Exported records arrive wrapped in a Type.ModuleMember; unwrap so
+        -- the record's nominal type is registered for `.so`-only imports too
+        -- (the source-import path registers it as a side effect of checking).
+        local t = member.type or member
+        if t and (t._tag == "Type.Record" or t._tag == "Type.Interface") then
+            types.registry[t.name] = t
         end
     end
     return type_or_error, errors

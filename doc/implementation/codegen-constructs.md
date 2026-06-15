@@ -99,31 +99,53 @@ never passes through `luaD_call` and would otherwise starve the collector.
 
 ## The numeric `for`
 
-`codefor` precomputes `_forstart`/`_forlimit` and specializes on the
-step via `node2literal` (a small constant-folding helper whose comment
-notes "A constant-folding optimization pass would obsolete this"):
+`codefor` follows Lua 5.5's own `forprep`/`forloop`/`floatforloop`
+(`lvm.c`). It precomputes `_forstart`, `_forlimit` and `_forstep` once,
+raises a clean `'for' step is zero` run-time error on a zero step, and
+then drives the integer loop with an **unsigned iteration count**
+computed up front rather than re-comparing the control variable against
+the limit each turn. The count is the number of remaining steps, so the
+loop runs exactly that many times and an integer loop near
+`mininteger`/`maxinteger` terminates instead of overflowing into a
+non-terminating loop. The body's visible control variable is a **fresh
+copy** taken from a separate internal index (`_foridx`) each iteration,
+so it is independent of the iteration and effectively read-only — the
+checker rejects an assignment to it as `cannot assign to 'for' control
+variable`, matching Lua 5.4+.
 
-* **Positive literal step**: integer loops step with
-  `$CVAR = l_castU2S(l_castS2U($CVAR) + $LIT)` — unsigned arithmetic, so
-  stepping past `maxinteger` wraps instead of invoking C signed-overflow
-  undefined behavior — and compare `$CVAR <= _forlimit`; float loops use
-  `$CVAR += $LIT`.
-* **Negative literal step**: `l_castS2U($CVAR) - $NEGLIT`, comparison
-  flipped to `_forlimit <= $CVAR`.
-* **Dynamic step**: `_forstep` is computed once; stepping adds
-  `l_castS2U(_forstep)` and the comparison tests direction every
-  iteration: `0 < _forstep ? ($CVAR <= _forlimit) : (_forlimit <= $CVAR)`.
-
-Real output for `for i = 1, n, 2`:
+Real output for `for i = 1, n, 2` (integer form):
 
 ```c
-lua_Integer _forstart = 1;
-lua_Integer _forlimit = _param_n;
-for(lua_Integer _local_i = _forstart; _local_i <= _forlimit;
-    _local_i = l_castU2S(l_castS2U(_local_i) + 2)) {
-    ...
+{
+    lua_Integer _forstart = 1;
+    lua_Integer _forlimit = _param_n;
+    lua_Integer _forstep = 2;
+    if (_forstep == 0) {
+        luaL_error(L, "test.titan:1:1: 'for' step is zero");
+    }
+    if (_forstep > 0 ? (_forstart <= _forlimit) : (_forstart >= _forlimit)) {
+        lua_Unsigned _forcount = (_forstep > 0)
+            ? (l_castS2U(_forlimit) - l_castS2U(_forstart)) / l_castS2U(_forstep)
+            : (l_castS2U(_forstart) - l_castS2U(_forlimit)) / (l_castS2U(-(_forstep + 1)) + 1u);
+        lua_Integer _foridx = _forstart;
+        while (1) {
+            lua_Integer _local_i = _foridx;
+            ...
+            if (_forcount == 0) {
+                break;
+            }
+            _forcount--;
+            _foridx = l_castU2S(l_castS2U(_foridx) + l_castS2U(_forstep));
+        }
+    }
 }
 ```
+
+The unsigned count and `l_castS2U`/`l_castU2S` stepping keep the step
+arithmetic out of C signed-overflow undefined behavior. The visible
+`_local_i` is only declared when the body actually reads it. The float
+form is simpler: there is no count — `_foridx += _forstep` and the loop
+breaks once `_foridx` passes `_forlimit` in the step's direction.
 
 The body tail gets the same allocation-gated `luaC_checkGC(L);` as
 `while`. `codereturn` stores returns 2..n through `*_outparam_<i>`,
@@ -459,9 +481,17 @@ values**: when both operands are `TValue`-represented (`value` or
 options), `==`/`~=` compile to `luaV_rawequalobj(&l, &r)` and its
 negation. **`and`/`or`** specialize on static truthiness: boolean
 operands become C `&&`/`||`; statically truthy/falsy sides short-circuit
-at compile time; `TValue` operands get a lazy `l_isfalse` branch; and the
-`t? or default` shape unwraps the option on the truthy side — the
-generated form of the `t[i] or v` idiom.
+at compile time. In the general case the left operand is first
+**materialized into a temp of its own type** and the truthiness test
+runs through `toboolean(lhs-type, temp)` rather than taking the address
+of a raw left-hand expression — so the test works for a boolean C value,
+a comparison rvalue, an option, or a `value` alike, and the operand is
+evaluated exactly once (it may be a non-lvalue such as a direct call).
+This is what makes the `cond and a or b` ternary idiom, long all-boolean
+`and`/`or` chains, and a `<call> or default` (e.g. `return find(xs,v) or
+0`) compile. The `t? or default` shape unwraps the option on the truthy
+side — the generated form of the `t[i] or v` idiom — and a `value`-typed
+`or` tests the materialized temp with `l_isfalse`.
 
 *Limitation:* integer `+ - *` and unary `-` are plain C operators with no
 overflow handling, and `driver.CFLAGS` does not pass `-fwrapv`; the spec

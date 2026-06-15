@@ -152,10 +152,10 @@ Titan's `integer` is 64-bit and `float` is double-precision, matching
 C types outside this table — bare `char`, `short`, C's single-precision
 `float`, `unsigned` variants spelled out in a prototype, structs and
 unions passed by value, C arrays, and function pointers — have **no
-Titan counterpart**. Declarations that mention them are still listed as
-members, but you cannot call or read them: the use crashes the compiler
-with an internal error (a Lua traceback ending in
-`impossible: Type.Unknown`), not a clean type error.
+Titan counterpart**. A member whose signature mentions one of these is
+*skipped* during import rather than partly converted: it simply does
+not appear in the foreign module, so referencing it is the ordinary
+compile-time error `member '...' not found inside module '...'`.
 
 *Limitation:* struct and union **contents** are parsed but not yet
 converted — you cannot access the fields of a C struct from Titan. The
@@ -195,11 +195,11 @@ function write_greeting(): integer
 end
 ```
 
-The annotation on `n` matters: `fwrite` returns the typedef `size_t`,
-and while a typedef-typed value converts to `integer` wherever an
-integer is expected, letting type inference give a local the raw
-typedef type currently crashes the code generator (an internal error,
-`invalid type size_t`).
+The annotation on `n` is optional here: `fwrite` returns the typedef
+`size_t`, which converts to `integer` wherever an integer is expected,
+and letting type inference give a local the typedef type works too — a
+typedef of a supported scalar (such as `size_t`) is treated as the
+scalar it resolves to.
 
 One C-ism to keep in mind with variadic functions: Titan integers are
 passed as 64-bit values, so `printf`-style formats must use 64-bit
@@ -225,10 +225,10 @@ between them at the boundary:
   *copied* into a fresh Titan string. Titan does not take ownership of
   the C pointer: if the C function allocated memory for it and expects
   the caller to free it, that memory leaks, because the pointer itself
-  is discarded after the copy. The conversion also assumes the pointer
-  is a valid zero-terminated string — a C function that can return a
-  null `char *` (like `getenv`) will crash the process on the null
-  case.
+  is discarded after the copy. A `char *` is converted as a string, not
+  a `string?`, so a C function that can return a null `char *` (like
+  `getenv` for an unset variable) raises a clean run-time error on the
+  null case rather than crashing the process.
 
 ## Pointers
 
@@ -293,14 +293,17 @@ Pointers are not managed by the garbage collector. Memory you obtain
 from C (as with `realloc` above) must be released through C (`free`),
 and Titan does nothing to stop you from using a pointer after the C
 library has invalidated it — this is exactly as unsafe as it is in C.
+There is no memory safety at the boundary in either direction: a Titan
+`string` passed to C is a pointer into a GC-owned buffer, so binding a
+C function that frees or reallocates what it is handed (passing a Titan
+string to `free` or `realloc`) corrupts the heap.
 
 ## Reading and writing C globals
 
 Foreign variables (including the `#define` constants) are read like
-module variables, as in the `errno.errno` example above. Treat them as
-**read-only**: assigning to one is not supported (the assignment
-typechecks, but code generation fails with an internal compiler error —
-an assertion failure — rather than a clean type error).
+module variables, as in the `errno.errno` example above. They are
+**read-only**: assigning to one is the clean compile-time error
+`cannot assign to foreign variable`.
 
 ## Linking and platform requirements
 
@@ -402,11 +405,11 @@ titanc examples.sdl_demo -lSDL2
   members; structs only as opaque pointers).
 * No C arrays, no function pointers, no by-value structs, and no
   mapping for bare `char`, `short`, C `float`, or explicit `unsigned`
-  types in prototypes.
+  types in prototypes. A member whose signature mentions one of these
+  is skipped during import, so referencing it is a clean "not a member"
+  error.
 * Function-like macros are not imported.
 * Foreign variables are effectively read-only.
-* Letting inference type a local from a typedef-returning call (e.g.
-  `size_t`) crashes the code generator; annotate such locals.
 * One flat C namespace across all imports, without conflict detection.
 * Pointers cannot appear in Titan type annotations, containers, record
   fields, or exported signatures, and never cross into Lua.

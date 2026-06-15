@@ -75,8 +75,12 @@ and records first; functions second). The pieces appear in this order:
 4. **Forward signatures** (`$SIGS`): the native-convention prototype of
    every function in this module, plus
    `extern CClosure *<dep>_init(lua_State *L);` per static import.
-5. **Record support** (from `coderecorddec`): per record, its
-   `static const void *<mangled-fqtn>_typetag;` and the
+5. **Record support**: first, *up front* (before any record body), a
+   `static const void *<mangled-fqtn>_typetag;` forward declaration for
+   every record in the module — emitted ahead of the bodies so a field
+   whose type is a record declared later in the file, or a pair of
+   mutually-recursive records, references an already-declared tag. Then,
+   per record (from `coderecorddec`), the
    `__index_<rec>`/`__newindex_<rec>` metamethods serving field access
    from Lua ([Lua interop internals](lua-interop-internals.md)).
 6. **Function bodies**: for each function, method and static, the
@@ -384,10 +388,15 @@ Code generation for one function body runs inside a context created by
   mark. `newslot(ctx, name)` hands out the next slot as
   `TValue *<name> = s2v(_base + <depth>);`, bumping both; `pushd`/`popd`
   save and restore `depth` around blocks and loop bodies so sibling
-  blocks reuse slots. The final `nslots` sizes the function preamble,
-  which (only when `nslots > 0`) runs `luaC_checkGC`, reserves `nslots`
-  stack slots above `_base = L->top.p`, and nils them; every `return`
-  restores `L->top.p = _base` first.
+  blocks reuse slots. The final `nslots` sizes the function preamble. The
+  preamble **always** declares `_base = L->top.p`, and only when
+  `nslots > 0` does it additionally run `luaC_checkGC`, reserve `nslots`
+  stack slots above `_base`, and nil them. Every `return` unconditionally
+  restores `L->top.p = _base` first — because an early return is coded
+  before the function's final `nslots` is known (a later statement can
+  still raise it), the reset is uniform across all return paths (a no-op
+  when no slots were reserved) rather than chosen per-return from the
+  current slot count.
 * `allocations` — incremented by every `newslot`; loop generators compare
   it across the loop body and emit a per-iteration `luaC_checkGC(L)` only
   when the body actually allocates.

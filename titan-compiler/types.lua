@@ -132,6 +132,9 @@ function types.coerceable(source, target)
            (target._tag == "Type.Option" and
             source._tag == "Type.Nil") or
 
+           -- t1? -> t2? whenever t1 is coerceable to t2: the conversion
+           -- propagates nil and converts/re-wraps a present value (see the
+           -- option-to-option case in trycoerce and the coder's ExpCast).
            (target._tag == "Type.Option" and
             source._tag == "Type.Option" and
             types.coerceable(source.base, target.base)) or
@@ -142,7 +145,7 @@ function types.coerceable(source, target)
 
            (source._tag == "Type.Option" and
             target._tag ~= "Type.Option" and
-            types.coerceable(target, source.base))
+            types.coerceable(source.base, target))
 
 end
 

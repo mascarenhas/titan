@@ -127,15 +127,11 @@ anything but a named function, static method or method reports
 `first-class functions are not supported in this version of Titan`.
 See [Functions](functions.md).
 
-*Limitation:* the current compiler additionally aborts with raw internal
-errors (Lua tracebacks, not type errors) on every *written* function-type
-annotation: with zero or two-plus parameter types it stops in the type
-checker (`functions with 0 or 2+ return values are not yet implemented`
-— the message actually concerns parameters), and with exactly one
-parameter type it passes the checker only to die in code generation
-(`invalid type (integer) -> integer`). Since no value can inhabit a
-function-typed variable anyway, written function types are best avoided
-entirely in 0.5.
+Writing a function-type annotation directly (e.g. `g: (integer) -> integer`)
+is itself a clean compile-time error,
+`first-class function types are not supported yet`. Since no value can
+inhabit a function-typed variable anyway, written function types are not
+usable in 0.5.
 
 ### Foreign types
 
@@ -243,9 +239,9 @@ the value does not conform.
 | `t` | `t?` | no |
 | `t?` | `t` | yes — error `expected t but found nil` if the value is absent |
 | `nil` | `t?` | no |
-| `s?` | `t?` | yes — nil check, then convert, then re-wrap: a nil raises instead of flowing through to the target option (nil passes through only between *equal* option types, where no coercion happens at all) |
+| `s?` | `t?` | whenever `s` coerces to `t`: `nil` passes straight through, and a present value is converted from `s` to `t` and re-wrapped — so e.g. `integer? → float?` works and is nil-preserving (a narrowing conversion can still raise on a present value) |
 | `s` | `t?` | as for `s` to `t` (convert, then wrap) |
-| `s?` | `t`, for inter-coercible bases | yes — nil check, then convert (in practice the numeric pairs: `integer? → float`, `float? → integer`; the compiler's test for this rule swaps its operands, so it also admits backwards pairs like `boolean? → integer`, which compile into run-time checks that always fail) |
+| `s?` | `t`, for inter-coercible bases | yes — nil check, then convert (in practice the numeric pairs: `integer? → float`, `float? → integer`; an option over a non-coercible base, like `boolean? → integer`, is a clean compile-time type error) |
 | `integer` or `float` | `string` | no — **only** as an operand of `..`; integral floats format with a `.0` suffix exactly like Lua's `tostring` |
 | `string` or pointer | void pointer | no (FFI only) |
 
@@ -359,11 +355,11 @@ local y? = arr[1]     -- y: integer? (nil flows through)
 `local y?: integer = arr[1]` is accepted too, as pure sugar for
 `local y: integer? = arr[1]`.
 
-*Limitation:* the `?` marker is ignored in two places: for names bound to
-the extra values of a multiple-return call (`local a, b? = f()` infers a
-non-option type for `b` when `b` comes from `f`'s second return), and on
-module-level variables (`y? = 18` at the top level parses, but the
-variable is inferred non-option).
+The `?` marker is honored everywhere a name is inferred, including for
+names bound to the extra values of a multiple-return call (`local a, b? = f()`
+infers an option type for `b` when `b` comes from `f`'s second return) and
+on module-level variables (`y? = 18` at the top level infers `y` as an
+option type).
 
 Two other positions are inferred: the control variable of a numeric `for`
 takes the type of the start expression when not annotated (and must end
