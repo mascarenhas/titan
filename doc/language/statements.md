@@ -97,11 +97,8 @@ exactly one, and after that expansion the number of values must equal the
 number of names, or the declaration is rejected at compile time with
 `left-hand side expects N value(s) but right-hand side produces M
 value(s)`. Wrapping a call in parentheses truncates it to one value (see
-[Functions](functions.md)). *Limitation:* one corner of this check crashes
-instead of reporting: a parenthesized call that leaves a multi-name
-declaration short (`local a, b = (f())`) fails with an internal compiler
-error rather than the arity message — the same form in an assignment
-statement gets the clean error.
+[Functions](functions.md)); a parenthesized call that leaves a multi-name
+declaration short (`local a, b = (f())`) gets that same clean arity error.
 
 The declared names only enter scope after the whole statement, so the
 initializers see the *outer* bindings:
@@ -184,9 +181,7 @@ function sign(x: integer): integer
 end
 ```
 
-The condition may be an expression of any type (foreign pointers
-excepted — their truthiness tests crash the compiler; see
-[the C FFI](ffi.md)), with Lua's truthiness
+The condition may be an expression of any type, with Lua's truthiness
 rules: `false` and `nil` are false, everything else is true. In
 particular, an option-typed condition tests whether the value is `nil` —
 the idiomatic way to check an array read:
@@ -206,9 +201,8 @@ Note that a condition whose type can never be `nil` or `false` (an
 compiler accepts it without complaint. How conditions influence the typing
 of `and`/`or` inside them is described in [Expressions](expressions.md).
 
-Each arm's block is its own scope. Note that the any-type rule holds fully
-only for `if`; `while` and `repeat` conditions should be boolean in the
-current prototype (see the limitation in the next section).
+Each arm's block is its own scope. The same any-type, Lua-truthiness rule
+applies to `while` and `repeat`/`until` conditions.
 
 ## `while`
 
@@ -223,21 +217,14 @@ end
 ```
 
 The condition is evaluated before each iteration. The body is a new scope,
-re-entered on each iteration.
-
-*Limitation:* in `while` (and `repeat`/`until`) conditions, only
-**boolean** expressions currently behave correctly. The type checker
-accepts a condition of any type, as in `if`, but the code generator does
-not apply Lua's truthiness conversion here: an option- or `value`-typed
-condition (`while t[i] do`) makes the generated C fail to compile
-(`titanc` stops with C compiler errors), and a numeric condition compiles
-but tests C-style — `while n do` exits when `n` reaches `0`, whereas in
-Lua `0` is truthy. Write the condition as a comparison, or use `not`,
-`and`, `or` to produce a boolean, as in the example above. (Note that
-comparing an option against `nil` with `==`/`~=` is itself a compile-time
-error — `trying to compare values of incomparable types: integer? and
-nil?` — so the `not`/`if` forms are the way to test for a missing
-element.)
+re-entered on each iteration. The condition may be of any type, with Lua's
+truthiness rules — an option-typed condition (`while t[i] do`) tests
+whether the value is `nil`, and a numeric condition is always truthy
+(`while n do` does not exit when `n` reaches `0`, since `0` is truthy in
+Lua). (Note that comparing an option against `nil` with `==`/`~=` is itself
+a compile-time error — `trying to compare values of incomparable types:
+integer? and nil?` — so the `not`/`if` forms are the way to test for a
+missing element.)
 
 ## `repeat` / `until`
 
@@ -364,19 +351,6 @@ mismatches are reported per position (`types in return do not match,
 expected integer but found string`). A multi-return call expands in the
 last position, and `return (f())` truncates to a single value — see
 [Functions](functions.md) for the full multiple-return story.
-
-*Limitation:* two of these expansions are currently **miscompiled** —
-they type-check and compile cleanly, but the extra values are read before
-the call that produces them has run. Bare forwarding, where the
-expression list is just the call, returns wrong extras: `return
-divmod(17, 5)` from an `(integer, integer)` function returns `3, 0`, not
-`3, 2`. A trailing call expanding into an argument list (`g(f())`) passes
-zeros the same way. (`return 10, divmod(13, 2)` from a three-value
-function is compiled correctly, and when the values involved include heap
-types such as strings the generated code happens to come out right — but
-do not rely on it.) Capture the values with a multiple declaration and
-return, or pass, the locals instead; see the matching limitation in
-[Functions](functions.md).
 
 A function declared without a return annotation returns `nil` (the
 annotation defaults to `: nil`). Such functions need no `return` at all.

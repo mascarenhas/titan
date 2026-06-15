@@ -306,16 +306,9 @@ as its environment. When the driver's loader finds only a compiled `.so`
 for an import, it loads this one symbol with `package.loadlib`, calls it,
 and `load`s `"return " .. serialized` to recover the interface — letting
 the checker type the importing module against a dependency whose source
-is gone.
-
-*Limitation:* as currently written, the guard in `driver.defaultloader`
-selecting the `.so`-only branch ends in `mtime_bin >= mtime_src`, which
-is only reached when the source mtime is `nil` — so compiling against a
-`.so`-only dependency does not fail cleanly but crashes `titanc` with an
-internal Lua error (`driver.lua:62: attempt to compare nil with number`,
-plus traceback). The intended policy (static when source is present,
-dynamic otherwise) is what the generated code implements, and the tests'
-in-memory `tableloader` exercises the same serialization round-trip. See
+is gone. The policy is static linkage when the source is present and
+dynamic linkage otherwise, and the tests' in-memory `tableloader`
+exercises the same serialization round-trip. See
 [driver and toolchain](driver.md).
 
 ## Static vs dynamic dependency wiring

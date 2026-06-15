@@ -66,7 +66,7 @@ The same factory builds the checker's semantic types:
 `types.Module` is a hand-written function (its `members` table is both
 an array and a name-keyed map), and the FFI's `Type.Pointer`,
 `Type.Typedef` and `Type.Unknown` are ad-hoc table literals built in
-`foreigntypes.lua` (which also emits `Struct`/`Union`/`Enum`
+`foreigntypes.lua` (which also emits `Struct`/`Union`
 placeholder tables that drop the `Type.` prefix entirely).
 Code that walks types must tolerate all of them. See
 [the type checker](checker.md) for the type language itself.
@@ -302,8 +302,8 @@ Two practical consequences of this scheme:
   test-suite notes of the repository `CLAUDE.md`.
 * **Decorations are invisible to arity checks.** They are added by
   plain field assignment after construction, so nothing validates them:
-  a typo like `node._pos` instead of `node.loc` (one survives in the
-  checker's foreign-import error path) fails only when read.
+  a misspelled decoration name (`node._typ` for `node._type`) fails only
+  when read.
 
 ## The cost of adding a node or type
 

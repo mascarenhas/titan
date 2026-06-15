@@ -268,20 +268,6 @@ Notes on the entries a Lua programmer might not expect:
   conversion. Coercions targeting `boolean` or `value` do *not* unwrap
   the option — nil-ness maps to falseness, or rides along in the `value`.
 
-*Limitation:* the unwrapping coercions (`t?` → `t`, and the nil-check
-step of `s?` → `t`) are only implemented when the option expression is
-an array or map indexing expression, as in all the examples above — the
-check is folded into the read. Everywhere else the compiler inserts an
-unwrap — an option-typed variable, parameter or call result in the
-coercion contexts below, an operator unwrapping such an operand, a `for`
-bound — code generation aborts with a raw internal error (a Lua
-traceback complaining of a `missing template variable FILE`; the
-concatenation path dies on a different internal message), not a type
-error. Until that is fixed, unwrap options at the indexing expression
-itself, or default them with `or`, which does not go through this
-coercion. Coercions targeting `boolean` or `value` are unaffected, since
-they do not unwrap.
-
 ### Where implicit coercions are applied
 
 The compiler inserts coercions in exactly these syntactic contexts,
@@ -307,17 +293,6 @@ they need no coercion: *any* type is accepted as a condition, and its
 truthiness is evaluated at run time. The condition position does count as
 "boolean context" for the operators `and`, `or` and `not` inside it (see
 [Expressions](expressions.md)).
-
-*Limitation:* only `if` actually delivers Lua truthiness for every
-condition type. Code generation for `while` and `repeat` conditions omits
-the truthiness conversion: a condition of type `value` or an option type
-produces C that the C compiler rejects (an internal failure, not a type
-error), and an `integer` or `float` condition is tested with C
-truthiness, so `0` and `0.0` count as false. A condition that is already
-`boolean` — a comparison, or `not`/`and`/`or` in boolean context —
-behaves correctly in all three statements. (Foreign pointer conditions
-crash the compiler in every statement, `if` included — see
-[the C FFI](ffi.md).)
 
 One context conspicuously **not** on the list: the bound expressions of a
 numeric `for`. Earlier versions of this manual claimed loop initializers

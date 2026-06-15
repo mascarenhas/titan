@@ -46,14 +46,11 @@ Second, the failure paths are asymmetric: if preprocessing or parsing fails,
 `checker.typeerror` at the import's location — the shape is
 `foo.titan:1:1: type error: failed preprocessing 'does_not_exist.h':
 does_not_exist.h: No such file or directory` (the spec checks the
-`failed preprocessing '...'` part) — but the per-member failure path is
-buggy: it calls `checker.typeerror(errors, err, node._pos)` with the
-location and message arguments swapped, and `node._pos` does not exist (the
-field is `loc`). It only triggers on the `"FIXME unconverted ..."` fallback
-of `foreigntypes.convert`, and when it fires the compiler aborts with the
-raw Lua error `checker.lua:26: attempt to concatenate a nil value (local
-'fmt')` instead of reporting anything (verified with a header declaring
-`extern restrict x;`, whose type reduces to an empty token array).
+`failed preprocessing '...'` part). The per-member failure path reports a
+clean type error at the import's location too; it triggers on the
+`"FIXME unconverted ..."` fallback of `foreigntypes.convert` (for example a
+header declaring `extern restrict x;`, whose type reduces to an empty token
+array).
 
 ## The preprocessor (`c-parser/cpp.lua`)
 
@@ -218,9 +215,8 @@ declaration falls through `register_types`' dispatch as a forward
 declaration and registers nothing, so its constants are missing members
 at the Titan level (`member '...' not found`). Even when registered,
 their **values are not stored** (`-- TODO store enum actual values`), so
-typedef'd-enum constants surface as members whose use crashes the
-checker (`impossible: Enum`); the working path for constants is
-`#define`s, below. Because headers redeclare things
+typedef'd-enum constants surface as integer members; the other working
+path for constants is `#define`s, below. Because headers redeclare things
 constantly, every re-registration is structurally compared with
 `equal_declarations` (struct names, function return/params/`vararg`);
 mismatches fail the import with `"redeclaration for <key>"` or
@@ -277,7 +273,8 @@ variable. That is the entire mechanism behind `errno.ENOENT` working as an
 | --- | --- |
 | `function` | `types.Function(ptypes, rettypes, ftype.vararg)`, params and the single return converted recursively (a wrapping decl with `islocal`/`isforeign` flags is built but discarded — only the bare type is returned) |
 | `typedef` | ad-hoc `{ _tag = "Type.Typedef", name, _type = <resolved> }` |
-| `struct` / `union` / `enum` | stub `{ _tag = "Struct"/"Union"/"Enum", name, data = ftype }` — fields and values are **not** converted (`-- TODO process fields`) |
+| `enum` | a real integer type (constants behave as integers) |
+| `struct` / `union` | stub `{ _tag = "Struct"/"Union", name, data = ftype }` — fields are **not** converted (`-- TODO process fields`) |
 | token-array type | `type_from_name` (below) |
 | anything else | `nil, "FIXME unconverted ..."` |
 
@@ -301,7 +298,7 @@ error), and — only here, unlike in `type_from_name` — `int`, `char` and
 
 Two cross-cutting caveats. First, **none of these tags are
 typedecl-registered**: `Type.Pointer`, `Type.Typedef`, `Type.Unknown`,
-`Struct`, `Union` and `Enum` are plain table literals with no constructors in
+`Struct` and `Union` are plain table literals with no constructors in
 `types.lua` and no arity checking (see [AST and typedecl](ast-typedecl.md));
 code that switches exhaustively on official `Type.*` tags will not see them
 coming. Second, `types.tostring` knows just enough to render errors:
@@ -324,10 +321,9 @@ rules in `types.lua` and `checker.lua`:
 * **Nullable pointers**: `types.compatible` accepts `Pointer ~ Nil` in both
   directions, so `nil` passes for any pointer parameter and pointers compare
   against `nil`; `types.is_truthy` excludes `Type.Pointer`, so the *checker*
-  accepts a pointer as a condition — but the coder's `toboolean` has no
-  pointer case, and `if fd then ...` aborts code generation with the raw Lua
-  error `invalid type pointer to FILE`; the working idiom is the spec's
-  explicit `fd ~= nil`. Relational comparison of pointers is rejected
+  accepts a pointer as a condition, and the coder's `toboolean` handles it —
+  `if fd then ...` compiles and runs (a pointer is truthy iff non-NULL).
+  Relational comparison of pointers is rejected
   (`trying to use relational expression`).
 * **Typedef transparency**: `types.compatible` unwraps `Type.Typedef`
   through its `_type` on either side; `types.equals` compares typedefs by
@@ -472,7 +468,7 @@ generally as an internal compiler error rather than a clean diagnostic.
   operator` (in `#if`), `unterminated function-like macro`,
   `NYI long double`, `FIXME unknown foreign c type` and `invalid type ...`
   (in the coder).
-* Struct/union/enum contents are stubs; enum values are not stored
+* Struct/union contents are stubs; enum values are not stored
   (bare-enum constants are not registered at all); static C
   functions are invisible; `extern inline` definitions are demoted to
   declarations; one flat C namespace with no conflict detection; `#error` is

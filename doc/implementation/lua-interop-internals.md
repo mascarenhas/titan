@@ -450,10 +450,10 @@ direct calls. The full wiring — including the re-initialization branch
 that re-stitches pointers when the same module's code is present twice
 in a process, and its `#loadmods > 1` quirk that can leave that branch
 empty — is in the
-[code generator overview](codegen-overview.md#static-vs-dynamic-dependency-wiring),
-as is the driver bug that currently makes compiling against a
-`.so`-only import crash `titanc` (an internal Lua error in
-`defaultloader`) before any of this code can be generated.
+[code generator overview](codegen-overview.md#static-vs-dynamic-dependency-wiring);
+the source-vs-`.so` decision that selects dynamic linking from a compiled
+`.so` (no source present) over static linking from source is covered in
+[driver and toolchain](driver.md#source-vs-so-the-selection-logic).
 
 ## The error handler and `titan.backtrace()`
 

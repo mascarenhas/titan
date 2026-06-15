@@ -45,9 +45,9 @@ end
 
 The `next` field uses an [option type](option-types.md) so that a list
 can end: a field of plain type `List` could never be `nil`, and you could
-never construct the first cell. (But see the
-[limitation on option-typed records](#records-and-nil) below before
-reaching for this pattern.)
+never construct the first cell. Walking such a list reads the `next`
+field as a plain `List`, which [unwraps](#records-and-nil) the option
+with a run-time nil check.
 
 *Limitation:* a field type that mentions a record declared *later* in
 the module — including mutually recursive records — passes the type
@@ -392,21 +392,20 @@ The details, all run-time behavior:
 
 The option type `Point?` exists and can be used in signatures, fields
 (as in the `List` example), and locals; nil-ness is tested by truthiness
-(`if p then ... end`), and option records can be passed along and
-returned freely.
+(`if p then ... end`, and also as a `while` condition), and option
+records can be passed along and returned freely.
 
-*Limitation:* the current compiler cannot **unwrap** an option-typed
-record. Any construct that needs the `Point` out of a `Point?` — reading
-a field (`p.x`), assigning it to a plain `Point` variable, or letting an
-unannotated `local` force it — makes code generation fail with an
-internal compiler error, and calling a method through an option receiver
-is rejected by the checker (`expected record in receiver of method call
-but found 'test.Point?'`). An option record as a `while` condition also
-fails to build — the generated C does not compile — though `if`
-conditions and `not` work. Indexing an array of records (`a[1].x`) is
-unaffected. Until this is fixed, treat `Point?` as
-pass-through-and-test-only. See [option types](option-types.md) for the
-general machinery.
+Wherever a bare `Point` is required, a `Point?` is **unwrapped** with a
+run-time nil check: reading a field (`p.x`), assigning it to a plain
+`Point` variable, and letting an unannotated `local` force it all work,
+raising a clean `expected test.Point but found nil` error if the value is
+`nil` at run time. See [option types](option-types.md) for the general
+machinery.
+
+*Limitation:* calling a method through an option receiver is rejected by
+the checker (`expected record in receiver of method call but found
+'test.Point?'`) — unwrap the receiver into a plain `Point` first (for
+example with an `if`), then call the method on that.
 
 ## What records are not
 

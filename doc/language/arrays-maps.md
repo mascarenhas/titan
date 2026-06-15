@@ -78,11 +78,9 @@ Arrays are indexed with square brackets and are 1-based, like Lua
 sequences. The index must be an integer. An index expression of type
 `float` (or `value`) is accepted and converted with a run-time check:
 an integral float such as `2.0` denotes the same element as `2`, and a
-non-integral one raises a run-time error. (An option-typed index such as
-`integer?` passes the checker but currently crashes the prototype's code
-generator with an internal compiler error — a Lua traceback from
-`titanc`, not a type error; default the index first, as in `xs[i or 1]`,
-to index with a plain integer.) An index of a
+non-integral one raises a run-time error. An option-typed index such as
+`integer?` is also accepted: it is unwrapped with a nil check, so a `nil`
+index raises a clean run-time error. An index of a
 non-numeric type such as a string is a compile-time error: `types in
 array indexing do not match, expected integer but found string`.
 
@@ -137,13 +135,6 @@ end
 Indexing nests through options transparently: with `a: {{string}}`, the
 expression `a[1][1]` first checks that `a[1]` is present, then indexes
 it.
-
-*Limitation:* an option-typed expression used directly as a `while` or
-`repeat` condition (for example `while xs[i] do`) currently makes the
-prototype emit C code that fails to compile. `if xs[i] then` works, and
-so do boolean-typed loop conditions (`while not xs[i] do`,
-`repeat ... until xs[i] or i == 0`); restructure the loop around one of
-those.
 
 ### Writes and deletion
 

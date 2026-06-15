@@ -135,13 +135,7 @@ operators are `& | ~ << >>` and unary `~`. Their typing rules:
 * Operands must be numbers. Using a `value` in arithmetic is a
   compile-time error (`... is a value instead of a number`) — cast it
   first. Option-typed operands are implicitly unwrapped, with a run-time
-  error if they are nil (but see the option limitation under
-  *Comparisons* below).
-
-*Limitation:* `%` between floats typechecks but is not implemented: the
-compiler aborts during code generation with an internal
-`not implemented yet` error. Only all-integer `%` works. This is listed
-among the [known limitations](index.md#status-and-limitations).
+  error if they are nil.
 
 ### Lua-faithful results
 
@@ -223,20 +217,12 @@ interns strings up to 40 bytes) but two separately created equal *long*
 strings can compare unequal; for `<` the result is not lexicographic
 order at all. Do not rely on either for long strings or ordering.
 
-*Limitation:* an option-typed operand of a relational or arithmetic
-operator is implicitly unwrapped, which works when the operand is an
-array or map access (`t[i] + 1`, `t1[1] ~= t2[1]`), but a plain
-option-typed *variable* in that position currently aborts the compiler
-with an internal error. Unwrap through `or` defaulting instead (see
-[option types](option-types.md)).
-
 ## `and`, `or` and `not`
 
 `not` accepts an operand of any type and produces a `boolean`: the
 operand is tested for truthiness (only `nil` and `false` are false; an
 option is false when it is nil — and a `boolean?` also when it holds
-`false`). The one exception is foreign pointer types, whose truthiness
-tests crash the compiler — see [the C FFI](ffi.md).
+`false`; a foreign pointer is false when it is NULL).
 
 `and` and `or` keep Lua's value-returning, short-circuiting semantics,
 and the static type of the result depends on what the checker knows:
@@ -313,10 +299,8 @@ constant at parse time. Concatenating anything else — booleans, `nil`,
 arrays, maps, records — is a compile-time error
 (`cannot concatenate with boolean value`, etc.), as is concatenating a
 `value` directly (`cannot concatenate with value of type 'value'` —
-cast it to `string` first). Option operands are implicitly unwrapped
-when they are array or map accesses; a plain option-typed *variable*
-operand aborts the compiler with an internal error, as under
-*Comparisons*.
+cast it to `string` first). Option operands are implicitly unwrapped,
+with a run-time error if they are nil.
 
 ## Length: `#`
 
@@ -471,17 +455,6 @@ function use(): integer
     return q + r + just_q
 end
 ```
-
-*Limitation:* the argument-list position currently miscompiles: with a
-three-parameter `add3`, `add3(10, divmod(7, 2))` passes the arity check
-(the call counts as two arguments) but the generated C reads the extra
-return values before the call has produced them, so every value after
-the first arrives as `0`/garbage. The same happens to a `return` whose
-expression list is *just* the multi-return call: `return divmod(13, 2)`
-from a `(integer, integer)` function returns `6, 0`. Route the values
-through a multiple assignment instead. The array-constructor and
-multiple-assignment positions work, as does a `return` that mixes the
-call with other expressions (`return 10, divmod(13, 2)`).
 
 See [functions](functions.md) for multiple returns in full, and
 [statements](statements.md) for calls as statements.

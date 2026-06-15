@@ -42,34 +42,28 @@ skips empty entries (`[^;]+`) and does **not** implement the `;;`
 "insert the default path here" convention; the run-time loader in
 `titan.c` does (see [pushpath](#titanc-the-dynamic-loader) below).
 
-### Source vs `.so`: the selection logic and its known bug
+### Source vs `.so`: the selection logic
 
-The intended policy, introduced by PR #237, is: **if source is
-available, compile it in and link it statically; if only a `.so`
-exists, recover its interface from the compiled module and load it
-dynamically at run time.** The guard in `driver.defaultloader` that
-chooses the `.so` branch reads:
+The policy is: **if source is available and newer, compile it in and
+link it statically; if only a `.so` exists, or the `.so` is at least as
+new as the source, recover its interface from the compiled module and
+load it dynamically at run time.** The guard in `driver.defaultloader`
+that chooses the `.so` branch reads:
 
 ```lua
-if mtime_bin and (not mtime_src) and mtime_bin >= mtime_src then
+if mtime_bin and ((not mtime_src) or mtime_bin >= mtime_src) then
 ```
 
-*Limitation:* this condition is wrong as written. When both files exist,
-`not mtime_src` is false, so the `.so` branch is never taken (the source
-always wins — which matches the intended default, though the mtimes are
-then never actually compared, so a stale `.so` is simply ignored rather
-than reused). When **only** the `.so` exists, `mtime_src` is `nil` and
-the trailing `mtime_bin >= mtime_src` raises `attempt to compare nil
-with number` instead of taking the branch — `titanc` dies with an
-unhandled Lua traceback out of `driver.lua` (an internal compiler
-error, not a reported type error).
-PR #237 changed the condition
-from the earlier `mtime_bin and (not mtime_src or mtime_bin >=
-mtime_src)`; as committed, the `.so`-only path is dead code that errors
-when reached. The dynamic-loading machinery itself (the `_types` symbol,
-`loadlib`/`loadsym`, the generated `_init`) is real and tested through
-other entry points, but do not expect `titanc` to consume a `.so`-only
-dependency today.
+So the `.so` branch is taken when a compiled module exists *and* either
+no source is present (`not mtime_src`) or the `.so` is at least as new
+as the source (`mtime_bin >= mtime_src`); otherwise the loader falls
+through to the source path below. The `.so`-only case works end to end:
+the branch `package.loadlib`s the `<mangled>_types` symbol, evaluates
+the serialized interface, caches it as `{ type = ..., compiled = true }`,
+and the dependency is then linked dynamically at run time. The
+dynamic-loading machinery this rides on (the `_types` symbol,
+`loadlib`/`loadsym`, the generated `_init`) is the same one exercised
+through every other entry point.
 
 ## The loader protocol
 
@@ -100,8 +94,9 @@ is a message. See [the type checker](checker.md) for the consumer side.
   `"circular reference to module"`.
 
 The closure proceeds: cache hit → return the cached type (and mark the
-module in `static_deps` if it has a source AST); `.so` found (see the
-bug above) → `package.loadlib` the `<mangled>_types` symbol, call it,
+module in `static_deps` if it has a source AST); `.so` selected (see the
+[selection logic above](#source-vs-so-the-selection-logic)) →
+`package.loadlib` the `<mangled>_types` symbol, call it,
 and evaluate the returned string with `load("return " .. serialized,
 modname, "t", types)` — the serialized interface is a Lua expression
 over `types.lua` constructors (see

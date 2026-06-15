@@ -413,6 +413,44 @@ describe("Titan type checker", function()
         assert.match("expected string but found integer", err)
     end)
 
+    it("reports a clean error for an adjusted call in a multi-declaration", function ()
+        local code = [[
+            function f(): (integer, integer)
+                return 10, 20
+            end
+            function g(): integer
+                local a, b = (f())
+                return a + b
+            end
+        ]]
+        local ok, err = run_checker(code)
+        assert.falsy(ok)
+        assert.match("expects 2 value", err)
+    end)
+
+    it("expands only a trailing multi-return call argument (Lua adjustment)", function ()
+        -- a trailing multi-return call expands, so over-supplying is an arity error
+        local ok, err = run_checker([[
+            function dm(a: integer, b: integer): (integer, integer)
+                return a // b, a % b
+            end
+            function add2(a: integer, b: integer): integer return a + b end
+            function f(): integer return add2(10, dm(7, 2)) end
+        ]])
+        assert.falsy(ok)
+        assert.match("called with 3 arguments but expects 2", err)
+        -- a non-trailing multi-return call is adjusted to a single value
+        ok, err = run_checker([[
+            function dm(a: integer, b: integer): (integer, integer)
+                return a // b, a % b
+            end
+            function add3(a: integer, b: integer, c: integer): integer return a + b + c end
+            function f(): integer return add3(dm(7, 2), 10) end
+        ]])
+        assert.falsy(ok)
+        assert.match("called with 2 arguments but expects 3", err)
+    end)
+
     it("catches named init list assigned to an array", function()
         local code = [[
             function fn(x: integer)
@@ -1640,6 +1678,66 @@ describe("Titan type checker", function()
          ok, err = run_checker(code)
         assert.falsy(ok)
         assert.match("expected string but found integer", err)
+    end)
+
+    it("can check typedef'd enum constants imported by the FFI", function()
+        local header = os.tmpname() .. ".h"
+        local fd = assert(io.open(header, "w"))
+        fd:write("typedef enum { RED, GREEN, BLUE } Color;\n")
+        fd:close()
+        -- Enum constant used as an integer: must type-check cleanly
+        -- (previously crashed the checker with 'impossible: Enum').
+        local code = [[
+            local colors = foreign import "]] .. header .. [["
+            function fun(): integer
+                return colors.GREEN
+            end
+        ]]
+        local ok, err = run_checker(code)
+        assert.truthy(ok, err)
+        -- Same constant used where a string is expected: clean type error.
+        code = [[
+            local colors = foreign import "]] .. header .. [["
+            function fun(): string
+                return colors.GREEN
+            end
+        ]]
+        ok, err = run_checker(code)
+        os.remove(header)
+        assert.falsy(ok)
+        assert.match("expected string but found integer", err)
+    end)
+
+    it("reports a clean error for unconvertible foreign types instead of crashing", function ()
+        local foreigntypes = require 'titan-compiler.foreigntypes'
+        local orig = foreigntypes.convert
+        -- Force the convert failure path; the '%' in the message also
+        -- exercises the safe "%s"-routed error formatting.
+        foreigntypes.convert = function() return nil, "FIXME unconverted %thing" end
+        local ok, clean, joined = pcall(run_checker, [[
+            local stdio = foreign import "stdio.h"
+        ]])
+        foreigntypes.convert = orig
+        assert.truthy(ok, "checker crashed on foreign-import error path: " .. tostring(clean))
+        assert.falsy(clean)
+        assert.match("FIXME unconverted", joined)
+    end)
+
+    it("does not crash choosing a compiled module with no source present", function ()
+        -- driver.defaultloader's staleness check used to compare a number
+        -- with nil (mtime_bin >= nil) when a .so exists but no .titan does.
+        local lfs = require 'lfs'
+        local real = lfs.attributes
+        lfs.attributes = function(f, attr)
+            if tostring(f):match("%.so$") then return 12345
+            elseif tostring(f):match("%.titan$") then return nil
+            else return real(f, attr) end
+        end
+        driver.imported = {}
+        local ok = pcall(driver.defaultloader(), "no_such_titan_module")
+        lfs.attributes = real
+        driver.imported = {}
+        assert.truthy(ok, "driver crashed comparing a number with nil")
     end)
 
     it("fails on circular module references", function ()

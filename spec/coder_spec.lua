@@ -244,6 +244,154 @@ describe("Titan code generator", function()
         assert.truthy(ok, err)
     end)
 
+    it("coerces an option-typed 'while' condition", function()
+        run_coder([[
+            function sum_until_nil(xs: {integer}): integer
+                local sum: integer = 0
+                local i: integer = 1
+                while xs[i] do
+                    sum = sum + xs[i]
+                    i = i + 1
+                end
+                return sum
+            end
+        ]], [[
+            assert(test.sum_until_nil({10, 20, 30}) == 60)
+            assert(test.sum_until_nil({}) == 0)
+        ]])
+    end)
+
+    it("coerces an option-typed 'repeat' condition", function()
+        run_coder([[
+            function first_present(xs: {integer}): integer
+                local i: integer = 0
+                repeat
+                    i = i + 1
+                until xs[i]
+                return i
+            end
+        ]], [[
+            assert(test.first_present({5, 6}) == 1)
+        ]])
+    end)
+
+    it("computes float modulo with Lua-faithful sign (luai_nummod)", function()
+        run_coder([[
+            function fmod_f(a: float, b: float): float
+                return a % b
+            end
+        ]], [[
+            assert(test.fmod_f(5.0, -3.0) == (5.0 % -3.0))
+            assert(test.fmod_f(-5.0, 3.0) == (-5.0 % 3.0))
+            assert(test.fmod_f(5.5, 2.0) == (5.5 % 2.0))
+            assert(test.fmod_f(-5.5, -2.0) == (-5.5 % -2.0))
+            assert(test.fmod_f(-7.3, 2.5) == (-7.3 % 2.5))
+            assert(test.fmod_f(5.0, -3.0) == -1.0)
+            assert(test.fmod_f(-5.5, -2.0) == -1.5)
+        ]])
+    end)
+
+    it("unwraps an option-typed variable to its base type", function()
+        run_coder([[
+            function unwrap_present(): integer
+                local x: integer? = 5
+                return x
+            end
+        ]], [[
+            assert(test.unwrap_present() == 5)
+        ]])
+    end)
+
+    it("raises a typed error unwrapping a nil option", function()
+        run_coder([[
+            function unwrap_nil(xs: {integer}): integer
+                local x: integer? = xs[10]
+                return x
+            end
+        ]], [[
+            test.unwrap_nil({1, 2, 3})
+        ]], "expected integer but found nil")
+    end)
+
+    it("concatenates an option value, unwrapping it", function()
+        run_coder([[
+            function catopt(): string
+                local x: integer? = 5
+                return x .. "!"
+            end
+        ]], [[
+            assert(test.catopt() == '5!')
+        ]])
+    end)
+
+    it("unwraps an option returned directly by a call", function()
+        run_coder([[
+            function opt(): integer? return 9 end
+            function ucall(): integer return opt() end
+        ]], [[
+            assert(test.ucall() == 9)
+        ]])
+    end)
+
+    it("forwards a bare multiple-return call in return position", function()
+        run_coder([[
+            function divmod(a: integer, b: integer): (integer, integer)
+                return a // b, a % b
+            end
+            function bare(): (integer, integer)
+                return divmod(13, 2)
+            end
+            function mixed(): (integer, integer, integer)
+                return 10, divmod(13, 2)
+            end
+        ]], [[
+            local q, r = test.bare()
+            assert(q == 6 and r == 1, 'bare=' .. q .. ',' .. r)
+            local a, b, c = test.mixed()
+            assert(a == 10 and b == 6 and c == 1, 'mixed=' .. a .. ',' .. b .. ',' .. c)
+        ]])
+    end)
+
+    it("expands a multiple-return call in the last argument position", function()
+        run_coder([[
+            function divmod(a: integer, b: integer): (integer, integer)
+                return a // b, a % b
+            end
+            function add3(a: integer, b: integer, c: integer): integer
+                return a + b + c
+            end
+            function add2(a: integer, b: integer): integer
+                return a + b
+            end
+            function trailing(): integer return add3(10, divmod(7, 2)) end
+            function adjusted(): integer return add2(divmod(7, 2), 100) end
+            function two(): (string, string) return "a", "b" end
+            function cat2(x: string, y: string): string return x .. y end
+            function gc(): string return cat2(two()) end
+        ]], [[
+            assert(test.trailing() == 14, 'trailing')
+            assert(test.adjusted() == 103, 'adjusted')
+            assert(test.gc() == 'ab', 'gc')
+        ]])
+    end)
+
+    it("combines array-of-records and map-of-records constructors with element assignments", function()
+        run_coder([[
+            record P
+                x: float
+            end
+            function boom(): float
+                local arr: {P} = { { x = 1.0 }, { x = 2.0 } }
+                local m: {integer: P} = { [1] = { x = 3.0 } }
+                arr[1] = { x = 4.0 }
+                m[2] = { x = 5.0 }
+                return arr[1].x + m[2].x
+            end
+        ]], [[
+            assert(test.boom() == 9.0)
+        ]])
+    end)
+
     it("tests integer step value in 'for'", function()
         local code = [[
             function forstep(f: integer, t: integer, s: integer): integer
@@ -1176,6 +1324,33 @@ describe("Titan code generator", function()
         local ok, err = call("foo", [[
             os.remove('file_that_doesnt_exist.txt')
             assert(foo.fun('file_that_doesnt_exist.txt') > 0)
+        ]])
+        assert.truthy(ok, err)
+    end)
+
+    it("uses a foreign pointer in a boolean context", function ()
+        local modules = {
+            foo = [[
+                local stdio = foreign import "stdio.h"
+                function opened(name: string): boolean
+                    local f = stdio.fopen(name, "r")
+                    if not f then
+                        return false
+                    end
+                    stdio.fclose(f)
+                    return true
+                end
+            ]]
+        }
+        local ok, err = generate_modules(modules, "foo")
+        assert.truthy(ok, err)
+        local ok, err = call("foo", [[
+            os.remove('file_that_doesnt_exist.txt')
+            assert(foo.opened('file_that_doesnt_exist.txt') == false)
+            local p = os.tmpname()
+            local fd = io.open(p, 'w'); fd:write('x'); fd:close()
+            assert(foo.opened(p) == true)
+            os.remove(p)
         ]])
         assert.truthy(ok, err)
     end)

@@ -18,7 +18,8 @@ refreshes the slot after every store. `codeexp(ctx, node, iscondition,
 target)` also threads `target` — a `VarName` lvalue's `_decl`, letting
 constructors build directly into the lvalue's `_cvar`/`_slot` — and
 `iscondition`, which no generator currently consumes: truth conversion
-happens only in `codeif` and the `as boolean` cast, via `toboolean`.
+happens in `codeif`, `codewhile`/`coderepeat`, and the `as boolean` cast,
+via `toboolean`.
 
 ## Locals and assignment
 
@@ -68,6 +69,10 @@ cannot live in a C `while(...)` head.
 preliminary statements in an enclosing block and wrapping the condition
 with `toboolean(type, cexp)`, so option- and `value`-typed conditions
 become real C truth tests (`!l_isfalse(...)`, `!ttisnil(...)`).
+`codewhile` and `coderepeat` wrap their conditions with the same
+`toboolean`, so a numeric condition is always truthy (matching Lua, where
+`0`/`0.0` are true) and option- or `value`-typed conditions test for nil
+rather than emitting a bare `TValue`.
 
 `codewhile` emits a plain `while($CEXP) { $CBLK $CHECKGC }` when the
 condition needs no statements; otherwise it hoists them into the body:
@@ -91,15 +96,6 @@ created stack slots** — the generators diff `ctx.allocations` (bumped by
 every `newslot`) across the body. Pure-arithmetic loops carry no GC
 polling; allocating loops poll once per iteration, since native code
 never passes through `luaD_call` and would otherwise starve the collector.
-
-*Limitation:* unlike `codeif`, `codewhile`/`coderepeat` do **not** apply
-`toboolean`. A directly option- or `value`-typed condition such as
-`while t[i] do` generates `if(!(<TValue>))`, which does not compile, and
-an `integer` or `float` condition compiles to a C truth test, so `0` and
-`0.0` count as false where Lua truthiness would say true; the spec suite
-only uses boolean-typed `while`/`repeat` conditions. (The user-facing
-consequences are documented in [the type system](../language/types.md)
-and [statements](../language/statements.md).)
 
 ## The numeric `for`
 
@@ -452,9 +448,11 @@ if (l_castS2U(_param_b) + 1u <= 1u) {      /* n == 0 or n == -1 */
 `m == n*(m//n) + m%n`): the same branch-free `n == 0 or -1` test, raising
 `error at line %d, % by zero` for zero, yielding `0` for `-1`, otherwise
 correcting C's remainder sign with
-`if (r != 0 && (m ^ n) < 0) { r += n; }`. Float `//` is `floor(x / y)`.
-*Limitation:* float `%` is `error("not implemented yet")` in
-`codebinaryop` — a compiler crash, not a diagnostic.
+`if (r != 0 && (m ^ n) < 0) { r += n; }`. Float `//` is `floor(x / y)`,
+and float `%` (`generate_binop_mod_flt`) is faithful to Lua's
+`luai_nummod`: `r = fmod(m, n)` with a sign correction
+(`if ((r > 0) ? n < 0 : (r < 0 && n > 0)) { r += n; }`) so the result
+takes the sign of the divisor, as floored division requires.
 
 **`^`** always produces a float: `pow(l, r)`. **Equality on dynamic
 values**: when both operands are `TValue`-represented (`value` or
@@ -502,13 +500,10 @@ complete inventory of conversions:
 8. **nil → `t?`**: `setnilvalue(&$TMP);`.
 9. **t → `t?`** (wrap): `setslot(base-type, &$TMP, exp)` — box the
    native value into a `TValue`.
-10. **`t?` → t** (unwrap): intended shape
-    `if(TITAN_UNLIKELY(ttisnil(&$CEXP))) { luaL_error(L, "%s:%d:%d: type error, expected %s but found nil", ...); } else { $GETSLOT }`.
-    *Limitation (latent bug):* the template is rendered with
-    `node.loc.file`, but location objects carry `filename`, so
-    `util.render` aborts with `Internal compiler error: missing template
-    variable FILE` whenever this path is reached — the run-time message
-    is currently unreachable, and no spec exercises it.
+10. **`t?` → t** (unwrap):
+    `if(TITAN_UNLIKELY(ttisnil(&$CEXP))) { luaL_error(L, "%s:%d:%d: type error, expected %s but found nil", ...); } else { $GETSLOT }`,
+    so a nil reaching any unwrap position raises a clean
+    `expected <T> but found nil` at run time.
 11. **→ foreign pointer**: a plain C cast `(($CTYPE)($CEXP))` via
     `nativetoforeignexp` ([FFI internals](ffi-internals.md)).
 
@@ -562,7 +557,7 @@ by `codethrow` or its callers. Two prefix conventions coexist:
 * **`%s:%d:%d:` — `filename:line:col`** (the `.titan` path given to the
   checker). Used by all `checkandget`/`checkandset` sites: boundary
   argument checks, `value` casts, array/map element checks, record tag
-  mismatches (`expected test.Rec but found test.Point`), the unreachable
+  mismatches (`expected test.Rec but found test.Point`), the
   option unwrap above, and the record `__index`/`__newindex`
   field-not-found errors (`field '%s' not found in record '%s'`).
 * **`at line %d` — line only.** Used by the inlined arithmetic and the

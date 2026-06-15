@@ -215,15 +215,14 @@ This is the "fail fast" half of the option-type bargain; the graceful
 half is shown
 [below](#recoverable-failures-without-errors-the-option-idiom).
 
-*Limitation:* the implicit unwrap currently compiles only when the
-option value comes directly from an array or map read (as in `first`
-above). Unwrapping a variable *declared* with an option type — given
-`local y? = xs[1]`, a later `local z: integer = y` or `y + 1` — or the
-result of an option-returning call (`local i = find(xs, v)`,
-`local i: integer = find(xs, v)`) aborts compilation with `Internal
-compiler error: missing template variable FILE` (a Lua traceback from
-the compiler, not a type error). Unwrapping directly at the read site
-and `or`-defaulting an option variable both work.
+The implicit unwrap applies in every position: a value read directly
+from an array or map (as in `first` above), a variable *declared* with
+an option type (given `local y? = xs[1]`, a later `local z: integer = y`
+or `y + 1`), the result of an option-returning call
+(`local i: integer = find(xs, v)`), an option used as an array or map
+index, in arithmetic, as a call argument, and in string concatenation. A
+`nil` found at run time raises the same `expected T but found nil` error
+shown above.
 
 ### Container element checks (the deferred check)
 
@@ -429,10 +428,9 @@ print(m.find_or_first({10, 20, 30}, 99))  --> 1
 
 The pieces, all covered in depth in [Option types](option-types.md):
 `return nil` and `return i` both coerce into the declared `integer?`;
-`local i? = ...` opts in to keeping the option (by design a plain
-`local i = ...` would unwrap immediately and raise on `nil`, but for a
-call result the current prototype instead crashes at compile time — see
-[the unwrap limitation](#option-unwraps-that-find-nil)); `i or 1` collapses
+`local i? = ...` opts in to keeping the option (a plain `local i = ...`
+would instead unwrap immediately and raise on `nil` — see
+[the unwrap behaviour](#option-unwraps-that-find-nil)); `i or 1` collapses
 `integer?` to `integer` with a default — and `if i then` would test for
 presence instead. From Lua, an option return is simply the value or
 `nil`, the natural Lua convention for "no result".

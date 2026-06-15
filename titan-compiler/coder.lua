@@ -84,6 +84,9 @@ local function toboolean(typ --[[:table]], src --[[:string]])
         tmpl = "!l_isfalse(&$SRC)"
     elseif typ._tag == "Type.Option" and typ.base._tag ~= "Type.Boolean" then
         tmpl = "!ttisnil(&$SRC)"
+    elseif typ._tag == "Type.Pointer" then
+        -- a foreign C pointer is truthy iff it is non-NULL
+        tmpl = "($SRC != NULL)"
     else error("invalid type " .. types.tostring(typ)) end
     return render(tmpl, { SRC = src })
 end
@@ -645,7 +648,7 @@ local function codewhile(ctx, node)
     end
     return render(tmpl, {
         CSTATS = cstats,
-        CEXP = cexp,
+        CEXP = toboolean(node.condition._type, cexp),
         CBLK = cblk,
         CHECKGC = nallocs > 0 and "luaC_checkGC(L);" or ""
     })
@@ -670,7 +673,7 @@ local function coderepeat(ctx, node)
     ]], {
         CBLK = cblk,
         CSTATS = cstats,
-        CEXP = cexp,
+        CEXP = toboolean(node.condition._type, cexp),
         CHECKGC = nallocs > 0 and "luaC_checkGC(L);" or ""
     })
 end
@@ -1249,6 +1252,18 @@ local function codecall(ctx, node)
     for _, arg in ipairs(node.args.args) do
         local cstat, cexp = codeexp(ctx, arg)
         table.insert(castats, cstat)
+        if arg._tag == "Ast.ExpCall" and arg._extras then
+            -- A multi-return call expanded in this argument list: force it to
+            -- run now (into a temp), filling its out-param temps, before the
+            -- ExpExtra arguments that read those temps are evaluated -- C does
+            -- not specify the evaluation order of a call's arguments.
+            local ctmp, tmpname = newtmp(ctx, arg._type)
+            table.insert(castats, render([[
+                $CTMP
+                $TMPNAME = $CEXP;
+            ]], { CTMP = ctmp, TMPNAME = tmpname, CEXP = cexp }))
+            cexp = tmpname
+        end
         table.insert(caexps, cexp)
     end
     for i = 2, #node._types do
@@ -1296,6 +1311,25 @@ end
 local function codereturn(ctx, node)
     local cs, cexp = codeexp(ctx, node.exps[1])
     local cstats = { cs }
+    if #node.exps > 1 then
+        -- The first return expression may itself be a bare multi-return
+        -- call whose 2..n values are produced through out-param temps that
+        -- the ExpExtra nodes below read back. Evaluate it into a temp NOW so
+        -- the call actually executes (and fills those out-param temps)
+        -- before we copy them into our own *_outparam_i. Otherwise the call
+        -- would be deferred into the trailing 'return $CEXP' and the extra
+        -- values would be read uninitialized.
+        local ctmp, tmpname = newtmp(ctx, node.exps[1]._type)
+        table.insert(cstats, render([[
+            $CTMP
+            $TMPNAME = $CEXP;
+        ]], {
+            CTMP = ctmp,
+            TMPNAME = tmpname,
+            CEXP = cexp,
+        }))
+        cexp = tmpname
+    end
     for i = 2, #node.exps do
         local cs, ce = codeexp(ctx, node.exps[i])
         table.insert(cstats, cs)
@@ -1829,6 +1863,38 @@ local function generate_binop_mod_int(exp, ctx)
     return cstats, rname
 end
 
+-- Float modulo, faithful to Lua's luai_nummod (see lvm.c/llimits.h):
+--   m = fmod(a, b); if ((m>0) ? b<0 : (m<0 && b!=0)) m += b;
+-- This differs from C's fmod for operands of opposite sign, where Lua
+-- (like floored division) returns a result with the sign of the divisor.
+local function generate_binop_mod_flt(exp, ctx)
+    local m_stats, m_var = codeexp(ctx, exp.lhs)
+    local n_stats, n_var = codeexp(ctx, exp.rhs)
+    local bdecl, bname = newtmp(ctx, types.Float())
+    local rdecl, rname = newtmp(ctx, types.Float())
+    local cstats = util.render([[
+        ${M_STATS}
+        ${N_STATS}
+        ${B_DECL};
+        ${R_DECL};
+        ${B} = ${N};
+        ${R} = fmod(${M}, ${B});
+        if (((${R}) > 0) ? ((${B}) < 0) : (((${R}) < 0) && ((${B}) > 0))) {
+            ${R} += ${B};
+        }
+    ]], {
+        M = m_var,
+        M_STATS = m_stats,
+        N = n_var,
+        N_STATS = n_stats,
+        B = bname,
+        B_DECL = bdecl,
+        R = rname,
+        R_DECL = rdecl,
+    })
+    return cstats, rname
+end
+
 local function codebinaryop(ctx, node, iscondition)
     local op = node.op
     if op == "~=" then op = "!=" end
@@ -1947,8 +2013,7 @@ local function codebinaryop(ctx, node, iscondition)
         if ltyp == "Type.Integer" and rtyp == "Type.Integer" then
             return generate_binop_mod_int(node, ctx)
         elseif ltyp == "Type.Float" and rtyp == "Type.Float" then
-            -- see luai_nummod
-            error("not implemented yet")
+            return generate_binop_mod_flt(node, ctx)
         else
             error("impossible: " .. ltyp .. " " .. rtyp)
         end
@@ -2248,10 +2313,12 @@ function codeexp(ctx, node, iscondition, target)
         else
             local ctmp, tmpname, tmpslot = newtmp(ctx, types.String(), true)
             local code = render([[
+                $CSTATS
                 $CTMP
                 $TMPNAME = $CVT;
                 setsvalue(L, $TMPSLOT, $TMPNAME);
             ]], {
+                CSTATS = cstats,
                 CTMP = ctmp,
                 TMPNAME = tmpname,
                 CVT = cvt,
@@ -2283,27 +2350,35 @@ function codeexp(ctx, node, iscondition, target)
             SETSLOT = setslot(node._type.base, "&" .. tmpname, cexp)
         }), tmpname
     elseif tag == "Ast.ExpCast" and node.exp._type._tag == "Type.Option" then
-        -- cast form t? to t
+        -- cast from t? to t
         assert(types.equals(node.exp._type.base, node._type))
         local cstats, cexp = codeexp(ctx, node.exp)
+        -- Materialize the option value into a TValue temp first: the operand
+        -- may be a non-lvalue (e.g. a direct call returning t?), so we cannot
+        -- take its address directly.
+        local csrc, srcname = newtmp(ctx, node.exp._type)
         local ctmp, tmpname = newtmp(ctx, node._type)
         return render([[
             $CSTATS
+            $CSRC
+            $SRCNAME = $CEXP;
             $CTMP
-            if(TITAN_UNLIKELY(ttisnil(&$CEXP))) {
+            if(TITAN_UNLIKELY(ttisnil(&$SRCNAME))) {
                 $THROW_WRONG_CAST
             } else {
-                $GETSLOT
+                $GETSLOT;
             }
         ]], {
             CSTATS = cstats,
+            CSRC = csrc,
+            SRCNAME = srcname,
             CEXP = cexp,
             CTMP = ctmp,
-            FILE = node.loc.file,
+            FILE = c_string_literal(node.loc.filename),
             LINE = node.loc.line,
             COL = node.loc.col,
             TYPENAME = c_string_literal(types.tostring(node._type)),
-            GETSLOT = getslot(node._type, tmpname, "&" .. cexp),
+            GETSLOT = getslot(node._type, tmpname, "&" .. srcname),
             THROW_WRONG_CAST = codethrow(ctx, "%s:%d:%d: type error, expected %s but found nil", { "$FILE", "$LINE", "$COL", "$TYPENAME" })
         }), tmpname
     elseif tag == "Ast.ExpCast" and node._type._tag == "Type.Pointer" then
@@ -2425,9 +2500,13 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
     end
     table.insert(stats, render([[
         lua_checkstack(L, $NRET);
-        StkId _firstret = L->top.p;
+        ptrdiff_t _firstret_off = savestack(L, L->top.p);
         L->top.p += $NRET;
         $TYPE res = $NAME($PARAMS);
+        /* the native callee may have grown (and thus relocated) the Lua
+           stack via lua_checkstack, so recompute the return slot pointer
+           from the saved offset before writing through it */
+        StkId _firstret = restorestack(L, _firstret_off);
         $SETSLOT;
         _firstret++;
     ]], {

@@ -431,18 +431,13 @@ Two real loaders exist in `driver.lua`:
   cycles by planting a `CIRCULAR_MARK` sentinel in the cache before recursing
   (a re-entry finds the mark and fails with `circular reference to module`).
   Dependencies with `.titan` source are recursively parsed and checked.
-  `.so`-only dependencies are *meant* to recover their interface by loading
-  the compiled module's `<mangled>_types` symbol — a string of nested
-  constructor calls produced by `types.serialize` — and evaluating it with
+  `.so`-only dependencies recover their interface by loading the compiled
+  module's `<mangled>_types` symbol — a string of nested constructor calls
+  produced by `types.serialize` — and evaluating it with
   `load("return " .. s, modname, "t", types)`, the `types` module itself
-  serving as the environment; but the branch's guard (`mtime_bin and (not
-  mtime_src) and mtime_bin >= mtime_src`) compares against a nil `mtime_src`
-  precisely when only the `.so` exists, so an `.so`-only import crashes the
-  compiler with a Lua traceback (`driver.lua:62: attempt to compare nil with
-  number`, verified) and the recovery path is unreachable. Pointer, Typedef
-  and ForeignModule types are *not* serializable (`types.serialize` raises
-  on them), so FFI types could not cross a compiled-interface boundary even
-  if it worked.
+  serving as the environment. Pointer, Typedef and ForeignModule types are
+  *not* serializable (`types.serialize` raises on them), so FFI types cannot
+  cross a compiled-interface boundary.
 * `driver.tableloader` is the in-memory variant for tests; it deliberately
   serializes and re-loads every module type, so the round-trip is exercised
   by every import test in the suite.
@@ -451,9 +446,7 @@ Two real loaders exist in `driver.lua`:
 the C parser pipeline and converts each declaration with
 `foreigntypes.convert` into members of a `Type.ForeignModule`, adding typedef
 names to the symbol table's `foreign_types` namespace (see
-[FFI internals](ffi-internals.md)). Beware: the error path for a failed
-conversion calls `checker.typeerror(errors, err, node._pos)` with the message
-and location arguments swapped — a latent crash, unexercised by the specs.
+[FFI internals](ffi-internals.md)).
 
 ## Process-global state
 

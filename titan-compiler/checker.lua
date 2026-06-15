@@ -354,6 +354,17 @@ checkstat = util.make_visitor({
             checker.typeerror(errors, node.loc, "left-hand side expects %d value(s) but right-hand side produces %d value(s)", #node.decls, #node.exps)
         end
         for _, decl in ipairs(node.decls) do
+            if not decl._type then
+                -- no initializer reached this declaration (too few values on
+                -- the right-hand side, e.g. `local a, b = (f())`): the arity
+                -- error above is already reported; recover the type so later
+                -- uses of this variable don't crash the checker with a nil type
+                if decl.type then
+                    checkdecl(decl, st, errors)
+                else
+                    decl._type = types.Invalid()
+                end
+            end
             declare(decl, st)
         end
     end,
@@ -1396,7 +1407,7 @@ local toplevel_visitor = util.make_visitor({
                     members[fname] = types.ModuleMember(name, fname, decl)
                     st:add_foreign_type(fname, decl)
                 else
-                    checker.typeerror(errors, err, node._pos)
+                    checker.typeerror(errors, node.loc, "%s", err)
                 end
             end
             local modtype = types.ForeignModule(name, members)

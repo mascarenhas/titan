@@ -334,20 +334,12 @@ available, dynamic otherwise*:
   interface from type information embedded in the library, and the
   generated code **dlopens** the dependency at run time, finding it on
   the binary search path. This is what makes distributing binary-only
-  Titan modules possible in principle.
+  Titan modules possible.
 
 A statically linked dependency is still a module of its own from Lua's
 point of view: if `main.so` embeds `geom.point` and a Lua script also
 `require`s `geom.point`, both refer to the same module instance in that
 Lua state, with the same record types and the same module variables.
-
-*Limitation:* the `.so`-only branch of the compile-time lookup is
-broken in the current prototype driver — importing a module for which
-only a `.so` (and no source) exists crashes `titanc` with an internal
-Lua error (`attempt to compare nil with number`) rather than loading
-the binary interface. The run-time dynamic-loading machinery is in
-place, but until the driver is fixed, every imported module needs its
-source present, and is linked statically.
 
 ## Standalone executables
 

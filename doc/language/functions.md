@@ -198,7 +198,7 @@ compile-time errors a written-out argument would. Expansion applies to:
 
   function h(): integer
       return add3(10, divmod(13, 2))   -- divmod fills parameters b and c
-  end                                  -- (but see the limitation below)
+  end
   ```
 
 * array constructors — `{ 10, divmod(13, 2) }` is `{ 10, 6, 1 }`, while
@@ -208,19 +208,6 @@ compile-time errors a written-out argument would. Expansion applies to:
 Map constructors are the exception: a multi-return call as a value
 (`[k] = divmod(13, 2)`) keeps only the first value; the extras are
 dropped.
-
-*Limitation:* expansion into declarations, assignments and array
-constructors is compiled correctly, but two of the cases above are
-currently **miscompiled** — they type-check and compile cleanly, yet at
-run time the extra values are read before the call that produces them
-has run, so they arrive as zeros (or garbage). A trailing call in an
-argument list delivers wrong extras: `add3(10, divmod(13, 2))` computes
-`10 + 6 + 0`, not `10 + 6 + 1`. And a `return` whose expression list is
-just the multi-return call (`return divmod(13, 2)` from a function
-declared `(integer, integer)`) returns `6, 0` — though
-`return 10, divmod(13, 2)` from a three-value function is compiled
-correctly. Until this is fixed, capture the values with a multiple
-declaration first.
 
 ### Adjusting to one value
 
@@ -332,11 +319,9 @@ a `main`, it produces a standalone executable instead of shared
 libraries. The executable is named after the module (dots in the module
 name become directory separators) and statically embeds all the
 requested modules plus every imported module whose source is available;
-imports available only as compiled `.so` files are meant to be loaded
-dynamically at startup, but resolving a `.so`-only import currently
-crashes the compiler with an internal error, so in practice the source
-of every import must be available. See [Modules](modules.md) for the
-compilation model.
+imports available only as compiled `.so` files are loaded dynamically at
+startup, their interface recovered from the compiled module. See
+[Modules](modules.md) for the compilation model.
 
 ```sh
 ./titanc answer        # answer.titan declares main -> executable ./answer

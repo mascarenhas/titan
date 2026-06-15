@@ -171,17 +171,12 @@ function get(a: {{string}}): string
 end
 ```
 
-*Limitation:* the current compiler only generates this unwrap correctly
-when the option is the direct result of an array or map read (the nil
-check is fused into the read, as in both examples above). Unwrapping an
-option held in a plain *variable* — a local, a parameter, a module
-variable, or a record field — crashes the compiler with
-`Internal compiler error: missing template variable FILE` (the
-concatenation path dies on
-`invalid node type for coercion to string` instead). In practice an
-explicitly option-typed variable is consumed with `or` defaulting,
-conditions and `==`, or passed along to option contexts, rather than
-implicitly unwrapped.
+This unwrap works wherever an option reaches a context that needs the bare
+value, whether the option is the direct result of an array or map read or
+is held in a plain *variable* — a local, a parameter, a module variable, or
+a record field — and whether the consuming context is arithmetic, a call
+argument, an array or map index, or string concatenation. A nil at run time
+raises the `expected <T> but found nil` error shown above.
 
 ### Conversions between different option types
 
@@ -379,12 +374,10 @@ there is no flow typing. The read in the then-branch is a fresh `integer?`
 unwrapped by the `+`, with its own (now unfailing) nil check; to pay for
 the check once, combine the test and the use with `or`.
 
-*Limitation:* option conditions only build in `if` (and under `not`, which
-yields a `boolean`). In a `while` or `repeat`/`until` condition the checker
-accepts an option, but the generated C treats the tagged value as a C truth
-value and is rejected by the C compiler — `titanc` fails with `cc` errors,
-not a type error. Write loop conditions as booleans (`while not t[i] do`
-compiles; `while t[i] do` does not); see [statements](statements.md).
+The same falsiness rule applies in `while` and `repeat`/`until` conditions:
+an option condition there tests nil-ness exactly as in `if` (`while t[i] do`
+loops while the element is present), and `not` yields a `boolean`; see
+[statements](statements.md).
 
 ## Options at the Lua boundary
 
@@ -422,13 +415,6 @@ passes a table with holes, and the holes surface in Titan as nil options.
 Beyond the notes already made above, the 0.5 prototype has these known
 rough edges:
 
-* **Implicit unwrap of plain option variables crashes the compiler.** Only
-  unwraps fused into array/map reads compile; forcing an option-typed
-  local, parameter, module variable or record field aborts code generation
-  with an internal error (`missing template variable FILE`, or a
-  different internal message on the concatenation path). Consume such
-  values with `or`, conditions, and `==`, or keep them in option-typed
-  positions.
 * **No explicit option casts.** `e as T` when `e: T?` (and the reverse) is
   a compile-time error `cannot cast 'T?' to 'T'`; only the implicit
   coercions exist.
@@ -445,10 +431,6 @@ rough edges:
   boolean context: the expression typechecks as an option, but the
   generated C is rejected by the C compiler. Use an option or `value` on
   the left, or put the `and` in a boolean context.
-* **Option conditions in `while`/`repeat` do not compile.** The checker
-  accepts them, but the generated C is rejected by the C compiler; only
-  `if` conditions and `not` take options. Write loop conditions as
-  booleans.
 * **Method calls do not unwrap their receiver.** With `p: Point?`,
   `p:move(1, 2)` is a compile-time error — `expected record in receiver of
   method call but found 'mod.Point?'`, followed by `expected a record

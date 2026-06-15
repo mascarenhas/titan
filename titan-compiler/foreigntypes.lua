@@ -117,13 +117,11 @@ local function convert_union(st, ftype)
 end
 
 local function convert_enum(st, ftype)
-    local decl = {
-        _tag = "Enum",
-        name = ftype.name,
-        data = ftype,
-    }
-    -- TODO process fields
-    return decl
+    -- A C enum (and each of its constants) is integer-like; map its Titan
+    -- type to integer so imported enum constants can be used and
+    -- type-checked like integers. (Struct/union field processing is still
+    -- TODO; only the enum-as-integer mapping is handled here.)
+    return types.Integer()
 end
 
 function foreigntypes.convert(st, ftype)

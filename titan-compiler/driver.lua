@@ -59,7 +59,7 @@ function driver.defaultloader(static_deps)
         end
         local mtime_bin, binf = findmodule(driver.TITAN_BIN_PATH, modname, ".so")
         local mtime_src, srcf = findmodule(driver.TITAN_SOURCE_PATH, modname, ".titan")
-        if mtime_bin and (not mtime_src) and mtime_bin >= mtime_src then
+        if mtime_bin and ((not mtime_src) or mtime_bin >= mtime_src) then
             local typesf, err = package.loadlib(binf, modname:gsub("[%-.]", "_") .. "_types")
             if not typesf then return false, err end
             local ok, types_or_err = pcall(typesf)

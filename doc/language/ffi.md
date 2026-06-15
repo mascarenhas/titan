@@ -157,16 +157,14 @@ members, but you cannot call or read them: the use crashes the compiler
 with an internal error (a Lua traceback ending in
 `impossible: Type.Unknown`), not a clean type error.
 
-*Limitation:* struct, union and enum **contents** are parsed but not yet
-converted — you cannot access the fields of a C struct from Titan, and
-enum constants are unusable either way. The constants of a bare
-top-level `enum color { ... };` declaration are not imported at all:
-using one is the compile-time error `member '...' not found inside
-module '...'`. The constants of a *typedef'd* enum
-(`typedef enum { ... } color_t;`) do become members, but their values
-are not stored and using one crashes the compiler with an internal
-error (a Lua traceback ending in `impossible: Enum`). Struct values are
-only usable behind pointers, as opaque values (see below).
+*Limitation:* struct and union **contents** are parsed but not yet
+converted — you cannot access the fields of a C struct from Titan. The
+constants of a bare top-level `enum color { ... };` declaration are not
+imported at all: using one is the compile-time error `member '...' not
+found inside module '...'`. The constants of a *typedef'd* enum
+(`typedef enum { ... } color_t;`) do become members and behave as
+integers. Struct values are only usable behind pointers, as opaque
+values (see below).
 
 ## Calling C functions
 
@@ -254,11 +252,9 @@ What you can do with a pointer:
   to `nil`, and you may pass `nil` for any pointer parameter.
   Relational operators (`<`, `<=`, ...) are not allowed on pointers
   (compile-time error `trying to use relational expression ...`).
-* **Test it for null — as an explicit `nil` comparison.** The
-  "returned null on failure" check must be spelled `== nil`/`~= nil`:
-  using a pointer's *truthiness* instead (`if p then`, `not p`)
-  currently crashes the compiler with an internal error
-  (`invalid type pointer to FILE`).
+* **Test it for null.** Compare it with `nil` (`== nil`/`~= nil`), or
+  use its *truthiness* directly (`if p then`, `not p`, `while p`): a
+  pointer is truthy exactly when it is non-null.
 
   ```lua
   -- Titan
@@ -341,10 +337,7 @@ The repository's two-module SDL program (`examples/sdl_demo.titan` and
 `examples/sdl_quit.titan`) exercises most of this chapter: a third-party
 library bound through one umbrella header, `#define` constants, opaque
 pointers tested for null, `nil` arguments, variadic `printf`, and
-linking with `-l`. (The committed example writes its null tests as
-`if not win`, which trips the pointer-truthiness compiler bug described
-above; the excerpt below shows the `== nil` form the current compiler
-accepts.)
+linking with `-l`.
 
 ```lua
 -- Titan: examples/sdl_quit.titan
@@ -405,16 +398,13 @@ titanc examples.sdl_demo -lSDL2
 
 ## Summary of current limitations
 
-* No access to struct/union fields or enum values (bare-enum constants
-  are missing members; typedef'd-enum constants crash the compiler);
-  structs only as opaque pointers.
+* No access to struct/union fields (bare-enum constants are missing
+  members; structs only as opaque pointers).
 * No C arrays, no function pointers, no by-value structs, and no
   mapping for bare `char`, `short`, C `float`, or explicit `unsigned`
   types in prototypes.
 * Function-like macros are not imported.
 * Foreign variables are effectively read-only.
-* Pointer truthiness tests (`if p`, `not p`) crash the compiler; write
-  `p == nil` / `p ~= nil` instead.
 * Letting inference type a local from a typedef-returning call (e.g.
   `size_t`) crashes the code generator; annotate such locals.
 * One flat C namespace across all imports, without conflict detection.
