@@ -32,9 +32,10 @@ import  in      integer  local     nil    not     or      record
 repeat  return  string   then      true   until   value   while
 ```
 
-Note that `break`, `goto`, and `in` are **reserved but unused**: no
-Titan construct uses them, so a `break` or `goto` statement (or a
-generic `for ... in` loop) is a compile-time syntax error. The type
+Note that `goto` and `in` are **reserved but unused**: no Titan construct
+uses them, so a `goto` statement or a generic `for ... in` loop is a
+compile-time syntax error. (`break` *is* a statement — see
+[statements](statements.md#break-no-goto).) The type
 keywords `boolean`, `float`, `integer`, `nil`, `string`, and `value`
 are reserved too, so they cannot name variables, functions, or fields
 (`local integer: integer = 10` is a syntax error).
@@ -262,11 +263,9 @@ var        ::= Name
 ```
 
 An lvalue (`var`) is a plain name or a suffixed expression whose *last*
-suffix is an index or a field selection — `f()[1] = v` and `m[k][1] = v`
-are assignable; a call is not. (One gap: *field* selection on a call
-result, as in `f().x = 1`, parses as an lvalue but aborts the current
-compiler with an internal error — as does merely reading `f().x`.)
-Multiple assignment and multiple `local`
+suffix is an index or a field selection — `f()[1] = v`, `m[k][1] = v`,
+and `f().x = v` are assignable, as is reading `f().x`; a bare call is
+not. Multiple assignment and multiple `local`
 declaration mirror Lua, but a `local` declaration *requires* an
 initializer — plain `local x: integer` is a syntax error. `return`
 takes zero or more expressions, only as the last statement of a block —

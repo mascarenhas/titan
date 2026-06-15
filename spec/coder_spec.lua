@@ -2708,6 +2708,161 @@ describe("Titan code generator", function()
                 assert(not test.fn(1, 1))
             ]])
         end)
+
+        it("breaks out of a numeric for loop", function ()
+            run_coder([[
+                function fn(n: integer): integer
+                    local s = 0
+                    for i = 1, n do
+                        s = s + i
+                        if s > 20 then break end
+                    end
+                    return s
+                end
+            ]], [[
+                assert(test.fn(10) == 21)
+                assert(test.fn(3) == 6)
+            ]])
+        end)
+
+        it("breaks out of a while loop", function ()
+            run_coder([[
+                function fn(xs: {integer}): integer
+                    local r = 0
+                    local i = 1
+                    while i <= #xs do
+                        if xs[i] > 0 then
+                            r = xs[i]
+                            break
+                        end
+                        i = i + 1
+                    end
+                    return r
+                end
+            ]], [[
+                assert(test.fn({-1, -2, 7, 9}) == 7)
+                assert(test.fn({-1, -2}) == 0)
+            ]])
+        end)
+
+        it("breaks out of a repeat loop", function ()
+            run_coder([[
+                function fn(n: integer): integer
+                    local i = 0
+                    repeat
+                        i = i + 1
+                        if i == n then break end
+                    until i > 100
+                    return i
+                end
+            ]], [[
+                assert(test.fn(5) == 5)
+            ]])
+        end)
+
+        it("break exits only the innermost loop", function ()
+            run_coder([[
+                function fn(): integer
+                    local c = 0
+                    for i = 1, 3 do
+                        for j = 1, 3 do
+                            if j == 2 then break end
+                            c = c + 1
+                        end
+                    end
+                    return c
+                end
+            ]], [[
+                assert(test.fn() == 3)
+            ]])
+        end)
+
+        it("auto-unwraps an option receiver for a method call", function ()
+            run_coder([[
+                record Point
+                    x: integer
+                    y: integer
+                end
+                function Point:mag(): integer
+                    return self.x * self.x + self.y * self.y
+                end
+                function fn(p: Point?): integer
+                    return p:mag()
+                end
+                function mk(a: integer, b: integer): Point
+                    return Point.new(a, b)
+                end
+            ]], [[
+                assert(test.fn(test.mk(3, 4)) == 25)
+            ]])
+        end)
+
+        it("raises when the option receiver of a method call is nil", function ()
+            run_coder([[
+                record Point
+                    x: integer
+                end
+                function Point:get(): integer
+                    return self.x
+                end
+                function fn(p: Point?): integer
+                    return p:get()
+                end
+            ]], [[
+                assert(test.fn(nil))
+            ]], "but found nil")
+        end)
+
+        it("unwraps an option with an explicit 'as' cast", function ()
+            run_coder([[
+                function fn(xs: {integer}): integer
+                    local v: integer? = xs[1]
+                    return v as integer
+                end
+            ]], [[
+                assert(test.fn({5, 6}) == 5)
+            ]])
+        end)
+
+        it("raises when an 'as' cast unwraps a nil option", function ()
+            run_coder([[
+                function fn(xs: {integer}): integer
+                    local v: integer? = xs[1]
+                    return v as integer
+                end
+            ]], [[
+                assert(test.fn({}))
+            ]], "expected integer but found nil")
+        end)
+
+        it("unwraps an option array element with an 'as' cast", function ()
+            run_coder([[
+                function fn(xs: {integer?}): integer
+                    return xs[1] as integer
+                end
+            ]], [[
+                assert(test.fn({5, 6}) == 5)
+                local ok = pcall(function () return test.fn({}) end)
+                assert(not ok)
+            ]])
+        end)
+
+        it("selects a field from a call result", function ()
+            run_coder([[
+                record Point
+                    x: integer
+                    y: integer
+                end
+                function mk(a: integer): Point
+                    return Point.new(a, a + 1)
+                end
+                function fn(a: integer): integer
+                    return mk(a).y
+                end
+            ]], [[
+                assert(test.fn(3) == 4)
+            ]])
+        end)
     end)
 
     describe("#apps", function()

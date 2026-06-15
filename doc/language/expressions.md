@@ -326,6 +326,7 @@ checker accepts are deliberately few:
 
 | From | To | Can fail at run time? |
 | --- | --- | --- |
+| option `T?` | base `T` | yes — checked (raises on `nil`) |
 | any type (including options) | `value` | never |
 | `value` | any type (including options) | yes — checked |
 | void pointer (FFI) | `string` | no run-time check |
@@ -336,8 +337,10 @@ on mismatch. Casting a `value` holding a float to `integer` accepts
 exact integral values and raises
 `... number '2.5' has no integer representation` otherwise. Casts *to*
 `value`, and from `value` *to* `boolean`, never fail — any value
-converts. The void-pointer row belongs to the FFI; see
-[the C FFI](ffi.md).
+converts. An option cast `o as T` unwraps the option, raising
+`expected T but found nil` when `o` is `nil` (the explicit form of the
+implicit option unwrap; see [option types](option-types.md)). The
+void-pointer row belongs to the FFI; see [the C FFI](ffi.md).
 
 ```lua
 function unbox(v: value): integer
@@ -347,16 +350,19 @@ end
 function box(n: integer): value
     return n as value          -- never fails
 end
+
+function unwrap(o: integer?): integer
+    return o as integer        -- unwraps; raises if o is nil
+end
 ```
 
 Everything else is the compile-time error `cannot cast 'T1' to 'T2'` —
 in the current compiler all of these are rejected:
 
 ```lua
-function rejected(i: integer, x: float, o: integer?)
+function rejected(i: integer, x: float)
     local a = i as float       -- cannot cast 'integer' to 'float'
     local b = x as integer     -- cannot cast 'float' to 'integer'
-    local c = o as integer     -- cannot cast 'integer?' to 'integer'
     local d = i as integer?    -- cannot cast 'integer' to 'integer?'
     local e = i as integer     -- cannot cast 'integer' to 'integer'
 end

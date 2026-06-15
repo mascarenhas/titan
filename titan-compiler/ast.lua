@@ -40,6 +40,7 @@ return typedecl("Ast", {
         StatDecl        = {"loc", "decls", "exps"},
         StatCall        = {"loc", "callexp"},
         StatReturn      = {"loc", "exps"},
+        StatBreak       = {"loc"},
     },
 
     Then = {

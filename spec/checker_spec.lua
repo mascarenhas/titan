@@ -2682,5 +2682,84 @@ describe("Titan typecheck of records", function()
             end
         ]])
     end)
+
+    it("allows break inside loops", function()
+        assert_type_check([[
+            function f(): integer
+                local s = 0
+                for i = 1, 10 do
+                    s = s + i
+                    if s > 20 then break end
+                end
+                while s > 0 do
+                    s = s - 1
+                    break
+                end
+                repeat break until true
+                return s
+            end
+        ]])
+    end)
+
+    it("rejects break outside a loop", function()
+        assert_type_error("'break' outside a loop", [[
+            function f()
+                break
+            end
+        ]])
+    end)
+
+    it("rejects break in a conditional that is not inside a loop", function()
+        assert_type_error("'break' outside a loop", [[
+            function f(c: boolean)
+                if c then
+                    break
+                end
+            end
+        ]])
+    end)
+
+    it("auto-unwraps an option receiver in a method call", function()
+        assert_type_check([[
+            record Point
+                x: integer
+            end
+            function Point:get(): integer
+                return self.x
+            end
+            function f(p: Point?): integer
+                return p:get()
+            end
+        ]])
+    end)
+
+    it("allows an explicit 'as' cast unwrapping an option", function()
+        assert_type_check([[
+            function f(xs: {integer}): integer
+                local v: integer? = xs[1]
+                return v as integer
+            end
+        ]])
+    end)
+
+    it("rejects an 'as' cast from an option to an unrelated base", function()
+        assert_type_error("cannot cast 'boolean%?' to 'integer'", [[
+            function f(b: boolean?): integer
+                return b as integer
+            end
+        ]])
+    end)
+
+    it("cleanly reports a wrong-arity call to a multiple-return callee", function()
+        assert_type_error("function 'pair' called with 3 arguments but expects 1", [[
+            function pair(a: integer): (integer, integer)
+                return a, a + 1
+            end
+            function bad(): integer
+                local x = pair(1, 2, 3)
+                return x
+            end
+        ]])
+    end)
 end)
 

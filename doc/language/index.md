@@ -78,22 +78,11 @@ with a clean error; each links to the chapter that documents it in full.
 
 ### Smaller gaps and rough edges
 
-* **No `break`, no `goto`, no `for ... in`** — these words are reserved but
-  unused; restructure the loop or `return` from it
-  ([statements](statements.md#no-break-no-goto)).
-* **An option receiver is not auto-unwrapped for a method call:** `p:m()`
-  on a `Point?` is a compile-time error — unwrap into a plain record first
-  ([records](records.md#records-and-nil),
-  [option types](option-types.md#limitations)).
-* **There are no explicit option `as` casts:** `e as T` when `e: T?` is a
-  compile-time error — unwrap with `or` or a truthiness check instead
-  ([option types](option-types.md#limitations)). (Implicit `t1? → t2?`
-  conversion does work when `t1` is coercible to `t2`, propagating `nil`.)
-* **Two constructs still crash the compiler rather than erroring cleanly:**
-  a wrong-arity call to a callee with *multiple* return types (the message
-  formatter crashes; [functions](functions.md#strict-arity)) and field
-  selection on a call result, `f().x` ([grammar](grammar.md#statements)).
-  These are the last known internal-error corners.
+* **No `goto`, no `for ... in`** — these two words are reserved but unused:
+  there is no generic `for ... in` loop and no `goto`/labels, so using
+  them is a syntax error. `break` *is* supported (and a loop can also be
+  exited with `return`)
+  ([statements](statements.md#break-no-goto)).
 
 ### The C FFI
 

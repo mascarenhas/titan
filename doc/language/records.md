@@ -394,16 +394,11 @@ The option type `Point?` exists and can be used in signatures, fields
 records can be passed along and returned freely.
 
 Wherever a bare `Point` is required, a `Point?` is **unwrapped** with a
-run-time nil check: reading a field (`p.x`), assigning it to a plain
-`Point` variable, and letting an unannotated `local` force it all work,
-raising a clean `expected test.Point but found nil` error if the value is
-`nil` at run time. See [option types](option-types.md) for the general
-machinery.
-
-*Limitation:* calling a method through an option receiver is rejected by
-the checker (`expected record in receiver of method call but found
-'test.Point?'`) — unwrap the receiver into a plain `Point` first (for
-example with an `if`), then call the method on that.
+run-time nil check: reading a field (`p.x`), calling a method (`p:move()`),
+assigning it to a plain `Point` variable, and letting an unannotated
+`local` force it all work, raising a clean `expected test.Point but found
+nil` error if the value is `nil` at run time. See
+[option types](option-types.md) for the general machinery.
 
 ## What records are not
 

@@ -22,6 +22,9 @@ local checkstat
 local checkexp
 local checkvar
 
+-- nesting depth of enclosing loops, so `break` can be rejected outside a loop
+local loop_depth = 0
+
 function checker.typeerror(errors, loc, fmt, ...)
     local errmsg = location.format_error(loc, "type error: "..fmt, ...)
     table.insert(errors, errmsg)
@@ -378,15 +381,29 @@ checkstat = util.make_visitor({
 
     ["Ast.StatWhile"] = function(node, st, errors)
         checkexp(node.condition, st, errors, types.Boolean())
+        loop_depth = loop_depth + 1
         st:with_block(checkstat, node.block, st, errors)
+        loop_depth = loop_depth - 1
     end,
 
     ["Ast.StatRepeat"] = function(node, st, errors)
+        loop_depth = loop_depth + 1
         st:with_block(checkrepeat, node, st, errors)
+        loop_depth = loop_depth - 1
     end,
 
     ["Ast.StatFor"] = function(node, st, errors)
+        loop_depth = loop_depth + 1
         st:with_block(checkfor, node, st, errors)
+        loop_depth = loop_depth - 1
+    end,
+
+    ["Ast.StatBreak"] = function(node, st, errors)
+        if loop_depth == 0 then
+            checker.typeerror(errors, node.loc,
+                "'break' outside a loop")
+        end
+        return false
     end,
 
     ["Ast.StatAssign"] = function(node, st, errors)
@@ -1189,6 +1206,15 @@ checkexp = util.make_visitor({
         else
             assert(node.args._tag == "Ast.ArgsMethod")
             local otype = node.exp._type
+            -- auto-unwrap an option receiver: p:m() on a Point? unwraps to the
+            -- underlying record. The cast codegen inserts a runtime nil-check,
+            -- so calling a method through a nil option raises a clean error.
+            if otype._tag == "Type.Option" and otype.base._tag == "Type.Nominal" then
+                local cast = ast.ExpCast(node.exp.loc, node.exp, otype.base)
+                cast._type = otype.base
+                node.exp = cast
+                otype = otype.base
+            end
             if otype._tag == "Type.Nominal" and
                types.registry[otype.fqtn] and
                types.registry[otype.fqtn]._tag == "Type.Record" then
@@ -1233,11 +1259,21 @@ checkexp = util.make_visitor({
     ["Ast.ExpCast"] = function(node, st, errors, context)
         node.target = typefromnode(node.target, st, errors)
         checkexp(node.exp, st, errors, node.target)
-        if not (types.explicitly_coerceable(node.exp._type, node.target) or
-                types.coerceable(node.exp._type, node.target))
-           or not types.compatible(node.exp._type, node.target) then
+        local source = node.exp._type
+        local target = node.target
+        local ok
+        if source._tag == "Type.Option" and types.equals(source.base, target) then
+            -- explicit unwrap of an option to its base type; the cast codegen
+            -- emits a runtime nil-check that raises if the value is nil
+            ok = true
+        else
+            ok = (types.explicitly_coerceable(source, target) or
+                  types.coerceable(source, target))
+                 and types.compatible(source, target)
+        end
+        if not ok then
             checker.typeerror(errors, node.loc, "cannot cast '%s' to '%s'",
-                types.tostring(node.exp._type), types.tostring(node.target))
+                types.tostring(source), types.tostring(target))
         end
         node._type = node.target
     end,

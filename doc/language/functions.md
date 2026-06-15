@@ -122,13 +122,9 @@ print(pcall(m.fma, 2.0, 3.0))          --> false   calling Titan function fma wi
 
 The same strictness applies to `return` (returning the wrong number of
 values is a compile-time error) and to multiple assignment and
-declaration — see the next section.
-
-*Limitation:* when the *callee* has multiple declared return types, a
-wrong-arity call currently crashes the compiler with an internal error
-instead of printing the type error above (the bug is in formatting the
-function type for the message). The call is still rejected — just not
-gracefully.
+declaration — see the next section. A wrong-arity call is reported the
+same way whether the callee returns one value or several: the message
+names the function and the expected and actual argument counts.
 
 ## Multiple return values
 

@@ -510,6 +510,14 @@ describe("Titan parser", function()
         })
     end)
 
+    describe("can parse break statements", function()
+        assert_statements_ast("while true do break end", {
+            { _tag = "Ast.StatWhile",
+              block = { _tag = "Ast.StatBlock",
+                        stats = { { _tag = "Ast.StatBreak" } } } }
+        })
+    end)
+
     describe("can parse if statements", function()
         assert_statements_ast("if 10 then end", {
             { _tag = "Ast.StatIf",

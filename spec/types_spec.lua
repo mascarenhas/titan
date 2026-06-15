@@ -6,6 +6,12 @@ describe("Titan types", function()
         assert.same("{ integer }", types.tostring(types.Array(types.Integer())))
     end)
 
+    it("pretty-prints a function with multiple return types", function()
+        local f = types.Function({types.Integer()},
+                                 {types.Integer(), types.String()}, false)
+        assert.same("(integer) -> (integer, string)", types.tostring(f))
+    end)
+
     -- TODO test vararg functions (types.Function with third argument as true)
 
     it("checks if a type is garbage collected", function()

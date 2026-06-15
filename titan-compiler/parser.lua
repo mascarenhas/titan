@@ -337,6 +337,7 @@ local grammar = re.compile([[
     block           <- (P  {| statement* returnstat? |})         -> StatBlock
 
     statement       <- (SEMICOLON)                               -- ignore
+                     / (P  BREAK)                                -> StatBreak
                      / (DO block END^EndBlock)                   -- produces StatBlock
                      / (P  WHILE exp^ExpWhile DO^DoWhile
                                  block END^EndWhile)             -> StatWhile

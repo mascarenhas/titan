@@ -1476,6 +1476,8 @@ function codestat(ctx, node)
         end
     elseif tag == "Ast.StatReturn" then
         return codereturn(ctx, node)
+    elseif tag == "Ast.StatBreak" then
+        return "break;"
     else
         error("invalid node tag " .. tag)
     end
@@ -2314,7 +2316,8 @@ function codeexp(ctx, node, iscondition, target)
         return codecall(ctx, node, target)
     elseif tag == "Ast.ExpExtra" then
         return "", node.exp._extras[node.index]
-    elseif tag == "Ast.ExpCast" and node.exp._tag == "Ast.ExpVar" and node.exp.var._tag == "Ast.VarBracket" then
+    elseif tag == "Ast.ExpCast" and node.exp._tag == "Ast.ExpVar" and node.exp.var._tag == "Ast.VarBracket"
+           and node.exp._type._tag ~= "Type.Option" then
         -- Fold casts of array/map indexing into the code for the operation
         local t = node.exp.var._type
         node.exp.var._type = node._type
@@ -2359,7 +2362,7 @@ function codeexp(ctx, node, iscondition, target)
         local cstat, cexp = codeexp(ctx, node.exp)
         return cstat, "((lua_Number)" .. cexp .. ")"
     elseif tag == "Ast.ExpCast" and node._type._tag == "Type.Boolean" then
-        -- cast to boolean from any type
+        -- cast to boolean from any type (including options, via truthiness)
         local cstat, cexp = codeexp(ctx, node.exp, true)
         return cstat, toboolean(node.exp._type, cexp)
     elseif tag == "Ast.ExpCast" and node.exp._type._tag == "Type.Float" and node.target._tag == "Type.Integer" then
@@ -2393,7 +2396,8 @@ function codeexp(ctx, node, iscondition, target)
             THROW_WRONG_INT = codethrow(ctx, "type error at line %d, number '%f' has no integer representation", { "$LINE", "$TMPNAME1" })
         })
         return cfloor, tmpname3
-    elseif tag == "Ast.ExpCast" and node._type._tag == "Type.String" then
+    elseif tag == "Ast.ExpCast" and node._type._tag == "Type.String"
+           and node.exp._type._tag ~= "Type.Option" then
         local cvt
         local cstats, cexp = codeexp(ctx, node.exp)
         if node.exp._type._tag == "Type.Integer" then

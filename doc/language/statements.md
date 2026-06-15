@@ -354,28 +354,29 @@ function bump(n: integer)    -- no annotation: returns nil
 end
 ```
 
-## No `break`, no `goto`
+## `break` (no `goto`)
 
-`break`, `goto`, and `in` are reserved words in Titan, and `::label::`
-syntax is recognized by the lexer, but **none of them have any statement
-form in this version** — there is no way to exit a loop early other than
-`return`, and no goto. Using `break` or `goto` is a syntax error, though
-an unhelpfully generic one (the parser typically reports something like
-`Expected 'end' to close the function body.` at the offending line,
-because the reserved word cannot start any statement).
-
-Where Lua code would `break`, Titan code currently restructures the loop —
-hoist the exit condition into the `while`/`until` condition, or move the
-loop into its own function and `return` from it:
+`break` exits the innermost enclosing loop — a `while`, `repeat`, or
+numeric `for` — exactly as in Lua:
 
 ```lua
--- instead of: for i = 1, #xs do ... if found then break end ... end
-function index_of(xs: {integer}, v: integer): integer
+function first_positive(xs: {integer}): integer
+    local r = 0
     for i = 1, #xs do
-        if xs[i] == v then
-            return i
+        if xs[i] > 0 then
+            r = xs[i]
+            break
         end
     end
-    return 0
+    return r
 end
 ```
+
+A `break` that is not inside any loop is the compile-time error
+`'break' outside a loop`.
+
+`goto` and the generic `for ... in` loop are **not** implemented:
+`goto`, `in`, and `::label::` syntax are recognized by the lexer but have
+no statement form, so using them is a syntax error (and there is no
+iterator-based `for`). Where Lua would write `for k, v in pairs(t)`,
+iterate with a numeric `for` over the keys or indices instead.

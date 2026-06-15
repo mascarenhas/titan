@@ -281,7 +281,7 @@ function types.tostring(t)
             table.insert(out, rtypes[1])
         elseif #rtypes > 1 then
             table.insert(out, " -> (")
-            table.insert(out, table.concat(rtypes), ", ")
+            table.insert(out, table.concat(rtypes, ", "))
             table.insert(out, ")")
         end
         return table.concat(out)
@@ -304,7 +304,7 @@ function types.tostring(t)
             table.insert(out, rtypes[1])
         elseif #rtypes > 1 then
             table.insert(out, ": (")
-            table.insert(out, table.concat(rtypes), ", ")
+            table.insert(out, table.concat(rtypes, ", "))
             table.insert(out, ")")
         end
         return table.concat(out)

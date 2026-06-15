@@ -188,13 +188,14 @@ one can still fail at run time on a present value — converting a `float?`
 that holds a non-integral or out-of-range number to `integer?` raises the
 usual "no integer representation" error, while `nil` is unaffected.
 
-### No explicit `as` casts
+### Explicit `as` casts
 
-Perhaps surprisingly, the *explicit* cast between an option and its base
-type is rejected: `xs[1] as integer` is a **compile-time error**,
-`cannot cast 'integer?' to 'integer'`. Only the implicit coercion exists;
-to request an unwrap, use the value in a context typed `integer` (or use
-`or` for a defaulted unwrap).
+The *explicit* cast from an option to its base type unwraps it with a
+run-time nil check: `xs[1] as integer` evaluates to the integer when one
+is present, and raises `expected integer but found nil` when the value is
+`nil`. It is the explicit spelling of the same unwrap the implicit
+coercions perform. For a *defaulted* unwrap that never raises, use `or`
+instead (`xs[1] or 0`).
 
 ## Arrays, maps, and `nil`
 
@@ -391,15 +392,7 @@ passes a table with holes, and the holes surface in Titan as nil options.
 Beyond the notes already made above, the 0.5 prototype has these known
 rough edges:
 
-* **No explicit option casts.** `e as T` when `e: T?` (and the reverse) is
-  a compile-time error `cannot cast 'T?' to 'T'`; only the implicit
-  coercions exist.
 * **Option function types cannot be written.** `?` suffixes simple types
   only, and there is no parenthesized type syntax to attach it to a
   function type — moot for now, since
   [functions are not first-class values](functions.md) in this version.
-* **Method calls do not unwrap their receiver.** With `p: Point?`,
-  `p:move(1, 2)` is a compile-time error — `expected record in receiver of
-  method call but found 'mod.Point?'`, followed by `expected a record
-  type` — not a run-time check; call methods on a plain record-typed
-  value.
