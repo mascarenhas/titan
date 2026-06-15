@@ -446,6 +446,55 @@ describe("Titan code generator", function()
         ]])
     end)
 
+    it("terminates a for loop at the integer limits (issue #59)", function()
+        -- Stepping past LUA_MAXINTEGER (or below LUA_MININTEGER) must not wrap
+        -- around into a non-terminating loop; the unsigned trip count prevents
+        -- that. The down() case also exercises the LUA_MININTEGER literal.
+        run_coder([[
+            function up(nth: integer): integer
+                local c: integer = 0
+                for i = 0x7FFFFFFFFFFFFFF8, 0x7FFFFFFFFFFFFFFF do
+                    c = c + 1
+                    if c == nth then return i end
+                end
+                return 0
+            end
+            function down(nth: integer): integer
+                local c: integer = 0
+                for i = 0x8000000000000007, 0x8000000000000000, -1 do
+                    c = c + 1
+                    if c == nth then return i end
+                end
+                return 0
+            end
+        ]], [[
+            assert(test.up(8) == 9223372036854775807)
+            assert(test.up(9) == 0)        -- must terminate, not hang
+            assert(test.down(8) == -9223372036854775808)
+            assert(test.down(9) == 0)      -- must terminate, not hang
+        ]])
+    end)
+
+    it("emits LUA_MININTEGER instead of an out-of-range C literal", function()
+        -- The most negative integer cannot be written as the literal
+        -- -9223372036854775808 (C reads it as a too-large positive constant);
+        -- the macro avoids the resulting compiler warning.
+        types.registry = {}
+        local code = [[
+            function f(): integer
+                return 0x8000000000000000
+            end
+        ]]
+        local ast = parse(code)
+        local _, errs = checker.check("test", ast, code, "test.titan")
+        assert.equal(0, #errs, table.concat(errs, "\n"))
+        local c = coder.generate("test", ast, {})
+        assert.truthy(c:find("LUA_MININTEGER", 1, true),
+            "expected LUA_MININTEGER in the generated C")
+        assert.falsy(c:find("9223372036854775808", 1, true),
+            "the raw out-of-range literal must not appear")
+    end)
+
     it("raises on a zero for step like Lua", function()
         run_coder([[
             function f(): integer

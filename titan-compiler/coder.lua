@@ -30,6 +30,14 @@ local function c_string_literal(s)
 end
 
 local function c_integer_literal(n)
+    -- The most negative lua_Integer cannot be written as the literal
+    -- -9223372036854775808: C parses that as -(9223372036854775808), whose
+    -- magnitude overflows a signed integer, so the compiler warns and gives
+    -- it unsigned type. Emit the Lua header macro (itself -LUA_MAXINTEGER-1)
+    -- instead. Every other value formats safely.
+    if n == math.mininteger then
+        return "LUA_MININTEGER"
+    end
     return string.format("%i", n)
 end
 
