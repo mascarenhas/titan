@@ -112,15 +112,13 @@ they are in the roadmap:
 * FFI with C (C pointers, call C functions)
 * records (structs) with `:` method calls
 * maps
-
-## In progress
-
-* first-class functions (still only in the top-level)
+* first-class functions (without anonymous functions)
 
 ## Next
 
 * nested and anonymous first-class functions with proper lexical scoping (closures)
 * slice type (native array with length and capacity), variadic functions using a slice to collect variadic arguments (Go-like)
+* error handling integrated with Lua's, nice backtraces (details TBD)
 * FFI with C, continued (other C primitive types, C arrays, C structs/unions including pointers, function pointers)
 * standard library that is a subset of Lua's standard library, built using the C FFI (the previous C FFI should be strong enough to call Lua API functions)
 * tagged variants (unions of records with some syntax for switch/case on the record tag)
