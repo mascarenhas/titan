@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: ["*"]
+    # "*" matches only top-level branch names; "**" also matches names with
+    # slashes (e.g. "tooling/foo"), so every pushed branch triggers CI.
+    branches: ["**"]
 
 jobs:
   test:

@@ -32,7 +32,7 @@ CC        ?= cc
 CFLAGS    ?= --std=c99 -O2 -Wall -fPIC
 RUNTIME_O := titan-runtime/titan.o
 
-.PHONY: all help lua runtime test clean clean-lua distclean
+.PHONY: all help lua runtime test examples clean clean-lua distclean
 
 all: lua ## Build everything needed to run the test suite (default)
 
@@ -68,9 +68,12 @@ test: lua ## Build/install the rock and run the suite via `luarocks test`
 	luarocks make
 	luarocks test
 
+examples: lua ## Compile the example Titan modules (SDL examples need SDL2 headers)
+	$(MAKE) -C examples all
+
 clean: ## Remove generated build/test artifacts (keeps the Lua tree)
 	rm -f $(RUNTIME_O) titan-runtime/*.o
-	rm -f examples/*.c examples/*.o examples/*.so
+	rm -f examples/*.c examples/*.o examples/*.so examples/sdl_demo
 	rm -f testfiles/*.c testfiles/*.o testfiles/*.so
 	rm -f *.c *.o *.so test
 	rm -f luacov.stats.out luacov.report.out

@@ -97,6 +97,18 @@ Two related gotchas if you drive Busted directly:
   *installed* rock, not from your checkout — re-run `luarocks make` after editing
   compiler sources so the tests see your changes.
 
+# Building the examples
+
+The `examples/` directory has its own `Makefile` with a target per example
+module plus an `all` target. From the repository root, `make examples` builds
+them all:
+
+        $ make examples            # or: make -C examples all
+        $ make -C examples utils   # build a single example
+
+`sdl_demo` depends on `sdl_quit`, and both use the C FFI against SDL2, so they
+need the SDL2 development headers installed.
+
 # Cleaning up
 
 `make clean` removes generated build and test artifacts (object files, generated
