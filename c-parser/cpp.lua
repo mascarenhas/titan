@@ -70,7 +70,12 @@ do
             return shallow_copy(default_defines)
         end
 
-        local pd = io.popen("LANG=C gcc -dM -E - < /dev/null")
+        -- The FFI grammar (c99.lua) targets C99/C11; ask for predefined macros
+        -- in gnu11 mode so a C23-default toolchain doesn't set __STDC_VERSION__
+        -- to 202311L, which would pull in C23-only constructs from system
+        -- headers (e.g. `typedef __typeof__(nullptr) nullptr_t;` in <stddef.h>)
+        -- that the grammar cannot parse.
+        local pd = io.popen("LANG=C gcc -std=gnu11 -dM -E - < /dev/null")
         if not pd then
             return {}
         end
