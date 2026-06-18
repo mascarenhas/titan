@@ -110,7 +110,7 @@ they are in the roadmap:
 * early-bound modules
 * multiple assignment/multiple returns
 * FFI with C (C pointers, call C functions)
-* records (structs) with methods
+* records (structs) with `:` method calls
 * maps
 
 ## In progress
@@ -119,15 +119,15 @@ they are in the roadmap:
 
 ## Next
 
-* FFI with C, continued (C arrays, C structs)
-* standard library that is a subset of Lua's standard library, built using the C FFI
-* tagged variants (unions of structs with some syntax for switch/case on the tag)
-* polymorphic functions
-* for-in
-* self-hosted compiler
 * nested and anonymous first-class functions with proper lexical scoping (closures)
-* ":" syntax sugar for records of functions
-* classes with single inheritance, either Go/Java/C#/Swift-like interfaces/protocols or Haskell/Rust-like typeclasses/traits
-* ":" method calls (not syntax sugar)
+* slice type (native array with length and capacity), variadic functions using a slice to collect variadic arguments (Go-like)
+* FFI with C, continued (other C primitive types, C arrays, C structs/unions including pointers, function pointers)
+* standard library that is a subset of Lua's standard library, built using the C FFI (the previous C FFI should be strong enough to call Lua API functions)
+* tagged variants (unions of records with some syntax for switch/case on the record tag)
+* parametric polymorphism (via type erasure and boxed values)
+* for-in for built-in collection types (arrays, maps, slices)
+* some mechanism for ad-hoc polymorphism, either Go/Java/C#/Swift-like interfaces/protocols or Haskell/Rust-like typeclasses/traits
+* for-in for user-defined types
 * operator overloading
+* self-hosted compiler
 * ...Titan 1.0!

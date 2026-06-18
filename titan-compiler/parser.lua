@@ -41,9 +41,10 @@ end
 
 function defs.rettypeopt(pos, x)
     if not x then
-        -- When possible, we should change this default to the empty list
-        -- or infer the return type.
-        return { ast.TypeNil(pos) }
+        -- No return annotation means a zero-return `(...) -> ()` function, as
+        -- in Lua where `function f() end` returns nothing. `return` (bare) is
+        -- the only legal return; `: nil` is the explicit one-`nil` form.
+        return {}
     else
         return x
     end

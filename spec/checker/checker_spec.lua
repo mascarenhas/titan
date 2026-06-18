@@ -1,59 +1,62 @@
-local checker = require 'titan-compiler.checker'
-local parser = require 'titan-compiler.parser'
 local types = require 'titan-compiler.types'
 local driver = require 'titan-compiler.driver'
 local util = require 'titan-compiler.util'
+local h = require 'spec.support.helpers'
 
-local function run_checker(code)
-    types.registry = {}
-    driver.imported = {}
-    local ast = assert(parser.parse("(checker_spec)", code))
-    local t, errs = checker.check("test", ast, code, "test.titan", driver.defaultloader())
-    return #errs == 0, table.concat(errs, "\n"), ast, t
-end
+local run_checker = h.run_checker
+local run_checker_modules = h.run_checker_modules
+local assert_type_check = h.assert_type_check
+local assert_type_error = h.assert_type_error
+local assert_ast = h.assert_ast
+local check_errs = h.check_errs
 
-local function run_checker_modules(modules, main)
-    local imported = {}
-    local loader = driver.tableloader(modules, imported)
-    local modt, err = checker.checkimport(main, loader)
-    if not modt then return false, err end
-    return #err == 0, table.concat(err, "\n"), imported
-end
+describe("zero-return () functions (typechecker)", function()
+    it("rejects return nil in a () function", function()
+        local errs = check_errs([[
+            function f(): ()
+                return nil
+            end
+        ]])
+        assert.equal(1, #errs)
+        assert.match("returned 1 value.* but function expected 0", errs[1])
+    end)
 
--- Return a version of t2 that only contains fields present in t1 (recursively)
--- Example:
---   t1  = { b = { c = 10 } e = 40 }
---   t2  = { a = 1, b = { c = 20, d = 30} }
---   out = { b = { c = 20 } }
-local function restrict(t1, t2)
-    if type(t1) == 'table' and type(t2) == 'table' then
-        local out = {}
-        for k,_ in pairs(t1) do
-            out[k] = restrict(t1[k], t2[k])
-        end
-        return out
-    else
-        return t2
-    end
-end
+    it("rejects a ()-call used as a value (annotated)", function()
+        local errs = check_errs([[
+            local function vd(): ()
+            end
+            function g(): integer
+                local x: integer = vd()
+                return x
+            end
+        ]])
+        assert.truthy(#errs >= 1)
+        assert.match("function returning no values cannot be used as a value", errs[1])
+    end)
 
-local function assert_type_check(code)
-    local ok, err = run_checker(code)
-    assert.truthy(ok, err)
-end
+    it("rejects a ()-call used as a value (inferred local — no silent Void)", function()
+        local errs = check_errs([[
+            local function vd(): ()
+            end
+            function g()
+                local x = vd()
+            end
+        ]])
+        assert.truthy(#errs >= 1)
+        assert.match("function returning no values cannot be used as a value", errs[1])
+    end)
 
-local function assert_type_error(expected, code)
-    local ok, err = run_checker(code)
-    assert.falsy(ok)
-    assert.match(expected, err)
-end
-
--- To avoid having these tests break all the time when we make insignificant
--- changes to the AST, we only verify a subset of the AST.
-local function assert_ast(program, expected)
-    local received = restrict(expected, program)
-    assert.are.same(expected, received)
-end
+    it("rejects a ()-call as an operand", function()
+        local errs = check_errs([[
+            local function vd(): ()
+            end
+            function g(): integer
+                return 1 + vd()
+            end
+        ]])
+        assert.truthy(#errs >= 1)
+    end)
+end)
 
 describe("Titan type checker", function()
     it("for loop iteration variables don't shadow var limit and step", function()
@@ -451,12 +454,11 @@ describe("Titan type checker", function()
         assert.match("called with 2 arguments but expects 3", err)
     end)
 
-    it("rejects a written function-type annotation cleanly", function ()
+    it("accepts a written function-type annotation", function ()
         local ok, err = run_checker([[
             function f(g: (integer) -> integer): integer return 0 end
         ]])
-        assert.falsy(ok)
-        assert.match("function types are not supported", err)
+        assert.truthy(ok, err)
     end)
 
     it("rejects assignment to a foreign variable cleanly", function ()
@@ -1889,15 +1891,17 @@ describe("Titan type checker", function()
         end
     end)
 
-    it("catches use of function as first-class value", function ()
+    it("allows use of a function as a first-class value", function ()
         local code = [[
             function foo(): integer
+                return 0
+            end
+            function get(): () -> integer
                 return foo
             end
         ]]
         local ok, err = run_checker(code)
-        assert.falsy(ok)
-        assert.match("access a function", err)
+        assert.truthy(ok, err)
     end)
 
     it("catches assignment to function", function ()
@@ -1911,23 +1915,23 @@ describe("Titan type checker", function()
         assert.match("assign to a function", err)
     end)
 
-    it("catches use of external function as first-class value", function ()
+    it("allows use of an external function as a first-class value", function ()
         local modules = {
             foo = [[
                 a: integer = 1
-                function foo()
+                function foo(): integer
+                    return 0
                 end
             ]],
             bar = [[
                 local foo = import "foo"
-                function bar(): integer
+                function bar(): () -> integer
                     return foo.foo
                 end
             ]]
         }
         local ok, err, mods = run_checker_modules(modules, "bar")
-        assert.falsy(ok)
-        assert.match("access a function", err)
+        assert.truthy(ok, err)
     end)
 
     it("catches assignment to external function", function ()

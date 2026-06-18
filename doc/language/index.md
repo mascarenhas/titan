@@ -61,20 +61,26 @@ implemented and covered by the compiler's test suite. Its boundaries are
 mostly missing features, plus a handful of constructs the compiler rejects
 with a clean error; each links to the chapter that documents it in full.
 
-### The biggest missing feature
+### First-class functions, with limits
 
-* **First-class functions are not implemented yet.** Functions exist only
-  at the module top level; a function value cannot be stored in a
-  variable, passed, or returned, and calling through a function-typed
-  value is rejected
-  ([functions](functions.md#functions-are-not-values-yet),
-  [type system](types.md#function-types)). This (with closures) is the
-  most prominent roadmap item. A consequence: there is **no way to call a
-  Lua function from Titan**
-  ([Lua interop](lua-interop.md#calling-lua-from-titan)). Writing a
-  function *type* in an annotation is itself a clean compile-time error
-  ("first-class function types are not supported yet")
-  ([type system](types.md#function-types)).
+* **Functions are now first-class values.** A function name — a top-level
+  function, a `local` function, an imported module's function, or a record
+  static like `Rec.new` — used as a value yields a stable function value,
+  and function types like `(integer) -> integer` are accepted in every
+  type position. Function values can be stored in locals, parameters,
+  record fields, arrays and maps, passed, returned, and called; exact
+  Titan-to-Titan calls take a zero-overhead fast path, other callables a
+  generic one
+  ([functions](functions.md#functions-as-values),
+  [type system](types.md#function-types)). This also means Titan can now
+  **call a Lua function directly** — passing a Lua closure to a
+  function-typed parameter and calling it
+  ([Lua interop](lua-interop.md#calling-lua-from-titan)).
+* **What is still not first-class.** Anonymous and nested function
+  expressions, closures over local variables, instance *methods* as
+  values (they need a bound `self`), and foreign/FFI functions as values
+  are not yet supported. These remain the most prominent roadmap items
+  ([functions](functions.md#functions-as-values)).
 
 ### Smaller gaps and rough edges
 

@@ -175,6 +175,16 @@ checked at compile time against the C prototype, with the usual
 accept any number of extra arguments. Mismatched argument types are
 ordinary compile-time type errors.
 
+**Foreign functions are not first-class values.** Even though Titan
+functions in general are now [first-class](functions.md) — you can refer
+to a regular Titan function by name, store it, pass it, and call it
+through a variable — a `foreign import`ed C function is *not* a value: it
+can only be *called* by name (`stdio.printf(...)`). Referring to one
+without calling it (to store or pass it as a value) is a compile-time
+error. Bind a C function once in the header and call it directly; if you
+need to pass C functionality around, wrap the call in a Titan function
+and pass that instead.
+
 Each argument is converted per the table above: numbers and booleans
 pass through directly, `nil` becomes the C null pointer, strings become
 `char *` (see the next section), pointers pass through unchanged, and
@@ -409,6 +419,8 @@ titanc examples.sdl_demo -lSDL2
   is skipped during import, so referencing it is a clean "not a member"
   error.
 * Function-like macros are not imported.
+* Foreign functions are not first-class values: they can be called by
+  name but not referenced, stored, or passed as values.
 * Foreign variables are effectively read-only.
 * One flat C namespace across all imports, without conflict detection.
 * Pointers cannot appear in Titan type annotations, containers, record

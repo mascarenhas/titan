@@ -23,7 +23,7 @@ which raise ordinary Lua errors when they fail (see
 | maps | `{ k : v }` | [Arrays and maps](arrays-maps.md) |
 | records | `Point`, `mod.Point` | [Records](records.md) |
 | option types | `t?` | [Option types](option-types.md) |
-| function types | `(t1, t2) -> t3` | below (not first-class yet) |
+| function types | `(t1, t2) -> t3` | below |
 | foreign types | from C headers | [The C FFI](ffi.md) |
 
 ### Basic types
@@ -112,26 +112,31 @@ same type as `value` — a `value` can already hold nil. The full story
 
 ### Function types
 
-Function types are written with the `->` constructor: `(a, b) -> (c)` is
-the type of a function from an `a` and a `b` to a `c`. Parentheses are
-optional around a single parameter or a single return type, and `->` is
-right-associative: `a -> b -> c` is `a -> (b -> c)`.
+Functions are first-class values in Titan, and function types are real,
+usable types. A function type is written with the `->` constructor:
+`(a, b) -> c` is the type of a function from an `a` and a `b` to a `c`.
+Parentheses are optional around a single parameter or a single return
+type, so `(integer) -> integer` and `integer -> integer` denote the same
+type. The forms are:
 
-Function types exist in the grammar and inside the compiler — they
-describe module functions, methods and FFI functions, and appear in error
-messages — but **functions are not first-class values in this version of
-Titan**. You cannot store a function in a variable or pass one as an
-argument; using a function name as a value is the compile-time error
-`trying to access a function as a first-class value`, and calling
-anything but a named function, static method or method reports
-`first-class functions are not supported in this version of Titan`.
-See [Functions](functions.md).
+* **Parameters.** `(P1, ..., Pn) -> R` takes `n` parameters; `() -> R`
+  takes none.
+* **Single return.** `(P...) -> R` returns one value of type `R`.
+* **Multiple return.** `(P...) -> (R1, ..., Rm)` returns the `m` values
+  of the parenthesized return list, the same shape used by a function's
+  own return annotation.
+* **Zero return.** `(P...) -> ()` returns *nothing* — the empty return
+  list. This is distinct from `(P...) -> nil`, which returns a single
+  `nil` value; the unannotated function default is the zero-return form
+  (see [Functions](functions.md)).
 
-Writing a function-type annotation directly (e.g. `g: (integer) -> integer`)
-is itself a clean compile-time error,
-`first-class function types are not supported yet`. Since no value can
-inhabit a function-typed variable anyway, written function types are not
-usable in 0.5.
+`->` is right-associative — `a -> b -> c` is `a -> (b -> c)` — and
+function types nest, so a higher-order type like
+`(integer -> integer, integer) -> integer` (a function taking an
+`integer -> integer` and an `integer`, returning an `integer`) is
+written directly. A function value can be stored in a variable, passed as
+an argument, returned, and called like any other; see
+[Functions](functions.md) and [Expressions](expressions.md).
 
 ### Foreign types
 

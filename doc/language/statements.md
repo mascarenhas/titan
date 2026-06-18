@@ -331,28 +331,38 @@ expected integer but found string`). A multi-return call expands in the
 last position, and `return (f())` truncates to a single value — see
 [Functions](functions.md) for the full multiple-return story.
 
-A function declared without a return annotation returns `nil` (the
-annotation defaults to `: nil`). Such functions need no `return` at all.
-Functions whose first return type is anything other than `nil` must
-provably return on every control path; otherwise the compiler rejects them
-with `function can return nil but return type is not nil`. The analysis
-understands `if`/`elseif`/`else` chains where every arm returns, but it
-does not credit loops — a `return` inside a `while` body does not count as
-"always returns".
+A function declared without a return annotation returns **zero** values
+(its type is `() -> ()`), matching Lua — not one `nil`. Such functions need
+no `return` at all, and falling off the end is allowed.
 
-A completely bare `return` (zero expressions) is allowed in a
-nil-returning function and means `return nil`:
+In a zero-return function a completely bare `return` (zero expressions) is
+the **only** legal return. Returning any value — `return nil` included — is
+a compile-time error (`returned 1 value(s) but function expected 0`):
 
 ```lua
 local count: integer = 0
 
-function bump(n: integer)    -- no annotation: returns nil
+function bump(n: integer)    -- no annotation: returns zero values
     if n <= 0 then
-        return               -- bare return: means 'return nil'
+        return               -- bare return: the only legal return here
     end
     count = count + n
 end
 ```
+
+`return` and `return nil` are therefore **not** equivalent. A bare `return`
+returns no values; `return nil` returns one value and is only legal in a
+function whose return type includes a value — for instance one declared
+`: nil` (the explicit one-`nil`-return form), `: integer?`, or any other
+type. The explicit `: nil` annotation is how you ask for a function that
+returns a single `nil`.
+
+A function whose return type carries one or more values must provably
+return on every control path; otherwise the compiler rejects it. (A
+nil-returning function, like a zero-return one, may instead fall off the
+end.) The analysis understands `if`/`elseif`/`else` chains where every arm
+returns, but it does not credit loops — a `return` inside a `while` body
+does not count as "always returns".
 
 ## `break` (no `goto`)
 

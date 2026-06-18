@@ -176,6 +176,12 @@ a record field — and whether the consuming context is arithmetic, a call
 argument, an array or map index, or string concatenation. A nil at run time
 raises the `expected <T> but found nil` error shown above.
 
+The same unwrap fires when you **call through** an option-of-function. An
+array or map whose element type is a function yields a `T?` on indexing, so
+calling the result directly — `arr[i](x)` — auto-unwraps the option with a
+run-time nil check, raising cleanly if the element is nil, exactly as a
+method call unwraps an option record receiver.
+
 ### Conversions between different option types
 
 Options interconvert across base types: `t1?` converts to `t2?` whenever
@@ -394,5 +400,7 @@ rough edges:
 
 * **Option function types cannot be written.** `?` suffixes simple types
   only, and there is no parenthesized type syntax to attach it to a
-  function type — moot for now, since
-  [functions are not first-class values](functions.md) in this version.
+  function type. An option of a function type still *arises* implicitly —
+  indexing an array or map whose element type is a function yields one, and
+  calling through it auto-unwraps (see [above](#unwrapping-is-checked)) —
+  but it cannot be spelled in an annotation.

@@ -174,10 +174,14 @@ by these lights, roughly in order:
    semantics demand branches (shift amounts, division signs), they are
    written so constant operands let the C compiler delete them.
 5. **Restrictions are features when they buy the above.** Strict arity,
-   no first-class functions yet, nominal records, no metatables on Titan
-   data — each is a smaller language in exchange for a faster and more
-   predictable one, and each can be revisited as the design matures (see
-   the roadmap in the [README](../../README.md)).
+   nominal records, no metatables on Titan data — each is a smaller
+   language in exchange for a faster and more predictable one, and each can
+   be revisited as the design matures (see the roadmap in the
+   [README](../../README.md)). First-class functions began as one of these
+   restrictions and have since been lifted: named functions are now values
+   that can be stored, passed, returned and called — with a zero-overhead
+   fast path for exact Titan-to-Titan calls — though closures and anonymous
+   functions remain future work.
 
 ---
 

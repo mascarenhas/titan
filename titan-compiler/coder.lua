@@ -77,6 +77,7 @@ local function getslot(typ --[[:table]], dst --[[:string?]], src --[[:string]])
     elseif typ._tag == "Type.Value" then tmpl = "$DST *($SRC)"
     elseif typ._tag == "Type.Nominal" then tmpl = "$DST clCvalue($SRC)"
     elseif typ._tag == "Type.Option" then tmpl = "$DST *($SRC)"
+    elseif typ._tag == "Type.Function" then tmpl = "$DST *($SRC)"
     else error("invalid type " .. types.tostring(typ)) end
     return render(tmpl, { DST = dst, SRC = src })
 end
@@ -171,6 +172,25 @@ local function type2metatable(ctx, typ --[[:table]])
     return ctx.metatables[typ.fqtn]
 end
 
+-- Get the C identifier of the `static const void *` holding the type tag for a
+-- function type, allocating one (numbered per module) on first use. Tags are
+-- keyed by the verbatim canonical type string and shared across all modules
+-- through the Lua registry (publish-or-recover, emitted in _init), so two
+-- modules that mention `(integer) -> integer` agree on the same tag pointer and
+-- the fast path can recognise each other's function values.
+local function function_type_tag(tlcontext, ftype --[[:table]])
+    local key = types.tostring(ftype)
+    local entry = tlcontext.functags[key]
+    if not entry then
+        local n = tlcontext.functag_count
+        tlcontext.functag_count = n + 1
+        entry = { id = tlcontext.prefix .. "functag_" .. n, key = key }
+        tlcontext.functags[key] = entry
+        table.insert(tlcontext.functag_list, entry)
+    end
+    return entry.id
+end
+
 local checkandset
 
 local function codethrow(ctx, template, params)
@@ -241,6 +261,16 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
     elseif typ._tag == "Type.Array" then tag = "table"
     elseif typ._tag == "Type.Map" then tag = "table"
     elseif typ._tag == "Type.Value" then
+        return render([[
+            setobj2t(L, &$VAR, $EXP);
+        ]], {
+            EXP = exp,
+            VAR = cvar
+        })
+    elseif typ._tag == "Type.Function" then
+        -- No callability check at the boundary: a function-typed value is
+        -- stored boxed exactly like `value`. If it turns out not to be
+        -- callable, luaD_callnoyield raises cleanly when it is actually called.
         return render([[
             setobj2t(L, &$VAR, $EXP);
         ]], {
@@ -373,6 +403,16 @@ function checkandset(ctx, typ --[[:table]], dst --[[:string]], src --[[:string]]
             SRC = src,
             DST = dst,
         })
+    elseif typ._tag == "Type.Function" then
+        -- Like `value`: store boxed with no callability check (deferred to the
+        -- call). Used when a function value crosses the boundary into a record
+        -- field or map slot.
+        return render([[
+            setobj2t(L, $DST, $SRC);
+        ]], {
+            SRC = src,
+            DST = dst,
+        })
     elseif typ._tag == "Type.Option" then
         return render([[
             if(ttisnil($SRC)) {
@@ -429,6 +469,7 @@ local function setslot(typ --[[:table]], dst --[[:string]], src --[[:string]])
     elseif typ._tag == "Type.Value" then tmpl = "setobj2t(L, $DST, &$SRC);"
     elseif typ._tag == "Type.Nominal" then tmpl = "setclCvalue(L, $DST, $SRC);"
     elseif typ._tag == "Type.Option" then tmpl = "setobj2t(L, $DST, &$SRC);"
+    elseif typ._tag == "Type.Function" then tmpl = "setobj2t(L, $DST, &$SRC);"
     else
         error("invalid type " .. types.tostring(typ))
     end
@@ -523,6 +564,9 @@ local function ctype(typ --[[:table]])
     elseif typ._tag == "Type.Nominal" then return "CClosure*"
     elseif typ._tag == "Type.Pointer" then return foreignctype(typ)
     elseif typ._tag == "Type.Option" then return "TValue"
+    -- A first-class function value is boxed (it may be a Titan closure, a Lua
+    -- closure, a C function, or a `__call` object), like `value`/`option`.
+    elseif typ._tag == "Type.Function" then return "TValue"
     -- A foreign typedef of a supported scalar (e.g. size_t -> integer) can
     -- leak in via inference; use the C type of its resolved underlying type.
     elseif typ._tag == "Type.Typedef" then return ctype(typ._type)
@@ -531,7 +575,8 @@ local function ctype(typ --[[:table]])
 end
 
 local function initval(typ --[[:table]])
-    if typ._tag == "Type.Value" or typ._tag == "Type.Option" then return "{ {0}, 0 }"
+    if typ._tag == "Type.Value" or typ._tag == "Type.Option"
+       or typ._tag == "Type.Function" then return "{ {0}, 0 }"
     else return "0" end
 end
 
@@ -552,7 +597,8 @@ local function function_sig(fname, ftype, is_pointer)
                      and "$RETTYPE (*$FNAME)($PARAMS)"
                      or  "$RETTYPE $FNAME($PARAMS)"
     return render(template, {
-        RETTYPE = ctype(rettype),
+        -- a zero-return `() -> ()` function has a `void` native entry
+        RETTYPE = rettype and ctype(rettype) or "void",
         FNAME = fname,
         PARAMS = table.concat(params, ", ")
     })
@@ -1230,7 +1276,165 @@ local function codeforeignvar(ctx, node)
     return "", node.name
 end
 
+-- Is the callee of this ExpCall a statically-known function symbol (a top-level
+-- function, a record static, an imported module function, or a foreign call)?
+-- If so, codecall emits a direct native call. Otherwise the callee is a
+-- first-class function *value* and codevaluecall handles it.
+local function is_static_callee(node)
+    if node.args._tag ~= "Ast.ArgsFunc" then return true end
+    if node.exp._tag ~= "Ast.ExpVar" then return false end
+    local var = node.exp.var
+    if var._tag == "Ast.VarDot" and var.exp and var.exp._type
+       and var.exp._type._tag == "Type.ForeignModule" then
+        return true   -- foreign call, handled by codeforeigncall
+    end
+    local decl = var._decl
+    return decl ~= nil and (decl._tag == "Ast.TopLevelFunc"
+        or decl._tag == "Type.ModuleMember"
+        or decl._tag == "Type.StaticMethod")
+end
+
+-- Generate a call through a first-class function *value* (a boxed TValue of
+-- type Type.Function). The value may be a Titan closure, a Lua closure, a C
+-- function, or a `__call` object, so the call goes through the Lua stack with
+-- `luaD_callnoyield`, which raises cleanly if the value is not callable.
+--
+-- luaD_callnoyield can grow (and relocate) the Lua stack for the callee's
+-- frame, which would dangle this native function's `_base`. We therefore use
+-- savestack/restorestack offsets for everything that must survive the call and
+-- recompute `_base` from `_base_off` afterwards (see codefuncdec).
+local function codevaluecall(ctx, node)
+    ctx.uses_base_off = true
+    local ftype = node.exp._type     -- Type.Function: the callee's static type
+    local nresults = #node._types
+    local stats = {}
+
+    -- 1. evaluate the callee into an anchored TValue
+    local fstat, fexp = codeexp(ctx, node.exp)
+    local fdecl, fname, fslot = newtmp(ctx, ftype, true)
+    table.insert(stats, fstat)
+    table.insert(stats, fdecl)
+    table.insert(stats, fname .. " = " .. fexp .. ";")
+    table.insert(stats, setslot(ftype, fslot, fname))
+
+    -- 2. evaluate arguments into anchored temps, boxed per the callee's
+    --    declared parameter types
+    local argnames, argtypes = {}, {}
+    for i, arg in ipairs(node.args.args) do
+        local atype = ftype.params[i]
+        argtypes[i] = atype
+        local astat, aexp = codeexp(ctx, arg)
+        local adecl, aname, aslot = newtmp(ctx, atype, types.is_gc(atype))
+        table.insert(stats, astat)
+        table.insert(stats, adecl)
+        table.insert(stats, aname .. " = " .. aexp .. ";")
+        if aslot then
+            table.insert(stats, setslot(atype, aslot, aname))
+        end
+        argnames[i] = aname
+    end
+
+    -- 3. declare result holders (filled by whichever path runs) and remember
+    --    which need anchoring against the GC after the call
+    local resultnames, rslots, rtypes = {}, {}, {}
+    for i = 1, nresults do
+        local rtype = node._types[i]
+        local rdecl, rname, rslot = newtmp(ctx, rtype, types.is_gc(rtype))
+        table.insert(stats, rdecl)
+        resultnames[i] = rname
+        rslots[i] = rslot
+        rtypes[i] = rtype
+    end
+
+    -- 4a. fast path: the value is a Titan closure whose exact type tag matches
+    --     the callee's static type -> unboxed direct native call
+    ctx.valuecall_count = (ctx.valuecall_count or 0) + 1
+    local fptype = "_vc_fp_t_" .. ctx.valuecall_count
+    local fastargs = { "L", "_vc_mod" }
+    for _, aname in ipairs(argnames) do table.insert(fastargs, aname) end
+    for i = 2, nresults do table.insert(fastargs, "&" .. resultnames[i]) end
+    local fastcall = "_vc_fp(" .. table.concat(fastargs, ", ") .. ");"
+    if nresults > 0 then
+        fastcall = resultnames[1] .. " = " .. fastcall
+    end
+
+    -- 4b. generic path: box function + args and call through the Lua stack
+    local pushes = { "setobj2s(L, L->top.p, &" .. fname .. "); L->top.p++;" }
+    for i, aname in ipairs(argnames) do
+        table.insert(pushes,
+            setslot(argtypes[i], "s2v(L->top.p)", aname) .. " L->top.p++;")
+    end
+    local slowreads = {}
+    for i = 1, nresults do
+        table.insert(slowreads, checkandget(ctx, rtypes[i], resultnames[i],
+            "s2v(restorestack(L, _vc_func) + " .. (i-1) .. ")", node.loc))
+    end
+
+    -- anchoring of gc-able results, run after the stack is restored and `_base`
+    -- recomputed, common to both paths
+    local anchors = {}
+    for i = 1, nresults do
+        if rslots[i] then
+            table.insert(anchors, setslot(rtypes[i], rslots[i], resultnames[i]))
+        end
+    end
+
+    table.insert(stats, render([[
+        if (ttisCclosure(&$FNAME) && clCvalue(&$FNAME)->nupvalues >= 3
+            && ttislightuserdata(&clCvalue(&$FNAME)->upvalue[1])
+            && pvalue(&clCvalue(&$FNAME)->upvalue[1]) == $FUNCTAG) {
+            /* fast path: exact function-type match, unboxed native call */
+            CClosure *_vc_callee = clCvalue(&$FNAME);
+            CClosure *_vc_mod = clCvalue(&_vc_callee->upvalue[0]);
+            $FPTYPEDEF;
+            $FPTYPE _vc_fp = titan_cast_func($FPTYPE,
+                pvalue(&_vc_callee->upvalue[2]));
+            $FASTCALL
+        } else {
+            /* generic path: call any callable value through the Lua stack;
+               luaD_callnoyield raises if it is not callable */
+            lua_checkstack(L, $NPUSH);
+            ptrdiff_t _vc_func = savestack(L, L->top.p);
+            $PUSHES
+            luaD_callnoyield(L, restorestack(L, _vc_func), $NRESULTS);
+            $SLOWREADS
+            L->top.p = restorestack(L, _vc_func);
+        }
+        _base = restorestack(L, _base_off);
+        $ANCHORS
+    ]], {
+        FNAME = fname,
+        FUNCTAG = function_type_tag(ctx.tlcontext, ftype),
+        FPTYPEDEF = "typedef " .. function_sig(fptype, ftype, true),
+        FPTYPE = fptype,
+        FASTCALL = fastcall,
+        NPUSH = c_integer_literal(1 + #argnames),
+        PUSHES = table.concat(pushes, "\n"),
+        NRESULTS = c_integer_literal(nresults),
+        SLOWREADS = table.concat(slowreads, "\n"),
+        ANCHORS = table.concat(anchors, "\n"),
+    }))
+
+    -- 5. expose extra return values for ExpExtra readers
+    if nresults >= 2 then
+        node._extras = node._extras or {}
+        for i = 2, nresults do
+            node._extras[i] = resultnames[i]
+        end
+    end
+
+    local cstats = table.concat(stats, "\n")
+    if nresults == 0 then
+        return cstats, "((void)0)"
+    else
+        return cstats, resultnames[1]
+    end
+end
+
 local function codecall(ctx, node)
+    if not is_static_callee(node) then
+        return codevaluecall(ctx, node)
+    end
     local castats, caexps, tmpnames, retslots = {}, { "L" }, {}, {}
     local fname
     local fnode = node.exp.var
@@ -1360,6 +1564,13 @@ local function codecall(ctx, node)
 end
 
 local function codereturn(ctx, node)
+    if #node.exps == 0 then
+        -- bare `return` in a zero-return `() -> ()` function: no value to
+        -- produce, just reset the stack and return from the void native entry
+        return [[
+        L->top.p = _base;
+        return;]]
+    end
     local cs, cexp = codeexp(ctx, node.exps[1])
     local cstats = { cs }
     if #node.exps > 1 then
@@ -1474,8 +1685,9 @@ function codestat(ctx, node)
             return codemultiassignment(ctx, node)
         end
     elseif tag == "Ast.StatCall" then
-        if node.callexp.exp.var._tag == "Ast.VarDot"
-           and node.callexp.exp.var.exp._type._tag == "Type.ForeignModule" then
+        local callee = node.callexp.exp
+        if callee.var and callee.var._tag == "Ast.VarDot"
+           and callee.var.exp._type._tag == "Type.ForeignModule" then
             local fstats, fexp = codeforeigncall(ctx, node.callexp)
             return fstats .. fexp .. ";"
         else
@@ -1506,6 +1718,25 @@ local function codevar(ctx, node)
                     EXP = cexp,
                     INDEX = node._decl.index
                 }))
+        elseif node._decl._tag == "Type.ModuleMember"
+               and node._type._tag == "Type.Function" then
+            -- Reference to an imported module's function as a first-class value:
+            -- index the canonical closure out of that module's `_mod` directly
+            -- (the closure slot is reconstructed in import_module), so the
+            -- reference is O(1) and identity-preserving.
+            return "", getslot(node._type, nil, render(
+                "&(clCvalue(&_mod->upvalue[$MODINDEX])->upvalue[$FNINDEX])", {
+                MODINDEX = c_integer_literal(node.exp.var._decl._upvalue),
+                FNINDEX = c_integer_literal(node._decl._closure_upvalue),
+            }))
+        elseif node._decl._tag == "Type.StaticMethod"
+               and ctx.tlcontext.static_slots[node._decl.fqtn .. "." .. node._decl.name] then
+            -- Reference to a record static (e.g. `Rec.new`) as a value: read its
+            -- canonical closure from the shadow slot allocated for it.
+            return "", getslot(node._type, nil, render("&_mod->upvalue[$SLOT]", {
+                SLOT = c_integer_literal(
+                    ctx.tlcontext.static_slots[node._decl.fqtn .. "." .. node._decl.name]),
+            }))
         else
             assert(node._decl._tag == "Type.ModuleVariable")
             ctx.variables[node.exp.var.name .. "." .. node.name] = {
@@ -1521,6 +1752,12 @@ local function codevar(ctx, node)
         end
     elseif node._decl._tag == "Ast.TopLevelVar" then
         return "", getslot(node._type, nil, node._decl._slot)
+    elseif node._decl._tag == "Ast.TopLevelFunc" then
+        -- Reference to a top-level function as a first-class value: read its
+        -- canonical closure from the shadow upvalue slot, boxed as a TValue.
+        return "", getslot(node._type, nil, render("&_mod->upvalue[$SLOT]", {
+            SLOT = c_integer_literal(node._decl._closure_upvalue)
+        }))
     else
         return "", node._decl._cvar
     end
@@ -2586,6 +2823,12 @@ function codeexp(ctx, node, iscondition, target)
         })
         return code, tmpname
     elseif tag == "Ast.ExpAdjust" then
+        if node._adjustvoid then
+            -- `(f())` on a zero-return call: execute the void call for effect,
+            -- then yield a single nil value (encoded as int 0, like Type.Nil)
+            local cstats, cexp = codeexp(ctx, node.exp, iscondition)
+            return cstats .. "\n    " .. cexp .. ";", "0"
+        end
         return codeexp(ctx, node.exp, iscondition, target)
     else
         error("invalid node tag " .. tag)
@@ -2647,31 +2890,42 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
             lua_replace(L, 1); /* replace first stack element with nil, this is our error slot */
         ]])
     end
-    table.insert(stats, render([[
-        lua_checkstack(L, $NRET);
-        ptrdiff_t _firstret_off = savestack(L, L->top.p);
-        L->top.p += $NRET;
-        $TYPE res = $NAME($PARAMS);
-        /* the native callee may have grown (and thus relocated) the Lua
-           stack via lua_checkstack, so recompute the return slot pointer
-           from the saved offset before writing through it */
-        StkId _firstret = restorestack(L, _firstret_off);
-        $SETSLOT;
-        _firstret++;
-    ]], {
-        TYPE = ctype(rettype),
-        NAME = titan_entry,
-        PARAMS = table.concat(pnames, ", "),
-        SETSLOT = setwrapped(rettype, "s2v(_firstret)", "res"),
-        NRET = #typ.rettypes
-    }))
-    for i = 2, #typ.rettypes do
+    if #typ.rettypes == 0 then
+        -- zero-return `() -> ()`: invoke the void native entry purely for
+        -- effect and return no values across the Lua boundary
         table.insert(stats, render([[
+            $NAME($PARAMS);
+        ]], {
+            NAME = titan_entry,
+            PARAMS = table.concat(pnames, ", "),
+        }))
+    else
+        table.insert(stats, render([[
+            lua_checkstack(L, $NRET);
+            ptrdiff_t _firstret_off = savestack(L, L->top.p);
+            L->top.p += $NRET;
+            $TYPE res = $NAME($PARAMS);
+            /* the native callee may have grown (and thus relocated) the Lua
+               stack via lua_checkstack, so recompute the return slot pointer
+               from the saved offset before writing through it */
+            StkId _firstret = restorestack(L, _firstret_off);
             $SETSLOT;
             _firstret++;
         ]], {
-            SETSLOT = setwrapped(typ.rettypes[i], "s2v(_firstret)", "_outparam_" .. i)
+            TYPE = ctype(rettype),
+            NAME = titan_entry,
+            PARAMS = table.concat(pnames, ", "),
+            SETSLOT = setwrapped(rettype, "s2v(_firstret)", "res"),
+            NRET = #typ.rettypes
         }))
+        for i = 2, #typ.rettypes do
+            table.insert(stats, render([[
+                $SETSLOT;
+                _firstret++;
+            ]], {
+                SETSLOT = setwrapped(typ.rettypes[i], "s2v(_firstret)", "_outparam_" .. i)
+            }))
+        end
     end
     table.insert(stats, render([[
         L->errfunc = __save_errfunc;
@@ -2750,6 +3004,11 @@ local function codefuncdec(tlcontext, node)
     end
     local body = codestat(ctx, node.block)
     local nslots = ctx.nslots
+    -- A value-call (codevaluecall) can relocate the Lua stack, which would
+    -- dangle `_base`; such a function saves `_base` as an offset so it can be
+    -- recomputed after each value-call.
+    local baseoff = ctx.uses_base_off
+        and "\n        ptrdiff_t _base_off = savestack(L, _base);" or ""
     if nslots > 0 then
         table.insert(stats, 1, render([[
         luaC_checkGC(L);
@@ -2763,17 +3022,26 @@ local function codefuncdec(tlcontext, node)
         L->top.p += $NSLOTS;
         for(StkId _s = L->top.p - 1; _base <= _s; _s--) {
             setnilvalue(s2v(_s));
-        }
+        }$BASEOFF
         ]], {
             NSLOTS = c_integer_literal(nslots),
+            BASEOFF = baseoff,
         }))
     else
         -- No reserved slots, but still anchor _base so every return path can
         -- reset L->top.p uniformly (the reset is then a no-op).
-        table.insert(stats, 1, "        StkId _base = L->top.p;")
+        table.insert(stats, 1, "        StkId _base = L->top.p;" .. baseoff)
     end
     table.insert(stats, body)
-    if rettype._tag == "Type.Nil" then
+    -- A zero-return `() -> ()` function has no `rettypes[1]`: its native entry
+    -- returns C `void`, so falling off the end emits a bare `return;`. A
+    -- `nil`-returning function returns the int 0 (the native nil encoding).
+    local crettype = rettype and ctype(rettype) or "void"
+    if not rettype then
+        table.insert(stats, [[
+            L->top.p = _base;
+            return;]])
+    elseif rettype._tag == "Type.Nil" then
         table.insert(stats, [[
             L->top.p = _base;
             return 0;]])
@@ -2783,7 +3051,7 @@ local function codefuncdec(tlcontext, node)
         $BODY
     }]], {
         ISLOCAL = node.islocal and "static" or "",
-        RETTYPE = ctype(rettype),
+        RETTYPE = crettype,
         NAME = fname,
         PARAMS = table.concat(cparams, ", "),
         BODY = table.concat(stats, "\n")
@@ -2792,7 +3060,7 @@ local function codefuncdec(tlcontext, node)
         $ISLOCAL $RETTYPE $NAME($PARAMS);
     ]], {
         ISLOCAL = node.islocal and "static" or "",
-        RETTYPE = ctype(rettype),
+        RETTYPE = crettype,
         NAME = fname,
         PARAMS = table.concat(cparams, ", ")
     })
@@ -2913,6 +3181,7 @@ CClosure *$INITNAME(lua_State *L) {
         lua_newtable(L);
         setobj2t(L, &_mod->upvalue[0], s2v(L->top.p - 1));
         luaC_barrier(L, _mod, &_mod->upvalue[0]);
+        $INITFUNCTAGS
         $FUNCS
         lua_pop(L, 1);
         $CREATEMETA
@@ -2925,6 +3194,7 @@ CClosure *$INITNAME(lua_State *L) {
             _initialized = 1;
             /* set up tag cache and functions from shared libraries */
             $LOADMODULES2
+            $INITFUNCTAGS
             $INITTAGS
         }
         return _mod;
@@ -2969,12 +3239,21 @@ local function import_module(loadmods, initmods, sigs, mprefixes, dynamic, node)
             }
         ]], { INIT = mprefix .. "init", INDEX = c_integer_literal(upvalue) }))
     end
-    -- Set upvalue indexes for public members in the module's type
-    -- if they are not set yet
+    -- Set upvalue indexes for public members in the module's type, mirroring
+    -- allocate_upvalues in the imported module: exported variables (slots
+    -- 1..V) first, then every exported function's canonical-closure slot
+    -- (V+1..V+F). This lets us reference an imported function value by index
+    -- instead of a table lookup.
     local memberslot = 1
     for _, member in ipairs(node._type.members) do
         if member._tag == "Type.ModuleVariable" then
             member._upvalue = memberslot
+            memberslot = memberslot + 1
+        end
+    end
+    for _, member in ipairs(node._type.members) do
+        if member._tag == "Type.ModuleMember" and member.type._tag == "Type.Function" then
+            member._closure_upvalue = memberslot
             memberslot = memberslot + 1
         end
     end
@@ -3211,12 +3490,24 @@ end
 -- Tags can be stored in C variables, as their value
 -- is the same across all instances of the module
 local function allocate_upvalues(tlcontext, ast)
+    -- Exported variables first (slots 1..V). Importers reconstruct these
+    -- indices purely from the module interface, enumerating members in
+    -- declaration order (see import_module), so the layout here must match.
     for _, node in pairs(ast) do
         if not node._ignore then
             local tag = node._tag
             if tag == "Ast.TopLevelVar" and not node.islocal then
                 node._upvalue = nextupvalue(tlcontext)
             end
+        end
+    end
+    -- Then a canonical-closure slot for *every* exported function (slots
+    -- V+1..V+F), exported-always: an importer may take the value even when this
+    -- module never references it, and indexing the closure (rather than a hash
+    -- lookup) keeps the cross-module reference O(1) and fast-path eligible.
+    for _, node in pairs(ast) do
+        if not node._ignore and node._tag == "Ast.TopLevelFunc" and not node.islocal then
+            node._closure_upvalue = nextupvalue(tlcontext)
         end
     end
     for _, node in pairs(ast) do
@@ -3226,6 +3517,19 @@ local function allocate_upvalues(tlcontext, ast)
                 node._upvalue = nextupvalue(tlcontext)
             elseif tag == "Ast.TopLevelImport" then
                 node._upvalue = nextupvalue(tlcontext)
+            end
+        end
+    end
+    -- Referenced local functions (private, so only when used as a value) and
+    -- every record static (e.g. `Rec.new`) each get a canonical-closure slot.
+    for _, node in pairs(ast) do
+        if not node._ignore then
+            if node._tag == "Ast.TopLevelFunc" and node.islocal and node._valref then
+                node._closure_upvalue = nextupvalue(tlcontext)
+            elseif node._tag == "Ast.TopLevelStatic" then
+                node._closure_upvalue = nextupvalue(tlcontext)
+                tlcontext.static_slots[node._type.fqtn .. "." .. node._type.name] =
+                    node._closure_upvalue
             end
         end
     end
@@ -3240,6 +3544,10 @@ function coder.generate(modname, ast, static_deps)
         tags = {},
         functions = {},
         modules = {},
+        functags = {},       -- canonical function-type string -> { id, key }
+        functag_list = {},   -- same entries, in allocation order (for emission)
+        functag_count = 0,
+        static_slots = {},   -- "fqtn.name" -> module upvalue slot of a static's closure
         upvalue = 0
     }
 
@@ -3305,28 +3613,83 @@ function coder.generate(modname, ast, static_deps)
                 table.insert(code, node._body)
                 if tag == "Ast.TopLevelFunc" and not node.islocal then
                     table.insert(code, node._luabody)
+                    if node._closure_upvalue then
+                        -- Build the canonical closure once into its shadow slot
+                        -- and install that same object into the module table, so
+                        -- internal references and `m.f` denote one identity. The
+                        -- closure carries its function-type tag (upvalue[1]) and
+                        -- native entry pointer (upvalue[2]) for the fast call path.
+                        table.insert(funcs, render([[
+                            titan_pushmodule(L, _mod);
+                            lua_pushlightuserdata(L, (void*)$FUNCTAG);
+                            lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
+                            lua_pushcclosure(L, $LUANAME, 3);
+                            setobj2t(L, &_mod->upvalue[$SLOT], s2v(L->top.p - 1));
+                            luaC_barrier(L, _mod, &_mod->upvalue[$SLOT]);
+                            lua_setfield(L, -2, $NAMESTR);
+                        ]], {
+                            LUANAME = func_luaname(tlcontext.module, node.name),
+                            NAMESTR = c_string_literal(node.name),
+                            SLOT = c_integer_literal(node._closure_upvalue),
+                            FUNCTAG = function_type_tag(tlcontext, node._type),
+                            NATIVE = func_name(tlcontext.module, node.name),
+                        }))
+                    else
+                        table.insert(funcs, render([[
+                            titan_pushmodule(L, _mod);
+                            lua_pushcclosure(L, $LUANAME, 1);
+                            lua_setfield(L, -2, $NAMESTR);
+                        ]], {
+                            LUANAME = func_luaname(tlcontext.module, node.name),
+                            NAMESTR = c_string_literal(node.name),
+                        }))
+                    end
+                elseif tag == "Ast.TopLevelFunc" and node.islocal
+                       and node._closure_upvalue then
+                    -- A referenced `local` function has no module-table entry, so
+                    -- emit its Lua entry and build its canonical closure straight
+                    -- into the shadow slot.
+                    table.insert(code, node._luabody)
                     table.insert(funcs, render([[
                         titan_pushmodule(L, _mod);
-                        lua_pushcclosure(L, $LUANAME, 1);
-                        lua_setfield(L, -2, $NAMESTR);
+                        lua_pushlightuserdata(L, (void*)$FUNCTAG);
+                        lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
+                        lua_pushcclosure(L, $LUANAME, 3);
+                        setobj2t(L, &_mod->upvalue[$SLOT], s2v(L->top.p - 1));
+                        luaC_barrier(L, _mod, &_mod->upvalue[$SLOT]);
+                        lua_pop(L, 1);
                     ]], {
                         LUANAME = func_luaname(tlcontext.module, node.name),
-                        NAMESTR = c_string_literal(node.name),
+                        SLOT = c_integer_literal(node._closure_upvalue),
+                        FUNCTAG = function_type_tag(tlcontext, node._type),
+                        NATIVE = func_name(tlcontext.module, node.name),
                     }))
                 elseif tag == "Ast.TopLevelMethod" then
                     table.insert(code, node._luabody)
                 elseif tag == "Ast.TopLevelStatic" then
                     table.insert(code, node._luabody)
+                    -- Build the static's canonical 3-upvalue closure once into
+                    -- its shadow slot, then install that object into the record
+                    -- subtable so `Rec.new` (Lua) and a Titan value reference
+                    -- denote the same closure.
                     table.insert(funcs, render([[
                         lua_getfield(L, -1, $RECNAME);
                         titan_pushmodule(L, _mod);
-                        lua_pushcclosure(L, $LUANAME, 1);
+                        lua_pushlightuserdata(L, (void*)$FUNCTAG);
+                        lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
+                        lua_pushcclosure(L, $LUANAME, 3);
+                        setobj2t(L, &_mod->upvalue[$SLOT], s2v(L->top.p - 1));
+                        luaC_barrier(L, _mod, &_mod->upvalue[$SLOT]);
                         lua_setfield(L, -2, $NAMESTR);
                         lua_pop(L, 1);
                     ]], {
                         RECNAME = c_string_literal(node.class),
                         LUANAME = static_luaname(node._type),
                         NAMESTR = c_string_literal(node.name),
+                        SLOT = c_integer_literal(node._closure_upvalue),
+                        FUNCTAG = function_type_tag(tlcontext,
+                            types.Function(node._type.params, node._type.rettypes, false)),
+                        NATIVE = static_name(node._type),
                     }))
                 end
             elseif tag == "Ast.TopLevelRecord" then
@@ -3437,12 +3800,37 @@ function coder.generate(modname, ast, static_deps)
 
     init_data_from_other_modules(tlcontext, includes, loadmods, initrecs, inittags, mprefixes, static_deps)
 
+    -- Function-type tags: a per-library `static const void*` each, declared up
+    -- front (in $SIGS, ahead of any function body that references it) and set up
+    -- in _init by publish-or-recover through the Lua registry so unrelated
+    -- modules that mention the same function type agree on one tag pointer.
+    local initfunctags = {}
+    for _, entry in ipairs(tlcontext.functag_list) do
+        table.insert(sigs, "static const void *" .. entry.id .. ";")
+        table.insert(initfunctags, render([[
+            lua_getfield(L, LUA_REGISTRYINDEX, $KEYSTR);
+            if(lua_isnil(L, -1)) {
+                lua_pop(L, 1);
+                $ID = &$ID;
+                lua_pushlightuserdata(L, (void*)$ID);
+                lua_setfield(L, LUA_REGISTRYINDEX, $KEYSTR);
+            } else {
+                $ID = lua_topointer(L, -1);
+                lua_pop(L, 1);
+            }
+        ]], {
+            ID = entry.id,
+            KEYSTR = c_string_literal("Titan function type " .. entry.key .. " tag"),
+        }))
+    end
+
     table.insert(code, render(init, {
         INITNAME = tlcontext.prefix .. 'init',
         INITMODULES = table.concat(initmods, "\n"),
         LOADMODULES1 = table.concat(loadmods, "\n"),
         LOADMODULES2 = #loadmods > 1 and table.concat(loadmods, "\n") or "",
         INITTAGS = table.concat(inittags, "\n"),
+        INITFUNCTAGS = table.concat(initfunctags, "\n"),
         INITVARS = table.concat(initvars, "\n"),
         INITRECORDS = table.concat(initrecs, "\n"),
         FUNCS = table.concat(funcs, "\n"),

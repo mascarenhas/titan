@@ -415,14 +415,43 @@ constructor's value position extra return values are dropped. See
 [arrays and maps](arrays-maps.md) and [records](records.md) for the full
 story on each constructor, including what `nil` elements mean.
 
+## Function values
+
+Functions are first-class values in Titan. **Referencing a function name
+is an expression** that yields a function value of the corresponding
+[function type](types.md#function-types): a top-level or `local`
+function name, an imported `mod.f`, and a record static like `Rec.new`
+all denote values you can store in a variable, pass as an argument,
+return, and call. The conversion between a function value and `value` is
+implicit: a function flows into a `value` for free, and a `value` flows
+back into a function type with the callability check deferred to the
+actual call.
+
+```lua
+function inc(n: integer): integer return n + 1 end
+
+function apply(f: (integer) -> integer, x: integer): integer
+    return f(x)               -- call a function value
+end
+
+function use(): integer
+    local g: (integer) -> integer = inc   -- a function name is a value
+    return apply(g, 41)                    -- pass it along: 42
+end
+```
+
+Indexing an array or map of functions yields an *option* (`T?`), like any
+container read, and that option is auto-unwrapped when the result is
+called directly — `arr[i](x)` works, raising cleanly if the slot is nil
+(see [option types](option-types.md)).
+
 ## Calls in expressions
 
-Function calls, method calls and record-static calls are expressions.
-The callable things are module-level functions (local or imported),
-record methods (`r:move(...)`), and record static functions
-(`Point.new(...)`); Titan has no first-class function values yet, so
-calling through a variable or parameter is the compile-time error
-`first-class functions are not supported in this version of Titan`.
+Function calls, method calls and record-static calls are expressions, and
+so is calling a function value. The callable things are module-level
+functions (local or imported), record methods (`r:move(...)`), record
+static functions (`Point.new(...)`), and any function value held in a
+variable, parameter, field, or container slot.
 Arity is strict at compile time: the wrong number of arguments is the
 compile-time error `function 'f' called with N arguments but expects M`
 — no Lua-style padding with nil, no dropping of extras. (Calls coming
@@ -452,6 +481,22 @@ function use(): integer
     local q, r = divmod(7, 2)     -- both values: q = 3, r = 1
     local just_q = (divmod(7, 2)) -- parentheses keep only the first
     return q + r + just_q
+end
+```
+
+The same parentheses-adjust rule rescues a **zero-return** call. An
+unannotated function returns nothing (its type is `(...) -> ()`; see
+[the type system](types.md#function-types)), and using such a call where
+a value is expected is a compile-time error — *except* when wrapped in
+parentheses, which adjust the empty result up to a single `nil`:
+
+```lua
+function log(s: string) end       -- returns nothing: (string) -> ()
+
+function use_log(): value
+    -- local x = log("hi")        -- error: call returns no value
+    local x = (log("hi"))         -- (f()) adjusts up to a single nil
+    return x
 end
 ```
 

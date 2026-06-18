@@ -33,24 +33,33 @@ The pieces:
   never inferred. Declaring two parameters with the same name is a
   compile-time error (`duplicate parameter 'x' in declaration of
   function 'f'`).
-* **The return annotation is optional.** A function declared without
-  `: type` returns `nil`; `function log_it(msg: string)` is the same as
-  `function log_it(msg: string): nil`. A single return type is written
-  bare (`: integer`); multiple return types are written as a
-  parenthesized list (`: (integer, string)`).
-* **Functions with a non-`nil` return type must return on every control
-  path.** If some path can fall off the end of the body, the compiler
-  rejects the function with the compile-time error `function can return
-  nil but return type is not nil`. Functions returning `nil` may simply
-  fall off the end. A `return` statement can only appear as the last
-  statement of a block — see [Statements](statements.md).
+* **The return annotation is optional, and omitting it means zero return
+  values.** A function declared without `: type` is a `(...) -> ()`
+  function that returns *nothing* — `function log_it(msg: string)` is the
+  same as `function log_it(msg: string): ()`, and `select('#', m.log_it(s))`
+  from Lua is `0`. This matches Lua, where `function f() end` returns no
+  values. If you want a function that returns a single `nil`, write it
+  explicitly as `: nil`. A single return type is written bare
+  (`: integer`); multiple return types are written as a parenthesized list
+  (`: (integer, string)`); zero return values are written `: ()`.
+* **Functions whose return type carries a value must return on every
+  control path.** If some path can fall off the end of the body, the
+  compiler rejects the function with the compile-time error `function can
+  return nil but return type is not nil`. Zero-return (`()`) functions and
+  `nil`-returning functions may simply fall off the end. A `return`
+  statement can only appear as the last statement of a block — see
+  [Statements](statements.md).
 * Declaring two top-level functions (or a function and a variable) with
   the same name is a compile-time error (`duplicate declaration for f,
   previous one at line N`).
 
-In a function that returns `nil`, an early exit may be written either as
-a bare `return` with no expression or as `return nil` — both mean the
-same thing.
+In a zero-return (`()`) function — including any function written without
+a return annotation — the only legal `return` is a bare `return` with no
+expression. `return nil` is **not** the same thing: it tries to return one
+value and is the arity error `returned 1 value(s) but function expected 0`.
+A bare `return` and `return nil` are equivalent only inside a function
+whose declared return type is `nil` (or another value type that `nil`
+fits, such as `integer?`).
 
 ## Exported and `local` functions
 
@@ -224,43 +233,68 @@ Multiple return values cross the Lua boundary unchanged: Lua code
 calling `divmod` receives two values, as from any Lua function (see
 [Lua interoperability](lua-interop.md)).
 
-## Functions are not values (yet)
+## Functions as values
 
-Titan functions are not first-class in the current prototype. A function
-name can be used in exactly one way — called. Concretely, all of the
-following are compile-time errors:
+Titan functions are first-class values. A **function name** used where a
+value is expected yields a function value you can store, pass, return, and
+call indirectly. The name can be a top-level function, a `local` function,
+an imported module's function (`mod.f`), or a record static (`Rec.new`):
 
 ```lua
 function double(x: integer): integer
     return x * 2
 end
 
-function bad()
-    local f: integer -> integer = double   -- type error: trying to access a function as a first-class value
-    double = bad                           -- type error: trying to assign to a function
+function apply(f: (integer) -> integer, x: integer): integer
+    return f(x)                            -- call through a function value
 end
 
-function apply(f: integer -> integer, x: integer): integer
-    return f(x)                            -- type error: first-class functions are not
-end                                        --             supported in this version of Titan
+function use(): integer
+    local f: (integer) -> integer = double -- store a function in a variable
+    return apply(f, 21)                    -- pass it as an argument  --> 42
+end
 ```
 
-Storing a function in a variable, passing it as an argument, returning
-it, or calling through anything other than the name of a declared
-function (a module function, an imported module's function, or a record
-static — see [Records](records.md)) is rejected. Function *types* exist
-in the grammar (`integer -> integer`; `->` is right-associative, and
-parameter/return lists are parenthesized: `(integer, string) -> (boolean)`)
-precisely so that signatures like `apply`'s can be written down — they
-are reserved for the planned first-class functions and closures, the
-most prominent item on the project roadmap (see the
-[status section](index.md#status-and-limitations)).
+A **function type** is written `(P1, …, Pn) -> R` for one return,
+`(P…) -> (R1, …, Rm)` for several, `() -> R` for no parameters, and
+`(P…) -> ()` for zero return values. `->` is right-associative and the
+single-parameter form may drop its parentheses (`integer -> integer`), so
+higher-order types nest naturally: `(integer -> integer, integer) -> integer`.
+Writing a function type in an annotation is no longer an error.
 
-Because first-class function values are not implemented, writing a
-function type in an annotation (whatever its parameter and return
-arity — `integer -> integer`, `() -> integer`,
-`(integer, integer) -> integer`) is a clean compile-time error,
-`first-class function types are not supported yet`.
+Function values may be assigned into function-typed locals, parameters and
+record fields, stored in arrays (`{(integer) -> integer}`) and maps,
+returned, and passed across the Lua boundary in both directions. (Indexing
+an array or map of functions yields an option `T?`; calling it directly,
+`fns[i](x)`, auto-unwraps with a runtime nil-check.)
+
+**Calling a function value** has two paths, chosen automatically. When the
+value is a Titan function whose type is *exactly* the call's static type,
+the call goes straight to its native entry with no Lua-stack round trip —
+the same cost as calling the function by name. Otherwise (a Titan function
+of a merely *compatible* type, or a plain Lua function, C function, or
+`__call` object) the call goes through the Lua stack; an attempt to call a
+value that is not actually callable raises a clean runtime error at the
+call. This is also how Titan **calls Lua code**: pass a Lua closure to a
+function-typed parameter and call it — see
+[Lua interoperability](lua-interop.md).
+
+**Identity is stable.** Each referenced function has one canonical value,
+so `m.f == m.f` and an in-module reference equals the exported
+module-table entry seen from Lua.
+
+**`value` and function types convert both ways.** A function value flows
+into a `value` implicitly, and a `value` flows into a function type
+implicitly as well — the check that it is callable is deferred to the
+moment of the call (so a `value` holding a non-callable raises only when
+you try to call it).
+
+What is **still not** a value: an instance method (it would need a bound
+`self` — `p:move` cannot be taken as a value), a foreign/FFI function
+(see [the FFI chapter](ffi.md)), and — because there are no anonymous or
+nested functions and no closures over locals yet — any function not
+introduced by a top-level declaration. Assigning *to* a function name
+(`double = bad`) also remains an error.
 
 ## Recursion and declaration order
 

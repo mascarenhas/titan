@@ -294,15 +294,15 @@ describe("Titan parser", function()
         })
     end)
 
-    it("allows ommiting the optional return type annotation", function ()
+    it("omitting the return annotation yields a zero-return () function", function ()
         assert_program_ast([[
             function foo()
             end
             local function bar()
             end
         ]], {
-            { _tag = "Ast.TopLevelFunc", name = "foo", rettypes = { { _tag = "Ast.TypeNil" } } },
-            { _tag = "Ast.TopLevelFunc", name = "bar", rettypes = { { _tag = "Ast.TypeNil" } } },
+            { _tag = "Ast.TopLevelFunc", name = "foo", rettypes = {} },
+            { _tag = "Ast.TopLevelFunc", name = "bar", rettypes = {} },
         })
     end)
 
