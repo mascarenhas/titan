@@ -1,3 +1,4 @@
+rockspec_format = "3.0"
 package = "titan"
 version = "dev-1"
 source = {
@@ -11,6 +12,8 @@ description = {
       the Titan language.
    ]],
    homepage = "http://github.com/titan-lang/titan",
+   issues_url = "https://github.com/titan-lang/titan/issues",
+   labels = { "compiler", "lua", "language" },
    license = "MIT"
 }
 dependencies = {
@@ -19,6 +22,13 @@ dependencies = {
    "inspect >= 3.1.0",
    "argparse >= 0.5.0",
    "luafilesystem >= 1.7.0"
+}
+test_dependencies = {
+   "busted >= 2.0",
+   "cluacov >= 0.1"
+}
+test = {
+   type = "busted"
 }
 build = {
    type = "builtin",

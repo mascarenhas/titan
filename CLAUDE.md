@@ -9,21 +9,25 @@ Titan is a statically-typed, ahead-of-time-compiled sister language to Lua. This
 ## Prerequisites (important — the suite cannot run without these)
 
 - **Lua 5.5.** Both the compiler's own Lua code and the generated C target Lua 5.5 (rockspec: `lua ~> 5.5`). CI (`.github/workflows/ci.yml`) uses hererocks (installed from git master — the PyPI release does not know Lua 5.5) to build a Lua 5.5 + LuaRocks environment.
-- **A built Lua 5.5.0 source tree at `./lua-5.5.0`** (gitignored). Generated C includes Lua *internal* headers (`lobject.h`, `lgc.h`, `lvm.h`, ...) and links `lua-5.5.0/src/liblua.a`:
+- **A built Lua 5.5.0 source tree at `./lua-5.5.0`** (gitignored). Generated C includes Lua *internal* headers (`lobject.h`, `lgc.h`, `lvm.h`, ...) and links `lua-5.5.0/src/liblua.a`. Easiest: `make lua` (downloads the tarball, extracts, builds with `MYCFLAGS=-fPIC`, auto-picking the `linux`/`macosx` target from `uname`; override with `make lua LUA_PLATFORM=...`). By hand:
   ```
   wget http://www.lua.org/ftp/lua-5.5.0.tar.gz && tar zxvf lua-5.5.0.tar.gz
   cd lua-5.5.0 && make linux MYCFLAGS=-fPIC    # 'make macosx' on Darwin
   ```
-- **Lua deps**: `luarocks make titan-dev-1.rockspec` installs lpeglabel, inspect, argparse, luafilesystem, plus the `titan` runtime-support module (`titan.backtrace()`) that one coder spec requires. Tests need `luarocks install busted`.
+- **Lua deps**: `luarocks make titan-dev-1.rockspec` installs lpeglabel, inspect, argparse, luafilesystem, plus the `titan` runtime-support module (`titan.backtrace()`) that one coder spec requires. The rockspec is format 3.0 and declares `test_dependencies` (busted, cluacov) plus a `test = { type = "busted" }` block, so `luarocks test` installs those and runs the suite (no separate `luarocks install busted`). Note `luarocks test` does **not** build the rock-under-test — only its deps — so the `titan` C module won't exist on a fresh tree until you `luarocks make`; `make test` runs both for you.
 - **C toolchain**: `cc` for compilation; the C FFI also shells out to `gcc -dM -E` and `cpp -v` at compile time (POSIX only).
 
 ## Commands
 
 ```sh
+make lua                                            # download + build the ./lua-5.5.0 source tree (one-time setup)
+make test                                           # `luarocks make` + `luarocks test`: (re)install the rock, then run the full suite
+luarocks make && luarocks test -- -c -o gtest -v    # what CI runs (luarocks test does NOT build the rock; flags after -- go to busted; -c = coverage)
+make clean                                           # remove generated artifacts; `make distclean` also removes the lua tree
+
 busted                                              # full test suite — MUST run from repo root (all driver paths are relative); busted recurses into spec/ subdirs
 busted spec/parser_spec.lua                         # single spec file
 busted spec/coder/coder_spec.lua --filter='for loop' # single test (Lua pattern on test name)
-busted -c -o gtest -v spec/                         # what CI runs (with luacov coverage)
 LUA_CPATH="./?.so;$HOME/.luarocks/lib/lua/5.5/?.so;;" busted   # if the 'titan' rock lives in a local rocks tree
 
 ./titanc [--print-ast] [-v] [--lua <luasrc>] [--tree <srcroot>] [-l lib1,lib2] <module>...
@@ -33,7 +37,7 @@ LUA_CPATH="./?.so;$HOME/.luarocks/lib/lua/5.5/?.so;;" busted   # if the 'titan' 
 
 `titanc` takes dot-separated **module names**, not file paths (dots map to directory separators under `--tree`, default `.`). Compiled-module lookup uses `TITAN_PATH_0_5`/`TITAN_PATH` (default `.;/usr/local/lib/titan/0.5`). `-v` prints the exact `cc` command lines. Without the `lua-5.5.0` build, only the pure specs pass (cpp, lexer, location, parser, symtab, types, util); `spec/checker/` and `spec/coder/` need the full setup.
 
-**Gotcha — the installed rock shadows the working tree under busted.** The busted launcher prepends the rocks tree to `package.path` and uses `luarocks.loader`, so once `luarocks make` has installed the `titan` rock, `require "titan-compiler.X"` inside specs resolves to the *installed snapshot*, not your edited files — edits silently don't take effect. Re-run `luarocks make --local titan-dev-1.rockspec` after changing compiler sources, before running busted. (CI does the same: `luarocks make` then `busted`.)
+**Gotcha — the installed rock shadows the working tree under busted.** The busted launcher prepends the rocks tree to `package.path` and uses `luarocks.loader`, so once `luarocks make` has installed the `titan` rock, `require "titan-compiler.X"` inside specs resolves to the *installed snapshot*, not your edited files — edits silently don't take effect. Re-run `luarocks make --local titan-dev-1.rockspec` after changing compiler sources, before running busted. (`make test` re-runs `luarocks make` for you each time, so it always tests current sources; `luarocks test` on its own does **not** rebuild the rock.)
 
 ### Lua 5.5 internals conventions in generated C
 
