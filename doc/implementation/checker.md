@@ -339,17 +339,20 @@ specified case-by-case in [option types](../language/option-types.md).
   (bracketed keys → map, named fields → record error, otherwise array; an
   empty `{}` defaults to `{integer}`). A Boolean context also switches
   `and`/`or` into plain boolean mode.
-* **First-class function rejection points.** Three, all clean type errors:
-  reading a name whose type is Function (or Module, or a record type) as a
-  value errors in `Ast.ExpVar` (`trying to access a function as a first-class
-  value`); a call whose callee is not a `VarName`/`VarDot` resolving to a
-  top-level function, module member or static errors in `Ast.ExpCall`
-  (`first-class functions are not supported in this version of Titan`); and
-  writing a function *type* in an annotation (e.g. `g: (integer) -> integer`)
-  errors in `typefromnode`'s `Ast.TypeFunction` handler (`first-class
-  function types are not supported yet`), which logs through `invalid` and
-  returns `Type.Invalid()` so checking continues. First-class function values
-  remain unimplemented; these are the points that reject them.
+* **First-class functions.** These are now *implemented*, so the points
+  that historically rejected them are acceptance points. Referencing a name
+  whose type is `Type.Function` as a value (`Ast.ExpVar`) yields a function
+  value; calling a function *value* — a callee that is not a `VarName`/`VarDot`
+  resolving to a top-level function, module member or static (`Ast.ExpCall`) —
+  typechecks against the function type; writing a function *type* in an
+  annotation (`g: (integer) -> integer`) is handled by `typefromnode`'s
+  `Ast.TypeFunction` handler and produces a `Type.Function`; and assigning a
+  value into a function-typed variable is allowed. What the checker **still
+  rejects**, all clean type errors: assigning to a function *name* (you cannot
+  rebind a function); taking a *foreign* (C FFI) function as a value (it can
+  only be called by name — see [the FFI chapter](../language/ffi.md)); taking
+  an instance *method* as a value; and using a record type or a module as a
+  value.
 * **Conditions are not coerced.** `if`/`while`/`repeat` conditions are
   checked with a Boolean context but never `trycoerce`d or `checkmatch`ed:
   any type is a legal condition, and truthiness is the coder's problem.
@@ -379,11 +382,12 @@ go completely unchecked — a type error placed there is not reported (verified
 experimentally). The checker performs no dead-code analysis to flag or prune
 them.
 
-`checkfunc` consumes the result: if the body does not always return and
-`rettypes[1]` is not `Type.Nil`, it reports `function can return nil but
-return type is not nil`. Functions declared without a return annotation
-default to a single `nil` return (the parser synthesizes
-`{ ast.TypeNil(pos) }`), which is why procedures need no `return`.
+`checkfunc` consumes the result: if the body does not always return and the
+function has a declared return type (`rettypes` is non-empty and not a single
+`Type.Nil`), it reports `function can return nil but return type is not nil`.
+Functions declared without a return annotation default to **zero returns**
+(`() -> ()`, returning nothing as in Lua), so a procedure needs no `return`
+and is never flagged.
 
 ## Imports and the loader protocol
 

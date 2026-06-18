@@ -451,12 +451,11 @@ describe("Titan type checker", function()
         assert.match("called with 2 arguments but expects 3", err)
     end)
 
-    it("rejects a written function-type annotation cleanly", function ()
+    it("accepts a written function-type annotation", function ()
         local ok, err = run_checker([[
             function f(g: (integer) -> integer): integer return 0 end
         ]])
-        assert.falsy(ok)
-        assert.match("function types are not supported", err)
+        assert.truthy(ok, err)
     end)
 
     it("rejects assignment to a foreign variable cleanly", function ()
@@ -1889,15 +1888,17 @@ describe("Titan type checker", function()
         end
     end)
 
-    it("catches use of function as first-class value", function ()
+    it("allows use of a function as a first-class value", function ()
         local code = [[
             function foo(): integer
+                return 0
+            end
+            function get(): () -> integer
                 return foo
             end
         ]]
         local ok, err = run_checker(code)
-        assert.falsy(ok)
-        assert.match("access a function", err)
+        assert.truthy(ok, err)
     end)
 
     it("catches assignment to function", function ()
@@ -1911,23 +1912,23 @@ describe("Titan type checker", function()
         assert.match("assign to a function", err)
     end)
 
-    it("catches use of external function as first-class value", function ()
+    it("allows use of an external function as a first-class value", function ()
         local modules = {
             foo = [[
                 a: integer = 1
-                function foo()
+                function foo(): integer
+                    return 0
                 end
             ]],
             bar = [[
                 local foo = import "foo"
-                function bar(): integer
+                function bar(): () -> integer
                     return foo.foo
                 end
             ]]
         }
         local ok, err, mods = run_checker_modules(modules, "bar")
-        assert.falsy(ok)
-        assert.match("access a function", err)
+        assert.truthy(ok, err)
     end)
 
     it("catches assignment to external function", function ()

@@ -135,10 +135,18 @@ typefromnode = util.make_visitor({
     end,
 
     ["Ast.TypeFunction"] = function(node, st, errors)
-        -- First-class function values are not implemented; writing a
-        -- function type in an annotation is a clean compile-time error
-        -- rather than a checker/codegen crash.
-        return invalid(errors, node.loc, "first-class function types are not supported yet")
+        -- First-class function type `(P...) -> (R...)`. argtypes and rettypes
+        -- are lists of type nodes; a nested arrow (`a -> b -> c`, right
+        -- associative) shows up as a TypeFunction inside rettypes and recurses.
+        local ptypes = {}
+        for _, pt in ipairs(node.argtypes) do
+            table.insert(ptypes, typefromnode(pt, st, errors))
+        end
+        local rettypes = {}
+        for _, rt in ipairs(node.rettypes) do
+            table.insert(rettypes, typefromnode(rt, st, errors))
+        end
+        return types.Function(ptypes, rettypes, false)
     end,
 
     ["Ast.TypeOption"] = function(node, st, errors)
@@ -429,7 +437,14 @@ checkstat = util.make_visitor({
                 local texp = var._type
                 if texp._tag == "Type.Module" then
                     checker.typeerror(errors, var.loc, "trying to assign to a module")
-                elseif texp._tag == "Type.Function" then
+                elseif texp._tag == "Type.Function" and var._decl
+                       and (var._decl._tag == "Ast.TopLevelFunc"
+                            or var._decl._tag == "Type.ModuleMember"
+                            or var._decl._tag == "Type.StaticMethod") then
+                    -- Cannot rebind a function *declaration* (top-level
+                    -- function, imported module function, or record static).
+                    -- Assigning a value *into* a function-typed local, param
+                    -- or field is fine and falls through to the normal path.
                     checker.typeerror(errors, var.loc, "trying to assign to a function")
                 elseif var._tag == "Ast.VarDot" and var._decl
                        and var._decl._tag == "Type.ModuleMember" then
@@ -453,6 +468,9 @@ checkstat = util.make_visitor({
     end,
 
     ["Ast.StatCall"] = function(node, st, errors)
+        -- A call in statement position may discard its result, including a
+        -- zero-return `() -> ()` call that produces no value at all.
+        node.callexp._voidok = true
         checkexp(node.callexp, st, errors)
     end,
 
@@ -879,8 +897,25 @@ checkexp = util.make_visitor({
                 "trying to access module '%s' as a first-class value",
                 node.var.name)
         elseif texp._tag == "Type.Function" then
-            node._type = invalid(errors, node.loc,
-                "trying to access a function as a first-class value")
+            -- First-class function value. Foreign (C FFI) functions cannot be
+            -- taken as values; every other function (Titan top-level function,
+            -- record static, imported module function, or a function-typed
+            -- local/param/field that already holds a value) is allowed.
+            local var = node.var
+            if var._tag == "Ast.VarDot" and var.exp._type
+               and var.exp._type._tag == "Type.ForeignModule" then
+                node._type = invalid(errors, node.loc,
+                    "a foreign (C) function cannot be used as a first-class value")
+            else
+                node._type = texp
+                -- Mark a referenced *local* function declaration so the coder
+                -- builds its canonical closure (exported functions and statics
+                -- always get one; a function-typed local is already a value).
+                local decl = var._decl
+                if decl and decl._tag == "Ast.TopLevelFunc" then
+                    decl._valref = true
+                end
+            end
         elseif texp._tag == "Type.Record" then
             node._type = invalid(errors, node.loc,
                 "trying to access record type '%s' as a first-class value",
@@ -1183,13 +1218,21 @@ checkexp = util.make_visitor({
                 return
             end
             local fname = expname(node.exp)
-            local var = node.exp.var
-            if not (var and var._decl and (var._decl._tag == "Ast.TopLevelFunc" or
-              var._decl._tag == "Type.ModuleMember" or
-              var._decl._tag == "Type.StaticMethod")) then
-                checker.typeerror(errors, node.loc,
-                    "first-class functions are not supported in this version of Titan")
+            -- Auto-unwrap an option-of-function callee (e.g. an array element
+            -- `arr[i]`, which has type `T?`): cast to the underlying function
+            -- type. The cast codegen inserts a runtime nil-check, so calling
+            -- through a nil option raises cleanly. Mirrors the option-receiver
+            -- unwrap for method calls below.
+            if ftype._tag == "Type.Option" and ftype.base._tag == "Type.Function" then
+                local cast = ast.ExpCast(node.exp.loc, node.exp, ftype.base)
+                cast._type = ftype.base
+                node.exp = cast
+                ftype = ftype.base
             end
+            -- A callee may be a statically-known function (top-level function,
+            -- record static, imported module function) or any function-typed
+            -- value (a local/param, a returned function, ...). The coder tells
+            -- the two apart; here we only require the callee to be a function.
             if ftype._tag ~= "Type.Function" then
                 node._type = invalid(errors, node.loc,
                     "'%s' is not a function but %s",
@@ -1201,8 +1244,15 @@ checkexp = util.make_visitor({
             end
             checkargs(ftype, node.args.args, node.loc,
                 "function '" .. fname .. "'", st, errors)
-            node._type = ftype.rettypes[1]
             node._types = ftype.rettypes
+            -- A zero-return `() -> ()` callee produces no value; its result is
+            -- `Type.Void`, which is only legal in statement position or inside
+            -- an explicit `(f())` adjust (see Ast.ExpAdjust / Ast.StatCall).
+            node._type = ftype.rettypes[1] or types.Void()
+            if node._type._tag == "Type.Void" and not node._voidok then
+                node._type = invalid(errors, node.loc,
+                    "a function returning no values cannot be used as a value")
+            end
         else
             assert(node.args._tag == "Ast.ArgsMethod")
             local otype = node.exp._type
@@ -1232,8 +1282,12 @@ checkexp = util.make_visitor({
                 checkargs(ftype, node.args.args, node.loc,
                     "method '" .. class.name .. ":" .. node.args.method .. "'", st, errors)
                 node._method = ftype
-                node._type = ftype.rettypes[1]
                 node._types = ftype.rettypes
+                node._type = ftype.rettypes[1] or types.Void()
+                if node._type._tag == "Type.Void" and not node._voidok then
+                    node._type = invalid(errors, node.loc,
+                        "a function returning no values cannot be used as a value")
+                end
             else
                 if otype._tag ~= "Type.Nominal" then
                     checker.typeerror(errors, node.loc,
@@ -1279,8 +1333,16 @@ checkexp = util.make_visitor({
     end,
 
     ["Ast.ExpAdjust"] = function(node, st, errors, context)
+        node.exp._voidok = true
         checkexp(node.exp, st, errors, context)
-        node._type = node.exp._type
+        if node.exp._type._tag == "Type.Void" then
+            -- `(f())` on a zero-return call adjusts up to a single `nil`,
+            -- mirroring Lua's parenthesized-call adjustment.
+            node._type = types.Nil()
+            node._adjustvoid = true
+        else
+            node._type = node.exp._type
+        end
     end
 })
 
@@ -1312,7 +1374,11 @@ local function checkfunc(node, st, errors)
         end
     end
     local ret = st:with_block(checkstat, node.block, st, errors)
-    if not ret and node._type.rettypes[1]._tag ~= "Type.Nil" then
+    -- A zero-return `() -> ()` function (empty rettypes) may fall off the end,
+    -- exactly like a `nil`-returning one; only a function whose first declared
+    -- return type is some non-`nil` value must return on every path.
+    local firstret = node._type.rettypes[1]
+    if not ret and firstret and firstret._tag ~= "Type.Nil" then
         checker.typeerror(errors, node.loc,
             "function can return nil but return type is not nil")
     end
@@ -1676,6 +1742,49 @@ function checker.has_main(ast)
     return false
 end
 
+-- Walk a recovered interface type and, for every Nominal that names a record of
+-- *another* module which is not yet registered, recover that module so its
+-- record definition registers too. This makes record types resolve transitively
+-- across `.so`-only imports (a module's interface may return/accept a record
+-- defined in a module it imported but that this importer does not import
+-- directly). `seen` guards against revisiting a type and against cycles; the
+-- registry itself is the cross-call memo. Load failures are ignored — the
+-- nominal simply stays unresolved, exactly as before this pass existed.
+local function register_referenced_records(t, loader, seen)
+    if type(t) ~= "table" or not t._tag or seen[t] then return end
+    seen[t] = true
+    local tag = t._tag
+    if tag == "Type.Nominal" then
+        if not types.registry[t.fqtn] then
+            local mod = t.fqtn:match("^(.*)%.[^.]+$")
+            if mod and mod ~= "" then
+                pcall(checker.checkimport, mod, loader)
+            end
+        end
+    elseif tag == "Type.Array" then
+        register_referenced_records(t.elem, loader, seen)
+    elseif tag == "Type.Map" then
+        register_referenced_records(t.keys, loader, seen)
+        register_referenced_records(t.values, loader, seen)
+    elseif tag == "Type.Option" then
+        register_referenced_records(t.base, loader, seen)
+    elseif tag == "Type.ModuleMember" or tag == "Type.ModuleVariable" then
+        register_referenced_records(t.type, loader, seen)
+    elseif tag == "Type.Function" or tag == "Type.Method"
+           or tag == "Type.StaticMethod" then
+        for _, p in ipairs(t.params or {}) do
+            register_referenced_records(p, loader, seen)
+        end
+        for _, r in ipairs(t.rettypes or {}) do
+            register_referenced_records(r, loader, seen)
+        end
+    elseif tag == "Type.Record" then
+        for _, f in ipairs(t.fields or {}) do
+            register_referenced_records(f.type, loader, seen)
+        end
+    end
+end
+
 function checker.checkimport(modname, loader)
     local ok, type_or_error, errors = loader(modname)
     if not ok then return nil, type_or_error end
@@ -1687,6 +1796,10 @@ function checker.checkimport(modname, loader)
         if t and (t._tag == "Type.Record" or t._tag == "Type.Interface") then
             types.registry[t.name] = t
         end
+    end
+    local seen = {}
+    for _, member in ipairs(type_or_error.members) do
+        register_referenced_records(member.type or member, loader, seen)
     end
     return type_or_error, errors
 end

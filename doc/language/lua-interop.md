@@ -333,28 +333,60 @@ all; they are private to the module (see [Modules](modules.md)).
 
 ## Calling Lua from Titan
 
-In the current prototype, calls cross the boundary in **one direction
-only: Lua calls Titan.** There is no mechanism for Titan code to call a
-Lua function:
+Calls cross the boundary **both ways**: Lua calls Titan, and Titan calls
+Lua. Titan code can now receive a Lua function in a function-typed
+parameter (or a `value`) and call it directly. There is still no `import`
+of a Lua *module* — `import` loads Titan modules and `foreign import` binds
+C headers (see [the C FFI](ffi.md)) — but a Lua callable passed in as an
+argument is fully usable:
 
-* `import` only loads other Titan modules (compiled or from source), and
-  `foreign import` only binds C headers (see [the C FFI](ffi.md)) — a Lua
-  module cannot be imported.
-* Function types appear in the grammar, but functions are not first-class
-  values: a function cannot be stored in a variable or passed as an
-  argument, and calling through a function-typed value is a compile-time
-  error (`first-class functions are not supported in this version of
-  Titan`).
+```lua
+-- apply.titan            -- Titan
+function apply(f: (integer) -> integer, x: integer): integer
+    return f(x)
+end
+```
 
-A Lua function *can* travel through Titan opaquely — as a `value`, or
-inside a shared table — and be handed back to Lua intact, but Titan code
-cannot invoke it.
+```lua
+-- Lua
+local m = require "apply"
+print(m.apply(function(n) return n * 10 end, 5))   --> 50
+```
 
-*Limitation:* the old manual stated that a Titan variable of function
-type may refer to a dynamically-typed Lua function. That describes the
-design intent, not the implementation; none of it works today. First-class
-functions (and with them, calling Lua from Titan) are the most prominent
-item on the [roadmap](index.md#status-and-limitations).
+The value passed for `f` may be any callable: a plain Lua function, a C
+function, a table with a `__call` metamethod, or another Titan function.
+The call is checked the way every Titan call is — the arguments are
+coerced to the parameter types and the results are checked against the
+return types — and calling a value that turns out **not** to be callable
+raises an ordinary Lua error at the point of the call. (A Titan function
+value of the *exact* expected type skips the Lua stack entirely and calls
+the native entry directly; everything else goes through a normal Lua
+call.) A Lua function may still also travel through Titan opaquely as a
+`value` inside a shared table and be handed back intact.
+
+For storing, passing, returning and the two call paths in general, see
+[Functions as values](functions.md#functions-as-values).
+
+## Unannotated functions return nothing
+
+A Titan function with no return annotation is a zero-return `() -> ()`
+function (see [Functions](functions.md)), so from Lua it returns **no**
+values, exactly like a Lua `function f() end`:
+
+```lua
+-- log.titan              -- Titan
+function note(msg: string)   -- no annotation: returns ()
+end
+```
+
+```lua
+-- Lua
+local m = require "log"
+print(select('#', m.note("hi")))   --> 0
+```
+
+If you want a function that hands one `nil` back to Lua, annotate it
+`: nil` explicitly.
 
 ## Errors cross the boundary as Lua errors
 

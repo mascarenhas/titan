@@ -209,6 +209,12 @@ statically checked and compile to direct stores, with no run-time type
 check. Record types are referenced as `alias.Name` in type annotations,
 and their constructors and static functions as `alias.Name.new(...)`.
 
+An exported function is itself a **first-class value**: besides calling it
+as `geom.norm(p)`, the importer can reference `geom.norm` as a value — pass
+it, store it, return it, and call it indirectly — with stable identity (the
+same function reference each time) and a fast call path. (Only the function
+is first-class; the module alias itself is not, as described next.)
+
 Modules are not first-class values: the alias can only be used as a
 prefix. Reading it as a value (`local m2 = geom`) is the compile-time
 error `trying to access module 'geom' as a first-class value`;

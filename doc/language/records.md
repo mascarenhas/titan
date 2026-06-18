@@ -209,6 +209,12 @@ passing it to a function, or storing it in an array, map, module
 variable, `value`, or another record copies the reference, never the
 contents; mutations through one reference are visible through all.
 
+Record fields may also have **function types** and hold function values:
+a field typed as a function can store a top-level function, an imported
+module's function, or a record's `new` static, and the stored value can be
+called through the field (instance methods, which need a bound `self`, are
+not first-class and so cannot be stored — see [Methods](#methods)).
+
 Record fields can themselves have record types, and nesting works as
 expected:
 
@@ -274,9 +280,10 @@ Rules and their compile-time errors:
 
 **Methods are not fields.** In Titan code a method name can only be used
 in a call; `p.move` as a value, or `p.move = ...`, is the compile-time
-error `field 'move' not found in record 'test.Point'`. (Functions are not
-first-class values in this version of Titan — see
-[Functions](functions.md).)
+error `field 'move' not found in record 'test.Point'`. Unlike top-level
+functions and a record's `new` static, instance methods are **not**
+first-class values — they would need a bound `self` — so there is no way
+to take `p.move` as a value (see [Functions](functions.md)).
 
 ## Static functions
 
@@ -295,6 +302,11 @@ Accessing a static the record does not have is a compile-time error
 (`trying to access invalid record function 'nope'`), and the record type
 itself is not a value — `return Point` gives
 `trying to access record type 'test.Point' as a first-class value`.
+
+`Rec.new` itself, however, **is** a first-class value, exactly like a
+top-level function: it can be passed as an argument, stored in a variable,
+array, map, or record field, returned, and called indirectly, not just
+written inline as `Rec.new(...)`.
 
 ## Records across modules
 
@@ -413,8 +425,10 @@ nil` error if the value is `nil` at run time. See
   overriding; method dispatch is fully static. Records were designed as
   a deliberate stepping stone toward possible classes later, not as a
   class system.
-* **Not first-class.** Neither the record type nor its methods can be
-  used as values, in this version of Titan.
+* **The record type and its methods are not values.** The record type
+  itself cannot be used as a value, and instance methods cannot either
+  (they would need a bound `self`). The `new` static, by contrast, *is* a
+  first-class value, like any top-level function.
 
 ## Performance notes
 

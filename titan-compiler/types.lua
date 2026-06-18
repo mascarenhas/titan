@@ -4,6 +4,7 @@ local types = typedecl("Type", {
     Types = {
         Invalid     = {},
         Nil         = {},
+        Void        = {},
         Boolean     = {},
         Integer     = {},
         Float       = {},
@@ -249,6 +250,7 @@ function types.tostring(t)
     elseif tag == "Type.Boolean"     then return "boolean"
     elseif tag == "Type.String"      then return "string"
     elseif tag == "Type.Nil"         then return "nil"
+    elseif tag == "Type.Void"        then return "()"
     elseif tag == "Type.Float"       then return "float"
     elseif tag == "Type.Value"       then return "value"
     elseif tag == "Type.Invalid"     then return "invalid type"
@@ -283,6 +285,10 @@ function types.tostring(t)
             table.insert(out, " -> (")
             table.insert(out, table.concat(rtypes, ", "))
             table.insert(out, ")")
+        else
+            -- zero return values: canonicalize as `(P...) -> ()`, distinct
+            -- from a `nil`-returning function `(P...) -> nil`
+            table.insert(out, " -> ()")
         end
         return table.concat(out)
     elseif tag == "Type.Method" or tag == "Type.StaticMethod" then
@@ -394,6 +400,7 @@ function types.serialize(t)
     elseif tag == "Type.Boolean"     then return "Boolean()"
     elseif tag == "Type.String"      then return "String()"
     elseif tag == "Type.Nil"         then return "Nil()"
+    elseif tag == "Type.Void"        then return "Void()"
     elseif tag == "Type.Float"       then return "Float()"
     elseif tag == "Type.Value"       then return "Value()"
     elseif tag == "Type.Invalid"     then return "Invalid()"

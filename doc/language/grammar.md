@@ -164,8 +164,9 @@ end
 
 Notes on the top level:
 
-* A missing `[':' rettype]` annotation means the function returns `nil`
-  (filled in at parse time; see [Functions](functions.md)).
+* A missing `[':' rettype]` annotation means the function returns
+  *nothing* — its type is `(...) -> ()`, the zero-return form, distinct
+  from a `: nil` return of one `nil` value (see [Functions](functions.md)).
 * Methods cannot be declared `local`, and they are written outside the
   `record ... end` body, which contains only fields; a record may be
   empty (`record A end` parses).
@@ -230,16 +231,14 @@ local ages: {string: integer} = {}           -- map
 The `?` suffix attaches only to `simpletype`, so there is no syntax for
 an optional function type: `((integer) -> integer)?` is a syntax error.
 
-*Limitation:* function types parse in any type position, but since
-function values are
-[not implemented yet](index.md#status-and-limitations), no use of one
-compiles. Initializing a variable from a function name is a clean
-compile-time error (`trying to access a function as a first-class
-value`); a written function type with other than exactly one argument
-type aborts the compiler with an internal error rather than a
-compile-time error; and even a one-argument function type in a position
-the checker does not reject (a parameter type, say) aborts code
-generation with an internal error.
+Function types are valid, checked types in any type position: functions
+are first-class values, so a function type may annotate a variable,
+parameter, return, field, or any other declaration, and a function value
+inhabiting it can be stored, passed, returned, and called. A return list
+of `()` denotes a function that returns nothing, distinct from `nil`
+(one `nil` return); `->` is right-associative and function types nest, so
+a higher-order type like `(integer -> integer, integer) -> integer` is
+written directly. See [the type system](types.md#function-types).
 
 ## Statements
 
