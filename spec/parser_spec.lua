@@ -36,7 +36,7 @@ end
 local function assert_parses_successfuly(program_str)
     local ast, err = parser.parse("(parser_spec)", program_str)
     if not ast then
-        error(string.format("Unexpected Titan syntax error: %s", err.label))
+        error(string.format("Unexpected Titan syntax error: %s", err and err.label or "?"))
     end
     return ast
 end

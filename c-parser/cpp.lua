@@ -364,7 +364,7 @@ local function find_file(ctx, filename, mode, is_next)
     end
     for _, path in ipairs(paths) do
         local pathname = path..SEP..filename
-        local fd, err = io.open(pathname, "r")
+        local fd = io.open(pathname, "r")
         if fd then
             return pathname, fd
         end
@@ -713,6 +713,9 @@ cpp.parse_file = typed("string, FILE*?, Ctx? -> Ctx?, string?", function(filenam
         lineitem.tk = cpp.tokenize(lineitem.line)
     end
 
+    -- ifmode is a tri-state stack: true (emitting), false (skipping this
+    -- branch), or "skip" (a previous branch already matched).
+    ---@type (boolean|string)[]
     local ifmode = ctx.ifmode
     for cur, lineitem in ipairs(linelist) do
         local line = lineitem.line

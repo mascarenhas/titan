@@ -18,17 +18,11 @@ driver.TITAN_RUNTIME_PATH = "titan-runtime/"
 driver.CFLAGS = "--std=c99 -O2 -Wall -fPIC"
 driver.CC = "cc"
 
-local LUA_OFILES = {
-    "lgc.o", "ltable.o", "lstring.o", "lfunc.o", "lvm.o", "lobject.o",
-    "ldebug.o", "ltm.o", "lmem.o", "ldo.o", "lstate.o", "lctype.o",
-    "lopcodes.o", "lparser.o", "llex.o", "lundump.o", "lzio.o", "lcode.o"
-}
-
 local CIRCULAR_MARK = {}
 
 local function shell(cmd)
-    local p = io.popen(cmd)
-    out = p:read("*a")
+    local p = assert(io.popen(cmd))
+    local out = p:read("*a")
     p:close()
     return out
 end
@@ -59,7 +53,7 @@ function driver.defaultloader(static_deps)
         end
         local mtime_bin, binf = findmodule(driver.TITAN_BIN_PATH, modname, ".so")
         local mtime_src, srcf = findmodule(driver.TITAN_SOURCE_PATH, modname, ".titan")
-        if mtime_bin and ((not mtime_src) or mtime_bin >= mtime_src) then
+        if mtime_bin and binf and ((not mtime_src) or mtime_bin >= mtime_src) then
             local typesf, err = package.loadlib(binf, modname:gsub("[%-.]", "_") .. "_types")
             if not typesf then return false, err end
             local ok, types_or_err = pcall(typesf)
@@ -169,7 +163,7 @@ function driver.compile(modname, ast, sourcef, static_deps, verbose)
     if verbose then
         print(cmd)
     end
-    ok, err = os.execute(cmd)
+    local ok, err = os.execute(cmd)
     if ok then
         return ok, nil, libname
     else
@@ -276,7 +270,7 @@ local function write_entrypoint(modname)
     local entrypoint_c = modname:gsub("[.]", "/") .. "__entrypoint.c"
     local fd, err = io.open(entrypoint_c, "w")
     if not fd then return nil, err end
-    local ok, err = fd:write(util.render(entrypoint_template, {
+    local _, err = fd:write(util.render(entrypoint_template, {
         PROGNAME = modname:gsub(".*[.]", ""),
         LUAOPEN_FN = "luaopen_" .. modname:gsub("[.]", "_"),
         MODNAME = modname,
