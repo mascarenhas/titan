@@ -9,6 +9,7 @@
 -- test failure instead of a hung suite.
 
 local cpp = require "c-parser.cpp"
+local c99 = require "c-parser.c99"
 
 -- Run the preprocessor over `src` (a chunk of C) in isolation -- an empty
 -- define set and no system include paths, so nothing is pulled in from the
@@ -39,6 +40,16 @@ local function expand(src)
     assert(ok, rctx)        -- on a hook/runtime error, rctx is the message
     assert(rctx, err)       -- parse_file returned (nil, err)
     return table.concat(ctx.output, " ")
+end
+
+-- Preprocess `src` like the FFI does, then run the C99 declaration grammar
+-- (c-parser/c99.lua) over the result. Returns (parsed_ok, recoveries) where
+-- `recoveries` is how many top-level declarations the error-recovery rule had
+-- to skip. This exercises the grammar pieces the FFI needs for real system
+-- headers (extended floats, _Static_assert, function-body skipping, recovery).
+local function parse_decls(src)
+    local res = c99.match_language_grammar(expand(src) .. " $EOF$")
+    return res ~= nil, c99.recoveries
 end
 
 describe("c preprocessor (cpp)", function()
@@ -173,6 +184,51 @@ VEC(acos,, (double __x))
         end)
         it("expands macros inside an #if condition", function()
             assert.equal("hit", expand("#define V 1\n#if V == 1\nhit\n#endif\n"))
+        end)
+    end)
+
+    -- The C99 declaration grammar (c-parser/c99.lua) consumed by the FFI. These
+    -- pin the additions made so real system headers (math.h, SDL2/SDL.h, ...)
+    -- can be imported: extended float keywords, _Static_assert, function-body
+    -- skipping, and error recovery over declarations the grammar can't model.
+    describe("c99 declaration grammar (FFI)", function()
+        it("accepts the extended floating-point type keywords", function()
+            local ok, rec = parse_decls(
+                "extern _Float128 f(_Float64 a, _Float32 b, _Float16 c);\n")
+            assert.is_true(ok)
+            assert.equal(0, rec)
+        end)
+        it("parses and discards _Static_assert (message may contain parens)", function()
+            local ok, rec = parse_decls(
+                '_Static_assert(sizeof(int) == 4, "sizeof (int) == 4");\n'
+                .. "extern int g(void);\n")
+            assert.is_true(ok)
+            assert.equal(0, rec)
+        end)
+        it("skips function bodies, including empty blocks and Duff's device", function()
+            local ok, rec = parse_decls([[
+static inline void fill(int *p, int n) {
+    switch (n % 2) {
+    case 0: do { *p++ = 0; do {} while (0);
+    case 1: *p++ = 0;
+            } while (--n > 0);
+    }
+}
+extern int after(void);
+]])
+            assert.is_true(ok)
+            assert.equal(0, rec)
+        end)
+        it("recovers from an unparseable declaration, keeping its neighbours", function()
+            local ok, rec = parse_decls(
+                "extern int a(void);\n1 2 3 ;\nextern int b(void);\n")
+            assert.is_true(ok)
+            assert.equal(1, rec)
+        end)
+        it("does not recover when everything parses cleanly", function()
+            local ok, rec = parse_decls("extern int a(void);\nextern int b(void);\n")
+            assert.is_true(ok)
+            assert.equal(0, rec)
         end)
     end)
 

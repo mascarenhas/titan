@@ -6,7 +6,11 @@
 # does `cd .. && ./titanc examples.<name>` — output lands back here in examples/.
 #
 # Run `make -C .. examples` (or `make all` from this directory) to build them
-# all. The SDL examples need the SDL2 development headers installed.
+# all. The SDL examples need SDL2 installed. titanc has no -I/-L flags, so for an
+# SDL2 outside the default compiler search paths, point the C compiler at it via
+# the environment, e.g.:
+#   make sdl_demo CPATH=/path/to/include LIBRARY_PATH=/path/to/lib
+# and run with LD_LIBRARY_PATH=/path/to/lib so libSDL2 is found at load time.
 
 TITANC := ./titanc
 
@@ -22,9 +26,11 @@ utils:
 artisanal: utils
 	cd .. && $(TITANC) examples.artisanal
 
-# foreign import "SDL2/SDL.h" (needs SDL2 headers) -> sdl_quit.so
+# foreign import "SDL2/SDL.h" (needs SDL2 headers) -> sdl_quit.so. Links SDL2 so
+# the .so is self-contained (the driver dlopens it to read its interface when
+# another module imports it).
 sdl_quit:
-	cd .. && $(TITANC) examples.sdl_quit
+	cd .. && $(TITANC) examples.sdl_quit -l SDL2
 
 # Imports examples.sdl_quit and SDL2, has main -> sdl_demo executable.
 # Links SDL2 (see the header comment in sdl_demo.titan).

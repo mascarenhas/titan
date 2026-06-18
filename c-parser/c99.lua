@@ -46,6 +46,11 @@ end
 
 local typedefs = {}
 
+-- Number of top-level declarations skipped by the error-recovery rule during the
+-- last match_language_grammar call (see the `recover` rule). Exposed as
+-- c99.recoveries so callers can report how many declarations were not understood.
+local recoveries = 0
+
 local function elem(xs, e)
     for _, x in ipairs(xs) do
         if e == x then
@@ -59,6 +64,14 @@ defs["decl_func"] = typed("string, number, table -> boolean, Decl", function(_, 
     typed.set_type(decl, "Decl")
     return true, decl
 end)
+
+-- Match-time action for the error-recovery rule: count the skipped declaration
+-- and succeed without producing a capture (so it contributes nothing to the
+-- translation unit's declaration list).
+defs["recover"] = function(_, _)
+    recoveries = recoveries + 1
+    return true
+end
 
 defs["decl_ids"] = typed("string, number, table -> boolean, Decl?", function(_, _, decl)
     -- store typedef
@@ -265,12 +278,41 @@ local language_rules = [[--lpeg.re
 --------------------------------------------------------------------------------
 -- External Definitions
 
-translationUnit <- %s* {| externalDeclaration* |} "$EOF$"
+translationUnit <- %s* {| (externalDeclaration / recover)* |} "$EOF$"
 
-externalDeclaration <- functionDefinition
+externalDeclaration <- staticAssertDeclaration
+                     / functionDefinition
                      / declaration
 
-functionDefinition <- {| {:spec: {| declarationSpecifier+ |} :} {:func: declarator :} {:decls: declaration* :} {:code: compoundStatement :} |} => decl_func
+-- Error recovery: system headers (e.g. GCC's SIMD intrinsics pulled in via
+-- SDL's <SDL_cpuinfo.h>) contain declarations this C99 grammar does not model.
+-- Rather than fail the whole header, skip one unparseable top-level unit and
+-- resync at the next `;` or balanced `{...}`. The generated C still #includes the
+-- real header, so only the *types Titan references* need to be understood here;
+-- c99.recoveries reports how many units were skipped. String/char literals are
+-- consumed atomically so their `;`/`{`/`}` are not treated as delimiters.
+recover <- recoverBody => recover
+recoverBody <- ( functionBody / stringSkip / charSkip / (!";" !"{" !"}" !"$EOF$" .) )* (";" _ / functionBody)
+
+-- C11 _Static_assert (and the C23 static_assert spelling). The FFI has no use
+-- for these, so match and discard -- but consume the message with STRING_LITERAL
+-- so its parentheses don't confuse paren matching.
+staticAssertDeclaration <- ("_Static_assert" / "static_assert") _ "(" _ constantExpression ("," _ STRING_LITERAL)? ")" _ ";" _
+
+functionDefinition <- {| {:spec: {| declarationSpecifier+ |} :} {:func: declarator :} {:decls: declaration* :} functionBody |} => decl_func
+
+-- The FFI only needs a function's signature, never its body (and headers carry
+-- `static inline` definitions whose bodies use the full C statement grammar,
+-- inline asm, GNU extensions, Duff's device, ...). Skip the body as a balanced
+-- brace group, consuming string/char literals atomically so braces inside them
+-- are not miscounted.
+functionBody <- "{" _ functionBodyItem* "}" _
+functionBodyItem <- functionBody
+                  / stringSkip
+                  / charSkip
+                  / (!"{" !"}" !'"' !"'" .)+
+stringSkip <- ('"' / 'L"') sChar* '"' _
+charSkip <- ("'" / "L'") cChar+ "'" _
 
 --------------------------------------------------------------------------------
 -- Declarations
@@ -323,6 +365,15 @@ typeSpecifier <- typedefName
                / { "__int128_t"  } _
                / { "__uint128_t" } _
                / { "__int128"    } _
+               / { "_Float128x"  } _
+               / { "_Float128"   } _
+               / { "_Float64x"   } _
+               / { "_Float64"    } _
+               / { "_Float32x"   } _
+               / { "_Float32"    } _
+               / { "_Float16"    } _
+               / { "__float128"  } _
+               / { "__float80"   } _
                / structOrUnionSpecifier
                / enumSpecifier
 
@@ -690,7 +741,10 @@ end
 
 function c99.match_language_grammar(subject)
     typedefs = {}
-    return match(language_grammar, subject)
+    recoveries = 0
+    local res, err, l, c, fragment = match(language_grammar, subject)
+    c99.recoveries = recoveries
+    return res, err, l, c, fragment
 end
 
 function c99.match_language_expression_grammar(subject)
