@@ -8,9 +8,18 @@ application programming language with a focus on performance.
 
 # Install
 
-First you need to download, extract and build the [sources to Lua 5.5.0](http://www.lua.org/ftp/lua-5.5.0.tar.gz)
-inside the folder where you cloned this repository. The Lua tarball will extract
-to a `lua-5.5.0` folder. Enter it and build Lua with `make linux MYCFLAGS=-fPIC`.
+The Titan compiler generates C that includes Lua 5.5's *internal* headers and
+links against its static library, so you first need a built Lua 5.5.0 source
+tree alongside this checkout. The provided `Makefile` downloads and builds it
+for you:
+
+        $ make lua
+
+This fetches the [Lua 5.5.0 sources](http://www.lua.org/ftp/lua-5.5.0.tar.gz)
+into a `lua-5.5.0` folder and builds them with `MYCFLAGS=-fPIC`, auto-detecting
+the `linux`/`macosx` build target from `uname` (override with
+`make lua LUA_PLATFORM=...`). To do it by hand instead, download and extract the
+tarball into a `lua-5.5.0` folder and run `make linux MYCFLAGS=-fPIC` inside it.
 
 You can install the Titan compiler itself using  [LuaRocks](http://luarocks.org)
 this will also install all dependencies automatically. The compiler itself
@@ -60,30 +69,51 @@ your compilation as a native binary:
 
 # Running the test suite
 
-The test suite es written using Busted, which can be installed using LuaRocks:
+The test suite is written using [Busted](https://lunarmodules.github.io/busted/).
+The simplest way to run it is:
 
-        $ luarocks install busted
+        $ make lua          # once, to build the bundled Lua 5.5.0 tree
+        $ make test
 
-Then, you need to build the local copy of Lua, and run `busted` from the root directory
-of this repository:
+`make test` runs `luarocks make` followed by `luarocks test`. The `luarocks make`
+step builds and installs the rock — including the `titan` C runtime module that a
+couple of tests need — and `luarocks test` installs the test dependencies (Busted
+and cluacov, declared in the rockspec) and runs the suite from the repository
+root. To run the steps yourself:
 
-        $ cd lua-5.5.0
-        $ make linux MYCFLAGS=-fPIC
-        $ cd ..
-        $ busted
+        $ luarocks make                      # build/install the rock (also picks up source edits)
+        $ luarocks test                      # install test deps + run the suite
+        $ luarocks test -- -c -o gtest       # ...forwarding flags to Busted (here: luacov coverage)
 
-You may need to adapt the invocation of `make` above to your platform.
+Note that `luarocks test` does **not** build the rock-under-test, only its
+dependencies, so always `luarocks make` first (that is what `make test` does).
+Two related gotchas if you drive Busted directly:
 
-A few tests need the `titan` runtime support module (for `titan.backtrace()`),
-which `luarocks make` installs; make sure the in-tree `lua-5.5.0/src/lua`
-interpreter can find it by including your rocks tree in `LUA_CPATH`, e.g.:
+* A few tests need the `titan` runtime support module (for `titan.backtrace()`),
+  which `luarocks make` installs; make sure the in-tree `lua-5.5.0/src/lua`
+  interpreter can find it by including your rocks tree in `LUA_CPATH`, e.g.
+  `LUA_CPATH="./?.so;$HOME/.luarocks/lib/lua/5.5/?.so;;" busted`.
+* Once the `titan` rock is installed, Busted loads the compiler modules from the
+  *installed* rock, not from your checkout — re-run `luarocks make` after editing
+  compiler sources so the tests see your changes.
 
-        $ LUA_CPATH="./?.so;$HOME/.luarocks/lib/lua/5.5/?.so;;" busted
+# Building the examples
 
-Note that once the `titan` rock is installed, busted loads the compiler
-modules from the *installed* rock, not from your checkout — re-run
-`luarocks make` after changing compiler sources so the tests see your
-changes.
+The `examples/` directory has its own `Makefile` with a target per example
+module plus an `all` target. From the repository root, `make examples` builds
+them all:
+
+        $ make examples            # or: make -C examples all
+        $ make -C examples utils   # build a single example
+
+`sdl_demo` depends on `sdl_quit`, and both use the C FFI against SDL2, so they
+need the SDL2 development headers installed.
+
+# Cleaning up
+
+`make clean` removes generated build and test artifacts (object files, generated
+C, compiled modules, coverage data) while keeping the downloaded Lua tree.
+`make distclean` additionally removes the `lua-5.*` source tree(s) and tarball.
 
 # Compiler options
 
@@ -112,15 +142,13 @@ they are in the roadmap:
 * FFI with C (C pointers, call C functions)
 * records (structs) with `:` method calls
 * maps
-
-## In progress
-
-* first-class functions (still only in the top-level)
+* first-class functions (without anonymous functions)
 
 ## Next
 
 * nested and anonymous first-class functions with proper lexical scoping (closures)
 * slice type (native array with length and capacity), variadic functions using a slice to collect variadic arguments (Go-like)
+* error handling integrated with Lua's, nice backtraces (details TBD)
 * FFI with C, continued (other C primitive types, C arrays, C structs/unions including pointers, function pointers)
 * standard library that is a subset of Lua's standard library, built using the C FFI (the previous C FFI should be strong enough to call Lua API functions)
 * tagged variants (unions of records with some syntax for switch/case on the record tag)
