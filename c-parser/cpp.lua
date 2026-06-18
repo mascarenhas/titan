@@ -503,9 +503,19 @@ local mark_noloop = typed("table, string, number -> ()", function(noloop, token,
     noloop[token] = math.max(noloop[token] or 0, n)
 end)
 
-local shift_noloop = typed("table, number -> ()", function(noloop, n)
+-- Shift recorded "blue paint" positions by `n` after the token stream changed
+-- length at position `from`. Only entries at or past `from` move; entries before
+-- it are already behind the cursor (their paint has expired -- see valid_noloop)
+-- and must NOT be bumped forward, or a subsequent, unrelated use of the same
+-- macro would be wrongly suppressed. This happens with glibc's <math.h>, where
+-- __CONCAT is reused across sibling expansions of __MATHCALL_VEC: painting it
+-- once (via __SIMD_DECL) used to block the later __CONCAT(name,) in the actual
+-- declaration, dropping the function name.
+local shift_noloop = typed("table, number, number -> ()", function(noloop, n, from)
     for token, v in pairs(noloop) do
-        noloop[token] = v + n
+        if v >= from then
+            noloop[token] = v + n
+        end
     end
 end)
 
@@ -595,7 +605,7 @@ macro_expand = typed("Ctx, {string}, LineList, number, boolean -> ()", function(
                     else
                         table_replace_n_with(tokens, i, n, expansion)
                     end
-                    shift_noloop(noloop, nexpansion - n)
+                    shift_noloop(noloop, nexpansion - n, i)
                     mark_noloop(noloop, token, i + nexpansion - 1)
                 else
                     i = i + 1
@@ -604,7 +614,7 @@ macro_expand = typed("Ctx, {string}, LineList, number, boolean -> ()", function(
                 local ndefine = #define
                 if ndefine == 0 then
                     table.remove(tokens, i)
-                    shift_noloop(noloop, -1)
+                    shift_noloop(noloop, -1, i)
                 elseif ndefine == 1 then
                     tokens[i] = define[1]
                     mark_noloop(noloop, token, i)

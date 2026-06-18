@@ -127,6 +127,31 @@ describe("c preprocessor (cpp)", function()
         it("pastes tokens with ##", function()
             assert.equal("foobar", expand("#define CAT(a,b) a ## b\nCAT(foo,bar)\n"))
         end)
+        it("pastes with an empty argument (placemarker)", function()
+            assert.equal("acos", expand("#define CAT(x,y) x ## y\nCAT(acos,)\n"))
+        end)
+        -- Regression: a paste macro reused across sibling expansions must not be
+        -- suppressed by the recursion guard. This mirrors glibc's <math.h>, where
+        -- __MATHCALL_VEC expands __CONCAT once via __SIMD_DECL (which used to
+        -- "blue paint" it for the rest of the line) and again in the actual
+        -- declaration -- the second __CONCAT(name,) was dropped, losing the
+        -- function name. See shift_noloop in cpp.lua.
+        it("re-expands a paste macro reused in a later sibling expansion", function()
+            assert.equal(
+                "simd_acos extern double acos ( double __x ) ; "
+                .. "extern double __acos ( double __x )",
+                expand([[
+#define CAT(x,y) x ## y
+#define PRECNAME(name,r) CAT(name,r)
+#define SIMD(f) CAT(simd_, f)
+#define DECL1_IMPL(t,f,s,a) extern t PRECNAME(f,s) a
+#define DECL1(t,f,s,a) DECL1_IMPL(t,f,s,a)
+#define DECL(t,f,s,a) DECL1(t,f,s,a) ; DECL1(t, CAT(__,f), s, a)
+#define CALL(f,s,a) DECL(double, f, s, a)
+#define VEC(f,s,a) SIMD(PRECNAME(f,s)) CALL(f,s,a)
+VEC(acos,, (double __x))
+]]))
+        end)
     end)
 
     describe("conditional compilation", function()
