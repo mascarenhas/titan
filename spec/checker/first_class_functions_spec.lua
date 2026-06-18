@@ -1,74 +1,13 @@
--- Typechecker tests for first-class function values and the zero-return
--- `() -> ()` function type: which programs the checker accepts and which it
--- rejects, and with what error. These run the checker only -- no code is
--- generated or executed. The end-to-end behaviour of the same feature (and the
--- `.so`-import variants) lives in spec/coder/first_class_functions_spec.lua;
--- the pure type-algebra assertions live in spec/types_spec.lua.
-local checker = require 'titan-compiler.checker'
-local parser = require 'titan-compiler.parser'
-local types = require 'titan-compiler.types'
+-- Typechecker tests for first-class function values: which programs the checker
+-- accepts and which it rejects, and with what error. These run the checker only
+-- -- no code is generated or executed. The end-to-end behaviour lives in
+-- spec/coder/first_class_functions_spec.lua, the pure type-algebra assertions in
+-- spec/types_spec.lua, and the zero-return `() -> ()` checker tests alongside the
+-- rest of the checker tests in spec/checker/checker_spec.lua.
+local h = require 'spec.support.helpers'
+local check_errs = h.check_errs
 
-local function parse(code) return parser.parse("(fcf_checker)", code) end
-
--- Run the checker over `titan_code` and return its list of error strings.
-local function check_errs(titan_code)
-    types.registry = {}
-    local ast = assert(parse(titan_code))
-    local _, errs = checker.check("test", ast, titan_code, "test.titan")
-    return errs
-end
-
-describe("first-class functions and zero-return () functions (typechecker)", function()
-
-    -- ===== zero-return () functions =====
-
-    it("rejects return nil in a () function", function()
-        local errs = check_errs([[
-            function f(): ()
-                return nil
-            end
-        ]])
-        assert.equal(1, #errs)
-        assert.match("returned 1 value.* but function expected 0", errs[1])
-    end)
-
-    it("rejects a ()-call used as a value (annotated)", function()
-        local errs = check_errs([[
-            local function vd(): ()
-            end
-            function g(): integer
-                local x: integer = vd()
-                return x
-            end
-        ]])
-        assert.truthy(#errs >= 1)
-        assert.match("function returning no values cannot be used as a value", errs[1])
-    end)
-
-    it("rejects a ()-call used as a value (inferred local — no silent Void)", function()
-        local errs = check_errs([[
-            local function vd(): ()
-            end
-            function g()
-                local x = vd()
-            end
-        ]])
-        assert.truthy(#errs >= 1)
-        assert.match("function returning no values cannot be used as a value", errs[1])
-    end)
-
-    it("rejects a ()-call as an operand", function()
-        local errs = check_errs([[
-            local function vd(): ()
-            end
-            function g(): integer
-                return 1 + vd()
-            end
-        ]])
-        assert.truthy(#errs >= 1)
-    end)
-
-    -- ===== first-class function values =====
+describe("first-class function values (typechecker)", function()
 
     it("accepts a function-type annotation", function()
         assert.equal(0, #check_errs([[

@@ -1,132 +1,88 @@
 local checker = require 'titan-compiler.checker'
-local parser = require 'titan-compiler.parser'
 local types = require 'titan-compiler.types'
 local coder = require 'titan-compiler.coder'
 local util = require 'titan-compiler.util'
-local pretty = require 'titan-compiler.pretty'
-local driver = require 'titan-compiler.driver'
+local h = require 'spec.support.helpers'
 
-local verbose = false
+local parse = h.parse
+local compile = h.compile
+local call = h.call
+local call_app = h.call_app
+local run_coder = h.run_coder
+local run_coder_app = h.run_coder_app
+local generate_modules = h.generate_modules
 
-local function parse(code)
-    return parser.parse("(parser_spec)", code)
+local function clean()
+    os.execute("rm -f *.o *.so")
+    if not h.verbose then os.execute("rm -f *.c") end
 end
 
-local function compile(modname, ast)
-    local ok, err, libname = driver.compile(modname, ast, nil, {}, verbose)
-    if not ok then return ok, err end
-    return driver.compile_library(modname, { libname }, nil, verbose)
-end
+describe("zero-return () functions (code generator)", function()
+    setup(function () os.remove("titan-runtime/titan.o") end)
+    after_each(clean)
 
-local function compile_app(modname, ast)
-    local ok, err, libname = driver.compile(modname, ast, nil, {}, verbose)
-    if not ok then return ok, err end
-    return driver.compile_program(modname, { libname }, nil, verbose)
-end
+    it("exported () function returns zero values across the Lua boundary", function()
+        run_coder([[
+            function noop(): ()
+            end
+            function effect(x: {integer}): ()
+                x[1] = 42
+            end
+        ]], [[
+            assert(select('#', test.noop()) == 0)
+            local t = {0}
+            test.effect(t)
+            assert(t[1] == 42)
+            assert(select('#', test.effect(t)) == 0)
+        ]])
+    end)
 
-local function generate_modules(modules, main, forapp)
-    types.registry = {}
-    local imported = {}
-    local deps = {}
-    local loader = driver.tableloader(modules, imported, deps)
-    local type, err = checker.checkimport(main, loader)
-    if not type then return nil, err end
-    if #err ~= 0 then return nil, table.concat(err, "\n") end
-    local ofiles = {}
-    for name, mod in pairs(imported) do
-        local ok, err = driver.compile_module(name, mod, deps, verbose)
-        table.insert(ofiles, name .. ".o")
-        if not ok then return nil, err end
-    end
-    if forapp then
-        local ok, err = driver.compile_program(main, ofiles, nil, verbose)
-        if not ok then return nil, err end
-    else
-        for name, _ in pairs(imported) do
-            local ok, err = driver.compile_library(name, ofiles, nil, verbose)
-            if not ok then return nil, err end
-        end
-    end
-    return true
-end
+    it("internal statement-context call + bare return", function()
+        run_coder([[
+            local function helper(x: {integer}): ()
+                x[1] = x[1] + 1
+                return
+            end
+            function bump(x: {integer}): integer
+                helper(x)
+                helper(x)
+                return x[1]
+            end
+        ]], [[
+            assert(test.bump({10}) == 12)
+        ]])
+    end)
 
-local function call(modname, code)
-    local cmd = string.format("lua-5.5.0/src/lua -l %s -e \"print(pcall(function () %s end))\"",
-        modname, code)
-    local f = io.popen(cmd)
-    local out = f:read()
-    local ok, err = f:close()
-    if not ok then return false, err end
-    local ok, data = out:match("^(true)%s*(.*)$")
-    if not ok then
-        local _, error = out:match("^(false)%s*(.*)$")
-        return false, error
-    else
-        return true, data
-    end
-end
+    it("(f()) adjusts a void call up to a single nil", function()
+        run_coder([[
+            local function vd(): ()
+            end
+            function adj(): value
+                return (vd())
+            end
+        ]], [[
+            assert(select('#', test.adj()) == 1)
+            assert(test.adj() == nil)
+        ]])
+    end)
 
-local function run_coder(titan_code, lua_test, errmsg)
-    types.registry = {}
-    local ast, err = parse(titan_code)
-    assert.truthy(ast, err)
-    local ok, err = checker.check("test", ast, titan_code, "test.titan")
-    assert.equal(0, #err, table.concat(err, "\n"))
-    local ok, err = compile("test", ast)
-    assert.truthy(ok, err)
-    local ok, err = call("test", lua_test)
-    if errmsg then
-        assert.falsy(ok)
-        assert.match(errmsg, err)
-    else
-        assert.truthy(ok, err)
-    end
-end
-
-local function call_app(appname, ...)
-    local cmd = table.concat({ appname, ... }, " ")
-    local f = io.popen(cmd)
-    local out = f:read()
-    local ok, err, status = f:close()
-    if err == "exit" then ok = true end
-    if not verbose then os.remove(appname) end
-    return ok, err, status, out
-end
-
-local function run_coder_app(titan_code, main, estatus, eout)
-    types.registry = {}
-    local code = string.format([[
-        %s
-        function main(args: {string}): integer
-            %s
-        end
-    ]], titan_code, main)
-    local ast, err = parse(code)
-    assert.truthy(ast, err)
-    local ok, err = checker.check("test", ast, code, "test.titan")
-    assert.equal(0, #err, table.concat(err, "\n"))
-    local ok, err = compile_app("test", ast)
-    assert.truthy(ok, err)
-    local ok, err, status, output = call_app("./test")
-    assert.truthy(ok, err)
-    assert.equal(estatus, status)
-    if eout then
-        assert.match(eout, output)
-    end
-end
+    it("an explicit : nil return still yields one nil value", function()
+        run_coder([[
+            function n(): nil
+            end
+        ]], [[
+            assert(select('#', test.n()) == 1)
+            assert(test.n() == nil)
+        ]])
+    end)
+end)
 
 describe("Titan code generator", function()
     setup(function ()
         os.remove("titan-runtime/titan.o")
     end)
 
-    after_each(function ()
-        os.execute("rm -f *.o")
-        os.execute("rm -f *.so")
-        if not verbose then
-            os.execute("rm -f *.c")
-        end
-    end)
+    after_each(clean)
 
     it("deletes array element", function()
         local code = [[

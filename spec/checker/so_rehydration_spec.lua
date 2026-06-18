@@ -11,47 +11,14 @@
 -- source never reaches the source path); only then is the TYPE CHECKER run on
 -- the importer. No importer code is generated or executed here -- the end-to-end
 -- run-time behaviour of the same path lives in spec/coder/so_import_spec.lua.
-local checker = require 'titan-compiler.checker'
-local parser = require 'titan-compiler.parser'
-local types = require 'titan-compiler.types'
-local driver = require 'titan-compiler.driver'
-
-local verbose = false
-
-local function parse(code) return parser.parse("(so_rehydrate)", code) end
-
--- Compile each dependency in `deps` ({name=, src=}, in dependency order) to a
--- `.so` from memory, then run ONLY the typechecker on `main_src` with the
--- dependencies reachable solely through their `.so`. Returns the list of type
--- errors reported for `main` (so tests can assert acceptance or a specific
--- rejection) and the recovered module type.
-local function so_check(deps, main_name, main_src)
-    for _, d in ipairs(deps) do
-        types.registry = {}
-        driver.imported = {}
-        local sdeps = {}
-        local ast = assert(parse(d.src), "parse " .. d.name)
-        local _, errs = checker.check(d.name, ast, d.src, d.name .. ".titan",
-            driver.defaultloader(sdeps))
-        assert(#errs == 0, d.name .. ": " .. table.concat(errs, "\n"))
-        local ok, err, lib = driver.compile(d.name, ast, nil, sdeps, verbose)
-        assert(ok, err)
-        ok, err = driver.compile_library(d.name, { lib }, nil, verbose)
-        assert(ok, err)
-    end
-    types.registry = {}
-    driver.imported = {}
-    local mast = assert(parse(main_src), "parse " .. main_name)
-    local mtype, errs = checker.check(main_name, mast, main_src,
-        main_name .. ".titan", driver.defaultloader({}))
-    return errs, mtype
-end
+local h = require 'spec.support.helpers'
+local so_check = h.check_against_so
 
 describe("typechecker rehydration of .so-only imports", function()
     setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(function ()
         os.execute("rm -f *.o *.so")
-        if not verbose then os.execute("rm -f *.c") end
+        os.execute("rm -f *.c")
     end)
 
     it("rehydrates a function signature and checks calls against it", function ()

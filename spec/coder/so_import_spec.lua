@@ -12,61 +12,14 @@
 -- `.titan` source never touches the source path and the default loader is
 -- forced onto the `.so` route. Dependencies are built in order, so an earlier
 -- one can itself be a `.so`-only dependency of a later one (transitive case).
-local checker = require 'titan-compiler.checker'
-local parser = require 'titan-compiler.parser'
-local types = require 'titan-compiler.types'
-local driver = require 'titan-compiler.driver'
-
-local verbose = false
-
-local function parse(code) return parser.parse("(so_import)", code) end
-
--- Build a chain of `.so`-only modules. `mods` is an array of {name=, src=} in
--- dependency order (each may import earlier ones); the last entry is the module
--- under test. Returns true, or (nil, message). Verifies every dependency was
--- resolved dynamically (from its `.so`), never statically linked.
-local function build_so_chain(mods)
-    local names = {}
-    for _, m in ipairs(mods) do names[m.name] = true end
-    for i, m in ipairs(mods) do
-        types.registry = {}
-        driver.imported = {}            -- force `.so` resolution of earlier deps
-        local static_deps = {}
-        local ast = parse(m.src)
-        if not ast then return nil, "parse error in " .. m.name end
-        local _, errs = checker.check(m.name, ast, m.src, m.name .. ".titan",
-            driver.defaultloader(static_deps))
-        if #errs ~= 0 then return nil, m.name .. ": " .. table.concat(errs, "\n") end
-        for dep in pairs(static_deps) do
-            if names[dep] and dep ~= m.name then
-                return nil, m.name .. " linked '" .. dep .. "' statically, not via .so"
-            end
-        end
-        local ok, err, lib = driver.compile(m.name, ast, nil, static_deps, verbose)
-        if not ok then return nil, err end
-        ok, err = driver.compile_library(m.name, { lib }, nil, verbose)
-        if not ok then return nil, err end
-    end
-    return true
-end
-
-local function call(modname, code)
-    local cmd = string.format(
-        "lua-5.5.0/src/lua -l %s -e \"print(pcall(function () %s end))\"",
-        modname, code)
-    local f = io.popen(cmd)
-    local out = f:read()
-    f:close()
-    if not out then return false, "no output" end
-    if out:match("^true") then return true, out:match("^true%s*(.*)$") end
-    return false, out:match("^false%s*(.*)$") or out
-end
+local h = require 'spec.support.helpers'
+local build_so_chain, call = h.build_so_chain, h.call
 
 describe(".so-only cross-module imports", function()
     setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(function ()
         os.execute("rm -f *.o *.so")
-        if not verbose then os.execute("rm -f *.c") end
+        os.execute("rm -f *.c")
     end)
 
     it("calls a function in a .so-only module", function ()
@@ -194,6 +147,69 @@ describe(".so-only cross-module imports", function()
         assert.truthy(ok, err)
         local rok, out = call("tbar",
             "local x,y = tbar.bar(); assert(x == 4.0 and y == 6.0)")
+        assert.truthy(rok, out)
+    end)
+
+    it("references, calls and passes function values across a .so boundary", function ()
+        local ok, err = build_so_chain({
+            { name = "fcfa", src = [[
+                function inc(x: integer): integer return x + 1 end
+                function twice(f: (integer) -> integer, x: integer): integer
+                    return f(f(x))
+                end
+                function getinc(): (integer) -> integer
+                    return inc
+                end
+            ]] },
+            { name = "fcfb", src = [[
+                local a = import "fcfa"
+                function binc(x: integer): integer return x + 1 end
+                function run(): integer
+                    local f: (integer) -> integer = a.inc  -- reference across the .so
+                    local r1 = f(10)                       -- call a's value
+                    local r2 = a.twice(binc, 0)            -- pass b's value into a
+                    local r3 = a.twice(a.inc, 5)           -- pass a's value into a
+                    local g = a.getinc()                   -- get a value back from a
+                    local r4 = g(100)
+                    return r1 + r2 + r3 + r4                -- 11 + 2 + 7 + 101
+                end
+            ]] },
+        })
+        assert.truthy(ok, err)
+        local rok, out = call("fcfb", "assert(fcfb.run() == 121)")
+        assert.truthy(rok, out)
+    end)
+
+    it("takes the exact-type fast path for a function value across a .so boundary", function ()
+        -- The dependency is reachable ONLY as a compiled `.so`: the closure-slot
+        -- index is rebuilt from the recovered interface and the function-type tag
+        -- is recovered from the registry the dependency's `.so` published when it
+        -- was dlopened. `run_fast` calls a's `inner` as a value; if the tags agree
+        -- the call uses the fast path (no extra Lua frame) and the stack is one
+        -- frame shallower than the slow path. If either disagrees the call falls
+        -- back to the slow path and the depth assertion fails.
+        local ok, err = build_so_chain({
+            { name = "fpa", src = [[
+                function inner(p: () -> integer): integer return p() end
+            ]] },
+            { name = "fpb", src = [[
+                local a = import "fpa"
+                function outer(g: (() -> integer) -> integer, p: () -> integer): integer
+                    return g(p)
+                end
+                function run_fast(p: () -> integer): integer return outer(a.inner, p) end
+                function run_slow(p: () -> integer,
+                                  g: (() -> integer) -> integer): integer
+                    return outer(g, p)
+                end
+            ]] },
+        })
+        assert.truthy(ok, err)
+        local rok, out = call("fpb", h.DEPTH_PROBE .. [[
+            local fastd = fpb.run_fast(depth)
+            local slowd = fpb.run_slow(depth, slow_g)
+            assert(slowd > fastd, ('fast=')..fastd..(' slow=')..slowd)
+        ]])
         assert.truthy(rok, out)
     end)
 end)
