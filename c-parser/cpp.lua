@@ -204,10 +204,106 @@ cpp.initial_processing = typed("FILE* -> LineList", function(fd)
     local state = "any"
     local output = {}
     local linenr = 0
+
+    -- Run the comment/string state machine over one complete logical line
+    -- (backslash-continuations already merged) and append the result to
+    -- `output`. `buf` and `state` persist across calls so a block comment can
+    -- span several logical lines (states[state].continue_line).
+    local function flush_logical_line(line, nr)
+        local len = #line
+        local i = 1
+        local out = ""
+        -- Go through the line
+        while i <= len do
+            -- Current state in the state machine
+            local st = states[state]
+
+            -- Look for next character matching a state transition
+            local n = nil
+            if st.pattern then
+                if st.single_char then
+                    if line:sub(i,i):find(st.pattern) then
+                        n = i
+                    end
+                else
+                    n = line:find(st.pattern, i)
+                end
+            end
+
+            local transition, ch
+            if n then
+                ch = line:sub(n, n)
+                transition = st[ch]
+            else
+                n = i
+                ch = line:sub(n, n)
+                transition = st.default
+            end
+
+            if not transition then
+                -- output the rest of the string if we should
+                if not st.silent then
+                    out = i == 1 and line or line:sub(i)
+                end
+                break
+            end
+
+            -- output everything up to the transition if we should
+            if n > i and not st.silent then
+                buf = add(buf, line:sub(i, n - 1))
+            end
+
+            -- Some transitions output an explicit character
+            if transition.add then
+                buf = add(buf, transition.add)
+            end
+
+            if not transition.silent then
+                buf = add(buf, ch)
+            end
+
+            -- and move to the next state
+            state = transition.next
+            i = n + 1
+        end
+
+        -- A '/' at the very end of a logical line was consumed into the 'slash'
+        -- lookahead but never emitted; it cannot begin a comment (the next char
+        -- is on a different logical line), so it is a division operator. Emit it
+        -- rather than dropping it.
+        if state == "slash" then
+            out = out .. "/"
+            state = "any"
+        end
+
+        -- If we ended in a non-line-terminating state
+        if states[state].continue_line then
+            -- buffer the output and keep going
+            buf = add(buf, out)
+            state = states[state].continue_line
+        else
+            -- otherwise, flush the buffer
+            if buf then
+                table.insert(buf, out)
+                out = table.concat(buf)
+                buf = nil
+            end
+            -- output the string and reset the state.
+            table.insert(output, { nr = nr, line = out})
+            state = "any"
+        end
+    end
+
     for input_line in fd:lines() do
         -- for-loop control variables are read-only in Lua 5.5
         local line = input_line
         linenr = linenr + 1
+        -- Normalize CRLF: a physical line read in binary mode keeps its trailing
+        -- '\r', which would both hide a backslash-continuation (the '\' is no
+        -- longer the last character) and leak a stray '\r' into the tokens.
+        if line:sub(-1) == "\r" then
+            line = line:sub(1, -2)
+        end
         local len = #line
         if line:find("\\", len, true) then
             -- If backslash-terminated, buffer it
@@ -219,82 +315,22 @@ cpp.initial_processing = typed("FILE* -> LineList", function(fd)
                 line = table.concat(backslash_buf)
             end
             backslash_buf = nil
-
-            len = #line
-            local i = 1
-            local out = ""
-            -- Go through the line
-            while i <= len do
-                -- Current state in the state machine
-                local st = states[state]
-
-                -- Look for next character matching a state transition
-                local n = nil
-                if st.pattern then
-                    if st.single_char then
-                        if line:sub(i,i):find(st.pattern) then
-                            n = i
-                        end
-                    else
-                        n = line:find(st.pattern, i)
-                    end
-                end
-
-                local transition, ch
-                if n then
-                    ch = line:sub(n, n)
-                    transition = st[ch]
-                else
-                    n = i
-                    ch = line:sub(n, n)
-                    transition = st.default
-                end
-
-                if not transition then
-                    -- output the rest of the string if we should
-                    if not st.silent then
-                        out = i == 1 and line or line:sub(i)
-                    end
-                    break
-                end
-
-                -- output everything up to the transition if we should
-                if n > i and not st.silent then
-                    buf = add(buf, line:sub(i, n - 1))
-                end
-
-                -- Some transitions output an explicit character
-                if transition.add then
-                    buf = add(buf, transition.add)
-                end
-
-                if not transition.silent then
-                    buf = add(buf, ch)
-                end
-
-                -- and move to the next state
-                state = transition.next
-                i = n + 1
-            end
-
-            -- If we ended in a non-line-terminating state
-            if states[state].continue_line then
-                -- buffer the output and keep going
-                buf = add(buf, out)
-                state = states[state].continue_line
-            else
-                -- otherwise, flush the buffer
-                if buf then
-                    table.insert(buf, out)
-                    out = table.concat(buf)
-                    buf = nil
-                end
-                -- output the string and reset the state.
-                table.insert(output, { nr = linenr, line = out})
-                state = "any"
-            end
+            flush_logical_line(line, linenr)
         end
     end
+
+    -- EOF housekeeping so trailing code is never silently dropped: a file ending
+    -- with a backslash-continuation leaves text in backslash_buf, and a file
+    -- ending inside a block comment (or any continue_line state) leaves text in
+    -- buf. Flush both.
+    if backslash_buf then
+        flush_logical_line(table.concat(backslash_buf), linenr)
+    end
+    if buf then
+        table.insert(output, { nr = linenr, line = table.concat(buf) })
+        buf = nil
+    end
+
     fd:close()
     typed.set_type(output, "LineList")
     return output

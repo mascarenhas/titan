@@ -423,16 +423,38 @@ extern int after(void);
         end)
     end)
 
-    -- KNOWN pre-existing tokenizer/preprocessor defects (cpp.lua's hand-written
-    -- state machine was untested). Recorded as pending so they are tracked; none
-    -- are regressions from the FFI work. See the audit notes.
-    describe("known preprocessor bugs (pending)", function()
-        pending("a stray non-C character (@, $, `) silently truncates the rest of the line")
-        pending("a trailing '/' at end of a line is dropped (division operator lost)")
-        pending("EOF inside a backslash-continuation drops the buffered logical line")
-        pending("EOF inside an unterminated block comment drops the preceding code")
-        pending("backslash-continuation is not recognized on CRLF-terminated lines")
-        pending("an unterminated string/char literal drops the literal and rejoins the next line")
+    -- Regressions for pre-existing tokenizer/preprocessor defects in cpp.lua's
+    -- hand-written state machine and the c99 preprocessing tokenizer. These were
+    -- latent (the state machine was untested) and surfaced by the coverage
+    -- audit; each one used to silently drop the rest of a line. None were
+    -- regressions from the FFI work.
+    describe("tokenizer and state-machine robustness", function()
+        it("passes a stray non-C character through instead of truncating the line", function()
+            -- C99 6.4p1: any non-whitespace char that is no other token is an
+            -- "other" pp-token. It must not swallow the rest of the line.
+            assert.equal("int x @ = 1 ; kept", expand("int x@ = 1;\nkept\n"))
+            assert.equal("a $ b kept", expand("a $ b\nkept\n"))
+            assert.equal("a ` b kept", expand("a ` b\nkept\n"))
+        end)
+        it("keeps a '/' at the end of a line (division operator)", function()
+            assert.equal("a / b", expand("a /\nb\n"))
+        end)
+        it("keeps the buffered line when the file ends in a backslash-continuation", function()
+            assert.equal("a", expand("a \\\n"))
+        end)
+        it("keeps the preceding code when the file ends in an unterminated block comment", function()
+            assert.equal("kept more", expand("kept\nmore /* unterminated\n"))
+        end)
+        it("recognizes a backslash-continuation on a CRLF-terminated line", function()
+            assert.equal("1 + 2", expand("#define A 1 \\\r\n+ 2\nA\n"))
+        end)
+        it("does not drop an unterminated string or char literal", function()
+            assert.equal('a " unterminated next', expand("a \"unterminated\nnext\n"))
+            assert.equal("a ' x next", expand("a 'x\nnext\n"))
+        end)
+        it("does not drop the rest of the line after an empty char literal", function()
+            assert.equal("a ' ' b", expand("a '' b\n"))
+        end)
     end)
 
 end)

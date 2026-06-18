@@ -650,6 +650,13 @@ preprocessingToken <- preprocessingNumber
                     / STRING_LITERAL
                     / punctuator
                     / IDENTIFIER
+                    / otherToken
+
+-- C "each non-white-space character that cannot be one of the above" pp-token
+-- (C99 6.4p1). Without this, a stray char (@, $, `), an unterminated or empty
+-- string/char literal, etc. would stop the token list early and silently drop
+-- the rest of the logical line; instead we pass the character through verbatim.
+otherToken <- { !%s . }
 
 headerName <- {| {:mode: "<" -> "system" :} { (![%nl>] .)+ } ">" |}
             / {| {:mode: '"' -> "quote" :} { (![%nl"] .)+ } '"' |}
