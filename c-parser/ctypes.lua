@@ -478,52 +478,47 @@ local function register_enum(lst, item)
     return get_enum(lst, item.spec)
 end
 
+local function register_one(lst, item)
+    local spec_set = util.to_set(item.spec)
+    if spec_set.extern and item.ids then
+        return register_decls(lst, item.ids, item.spec)
+    elseif spec_set.extern and item.func then
+        return register_function(lst, item)
+    elseif spec_set.static and item.func then
+        return register_static_function(lst, item)
+    elseif spec_set.typedef then
+        return register_typedefs(lst, item)
+    elseif item.spec.type == "struct" or item.spec.type == "union" then
+        return register_structunion(lst, item)
+    elseif item.spec.type == "enum" then
+        return register_enum(lst, item)
+    elseif not item.ids then
+        return true -- forward declaration (e.g. "struct foo;")
+    elseif item.ids then
+        return register_decls(lst, item.ids, item.spec)
+    else
+        return false, "uncategorized declaration"
+    end
+end
+
 ctypes.register_types = typed("{Decl} -> TypeList?, string?", function(parsed)
     local lst = typed.table("TypeList", {})
+    local skipped = 0
     for _, item in ipairs(parsed) do
-        typed.check(item.spec, "table")
-        local spec_set = util.to_set(item.spec)
-        if spec_set.extern and item.ids then
-            local ok, err = register_decls(lst, item.ids, item.spec)
-            if not ok then
-                return nil, err or "failed extern"
-            end
-        elseif spec_set.extern and item.func then
-            local ok, err = register_function(lst, item)
-            if not ok then
-                return nil, err or "failed extern"
-            end
-        elseif spec_set.static and item.func then
-            local ok, err = register_static_function(lst, item)
-            if not ok then
-                return nil, err or "failed static function"
-            end
-        elseif spec_set.typedef then
-            local ok, err = register_typedefs(lst, item)
-            if not ok then
-                return nil, err or "failed typedef"
-            end
-        elseif item.spec.type == "struct" or item.spec.type == "union" then
-            local ok, err = register_structunion(lst, item)
-            if not ok then
-                return nil, err or "failed struct/union"
-            end
-        elseif item.spec.type == "enum" then
-            local ok, err = register_enum(lst, item)
-            if not ok then
-                return nil, err or "failed enum"
-            end
-        elseif not item.ids then
-            -- forward declaration (e.g. "struct foo;")
-        elseif item.ids then
-            local ok, err = register_decls(lst, item.ids, item.spec)
-            if not ok then
-                return nil, err or "failed declaration"
-            end
-        else
-            return nil, "FIXME Uncategorized declaration: " .. inspect(item)
+        -- Best-effort: any declaration we cannot model -- an unsupported C type
+        -- from a system header, or a shape this hand-written parser produced
+        -- that the registrar does not expect -- is skipped rather than failing
+        -- the whole header (and a raised error is caught, not propagated). The
+        -- generated C still #includes the real header, so only the types Titan
+        -- actually references need to register here; referencing a skipped one
+        -- is then a clean "not a member" error. ctypes.skipped reports how many
+        -- declarations were dropped.
+        local pok, rok = pcall(register_one, lst, item)
+        if not (pok and rok) then
+            skipped = skipped + 1
         end
     end
+    ctypes.skipped = skipped
     return lst, nil
 end)
 

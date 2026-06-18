@@ -46,6 +46,11 @@ end
 
 local typedefs = {}
 
+-- Number of top-level declarations skipped by the error-recovery rule during the
+-- last match_language_grammar call (see the `recover` rule). Exposed as
+-- c99.recoveries so callers can report how many declarations were not understood.
+local recoveries = 0
+
 local function elem(xs, e)
     for _, x in ipairs(xs) do
         if e == x then
@@ -59,6 +64,21 @@ defs["decl_func"] = typed("string, number, table -> boolean, Decl", function(_, 
     typed.set_type(decl, "Decl")
     return true, decl
 end)
+
+-- Match-time action for the error-recovery rule: count the skipped token/unit
+-- and succeed without producing a capture (so it contributes nothing to the
+-- translation unit's declaration list).
+defs["recover"] = function(_, _)
+    recoveries = recoveries + 1
+    return true
+end
+
+-- Match-time action used to drop a rule's captures: succeeds (keeping the match
+-- and its consumed input) but produces no value, so nothing leaks into an
+-- enclosing table capture.
+defs["discard"] = function(_, _)
+    return true
+end
 
 defs["decl_ids"] = typed("string, number, table -> boolean, Decl?", function(_, _, decl)
     -- store typedef
@@ -265,17 +285,53 @@ local language_rules = [[--lpeg.re
 --------------------------------------------------------------------------------
 -- External Definitions
 
-translationUnit <- %s* {| externalDeclaration* |} "$EOF$"
+translationUnit <- %s* {| (externalDeclaration / recover)* |} "$EOF$"
 
-externalDeclaration <- functionDefinition
+externalDeclaration <- staticAssertDeclaration
+                     / functionDefinition
                      / declaration
 
-functionDefinition <- {| {:spec: {| declarationSpecifier+ |} :} {:func: declarator :} {:decls: declaration* :} {:code: compoundStatement :} |} => decl_func
+-- Error recovery: system headers (e.g. GCC's SIMD intrinsics pulled in via
+-- SDL's <SDL_cpuinfo.h>) contain declarations this C99 grammar does not model.
+-- Rather than fail the whole header, skip a single token (or `;`, or a balanced
+-- `{...}`/string/char consumed atomically) and let translationUnit retry
+-- externalDeclaration -- so recovery resyncs at the very next declaration it can
+-- parse instead of over-running to the next `;` (which would swallow a good
+-- following declaration), and a dangling fragment at end-of-input is dropped
+-- rather than failing the whole parse. The generated C still #includes the real
+-- header, so only the types Titan references must be understood here;
+-- c99.recoveries counts the skipped items.
+recover <- recoverItem => recover
+recoverItem <- ";" _
+             / functionBody
+             / stringSkip
+             / charSkip
+             / (!"$EOF$" (!%s !";" !"{" !"}" !"$EOF$" .)+ %s*)
+
+-- C11 _Static_assert (and the C23 static_assert spelling). The FFI has no use
+-- for these, so match and discard -- but consume the message with STRING_LITERAL
+-- so its parentheses don't confuse paren matching.
+staticAssertDeclaration <- ( ("_Static_assert" / "static_assert") _ "(" _ constantExpression ("," _ STRING_LITERAL+)? ")" _ ";" _ ) => discard
+
+functionDefinition <- {| {:spec: {| declarationSpecifier+ |} :} {:func: declarator :} {:decls: declaration* :} functionBody |} => decl_func
+
+-- The FFI only needs a function's signature, never its body (and headers carry
+-- `static inline` definitions whose bodies use the full C statement grammar,
+-- inline asm, GNU extensions, Duff's device, ...). Skip the body as a balanced
+-- brace group, consuming string/char literals atomically so braces inside them
+-- are not miscounted.
+functionBody <- "{" _ functionBodyItem* "}" _
+functionBodyItem <- functionBody
+                  / stringSkip
+                  / charSkip
+                  / (!"{" !"}" !'"' !"'" .)+
+stringSkip <- ('"' / 'L"') sChar* '"' _
+charSkip <- ("'" / "L'") cChar+ "'" _
 
 --------------------------------------------------------------------------------
 -- Declarations
 
-declaration <- {| gccExtensionSpecifier? {:spec: {| declarationSpecifier+ |} :} ({:ids: initDeclarationList :})? gccExtensionSpecifier* ";" _ |} => decl_ids
+declaration <- {| gccExtensionSpecifier? {:spec: {| declarationSpecifier+ |} :} gccExtensionSpecifier* ({:ids: initDeclarationList :})? gccExtensionSpecifier* ";" _ |} => decl_ids
 
 declarationSpecifier <- storageClassSpecifier
                       / typeSpecifier
@@ -286,11 +342,14 @@ initDeclarationList <- {| initDeclarator ("," _ initDeclarator)* |}
 
 initDeclarator <- {| {:decl: declarator :} ("=" _ {:value: initializer :} )? |}
 
-gccExtensionSpecifier <- "__attribute__" _ "(" _ "(" _ gccAttributeList ")" _ ")" _
-                       / gccAsm
-                       / clangAsm
-                       / "__DARWIN_ALIAS_STARTING_MAC_1060" _ "(" _ clangAsm ")" _
-                       / "__AVAILABILITY_INTERNAL" [a-zA-Z0-9_]+ _ ("(" _ STRING_LITERAL ")" _ )?
+-- Wrapped in `=> discard`: attribute/asm specifiers carry no type information,
+-- so their inner captures (attribute names, asm operands) must not leak as stray
+-- positional entries into the enclosing declaration table.
+gccExtensionSpecifier <- ( "__attribute__" _ "(" _ "(" _ gccAttributeList ")" _ ")" _
+                         / gccAsm
+                         / clangAsm
+                         / "__DARWIN_ALIAS_STARTING_MAC_1060" _ "(" _ clangAsm ")" _
+                         / "__AVAILABILITY_INTERNAL" [a-zA-Z0-9_]+ _ ("(" _ STRING_LITERAL ")" _ )? ) => discard
 
 gccAsm <- "__asm__" _ "(" _ (STRING_LITERAL / ":" _ / expression)+ ")" _
 
@@ -323,6 +382,15 @@ typeSpecifier <- typedefName
                / { "__int128_t"  } _
                / { "__uint128_t" } _
                / { "__int128"    } _
+               / { "_Float128x"  } _
+               / { "_Float128"   } _
+               / { "_Float64x"   } _
+               / { "_Float64"    } _
+               / { "_Float32x"   } _
+               / { "_Float32"    } _
+               / { "_Float16"    } _
+               / { "__float128"  } _
+               / { "__float80"   } _
                / structOrUnionSpecifier
                / enumSpecifier
 
@@ -332,8 +400,8 @@ typeQualifier <- { "const"    } _
 
 functionSpecifier <- { "inline" } _
 
-structOrUnionSpecifier <- {| {:type: structOrUnion :} ({:id: IDENTIFIER :})? "{" _ {:fields: {| structDeclaration+ |} :} "}" _ |}
-                        / {| {:type: structOrUnion :}  {:id: IDENTIFIER :}                                                     |}
+structOrUnionSpecifier <- {| {:type: structOrUnion :} gccExtensionSpecifier* ({:id: IDENTIFIER :})? "{" _ {:fields: {| structDeclaration+ |} :} "}" _ |}
+                        / {| {:type: structOrUnion :} gccExtensionSpecifier* {:id: IDENTIFIER :}                                                     |}
 
 structOrUnion <- { "struct" } _
                / { "union"  } _
@@ -351,8 +419,8 @@ structDeclaratorList <- {| structDeclarator ("," _ structDeclarator)* |}
 structDeclarator <- declarator? ":" _ constantExpression
                   / declarator
 
-enumSpecifier <- {| {:type: enum :} ({:id: IDENTIFIER :})? "{" _ {:values: enumeratorList :} ("," _)? "}" _ |}
-               / {| {:type: enum :}  {:id: IDENTIFIER :}                                                          |}
+enumSpecifier <- {| {:type: enum :} gccExtensionSpecifier* ({:id: IDENTIFIER :})? "{" _ {:values: enumeratorList :} ("," _)? "}" _ |}
+               / {| {:type: enum :} gccExtensionSpecifier* {:id: IDENTIFIER :}                                                          |}
 
 enum <- { "enum" } _
 
@@ -582,6 +650,13 @@ preprocessingToken <- preprocessingNumber
                     / STRING_LITERAL
                     / punctuator
                     / IDENTIFIER
+                    / otherToken
+
+-- C "each non-white-space character that cannot be one of the above" pp-token
+-- (C99 6.4p1). Without this, a stray char (@, $, `), an unterminated or empty
+-- string/char literal, etc. would stop the token list early and silently drop
+-- the rest of the logical line; instead we pass the character through verbatim.
+otherToken <- { !%s . }
 
 headerName <- {| {:mode: "<" -> "system" :} { (![%nl>] .)+ } ">" |}
             / {| {:mode: '"' -> "quote" :} { (![%nl"] .)+ } '"' |}
@@ -679,7 +754,13 @@ local language_grammar = re.compile(
     common_expression_rules, defs)
 
 local function match(grammar, subject)
-    local res, err, pos = grammar:match(subject)
+    -- pcall so a pathologically nested input (LPeg "backtrack stack overflow",
+    -- e.g. hundreds of nested braces/parens in a system header) surfaces as a
+    -- clean parse failure instead of raising out of the FFI.
+    local ok, res, err, pos = pcall(grammar.match, grammar, subject)
+    if not ok then
+        return nil, tostring(res), 1, 1, ""
+    end
     if res == nil then
         local l, c = re.calcline(subject, pos)
         local fragment = subject:sub(pos, pos+20)
@@ -690,7 +771,10 @@ end
 
 function c99.match_language_grammar(subject)
     typedefs = {}
-    return match(language_grammar, subject)
+    recoveries = 0
+    local res, err, l, c, fragment = match(language_grammar, subject)
+    c99.recoveries = recoveries
+    return res, err, l, c, fragment
 end
 
 function c99.match_language_expression_grammar(subject)

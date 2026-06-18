@@ -70,7 +70,12 @@ do
             return shallow_copy(default_defines)
         end
 
-        local pd = io.popen("LANG=C gcc -dM -E - < /dev/null")
+        -- The FFI grammar (c99.lua) targets C99/C11; ask for predefined macros
+        -- in gnu11 mode so a C23-default toolchain doesn't set __STDC_VERSION__
+        -- to 202311L, which would pull in C23-only constructs from system
+        -- headers (e.g. `typedef __typeof__(nullptr) nullptr_t;` in <stddef.h>)
+        -- that the grammar cannot parse.
+        local pd = io.popen("LANG=C gcc -std=gnu11 -dM -E - < /dev/null")
         if not pd then
             return {}
         end
@@ -199,10 +204,106 @@ cpp.initial_processing = typed("FILE* -> LineList", function(fd)
     local state = "any"
     local output = {}
     local linenr = 0
+
+    -- Run the comment/string state machine over one complete logical line
+    -- (backslash-continuations already merged) and append the result to
+    -- `output`. `buf` and `state` persist across calls so a block comment can
+    -- span several logical lines (states[state].continue_line).
+    local function flush_logical_line(line, nr)
+        local len = #line
+        local i = 1
+        local out = ""
+        -- Go through the line
+        while i <= len do
+            -- Current state in the state machine
+            local st = states[state]
+
+            -- Look for next character matching a state transition
+            local n = nil
+            if st.pattern then
+                if st.single_char then
+                    if line:sub(i,i):find(st.pattern) then
+                        n = i
+                    end
+                else
+                    n = line:find(st.pattern, i)
+                end
+            end
+
+            local transition, ch
+            if n then
+                ch = line:sub(n, n)
+                transition = st[ch]
+            else
+                n = i
+                ch = line:sub(n, n)
+                transition = st.default
+            end
+
+            if not transition then
+                -- output the rest of the string if we should
+                if not st.silent then
+                    out = i == 1 and line or line:sub(i)
+                end
+                break
+            end
+
+            -- output everything up to the transition if we should
+            if n > i and not st.silent then
+                buf = add(buf, line:sub(i, n - 1))
+            end
+
+            -- Some transitions output an explicit character
+            if transition.add then
+                buf = add(buf, transition.add)
+            end
+
+            if not transition.silent then
+                buf = add(buf, ch)
+            end
+
+            -- and move to the next state
+            state = transition.next
+            i = n + 1
+        end
+
+        -- A '/' at the very end of a logical line was consumed into the 'slash'
+        -- lookahead but never emitted; it cannot begin a comment (the next char
+        -- is on a different logical line), so it is a division operator. Emit it
+        -- rather than dropping it.
+        if state == "slash" then
+            out = out .. "/"
+            state = "any"
+        end
+
+        -- If we ended in a non-line-terminating state
+        if states[state].continue_line then
+            -- buffer the output and keep going
+            buf = add(buf, out)
+            state = states[state].continue_line
+        else
+            -- otherwise, flush the buffer
+            if buf then
+                table.insert(buf, out)
+                out = table.concat(buf)
+                buf = nil
+            end
+            -- output the string and reset the state.
+            table.insert(output, { nr = nr, line = out})
+            state = "any"
+        end
+    end
+
     for input_line in fd:lines() do
         -- for-loop control variables are read-only in Lua 5.5
         local line = input_line
         linenr = linenr + 1
+        -- Normalize CRLF: a physical line read in binary mode keeps its trailing
+        -- '\r', which would both hide a backslash-continuation (the '\' is no
+        -- longer the last character) and leak a stray '\r' into the tokens.
+        if line:sub(-1) == "\r" then
+            line = line:sub(1, -2)
+        end
         local len = #line
         if line:find("\\", len, true) then
             -- If backslash-terminated, buffer it
@@ -214,82 +315,22 @@ cpp.initial_processing = typed("FILE* -> LineList", function(fd)
                 line = table.concat(backslash_buf)
             end
             backslash_buf = nil
-
-            len = #line
-            local i = 1
-            local out = ""
-            -- Go through the line
-            while i <= len do
-                -- Current state in the state machine
-                local st = states[state]
-
-                -- Look for next character matching a state transition
-                local n = nil
-                if st.pattern then
-                    if st.single_char then
-                        if line:sub(i,i):find(st.pattern) then
-                            n = i
-                        end
-                    else
-                        n = line:find(st.pattern, i)
-                    end
-                end
-
-                local transition, ch
-                if n then
-                    ch = line:sub(n, n)
-                    transition = st[ch]
-                else
-                    n = i
-                    ch = line:sub(n, n)
-                    transition = st.default
-                end
-
-                if not transition then
-                    -- output the rest of the string if we should
-                    if not st.silent then
-                        out = i == 1 and line or line:sub(i)
-                    end
-                    break
-                end
-
-                -- output everything up to the transition if we should
-                if n > i and not st.silent then
-                    buf = add(buf, line:sub(i, n - 1))
-                end
-
-                -- Some transitions output an explicit character
-                if transition.add then
-                    buf = add(buf, transition.add)
-                end
-
-                if not transition.silent then
-                    buf = add(buf, ch)
-                end
-
-                -- and move to the next state
-                state = transition.next
-                i = n + 1
-            end
-
-            -- If we ended in a non-line-terminating state
-            if states[state].continue_line then
-                -- buffer the output and keep going
-                buf = add(buf, out)
-                state = states[state].continue_line
-            else
-                -- otherwise, flush the buffer
-                if buf then
-                    table.insert(buf, out)
-                    out = table.concat(buf)
-                    buf = nil
-                end
-                -- output the string and reset the state.
-                table.insert(output, { nr = linenr, line = out})
-                state = "any"
-            end
+            flush_logical_line(line, linenr)
         end
     end
+
+    -- EOF housekeeping so trailing code is never silently dropped: a file ending
+    -- with a backslash-continuation leaves text in backslash_buf, and a file
+    -- ending inside a block comment (or any continue_line state) leaves text in
+    -- buf. Flush both.
+    if backslash_buf then
+        flush_logical_line(table.concat(backslash_buf), linenr)
+    end
+    if buf then
+        table.insert(output, { nr = linenr, line = table.concat(buf) })
+        buf = nil
+    end
+
     fd:close()
     typed.set_type(output, "LineList")
     return output
@@ -498,9 +539,19 @@ local mark_noloop = typed("table, string, number -> ()", function(noloop, token,
     noloop[token] = math.max(noloop[token] or 0, n)
 end)
 
-local shift_noloop = typed("table, number -> ()", function(noloop, n)
+-- Shift recorded "blue paint" positions by `n` after the token stream changed
+-- length at position `from`. Only entries at or past `from` move; entries before
+-- it are already behind the cursor (their paint has expired -- see valid_noloop)
+-- and must NOT be bumped forward, or a subsequent, unrelated use of the same
+-- macro would be wrongly suppressed. This happens with glibc's <math.h>, where
+-- __CONCAT is reused across sibling expansions of __MATHCALL_VEC: painting it
+-- once (via __SIMD_DECL) used to block the later __CONCAT(name,) in the actual
+-- declaration, dropping the function name.
+local shift_noloop = typed("table, number, number -> ()", function(noloop, n, from)
     for token, v in pairs(noloop) do
-        noloop[token] = v + n
+        if v >= from then
+            noloop[token] = v + n
+        end
     end
 end)
 
@@ -590,7 +641,7 @@ macro_expand = typed("Ctx, {string}, LineList, number, boolean -> ()", function(
                     else
                         table_replace_n_with(tokens, i, n, expansion)
                     end
-                    shift_noloop(noloop, nexpansion - n)
+                    shift_noloop(noloop, nexpansion - n, i)
                     mark_noloop(noloop, token, i + nexpansion - 1)
                 else
                     i = i + 1
@@ -599,7 +650,7 @@ macro_expand = typed("Ctx, {string}, LineList, number, boolean -> ()", function(
                 local ndefine = #define
                 if ndefine == 0 then
                     table.remove(tokens, i)
-                    shift_noloop(noloop, -1)
+                    shift_noloop(noloop, -1, i)
                 elseif ndefine == 1 then
                     tokens[i] = define[1]
                     mark_noloop(noloop, token, i)

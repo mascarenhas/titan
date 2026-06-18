@@ -9,6 +9,7 @@
 -- test failure instead of a hung suite.
 
 local cpp = require "c-parser.cpp"
+local c99 = require "c-parser.c99"
 
 -- Run the preprocessor over `src` (a chunk of C) in isolation -- an empty
 -- define set and no system include paths, so nothing is pulled in from the
@@ -39,6 +40,16 @@ local function expand(src)
     assert(ok, rctx)        -- on a hook/runtime error, rctx is the message
     assert(rctx, err)       -- parse_file returned (nil, err)
     return table.concat(ctx.output, " ")
+end
+
+-- Preprocess `src` like the FFI does, then run the C99 declaration grammar
+-- (c-parser/c99.lua) over the result. Returns (parsed_ok, recoveries) where
+-- `recoveries` is how many top-level declarations the error-recovery rule had
+-- to skip. This exercises the grammar pieces the FFI needs for real system
+-- headers (extended floats, _Static_assert, function-body skipping, recovery).
+local function parse_decls(src)
+    local res = c99.match_language_grammar(expand(src) .. " $EOF$")
+    return res ~= nil, c99.recoveries, res and #res or 0
 end
 
 describe("c preprocessor (cpp)", function()
@@ -127,6 +138,31 @@ describe("c preprocessor (cpp)", function()
         it("pastes tokens with ##", function()
             assert.equal("foobar", expand("#define CAT(a,b) a ## b\nCAT(foo,bar)\n"))
         end)
+        it("pastes with an empty argument (placemarker)", function()
+            assert.equal("acos", expand("#define CAT(x,y) x ## y\nCAT(acos,)\n"))
+        end)
+        -- Regression: a paste macro reused across sibling expansions must not be
+        -- suppressed by the recursion guard. This mirrors glibc's <math.h>, where
+        -- __MATHCALL_VEC expands __CONCAT once via __SIMD_DECL (which used to
+        -- "blue paint" it for the rest of the line) and again in the actual
+        -- declaration -- the second __CONCAT(name,) was dropped, losing the
+        -- function name. See shift_noloop in cpp.lua.
+        it("re-expands a paste macro reused in a later sibling expansion", function()
+            assert.equal(
+                "simd_acos extern double acos ( double __x ) ; "
+                .. "extern double __acos ( double __x )",
+                expand([[
+#define CAT(x,y) x ## y
+#define PRECNAME(name,r) CAT(name,r)
+#define SIMD(f) CAT(simd_, f)
+#define DECL1_IMPL(t,f,s,a) extern t PRECNAME(f,s) a
+#define DECL1(t,f,s,a) DECL1_IMPL(t,f,s,a)
+#define DECL(t,f,s,a) DECL1(t,f,s,a) ; DECL1(t, CAT(__,f), s, a)
+#define CALL(f,s,a) DECL(double, f, s, a)
+#define VEC(f,s,a) SIMD(PRECNAME(f,s)) CALL(f,s,a)
+VEC(acos,, (double __x))
+]]))
+        end)
     end)
 
     describe("conditional compilation", function()
@@ -148,6 +184,276 @@ describe("c preprocessor (cpp)", function()
         end)
         it("expands macros inside an #if condition", function()
             assert.equal("hit", expand("#define V 1\n#if V == 1\nhit\n#endif\n"))
+        end)
+    end)
+
+    -- The C99 declaration grammar (c-parser/c99.lua) consumed by the FFI. These
+    -- pin the additions made so real system headers (math.h, SDL2/SDL.h, ...)
+    -- can be imported: extended float keywords, _Static_assert, function-body
+    -- skipping, and error recovery over declarations the grammar can't model.
+    -- The C99 declaration grammar (c-parser/c99.lua) consumed by the FFI. It was
+    -- essentially untested before; these pin its real behaviour. `n` is the
+    -- number of top-level declaration nodes (one per declaration, not per
+    -- declarator), and recoveries must be 0 for well-formed input.
+    describe("c99 declaration grammar (FFI): types and declarators", function()
+        local function ok_decls(src, n)
+            local ok, rec, ndecls = parse_decls(src)
+            assert.is_true(ok)
+            assert.equal(0, rec)
+            assert.equal(n, ndecls)
+        end
+        it("accepts the extended floating-point type keywords", function()
+            ok_decls("extern _Float128 f(_Float64 a, _Float32 b, _Float16 c);\n", 1)
+        end)
+        it("pointers and pointer-to-pointer", function()
+            ok_decls("extern int *p; extern char **q;\n", 2)
+        end)
+        it("arrays, sized and unsized", function()
+            ok_decls("extern int a[]; extern int b[10];\n", 2)
+        end)
+        it("multiple declarators count as one declaration node", function()
+            ok_decls("int a, b, c;\n", 1)
+        end)
+        it("qualifiers and storage-class specifiers", function()
+            ok_decls("static const volatile int x;\n", 1)
+        end)
+        it("varargs and (void) parameter lists", function()
+            ok_decls("int p(const char *f, ...); int q(void);\n", 2)
+        end)
+        it("abstract (unnamed) parameter declarators", function()
+            ok_decls("int f(int, char *);\n", 1)
+        end)
+        it("function-pointer parameters (qsort-style)", function()
+            ok_decls("void qs(void *b, int (*cmp)(const void *, const void *));\n", 1)
+        end)
+        it("the hard declarators: fn-returning-fn-pointer, fn-pointer array, pointer-to-array", function()
+            ok_decls("int (*signal(int, void (*)(int)))(int);\n", 1)
+            ok_decls("int (*fns[3])(void); int (*p)[10];\n", 2)
+        end)
+        it("typedef definition then use of the typedef name", function()
+            ok_decls("typedef int myint;\nmyint x;\n", 2)
+        end)
+        it("struct/union with fields", function()
+            ok_decls("struct P { int x; int y; };\n", 1)
+        end)
+        it("struct bitfields, including anonymous zero-width", function()
+            ok_decls("struct B { unsigned a : 3; int : 0; };\n", 1)
+        end)
+        it("anonymous union member inside a struct", function()
+            ok_decls("struct s { int tag; union { int i; float f; }; };\n", 1)
+        end)
+        it("enum with assigned values and a trailing comma", function()
+            ok_decls("enum E { A, B = 5, C, };\n", 1)
+        end)
+        it("constant-expression grammar in an array size (sizeof, shift, ternary)", function()
+            ok_decls("int arr[(sizeof(int) << 1) > 4 ? 8 : 4];\n", 1)
+        end)
+        it("GCC attributes on declarations and around struct/enum tags", function()
+            ok_decls("__attribute__((deprecated)) int x;\n", 1)
+            ok_decls("int y __attribute__((aligned(8)));\n", 1)
+            ok_decls("struct s { int x; } __attribute__((packed));\n", 1)
+            ok_decls("struct __attribute__((packed)) t { int x; };\n", 1)
+            ok_decls("enum e { A, B } __attribute__((packed));\n", 1)
+        end)
+    end)
+
+    -- Robustness features that let the FFI read messy real headers without
+    -- failing the whole import. Regressions live here too.
+    describe("c99 error recovery and robustness", function()
+        it("a _Static_assert injects no phantom declarations", function()
+            -- regression: its constant-expression/message captures used to leak
+            -- as extra top-level entries (n was 3 here instead of 1).
+            local ok, rec, n = parse_decls(
+                '_Static_assert(sizeof(int) == 4, "sizeof (int) == 4");\n'
+                .. "extern int g(void);\n")
+            assert.is_true(ok); assert.equal(0, rec); assert.equal(1, n)
+        end)
+        it("_Static_assert: single-arg (C23) and concatenated message", function()
+            local ok, rec, n = parse_decls("static_assert(1);\nextern int g(void);\n")
+            assert.is_true(ok); assert.equal(0, rec); assert.equal(1, n)
+            ok, rec, n = parse_decls('_Static_assert(1, "ab" "cd");\nextern int g(void);\n')
+            assert.is_true(ok); assert.equal(0, rec); assert.equal(1, n)
+        end)
+        it("recovery resyncs at the next declaration, keeping both neighbours", function()
+            -- regression: skip-to-`;` recovery used to swallow the following good
+            -- declaration when the bad unit had no terminator of its own.
+            local ok, _, n = parse_decls(
+                "extern int a(void);\nunmodeled garbage here\nextern int b(void);\n")
+            assert.is_true(ok); assert.equal(2, n)
+        end)
+        it("recovery degrades gracefully at end-of-input", function()
+            -- regression: a brace- or token-terminated bad unit at EOF used to
+            -- fail the entire parse instead of just dropping the bad unit.
+            local ok, _, n = parse_decls("weird { x }\n")
+            assert.is_true(ok); assert.equal(0, n)
+            ok, _, n = parse_decls("extern int a(void);\ngarbage_token\n")
+            assert.is_true(ok); assert.equal(1, n)
+        end)
+        it("counts each skipped token/unit and keeps the good neighbours", function()
+            local ok, rec, n = parse_decls(
+                "extern int a(void);\n1 2 3 ;\nextern int b(void);\n")
+            assert.is_true(ok); assert.equal(4, rec); assert.equal(2, n)
+        end)
+        it("does not recover when everything parses cleanly", function()
+            local ok, rec, n = parse_decls("extern int a(void);\nextern int b(void);\n")
+            assert.is_true(ok); assert.equal(0, rec); assert.equal(2, n)
+        end)
+        it("skips function bodies (empty, Duff's device, brace/`;` in literals)", function()
+            local ok, rec = parse_decls([[
+static inline void fill(int *p, int n) {
+    switch (n % 2) {
+    case 0: do { *p++ = 0; do {} while (0);
+    case 1: *p++ = 0;
+            } while (--n > 0);
+    }
+}
+extern int after(void);
+]])
+            assert.is_true(ok); assert.equal(0, rec)
+            ok, rec = parse_decls(
+                'static inline void f(void) { const char *s = "}{;}{"; char c = \'}\'; }\n'
+                .. "extern int after(void);\n")
+            assert.is_true(ok); assert.equal(0, rec)
+        end)
+        it("fails cleanly (no Lua error) on pathologically nested input", function()
+            -- regression: an LPeg backtrack-stack overflow now returns a clean
+            -- parse failure (pcall in match) instead of raising out of the FFI.
+            local deep = "static inline void f(void) "
+                .. string.rep("{", 250) .. string.rep("}", 250) .. "\n"
+            assert.is_false((parse_decls(deep)))
+        end)
+    end)
+
+    describe("comments and line continuation", function()
+        it("strips a line comment", function()
+            assert.equal("int x ; int y ;", expand("int x; // tail\nint y;\n"))
+        end)
+        it("strips a block comment", function()
+            assert.equal("int x ;", expand("int /* c */ x;\n"))
+        end)
+        it("strips a block comment spanning lines", function()
+            assert.equal("a b", expand("a /* l1\nl2 */ b\n"))
+        end)
+        it("does not treat comment markers inside a string as a comment", function()
+            assert.equal([[char * s = "a \" /* x */" ;]],
+                expand([[char *s = "a \" /* x */";]] .. "\n"))
+        end)
+        it("preserves an escaped backslash in a char literal", function()
+            assert.equal([[c = '\\' ;]], expand([[c = '\\';]] .. "\n"))
+        end)
+        it("splices a backslash-newline mid-token (pure deletion)", function()
+            assert.equal("int x ;", expand("in\\\nt x;\n"))
+        end)
+        it("splices a backslash-newline inside a macro body", function()
+            assert.equal("a + b", expand("#define M a \\\n+ b\nM\n"))
+        end)
+        it("applies continuation before comment stripping", function()
+            assert.equal("a b", expand("a /* l1 \\\nl2 */ b\n"))
+        end)
+        it("treats a trailing CR (CRLF) as whitespace on normal lines", function()
+            assert.equal("int x ; int y ;", expand("int x;\r\nint y;\r\n"))
+        end)
+    end)
+
+    describe("#if expression operators and #elif", function()
+        local function on(expr) -- "OK" iff the #if branch is kept
+            return expand("#if " .. expr .. "\nOK\n#endif\n")
+        end
+        it("arithmetic, shift, relational, logical, ternary, unary operators", function()
+            assert.equal("OK", on("1 - 1 == 0"))
+            assert.equal("OK", on("2 * 3 == 6"))
+            assert.equal("OK", on("8 / 2 == 4"))
+            assert.equal("OK", on("1 << 4 == 16"))
+            assert.equal("OK", on("256 >> 2 == 64"))
+            assert.equal("OK", on("3 > 2"))
+            assert.equal("OK", on("2 < 3"))
+            assert.equal("OK", on("2 <= 2"))
+            assert.equal("OK", on("3 >= 3"))
+            assert.equal("OK", on("1 != 2"))
+            assert.equal("OK", on("1 && 1"))
+            assert.equal("OK", on("0 || 1"))
+            assert.equal("OK", on("!0"))
+            assert.equal("OK", on("(1 ? 2 : 0) == 2"))
+        end)
+        it("octal, hex, and parenthesized constants", function()
+            assert.equal("OK", on("0x10 == 16"))
+            assert.equal("OK", on("010 == 8"))
+            assert.equal("OK", on("1 + (2 * 3) == 7"))
+        end)
+        it("the defined operator, with and without parentheses", function()
+            assert.equal("yes", expand("#define F\n#if defined F\nyes\n#endif\n"))
+            assert.equal("yes", expand("#define F\n#if defined(F)\nyes\n#endif\n"))
+        end)
+        it("expands a macro operand inside the condition", function()
+            assert.equal("yes", expand("#define N 3\n#if N * 2 == 6\nyes\n#endif\n"))
+        end)
+        it("#elif takes a true branch after a false #if", function()
+            assert.equal("b", expand("#if 0\na\n#elif 1\nb\n#else\nc\n#endif\n"))
+        end)
+        it("#elif is skipped after a true #if branch", function()
+            assert.equal("a", expand("#if 1\na\n#elif 1\nb\n#endif\n"))
+        end)
+        it("skips a nested #if inside a dropped block", function()
+            assert.equal("after", expand("#if 0\n#if 1\nx\n#endif\ny\n#endif\nafter\n"))
+        end)
+        it("ignores #pragma", function()
+            assert.equal("kept", expand("#pragma once\nkept\n"))
+        end)
+    end)
+
+    describe("macro expansion edge cases", function()
+        it("an empty object-like macro expands to nothing", function()
+            assert.equal("a b", expand("#define E\na E b\n"))
+        end)
+        it("expands a function-like call spanning multiple lines", function()
+            -- the consumed continuation line contributes the trailing space
+            assert.equal("1 + 2 ", expand("#define ADD(a,b) a + b\nADD(1,\n2)\n"))
+        end)
+        it("keeps a comma inside parentheses within a single argument", function()
+            assert.equal("( a , b )", expand("#define F(x) x\nF((a,b))\n"))
+        end)
+        it("chains ## across three operands", function()
+            assert.equal("foobarbaz", expand("#define C(a,b,c) a ## b ## c\nC(foo,bar,baz)\n"))
+        end)
+        it("rescans a name formed by ## and expands it", function()
+            assert.equal("7", expand("#define AB 7\n#define J(a,b) a ## b\nJ(A,B)\n"))
+        end)
+        it("stringizes a multi-token argument", function()
+            assert.equal('"a + b"', expand("#define S(x) #x\nS(a + b)\n"))
+        end)
+    end)
+
+    -- Regressions for pre-existing tokenizer/preprocessor defects in cpp.lua's
+    -- hand-written state machine and the c99 preprocessing tokenizer. These were
+    -- latent (the state machine was untested) and surfaced by the coverage
+    -- audit; each one used to silently drop the rest of a line. None were
+    -- regressions from the FFI work.
+    describe("tokenizer and state-machine robustness", function()
+        it("passes a stray non-C character through instead of truncating the line", function()
+            -- C99 6.4p1: any non-whitespace char that is no other token is an
+            -- "other" pp-token. It must not swallow the rest of the line.
+            assert.equal("int x @ = 1 ; kept", expand("int x@ = 1;\nkept\n"))
+            assert.equal("a $ b kept", expand("a $ b\nkept\n"))
+            assert.equal("a ` b kept", expand("a ` b\nkept\n"))
+        end)
+        it("keeps a '/' at the end of a line (division operator)", function()
+            assert.equal("a / b", expand("a /\nb\n"))
+        end)
+        it("keeps the buffered line when the file ends in a backslash-continuation", function()
+            assert.equal("a", expand("a \\\n"))
+        end)
+        it("keeps the preceding code when the file ends in an unterminated block comment", function()
+            assert.equal("kept more", expand("kept\nmore /* unterminated\n"))
+        end)
+        it("recognizes a backslash-continuation on a CRLF-terminated line", function()
+            assert.equal("1 + 2", expand("#define A 1 \\\r\n+ 2\nA\n"))
+        end)
+        it("does not drop an unterminated string or char literal", function()
+            assert.equal('a " unterminated next', expand("a \"unterminated\nnext\n"))
+            assert.equal("a ' x next", expand("a 'x\nnext\n"))
+        end)
+        it("does not drop the rest of the line after an empty char literal", function()
+            assert.equal("a ' ' b", expand("a '' b\n"))
         end)
     end)
 
