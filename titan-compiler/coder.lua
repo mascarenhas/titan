@@ -46,24 +46,6 @@ local function c_float_literal(n)
 end
 
 
--- Is this expression a numeric literal?
--- If yes, return that number. If not, returns nil.
---
--- This limited form of constant-folding is enough to optimize things like for
--- loops, since most of the time the loop step is a numeric literal.
--- Note to self: A constant-folding optimization pass would obsolete this
-local function node2literal(node)
-    local tag = node._tag
-    if tag == "Ast.ExpInteger" or tag == "Ast.ExpFloat" then
-        return tonumber(node.value)
-    elseif tag == "Ast.ExpUnop" and node.op == "-" then
-        local lexp = node2literal(node.exp)
-        return lexp and -lexp
-    else
-        return nil
-    end
-end
-
 local function getslot(typ --[[:table]], dst --[[:string?]], src --[[:string]])
     dst = dst and dst .. " =" or ""
     local tmpl
@@ -146,10 +128,6 @@ local function func_luaname(modname, name)
     return modprefix(modname) .. name .. "_lua"
 end
 
-local function var_name(modname, name)
-    return modprefix(modname) .. name .. "_titanvar"
-end
-
 -- get name of the variable holding the tag for this type
 local function type2tagname(ctx, typ --[[:table]])
     local mod, name = typ.fqtn:match("^(.*)%.(%a+)$")
@@ -193,7 +171,7 @@ end
 
 local checkandset
 
-local function codethrow(ctx, template, params)
+local function codethrow(_, template, params)
     return render([[
         luaL_error(L, "$TEMPLATE", $PARAMS);
     ]], {
@@ -586,7 +564,7 @@ local function function_sig(fname, ftype, is_pointer)
     if ftype._tag == "Type.Method" then
         table.insert(params, "CClosure*")
     end
-    for i, ptype in ipairs(ftype.params) do
+    for _, ptype in ipairs(ftype.params) do
         table.insert(params, ctype(ptype))
     end
     for i = 2, #ftype.rettypes do
@@ -1146,7 +1124,6 @@ local function codemultiassignment(ctx, node)
     local tmps = {}
     for i, exp in ipairs(node.exps) do
         local var = node.vars[i]
-        local vtag = var and var._tag
         if var then
             local typ = exp._type
             local ctmp, tmpname = newtmp(ctx, typ)
@@ -1272,7 +1249,7 @@ local function codeforeigncall(ctx, node)
     return cstats, ccall
 end
 
-local function codeforeignvar(ctx, node)
+local function codeforeignvar(_, node)
     return "", node.name
 end
 
@@ -1963,7 +1940,6 @@ local function coderecord(ctx, node, target)
         META = c_integer_literal(type2metatable(ctx, node._type))
     })
     table.insert(stats, cinit)
-    local slots = {}
     for _, field in ipairs(node.fields) do
         local exp = field.exp
         local cstats, cexp = codeexp(ctx, exp)
@@ -2182,7 +2158,7 @@ local function generate_binop_mod_flt(exp, ctx)
     return cstats, rname
 end
 
-local function codebinaryop(ctx, node, iscondition)
+local function codebinaryop(ctx, node, _)
     local op = node.op
     if op == "~=" then op = "!=" end
     if op == "and" then
@@ -2990,7 +2966,7 @@ local function codefuncdec(tlcontext, node)
         end
         table.insert(cparams, ctype(node._self._type) .. " " .. node._self._cvar)
     end
-    for i, param in ipairs(node.params) do
+    for _, param in ipairs(node.params) do
         param._cvar = "_param_" .. param.name
         if types.is_gc(param._type) and param._assigned then
             param._slot = "_paramslot_" .. param.name
@@ -3264,7 +3240,7 @@ local function init_data_from_other_modules(tlcontext, includes, loadmods, initm
     -- from the other module's dynamic library
     -- When linking statically, we only need to make 'extern' forward declarations.
 
-    for name, func in pairs(tlcontext.functions) do
+    for _, func in pairs(tlcontext.functions) do
         local is_dynamic = not static_deps[func.module]
         local storage_class = is_dynamic and "static" or "extern"
         local fname = func.mangled
@@ -3324,7 +3300,7 @@ local function coderecorddec(ctx, code, initrecs, inittags, node)
     -- (the type tag is forward-declared up front in generate(), so that
     -- forward/mutually-recursive record field types resolve)
     local fieldmap, getswitch, setswitch = {}, {}, {}
-    for i, field in ipairs(node._type.fields) do
+    for _, field in ipairs(node._type.fields) do
         table.insert(fieldmap, render([[
             lua_pushliteral(L, $NAME);
             lua_pushinteger(L, $INDEX);
