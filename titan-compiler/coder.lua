@@ -2738,7 +2738,11 @@ function codeexp(ctx, node, iscondition, target)
         -- the shared AST/type tables in place; the synthetic node carries its own
         -- resolved types and reuses the original operand and location.
         local function resolve(t)
-            if t and t._tag == "Type.Typedef" then return t._type end
+            -- Unwrap ALL typedef levels: typedefs can chain (e.g. macOS's
+            -- `size_t` -> `__darwin_size_t` -> `unsigned long`, glibc's
+            -- `clock_t` -> `__clock_t` -> long). A one-level unwrap leaves a
+            -- Typedef on the synthesized cast, which re-enters this arm forever.
+            while t and t._tag == "Type.Typedef" do t = t._type end
             return t
         end
         local stype = resolve(node.exp._type)

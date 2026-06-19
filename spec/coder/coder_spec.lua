@@ -1540,6 +1540,33 @@ describe("Titan code generator", function()
         assert.truthy(ok, err)
     end)
 
+    it("casts a multi-level (chained) foreign typedef to value", function ()
+        -- Regression for a macOS-only CI hang. glibc's `size_t` is a single
+        -- typedef, but macOS's is chained: `size_t` -> `__darwin_size_t` ->
+        -- `unsigned long`. The cast-site typedef resolver must unwrap ALL levels;
+        -- a one-level unwrap kept re-wrapping the original operand and re-entered
+        -- the cast-normalization arm forever on a chained typedef (CPU-spin hang).
+        -- `clock_t` is chained on glibc too (`clock_t` -> `__clock_t` -> long), so
+        -- this reproduces the loop on Linux.
+        local modules = {
+            foo = [[
+                local time_h = foreign import "time.h"
+                function ticks(): value
+                    local c = time_h.clock()   -- c: clock_t (chained typedef)
+                    return c as value
+                end
+            ]]
+        }
+        local ok, err = generate_modules(modules, "foo")
+        assert.truthy(ok, err)
+        local ok, err = call("foo", [[
+            local t = foo.ticks()
+            assert(type(t) == "number")
+            assert(t >= 0)
+        ]])
+        assert.truthy(ok, err)
+    end)
+
     it("can read foreign global variables", function ()
         local modules = {
             foo = [[
