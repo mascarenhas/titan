@@ -69,7 +69,7 @@ describe("Titan type checker", function()
                 return x
             end
         ]]
-        local ok, err = run_checker(code)
+        local ok = run_checker(code)
         assert.truthy(ok)
     end)
 
@@ -91,7 +91,7 @@ describe("Titan type checker", function()
                 return 1
             end
         ]]
-        local ok, err, ast = run_checker(code)
+        local ok, _, ast = run_checker(code)
         assert.truthy(ok)
         assert.same("Ast.ExpCast", ast[1].block.stats[2].exps[1]._tag)
         assert.same("Type.Integer", ast[1].block.stats[2].exps[1].target._tag)
@@ -105,7 +105,7 @@ describe("Titan type checker", function()
                 return 1
             end
         ]]
-        local ok, err, ast = run_checker(code)
+        local ok, _, ast = run_checker(code)
         assert.truthy(ok)
         assert.same("Ast.ExpCast", ast[1].block.stats[2].exps[1]._tag)
         assert.same("Type.Float", ast[1].block.stats[2].exps[1].target._tag)
@@ -211,7 +211,7 @@ describe("Titan type checker", function()
                 return #x
             end
         ]]
-        local ok, err = run_checker(code)
+        local ok = run_checker(code)
         assert.truthy(ok)
     end)
 
@@ -281,7 +281,7 @@ describe("Titan type checker", function()
             function fn2()
             end
         ]]
-        local ok, err = run_checker(code)
+        local ok = run_checker(code)
         assert.truthy(ok)
     end)
 
@@ -554,7 +554,7 @@ describe("Titan type checker", function()
                 return x
             end
         ]]
-        local ok, err = run_checker(code)
+        local ok = run_checker(code)
         assert.truthy(ok)
     end)
 
@@ -567,7 +567,7 @@ describe("Titan type checker", function()
                 return x
             end
         ]]
-        local ok, err = run_checker(code)
+        local ok = run_checker(code)
         assert.truthy(ok)
     end)
 
@@ -580,7 +580,7 @@ describe("Titan type checker", function()
                 return x
             end
         ]]
-        local ok, err = run_checker(code)
+        local ok = run_checker(code)
         assert.truthy(ok)
     end)
 
@@ -593,7 +593,7 @@ describe("Titan type checker", function()
                 return x
             end
         ]]
-        local ok, err = run_checker(code)
+        local ok = run_checker(code)
         assert.truthy(ok)
     end)
 
@@ -607,7 +607,7 @@ describe("Titan type checker", function()
                 return x
             end
         ]]
-        local ok, err = run_checker(code)
+        local ok = run_checker(code)
         assert.truthy(ok)
     end)
 
@@ -625,7 +625,7 @@ describe("Titan type checker", function()
                 return x
             end
         ]]
-        local ok, err = run_checker(code)
+        local ok = run_checker(code)
         assert.truthy(ok)
     end)
 
@@ -795,7 +795,7 @@ describe("Titan type checker", function()
                 return 20, "foo", true
             end
         ]]
-        local ok, err = run_checker(code)
+        local ok = run_checker(code)
         assert.truthy(ok)
     end)
 
@@ -836,7 +836,7 @@ describe("Titan type checker", function()
                     local i_i = i ]] .. op .. [[ i
                 end
             ]]
-            local ok, err, ast = run_checker(code)
+            local _, _, ast = run_checker(code)
 
             assert.same(types.Float(), ast[1].block.stats[3].exps[1].lhs._type)
             assert.same(types.Float(), ast[1].block.stats[3].exps[1].rhs._type)
@@ -868,7 +868,7 @@ describe("Titan type checker", function()
                     local i_i = i ]] .. op .. [[ i
                 end
             ]]
-            local ok, err, ast = run_checker(code)
+            local _, _, ast = run_checker(code)
 
             assert.same(types.Float(), ast[1].block.stats[3].exps[1].lhs._type)
             assert.same(types.Float(), ast[1].block.stats[3].exps[1].rhs._type)
@@ -905,7 +905,7 @@ describe("Titan type checker", function()
                 local b_of = b and of
             end
         ]]
-        local ok, err, ast = run_checker(code)
+        local _, _, ast = run_checker(code)
 
         assert.same(types.Float(), ast[1].block.stats[4].exps[1]._type)
         assert.same(types.Integer(), ast[1].block.stats[5].exps[1]._type)
@@ -937,7 +937,7 @@ describe("Titan type checker", function()
                 local v_f = v or f
             end
         ]]
-        local ok, err, ast = run_checker(code)
+        local _, _, ast = run_checker(code)
 
         assert.same(types.Float(), ast[1].block.stats[4].exps[1]._type)
         assert.same(types.Integer(), ast[1].block.stats[5].exps[1]._type)
@@ -963,7 +963,7 @@ describe("Titan type checker", function()
                     local i_i = i ]] .. op .. [[ i
                 end
             ]]
-            local ok, err, ast = run_checker(code)
+            local _, _, ast = run_checker(code)
 
             assert.same(types.Integer(), ast[1].block.stats[3].exps[1].lhs._type)
             assert.same(types.Integer(), ast[1].block.stats[3].exps[1].rhs._type)
@@ -995,7 +995,7 @@ describe("Titan type checker", function()
                     local i_i = i ]] .. op .. [[ i
                 end
             ]]
-            local ok, err, ast = run_checker(code)
+            local _, _, ast = run_checker(code)
 
             assert.same(types.Float(), ast[1].block.stats[3].exps[1].lhs._type)
             assert.same(types.Float(), ast[1].block.stats[3].exps[1].rhs._type)
@@ -1025,7 +1025,7 @@ describe("Titan type checker", function()
                     local f_i = f ]] .. op .. [[ i
                 end
             ]]
-            local ok, err, ast = run_checker(code)
+            local ok, err = run_checker(code)
             assert.falsy(ok)
             assert.match("is a value instead of a number", err)
         end)
@@ -1093,7 +1093,7 @@ describe("Titan type checker", function()
                 local s = 1 .. 2.5
             end
         ]]
-        local ok, err = run_checker(code)
+        local ok = run_checker(code)
         assert.truthy(ok)
     end)
 
@@ -1104,7 +1104,7 @@ describe("Titan type checker", function()
                     return a1 ]] .. op .. [[ a2
                 end
             ]]
-            local ok, err = run_checker(code)
+            local ok = run_checker(code)
             assert.truthy(ok)
         end)
 
@@ -1114,7 +1114,7 @@ describe("Titan type checker", function()
                     return a1 ]] .. op .. [[ a2
                 end
             ]]
-            local ok, err = run_checker(code)
+            local ok = run_checker(code)
             assert.truthy(ok)
         end)
     end
@@ -1126,7 +1126,7 @@ describe("Titan type checker", function()
                     return b1 ]] .. op .. [[ b2
                 end
             ]]
-            local ok, err = run_checker(code)
+            local ok = run_checker(code)
             assert.truthy(ok)
         end)
     end
@@ -1138,7 +1138,7 @@ describe("Titan type checker", function()
                     return s1 ]] .. op .. [[ s2
                 end
             ]]
-            local ok, err = run_checker(code)
+            local ok = run_checker(code)
             assert.truthy(ok)
         end)
     end
@@ -1167,7 +1167,7 @@ describe("Titan type checker", function()
                     return f1 ]] .. op .. [[ nil
                 end
             ]]
-            local ok, err = run_checker(code)
+            local ok = run_checker(code)
             assert.truthy(ok)
         end)
     end
@@ -1195,7 +1195,7 @@ describe("Titan type checker", function()
                     return f1 ]] .. op .. [[ f2
                 end
             ]]
-            local ok, err = run_checker(code)
+            local ok = run_checker(code)
             assert.truthy(ok)
         end)
     end
@@ -1207,7 +1207,7 @@ describe("Titan type checker", function()
                     return i1 ]] .. op .. [[ i2
                 end
             ]]
-            local ok, err = run_checker(code)
+            local ok = run_checker(code)
             assert.truthy(ok)
         end)
     end
@@ -1219,7 +1219,7 @@ describe("Titan type checker", function()
                     return i ]] .. op .. [[ f
                 end
             ]]
-            local ok, err = run_checker(code)
+            local ok = run_checker(code)
             assert.truthy(ok)
         end)
     end
@@ -1231,7 +1231,7 @@ describe("Titan type checker", function()
                     return s1 ]] .. op .. [[ s2
                 end
             ]]
-            local ok, err = run_checker(code)
+            local ok = run_checker(code)
             assert.truthy(ok)
         end)
     end
@@ -1457,7 +1457,7 @@ describe("Titan type checker", function()
                     return i1 ]] .. op .. [[ i2
                 end
             ]]
-            local ok, err = run_checker(code)
+            local ok = run_checker(code)
             assert.truthy(ok)
         end)
     end
@@ -1600,8 +1600,9 @@ describe("Titan type checker", function()
             end
             local function foo() end
         ]] }
-        local ok, err, mods = run_checker_modules(modules, "test")
+        local ok, _, mods = run_checker_modules(modules, "test")
         assert.truthy(ok)
+        if not mods then error("no modules") end
         assert_ast(mods.test.type, {
             _tag = "Type.Module",
             name = "test",
@@ -1619,7 +1620,7 @@ describe("Titan type checker", function()
             local foo = import "foo"
             local bar = import "bar.baz"
         ]]
-        local ok, err, ast = run_checker(code)
+        local ok, err = run_checker(code)
         assert.falsy(ok)
         assert.match("module 'foo' not found", err)
         assert.match("module 'bar.baz' not found", err)
@@ -1646,8 +1647,9 @@ describe("Titan type checker", function()
                 local foo = import "foo"
             ]]
         }
-        local ok, err, mods = run_checker_modules(modules, "bar")
+        local ok, _, mods = run_checker_modules(modules, "bar")
         assert.truthy(ok)
+        if not mods then error("no modules") end
         assert.truthy(mods.foo)
         assert_ast(mods.foo.type, {
             _tag = "Type.Module",
@@ -1663,7 +1665,7 @@ describe("Titan type checker", function()
         local code = [[
             local stdio = foreign import "stdio.h"
         ]]
-        local ok, err, ast = run_checker(code)
+        local ok, _, ast = run_checker(code)
         assert.truthy(ok)
         assert_ast(ast[1], {
             _tag = "Ast.TopLevelForeignImport",
@@ -1853,7 +1855,7 @@ describe("Titan type checker", function()
                 end
             ]]
         }
-        local ok, err, mods = run_checker_modules(modules, "bar")
+        local ok = run_checker_modules(modules, "bar")
         assert.truthy(ok)
     end)
 
@@ -1870,7 +1872,7 @@ describe("Titan type checker", function()
                 end
             ]]
         }
-        local ok, err, mods = run_checker_modules(modules, "bar")
+        local ok, err = run_checker_modules(modules, "bar")
         assert.falsy(ok)
         assert.match("expected string but found integer", err)
         assert.match("expected integer but found string", err)
@@ -1930,7 +1932,7 @@ describe("Titan type checker", function()
                 end
             ]]
         }
-        local ok, err, mods = run_checker_modules(modules, "bar")
+        local ok, err = run_checker_modules(modules, "bar")
         assert.truthy(ok, err)
     end)
 
@@ -1948,7 +1950,7 @@ describe("Titan type checker", function()
                 end
             ]]
         }
-        local ok, err, mods = run_checker_modules(modules, "bar")
+        local ok, err = run_checker_modules(modules, "bar")
         assert.falsy(ok)
         assert.match("assign to a function", err)
     end)
@@ -1965,7 +1967,7 @@ describe("Titan type checker", function()
                 end
             ]]
         }
-        local ok, err, mods = run_checker_modules(modules, "bar")
+        local ok, err = run_checker_modules(modules, "bar")
         assert.falsy(ok)
         assert.match("access module", err)
     end)
@@ -1982,7 +1984,7 @@ describe("Titan type checker", function()
                 end
             ]]
         }
-        local ok, err, mods = run_checker_modules(modules, "bar")
+        local ok, err = run_checker_modules(modules, "bar")
         assert.falsy(ok)
         assert.match("assign to a module", err)
     end)
@@ -1999,7 +2001,7 @@ describe("Titan type checker", function()
                 end
             ]]
         }
-        local ok, err, mods = run_checker_modules(modules, "bar")
+        local ok, err = run_checker_modules(modules, "bar")
         assert.falsy(ok)
         assert.match("'foo.a' is not a function", err)
     end)
@@ -2016,7 +2018,7 @@ describe("Titan type checker", function()
                 end
             ]]
         }
-        local ok, err, mods = run_checker_modules(modules, "bar")
+        local ok, err = run_checker_modules(modules, "bar")
         assert.falsy(ok)
         assert.match("member 'b' not found inside module 'foo'", err)
     end)
@@ -2047,7 +2049,7 @@ describe("Titan type checker", function()
                 end
             ]]
         }
-        local ok, err, mods = run_checker_modules(modules, "bar")
+        local ok = run_checker_modules(modules, "bar")
         assert.truthy(ok)
     end)
 
@@ -2400,7 +2402,7 @@ describe("Titan typecheck of records", function()
                 end
             ]]
         }
-        local ok, err, mods = run_checker_modules(modules, "bar")
+        local ok, err = run_checker_modules(modules, "bar")
         assert.falsy(ok)
         assert.match("expected string but found float", err)
     end)
@@ -2420,7 +2422,7 @@ describe("Titan typecheck of records", function()
                 end
             ]]
         }
-        local ok, err, mods = run_checker_modules(modules, "bar")
+        local ok = run_checker_modules(modules, "bar")
         assert.truthy(ok)
     end)
 
@@ -2446,7 +2448,7 @@ describe("Titan typecheck of records", function()
                 end
             ]]
         }
-        local ok, err, mods = run_checker_modules(modules, "bar")
+        local ok, err = run_checker_modules(modules, "bar")
         assert.falsy(ok)
         assert.match("expected string but found float", err)
     end)
@@ -2473,7 +2475,7 @@ describe("Titan typecheck of records", function()
                 end
             ]]
         }
-        local ok, err, mods = run_checker_modules(modules, "bar")
+        local ok, err = run_checker_modules(modules, "bar")
         assert.truthy(ok, err)
     end)
 
@@ -2526,7 +2528,7 @@ describe("Titan typecheck of records", function()
                 end
             ]]
         }
-        local ok, err, mods = run_checker_modules(modules, "bar")
+        local ok, err = run_checker_modules(modules, "bar")
         assert.falsy(ok)
         assert.match("record type 'foo.P' in receiver of method call does not exist", err)
         assert.match("method 'm' not found in record 'foo.R'", err)
@@ -2548,7 +2550,7 @@ describe("Titan typecheck of records", function()
                 end
             ]]
         }
-        local ok, err, mods = run_checker_modules(modules, "bar")
+        local ok, err = run_checker_modules(modules, "bar")
         assert.truthy(ok, err)
     end)
 
@@ -2574,7 +2576,7 @@ describe("Titan typecheck of records", function()
                 end
             ]]
         }
-        local ok, err, mods = run_checker_modules(modules, "bar")
+        local ok, err = run_checker_modules(modules, "bar")
         assert.truthy(ok, err)
     end)
 

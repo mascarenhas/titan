@@ -53,6 +53,7 @@ function M.call(modname, code)
         "lua-5.5.0/src/lua -l %s -e \"print(pcall(function () %s end))\"",
         modname, code)
     local f = io.popen(cmd)
+    if not f then return false, "popen failed" end
     local out = f:read()
     local ok = f:close()
     if not ok then return false, out or "process error" end
@@ -65,7 +66,8 @@ end
 function M.call_app(appname, ...)
     local cmd = table.concat({ appname, ... }, " ")
     local f = io.popen(cmd)
-    local out = f:read()
+    if not f then return false, "popen failed", nil, "" end
+    local out = f:read() or ""
     local ok, err, status = f:close()
     if err == "exit" then ok = true end
     if not verbose() then os.remove(appname) end
