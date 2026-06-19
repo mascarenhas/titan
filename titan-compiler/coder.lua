@@ -42,7 +42,10 @@ local function c_integer_literal(n)
 end
 
 local function c_float_literal(n)
-    return string.format("%f", n)
+    if n ~= n then return "NAN" end            -- nan (unreachable from a literal, defensive)
+    if n == math.huge then return "HUGE_VAL" end   -- +inf, e.g. the literal 1e400
+    if n == -math.huge then return "(-HUGE_VAL)" end
+    return string.format("%.17g", n)           -- round-trips every finite double
 end
 
 
