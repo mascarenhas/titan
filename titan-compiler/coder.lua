@@ -2166,6 +2166,11 @@ local function codeunaryop(ctx, node, iscondition)
         else
             return estats, "tsslen(" .. ecode .. ")"
         end
+    elseif op == "-" and node.exp._type._tag == "Type.Integer" then
+        -- Integer negation wraps two's-complement like Lua (intop(-,0,x));
+        -- raw (-x) is signed-overflow UB for math.mininteger.
+        local estats, ecode = codeexp(ctx, node.exp)
+        return estats, "intop(-, 0, " .. ecode .. ")"
     else
         local estats, ecode = codeexp(ctx, node.exp)
         return estats, "(" .. op .. ecode .. ")"
@@ -2536,6 +2541,14 @@ local function codebinaryop(ctx, node, _)
         else
             return lstats .. rstats, "luaV_rawequalobj(&(" .. lcode .. "),&(" .. rcode .. "))"
         end
+    elseif (op == "+" or op == "-" or op == "*")
+           and node.lhs._type._tag == "Type.Integer"
+           and node.rhs._type._tag == "Type.Integer" then
+        -- Integer + - * wrap two's-complement like Lua (intop), instead of raw
+        -- signed C arithmetic which is overflow UB under -O2 (no -fwrapv).
+        local lstats, lcode = codeexp(ctx, node.lhs)
+        local rstats, rcode = codeexp(ctx, node.rhs)
+        return lstats .. rstats, "intop(" .. op .. ", " .. lcode .. ", " .. rcode .. ")"
     else
         local lstats, lcode = codeexp(ctx, node.lhs)
         local rstats, rcode = codeexp(ctx, node.rhs)
