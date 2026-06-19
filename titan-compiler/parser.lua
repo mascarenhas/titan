@@ -184,6 +184,15 @@ function defs.suffix_methodcall(pos, name, args)
     end
 end
 
+-- `obj:m` with no argument list is a bound-method reference: it evaluates to a
+-- function value (the method with `self` captured), not a call. Tried after the
+-- method-call form, so a real call (`obj:m(args)`) still parses as a call.
+function defs.suffix_methodref(pos, name)
+    return function(exp)
+        return ast.ExpMethodRef(pos, exp, name)
+    end
+end
+
 function defs.suffix_bracket(pos, index)
     return function(exp)
         return ast.ExpVar(pos, ast.VarBracket(pos, exp, index))
@@ -425,7 +434,8 @@ local grammar = re.compile([[
 
     expsuffix       <- (P  funcargs)                             -> suffix_funccall
                      / (P  COLON NAME^NameColonExpSuf
-                                 funcargs^FuncArgsExpSuf)        -> suffix_methodcall
+                                 funcargs)                       -> suffix_methodcall
+                     / (P  COLON NAME^NameColonExpSuf)           -> suffix_methodref
                      / (P  LBRACKET exp^ExpExpSuf
                                 RBRACKET^RBracketExpSuf)         -> suffix_bracket
                      / (P  DOT NAME^NameDotExpSuf)               -> suffix_dot

@@ -240,3 +240,82 @@ describe("closures (still-an-error cases)", function()
         ]])
     end)
 end)
+
+describe("bound method references (obj:m)", function()
+    it("a bound method has the method's type with self removed", function()
+        local ok, err, ast = run_checker([[
+            record Adder base: integer end
+            function Adder:add(x: integer): integer
+                return self.base + x
+            end
+            function use(): (integer) -> integer
+                local a = Adder.new(0)
+                local f = a:add
+                return f
+            end
+        ]])
+        assert.truthy(ok, err)
+        -- `use` is the last top-level; its body declares `f = a:add`
+        local fnode = ast[#ast]
+        local fdecl = fnode.block.stats[2]
+        local ftype = fdecl.decls[1]._type
+        assert.equal("Type.Function", ftype._tag)
+        assert.equal(1, #ftype.params)
+        assert.equal("Type.Integer", ftype.params[1]._tag)
+        assert.equal(1, #ftype.rettypes)
+        assert.equal("Type.Integer", ftype.rettypes[1]._tag)
+    end)
+
+    it("typechecks where a matching function value is expected", function()
+        assert_type_check([[
+            record Adder base: integer end
+            function Adder:add(x: integer): integer return self.base + x end
+            function use(): integer
+                local a = Adder.new(1)
+                local f: (integer) -> integer = a:add
+                return f(2)
+            end
+        ]])
+    end)
+
+    it("rejects a bound method bound to an incompatible function type", function()
+        assert_type_error(
+            "do not match, expected %(string%) %-> string but found %(integer%) %-> integer",
+            [[
+                record Adder base: integer end
+                function Adder:add(x: integer): integer return self.base + x end
+                function use()
+                    local a = Adder.new(1)
+                    local f: (string) -> string = a:add
+                end
+            ]])
+    end)
+
+    it("rejects a method reference on a non-record receiver", function()
+        assert_type_error("expected record in receiver of method reference", [[
+            function use()
+                local n = 3
+                local f = n:bump
+            end
+        ]])
+    end)
+
+    it("rejects a reference to a non-existent method", function()
+        assert_type_error("method 'nope' not found in record", [[
+            record Adder base: integer end
+            function use()
+                local a = Adder.new(1)
+                local f = a:nope
+            end
+        ]])
+    end)
+
+    it("rejects a foreign (C) method reference", function()
+        assert_type_error("a foreign %(C%) method cannot be used as a first", [[
+            local m = foreign import "math.h"
+            function use()
+                local f = m:fabs
+            end
+        ]])
+    end)
+end)

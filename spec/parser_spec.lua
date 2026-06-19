@@ -956,6 +956,20 @@ describe("Titan parser", function()
                     { _tag = "Ast.ExpInitList" } } } })
     end)
 
+    it("parses a bound method reference (obj:m with no argument list)", function()
+        -- `o:m` with no `()` is a bound-method-reference expression, distinct
+        -- from a method call. A real call (`o:m()`) still parses as ExpCall.
+        assert_expression_ast([[ o:m ]],
+            { _tag = "Ast.ExpMethodRef", name = "m",
+              exp = { _tag = "Ast.ExpVar",
+                      var = { _tag = "Ast.VarName", name = "o" } } })
+
+        -- in an arithmetic context the ref is the left operand
+        assert_expression_ast([[ o:m + 1 ]],
+            { _tag = "Ast.ExpBinop", op = "+",
+              lhs = { _tag = "Ast.ExpMethodRef", name = "m" } })
+    end)
+
     it("only allows call expressions as statements", function()
         -- Currently the error messages mention something else
 
@@ -1398,8 +1412,6 @@ describe("Titan parser", function()
         assert_expression_syntax_error([[ 1 + ]], "OpExp")
 
         assert_expression_syntax_error([[ obj:() ]], "NameColonExpSuf")
-
-        assert_expression_syntax_error([[ obj:f + 1 ]], "FuncArgsExpSuf")
 
         assert_expression_syntax_error([[ y[] ]], "ExpExpSuf")
 

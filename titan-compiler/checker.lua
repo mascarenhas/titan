@@ -1498,6 +1498,52 @@ checkexp = util.make_visitor({
         end
 
         return node._type
+    end,
+
+    -- Bound method reference `obj:m` (no call): yields a function value, the
+    -- method's type with the implicit `self` removed and the receiver captured.
+    -- Mirrors the method-resolution of the ArgsMethod arm of ExpCall.
+    ["Ast.ExpMethodRef"] = function(node, st, errors, _)
+        checkexp(node.exp, st, errors)
+        local otype = node.exp._type
+        -- auto-unwrap an option receiver, like a method call does, so `p:m` on a
+        -- Point? unwraps to the underlying record (the cast codegen nil-checks).
+        if otype._tag == "Type.Option" and otype.base._tag == "Type.Nominal" then
+            local cast = ast.ExpCast(node.exp.loc, node.exp, otype.base)
+            cast._type = otype.base
+            node.exp = cast
+            otype = otype.base
+        end
+        if otype._tag == "Type.ForeignModule" then
+            node._type = invalid(errors, node.loc,
+                "a foreign (C) method cannot be used as a first-class value")
+        elseif otype._tag == "Type.Nominal" and
+           types.registry[otype.fqtn] and
+           types.registry[otype.fqtn]._tag == "Type.Record" then
+            local class = types.registry[otype.fqtn]
+            local mtype = class.methods[node.name]
+            if not mtype then
+                node._type = invalid(errors, node.loc,
+                    "method '%s' not found in record '%s'",
+                    node.name, types.tostring(otype))
+            else
+                node._method = mtype
+                node._type = types.Function(mtype.params, mtype.rettypes, false)
+            end
+        elseif otype._tag ~= "Type.Nominal" then
+            node._type = invalid(errors, node.loc,
+                "expected record in receiver of method reference but found '%s'",
+                types.tostring(otype))
+        elseif not types.registry[otype.fqtn] then
+            node._type = invalid(errors, node.loc,
+                "record type '%s' in receiver of method reference does not exist",
+                types.tostring(otype))
+        else
+            node._type = invalid(errors, node.loc,
+                "expected record in receiver of method reference but found '%s'",
+                types.tostring(types.registry[otype.fqtn]))
+        end
+        return node._type
     end
 })
 
@@ -1668,6 +1714,11 @@ local function isconst(node)
         -- is never a constant. Rejecting it here yields the clean "top level
         -- variable initialization must be constant" error rather than letting an
         -- unsupported (this phase) lambda reach codegen.
+        return false
+
+    elseif tag == "Ast.ExpMethodRef" then
+        -- A bound-method reference captures a runtime receiver, so it is never
+        -- constant — same clean rejection as a lambda at top level.
         return false
 
     else

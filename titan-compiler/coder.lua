@@ -3,7 +3,7 @@ local util  = require "titan-compiler.util"
 
 local coder = {}
 
-local codeexp, codestat, codeforeignexp, codelambda, codelambdadec
+local codeexp, codestat, codeforeignexp, codelambda, codelambdadec, codemethodref
 
 local render = util.render
 
@@ -114,6 +114,19 @@ end
 
 local function method_luaname(typ)
     return fname_prefix(typ) .. "_luamethod"
+end
+
+-- Bound-method trampolines: the native one (`_boundmethod`) matches the
+-- self-removed function ABI and delegates to the method's own native entry with
+-- the captured `self`; the Lua one (`_boundlua`) is the closure's `lua_CFunction`
+-- and inserts `self` before delegating to the method's Lua entry. Both are
+-- exported so a bind site in another module (with only the `.so`) can reach them.
+local function bound_method_name(typ)
+    return fname_prefix(typ) .. "_boundmethod"
+end
+
+local function bound_method_luaname(typ)
+    return fname_prefix(typ) .. "_boundlua"
 end
 
 local function modprefix(modname)
@@ -603,6 +616,7 @@ local function newcontext(tlcontext)
         variables = tlcontext.variables, -- set of external variables that we use
         module = tlcontext.module, -- module name,
         modules = tlcontext.modules, -- set of record metatables that we need
+        bound_luas = tlcontext.bound_luas, -- external bound-method Lua trampolines we bind
         tlcontext = tlcontext -- toplevel context
     }
 end
@@ -2916,6 +2930,8 @@ function codeexp(ctx, node, iscondition, target)
         return codeexp(ctx, node.exp, iscondition, target)
     elseif tag == "Ast.ExpFunction" then
         return codelambda(ctx, node)
+    elseif tag == "Ast.ExpMethodRef" then
+        return codemethodref(ctx, node)
     else
         error("invalid node tag " .. tag)
     end
@@ -3182,6 +3198,98 @@ local function codefuncdec(tlcontext, node)
     node._luabody = genluaentry(tlcontext, node.name, fname, node._type, node.loc, luaname)
 end
 
+-- Emit the two bound-method trampolines for a TopLevelMethod, delegating to the
+-- method's own native/Lua entries. They turn `obj:m` into a first-class function
+-- value of the self-removed type `(params) -> rettypes`, with `self` captured in
+-- the closure's `upvalue[3]`. Emitted for EVERY method (and exported) so a bind
+-- site in a module that only has this module's `.so` can still reach them.
+-- Produces node._boundsig / node._boundbody.
+local function codemethodtrampoline(tlcontext, node)
+    local mtype = node._type
+    -- the self-removed function type whose ABI the native trampoline matches
+    local ftype = types.Function(mtype.params, mtype.rettypes, false)
+    local nativename = bound_method_name(mtype)
+    local luaname = bound_method_luaname(mtype)
+    local mnative = method_name(mtype)
+    local mlua = method_luaname(mtype)
+    local rettype = mtype.rettypes[1]
+    local crettype = rettype and ctype(rettype) or "void"
+
+    -- Named parameter list matching function_sig(ftype) so the trampoline body
+    -- can forward each one. Names are local to the trampoline (`_bp_N` for params,
+    -- `_outparam_N` for out-params), independent of the method's own _cvar names.
+    local cparams = { "lua_State *L", "CClosure *_mod", "CClosure *_fn" }
+    local callargs = { "L", "_mod", "NULL",
+        "clCvalue(&_fn->upvalue[3])" }
+    for i, ptype in ipairs(mtype.params) do
+        local pname = "_bp_" .. i
+        table.insert(cparams, ctype(ptype) .. " " .. pname)
+        table.insert(callargs, pname)
+    end
+    for i = 2, #mtype.rettypes do
+        local oname = "_outparam_" .. i
+        table.insert(cparams, ctype(mtype.rettypes[i]) .. " *" .. oname)
+        table.insert(callargs, oname)
+    end
+    local call = render("$NAME($ARGS)", {
+        NAME = mnative,
+        ARGS = table.concat(callargs, ", "),
+    })
+    local bodycall
+    if rettype then
+        bodycall = "return " .. call .. ";"
+    else
+        bodycall = call .. ";\n        return;"
+    end
+
+    -- native trampoline signature == function_sig of the self-removed type, but
+    -- with named parameters so the body can forward them.
+    local nativesig = render("$RETTYPE $NAME($PARAMS)", {
+        RETTYPE = crettype,
+        NAME = nativename,
+        PARAMS = table.concat(cparams, ", "),
+    })
+    -- Both trampolines are exported (non-static): a bind site in a module that
+    -- only has this module's `.so` reaches the native one for the fast path AND
+    -- the Lua one (the closure's lua_CFunction) by dlsym.
+    node._boundbody = render([[
+    $SIG {
+        $BODYCALL
+    }
+    int $LUANAME(lua_State *L) {
+        /* insert the captured receiver (self) as the first stack argument, then
+           delegate to the method's Lua entry (which reuses all the boundary
+           checks/coercions). upvalue[3] holds the record's raw CClosure (as the
+           native trampoline expects); the method Lua entry expects the Lua-facing
+           Udata, which lives in the record CClosure's own upvalue[0]. The bound
+           closure's upvalue[0] is the method's module, so the method Lua entry
+           recovers _mod correctly from it. */
+        CClosure *_bound = clCvalue(s2v(L->ci->func.p));
+        lua_checkstack(L, 1);
+        setobj2s(L, L->top.p, &(clCvalue(&_bound->upvalue[3])->upvalue[0]));
+        L->top.p++;
+        lua_insert(L, 1);
+        return $MLUA(L);
+    }]], {
+        SIG = nativesig,
+        BODYCALL = bodycall,
+        LUANAME = luaname,
+        MLUA = mlua,
+    })
+    node._boundsig = render([[
+        $SIG;
+        int $LUANAME(lua_State *L);
+    ]], {
+        SIG = function_sig(nativename, ftype, false),
+        LUANAME = luaname,
+    })
+    -- Publish the bound function type's tag from the DEFINING module (every
+    -- method, even one never bound here): a `.so`-only importer recovers the tag
+    -- from the registry this module populates, so its bound value's fast path can
+    -- recognise the trampoline. (publish-or-recover dedupes a double publish.)
+    function_type_tag(tlcontext, ftype)
+end
+
 -- Names + registration for a lambda node, assigned on first sight at its use
 -- site. Both the closure-creation (codelambda) and the body emission
 -- (codelambdadec) read these; assigning here (lazily) keeps the native/Lua names
@@ -3277,6 +3385,92 @@ function codelambda(ctx, node)
         CDECL = cdecl,
         TMPSLOT = tmpslot,
         GETSLOT = getslot(node._type, tmpname, "s2v(L->top.p - 1)"),
+    }))
+    return table.concat(stats, "\n"), tmpname
+end
+
+-- Use-site code for a bound method reference `obj:m`: evaluate the receiver once
+-- into an anchored gc temp, then build a 4-upvalue CClosure exactly like a
+-- 1-capture lambda whose capture is `self`:
+--   upvalue[0] = the method's module closure
+--   upvalue[1] = the self-removed function-type tag (light userdata)
+--   upvalue[2] = the bound native trampoline pointer (light userdata)
+--   upvalue[3] = self (the captured receiver)
+-- The closure's lua_CFunction is the bound Lua trampoline. The result is an
+-- ordinary Type.Function value, callable through both paths and Lua-crossable.
+function codemethodref(ctx, node)
+    local tlcontext = ctx.tlcontext
+    local mtype = node._method
+    local ftype = node._type      -- Type.Function (self removed)
+    local nativename = bound_method_name(mtype)
+    local luaname = bound_method_luaname(mtype)
+    local mod, record = mtype.fqtn:match("^(.*)%.(%a+)$")
+
+    -- The bound closure's upvalue[0] must be the defining module's closure: `_mod`
+    -- for a same-module method, or the imported module's closure recovered from
+    -- our `_mod` upvalues exactly as method *calls* do. Cross-module also requires
+    -- the trampoline symbol to be reachable (extern / dlsym), registered in
+    -- ctx.functions keyed by its mangled name.
+    local modexpr = "_mod"
+    if mod ~= ctx.module then
+        ctx.functions[mtype.fqtn .. ":bound:" .. mtype.name] = {
+            module = mod,
+            record = record,
+            name = mtype.name,
+            type = ftype,
+            mangled = nativename,
+        }
+        -- the Lua trampoline (the closure's lua_CFunction) is not function_sig
+        -- shaped, so it gets its own extern/dlsym registry entry
+        ctx.bound_luas[luaname] = { module = mod }
+        if not ctx.modules[mod] then
+            ctx.modules[mod] = nextupvalue(ctx.tlcontext)
+        end
+        modexpr = render("clCvalue(&_mod->upvalue[$INDEX])", {
+            INDEX = c_integer_literal(ctx.modules[mod]),
+        })
+    end
+
+    ctx.uses_base_off = true
+    local stats = {}
+
+    -- 1. evaluate the receiver once into an anchored gc temp (self: CClosure*)
+    local rtype = node.exp._type
+    local rstat, rexp = codeexp(ctx, node.exp)
+    local rdecl, rname, rslot = newtmp(ctx, rtype, true)
+    table.insert(stats, rstat)
+    table.insert(stats, rdecl)
+    table.insert(stats, rname .. " = " .. rexp .. ";")
+    table.insert(stats, setslot(rtype, rslot, rname))
+
+    -- 2. push the four upvalues and build the closure
+    table.insert(stats, render([[
+        lua_checkstack(L, 4);
+        titan_pushmodule(L, $MODEXPR);
+        lua_pushlightuserdata(L, (void*)$FUNCTAG);
+        lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
+        $PUSHSELF L->top.p++;
+    ]], {
+        MODEXPR = modexpr,
+        FUNCTAG = function_type_tag(tlcontext, ftype),
+        NATIVE = nativename,
+        PUSHSELF = setslot(rtype, "s2v(L->top.p)", rname),
+    }))
+
+    -- 3. consume the closure into an anchored gc temp
+    local cdecl, tmpname, tmpslot = newtmp(ctx, ftype, true)
+    table.insert(stats, render([[
+        lua_pushcclosure(L, $LUANAME, 4);
+        _base = restorestack(L, _base_off);
+        $CDECL
+        setobj2t(L, $TMPSLOT, s2v(L->top.p - 1));
+        $GETSLOT;
+        L->top.p--;
+    ]], {
+        LUANAME = luaname,
+        CDECL = cdecl,
+        TMPSLOT = tmpslot,
+        GETSLOT = getslot(ftype, tmpname, "s2v(L->top.p - 1)"),
     }))
     return table.concat(stats, "\n"), tmpname
 end
@@ -3608,6 +3802,25 @@ local function init_data_from_other_modules(tlcontext, includes, loadmods, initm
         end
     end
 
+    -- Bound-method Lua trampolines we reference for cross-module `obj:m`: each is
+    -- the closure's lua_CFunction. Statically-linked deps just need an `extern`
+    -- prototype; `.so`-only deps dlsym it into a `static` function pointer (the
+    -- module handle was already opened by the function loop above, since a bound
+    -- ref always also registers the native trampoline in tlcontext.functions).
+    for luaname, info in pairs(tlcontext.bound_luas) do
+        local is_dynamic = not static_deps[info.module]
+        if is_dynamic then
+            local mprefix = mprefixes[info.module]
+            table.insert(includes,
+                "static int (*" .. luaname .. ")(lua_State *L);")
+            table.insert(loadmods, render([[
+                $NAME = titan_cast_func(int (*)(lua_State *L), loadsym(L, $HANDLE, "$NAME"));
+            ]], { NAME = luaname, HANDLE = mprefix .. "handle" }))
+        else
+            table.insert(includes, "extern int " .. luaname .. "(lua_State *L);")
+        end
+    end
+
     for name, tag in pairs(tlcontext.tags) do
         table.insert(includes, "static const void *" .. tag.mangled .. ";")
         table.insert(inittags, render([[
@@ -3870,6 +4083,7 @@ function coder.generate(modname, ast, static_deps)
         functags = {},       -- canonical function-type string -> { id, key }
         functag_list = {},   -- same entries, in allocation order (for emission)
         functag_count = 0,
+        bound_luas = {},     -- mangled bound-Lua-trampoline name -> { module }
         static_slots = {},   -- "fqtn.name" -> module upvalue slot of a static's closure
         lambdas = {},        -- ExpFunction nodes pending file-scope emission
         lambda_count = 0,    -- counter for unique lambda native/Lua names
@@ -3991,6 +4205,12 @@ function coder.generate(modname, ast, static_deps)
                     }))
                 elseif tag == "Ast.TopLevelMethod" then
                     table.insert(code, node._luabody)
+                    -- Emit the bound-method trampolines for every method, so a
+                    -- bind site `obj:m` (here or in a module that only has this
+                    -- module's `.so`) turns the method into a function value.
+                    codemethodtrampoline(tlcontext, node)
+                    table.insert(sigs, node._boundsig)
+                    table.insert(code, node._boundbody)
                 elseif tag == "Ast.TopLevelStatic" then
                     table.insert(code, node._luabody)
                     -- Build the static's canonical 3-upvalue closure once into
