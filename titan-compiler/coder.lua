@@ -2234,12 +2234,18 @@ end
 -- zero. We inline luaV_div here to give the C compiler more optimization
 -- opportunities (see that function for comments on how it works).
 local function generate_binop_idiv_int(exp, ctx)
-    local m_stats, m_var = codeexp(ctx, exp.lhs)
-    local n_stats, n_var = codeexp(ctx, exp.rhs)
+    local m_stats, m_code = codeexp(ctx, exp.lhs)
+    local n_stats, n_code = codeexp(ctx, exp.rhs)
+    local mdecl, m_var = newtmp(ctx, types.Integer())
+    local ndecl, n_var = newtmp(ctx, types.Integer())
     local qdecl, qname = newtmp(ctx, exp._type)
     local cstats = util.render([[
         ${M_STATS}
+        ${M_DECL}
+        ${M} = ${M_CODE};
         ${N_STATS}
+        ${N_DECL}
+        ${N} = ${N_CODE};
         ${Q_DECL}
         if (l_castS2U(${N}) + 1u <= 1u) {
             if (${N} == 0){
@@ -2255,8 +2261,12 @@ local function generate_binop_idiv_int(exp, ctx)
         }
     ]], {
         M = m_var,
+        M_DECL = mdecl,
+        M_CODE = m_code,
         M_STATS = m_stats,
         N = n_var,
+        N_DECL = ndecl,
+        N_CODE = n_code,
         N_STATS = n_stats,
         Q = qname,
         Q_DECL = qdecl,
@@ -2290,12 +2300,18 @@ end
 -- Lua/Titan guarantees that (m == n*(m//n) + (,%n))
 -- See generate binop_intdiv and luaV_mod
 local function generate_binop_mod_int(exp, ctx)
-    local m_stats, m_var = codeexp(ctx, exp.lhs)
-    local n_stats, n_var = codeexp(ctx, exp.rhs)
+    local m_stats, m_code = codeexp(ctx, exp.lhs)
+    local n_stats, n_code = codeexp(ctx, exp.rhs)
+    local mdecl, m_var = newtmp(ctx, types.Integer())
+    local ndecl, n_var = newtmp(ctx, types.Integer())
     local rdecl, rname = newtmp(ctx, types.Integer())
     local cstats = util.render([[
         ${M_STATS}
+        ${M_DECL}
+        ${M} = ${M_CODE};
         ${N_STATS}
+        ${N_DECL}
+        ${N} = ${N_CODE};
         ${R_DECL};
         if (l_castS2U(${N}) + 1u <= 1u) {
             if (${N} == 0){
@@ -2311,13 +2327,17 @@ local function generate_binop_mod_int(exp, ctx)
         }
     ]], {
         M = m_var,
+        M_DECL = mdecl,
+        M_CODE = m_code,
         M_STATS = m_stats,
         N = n_var,
+        N_DECL = ndecl,
+        N_CODE = n_code,
         N_STATS = n_stats,
         R = rname,
         R_DECL = rdecl,
         LINE = c_integer_literal(exp.loc.line),
-        THROW_MOD0 = codethrow(ctx, "error at line %d, % by zero", { "$LINE" })
+        THROW_MOD0 = codethrow(ctx, "error at line %d, %% by zero", { "$LINE" })
     })
     return cstats, rname
 end
