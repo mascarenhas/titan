@@ -2191,18 +2191,24 @@ end
 -- (shift amount is a small positive integer) under only one level of branching
 -- and with a TITAN_LIKELY annotation.
 local function generate_binop_shift(shift_pos, shift_neg, exp, ctx)
-    local x_stats, x_var = codeexp(ctx, exp.lhs)
-    local y_stats, y_var = codeexp(ctx, exp.rhs)
+    local x_stats, x_code = codeexp(ctx, exp.lhs)
+    local y_stats, y_code = codeexp(ctx, exp.rhs)
+    local xdecl, x_var = newtmp(ctx, types.Integer())
+    local ydecl, y_var = newtmp(ctx, types.Integer())
     local rdecl, rname = newtmp(ctx, types.Integer())
     local cstats = util.render([[
         ${X_STATS}
+        ${X_DECL}
+        ${X} = ${X_CODE};
         ${Y_STATS}
+        ${Y_DECL}
+        ${Y} = ${Y_CODE};
         ${R_DECL}
         if (TITAN_LIKELY(l_castS2U(${Y}) < TITAN_LUAINTEGER_NBITS)) {
             ${R} = intop(${SHIFT_POS}, ${X}, ${Y});
         } else {
-            if (l_castS2U(-${Y}) < TITAN_LUAINTEGER_NBITS) {
-                ${R} = intop(${SHIFT_NEG}, ${X}, -${Y});
+            if (l_castS2U(intop(-, 0, ${Y})) < TITAN_LUAINTEGER_NBITS) {
+                ${R} = intop(${SHIFT_NEG}, ${X}, intop(-, 0, ${Y}));
             } else {
                 ${R} = 0;
             }
@@ -2211,8 +2217,12 @@ local function generate_binop_shift(shift_pos, shift_neg, exp, ctx)
         SHIFT_POS = shift_pos,
         SHIFT_NEG = shift_neg,
         X = x_var,
+        X_DECL = xdecl,
+        X_CODE = x_code,
         X_STATS = x_stats,
         Y = y_var,
+        Y_DECL = ydecl,
+        Y_CODE = y_code,
         Y_STATS = y_stats,
         R = rname,
         R_DECL = rdecl,
