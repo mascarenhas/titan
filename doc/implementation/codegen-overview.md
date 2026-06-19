@@ -108,9 +108,9 @@ generates:
 #include <stdlib.h>
 ...                /* C library and Lua internal headers, titan.h, pragmas */
 
-lua_Integer counter_inc_titan(lua_State *L, CClosure *_mod, lua_Integer _param_n);
+lua_Integer counter_inc_titan(lua_State *L, CClosure *_mod, CClosure *_fn, lua_Integer _param_n);
 
-lua_Integer counter_inc_titan(lua_State *L, CClosure *_mod, lua_Integer _param_n) {
+lua_Integer counter_inc_titan(lua_State *L, CClosure *_mod, CClosure *_fn, lua_Integer _param_n) {
     {
         return (_param_n+ ivalue(&_mod->upvalue[1]));
     }
@@ -173,7 +173,7 @@ The authoritative statement is the comment above `codefuncdec` in
 The signature shape, produced by `function_sig`:
 
 ```c
-RETTYPE f(lua_State *L, CClosure *_mod, [CClosure *self,]
+RETTYPE f(lua_State *L, CClosure *_mod, CClosure *_fn, [CClosure *self,]
           <ctype(param_1)>, ..., <ctype(param_n)>,
           <ctype(ret_2)> *_outparam_2, ..., <ctype(ret_m)> *_outparam_m);
 ```
@@ -183,14 +183,31 @@ return value (`lua_Integer`, `TString*`, `Table*`, `TValue`, `CClosure*`,
 …; full map in [values and the GC](values-and-gc.md)); a function
 returning only `nil` returns `int` and ends with `return 0;`. `_mod` is
 the callee's **own** module closure; a cross-module caller passes it from
-one of its upvalues. The `CClosure *self` slot exists only for methods
-(`Type.Method`) and is named `__self__` in the generated body. Return
-values 2..m are written through out-pointers following the declared
-parameters. Real signatures from a generated module:
+one of its upvalues. `_fn` is the **callee's own closure** — the
+`CClosure` of the function value being invoked, whose `upvalue[3..]` hold
+its captured variables; it is what a closure body reads its captures
+through (see [closures and captured variables](#closures-and-captured-variables)).
+It comes **immediately after `_mod` and before the method `self`**, and
+*every* Titan function takes it even when the body never reads it: the
+fast value-call path dispatches purely on the function-type tag, so all
+native entries of a given `Type.Function` must share one ABI. Its value
+at a call site depends on the path:
+
+* **`NULL`** on a static direct call (`codecall`) — a top-level
+  function/method/static reached by name has no closure to pass;
+* **the callee value itself** (`_vc_callee`) on the fast value-call path
+  (`codevaluecall`);
+* **`clCvalue(s2v(func))`** in the Lua entry wrapper, which then derives
+  `_mod = clCvalue(&_fn->upvalue[0])`.
+
+The `CClosure *self` slot exists only for methods (`Type.Method`) and is
+named `__self__` in the generated body. Return values 2..m are written
+through out-pointers following the declared parameters. Real signatures
+from a generated module:
 
 ```c
-TString*    packtest_Point_getname_titanmethod(lua_State *L, CClosure *_mod, CClosure* __self__);
-lua_Integer packtest_two_titan(lua_State *L, CClosure *_mod, TString* *_outparam_2);
+TString*    packtest_Point_getname_titanmethod(lua_State *L, CClosure *_mod, CClosure *_fn, CClosure* __self__);
+lua_Integer packtest_two_titan(lua_State *L, CClosure *_mod, CClosure *_fn, TString* *_outparam_2);
 ```
 
 A Titan-to-Titan call is therefore an ordinary C call — no Lua stack
@@ -217,13 +234,119 @@ companion `static int <name>_lua(lua_State *L)` with the standard
 `lua_CFunction` signature. It checks arity strictly (raising
 `calling Titan function %s with %d arguments, but expected %d`), installs
 the runtime's `errorhandler` as `L->errfunc` for the duration of the
-call, recovers `_mod` from the wrapper closure's single upvalue, checks
-and converts each argument with `checkandget`, reserves one stack slot
-per return value, calls the native function, and writes the results back
-with `setwrapped` (which hands records to Lua as their userdata wrapper).
+call, recovers the called closure as `_fn = clCvalue(s2v(func))` and
+`_mod = clCvalue(&_fn->upvalue[0])` from it (so a closure entered from Lua
+still reaches its own captures), checks and converts each argument with
+`checkandget`, reserves one stack slot per return value, calls the native
+function (passing `_fn` so a closure body can read its captures), and
+writes the results back with `setwrapped` (which hands records to Lua as
+their userdata wrapper).
 The full anatomy — per-type boundary checks, error-slot juggling, exact
 error messages, safety argument — is in
 [Lua interop internals](lua-interop-internals.md).
+
+## Closures and captured variables
+
+An anonymous function ([closures](../language/closures.md)) is a function
+value just like a top-level reference — a `CClosure` whose `f` is a Lua
+entry wrapper, with `upvalue[0]=_mod`, `upvalue[1]=`function-type tag,
+`upvalue[2]=`native entry pointer. A closure adds **one upvalue per
+captured variable**, giving the layout
+
+```
+upvalue[0]     = _mod                  (module closure, captured lexically)
+upvalue[1]     = function-type tag     (light userdata)
+upvalue[2]     = native entry ptr      (light userdata)
+upvalue[3 + i] = captured variable i   (a box CClosure, or a copied value)
+```
+
+so the constant `3` separates the closure header from the captures, and a
+closure body reaches capture *i* as `_fn->upvalue[3 + i]`. The `_fn`
+parameter (above) is exactly what makes this work: a top-level call passes
+`NULL`, but a closure is always entered with `_fn` pointing at itself.
+
+### The captured-variable box
+
+A variable that is both **captured and assigned** (mutated by an inner
+function) cannot be a plain C local — the inner closure must share one
+mutable cell with the declarer and any sibling closures. The
+representation is a **box**: a `CClosure` with exactly **one** upvalue,
+used purely as a heap cell. The boxed value lives in `box->upvalue[0]`;
+the box's `f` is a per-module trap stub (`titan_box_trap`) that
+`luaL_error`s if the box is ever mistakenly called, since a box is never a
+real callable and never flows into Lua. A box is chosen over a literal
+`UpVal` (which crashes under the generational GC — Lua assumes every
+`UpVal` is born open) or a one-uservalue `Udata` (8 bytes larger, with an
+unused metatable slot): the `CClosure` cell is the smallest GC-safe option
+that survives every collector mode.
+
+Crucially the box uses the **same forward `luaC_barrier`** the coder
+already emits for every closure-upvalue store, for *both* installing the
+box into the enclosing closure *and* mutating the boxed value — one
+uniform barrier rule. The mutation barrier is load-bearing: under the
+generational collector, omitting it is a near-deterministic use-after-free
+(blacken box → store fresh white value → sweep frees it). A box is
+allocated and **immediately anchored** in a dedicated stack slot before
+its initializer is stored into it, so there is never an unanchored-box
+window. A variable that is captured-but-immutable, or mutated-but-not-
+captured, keeps its ordinary representation; only the conjunction is boxed.
+
+### Capture lists, lambda hoisting, transitive capture
+
+The checker computes, for each `ExpFunction`, the ordered de-duplicated
+list of enclosing-function declarations it captures (see
+[the type checker](checker.md#closures-capture-analysis-and-lambda-inference)); the coder
+turns that list into the `upvalue[3 + i]` slots in agreed order. At the
+use site the closure is built by pushing the three header upvalues then,
+in capture-list order, each capture — the box `CClosure*` for a boxed
+capture, or the copied value for a by-value capture — and calling
+`lua_pushcclosure` (preceded by a `lua_checkstack(L, 3 + ncaptured)`,
+since the capture pushes are raw transient stack pushes, not
+slot-reserved). `lua_pushcclosure` moves the pushed upvalues into the new
+white closure, so no barrier is needed at construction.
+
+Each lambda's native and Lua entries are **hoisted to file scope** and
+emitted alongside the top-level functions, named `<modprefix>lambda_<N>`.
+Because a lambda nested inside another lambda is discovered only while the
+outer one's body is generated, the emission loop drains the lambda list
+with an index-based `while` that re-reads its length each iteration rather
+than iterating a snapshot.
+
+**Transitive capture** (a deep lambda using a variable from a function it
+is not directly inside) falls out of the per-frame capture lists: the
+variable appears in the capture list of *every* intervening lambda, so
+each level reads it from its own `_fn` and pushes it into the next
+level's closure. A boxed transitive capture copies the one box pointer all
+the way down — every level shares the cell; a by-value transitive capture
+copies the immutable value down.
+
+### Bound-method trampolines
+
+A bound method reference `obj:m` is a one-capture closure whose captured
+"variable" is the receiver `self`, with a pair of **trampolines** that
+delegate to the method's real entries. Both are emitted by the method's
+**defining module for every method**, with exported/recoverable symbols
+mirroring the method's own entries plus a `function_type_tag` for the
+self-removed type, so a bind site in another module — which may have only
+the `.so` — can point at them. The **native trampoline** matches the
+self-removed function type's ABI, extracts `self` from its closure's
+`upvalue[3]`, and tail-calls the method's native entry with that `self`;
+the **Lua trampoline** inserts `self` as the first stack argument and
+delegates to the method's existing Lua entry, reusing its boundary checks.
+At the bind site `obj` is evaluated once into an anchored temp, then the
+closure is built exactly like a one-capture lambda (`_mod`, the
+self-removed tag, the native trampoline pointer, and `self`). The result
+is an ordinary `Type.Function` value with no special downstream handling.
+
+### The `.so` ABI bump
+
+Adding `_fn` to `function_sig` changes **every** native-entry signature,
+including the cross-`.so` value fast path and the cross-module externs.
+Old (`TITAN_VER` 0.5) and new compiled `.so`s are therefore
+**ABI-incompatible** — mixing them is undefined behavior — so this work
+bumps `TITAN_VER` from **0.5 to 0.6** (`titan-runtime/titan.h`), which
+also changes the compiled-module search-path suffix. All dependency `.so`s
+must be recompiled against 0.6.
 
 ## The module protocol
 
@@ -337,18 +460,19 @@ runtime's `loadlib`/`loadsym` (`titan-runtime/titan.c`: Titan-path
 search, registry-cached handles, Lua error on failure):
 
 ```c
-static CClosure* (*dep_mk_titan)(lua_State *L, CClosure *_mod, lua_Integer);
+static CClosure* (*dep_mk_titan)(lua_State *L, CClosure *_mod, CClosure *_fn, lua_Integer);
 /* in _init ($LOADMODULES1), at first init in the process: */
 void *dep_handle = loadlib(L, "dep.so");
-dep_mk_titan = titan_cast_func(CClosure* (*)(lua_State *L, CClosure *_mod, lua_Integer),
+dep_mk_titan = titan_cast_func(CClosure* (*)(lua_State *L, CClosure *_mod, CClosure *_fn, lua_Integer),
                                loadsym(L, dep_handle, "dep_mk_titan"));
 ```
 
 The dep's `_init` is fetched and called the same way inside
 `$INITMODULES`. In both regimes the *call sites are identical* C calls —
 only the storage class of the callee name differs — and the caller passes
-the callee's module closure read from its own upvalue:
-`dep_mk_titan(L, clCvalue(&_mod->upvalue[1]), 7)`. Record tags and
+the callee's module closure read from its own upvalue and `NULL` for the
+direct-call `_fn`: `dep_mk_titan(L, clCvalue(&_mod->upvalue[1]), NULL, 7)`.
+Record tags and
 metatables of imported records are not wired through symbols at all: they
 synchronize through the Lua registry at init time (`"Titan record <fqtn>
 tag"` / `"... metatable"`; [Lua interop internals](lua-interop-internals.md)).

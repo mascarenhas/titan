@@ -327,6 +327,100 @@ contexts, statically truthy/falsy left sides, optionizing the right side of
 `and`, Value mixing) live in `checkexp`'s `Ast.ExpBinop` handler and are
 specified case-by-case in [option types](../language/option-types.md).
 
+## Closures: capture analysis and lambda inference
+
+Anonymous functions (`Ast.ExpFunction`) add two pieces of work to the
+checker: deciding which enclosing variables each lambda **captures** (and
+whether each captured variable is mutated, which the coder needs to choose
+the boxed representation), and **inferring** a lambda's missing parameter
+and return types.
+
+### Function-nesting tracking
+
+The symbol table is a flat block stack with no notion of function
+boundaries, so the checker keeps its own. `checker.check` initialises
+`func_stack = {}` at the top (it is reset per check, unlike the
+module-global `loop_depth`). A frame `{ depth, captures = {}, capture_set
+= {} }` is pushed at the **very top** of the body-check for `checkfunc`,
+`checkmethod`, and the `Ast.ExpFunction` handler — *before* the
+parameters/`self` are declared, so they are stamped at the function's own
+depth — and popped after the body. Every local/param/`self` `Decl` records
+`decl._funcdepth = #func_stack` (locals in the single `declare` helper;
+params/`self` in `checkfunc`/`checkmethod`).
+
+The lambda handler must additionally open its **own** `with_block` and
+`add_symbol("$function", node)` inside it before checking the body (and set
+the lambda node's `_type` first, so `StatReturn` can find the return
+types). `checkfunc` gets away with adding `$function` to the caller's block
+only because `checkbodies` wraps it in `with_block`; a lambda has no such
+wrapper, so a naïve copy would leak `$function` into the enclosing scope.
+
+### The capture flags
+
+For each in-function local/param `Decl`:
+
+* `decl._assigned` — set when the variable is assigned after declaration
+  (the pre-existing flag, set in `checkvar`). The numeric-`for` control
+  variable's implicit increment does **not** set it, so a captured `for`
+  variable stays immutable (and thus by-value, fresh per iteration).
+* `decl._captured` — set when the variable is referenced (read or write)
+  from a function nested inside its declarer.
+* `decl._used` — **forced true** when a decl is captured, so a variable
+  only *written* (never read) by an inner function still passes
+  `StatDecl`'s `_used` gate and gets its box allocated.
+
+Capture detection lives in **one place**, the `VarName` visitor, which
+uniformly covers reads and assignment targets. When a resolved name is a
+local/param (`decl._tag == "Ast.Decl"` — `TopLevelVar`/`TopLevelFunc`/
+module members resolve to other node tags and are therefore never
+captured) and `decl._funcdepth < #func_stack`, it is a capture: set
+`_captured`/`_used`, and add the decl (first-seen order, deduped via
+`capture_set`) to the `captures` list of **every frame in the inclusive
+range `[decl._funcdepth + 1 .. #func_stack]`** — every function from the
+one just inside the declarer up to *and including* the current innermost
+one. The inclusivity is what threads a transitively-captured variable
+through the intervening lambdas all the way to the deepest one that uses
+it; a "strictly between" interval would drop the innermost frame and miss
+the actual user. The pass is a single in-order traversal, so by the end of
+`checkbodies` every flag and capture list is final, before codegen.
+
+### Lambda type inference: checking vs synthesis mode
+
+The `Ast.ExpFunction` handler reads the 4th `context` argument every
+`checkexp` visitor receives (the expected type). If `context` is a
+`Type.Function` whose arity matches `#node.params`, the lambda is in
+**checking mode**; otherwise in **synthesis mode**. This is exactly the
+`local x: T = exp` (checking) versus `local x = exp` (synthesis)
+distinction, lifted to lambdas. **Both the parameter types and the return
+type are taken from this expected type** — symmetric, context-only
+inference; neither is reverse-engineered from the lambda's body.
+
+* **Parameters.** An annotated parameter uses its annotation. An
+  unannotated one takes `context.params[i]` in checking mode, and in
+  synthesis mode is the clean error `cannot infer type of parameter 'x'`.
+* **Return.** An explicit `node.rettypes` list (including `{}` for an
+  explicit `: ()`) is used as written. The parser distinguishes *no return
+  annotation* from `: ()` with a sentinel, so the handler can tell them
+  apart. With no annotation: in checking mode the return comes from
+  `context.rettypes`; in synthesis mode it defaults to `{}` (zero-return
+  `()`), exactly the default an unannotated top-level function gets.
+
+So `node._type.rettypes` is always known *before* the body is checked. The
+body's `return`s are never inspected to synthesize a return type — they are
+checked/coerced against the now-fixed return types in `StatReturn`, exactly
+as a top-level function body is. A synthesis-mode lambda whose body does
+`return <expr>` is therefore the documented zero-return footgun: a clean
+arity error (`returned N value(s) but function expected 0`), consistent
+with an unannotated top-level function.
+
+Because the return types are fixed before the body is checked, the
+all-paths-return rule runs unconditionally inside `checkfuncbody` (no
+special deferral for lambdas), so a lambda with a non-`nil` return whose
+body can fall through gets the usual `function can return nil but return
+type is not nil` error, prompting an annotation. After the handler returns
+with `_type = node._type`, the surrounding context applies its usual
+`trycoerce`/`checkmatch` against the lambda's target.
+
 ## Per-construct notes for contributors
 
 * **The `context` parameter.** `checkexp(node, st, errors, context)` threads
@@ -339,20 +433,29 @@ specified case-by-case in [option types](../language/option-types.md).
   (bracketed keys → map, named fields → record error, otherwise array; an
   empty `{}` defaults to `{integer}`). A Boolean context also switches
   `and`/`or` into plain boolean mode.
-* **First-class functions.** These are now *implemented*, so the points
-  that historically rejected them are acceptance points. Referencing a name
-  whose type is `Type.Function` as a value (`Ast.ExpVar`) yields a function
-  value; calling a function *value* — a callee that is not a `VarName`/`VarDot`
-  resolving to a top-level function, module member or static (`Ast.ExpCall`) —
-  typechecks against the function type; writing a function *type* in an
-  annotation (`g: (integer) -> integer`) is handled by `typefromnode`'s
-  `Ast.TypeFunction` handler and produces a `Type.Function`; and assigning a
-  value into a function-typed variable is allowed. What the checker **still
-  rejects**, all clean type errors: assigning to a function *name* (you cannot
-  rebind a function); taking a *foreign* (C FFI) function as a value (it can
-  only be called by name — see [the FFI chapter](../language/ffi.md)); taking
-  an instance *method* as a value; and using a record type or a module as a
-  value.
+* **First-class functions, closures, and bound methods.** These are now
+  *implemented*, so the points that historically rejected them are acceptance
+  points. Referencing a name whose type is `Type.Function` as a value
+  (`Ast.ExpVar`) yields a function value; calling a function *value* — a callee
+  that is not a `VarName`/`VarDot` resolving to a top-level function, module
+  member or static (`Ast.ExpCall`) — typechecks against the function type;
+  writing a function *type* in an annotation (`g: (integer) -> integer`) is
+  handled by `typefromnode`'s `Ast.TypeFunction` handler and produces a
+  `Type.Function`; and assigning a value into a function-typed variable is
+  allowed. An `Ast.ExpFunction` (an anonymous function) typechecks to a
+  `Type.Function`, with parameter and return types inferred where annotations
+  are omitted, and its body captures enclosing locals (see
+  [Closures: capture analysis and lambda inference](#closures-capture-analysis-and-lambda-inference)).
+  A bare `obj:method` (no call) typechecks to a *bound method reference*: the
+  method's `Type.Function` with the implicit `self` removed. What the checker
+  **still rejects**, all clean type errors: assigning to a function *name* (you
+  cannot rebind a function); taking a *foreign* (C FFI) function as a value or
+  binding a foreign method (it can only be called by name — see
+  [the FFI chapter](../language/ffi.md)); a method reference on a non-record
+  receiver, or to a non-existent method; using a record type or a module as a
+  value; and a top-level `local x = function … end` (its initializer is not a
+  constant, so `isconst` rejects it as `top level variable initialization must
+  be constant`).
 * **Conditions are not coerced.** `if`/`while`/`repeat` conditions are
   checked with a Boolean context but never `trycoerce`d or `checkmatch`ed:
   any type is a legal condition, and truthiness is the coder's problem.

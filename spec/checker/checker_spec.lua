@@ -489,6 +489,27 @@ describe("Titan type checker", function()
         assert.truthy(ok, err)
     end)
 
+    it("wraps nil for boolean? directly, without coercing through the base", function ()
+        -- regression: nil -> boolean? must be ExpCast(nil-literal, boolean?),
+        -- NOT ExpCast(ExpCast(nil -> boolean), boolean?). The nested form would
+        -- coerce nil to the boolean base first (= false), so the coder would
+        -- emit false instead of nil.
+        local ok, err, ast = run_checker([[
+            function f(): boolean?
+                local b: boolean? = nil
+                return b
+            end
+        ]])
+        assert.truthy(ok, err)
+        local init = ast[1].block.stats[1].exps[1]
+        assert.same("Ast.ExpCast", init._tag)
+        assert.same("Type.Option", init.target._tag)
+        assert.same("Type.Boolean", init.target.base._tag)
+        -- the cast's operand is the nil literal itself, not a nested cast
+        assert.same("Ast.ExpNil", init.exp._tag)
+        assert.same("Type.Nil", init.exp._type._tag)
+    end)
+
     it("rejects coercing an option to a non-coercible base", function ()
         local ok, err = run_checker([[
             function f(b: boolean?): integer return b end

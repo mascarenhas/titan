@@ -306,6 +306,164 @@ describe("Titan parser", function()
         })
     end)
 
+    it("can parse a lambda with no annotations", function()
+        assert_program_ast([[
+            function f(): integer
+                local g = function(x) return x end
+                return 1
+            end
+        ]], {
+            { _tag = "Ast.TopLevelFunc",
+                block = { stats = {
+                    { _tag = "Ast.StatDecl",
+                        exps = {
+                            { _tag = "Ast.ExpFunction",
+                                params = {
+                                    { _tag = "Ast.Decl", name = "x", type = false },
+                                },
+                                rettypes = false,
+                                block = { _tag = "Ast.StatBlock" } },
+                        } },
+                } } },
+        })
+    end)
+
+    it("can parse a lambda with a return annotation", function()
+        assert_program_ast([[
+            function f(): integer
+                local g = function(x: integer): integer return x end
+                return 1
+            end
+        ]], {
+            { _tag = "Ast.TopLevelFunc",
+                block = { stats = {
+                    { _tag = "Ast.StatDecl",
+                        exps = {
+                            { _tag = "Ast.ExpFunction",
+                                params = {
+                                    { _tag = "Ast.Decl", name = "x" },
+                                },
+                                rettypes = {
+                                    { _tag = "Ast.TypeInteger" },
+                                } },
+                        } },
+                } } },
+        })
+    end)
+
+    it("can parse a zero-param and a multi-param lambda", function()
+        assert_program_ast([[
+            function f(): integer
+                local g = function() return 1 end
+                local h = function(a, b: integer, c) return a end
+                return 1
+            end
+        ]], {
+            { _tag = "Ast.TopLevelFunc",
+                block = { stats = {
+                    { _tag = "Ast.StatDecl",
+                        decls = { { name = "g" } },
+                        exps = {
+                            { _tag = "Ast.ExpFunction", params = {} },
+                        } },
+                    { _tag = "Ast.StatDecl",
+                        decls = { { name = "h" } },
+                        exps = {
+                            { _tag = "Ast.ExpFunction",
+                                params = {
+                                    { _tag = "Ast.Decl", name = "a", type = false },
+                                    { _tag = "Ast.Decl", name = "b" },
+                                    { _tag = "Ast.Decl", name = "c", type = false },
+                                } },
+                        } },
+                } } },
+        })
+    end)
+
+    it("distinguishes an explicit `: ()` lambda from no annotation", function()
+        assert_program_ast([[
+            function f(): integer
+                local g = function(): () end
+                return 1
+            end
+        ]], {
+            { _tag = "Ast.TopLevelFunc",
+                block = { stats = {
+                    { _tag = "Ast.StatDecl",
+                        exps = {
+                            { _tag = "Ast.ExpFunction", rettypes = {} },
+                        } },
+                } } },
+        })
+    end)
+
+    it("can parse a nested lambda", function()
+        assert_program_ast([[
+            function f(): integer
+                local g = function(x: integer): integer
+                    local h = function(y: integer): integer return x + y end
+                    return h(x)
+                end
+                return 1
+            end
+        ]], {
+            { _tag = "Ast.TopLevelFunc",
+                block = { stats = {
+                    { _tag = "Ast.StatDecl",
+                        exps = {
+                            { _tag = "Ast.ExpFunction",
+                                block = { stats = {
+                                    { _tag = "Ast.StatDecl",
+                                        exps = {
+                                            { _tag = "Ast.ExpFunction" },
+                                        } },
+                                } } },
+                        } },
+                } } },
+        })
+    end)
+
+    it("can parse a lambda in argument position", function()
+        assert_program_ast([[
+            function f(): integer
+                apply(function(x: integer): integer return x end, 1)
+                return 1
+            end
+        ]], {
+            { _tag = "Ast.TopLevelFunc",
+                block = { stats = {
+                    { _tag = "Ast.StatCall",
+                        callexp = { _tag = "Ast.ExpCall",
+                            args = { _tag = "Ast.ArgsFunc",
+                                args = {
+                                    { _tag = "Ast.ExpFunction" },
+                                    { _tag = "Ast.ExpInteger", value = 1 },
+                                } } } },
+                } } },
+        })
+    end)
+
+    it("can parse a lambda in init-list position", function()
+        assert_program_ast([[
+            function f(): integer
+                local t = { function(x: integer): integer return x end }
+                return 1
+            end
+        ]], {
+            { _tag = "Ast.TopLevelFunc",
+                block = { stats = {
+                    { _tag = "Ast.StatDecl",
+                        exps = {
+                            { _tag = "Ast.ExpInitList",
+                                fields = {
+                                    { _tag = "Ast.Field",
+                                        exp = { _tag = "Ast.ExpFunction" } },
+                                } },
+                        } },
+                } } },
+        })
+    end)
+
     it("can parse primitive types", function()
         assert_type_ast("nil", { _tag = "Ast.TypeNil" } )
         assert_type_ast("int", { _tag = "Ast.TypeName", name = "int" } )
@@ -798,6 +956,20 @@ describe("Titan parser", function()
                     { _tag = "Ast.ExpInitList" } } } })
     end)
 
+    it("parses a bound method reference (obj:m with no argument list)", function()
+        -- `o:m` with no `()` is a bound-method-reference expression, distinct
+        -- from a method call. A real call (`o:m()`) still parses as ExpCall.
+        assert_expression_ast([[ o:m ]],
+            { _tag = "Ast.ExpMethodRef", name = "m",
+              exp = { _tag = "Ast.ExpVar",
+                      var = { _tag = "Ast.VarName", name = "o" } } })
+
+        -- in an arithmetic context the ref is the left operand
+        assert_expression_ast([[ o:m + 1 ]],
+            { _tag = "Ast.ExpBinop", op = "+",
+              lhs = { _tag = "Ast.ExpMethodRef", name = "m" } })
+    end)
+
     it("only allows call expressions as statements", function()
         -- Currently the error messages mention something else
 
@@ -1240,8 +1412,6 @@ describe("Titan parser", function()
         assert_expression_syntax_error([[ 1 + ]], "OpExp")
 
         assert_expression_syntax_error([[ obj:() ]], "NameColonExpSuf")
-
-        assert_expression_syntax_error([[ obj:f + 1 ]], "FuncArgsExpSuf")
 
         assert_expression_syntax_error([[ y[] ]], "ExpExpSuf")
 

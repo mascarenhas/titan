@@ -1,13 +1,16 @@
 # Functions
 
-Functions are the unit of Titan code. They are declared at the top level
-of a module — there are no nested functions, no anonymous functions, and
-no function values yet (see [below](#functions-are-not-values-yet)) — and
-they come in two syntactic forms: plain module functions (this
+Functions are the unit of Titan code. They come in two syntactic forms
+declared at the top level of a module: plain module functions (this
 chapter), and the methods of records (declared with `:` after a record
-name; see [Records](records.md)). Everything this chapter says about
-parameters, return values and arity applies to both forms, and to the
-compiler-synthesized `new` static function of each record.
+name; see [Records](records.md)). Functions are also **first-class
+values** — a function name can be used as a value (see
+[Functions as values](#functions-as-values)) — and there are **anonymous
+function expressions** that close over the enclosing function's locals,
+which have their own chapter
+([anonymous functions and closures](closures.md)). Everything this chapter
+says about parameters, return values and arity applies to every form, and
+to the compiler-synthesized `new` static function of each record.
 
 ## Declaring functions
 
@@ -289,12 +292,17 @@ implicitly as well — the check that it is callable is deferred to the
 moment of the call (so a `value` holding a non-callable raises only when
 you try to call it).
 
-What is **still not** a value: an instance method (it would need a bound
-`self` — `p:move` cannot be taken as a value), a foreign/FFI function
-(see [the FFI chapter](ffi.md)), and — because there are no anonymous or
-nested functions and no closures over locals yet — any function not
-introduced by a top-level declaration. Assigning *to* a function name
-(`double = bad`) also remains an error.
+**Anonymous functions are values too.** A `function (...) ... end`
+expression evaluates to a function value of the same kind, and it can
+capture the enclosing function's locals — see
+[anonymous functions and closures](closures.md). An instance method named
+but not called, `obj:method`, is also a value: a *bound method reference*,
+the method's type with the implicit `self` bound to the receiver (see
+[bound method references](closures.md#bound-method-references)).
+
+What is **still not** a value: a foreign/FFI function — it can be called by
+name but not referenced (see [the FFI chapter](ffi.md)). Assigning *to* a
+function name (`double = bad`) also remains an error.
 
 ## Recursion and declaration order
 

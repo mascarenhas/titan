@@ -3,7 +3,7 @@ local util  = require "titan-compiler.util"
 
 local coder = {}
 
-local codeexp, codestat, codeforeignexp
+local codeexp, codestat, codeforeignexp, codelambda, codelambdadec, codemethodref
 
 local render = util.render
 
@@ -114,6 +114,19 @@ end
 
 local function method_luaname(typ)
     return fname_prefix(typ) .. "_luamethod"
+end
+
+-- Bound-method trampolines: the native one (`_boundmethod`) matches the
+-- self-removed function ABI and delegates to the method's own native entry with
+-- the captured `self`; the Lua one (`_boundlua`) is the closure's `lua_CFunction`
+-- and inserts `self` before delegating to the method's Lua entry. Both are
+-- exported so a bind site in another module (with only the `.so`) can reach them.
+local function bound_method_name(typ)
+    return fname_prefix(typ) .. "_boundmethod"
+end
+
+local function bound_method_luaname(typ)
+    return fname_prefix(typ) .. "_boundlua"
 end
 
 local function modprefix(modname)
@@ -560,7 +573,12 @@ end
 
 
 local function function_sig(fname, ftype, is_pointer)
-    local params = { "lua_State *L", "CClosure *_mod" }
+    -- Every native entry takes the function's own closure (_fn) right after the
+    -- module closure (_mod): NULL on the static path, the callee on a value call,
+    -- the wrapper closure in the Lua entry. Closures read captured upvalues from
+    -- it; top-level/static/method bodies ignore it. This uniform ABI lets the
+    -- value-call fast path dispatch on the type tag alone.
+    local params = { "lua_State *L", "CClosure *_mod", "CClosure *_fn" }
     if ftype._tag == "Type.Method" then
         table.insert(params, "CClosure*")
     end
@@ -598,6 +616,7 @@ local function newcontext(tlcontext)
         variables = tlcontext.variables, -- set of external variables that we use
         module = tlcontext.module, -- module name,
         modules = tlcontext.modules, -- set of record metatables that we need
+        bound_luas = tlcontext.bound_luas, -- external bound-method Lua trampolines we bind
         tlcontext = tlcontext -- toplevel context
     }
 end
@@ -659,6 +678,114 @@ local function newforeigntmp(ctx --[[:table]], typ --[[:table]])
         TYPE = ftype,
         TMPNAME = tmpname,
     }), tmpname
+end
+
+-- A captured-and-mutated local/param is stored in a "box": a heap cell whose
+-- single value holds the variable's value. The box pointer is the thing copied
+-- into closures that capture the variable, so all sharers mutate one cell. The
+-- box is a Lua *userdata* (`Udata*`), not a CClosure: a userdata's GC traversal
+-- (`traverseudata`) calls `genlink`, so an overwriting write can use the BACK
+-- barrier (`luaC_barrierback`) — which, unlike the forward barrier a CClosure
+-- box would require, does not float fresh values written in a hot loop to the
+-- old generation until the next major GC. A box never crosses a module boundary
+-- (it backs a captured local inside one module's closures, and only that module
+-- generates the code that touches it), so this representation is module-internal
+-- and does not affect the cross-module ABI (no TITAN_VER bump).
+--
+-- Two representations, chosen by `is_rawbox` (= `not types.is_gc(typ)`):
+--   (N) any non-gc type (integer/float/boolean/Nil/foreign pointer/scalar
+--       typedef, plus an Option of a non-gc base whose TValue is only ever
+--       nil-or-scalar): a 0-uservalue userdata (`Udata0`) with the raw,
+--       non-collectable C value stored inline (`getudatamem`). No TValue
+--       tagging and no barrier — ever.
+--   (G) every gc type (TValue-stored: String/Array/Map/record/Function/Value
+--       and an Option of a gc base): a 1-uservalue userdata holding a TValue in
+--       `uv[0].uv`, written with the BACK barrier.
+
+-- A box uses the raw (N) representation iff its value can never hold a GC
+-- pointer, i.e. `not types.is_gc(typ)`. `is_gc` is exactly the predicate that
+-- governs every other barrier decision in the coder, so a non-gc type has no GC
+-- reference and is safe to store raw and untraced in a Udata0. Because newbox /
+-- box_read / box_write derive the storage type and size from ctype(typ) /
+-- sizeof(ctype(typ)), any non-gc type works with no enumeration: integer, float,
+-- boolean, Nil (a dummy int), an Option of a non-gc base (a TValue that is only
+-- ever nil-or-scalar), foreign pointers, and scalar typedefs all route here
+-- automatically. Everything that may hold a GC object uses (G).
+local function is_rawbox(typ --[[:table]])
+    return not types.is_gc(typ)
+end
+
+-- The C lvalue/rvalue for a box's stored value.
+--   (G) -> "&BOX->uv[0].uv" (a TValue*, used with setslot/getslot)
+--   (N) -> "*(CT *)getudatamem(BOX)" (the raw unboxed C value)
+local function box_value_slot(boxvar)
+    return "&" .. boxvar .. "->uv[0].uv"
+end
+
+-- Read a box's value as a C rvalue yielding the unboxed value.
+local function box_read(typ --[[:table]], boxvar --[[:string]])
+    if is_rawbox(typ) then
+        return render("(*($CT *)getudatamem($BOX))",
+            { CT = ctype(typ), BOX = boxvar })
+    else
+        return getslot(typ, nil, box_value_slot(boxvar))
+    end
+end
+
+-- Write `cexp` into a box. (N) stores the raw scalar inline, no barrier.
+-- (G) stores a TValue and, when the value may be collectable, runs the BACK
+-- barrier (safe because the box is a genlink-managed userdata).
+local function box_write(typ --[[:table]], boxvar --[[:string]], cexp --[[:string]])
+    if is_rawbox(typ) then
+        return render("*($CT *)getudatamem($BOX) = $CEXP;",
+            { CT = ctype(typ), BOX = boxvar, CEXP = cexp })
+    else
+        local slot = box_value_slot(boxvar)
+        local code = setslot(typ, slot, cexp)
+        if types.is_gc(typ) then
+            code = code .. render(
+                "\nluaC_barrierback(L, obj2gco($BOX), $SLOT);",
+                { BOX = boxvar, SLOT = slot })
+        end
+        return code
+    end
+end
+
+-- `newbox` emits the box allocation: declares the `Udata*` C var, allocates the
+-- cell inline (luaS_newudata expanded with the size check dropped — the size is
+-- a tiny constant), and anchors the box in a fresh stack slot against the GC
+-- BEFORE any later allocation. For (G) the value slot is nil'd before anchoring
+-- so a GC triggered by a later alloc never traverses a garbage uv[0]. The caller
+-- stores the initial value afterwards (via box_write).
+--   typ:      the Titan type of the boxed variable (selects (G) vs (N))
+--   boxvar:   name of the `Udata*` C variable to declare
+--   slotname: name of the anchor-slot `TValue*` C variable to declare
+local function newbox(ctx, typ, boxvar, slotname)
+    if is_rawbox(typ) then
+        return render([[
+            $NEWSLOT
+            Udata *$BOXVAR = gco2u(luaC_newobj(L, LUA_VUSERDATA, sizeudata(0, sizeof($CT))));
+            $BOXVAR->len = sizeof($CT); $BOXVAR->nuvalue = 0; $BOXVAR->metatable = NULL;
+            setuvalue(L, $SLOTNAME, $BOXVAR);
+        ]], {
+            NEWSLOT = newslot(ctx, slotname),
+            BOXVAR = boxvar,
+            SLOTNAME = slotname,
+            CT = ctype(typ),
+        })
+    else
+        return render([[
+            $NEWSLOT
+            Udata *$BOXVAR = gco2u(luaC_newobj(L, LUA_VUSERDATA, sizeudata(1, 0)));
+            $BOXVAR->len = 0; $BOXVAR->nuvalue = 1; $BOXVAR->metatable = NULL;
+            setnilvalue(&$BOXVAR->uv[0].uv);
+            setuvalue(L, $SLOTNAME, $BOXVAR);
+        ]], {
+            NEWSLOT = newslot(ctx, slotname),
+            BOXVAR = boxvar,
+            SLOTNAME = slotname,
+        })
+    end
 end
 
 local function pushd(ctx)
@@ -1016,6 +1143,16 @@ local function codeassignment(ctx, var, cexp, etype)
                 cset = cset .. "\nluaC_barrier(L, _mod, " .. var._decl._slot .. ");"
             end
             return cset
+        elseif ctx.captures and ctx.captures[var._decl] then
+            -- Inside a lambda body: write to a captured (boxed) variable through
+            -- its box cell. By-value captures are immutable, so a write target is
+            -- always boxed.
+            local cap = ctx.captures[var._decl]
+            return box_write(var._type, cap.boxvar, cexp)
+        elseif var._decl._boxed then
+            -- Captured-and-mutated local/param of the current function: write
+            -- through its box cell.
+            return box_write(var._type, var._decl._box, cexp)
         elseif var._decl._used and cexp ~= var._decl._cvar then
             local cset = ""
             if types.is_gc(var._type) then
@@ -1327,7 +1464,9 @@ local function codevaluecall(ctx, node)
     --     the callee's static type -> unboxed direct native call
     ctx.valuecall_count = (ctx.valuecall_count or 0) + 1
     local fptype = "_vc_fp_t_" .. ctx.valuecall_count
-    local fastargs = { "L", "_vc_mod" }
+    -- _fn on the fast path is the callee closure itself, so its native entry can
+    -- reach any captured upvalues (slots 3+).
+    local fastargs = { "L", "_vc_mod", "_vc_callee" }
     for _, aname in ipairs(argnames) do table.insert(fastargs, aname) end
     for i = 2, nresults do table.insert(fastargs, "&" .. resultnames[i]) end
     local fastcall = "_vc_fp(" .. table.concat(fastargs, ", ") .. ");"
@@ -1456,6 +1595,7 @@ local function codecall(ctx, node)
             end
         end
         table.insert(caexps, modarg)
+        table.insert(caexps, "NULL")  -- _fn: a static top-level call has no closure
     else
         assert(node.args._tag == "Ast.ArgsMethod")
         local mtype = node._method
@@ -1479,6 +1619,7 @@ local function codecall(ctx, node)
         local cstat, cexp = codeexp(ctx, node.exp)
         table.insert(castats, cstat)
         table.insert(caexps, modarg)
+        table.insert(caexps, "NULL")  -- _fn: a static method call has no closure
         table.insert(caexps, cexp)
     end
     for _, arg in ipairs(node.args.args) do
@@ -1604,7 +1745,41 @@ function codestat(ctx, node)
             local exp = node.exps[i]
             local decl = node.decls[i]
             local cstats, cexp = codeexp(ctx, exp)
-            if decl._used then
+            decl._boxed = decl._captured and decl._assigned
+            if decl._boxed then
+                -- Captured-and-mutated: storage is a heap box (Udata cell).
+                -- Ordering avoids an unanchored-box window: (1) evaluate the init
+                -- into a temp (it may allocate); (2) create+anchor the box with no
+                -- allocation between alloc and anchor; (3) store the init into the
+                -- box (with the back barrier if gc).
+                local typ = decl._type
+                local isgc = types.is_gc(typ)
+                local n = localname(ctx, decl.name)
+                -- A gc init value must be anchored in a stack slot before the box
+                -- allocation (luaC_newobj can run the GC), so the still-white
+                -- init is not swept while only held in a C local.
+                local ctmp, tmpname, tmpslot = newtmp(ctx, typ, isgc)
+                decl._box = "_box_" .. n
+                local boxslot = "_boxslot_" .. n
+                local anchortmp = tmpslot
+                    and setslot(typ, tmpslot, tmpname) or ""
+                table.insert(code, render([[
+                    $CSTATS
+                    $CTMP
+                    $TMPNAME = $CEXP;
+                    $ANCHORTMP
+                    $NEWBOX
+                    $SETSLOT
+                ]], {
+                    CSTATS = cstats,
+                    CTMP = ctmp,
+                    TMPNAME = tmpname,
+                    CEXP = cexp,
+                    ANCHORTMP = anchortmp,
+                    NEWBOX = newbox(ctx, typ, decl._box, boxslot),
+                    SETSLOT = box_write(typ, decl._box, tmpname),
+                }))
+            elseif decl._used then
                 local typ = decl._type
                 decl._cvar = "_local_" .. localname(ctx, decl.name)
                 local cdecl = ctype(typ) .. " " .. decl._cvar .. ";"
@@ -1735,6 +1910,21 @@ local function codevar(ctx, node)
         return "", getslot(node._type, nil, render("&_mod->upvalue[$SLOT]", {
             SLOT = c_integer_literal(node._decl._closure_upvalue)
         }))
+    elseif ctx.captures and ctx.captures[node._decl] then
+        -- Inside a lambda body: the variable is captured from an enclosing
+        -- function and lives in this closure's upvalues (read via _fn). A boxed
+        -- capture is read through its box; a by-value capture directly.
+        local cap = ctx.captures[node._decl]
+        if cap.boxed then
+            return "", box_read(node._type, cap.boxvar)
+        else
+            return "", getslot(node._type, nil,
+                "&_fn->upvalue[" .. c_integer_literal(cap.index) .. "]")
+        end
+    elseif node._decl._boxed then
+        -- Captured-and-mutated local/param of the current function: read through
+        -- its box cell.
+        return "", box_read(node._type, node._decl._box)
     else
         return "", node._decl._cvar
     end
@@ -2537,6 +2727,48 @@ function codeexp(ctx, node, iscondition, target)
         return codecall(ctx, node, target)
     elseif tag == "Ast.ExpExtra" then
         return "", node.exp._extras[node.index]
+    elseif tag == "Ast.ExpCast"
+           and (node.exp._type._tag == "Type.Typedef"
+                or node._type._tag == "Type.Typedef") then
+        -- A scalar foreign typedef (e.g. size_t) IS its underlying scalar in C,
+        -- so `<typedef> as T` (or a cast TO a typedef) behaves exactly like the
+        -- cast of/to the underlying type. Resolve the typedef(s) and re-dispatch
+        -- through the ordinary cast arms via a synthetic cast node, mirroring
+        -- `ctype` (which recurses through `Type.Typedef._type`). We never mutate
+        -- the shared AST/type tables in place; the synthetic node carries its own
+        -- resolved types and reuses the original operand and location.
+        local function resolve(t)
+            -- Unwrap ALL typedef levels: typedefs can chain (e.g. macOS's
+            -- `size_t` -> `__darwin_size_t` -> `unsigned long`, glibc's
+            -- `clock_t` -> `__clock_t` -> long). A one-level unwrap leaves a
+            -- Typedef on the synthesized cast, which re-enters this arm forever.
+            while t and t._tag == "Type.Typedef" do t = t._type end
+            return t
+        end
+        local stype = resolve(node.exp._type)
+        local ttype = resolve(node._type)
+        if types.equals(stype, ttype) then
+            -- typedef-vs-underlying identity (e.g. size_t as integer): no-op
+            return codeexp(ctx, node.exp, iscondition, target)
+        end
+        local synthexp
+        if node.exp._type._tag == "Type.Typedef" then
+            -- Re-tag the operand with its underlying type by wrapping it in a
+            -- pass-through cast node so the existing arms see a native source.
+            synthexp = { _tag = "Ast.ExpCast", loc = node.exp.loc,
+                         exp = node.exp, target = stype, _type = stype,
+                         _typedef_resolved = true }
+        else
+            synthexp = node.exp
+        end
+        local synthcast = { _tag = "Ast.ExpCast", loc = node.loc,
+                            exp = synthexp, target = ttype, _type = ttype }
+        return codeexp(ctx, synthcast, iscondition, target)
+    elseif tag == "Ast.ExpCast" and node._typedef_resolved then
+        -- Pass-through wrapper produced above: the operand's static type is a
+        -- typedef but its C representation already is the underlying scalar, so
+        -- just emit the operand unchanged under its resolved type.
+        return codeexp(ctx, node.exp, iscondition, target)
     elseif tag == "Ast.ExpCast" and node.exp._tag == "Ast.ExpVar" and node.exp.var._tag == "Ast.VarBracket"
            and node.exp._type._tag ~= "Type.Option" then
         -- Fold casts of array/map indexing into the code for the operation
@@ -2806,6 +3038,10 @@ function codeexp(ctx, node, iscondition, target)
             return cstats .. "\n    " .. cexp .. ";", "0"
         end
         return codeexp(ctx, node.exp, iscondition, target)
+    elseif tag == "Ast.ExpFunction" then
+        return codelambda(ctx, node)
+    elseif tag == "Ast.ExpMethodRef" then
+        return codemethodref(ctx, node)
     else
         error("invalid node tag " .. tag)
     end
@@ -2837,7 +3073,7 @@ end
 local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_name)
     -- generate Lua entry point
     local stats = {}
-    local pnames = { "L", "_mod" }
+    local pnames = { "L", "_mod", "_fn" }
     local params
     if typ._tag == "Type.Function" or typ._tag == "Type.StaticMethod" then
         params = typ.params
@@ -2919,7 +3155,8 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
         ptrdiff_t __save_errfunc = L->errfunc;
         lua_pushcclosure(L, errorhandler, 0);
         L->errfunc = savestack(L, L->top.p - 1);
-        CClosure *_mod = clCvalue(&clCvalue(s2v(func))->upvalue[0]);
+        CClosure *_fn = clCvalue(s2v(func));
+        CClosure *_mod = clCvalue(&_fn->upvalue[0]);
         $BODY
     }]], {
         LUANAME = lua_name,
@@ -2927,6 +3164,22 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
         ERRORSLOT = #params == 0 and "lua_pushnil(L);" or "",
         NAME = c_string_literal(titan_name),
         BODY = table.concat(stats, "\n"),
+    })
+end
+
+-- A captured-and-mutated parameter is boxed: its incoming value (already anchored
+-- in `_paramslot` by the caller for gc types) is copied into a fresh box cell so a
+-- nested lambda capturing it shares the same mutable storage. Sets `param._box`.
+local function codeboxparam(ctx, param)
+    local typ = param._type
+    param._box = "_box_" .. param.name
+    local boxslot = "_boxslot_" .. param.name
+    return render([[
+        $NEWBOX
+        $SETSLOT
+    ]], {
+        NEWBOX = newbox(ctx, typ, param._box, boxslot),
+        SETSLOT = box_write(typ, param._box, param._cvar),
     })
 end
 
@@ -2957,20 +3210,38 @@ local function codefuncdec(tlcontext, node)
         fname = method_name(node._type)
         luaname = method_luaname(node._type)
     end
-    local cparams = { "lua_State *L", "CClosure *_mod" }
+    local cparams = { "lua_State *L", "CClosure *_mod", "CClosure *_fn" }
     if node._tag == "Ast.TopLevelMethod" then
-        node._self._cvar = "__self__"
-        if node._self._assigned then
-            node._self._slot = "__selfslot__"
-            table.insert(stats, newslot(ctx, node._self._slot))
+        -- `self` is a real Decl that capture analysis can mark captured/assigned,
+        -- so it is treated exactly like a parameter: anchored when a gc-typed and
+        -- assigned self, and boxed when captured-and-mutated by a nested lambda.
+        local self = node._self
+        self._cvar = "__self__"
+        self._boxed = self._captured and self._assigned
+        if types.is_gc(self._type) and self._assigned then
+            self._slot = "__selfslot__"
+            table.insert(stats, newslot(ctx, self._slot))
+            -- anchor the incoming gc self before the box allocation (which can
+            -- trigger GC), so a reassigned/captured self stays live
+            table.insert(stats, setslot(self._type, self._slot, self._cvar))
         end
-        table.insert(cparams, ctype(node._self._type) .. " " .. node._self._cvar)
+        if self._boxed then
+            table.insert(stats, codeboxparam(ctx, self))
+        end
+        table.insert(cparams, ctype(self._type) .. " " .. self._cvar)
     end
     for _, param in ipairs(node.params) do
         param._cvar = "_param_" .. param.name
+        param._boxed = param._captured and param._assigned
         if types.is_gc(param._type) and param._assigned then
             param._slot = "_paramslot_" .. param.name
             table.insert(stats, newslot(ctx, param._slot))
+            -- anchor the incoming gc param in its own slot before the box
+            -- allocation (which can trigger GC) — see codeboxparam
+            table.insert(stats, setslot(param._type, param._slot, param._cvar))
+        end
+        if param._boxed then
+            table.insert(stats, codeboxparam(ctx, param))
         end
         table.insert(cparams, ctype(param._type) .. " " .. param._cvar)
     end
@@ -3043,6 +3314,392 @@ local function codefuncdec(tlcontext, node)
     node._luabody = genluaentry(tlcontext, node.name, fname, node._type, node.loc, luaname)
 end
 
+-- Emit the two bound-method trampolines for a TopLevelMethod, delegating to the
+-- method's own native/Lua entries. They turn `obj:m` into a first-class function
+-- value of the self-removed type `(params) -> rettypes`, with `self` captured in
+-- the closure's `upvalue[3]`. Emitted for EVERY method (and exported) so a bind
+-- site in a module that only has this module's `.so` can still reach them.
+-- Produces node._boundsig / node._boundbody.
+local function codemethodtrampoline(tlcontext, node)
+    local mtype = node._type
+    -- the self-removed function type whose ABI the native trampoline matches
+    local ftype = types.Function(mtype.params, mtype.rettypes, false)
+    local nativename = bound_method_name(mtype)
+    local luaname = bound_method_luaname(mtype)
+    local mnative = method_name(mtype)
+    local mlua = method_luaname(mtype)
+    local rettype = mtype.rettypes[1]
+    local crettype = rettype and ctype(rettype) or "void"
+
+    -- Named parameter list matching function_sig(ftype) so the trampoline body
+    -- can forward each one. Names are local to the trampoline (`_bp_N` for params,
+    -- `_outparam_N` for out-params), independent of the method's own _cvar names.
+    local cparams = { "lua_State *L", "CClosure *_mod", "CClosure *_fn" }
+    local callargs = { "L", "_mod", "NULL",
+        "clCvalue(&_fn->upvalue[3])" }
+    for i, ptype in ipairs(mtype.params) do
+        local pname = "_bp_" .. i
+        table.insert(cparams, ctype(ptype) .. " " .. pname)
+        table.insert(callargs, pname)
+    end
+    for i = 2, #mtype.rettypes do
+        local oname = "_outparam_" .. i
+        table.insert(cparams, ctype(mtype.rettypes[i]) .. " *" .. oname)
+        table.insert(callargs, oname)
+    end
+    local call = render("$NAME($ARGS)", {
+        NAME = mnative,
+        ARGS = table.concat(callargs, ", "),
+    })
+    local bodycall
+    if rettype then
+        bodycall = "return " .. call .. ";"
+    else
+        bodycall = call .. ";\n        return;"
+    end
+
+    -- native trampoline signature == function_sig of the self-removed type, but
+    -- with named parameters so the body can forward them.
+    local nativesig = render("$RETTYPE $NAME($PARAMS)", {
+        RETTYPE = crettype,
+        NAME = nativename,
+        PARAMS = table.concat(cparams, ", "),
+    })
+    -- Both trampolines are exported (non-static): a bind site in a module that
+    -- only has this module's `.so` reaches the native one for the fast path AND
+    -- the Lua one (the closure's lua_CFunction) by dlsym.
+    node._boundbody = render([[
+    $SIG {
+        $BODYCALL
+    }
+    int $LUANAME(lua_State *L) {
+        /* insert the captured receiver (self) as the first stack argument, then
+           delegate to the method's Lua entry (which reuses all the boundary
+           checks/coercions). upvalue[3] holds the record's raw CClosure (as the
+           native trampoline expects); the method Lua entry expects the Lua-facing
+           Udata, which lives in the record CClosure's own upvalue[0]. The bound
+           closure's upvalue[0] is the method's module, so the method Lua entry
+           recovers _mod correctly from it. */
+        CClosure *_bound = clCvalue(s2v(L->ci->func.p));
+        lua_checkstack(L, 1);
+        setobj2s(L, L->top.p, &(clCvalue(&_bound->upvalue[3])->upvalue[0]));
+        L->top.p++;
+        lua_insert(L, 1);
+        return $MLUA(L);
+    }]], {
+        SIG = nativesig,
+        BODYCALL = bodycall,
+        LUANAME = luaname,
+        MLUA = mlua,
+    })
+    node._boundsig = render([[
+        $SIG;
+        int $LUANAME(lua_State *L);
+    ]], {
+        SIG = function_sig(nativename, ftype, false),
+        LUANAME = luaname,
+    })
+    -- Publish the bound function type's tag from the DEFINING module (every
+    -- method, even one never bound here): a `.so`-only importer recovers the tag
+    -- from the registry this module populates, so its bound value's fast path can
+    -- recognise the trampoline. (publish-or-recover dedupes a double publish.)
+    function_type_tag(tlcontext, ftype)
+end
+
+-- Names + registration for a lambda node, assigned on first sight at its use
+-- site. Both the closure-creation (codelambda) and the body emission
+-- (codelambdadec) read these; assigning here (lazily) keeps the native/Lua names
+-- stable across the two.
+local function lambda_register(tlcontext, node)
+    if not node._lambda_native then
+        local n = tlcontext.lambda_count
+        tlcontext.lambda_count = n + 1
+        node._lambda_native = tlcontext.prefix .. "lambda_" .. n
+        node._lambda_lua = tlcontext.prefix .. "lambda_" .. n .. "_lua"
+        table.insert(tlcontext.lambdas, node)
+    end
+end
+
+-- Read a captured variable in the CURRENT function, for pushing into a nested
+-- lambda's closure. Returns (boxexpr, valuestats, valueexpr): for a boxed
+-- capture, `boxexpr` is the C expression for the box `Udata*`; for a by-value
+-- capture, `valueexpr` (with prelude `valuestats`) is the C value expression.
+-- A capture that is itself captured by the current function (transitive) is
+-- reached through the current `_fn`; otherwise it is a local/param of the current
+-- function.
+local function read_capture(ctx, decl)
+    local cap = ctx.captures and ctx.captures[decl]
+    if cap then
+        -- transitive: the current function captured this decl too
+        if cap.boxed then
+            return cap.boxvar, nil, nil
+        else
+            return nil, "", getslot(decl._type, nil,
+                "&_fn->upvalue[" .. c_integer_literal(cap.index) .. "]")
+        end
+    elseif decl._boxed then
+        return decl._box, nil, nil
+    else
+        -- a by-value local/param of the current function
+        return nil, "", decl._cvar
+    end
+end
+
+-- Use-site code for an anonymous function: build a fresh CClosure with
+-- upvalue[0]=_mod, [1]=type tag, [2]=native ptr, and [3+i]=captured variable i
+-- (a box Udata* or a copied value), then return the closure value (anchored in
+-- a gc temp). The capture pushes are transient raw stack pushes (guarded by
+-- lua_checkstack, consumed by lua_pushcclosure), not nslots-accounted.
+function codelambda(ctx, node)
+    local tlcontext = ctx.tlcontext
+    lambda_register(tlcontext, node)
+    local ncap = #node._captures
+    local stats = {}
+    -- lua_checkstack can relocate the Lua stack; this function therefore needs
+    -- _base recomputed from its saved offset afterwards (like a value call).
+    ctx.uses_base_off = true
+    table.insert(stats, render([[
+        lua_checkstack(L, $NPUSH);
+        titan_pushmodule(L, _mod);
+        lua_pushlightuserdata(L, (void*)$FUNCTAG);
+        lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
+    ]], {
+        NPUSH = c_integer_literal(3 + ncap),
+        FUNCTAG = function_type_tag(tlcontext, node._type),
+        NATIVE = node._lambda_native,
+    }))
+    for _, decl in ipairs(node._captures) do
+        local captype = decl._type
+        local boxexpr, vstats, vexpr = read_capture(ctx, decl)
+        if boxexpr then
+            table.insert(stats, render([[
+                setuvalue(L, s2v(L->top.p), $BOX); L->top.p++;
+            ]], { BOX = boxexpr }))
+        else
+            table.insert(stats, render([[
+                $VSTATS
+                $SETSLOT L->top.p++;
+            ]], {
+                VSTATS = vstats,
+                SETSLOT = setslot(captype, "s2v(L->top.p)", vexpr),
+            }))
+        end
+    end
+    -- lua_pushcclosure moves the pushed upvalues into the fresh (white) closure,
+    -- so no barrier is needed at creation. The result closure is on top.
+    local cdecl, tmpname, tmpslot = newtmp(ctx, node._type, true)
+    table.insert(stats, render([[
+        lua_pushcclosure(L, $LUANAME, $NUP);
+        _base = restorestack(L, _base_off);
+        $CDECL
+        setobj2t(L, $TMPSLOT, s2v(L->top.p - 1));
+        $GETSLOT;
+        L->top.p--;
+    ]], {
+        LUANAME = node._lambda_lua,
+        NUP = c_integer_literal(3 + ncap),
+        CDECL = cdecl,
+        TMPSLOT = tmpslot,
+        GETSLOT = getslot(node._type, tmpname, "s2v(L->top.p - 1)"),
+    }))
+    return table.concat(stats, "\n"), tmpname
+end
+
+-- Use-site code for a bound method reference `obj:m`: evaluate the receiver once
+-- into an anchored gc temp, then build a 4-upvalue CClosure exactly like a
+-- 1-capture lambda whose capture is `self`:
+--   upvalue[0] = the method's module closure
+--   upvalue[1] = the self-removed function-type tag (light userdata)
+--   upvalue[2] = the bound native trampoline pointer (light userdata)
+--   upvalue[3] = self (the captured receiver)
+-- The closure's lua_CFunction is the bound Lua trampoline. The result is an
+-- ordinary Type.Function value, callable through both paths and Lua-crossable.
+function codemethodref(ctx, node)
+    local tlcontext = ctx.tlcontext
+    local mtype = node._method
+    local ftype = node._type      -- Type.Function (self removed)
+    local nativename = bound_method_name(mtype)
+    local luaname = bound_method_luaname(mtype)
+    local mod, record = mtype.fqtn:match("^(.*)%.(%a+)$")
+
+    -- The bound closure's upvalue[0] must be the defining module's closure: `_mod`
+    -- for a same-module method, or the imported module's closure recovered from
+    -- our `_mod` upvalues exactly as method *calls* do. Cross-module also requires
+    -- the trampoline symbol to be reachable (extern / dlsym), registered in
+    -- ctx.functions keyed by its mangled name.
+    local modexpr = "_mod"
+    if mod ~= ctx.module then
+        ctx.functions[mtype.fqtn .. ":bound:" .. mtype.name] = {
+            module = mod,
+            record = record,
+            name = mtype.name,
+            type = ftype,
+            mangled = nativename,
+        }
+        -- the Lua trampoline (the closure's lua_CFunction) is not function_sig
+        -- shaped, so it gets its own extern/dlsym registry entry
+        ctx.bound_luas[luaname] = { module = mod }
+        if not ctx.modules[mod] then
+            ctx.modules[mod] = nextupvalue(ctx.tlcontext)
+        end
+        modexpr = render("clCvalue(&_mod->upvalue[$INDEX])", {
+            INDEX = c_integer_literal(ctx.modules[mod]),
+        })
+    end
+
+    ctx.uses_base_off = true
+    local stats = {}
+
+    -- 1. evaluate the receiver once into an anchored gc temp (self: CClosure*)
+    local rtype = node.exp._type
+    local rstat, rexp = codeexp(ctx, node.exp)
+    local rdecl, rname, rslot = newtmp(ctx, rtype, true)
+    table.insert(stats, rstat)
+    table.insert(stats, rdecl)
+    table.insert(stats, rname .. " = " .. rexp .. ";")
+    table.insert(stats, setslot(rtype, rslot, rname))
+
+    -- 2. push the four upvalues and build the closure
+    table.insert(stats, render([[
+        lua_checkstack(L, 4);
+        titan_pushmodule(L, $MODEXPR);
+        lua_pushlightuserdata(L, (void*)$FUNCTAG);
+        lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
+        $PUSHSELF L->top.p++;
+    ]], {
+        MODEXPR = modexpr,
+        FUNCTAG = function_type_tag(tlcontext, ftype),
+        NATIVE = nativename,
+        PUSHSELF = setslot(rtype, "s2v(L->top.p)", rname),
+    }))
+
+    -- 3. consume the closure into an anchored gc temp
+    local cdecl, tmpname, tmpslot = newtmp(ctx, ftype, true)
+    table.insert(stats, render([[
+        lua_pushcclosure(L, $LUANAME, 4);
+        _base = restorestack(L, _base_off);
+        $CDECL
+        setobj2t(L, $TMPSLOT, s2v(L->top.p - 1));
+        $GETSLOT;
+        L->top.p--;
+    ]], {
+        LUANAME = luaname,
+        CDECL = cdecl,
+        TMPSLOT = tmpslot,
+        GETSLOT = getslot(ftype, tmpname, "s2v(L->top.p - 1)"),
+    }))
+    return table.concat(stats, "\n"), tmpname
+end
+
+-- File-scope emission of a lambda: its native entry (signature via function_sig,
+-- so the uniform (L,_mod,_fn,params...,outparams) ABI) and Lua entry. The body
+-- reads captures from _fn->upvalue[3+i]; the ctx.captures map (decl -> {index,
+-- boxed, boxvar}) is consulted by codevar/codeassignment before the local/box
+-- logic. Produces node._sig / node._body / node._luabody.
+function codelambdadec(tlcontext, node)
+    local ctx = newcontext(tlcontext)
+    local stats = {}
+    local rettype = node._type.rettypes[1]
+    local fname = node._lambda_native
+    local luaname = node._lambda_lua
+
+    -- Build the capture map and bind each boxed capture's box pointer once at
+    -- body entry. By-value captures are read directly from _fn (immutable).
+    ctx.captures = {}
+    local capbinds = {}
+    for i, decl in ipairs(node._captures) do
+        local index = 3 + (i - 1)
+        local boxed = decl._boxed and true or false
+        local entry = { index = index, boxed = boxed }
+        if boxed then
+            entry.boxvar = "_box_cap_" .. i
+            table.insert(capbinds, render([[
+                Udata *$BOXVAR = uvalue(&_fn->upvalue[$INDEX]);
+            ]], { BOXVAR = entry.boxvar, INDEX = c_integer_literal(index) }))
+        end
+        ctx.captures[decl] = entry
+    end
+
+    local cparams = { "lua_State *L", "CClosure *_mod", "CClosure *_fn" }
+    for _, param in ipairs(node.params) do
+        param._cvar = "_param_" .. param.name
+        param._boxed = param._captured and param._assigned
+        if types.is_gc(param._type) and param._assigned then
+            param._slot = "_paramslot_" .. param.name
+            table.insert(stats, newslot(ctx, param._slot))
+            table.insert(stats, setslot(param._type, param._slot, param._cvar))
+        end
+        if param._boxed then
+            table.insert(stats, codeboxparam(ctx, param))
+        end
+        table.insert(cparams, ctype(param._type) .. " " .. param._cvar)
+    end
+    for i = 2, #node._type.rettypes do
+        local outtype = node._type.rettypes[i]
+        table.insert(cparams, ctype(outtype) .. " *" .. "_outparam_" .. i)
+    end
+
+    local body = codestat(ctx, node.block)
+    local nslots = ctx.nslots
+    local baseoff = ctx.uses_base_off
+        and "\n        ptrdiff_t _base_off = savestack(L, _base);" or ""
+    if nslots > 0 then
+        table.insert(stats, 1, render([[
+        luaC_checkGC(L);
+        /* function preamble: reserve needed stack space */
+        if (L->stack_last.p - L->top.p > $NSLOTS) {
+            if (L->ci->top.p < L->top.p + $NSLOTS) L->ci->top.p = L->top.p + $NSLOTS;
+        } else {
+            lua_checkstack(L, $NSLOTS);
+        }
+        StkId _base = L->top.p;
+        L->top.p += $NSLOTS;
+        for(StkId _s = L->top.p - 1; _base <= _s; _s--) {
+            setnilvalue(s2v(_s));
+        }$BASEOFF
+        ]], {
+            NSLOTS = c_integer_literal(nslots),
+            BASEOFF = baseoff,
+        }))
+    else
+        table.insert(stats, 1, "        StkId _base = L->top.p;" .. baseoff)
+    end
+    -- box-capture bindings come first, before any body code or preamble use
+    for i = #capbinds, 1, -1 do
+        table.insert(stats, 1, capbinds[i])
+    end
+    table.insert(stats, body)
+    local crettype = rettype and ctype(rettype) or "void"
+    if not rettype then
+        table.insert(stats, [[
+            L->top.p = _base;
+            return;]])
+    elseif rettype._tag == "Type.Nil" then
+        table.insert(stats, [[
+            L->top.p = _base;
+            return 0;]])
+    end
+    node._body = render([[
+    static $RETTYPE $NAME($PARAMS) {
+        $BODY
+    }]], {
+        RETTYPE = crettype,
+        NAME = fname,
+        PARAMS = table.concat(cparams, ", "),
+        BODY = table.concat(stats, "\n")
+    })
+    node._sig = render([[
+        static $RETTYPE $NAME($PARAMS);
+        static int $LUANAME(lua_State *L);
+    ]], {
+        RETTYPE = crettype,
+        NAME = fname,
+        PARAMS = table.concat(cparams, ", "),
+        LUANAME = luaname,
+    })
+    node._luabody = genluaentry(tlcontext, "lambda", fname, node._type, node.loc, luaname)
+end
+
 local function codevardec(ctx, initvars, switch_get, switch_set, gvar_map, node)
     local cstats, cexp = codeexp(ctx, node.value)
     node._slot = render("&_mod->upvalue[$INDEX]",
@@ -3101,6 +3758,7 @@ local preamble = [[
 
 #include "luaconf.h"
 #include "lauxlib.h"
+#include "lstate.h"
 #include "lgc.h"
 #include "ltable.h"
 #include "ltm.h"
@@ -3258,6 +3916,25 @@ local function init_data_from_other_modules(tlcontext, includes, loadmods, initm
             table.insert(loadmods, render([[
                 $NAME = titan_cast_func($TYPE, loadsym(L, $HANDLE, "$NAME"));
             ]], { NAME = fname, TYPE = function_sig("", func.type, true), HANDLE = mprefix .. "handle" }))
+        end
+    end
+
+    -- Bound-method Lua trampolines we reference for cross-module `obj:m`: each is
+    -- the closure's lua_CFunction. Statically-linked deps just need an `extern`
+    -- prototype; `.so`-only deps dlsym it into a `static` function pointer (the
+    -- module handle was already opened by the function loop above, since a bound
+    -- ref always also registers the native trampoline in tlcontext.functions).
+    for luaname, info in pairs(tlcontext.bound_luas) do
+        local is_dynamic = not static_deps[info.module]
+        if is_dynamic then
+            local mprefix = mprefixes[info.module]
+            table.insert(includes,
+                "static int (*" .. luaname .. ")(lua_State *L);")
+            table.insert(loadmods, render([[
+                $NAME = titan_cast_func(int (*)(lua_State *L), loadsym(L, $HANDLE, "$NAME"));
+            ]], { NAME = luaname, HANDLE = mprefix .. "handle" }))
+        else
+            table.insert(includes, "extern int " .. luaname .. "(lua_State *L);")
         end
     end
 
@@ -3523,7 +4200,10 @@ function coder.generate(modname, ast, static_deps)
         functags = {},       -- canonical function-type string -> { id, key }
         functag_list = {},   -- same entries, in allocation order (for emission)
         functag_count = 0,
+        bound_luas = {},     -- mangled bound-Lua-trampoline name -> { module }
         static_slots = {},   -- "fqtn.name" -> module upvalue slot of a static's closure
+        lambdas = {},        -- ExpFunction nodes pending file-scope emission
+        lambda_count = 0,    -- counter for unique lambda native/Lua names
         upvalue = 0
     }
 
@@ -3642,6 +4322,12 @@ function coder.generate(modname, ast, static_deps)
                     }))
                 elseif tag == "Ast.TopLevelMethod" then
                     table.insert(code, node._luabody)
+                    -- Emit the bound-method trampolines for every method, so a
+                    -- bind site `obj:m` (here or in a module that only has this
+                    -- module's `.so`) turns the method into a function value.
+                    codemethodtrampoline(tlcontext, node)
+                    table.insert(sigs, node._boundsig)
+                    table.insert(code, node._boundbody)
                 elseif tag == "Ast.TopLevelStatic" then
                     table.insert(code, node._luabody)
                     -- Build the static's canonical 3-upvalue closure once into
@@ -3678,6 +4364,22 @@ function coder.generate(modname, ast, static_deps)
             else
                 -- ignore other nodes in second pass
             end
+        end
+    end
+
+    -- Drain pending lambdas to file scope. A lambda nested inside another lambda
+    -- is registered only while the outer one's body is emitted, so re-read the
+    -- length each iteration rather than snapshotting. Forward declarations go in
+    -- $SIGS (ahead of every body) so any emission order resolves.
+    do
+        local i = 1
+        while i <= #tlcontext.lambdas do
+            local lnode = tlcontext.lambdas[i]
+            codelambdadec(tlcontext, lnode)
+            table.insert(sigs, lnode._sig)
+            table.insert(code, lnode._body)
+            table.insert(code, lnode._luabody)
+            i = i + 1
         end
     end
 
@@ -3755,6 +4457,14 @@ function coder.generate(modname, ast, static_deps)
 
     local nslots = initctx.nslots
 
+    -- A lambda or bound-method-ref initializer (codelambda/codemethodref) can
+    -- relocate the Lua stack via lua_checkstack, so it recomputes `_base` from a
+    -- saved offset (`_base = restorestack(L, _base_off);`). Declare `_base_off`
+    -- alongside `_base` in the init-var prologue when any such initializer is
+    -- present. (Both codelambda and codemethodref reserve a gc temp, so
+    -- nslots > 0 whenever uses_base_off is set, and `_base` is always declared.)
+    local baseoff = initctx.uses_base_off
+        and "\n            ptrdiff_t _base_off = savestack(L, _base);" or ""
     if nslots > 0 then
         table.insert(initvars, 1, render([[
             lua_checkstack(L, $NSLOTS);
@@ -3762,9 +4472,10 @@ function coder.generate(modname, ast, static_deps)
             L->top.p += $NSLOTS;
             for(StkId _s = L->top.p - 1; _base <= _s; _s--) {
                 setnilvalue(s2v(_s));
-            }
+            }$BASEOFF
         ]], {
             NSLOTS = c_integer_literal(nslots),
+            BASEOFF = baseoff,
         }))
         table.insert(initvars, "L->top.p = _base;")
     end
