@@ -514,6 +514,155 @@ describe("closures (end-to-end)", function()
         ]])
     end)
 
+    it("GC churn over a boxed integer? (raw-TValue Udata0 box)", function()
+        -- An `integer?` captured-and-mutated local is boxed, but `integer?` is
+        -- NOT a gc type (its TValue is only ever nil-or-scalar), so the box is a
+        -- raw 0-uservalue Udata0 storing the TValue inline with no GC barrier.
+        -- The closure reads/writes the boxed option across both `nil` and
+        -- integer values; drive it under generational GC with allocation churn
+        -- to confirm the untraced raw-TValue box round-trips and is GC-safe.
+        run_coder([[
+            function make_optcell(): (integer) -> integer
+                local n: integer? = nil
+                return function (x: integer): integer
+                    local prev = n or -1
+                    if x == 0 then
+                        n = nil
+                    else
+                        n = x
+                    end
+                    return prev
+                end
+            end
+        ]], [[
+            collectgarbage('generational')
+            local fs = {}
+            for i = 1, 40 do fs[i] = test.make_optcell() end
+            collectgarbage()
+            -- first call: box holds nil -> prev defaults to -1
+            for i = 1, 40 do assert(fs[i](7) == -1) end
+            collectgarbage()
+            -- box now holds 7; set it back to nil, observing 7
+            for i = 1, 40 do assert(fs[i](0) == 7) end
+            collectgarbage('collect')
+            -- box holds nil again -> prev defaults to -1; store 13
+            for i = 1, 40 do assert(fs[i](13) == -1) end
+            collectgarbage()
+            -- box holds 13
+            for i = 1, 40 do assert(fs[i](99) == 13) end
+        ]])
+    end)
+
+    it("GC churn over a boxed float? (raw-TValue Udata0 box)", function()
+        -- Like the integer? case above, a `float?` captured-and-mutated local is
+        -- boxed but NOT a gc type (its TValue is only ever nil-or-float), so it
+        -- uses the raw 0-uservalue Udata0 box storing the TValue inline with no GC
+        -- barrier (ctype = TValue, sizeudata(0, sizeof(TValue)), nuvalue = 0). The
+        -- closure round-trips the boxed option across nil and float values under
+        -- generational GC churn to confirm the untraced raw box is GC-safe.
+        run_coder([[
+            function make_optf(): (float) -> float
+                local n: float? = nil
+                return function (x: float): float
+                    local prev = n or -1.0
+                    if x == 0.0 then
+                        n = nil
+                    else
+                        n = x
+                    end
+                    return prev
+                end
+            end
+        ]], [[
+            collectgarbage('generational')
+            local fs = {}
+            for i = 1, 40 do fs[i] = test.make_optf() end
+            collectgarbage()
+            -- box holds nil -> prev defaults to -1.0; store 2.5
+            for i = 1, 40 do assert(fs[i](2.5) == -1.0) end
+            collectgarbage()
+            -- box holds 2.5; set it back to nil, observing 2.5
+            for i = 1, 40 do assert(fs[i](0.0) == 2.5) end
+            collectgarbage('collect')
+            -- box holds nil again -> prev defaults to -1.0; store 7.25
+            for i = 1, 40 do assert(fs[i](7.25) == -1.0) end
+            collectgarbage()
+            -- box holds 7.25
+            for i = 1, 40 do assert(fs[i](99.0) == 7.25) end
+        ]])
+    end)
+
+    it("GC churn over a boxed boolean? (raw-TValue Udata0 box)", function()
+        -- A `boolean?` captured-and-mutated local is boxed but NOT a gc type, so
+        -- it uses the raw 0-uservalue Udata0 box (ctype = TValue,
+        -- sizeudata(0, sizeof(TValue)), nuvalue = 0, no barrier). `boolean?` has
+        -- special-case loadslot/setslot handling distinct from other option bases;
+        -- the raw box path bypasses that, so this guards that the raw TValue box
+        -- round-trips all three boolean? states (nil / true / false) faithfully
+        -- under generational GC churn. The box's initial nil enters via a real
+        -- `boolean?` argument (NOT a `nil` literal): a `nil` *literal* coerced to
+        -- `boolean?` is a SEPARATE known checker bug (it materializes boolean
+        -- false rather than nil; reproduces on a non-boxed boolean? too), unrelated
+        -- to the box representation, so it is deliberately avoided here.
+        run_coder([[
+            -- classify the boxed boolean?: 0 = nil, 1 = true, 2 = false
+            function make(init: boolean?): (boolean?) -> integer
+                local b: boolean? = init
+                return function (next: boolean?): integer
+                    local r = 0
+                    if b == true then
+                        r = 1
+                    elseif b == false then
+                        r = 2
+                    else
+                        r = 0
+                    end
+                    b = next
+                    return r
+                end
+            end
+        ]], [[
+            collectgarbage('generational')
+            local fs = {}
+            for i = 1, 40 do fs[i] = test.make(nil) end   -- box starts nil (real nil arg)
+            collectgarbage()
+            for i = 1, 40 do assert(fs[i](true) == 0) end   -- was nil -> set true
+            collectgarbage()
+            for i = 1, 40 do assert(fs[i](false) == 1) end  -- was true -> set false
+            collectgarbage('collect')
+            for i = 1, 40 do assert(fs[i](nil) == 2) end    -- was false -> set nil
+            collectgarbage()
+            for i = 1, 40 do assert(fs[i](true) == 0) end   -- was nil again -> set true
+        ]])
+    end)
+
+    it("GC churn over a boxed nil-typed local (raw Udata0 box)", function()
+        -- A `nil`-typed captured-and-mutated local IS expressible in surface Titan
+        -- (`local n: nil = nil`, captured + reassigned). It is non-gc, so it uses
+        -- the raw 0-uservalue Udata0 box with ctype = int (a dummy:
+        -- sizeudata(0, sizeof(int)), nuvalue = 0, raw getudatamem, no barrier).
+        -- The Nil raw branch is therefore reachable, not defensive-only. The box
+        -- never holds anything but a placeholder int; the test confirms the
+        -- closure runs and the box survives GC churn.
+        run_coder([[
+            function make_nilcell(): (integer) -> integer
+                local n: nil = nil
+                return function (x: integer): integer
+                    n = nil          -- reassign the boxed nil-typed local
+                    return x + 1
+                end
+            end
+        ]], [[
+            collectgarbage('generational')
+            local fs = {}
+            for i = 1, 40 do fs[i] = test.make_nilcell() end
+            collectgarbage()
+            for i = 1, 40 do assert(fs[i](10) == 11) end
+            collectgarbage('collect')
+            for i = 1, 40 do assert(fs[i](41) == 42) end
+        ]])
+    end)
+
     it("for-loop-created closures each capture their own iteration value", function()
         -- A `for` control variable is immutable (the implicit increment does not
         -- mark it assigned), so it is captured by value -> fresh per iteration.
@@ -563,6 +712,39 @@ describe("closures (end-to-end)", function()
             collectgarbage('collect')
             assert(h.f() == 101)
             assert(h.f() == 102)
+        ]])
+    end)
+
+    it("a module var initialized with a lambda is a runtime-replaceable function", function()
+        -- A module-level `local f = function...end` is a module *variable* holding
+        -- a function value (stored into a `_mod` upvalue with the gc barrier), so
+        -- `apply` calls it through the first-class value path and `setf` can
+        -- reassign it at runtime — the replacement is observed on the next call.
+        run_coder([[
+            local f = function(x: integer): integer return x * 2 end
+            function apply(x: integer): integer return f(x) end
+            function setf(g: (integer) -> integer) f = g end
+        ]], [[
+            assert(test.apply(10) == 20)
+            test.setf(function(x) return x + 100 end)
+            assert(test.apply(10) == 110)   -- reflects the replacement
+        ]])
+    end)
+
+    it("a module var initialized with a const-receiver bound method ref runs", function()
+        -- The receiver is a constructor call with a const arg, which `isconst`
+        -- accepts; the bound method-ref initializer evaluates that receiver at
+        -- module-init time, captures self, and stores the bound closure into a
+        -- `_mod` upvalue (gc store, barriered). Calling it later applies the
+        -- method against the captured receiver.
+        run_coder([[
+            record Adder base: integer end
+            function Adder:add(x: integer): integer return self.base + x end
+            local f = Adder.new(100):add
+            function apply(x: integer): integer return f(x) end
+        ]], [[
+            assert(test.apply(5) == 105)
+            assert(test.apply(7) == 107)
         ]])
     end)
 end)
@@ -655,6 +837,102 @@ describe("closures across modules (end-to-end)", function()
         }, "useb")
         assert.truthy(ok, err)
         local rok, out = h.call("useb", "assert(useb.run() == 204)")
+        assert.truthy(rok, out)
+    end)
+end)
+
+-- Boxes whose value type only arises through `foreign import`: a foreign
+-- `Type.Pointer` (e.g. FILE*) and a scalar `Type.Typedef` (e.g. size_t). Both
+-- are non-gc, so a captured-and-mutated local of those types uses the raw
+-- 0-uservalue Udata0 box (ctype = foreignctype(typ) / ctype(underlying),
+-- sizeudata(0, sizeof(ctype)), nuvalue = 0, raw getudatamem, no barrier). These
+-- require the C FFI toolchain (cc/cpp/gcc), like the other foreign-import specs.
+describe("closures over foreign-typed boxes (end-to-end)", function()
+    setup(function () os.remove("titan-runtime/titan.o") end)
+    after_each(function ()
+        os.execute("rm -f *.o *.so")
+        if not h.verbose then os.execute("rm -f *.c") end
+    end)
+
+    it("captures and reassigns a foreign pointer (raw Udata0 box)", function()
+        -- A `FILE*` foreign-pointer local, captured by the lambda and reassigned
+        -- inside it, is boxed; the box stores the raw `FILE*` inline (no barrier).
+        -- The closure observes whether the box currently holds an open file (a
+        -- non-NULL pointer) vs NULL across calls, and reassigns the box each call,
+        -- exercising a NULL round-trip under generational GC churn.
+        local ok, err = h.generate_modules({
+            foo = [[
+                local stdio = foreign import "stdio.h"
+                function make(name: string): (string) -> integer
+                    local f = stdio.fopen(name, "r")   -- f: FILE* foreign pointer, boxed
+                    return function (next: string): integer
+                        local opened = 0
+                        if f then
+                            opened = 1
+                            stdio.fclose(f)
+                        end
+                        f = stdio.fopen(next, "r")     -- reassign the boxed pointer
+                        return opened
+                    end
+                end
+            ]],
+        }, "foo")
+        assert.truthy(ok, err)
+        local rok, out = h.call("foo", [[
+            local exists = os.tmpname()
+            local fd = io.open(exists, 'w'); fd:write('x'); fd:close()
+            local missing = exists .. '.nope'
+            os.remove(missing)
+            collectgarbage('generational')
+            local fns = {}
+            for i = 1, 30 do fns[i] = foo.make(exists) end   -- box opened (existing file)
+            collectgarbage()
+            for i = 1, 30 do assert(fns[i](exists) == 1) end   -- was open; reopen existing
+            collectgarbage()
+            for i = 1, 30 do assert(fns[i](missing) == 1) end  -- was open; reassign to NULL
+            collectgarbage('collect')
+            for i = 1, 30 do assert(fns[i](exists) == 0) end   -- box was NULL; reopen existing
+            collectgarbage()
+            for i = 1, 30 do assert(fns[i](exists) == 1) end   -- open again
+            os.remove(exists)
+        ]])
+        assert.truthy(rok, out)
+    end)
+
+    it("captures and reassigns a scalar foreign typedef (raw Udata0 box)", function()
+        -- `strlen` returns `size_t`, which stays a `Type.Typedef` on the local `n`
+        -- (it resolves to ctype lua_Integer only at the storage layer). Captured
+        -- and reassigned in the lambda, `n` is boxed raw. The closure compares the
+        -- boxed size_t against a fresh strlen and reassigns it (returning boolean,
+        -- so no Typedef->integer cast is needed), round-tripping the raw box under
+        -- generational GC churn.
+        local ok, err = h.generate_modules({
+            foo = [[
+                local string_h = foreign import "string.h"
+                function make(s: string): (string) -> boolean
+                    local n = string_h.strlen(s)   -- n: size_t scalar typedef, boxed
+                    return function (next: string): boolean
+                        local same = (n == string_h.strlen(next))   -- read boxed size_t
+                        n = string_h.strlen(next)                    -- reassign boxed size_t
+                        return same
+                    end
+                end
+            ]],
+        }, "foo")
+        assert.truthy(ok, err)
+        local rok, out = h.call("foo", [[
+            collectgarbage('generational')
+            local fns = {}
+            for i = 1, 40 do fns[i] = foo.make("abcd") end   -- box n = 4
+            collectgarbage()
+            for i = 1, 40 do assert(fns[i]("hi") == false) end   -- 4 vs 2 -> false; n -> 2
+            collectgarbage()
+            for i = 1, 40 do assert(fns[i]("yo") == true) end    -- 2 vs 2 -> true;  n -> 2
+            collectgarbage('collect')
+            for i = 1, 40 do assert(fns[i]("") == false) end     -- 2 vs 0 -> false; n -> 0
+            collectgarbage()
+            for i = 1, 40 do assert(fns[i]("") == true) end      -- 0 vs 0 -> true
+        ]])
         assert.truthy(rok, out)
     end)
 end)

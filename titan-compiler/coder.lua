@@ -680,26 +680,112 @@ local function newforeigntmp(ctx --[[:table]], typ --[[:table]])
     }), tmpname
 end
 
--- A captured-and-mutated local/param is stored in a "box": a 1-upvalue CClosure
--- cell whose single upvalue holds the variable's value. The box pointer is the
--- thing copied into closures that capture the variable, so all sharers mutate one
--- cell. `newbox` emits the allocation: declares the `CClosure*` C var, allocates
--- the cell, sets its trap-stub `f`, nils the value slot, and anchors the box in a
--- fresh stack slot against the GC. Caller stores the initial value afterwards.
---   boxvar: name of the `CClosure*` C variable to declare
+-- A captured-and-mutated local/param is stored in a "box": a heap cell whose
+-- single value holds the variable's value. The box pointer is the thing copied
+-- into closures that capture the variable, so all sharers mutate one cell. The
+-- box is a Lua *userdata* (`Udata*`), not a CClosure: a userdata's GC traversal
+-- (`traverseudata`) calls `genlink`, so an overwriting write can use the BACK
+-- barrier (`luaC_barrierback`) — which, unlike the forward barrier a CClosure
+-- box would require, does not float fresh values written in a hot loop to the
+-- old generation until the next major GC. A box never crosses a module boundary
+-- (it backs a captured local inside one module's closures, and only that module
+-- generates the code that touches it), so this representation is module-internal
+-- and does not affect the cross-module ABI (no TITAN_VER bump).
+--
+-- Two representations, chosen by `is_rawbox` (= `not types.is_gc(typ)`):
+--   (N) any non-gc type (integer/float/boolean/Nil/foreign pointer/scalar
+--       typedef, plus an Option of a non-gc base whose TValue is only ever
+--       nil-or-scalar): a 0-uservalue userdata (`Udata0`) with the raw,
+--       non-collectable C value stored inline (`getudatamem`). No TValue
+--       tagging and no barrier — ever.
+--   (G) every gc type (TValue-stored: String/Array/Map/record/Function/Value
+--       and an Option of a gc base): a 1-uservalue userdata holding a TValue in
+--       `uv[0].uv`, written with the BACK barrier.
+
+-- A box uses the raw (N) representation iff its value can never hold a GC
+-- pointer, i.e. `not types.is_gc(typ)`. `is_gc` is exactly the predicate that
+-- governs every other barrier decision in the coder, so a non-gc type has no GC
+-- reference and is safe to store raw and untraced in a Udata0. Because newbox /
+-- box_read / box_write derive the storage type and size from ctype(typ) /
+-- sizeof(ctype(typ)), any non-gc type works with no enumeration: integer, float,
+-- boolean, Nil (a dummy int), an Option of a non-gc base (a TValue that is only
+-- ever nil-or-scalar), foreign pointers, and scalar typedefs all route here
+-- automatically. Everything that may hold a GC object uses (G).
+local function is_rawbox(typ --[[:table]])
+    return not types.is_gc(typ)
+end
+
+-- The C lvalue/rvalue for a box's stored value.
+--   (G) -> "&BOX->uv[0].uv" (a TValue*, used with setslot/getslot)
+--   (N) -> "*(CT *)getudatamem(BOX)" (the raw unboxed C value)
+local function box_value_slot(boxvar)
+    return "&" .. boxvar .. "->uv[0].uv"
+end
+
+-- Read a box's value as a C rvalue yielding the unboxed value.
+local function box_read(typ --[[:table]], boxvar --[[:string]])
+    if is_rawbox(typ) then
+        return render("(*($CT *)getudatamem($BOX))",
+            { CT = ctype(typ), BOX = boxvar })
+    else
+        return getslot(typ, nil, box_value_slot(boxvar))
+    end
+end
+
+-- Write `cexp` into a box. (N) stores the raw scalar inline, no barrier.
+-- (G) stores a TValue and, when the value may be collectable, runs the BACK
+-- barrier (safe because the box is a genlink-managed userdata).
+local function box_write(typ --[[:table]], boxvar --[[:string]], cexp --[[:string]])
+    if is_rawbox(typ) then
+        return render("*($CT *)getudatamem($BOX) = $CEXP;",
+            { CT = ctype(typ), BOX = boxvar, CEXP = cexp })
+    else
+        local slot = box_value_slot(boxvar)
+        local code = setslot(typ, slot, cexp)
+        if types.is_gc(typ) then
+            code = code .. render(
+                "\nluaC_barrierback(L, obj2gco($BOX), $SLOT);",
+                { BOX = boxvar, SLOT = slot })
+        end
+        return code
+    end
+end
+
+-- `newbox` emits the box allocation: declares the `Udata*` C var, allocates the
+-- cell inline (luaS_newudata expanded with the size check dropped — the size is
+-- a tiny constant), and anchors the box in a fresh stack slot against the GC
+-- BEFORE any later allocation. For (G) the value slot is nil'd before anchoring
+-- so a GC triggered by a later alloc never traverses a garbage uv[0]. The caller
+-- stores the initial value afterwards (via box_write).
+--   typ:      the Titan type of the boxed variable (selects (G) vs (N))
+--   boxvar:   name of the `Udata*` C variable to declare
 --   slotname: name of the anchor-slot `TValue*` C variable to declare
-local function newbox(ctx, boxvar, slotname)
-    return render([[
-        $NEWSLOT
-        CClosure *$BOXVAR = luaF_newCclosure(L, 1);
-        $BOXVAR->f = titan_box_trap;
-        setnilvalue(&$BOXVAR->upvalue[0]);
-        setclCvalue(L, $SLOTNAME, $BOXVAR);
-    ]], {
-        NEWSLOT = newslot(ctx, slotname),
-        BOXVAR = boxvar,
-        SLOTNAME = slotname,
-    })
+local function newbox(ctx, typ, boxvar, slotname)
+    if is_rawbox(typ) then
+        return render([[
+            $NEWSLOT
+            Udata *$BOXVAR = gco2u(luaC_newobj(L, LUA_VUSERDATA, sizeudata(0, sizeof($CT))));
+            $BOXVAR->len = sizeof($CT); $BOXVAR->nuvalue = 0; $BOXVAR->metatable = NULL;
+            setuvalue(L, $SLOTNAME, $BOXVAR);
+        ]], {
+            NEWSLOT = newslot(ctx, slotname),
+            BOXVAR = boxvar,
+            SLOTNAME = slotname,
+            CT = ctype(typ),
+        })
+    else
+        return render([[
+            $NEWSLOT
+            Udata *$BOXVAR = gco2u(luaC_newobj(L, LUA_VUSERDATA, sizeudata(1, 0)));
+            $BOXVAR->len = 0; $BOXVAR->nuvalue = 1; $BOXVAR->metatable = NULL;
+            setnilvalue(&$BOXVAR->uv[0].uv);
+            setuvalue(L, $SLOTNAME, $BOXVAR);
+        ]], {
+            NEWSLOT = newslot(ctx, slotname),
+            BOXVAR = boxvar,
+            SLOTNAME = slotname,
+        })
+    end
 end
 
 local function pushd(ctx)
@@ -1062,22 +1148,11 @@ local function codeassignment(ctx, var, cexp, etype)
             -- its box cell. By-value captures are immutable, so a write target is
             -- always boxed.
             local cap = ctx.captures[var._decl]
-            local cset = setslot(var._type, "&" .. cap.boxvar .. "->upvalue[0]", cexp)
-            if types.is_gc(var._type) then
-                cset = cset .. "\nluaC_barrier(L, " .. cap.boxvar
-                    .. ", &" .. cap.boxvar .. "->upvalue[0]);"
-            end
-            return cset
+            return box_write(var._type, cap.boxvar, cexp)
         elseif var._decl._boxed then
             -- Captured-and-mutated local/param of the current function: write
             -- through its box cell.
-            local box = var._decl._box
-            local cset = setslot(var._type, "&" .. box .. "->upvalue[0]", cexp)
-            if types.is_gc(var._type) then
-                cset = cset .. "\nluaC_barrier(L, " .. box
-                    .. ", &" .. box .. "->upvalue[0]);"
-            end
-            return cset
+            return box_write(var._type, var._decl._box, cexp)
         elseif var._decl._used and cexp ~= var._decl._cvar then
             local cset = ""
             if types.is_gc(var._type) then
@@ -1672,25 +1747,22 @@ function codestat(ctx, node)
             local cstats, cexp = codeexp(ctx, exp)
             decl._boxed = decl._captured and decl._assigned
             if decl._boxed then
-                -- Captured-and-mutated: storage is a heap box (1-upvalue CClosure
-                -- cell). Ordering avoids an unanchored-box window: (1) evaluate the
-                -- init into a temp (it may allocate); (2) create+anchor the box with
-                -- no allocation between alloc and anchor; (3) store the init into the
-                -- box and barrier if gc.
+                -- Captured-and-mutated: storage is a heap box (Udata cell).
+                -- Ordering avoids an unanchored-box window: (1) evaluate the init
+                -- into a temp (it may allocate); (2) create+anchor the box with no
+                -- allocation between alloc and anchor; (3) store the init into the
+                -- box (with the back barrier if gc).
                 local typ = decl._type
                 local isgc = types.is_gc(typ)
                 local n = localname(ctx, decl.name)
                 -- A gc init value must be anchored in a stack slot before the box
-                -- allocation (luaF_newCclosure can run the GC), so the still-white
+                -- allocation (luaC_newobj can run the GC), so the still-white
                 -- init is not swept while only held in a C local.
                 local ctmp, tmpname, tmpslot = newtmp(ctx, typ, isgc)
                 decl._box = "_box_" .. n
                 local boxslot = "_boxslot_" .. n
                 local anchortmp = tmpslot
                     and setslot(typ, tmpslot, tmpname) or ""
-                local barrier = isgc
-                    and render("luaC_barrier(L, $BOX, &$BOX->upvalue[0]);",
-                        { BOX = decl._box }) or ""
                 table.insert(code, render([[
                     $CSTATS
                     $CTMP
@@ -1698,16 +1770,14 @@ function codestat(ctx, node)
                     $ANCHORTMP
                     $NEWBOX
                     $SETSLOT
-                    $BARRIER
                 ]], {
                     CSTATS = cstats,
                     CTMP = ctmp,
                     TMPNAME = tmpname,
                     CEXP = cexp,
                     ANCHORTMP = anchortmp,
-                    NEWBOX = newbox(ctx, decl._box, boxslot),
-                    SETSLOT = setslot(typ, "&" .. decl._box .. "->upvalue[0]", tmpname),
-                    BARRIER = barrier,
+                    NEWBOX = newbox(ctx, typ, decl._box, boxslot),
+                    SETSLOT = box_write(typ, decl._box, tmpname),
                 }))
             elseif decl._used then
                 local typ = decl._type
@@ -1846,8 +1916,7 @@ local function codevar(ctx, node)
         -- capture is read through its box; a by-value capture directly.
         local cap = ctx.captures[node._decl]
         if cap.boxed then
-            return "", getslot(node._type, nil,
-                "&" .. cap.boxvar .. "->upvalue[0]")
+            return "", box_read(node._type, cap.boxvar)
         else
             return "", getslot(node._type, nil,
                 "&_fn->upvalue[" .. c_integer_literal(cap.index) .. "]")
@@ -1855,8 +1924,7 @@ local function codevar(ctx, node)
     elseif node._decl._boxed then
         -- Captured-and-mutated local/param of the current function: read through
         -- its box cell.
-        return "", getslot(node._type, nil,
-            "&" .. node._decl._box .. "->upvalue[0]")
+        return "", box_read(node._type, node._decl._box)
     else
         return "", node._decl._cvar
     end
@@ -2659,6 +2727,44 @@ function codeexp(ctx, node, iscondition, target)
         return codecall(ctx, node, target)
     elseif tag == "Ast.ExpExtra" then
         return "", node.exp._extras[node.index]
+    elseif tag == "Ast.ExpCast"
+           and (node.exp._type._tag == "Type.Typedef"
+                or node._type._tag == "Type.Typedef") then
+        -- A scalar foreign typedef (e.g. size_t) IS its underlying scalar in C,
+        -- so `<typedef> as T` (or a cast TO a typedef) behaves exactly like the
+        -- cast of/to the underlying type. Resolve the typedef(s) and re-dispatch
+        -- through the ordinary cast arms via a synthetic cast node, mirroring
+        -- `ctype` (which recurses through `Type.Typedef._type`). We never mutate
+        -- the shared AST/type tables in place; the synthetic node carries its own
+        -- resolved types and reuses the original operand and location.
+        local function resolve(t)
+            if t and t._tag == "Type.Typedef" then return t._type end
+            return t
+        end
+        local stype = resolve(node.exp._type)
+        local ttype = resolve(node._type)
+        if types.equals(stype, ttype) then
+            -- typedef-vs-underlying identity (e.g. size_t as integer): no-op
+            return codeexp(ctx, node.exp, iscondition, target)
+        end
+        local synthexp
+        if node.exp._type._tag == "Type.Typedef" then
+            -- Re-tag the operand with its underlying type by wrapping it in a
+            -- pass-through cast node so the existing arms see a native source.
+            synthexp = { _tag = "Ast.ExpCast", loc = node.exp.loc,
+                         exp = node.exp, target = stype, _type = stype,
+                         _typedef_resolved = true }
+        else
+            synthexp = node.exp
+        end
+        local synthcast = { _tag = "Ast.ExpCast", loc = node.loc,
+                            exp = synthexp, target = ttype, _type = ttype }
+        return codeexp(ctx, synthcast, iscondition, target)
+    elseif tag == "Ast.ExpCast" and node._typedef_resolved then
+        -- Pass-through wrapper produced above: the operand's static type is a
+        -- typedef but its C representation already is the underlying scalar, so
+        -- just emit the operand unchanged under its resolved type.
+        return codeexp(ctx, node.exp, iscondition, target)
     elseif tag == "Ast.ExpCast" and node.exp._tag == "Ast.ExpVar" and node.exp.var._tag == "Ast.VarBracket"
            and node.exp._type._tag ~= "Type.Option" then
         -- Fold casts of array/map indexing into the code for the operation
@@ -3064,17 +3170,12 @@ local function codeboxparam(ctx, param)
     local typ = param._type
     param._box = "_box_" .. param.name
     local boxslot = "_boxslot_" .. param.name
-    local barrier = types.is_gc(typ)
-        and render("luaC_barrier(L, $BOX, &$BOX->upvalue[0]);",
-            { BOX = param._box }) or ""
     return render([[
         $NEWBOX
         $SETSLOT
-        $BARRIER
     ]], {
-        NEWBOX = newbox(ctx, param._box, boxslot),
-        SETSLOT = setslot(typ, "&" .. param._box .. "->upvalue[0]", param._cvar),
-        BARRIER = barrier,
+        NEWBOX = newbox(ctx, typ, param._box, boxslot),
+        SETSLOT = box_write(typ, param._box, param._cvar),
     })
 end
 
@@ -3317,7 +3418,7 @@ end
 
 -- Read a captured variable in the CURRENT function, for pushing into a nested
 -- lambda's closure. Returns (boxexpr, valuestats, valueexpr): for a boxed
--- capture, `boxexpr` is the C expression for the box `CClosure*`; for a by-value
+-- capture, `boxexpr` is the C expression for the box `Udata*`; for a by-value
 -- capture, `valueexpr` (with prelude `valuestats`) is the C value expression.
 -- A capture that is itself captured by the current function (transitive) is
 -- reached through the current `_fn`; otherwise it is a local/param of the current
@@ -3342,7 +3443,7 @@ end
 
 -- Use-site code for an anonymous function: build a fresh CClosure with
 -- upvalue[0]=_mod, [1]=type tag, [2]=native ptr, and [3+i]=captured variable i
--- (a box CClosure* or a copied value), then return the closure value (anchored in
+-- (a box Udata* or a copied value), then return the closure value (anchored in
 -- a gc temp). The capture pushes are transient raw stack pushes (guarded by
 -- lua_checkstack, consumed by lua_pushcclosure), not nslots-accounted.
 function codelambda(ctx, node)
@@ -3368,7 +3469,7 @@ function codelambda(ctx, node)
         local boxexpr, vstats, vexpr = read_capture(ctx, decl)
         if boxexpr then
             table.insert(stats, render([[
-                setclCvalue(L, s2v(L->top.p), $BOX); L->top.p++;
+                setuvalue(L, s2v(L->top.p), $BOX); L->top.p++;
             ]], { BOX = boxexpr }))
         else
             table.insert(stats, render([[
@@ -3509,7 +3610,7 @@ function codelambdadec(tlcontext, node)
         if boxed then
             entry.boxvar = "_box_cap_" .. i
             table.insert(capbinds, render([[
-                CClosure *$BOXVAR = clCvalue(&_fn->upvalue[$INDEX]);
+                Udata *$BOXVAR = uvalue(&_fn->upvalue[$INDEX]);
             ]], { BOXVAR = entry.boxvar, INDEX = c_integer_literal(index) }))
         end
         ctx.captures[decl] = entry
@@ -3653,6 +3754,7 @@ local preamble = [[
 
 #include "luaconf.h"
 #include "lauxlib.h"
+#include "lstate.h"
 #include "lgc.h"
 #include "ltable.h"
 #include "ltm.h"
@@ -4351,6 +4453,14 @@ function coder.generate(modname, ast, static_deps)
 
     local nslots = initctx.nslots
 
+    -- A lambda or bound-method-ref initializer (codelambda/codemethodref) can
+    -- relocate the Lua stack via lua_checkstack, so it recomputes `_base` from a
+    -- saved offset (`_base = restorestack(L, _base_off);`). Declare `_base_off`
+    -- alongside `_base` in the init-var prologue when any such initializer is
+    -- present. (Both codelambda and codemethodref reserve a gc temp, so
+    -- nslots > 0 whenever uses_base_off is set, and `_base` is always declared.)
+    local baseoff = initctx.uses_base_off
+        and "\n            ptrdiff_t _base_off = savestack(L, _base);" or ""
     if nslots > 0 then
         table.insert(initvars, 1, render([[
             lua_checkstack(L, $NSLOTS);
@@ -4358,9 +4468,10 @@ function coder.generate(modname, ast, static_deps)
             L->top.p += $NSLOTS;
             for(StkId _s = L->top.p - 1; _base <= _s; _s--) {
                 setnilvalue(s2v(_s));
-            }
+            }$BASEOFF
         ]], {
             NSLOTS = c_integer_literal(nslots),
+            BASEOFF = baseoff,
         }))
         table.insert(initvars, "L->top.p = _base;")
     end

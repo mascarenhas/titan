@@ -299,13 +299,36 @@ describe("closures (return inference)", function()
     end)
 end)
 
-describe("closures (still-an-error cases)", function()
-    it("rejects a top-level `local x = function...end`", function()
-        assert_type_error("top level variable initialization must be constant", [[
-            local x = function() end
+describe("closures (top-level lambda initializer is sound)", function()
+    it("accepts a top-level `local f = function...end`", function()
+        -- Constructing a lambda reads no module variable's value (the body runs
+        -- only when the closure is later called), so it is a sound top-level
+        -- initializer: a module *variable* holding a function, callable through
+        -- the first-class value path and reassignable at runtime.
+        assert_type_check([[
+            local f = function(x: integer): integer return x + 1 end
         ]])
     end)
 
+    it("accepts an exported top-level function-typed module variable", function()
+        assert_type_check([[
+            local f = function(x: integer): integer return x * 2 end
+            function apply(x: integer): integer return f(x) end
+            function setf(g: (integer) -> integer) f = g end
+        ]])
+    end)
+
+    it("still rejects a genuinely non-const top-level initializer (a = b)", function()
+        -- Reading another module variable's value during init is unsound (b may
+        -- not be initialized yet), so it must still be rejected.
+        assert_type_error("top level variable initialization must be constant", [[
+            b = 1
+            a = b
+        ]])
+    end)
+end)
+
+describe("closures (still-an-error cases)", function()
     it("rejects a self-reference inside its own anonymous initializer", function()
         -- `f` only binds after its initializer is checked, so the inner `f` is
         -- a clean 'not declared' error, not a silent miscompile (D2).
@@ -407,6 +430,29 @@ describe("bound method references (obj:m)", function()
             function use()
                 local f = m:fabs
             end
+        ]])
+    end)
+
+    it("accepts a top-level method-ref initializer with a const receiver", function()
+        -- Binding `obj:m` evaluates the receiver now to capture self; a
+        -- constructor call with const args is itself a sound (const) receiver,
+        -- so the whole bind is a sound top-level initializer.
+        assert_type_check([[
+            record Adder base: integer end
+            function Adder:add(x: integer): integer return self.base + x end
+            local f = Adder.new(1):add
+        ]])
+    end)
+
+    it("rejects a top-level method-ref initializer with a non-const receiver", function()
+        -- The receiver here reads another module variable (`a`, an ExpVar), so
+        -- binding `a:add` at init time may read a not-yet-initialized variable:
+        -- still unsound, still rejected.
+        assert_type_error("top level variable initialization must be constant", [[
+            record Adder base: integer end
+            function Adder:add(x: integer): integer return self.base + x end
+            a = Adder.new(1)
+            local f = a:add
         ]])
     end)
 end)

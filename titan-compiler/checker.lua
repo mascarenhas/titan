@@ -181,7 +181,15 @@ local function trycoerce(source, target, errors)
             inner._type = source._type.base
             n = trycoerce(inner, target, errors)
         elseif target._tag == "Type.Option" then
-            n = ast.ExpCast(source.loc, trycoerce(source, target.base, errors), target)
+            if source._type._tag == "Type.Nil" then
+                -- nil -> T?: emit the cast directly so the coder's Nil->Option
+                -- path runs (setnilvalue). Recursing through target.base would
+                -- coerce nil to the base first (e.g. nil -> boolean = false),
+                -- destroying the nil/false distinction that is the point of T?.
+                n = ast.ExpCast(source.loc, source, target)
+            else
+                n = ast.ExpCast(source.loc, trycoerce(source, target.base, errors), target)
+            end
         else
             n = ast.ExpCast(source.loc, source, target)
         end
@@ -1650,16 +1658,23 @@ local function isconst(node)
         return isconst(node.exp)
 
     elseif tag == "Ast.ExpFunction" then
-        -- A lambda evaluates to a fresh closure each time it is reached, so it
-        -- is never a constant. Rejecting it here yields the clean "top level
-        -- variable initialization must be constant" error rather than letting an
-        -- unsupported (this phase) lambda reach codegen.
-        return false
+        -- `isconst` here gates top-level (module) variable initializers, whose
+        -- real requirement is soundness: an initializer runs during module init
+        -- in declaration order, so it must not read a not-yet-initialized module
+        -- variable's value. Constructing a lambda reads no module variable's
+        -- value — the body executes only when the closure is later called — so a
+        -- lambda is always a sound top-level initializer. (This also enables a
+        -- module-level `local f = function ... end`: a module *variable* holding
+        -- a function, so calls to `f` go through the first-class value-call path
+        -- and `f` can be reassigned at runtime — a runtime-replaceable module
+        -- function, at the cost of static dispatch.)
+        return true
 
     elseif tag == "Ast.ExpMethodRef" then
-        -- A bound-method reference captures a runtime receiver, so it is never
-        -- constant — same clean rejection as a lambda at top level.
-        return false
+        -- Binding `obj:method` evaluates the receiver `obj` now (at init time) to
+        -- capture self, so it is a sound top-level initializer exactly when
+        -- reading the receiver is sound.
+        return isconst(node.exp)
 
     else
         error("impossible")

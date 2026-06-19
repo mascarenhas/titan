@@ -554,6 +554,55 @@ describe("Titan code generator", function()
         ]])
     end)
 
+    it("keeps nil distinct from false when coercing nil to boolean?", function()
+        -- regression: coercing nil to an option whose base nil is itself
+        -- coerceable to (boolean) must yield nil, not the base's coercion of
+        -- nil (false). classify must take the else (nil) branch, returning 0.
+        run_coder([[
+            function classify_init(): integer
+                local b: boolean? = nil
+                if b == true then return 1
+                elseif b == false then return 2
+                else return 0 end
+            end
+            function classify_assign(): integer
+                local b: boolean? = true
+                b = nil
+                if b == true then return 1
+                elseif b == false then return 2
+                else return 0 end
+            end
+            function classify_return(): boolean?
+                return nil
+            end
+            function classify_param(b: boolean?): integer
+                if b == true then return 1
+                elseif b == false then return 2
+                else return 0 end
+            end
+        ]], [[
+            assert(test.classify_init() == 0)
+            assert(test.classify_assign() == 0)
+            assert(test.classify_return() == nil)
+            assert(test.classify_param(nil) == 0)
+            -- present values still round-trip correctly
+            assert(test.classify_param(true) == 1)
+            assert(test.classify_param(false) == 2)
+        ]])
+    end)
+
+    it("coerces nil to value? as nil, not a non-nil value", function()
+        -- value is another base nil is coerceable to; nil -> value? must be nil
+        run_coder([[
+            function v(): value
+                local x: value? = nil
+                if x == nil then return 1 else return 0 end
+            end
+        ]], [[
+            assert(test.v() == 1)
+        ]])
+    end)
+
     it("tests integer step value in 'for'", function()
         local code = [[
             function forstep(f: integer, t: integer, s: integer): integer
@@ -1457,6 +1506,36 @@ describe("Titan code generator", function()
             fd:close()
             os.remove('tmp_test_hello.txt')
             assert(data == 'Hello, cast')
+        ]])
+        assert.truthy(ok, err)
+    end)
+
+    it("casts a scalar foreign typedef to value", function ()
+        -- `strlen` returns `size_t`, which stays a `Type.Typedef` (resolving to
+        -- the underlying `integer` only at the storage layer). Explicitly casting
+        -- that typedef-typed value with `as value` is the typedef cast Titan
+        -- permits (a cast gates on `types.compatible`, which only crosses scalars
+        -- through `value`). The coder resolves the `Type.Typedef` source to its
+        -- underlying scalar at the cast site, so the wrapped slot stores the
+        -- integer length; before the fix this raised `invalid type size_t` in
+        -- `setslot`. The returned `value` must carry the string length back to Lua.
+        local modules = {
+            foo = [[
+                local string_h = foreign import "string.h"
+                function len(s: string): value
+                    local n = string_h.strlen(s)   -- n: size_t scalar typedef
+                    return n as value              -- Type.Typedef -> Type.Value cast
+                end
+            ]]
+        }
+        local ok, err = generate_modules(modules, "foo")
+        assert.truthy(ok, err)
+        local ok, err = call("foo", [[
+            assert(foo.len("abcd") == 4)
+            assert(foo.len("") == 0)
+            assert(foo.len("hello, world") == 12)
+            -- the value carries an integer payload usable in arithmetic
+            assert(foo.len("titan") + 1 == 6)
         ]])
         assert.truthy(ok, err)
     end)
