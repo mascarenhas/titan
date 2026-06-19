@@ -69,20 +69,19 @@ and records first; functions second). The pieces appear in this order:
    followed by an `#ifdef __clang__` block silencing two warnings.
 3. **Cross-module declarations** (`$INCLUDES`, filled by
    `init_data_from_other_modules`): `extern` or `static`-function-pointer
-   declarations for every imported function actually called, plus a
-   `static const void *<mangled-fqtn>_typetag;` cache per external record
-   used (see the wiring section below).
+   declarations for every imported function actually called. (A record's
+   type identity is its metatable, cached per-Lua-state in a `_mod` user
+   value rather than a C static, so an external record needs no
+   per-translation-unit tag declaration — see the wiring section below.)
 4. **Forward signatures** (`$SIGS`): the native-convention prototype of
    every function in this module, plus
    `extern Udata *<dep>_init(lua_State *L);` per static import.
-5. **Record support**: first, *up front* (before any record body), a
-   `static const void *<mangled-fqtn>_typetag;` forward declaration for
-   every record in the module — emitted ahead of the bodies so a field
-   whose type is a record declared later in the file, or a pair of
-   mutually-recursive records, references an already-declared tag. Then,
-   per record (from `coderecorddec`), the
+5. **Record support**: per record (from `coderecorddec`), the
    `__index_<rec>`/`__newindex_<rec>` metamethods serving field access
-   from Lua ([Lua interop internals](lua-interop-internals.md)).
+   from Lua ([Lua interop internals](lua-interop-internals.md)). A
+   record's type identity is its metatable (cached per-Lua-state in a
+   `_mod` user value), so there is no per-record C tag static to declare
+   up front.
 6. **Function bodies**: for each function, method and static, the
    native-convention body followed by its Lua entry wrapper (local
    functions get no wrapper).
@@ -360,6 +359,15 @@ changed C type (`CClosure*`→`Udata*`) and `<mangled>_init` now returns
 `Udata*` — all cross-`.so` ABI points. 0.6 and 0.7 `.so`s are likewise
 ABI-incompatible and live under different `TITAN_PATH` directories.
 
+A further change bumped `TITAN_VER`, **0.7 to 0.8**: a record's type
+identity moved from a `void*` tag word in the udata's raw payload to the
+udata's **metatable pointer**, so record instances now carry no raw
+payload (`luaS_newudata(L, 0, N)`) and a cross-module type check compares
+`uvalue(v)->metatable` rather than reading `getudatamem`. A 0.7 checker
+reading a 0.8 record's `getudatamem` would read out of bounds, so 0.7 and
+0.8 `.so`s are ABI-incompatible and live under different `TITAN_PATH`
+directories.
+
 ## The module protocol
 
 All per-Lua-state module state lives in one `Udata` (`_mod`) created by
@@ -374,7 +382,7 @@ upvalue 0. Around `_mod`, each module exports three protocol symbols:
 ### `<prefix>_init` — idempotent at two levels
 
 ```c
-static int _initialized = 0; /* tags and external functions are set up */
+static int _initialized = 0; /* external functions are stitched up */
 Udata *counter_init(lua_State *L) {
     lua_checkstack(L, 10);
     lua_getfield(L, LUA_REGISTRYINDEX, "Titan module counter");
@@ -384,8 +392,7 @@ Udata *counter_init(lua_State *L) {
            $LOADMODULES1 (dlopen dynamic deps), $INITMODULES (dep inits),
            $INITRECORDS (record metatables), $INITVARS (variable
            initializers); install functions and record namespaces into
-           their uv slots; $CREATEMETA (member metatable on the udata);
-           $INITTAGS */
+           their uv slots; $CREATEMETA (member metatable on the udata) */
         return _mod;
     } else {
         Udata *_mod = uvalue(s2v(L->top.p - 1));
@@ -393,7 +400,6 @@ Udata *counter_init(lua_State *L) {
         if(!_initialized) {
             _initialized = 1;
             $LOADMODULES2  /* re-stitch dlopened function pointers */
-            $INITTAGS      /* re-fetch the tag cache */
         }
         return _mod;
     }
@@ -409,12 +415,14 @@ Idempotency works at two independent levels:
   fresh `Udata` and metatables — there is no per-state C global state, so
   one compiled module serves many states.
 * **Per process / translation unit**: the C `static int _initialized`
-  guards the genuinely process-global pieces — record-tag statics and
-  dlsym'd function pointers. This branch matters when the *same module's
-  code* is present twice in a process (e.g. linked into an executable and
-  also dlopened as someone else's dependency): the registry says the
-  module exists, but this copy of the code still needs its statics
-  stitched from the registry and the shared libraries.
+  guards the genuinely process-global pieces — the dlsym'd function
+  pointers. This branch matters when the *same module's code* is present
+  twice in a process (e.g. linked into an executable and also dlopened as
+  someone else's dependency): the registry says the module exists, but
+  this copy of the code still needs its function pointers stitched from
+  the shared libraries. (Record type identity is the metatable, a
+  per-Lua-state object cached in a `_mod` user value rather than a C
+  static, so this branch no longer re-fetches any tag cache.)
 
 *Detail:* the re-initialization branch substitutes `$LOADMODULES2` only
 when the dynamic-load list has more than one entry (`#loadmods > 1` in

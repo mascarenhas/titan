@@ -310,10 +310,9 @@ One allocation (real output for `Point.new`; the layout's rationale is in
 
 ```c
 {
-    Udata* _ud = luaS_newudata(L, sizeof(void*), 2);  /* #fields user values */
+    Udata* _ud = luaS_newudata(L, 0, 2);              /* #fields user values, no raw payload */
     setuvalue(L, _tmp_1_slot, _ud);                   /* anchor the udata FIRST */
-    *((void**)(getudatamem(_ud))) = (void*)test_Point_typetag;
-    _ud->metatable = hvalue(&_mod->uv[1].uv);
+    _ud->metatable = hvalue(&_mod->uv[1].uv);         /* this metatable IS the type identity */
     /* per field i: setobj2t(L, &(_ud->uv[i].uv), $SLOT), then
        luaC_barrierback(L, obj2gco(_ud), &(_ud->uv[i].uv)) for GC-able
        field types */

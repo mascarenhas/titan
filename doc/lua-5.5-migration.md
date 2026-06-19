@@ -128,10 +128,12 @@ All templates that touch the Lua stack were rewritten for
 > **Superseded (0.7 ABI).** The CClosure+Udata dual object described below
 > was the 5.5-migration-era representation. Records (and module state
 > `_mod`) have since been collapsed to a **single Lua 5.5 `Udata`**: a
-> record value *is* its userdata (fields in `uv[0..N-1]`, tag in
-> `getudatamem`, metatable on the udata), there is no backing closure, and
-> field stores use the **back** barrier (`luaC_barrierback`) instead of
-> the forward barrier. See the
+> record value *is* its userdata (fields in `uv[0..N-1]`, type identity in
+> the udata's metatable, metatable on the udata), there is no backing
+> closure, and field stores use the **back** barrier (`luaC_barrierback`)
+> instead of the forward barrier. (As of the 0.8 ABI the record type
+> identity is the metatable pointer — there is no raw tag payload in
+> `getudatamem` at all.) See the
 > [records/modules single-Udata plan](../.claude/plans/records-modules-udata-simplification.md)
 > and the current [values and GC](implementation/values-and-gc.md)
 > chapter; this section is retained as migration history.

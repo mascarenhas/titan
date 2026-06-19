@@ -149,17 +149,19 @@ raised as run-time errors via `luaL_error`:
 | `{T}` / `{K:V}` | **any table** (`ttistable`); element types are *not* checked here | `type error, expected table but found %s` |
 | `value` | anything, copied with `setobj2t` | never fails |
 | `T?` | nil (stores nil), else delegates to `checkandset` on the base — an `integer?` accepts an integral float just like a plain `integer`, but `boolean?` is stricter than a bare `boolean` parameter (a real boolean required) | the base type's message |
-| record | a full userdata whose payload pointer equals the record's tag | three-way message, below |
+| record | a full userdata whose metatable equals the record's metatable | three-way message, below |
 
-The record case compares the pointer stored in the userdata body against
-the per-FQTN tag and, on match, uses the userdata directly as the record
-value (there is no wrapper to unwrap) — full excerpt and tag mechanism in
+The record case compares the userdata's metatable against the record's
+metatable (read per-Lua-state from the `_mod` user value caching it) and,
+on match, uses the userdata directly as the record value (there is no
+wrapper to unwrap) — full excerpt and identity mechanism in
 [values and the GC](values-and-gc.md#wrap-and-unwrap-at-the-boundary).
 The failure message is always `type error, expected %s but found %s`,
 with three arms for the found part: another Titan record reports its
-FQTN, found through the registry's reverse tag→name entry
+FQTN, found through the registry's reverse metatable→name entry
 (`expected test.Rec but found test.Point`); a full userdata with an
-unknown tag is *meant* to report `luaL_tolstring` of the userdata, but
+unknown metatable (a non-record userdata) is *meant* to report
+`luaL_tolstring` of the userdata, but
 the generated code writes the userdata to `s2v(L->top.p)` without
 raising the top, so `luaL_tolstring(L, -1, …)` formats the nil the
 registry lookup left behind and the message actually reads
@@ -431,9 +433,8 @@ lives in the Lua registry. The complete key inventory:
 | --- | --- |
 | `"Titan module <modname>"` | the module `Udata` (`_init`'s idempotency check) |
 | `"Titan module <modname> metatable"` | the module `Udata`'s member metatable (only if the module exports anything) |
-| `"Titan record <fqtn> metatable"` | the record metatable (`luaL_newmetatable`) |
-| `"Titan record <fqtn> tag"` | the tag pointer as light userdata — how other code copies fetch it |
-| the tag pointer itself (via `lua_rawsetp`) | the FQTN string — the reverse map, used only in error messages |
+| `"Titan record <fqtn> metatable"` | the record metatable (`luaL_newmetatable`) — also the record's type identity (a type check compares `uvalue(v)->metatable`) |
+| the metatable pointer itself (via `lua_rawsetp`) | the FQTN string — the reverse map, metatable → name, used only in error messages |
 | `TITAN_PATH_KEY` (`"ec10e486-d8fd-11e7-87f4-e7e9581a929c"`) | the resolved Titan search path (cached by `pushpath`) |
 | `TITAN_LIBS_KEY` (`"ecfc9174-d8fd-11e7-8be2-abbaa3ded45f"`) | the dlopen-handle cache table (below) |
 | `TITAN_BACKTRACE_KEY` (`"57d80578-2534-4856-ad3b-bde8cba4c445"`) | the last error's merged backtrace string |
@@ -454,8 +455,8 @@ Udata* (*some_dep_init)(lua_State *L) =
 
 `loadlib(L, file)` first consults the handle cache under
 `TITAN_LIBS_KEY`; on a miss it walks the Titan path — environment
-variable `TITAN_PATH_0_7`, then `TITAN_PATH`, then the default
-`".;/usr/local/lib/titan/0.7"`, with `;;` in an env value splicing the
+variable `TITAN_PATH_0_8`, then `TITAN_PATH`, then the default
+`".;/usr/local/lib/titan/0.8"`, with `;;` in an env value splicing the
 default in — trying `dlopen(dir "/" file, RTLD_NOW | RTLD_LOCAL)` per
 `;`-separated directory. Successes are cached; the cache table's
 metatable has a `__gc` that `dlclose`s every handle in reverse insertion
