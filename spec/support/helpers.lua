@@ -48,14 +48,21 @@ end
 
 -- Run `code` under the stock Lua interpreter with `modname` loaded (`-l`),
 -- wrapped in pcall. Returns (true, output) on success, or (false, message).
+-- The driver code is written to a temp script and run by path rather than via
+-- `-e`, so quote characters in `code` (e.g. double-quoted Lua string literals)
+-- cannot collide with the shell's quoting of the command line.
 function M.call(modname, code)
+    local script = os.tmpname()
+    local sf = assert(io.open(script, "w"))
+    sf:write(string.format("print(pcall(function () %s end))\n", code))
+    sf:close()
     local cmd = string.format(
-        "lua-5.5.0/src/lua -l %s -e \"print(pcall(function () %s end))\"",
-        modname, code)
+        "lua-5.5.0/src/lua -l %s %s", modname, script)
     local f = io.popen(cmd)
-    if not f then return false, "popen failed" end
+    if not f then os.remove(script); return false, "popen failed" end
     local out = f:read()
     local ok = f:close()
+    os.remove(script)
     if not ok then return false, out or "process error" end
     if not out then return false, "no output" end
     local data = out:match("^true%s*(.*)$")

@@ -34,20 +34,38 @@ describe("bound methods (end-to-end)", function()
         ]])
     end)
 
-    it("binds obj:m as a `value` then calls it (slow path)", function()
+    it("binds obj:m and calls it on both the fast and the slow path", function()
+        -- `outer(g, p)` calls the function VALUE `g`. A bound method whose type is
+        -- exactly `(()->integer)->integer` is called via the fast path (no extra
+        -- Lua frame); a plain Lua closure in the same slot falls to the generic
+        -- path through luaD_callnoyield (one extra frame). DEPTH_PROBE catches a
+        -- tag mismatch that would silently downgrade the bound-method fast path.
+        -- The bound method `c:call` also reads `self` (value correctness on the
+        -- fast path).
         run_coder([[
-            record Adder base: integer end
-            function Adder:add(x: integer): integer
-                return self.base + x
+            record Caller tag: integer end
+            function Caller:call(p: () -> integer): integer
+                return p() + self.tag
             end
-            function run(): integer
-                local a = Adder.new(100)
-                local v: value = a:add
-                local g = v as (integer) -> integer
-                return g(5)
+            function outer(g: (() -> integer) -> integer,
+                           p: () -> integer): integer
+                return g(p)
             end
-        ]], [[
-            assert(test.run() == 105)
+            -- fast path: the bound method `c:call` called at its exact type
+            function run_fast(p: () -> integer): integer
+                local c = Caller.new(0)
+                return outer(c:call, p)
+            end
+            -- slow path: g arrives as a value whose tag is unknown statically
+            function run_slow(g: (() -> integer) -> integer,
+                              p: () -> integer): integer
+                return outer(g, p)
+            end
+        ]], h.DEPTH_PROBE .. [[
+            assert(test.run_fast(function () return 7 end) == 7)
+            local fastd = test.run_fast(depth)
+            local slowd = test.run_slow(slow_g, depth)
+            assert(slowd > fastd, ('fast=')..fastd..(' slow=')..slowd)
         ]])
     end)
 
@@ -179,28 +197,43 @@ describe("bound methods (end-to-end)", function()
         -- The importer binds its own method to a value and passes it into a
         -- `.so`-only higher-order function that calls it. If the native
         -- trampoline pointer and the published type tag agree across the
-        -- boundary, the call uses the fast path and returns the right value.
+        -- boundary the call uses the fast path (no extra Lua frame); if they
+        -- disagree it silently downgrades to the slow path. A DEPTH_PROBE
+        -- assertion (the fast bound-method call is one frame shallower than a
+        -- Lua-closure slow call) catches that downgrade, which a return-value
+        -- check alone would not.
         local ok, err = h.build_so_chain({
             { name = "fpbmf", src = [[
-                function inner(p: () -> integer): integer return p() end
-            ]] },
-            { name = "fpbmb", src = [[
-                local a = import "fpbmf"
-                record Counter n: integer end
-                function Counter:get(): integer return self.n end
-                function outer(g: (() -> integer) -> integer,
+                function inner(g: (() -> integer) -> integer,
                                p: () -> integer): integer
                     return g(p)
                 end
-                function run(): integer
-                    local c = Counter.new(42)
-                    local p: () -> integer = c:get
-                    return outer(a.inner, p)
+            ]] },
+            { name = "fpbmb", src = [[
+                local a = import "fpbmf"
+                record Caller tag: integer end
+                function Caller:call(p: () -> integer): integer
+                    return p() + self.tag
+                end
+                -- fast: the bound method `c:call` is the function value `g`
+                function run_fast(p: () -> integer): integer
+                    local c = Caller.new(0)
+                    return a.inner(c:call, p)
+                end
+                -- slow: g arrives as a value whose tag is unknown statically
+                function run_slow(g: (() -> integer) -> integer,
+                                  p: () -> integer): integer
+                    return a.inner(g, p)
                 end
             ]] },
         })
         assert.truthy(ok, err)
-        local rok, out = h.call("fpbmb", "assert(fpbmb.run() == 42)")
+        local rok, out = h.call("fpbmb", h.DEPTH_PROBE .. [[
+            assert(fpbmb.run_fast(function () return 7 end) == 7)
+            local fastd = fpbmb.run_fast(depth)
+            local slowd = fpbmb.run_slow(slow_g, depth)
+            assert(slowd > fastd, ('fast=')..fastd..(' slow=')..slowd)
+        ]])
         assert.truthy(rok, out)
         os.execute("rm -f *.o *.so *.c")
     end)

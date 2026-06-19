@@ -118,6 +118,43 @@ describe("closures (capture analysis)", function()
         local x = ast[1].params[1]
         assert.is_true(x._captured)
     end)
+
+    it("captures `self` of an enclosing method", function()
+        -- A lambda nested in a method body captures `self` like any parameter:
+        -- `self` is declared at the method's own func-depth (checkfuncbody).
+        local ok, err, ast = run_checker([[
+            record C n: integer end
+            function C:m(): (() -> (integer))
+                local g = function(): integer return self.n end
+                return g
+            end
+        ]])
+        assert.truthy(ok, err)
+        local m = ast[#ast]
+        assert.equal("Ast.TopLevelMethod", m._tag)
+        assert.is_true(m._self._captured)
+    end)
+
+    it("a captured `for` control variable is not marked assigned", function()
+        -- The implicit increment must not set `_assigned`, so a captured `for`
+        -- variable stays immutable -> by-value (never boxed) -> fresh per
+        -- iteration. (§3/§4.2 invariant.)
+        local ok, err, ast = run_checker([[
+            function f(): {() -> integer}
+                local fns: {() -> integer} = {}
+                for i = 1, 3 do
+                    fns[i] = function(): integer return i end
+                end
+                return fns
+            end
+        ]])
+        assert.truthy(ok, err)
+        -- the `for` statement is the second stat of f's body; its control decl
+        local forstat = tlfunc_stats(ast)[2]
+        assert.equal("Ast.StatFor", forstat._tag)
+        assert.is_true(forstat.decl._captured)
+        assert.is_nil(forstat.decl._assigned)
+    end)
 end)
 
 describe("closures (parameter inference)", function()
@@ -166,6 +203,7 @@ describe("closures (parameter inference)", function()
             end
         ]])
     end)
+
 end)
 
 describe("closures (return inference)", function()
@@ -218,6 +256,32 @@ describe("closures (return inference)", function()
             end
         ]])
     end)
+
+    it("infers the full tuple from a trailing option-first multi-return call", function()
+        -- `return h()` where h returns (integer?, integer): the trailing return
+        -- values must be harvested from the original call BEFORE forcing the
+        -- option-typed first value (forcing wraps it in an ExpCast carrying no
+        -- `_types`), so the lambda infers a 2-tuple, not a single value.
+        local ok, err, ast = run_checker([[
+            function h(): (integer?, integer)
+                return 1, 2
+            end
+            function f(): integer
+                local g = function()
+                    return h()
+                end
+                local a: integer?, b: integer = g()
+                if a then return (a as integer) + b else return b end
+            end
+        ]])
+        assert.truthy(ok, err)
+        -- g is the first stat-decl of f's body (f is the 2nd top-level)
+        local g = ast[2].block.stats[1].decls[1]
+        assert.equal("Type.Function", g._type._tag)
+        assert.equal(2, #g._type.rettypes)
+        assert.equal("Type.Integer", g._type.rettypes[1]._tag)
+        assert.equal("Type.Integer", g._type.rettypes[2]._tag)
+    end)
 end)
 
 describe("closures (still-an-error cases)", function()
@@ -235,6 +299,18 @@ describe("closures (still-an-error cases)", function()
                 local f: (integer) -> (integer) = function(n: integer): integer
                     return f(n)
                 end
+                return 1
+            end
+        ]])
+    end)
+
+    it("names a lambda generically in the duplicate-parameter error", function()
+        -- A lambda has no name; the message must say "anonymous function", not
+        -- "declaration of function 'nil'".
+        assert_type_error("duplicate parameter 'x' in anonymous function", [[
+            function g(): integer
+                local f: (integer, integer) -> (integer) =
+                    function(x: integer, x: integer): integer return x end
                 return 1
             end
         ]])
