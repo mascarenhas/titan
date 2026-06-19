@@ -397,3 +397,52 @@ then brought the documentation in line.
   function-type cases in `spec/types_spec.lua` (zero-return `-> ()` rendering,
   higher-order tostring, exact-vs-compatible, serialize round-trip, nested
   `is_gc`). Full suite green.
+
+## 2026-06-19 — anonymous functions, closures, and bound methods
+
+Documented the anonymous-functions / closures feature (branch
+`anonymous-functions`), a docs-only pass against the shipped behavior in
+`titan-compiler/{parser,checker,coder}.lua` and the new specs
+(`spec/checker/closures_spec.lua`, `spec/coder/closures_spec.lua`,
+`spec/coder/bound_methods_spec.lua`). Design source:
+`.claude/plans/anonymous-functions.md`.
+
+* **Language feature shipped.** A `function (...) ... end` expression is a
+  fresh function value that closes over the enclosing function's locals —
+  reading captured-immutable ones by value, sharing captured-and-mutated
+  ones through a box. Lambda parameter and return annotations are optional
+  and **inferred** (params from the expected function type, return from the
+  body, unified), framed as the same checking-vs-synthesis inference as
+  `local x = exp`. A lambda is a `simpleexp`, so direct application needs
+  parentheses; equality is object identity (each evaluation is a fresh
+  value); a `local f = function … end` self-reference is a clean "not
+  declared" error; a top-level `local x = function … end` is the existing
+  "must be constant" error. Bound instance-method references `obj:method`
+  (no call) are also values — the method's type with `self` removed and the
+  receiver bound — including across a `.so` boundary. Only foreign/FFI
+  functions remain non-values.
+
+* **New language chapter.** Added `doc/language/closures.md` (syntax,
+  inference, lexical capture, fresh-per-evaluation/equality, the recursion
+  limitation, and bound method references). Reconciled the "not
+  first-class" list in `index.md` (now only FFI functions), the chapter
+  header and "Functions as values" in `functions.md`, the method/field
+  notes in `records.md`, and added the `funcexp`/bare-`obj:m` productions
+  and a note to `grammar.md`. Linked the new chapter from the index
+  reading guide.
+
+* **Implementation docs.** `codegen-overview.md`: documented the `_fn`
+  native-ABI parameter (after `_mod`; `NULL` on static calls, the callee on
+  fast value calls, the called closure in the Lua entry), updated the
+  example signatures and the dynamic-wiring typedef, and added a "Closures
+  and captured variables" section (the trap-stub `CClosure`-cell box and
+  its uniform forward `luaC_barrier`, the `3 + N` upvalue layout, capture
+  lists, file-scope lambda hoisting, transitive capture, bound-method
+  trampolines, and the `TITAN_VER` 0.5 → 0.6 ABI bump). `checker.md`: added
+  a "Closures: capture analysis and lambda inference" section (the
+  `func_stack`, `_funcdepth`, `_captured`/`_assigned`/forced-`_used`, the
+  inclusive transitive capture interval, and checking-vs-synthesis
+  inference incl. return collection) and reconciled the first-class-
+  functions contributor note. Added a pointer from
+  `first-class-functions-spec-v1.md`'s scope note (it had excluded
+  nested/anonymous functions).

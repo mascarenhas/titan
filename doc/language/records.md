@@ -210,10 +210,10 @@ variable, `value`, or another record copies the reference, never the
 contents; mutations through one reference are visible through all.
 
 Record fields may also have **function types** and hold function values:
-a field typed as a function can store a top-level function, an imported
-module's function, or a record's `new` static, and the stored value can be
-called through the field (instance methods, which need a bound `self`, are
-not first-class and so cannot be stored — see [Methods](#methods)).
+a field typed as a function can store a top-level function, a lambda, an
+imported module's function, a record's `new` static, or a
+[bound method reference](#methods) (`obj:m`), and the stored value can be
+called through the field.
 
 Record fields can themselves have record types, and nesting works as
 expected:
@@ -279,11 +279,31 @@ Rules and their compile-time errors:
   `expected record in receiver of method call but found 'integer'`.
 
 **Methods are not fields.** In Titan code a method name can only be used
-in a call; `p.move` as a value, or `p.move = ...`, is the compile-time
-error `field 'move' not found in record 'test.Point'`. Unlike top-level
-functions and a record's `new` static, instance methods are **not**
-first-class values — they would need a bound `self` — so there is no way
-to take `p.move` as a value (see [Functions](functions.md)).
+after a colon; `p.move` as a value, or `p.move = ...`, is the compile-time
+error `field 'move' not found in record 'test.Point'`. Method names are
+not fields.
+
+**Bound method references.** A method *named but not called*, `p:move`
+with no argument list, **is** a first-class value: a *bound method
+reference* whose type is the method's type with the implicit `self`
+removed, with the receiver `p` bound in. The receiver is evaluated once,
+when the reference is taken, and the result is an ordinary function value —
+store it, pass it, return it, call it, or hand it to Lua:
+
+```lua
+function demo(): integer
+    local p = Point.new(1.0, 2.0)
+    local m: (float, float) -> () = p:move   -- bound to p
+    m(1.0, 1.0)                              -- runs Point:move on p
+    return 1
+end
+```
+
+The receiver is captured by reference, so a bound method that mutates the
+record is visible through it. Bound references work across modules,
+including a dependency available only as a compiled `.so`. The full rules,
+errors and examples are in
+[anonymous functions and closures](closures.md#bound-method-references).
 
 ## Static functions
 
@@ -425,10 +445,11 @@ nil` error if the value is `nil` at run time. See
   overriding; method dispatch is fully static. Records were designed as
   a deliberate stepping stone toward possible classes later, not as a
   class system.
-* **The record type and its methods are not values.** The record type
-  itself cannot be used as a value, and instance methods cannot either
-  (they would need a bound `self`). The `new` static, by contrast, *is* a
-  first-class value, like any top-level function.
+* **The record type itself is not a value.** A record type cannot be used
+  as a value — `return Point` is an error. Its `new` static, by contrast,
+  *is* a first-class value, like any top-level function, and an instance
+  method can be taken as a value through a
+  [bound reference](#methods) (`obj:method`).
 
 ## Performance notes
 

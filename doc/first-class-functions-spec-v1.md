@@ -18,13 +18,24 @@
 >   defaults to **zero returns** (`() -> ()`, returning nothing as in Lua),
 >   not a single `nil`.
 >
-> Foreign (C FFI) functions are still **not** first-class values, as the
-> overview already notes.
+> **Nested/anonymous functions and closures have since shipped too.** This
+> draft deliberately scoped them *out* (see the Overview below), but a
+> follow-on feature added anonymous function expressions that capture
+> enclosing locals, plus bound instance-method references `obj:method`. The
+> extra native-ABI `_fn` parameter that closures need is a hard `.so` ABI
+> break, so `TITAN_VER` was bumped 0.5 → 0.6. See
+> [anonymous functions and closures](language/closures.md) for the language
+> feature and [the code generator overview](implementation/codegen-overview.md#closures-and-captured-variables)
+> for the implementation.
+>
+> Foreign (C FFI) functions remain the **only** kind that is still not a
+> first-class value.
 
 ## Overview
 
 This spec covers the addition of first-class functions to Titan
-**without support for nested/anonymous functions**. First class
+**without support for nested/anonymous functions** (which a later feature
+added — see the status note above). First class
 function values are either references to Titan top-level functions
 or function-like values coming from Lua (native Lua functions, C functions,
 anything with a `__call` metamethod). Notice this excludes Titan foreign

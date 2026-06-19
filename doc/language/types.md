@@ -135,8 +135,11 @@ function types nest, so a higher-order type like
 `(integer -> integer, integer) -> integer` (a function taking an
 `integer -> integer` and an `integer`, returning an `integer`) is
 written directly. A function value can be stored in a variable, passed as
-an argument, returned, and called like any other; see
-[Functions](functions.md) and [Expressions](expressions.md).
+an argument, returned, and called like any other; it may be a named
+function, a record's `new` static, an anonymous function (lambda), or a
+bound method reference `obj:m`. See
+[Functions](functions.md), [closures](closures.md), and
+[Expressions](expressions.md).
 
 ### Foreign types
 

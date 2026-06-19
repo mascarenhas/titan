@@ -311,7 +311,10 @@ e12         ::= castexp ['^' e11]
 castexp     ::= simpleexp [as type]
 unop        ::= not | '#' | '-' | '~'
 simpleexp   ::= nil | false | true | Numeral | LiteralString
-             |  constructor | suffixedexp | prefixexp
+             |  constructor | funcexp | suffixedexp | prefixexp
+funcexp     ::= function '(' [lambdaparlist] ')' [':' rettype] block end
+lambdaparlist ::= lambdaparam {',' lambdaparam}
+lambdaparam ::= Name [':' type]
 prefixexp   ::= Name | '(' exp ')'
 suffixedexp ::= prefixexp suffix {suffix}
 suffix      ::= funcargs
@@ -333,9 +336,18 @@ fieldsep    ::= ',' | ';'
 
 Calls support the same argument sugar as Lua — `f(x)`, `f "literal"`,
 `f {1, 2}` — and the method forms `o:m(x)`, `o:m "literal"`, `o:m {}`.
-Constructors cover arrays (positional fields), maps (`[k] = v`), and
+A method name used in a `suffix`/`funcargs` position is a call; a method
+name with **no** following `funcargs` — a bare `o:m` — is instead a
+[bound method reference](closures.md#bound-method-references), a function
+value. Constructors cover arrays (positional fields), maps (`[k] = v`), and
 records (`name = v`); `,` and `;` are interchangeable and a trailing
-separator is allowed. See [Expressions](expressions.md),
+separator is allowed. A `funcexp` is an anonymous function: unlike a
+top-level `tlfunc` its parameter annotations are *optional* (inferred when
+omitted, as is the whole return annotation), and because it is a
+`simpleexp` and not a `prefixexp` it cannot be applied directly —
+`(function () … end)(x)` needs the parentheses. See
+[Expressions](expressions.md),
+[Anonymous functions and closures](closures.md),
 [Arrays and maps](arrays-maps.md), and [Records](records.md).
 
 ```lua

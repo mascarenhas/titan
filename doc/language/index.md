@@ -45,7 +45,8 @@ Start with the [design philosophy](philosophy.md) if you want to know
 | [Option types](option-types.md) | `T?`: nil-tolerant types — syntax, semantics, defaulting with `or`, and how `nil` flows through arrays, maps, and the Lua boundary. |
 | [Expressions](expressions.md) | Literals and escapes, operators and precedence, Lua-faithful arithmetic, concatenation, `and`/`or`, explicit casts with `as`, constructors, calls. |
 | [Statements](statements.md) | Declarations and inference, assignment and multiple assignment, control flow, the numeric `for`, `return`. |
-| [Functions](functions.md) | Declarations, strict arity, multiple return values, visibility, and the `main` convention for standalone programs. |
+| [Functions](functions.md) | Declarations, strict arity, multiple return values, visibility, functions as values, and the `main` convention for standalone programs. |
+| [Anonymous functions and closures](closures.md) | Lambda expressions, parameter/return type inference, lexical capture of enclosing locals, fresh-value-per-evaluation semantics, and bound method references `obj:method`. |
 | [Records](records.md) | Nominal record types, constructors, fields, methods and statics, and records as seen from Lua. |
 | [Arrays and maps](arrays-maps.md) | The two table-backed container types: construction, indexing, length, deletion, key rules, performance model. |
 | [Modules](modules.md) | Module files, `import`, visibility, module variables, and the compilation model (shared libraries, executables, search paths). |
@@ -61,9 +62,9 @@ implemented and covered by the compiler's test suite. Its boundaries are
 mostly missing features, plus a handful of constructs the compiler rejects
 with a clean error; each links to the chapter that documents it in full.
 
-### First-class functions, with limits
+### First-class functions
 
-* **Functions are now first-class values.** A function name — a top-level
+* **Functions are first-class values.** A function name — a top-level
   function, a `local` function, an imported module's function, or a record
   static like `Rec.new` — used as a value yields a stable function value,
   and function types like `(integer) -> integer` are accepted in every
@@ -72,15 +73,25 @@ with a clean error; each links to the chapter that documents it in full.
   Titan-to-Titan calls take a zero-overhead fast path, other callables a
   generic one
   ([functions](functions.md#functions-as-values),
-  [type system](types.md#function-types)). This also means Titan can now
+  [type system](types.md#function-types)). This also means Titan can
   **call a Lua function directly** — passing a Lua closure to a
   function-typed parameter and calling it
   ([Lua interop](lua-interop.md#calling-lua-from-titan)).
-* **What is still not first-class.** Anonymous and nested function
-  expressions, closures over local variables, instance *methods* as
-  values (they need a bound `self`), and foreign/FFI functions as values
-  are not yet supported. These remain the most prominent roadmap items
-  ([functions](functions.md#functions-as-values)).
+* **Anonymous functions and closures.** A `function (...) ... end`
+  expression evaluates to a fresh function value, and it **closes over**
+  the enclosing function's locals and parameters — reading them, and
+  mutating them through a shared box when it assigns to them. Lambda
+  parameter and return types are *inferred* (from the expected type and
+  from the body) the same way `local x = exp` infers a local's type
+  ([closures](closures.md)).
+* **Bound instance methods are values too.** `obj:method` with no argument
+  list is a function value that has the method's type with the implicit
+  `self` removed, bound to the receiver — so a method *can* now be taken
+  as a value ([closures](closures.md#bound-method-references),
+  [records](records.md#methods)).
+* **What is still not first-class.** Only foreign/FFI functions remain
+  non-values: a C function can be called by name but cannot be referenced
+  as a value ([the FFI chapter](ffi.md)).
 
 ### Smaller gaps and rough edges
 

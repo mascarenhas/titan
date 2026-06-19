@@ -178,10 +178,11 @@ by these lights, roughly in order:
    language in exchange for a faster and more predictable one, and each can
    be revisited as the design matures (see the roadmap in the
    [README](../../README.md)). First-class functions began as one of these
-   restrictions and have since been lifted: named functions are now values
-   that can be stored, passed, returned and called — with a zero-overhead
-   fast path for exact Titan-to-Titan calls — though closures and anonymous
-   functions remain future work.
+   restrictions and have since been lifted: functions are now values that
+   can be stored, passed, returned and called — with a zero-overhead fast
+   path for exact Titan-to-Titan calls — and that has grown to include
+   anonymous functions that close over enclosing locals and bound instance-
+   method references; only foreign/FFI functions remain non-values.
 
 ---
 
