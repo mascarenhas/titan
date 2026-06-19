@@ -64,19 +64,18 @@ The body block follows the same rules as any function body, including the
 
 ## Type inference for parameters and return
 
-Lambda annotations are optional. When you leave them off, Titan infers
-them — and the rule is the one you already know from
-`local x = exp` versus `local x: T = exp`: an explicit annotation is used
-as written, and a missing one is inferred from context.
+Lambda annotations are optional. When you leave them off, Titan fills them
+in from the **expected function type** — the type of the slot the lambda
+flows into, whether that is an assignment target, an argument position, or a
+`return`. **Both the parameter types and the return type come from this same
+expected type**; neither is reverse-engineered from the lambda's body.
 
 **Parameter types.** An annotated parameter uses its annotation. An
-*unannotated* parameter is filled in from the **expected function type** —
-the type of the slot the lambda flows into, whether that is an assignment
-target, an argument position, or a `return`:
+*unannotated* parameter is filled in from the expected function type:
 
 ```lua
 function f(): integer
-    -- g's parameter and return are inferred from the annotation on g
+    -- g's parameter and return both come from the annotation on g
     local g: (integer) -> (integer) = function (x) return x + 1 end
     return g(2)
 end
@@ -107,49 +106,53 @@ test.titan:2:30: type error: cannot infer type of parameter 'x'
 
 Annotate the parameter, or use the lambda where its type is known.
 
-**Return type.** An explicit return annotation is used as written.
-Otherwise the return type is taken from the expected function type when
-there is one, and failing that is **inferred from the body's `return`
-statements**, unified across all of them — the same way `local x = exp`
-takes its type from the right-hand side:
+**Return type.** Like the parameters, the return type comes only from the
+expected function type — it is *never* read off the body's `return`
+statements. An explicit return annotation is used as written; otherwise the
+return type is taken from the expected function type when there is one. The
+body is then checked against those return types, exactly as a top-level
+function body is checked against its declared returns:
 
 ```lua
 function f(): integer
-    local g = function (x: integer) return x + 1 end       -- inferred: -> integer
-    local h = function (x: integer) return x, x + 1 end    -- inferred: -> (integer, integer)
+    -- g's return (integer) comes from the annotation on g; the body's
+    -- `return x + 1` is checked against it
+    local g: (integer) -> (integer) = function (x) return x + 1 end
+    -- h returns two values, again from h's annotation
+    local h: (integer) -> (integer, integer) = function (x) return x, x + 1 end
     return g(2)
 end
 ```
 
-A lambda with no `return` (or one that only falls off the end) infers the
-**zero-return** type `()`:
+When there is no return annotation and no expected function type, the return
+type defaults to the **zero-return** type `()` — exactly the default an
+unannotated top-level function gets:
 
 ```lua
 function f(): integer
-    local g = function (x: integer) end   -- inferred: (integer) -> ()
+    local g = function (x: integer) end   -- (integer) -> ()
     g(1)
     return 1
 end
 ```
 
-Note that an explicit `: ()` is *not* the same as leaving the annotation
-off: `: ()` means "this lambda returns nothing" and is used as written,
-whereas no annotation means "infer the return type from the body". The two
-agree when the body has no `return`, but writing `: ()` is how you *fix*
-the return type to zero values regardless of the body.
-
-If the body's `return`s disagree — different arities, or types that do not
-unify — inference cannot pick one type and it is a clean error, prompting
-you to add an annotation:
+This default applies whether or not the body contains a `return`. Because
+the lambda has no expected type, `g`'s return type is `()`, so a body that
+tries to `return` a value is a clean arity error — the documented
+zero-return footgun, consistent with an unannotated top-level function:
 
 ```lua
 function f(): integer
-    local g = function (b: boolean)
-        if b then return 1 else return 1.0 end   -- compile-time error: returns disagree
-    end
+    -- no annotation, no expected type -> g is () -> (); the return is an
+    -- arity error: returned 1 value(s) but function expected 0
+    local g = function (x: integer) return x + 1 end
     return 1
 end
 ```
+
+To give such a lambda a return type, either annotate it (`function (x:
+integer): integer ...`) or place it where its function type is known (an
+annotated `local`, an argument slot, or a `return` position).
 
 ## Capturing enclosing locals
 

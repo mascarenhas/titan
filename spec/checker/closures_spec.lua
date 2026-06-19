@@ -207,26 +207,66 @@ describe("closures (parameter inference)", function()
 end)
 
 describe("closures (return inference)", function()
-    it("infers a single return type from the body", function()
+    it("infers a single return type from an assignment-target function type", function()
         assert_type_check([[
             function f(): integer
-                local g = function(x: integer) return x + 1 end
+                local g: (integer) -> (integer) = function(x) return x + 1 end
                 return g(2)
             end
         ]])
     end)
 
-    it("infers a multi return type from the body", function()
+    it("infers a multi return type from the context function type", function()
         assert_type_check([[
             function f(): integer
-                local g = function(x: integer) return x, x + 1 end
+                local g: (integer) -> (integer, integer) =
+                    function(x) return x, x + 1 end
                 local a: integer, b: integer = g(2)
                 return a + b
             end
         ]])
     end)
 
-    it("infers a zero-return lambda from an empty body", function()
+    it("infers a return type from an argument-position function type", function()
+        assert_type_check([[
+            function apply(g: (integer) -> (integer), x: integer): integer
+                return g(x)
+            end
+            function f(): integer
+                return apply(function(y) return y + 1 end, 5)
+            end
+        ]])
+    end)
+
+    it("infers a return type from a return-position function type", function()
+        assert_type_check([[
+            function make(): ((integer) -> (integer))
+                return function(x) return x * 2 end
+            end
+        ]])
+    end)
+
+    it("checks the body against the context-inferred return type", function()
+        -- The body's `return` is checked/coerced against the context's return
+        -- type, not used to synthesize it: an integer return coerces to float.
+        assert_type_check([[
+            function f(): float
+                local g: (integer) -> (float) = function(x) return x end
+                return g(2)
+            end
+        ]])
+    end)
+
+    it("rejects a body return that mismatches the context return type", function()
+        assert_type_error("types in return do not match", [[
+            function f(): integer
+                local g: (integer) -> (string) = function(x) return x end
+                return 1
+            end
+        ]])
+    end)
+
+    it("defaults to zero-return with no context and an empty body", function()
         assert_type_check([[
             function f(): integer
                 local g = function(x: integer) end
@@ -246,41 +286,16 @@ describe("closures (return inference)", function()
         ]])
     end)
 
-    it("errors when inferred returns disagree", function()
-        assert_type_error("returns disagree", [[
+    it("zero-return is the default with no context, so a body return is an arity error", function()
+        -- No return annotation and no usable context defaults the lambda to
+        -- zero-return `()`, exactly like an unannotated top-level function, so a
+        -- `return <expr>` is a clean arity error.
+        assert_type_error("returned 1 value%(s%) but function expected 0", [[
             function f(): integer
-                local g = function(b: boolean)
-                    if b then return 1 else return 1.0 end
-                end
+                local g = function(x: integer) return x + 1 end
                 return 1
             end
         ]])
-    end)
-
-    it("infers the full tuple from a trailing option-first multi-return call", function()
-        -- `return h()` where h returns (integer?, integer): the trailing return
-        -- values must be harvested from the original call BEFORE forcing the
-        -- option-typed first value (forcing wraps it in an ExpCast carrying no
-        -- `_types`), so the lambda infers a 2-tuple, not a single value.
-        local ok, err, ast = run_checker([[
-            function h(): (integer?, integer)
-                return 1, 2
-            end
-            function f(): integer
-                local g = function()
-                    return h()
-                end
-                local a: integer?, b: integer = g()
-                if a then return (a as integer) + b else return b end
-            end
-        ]])
-        assert.truthy(ok, err)
-        -- g is the first stat-decl of f's body (f is the 2nd top-level)
-        local g = ast[2].block.stats[1].decls[1]
-        assert.equal("Type.Function", g._type._tag)
-        assert.equal(2, #g._type.rettypes)
-        assert.equal("Type.Integer", g._type.rettypes[1]._tag)
-        assert.equal("Type.Integer", g._type.rettypes[2]._tag)
     end)
 end)
 

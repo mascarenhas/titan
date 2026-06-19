@@ -79,9 +79,12 @@ function (p1[: T1], …, pn[: Tn]) [: rettype] <block> end
 ```
 
 **Type inference (resolved, D1+D6).** Per the user's call, lambdas infer missing
-parameter and return types — this parallels Titan's existing inference for
-`local x = exp` (synthesize when no expectation, check when there is one) and is
-*not* a departure from explicit typing. Two modes (§3 has the algorithm):
+parameter and return types **only from the expected function type** — this
+parallels Titan's existing inference for `local x = exp` (synthesize when no
+expectation, check when there is one) and is *not* a departure from explicit
+typing. Both parameter and return inference are symmetric: both come from the
+expected/context `Type.Function`; neither is reverse-engineered from the body.
+Two modes (§3 has the algorithm):
 
 - **Parameter types**: an annotated param uses its annotation; an *unannotated*
   param is inferred from the **expected function type** (the `context`: the slot/
@@ -89,9 +92,12 @@ parameter and return types — this parallels Titan's existing inference for
   unannotated param is a clean compile error ("cannot infer type of parameter
   'x'; annotate it or use the lambda where its type is known").
 - **Return type**: an explicit annotation is used as-is; otherwise it is taken
-  from the context's return types if available, else **inferred from the body's
-  `return` statements** (unified across all returns; no returns → zero-return
-  `()`).
+  from the **context's return types** when in checking mode (the expected
+  function type's `rettypes`). With no annotation and no usable context, the
+  return type defaults to zero-return `()` — exactly the default an unannotated
+  top-level function gets. The return type is *never* inferred from the body's
+  `return` statements, so a synthesis-mode lambda whose body does `return <expr>`
+  is a clean arity error (the documented zero-return footgun).
 
 Note the lambda grammar must distinguish *no return annotation* (→ infer) from an
 explicit `: ()` (→ zero-return), so it uses a `lambdarettypeopt` that yields a
@@ -389,24 +395,24 @@ uses it). The handler:
    else if checking mode, take `context.params[i]`; else (synthesis, no
    annotation) emit "cannot infer type of parameter 'x'". This mirrors `local x`
    vs `local x: T`.
-2. **Resolve / set up return types.** If `node.rettypes` is an explicit list
-   (incl. `{}` for `: ()`), use it. Else if checking mode, use `context.rettypes`.
-   Else mark the frame for **return inference** (`frame.infer_ret = true`,
-   `frame.collected = nil`).
-3. Build `node._type = Type.Function(paramtypes, rettypes_or_placeholder, false)`.
-   Push the frame (before declaring params — §"Function-nesting tracking"), open a
-   block, bind params and `$function = node`, check the body.
-4. **Return inference in `StatReturn`** (`checker.lua:478`): if the enclosing
-   `$function`'s frame has `infer_ret`, *collect* each return's expression types
-   (`tryforce`d, never option — as local inference does) instead of checking them
-   against fixed rettypes; otherwise behave exactly as today (coerce/check against
-   the known rettypes). After the body, unify the collected returns: zero returns
-   → `{}` (zero-return); otherwise all returns must agree in arity and type (the
-   first is the template; a mismatch → "cannot infer return type: returns disagree
-   — add a return annotation"); set `node._type.rettypes` to the result.
-5. Run the all-paths-return rule against the now-final rettypes (when inferring and
-   there *are* returns but some path falls through, the existing "can return nil
-   but return type is not nil" error fires — prompting an annotation). Pop frame.
+2. **Resolve / set up return types (context-only).** If `node.rettypes` is an
+   explicit list (incl. `{}` for `: ()`), use it. Else if checking mode, use
+   `context.rettypes`. Else (synthesis mode) default to `{}` (zero-return `()`),
+   exactly the default an unannotated top-level function gets. The return type is
+   *never* inferred from the body — return inference is symmetric with parameter
+   inference, both coming from the expected function type.
+3. Build `node._type = Type.Function(paramtypes, rettypes, false)`. Push the frame
+   (before declaring params — §"Function-nesting tracking"), open a block, bind
+   params and `$function = node`, check the body.
+4. **`StatReturn`** behaves exactly as it did before lambdas existed: it
+   coerces/checks each return expression against the now-always-known
+   `$function` rettypes. There is no collect/unify path; a `return <expr>` in a
+   synthesis-mode (zero-return) lambda is a clean arity error.
+5. The all-paths-return rule runs unconditionally inside `checkfuncbody` against
+   the now-final rettypes (no special deferral for lambdas, since the rettypes are
+   known before the body is checked); a non-`nil`-returning lambda that can fall
+   through gets the existing "can return nil but return type is not nil" error.
+   Pop frame.
 6. Return with `_type = node._type`. The surrounding context then applies the
    usual `trycoerce`/`checkmatch` of the lambda *value* against its target (in
    checking mode this matches by construction; in synthesis mode the synthesized
@@ -595,8 +601,8 @@ They are cheap (pure delegation), so emitting them for every method is fine.
   **and bound instance methods** out of the "not first-class" list (only FFI
   functions remain non-first-class).
 - New closures section (in `functions.md` or `closures.md`): lambda syntax with
-  **optional annotations + inference** (params from context, return from body —
-  framed as the same inference as `local x`); lexical capture (presented simply as
+  **optional annotations + inference** (params and return both from context —
+  framed as the same inference as `local x: T`); lexical capture (presented simply as
   "closures capture enclosing locals"); no-stable-identity + equality meaning; the
   D2 recursion limitation (clean "not declared" error). Document **bound method
   references** `obj:m` (in `records.md`/`functions.md`).
@@ -626,11 +632,13 @@ error; malformed-lambda error labels; a 3–4 deep nesting case (parser limit).
 captured-immutable, mutated-not-captured, neither, shadowing, **transitive
 3-level**, for-var capture, self capture); type errors through a lambda value;
 **top-level `local x = function…end` → "must be constant"** (R4 BLOCKER
-regression); D2 self-reference → "not declared". **Inference (D1/D6):**
-param inferred from an assignment-target/argument/return function type; return
-inferred from the body (single and multi-return; unify); unannotated param with
-no context → clean error; conflicting returns → clean error; explicit `: ()` is
-zero-return (distinct from no annotation). **Bound methods (§4.6):** `obj:m` has
+regression); D2 self-reference → "not declared". **Inference (D1/D6), context-
+only:** param inferred from an assignment-target/argument/return function type;
+return inferred from the **context** (the same assignment-target/argument/return
+function type — single and multi-return — with the body checked against it);
+unannotated param with no context → clean error; explicit `: ()` is zero-return;
+a no-context no-annotation lambda whose body does `return <expr>` is a clean
+arity error (zero-return default). **Bound methods (§4.6):** `obj:m` has
 type `(params)->rettypes` (self removed); using it where a function value is
 expected typechecks; FFI/foreign method ref rejected.
 
@@ -651,9 +659,9 @@ expected typechecks; FFI/foreign method ref rejected.
 - **Feature interactions** (R5): lambda-returns-lambda (escape two frames);
   lambda in a record field then GC then call; IIFE via parens; lambda passed
   across an import and stored/called.
-- **Inference end-to-end**: a lambda with inferred params (from an argument
-  position, e.g. a higher-order `apply`) and an inferred body return, compiled and
-  run; confirms the inferred type drives codegen correctly.
+- **Inference end-to-end**: a lambda with inferred params and return (both from
+  an argument position, e.g. a higher-order `apply`), compiled and run; confirms
+  the context-inferred type drives codegen correctly.
 - **Bound methods (§4.6)**: `obj:m` stored and called (fast + slow path); a bound
   method that mutates record state via `self`; a bound method handed to Lua and
   called; a **cross-module / `.so`-only** bound method (so_import-style) — verifies
@@ -692,10 +700,11 @@ step. Run it first after §4.1, before any closure feature.
    (`titan-runtime/titan.h:16-20` — changes the search path and version suffix)
    and document that all dependency `.so`s must be recompiled. This is mandatory,
    not "verify."
-6. **Inference soundness** (D1/D6): checking-vs-synthesis mode selection; the
-   return-collection mode in `StatReturn` must not double-coerce; unannotated
-   param / conflicting-return errors must be clean; inferred type must be final
-   before the closure-creation codegen reads it. Cover with checker specs.
+6. **Inference soundness** (D1/D6): checking-vs-synthesis mode selection; both
+   params and return come from the context (return is never read off the body);
+   unannotated-param and zero-return-arity errors must be clean; the
+   context-inferred type must be final before the closure-creation codegen reads
+   it. Cover with checker specs.
 7. **Method trampolines** (§4.6): the bound native trampoline's ABI must match the
    self-removed function type exactly; the per-method trampolines must be emitted
    and exported for *every* method (cross-`.so` bind sites depend on them); `self`
@@ -706,11 +715,16 @@ step. Run it first after §4.1, before any closure feature.
 
 ## Part 8 — Open decisions (for the user)
 
-- **D1 — Return-type inference for lambdas. RESOLVED → infer** (user). No
-  annotation → take the context's return types if the lambda flows into a known
-  function type, else infer from the body's `return`s (unified). Explicit `: ()`
-  still means zero-return. Algorithm in §3. Parallels `local x = exp` inference,
-  so it is consistent with explicit typing, not a departure.
+- **D1 — Return-type inference for lambdas. RESOLVED → context-only** (user). No
+  annotation → take the context's return types when the lambda flows into a known
+  function type (checking mode); otherwise default to zero-return `()`, exactly
+  like an unannotated top-level function. The return type is **never** inferred
+  from the body's `return`s — return inference is symmetric with parameter
+  inference, both coming from the expected function type. Explicit `: ()` still
+  means zero-return. A no-context no-annotation lambda whose body does
+  `return <expr>` is a clean arity error (the documented zero-return footgun).
+  Algorithm in §3. Parallels `local x = exp` / `local x: T = exp` inference, so it
+  is consistent with explicit typing, not a departure.
 - **D2 — Nested `local function` & direct recursion.** *Recommend:* out of scope
   for v1 (anonymous expressions only); self-reference is a clean "not declared"
   error; document the workaround. Could be a fast follow (desugar `local function

@@ -391,7 +391,9 @@ The `Ast.ExpFunction` handler reads the 4th `context` argument every
 `Type.Function` whose arity matches `#node.params`, the lambda is in
 **checking mode**; otherwise in **synthesis mode**. This is exactly the
 `local x: T = exp` (checking) versus `local x = exp` (synthesis)
-distinction, lifted to lambdas.
+distinction, lifted to lambdas. **Both the parameter types and the return
+type are taken from this expected type** — symmetric, context-only
+inference; neither is reverse-engineered from the lambda's body.
 
 * **Parameters.** An annotated parameter uses its annotation. An
   unannotated one takes `context.params[i]` in checking mode, and in
@@ -400,22 +402,23 @@ distinction, lifted to lambdas.
   explicit `: ()`) is used as written. The parser distinguishes *no return
   annotation* from `: ()` with a sentinel, so the handler can tell them
   apart. With no annotation: in checking mode the return comes from
-  `context.rettypes`; otherwise the frame is marked for **return
-  inference** and the types are collected from the body.
-* **Return inference** runs in `StatReturn`: when the enclosing
-  `$function`'s frame is in inference mode, each return's expression types
-  are *collected* (`tryforce`d, never optionized — as local inference does)
-  instead of being coerced/checked against fixed return types. After the
-  body, the collected returns are unified: zero returns → `{}` (zero
-  return); otherwise all returns must agree in arity and type (the first is
-  the template) or it is the clean error `cannot infer return type: returns
-  disagree`. The result is written back into `node._type.rettypes`.
+  `context.rettypes`; in synthesis mode it defaults to `{}` (zero-return
+  `()`), exactly the default an unannotated top-level function gets.
 
-The all-paths-return rule (below) runs against the now-final return types,
-so an inferring lambda with a non-`nil` return whose body can fall through
-gets the usual `function can return nil but return type is not nil` error,
-prompting an annotation. After the handler returns with `_type =
-node._type`, the surrounding context applies its usual
+So `node._type.rettypes` is always known *before* the body is checked. The
+body's `return`s are never inspected to synthesize a return type — they are
+checked/coerced against the now-fixed return types in `StatReturn`, exactly
+as a top-level function body is. A synthesis-mode lambda whose body does
+`return <expr>` is therefore the documented zero-return footgun: a clean
+arity error (`returned N value(s) but function expected 0`), consistent
+with an unannotated top-level function.
+
+Because the return types are fixed before the body is checked, the
+all-paths-return rule runs unconditionally inside `checkfuncbody` (no
+special deferral for lambdas), so a lambda with a non-`nil` return whose
+body can fall through gets the usual `function can return nil but return
+type is not nil` error, prompting an annotation. After the handler returns
+with `_type = node._type`, the surrounding context applies its usual
 `trycoerce`/`checkmatch` against the lambda's target.
 
 ## Per-construct notes for contributors

@@ -27,10 +27,10 @@ local checkfuncbody
 local loop_depth = 0
 
 -- Stack of enclosing-function frames, used for closure capture analysis. Each
--- frame is { depth, captures = {}, capture_set = {}, infer_ret = bool,
--- collected = {...} }. A top-level function body is at depth 1; a lambda nested
--- inside it is at depth 2; and so on. Reset explicitly at the top of
--- `checker.check` (unlike `loop_depth`, which is never reset).
+-- frame is { depth, captures = {}, capture_set = {} }. A top-level function body
+-- is at depth 1; a lambda nested inside it is at depth 2; and so on. Reset
+-- explicitly at the top of `checker.check` (unlike `loop_depth`, which is never
+-- reset).
 local func_stack = {}
 
 function checker.typeerror(errors, loc, fmt, ...)
@@ -488,37 +488,6 @@ checkstat = util.make_visitor({
 
     ["Ast.StatReturn"] = function(node, st, errors)
         local ftype = st:find_symbol("$function")._type
-        -- Return-type inference for lambdas: the enclosing function's frame is
-        -- always the innermost one on `func_stack` while its body is checked.
-        local frame = func_stack[#func_stack]
-        if frame and frame.infer_ret then
-            -- Collect this return's value types (forced, never option, exactly
-            -- as `local x = exp` inference does) for later unification, instead
-            -- of checking against fixed return types.
-            for _, exp in ipairs(node.exps) do
-                checkexp(exp, st, errors)
-            end
-            -- Harvest the extra values of a trailing multi-return call BEFORE
-            -- forcing any expression: tryforce wraps an option-typed first
-            -- return in an ExpCast that does not carry `_types`, so forcing
-            -- first would drop the trailing returns (mirrors the non-infer
-            -- branch's ordering below).
-            local lastexp = node.exps[#node.exps]
-            if lastexp and lastexp._types and #lastexp._types > 1 then
-                for i = 2, #lastexp._types do
-                    table.insert(node.exps,
-                        ast.ExpExtra(lastexp.loc, lastexp, i, lastexp._types[i]))
-                end
-            end
-            local rettypes = {}
-            for i, exp in ipairs(node.exps) do
-                exp = tryforce(exp)
-                node.exps[i] = exp
-                rettypes[i] = exp._type
-            end
-            table.insert(frame.collected, { loc = node.loc, rettypes = rettypes })
-            return true
-        end
         for i, exp in ipairs(node.exps) do
             checkexp(exp, st, errors, ftype.rettypes[i])
         end
@@ -1408,10 +1377,12 @@ checkexp = util.make_visitor({
         end
     end,
 
-    -- Anonymous function expression (lambda). Parameter and return types may be
-    -- inferred: an unannotated parameter takes its type from the expected
-    -- function type (`context`), and a missing return annotation is taken from
-    -- the context or, failing that, inferred from the body's `return`s.
+    -- Anonymous function expression (lambda). Both parameter and return types
+    -- may be inferred from the expected function type (`context`): an unannotated
+    -- parameter takes its type from the context, and a missing return annotation
+    -- is likewise taken from the context. With no usable context the return type
+    -- defaults to zero-return `()`, exactly like an unannotated top-level
+    -- function.
     ["Ast.ExpFunction"] = function(node, st, errors, context)
         -- Checking mode iff the context is a function type whose arity matches.
         local expected = (context and context._tag == "Type.Function"
@@ -1432,21 +1403,23 @@ checkexp = util.make_visitor({
             paramtypes[i] = param._type
         end
 
-        -- Resolve / set up return types.
-        local rettypes, infer_ret
+        -- Resolve / set up return types. Like parameters, the return type comes
+        -- only from the expected function type (`context`); it is never inferred
+        -- from the body's `return`s.
+        local rettypes
         if node.rettypes then
             -- Explicit annotation, including `: ()` (an empty list).
             rettypes = {}
             for _, rt in ipairs(node.rettypes) do
                 table.insert(rettypes, typefromnode(rt, st, errors))
             end
-            infer_ret = false
         elseif expected then
+            -- Checking mode: take the return types from the context.
             rettypes = expected.rettypes
-            infer_ret = false
         else
+            -- No annotation, no usable context: default to zero-return `()`,
+            -- exactly like an unannotated top-level function.
             rettypes = {}
-            infer_ret = true
         end
 
         node._type = types.Function(paramtypes, rettypes, false)
@@ -1456,51 +1429,12 @@ checkexp = util.make_visitor({
         -- only the first return value, so open/close the block by hand to also
         -- recover the frame.
         st:open_block()
-        local ret, frame = checkfuncbody(node, st, errors,
-            { infer_ret = infer_ret })
+        local _, frame = checkfuncbody(node, st, errors)
         st:close_block()
 
         -- Save the ordered list of enclosing decls this lambda captures, for
         -- codegen (closure-creation pushes + lambda-body upvalue indexing).
         node._captures = frame.captures
-
-        if infer_ret then
-            -- Unify the collected returns: no returns -> zero-return `()`;
-            -- otherwise every return must agree in arity and element types (the
-            -- first return is the template).
-            local collected = frame.collected
-            if #collected == 0 then
-                rettypes = {}
-            else
-                local template = collected[1].rettypes
-                rettypes = template
-                for i = 2, #collected do
-                    local cand = collected[i].rettypes
-                    local agree = #cand == #template
-                    if agree then
-                        for j = 1, #template do
-                            if not types.equals(template[j], cand[j]) then
-                                agree = false
-                                break
-                            end
-                        end
-                    end
-                    if not agree then
-                        checker.typeerror(errors, collected[i].loc,
-                            "cannot infer return type: returns disagree — "
-                            .. "add a return annotation")
-                        break
-                    end
-                end
-            end
-            node._type.rettypes = rettypes
-            -- Now that the return types are known, apply the all-paths rule.
-            local firstret = rettypes[1]
-            if not ret and firstret and firstret._tag ~= "Type.Nil" then
-                checker.typeerror(errors, node.loc,
-                    "function can return nil but return type is not nil")
-            end
-        end
 
         return node._type
     end,
@@ -1564,17 +1498,12 @@ checkexp = util.make_visitor({
 --   node: a node carrying `_type` (Function), `params`, `block`, and (for the
 --         duplicate-parameter message) `name`. For lambdas, `node.rettypes` may
 --         be `false`/a list; `node._type.rettypes` is authoritative here.
---   opts (optional): { self_decl = Decl, infer_ret = bool }. When `infer_ret`
---         is set, the body's `return` statements collect their value types into
---         `frame.collected` (see StatReturn) instead of being checked against
---         fixed return types, and the all-paths-return rule is deferred to the
---         caller (rettypes are not yet known). Returns (ret, frame): `ret` is
---         whether the body always returns; `frame` carries `captures`/`collected`.
+--   opts (optional): { self_decl = Decl }. Returns (ret, frame): `ret` is
+--         whether the body always returns; `frame` carries `captures`.
 function checkfuncbody(node, st, errors, opts)
     opts = opts or {}
     st:add_symbol("$function", node) -- for return type
-    local frame = { depth = #func_stack + 1, captures = {}, capture_set = {},
-        infer_ret = opts.infer_ret or false, collected = {} }
+    local frame = { depth = #func_stack + 1, captures = {}, capture_set = {} }
     table.insert(func_stack, frame)
     if opts.self_decl then
         -- `self` belongs to this function's own depth, so a lambda nested in a
@@ -1609,15 +1538,13 @@ function checkfuncbody(node, st, errors, opts)
         end
     end
     local ret = st:with_block(checkstat, node.block, st, errors)
-    if not opts.infer_ret then
-        -- A zero-return `() -> ()` function (empty rettypes) may fall off the
-        -- end, exactly like a `nil`-returning one; only a function whose first
-        -- declared return type is some non-`nil` value must return on every path.
-        local firstret = node._type.rettypes[1]
-        if not ret and firstret and firstret._tag ~= "Type.Nil" then
-            checker.typeerror(errors, node.loc,
-                "function can return nil but return type is not nil")
-        end
+    -- A zero-return `() -> ()` function (empty rettypes) may fall off the end,
+    -- exactly like a `nil`-returning one; only a function whose first declared
+    -- return type is some non-`nil` value must return on every path.
+    local firstret = node._type.rettypes[1]
+    if not ret and firstret and firstret._tag ~= "Type.Nil" then
+        checker.typeerror(errors, node.loc,
+            "function can return nil but return type is not nil")
     end
     table.remove(func_stack)
     return ret, frame
