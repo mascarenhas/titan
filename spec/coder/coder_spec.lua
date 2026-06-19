@@ -3036,4 +3036,272 @@ describe("Titan code generator", function()
     end)
 end)
 
+describe("single-Udata representation (GC stress)", function()
+    setup(function () os.remove("titan-runtime/titan.o") end)
+    after_each(clean)
+
+    -- 1. Record field (GC-able) mutated in a hot loop, GC forced between writes.
+    -- Pins the forward->back barrier flip for record fields: a fresh GC value
+    -- (a brand-new string) is stored into an existing, possibly-old record under
+    -- repeated collection. A missing/back-wrong barrier corrupts the field.
+    it("record field mutated in a hot loop under GC", function ()
+        run_coder([[
+            record Box
+                s: string
+            end
+            function mkbox(): Box
+                return { s = "init" }
+            end
+            function setname(b: Box, s: string): ()
+                b.s = s
+            end
+            function getname(b: Box): string
+                return b.s
+            end
+        ]], [[
+            local b = test.mkbox()
+            assert(type(b) == 'userdata')
+            for i = 1, 1000 do
+                test.setname(b, "v" .. i)
+                collectgarbage()
+            end
+            assert(test.getname(b) == "v1000")
+        ]])
+    end)
+
+    -- A nested GC field (an array of integers) churned the same way, to exercise
+    -- a collectable field whose own contents are also fresh each iteration.
+    it("record field holding an array mutated under GC", function ()
+        run_coder([[
+            record Bag
+                xs: {integer}
+            end
+            function mkbag(): Bag
+                return { xs = {} }
+            end
+            function fill(b: Bag, n: integer): ()
+                local t: {integer} = {}
+                local i = 1
+                while i <= n do
+                    t[i] = i
+                    i = i + 1
+                end
+                b.xs = t
+            end
+            function sum(b: Bag): integer
+                local s = 0
+                local i = 1
+                while i <= #b.xs do
+                    s = s + b.xs[i]
+                    i = i + 1
+                end
+                return s
+            end
+        ]], [[
+            local b = test.mkbag()
+            for i = 1, 500 do
+                test.fill(b, i)
+                collectgarbage()
+            end
+            assert(test.sum(b) == 500 * 501 / 2)
+        ]])
+    end)
+
+    -- 2. A record stored into a module variable AND into an array, mutated, GC'd,
+    -- read back. Exercises the back barrier across both a module-slot store and a
+    -- table store, plus container reachability of the shared record.
+    it("record shared by a module var and an array survives GC", function ()
+        run_coder([[
+            record Box
+                s: string
+            end
+            held: Box = { s = "init" }
+            store: {Box} = {}
+            function reset(): ()
+                held = { s = "h0" }
+                store = {}
+                store[1] = held
+            end
+            function bump(i: integer): ()
+                held.s = "h" .. i
+            end
+            function fromvar(): string
+                return held.s
+            end
+            function fromarr(): string
+                return store[1].s
+            end
+        ]], [[
+            test.reset()
+            for i = 1, 800 do
+                test.bump(i)
+                collectgarbage()
+            end
+            -- Same record reached two ways: both must see the latest mutation.
+            assert(test.fromvar() == "h800")
+            assert(test.fromarr() == "h800")
+            assert(test.held == test.store[1])
+            assert(type(test.held) == 'userdata')
+        ]])
+    end)
+
+    -- 3. Nested record (a record whose field is another record), built in Titan,
+    -- returned to Lua, inner field read back after a collection. Confirms the
+    -- removed back-ref hop did not break the nested unwrap.
+    it("nested record round-trips through Lua under GC", function ()
+        run_coder([[
+            record Inner
+                v: string
+            end
+            record Outer
+                inner: Inner
+                n: integer
+            end
+            function mk(s: string, n: integer): Outer
+                return { inner = { v = s }, n = n }
+            end
+            function getinner(o: Outer): Inner
+                return o.inner
+            end
+            function ival(i: Inner): string
+                return i.v
+            end
+        ]], [[
+            local o = test.mk("deep", 7)
+            assert(type(o) == 'userdata')
+            collectgarbage()
+            collectgarbage()
+            local i = test.getinner(o)
+            assert(type(i) == 'userdata')
+            assert(test.ival(i) == "deep")
+            -- churn so the outer record is likely promoted, then re-read
+            for k = 1, 300 do
+                local t = test.mk("x" .. k, k)
+                collectgarbage("step")
+            end
+            collectgarbage()
+            assert(test.ival(test.getinner(o)) == "deep")
+        ]])
+    end)
+
+    -- 4. Empty record: 0 fields => allocates 0+1 user values. Construct via new,
+    -- return to Lua (must be userdata), and round-trip through a Titan function
+    -- that takes and returns it.
+    it("empty record constructs and round-trips", function ()
+        run_coder([[
+            record E
+            end
+            function mk(): E
+                return E.new()
+            end
+            function id(e: E): E
+                return e
+            end
+        ]], [[
+            local e = test.mk()
+            assert(type(e) == 'userdata')
+            collectgarbage()
+            local e2 = test.id(e)
+            assert(e == e2)
+            assert(type(e2) == 'userdata')
+            -- literal construction round-trips too
+            local e3 = test.E.new()
+            assert(type(e3) == 'userdata')
+            assert(e3 ~= e)
+            assert(getmetatable(e3) == getmetatable(e))
+        ]])
+    end)
+
+    -- 5. A GC-typed module variable mutated from Lua under GC stress. Pins the
+    -- module-slot back barrier in __newindex / codevardec: fresh arrays assigned
+    -- from Lua into the module slot must survive collection.
+    it("GC-typed module var mutated from Lua under GC", function ()
+        run_coder([[
+            a: {integer} = {}
+            function suma(): integer
+                local s = 0
+                local i = 1
+                while i <= #a do
+                    s = s + a[i]
+                    i = i + 1
+                end
+                return s
+            end
+        ]], [[
+            for i = 1, 600 do
+                test.a = { i, i + 1, i + 2 }
+                collectgarbage()
+                assert(test.suma() == 3 * i + 3)
+            end
+        ]])
+    end)
+
+    -- Same pattern for a string-typed module variable.
+    it("string module var mutated from Lua under GC", function ()
+        run_coder([[
+            s: string = ""
+            function gets(): string
+                return s
+            end
+        ]], [[
+            for i = 1, 600 do
+                test.s = "s" .. i
+                collectgarbage()
+                assert(test.gets() == "s" .. i)
+            end
+        ]])
+    end)
+
+    -- 6. Module Udata Lua-facing surface sanity: the module table is gone and
+    -- `require` returns the Udata. Functions call, exported vars read/write, and
+    -- record statics construct with stable identity.
+    it("module Udata surface: call, var get/set, static identity", function ()
+        run_coder([[
+            record Rec
+                x: integer
+            end
+            v: integer = 10
+            function f(x: integer): integer
+                return x + 1
+            end
+            function getx(r: Rec): integer
+                return r.x
+            end
+        ]], [[
+            assert(type(require('test')) == 'userdata')
+            -- function is callable
+            assert(test.f(41) == 42)
+            -- exported variable reads and writes
+            assert(test.v == 10)
+            test.v = 99
+            assert(test.v == 99)
+            -- record static constructs and has stable identity
+            local r = test.Rec.new(5)
+            assert(type(r) == 'userdata')
+            assert(test.getx(r) == 5)
+            assert(test.Rec.new == test.Rec.new)
+        ]])
+    end)
+
+    it("module Udata surface: indexing a missing member errors", function ()
+        run_coder([[
+            function f(): integer
+                return 1
+            end
+        ]], [[
+            local _ = test.nonexistent
+        ]], "does not exist")
+    end)
+
+    it("module Udata surface: assigning to a function errors", function ()
+        run_coder([[
+            function f(): integer
+                return 1
+            end
+        ]], [[
+            test.f = 1
+        ]], "cannot assign")
+    end)
+end)
+
 
