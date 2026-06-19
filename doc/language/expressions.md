@@ -148,7 +148,9 @@ Lua's modulo, taking the sign of the divisor and preserving
 `m == n * (m // n) + (m % n)`, with `math.mininteger % -1` equal to `0`;
 and shift amounts can be any integer — negative amounts shift the other
 way, amounts at or beyond the 64-bit width yield `0`, and shifts are
-logical (zero-fill), as in Lua.
+logical (zero-fill), as in Lua. Exponentiation `^` reproduces Lua's
+`luai_numpow`, including that `x ^ 2.0` is computed as `x * x` (not
+`pow(x, 2)`), so its result matches Lua's to the last bit.
 
 ```lua
 function lua_not_c(): boolean
@@ -172,8 +174,15 @@ rules (infinities and NaN), as in Lua.
 Equality is defined between operands of the same type, and across a few
 type pairs:
 
-* **Numbers** compare across `integer`/`float` with Lua's numeric
-  equality (the integer side is promoted to float).
+* **Numbers** compare across `integer`/`float` by **mathematical
+  value**, with *no* promotion of the integer to float — exactly Lua's
+  numeric equality. An `integer` and a `float` are equal only when they
+  denote the same mathematical value, so the float side never loses the
+  integer to rounding. In particular `math.maxinteger == 2.0^63` is
+  **false** (and `math.maxinteger < 2.0^63` is **true**), because
+  `math.maxinteger` (2^63 − 1) is *not* promoted to the float 2^63;
+  likewise `(1 << 53) + 1 ~= 2.0^53`. NaN follows IEEE 754, as in Lua:
+  any comparison with NaN is false, so `x ~= x` is true when `x` is NaN.
 * **Strings** compare by content (lexicographically for the relational
   operators), exactly as in Lua.
 * **Arrays, maps and records** compare by identity, exactly like Lua's
@@ -199,15 +208,16 @@ end
 
 ### Relational: `<` `>` `<=` `>=`
 
-The relational operators accept two numbers (mixing `integer` and
-`float` promotes to float) or two strings. Everything else — booleans,
+The relational operators accept two numbers (a mixed `integer`/`float`
+comparison compares mathematical values exactly, with *no* promotion of
+the integer to float — matching Lua) or two strings. Everything else — booleans,
 `value`, arrays, maps, records, mixed types — is a compile-time error
 (`left/right hand side of relational expression is a ... instead of a
 number`, or `trying to use relational expression with ...`).
 
 ```lua
 function in_range(x: integer, lo: float, hi: float): boolean
-    return lo <= x and x <= hi    -- x promoted to float on each side
+    return lo <= x and x <= hi    -- x compared to each float bound by exact mathematical value (no promotion)
 end
 ```
 
