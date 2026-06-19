@@ -1,11 +1,15 @@
 # Anonymous Functions with Lexical Closure — Implementation Plan
 
-> Status: **reviewed & hardened (v2).** Expands the user's 12-point outline into a
-> full design + implementation + testing plan, grounded in the current code
-> (post first-class-functions, `master` @ `6988960`) and **de-risked by a dynamic
-> workflow**: 4 standalone C experiments against the real Lua 5.5 tree + 5
-> adversarial design reviews. Every BLOCKER/MAJOR finding is folded into the
-> design below; the raw evidence is in the Appendix. Open decisions are in Part 8.
+> Status: **reviewed & approved-to-build (v3).** Expands the user's 12-point
+> outline into a full design + implementation + testing plan, grounded in the
+> current code (post first-class-functions, `master` @ `6988960`), **de-risked by
+> a dynamic workflow** (4 C experiments vs the real Lua 5.5 tree + 5 adversarial
+> reviews), and updated for the user's review decisions: box `f` = **trap stub**
+> (D3b); **lambda type inference** for params + return (D1/D6); **bound instance
+> methods** as first-class values (§4.6); and a **multi-agent PR review** after
+> implementation (Part 9, step 7). Open/standing decisions are in Part 8; the only
+> non-finalized one is the bound-method *surface syntax* (D7, proposed
+> `obj:method`). Raw evidence in the Appendix.
 
 ## Context
 
@@ -34,8 +38,10 @@ Anonymous functions extend exactly this machinery. The headline additions are
 captured upvalues, and (b) a capture analysis + a boxed-variable representation
 so closures can read and **mutate** variables of an enclosing function.
 
-Still out of scope after this work: instance *methods* as values; foreign/FFI
-functions as values (unchanged from the first-class spec).
+This work also adds **bound instance methods as first-class values** (a method
+reference closure capturing `self` — §4.6), a small extension that reuses the
+closure machinery. Still out of scope: foreign/FFI functions as values
+(unchanged from the first-class spec).
 
 **All runtime assumptions were empirically validated** (Appendix A): the
 box (a 1-upvalue `CClosure` cell) + `_fn` ABI + closure-fast-path + end-to-end
@@ -51,7 +57,7 @@ assertions (`-DLUAI_ASSERT`) build.
 | 3 | Value calls pass the value itself | fast path passes `_vc_callee` — §4.1 |
 | 4 | Lua/generic entry has the value and passes it | `genluaentry` binds `_fn = clCvalue(s2v(func))` — §4.1 |
 | 5 | Two flags per local (assigned-after-decl, captured), set in checking | `_assigned` (exists) + `_captured` (new) — §3 |
-| 6 | both-flags vars → boxed; box is GC, anchored on stack | **CClosure-cell box** (1 upvalue, NULL `f`) anchored in a slot — §2.1, §4.2 |
+| 6 | both-flags vars → boxed; box is GC, anchored on stack | **CClosure-cell box** (1 upvalue, trap-stub `f`) anchored in a slot — §2.1, §4.2 |
 | 7 | reads follow the pointer/unbox; writes update the boxed value | `getslot`/`setslot` on `&box->upvalue[0]` + `luaC_barrier` — §4.2 |
 | 8 | captured-not-mutated OR mutated-not-captured → current rep | gating `decl._captured and decl._assigned` — §2.1 |
 | 9 | local function = fresh CClosure; first 3 upvalues + one per captured var | closure-creation codegen — §4.3 |
@@ -65,25 +71,43 @@ assertions (`-DLUAI_ASSERT`) build.
 
 ### Syntax
 
-A new **function expression**, identical to a top-level function minus the name
-and `local`:
+A new **function expression**, like a top-level function minus the name and
+`local`, but with **optional** parameter and return annotations:
 
 ```
-function (p1: T1, …, pn: Tn) [: rettype] <block> end
+function (p1[: T1], …, pn[: Tn]) [: rettype] <block> end
 ```
 
-It produces a value of type `(T1,…,Tn) -> rettype`. Parameter types are
-**required** (Titan is explicitly typed; D6). The return annotation is optional
-and follows the same rule as top-level functions — **no annotation means
-zero-return `(…) -> ()`** (`rettypeopt`, `parser.lua:42`). See D1.
+**Type inference (resolved, D1+D6).** Per the user's call, lambdas infer missing
+parameter and return types — this parallels Titan's existing inference for
+`local x = exp` (synthesize when no expectation, check when there is one) and is
+*not* a departure from explicit typing. Two modes (§3 has the algorithm):
 
-Grammar: add a `funcexp` alternative to `simpleexp` (`parser.lua:416-423`). The
-keyword `function` is reserved (`lexer.lua`), so the alternative is unambiguous;
+- **Parameter types**: an annotated param uses its annotation; an *unannotated*
+  param is inferred from the **expected function type** (the `context`: the slot/
+  argument/return position the lambda flows into). With no usable context, an
+  unannotated param is a clean compile error ("cannot infer type of parameter
+  'x'; annotate it or use the lambda where its type is known").
+- **Return type**: an explicit annotation is used as-is; otherwise it is taken
+  from the context's return types if available, else **inferred from the body's
+  `return` statements** (unified across all returns; no returns → zero-return
+  `()`).
+
+Note the lambda grammar must distinguish *no return annotation* (→ infer) from an
+explicit `: ()` (→ zero-return), so it uses a `lambdarettypeopt` that yields a
+sentinel (`false`) when absent rather than `rettypeopt`'s `{}`.
+
+Grammar: add a `funcexp` alternative to `simpleexp` (`parser.lua:416-423`), with a
+lambda-specific param list (optional `: type`) and return-opt. The keyword
+`function` is reserved (`lexer.lua`), so the alternative is unambiguous;
 empirically validated (Appendix B):
 
 ```
-funcexp   <- (P FUNCTION LPAREN^LParPList paramlist RPAREN^RParPList
-                 rettypeopt block END^EndFunc)            -> ExpFunction
+lambdaparam     <- (P NAME COLON type) -> typeddecl  /  (P NAME) -> inferreddecl
+lambdaparamlist <- {| (lambdaparam (COMMA lambdaparam^DeclParList)*)? |}
+lambdarettypeopt<- (P (COLON rettype^TypeFunc)?) -> lambdarettypeopt  -- false when absent
+funcexp   <- (P FUNCTION LPAREN^LParPList lambdaparamlist RPAREN^RParPList
+                 lambdarettypeopt block END^EndFunc)    -> ExpFunction
 simpleexp <- … / funcexp / suffixedexp / prefixexp
 ```
 
@@ -139,7 +163,8 @@ shapes as `TopLevelFunc`.) Adding an `Exp` tag requires updating the
   clean "top level variable initialization must be constant" error rather than
   crashing codegen (BLOCKER from review R4). Lambdas live only inside function
   bodies.
-- Instance methods as values; foreign functions as values (unchanged).
+- Foreign functions as values (unchanged). **Instance methods *are* now first-
+  class** as bound `self`-capturing values (§4.6).
 - **Nested `local function f() … end` statements**, and thus *direct* nested
   recursion (D2). A self-reference inside an anonymous `local f = function…end`
   is a clean compile-time "variable not declared" error — the name `f` binds only
@@ -153,7 +178,7 @@ shapes as `TopLevelFunc`.) Adding an `Exp` tag requires updating the
 ### 2.1 The variable box ("UpVal") — a 1-upvalue `CClosure` cell
 
 The outline says "closed UpVal object." The realization is a **`CClosure` with
-exactly one upvalue and a NULL function pointer**, used purely as a heap cell.
+exactly one upvalue and a trap-stub function pointer**, used purely as a heap cell.
 The boxed value lives in `box->upvalue[0]` (a `TValue`). The box is internal to
 Titan and **never flows into Lua code** (it is the storage of a captured local,
 not a function value), so it needs none of the Lua-facing features a `Udata`
@@ -166,7 +191,7 @@ incremental, generational, and assertions (`-DLUAI_ASSERT`) builds:
 | Box | Size | All GC modes? | Mutation barrier |
 |---|---|---|---|
 | literal closed `UpVal` | 40 | **no — SEGFAULTs under generational GC** | n/a |
-| **`CClosure` cell (NULL f)** | **48** (`sizeCclosure(1)`) | **yes** | forward `luaC_barrier` |
+| **`CClosure` cell (trap-stub f)** | **48** (`sizeCclosure(1)`) | **yes** | forward `luaC_barrier` |
 | `Udata` (`nuvalue=1`) | 56 | yes | back `luaC_barrierback` |
 
 A literal closed `UpVal` *is* GC-traceable from a `CClosure` `TValue`
@@ -181,21 +206,23 @@ The `CClosure` cell and the `Udata` box both survive **every** mode. The
 unused metatable slot, and — the real simplifier — its mutation uses the **same
 forward `luaC_barrier`** the codebase already emits for *every* closure-upvalue
 store, so **one barrier rule covers both installing the box and mutating it**
-(the `Udata` needs forward-install + back-mutate). NULL `f` is safe: the GC never
-calls `f` (it only marks `upvalue[]`; verified — no reached assertion requires
-`f != NULL`), and the box is never callable from Lua because well-typed Titan
-never treats it as a function value. (Records keep their `Udata` box — they *do*
-flow into Lua and need the metatable for method dispatch; the closure box is a
-deliberately lighter, Lua-invisible representation. Optional defensive hardening:
-point `f` at a one-line trap stub that `luaL_error`s instead of NULL, so a codegen
-bug that ever calls a box fails loudly. D3b.)
+(the `Udata` needs forward-install + back-mutate). The GC never calls a
+`CClosure`'s `f` (it only marks `upvalue[]`; verified — no reached assertion
+requires `f != NULL`), and the box is never callable from well-typed Titan. Its
+`f` points at a **per-module trap stub** (resolved, D3b) —
+`static int <prefix>box_trap(lua_State *L) { return luaL_error(L, "internal
+error: Titan closure variable box called as a function"); }` — so a codegen bug
+that ever made a box reachable as a callable fails loudly instead of jumping
+through a NULL pointer. (Records keep their `Udata` box — they *do* flow into Lua
+and need the metatable for method dispatch; the closure box is a deliberately
+lighter, Lua-invisible representation.)
 
 **Box lifecycle and barriers** (precise):
 
 ```c
 /* create: a 1-upvalue CClosure used as a cell. luaF_newCclosure allocates. */
 CClosure *_box_x = luaF_newCclosure(L, 1);
-_box_x->f = NULL;
+_box_x->f = <prefix>box_trap;                   /* trap stub; never legitimately called */
 setnilvalue(&_box_x->upvalue[0]);               /* or init via setslot */
 setclCvalue(L, s2v(_base + SLOT), _box_x);      /* anchor against GC */
 ```
@@ -350,13 +377,53 @@ type checks, block check, and the all-paths-return rule (`checker.lua:1381` —
 "function can return nil but return type is not nil" must apply to lambdas whose
 first declared return type is non-`nil`).
 
-### `ExpFunction` checker handler
+### `ExpFunction` checker handler + type inference (D1+D6)
 
-`['Ast.ExpFunction'] = function(node, st, errors, context)` — like every
-`checkexp` visitor it receives a 4th `context` arg (the expected type); ignore it
-in v1 (D6). Build `node._type`, push the frame, open the block, bind `$function`
-and params, check the body, run the all-paths rule, pop. Returns the value with
-`_type = node._type`.
+`['Ast.ExpFunction'] = function(node, st, errors, context)` — every `checkexp`
+visitor already receives the 4th `context` arg (the expected type; e.g. `ExpCast`
+uses it). The handler:
+
+1. **Resolve parameter types.** Determine the expected function type: if `context`
+   is a `Type.Function` whose arity matches `#node.params`, we are in *checking
+   mode*; else *synthesis mode*. For each param: if it has an annotation, use it;
+   else if checking mode, take `context.params[i]`; else (synthesis, no
+   annotation) emit "cannot infer type of parameter 'x'". This mirrors `local x`
+   vs `local x: T`.
+2. **Resolve / set up return types.** If `node.rettypes` is an explicit list
+   (incl. `{}` for `: ()`), use it. Else if checking mode, use `context.rettypes`.
+   Else mark the frame for **return inference** (`frame.infer_ret = true`,
+   `frame.collected = nil`).
+3. Build `node._type = Type.Function(paramtypes, rettypes_or_placeholder, false)`.
+   Push the frame (before declaring params — §"Function-nesting tracking"), open a
+   block, bind params and `$function = node`, check the body.
+4. **Return inference in `StatReturn`** (`checker.lua:478`): if the enclosing
+   `$function`'s frame has `infer_ret`, *collect* each return's expression types
+   (`tryforce`d, never option — as local inference does) instead of checking them
+   against fixed rettypes; otherwise behave exactly as today (coerce/check against
+   the known rettypes). After the body, unify the collected returns: zero returns
+   → `{}` (zero-return); otherwise all returns must agree in arity and type (the
+   first is the template; a mismatch → "cannot infer return type: returns disagree
+   — add a return annotation"); set `node._type.rettypes` to the result.
+5. Run the all-paths-return rule against the now-final rettypes (when inferring and
+   there *are* returns but some path falls through, the existing "can return nil
+   but return type is not nil" error fires — prompting an annotation). Pop frame.
+6. Return with `_type = node._type`. The surrounding context then applies the
+   usual `trycoerce`/`checkmatch` of the lambda *value* against its target (in
+   checking mode this matches by construction; in synthesis mode the synthesized
+   type is validated like any other expression).
+
+### Bound method references (point 4 / §4.6)
+
+A method named but **not called** is a bound-method value. Surface syntax
+(proposed, D7): `obj:method` with no argument list — `r:m` parses to a new
+`Ast.VarDotColon`/method-ref node (today `r:m` *requires* a call, so this is
+additive). Its type rule: a receiver of nominal/record type with method `m :
+Type.Method(fqtn, name, params, rettypes)` yields a value of
+`Type.Function(params, rettypes, false)` — i.e. the method type with the implicit
+`self` removed. The receiver expression is evaluated once (eagerly) when the bound
+value is created. Checking reuses method resolution (`checker.lua` VarDot/method
+paths); codegen is §4.6. (FFI/foreign methods and static methods are unaffected —
+`Rec.new` already works as a value.)
 
 ---
 
@@ -467,17 +534,72 @@ the stack, so recompute `_base` from a `savestack` offset afterward where the
 existing value-call code already does (`luaF_newCclosure`/`lua_pushcclosure`
 themselves do not relocate the stack — correct the rationale; MINOR/R1).
 
+### 4.6 Bound method closures (point 4)
+
+A bound-method value `obj:m` is a closure capturing the receiver as its single
+"upvalue capture", with two tiny **trampoline** entry points that delegate to the
+method's existing native/Lua entries. Per the user's design.
+
+**Closure layout** (same shape as a 1-capture lambda; the capture *is* `self`):
+
+```
+upvalue[0] = _mod                         (the defining module's closure)
+upvalue[1] = function-type tag            for (params) -> rettypes  (self removed)
+upvalue[2] = bound trampoline native ptr  (NOT the method's own native entry)
+upvalue[3] = self                          (the receiver, a CClosure* for records)
+```
+
+**Two trampolines, emitted by the method's defining module for *every* method**
+(so a bind site in another module — which only has the `.so` — can point at them;
+they are small, just delegations):
+
+- **Native trampoline** — matches the bound function type's ABI
+  `RETTYPE m_bound(L, _mod, _fn, params…, outparams…)`; it extracts
+  `self = clCvalue(&_fn->upvalue[3])` (the captured receiver) and tail-calls the
+  real method native entry `m_native(L, _mod, NULL, self, params…, outparams…)`
+  (the method's own `_fn` is `NULL` — its captures, if any, are a separate
+  concern). This is exactly a hand-written one-capture lambda whose body is "call
+  the method with the captured self."
+- **Lua trampoline** — a `lua_CFunction`; it inserts `self` (from its closure's
+  `upvalue[3]`) as the first stack argument and delegates to the method's existing
+  **Lua** entry, so the boundary checks/coercions are reused unchanged.
+
+**Codegen.** Extend `codefuncdec`'s method arm (or a new `codemethodtrampoline`)
+to also emit `m_bound` (native) and `m_bound_lua` (Lua), with exported/recoverable
+symbols mirroring the method's own entries (and a `function_type_tag` for the
+self-removed type). At a bind site `obj:m`: evaluate `obj` once into an anchored
+temp; `lua_checkstack(L, 4)`; push `_mod` (the *method's* module — its closure is
+already an upvalue of the binder's `_mod` for cross-module methods, exactly as
+method *calls* recover it, `coder.lua:1463-1478`), the tag, the bound native
+trampoline pointer, and `self`; `lua_pushcclosure(L, m_bound_lua, 4)`. The result
+is an ordinary `Type.Function` value — callable via both paths, storable, Lua-
+crossable — with no special handling downstream.
+
+**Cross-module / `.so`.** Because the trampolines are emitted per method by the
+defining module and reached by the same cross-module symbol machinery as method
+native entries (`ctx.functions`, the `function_sig` externs at
+`coder.lua:3247/3260`), a bound reference created in an importer works against a
+`.so`-only dependency. (This rides on the same `_fn` ABI / `TITAN_VER` bump as the
+rest — §7.5.) Add a `so_import`-style test for a cross-module bound method.
+
+**Why per-method, always.** A method may be bound in a module that imports the
+defining one only as a compiled `.so`; the trampolines must therefore exist as
+real exported symbols of the defining module, not be synthesised at the bind site.
+They are cheap (pure delegation), so emitting them for every method is fine.
+
 ---
 
 ## Part 5 — Documentation
 
-- `doc/language/index.md:79` — move anonymous functions & closures-over-locals out
-  of the "not first-class" list (keep methods/FFI).
-- New closures section (in `functions.md` or `closures.md`): syntax, lexical
-  capture (presented simply as "closures capture enclosing locals"; the by-ref/
-  by-value split is an implementation detail), no-stable-identity + equality
-  meaning, the D1 zero-return footgun (note it is a **compile-time arity error**,
-  not silent), and the D2 recursion limitation (clean "not declared" error).
+- `doc/language/index.md:79` — move anonymous functions, closures-over-locals,
+  **and bound instance methods** out of the "not first-class" list (only FFI
+  functions remain non-first-class).
+- New closures section (in `functions.md` or `closures.md`): lambda syntax with
+  **optional annotations + inference** (params from context, return from body —
+  framed as the same inference as `local x`); lexical capture (presented simply as
+  "closures capture enclosing locals"); no-stable-identity + equality meaning; the
+  D2 recursion limitation (clean "not declared" error). Document **bound method
+  references** `obj:m` (in `records.md`/`functions.md`).
 - `doc/implementation/codegen-overview.md:173` — document `_fn` in the ABI shape;
   add a closures subsection (CClosure-cell box, barrier rules, capture lists, transitive
   capture, the `3 + N` upvalue layout, the `.so` ABI bump).
@@ -502,10 +624,15 @@ error; malformed-lambda error labels; a 3–4 deep nesting case (parser limit).
 
 **spec/checker/closures_spec.lua** (new): capture flags (captured-mutated,
 captured-immutable, mutated-not-captured, neither, shadowing, **transitive
-3-level**, for-var capture, self capture); lambda return checking (all-paths rule;
-zero-return default rejects `return expr` with the exact arity message — D1);
-type errors through a lambda value; **top-level `local x = function…end` →
-"must be constant"** (R4 BLOCKER regression); D2 self-reference → "not declared".
+3-level**, for-var capture, self capture); type errors through a lambda value;
+**top-level `local x = function…end` → "must be constant"** (R4 BLOCKER
+regression); D2 self-reference → "not declared". **Inference (D1/D6):**
+param inferred from an assignment-target/argument/return function type; return
+inferred from the body (single and multi-return; unify); unannotated param with
+no context → clean error; conflicting returns → clean error; explicit `: ()` is
+zero-return (distinct from no annotation). **Bound methods (§4.6):** `obj:m` has
+type `(params)->rettypes` (self removed); using it where a function value is
+expected typechecks; FFI/foreign method ref rejected.
 
 **spec/coder/closures_spec.lua** (new), end-to-end (generate C, compile, run):
 
@@ -524,6 +651,14 @@ type errors through a lambda value; **top-level `local x = function…end` →
 - **Feature interactions** (R5): lambda-returns-lambda (escape two frames);
   lambda in a record field then GC then call; IIFE via parens; lambda passed
   across an import and stored/called.
+- **Inference end-to-end**: a lambda with inferred params (from an argument
+  position, e.g. a higher-order `apply`) and an inferred body return, compiled and
+  run; confirms the inferred type drives codegen correctly.
+- **Bound methods (§4.6)**: `obj:m` stored and called (fast + slow path); a bound
+  method that mutates record state via `self`; a bound method handed to Lua and
+  called; a **cross-module / `.so`-only** bound method (so_import-style) — verifies
+  the per-method trampolines are reachable across the boundary; GC stress on a
+  stored bound method (self stays anchored via the closure upvalue).
 
 **Audit**: no existing fixture uses `function` as an expression, so the parser
 change is additive — but adding `_fn` to **every** native signature changes all
@@ -557,36 +692,49 @@ step. Run it first after §4.1, before any closure feature.
    (`titan-runtime/titan.h:16-20` — changes the search path and version suffix)
    and document that all dependency `.so`s must be recompiled. This is mandatory,
    not "verify."
+6. **Inference soundness** (D1/D6): checking-vs-synthesis mode selection; the
+   return-collection mode in `StatReturn` must not double-coerce; unannotated
+   param / conflicting-return errors must be clean; inferred type must be final
+   before the closure-creation codegen reads it. Cover with checker specs.
+7. **Method trampolines** (§4.6): the bound native trampoline's ABI must match the
+   self-removed function type exactly; the per-method trampolines must be emitted
+   and exported for *every* method (cross-`.so` bind sites depend on them); `self`
+   stays anchored via the closure upvalue. Cover with a cross-module bound-method
+   test.
 
 ---
 
 ## Part 8 — Open decisions (for the user)
 
-- **D1 — Return-type inference for lambdas.** Keep the top-level rule
-  (no annotation = zero-return `()`), or infer from the body? *Recommend:* keep
-  consistent (no inference) for v1. The footgun (`function(x:integer) return x+1
-  end` → `(integer)->()` → arity error on the `return`) is a **clean compile-time
-  error**, not silent. Trade-off: consistency/scope vs. ergonomics.
+- **D1 — Return-type inference for lambdas. RESOLVED → infer** (user). No
+  annotation → take the context's return types if the lambda flows into a known
+  function type, else infer from the body's `return`s (unified). Explicit `: ()`
+  still means zero-return. Algorithm in §3. Parallels `local x = exp` inference,
+  so it is consistent with explicit typing, not a departure.
 - **D2 — Nested `local function` & direct recursion.** *Recommend:* out of scope
   for v1 (anonymous expressions only); self-reference is a clean "not declared"
   error; document the workaround. Could be a fast follow (desugar `local function
   f` → `local f; f = function…`).
-- **D3 — Box representation. RESOLVED → 1-upvalue `CClosure` cell with NULL `f`**
-  (empirically; §2.1, Appendix A). 48 bytes, survives every GC mode, barrier-
+- **D3 — Box representation. RESOLVED → 1-upvalue `CClosure` cell** (trap-stub
+  `f`, D3b; empirically; §2.1, Appendix A). 48 bytes, survives every GC mode, barrier-
   uniform (forward `luaC_barrier` for both install and mutate), no Lua-facing
   baggage since the box never escapes to Lua. Literal `UpVal` rejected (crashes
   generational GC); `Udata` box workable but 8 bytes larger with an unused
   metatable slot and a mixed barrier rule.
-- **D3b — NULL `f` vs trap stub for the box.** *Recommend:* NULL `f` (GC never
-  calls it; box never callable from well-typed Titan). Optional: point `f` at a
-  `luaL_error` trap stub for defensive failure on a codegen bug. User's call.
+- **D3b — box `f`: NULL vs trap stub. RESOLVED → trap stub** (user). A per-module
+  `<prefix>box_trap` that `luaL_error`s; a codegen bug that ever calls a box fails
+  loudly rather than via a NULL jump (§2.1).
 - **D4 — Lambda collection. RESOLVED → lazy**, drained with a re-reading `while`
   loop (§4.3).
 - **D5 — Direct application `function…end(args)`. RESOLVED → unsupported**;
   require `(function…end)(args)` (lambda is a `simpleexp`, not a `prefixexp`).
-- **D6 — Lambda parameter type inference from the expected type.** *Recommend:*
-  require explicit param types for v1 (Titan is explicitly typed). Strong future
-  ergonomic win (the `context` arg is already threaded to the handler for it).
+- **D6 — Lambda parameter type inference from the expected type. RESOLVED →
+  infer** (user). Unannotated params take their types from the expected function
+  type (`context`); with no context, an unannotated param is a clean error.
+  Threads through the existing `context` arg. Algorithm in §3.
+- **D7 — Bound-method-reference surface syntax. PROPOSED → `obj:method`** (bare,
+  no call). Additive (today `r:m` requires a call). Open to a different spelling
+  if you prefer; the runtime mechanism (§4.6) is independent of the syntax choice.
 
 ---
 
@@ -601,19 +749,29 @@ edits).
 1. **ABI step (§4.1) + `.so` version bump (§7.5)** — *sequential.* Add `_fn`
    everywhere; feature inert but every signature changes. **Full existing suite
    green** is the regression gate.
-2. **Frontend (§1, §3)** — *sequential.* Parser `ExpFunction` + AST node +
-   `isconst` arm; checker capture analysis + lambda body check. Verify parser +
-   checker specs.
-3. **Coder boxes (§4.2)** — *sequential.* Boxed-variable representation; verify a
-   top-level function that boxes a local (no lambda yet — a valid isolated config)
-   still round-trips.
+2. **Frontend (§1, §3)** — *sequential.* Parser `ExpFunction` (with optional
+   param annotations + `lambdarettypeopt`) + AST node + `isconst` arm; checker
+   capture analysis, lambda body check, **and inference** (param + return, D1/D6).
+   Verify parser + checker specs.
+3. **Coder boxes (§4.2) + trap stub** — *sequential.* Boxed-variable
+   representation; verify a top-level function that boxes a local (no lambda yet —
+   a valid isolated config) still round-trips.
 4. **Coder lambdas (§4.3, §4.4)** — *sequential, largest step.* Emission, closure
    creation, captured access, transitive capture. Verify each end-to-end case.
-5. **Tests + docs** — test authoring + docs fan out via worktrees (write-only);
+5. **Bound method closures (§4.6)** — *sequential.* Per-method trampolines, bind-
+   site codegen, cross-module/`.so`. Reuses the closure machinery from steps 3–4.
+6. **Tests + docs** — test authoring + docs fan out via worktrees (write-only);
    then serial `busted` in the main tree.
+7. **Multi-agent PR review (user request)** — after tests + code are green, run a
+   dynamic review workflow: several reviewer agents over the actual diff, each on a
+   dimension (GC barriers/anchoring; ABI & upvalue-index agreement; capture
+   analysis & inference soundness; method-trampoline correctness incl. cross-`.so`;
+   parser/AST/types; test coverage & completeness), with adversarial verification
+   of each finding before it is reported. Fix, then re-run `busted`.
 
-Dedicated **adversarial verification** agents (read-only, parallel) after step 4
-for GC barriers/anchoring and ABI/upvalue-index agreement.
+Dedicated **adversarial verification** agents (read-only, parallel) also run after
+step 4 for GC barriers/anchoring and ABI/upvalue-index agreement (folded into the
+step-7 review for the final pass).
 
 ---
 
@@ -634,7 +792,8 @@ All four confirmed the design on Lua 5.5 internals; sources under `/tmp`
   active) — **but superseded by the head-to-head below.**
 - **Head-to-head under GENERATIONAL GC** (`titan_box_compare.c` /
   `titan_box_ccl.c`, asserts builds): the `Udata` box and the **`CClosure`-cell
-  box (NULL f)** both **SURVIVE** 150 rebox rounds with stable identity; the
+  box (NULL f in the probe; the design uses a trap-stub f — irrelevant to GC)**
+  both **SURVIVE** 150 rebox rounds with stable identity; the
   literal `UpVal` **SEGFAULTs** (`freeupval → luaF_unlinkupval` in
   `youngcollection`'s `sweepgen`). Sizes: `UpVal`=40, `sizeCclosure(1)`=48,
   `Udata(1uv)`=56. The `CClosure` cell's mutation uses the same forward
