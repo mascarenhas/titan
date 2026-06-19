@@ -10,10 +10,6 @@ local function make_input(N)
     return xs
 end
 
-local function print_array(xs)
-    print( "{" .. table.concat(xs, ", ") .. "}" )
-end
-
 local function is_sorted(xs)
     for i=2,#xs do
         if xs[i-1] > xs[i] then

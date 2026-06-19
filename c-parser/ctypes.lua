@@ -105,6 +105,8 @@ local convert_value = typed("TypeList, table -> CType?, string?", function (lst,
     if type(src.id) == "table" or type(src.ids) == "table" then
         -- FIXME multiple ids, e.g.: int *x, y, *z;
         local ok
+        -- get_name fills these only when ok is true (checked below); LuaLS can't correlate.
+        ---@diagnostic disable-next-line: cast-local-type
         ok, name, ret_pointer, idxs = get_name(src.id or src.ids)
         if not ok then
             return nil, name
@@ -437,7 +439,7 @@ local function register_function(lst, item)
     return register_decl_item(lst, id, item.spec)
 end
 
-local function register_static_function(lst, item)
+local function register_static_function(_, _)
     return true
 end
 

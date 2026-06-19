@@ -108,7 +108,7 @@ local function convert_typedef(st, ftype)
     return decl
 end
 
-local function convert_struct(st, ftype)
+local function convert_struct(_, ftype)
     local decl = {
         _tag = "Struct",
         name = ftype.name,
@@ -118,7 +118,7 @@ local function convert_struct(st, ftype)
     return decl
 end
 
-local function convert_union(st, ftype)
+local function convert_union(_, ftype)
     local decl = {
         _tag = "Union",
         name = ftype.name,
@@ -128,7 +128,7 @@ local function convert_union(st, ftype)
     return decl
 end
 
-local function convert_enum(st, ftype)
+local function convert_enum(_, _)
     -- A C enum (and each of its constants) is integer-like; map its Titan
     -- type to integer so imported enum constants can be used and
     -- type-checked like integers. (Struct/union field processing is still
