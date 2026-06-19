@@ -846,7 +846,7 @@ describe("Titan type checker", function()
     end)
 
     for _, op in ipairs({"==", "~=", "<", ">", "<=", ">="}) do
-        it("coerces "..op.." to float if any side is a float", function()
+        it("compares "..op.." across integer/float without promotion", function()
             local code = [[
                 function fn()
                     local i: integer = 1
@@ -860,18 +860,22 @@ describe("Titan type checker", function()
             local ok, err, ast = run_checker(code)
             assert.truthy(ok, err)
 
-            assert.same(types.Float(), ast[1].block.stats[3].exps[1].lhs._type)
+            -- i op f : operands keep their natural types (no int->float promotion)
+            assert.same(types.Integer(), ast[1].block.stats[3].exps[1].lhs._type)
             assert.same(types.Float(), ast[1].block.stats[3].exps[1].rhs._type)
             assert.same(types.Boolean(), ast[1].block.stats[3].exps[1]._type)
 
+            -- f op i
             assert.same(types.Float(), ast[1].block.stats[4].exps[1].lhs._type)
-            assert.same(types.Float(), ast[1].block.stats[4].exps[1].rhs._type)
+            assert.same(types.Integer(), ast[1].block.stats[4].exps[1].rhs._type)
             assert.same(types.Boolean(), ast[1].block.stats[4].exps[1]._type)
 
+            -- f op f
             assert.same(types.Float(), ast[1].block.stats[5].exps[1].lhs._type)
             assert.same(types.Float(), ast[1].block.stats[5].exps[1].rhs._type)
             assert.same(types.Boolean(), ast[1].block.stats[5].exps[1]._type)
 
+            -- i op i
             assert.same(types.Integer(), ast[1].block.stats[6].exps[1].lhs._type)
             assert.same(types.Integer(), ast[1].block.stats[6].exps[1].rhs._type)
             assert.same(types.Boolean(), ast[1].block.stats[6].exps[1]._type)
