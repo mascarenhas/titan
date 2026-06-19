@@ -18,6 +18,9 @@ If:
   PathMatch: ".*titan-runtime/.*"
 CompileFlags:
   Add:
+    # Force the C language: clangd otherwise guesses Objective-C++ for the
+    # .h files, which conflicts with --std=c99.
+    - "-xc"
     - "-I"
     - "titan-runtime"
     - "-I"
