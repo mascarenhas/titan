@@ -37,9 +37,10 @@ so closures can read and **mutate** variables of an enclosing function.
 Still out of scope after this work: instance *methods* as values; foreign/FFI
 functions as values (unchanged from the first-class spec).
 
-**All four runtime assumptions were empirically validated** (Appendix A): the
-Udata box + `_fn` ABI + closure-fast-path + end-to-end counter all work on real
-Lua 5.5 internals, including an assertions (`-DLUAI_ASSERT`) build.
+**All runtime assumptions were empirically validated** (Appendix A): the
+box (a 1-upvalue `CClosure` cell) + `_fn` ABI + closure-fast-path + end-to-end
+counter all work on real Lua 5.5 internals, including generational GC and an
+assertions (`-DLUAI_ASSERT`) build.
 
 ## The 12-point outline → how this plan realizes each
 
@@ -50,11 +51,11 @@ Lua 5.5 internals, including an assertions (`-DLUAI_ASSERT`) build.
 | 3 | Value calls pass the value itself | fast path passes `_vc_callee` — §4.1 |
 | 4 | Lua/generic entry has the value and passes it | `genluaentry` binds `_fn = clCvalue(s2v(func))` — §4.1 |
 | 5 | Two flags per local (assigned-after-decl, captured), set in checking | `_assigned` (exists) + `_captured` (new) — §3 |
-| 6 | both-flags vars → boxed; box is GC, anchored on stack | **Udata box** (`nuvalue=1`) anchored in a slot — §2.1, §4.2 |
-| 7 | reads follow the pointer/unbox; writes update the boxed value | `getslot`/`setslot` on `&box->uv[0].uv` + `luaC_barrierback` — §4.2 |
+| 6 | both-flags vars → boxed; box is GC, anchored on stack | **CClosure-cell box** (1 upvalue, NULL `f`) anchored in a slot — §2.1, §4.2 |
+| 7 | reads follow the pointer/unbox; writes update the boxed value | `getslot`/`setslot` on `&box->upvalue[0]` + `luaC_barrier` — §4.2 |
 | 8 | captured-not-mutated OR mutated-not-captured → current rep | gating `decl._captured and decl._assigned` — §2.1 |
 | 9 | local function = fresh CClosure; first 3 upvalues + one per captured var | closure-creation codegen — §4.3 |
-| 10 | boxed captures: copy the box pointer, access through it | `setuvalue` copies the box `Udata*`; native reads `uvalue(&_fn->upvalue[i])` — §4.3/4.4 |
+| 10 | boxed captures: copy the box pointer, access through it | `setclCvalue` copies the box `CClosure*`; native reads `clCvalue(&_fn->upvalue[i])` — §4.3/4.4 |
 | 11 | non-boxed captures: copy by value (immutable) | `setslot` copies the value — §4.3/4.4 |
 | 12 | native + Lua entries like top-level; **no stable identity** | hoisted entries, no shadow slot — §4.3 |
 
@@ -149,55 +150,73 @@ shapes as `TopLevelFunc`.) Adding an `Exp` tag requires updating the
 
 ## Part 2 — Representation & runtime design
 
-### 2.1 The variable box ("UpVal") — a single-user-value `Udata`
+### 2.1 The variable box ("UpVal") — a 1-upvalue `CClosure` cell
 
-The outline says "closed UpVal object." The realization is a **`Udata` with
-`nuvalue == 1`** — the box records already use (`coderecord`, `coder.lua:1919`).
-The boxed value lives in `box->uv[0].uv` (a `TValue`).
+The outline says "closed UpVal object." The realization is a **`CClosure` with
+exactly one upvalue and a NULL function pointer**, used purely as a heap cell.
+The boxed value lives in `box->upvalue[0]` (a `TValue`). The box is internal to
+Titan and **never flows into Lua code** (it is the storage of a captured local,
+not a function value), so it needs none of the Lua-facing features a `Udata`
+carries (the optional metatable) — that slot would be pure waste.
 
-**Why a `Udata` box, not a literal Lua `UpVal` (resolves D3 — empirically):**
-Both were built and GC-stressed (Appendix A, experiments E1/E2 + a direct
-head-to-head). A literal closed `UpVal` *is* GC-traceable from a `CClosure`
-`TValue` (it carries `CommonHeader`; `righttt`/`checkliveness` pass because
-`ttypetag(slot)==LUA_VUPVAL==gcvalue->tt`) and survives **incremental** GC. **But
-it SEGFAULTs under generational GC** (`freeupval → luaF_unlinkupval`, in
-`youngcollection`'s sweep), because Lua's GC assumes every `UpVal` is born *open*
-(on a thread's `openupval`/`twups` list) and becomes closed only via
-`luaF_closeupval`; a born-closed heap UpVal violates that contract, and at least
-one collector path mishandles it. The `Udata` box — an ordinary full userdata —
-survives **every** mode (incremental, generational, asserts build). The literal
-UpVal is 16 bytes smaller (40 vs 56) but stands on version-specific UpVal GC
-internals exactly where CLAUDE.md warns the generational GC turns mistakes into
-near-deterministic corruption. **Not worth it.** (A 1-upvalue `CClosure` cell is
-also 40 bytes and GC-clean, but semantically odd; the `Udata` box wins on
-consistency with the existing record machinery and is the choice.)
+**Why a `CClosure` cell, not a literal `UpVal` and not a `Udata` (resolves D3 —
+empirically; Appendix A):** three candidates were built and GC-stressed under
+incremental, generational, and assertions (`-DLUAI_ASSERT`) builds:
 
-**Box lifecycle and barriers** (precise; the barrier kinds matter):
+| Box | Size | All GC modes? | Mutation barrier |
+|---|---|---|---|
+| literal closed `UpVal` | 40 | **no — SEGFAULTs under generational GC** | n/a |
+| **`CClosure` cell (NULL f)** | **48** (`sizeCclosure(1)`) | **yes** | forward `luaC_barrier` |
+| `Udata` (`nuvalue=1`) | 56 | yes | back `luaC_barrierback` |
+
+A literal closed `UpVal` *is* GC-traceable from a `CClosure` `TValue`
+(`righttt`/`checkliveness` pass: `ttypetag==LUA_VUPVAL==gcvalue->tt`) and survives
+**incremental** GC, but **crashes under generational GC** (`freeupval →
+luaF_unlinkupval` in `youngcollection`'s sweep): Lua assumes every `UpVal` is
+born *open* (on a thread's `openupval`/`twups` list) and closed only via
+`luaF_closeupval`; a born-closed heap UpVal violates that contract. Rejected.
+
+The `CClosure` cell and the `Udata` box both survive **every** mode. The
+`CClosure` cell wins: it is **8 bytes smaller** than `Udata` (48 vs 56), drops the
+unused metatable slot, and — the real simplifier — its mutation uses the **same
+forward `luaC_barrier`** the codebase already emits for *every* closure-upvalue
+store, so **one barrier rule covers both installing the box and mutating it**
+(the `Udata` needs forward-install + back-mutate). NULL `f` is safe: the GC never
+calls `f` (it only marks `upvalue[]`; verified — no reached assertion requires
+`f != NULL`), and the box is never callable from Lua because well-typed Titan
+never treats it as a function value. (Records keep their `Udata` box — they *do*
+flow into Lua and need the metatable for method dispatch; the closure box is a
+deliberately lighter, Lua-invisible representation. Optional defensive hardening:
+point `f` at a one-line trap stub that `luaL_error`s instead of NULL, so a codegen
+bug that ever calls a box fails loudly. D3b.)
+
+**Box lifecycle and barriers** (precise):
 
 ```c
-/* create: zero raw bytes, one user value. setuvalue does NOT allocate. */
-Udata *_box_x = luaS_newudata(L, 0, 1);
-setnilvalue(&_box_x->uv[0].uv);                 /* or init via setslot */
-setuvalue(L, s2v(_base + SLOT), _box_x);        /* anchor against GC */
+/* create: a 1-upvalue CClosure used as a cell. luaF_newCclosure allocates. */
+CClosure *_box_x = luaF_newCclosure(L, 1);
+_box_x->f = NULL;
+setnilvalue(&_box_x->upvalue[0]);               /* or init via setslot */
+setclCvalue(L, s2v(_base + SLOT), _box_x);      /* anchor against GC */
 ```
 
-- **Install** the box reference into a `CClosure` upvalue (closure construction):
-  `setuvalue(L, &cl->upvalue[i], box)` then **`luaC_barrier(L, cl, &cl->upvalue[i])`**
-  — *forward* barrier, because a closure is a forward-barrier container (matches
-  `coderecord`, `coder.lua:1932`, and Lua's own closure-upvalue stores).
-- **Read** `x`:  `getslot(typ, dst, "&_box_x->uv[0].uv")`.
-- **Write** `x`: `setslot(typ, "&_box_x->uv[0].uv", val)` followed by
-  **`luaC_barrierback(L, _box_x, &_box_x->uv[0].uv)` iff `is_gc(typ)`** — *back*
-  barrier, because the box is a `Udata` (back-barrier container). This is exactly
-  what Lua's `lua_setiuservalue` does (`lapi.c`). E1 proved this store barrier is
-  *load-bearing*: omitting it is a deterministic use-after-free under churn.
-  (Non-gc types — integer/float/boolean/nil — need no barrier.)
+- **Install** the box into the enclosing `CClosure`'s upvalue (closure
+  construction): `setclCvalue(L, &cl->upvalue[i], box)` then
+  **`luaC_barrier(L, cl, &cl->upvalue[i])`** — forward (closure container; matches
+  `coderecord`, `coder.lua:1932`, and every closure-upvalue store).
+- **Read** `x`:  `getslot(typ, dst, "&_box_x->upvalue[0]")`.
+- **Write** `x`: `setslot(typ, "&_box_x->upvalue[0]", val)` followed by
+  **`luaC_barrier(L, _box_x, &_box_x->upvalue[0])` iff `is_gc(typ)`** — forward
+  again (the box is itself a closure). The store barrier is *load-bearing*:
+  experiment E1 reproduced a deterministic use-after-free when an analogous box
+  store omitted its barrier. (Non-gc types — integer/float/boolean/nil — need no
+  barrier.)
 - **Ordering discipline** (avoids an unanchored-box window — MAJOR from R1):
   1. evaluate the declaration's init expression first into a temp (it may
-     allocate); 2. `luaS_newudata` the box and **immediately** `setuvalue` it into
-     its anchor slot with *no* allocation between (same adjacency as `coderecord`
-     `coder.lua:1923-1932`); 3. `setslot` the init temp into `&box->uv[0].uv`
-     (+ `luaC_barrierback` if gc).
+     allocate); 2. `luaF_newCclosure` the box, set `f=NULL`, and **immediately**
+     `setclCvalue` it into its anchor slot with *no* allocation between (same
+     adjacency as `coderecord` `coder.lua:1923-1932`); 3. `setslot` the init temp
+     into `&box->upvalue[0]` (+ `luaC_barrier` if gc).
 - The box is anchored in a dedicated stack slot (`newslot`) for the owning
   function's lifetime.
 
@@ -234,7 +253,7 @@ An `ExpFunction` evaluates to a fresh `CClosure`:
 upvalue[0]     = _mod                  (module closure — captured lexically)
 upvalue[1]     = function-type tag     (light userdata)
 upvalue[2]     = native entry ptr      (light userdata)
-upvalue[3 + i] = captured variable i   (a Udata box, OR a copied value)
+upvalue[3 + i] = captured variable i   (a CClosure-cell box, OR a copied value)
 ```
 
 Built at the use site. **`lua_checkstack` first** (BLOCKER from R1 — the pushes
@@ -246,7 +265,7 @@ titan_pushmodule(L, _mod);
 lua_pushlightuserdata(L, (void*)<functag>);
 lua_pushlightuserdata(L, titan_cast_func(void*, <native_sym>));
 /* one push per captured var, in node._captures order: */
-setuvalue(L, s2v(L->top.p), <box>);  L->top.p++;            /* boxed capture */
+setclCvalue(L, s2v(L->top.p), <box>);  L->top.p++;          /* boxed capture */
 /*  …or…  */
 <setslot of captured value into s2v(L->top.p)>; L->top.p++; /* by-value capture */
 lua_pushcclosure(L, <lua_entry>, 3 + ncaptured);
@@ -369,24 +388,24 @@ and params, check the body, run the all-paths rule, pop. Returns the value with
 ### 4.2 Boxed-variable codegen in the **owning** function (points 6–8)
 
 Gate on `decl._boxed := decl._captured and decl._assigned`. Storage becomes a
-`Udata*` box (`decl._box`) instead of a plain C local:
+`CClosure*` box (`decl._box`) instead of a plain C local:
 
 - **`StatDecl`** (`coder.lua:1601`): allocate per §2.1 ordering; box gated on
   `decl._boxed` (not on `_used` alone — the capture analysis forces `_used` true,
   but gate the *box* on `_boxed`). Set `decl._box`, `decl._boxed = true`.
 - **Params** (`codefuncdec`, `coder.lua:2969`): a boxed gc-typed param is first
   anchored in its existing `_paramslot`, **then** the box is allocated, **then**
-  the incoming `_param_x` is copied into `&box->uv[0].uv` (ordering avoids an
+  the incoming `_param_x` is copied into `&box->upvalue[0]` (ordering avoids an
   unanchored window — MINOR/R5).
 - **`for` control variable**: never boxed (immutable). The "never boxed"
   invariant relies on codegen running only after zero type errors (true: `titanc`
   typechecks all modules and exits before codegen); optionally guard `:460` with
   `if not var._decl._forcontrol` defensively.
 - **Reads** (`codevar` else-branch, `coder.lua:1739`): if `node._decl._boxed`,
-  return `getslot(node._type, nil, "&"..decl._box.."->uv[0].uv")`.
+  return `getslot(node._type, nil, "&"..decl._box.."->upvalue[0]")`.
 - **Writes** (`codeassignment` local-var branch, `coder.lua:1019`): if
-  `var._decl._boxed`, `setslot(typ, "&"..box.."->uv[0].uv", cexp)` +
-  `luaC_barrierback(L, box, &box->uv[0].uv)` when `is_gc(typ)`.
+  `var._decl._boxed`, `setslot(typ, "&"..box.."->upvalue[0]", cexp)` +
+  `luaC_barrier(L, box, &box->upvalue[0])` when `is_gc(typ)`.
 - Non-boxed locals/params keep today's representation verbatim (point 8).
 
 ### 4.3 Anonymous-function emission (points 9, 12)
@@ -404,9 +423,9 @@ top-level functions:
 - `codeexp(ExpFunction)` appends the lambda to `tlcontext.lambdas` and returns the
   closure-creation C (§2.3) as prelude + the closure `TValue` as value. Captures
   are pushed in `node._captures` order: a **boxed** capture pushes the box
-  (`setuvalue` of `decl._box`, or — when the capture is transitive — the box read
-  from the *current* function's `_fn`, §4.4); a **by-value** capture pushes the
-  value via `setslot`.
+  (`setclCvalue` of `decl._box`, or — when the capture is transitive — the box
+  read from the *current* function's `_fn`, §4.4); a **by-value** capture pushes
+  the value via `setslot`.
 - **Emission loop** (D4 resolved): after the main toplevel loop in
   `coder.generate`, drain `tlcontext.lambdas` with an **index-based `while` loop
   that re-reads `#tlcontext.lambdas` each iteration** — a lambda nested inside a
@@ -421,9 +440,9 @@ logic (the outer C locals are not in scope inside the lambda). For each captured
 decl `c` at upvalue index `3 + i`:
 
 - **Boxed** (`c._boxed`): the upvalue holds the shared box. Bind once at entry
-  `Udata *_box_c = uvalue(&_fn->upvalue[3+i]);`, then read via
-  `getslot(c._type, …, "&_box_c->uv[0].uv")` and write via `setslot` +
-  `luaC_barrierback(L, _box_c, &_box_c->uv[0].uv)` (gc). Point 10 — the box
+  `CClosure *_box_c = clCvalue(&_fn->upvalue[3+i]);`, then read via
+  `getslot(c._type, …, "&_box_c->upvalue[0]")` and write via `setslot` +
+  `luaC_barrier(L, _box_c, &_box_c->upvalue[0])` (gc). Point 10 — the box
   *pointer* was copied; all sharers mutate one boxed value.
 - **By-value** (`not c._boxed`): the upvalue holds the copied value; read directly
   with `getslot(c._type, …, "&_fn->upvalue[3+i]")`. Immutable in the lambda
@@ -445,7 +464,7 @@ The closure *result* and any boxes go through `newslot`/`newtmp`, counted in
 (§2.3), consumed by `lua_pushcclosure`, **not** `nslots`-accounted. A lambda that
 performs value-calls sets `ctx.uses_base_off`. `lua_checkstack` can reallocate
 the stack, so recompute `_base` from a `savestack` offset afterward where the
-existing value-call code already does (`luaS_newudata`/`lua_pushcclosure`
+existing value-call code already does (`luaF_newCclosure`/`lua_pushcclosure`
 themselves do not relocate the stack — correct the rationale; MINOR/R1).
 
 ---
@@ -460,7 +479,7 @@ themselves do not relocate the stack — correct the rationale; MINOR/R1).
   meaning, the D1 zero-return footgun (note it is a **compile-time arity error**,
   not silent), and the D2 recursion limitation (clean "not declared" error).
 - `doc/implementation/codegen-overview.md:173` — document `_fn` in the ABI shape;
-  add a closures subsection (Udata box, barrier rules, capture lists, transitive
+  add a closures subsection (CClosure-cell box, barrier rules, capture lists, transitive
   capture, the `3 + N` upvalue layout, the `.so` ABI bump).
 - `doc/implementation/checker.md` — capture analysis (flags, `func_stack`,
   `_funcdepth`, the inclusive capture interval).
@@ -495,7 +514,7 @@ type errors through a lambda value; **top-level `local x = function…end` →
 - **By-value capture**: lambda reads an immutable captured local; loop-created
   closures each capture the per-iteration value (fresh-per-iteration).
 - **Both call paths** (fast: exact-type; slow: stored as `value` then called).
-- **gc-typed captures** (string/array/record) — exercises `luaC_barrierback`.
+- **gc-typed captures** (string/array/record) — exercises the box `luaC_barrier`.
 - **Transitive 3-level** (shared boxed mutation + by-value across two levels).
 - **Lambda ⇄ Lua boundary** both ways; a passed-in Lua closure stored/called.
 - **`_fn` ABI regression**: existing first-class top-level value call still works.
@@ -515,11 +534,12 @@ step. Run it first after §4.1, before any closure feature.
 
 ## Part 7 — Risks & implementation guardrails
 
-1. **GC barriers/anchoring** (highest): box mutation = `luaC_barrierback`
-   (back, userdata); box install into a closure upvalue = `luaC_barrier`
-   (forward, closure); the `lua_checkstack(3 + ncaptured)` before capture pushes;
-   the create-then-anchor-then-store ordering; boxed-param anchor-first ordering.
-   E1 proved the store barrier is a deterministic UAF if omitted.
+1. **GC barriers/anchoring** (highest): with the `CClosure`-cell box, *both* box
+   install into the enclosing closure *and* box mutation use forward
+   `luaC_barrier` (one uniform rule); the `lua_checkstack(3 + ncaptured)` before
+   capture pushes; the create-then-anchor-then-store ordering; boxed-param
+   anchor-first ordering. E1 proved the store barrier is a deterministic UAF if
+   omitted.
 2. **ABI uniformity**: `_fn` after `_mod`, before `self`, in *both* `function_sig`
    and `codefuncdec`; every call site updated (the §4.1 checklist). The fast-path
    typedef and cross-module externs track automatically via `function_sig`.
@@ -551,8 +571,15 @@ step. Run it first after §4.1, before any closure feature.
   for v1 (anonymous expressions only); self-reference is a clean "not declared"
   error; document the workaround. Could be a fast follow (desugar `local function
   f` → `local f; f = function…`).
-- **D3 — Box representation. RESOLVED → `Udata` box** (empirically; §2.1,
-  Appendix A). Literal `UpVal` rejected: crashes generational GC.
+- **D3 — Box representation. RESOLVED → 1-upvalue `CClosure` cell with NULL `f`**
+  (empirically; §2.1, Appendix A). 48 bytes, survives every GC mode, barrier-
+  uniform (forward `luaC_barrier` for both install and mutate), no Lua-facing
+  baggage since the box never escapes to Lua. Literal `UpVal` rejected (crashes
+  generational GC); `Udata` box workable but 8 bytes larger with an unused
+  metatable slot and a mixed barrier rule.
+- **D3b — NULL `f` vs trap stub for the box.** *Recommend:* NULL `f` (GC never
+  calls it; box never callable from well-typed Titan). Optional: point `f` at a
+  `luaL_error` trap stub for defensive failure on a codegen bug. User's call.
 - **D4 — Lambda collection. RESOLVED → lazy**, drained with a re-reading `while`
   loop (§4.3).
 - **D5 — Direct application `function…end(args)`. RESOLVED → unsupported**;
@@ -605,10 +632,15 @@ All four confirmed the design on Lua 5.5 internals; sources under `/tmp`
 - **E2 — literal closed UpVal in a CClosure TValue: VIABLE under incremental,
   passes `checkliveness`** (asserts build, with a negative control proving asserts
   active) — **but superseded by the head-to-head below.**
-- **Head-to-head under GENERATIONAL GC** (`titan_box_compare.c`, asserts build):
-  Udata box **SURVIVES** 150 rebox rounds; literal UpVal **SEGFAULTs**
-  (`freeupval → luaF_unlinkupval` in `youngcollection`'s `sweepgen`). `sizeof
-  (UpVal)=40` vs `Udata(1uv)=56`. → **D3 resolved in favor of the Udata box.**
+- **Head-to-head under GENERATIONAL GC** (`titan_box_compare.c` /
+  `titan_box_ccl.c`, asserts builds): the `Udata` box and the **`CClosure`-cell
+  box (NULL f)** both **SURVIVE** 150 rebox rounds with stable identity; the
+  literal `UpVal` **SEGFAULTs** (`freeupval → luaF_unlinkupval` in
+  `youngcollection`'s `sweepgen`). Sizes: `UpVal`=40, `sizeCclosure(1)`=48,
+  `Udata(1uv)`=56. The `CClosure` cell's mutation uses the same forward
+  `luaC_barrier` as its install (verified `righttt`/`checkliveness` and NULL-`f`
+  GC-safety in the asserts build). → **D3 resolved in favor of the `CClosure`
+  cell** (smallest GC-safe option, barrier-uniform, no Lua-facing baggage).
 - **E3 — uniform `_fn` ABI: CONFIRMED.** One convention covers `_fn`-ignoring
   (top-level) and `_fn`-reading (closure) entries; calling through a
   `function_sig`-style function pointer pulled from a light-userdata upvalue gives
@@ -622,8 +654,9 @@ All four confirmed the design on Lua 5.5 internals; sources under `/tmp`
 
 5 reviewers. Blocker/major items, all addressed: closure-creation needs
 `lua_checkstack` before pushes (R1); capture pushes are transient, not
-`nslots`-accounted (R1); box mutation uses `luaC_barrierback` (R1, confirmed vs
-`lua_setiuservalue`); `StatDecl` box must fire on `_boxed` and capture must force
+`nslots`-accounted (R1); box mutation barrier (R1 found the `Udata` option needs
+`luaC_barrierback` vs `lua_setiuservalue`; the final `CClosure`-cell box instead
+uses the uniform forward `luaC_barrier`); `StatDecl` box must fire on `_boxed` and capture must force
 `_used` (R1); create-then-anchor-then-store ordering (R1); **transitive capture
 interval must be inclusive of the innermost frame** (R3); `$function` needs its
 own `with_block` in the lambda checker (R3); push the frame before declaring
