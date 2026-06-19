@@ -50,6 +50,17 @@ function defs.rettypeopt(_, x)
     end
 end
 
+function defs.lambdarettypeopt(_, x)
+    if not x then
+        -- No return annotation on a lambda means "infer the return type" — a
+        -- distinct case from an explicit `: ()` (which is a zero-return `{}`).
+        -- We return `false` so the checker can tell the two apart.
+        return false
+    else
+        return x
+    end
+end
+
 function defs.typeopt(t, isopt)
     if not isopt or isopt == "" then
         return t
@@ -285,10 +296,24 @@ local grammar = re.compile([[
 
     rettypeopt      <- (P  (COLON rettype^TypeFunc)?)            -> rettypeopt
 
+    -- Lambda return-type: `false` when absent (infer), distinct from `: ()`.
+    lambdarettypeopt<- (P  (COLON rettype^TypeFunc)?)            -> lambdarettypeopt
+
     paramlist       <- {| (param (COMMA param^DeclParList)*)? |} -- produces {Decl}
 
     param           <- (P  NAME COLON^ParamSemicolon
                            type^TypeDecl)                        -> typeddecl
+
+    -- Lambda parameters: the type annotation is optional.
+    lambdaparamlist <- {| (lambdaparam
+                           (COMMA lambdaparam^DeclParList)*)? |} -- produces {Decl}
+
+    lambdaparam     <- (P  NAME COLON type^TypeDecl)             -> typeddecl
+                     / (P  NAME)                                 -> inferreddecl
+
+    funcexp         <- (P  FUNCTION LPAREN^LParPList lambdaparamlist
+                           RPAREN^RParPList lambdarettypeopt
+                           block END^EndFunc)                    -> ExpFunction
 
     decl            <- (P  NAME COLON type^TypeDecl)             -> typeddecl
                      / (P  NAME OPT COLON type^TypeDecl)         -> optiondecl
@@ -419,6 +444,7 @@ local grammar = re.compile([[
                      / (P  NUMBER)                               -> number_exp
                      / (P  STRINGLIT)                            -> ExpString
                      / initlist                                  -- produces Exp
+                     / funcexp                                   -- produces Exp
                      / suffixedexp                               -- produces Exp
                      / prefixexp                                 -- produces Exp
 

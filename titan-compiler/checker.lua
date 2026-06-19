@@ -21,9 +21,17 @@ local checkdecl
 local checkstat
 local checkexp
 local checkvar
+local checkfuncbody
 
 -- nesting depth of enclosing loops, so `break` can be rejected outside a loop
 local loop_depth = 0
+
+-- Stack of enclosing-function frames, used for closure capture analysis. Each
+-- frame is { depth, captures = {}, capture_set = {}, infer_ret = bool,
+-- collected = {...} }. A top-level function body is at depth 1; a lambda nested
+-- inside it is at depth 2; and so on. Reset explicitly at the top of
+-- `checker.check` (unlike `loop_depth`, which is never reset).
+local func_stack = {}
 
 function checker.typeerror(errors, loc, fmt, ...)
     local errmsg = location.format_error(loc, "type error: "..fmt, ...)
@@ -219,6 +227,10 @@ checkdecl = function(node, st, errors)
 end
 
 local function declare(node, st)
+    -- Stamp the function-nesting depth at which this local was declared, so the
+    -- VarName visitor can tell a capture (use from a deeper function) apart from
+    -- a same-function reference.
+    node._funcdepth = #func_stack
     st:add_symbol(node.name, node)
 end
 
@@ -476,6 +488,32 @@ checkstat = util.make_visitor({
 
     ["Ast.StatReturn"] = function(node, st, errors)
         local ftype = st:find_symbol("$function")._type
+        -- Return-type inference for lambdas: the enclosing function's frame is
+        -- always the innermost one on `func_stack` while its body is checked.
+        local frame = func_stack[#func_stack]
+        if frame and frame.infer_ret then
+            -- Collect this return's value types (forced, never option, exactly
+            -- as `local x = exp` inference does) for later unification, instead
+            -- of checking against fixed return types.
+            local rettypes = {}
+            for i, exp in ipairs(node.exps) do
+                checkexp(exp, st, errors)
+                exp = tryforce(exp)
+                node.exps[i] = exp
+                rettypes[i] = exp._type
+            end
+            local lastexp = node.exps[#node.exps]
+            if lastexp and lastexp._types and #lastexp._types > 1 then
+                for i = 2, #lastexp._types do
+                    local extra = ast.ExpExtra(lastexp.loc, lastexp, i,
+                        lastexp._types[i])
+                    table.insert(node.exps, extra)
+                    rettypes[#node.exps] = extra._type
+                end
+            end
+            table.insert(frame.collected, { loc = node.loc, rettypes = rettypes })
+            return true
+        end
         for i, exp in ipairs(node.exps) do
             checkexp(exp, st, errors, ftype.rettypes[i])
         end
@@ -540,6 +578,26 @@ checkvar = util.make_visitor({
         else
             node._decl = decl
             node._type = decl._type
+            -- Capture detection (single chokepoint). A local/param (`Ast.Decl`,
+            -- which excludes top-level functions/vars and module members) used
+            -- from a function nested deeper than where it was declared is
+            -- captured by every intervening lambda, INCLUSIVE of the current
+            -- (innermost) one.
+            if decl._tag == "Ast.Decl" and decl._funcdepth
+               and decl._funcdepth < #func_stack then
+                decl._captured = true
+                -- A variable only *written* (never read) by a nested function
+                -- would otherwise miss StatDecl's `_used` gate and never get a
+                -- box allocated; force it used here.
+                decl._used = true
+                for d = decl._funcdepth + 1, #func_stack do
+                    local frame = func_stack[d]
+                    if not frame.capture_set[decl] then
+                        frame.capture_set[decl] = true
+                        table.insert(frame.captures, decl)
+                    end
+                end
+            end
         end
     end,
 
@@ -1343,6 +1401,99 @@ checkexp = util.make_visitor({
         else
             node._type = node.exp._type
         end
+    end,
+
+    -- Anonymous function expression (lambda). Parameter and return types may be
+    -- inferred: an unannotated parameter takes its type from the expected
+    -- function type (`context`), and a missing return annotation is taken from
+    -- the context or, failing that, inferred from the body's `return`s.
+    ["Ast.ExpFunction"] = function(node, st, errors, context)
+        -- Checking mode iff the context is a function type whose arity matches.
+        local expected = (context and context._tag == "Type.Function"
+            and #context.params == #node.params) and context or nil
+
+        -- Resolve parameter types.
+        local paramtypes = {}
+        for i, param in ipairs(node.params) do
+            if param.type then
+                param._type = typefromnode(param.type, st, errors)
+            elseif expected then
+                param._type = expected.params[i]
+            else
+                param._type = invalid(errors, param.loc,
+                    "cannot infer type of parameter '%s'; annotate it or use "
+                    .. "the lambda where its type is known", param.name)
+            end
+            paramtypes[i] = param._type
+        end
+
+        -- Resolve / set up return types.
+        local rettypes, infer_ret
+        if node.rettypes then
+            -- Explicit annotation, including `: ()` (an empty list).
+            rettypes = {}
+            for _, rt in ipairs(node.rettypes) do
+                table.insert(rettypes, typefromnode(rt, st, errors))
+            end
+            infer_ret = false
+        elseif expected then
+            rettypes = expected.rettypes
+            infer_ret = false
+        else
+            rettypes = {}
+            infer_ret = true
+        end
+
+        node._type = types.Function(paramtypes, rettypes, false)
+
+        -- Open the lambda's own block so `$function`/params do not leak into the
+        -- enclosing scope (mirrors checkbodies+checkfunc). `with_block` keeps
+        -- only the first return value, so open/close the block by hand to also
+        -- recover the frame.
+        st:open_block()
+        local ret, frame = checkfuncbody(node, st, errors,
+            { infer_ret = infer_ret })
+        st:close_block()
+
+        if infer_ret then
+            -- Unify the collected returns: no returns -> zero-return `()`;
+            -- otherwise every return must agree in arity and element types (the
+            -- first return is the template).
+            local collected = frame.collected
+            if #collected == 0 then
+                rettypes = {}
+            else
+                local template = collected[1].rettypes
+                rettypes = template
+                for i = 2, #collected do
+                    local cand = collected[i].rettypes
+                    local agree = #cand == #template
+                    if agree then
+                        for j = 1, #template do
+                            if not types.equals(template[j], cand[j]) then
+                                agree = false
+                                break
+                            end
+                        end
+                    end
+                    if not agree then
+                        checker.typeerror(errors, collected[i].loc,
+                            "cannot infer return type: returns disagree — "
+                            .. "add a return annotation")
+                        break
+                    end
+                end
+            end
+            node._type.rettypes = rettypes
+            -- Now that the return types are known, apply the all-paths rule.
+            local firstret = rettypes[1]
+            if not ret and firstret and firstret._tag ~= "Type.Nil" then
+                checker.typeerror(errors, node.loc,
+                    "function can return nil but return type is not nil")
+            end
+        end
+
+        return node._type
     end
 })
 
@@ -1350,20 +1501,41 @@ checkexp = util.make_visitor({
 -- TopLevel
 --
 
--- Typechecks a function body
---   node: TopLevelFunc AST node
---   st: symbol table
---   errors: list of compile-time errors
-local function checkfunc(node, st, errors)
+-- Shared body-check for top-level functions, methods, and lambdas. Pushes a
+-- function frame (so captures of enclosing locals are detected), declares the
+-- parameters (stamping their nesting depth at this function's own depth), checks
+-- the body, and enforces the all-paths-return rule. The caller is responsible
+-- for having an open block and (for methods) declaring `self` before calling.
+--   node: a node carrying `_type` (Function), `params`, `block`, and (for the
+--         duplicate-parameter message) `name`. For lambdas, `node.rettypes` may
+--         be `false`/a list; `node._type.rettypes` is authoritative here.
+--   opts (optional): { self_decl = Decl, infer_ret = bool }. When `infer_ret`
+--         is set, the body's `return` statements collect their value types into
+--         `frame.collected` (see StatReturn) instead of being checked against
+--         fixed return types, and the all-paths-return rule is deferred to the
+--         caller (rettypes are not yet known). Returns (ret, frame): `ret` is
+--         whether the body always returns; `frame` carries `captures`/`collected`.
+function checkfuncbody(node, st, errors, opts)
+    opts = opts or {}
     st:add_symbol("$function", node) -- for return type
+    local frame = { depth = #func_stack + 1, captures = {}, capture_set = {},
+        infer_ret = opts.infer_ret or false, collected = {} }
+    table.insert(func_stack, frame)
+    if opts.self_decl then
+        -- `self` belongs to this function's own depth, so a lambda nested in a
+        -- method captures it just like any other parameter.
+        opts.self_decl._funcdepth = #func_stack
+        st:add_symbol("self", opts.self_decl)
+    end
     local ptypes = node._type.params
     local pnames = {}
-    for i, rettype in ipairs(node._type.rettypes) do
-        checktype(rettype, node.rettypes[i].loc, errors)
+    for _, rettype in ipairs(node._type.rettypes) do
+        checktype(rettype, node.loc, errors)
     end
     for i, param in ipairs(node.params) do
-        st:add_symbol(param.name, param)
         param._type = ptypes[i]
+        param._funcdepth = #func_stack
+        st:add_symbol(param.name, param)
         checktype(param._type, param.loc, errors)
         if pnames[param.name] then
             checker.typeerror(errors, node.loc,
@@ -1374,14 +1546,26 @@ local function checkfunc(node, st, errors)
         end
     end
     local ret = st:with_block(checkstat, node.block, st, errors)
-    -- A zero-return `() -> ()` function (empty rettypes) may fall off the end,
-    -- exactly like a `nil`-returning one; only a function whose first declared
-    -- return type is some non-`nil` value must return on every path.
-    local firstret = node._type.rettypes[1]
-    if not ret and firstret and firstret._tag ~= "Type.Nil" then
-        checker.typeerror(errors, node.loc,
-            "function can return nil but return type is not nil")
+    if not opts.infer_ret then
+        -- A zero-return `() -> ()` function (empty rettypes) may fall off the
+        -- end, exactly like a `nil`-returning one; only a function whose first
+        -- declared return type is some non-`nil` value must return on every path.
+        local firstret = node._type.rettypes[1]
+        if not ret and firstret and firstret._tag ~= "Type.Nil" then
+            checker.typeerror(errors, node.loc,
+                "function can return nil but return type is not nil")
+        end
     end
+    table.remove(func_stack)
+    return ret, frame
+end
+
+-- Typechecks a function body
+--   node: TopLevelFunc AST node
+--   st: symbol table
+--   errors: list of compile-time errors
+local function checkfunc(node, st, errors)
+    checkfuncbody(node, st, errors)
 end
 
 -- Typechecks a method body, binding self to the first parameter
@@ -1392,8 +1576,9 @@ local function checkmethod(node, st, errors)
     local self = ast.Decl(node.loc, "self", ast.TypeName(node.loc, node._record.name), false)
     node._self = self
     self._type = typefromnode(self.type, st, errors)
-    st:add_symbol("self", self)
-    checkfunc(node, st, errors)
+    -- `self` is declared into this method's own frame (inside checkfuncbody), so
+    -- a lambda nested in the method body captures it like any parameter.
+    checkfuncbody(node, st, errors, { self_decl = self })
 end
 
 -- Checks function bodies
@@ -1473,6 +1658,13 @@ local function isconst(node)
 
     elseif tag == "Ast.ExpCast" then
         return isconst(node.exp)
+
+    elseif tag == "Ast.ExpFunction" then
+        -- A lambda evaluates to a fresh closure each time it is reached, so it
+        -- is never a constant. Rejecting it here yields the clean "top level
+        -- variable initialization must be constant" error rather than letting an
+        -- unsupported (this phase) lambda reach codegen.
+        return false
 
     else
         error("impossible")
@@ -1838,6 +2030,7 @@ function checker.check(modname, ast, subject, filename, loader)
     loader = loader or function ()
         return nil, "you must pass a loader to import modules"
     end
+    func_stack = {}
     local st = symtab.new(modname)
     local errors = {subject = subject, filename = filename}
     checktoplevel(ast, st, errors, loader)
