@@ -1455,6 +1455,10 @@ checkexp = util.make_visitor({
             { infer_ret = infer_ret })
         st:close_block()
 
+        -- Save the ordered list of enclosing decls this lambda captures, for
+        -- codegen (closure-creation pushes + lambda-body upvalue indexing).
+        node._captures = frame.captures
+
         if infer_ret then
             -- Unify the collected returns: no returns -> zero-return `()`;
             -- otherwise every return must agree in arity and element types (the
