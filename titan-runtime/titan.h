@@ -1,9 +1,15 @@
 #ifndef TITAN_H
 #define TITAN_H
 
+#include <float.h>
+#include <math.h>
+#include <stdio.h>
+
 #include "luaconf.h"
 #include "lobject.h"
 #include "lstring.h"
+#include "llimits.h"
+#include "lvm.h"
 
 #ifdef __GNUC__
 #define TITAN_LIKELY(x)   __builtin_expect((x), 1)
@@ -44,6 +50,64 @@
 */
 #define titan_setbvalue(obj,x) \
     do { if (x) { setbtvalue(obj); } else { setbfvalue(obj); } } while (0)
+
+/* Whether a lua_Integer converts to lua_Number with no rounding — replicated
+** from lvm.c (l_intfitsf lives only in the .c file). NBM = float mantissa bits. */
+#define TITAN_NBM (l_floatatt(MANT_DIG))
+#if ((((LUA_MAXINTEGER >> (TITAN_NBM / 4)) >> (TITAN_NBM / 4)) >> (TITAN_NBM / 4)) \
+        >> (TITAN_NBM - (3 * (TITAN_NBM / 4)))) > 0
+#define TITAN_MAXINTFITSF ((lua_Unsigned)1 << TITAN_NBM)
+#define titan_intfitsf(i) ((TITAN_MAXINTFITSF + l_castS2U(i)) <= (2 * TITAN_MAXINTFITSF))
+#else
+#define titan_intfitsf(i) 1
+#endif
+
+/* i < f  (mirrors LTintfloat): i < f  <=>  i < ceil(f) when i doesn't fit a float */
+static l_inline int titan_lt_intfloat(lua_Integer i, lua_Number f) {
+  if (titan_intfitsf(i)) return luai_numlt(cast_num(i), f);
+  else {
+    lua_Integer fi; lua_Number ff = l_floor(f);
+    if (ff != f) ff += 1;                       /* F2Iceil */
+    if (lua_numbertointeger(ff, &fi)) return i < fi;
+    else return f > 0;                          /* f beyond integer range */
+  }
+}
+/* i <= f  (LEintfloat): i <= floor(f) */
+static l_inline int titan_le_intfloat(lua_Integer i, lua_Number f) {
+  if (titan_intfitsf(i)) return luai_numle(cast_num(i), f);
+  else {
+    lua_Integer fi; lua_Number ff = l_floor(f);  /* F2Ifloor */
+    if (lua_numbertointeger(ff, &fi)) return i <= fi;
+    else return f > 0;
+  }
+}
+/* f < i  (LTfloatint): floor(f) < i */
+static l_inline int titan_lt_floatint(lua_Number f, lua_Integer i) {
+  if (titan_intfitsf(i)) return luai_numlt(f, cast_num(i));
+  else {
+    lua_Integer fi; lua_Number ff = l_floor(f);  /* F2Ifloor */
+    if (lua_numbertointeger(ff, &fi)) return fi < i;
+    else return f < 0;
+  }
+}
+/* f <= i  (LEfloatint): ceil(f) <= i */
+static l_inline int titan_le_floatint(lua_Number f, lua_Integer i) {
+  if (titan_intfitsf(i)) return luai_numle(f, cast_num(i));
+  else {
+    lua_Integer fi; lua_Number ff = l_floor(f);
+    if (ff != f) ff += 1;                        /* F2Iceil */
+    if (lua_numbertointeger(ff, &fi)) return fi <= i;
+    else return f < 0;
+  }
+}
+/* i == f  (luaV_equalobj int/float case, F2Ieq): equal iff f is integral,
+** in range, and equals i. */
+static l_inline int titan_eq_intfloat(lua_Integer i, lua_Number f) {
+  lua_Integer fi; lua_Number ff = l_floor(f);
+  if (ff != f) return 0;                         /* non-integral */
+  if (!lua_numbertointeger(ff, &fi)) return 0;   /* out of range */
+  return i == fi;
+}
 
 /*
 ** Macro to convert pointer-to-void* to pointer-to-function. This cast

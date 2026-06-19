@@ -42,7 +42,10 @@ local function c_integer_literal(n)
 end
 
 local function c_float_literal(n)
-    return string.format("%f", n)
+    if n ~= n then return "NAN" end            -- nan (unreachable from a literal, defensive)
+    if n == math.huge then return "HUGE_VAL" end   -- +inf, e.g. the literal 1e400
+    if n == -math.huge then return "(-HUGE_VAL)" end
+    return string.format("%.17g", n)           -- round-trips every finite double
 end
 
 
@@ -2163,6 +2166,11 @@ local function codeunaryop(ctx, node, iscondition)
         else
             return estats, "tsslen(" .. ecode .. ")"
         end
+    elseif op == "-" and node.exp._type._tag == "Type.Integer" then
+        -- Integer negation wraps two's-complement like Lua (intop(-,0,x));
+        -- raw (-x) is signed-overflow UB for math.mininteger.
+        local estats, ecode = codeexp(ctx, node.exp)
+        return estats, "intop(-, 0, " .. ecode .. ")"
     else
         local estats, ecode = codeexp(ctx, node.exp)
         return estats, "(" .. op .. ecode .. ")"
@@ -2183,18 +2191,24 @@ end
 -- (shift amount is a small positive integer) under only one level of branching
 -- and with a TITAN_LIKELY annotation.
 local function generate_binop_shift(shift_pos, shift_neg, exp, ctx)
-    local x_stats, x_var = codeexp(ctx, exp.lhs)
-    local y_stats, y_var = codeexp(ctx, exp.rhs)
+    local x_stats, x_code = codeexp(ctx, exp.lhs)
+    local y_stats, y_code = codeexp(ctx, exp.rhs)
+    local xdecl, x_var = newtmp(ctx, types.Integer())
+    local ydecl, y_var = newtmp(ctx, types.Integer())
     local rdecl, rname = newtmp(ctx, types.Integer())
     local cstats = util.render([[
         ${X_STATS}
+        ${X_DECL}
+        ${X} = ${X_CODE};
         ${Y_STATS}
+        ${Y_DECL}
+        ${Y} = ${Y_CODE};
         ${R_DECL}
         if (TITAN_LIKELY(l_castS2U(${Y}) < TITAN_LUAINTEGER_NBITS)) {
             ${R} = intop(${SHIFT_POS}, ${X}, ${Y});
         } else {
-            if (l_castS2U(-${Y}) < TITAN_LUAINTEGER_NBITS) {
-                ${R} = intop(${SHIFT_NEG}, ${X}, -${Y});
+            if (l_castS2U(intop(-, 0, ${Y})) < TITAN_LUAINTEGER_NBITS) {
+                ${R} = intop(${SHIFT_NEG}, ${X}, intop(-, 0, ${Y}));
             } else {
                 ${R} = 0;
             }
@@ -2203,8 +2217,12 @@ local function generate_binop_shift(shift_pos, shift_neg, exp, ctx)
         SHIFT_POS = shift_pos,
         SHIFT_NEG = shift_neg,
         X = x_var,
+        X_DECL = xdecl,
+        X_CODE = x_code,
         X_STATS = x_stats,
         Y = y_var,
+        Y_DECL = ydecl,
+        Y_CODE = y_code,
         Y_STATS = y_stats,
         R = rname,
         R_DECL = rdecl,
@@ -2216,12 +2234,18 @@ end
 -- zero. We inline luaV_div here to give the C compiler more optimization
 -- opportunities (see that function for comments on how it works).
 local function generate_binop_idiv_int(exp, ctx)
-    local m_stats, m_var = codeexp(ctx, exp.lhs)
-    local n_stats, n_var = codeexp(ctx, exp.rhs)
+    local m_stats, m_code = codeexp(ctx, exp.lhs)
+    local n_stats, n_code = codeexp(ctx, exp.rhs)
+    local mdecl, m_var = newtmp(ctx, types.Integer())
+    local ndecl, n_var = newtmp(ctx, types.Integer())
     local qdecl, qname = newtmp(ctx, exp._type)
     local cstats = util.render([[
         ${M_STATS}
+        ${M_DECL}
+        ${M} = ${M_CODE};
         ${N_STATS}
+        ${N_DECL}
+        ${N} = ${N_CODE};
         ${Q_DECL}
         if (l_castS2U(${N}) + 1u <= 1u) {
             if (${N} == 0){
@@ -2237,8 +2261,12 @@ local function generate_binop_idiv_int(exp, ctx)
         }
     ]], {
         M = m_var,
+        M_DECL = mdecl,
+        M_CODE = m_code,
         M_STATS = m_stats,
         N = n_var,
+        N_DECL = ndecl,
+        N_CODE = n_code,
         N_STATS = n_stats,
         Q = qname,
         Q_DECL = qdecl,
@@ -2272,12 +2300,18 @@ end
 -- Lua/Titan guarantees that (m == n*(m//n) + (,%n))
 -- See generate binop_intdiv and luaV_mod
 local function generate_binop_mod_int(exp, ctx)
-    local m_stats, m_var = codeexp(ctx, exp.lhs)
-    local n_stats, n_var = codeexp(ctx, exp.rhs)
+    local m_stats, m_code = codeexp(ctx, exp.lhs)
+    local n_stats, n_code = codeexp(ctx, exp.rhs)
+    local mdecl, m_var = newtmp(ctx, types.Integer())
+    local ndecl, n_var = newtmp(ctx, types.Integer())
     local rdecl, rname = newtmp(ctx, types.Integer())
     local cstats = util.render([[
         ${M_STATS}
+        ${M_DECL}
+        ${M} = ${M_CODE};
         ${N_STATS}
+        ${N_DECL}
+        ${N} = ${N_CODE};
         ${R_DECL};
         if (l_castS2U(${N}) + 1u <= 1u) {
             if (${N} == 0){
@@ -2293,13 +2327,17 @@ local function generate_binop_mod_int(exp, ctx)
         }
     ]], {
         M = m_var,
+        M_DECL = mdecl,
+        M_CODE = m_code,
         M_STATS = m_stats,
         N = n_var,
+        N_DECL = ndecl,
+        N_CODE = n_code,
         N_STATS = n_stats,
         R = rname,
         R_DECL = rdecl,
         LINE = c_integer_literal(exp.loc.line),
-        THROW_MOD0 = codethrow(ctx, "error at line %d, % by zero", { "$LINE" })
+        THROW_MOD0 = codethrow(ctx, "error at line %d, %% by zero", { "$LINE" })
     })
     return cstats, rname
 end
@@ -2461,7 +2499,26 @@ local function codebinaryop(ctx, node, _)
     elseif op == "^" then
         local lstats, lcode = codeexp(ctx, node.lhs)
         local rstats, rcode = codeexp(ctx, node.rhs)
-        return lstats .. rstats, "pow(" .. lcode .. ", " .. rcode .. ")"
+        local bdecl, bname = newtmp(ctx, types.Float())
+        local edecl, ename = newtmp(ctx, types.Float())
+        local cstats = render([[
+            $LSTATS
+            $RSTATS
+            $BDECL
+            $EDECL
+            $B = $LCODE;
+            $E = $RCODE;
+        ]], { LSTATS=lstats, RSTATS=rstats, BDECL=bdecl, EDECL=edecl,
+              B=bname, E=ename, LCODE=lcode, RCODE=rcode })
+        -- luai_numpow: exponent 2 is a*a, not pow(a,2) (differs by 1 ULP).
+        return cstats, "((" .. ename .. " == 2) ? (" .. bname .. " * " .. bname
+                       .. ") : pow(" .. bname .. ", " .. ename .. "))"
+    elseif op == "~" then
+        -- Lua's binary '~' is bitwise exclusive-or; C's binary xor is '^'
+        -- (Titan's '^' is exponentiation). Wrap like Lua's intop(^,...).
+        local lstats, lcode = codeexp(ctx, node.lhs)
+        local rstats, rcode = codeexp(ctx, node.rhs)
+        return lstats .. rstats, "intop(^, " .. lcode .. ", " .. rcode .. ")"
     elseif op == "<<" then
         return generate_binop_shift("<<", ">>", node, ctx)
     elseif op == ">>" then
@@ -2533,6 +2590,51 @@ local function codebinaryop(ctx, node, _)
         else
             return lstats .. rstats, "luaV_rawequalobj(&(" .. lcode .. "),&(" .. rcode .. "))"
         end
+    elseif (op == "<" or op == "<=" or op == ">" or op == ">="
+            or op == "==" or op == "!=")
+           and ((node.lhs._type._tag == "Type.Integer" and node.rhs._type._tag == "Type.Float")
+             or (node.lhs._type._tag == "Type.Float"   and node.rhs._type._tag == "Type.Integer")) then
+        local lstats, lcode = codeexp(ctx, node.lhs)
+        local rstats, rcode = codeexp(ctx, node.rhs)
+        local ldecl, lname = newtmp(ctx, node.lhs._type)
+        local rdecl, rname = newtmp(ctx, node.rhs._type)
+        local cstats = render([[
+            $LSTATS
+            $LDECL
+            $LNAME = $LCODE;
+            $RSTATS
+            $RDECL
+            $RNAME = $RCODE;
+        ]], { LSTATS=lstats, LDECL=ldecl, LNAME=lname, LCODE=lcode,
+              RSTATS=rstats, RDECL=rdecl, RNAME=rname, RCODE=rcode })
+        local lint = node.lhs._type._tag == "Type.Integer"
+        local cmp
+        if op == "==" or op == "!=" then
+            cmp = lint and ("titan_eq_intfloat(" .. lname .. ", " .. rname .. ")")
+                        or ("titan_eq_intfloat(" .. rname .. ", " .. lname .. ")")
+            if op == "!=" then cmp = "(!" .. cmp .. ")" end
+        elseif op == "<" then
+            cmp = lint and ("titan_lt_intfloat(" .. lname .. ", " .. rname .. ")")
+                        or ("titan_lt_floatint(" .. lname .. ", " .. rname .. ")")
+        elseif op == "<=" then
+            cmp = lint and ("titan_le_intfloat(" .. lname .. ", " .. rname .. ")")
+                        or ("titan_le_floatint(" .. lname .. ", " .. rname .. ")")
+        elseif op == ">" then           -- a > b  ==  b < a
+            cmp = lint and ("titan_lt_floatint(" .. rname .. ", " .. lname .. ")")
+                        or ("titan_lt_intfloat(" .. rname .. ", " .. lname .. ")")
+        else                            -- ">=":  a >= b  ==  b <= a
+            cmp = lint and ("titan_le_floatint(" .. rname .. ", " .. lname .. ")")
+                        or ("titan_le_intfloat(" .. rname .. ", " .. lname .. ")")
+        end
+        return cstats, cmp
+    elseif (op == "+" or op == "-" or op == "*")
+           and node.lhs._type._tag == "Type.Integer"
+           and node.rhs._type._tag == "Type.Integer" then
+        -- Integer + - * wrap two's-complement like Lua (intop), instead of raw
+        -- signed C arithmetic which is overflow UB under -O2 (no -fwrapv).
+        local lstats, lcode = codeexp(ctx, node.lhs)
+        local rstats, rcode = codeexp(ctx, node.rhs)
+        return lstats .. rstats, "intop(" .. op .. ", " .. lcode .. ", " .. rcode .. ")"
     else
         local lstats, lcode = codeexp(ctx, node.lhs)
         local rstats, rcode = codeexp(ctx, node.rhs)

@@ -315,9 +315,10 @@ side is Value, both are boxed to Value; **else if either side is an Option,
 each side is lifted to the option of its own type** (`s? == s` lifts the
 right side to `string?` and compares equal types) — this lift is PR #250's
 fix; before it the coerced nodes were assigned to nonexistent fields and
-never landed. Then a Float on either side promotes both to Float, and
-finally incomparable pairs error — with a carve-out letting two options over
-Integer/Float (either order) compare without numeric promotion. The result
+never landed. Numbers are then **not** promoted: a mixed Integer/Float pair
+(either order, and likewise two options over Integer/Float) is allowed through
+without coercion — codegen compares them by mathematical value, exactly as Lua
+does — and any remaining incomparable pair errors. The result
 is always Boolean.
 
 `or` implements option defaulting: when the left side is `t?` and the right
