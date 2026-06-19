@@ -14,8 +14,6 @@ local checker = require 'titan-compiler.checker'
 local h = require 'spec.support.helpers'
 
 local run_coder = h.run_coder
-local compile = h.compile
-local call = h.call
 local parse = h.parse
 
 local function clean()
@@ -342,6 +340,35 @@ describe("numeric operator semantics (Lua 5.5 parity)", function()
                 assert(test.shl() == 0)
                 assert(test.shr() == (4 >> -1))
                 assert(test.shr() == 8)
+            ]])
+        end)
+
+        it("emits integral-valued float literals as C floating constants", function()
+            -- %.17g prints e.g. 1.0 as the bare token "1"; spliced straight into
+            -- a raw C operator that silently becomes INTEGER arithmetic. The
+            -- literal must stay a floating constant so the operation is float.
+            run_coder([[
+                function half(): float return 1.0 / 2.0 end
+                function negidiv(): float return -1.0 // 2.0 end
+                function prod(): float return 3.0 * 2.0 end
+                function diff(): float return 2.0 - 5.0 end
+            ]], [[
+                assert(test.half() == 0.5)              -- not integer (1/2)==0
+                assert(test.negidiv() == (-1.0 // 2.0))
+                assert(test.negidiv() == -1.0)          -- not floor(-1/2)==0.0
+                assert(test.prod() == 6.0)
+                assert(test.diff() == -3.0)
+            ]])
+        end)
+
+        it("float 0.0 / 0.0 literal is NaN, not an integer divide by zero", function()
+            run_coder([[
+                function nan(): float return 0.0 / 0.0 end
+                function inf(): float return 1.0 / 0.0 end
+            ]], [[
+                local n = test.nan()
+                assert(n ~= n)                          -- NaN, not integer 0/0 trap
+                assert(test.inf() == math.huge)         -- not integer 1/0 trap
             ]])
         end)
     end)
