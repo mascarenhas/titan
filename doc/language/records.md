@@ -384,7 +384,7 @@ end
 -- Lua
 local test = require "test"
 
-local p = test.Point.new(1, 2)   -- record types live in the module table
+local p = test.Point.new(1, 2)   -- record namespaces are members of the module
 print(type(p))                   --> userdata
 p:move(1.0, 1.0)                 -- methods work with Lua's colon call
 print(p.x, p.y)                  --> 2.0  3.0
@@ -393,9 +393,9 @@ p.x = 10.0                       -- field writes are type-checked
 
 The details, all run-time behavior:
 
-* **Construction.** Each record name is an entry in the module table
-  holding its statics, so `test.Point.new(1, 2)` works from Lua. Arity
-  is checked at run time:
+* **Construction.** Each record name is a member of the module — a small
+  namespace table holding its statics — so `test.Point.new(1, 2)` works
+  from Lua. Arity is checked at run time:
   `calling Titan function new with 1 arguments, but expected 2`.
 * **Field reads and writes** go through the record's metatable and are
   fully checked. An unknown field, read or written, raises
@@ -457,12 +457,13 @@ A record value is pointer-sized; its fields live in a fixed-size vector
 of slots owned by the record, so `p.x` is a constant-offset load and
 `p.x = v` a constant-offset store — no hashing, no string comparison, no
 metamethod dispatch. Method calls compile to direct C function calls.
-Constructing a record allocates two small heap objects (the field
-vector and its Lua-facing wrapper), both managed by Lua's garbage
-collector like every other Titan value.
+Constructing a record allocates **one** small heap object — a tagged Lua
+userdata holding the fields — managed by Lua's garbage collector like
+every other Titan value.
 
-*Implementation note:* the dual representation (a `CClosure` of slots
-for Titan, a tagged userdata for Lua, pointing at each other) and the
-type-tag scheme behind the nominal run-time checks are described in
+*Implementation note:* a record value *is* a single tagged userdata
+(`type(rec) == "userdata"`) — the same object Titan computes with and
+Lua sees, with no separate wrapper. That representation and the type-tag
+scheme behind the nominal run-time checks are described in
 [values and GC](../implementation/values-and-gc.md) and
 [Lua interop internals](../implementation/lua-interop-internals.md).

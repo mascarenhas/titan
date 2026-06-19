@@ -361,8 +361,8 @@ uses directly.
   path), `TITAN_LIBS_KEY` (dlopen handle table),
   `TITAN_BACKTRACE_KEY` (last error backtrace).
   `TITAN_LUAINTEGER_NBITS` is used by shift code generation.
-* **`titan_pushmodule(L, c)`** — pushes a `CClosure*` (a module
-  closure) onto the Lua stack by writing the slot and bumping
+* **`titan_pushmodule(L, c)`** — pushes a `Udata*` (the module state
+  object) onto the Lua stack by writing the slot and bumping
   `L->top.p` directly.
 * **`titan_setbvalue(obj, x)`** — sets a boolean `TValue` from a C
   `int`. Exists because Lua 5.5 removed `setbvalue`: booleans carry no

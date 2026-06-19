@@ -74,7 +74,7 @@ and records first; functions second). The pieces appear in this order:
    used (see the wiring section below).
 4. **Forward signatures** (`$SIGS`): the native-convention prototype of
    every function in this module, plus
-   `extern CClosure *<dep>_init(lua_State *L);` per static import.
+   `extern Udata *<dep>_init(lua_State *L);` per static import.
 5. **Record support**: first, *up front* (before any record body), a
    `static const void *<mangled-fqtn>_typetag;` forward declaration for
    every record in the module — emitted ahead of the bodies so a field
@@ -86,9 +86,10 @@ and records first; functions second). The pieces appear in this order:
 6. **Function bodies**: for each function, method and static, the
    native-convention body followed by its Lua entry wrapper (local
    functions get no wrapper).
-7. **Module-global metamethods**: if the module has exported variables,
-   one `__index`/`__newindex` pair serving them through the module
-   table's metatable.
+7. **Module-global metamethods**: if the module exports anything, one
+   `__index`/`__newindex` pair serving all members — variables, functions
+   and record namespaces — through the metatable installed on the module
+   `Udata`.
 8. **`<prefix>_types`**, **`<prefix>_init`**, **`luaopen_<prefix>`**: the
    module-protocol functions, described below.
 
@@ -108,31 +109,31 @@ generates:
 #include <stdlib.h>
 ...                /* C library and Lua internal headers, titan.h, pragmas */
 
-lua_Integer counter_inc_titan(lua_State *L, CClosure *_mod, CClosure *_fn, lua_Integer _param_n);
+lua_Integer counter_inc_titan(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer _param_n);
 
-lua_Integer counter_inc_titan(lua_State *L, CClosure *_mod, CClosure *_fn, lua_Integer _param_n) {
+lua_Integer counter_inc_titan(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer _param_n) {
     {
-        return (_param_n+ ivalue(&_mod->upvalue[1]));
+        return (_param_n+ ivalue(&_mod->uv[1].uv));
     }
 }
 
 static int counter_inc_lua(lua_State *L) {
     ...    /* arity check, error handler, checkandget arguments */
-    lua_Integer res = counter_inc_titan(L, _mod, _param_1);
+    lua_Integer res = counter_inc_titan(L, _mod, _fn, _param_1);
     setivalue(s2v(_firstret), res);
     ...
 }
 
-static int __index(lua_State *L) { ... }    /* module metatable: 'x', read  */
-static int __newindex(lua_State *L) { ... } /* module metatable: 'x', write */
+static int __index(lua_State *L) { ... }    /* module metatable: member read  */
+static int __newindex(lua_State *L) { ... } /* module metatable: member write */
 int counter_types(lua_State* L) { ... }     /* serialized interface, below  */
 
 static int _initialized = 0; /* tags and external functions are set up */
-CClosure *counter_init(lua_State *L) { ... }
+Udata *counter_init(lua_State *L) { ... }
 
 int luaopen_counter(lua_State *L) {
-    CClosure *mod = counter_init(L);
-    setobj2s(L, L->top.p, &mod->upvalue[0]);
+    Udata *mod = counter_init(L);
+    setuvalue(L, s2v(L->top.p), mod);   /* require returns the module Udata */
     L->top.p++;
     return 1;
 }
@@ -173,17 +174,17 @@ The authoritative statement is the comment above `codefuncdec` in
 The signature shape, produced by `function_sig`:
 
 ```c
-RETTYPE f(lua_State *L, CClosure *_mod, CClosure *_fn, [CClosure *self,]
+RETTYPE f(lua_State *L, Udata *_mod, CClosure *_fn, [Udata *self,]
           <ctype(param_1)>, ..., <ctype(param_n)>,
           <ctype(ret_2)> *_outparam_2, ..., <ctype(ret_m)> *_outparam_m);
 ```
 
 `RETTYPE` is `ctype(rettypes[1])` — the unboxed C type of the first
-return value (`lua_Integer`, `TString*`, `Table*`, `TValue`, `CClosure*`,
+return value (`lua_Integer`, `TString*`, `Table*`, `TValue`, `Udata*`,
 …; full map in [values and the GC](values-and-gc.md)); a function
 returning only `nil` returns `int` and ends with `return 0;`. `_mod` is
-the callee's **own** module closure; a cross-module caller passes it from
-one of its upvalues. `_fn` is the **callee's own closure** — the
+the callee's **own** module `Udata`; a cross-module caller passes it from
+one of its user values. `_fn` is the **callee's own closure** — the
 `CClosure` of the function value being invoked, whose `upvalue[3..]` hold
 its captured variables; it is what a closure body reads its captures
 through (see [closures and captured variables](#closures-and-captured-variables)).
@@ -198,16 +199,19 @@ at a call site depends on the path:
 * **the callee value itself** (`_vc_callee`) on the fast value-call path
   (`codevaluecall`);
 * **`clCvalue(s2v(func))`** in the Lua entry wrapper, which then derives
-  `_mod = clCvalue(&_fn->upvalue[0])`.
+  `_mod = uvalue(&_fn->upvalue[0])` (the module value stored in the
+  closure's upvalue 0 is now a `Udata`, read with `uvalue`, not
+  `clCvalue`).
 
-The `CClosure *self` slot exists only for methods (`Type.Method`) and is
-named `__self__` in the generated body. Return values 2..m are written
-through out-pointers following the declared parameters. Real signatures
-from a generated module:
+The `Udata *self` slot exists only for methods (`Type.Method`) and is
+named `__self__` in the generated body — `self` is a record, and a record
+is a `Udata`. Return values 2..m are written through out-pointers
+following the declared parameters. Real signatures from a generated
+module:
 
 ```c
-TString*    packtest_Point_getname_titanmethod(lua_State *L, CClosure *_mod, CClosure *_fn, CClosure* __self__);
-lua_Integer packtest_two_titan(lua_State *L, CClosure *_mod, CClosure *_fn, TString* *_outparam_2);
+TString*    packtest_Point_getname_titanmethod(lua_State *L, Udata *_mod, CClosure *_fn, Udata* __self__);
+lua_Integer packtest_two_titan(lua_State *L, Udata *_mod, CClosure *_fn, TString* *_outparam_2);
 ```
 
 A Titan-to-Titan call is therefore an ordinary C call — no Lua stack
@@ -235,8 +239,9 @@ companion `static int <name>_lua(lua_State *L)` with the standard
 `calling Titan function %s with %d arguments, but expected %d`), installs
 the runtime's `errorhandler` as `L->errfunc` for the duration of the
 call, recovers the called closure as `_fn = clCvalue(s2v(func))` and
-`_mod = clCvalue(&_fn->upvalue[0])` from it (so a closure entered from Lua
-still reaches its own captures), checks and converts each argument with
+`_mod = uvalue(&_fn->upvalue[0])` from it (the module value is a `Udata`;
+so a closure entered from Lua still reaches its own captures), checks and
+converts each argument with
 `checkandget`, reserves one stack slot per return value, calls the native
 function (passing `_fn` so a closure body can read its captures), and
 writes the results back with `setwrapped` (which hands records to Lua as
@@ -254,10 +259,10 @@ entry wrapper, with `upvalue[0]=_mod`, `upvalue[1]=`function-type tag,
 captured variable**, giving the layout
 
 ```
-upvalue[0]     = _mod                  (module closure, captured lexically)
+upvalue[0]     = _mod                  (the module Udata, captured lexically)
 upvalue[1]     = function-type tag     (light userdata)
 upvalue[2]     = native entry ptr      (light userdata)
-upvalue[3 + i] = captured variable i   (a box CClosure, or a copied value)
+upvalue[3 + i] = captured variable i   (a box, or a copied value)
 ```
 
 so the constant `3` separates the closure header from the captures, and a
@@ -348,32 +353,42 @@ bumps `TITAN_VER` from **0.5 to 0.6** (`titan-runtime/titan.h`), which
 also changes the compiled-module search-path suffix. All dependency `.so`s
 must be recompiled against 0.6.
 
+A later change bumped `TITAN_VER` again, **0.6 to 0.7**: record instances
+and module state (`_mod`) collapsed from a `CClosure`+`Udata` pair to a
+single `Udata`, so `_mod` and every record-typed parameter/return/`self`
+changed C type (`CClosure*`→`Udata*`) and `<mangled>_init` now returns
+`Udata*` — all cross-`.so` ABI points. 0.6 and 0.7 `.so`s are likewise
+ABI-incompatible and live under different `TITAN_PATH` directories.
+
 ## The module protocol
 
-All per-Lua-state module state lives in one `CClosure` (`_mod`) created
-by `_init`: `upvalue[0]` is the Lua-visible module table; the remaining
-upvalues hold module variables, imported modules' closures, and cached
-record metatables (allocation order below). Every generated function
-receives this closure as its `_mod` parameter; the Lua wrappers recover
-it from their closure upvalue. Around `_mod`, each module exports three
-protocol symbols:
+All per-Lua-state module state lives in one `Udata` (`_mod`) created by
+`_init`: user value 0 is reserved/unused (it once held the Lua-visible
+module table, now gone); the remaining user values hold module variables,
+imported modules' `Udata`s, exported-function canonical closures, cached
+record metatables and per-record static-namespace tables (allocation
+order below). Every generated function receives this `Udata` as its
+`_mod` parameter; the Lua wrappers recover it from their closure's
+upvalue 0. Around `_mod`, each module exports three protocol symbols:
 
 ### `<prefix>_init` — idempotent at two levels
 
 ```c
 static int _initialized = 0; /* tags and external functions are set up */
-CClosure *counter_init(lua_State *L) {
+Udata *counter_init(lua_State *L) {
     lua_checkstack(L, 10);
     lua_getfield(L, LUA_REGISTRYINDEX, "Titan module counter");
     if(lua_isnil(L, -1)) {
         _initialized = 1;
-        /* create and register _mod; $LOADMODULES1 (dlopen dynamic deps),
-           $INITMODULES (dep inits), $INITRECORDS (record metatables),
-           $INITVARS (variable initializers); module table into upvalue[0];
-           install functions; $CREATEMETA (variable metatable); $INITTAGS */
+        /* create and register _mod (luaS_newudata(L, 0, NUPVALS));
+           $LOADMODULES1 (dlopen dynamic deps), $INITMODULES (dep inits),
+           $INITRECORDS (record metatables), $INITVARS (variable
+           initializers); install functions and record namespaces into
+           their uv slots; $CREATEMETA (member metatable on the udata);
+           $INITTAGS */
         return _mod;
     } else {
-        CClosure *_mod = clCvalue(s2v(L->top.p - 1));
+        Udata *_mod = uvalue(s2v(L->top.p - 1));
         lua_pop(L, 1);
         if(!_initialized) {
             _initialized = 1;
@@ -387,12 +402,12 @@ CClosure *counter_init(lua_State *L) {
 
 Idempotency works at two independent levels:
 
-* **Per Lua state**: the module closure is registered in the Lua registry
+* **Per Lua state**: the module `Udata` is registered in the Lua registry
   under `"Titan module <modname>"`; a second `require`, or a dependent
   module calling `_init` again, finds it and returns it untouched. A
   second Lua *state* in the same process misses the registry and gets a
-  fresh closure, module table and metatables — there is no per-state C
-  global state, so one compiled module serves many states.
+  fresh `Udata` and metatables — there is no per-state C global state, so
+  one compiled module serves many states.
 * **Per process / translation unit**: the C `static int _initialized`
   guards the genuinely process-global pieces — record-tag statics and
   dlsym'd function pointers. This branch matters when the *same module's
@@ -414,11 +429,12 @@ would still re-emit their handles.)
 ### `luaopen_<prefix>` and `<prefix>_types`
 
 `luaopen_<mangled-modname>` is what `require` finds: it calls `_init` and
-pushes `mod->upvalue[0]` — so **`require` returns a plain Lua table**,
-holding one C closure per exported function and one subtable per record
-(carrying its statics), with exported variables served by the module
-table's metatable. `<prefix>_types` is the separate-compilation
-interface:
+pushes the module `Udata` itself — so **`require` returns a userdata**,
+not a table, with **no separate module table at all**. Its members —
+exported functions, exported variables, and one static-namespace table
+per record (carrying its statics) — are all served by a metatable on the
+`Udata` ([Lua interop internals](lua-interop-internals.md)).
+`<prefix>_types` is the separate-compilation interface:
 
 ```c
 int counter_types(lua_State* L) {
@@ -449,8 +465,8 @@ calls — each cross-module function used gets an `extern` prototype in
 `$INCLUDES`, and the dep's init is declared and called directly:
 
 ```c
-extern CClosure *dep_init(lua_State *L);
-/* in _init: */ { CClosure *_m = dep_init(L); setclCvalue(L, &_mod->upvalue[1], _m); }
+extern Udata *dep_init(lua_State *L);
+/* in _init: */ { Udata *_m = dep_init(L); setuvalue(L, &_mod->uv[1].uv, _m); }
 ```
 
 **Dynamic** (`.so`-only dep): each imported function is declared in
@@ -460,43 +476,47 @@ runtime's `loadlib`/`loadsym` (`titan-runtime/titan.c`: Titan-path
 search, registry-cached handles, Lua error on failure):
 
 ```c
-static CClosure* (*dep_mk_titan)(lua_State *L, CClosure *_mod, CClosure *_fn, lua_Integer);
+static Udata* (*dep_mk_titan)(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer);
 /* in _init ($LOADMODULES1), at first init in the process: */
 void *dep_handle = loadlib(L, "dep.so");
-dep_mk_titan = titan_cast_func(CClosure* (*)(lua_State *L, CClosure *_mod, CClosure *_fn, lua_Integer),
+dep_mk_titan = titan_cast_func(Udata* (*)(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer),
                                loadsym(L, dep_handle, "dep_mk_titan"));
 ```
 
 The dep's `_init` is fetched and called the same way inside
 `$INITMODULES`. In both regimes the *call sites are identical* C calls —
 only the storage class of the callee name differs — and the caller passes
-the callee's module closure read from its own upvalue and `NULL` for the
-direct-call `_fn`: `dep_mk_titan(L, clCvalue(&_mod->upvalue[1]), NULL, 7)`.
+the callee's module `Udata` read from its own user value and `NULL` for
+the direct-call `_fn`: `dep_mk_titan(L, uvalue(&_mod->uv[1].uv), NULL, 7)`.
 Record tags and
 metatables of imported records are not wired through symbols at all: they
 synchronize through the Lua registry at init time (`"Titan record <fqtn>
 tag"` / `"... metatable"`; [Lua interop internals](lua-interop-internals.md)).
 
-## Upvalue allocation
+## User-value allocation
 
-`allocate_upvalues` assigns `_mod` upvalue slots before any code is
-generated. `nextupvalue` pre-increments from 0, so slot 0 is always the
-module table; then come **exported (non-`local`) module variables, in
-declaration order** (slots 1..n); then local module variables and
-imports, in declaration order; and finally, lazily during codegen, record
-metatables (`type2metatable`) and the module closures needed only for
-cross-module *method* calls (`ctx.modules`), both filled in by
-`init_data_from_other_modules`.
+`allocate_upvalues` assigns `_mod` user-value slots before any code is
+generated. `nextupvalue` pre-increments from 0, so slot 0 is always
+reserved/unused (it kept the slot the now-removed module table held);
+then come **exported (non-`local`) module variables, in declaration
+order** (slots 1..n); then local module variables, imports and
+exported-function canonical closures, in declaration order; and finally,
+lazily during codegen, record metatables (`type2metatable`), per-record
+static-namespace tables, and the module `Udata`s needed only for
+cross-module *method* calls (`ctx.modules`), all filled in by
+`init_data_from_other_modules`. The late-group record-namespace slots
+come *after* the importer-visible variable and function slots, so adding
+them does not perturb the ABI slot math.
 
 Exported variables come first because their slot numbers are part of the
 module's ABI: an importing module never sees this module's AST — in
-`import_module` it recomputes the variables' upvalue indices on its own,
-by numbering the `Type.ModuleVariable` members of the *serialized
-interface* 1..n in order. Cross-module variable access then compiles to a
-direct slot read, `clCvalue(&_mod->upvalue[MOD])->upvalue[VAR]`, with no
-name lookup; if local variables or imports could claim earlier slots, the
-importer's numbering would diverge from reality. (The module metatable's
-name→slot varmap, serving the same variables to Lua, bakes in the same
+`import_module` it recomputes the variables' slot indices on its own, by
+numbering the `Type.ModuleVariable` members of the *serialized interface*
+1..n in order. Cross-module variable access then compiles to a direct
+slot read, `uvalue(&_mod->uv[MOD].uv)->uv[VAR].uv`, with no name lookup;
+if local variables or imports could claim earlier slots, the importer's
+numbering would diverge from reality. (The module metatable's name→slot
+member map, serving the same variables to Lua, bakes in the same
 indices.) Record *tags*, by contrast, live in plain C statics because
 their value is identical across all instances of the module in a state,
 while record *metatables* are per-Lua-state objects and must live in

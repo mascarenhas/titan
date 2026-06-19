@@ -68,7 +68,7 @@ fits, such as `integer?`).
 
 By default a top-level function is **exported**: it becomes part of the
 module's interface, callable from other Titan modules that `import` this
-one and from Lua through the module table returned by `require`.
+one and from Lua as a member of the module value returned by `require`.
 Prefixing the declaration with `local` makes the function private to the
 module:
 
@@ -84,9 +84,9 @@ end
 ```
 
 A `local` function does not appear in the module's type, is invisible to
-importing Titan modules and to Lua (`require "geometry"` yields a table
-with `dist2` but no `square`), and the compiler does not even generate
-the Lua-side entry code for it. See [Modules](modules.md) for module
+importing Titan modules and to Lua (`require "geometry"` yields a module
+value with `dist2` but no `square`), and the compiler does not even
+generate the Lua-side entry code for it. See [Modules](modules.md) for module
 interfaces and [Lua interoperability](lua-interop.md) for what exported
 functions look like from Lua.
 
@@ -376,8 +376,8 @@ The rules:
   <other module>)`.
 * `main` should not be declared `local`: a `local main` still selects
   executable mode, but the generated program starts by requiring the
-  module and looking up `main` in its module table, where a `local`
-  function never appears, so the program fails at startup with
+  module and looking up `main` as a member of the module value, where a
+  `local` function never appears, so the program fails at startup with
   `attempt to call a nil value (field 'main')`.
 
 At run time, `args` holds the command-line arguments: `args[1]` through

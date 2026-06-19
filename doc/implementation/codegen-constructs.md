@@ -40,10 +40,11 @@ A local the checker marked unused generates only `$CSTATS ((void)$CEXP);`
 — the initializer still runs. Parameters (`_param_<name>`) rely on the
 *caller's* anchoring and get a `_paramslot_<name>` only if assigned to
 inside the function (`param._assigned`). Module variables live in `_mod`
-upvalues: reads are `getslot` from `&_mod->upvalue[i]`, writes add
-`luaC_barrier(L, _mod, <slot>);` for GC-able types; imported-module
-variables go through the import's closure
-(`clCvalue(&_mod->upvalue[MOD])->upvalue[VAR]`) with the same barrier.
+user values: reads are `getslot` from `&_mod->uv[i].uv`, writes add
+`luaC_barrierback(L, obj2gco(_mod), <slot>);` for GC-able types (a
+userdata owner, back barrier); imported-module variables go through the
+import's `Udata` (`uvalue(&_mod->uv[MOD].uv)->uv[VAR].uv`) with the same
+barrier.
 
 **Multiple assignment is two-phase** (`codemultiassignment`): every
 right-hand side is evaluated into a fresh temporary first, then all
@@ -304,71 +305,70 @@ slot, `set_table_entry` per entry plus the back barrier — but with no
 
 ### Construction (`coderecord`)
 
-Two allocations in a fixed sequence (real output for `Point.new`; the
-layout's rationale is in [values and the GC](values-and-gc.md)):
+One allocation (real output for `Point.new`; the layout's rationale is in
+[values and the GC](values-and-gc.md)):
 
 ```c
-_tmp_1 = luaF_newCclosure(L, 3);               /* #fields + 1 upvalues */
-memset(_tmp_1->upvalue, 0, sizeof(TValue) * 3);
-setclCvalue(L, _tmp_1_slot, _tmp_1);           /* anchor closure FIRST */
 {
-    Udata* _ud = luaS_newudata(L, sizeof(void*), 1);
+    Udata* _ud = luaS_newudata(L, sizeof(void*), 3);  /* #fields + 1 user values */
+    setuvalue(L, _tmp_1_slot, _ud);                   /* anchor the udata FIRST */
     *((void**)(getudatamem(_ud))) = (void*)test_Point_typetag;
-    _ud->metatable = hvalue(&_mod->upvalue[1]);
-    setclCvalue(L, &_ud->uv[0].uv, _tmp_1);    /* user value -> closure */
-    setuvalue(L, &(_tmp_1->upvalue[0]), _ud);  /* upvalue[0] -> udata  */
-    /* an emergency GC inside luaS_newudata can blacken the
-       closure, so this store needs a forward barrier */
-    luaC_barrier(L, _tmp_1, &(_tmp_1->upvalue[0]));
+    _ud->metatable = hvalue(&_mod->uv[1].uv);
+    /* per field i: setobj2t(L, &(_ud->uv[i].uv), $SLOT), then
+       luaC_barrierback(L, obj2gco(_ud), &(_ud->uv[i].uv)) for GC-able
+       field types */
 }
 ```
 
-The closure is anchored *before* `luaS_newudata` can collect, and the
-quoted comment explains the barrier on a store into a brand-new object.
-Field initializers each go through an anchored temp and
-`setobj2t(L, &(_tmp_1->upvalue[i]), $SLOT);`, plus
-`luaC_barrier(L, _tmp_1, $SLOT);` for GC-able field types.
+The udata is anchored *before* any field expression can collect (no
+second allocation to order, and no closure↔udata cross-link to install).
+`uv[0]` is left unused so field indices stay 1-based; field initializers
+each go through an anchored temp and a `setobj2t` into `&(_ud->uv[i].uv)`
+plus a **back** barrier (the owner is a userdata) for GC-able field types.
 
 ### Field access
 
-A read is an indexed load from the closure — no hashing, no metatable:
-`return fltvalue(&((__self__)->upvalue[1]));`. A write is the upvalue
-store plus a *forward* barrier (CClosure owner, unlike table stores):
+A read is an indexed load from the udata — no hashing, no metatable:
+`return fltvalue(&((__self__)->uv[1].uv));`. A write is the user-value
+store plus a *back* barrier (`Udata` owner, like table stores, unlike
+closure stores):
 
 ```c
-CClosure *_recobj = _param_p;
-TValue *_fieldslot = &(_recobj->upvalue[1]);
+Udata *_recobj = _param_p;
+TValue *_fieldslot = &(_recobj->uv[1].uv);
 setfltvalue(_fieldslot, _param_v);
-/* + luaC_barrier(L, _recobj, _fieldslot); for GC-able fields */
+/* + luaC_barrierback(L, obj2gco(_recobj), _fieldslot); for GC-able fields */
 ```
 
 ### Method and static calls
 
 Within a module, `p:getx()` is a **direct C call** under the native
-convention, self passed as the raw `CClosure*` right after `_mod`:
+convention, self passed as the raw `Udata*` right after `_mod` (and the
+`_fn` slot):
 
 ```c
-return test_Point_getx_titanmethod(L, _mod, _param_p);
+return test_Point_getx_titanmethod(L, _mod, NULL, _param_p);
 ```
 
 (naming: `<mangled-fqtn>_<name>_titanmethod` / `..._titanstatic`).
 Cross-module calls are still direct C calls — the caller holds the
-target module's closure in one of its own upvalues and passes
-`clCvalue(&_mod->upvalue[i])` as the callee's `_mod`; statically linked
+target module's `Udata` in one of its own user values and passes
+`uvalue(&_mod->uv[i].uv)` as the callee's `_mod`; statically linked
 dependencies become `extern` prototypes, while `.so`-only dependencies
 become `static` **function pointers** stitched in `_init` from the
 dlopened library:
 
 ```c
-static CClosure* (*dep_mk_titan)(lua_State *L, CClosure *_mod, lua_Integer);
+static lua_Integer (*dep_mk_titan)(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer);
 /* in _init: */
-dep_mk_titan = titan_cast_func(CClosure* (*)(lua_State *L, CClosure *_mod, lua_Integer),
+dep_mk_titan = titan_cast_func(lua_Integer (*)(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer),
                                loadsym(L, dep_handle, "dep_mk_titan"));
 ```
 
-Records cross the Lua boundary as their Udata (`setwrapped`); coming
-back, `checkandget` verifies the embedded tag pointer and recovers the
-closure from `uv[0].uv` ([Lua interop internals](lua-interop-internals.md)).
+Records cross the Lua boundary unchanged — the value Titan computes with
+*is* the Udata Lua sees (`setwrapped`); coming back, `checkandget`
+verifies the embedded tag pointer and uses the udata directly
+([Lua interop internals](lua-interop-internals.md)).
 
 ## Strings
 
@@ -600,7 +600,7 @@ Boolean and `value` targets never throw — every Lua value converts.
 Wrapper arity errors use
 `calling Titan function %s with %d arguments, but expected %d`, and the
 module metatable raises
-`global variable '%s' does not exist in Titan module '%s'`. Whenever an
+`member '%s' does not exist in Titan module '%s'`. Whenever an
 error crosses a Lua entry wrapper, the runtime's `errorhandler` records
 a C-level backtrace retrievable via `titan.backtrace()`
 ([error handling](../language/error-handling.md)).

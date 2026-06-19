@@ -15,17 +15,23 @@ does and does not work in each direction.
 
 Compiling a module produces a shared library that a stock Lua interpreter
 can load with `require` (see [Modules](modules.md) for the compilation
-model and search paths). `require` returns a plain Lua table containing:
+model and search paths). `require` returns a **userdata** — the module
+value — whose members you access exactly like table fields (`m.f`, `m.v`,
+`m.v = x`, `m.Rec.new`), but served through a metatable. The members are:
 
 * **one function per exported Titan function** (and nothing for functions
-  declared `local` — they are invisible to Lua);
-* **one subtable per record type**, holding the record's static functions —
-  in particular the automatically generated constructor, so
-  `mod.Point.new(2, 3)` works from Lua (see [Records](records.md));
-* **exported module variables**, which are *not* stored in the table
-  itself but served through its metatable, so that reads always see the
-  current value and writes are type-checked (see
-  [Module variables from Lua](#module-variables-from-lua) below).
+  declared `local` — they are invisible to Lua), returned read-only;
+* **one namespace per record type**, a small table holding the record's
+  static functions — in particular the automatically generated
+  constructor, so `mod.Point.new(2, 3)` works from Lua (see
+  [Records](records.md));
+* **exported module variables**, read and written through the metatable
+  so that reads always see the current value and writes are type-checked
+  (see [Module variables from Lua](#module-variables-from-lua) below).
+
+Because the module value is a userdata, `type(require "m")` is
+`"userdata"`, not `"table"`; functions and record namespaces are
+read-only (assigning to them errors).
 
 ```lua
 -- counter.titan          -- Titan
@@ -50,7 +56,7 @@ counter.count = 100
 print(counter.bump(1))    --> 101
 ```
 
-The module table's metatable is protected: `getmetatable` on it returns
+The module value's metatable is protected: `getmetatable` on it returns
 the string `"Titan module counter"`, and `setmetatable` on it fails.
 
 ## How values map between the two languages
@@ -261,8 +267,8 @@ like an object:
 * **Unknown fields** raise
   `file:line:col: field 'name' not found in record 'mod.Rec'` on both
   read and write — there is no Lua-style `nil` for missing fields.
-* **Statics**, including the generated `new`, are reached through the
-  module table: `mod.Point.new(2, 3)`.
+* **Statics**, including the generated `new`, are reached as a member of
+  the module value: `mod.Point.new(2, 3)`.
 
 ```lua
 -- test.titan             -- Titan
@@ -302,10 +308,11 @@ where a record is expected is a run-time error naming both types:
 ## Module variables from Lua
 
 Exported (non-`local`) module variables are readable and writable from
-Lua through the module table, as in the `counter` example above. Reads
-always observe the current value — including changes made by Titan code —
-and writes made from Lua are immediately visible to Titan, because both
-sides share one storage location. Writes are type-checked at run time:
+Lua as members of the module value, as in the `counter` example above.
+Reads always observe the current value — including changes made by Titan
+code — and writes made from Lua are immediately visible to Titan, because
+both sides share one storage location. Writes are type-checked at run
+time:
 
 ```lua
 -- counter.titan          -- Titan
@@ -324,11 +331,11 @@ counter.count = "lots"
 ```
 
 Accessing a module member that does not exist raises
-`global variable 'name' does not exist in Titan module 'counter'` rather
-than returning `nil`. (Exception: a module that exports *no* variables
-has no metatable on its table, so unknown reads return `nil`, Lua-style.)
+`member 'name' does not exist in Titan module 'counter'` rather than
+returning `nil`. (Exception: a module that exports *nothing at all* has
+no metatable, so it has no members to reach.)
 
-Module variables declared `local` do not appear in the module table at
+Module variables declared `local` are not members of the module value at
 all; they are private to the module (see [Modules](modules.md)).
 
 ## Calling Lua from Titan
@@ -420,7 +427,7 @@ option-type idiom for recoverable failures.
 ## Multiple Lua states
 
 A Titan module keeps no instance state in C globals: everything a module
-instance owns (its variables, its module table, its record metatables)
+instance owns (its variables, its module userdata, its record metatables)
 lives inside one Lua state. Consequently:
 
 * The same compiled module can be loaded into **several Lua states in the
