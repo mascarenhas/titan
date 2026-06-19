@@ -495,21 +495,26 @@ checkstat = util.make_visitor({
             -- Collect this return's value types (forced, never option, exactly
             -- as `local x = exp` inference does) for later unification, instead
             -- of checking against fixed return types.
-            local rettypes = {}
-            for i, exp in ipairs(node.exps) do
+            for _, exp in ipairs(node.exps) do
                 checkexp(exp, st, errors)
-                exp = tryforce(exp)
-                node.exps[i] = exp
-                rettypes[i] = exp._type
             end
+            -- Harvest the extra values of a trailing multi-return call BEFORE
+            -- forcing any expression: tryforce wraps an option-typed first
+            -- return in an ExpCast that does not carry `_types`, so forcing
+            -- first would drop the trailing returns (mirrors the non-infer
+            -- branch's ordering below).
             local lastexp = node.exps[#node.exps]
             if lastexp and lastexp._types and #lastexp._types > 1 then
                 for i = 2, #lastexp._types do
-                    local extra = ast.ExpExtra(lastexp.loc, lastexp, i,
-                        lastexp._types[i])
-                    table.insert(node.exps, extra)
-                    rettypes[#node.exps] = extra._type
+                    table.insert(node.exps,
+                        ast.ExpExtra(lastexp.loc, lastexp, i, lastexp._types[i]))
                 end
+            end
+            local rettypes = {}
+            for i, exp in ipairs(node.exps) do
+                exp = tryforce(exp)
+                node.exps[i] = exp
+                rettypes[i] = exp._type
             end
             table.insert(frame.collected, { loc = node.loc, rettypes = rettypes })
             return true
@@ -1579,9 +1584,18 @@ function checkfuncbody(node, st, errors, opts)
     end
     local ptypes = node._type.params
     local pnames = {}
-    for _, rettype in ipairs(node._type.rettypes) do
-        checktype(rettype, node.loc, errors)
+    for i, rettype in ipairs(node._type.rettypes) do
+        -- Report an invalid return type at the precise return-type node when one
+        -- exists (top-level functions/methods); a lambda's `node.rettypes` may be
+        -- `false` (inferred) or shorter, so fall back to the function location.
+        local rloc = (node.rettypes and node.rettypes[i] and node.rettypes[i].loc)
+            or node.loc
+        checktype(rettype, rloc, errors)
     end
+    -- A lambda (Ast.ExpFunction) has no `name`; describe it generically in the
+    -- duplicate-parameter diagnostic instead of printing "function 'nil'".
+    local fdesc = node.name and ("declaration of function '" .. node.name .. "'")
+        or "anonymous function"
     for i, param in ipairs(node.params) do
         param._type = ptypes[i]
         param._funcdepth = #func_stack
@@ -1589,8 +1603,7 @@ function checkfuncbody(node, st, errors, opts)
         checktype(param._type, param.loc, errors)
         if pnames[param.name] then
             checker.typeerror(errors, node.loc,
-                "duplicate parameter '%s' in declaration of function '%s'",
-                param.name, node.name)
+                "duplicate parameter '%s' in %s", param.name, fdesc)
         else
             pnames[param.name] = true
         end

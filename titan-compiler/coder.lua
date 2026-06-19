@@ -3107,12 +3107,23 @@ local function codefuncdec(tlcontext, node)
     end
     local cparams = { "lua_State *L", "CClosure *_mod", "CClosure *_fn" }
     if node._tag == "Ast.TopLevelMethod" then
-        node._self._cvar = "__self__"
-        if node._self._assigned then
-            node._self._slot = "__selfslot__"
-            table.insert(stats, newslot(ctx, node._self._slot))
+        -- `self` is a real Decl that capture analysis can mark captured/assigned,
+        -- so it is treated exactly like a parameter: anchored when a gc-typed and
+        -- assigned self, and boxed when captured-and-mutated by a nested lambda.
+        local self = node._self
+        self._cvar = "__self__"
+        self._boxed = self._captured and self._assigned
+        if types.is_gc(self._type) and self._assigned then
+            self._slot = "__selfslot__"
+            table.insert(stats, newslot(ctx, self._slot))
+            -- anchor the incoming gc self before the box allocation (which can
+            -- trigger GC), so a reassigned/captured self stays live
+            table.insert(stats, setslot(self._type, self._slot, self._cvar))
         end
-        table.insert(cparams, ctype(node._self._type) .. " " .. node._self._cvar)
+        if self._boxed then
+            table.insert(stats, codeboxparam(ctx, self))
+        end
+        table.insert(cparams, ctype(self._type) .. " " .. self._cvar)
     end
     for _, param in ipairs(node.params) do
         param._cvar = "_param_" .. param.name
