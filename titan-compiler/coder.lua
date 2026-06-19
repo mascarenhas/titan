@@ -100,10 +100,6 @@ local function mangle_qn(qualname)
     return qualname:gsub("[%-.]", "_")
 end
 
-local function tagname(fqtn)
-    return mangle_qn(fqtn) .. "_typetag"
-end
-
 local function fname_prefix(typ)
     return mangle_qn(typ.fqtn) .. "_" .. typ.name
 end
@@ -149,24 +145,17 @@ local function func_luaname(modname, name)
     return modprefix(modname) .. name .. "_lua"
 end
 
--- get name of the variable holding the tag for this type
-local function type2tagname(ctx, typ --[[:table]])
-    local mod, name = typ.fqtn:match("^(.*)%.(%a+)$")
-    local mangled = tagname(typ.fqtn)
-    if mod == ctx.module then
-        -- local tag
-        return mangled
-    else
-        -- imported tag
-        ctx.tags[typ.fqtn] = { module = mod, type = name, mangled = mangled }
-        return mangled
-    end
-end
-
--- get name of the variable holding the metatable for this type
+-- get name of the variable holding the metatable for this type.
+-- `ctx` may be a per-function context (has `.tlcontext`) or the top-level
+-- tlcontext itself — genluaentry passes the latter into checkandget when
+-- coercing a Lua-facing record parameter, and that may be the first use of the
+-- type's metatable. Resolve the tlcontext either way (`ctx.metatables` is the
+-- same shared table in both); allocating the slot here is safe because it
+-- happens before init_data_from_other_modules emits the per-state recovery.
 local function type2metatable(ctx, typ --[[:table]])
+    local tlcontext = ctx.tlcontext or ctx
     if not ctx.metatables[typ.fqtn] then
-        ctx.metatables[typ.fqtn] = nextupvalue(ctx.tlcontext)
+        ctx.metatables[typ.fqtn] = nextupvalue(tlcontext)
     end
     return ctx.metatables[typ.fqtn]
 end
@@ -292,13 +281,13 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
         return render([[
             if (TITAN_LIKELY(ttisfulluserdata($EXP))) {
               Udata* _ud = uvalue($EXP);
-              void *_tag = *((void**)(getudatamem(_ud)));
-              if (TITAN_LIKELY($TAG == _tag)) {
+              if (TITAN_LIKELY(_ud->metatable == $MT)) {
                 $VAR = _ud;
               } else {
-                lua_pushlightuserdata(L, _tag);
-                if(lua_rawget(L, LUA_REGISTRYINDEX) == LUA_TNIL) {
-                    setuvalue(L, s2v(L->top.p), _ud);
+                lua_pushlightuserdata(L, (void*)_ud->metatable);
+                if (lua_rawget(L, LUA_REGISTRYINDEX) == LUA_TNIL) {
+                    lua_pop(L, 1);
+                    setuvalue(L, s2v(L->top.p), _ud); L->top.p++;
                     $THROWNIL
                 } else {
                     $THROWUD
@@ -308,7 +297,7 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
               $THROWPRIM
             }
         ]], {
-            TAG = type2tagname(ctx, typ),
+            MT = render("hvalue(&_mod->uv[$I].uv)", { I = c_integer_literal(type2metatable(ctx, typ)) }),
             FILE = c_string_literal(loc.filename),
             LINE = c_integer_literal(loc.line),
             COL = c_integer_literal(loc.col),
@@ -505,8 +494,8 @@ end
 
 -- A record value is now the Udata held directly in the slot, so for every type
 -- (nominal, option-of-nominal, or otherwise) the slot already holds the final
--- TValue to copy out verbatim.
-local function copyslotwrapped(typ, dst, src)
+-- TValue to copy out verbatim — no type dispatch needed (unlike setwrapped).
+local function copyslotwrapped(dst, src)
     return render([[
         setobj2t(L, $DST, $SRC);
     ]], {
@@ -604,7 +593,6 @@ local function newcontext(tlcontext)
         dstack = {}, -- stack of stack depths
         prefix = tlcontext.prefix, -- prefix for module member functions and variables
         names = {}, -- map of names to autoincrement suffixes for disambiguation,
-        tags = tlcontext.tags,             -- set of external record types that we need tags of
         metatables = tlcontext.metatables, -- set of record metatables that we need
         functions = tlcontext.functions, -- set of external functions and methods that we call
         variables = tlcontext.variables, -- set of external variables that we use
@@ -2101,15 +2089,14 @@ local function coderecord(ctx, node, target)
         ctmp, tmpname, tmpslot = newtmp(ctx, node._type, true)
     end
     -- The record value IS the Udata: one allocation, fields in user values
-    -- (1-based indices verbatim; uv[0] unused), type tag in the raw payload,
-    -- metatable straight on the udata. luaS_newudata returns the object already
-    -- nil-filled and white, and we anchor it via setuvalue immediately, so the
-    -- half-built record is reachable before any field is evaluated; each gc
-    -- field store uses the back barrier to keep it honest.
+    -- uv[0..N-1] (0-based), type identity is the udata's metatable (no raw
+    -- payload), metatable straight on the udata. luaS_newudata returns the
+    -- object already nil-filled and white, and we anchor it via setuvalue
+    -- immediately, so the half-built record is reachable before any field is
+    -- evaluated; each gc field store uses the back barrier to keep it honest.
     cinit = render([[
         $CTMP
-        $TMPNAME = luaS_newudata(L, sizeof(void*), $NUSERVALUES);
-        *((void**)(getudatamem($TMPNAME))) = (void*)$TAG;
+        $TMPNAME = luaS_newudata(L, 0, $NUSERVALUES);
         $TMPNAME->metatable = hvalue(&_mod->uv[$META].uv);
         setuvalue(L, $TMPSLOT, $TMPNAME);
     ]], {
@@ -2117,7 +2104,6 @@ local function coderecord(ctx, node, target)
         TMPNAME = tmpname,
         TMPSLOT = tmpslot,
         NUSERVALUES = #record.fields,
-        TAG = type2tagname(ctx, node._type),
         META = c_integer_literal(type2metatable(ctx, node._type))
     })
     table.insert(stats, cinit)
@@ -3824,7 +3810,7 @@ local function codevardec(ctx, initvars, switch_get, switch_set, gvar_map, node)
             }
         ]], {
             I = c_integer_literal(node._upvalue),
-            COPYSLOT = copyslotwrapped(node._type, "s2v(L->top.p - 1)", node._slot)
+            COPYSLOT = copyslotwrapped("s2v(L->top.p - 1)", node._slot)
         }))
         table.insert(switch_set, render([[
             case $I: {
@@ -3901,17 +3887,15 @@ Udata *$INITNAME(lua_State *L) {
         $INITFUNCTAGS
         $FUNCS
         $CREATEMETA
-        $INITTAGS
         return _mod;
     } else {
         Udata *_mod = uvalue(s2v(L->top.p - 1));
         lua_pop(L, 1);
         if(!_initialized) {
             _initialized = 1;
-            /* set up tag cache and functions from shared libraries */
+            /* set up function-type tags and functions from shared libraries */
             $LOADMODULES2
             $INITFUNCTAGS
-            $INITTAGS
         }
         return _mod;
     }
@@ -3978,7 +3962,7 @@ local function import_module(loadmods, initmods, sigs, mprefixes, dynamic, node)
     end
 end
 
-local function init_data_from_other_modules(tlcontext, includes, loadmods, initmetas, inittags, mprefixes, static_deps)
+local function init_data_from_other_modules(tlcontext, includes, loadmods, initmetas, mprefixes, static_deps)
     -- When linking dynamically, we need to make 'static' variables and load the values
     -- from the other module's dynamic library
     -- When linking statically, we only need to make 'extern' forward declarations.
@@ -4023,18 +4007,6 @@ local function init_data_from_other_modules(tlcontext, includes, loadmods, initm
         end
     end
 
-    for name, tag in pairs(tlcontext.tags) do
-        table.insert(includes, "static const void *" .. tag.mangled .. ";")
-        table.insert(inittags, render([[
-            lua_getfield(L, LUA_REGISTRYINDEX, "Titan record $TYPE tag");
-            $TAG = lua_topointer(L, -1);
-            lua_pop(L, 1);
-        ]], {
-            TAG = tag.mangled,
-            TYPE = name,
-        }))
-    end
-
     for fqtn, upvalue in pairs(tlcontext.metatables) do
         table.insert(initmetas, render([[
             luaL_getmetatable(L, "Titan record $TYPE metatable");
@@ -4060,7 +4032,7 @@ local function init_data_from_other_modules(tlcontext, includes, loadmods, initm
     end
 end
 
-local function coderecorddec(ctx, code, initrecs, inittags, node)
+local function coderecorddec(ctx, code, initrecs, node)
     -- (the type tag is forward-declared up front in generate(), so that
     -- forward/mutually-recursive record field types resolve)
     local fieldmap, getswitch, setswitch = {}, {}, {}
@@ -4110,10 +4082,11 @@ local function coderecorddec(ctx, code, initrecs, inittags, node)
         table.insert(code, render([[
             static int __index_$RECNAME(lua_State *L) {
                 TValue *_recslot = s2v(L->ci->func.p + 1);
+                CClosure *_func = clCvalue(s2v(L->ci->func.p));
+                Udata *_mod = uvalue(&_func->upvalue[1]);
                 Udata *_rec = NULL;
                 $CHECKANDGET;
                 TValue *_fieldslot = s2v(L->ci->func.p + 2);
-                CClosure *_func = clCvalue(s2v(L->ci->func.p));
                 Table *_fieldmap = hvalue(&(_func->upvalue[0]));
                 TValue _fieldidxv;
                 lu_byte _fieldtag = luaH_get(_fieldmap, _fieldslot, &_fieldidxv);
@@ -4134,10 +4107,11 @@ local function coderecorddec(ctx, code, initrecs, inittags, node)
             }
             static int __newindex_$RECNAME(lua_State *L) {
                 TValue *_recslot = s2v(L->ci->func.p + 1);
+                CClosure *_func = clCvalue(s2v(L->ci->func.p));
+                Udata *_mod = uvalue(&_func->upvalue[1]);
                 Udata *_rec = NULL;
                 $CHECKANDGET;
                 TValue *_fieldslot = s2v(L->ci->func.p + 2);
-                CClosure *_func = clCvalue(s2v(L->ci->func.p));
                 Table *_fieldmap = hvalue(&(_func->upvalue[0]));
                 TValue _fieldidxv;
                 lu_byte _fieldtag = luaH_get(_fieldmap, _fieldslot, &_fieldidxv);
@@ -4180,45 +4154,36 @@ local function coderecorddec(ctx, code, initrecs, inittags, node)
         }))
     end
     table.insert(initrecs, render([[
+        {
         /* If we are here then this is the first time
            this module is initialized in the current Lua state,
-           so there is no metatable or tag stored for this record */
+           so there is no metatable stored for this record */
         luaL_newmetatable(L, "Titan record $TYPE metatable");
+        const void *_mtp = lua_topointer(L, -1);
         lua_pushliteral(L, "__metatable");
         lua_pushliteral(L, "Titan record $TYPE");
         lua_rawset(L, -3);
         lua_newtable(L);
         $FIELDMAP
         lua_pushliteral(L, "__index");
-        lua_pushvalue(L, -2);
-        lua_pushcclosure(L, __index_$RECNAME, 1);
+        lua_pushvalue(L, -2);            /* fieldmap */
+        titan_pushmodule(L, _mod);       /* _mod as upvalue[1] */
+        lua_pushcclosure(L, __index_$RECNAME, 2);
         lua_rawset(L, -4);
         lua_pushliteral(L, "__newindex");
-        lua_pushvalue(L, -2);
-        lua_pushcclosure(L, __newindex_$RECNAME, 1);
+        lua_pushvalue(L, -2);            /* fieldmap */
+        titan_pushmodule(L, _mod);       /* _mod as upvalue[1] */
+        lua_pushcclosure(L, __newindex_$RECNAME, 2);
         lua_rawset(L, -4);
         lua_pop(L, 2); /* pop fieldmap and metatable */
-        $TAG = &$TAG;
-        /* Index from tag to typename for error messages */
+        /* Index from metatable pointer to typename for error messages */
         lua_pushstring(L, "$TYPE");
-        lua_rawsetp(L, LUA_REGISTRYINDEX, $TAG);
-        /* Store tag in registry for other instances of this record in
-           the current Lua state */
-        lua_pushlightuserdata(L, &$TAG);
-        lua_setfield(L, LUA_REGISTRYINDEX, "Titan record $TYPE tag");
+        lua_rawsetp(L, LUA_REGISTRYINDEX, _mtp);
+        }
     ]], {
         RECNAME = mangle_qn(node._type.name),
-        TAG = tagname(node._type.name),
         TYPE = node._type.name,
         FIELDMAP = table.concat(fieldmap, "\n")
-    }))
-    table.insert(inittags, render([[
-        lua_getfield(L, LUA_REGISTRYINDEX, "Titan record $TYPE tag");
-        $TAG = lua_topointer(L, -1);
-        lua_pop(L, 1);
-    ]], {
-        TAG = tagname(node._type.name),
-        TYPE = node._type.name,
     }))
 end
 
@@ -4288,7 +4253,6 @@ function coder.generate(modname, ast, static_deps)
         prefix = mangle_qn(modname) .. "_",
         variables = {},
         metatables = {},
-        tags = {},
         functions = {},
         modules = {},
         functags = {},       -- canonical function-type string -> { id, key }
@@ -4309,7 +4273,6 @@ function coder.generate(modname, ast, static_deps)
     local foreignimports = {}
     local initmods = {}
     local loadmods = {}
-    local inittags = {}
     local mprefixes = {}
     local initrecs = {}
     local code = {}
@@ -4352,16 +4315,6 @@ function coder.generate(modname, ast, static_deps)
 
     allocate_upvalues(tlcontext, ast)
 
-    -- Forward-declare every record's type tag up front, before any record
-    -- body is emitted, so a record field whose type is a record declared
-    -- LATER (or mutually recursive) does not reference an as-yet-undeclared
-    -- tag in the generated C.
-    for _, node in pairs(ast) do
-        if not node._ignore and node._tag == "Ast.TopLevelRecord" then
-            table.insert(code, "static const void *" .. tagname(node._type.name) .. ";")
-        end
-    end
-
     for _, node in pairs(ast) do
         if not node._ignore then
             local tag = node._tag
@@ -4380,7 +4333,7 @@ function coder.generate(modname, ast, static_deps)
             elseif tag == "Ast.TopLevelVar" then
                 codevardec(initctx, initvars, switch_get, switch_set, gvar_map, node)
             elseif tag == "Ast.TopLevelRecord" then
-                coderecorddec(initctx, code, initrecs, inittags, node)
+                coderecorddec(initctx, code, initrecs, node)
             end
         end
     end
@@ -4623,7 +4576,7 @@ function coder.generate(modname, ast, static_deps)
         TYPES = string.format("%q", types.serialize(ast._type))
     }))
 
-    init_data_from_other_modules(tlcontext, includes, loadmods, initrecs, inittags, mprefixes, static_deps)
+    init_data_from_other_modules(tlcontext, includes, loadmods, initrecs, mprefixes, static_deps)
 
     -- Function-type tags: a per-library `static const void*` each, declared up
     -- front (in $SIGS, ahead of any function body that references it) and set up
@@ -4654,7 +4607,6 @@ function coder.generate(modname, ast, static_deps)
         INITMODULES = table.concat(initmods, "\n"),
         LOADMODULES1 = table.concat(loadmods, "\n"),
         LOADMODULES2 = #loadmods > 1 and table.concat(loadmods, "\n") or "",
-        INITTAGS = table.concat(inittags, "\n"),
         INITFUNCTAGS = table.concat(initfunctags, "\n"),
         INITVARS = table.concat(initvars, "\n"),
         INITRECORDS = table.concat(initrecs, "\n"),

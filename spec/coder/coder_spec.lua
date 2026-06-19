@@ -1995,6 +1995,28 @@ describe("Titan code generator", function()
         ]], [[test.f()]], "expected test.Rec but found number")
     end)
 
+    it("rejects a non-record full userdata where a record is expected", function ()
+        -- The expected-record check must compare the udata's metatable, not read
+        -- a raw tag word out of getudatamem: a full userdata with no record
+        -- storage section (the module value itself, len 0) or a foreign one
+        -- (io.stdout) must error cleanly, never crash / read out of bounds.
+        run_coder([[
+            record Rec
+                x: integer
+            end
+            function f(r: Rec): integer
+                return r.x
+            end
+        ]], [[
+            local ok1, e1 = pcall(test.f, test)
+            assert(not ok1)
+            assert(e1:find("expected test%.Rec but found"))
+            local ok2, e2 = pcall(test.f, io.stdout)
+            assert(not ok2)
+            assert(e2:find("expected test%.Rec but found"))
+        ]])
+    end)
+
     it("calls record method that mutates fields", function ()
         run_coder([[
             record Point

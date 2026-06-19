@@ -119,10 +119,9 @@ declaration plus a `new` static method) generates, in `coderecord`
 
 ```c
 {
-    Udata* _ud = luaS_newudata(L, sizeof(void*), 3);   /* #fields user values */
+    Udata* _ud = luaS_newudata(L, 0, 3);               /* #fields user values, no raw payload */
     setuvalue(L, _tmp_1_slot, _ud);                    /* anchor the udata first */
-    *((void**)(getudatamem(_ud))) = (void*)test_Point_typetag;
-    _ud->metatable = hvalue(&_mod->uv[3].uv);
+    _ud->metatable = hvalue(&_mod->uv[3].uv);          /* this metatable IS the type identity */
     /* per field i: store into &_ud->uv[i].uv, then for GC-able fields
        luaC_barrierback(L, obj2gco(_ud), &_ud->uv[i].uv) */
 }
@@ -139,71 +138,46 @@ The layout:
   `setslot` into `&(_recobj->uv[i].uv)` plus a **back** barrier when the
   field type is GC-able (a userdata owner uses `luaC_barrierback`, see
   [write barriers](#5-write-barriers-back-for-userdata-and-tables-forward-for-closures)).
-* The udata's `sizeof(void*)` raw payload (after the user-value array,
-  reached by `getudatamem`) holds the record's *type tag* (next
-  section); its `metatable` field is set directly from the module user
-  value caching this record's metatable.
+* The udata has **no** raw payload (`luaS_newudata(L, 0, N)`): a record's
+  *type identity* is its `metatable` field (next section), set directly
+  from the module user value caching this record's metatable.
 
 There is no longer a backing `CClosure` and no closure↔udata
 cross-references: the value Titan computes with and the value Lua sees
 are the same object.
 
-### Type tags: address identity, synchronized through the registry
+### Type identity: the metatable pointer
 
-Each record type gets one C static per translation unit that uses it:
+A record's type identity is its **metatable pointer**. Every full
+userdata has a `metatable` field in its header, and each record type has
+exactly one metatable (allocated with `luaL_newmetatable`, per Lua
+state), so two userdata carry the same record type exactly when their
+`metatable` fields are equal. There is no separate tag word, no C static,
+and no per-type registry tag entry: the identity already lives in the
+udata header that Lua maintains anyway.
 
-```c
-static const void *test_Point_typetag;
-```
+This deliberately replaced an earlier scheme that stored a unique
+`void*` "tag" in the udata's raw payload (`luaS_newudata(L, sizeof(void*),
+N)` plus `*((void**)getudatamem(_ud)) = …`) and compared that tag word.
+The problem was **safety**: the check reads `getudatamem(_ud)` only after
+`ttisfulluserdata` passes, but a full userdata with *no* custom storage
+section — a Titan module value (a len-0 userdata), or a foreign-library
+userdata — passes `ttisfulluserdata` while `getudatamem` points *past*
+the object, so reading the tag word is out-of-bounds. The metatable
+pointer is always in bounds: every full userdata has the field, whether
+or not it has a payload, so the check is total.
 
-(`tagname` = `mangle_qn(fqtn) .. "_typetag"`.) In the *defining* module's
-`_init`, the first time the module is initialized in a Lua state, the tag
-is given its value and published (template in `coderecorddec`):
-
-```c
-test_Point_typetag = &test_Point_typetag;   /* tag value = its own address */
-/* Index from tag to typename for error messages */
-lua_pushstring(L, "test.Point");
-lua_rawsetp(L, LUA_REGISTRYINDEX, test_Point_typetag);
-/* Store tag in registry for other instances of this record in
-   the current Lua state */
-lua_pushlightuserdata(L, &test_Point_typetag);
-lua_setfield(L, LUA_REGISTRYINDEX, "Titan record test.Point tag");
-```
-
-Three registry entries per record type (with `$TYPE` the fully qualified
-type name):
+The metatable, being a per-Lua-state heap object, cannot live in a C
+static: it is cached in a `_mod` user value (`type2metatable` allocates
+the slot lazily; `_init` fills it with `luaL_getmetatable`), and the
+type check reads it per-state from there. One registry entry per record
+type survives, plus a metatable-keyed reverse map for error messages
+(with `$TYPE` the fully qualified type name):
 
 | Registry key | Value | Used for |
 | --- | --- | --- |
-| `"Titan record $TYPE tag"` | the tag pointer (light userdata) | tag lookup by other code copies |
-| the tag pointer itself (`lua_rawsetp`) | the FQTN string | the *reverse* map, tag → name, for error messages |
 | `"Titan record $TYPE metatable"` | the metatable (`luaL_newmetatable`) | wiring `_mod` user values; `__metatable` is protected with the string `"Titan record $TYPE"` |
-
-Identity is the *address*: two userdata carry the same record type
-exactly when their payload pointers are equal. Every other copy of code
-that mentions the type — an importing module, or a second instance of
-the defining module's own code in the process (statically linked into
-an executable *and* dlopened as someone's dependency) — has its own
-static, filled by fetching from the registry in its `_init` (the
-`$INITTAGS` block, emitted by `coderecorddec` for own records and
-`init_data_from_other_modules` for imported ones):
-
-```c
-lua_getfield(L, LUA_REGISTRYINDEX, "Titan record test.Point tag");
-test_Point_typetag = lua_topointer(L, -1);
-lua_pop(L, 1);
-```
-
-This is sound because `_init` runs dependency inits (`$INITMODULES`)
-before `$INITTAGS`, so the defining module has always registered first
-— per Lua state, every copy converges on the defining copy's static
-address; as the comment above `allocate_upvalues` puts it, "Tags can be
-stored in C variables, as their value is the same across all instances
-of the module". Record **metatables**, by contrast, are per-Lua-state
-heap objects and cannot live in C statics: they are cached in `_mod`
-user values (`type2metatable` allocates the slot lazily; `_init` fills
-it with `luaL_getmetatable`).
+| the metatable pointer itself (`lua_rawsetp`) | the FQTN string | the *reverse* map, metatable → name, for error messages |
 
 ### Wrap and unwrap at the boundary
 
@@ -211,18 +185,19 @@ Now that a record *is* its userdata, the boundary has nothing to swap:
 Titan and Lua hold the same object. `setwrapped` for a record is just
 `setslot` — it hands Lua the udata directly (for `T?` over a record,
 after a nil check). Coming back, the nominal case of `checkandget`
-verifies the tag and uses the udata as the value:
+compares the udata's metatable against the expected record's metatable
+(read per-Lua-state from the `_mod` user value caching it) and uses the
+udata as the value:
 
 ```c
 if (TITAN_LIKELY(ttisfulluserdata($EXP))) {
   Udata* _ud = uvalue($EXP);
-  void *_tag = *((void**)(getudatamem(_ud)));
-  if (TITAN_LIKELY(test_Point_typetag == _tag)) {
+  if (TITAN_LIKELY(_ud->metatable == hvalue(&_mod->uv[META].uv))) {
     $VAR = _ud;
   } else {
-    lua_pushlightuserdata(L, _tag);
+    lua_pushlightuserdata(L, _ud->metatable);
     if(lua_rawget(L, LUA_REGISTRYINDEX) == LUA_TNIL) {
-        /* unknown tag: describe the userdata itself */  $THROW...
+        /* not a Titan record: describe the userdata itself */  $THROW...
     } else {
         /* another Titan record: registry gave its name */ $THROW...
     }
@@ -230,11 +205,16 @@ if (TITAN_LIKELY(ttisfulluserdata($EXP))) {
 } else { /* not even a userdata */ $THROW... }
 ```
 
-All three failure arms raise the run-time error
+Reading `_ud->metatable` is safe for *any* full userdata — a Titan
+record, a Titan module, or a foreign-library userdata — because the
+field is part of the udata header and exists regardless of payload size;
+the old scheme's `getudatamem` read was out-of-bounds for a payload-less
+userdata. All three failure arms raise the run-time error
 `file:line:col: type error, expected %s but found %s`, with the
 expected name printed as the FQTN and the found name taken from the
-reverse tag→name registry entry when the value is some *other* Titan
-record — the spec suite asserts both
+reverse metatable→name registry entry when the value is some *other*
+Titan record (a non-record userdata has no such entry, so the message
+falls back to stringifying the value) — the spec suite asserts both
 `expected test.Rec but found test.Point` and
 `expected test.Rec but found number` (`spec/coder_spec.lua`).
 
@@ -250,8 +230,8 @@ metatable. **Titan needs** fixed-slot, unboxed-pointer field access and
 a GC object with barrier support for mutable slots — exactly
 what a `Udata`'s `UValue uv[]` array is. `setwrapped`/`checkandget`
 (Titan↔Lua) need no wrap or unwrap at all: the value crossing the
-boundary is the record itself, leaving only the one-pointer tag compare
-on the way in.
+boundary is the record itself, leaving only the one-pointer metatable
+compare on the way in.
 
 ## The module userdata
 
@@ -438,7 +418,9 @@ a `Udata` or a `Table`; used for:
 *value* and an `obj2gco`-wrapped container; forward takes the *slot
 pointer*.) Both `_mod` and record instances became `Udata` in the 0.7
 ABI, flipping these stores from the forward barrier the closure
-representation used.
+representation used. (The 0.8 ABI changed only a record's *type
+identity* — from a `getudatamem` tag word to the udata's metatable
+pointer — not its barriers.)
 
 **Forward barrier — `luaC_barrier(L, owner, slot)`** remains for the
 owners that are still `CClosure`s — every store of a captured value into

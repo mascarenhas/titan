@@ -26,9 +26,15 @@
    Udata (was a CClosure + Udata wrapper). The native ABI of every function
    taking/returning a record changed (ctype CClosure* -> Udata*), and
    <mangled>_init now returns Udata* (was CClosure*). 0.6-compiled .so modules
-   are ABI-incompatible with 0.7 ones and live under a different TITAN_PATH dir. */
-#define TITAN_VER          "0.7"
-#define TITAN_VER_SUFFIX   "_0_7"
+   are ABI-incompatible with 0.7 ones and live under a different TITAN_PATH dir.
+   0.7 -> 0.8: a record's type identity moved from a getudatamem tag word to the
+   udata's metatable pointer. Record instances now carry no raw payload
+   (luaS_newudata(L, 0, N)), and a type check compares uvalue(v)->metatable
+   against the expected record metatable. A 0.7 checker reading a 0.8 record's
+   getudatamem would read out-of-bounds, so 0.7 and 0.8 .so modules are
+   ABI-incompatible and live under a different TITAN_PATH dir. */
+#define TITAN_VER          "0.8"
+#define TITAN_VER_SUFFIX   "_0_8"
 #define TITAN_PATH_VAR     "TITAN_PATH"
 #define TITAN_PATH_SEP     "/"
 #define TITAN_PATH_DEFAULT ".;/usr/local/lib/titan/" TITAN_VER
