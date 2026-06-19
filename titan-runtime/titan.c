@@ -116,6 +116,10 @@ void *loadsym (lua_State *L, void *lib, const char *sym) {
     return f;
 }
 
+int titan_box_trap (lua_State *L) {
+  return luaL_error(L, "internal error: Titan closure variable box called as a function");
+}
+
 int errorhandler(lua_State *L) {
   void *buffer[255];
   const int calls = backtrace(buffer, sizeof(buffer) / sizeof(void *));

@@ -675,18 +675,16 @@ end
 --   boxvar: name of the `CClosure*` C variable to declare
 --   slotname: name of the anchor-slot `TValue*` C variable to declare
 local function newbox(ctx, boxvar, slotname)
-    ctx.tlcontext.uses_box = true
     return render([[
         $NEWSLOT
         CClosure *$BOXVAR = luaF_newCclosure(L, 1);
-        $BOXVAR->f = $TRAP;
+        $BOXVAR->f = titan_box_trap;
         setnilvalue(&$BOXVAR->upvalue[0]);
         setclCvalue(L, $SLOTNAME, $BOXVAR);
     ]], {
         NEWSLOT = newslot(ctx, slotname),
         BOXVAR = boxvar,
         SLOTNAME = slotname,
-        TRAP = ctx.prefix .. "box_trap",
     })
 end
 
@@ -3246,7 +3244,7 @@ function codelambda(ctx, node)
         FUNCTAG = function_type_tag(tlcontext, node._type),
         NATIVE = node._lambda_native,
     }))
-    for i, decl in ipairs(node._captures) do
+    for _, decl in ipairs(node._captures) do
         local captype = decl._type
         local boxexpr, vstats, vexpr = read_capture(ctx, decl)
         if boxexpr then
@@ -4046,23 +4044,6 @@ function coder.generate(modname, ast, static_deps)
             table.insert(code, lnode._luabody)
             i = i + 1
         end
-    end
-
-    -- The captured-variable box trap stub is needed iff some box was actually
-    -- created (a box only exists when a closure captures a mutated variable). Emit
-    -- it only then, so a module with no boxed captures does not warn
-    -- (-Wunused-function under -Wall). Forward decl in $SIGS, ahead of every body
-    -- that references it.
-    if tlcontext.uses_box then
-        table.insert(sigs, render([[
-            static int $TRAP(lua_State *L);
-        ]], { TRAP = tlcontext.prefix .. "box_trap" }))
-        table.insert(code, render([[
-            static int $TRAP(lua_State *L) {
-                return luaL_error(L,
-                    "internal error: Titan closure variable box called as a function");
-            }
-        ]], { TRAP = tlcontext.prefix .. "box_trap" }))
     end
 
     if #switch_get > 0 then

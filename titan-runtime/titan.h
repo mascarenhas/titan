@@ -71,4 +71,6 @@ LUAI_FUNC void *loadsym (lua_State *L, void *lib, const char *sym);
 
 int errorhandler(lua_State *L);
 
+int titan_box_trap (lua_State *L);
+
 #endif
