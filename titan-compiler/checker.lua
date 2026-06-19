@@ -1215,7 +1215,7 @@ checkexp = util.make_visitor({
                     types.tostring(tlhs), types.tostring(trhs))
                 node._type = types.Invalid()
             end
-        elseif op == "|" or op == "&" or op == "<<" or op == ">>" then
+        elseif op == "|" or op == "&" or op == "~" or op == "<<" or op == ">>" then
             node.lhs = tryforce(node.lhs)
             tlhs = node.lhs._type
             node.rhs = tryforce(node.rhs)
