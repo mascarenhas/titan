@@ -82,10 +82,15 @@ local function toboolean(typ --[[:table]], src --[[:string]])
     return render(tmpl, { SRC = src })
 end
 
--- Get the next local state slot for this module
+-- Get the next module user-value slot. Slots are 0-based: the module state is a
+-- Udata whose user values hold the module's globals/imports/metatables/etc.
+-- directly, and the old uv[0] (reserved for the Lua-facing module table) is
+-- gone, so hand out the current counter and post-increment. After all
+-- allocations tlcontext.upvalue is exactly the number of slots (NUPVALS).
 local function nextupvalue(tlcontext)
-    tlcontext.upvalue = tlcontext.upvalue + 1
-    return tlcontext.upvalue
+    local slot = tlcontext.upvalue
+    tlcontext.upvalue = slot + 1
+    return slot
 end
 
 local function mangle_qn(qualname)
@@ -2108,7 +2113,7 @@ local function coderecord(ctx, node, target)
         CTMP = ctmp,
         TMPNAME = tmpname,
         TMPSLOT = tmpslot,
-        NUSERVALUES = #record.fields + 1,
+        NUSERVALUES = #record.fields,
         TAG = type2tagname(ctx, node._type),
         META = c_integer_literal(type2metatable(ctx, node._type))
     })
@@ -3852,10 +3857,11 @@ local function import_module(loadmods, initmods, sigs, mprefixes, dynamic, node)
     end
     -- Set upvalue indexes for public members in the module's type, mirroring
     -- allocate_upvalues in the imported module: exported variables (slots
-    -- 1..V) first, then every exported function's canonical-closure slot
-    -- (V+1..V+F). This lets us reference an imported function value by index
-    -- instead of a table lookup.
-    local memberslot = 1
+    -- 0..V-1) first, then every exported function's canonical-closure slot
+    -- (V..V+F-1). 0-based to match the imported module's 0-based nextupvalue.
+    -- This lets us reference an imported function value by index instead of a
+    -- table lookup.
+    local memberslot = 0
     for _, member in ipairs(node._type.members) do
         if member._tag == "Type.ModuleVariable" then
             member._upvalue = memberslot
@@ -4553,7 +4559,7 @@ function coder.generate(modname, ast, static_deps)
         FUNCS = table.concat(funcs, "\n"),
         MODNAMESTR = c_string_literal("Titan module "..modname),
         CREATEMETA = create_meta,
-        NUPVALS = tlcontext.upvalue + 1
+        NUPVALS = tlcontext.upvalue
     }))
 
     table.insert(code, render(postamble, {

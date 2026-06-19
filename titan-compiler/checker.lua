@@ -1790,8 +1790,11 @@ local toplevel_visitor = util.make_visitor({
                 nameset[field.name] = true
                 local ftype = typefromnode(field.type, st, errors)
                 table.insert(ftypes, ftype)
+                -- 0-based field index: a record instance is a Udata whose
+                -- user values hold the fields directly (uv[0..N-1]); Lua never
+                -- sees these indices, so there is no reserved uv[0].
                 table.insert(fields,
-                    types.Field(fqtn, field.name, ftype, i))
+                    types.Field(fqtn, field.name, ftype, i - 1))
             end
         end
         node._type = types.Record(fqtn, fields, {}, {})
