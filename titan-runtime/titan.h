@@ -13,8 +13,11 @@
 #define TITAN_UNLIKELY(x) (x)
 #endif
 
-#define TITAN_VER          "0.5"
-#define TITAN_VER_SUFFIX   "_0_5"
+/* 0.5 -> 0.6: the native ABI changed (every entry gained the _fn closure
+   parameter for lexical closures), so 0.5-compiled .so modules are
+   ABI-incompatible and must not be mixed with 0.6 ones. */
+#define TITAN_VER          "0.6"
+#define TITAN_VER_SUFFIX   "_0_6"
 #define TITAN_PATH_VAR     "TITAN_PATH"
 #define TITAN_PATH_SEP     "/"
 #define TITAN_PATH_DEFAULT ".;/usr/local/lib/titan/" TITAN_VER

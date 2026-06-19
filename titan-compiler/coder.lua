@@ -560,7 +560,12 @@ end
 
 
 local function function_sig(fname, ftype, is_pointer)
-    local params = { "lua_State *L", "CClosure *_mod" }
+    -- Every native entry takes the function's own closure (_fn) right after the
+    -- module closure (_mod): NULL on the static path, the callee on a value call,
+    -- the wrapper closure in the Lua entry. Closures read captured upvalues from
+    -- it; top-level/static/method bodies ignore it. This uniform ABI lets the
+    -- value-call fast path dispatch on the type tag alone.
+    local params = { "lua_State *L", "CClosure *_mod", "CClosure *_fn" }
     if ftype._tag == "Type.Method" then
         table.insert(params, "CClosure*")
     end
@@ -1327,7 +1332,9 @@ local function codevaluecall(ctx, node)
     --     the callee's static type -> unboxed direct native call
     ctx.valuecall_count = (ctx.valuecall_count or 0) + 1
     local fptype = "_vc_fp_t_" .. ctx.valuecall_count
-    local fastargs = { "L", "_vc_mod" }
+    -- _fn on the fast path is the callee closure itself, so its native entry can
+    -- reach any captured upvalues (slots 3+).
+    local fastargs = { "L", "_vc_mod", "_vc_callee" }
     for _, aname in ipairs(argnames) do table.insert(fastargs, aname) end
     for i = 2, nresults do table.insert(fastargs, "&" .. resultnames[i]) end
     local fastcall = "_vc_fp(" .. table.concat(fastargs, ", ") .. ");"
@@ -1456,6 +1463,7 @@ local function codecall(ctx, node)
             end
         end
         table.insert(caexps, modarg)
+        table.insert(caexps, "NULL")  -- _fn: a static top-level call has no closure
     else
         assert(node.args._tag == "Ast.ArgsMethod")
         local mtype = node._method
@@ -1479,6 +1487,7 @@ local function codecall(ctx, node)
         local cstat, cexp = codeexp(ctx, node.exp)
         table.insert(castats, cstat)
         table.insert(caexps, modarg)
+        table.insert(caexps, "NULL")  -- _fn: a static method call has no closure
         table.insert(caexps, cexp)
     end
     for _, arg in ipairs(node.args.args) do
@@ -2837,7 +2846,7 @@ end
 local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_name)
     -- generate Lua entry point
     local stats = {}
-    local pnames = { "L", "_mod" }
+    local pnames = { "L", "_mod", "_fn" }
     local params
     if typ._tag == "Type.Function" or typ._tag == "Type.StaticMethod" then
         params = typ.params
@@ -2919,7 +2928,8 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
         ptrdiff_t __save_errfunc = L->errfunc;
         lua_pushcclosure(L, errorhandler, 0);
         L->errfunc = savestack(L, L->top.p - 1);
-        CClosure *_mod = clCvalue(&clCvalue(s2v(func))->upvalue[0]);
+        CClosure *_fn = clCvalue(s2v(func));
+        CClosure *_mod = clCvalue(&_fn->upvalue[0]);
         $BODY
     }]], {
         LUANAME = lua_name,
@@ -2957,7 +2967,7 @@ local function codefuncdec(tlcontext, node)
         fname = method_name(node._type)
         luaname = method_luaname(node._type)
     end
-    local cparams = { "lua_State *L", "CClosure *_mod" }
+    local cparams = { "lua_State *L", "CClosure *_mod", "CClosure *_fn" }
     if node._tag == "Ast.TopLevelMethod" then
         node._self._cvar = "__self__"
         if node._self._assigned then
