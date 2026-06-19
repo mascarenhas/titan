@@ -2590,6 +2590,43 @@ local function codebinaryop(ctx, node, _)
         else
             return lstats .. rstats, "luaV_rawequalobj(&(" .. lcode .. "),&(" .. rcode .. "))"
         end
+    elseif (op == "<" or op == "<=" or op == ">" or op == ">="
+            or op == "==" or op == "!=")
+           and ((node.lhs._type._tag == "Type.Integer" and node.rhs._type._tag == "Type.Float")
+             or (node.lhs._type._tag == "Type.Float"   and node.rhs._type._tag == "Type.Integer")) then
+        local lstats, lcode = codeexp(ctx, node.lhs)
+        local rstats, rcode = codeexp(ctx, node.rhs)
+        local ldecl, lname = newtmp(ctx, node.lhs._type)
+        local rdecl, rname = newtmp(ctx, node.rhs._type)
+        local cstats = render([[
+            $LSTATS
+            $LDECL
+            $LNAME = $LCODE;
+            $RSTATS
+            $RDECL
+            $RNAME = $RCODE;
+        ]], { LSTATS=lstats, LDECL=ldecl, LNAME=lname, LCODE=lcode,
+              RSTATS=rstats, RDECL=rdecl, RNAME=rname, RCODE=rcode })
+        local lint = node.lhs._type._tag == "Type.Integer"
+        local cmp
+        if op == "==" or op == "!=" then
+            cmp = lint and ("titan_eq_intfloat(" .. lname .. ", " .. rname .. ")")
+                        or ("titan_eq_intfloat(" .. rname .. ", " .. lname .. ")")
+            if op == "!=" then cmp = "(!" .. cmp .. ")" end
+        elseif op == "<" then
+            cmp = lint and ("titan_lt_intfloat(" .. lname .. ", " .. rname .. ")")
+                        or ("titan_lt_floatint(" .. lname .. ", " .. rname .. ")")
+        elseif op == "<=" then
+            cmp = lint and ("titan_le_intfloat(" .. lname .. ", " .. rname .. ")")
+                        or ("titan_le_floatint(" .. lname .. ", " .. rname .. ")")
+        elseif op == ">" then           -- a > b  ==  b < a
+            cmp = lint and ("titan_lt_floatint(" .. rname .. ", " .. lname .. ")")
+                        or ("titan_lt_intfloat(" .. rname .. ", " .. lname .. ")")
+        else                            -- ">=":  a >= b  ==  b <= a
+            cmp = lint and ("titan_le_floatint(" .. rname .. ", " .. lname .. ")")
+                        or ("titan_le_intfloat(" .. rname .. ", " .. lname .. ")")
+        end
+        return cstats, cmp
     elseif (op == "+" or op == "-" or op == "*")
            and node.lhs._type._tag == "Type.Integer"
            and node.rhs._type._tag == "Type.Integer" then

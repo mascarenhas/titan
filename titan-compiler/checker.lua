@@ -1049,14 +1049,11 @@ checkexp = util.make_visitor({
                 node.rhs = trycoerce(node.rhs, optionize(trhs), errors)
                 trhs = node.rhs._type
             end
-            -- tries to coerce to float if either side is float
-            if tlhs._tag == "Type.Float" or trhs._tag == "Type.Float" then
-                node.lhs = trycoerce(node.lhs, types.Float(), errors)
-                tlhs = node.lhs._type
-                node.rhs = trycoerce(node.rhs, types.Float(), errors)
-                trhs = node.rhs._type
-            end
-            if (tlhs._tag ~= "Type.Option" or trhs._tag ~= "Type.Option" or
+            local mixed_numeric =
+                (tlhs._tag == "Type.Integer" and trhs._tag == "Type.Float") or
+                (tlhs._tag == "Type.Float"   and trhs._tag == "Type.Integer")
+            if not mixed_numeric and
+               (tlhs._tag ~= "Type.Option" or trhs._tag ~= "Type.Option" or
                 ((tlhs.base._tag ~= "Type.Integer" or trhs.base._tag ~= "Type.Float") and
                  (tlhs.base._tag ~= "Type.Float" or trhs.base._tag ~= "Type.Integer"))) and
                not types.compatible(tlhs, trhs) then
@@ -1066,45 +1063,25 @@ checkexp = util.make_visitor({
             end
             node._type = types.Boolean()
         elseif op == "<" or op == ">" or op == "<=" or op == ">=" then
-            node.lhs = tryforce(node.lhs)
-            tlhs = node.lhs._type
-            node.rhs = tryforce(node.rhs)
-            trhs = node.rhs._type
-            -- tries to coerce to float if either side is float
-            if tlhs._tag == "Type.Float" or trhs._tag == "Type.Float" then
-                node.lhs = trycoerce(node.lhs, types.Float(), errors)
-                tlhs = node.lhs._type
-                node.rhs = trycoerce(node.rhs, types.Float(), errors)
-                trhs = node.rhs._type
-            end
-            if not types.equals(tlhs, trhs) then
-                if tlhs._tag ~= "Type.Integer" and tlhs._tag ~= "Type.Float" and trhs._tag == "Type.Integer" or trhs._tag == "Type.Float" then
-                    checker.typeerror(errors, loc,
-                        "left hand side of relational expression is a %s instead of a number",
-                        types.tostring(tlhs))
-                elseif trhs._tag ~= "Type.Integer" and trhs._tag ~= "Type.Float" and tlhs._tag == "Type.Integer" or tlhs._tag == "Type.Float" then
-                    checker.typeerror(errors, loc,
-                        "right hand side of relational expression is a %s instead of a number",
-                        types.tostring(trhs))
-                elseif tlhs._tag ~= "Type.String" and trhs._tag == "Type.String" then
-                    checker.typeerror(errors, loc,
-                        "left hand side of relational expression is a %s instead of a string",
-                        types.tostring(tlhs))
-                elseif trhs._tag ~= "Type.String" and tlhs._tag == "Type.String" then
-                    checker.typeerror(errors, loc,
-                        "right hand side of relational expression is a %s instead of a string",
-                        types.tostring(trhs))
-                else
-                    checker.typeerror(errors, loc,
-                        "trying to use relational expression with %s and %s",
-                         types.tostring(tlhs), types.tostring(trhs))
-                end
+            node.lhs = tryforce(node.lhs); tlhs = node.lhs._type
+            node.rhs = tryforce(node.rhs); trhs = node.rhs._type
+            local lnum = tlhs._tag == "Type.Integer" or tlhs._tag == "Type.Float"
+            local rnum = trhs._tag == "Type.Integer" or trhs._tag == "Type.Float"
+            local lstr, rstr = tlhs._tag == "Type.String", trhs._tag == "Type.String"
+            if (lnum and rnum) or (lstr and rstr) then
+                -- ok: numbers compare to numbers (int vs float exactly), strings to strings
+            elseif rnum and not lnum then
+                checker.typeerror(errors, loc, "left hand side of relational expression is a %s instead of a number", types.tostring(tlhs))
+            elseif lnum and not rnum then
+                checker.typeerror(errors, loc, "right hand side of relational expression is a %s instead of a number", types.tostring(trhs))
+            elseif rstr and not lstr then
+                checker.typeerror(errors, loc, "left hand side of relational expression is a %s instead of a string", types.tostring(tlhs))
+            elseif lstr and not rstr then
+                checker.typeerror(errors, loc, "right hand side of relational expression is a %s instead of a string", types.tostring(trhs))
+            elseif types.equals(tlhs, trhs) then
+                checker.typeerror(errors, loc, "trying to use relational expression with two %s values", types.tostring(tlhs))
             else
-                if tlhs._tag ~= "Type.Integer" and tlhs._tag ~= "Type.Float" and tlhs._tag ~= "Type.String" then
-                    checker.typeerror(errors, loc,
-                        "trying to use relational expression with two %s values",
-                        types.tostring(tlhs))
-                end
+                checker.typeerror(errors, loc, "trying to use relational expression with %s and %s", types.tostring(tlhs), types.tostring(trhs))
             end
             node._type = types.Boolean()
         elseif op == "+" or op == "-" or op == "*" or op == "%" or op == "//" then
