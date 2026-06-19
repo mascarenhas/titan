@@ -57,7 +57,7 @@ local function getslot(typ --[[:table]], dst --[[:string?]], src --[[:string]])
     elseif typ._tag == "Type.Array" then tmpl = "$DST hvalue($SRC)"
     elseif typ._tag == "Type.Map" then tmpl = "$DST hvalue($SRC)"
     elseif typ._tag == "Type.Value" then tmpl = "$DST *($SRC)"
-    elseif typ._tag == "Type.Nominal" then tmpl = "$DST clCvalue($SRC)"
+    elseif typ._tag == "Type.Nominal" then tmpl = "$DST uvalue($SRC)"
     elseif typ._tag == "Type.Option" then tmpl = "$DST *($SRC)"
     elseif typ._tag == "Type.Function" then tmpl = "$DST *($SRC)"
     else error("invalid type " .. types.tostring(typ)) end
@@ -286,7 +286,7 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
               Udata* _ud = uvalue($EXP);
               void *_tag = *((void**)(getudatamem(_ud)));
               if (TITAN_LIKELY($TAG == _tag)) {
-                $VAR = clCvalue(&_ud->uv[0].uv);
+                $VAR = _ud;
               } else {
                 lua_pushlightuserdata(L, _tag);
                 if(lua_rawget(L, LUA_REGISTRYINDEX) == LUA_TNIL) {
@@ -419,12 +419,12 @@ function checkandset(ctx, typ --[[:table]], dst --[[:string]], src --[[:string]]
     elseif typ._tag == "Type.Nominal" then
         return render([[
             {
-              CClosure *_cl = NULL;
+              Udata *_recval = NULL;
               $CHECKANDGET
-              setclCvalue(L, $DST, _cl);
+              setuvalue(L, $DST, _recval);
             }
         ]], {
-            CHECKANDGET = checkandget(ctx, typ, "_cl", src, loc),
+            CHECKANDGET = checkandget(ctx, typ, "_recval", src, loc),
             DST = dst
         })
     else
@@ -458,7 +458,7 @@ local function setslot(typ --[[:table]], dst --[[:string]], src --[[:string]])
     elseif typ._tag == "Type.Array" then tmpl = "sethvalue(L, $DST, $SRC);"
     elseif typ._tag == "Type.Map" then tmpl = "sethvalue(L, $DST, $SRC);"
     elseif typ._tag == "Type.Value" then tmpl = "setobj2t(L, $DST, &$SRC);"
-    elseif typ._tag == "Type.Nominal" then tmpl = "setclCvalue(L, $DST, $SRC);"
+    elseif typ._tag == "Type.Nominal" then tmpl = "setuvalue(L, $DST, $SRC);"
     elseif typ._tag == "Type.Option" then tmpl = "setobj2t(L, $DST, &$SRC);"
     elseif typ._tag == "Type.Function" then tmpl = "setobj2t(L, $DST, &$SRC);"
     else
@@ -470,18 +470,21 @@ end
 
 local function setwrapped(typ --[[:table]], dst --[[:string]], src --[[:string]])
     if typ._tag == "Type.Nominal" then
+        -- A record value IS the Udata; hand Lua the udata directly ($SRC is a
+        -- Udata*).
         return render([[
-            setobj2t(L, $DST, &(($SRC)->upvalue[0]));
+            setuvalue(L, $DST, $SRC);
         ]], {
             DST = dst,
             SRC = src
         })
     elseif typ._tag == "Type.Option" and typ.base._tag == "Type.Nominal" then
+        -- $SRC is a TValue already holding the udata value.
         return render([[
             if(ttisnil(&$SRC)) {
                 setnilvalue($DST);
             } else {
-                setobj2t(L, $DST, &(clCvalue(&$SRC)->upvalue[0]));
+                setobj2t(L, $DST, &$SRC);
             }
         ]], {
             DST = dst,
@@ -492,33 +495,16 @@ local function setwrapped(typ --[[:table]], dst --[[:string]], src --[[:string]]
     end
 end
 
+-- A record value is now the Udata held directly in the slot, so for every type
+-- (nominal, option-of-nominal, or otherwise) the slot already holds the final
+-- TValue to copy out verbatim.
 local function copyslotwrapped(typ, dst, src)
-    if typ._tag == "Type.Nominal" then
-        return render([[
-            setobj2t(L, $DST, &(clCvalue($SRC)->upvalue[0]));
-        ]], {
-            DST = dst,
-            SRC = src
-        })
-    elseif typ._tag == "Type.Option" and typ.base._tag == "Type.Nominal" then
-        return render([[
-            if(ttisnil($SRC)) {
-                setnilvalue($DST);
-            } else {
-                setobj2t(L, $DST, &(clCvalue($SRC)->upvalue[0]));
-            }
-        ]], {
-            DST = dst,
-            SRC = src
-        })
-    else
-        return render([[
-            setobj2t(L, $DST, $SRC);
-        ]], {
-            DST = dst,
-            SRC = src
-        })
-    end
+    return render([[
+        setobj2t(L, $DST, $SRC);
+    ]], {
+        DST = dst,
+        SRC = src
+    })
 end
 
 local function foreignctype(typ --[[:table]])
@@ -552,7 +538,7 @@ local function ctype(typ --[[:table]])
     elseif typ._tag == "Type.Array" then return "Table*"
     elseif typ._tag == "Type.Map" then return "Table*"
     elseif typ._tag == "Type.Value" then return "TValue"
-    elseif typ._tag == "Type.Nominal" then return "CClosure*"
+    elseif typ._tag == "Type.Nominal" then return "Udata*"
     elseif typ._tag == "Type.Pointer" then return foreignctype(typ)
     elseif typ._tag == "Type.Option" then return "TValue"
     -- A first-class function value is boxed (it may be a Titan closure, a Lua
@@ -578,9 +564,9 @@ local function function_sig(fname, ftype, is_pointer)
     -- the wrapper closure in the Lua entry. Closures read captured upvalues from
     -- it; top-level/static/method bodies ignore it. This uniform ABI lets the
     -- value-call fast path dispatch on the type tag alone.
-    local params = { "lua_State *L", "CClosure *_mod", "CClosure *_fn" }
+    local params = { "lua_State *L", "Udata *_mod", "CClosure *_fn" }
     if ftype._tag == "Type.Method" then
-        table.insert(params, "CClosure*")
+        table.insert(params, "Udata*")
     end
     for _, ptype in ipairs(ftype.params) do
         table.insert(params, ctype(ptype))
@@ -1103,8 +1089,8 @@ local function codeassignment(ctx, var, cexp, etype)
             return render([[
                 $STATS
                 {
-                    CClosure *_recobj = $RECORD;
-                    TValue *_fieldslot = &(_recobj->upvalue[$INDEX]);
+                    Udata *_recobj = $RECORD;
+                    TValue *_fieldslot = &(_recobj->uv[$INDEX].uv);
                     $SETSLOT
                     $BARRIER
                 }
@@ -1114,7 +1100,7 @@ local function codeassignment(ctx, var, cexp, etype)
                 INDEX = index,
                 SETSLOT = setslot(var._type, "_fieldslot", cexp),
                 BARRIER = types.is_gc(var._type)
-                          and "luaC_barrier(L, _recobj, _fieldslot);" or ""
+                          and "luaC_barrierback(L, obj2gco(_recobj), _fieldslot);" or ""
             })
         elseif vtag == "Ast.VarDot" then -- module variable
             assert(var._decl._tag == "Type.ModuleVariable")
@@ -1125,22 +1111,22 @@ local function codeassignment(ctx, var, cexp, etype)
             }
             return render([[
                 {
-                    CClosure *_imod = clCvalue(&_mod->upvalue[$MODINDEX]);
-                    TValue *_varslot = &_imod->upvalue[$VARINDEX];
+                    Udata *_imod = uvalue(&_mod->uv[$MODINDEX].uv);
+                    TValue *_varslot = &_imod->uv[$VARINDEX].uv;
                     $SETSLOT;
                     $BARRIER
                 }
             ]], {
                 SETSLOT = setslot(var._type, "_varslot", cexp),
                 BARRIER = types.is_gc(var._type)
-                          and "luaC_barrier(L, _imod, _varslot);" or "",
+                          and "luaC_barrierback(L, obj2gco(_imod), _varslot);" or "",
                 MODINDEX = c_integer_literal(var.exp.var._decl._upvalue),
                 VARINDEX = c_integer_literal(var._decl._upvalue)
             })
         elseif var._decl._tag == "Ast.TopLevelVar" then
             local cset = setslot(var._type, var._decl._slot, cexp)
             if types.is_gc(var._type) then
-                cset = cset .. "\nluaC_barrier(L, _mod, " .. var._decl._slot .. ");"
+                cset = cset .. "\nluaC_barrierback(L, obj2gco(_mod), " .. var._decl._slot .. ");"
             end
             return cset
         elseif ctx.captures and ctx.captures[var._decl] then
@@ -1501,7 +1487,7 @@ local function codevaluecall(ctx, node)
             && pvalue(&clCvalue(&$FNAME)->upvalue[1]) == $FUNCTAG) {
             /* fast path: exact function-type match, unboxed native call */
             CClosure *_vc_callee = clCvalue(&$FNAME);
-            CClosure *_vc_mod = clCvalue(&_vc_callee->upvalue[0]);
+            Udata *_vc_mod = uvalue(&_vc_callee->upvalue[0]);
             $FPTYPEDEF;
             $FPTYPE _vc_fp = titan_cast_func($FPTYPE,
                 pvalue(&_vc_callee->upvalue[2]));
@@ -1573,7 +1559,7 @@ local function codecall(ctx, node)
                         name = fnode._decl.name,
                         mangled = fname
                     }
-                    modarg = render("clCvalue(&_mod->upvalue[$INDEX])", {
+                    modarg = render("uvalue(&_mod->uv[$INDEX].uv)", {
                         INDEX = c_integer_literal(fnode.exp.var.exp.var._decl._upvalue) -- whew!
                     })
                 end
@@ -1589,7 +1575,7 @@ local function codecall(ctx, node)
                         mangled = fname
                     }
                 end
-                modarg = render("clCvalue(&_mod->upvalue[$INDEX])", {
+                modarg = render("uvalue(&_mod->uv[$INDEX].uv)", {
                     INDEX = c_integer_literal(fnode.exp.var._decl._upvalue)
                 })
             end
@@ -1612,7 +1598,7 @@ local function codecall(ctx, node)
             if not ctx.modules[mod] then
                 ctx.modules[mod] = nextupvalue(ctx.tlcontext)
             end
-            modarg = render("clCvalue(&_mod->upvalue[$INDEX])", {
+            modarg = render("uvalue(&_mod->uv[$INDEX].uv)", {
                 INDEX = c_integer_literal(ctx.modules[mod])
             })
         end
@@ -1866,7 +1852,7 @@ local function codevar(ctx, node)
         if node._decl._tag == "Type.Field" then
             local cstats, cexp = codeexp(ctx, node.exp)
             return cstats,
-                getslot(node._type, nil, render("&(($EXP)->upvalue[$INDEX])", {
+                getslot(node._type, nil, render("&(($EXP)->uv[$INDEX].uv)", {
                     EXP = cexp,
                     INDEX = node._decl.index
                 }))
@@ -1877,7 +1863,7 @@ local function codevar(ctx, node)
             -- (the closure slot is reconstructed in import_module), so the
             -- reference is O(1) and identity-preserving.
             return "", getslot(node._type, nil, render(
-                "&(clCvalue(&_mod->upvalue[$MODINDEX])->upvalue[$FNINDEX])", {
+                "&(uvalue(&_mod->uv[$MODINDEX].uv)->uv[$FNINDEX].uv)", {
                 MODINDEX = c_integer_literal(node.exp.var._decl._upvalue),
                 FNINDEX = c_integer_literal(node._decl._closure_upvalue),
             }))
@@ -1885,7 +1871,7 @@ local function codevar(ctx, node)
                and ctx.tlcontext.static_slots[node._decl.fqtn .. "." .. node._decl.name] then
             -- Reference to a record static (e.g. `Rec.new`) as a value: read its
             -- canonical closure from the shadow slot allocated for it.
-            return "", getslot(node._type, nil, render("&_mod->upvalue[$SLOT]", {
+            return "", getslot(node._type, nil, render("&_mod->uv[$SLOT].uv", {
                 SLOT = c_integer_literal(
                     ctx.tlcontext.static_slots[node._decl.fqtn .. "." .. node._decl.name]),
             }))
@@ -1896,7 +1882,7 @@ local function codevar(ctx, node)
                 name = node.name,
                 slot = node._decl._slot
             }
-            local slot = render("&(clCvalue(&_mod->upvalue[$MODINDEX])->upvalue[$VARINDEX])", {
+            local slot = render("&(uvalue(&_mod->uv[$MODINDEX].uv)->uv[$VARINDEX].uv)", {
                 MODINDEX = c_integer_literal(node.exp.var._decl._upvalue),
                 VARINDEX = c_integer_literal(node._decl._upvalue)
             })
@@ -1907,7 +1893,7 @@ local function codevar(ctx, node)
     elseif node._decl._tag == "Ast.TopLevelFunc" then
         -- Reference to a top-level function as a first-class value: read its
         -- canonical closure from the shadow upvalue slot, boxed as a TValue.
-        return "", getslot(node._type, nil, render("&_mod->upvalue[$SLOT]", {
+        return "", getslot(node._type, nil, render("&_mod->uv[$SLOT].uv", {
             SLOT = c_integer_literal(node._decl._closure_upvalue)
         }))
     elseif ctx.captures and ctx.captures[node._decl] then
@@ -2106,26 +2092,23 @@ local function coderecord(ctx, node, target)
     else
         ctmp, tmpname, tmpslot = newtmp(ctx, node._type, true)
     end
+    -- The record value IS the Udata: one allocation, fields in user values
+    -- (1-based indices verbatim; uv[0] unused), type tag in the raw payload,
+    -- metatable straight on the udata. luaS_newudata returns the object already
+    -- nil-filled and white, and we anchor it via setuvalue immediately, so the
+    -- half-built record is reachable before any field is evaluated; each gc
+    -- field store uses the back barrier to keep it honest.
     cinit = render([[
         $CTMP
-        $TMPNAME = luaF_newCclosure(L, $NFIELDS);
-        memset($TMPNAME->upvalue, 0, sizeof(TValue) * $NFIELDS);
-        setclCvalue(L, $TMPSLOT, $TMPNAME);
-        {
-            Udata* _ud = luaS_newudata(L, sizeof(void*), 1);
-            *((void**)(getudatamem(_ud))) = (void*)$TAG;
-            _ud->metatable = hvalue(&_mod->upvalue[$META]);
-            setclCvalue(L, &_ud->uv[0].uv, $TMPNAME);
-            setuvalue(L, &($TMPNAME->upvalue[0]), _ud);
-            /* an emergency GC inside luaS_newudata can blacken the
-               closure, so this store needs a forward barrier */
-            luaC_barrier(L, $TMPNAME, &($TMPNAME->upvalue[0]));
-        }
+        $TMPNAME = luaS_newudata(L, sizeof(void*), $NUSERVALUES);
+        *((void**)(getudatamem($TMPNAME))) = (void*)$TAG;
+        $TMPNAME->metatable = hvalue(&_mod->uv[$META].uv);
+        setuvalue(L, $TMPSLOT, $TMPNAME);
     ]], {
         CTMP = ctmp,
         TMPNAME = tmpname,
         TMPSLOT = tmpslot,
-        NFIELDS = #record.fields + 1,
+        NUSERVALUES = #record.fields + 1,
         TAG = type2tagname(ctx, node._type),
         META = c_integer_literal(type2metatable(ctx, node._type))
     })
@@ -2139,7 +2122,7 @@ local function coderecord(ctx, node, target)
             $CTMPE
             $TMPENAME = $CEXP;
             $SETSLOT;
-            setobj2t(L, &($RECORD->upvalue[$INDEX]), $SLOT);
+            setobj2t(L, &($RECORD->uv[$INDEX].uv), $SLOT);
         ]], {
             CSTATS = cstats,
             CTMPE = ctmpe,
@@ -2153,7 +2136,7 @@ local function coderecord(ctx, node, target)
         table.insert(stats, code)
         if types.is_gc(field._field.type) then
             table.insert(stats, render([[
-                luaC_barrier(L, $TMPNAME, $SLOT);
+                luaC_barrierback(L, obj2gco($TMPNAME), $SLOT);
             ]], {
                 TMPNAME = tmpname,
                 SLOT = tmpeslot,
@@ -3156,7 +3139,7 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
         lua_pushcclosure(L, errorhandler, 0);
         L->errfunc = savestack(L, L->top.p - 1);
         CClosure *_fn = clCvalue(s2v(func));
-        CClosure *_mod = clCvalue(&_fn->upvalue[0]);
+        Udata *_mod = uvalue(&_fn->upvalue[0]);
         $BODY
     }]], {
         LUANAME = lua_name,
@@ -3210,7 +3193,7 @@ local function codefuncdec(tlcontext, node)
         fname = method_name(node._type)
         luaname = method_luaname(node._type)
     end
-    local cparams = { "lua_State *L", "CClosure *_mod", "CClosure *_fn" }
+    local cparams = { "lua_State *L", "Udata *_mod", "CClosure *_fn" }
     if node._tag == "Ast.TopLevelMethod" then
         -- `self` is a real Decl that capture analysis can mark captured/assigned,
         -- so it is treated exactly like a parameter: anchored when a gc-typed and
@@ -3334,9 +3317,9 @@ local function codemethodtrampoline(tlcontext, node)
     -- Named parameter list matching function_sig(ftype) so the trampoline body
     -- can forward each one. Names are local to the trampoline (`_bp_N` for params,
     -- `_outparam_N` for out-params), independent of the method's own _cvar names.
-    local cparams = { "lua_State *L", "CClosure *_mod", "CClosure *_fn" }
+    local cparams = { "lua_State *L", "Udata *_mod", "CClosure *_fn" }
     local callargs = { "L", "_mod", "NULL",
-        "clCvalue(&_fn->upvalue[3])" }
+        "uvalue(&_fn->upvalue[3])" }
     for i, ptype in ipairs(mtype.params) do
         local pname = "_bp_" .. i
         table.insert(cparams, ctype(ptype) .. " " .. pname)
@@ -3375,14 +3358,14 @@ local function codemethodtrampoline(tlcontext, node)
     int $LUANAME(lua_State *L) {
         /* insert the captured receiver (self) as the first stack argument, then
            delegate to the method's Lua entry (which reuses all the boundary
-           checks/coercions). upvalue[3] holds the record's raw CClosure (as the
-           native trampoline expects); the method Lua entry expects the Lua-facing
-           Udata, which lives in the record CClosure's own upvalue[0]. The bound
-           closure's upvalue[0] is the method's module, so the method Lua entry
-           recovers _mod correctly from it. */
+           checks/coercions). upvalue[3] holds the record udata directly (the
+           record value IS the udata), which is exactly the Lua-facing value the
+           method Lua entry expects. The bound closure's upvalue[0] is the
+           method's module, so the method Lua entry recovers _mod correctly from
+           it. */
         CClosure *_bound = clCvalue(s2v(L->ci->func.p));
         lua_checkstack(L, 1);
-        setobj2s(L, L->top.p, &(clCvalue(&_bound->upvalue[3])->upvalue[0]));
+        setobj2s(L, L->top.p, &(_bound->upvalue[3]));
         L->top.p++;
         lua_insert(L, 1);
         return $MLUA(L);
@@ -3542,7 +3525,7 @@ function codemethodref(ctx, node)
         if not ctx.modules[mod] then
             ctx.modules[mod] = nextupvalue(ctx.tlcontext)
         end
-        modexpr = render("clCvalue(&_mod->upvalue[$INDEX])", {
+        modexpr = render("uvalue(&_mod->uv[$INDEX].uv)", {
             INDEX = c_integer_literal(ctx.modules[mod]),
         })
     end
@@ -3550,7 +3533,7 @@ function codemethodref(ctx, node)
     ctx.uses_base_off = true
     local stats = {}
 
-    -- 1. evaluate the receiver once into an anchored gc temp (self: CClosure*)
+    -- 1. evaluate the receiver once into an anchored gc temp (self: Udata*)
     local rtype = node.exp._type
     local rstat, rexp = codeexp(ctx, node.exp)
     local rdecl, rname, rslot = newtmp(ctx, rtype, true)
@@ -3620,7 +3603,7 @@ function codelambdadec(tlcontext, node)
         ctx.captures[decl] = entry
     end
 
-    local cparams = { "lua_State *L", "CClosure *_mod", "CClosure *_fn" }
+    local cparams = { "lua_State *L", "Udata *_mod", "CClosure *_fn" }
     for _, param in ipairs(node.params) do
         param._cvar = "_param_" .. param.name
         param._boxed = param._captured and param._assigned
@@ -3702,7 +3685,7 @@ end
 
 local function codevardec(ctx, initvars, switch_get, switch_set, gvar_map, node)
     local cstats, cexp = codeexp(ctx, node.value)
-    node._slot = render("&_mod->upvalue[$INDEX]",
+    node._slot = render("&_mod->uv[$INDEX].uv",
         { INDEX = c_integer_literal(node._upvalue) })
     table.insert(initvars, render([[
         $CSTATS
@@ -3717,7 +3700,7 @@ local function codevardec(ctx, initvars, switch_get, switch_set, gvar_map, node)
         CTYPE = ctype(node._type),
         SETSLOT = setslot(node._type, node._slot, "_var"),
         BARRIER = types.is_gc(node._type)
-                  and "luaC_barrier(L, _mod, " .. node._slot .. ");" or ""
+                  and "luaC_barrierback(L, obj2gco(_mod), " .. node._slot .. ");" or ""
     }))
     if not node.islocal then
         table.insert(gvar_map, render([[
@@ -3746,7 +3729,7 @@ local function codevardec(ctx, initvars, switch_get, switch_set, gvar_map, node)
             I = c_integer_literal(node._upvalue),
             SETSLOT = checkandset(ctx, node._type, node._slot, "_value", node.loc),
             BARRIER = types.is_gc(node._type)
-                      and "luaC_barrier(L, _mod, " .. node._slot .. ");" or ""
+                      and "luaC_barrierback(L, obj2gco(_mod), " .. node._slot .. ");" or ""
         }))
     end
 end
@@ -3785,8 +3768,8 @@ $SIGS
 
 local postamble = [[
 int $LUAOPEN_NAME(lua_State *L) {
-    CClosure *mod = $INITNAME(L);
-    setobj2s(L, L->top.p, &mod->upvalue[0]);
+    Udata *mod = $INITNAME(L);
+    setuvalue(L, s2v(L->top.p), mod);
     L->top.p++;
     return 1;
 }
@@ -3795,34 +3778,26 @@ int $LUAOPEN_NAME(lua_State *L) {
 local init = [[
 static int _initialized = 0; /* tags and external functions are set up */
 
-CClosure *$INITNAME(lua_State *L) {
+Udata *$INITNAME(lua_State *L) {
     lua_checkstack(L, 10);
     lua_getfield(L, LUA_REGISTRYINDEX, $MODNAMESTR);
     if(lua_isnil(L, -1)) {
         _initialized = 1;
         lua_pop(L, 1);
-        CClosure *_mod = luaF_newCclosure(L, $NUPVALS);
-        memset(_mod->upvalue, 0, sizeof(TValue) * $NUPVALS);
-        for(int i = 0; i < $NUPVALS; i++) {
-            setnilvalue(&_mod->upvalue[i]);
-        }
+        Udata *_mod = luaS_newudata(L, 0, $NUPVALS);
         titan_pushmodule(L, _mod);
         lua_setfield(L, LUA_REGISTRYINDEX, $MODNAMESTR);
         $LOADMODULES1
         $INITMODULES
         $INITRECORDS
         $INITVARS
-        lua_newtable(L);
-        setobj2t(L, &_mod->upvalue[0], s2v(L->top.p - 1));
-        luaC_barrier(L, _mod, &_mod->upvalue[0]);
         $INITFUNCTAGS
         $FUNCS
-        lua_pop(L, 1);
         $CREATEMETA
         $INITTAGS
         return _mod;
     } else {
-        CClosure *_mod = clCvalue(s2v(L->top.p - 1));
+        Udata *_mod = uvalue(s2v(L->top.p - 1));
         lua_pop(L, 1);
         if(!_initialized) {
             _initialized = 1;
@@ -3857,19 +3832,21 @@ local function import_module(loadmods, initmods, sigs, mprefixes, dynamic, node)
         ]], { HANDLE = mprefix .. "handle", FILE = file }))
         table.insert(initmods, render([[
             {
-                CClosure* (*$INIT)(lua_State *L) = titan_cast_func(CClosure* (*)(lua_State*), loadsym(L, $HANDLE, "$INIT"));
-                CClosure *_m = $INIT(L);
-                setclCvalue(L, &_mod->upvalue[$INDEX], _m);
+                Udata* (*$INIT)(lua_State *L) = titan_cast_func(Udata* (*)(lua_State*), loadsym(L, $HANDLE, "$INIT"));
+                Udata *_m = $INIT(L);
+                setuvalue(L, &_mod->uv[$INDEX].uv, _m);
+                luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$INDEX].uv);
             }
         ]], { HANDLE = mprefix .. "handle", INIT = mprefix .. "init", INDEX = c_integer_literal(upvalue) }))
     else
-        table.insert(sigs, render("extern CClosure *$INIT(lua_State *L);", {
+        table.insert(sigs, render("extern Udata *$INIT(lua_State *L);", {
             INIT = mprefix .. "init"
         }))
         table.insert(initmods, render([[
             {
-                CClosure *_m = $INIT(L);
-                setclCvalue(L, &_mod->upvalue[$INDEX], _m);
+                Udata *_m = $INIT(L);
+                setuvalue(L, &_mod->uv[$INDEX].uv, _m);
+                luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$INDEX].uv);
             }
         ]], { INIT = mprefix .. "init", INDEX = c_integer_literal(upvalue) }))
     end
@@ -3953,7 +3930,8 @@ local function init_data_from_other_modules(tlcontext, includes, loadmods, initm
     for fqtn, upvalue in pairs(tlcontext.metatables) do
         table.insert(initmetas, render([[
             luaL_getmetatable(L, "Titan record $TYPE metatable");
-            setobj2t(L, &_mod->upvalue[$INDEX], s2v(L->top.p - 1));
+            setobj2t(L, &_mod->uv[$INDEX].uv, s2v(L->top.p - 1));
+            luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$INDEX].uv);
             lua_pop(L, 1);
         ]], {
             INDEX = c_integer_literal(upvalue),
@@ -3964,7 +3942,8 @@ local function init_data_from_other_modules(tlcontext, includes, loadmods, initm
     for module, upvalue in pairs(tlcontext.modules) do
         table.insert(initmetas, render([[
             lua_getfield(L, LUA_REGISTRYINDEX, "Titan module $MODULE");
-            setobj2t(L, &_mod->upvalue[$INDEX], s2v(L->top.p - 1));
+            setobj2t(L, &_mod->uv[$INDEX].uv, s2v(L->top.p - 1));
+            luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$INDEX].uv);
             lua_pop(L, 1);
         ]], {
             INDEX = c_integer_literal(upvalue),
@@ -3993,9 +3972,9 @@ local function coderecorddec(ctx, code, initrecs, inittags, node)
             }
         ]], {
             INDEX = c_integer_literal(field.index),
-            SETWRAPPED = field.type._tag == "Type.Nominal" and
-                "setobj2s(L, L->top.p - 1, &((clCvalue(_slot))->upvalue[0]));" or
-                "setobj2s(L, L->top.p - 1, _slot);"
+            -- The field value (for any type, including a nominal whose value is
+            -- itself a udata) is held directly at _slot.
+            SETWRAPPED = "setobj2s(L, L->top.p - 1, _slot);"
         }))
         table.insert(setswitch, render([[
             case $INDEX: {
@@ -4023,7 +4002,7 @@ local function coderecorddec(ctx, code, initrecs, inittags, node)
         table.insert(code, render([[
             static int __index_$RECNAME(lua_State *L) {
                 TValue *_recslot = s2v(L->ci->func.p + 1);
-                CClosure *_rec = NULL;
+                Udata *_rec = NULL;
                 $CHECKANDGET;
                 TValue *_fieldslot = s2v(L->ci->func.p + 2);
                 CClosure *_func = clCvalue(s2v(L->ci->func.p));
@@ -4035,7 +4014,7 @@ local function coderecorddec(ctx, code, initrecs, inittags, node)
                     if(ttisCclosure(_fieldidx)) {
                         setobj2s(L, L->top.p - 1, _fieldidx);
                     } else {
-                        TValue *_slot = &_rec->upvalue[ivalue(_fieldidx)];
+                        TValue *_slot = &_rec->uv[ivalue(_fieldidx)].uv;
                         switch(ivalue(_fieldidx)) {
                             $GETCASES
                         }
@@ -4047,7 +4026,7 @@ local function coderecorddec(ctx, code, initrecs, inittags, node)
             }
             static int __newindex_$RECNAME(lua_State *L) {
                 TValue *_recslot = s2v(L->ci->func.p + 1);
-                CClosure *_rec = NULL;
+                Udata *_rec = NULL;
                 $CHECKANDGET;
                 TValue *_fieldslot = s2v(L->ci->func.p + 2);
                 CClosure *_func = clCvalue(s2v(L->ci->func.p));
@@ -4055,12 +4034,12 @@ local function coderecorddec(ctx, code, initrecs, inittags, node)
                 TValue _fieldidxv;
                 lu_byte _fieldtag = luaH_get(_fieldmap, _fieldslot, &_fieldidxv);
                 if(TITAN_LIKELY(!tagisempty(_fieldtag) && ttisinteger(&_fieldidxv))) {
-                    TValue* _dst = &(_rec->upvalue[ivalue(&_fieldidxv)]);
+                    TValue* _dst = &(_rec->uv[ivalue(&_fieldidxv)].uv);
                     TValue* _src = s2v(L->ci->func.p + 3);
                     switch(ivalue(&_fieldidxv)) {
                         $SETCASES
                     }
-                    luaC_barrier(L, _rec, _dst);
+                    luaC_barrierback(L, obj2gco(_rec), _dst);
                     return 0;
                 } else {
                     return luaL_error(L, "%s:%d:%d: field '%s' not found in record '%s'", $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
@@ -4183,6 +4162,13 @@ local function allocate_upvalues(tlcontext, ast)
                 node._closure_upvalue = nextupvalue(tlcontext)
                 tlcontext.static_slots[node._type.fqtn .. "." .. node._type.name] =
                     node._closure_upvalue
+            elseif node._tag == "Ast.TopLevelRecord" then
+                -- A per-record uv slot holding the record's static-namespace
+                -- table (what `m.Rec` returns). Allocated in the late group so
+                -- importer-visible slot math (vars 1..V, fn closures V+1..V+F)
+                -- is unchanged.
+                tlcontext.record_namespace_slots[node._type.name] =
+                    nextupvalue(tlcontext)
             end
         end
     end
@@ -4202,6 +4188,7 @@ function coder.generate(modname, ast, static_deps)
         functag_count = 0,
         bound_luas = {},     -- mangled bound-Lua-trampoline name -> { module }
         static_slots = {},   -- "fqtn.name" -> module upvalue slot of a static's closure
+        record_namespace_slots = {}, -- record fqtn -> module uv slot of its static-namespace table
         lambdas = {},        -- ExpFunction nodes pending file-scope emission
         lambda_count = 0,    -- counter for unique lambda native/Lua names
         upvalue = 0
@@ -4222,6 +4209,36 @@ function coder.generate(modname, ast, static_deps)
     local switch_set = {}
     local gvar_map = {}
     local create_meta = ""
+
+    -- Register a read-only member (an exported function or a record namespace)
+    -- in the unified member map served by the module metatable. The member's
+    -- value lives directly in its uv slot; `__index` pushes it, `__newindex`
+    -- rejects assignment.
+    local function register_readonly_member(name, slot)
+        table.insert(gvar_map, render([[
+            lua_pushinteger(L, $SLOT);
+            lua_setfield(L, -2, $NAME);
+        ]], {
+            SLOT = c_integer_literal(slot),
+            NAME = c_string_literal(name),
+        }))
+        table.insert(switch_get, render([[
+            case $SLOT: {
+                setobj2s(L, L->top.p - 1, &_mod->uv[$SLOT].uv);
+                break;
+            }
+        ]], {
+            SLOT = c_integer_literal(slot),
+        }))
+        table.insert(switch_set, render([[
+            case $SLOT: {
+                return luaL_error(L, "cannot assign to '%s' in Titan module '%s'", lua_tostring(L, 2), $MODSTR);
+            }
+        ]], {
+            SLOT = c_integer_literal(slot),
+            MODSTR = c_string_literal(modname),
+        }))
+    end
 
     local initctx = newcontext(tlcontext)
 
@@ -4260,6 +4277,25 @@ function coder.generate(modname, ast, static_deps)
         end
     end
 
+    -- Create each record's static-namespace table (what `m.Rec` returns) and
+    -- store it into the record's uv slot, BEFORE statics run so a static can be
+    -- installed into the namespace it belongs to. Register the namespace in the
+    -- module member map under the record's short name.
+    for _, node in pairs(ast) do
+        if not node._ignore and node._tag == "Ast.TopLevelRecord" then
+            local slot = tlcontext.record_namespace_slots[node._type.name]
+            table.insert(funcs, render([[
+                lua_newtable(L);
+                setobj2t(L, &_mod->uv[$SLOT].uv, s2v(L->top.p - 1));
+                luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$SLOT].uv);
+                lua_pop(L, 1);
+            ]], {
+                SLOT = c_integer_literal(slot),
+            }))
+            register_readonly_member(node.name, slot)
+        end
+    end
+
     for _, node in pairs(ast) do
         if not node._ignore then
             local tag = node._tag
@@ -4270,35 +4306,30 @@ function coder.generate(modname, ast, static_deps)
                 if tag == "Ast.TopLevelFunc" and not node.islocal then
                     table.insert(code, node._luabody)
                     if node._closure_upvalue then
-                        -- Build the canonical closure once into its shadow slot
-                        -- and install that same object into the module table, so
-                        -- internal references and `m.f` denote one identity. The
-                        -- closure carries its function-type tag (upvalue[1]) and
-                        -- native entry pointer (upvalue[2]) for the fast call path.
+                        -- Build the canonical closure once into its shadow slot;
+                        -- `m.f` is served from that same slot via the module
+                        -- metatable, so internal references and `m.f` denote one
+                        -- identity. The closure carries its function-type tag
+                        -- (upvalue[1]) and native entry pointer (upvalue[2]) for
+                        -- the fast call path.
                         table.insert(funcs, render([[
                             titan_pushmodule(L, _mod);
                             lua_pushlightuserdata(L, (void*)$FUNCTAG);
                             lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
                             lua_pushcclosure(L, $LUANAME, 3);
-                            setobj2t(L, &_mod->upvalue[$SLOT], s2v(L->top.p - 1));
-                            luaC_barrier(L, _mod, &_mod->upvalue[$SLOT]);
-                            lua_setfield(L, -2, $NAMESTR);
+                            setobj2t(L, &_mod->uv[$SLOT].uv, s2v(L->top.p - 1));
+                            luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$SLOT].uv);
+                            lua_pop(L, 1);
                         ]], {
                             LUANAME = func_luaname(tlcontext.module, node.name),
-                            NAMESTR = c_string_literal(node.name),
                             SLOT = c_integer_literal(node._closure_upvalue),
                             FUNCTAG = function_type_tag(tlcontext, node._type),
                             NATIVE = func_name(tlcontext.module, node.name),
                         }))
+                        register_readonly_member(node.name, node._closure_upvalue)
                     else
-                        table.insert(funcs, render([[
-                            titan_pushmodule(L, _mod);
-                            lua_pushcclosure(L, $LUANAME, 1);
-                            lua_setfield(L, -2, $NAMESTR);
-                        ]], {
-                            LUANAME = func_luaname(tlcontext.module, node.name),
-                            NAMESTR = c_string_literal(node.name),
-                        }))
+                        error("BUG: exported function '" .. node.name
+                              .. "' has no canonical-closure slot")
                     end
                 elseif tag == "Ast.TopLevelFunc" and node.islocal
                        and node._closure_upvalue then
@@ -4311,8 +4342,8 @@ function coder.generate(modname, ast, static_deps)
                         lua_pushlightuserdata(L, (void*)$FUNCTAG);
                         lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
                         lua_pushcclosure(L, $LUANAME, 3);
-                        setobj2t(L, &_mod->upvalue[$SLOT], s2v(L->top.p - 1));
-                        luaC_barrier(L, _mod, &_mod->upvalue[$SLOT]);
+                        setobj2t(L, &_mod->uv[$SLOT].uv, s2v(L->top.p - 1));
+                        luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$SLOT].uv);
                         lua_pop(L, 1);
                     ]], {
                         LUANAME = func_luaname(tlcontext.module, node.name),
@@ -4331,21 +4362,24 @@ function coder.generate(modname, ast, static_deps)
                 elseif tag == "Ast.TopLevelStatic" then
                     table.insert(code, node._luabody)
                     -- Build the static's canonical 3-upvalue closure once into
-                    -- its shadow slot, then install that object into the record
-                    -- subtable so `Rec.new` (Lua) and a Titan value reference
-                    -- denote the same closure.
+                    -- its shadow slot, then install that object into the record's
+                    -- static-namespace table (pushed from its uv slot) so
+                    -- `Rec.new` (Lua) and a Titan value reference denote the same
+                    -- closure.
                     table.insert(funcs, render([[
-                        lua_getfield(L, -1, $RECNAME);
+                        setobj2s(L, L->top.p, &_mod->uv[$RECNSSLOT].uv);
+                        L->top.p++;
                         titan_pushmodule(L, _mod);
                         lua_pushlightuserdata(L, (void*)$FUNCTAG);
                         lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
                         lua_pushcclosure(L, $LUANAME, 3);
-                        setobj2t(L, &_mod->upvalue[$SLOT], s2v(L->top.p - 1));
-                        luaC_barrier(L, _mod, &_mod->upvalue[$SLOT]);
+                        setobj2t(L, &_mod->uv[$SLOT].uv, s2v(L->top.p - 1));
+                        luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$SLOT].uv);
                         lua_setfield(L, -2, $NAMESTR);
                         lua_pop(L, 1);
                     ]], {
-                        RECNAME = c_string_literal(node.class),
+                        RECNSSLOT = c_integer_literal(
+                            tlcontext.record_namespace_slots[node._type.fqtn]),
                         LUANAME = static_luaname(node._type),
                         NAMESTR = c_string_literal(node.name),
                         SLOT = c_integer_literal(node._closure_upvalue),
@@ -4354,13 +4388,6 @@ function coder.generate(modname, ast, static_deps)
                         NATIVE = static_name(node._type),
                     }))
                 end
-            elseif tag == "Ast.TopLevelRecord" then
-                table.insert(funcs, render([[
-                    lua_newtable(L);
-                    lua_setfield(L, -2, $NAMESTR);
-                ]], {
-                    NAMESTR = c_string_literal(node.name),
-                }))
             else
                 -- ignore other nodes in second pass
             end
@@ -4387,12 +4414,12 @@ function coder.generate(modname, ast, static_deps)
         table.insert(code, render([[
             static int __index(lua_State *L) {
                 CClosure *_me = clCvalue(s2v(L->ci->func.p));
-                CClosure *_mod = clCvalue(&_me->upvalue[0]);
+                Udata *_mod = uvalue(&_me->upvalue[0]);
                 TValue _indexv;
                 lu_byte _indextag = luaH_get(hvalue(&_me->upvalue[1]), s2v(L->ci->func.p + 2), &_indexv);
                 if(TITAN_UNLIKELY(tagisempty(_indextag))) {
                     return luaL_error(L,
-                        "global variable '%s' does not exist in Titan module '%s'",
+                        "member '%s' does not exist in Titan module '%s'",
                         lua_tostring(L, 2), $MODSTR);
                 }
                 switch(ivalue(&_indexv)) {
@@ -4403,13 +4430,17 @@ function coder.generate(modname, ast, static_deps)
 
             static int __newindex(lua_State *L) {
                 CClosure *_me = clCvalue(s2v(L->ci->func.p));
-                CClosure *_mod = clCvalue(&_me->upvalue[0]);
+                Udata *_mod = uvalue(&_me->upvalue[0]);
                 TValue *_value = s2v(L->ci->func.p + 3);
+                /* _mod/_value are used only by writable-variable cases; a module
+                   with only read-only members (functions/records) leaves them
+                   untouched, so discard explicitly to stay warning-clean. */
+                (void)_mod; (void)_value;
                 TValue _indexv;
                 lu_byte _indextag = luaH_get(hvalue(&_me->upvalue[1]), s2v(L->ci->func.p + 2), &_indexv);
                 if(TITAN_UNLIKELY(tagisempty(_indextag))) {
                     return luaL_error(L,
-                        "global variable '%s' does not exist in Titan module '%s'",
+                        "member '%s' does not exist in Titan module '%s'",
                         lua_tostring(L, 2), $MODSTR);
                 }
                 switch(ivalue(&_indexv)) {
@@ -4441,9 +4472,8 @@ function coder.generate(modname, ast, static_deps)
             lua_pushvalue(L, -2);
             lua_pushcclosure(L, __newindex, 2);
             lua_setfield(L, -3, "__newindex");
-            /* Set metatable */
-            setobj2s(L, L->top.p, &_mod->upvalue[0]);
-            L->top.p++;
+            /* Set metatable on the module udata */
+            titan_pushmodule(L, _mod);
             lua_pushvalue(L, -3);
             lua_setmetatable(L, -2);
             /* Pop module, varmap, and metatable */

@@ -28,7 +28,10 @@
 
 #define TITAN_LUAINTEGER_NBITS cast_int(sizeof(lua_Integer) * CHAR_BIT)
 
-#define titan_pushmodule(L, c) { setclCvalue(L, s2v(L->top.p), (c)); L->top.p++; }
+/* The module state object is a Udata (was a CClosure): push it as a full
+   userdata value. Used to seed a function/method/metamethod closure's
+   upvalue[0] with the module, and to put the module on the stack. */
+#define titan_pushmodule(L, c) { setuvalue(L, s2v(L->top.p), (c)); L->top.p++; }
 
 /*
 ** Lua 5.5 removed setbvalue (booleans carry no payload; truth lives in
