@@ -11,7 +11,7 @@ local driver = {}
 
 driver.imported = {}
 
-driver.TITAN_BIN_PATH = os.getenv("TITAN_PATH_0_7") or os.getenv("TITAN_PATH") or ".;/usr/local/lib/titan/0.7"
+driver.TITAN_BIN_PATH = os.getenv("TITAN_PATH_0_8") or os.getenv("TITAN_PATH") or ".;/usr/local/lib/titan/0.8"
 driver.TITAN_SOURCE_PATH = "."
 driver.LUA_SOURCE_PATH = "lua-5.5.0/src/"
 driver.TITAN_RUNTIME_PATH = "titan-runtime/"
