@@ -2469,7 +2469,20 @@ local function codebinaryop(ctx, node, _)
     elseif op == "^" then
         local lstats, lcode = codeexp(ctx, node.lhs)
         local rstats, rcode = codeexp(ctx, node.rhs)
-        return lstats .. rstats, "pow(" .. lcode .. ", " .. rcode .. ")"
+        local bdecl, bname = newtmp(ctx, types.Float())
+        local edecl, ename = newtmp(ctx, types.Float())
+        local cstats = render([[
+            $LSTATS
+            $RSTATS
+            $BDECL
+            $EDECL
+            $B = $LCODE;
+            $E = $RCODE;
+        ]], { LSTATS=lstats, RSTATS=rstats, BDECL=bdecl, EDECL=edecl,
+              B=bname, E=ename, LCODE=lcode, RCODE=rcode })
+        -- luai_numpow: exponent 2 is a*a, not pow(a,2) (differs by 1 ULP).
+        return cstats, "((" .. ename .. " == 2) ? (" .. bname .. " * " .. bname
+                       .. ") : pow(" .. bname .. ", " .. ename .. "))"
     elseif op == "<<" then
         return generate_binop_shift("<<", ">>", node, ctx)
     elseif op == ">>" then
