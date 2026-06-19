@@ -119,7 +119,7 @@ declaration plus a `new` static method) generates, in `coderecord`
 
 ```c
 {
-    Udata* _ud = luaS_newudata(L, sizeof(void*), 4);   /* #fields + 1 user values */
+    Udata* _ud = luaS_newudata(L, sizeof(void*), 3);   /* #fields user values */
     setuvalue(L, _tmp_1_slot, _ud);                    /* anchor the udata first */
     *((void**)(getudatamem(_ud))) = (void*)test_Point_typetag;
     _ud->metatable = hvalue(&_mod->uv[3].uv);
@@ -130,13 +130,12 @@ declaration plus a `new` static method) generates, in `coderecord`
 
 The layout:
 
-* **The `Udata`** has `#fields + 1` user values: `uv[0]` is **unused**
-  (reserved so field indices stay 1-based and the template diff from the
-  old closure layout is minimal), and `uv[i].uv` holds field `i` (1-based,
-  assigned in declaration order by the checker — `types.Field` in
-  `checker.lua`). Inside Titan code a record value *is* this udata
+* **The `Udata`** has `#fields` user values (no reserved `uv[0]`):
+  `uv[i].uv` holds field `i`, **0-based** (`0..N-1`), assigned in
+  declaration order by the checker — `types.Field` in
+  `checker.lua`. Inside Titan code a record value *is* this udata
   (`ctype` = `Udata*`), so field access is an indexed load — `p.x`
-  compiles to `fltvalue(&((_param_p)->uv[1].uv))` — and a field write is
+  compiles to `fltvalue(&((_param_p)->uv[0].uv))` — and a field write is
   `setslot` into `&(_recobj->uv[i].uv)` plus a **back** barrier when the
   field type is GC-able (a userdata owner uses `luaC_barrierback`, see
   [write barriers](#5-write-barriers-back-for-userdata-and-tables-forward-for-closures)).
@@ -267,10 +266,10 @@ module table** — and it is allocated in `_init` with zero raw bytes and
 Udata *_mod = luaS_newudata(L, 0, $NUPVALS);
 ```
 
-User value 0 is **reserved/unused** (it kept the slot that once held the
-module table, so importers' slot math needs no change). The remaining
-user values hold, in allocation order: exported module variables (slots
-1..n — their indices are part of the module's ABI), then local module
+There is **no reserved user value**: the module table was removed
+entirely, so member slots are 0-based. The user values hold, in
+allocation order: exported module variables (slots 0..n-1 — their
+indices are part of the module's ABI), then local module
 variables, imported modules' `Udata`s and exported-function canonical
 closures, then lazily allocated slots for record metatables,
 per-record static-namespace tables, and modules needed only by

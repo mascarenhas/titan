@@ -363,11 +363,11 @@ ABI-incompatible and live under different `TITAN_PATH` directories.
 ## The module protocol
 
 All per-Lua-state module state lives in one `Udata` (`_mod`) created by
-`_init`: user value 0 is reserved/unused (it once held the Lua-visible
-module table, now gone); the remaining user values hold module variables,
-imported modules' `Udata`s, exported-function canonical closures, cached
-record metatables and per-record static-namespace tables (allocation
-order below). Every generated function receives this `Udata` as its
+`_init`: the module table's slot is gone entirely, and member slots are
+0-based with no reserved user value. The user values hold module
+variables, imported modules' `Udata`s, exported-function canonical
+closures, cached record metatables and per-record static-namespace tables
+(allocation order below). Every generated function receives this `Udata` as its
 `_mod` parameter; the Lua wrappers recover it from their closure's
 upvalue 0. Around `_mod`, each module exports three protocol symbols:
 
@@ -496,10 +496,11 @@ tag"` / `"... metatable"`; [Lua interop internals](lua-interop-internals.md)).
 ## User-value allocation
 
 `allocate_upvalues` assigns `_mod` user-value slots before any code is
-generated. `nextupvalue` pre-increments from 0, so slot 0 is always
-reserved/unused (it kept the slot the now-removed module table held);
-then come **exported (non-`local`) module variables, in declaration
-order** (slots 1..n); then local module variables, imports and
+generated. `nextupvalue` hands out slots 0-based with no reserved slot
+(the now-removed module table no longer takes slot 0), so `NUPVALS`
+equals the number of slots. First come **exported (non-`local`) module
+variables, in declaration order** (slots 0..n-1); then local module
+variables, imports and
 exported-function canonical closures, in declaration order; and finally,
 lazily during codegen, record metatables (`type2metatable`), per-record
 static-namespace tables, and the module `Udata`s needed only for

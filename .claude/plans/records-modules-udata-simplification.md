@@ -291,10 +291,11 @@ Today `require` returns `_mod->upvalue[0]`, a plain Lua table that holds the
 exported functions (direct fields) and record namespaces (subtables), with a
 metatable serving variables. After this change there is **no such table**:
 `require` returns the module `Udata`, and a metatable on the `Udata` serves every
-member. `uv[0]` (formerly the table slot) becomes **unused/reserved** — keeping
-all variable/function/import slot indices verbatim means importers
-(`import_module`'s slot recomputation: variables 1..V, then function closures
-V+1..V+F) need **no** change.
+member. The module member slots are **0-based** (the old `uv[0]` table slot is
+gone, not merely reserved): `import_module`'s slot recomputation enumerates
+variables `0..V-1`, then function closures `V..V+F-1`, matching the imported
+module's 0-based `nextupvalue`. (The first cut reserved `uv[0]` to keep slot math
+verbatim; the 0-based rebase shifted both the allocator and the importer.)
 
 **Unified member map.** The existing variable `varmap` (name→slot) and
 `__index`/`__newindex` switch are generalized to cover all three exported member
@@ -647,15 +648,20 @@ Udata.
 1. **Convert `_mod` to a `Udata`?** **YES** — and go further: remove the
    Lua-facing module table so `require` returns the `Udata` (§2.3). This is the
    owner's stated goal, not optional uniformity.
-2. **Field index base** for records: **keep 1-based with `uv[0]` unused** (minimal
-   diff, 1 wasted slot/record); a 0-based rebase is a possible later cleanup. The
-   module `Udata` likewise keeps `uv[0]` reserved so importer slot math is
-   unchanged.
+2. **Field index base** for records: landed **0-based** (`uv[0..N-1]`, no
+   reserved slot) — Lua never sees the indices, so the reserved `uv[0]` was pure
+   waste. The module `Udata` is **also 0-based**: `nextupvalue` hands out the
+   counter then post-increments (`NUPVALS` = slot count), the importer's
+   member-slot reconstruction starts at 0 to match, and the old `uv[0]` (the
+   removed module table's slot) is gone. (The first cut shipped 1-based with a
+   reserved `uv[0]` for a minimal diff; the 0-based rebase followed immediately.)
 3. **`Type.Nominal` ctype** flips `CClosure*` → `Udata*`; accepted, along with the
    full ABI fan-out (every record-typed param/return/local/`self`/out-param, and
    every `_mod`/`_init` signature) and the **`TITAN_VER` 0.6→0.7** bump it forces.
-4. **Empty-record / zero-field layout:** `nuvalue = #fields + 1` (≥1 always),
-   keeping the tag-payload + metatable machinery uniform.
+4. **Empty-record / zero-field layout:** with 0-based fields, `nuvalue = #fields`,
+   so an empty record is a 0-user-value `Udata` (`luaS_newudata(L, sizeof(void*),
+   0)`); the tag still lives in `getudatamem` and the metatable on the udata, so
+   the machinery stays uniform.
 5. **Timing:** the anon-functions branch is merged to `master` and the `_fn` ABI
    is frozen, so only one ABI moves now. ✔
 
@@ -679,11 +685,11 @@ Udata.
 ```
 record value      :  CClosure(uv[0]=udata, uv[1..N]=fields)  +  Udata(tag, uv[0]=closure, metatable)
                   ─────────────────────────────────────────────────────────────────────────────────►
-                     Udata(tag, metatable, uv[1..N]=fields)            // one object; ctype Udata*; back barriers
+                     Udata(tag, metatable, uv[0..N-1]=fields)          // one object; ctype Udata*; back barriers; 0-based
 
 _mod (module)     :  CClosure(uv[0]=Lua table, uv[1..]=vars/fnclosures/imports/metas)  + Lua returns the table
                   ─────────────────────────────────────────────────────────────────────────────────────────►
-                     Udata(uv[0]=unused, uv[1..]=vars/fnclosures/imports/metas/recnamespaces, metatable)
+                     Udata(uv[0..]=vars/fnclosures/imports/metas/recnamespaces, metatable)   // 0-based, no reserved slot
                      // one object; ctype Udata*; back barriers; require returns THIS; no separate module table
 
 function value    :  CClosure(uv[0]=_mod, uv[1]=tag, uv[2]=native, uv[3+]=captures)   // UNCHANGED — must stay callable

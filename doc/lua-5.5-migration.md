@@ -128,7 +128,7 @@ All templates that touch the Lua stack were rewritten for
 > **Superseded (0.7 ABI).** The CClosure+Udata dual object described below
 > was the 5.5-migration-era representation. Records (and module state
 > `_mod`) have since been collapsed to a **single Lua 5.5 `Udata`**: a
-> record value *is* its userdata (fields in `uv[1..N]`, tag in
+> record value *is* its userdata (fields in `uv[0..N-1]`, tag in
 > `getudatamem`, metatable on the udata), there is no backing closure, and
 > field stores use the **back** barrier (`luaC_barrierback`) instead of
 > the forward barrier. See the

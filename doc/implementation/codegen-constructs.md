@@ -310,7 +310,7 @@ One allocation (real output for `Point.new`; the layout's rationale is in
 
 ```c
 {
-    Udata* _ud = luaS_newudata(L, sizeof(void*), 3);  /* #fields + 1 user values */
+    Udata* _ud = luaS_newudata(L, sizeof(void*), 2);  /* #fields user values */
     setuvalue(L, _tmp_1_slot, _ud);                   /* anchor the udata FIRST */
     *((void**)(getudatamem(_ud))) = (void*)test_Point_typetag;
     _ud->metatable = hvalue(&_mod->uv[1].uv);
@@ -322,20 +322,20 @@ One allocation (real output for `Point.new`; the layout's rationale is in
 
 The udata is anchored *before* any field expression can collect (no
 second allocation to order, and no closure↔udata cross-link to install).
-`uv[0]` is left unused so field indices stay 1-based; field initializers
+fields are 0-based at `uv[0..N-1]` (no reserved slot); field initializers
 each go through an anchored temp and a `setobj2t` into `&(_ud->uv[i].uv)`
 plus a **back** barrier (the owner is a userdata) for GC-able field types.
 
 ### Field access
 
 A read is an indexed load from the udata — no hashing, no metatable:
-`return fltvalue(&((__self__)->uv[1].uv));`. A write is the user-value
+`return fltvalue(&((__self__)->uv[0].uv));`. A write is the user-value
 store plus a *back* barrier (`Udata` owner, like table stores, unlike
 closure stores):
 
 ```c
 Udata *_recobj = _param_p;
-TValue *_fieldslot = &(_recobj->uv[1].uv);
+TValue *_fieldslot = &(_recobj->uv[0].uv);
 setfltvalue(_fieldslot, _param_v);
 /* + luaC_barrierback(L, obj2gco(_recobj), _fieldslot); for GC-able fields */
 ```
