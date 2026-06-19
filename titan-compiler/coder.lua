@@ -142,10 +142,17 @@ local function func_luaname(modname, name)
     return modprefix(modname) .. name .. "_lua"
 end
 
--- get name of the variable holding the metatable for this type
+-- get name of the variable holding the metatable for this type.
+-- `ctx` may be a per-function context (has `.tlcontext`) or the top-level
+-- tlcontext itself — genluaentry passes the latter into checkandget when
+-- coercing a Lua-facing record parameter, and that may be the first use of the
+-- type's metatable. Resolve the tlcontext either way (`ctx.metatables` is the
+-- same shared table in both); allocating the slot here is safe because it
+-- happens before init_data_from_other_modules emits the per-state recovery.
 local function type2metatable(ctx, typ --[[:table]])
+    local tlcontext = ctx.tlcontext or ctx
     if not ctx.metatables[typ.fqtn] then
-        ctx.metatables[typ.fqtn] = nextupvalue(ctx.tlcontext)
+        ctx.metatables[typ.fqtn] = nextupvalue(tlcontext)
     end
     return ctx.metatables[typ.fqtn]
 end

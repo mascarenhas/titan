@@ -212,4 +212,37 @@ describe(".so-only cross-module imports", function()
         ]])
         assert.truthy(rok, out)
     end)
+
+    -- Regression: an imported record used ONLY as a Lua-facing parameter is
+    -- never constructed in the importer, so genluaentry's checkandget is the
+    -- FIRST site to allocate that record's metatable slot — and it runs with the
+    -- top-level tlcontext (no `.tlcontext` field). type2metatable must resolve
+    -- the tlcontext either way, or codegen crashes before emitting any C.
+    it("accepts an imported record used only as a Lua-facing parameter", function ()
+        local ok, err = build_so_chain({
+            { name = "ppfoo", src = [[
+                record Point
+                    x: integer
+                end
+                function make(n: integer): Point
+                    return { x = n }
+                end
+            ]] },
+            { name = "ppbar", src = [[
+                local foo = import "ppfoo"
+                function px(p: foo.Point): integer
+                    return p.x
+                end
+            ]] },
+        })
+        assert.truthy(ok, err)
+        -- the imported-record parameter coerces correctly at the Lua boundary...
+        local rok, out = call("ppbar",
+            "local foo = require 'ppfoo'; assert(ppbar.px(foo.make(7)) == 7)")
+        assert.truthy(rok, out)
+        -- ...and the metatable check cleanly rejects a non-record userdata
+        local rok2, out2 = call("ppbar",
+            "local ok, e = pcall(ppbar.px, ppbar); assert(not ok); assert(e:find('but found'))")
+        assert.truthy(rok2, out2)
+    end)
 end)
