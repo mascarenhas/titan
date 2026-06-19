@@ -39,7 +39,7 @@ function defs.tofalse()
     return false
 end
 
-function defs.rettypeopt(pos, x)
+function defs.rettypeopt(_, x)
     if not x then
         -- No return annotation means a zero-return `(...) -> ()` function, as
         -- in Lua where `function f() end` returns nothing. `return` (bare) is
@@ -355,7 +355,7 @@ local grammar = re.compile([[
                                  explist^ExpLocal)                   -> StatDecl
                      / (P  varlist ASSIGN^AssignAssign
                                explist^ExpAssign)                    -> StatAssign
-                     / &(exp ASSIGN) %{ExpAssign}
+                     / &(exp ASSIGN) %{AssignNotLValue}
                      / (P  (suffixedexp => exp_is_call))         -> StatCall
                      / &exp %{ExpStat}
 

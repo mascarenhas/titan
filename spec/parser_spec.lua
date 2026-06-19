@@ -36,7 +36,7 @@ end
 local function assert_parses_successfuly(program_str)
     local ast, err = parser.parse("(parser_spec)", program_str)
     if not ast then
-        error(string.format("Unexpected Titan syntax error: %s", err.label))
+        error(string.format("Unexpected Titan syntax error: %s", err and err.label or "?"))
     end
     return ast
 end
@@ -52,7 +52,7 @@ local function assert_program_syntax_error(program_str, expected_error_label)
     if ast then
         error(string.format("Expected Titan syntax error %s but parsed successfuly", expected_error_label))
     end
-    assert.are.same(expected_error_label, err.label)
+    assert.are.same(expected_error_label, err and err.label)
 end
 
 
@@ -979,7 +979,7 @@ describe("Titan parser", function()
 
     it("does not allow parentheses in the LHS of an assignment", function()
         assert_statements_syntax_error([[ local (x) = 42 ]], "DeclLocal")
-        assert_statements_syntax_error([[ (x) = 42 ]], "ExpAssign")
+        assert_statements_syntax_error([[ (x) = 42 ]], "AssignNotLValue")
     end)
 
     it("does not allow identifiers that are type names", function()

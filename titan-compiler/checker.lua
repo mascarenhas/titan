@@ -80,31 +80,31 @@ end
 --   errors: list of compile-time errors
 --   returns a type (from types.lua)
 typefromnode = util.make_visitor({
-    ["Ast.TypeNil"] = function(node, st, errors)
+    ["Ast.TypeNil"] = function(_, _, _)
         return types.Nil()
     end,
 
-    ["Ast.TypeBoolean"] = function(node, st, errors)
+    ["Ast.TypeBoolean"] = function(_, _, _)
         return types.Boolean()
     end,
 
-    ["Ast.TypeInteger"] = function(node, st, errors)
+    ["Ast.TypeInteger"] = function(_, _, _)
         return types.Integer()
     end,
 
-    ["Ast.TypeFloat"] = function(node, st, errors)
+    ["Ast.TypeFloat"] = function(_, _, _)
         return types.Float()
     end,
 
-    ["Ast.TypeString"] = function(node, st, errors)
+    ["Ast.TypeString"] = function(_, _, _)
         return types.String()
     end,
 
-    ["Ast.TypeValue"] = function(node, st, errors)
+    ["Ast.TypeValue"] = function(_, _, _)
         return types.Value()
     end,
 
-    ["Ast.TypeName"] = function(node, st, errors)
+    ["Ast.TypeName"] = function(node, st, _)
         return types.Nominal(st.modname .. "." .. node.name)
     end,
 
@@ -406,7 +406,7 @@ checkstat = util.make_visitor({
         loop_depth = loop_depth - 1
     end,
 
-    ["Ast.StatBreak"] = function(node, st, errors)
+    ["Ast.StatBreak"] = function(node, _, errors)
         if loop_depth == 0 then
             checker.typeerror(errors, node.loc,
                 "'break' outside a loop")
@@ -532,7 +532,7 @@ checkstat = util.make_visitor({
 --   context: expected type for this expression, if applicable
 --   annotates the node with its type in a "_type" field
 checkvar = util.make_visitor({
-    ["Ast.VarName"] = function(node, st, errors, context)
+    ["Ast.VarName"] = function(node, st, errors, _)
         local decl = st:find_symbol(node.name)
         if not decl then
             node._type = invalid(errors, node.loc,
@@ -543,7 +543,7 @@ checkvar = util.make_visitor({
         end
     end,
 
-    ["Ast.VarDot"] = function(node, st, errors, context)
+    ["Ast.VarDot"] = function(node, st, errors, _)
         if node.exp._tag == "Ast.ExpVar" then
             checkvar(node.exp.var, st, errors)
             if node.exp.var._decl then node.exp.var._decl._used = true end
@@ -602,7 +602,7 @@ checkvar = util.make_visitor({
         end
     end,
 
-    ["Ast.VarBracket"] = function(node, st, errors, context)
+    ["Ast.VarBracket"] = function(node, st, errors, _)
         checkexp(node.exp1, st, errors)
         node.exp1 = tryforce(node.exp1)
         local keystype, term
@@ -925,7 +925,7 @@ checkexp = util.make_visitor({
         end
     end,
 
-    ["Ast.ExpUnop"] = function(node, st, errors, context)
+    ["Ast.ExpUnop"] = function(node, st, errors, _)
         local op = node.op
         checkexp(node.exp, st, errors)
         local texp = node.exp._type
@@ -969,7 +969,7 @@ checkexp = util.make_visitor({
         end
     end,
 
-    ["Ast.ExpConcat"] = function(node, st, errors, context)
+    ["Ast.ExpConcat"] = function(node, st, errors, _)
         for i, exp in ipairs(node.exps) do
             checkexp(exp, st, errors, types.String())
             exp = tryforce(exp)
@@ -1202,7 +1202,7 @@ checkexp = util.make_visitor({
         end
     end,
 
-    ["Ast.ExpCall"] = function(node, st, errors, context)
+    ["Ast.ExpCall"] = function(node, st, errors, _)
         if node.exp._tag == "Ast.ExpVar" then
             local var = node.exp.var
             checkvar(var, st, errors)
@@ -1310,7 +1310,7 @@ checkexp = util.make_visitor({
         end
     end,
 
-    ["Ast.ExpCast"] = function(node, st, errors, context)
+    ["Ast.ExpCast"] = function(node, st, errors, _)
         node.target = typefromnode(node.target, st, errors)
         checkexp(node.exp, st, errors, node.target)
         local source = node.exp._type
@@ -1500,7 +1500,7 @@ end
 
 -- Typecheck the toplevel node
 local toplevel_visitor = util.make_visitor({
-    ["Ast.TopLevelImport"] = function(node, st, errors, loader)
+    ["Ast.TopLevelImport"] = function(node, _, errors, loader)
         local modtype, errs = checker.checkimport(node.modname, loader)
         if modtype then
             node._type = modtype

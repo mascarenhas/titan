@@ -1,5 +1,4 @@
 local lexer = require 'titan-compiler.lexer'
-local syntax_errors = require 'titan-compiler.syntax_errors'
 local lpeg = require 'lpeglabel'
 
 local function table_extend(t1, t2)
@@ -21,7 +20,7 @@ local function run_lexer(source)
         local found_j = nil
 
         for tokname, tokpat in pairs(lexer) do
-            local a, b, c = lpeg.match(lpeg.Ct(tokpat) * lpeg.Cp(), source, i)
+            local a, b = lpeg.match(lpeg.Ct(tokpat) * lpeg.Cp(), source, i)
             if a then
                 local captures, j = a, b
                 if i == j then
@@ -48,7 +47,7 @@ local function run_lexer(source)
 
         table.insert(all_matched_tokens, found_token)
         table_extend(all_captures, found_captures)
-        i = found_j
+        i = found_j or i
     end
 
     return { tokens = all_matched_tokens, captures = all_captures }

@@ -3,7 +3,7 @@
 
 return function(prefix, types)
     local constructors = {}
-    for typename, conss in pairs(types) do
+    for _, conss in pairs(types) do
         for consname, fields in pairs(conss) do
             local tag = prefix .. "." .. consname
             constructors[consname] = function(...)

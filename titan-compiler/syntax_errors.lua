@@ -161,7 +161,7 @@ local errors = {
 
     ExpStat = "Expected a statement but found an expression that is not a function call.",
 
-    ExpAssign = "Expected a valid lvalue in the left side of assignment but found a regular expression.",
+    AssignNotLValue = "Expected a valid lvalue in the left side of assignment but found a regular expression.",
 
     CastMissingType = "Expected a type for the cast expression.",
 
