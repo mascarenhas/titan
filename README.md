@@ -142,11 +142,12 @@ they are in the roadmap:
 * FFI with C (C pointers, call C functions)
 * records (structs) with `:` method calls
 * maps
-* first-class functions (without anonymous functions)
+* first-class functions
+* anonymous functions and closures, with proper lexical scoping
+* bound methods (`obj:method`) as first-class values
 
 ## Next
 
-* nested and anonymous first-class functions with proper lexical scoping (closures)
 * slice type (native array with length and capacity), variadic functions using a slice to collect variadic arguments (Go-like)
 * error handling integrated with Lua's, nice backtraces (details TBD)
 * FFI with C, continued (other C primitive types, C arrays, C structs/unions including pointers, function pointers)
