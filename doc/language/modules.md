@@ -109,8 +109,8 @@ float-typed variable holding `3.0`.
 A `local` variable is visible only inside its module. A variable
 without `local` is *exported*: modules that import this one can read
 and write it through their import alias, and Lua code that `require`s
-the module can read and write it as a field of the module table (writes
-from Lua are type-checked at run time — see
+the module can read and write it as a member of the module value (which
+is a userdata; writes from Lua are type-checked at run time — see
 [Module variables from Lua](lua-interop.md#module-variables-from-lua)).
 
 ### Initializers must be constant

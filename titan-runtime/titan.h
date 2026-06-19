@@ -15,9 +15,14 @@
 
 /* 0.5 -> 0.6: the native ABI changed (every entry gained the _fn closure
    parameter for lexical closures), so 0.5-compiled .so modules are
-   ABI-incompatible and must not be mixed with 0.6 ones. */
-#define TITAN_VER          "0.6"
-#define TITAN_VER_SUFFIX   "_0_6"
+   ABI-incompatible and must not be mixed with 0.6 ones.
+   0.6 -> 0.7: record instances and module state (_mod) are now a single Lua 5.5
+   Udata (was a CClosure + Udata wrapper). The native ABI of every function
+   taking/returning a record changed (ctype CClosure* -> Udata*), and
+   <mangled>_init now returns Udata* (was CClosure*). 0.6-compiled .so modules
+   are ABI-incompatible with 0.7 ones and live under a different TITAN_PATH dir. */
+#define TITAN_VER          "0.7"
+#define TITAN_VER_SUFFIX   "_0_7"
 #define TITAN_PATH_VAR     "TITAN_PATH"
 #define TITAN_PATH_SEP     "/"
 #define TITAN_PATH_DEFAULT ".;/usr/local/lib/titan/" TITAN_VER
@@ -28,7 +33,10 @@
 
 #define TITAN_LUAINTEGER_NBITS cast_int(sizeof(lua_Integer) * CHAR_BIT)
 
-#define titan_pushmodule(L, c) { setclCvalue(L, s2v(L->top.p), (c)); L->top.p++; }
+/* The module state object is a Udata (was a CClosure): push it as a full
+   userdata value. Used to seed a function/method/metamethod closure's
+   upvalue[0] with the module, and to put the module on the stack. */
+#define titan_pushmodule(L, c) { setuvalue(L, s2v(L->top.p), (c)); L->top.p++; }
 
 /*
 ** Lua 5.5 removed setbvalue (booleans carry no payload; truth lives in

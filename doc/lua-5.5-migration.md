@@ -125,6 +125,17 @@ All templates that touch the Lua stack were rewritten for
 
 ### Records
 
+> **Superseded (0.7 ABI).** The CClosure+Udata dual object described below
+> was the 5.5-migration-era representation. Records (and module state
+> `_mod`) have since been collapsed to a **single Lua 5.5 `Udata`**: a
+> record value *is* its userdata (fields in `uv[0..N-1]`, tag in
+> `getudatamem`, metatable on the udata), there is no backing closure, and
+> field stores use the **back** barrier (`luaC_barrierback`) instead of
+> the forward barrier. See the
+> [records/modules single-Udata plan](../.claude/plans/records-modules-udata-simplification.md)
+> and the current [values and GC](implementation/values-and-gc.md)
+> chapter; this section is retained as migration history.
+
 Records are CClosures whose Lua-visible face is a Udata carrying a type
 tag. The 5.5 Udata redesign forced:
 
@@ -154,6 +165,12 @@ barriers the old code skipped:
 * backward `luaC_barrierback(L, obj2gco(t), v)` for array/map stores —
   all existing table barriers also gained the `obj2gco` wrapper required
   by 5.5's `GCObject*`-typed `luaC_barrierback_`.
+
+(Superseded in part by the 0.7 ABI: once records and `_mod` became
+`Udata`, all of those record-field and module-slot stores flipped from
+the forward barrier to the **back** barrier — a userdata's traversal
+calls `genlink`, so the back barrier is the correct one. Only
+function-value/closure upvalue stores still take the forward barrier.)
 
 ### Miscellanea
 

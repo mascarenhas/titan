@@ -285,10 +285,10 @@ of these are declared anywhere; this table is the inventory.
 | `_self` | `TopLevelMethod` | checker (`checkmethod`) | checker, coder | a synthesized `Ast.Decl` for `self`, typed as the record's nominal type; becomes the C parameter `__self__` |
 | `_record` | `TopLevelStatic`, `TopLevelMethod` | checker pass 1 | checker (`checkmethod`, for `self`'s type) | the `Ast.TopLevelRecord` node the member belongs to |
 | `_method` | `ExpCall` (method calls) | checker | coder | the resolved `Type.Method` |
-| `_field` | `Field` (record constructors) | checker | coder | the resolved `Type.Field` descriptor; its `index` is the upvalue slot the field occupies |
+| `_field` | `Field` (record constructors) | checker | coder | the resolved `Type.Field` descriptor; its `index` is the record `Udata` user-value slot (`uv[index].uv`) the field occupies |
 | `_cvar` | `Decl` | coder | coder | name of the C local holding the value: `_local_x_1`, `_param_x`, `__self__` |
-| `_slot` | `Decl`, `TopLevelVar` | coder | coder | the `TValue` slot anchoring a GC-able value for the collector: a Lua stack slot (`_localslot_x_2` — the per-name counter is shared with `_cvar`, so the suffix is one past the `_cvar`'s — `_paramslot_x`, `__selfslot__`) or `&_mod->upvalue[N]` for module variables |
-| `_upvalue` | `TopLevelVar`, `TopLevelImport`, imported `Type.ModuleVariable` members | coder (`allocate_upvalues`, `import_module`) | coder | index of the node's slot in the module's `CClosure` upvalue array (see [the code generator overview](codegen-overview.md)) |
+| `_slot` | `Decl`, `TopLevelVar` | coder | coder | the `TValue` slot anchoring a GC-able value for the collector: a Lua stack slot (`_localslot_x_2` — the per-name counter is shared with `_cvar`, so the suffix is one past the `_cvar`'s — `_paramslot_x`, `__selfslot__`) or `&_mod->uv[N].uv` for module variables |
+| `_upvalue` | `TopLevelVar`, `TopLevelImport`, imported `Type.ModuleVariable` members | coder (`allocate_upvalues`, `import_module`) | coder | index of the node's slot in the module `Udata`'s user-value array (see [the code generator overview](codegen-overview.md)) |
 | `_body`, `_sig`, `_luabody` | `TopLevelFunc`/`Static`/`Method` | coder (`codefuncdec`) | coder (`generate`) | rendered C strings: the native function definition, its prototype, and the Lua-stack entry wrapper; `generate` concatenates them into the translation unit |
 | `_extras` | `ExpCall` | coder (`codecall`) | coder (`ExpExtra` case of `codeexp`) | maps return-value index (≥ 2) to the C temporary that received that out-parameter; this is how an `ExpExtra` finds the value its call already produced |
 

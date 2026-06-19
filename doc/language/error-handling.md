@@ -275,10 +275,10 @@ the access runs in; see
 The shape is `FILE:LINE:COL: field 'NAME' not found in record 'FQTN'`;
 assigning to a *method* name raises the same `not found` error — methods
 are not assignable fields. Exported module variables behave the same way
-through the module table: writes from Lua are type-checked (writing a
-string to an `integer` variable raises `type error, expected integer but
-found string` at the variable's declaration), and touching a name that is
-not an exported variable raises `global variable 'NAME' does not exist in
+as members of the module value: writes from Lua are type-checked (writing
+a string to an `integer` variable raises `type error, expected integer
+but found string` at the variable's declaration), and touching a name
+that is not an existing member raises `member 'NAME' does not exist in
 Titan module 'MOD'`, with no Titan file/line prefix.
 
 ## Anatomy of an error message

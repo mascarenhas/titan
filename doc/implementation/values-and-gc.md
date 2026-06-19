@@ -2,7 +2,7 @@
 
 This chapter describes how Titan values are represented in the generated
 C — every Titan type's C type, records in full detail, the module
-closure — and the discipline the code generator follows so that all of
+userdata — and the discipline the code generator follows so that all of
 those values stay safe under Lua's garbage collector. The structure of a
 generated translation unit and the calling convention are covered in the
 [code generator overview](codegen-overview.md); construct-by-construct
@@ -52,7 +52,7 @@ for locals, parameters, return values and temporaries alike:
 | `{T}` (array) | `Table*` | raw pointer; Titan arrays *are* Lua tables |
 | `{K:V}` (map) | `Table*` | likewise |
 | `value` | `TValue` | a full boxed Lua value, held **by value** |
-| record type (`Type.Nominal`) | `CClosure*` | pointer to the record's backing closure (below) |
+| record type (`Type.Nominal`) | `Udata*` | the record value *is* this userdata (below) |
 | `T?` (option) | `TValue` | boxed: nil or the payload |
 | foreign pointer | per `foreignctype` | e.g. `void*`, `char*` ([FFI internals](ffi-internals.md)) |
 
@@ -75,17 +75,22 @@ Three helper families in `coder.lua` mediate between C variables and
 `TValue` slots; all generated code goes through them:
 
 * `getslot(typ, dst, src)` reads a `TValue*` into a C variable —
-  `ivalue`, `fltvalue`, `ttistrue`, `tsvalue`, `hvalue`, `clCvalue`, or
-  a struct copy `*($SRC)` for `value`/options.
+  `ivalue`, `fltvalue`, `ttistrue`, `tsvalue`, `hvalue`, `uvalue` (for
+  records), or a struct copy `*($SRC)` for `value`/options.
 * `setslot(typ, dst, src)` writes a C value into a `TValue*` —
   `setivalue`, `setfltvalue`, `titan_setbvalue` (a `titan.h` macro; 5.5
   removed `setbvalue` along with the boolean payload), `setsvalue`,
-  `sethvalue`, `setclCvalue`, `setobj2t` for `value`/options.
-* `setwrapped(typ, dst, src)` is `setslot` except for records: it
-  stores the record's Lua-visible *userdata* instead of the closure
-  (next section). It is used whenever a value escapes anywhere Lua can
-  see — table elements, map keys/values, results returned to Lua.
-  `copyslotwrapped` is the slot-to-slot variant.
+  `sethvalue`, `setuvalue` (for records), `setobj2t` for
+  `value`/options.
+* `setwrapped(typ, dst, src)` was historically `setslot` except for
+  records, where it had to swap the Titan-side closure for the
+  Lua-visible userdata. Now that a record *is* its userdata, `setwrapped`
+  for records is just `setslot` — there is no wrapper to swap to (next
+  section). It is still used whenever a value escapes anywhere Lua can
+  see — table elements, map keys/values, results returned to Lua —
+  because other code paths historically distinguished the two; for
+  records the two are identical. `copyslotwrapped` is the slot-to-slot
+  variant.
 
 `types.is_gc` in `types.lua` decides which types the collector cares
 about, and therefore which values need anchoring: string, value,
@@ -94,9 +99,10 @@ GC-able (the list also tests a `Type.Interface` tag for which no
 constructor exists). Integers, floats, booleans, nil and foreign
 pointers need none.
 
-## Records: a CClosure wearing a Udata
+## Records: a single tagged Udata
 
-A Titan record value is **two** Lua objects joined back-to-back. For
+A Titan record value is **one** Lua object — a full userdata (`Udata`).
+For
 
 ```lua
 -- Titan
@@ -109,41 +115,38 @@ end
 
 the synthesized `Point.new` (the parser desugars every record into a
 declaration plus a `new` static method) generates, in `coderecord`
-(`coder.lua`):
+(`coder.lua`), a single allocation:
 
 ```c
-_tmp_1 = luaF_newCclosure(L, 4);                       /* #fields + 1 */
-memset(_tmp_1->upvalue, 0, sizeof(TValue) * 4);
-setclCvalue(L, _tmp_1_slot, _tmp_1);                   /* anchor closure first */
 {
-    Udata* _ud = luaS_newudata(L, sizeof(void*), 1);   /* 1 user value */
+    Udata* _ud = luaS_newudata(L, sizeof(void*), 3);   /* #fields user values */
+    setuvalue(L, _tmp_1_slot, _ud);                    /* anchor the udata first */
     *((void**)(getudatamem(_ud))) = (void*)test_Point_typetag;
-    _ud->metatable = hvalue(&_mod->upvalue[3]);
-    setclCvalue(L, &_ud->uv[0].uv, _tmp_1);            /* uv[0] = back-ref */
-    setuvalue(L, &(_tmp_1->upvalue[0]), _ud);          /* upvalue[0] = udata */
-    /* an emergency GC inside luaS_newudata can blacken the
-       closure, so this store needs a forward barrier */
-    luaC_barrier(L, _tmp_1, &(_tmp_1->upvalue[0]));
+    _ud->metatable = hvalue(&_mod->uv[3].uv);
+    /* per field i: store into &_ud->uv[i].uv, then for GC-able fields
+       luaC_barrierback(L, obj2gco(_ud), &_ud->uv[i].uv) */
 }
 ```
 
 The layout:
 
-* **The `CClosure`** has `#fields + 1` upvalues: `upvalue[0]` holds the
-  wrapper userdata, `upvalue[i]` holds field `i` (1-based, assigned in
-  declaration order by the checker — `types.Field` in `checker.lua`).
-  Inside Titan code a record value *is* this closure (`ctype` =
-  `CClosure*`), so field access is an indexed load — `p.x` compiles to
-  `fltvalue(&((_param_p)->upvalue[1]))` — and a field write is `setslot`
-  into `&(_recobj->upvalue[i])` plus a forward barrier when the field
-  type is GC-able.
-* **The `Udata`** has a `sizeof(void*)` payload holding the record's
-  *type tag* (next section); its one user value `uv[0].uv` points back
-  at the closure; its `metatable` field is set directly from the module
-  upvalue caching this record's metatable.
+* **The `Udata`** has `#fields` user values (no reserved `uv[0]`):
+  `uv[i].uv` holds field `i`, **0-based** (`0..N-1`), assigned in
+  declaration order by the checker — `types.Field` in
+  `checker.lua`. Inside Titan code a record value *is* this udata
+  (`ctype` = `Udata*`), so field access is an indexed load — `p.x`
+  compiles to `fltvalue(&((_param_p)->uv[0].uv))` — and a field write is
+  `setslot` into `&(_recobj->uv[i].uv)` plus a **back** barrier when the
+  field type is GC-able (a userdata owner uses `luaC_barrierback`, see
+  [write barriers](#5-write-barriers-back-for-userdata-and-tables-forward-for-closures)).
+* The udata's `sizeof(void*)` raw payload (after the user-value array,
+  reached by `getudatamem`) holds the record's *type tag* (next
+  section); its `metatable` field is set directly from the module user
+  value caching this record's metatable.
 
-Closure and userdata reference each other: `upvalue[0]` is the forward
-link, `uv[0].uv` the back link.
+There is no longer a backing `CClosure` and no closure↔udata
+cross-references: the value Titan computes with and the value Lua sees
+are the same object.
 
 ### Type tags: address identity, synchronized through the registry
 
@@ -175,7 +178,7 @@ type name):
 | --- | --- | --- |
 | `"Titan record $TYPE tag"` | the tag pointer (light userdata) | tag lookup by other code copies |
 | the tag pointer itself (`lua_rawsetp`) | the FQTN string | the *reverse* map, tag → name, for error messages |
-| `"Titan record $TYPE metatable"` | the metatable (`luaL_newmetatable`) | wiring `_mod` upvalues; `__metatable` is protected with the string `"Titan record $TYPE"` |
+| `"Titan record $TYPE metatable"` | the metatable (`luaL_newmetatable`) | wiring `_mod` user values; `__metatable` is protected with the string `"Titan record $TYPE"` |
 
 Identity is the *address*: two userdata carry the same record type
 exactly when their payload pointers are equal. Every other copy of code
@@ -199,27 +202,23 @@ address; as the comment above `allocate_upvalues` puts it, "Tags can be
 stored in C variables, as their value is the same across all instances
 of the module". Record **metatables**, by contrast, are per-Lua-state
 heap objects and cannot live in C statics: they are cached in `_mod`
-upvalues (`type2metatable` allocates the slot lazily; `_init` fills it
-with `luaL_getmetatable`).
+user values (`type2metatable` allocates the slot lazily; `_init` fills
+it with `luaL_getmetatable`).
 
 ### Wrap and unwrap at the boundary
 
-Lua never sees the closure; Titan never works through the userdata.
-`setwrapped` hands Lua the userdata stored in `upvalue[0]`:
-
-```c
-setobj2t(L, $DST, &(($SRC)->upvalue[0]));
-```
-
-(for `T?` over a record, after a nil check). Coming back, the nominal
-case of `checkandget` verifies the tag and follows the back-reference:
+Now that a record *is* its userdata, the boundary has nothing to swap:
+Titan and Lua hold the same object. `setwrapped` for a record is just
+`setslot` — it hands Lua the udata directly (for `T?` over a record,
+after a nil check). Coming back, the nominal case of `checkandget`
+verifies the tag and uses the udata as the value:
 
 ```c
 if (TITAN_LIKELY(ttisfulluserdata($EXP))) {
   Udata* _ud = uvalue($EXP);
   void *_tag = *((void**)(getudatamem(_ud)));
   if (TITAN_LIKELY(test_Point_typetag == _tag)) {
-    $VAR = clCvalue(&_ud->uv[0].uv);
+    $VAR = _ud;
   } else {
     lua_pushlightuserdata(L, _tag);
     if(lua_rawget(L, LUA_REGISTRYINDEX) == LUA_TNIL) {
@@ -239,42 +238,48 @@ record — the spec suite asserts both
 `expected test.Rec but found test.Point` and
 `expected test.Rec but found number` (`spec/coder_spec.lua`).
 
-### Why two objects
+### Why one object
 
-Each side gets its preferred representation in O(1). **Lua needs** a
-value with identity, a metatable and metamethod dispatch — a full
-userdata; the metatable's `__index`/`__newindex` serve field access and
-methods from Lua ([Lua interop internals](lua-interop-internals.md)),
-and the spec verifies `type(p) == "userdata"` and that two instances
-share a metatable. **Titan needs** fixed-slot, unboxed-pointer field
-access and a GC object with barrier support for mutable slots — exactly
-what a `CClosure`'s `TValue upvalue[]` array is. `setwrapped`
-(Titan→Lua) is one load of `upvalue[0]`; `checkandget` (Lua→Titan) is
-one pointer compare plus one load of `uv[0].uv`.
+A record needs to be two things at once and a single full userdata
+serves both in O(1). **Lua needs** a value with identity, a metatable
+and metamethod dispatch — a full userdata; the metatable's
+`__index`/`__newindex` serve field access and methods from Lua
+([Lua interop internals](lua-interop-internals.md)), and the spec
+verifies `type(p) == "userdata"` and that two instances share a
+metatable. **Titan needs** fixed-slot, unboxed-pointer field access and
+a GC object with barrier support for mutable slots — exactly
+what a `Udata`'s `UValue uv[]` array is. `setwrapped`/`checkandget`
+(Titan↔Lua) need no wrap or unwrap at all: the value crossing the
+boundary is the record itself, leaving only the one-pointer tag compare
+on the way in.
 
-## The module closure
+## The module userdata
 
-Module state uses the same trick as records: each module instance is one
-`CClosure`, `_mod`, passed as the second argument to every generated
-function. `upvalue[0]` is the Lua-visible module table (what `require`
-returns), created in `_init` and stored with a forward barrier:
+Module state uses the same representation as records: each module
+instance is one `Udata`, `_mod`, passed as the second argument to every
+generated function (`Udata *_mod` in every native signature). It is the
+value `require` returns directly — there is **no separate Lua-facing
+module table** — and it is allocated in `_init` with zero raw bytes and
+`NUPVALS` user values:
 
 ```c
-lua_newtable(L);
-setobj2t(L, &_mod->upvalue[0], s2v(L->top.p - 1));
-luaC_barrier(L, _mod, &_mod->upvalue[0]);
+Udata *_mod = luaS_newudata(L, 0, $NUPVALS);
 ```
 
-The remaining upvalues hold, in allocation order: exported module
-variables (slots 1..n — their indices are part of the module's ABI),
-local module variables and imported modules' closures, then lazily
-allocated slots for record metatables and for modules needed only by
-cross-module method calls. A sample module with exported `x`, local
-`secret` and record `Point` gets `NUPVALS = 4`: `[0]` module table,
-`[1]` `x`, `[2]` `secret`, `[3]` the `Point` metatable. Reading a
-module variable is `getslot` on `&_mod->upvalue[i]`; writing a GC-able
-one is `setslot` plus `luaC_barrier(L, _mod, slot)`. The allocation
-rules and the init protocol are in the
+There is **no reserved user value**: the module table was removed
+entirely, so member slots are 0-based. The user values hold, in
+allocation order: exported module variables (slots 0..n-1 — their
+indices are part of the module's ABI), then local module
+variables, imported modules' `Udata`s and exported-function canonical
+closures, then lazily allocated slots for record metatables,
+per-record static-namespace tables, and modules needed only by
+cross-module method calls. Reading a module variable is `getslot` on
+`&_mod->uv[i].uv`; writing a GC-able one is `setslot` plus the **back**
+barrier `luaC_barrierback(L, obj2gco(_mod), slot)` (a userdata owner,
+not a closure). All member access from Lua — functions, variables and
+record namespaces alike — flows through a metatable installed on the
+`Udata` itself ([Lua interop internals](lua-interop-internals.md)); the
+allocation rules and the init protocol are in the
 [code generator overview](codegen-overview.md).
 
 ## GC discipline: the invariants
@@ -355,19 +360,21 @@ the local (`codeassignment` emits `$CVAR = $CEXP;` followed by the
 live value. Parameters get a shadow slot (`_paramslot_<name>`) only
 when the body *assigns* to them — an unassigned parameter is already
 anchored by its caller ([below](#calls-the-caller-anchors)). Module
-variables need no shadow: their home, a `_mod` upvalue, is itself a
+variables need no shadow: their home, a `_mod` user value, is itself a
 GC-visible location.
 
 ### 3. Anchor fresh objects before the next allocation
 
 Any allocation can trigger a collection, so a freshly created object
 must reach a stack slot before the code allocates again. The record
-constructor shown earlier is the canonical case — two allocations back
-to back, with the closure anchored
-(`setclCvalue(L, _tmp_1_slot, _tmp_1)`) *before* `luaS_newudata` runs;
-even so, an emergency collection inside `luaS_newudata` can blacken the
-already-anchored closure, which is why the subsequent `upvalue[0]`
-store needs its forward barrier.
+constructor shown earlier is simpler now that it is a single object: one
+`luaS_newudata` returns the udata already nil-filled and white, and the
+generated code anchors it in its stack slot
+(`setuvalue(L, _tmp_1_slot, _ud)`) *before* any field expression runs.
+Each field store then happens with the udata already anchored, and the
+back barrier on each GC-able field store keeps the (possibly old/black)
+udata honest. There is no longer a separate closure-then-udata sequence
+to order, and no forward-barriered cross-link to install.
 
 Container literals follow the same pattern. `codearray` anchors the
 fresh table immediately — and *always* in a stack slot, even when the
@@ -404,28 +411,42 @@ allocating Titan loop cannot starve the collector. (History: commits
 "be smarter about avoiding calling GC when the loop does not allocate",
 November 2017.)
 
-### 5. Write barriers: forward for closures and userdata, back for tables
+### 5. Write barriers: back for userdata and tables, forward for closures
 
 Lua's generational collector only re-traces old objects that announce
 they were modified. Generated code announces with the two internal
-barrier macros, chosen by the *owner's* type:
+barrier macros, chosen by the *owner's* type. The choice turns on a GC
+detail: a `Udata`'s and a `Table`'s traversal call `genlink`, so the
+**back** barrier (re-greying the *container*) is safe for them, whereas a
+`CClosure`'s traversal does not, so a closure store must use the
+**forward** barrier (recolouring the *value*).
 
-**Forward barrier — `luaC_barrier(L, owner, slot)`** when the owner is a
-`CClosure` (or `Udata`); used for every store of a collectable value
-into a closure upvalue:
+**Back barrier — `luaC_barrierback(L, obj2gco(o), v)`** when the owner is
+a `Udata` or a `Table`; used for:
 
-* record field assignment, and record-literal field initialization;
-* the record constructor's `upvalue[0] = udata` store (above);
-* module-variable writes — local (`luaC_barrier(L, _mod, slot)`) and
-  imported (`luaC_barrier(L, _imod, _varslot)`), including writes coming
-  from Lua through the module metatable's `__newindex`;
-* installing the module table into `_mod->upvalue[0]` in `_init`;
-* record field writes from Lua through the record's `__newindex`.
+* record field assignment, and record-literal field initialization (the
+  owner is the record's `Udata`);
+* module-variable writes — local
+  (`luaC_barrierback(L, obj2gco(_mod), slot)`) and imported
+  (`luaC_barrierback(L, obj2gco(_imod), _varslot)`), including writes
+  coming from Lua through the module metatable's `__newindex`;
+* record field writes from Lua through the record's `__newindex`;
+* array element stores, map stores, and array/map-literal fills, each
+  gated on `types.is_gc` of the stored element or value type.
 
-**Back barrier — `luaC_barrierback(L, obj2gco(t), v)`** when the owner
-is a `Table`; used for array element stores, map stores, and
-array/map-literal fills, in each case gated on `types.is_gc` of the
-stored element or value type.
+(The argument shape differs from the forward barrier: back takes the
+*value* and an `obj2gco`-wrapped container; forward takes the *slot
+pointer*.) Both `_mod` and record instances became `Udata` in the 0.7
+ABI, flipping these stores from the forward barrier the closure
+representation used.
+
+**Forward barrier — `luaC_barrier(L, owner, slot)`** remains for the
+owners that are still `CClosure`s — every store of a captured value into
+a function value's upvalue array ([closures and captured
+variables](codegen-overview.md#closures-and-captured-variables)).
+(A capture *box* cell is itself a one-uservalue `Udata`, so its own
+mutation uses the back barrier — for the same genlink reason records and
+modules now do.)
 
 The division of labor with Lua's table internals is spelled out in a
 comment in `coder.lua`: raw stores go through `luaH_set`/`luaH_setint`
@@ -471,5 +492,6 @@ returns and is in a stack slot before any subsequent allocation can run.
 When a Lua program is the caller, the Lua entry wrapper plays this role:
 it reserves one stack slot per result (`lua_checkstack` + bumping
 `L->top.p`) before invoking the native function and writes each result
-back with `setwrapped` — which is also where records put their userdata
-face back on ([Lua interop internals](lua-interop-internals.md)).
+back with `setwrapped` — for a record that is just the record's own
+userdata, since the value and its Lua face are one object
+([Lua interop internals](lua-interop-internals.md)).

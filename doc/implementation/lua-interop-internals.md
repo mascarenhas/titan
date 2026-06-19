@@ -5,8 +5,8 @@ generated wrapper every public function gets, the per-type checks that
 admit Lua values into typed code, the metatables that serve records and
 module variables to Lua, the registry entries holding it all together,
 the dynamic loader, the error handler, the standalone-executable
-entrypoint, and the safety argument. Value representations (records as
-CClosure + tagged Udata, the module closure) are in
+entrypoint, and the safety argument. Value representations (records and
+the module state `_mod` as a single tagged `Udata` each) are in
 [values and the GC](values-and-gc.md); the `_init`/`luaopen` protocol
 and dependency linking are in the
 [code generator overview](codegen-overview.md); the user-facing view is
@@ -65,7 +65,7 @@ static int interop_fmod_lua(lua_State *L) {
     ptrdiff_t __save_errfunc = L->errfunc;
     lua_pushcclosure(L, errorhandler, 0);
     L->errfunc = savestack(L, L->top.p - 1);
-    CClosure *_mod = clCvalue(&clCvalue(s2v(func))->upvalue[0]);
+    Udata *_mod = uvalue(&clCvalue(s2v(func))->upvalue[0]);
     lua_Number _param_1 = 0;
     /* ...checkandget(float) from s2v(func + 1)... */
     lua_Integer _param_2 = 0;
@@ -112,8 +112,9 @@ Walking through it:
   after reservation**: all Titan run-time errors go through `codethrow`
   → `luaL_error`. It is leftover groundwork from that experiment.
 * **Module recovery.** The wrapper is registered as a C closure over the
-  module closure (`titan_pushmodule(L, _mod); lua_pushcclosure(L,
-  interop_fmod_lua, 1)`), so `_mod` is recovered from its upvalue.
+  module `Udata` (`titan_pushmodule(L, _mod); lua_pushcclosure(L,
+  interop_fmod_lua, 1)` — `titan_pushmodule` now pushes the udata), so
+  `_mod` is recovered from its upvalue with `uvalue`.
 * **Arguments.** Each parameter is a C local of its native
   [`ctype`](values-and-gc.md), filled by `checkandget` from
   `s2v(func + i)`. The location baked into boundary error messages is
@@ -122,9 +123,9 @@ Walking through it:
 * **Results.** The wrapper reserves one stack slot per declared return
   value, calls the native function (extra returns come back through
   out-parameters), and writes each result into its slot with
-  `setwrapped` — `setslot` for every type except records, which cross
-  out as their Udata wrapper. `return NRET;` makes multiple Titan
-  returns multiple Lua returns (`local x, y = titan_test.f(2)` works).
+  `setwrapped` — which for a record is just `setslot`, since the record
+  *is* its Udata. `return NRET;` makes multiple Titan returns multiple
+  Lua returns (`local x, y = titan_test.f(2)` works).
 
 ## `checkandget`: the per-type entry check
 
@@ -151,8 +152,8 @@ raised as run-time errors via `luaL_error`:
 | record | a full userdata whose payload pointer equals the record's tag | three-way message, below |
 
 The record case compares the pointer stored in the userdata body against
-the per-FQTN tag and, on match, recovers the backing `CClosure` from the
-userdata's user value — full excerpt and tag mechanism in
+the per-FQTN tag and, on match, uses the userdata directly as the record
+value (there is no wrapper to unwrap) — full excerpt and tag mechanism in
 [values and the GC](values-and-gc.md#wrap-and-unwrap-at-the-boundary).
 The failure message is always `type error, expected %s but found %s`,
 with three arms for the found part: another Titan record reports its
@@ -219,8 +220,9 @@ option base case. Three points matter:
 
 ## Records from Lua
 
-Lua holds the record's Udata wrapper; field access and method dispatch
-go through a metatable built once per Lua state in the module's `_init`:
+Lua holds the record's `Udata` (which is the record itself); field access
+and method dispatch go through a metatable built once per Lua state in the
+module's `_init`:
 
 ```c
 luaL_newmetatable(L, "Titan record interop.Point metatable");
@@ -259,7 +261,7 @@ to the method's Lua-entry C closure, itself closed over the module.
 ```c
 static int __index_interop_Point(lua_State *L) {
     TValue *_recslot = s2v(L->ci->func.p + 1);
-    CClosure *_rec = NULL;
+    Udata *_rec = NULL;
     /* ... full nominal checkandget of the receiver: tag compare,
        three-way "expected interop.Point but found %s" errors ... */
     TValue *_fieldslot = s2v(L->ci->func.p + 2);
@@ -272,7 +274,7 @@ static int __index_interop_Point(lua_State *L) {
         if(ttisCclosure(_fieldidx)) {
             setobj2s(L, L->top.p - 1, _fieldidx);   /* a method */
         } else {
-            TValue *_slot = &_rec->upvalue[ivalue(_fieldidx)];
+            TValue *_slot = &_rec->uv[ivalue(_fieldidx)].uv;
             switch(ivalue(_fieldidx)) {
                 case 1: { setobj2s(L, L->top.p - 1, _slot); break; }
                 /* ... one case per field ... */
@@ -287,12 +289,12 @@ static int __index_interop_Point(lua_State *L) {
 
 The receiver is re-validated with the full nominal `checkandget` even
 though dispatch already went through the right metatable — so extracting
-the raw closure with the `debug` library and calling it on a bogus
+the raw metamethod with the `debug` library and calling it on a bogus
 receiver still errors safely. A fieldmap hit that is a C closure is a
 method, returned as-is (this is how `p:move(2, 3)` from Lua reaches the
 `genluaentry` wrapper, with `p` then checked as argument 1). An integer
-hit reads the corresponding record upvalue; record-typed fields are
-unwrapped to *their* Udata on the way out. Unknown keys raise
+hit reads the corresponding record user value; a record-typed field is
+already its own Udata, handed out directly. Unknown keys raise
 `field '%s' not found in record '%s'`, located at the record
 declaration.
 
@@ -303,7 +305,7 @@ lookup, but additionally requires the hit to be an **integer** — so
 assigning to a method name (`p.move = 2`) raises the same "not found"
 error; methods are not assignable. The write goes through `checkandset`
 per field, followed by a GC
-[write barrier](values-and-gc.md#5-write-barriers-forward-for-closures-and-userdata-back-for-tables):
+[write barrier](values-and-gc.md#5-write-barriers-back-for-userdata-and-tables-forward-for-closures):
 
 ```c
 case 1: {
@@ -318,20 +320,25 @@ case 1: {
     break;
 }
 /* ... */
-luaC_barrier(L, _rec, _dst);
+luaC_barrierback(L, obj2gco(_rec), _dst);
 ```
 
-(The duplicated `luaL_error` is `checkandset`'s dead line.) Record-field
+(The duplicated `luaL_error` is `checkandset`'s dead line.) The barrier
+is the **back** barrier now that `_rec` is a `Udata`, not the forward
+barrier the old `CClosure` record used. Record-field
 writes from Lua are thus **type-enforced** with the standard messages;
 the spec covers correct-type mutation and the not-found errors, but no
 test writes a wrongly-typed value to a field from Lua. Records with zero
 fields get stub `__index`/`__newindex` that always error, with an
 unquoted message variant (`field %s not found in record %s`).
 
-Statics need no metatable: each record name becomes a plain Lua table in
-the module table with its statics inserted, so `mod.Point.new(2, 3)` is
-an ordinary table lookup plus a wrapped call — `new` was desugared into
-a static method by the parser long before codegen.
+Statics need no record metatable: each record name becomes a plain Lua
+**static-namespace table** with its statics inserted, held in a dedicated
+`_mod` user-value slot and served by the module metatable's `__index`
+(read-only) under the record's name. So `mod.Point.new(2, 3)` resolves
+`mod.Point` through the module `Udata`'s `__index` to that table, then
+does an ordinary table lookup plus a wrapped call — `new` was desugared
+into a static method by the parser long before codegen.
 
 ### Identity and tag security
 
@@ -357,51 +364,63 @@ record outright (and an undersized userdata causes an out-of-bounds
 read). C libraries are outside the trust boundary; an *accidental*
 pointer match from an innocent userdata is implausible.
 
-## The module table and exported variables
+## The module metatable and its members
 
-`require` of a Titan module returns a plain Lua table —
-`luaopen_<mangled>` calls `_init` and pushes `_mod->upvalue[0]`. The
-table holds one wrapper closure per exported function and one subtable
-per record. Exported module variables are deliberately **not** entries
-in it: they live in `_mod` upvalues so Titan reads them as direct slot
-accesses, and Lua reaches them through `__index`/`__newindex` on the
-module table's metatable. The generated `__index` for exported `x`
-(slot 1):
+`require` of a Titan module returns the module `Udata` itself —
+`luaopen_<mangled>` calls `_init` and pushes it; there is **no separate
+module table**. Every member access — exported functions, exported
+variables, and per-record static-namespace tables — flows through a
+metatable installed on the `Udata`, driven by a single **member map**
+(name→slot) shared by `__index`/`__newindex`. Functions and record
+namespaces live in their own `_mod` user-value slots and are served
+read-only; exported variables also live in `_mod` slots (so Titan reads
+them as direct slot accesses) but are coerced in and out. The generated
+`__index` for exported `x` (slot 1):
 
 ```c
 static int __index(lua_State *L) {
-    CClosure *_me = clCvalue(s2v(L->ci->func.p));
-    CClosure *_mod = clCvalue(&_me->upvalue[0]);
+    Udata *_me = uvalue(s2v(L->ci->func.p));   /* the module Udata */
+    Udata *_mod = _me;
     TValue _indexv;
-    lu_byte _indextag = luaH_get(hvalue(&_me->upvalue[1]), s2v(L->ci->func.p + 2), &_indexv);
+    lu_byte _indextag = luaH_get(<member map>, s2v(L->ci->func.p + 2), &_indexv);
     if(TITAN_UNLIKELY(tagisempty(_indextag))) {
         return luaL_error(L,
-        "global variable '%s' does not exist in Titan module '%s'",
+        "member '%s' does not exist in Titan module '%s'",
         lua_tostring(L, 2), "interop");
     }
     switch(ivalue(&_indexv)) {
         case 1: {
-            setobj2t(L, s2v(L->top.p - 1), &_mod->upvalue[1]);
+            /* exported variable: coerce out with copyslotwrapped */
+            setobj2t(L, s2v(L->top.p - 1), &_mod->uv[1].uv);
             break;
         }
+        /* exported functions / record namespaces: push the value from
+           their uv slot read-only */
     }
     return 1;
 }
 ```
 
-Both metamethods are C closures with two upvalues: the module closure
-and a *varmap* table mapping each exported variable's name to its slot
-(only non-`local` variables are entered). A name miss raises
-`global variable '%s' does not exist in Titan module '%s'` — generated
-but asserted by no spec. A hit switches on the slot index: reads go
-through `copyslotwrapped` (a record-typed variable is handed out as its
-Udata), writes through `checkandset` plus `luaC_barrier(L, _mod, slot)`
-for GC-able types — so module-variable writes from Lua are type-checked,
-located at the variable's declaration. The metatable (registry name
+Both metamethods are C closures closed over the module `Udata` and a
+*member map* table mapping each exported name to its slot (variables,
+functions and record namespaces; `local` variables are not entered). A
+name miss raises `member '%s' does not exist in Titan module '%s'` —
+generalized from the old "global variable ..." message now that
+functions and records route through the same metamethods. A hit switches
+on the slot index: variable reads go through `copyslotwrapped` (a
+record-typed variable is handed out as its Udata — itself, now), while
+functions and record namespaces are pushed read-only from their slots.
+`__newindex` allows only variable writes, through `checkandset` plus the
+**back** barrier `luaC_barrierback(L, obj2gco(_mod), slot)` for GC-able
+types (a userdata owner) — so module-variable writes from Lua are
+type-checked, located at the variable's declaration; assigning to a
+function or record namespace errors. The metatable (registry name
 `"Titan module interop metatable"`, `__metatable` protected with the
-string `"Titan module interop"`) is created **only when the module has
-exported variables**; without them the module table is bare, and unknown
-attribute reads just yield nil, Lua-style.
+string `"Titan module interop"`) is created whenever the module exports
+**any** member — functions now route through it too, so essentially every
+real module has one. Without the metatable (a module that exports
+nothing) the `Udata` has no members to reach and any attribute read on it
+fails the userdata-has-no-`__index` way.
 
 ## The registry footprint
 
@@ -410,8 +429,8 @@ lives in the Lua registry. The complete key inventory:
 
 | Registry key | Value |
 | --- | --- |
-| `"Titan module <modname>"` | the module `CClosure` (`_init`'s idempotency check) |
-| `"Titan module <modname> metatable"` | the module-table metatable (only if exported variables exist) |
+| `"Titan module <modname>"` | the module `Udata` (`_init`'s idempotency check) |
+| `"Titan module <modname> metatable"` | the module `Udata`'s member metatable (only if the module exports anything) |
 | `"Titan record <fqtn> metatable"` | the record metatable (`luaL_newmetatable`) |
 | `"Titan record <fqtn> tag"` | the tag pointer as light userdata — how other code copies fetch it |
 | the tag pointer itself (via `lua_rawsetp`) | the FQTN string — the reverse map, used only in error messages |
@@ -429,14 +448,14 @@ When a dependency exists only as a compiled `.so`, the importer's
 
 ```c
 void *some_dep_handle = loadlib(L, "some/dep.so");
-CClosure* (*some_dep_init)(lua_State *L) =
-    titan_cast_func(CClosure* (*)(lua_State*), loadsym(L, some_dep_handle, "some_dep_init"));
+Udata* (*some_dep_init)(lua_State *L) =
+    titan_cast_func(Udata* (*)(lua_State*), loadsym(L, some_dep_handle, "some_dep_init"));
 ```
 
 `loadlib(L, file)` first consults the handle cache under
 `TITAN_LIBS_KEY`; on a miss it walks the Titan path — environment
-variable `TITAN_PATH_0_5`, then `TITAN_PATH`, then the default
-`".;/usr/local/lib/titan/0.5"`, with `;;` in an env value splicing the
+variable `TITAN_PATH_0_7`, then `TITAN_PATH`, then the default
+`".;/usr/local/lib/titan/0.7"`, with `;;` in an env value splicing the
 default in — trying `dlopen(dir "/" file, RTLD_NOW | RTLD_LOCAL)` per
 `;`-separated directory. Successes are cached; the cache table's
 metatable has a `__gc` that `dlclose`s every handle in reverse insertion
@@ -520,7 +539,8 @@ interiors are never trusted, so each read re-checks the element type.
 On the way **out**, every value leaving Titan is an ordinary Lua value:
 numbers, strings, booleans and nil as-is; arrays and maps as the *same*
 Lua tables (aliased, never copied — the spec asserts table identity
-across the boundary); records as their stable Udata wrapper. Between
+across the boundary); records as their stable `Udata` (the record value
+itself). Between
 those edges, Titan code runs with no checks at all — Titan→Titan calls
 use the native convention and trust the checker.
 
