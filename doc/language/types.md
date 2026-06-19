@@ -179,9 +179,10 @@ matched exactly. A `PointF` can never be used where a `PointV` is
 expected, and there is no cast between them.
 
 Some constructs demand equality directly: relational comparisons
-(`<`, `<=`, `>`, `>=`) require equal operand types after numeric
-promotion, and the `or` defaulting rule for options (`x or d` where
-`x: t?`) requires `d` to have exactly the base type `t`.
+(`<`, `<=`, `>`, `>=`) require two numbers (any `integer`/`float` mix —
+compared by mathematical value, with no promotion) or two strings, and
+the `or` defaulting rule for options (`x or d` where `x: t?`) requires
+`d` to have exactly the base type `t`.
 
 ## Compatibility: how `value` flows through compound types
 
@@ -317,9 +318,11 @@ Write `for x: float = 1.0, 10.0` instead. See
 ### Coercions performed by operators
 
 The operators insert their own conversions, independent of the contexts
-above: mixed `integer`/`float` operands of arithmetic, relational and
-equality operators promote the integer side to `float` (`/` and `^`
-always promote operands and result to `float`); the bitwise operators
+above: mixed `integer`/`float` operands of *arithmetic* operators promote
+the integer side to `float` (`/` and `^` always promote operands and
+result to `float`), but the relational and equality operators do **not**
+promote — a mixed `integer`/`float` comparison compares mathematical
+values exactly, as in Lua; the bitwise operators
 narrow float operands to `integer` with a run-time check; `..` converts
 numeric operands to strings; `not` — and `and`/`or` in a boolean
 context — coerce to `boolean`; `==`/`~=` box the other side to `value`

@@ -475,10 +475,13 @@ and float `%` (`generate_binop_mod_flt`) is faithful to Lua's
 (`if ((r > 0) ? n < 0 : (r < 0 && n > 0)) { r += n; }`) so the result
 takes the sign of the divisor, as floored division requires.
 
-**`^`** always produces a float: `pow(l, r)`. **Equality on dynamic
-values**: when both operands are `TValue`-represented (`value` or
-options), `==`/`~=` compile to `luaV_rawequalobj(&l, &r)` and its
-negation. **`and`/`or`** specialize on static truthiness: boolean
+**`^`** always produces a float and follows Lua's `luai_numpow`:
+exponent `2` is special-cased as `b * b` (where `b` is the base hoisted
+into a float temp), every other exponent uses `pow(b, e)` — both
+operands are materialized into float temps first, so each is evaluated
+once. **Equality on dynamic values**: when both operands are
+`TValue`-represented (`value` or options), `==`/`~=` compile to
+`luaV_rawequalobj(&l, &r)` and its negation. **`and`/`or`** specialize on static truthiness: boolean
 operands become C `&&`/`||`; statically truthy/falsy sides short-circuit
 at compile time. In the general case the left operand is first
 **materialized into a temp of its own type** and the truthiness test
@@ -492,10 +495,39 @@ This is what makes the `cond and a or b` ternary idiom, long all-boolean
 side — the generated form of the `t[i] or v` idiom — and a `value`-typed
 `or` tests the materialized temp with `l_isfalse`.
 
-*Limitation:* integer `+ - *` and unary `-` are plain C operators with no
-overflow handling, and `driver.CFLAGS` does not pass `-fwrapv`; the spec
-suite nonetheless asserts Lua's wraparound at `mininteger`/`maxinteger`,
-which holds with current gcc/clang but is not guaranteed by C99.
+**Integer arithmetic wraps like Lua, not C.** Integer `+ - *` and unary
+`-` emit `intop(...)` — `intop(+, x, y)`, `intop(*, x, y)`,
+`intop(-, 0, x)` for negation — which does the operation in the unsigned
+domain (`l_castU2S(l_castS2U(v1) op l_castS2U(v2))`, `lvm.h`), giving
+defined two's-complement wraparound instead of C's signed-overflow
+undefined behavior. So `math.maxinteger + 1` is `math.mininteger` and
+unary minus of `math.mininteger` is itself, with no UB regardless of
+optimizer or `-fwrapv`. Binary `~` (Lua's bitwise *exclusive-or*)
+compiles to `intop(^, x, y)` — C's binary xor is `^`, while Titan's `^`
+is exponentiation. Shifts negate the amount with `intop(-, 0, y)` so a
+shift amount of `math.mininteger` is well-defined rather than overflowing
+under `-y`. Integer `//`, `%` and the shifts now materialize their
+operands into temps first, so a side-effecting operand (`f() // g()`,
+`x << g()`) is evaluated exactly once even though the template references
+each operand several times.
+
+**Float literals** are emitted with `%.17g` — full round-trip precision
+for every finite `double`, where the old `%f` truncated to six fractional
+digits. A literal that overflows to `+inf` (e.g. `1e400`) becomes
+`HUGE_VAL` (and `-inf` becomes `(-HUGE_VAL)`), since C has no `inf`
+literal.
+
+**Mixed integer/float comparisons** (`< <= > >= == ~=` with one
+`integer` and one `float` operand) are inlined as calls to the
+static-inline helpers in `titan-runtime/titan.h` —
+`titan_lt_intfloat`/`titan_le_intfloat`/`titan_lt_floatint`/`titan_le_floatint`
+and `titan_eq_intfloat` — chosen by the *static* operand types, so the
+operands stay unboxed native scalars with no `TValue` round-trip. These
+mirror Lua's `LTintfloat`/`LEintfloat`/`luaV_equalobj` int-vs-float
+paths: they compare the mathematical values with no precision loss, so a
+large `integer` is never rounded to a float before the test (`> >=` are
+emitted as the swapped `< <=` helper, `~=` as the negated `==`). An
+`int`/`int` or `float`/`float` comparison stays a plain C `<`/`<=`/`==`.
 
 ## Casts: every `ExpCast` variant
 
