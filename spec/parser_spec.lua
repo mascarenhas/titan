@@ -1692,6 +1692,34 @@ describe("Titan parser", function()
             }, stats)
         end)
 
+        it("indexes `...[e]` as a sole array-constructor field: {...[1]}", function()
+            local stats = vararg_stats("x = {...[1]}")
+            assert_is_subset({
+                { _tag = "Ast.StatAssign",
+                    exps = { { _tag = "Ast.ExpInitList",
+                        fields = {
+                            { _tag = "Ast.Field", name = false,
+                              exp = { _tag = "Ast.ExpDotsIndex",
+                                  exp = { _tag = "Ast.ExpInteger", value = 1 } } },
+                        } } } },
+            }, stats)
+        end)
+
+        it("indexes `...[e]` as a trailing array-constructor field: {a, ...[i]}", function()
+            local stats = vararg_stats("x = {a, ...[i]}")
+            assert_is_subset({
+                { _tag = "Ast.StatAssign",
+                    exps = { { _tag = "Ast.ExpInitList",
+                        fields = {
+                            { _tag = "Ast.Field",
+                              exp = { _tag = "Ast.ExpVar" } },
+                            { _tag = "Ast.Field", name = false,
+                              exp = { _tag = "Ast.ExpDotsIndex",
+                                  exp = { _tag = "Ast.ExpVar" } } },
+                        } } } },
+            }, stats)
+        end)
+
         it("indexes `...[e]` as an ExpDotsIndex", function()
             local stats = vararg_stats("x = ...[1]")
             assert_is_subset({

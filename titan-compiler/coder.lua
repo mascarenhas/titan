@@ -2113,9 +2113,11 @@ local function codecall(ctx, node)
             REBASE = rebase,
             SLOTS = table.concat(cslots, "\n"),
         }), tmpname
-    elseif dots_tail_close and node._type._tag == "Type.Void" then
-        -- void-returning case-3 forward: run the call for effect now (while the
-        -- Udata0 anchor slot is live), then the call expression is `((void)0)`.
+    elseif (varg_collectable or dots_tail_close) and node._type._tag == "Type.Void" then
+        -- void-returning call with stack-anchored arguments: either a case-3
+        -- forward (Udata0 anchor slot) or a static call carrying collectable
+        -- vararg elements anchored on source slots. Run the call for effect now
+        -- (while the anchors are live), then the call expression is `((void)0)`.
         return render([[
             $CSTATS
             $CCALL;$REBASE

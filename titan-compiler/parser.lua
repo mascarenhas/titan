@@ -563,7 +563,7 @@ local grammar = re.compile([[
                           !RCURLY %{ExpFieldList}))*
                         fieldsep?)                          -- produces Field...
 
-    field           <- (P  DOTS)                           -> dots_field
+    field           <- (P  DOTS !LBRACKET)                 -> dots_field
                      / (P  (key ASSIGN)? -> opt exp)       -> Field
 
     key             <- NAME

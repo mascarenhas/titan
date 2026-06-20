@@ -510,6 +510,40 @@ describe("collectable variadic parameters (code generator)", function()
             assert(test.pick(4, 42, s, 3.5, true) == true)
         ]])
     end)
+
+    -- A VOID-returning `...string` callee (collectable element type, returns
+    -- nothing) called in STATEMENT position. The static call site sets
+    -- varg_collectable = true / dots_tail_close = false, so the void result must
+    -- be routed through the void branch and emit the call for effect -- NOT fall
+    -- into the varg_collectable branch which would `newtmp(Type.Void)` and raise
+    -- "invalid type void". Pins that void + collectable-vararg codegen compiles.
+    it("void-returning ...string called in statement position from Titan and Lua", function()
+        run_coder([[
+            total: integer = 0
+            function sink(...string)
+                local n = #...
+                local i = 1
+                while i <= n do
+                    total = total + #(...[i])
+                    i = i + 1
+                end
+            end
+            function drive(a: string, b: string)
+                -- static statement call carrying collectable vararg elements
+                sink(a, b, "lit3")
+            end
+        ]], [[
+            test.total = 0
+            test.drive("xy", "zzz")          -- 2 + 3 + 4
+            assert(test.total == 9)
+            test.total = 0
+            test.sink("a", "bb", "ccc")      -- from Lua: 1 + 2 + 3
+            assert(test.total == 6)
+            test.total = 0
+            test.sink()                      -- empty vararg, no-op
+            assert(test.total == 0)
+        ]])
+    end)
 end)
 
 describe("forwarding an existing ... to another variadic callee", function()
@@ -1074,6 +1108,27 @@ describe("building {...} / {e1, ..., ...} array from a vararg", function()
             -- and consumed entirely inside Titan with an internal GC churn
             assert(test.sumfields(a, b, c) == 15)
             assert(test.sumfields() == 0)
+        ]])
+    end)
+
+    -- An array constructor whose field is a `...[i]` index (ExpDotsIndex), not a
+    -- bare `...` spread. The constructor `field` rule must let `...[i]` fall
+    -- through to the general `exp` alternative (the `!LBRACKET` guard on the
+    -- dots_field alternative) so `{...[1]}` parses, then evaluate the index as an
+    -- ordinary single-value element.
+    it("{...[i]} index field: a 1-element array of the indexed vararg element", function()
+        run_coder([[
+            function first(...integer): {integer}
+                return {...[1]}
+            end
+            function withprefix(...integer): {integer}
+                return {99, ...[2]}
+            end
+        ]], [[
+            local t = test.first(10, 20, 30)
+            assert(#t == 1 and t[1] == 10)
+            local u = test.withprefix(10, 20, 30)
+            assert(#u == 2 and u[1] == 99 and u[2] == 20)
         ]])
     end)
 end)
