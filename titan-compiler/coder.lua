@@ -2474,7 +2474,16 @@ local function codearray(ctx, node, target)
         -- (§5.7) plus the table back barrier on each store. The prefix temps are
         -- on reserved stack slots, so they too survive the resize-GC.
         local va = assert(ctx.varargs, "'...' in array build outside a variadic function")
-        local struct = varg_struct_name(elemtype)
+        -- Drive the backing-struct typedef and the `args[]` stride/read off the
+        -- REAL vararg element type (`va.elem`) -- the struct the callee actually
+        -- allocated. The array's declared element type (`elemtype`) may differ
+        -- (the checker §4.7 lets a context override it, e.g. `{...integer}` in a
+        -- `{float}` context); casting the buffer to the array-element struct would
+        -- bit-reinterpret a 8-byte `lua_Integer` slot as a 8-byte `lua_Number` or
+        -- read 16-byte `TValue`s out of the smaller buffer. Convert each element
+        -- from `va.elem` to `elemtype` before storing (the checker has proven it
+        -- coerceable; identical types convert to a verbatim copy).
+        local struct = varg_struct_name(va.elem)
         -- `luaH_resizearray` -> `luaM_reallocvector` can GC, which may shrink and
         -- relocate the Lua stack (`luaD_shrinkstack`), dangling the raw `_base`
         -- pointer. Save it as an offset and recompute it after the resize (the
@@ -2482,13 +2491,43 @@ local function codearray(ctx, node, target)
         -- the live stack. The preamble declares `_base_off` when uses_base_off.
         ctx.uses_base_off = true
         -- A reusable TValue scratch to wrap each vararg element before `obj2arr`
-        -- (which takes a `TValue *`); for value/option/function the struct element
-        -- already IS a TValue and `setwrapped` copies it verbatim.
+        -- (which takes a `TValue *`); for value/option/function the converted
+        -- element already IS a TValue and `setwrapped` copies it verbatim.
         local vslot = "_vaslot_" .. ctx.tmp
         ctx.tmp = ctx.tmp + 1
         local barrier = types.is_gc(elemtype) and render([[
             luaC_barrierback(L, obj2gco($TMPNAME), &$VSLOT);
         ]], { TMPNAME = tmpname, VSLOT = vslot }) or ""
+        -- The per-element store. When the vararg element type matches the array
+        -- element type, wrap the raw `args[]` read straight into the TValue slot.
+        -- Otherwise materialize the read into a `va.elem` temp, convert it to the
+        -- array element type via the ordinary cast codegen (a synthetic ExpCast,
+        -- as in the option t1?->t2? path), and wrap the result.
+        local rawread = render("(($STRUCT *)$NAME)->args[$START + _vj]",
+            { STRUCT = struct, NAME = va.cname, START = va.start })
+        local element_store
+        if types.equals(va.elem, elemtype) then
+            element_store = setwrapped(elemtype, "&" .. vslot, rawread)
+        else
+            local csrc, srcname = newtmp(ctx, va.elem)
+            local synthvar = { _tag = "Ast.VarName", _type = va.elem,
+                               _decl = { _cvar = srcname } }
+            local synthcast = { _tag = "Ast.ExpCast", loc = node.loc,
+                                exp = synthvar, target = elemtype, _type = elemtype }
+            local convstats, convexp = codeexp(ctx, synthcast)
+            element_store = render([[
+                $CSRC
+                $SRCNAME = $RAWREAD;
+                $CONVSTATS
+                $SETWRAPPED
+            ]], {
+                CSRC = csrc,
+                SRCNAME = srcname,
+                RAWREAD = rawread,
+                CONVSTATS = convstats,
+                SETWRAPPED = setwrapped(elemtype, "&" .. vslot, convexp),
+            })
+        end
         table.insert(stats, render([[
             {
                 int _vacount = (int)$SRC->n_args - $START;
@@ -2508,9 +2547,7 @@ local function codearray(ctx, node, target)
             TMPNAME = tmpname,
             NPREFIX = c_integer_literal(nprefix),
             VSLOT = vslot,
-            SETWRAPPED = setwrapped(elemtype, "&" .. vslot,
-                render("(($STRUCT *)$NAME)->args[$START + _vj]",
-                       { STRUCT = struct, NAME = va.cname, START = va.start })),
+            SETWRAPPED = element_store,
             BARRIER = barrier,
             PREFIX_STORES = (function()
                 local ps = {}

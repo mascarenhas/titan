@@ -261,6 +261,90 @@ describe("scalar variadic parameters (code generator)", function()
             assert(test.maybe(1, 2) == 2)
         ]])
     end)
+
+    -- Optional adjust-up ACROSS representations: the in-range element must be
+    -- CONVERTED from the vararg element type to the option base, not stored raw.
+    -- A raw store would bit-reinterpret the element (integer bits read as a
+    -- double, or a tagless scalar read as a pointer). One case per adjust-up
+    -- site (decl / assign / return / call-arg), plus the boxed `value?` form.
+    it("optional decl `float? = ...integer` converts element to float", function()
+        run_coder([[
+            function f(...integer): float
+                local x: float? = ...
+                if x then return x + 0.5 else return -1.0 end
+            end
+        ]], [[
+            assert(math.type(test.f(7)) == 'float')
+            assert(test.f(7) == 7.5)
+            assert(test.f() == -1.0)
+        ]])
+    end)
+
+    it("optional assign `x = ...integer` (x:float?) converts to float", function()
+        run_coder([[
+            function f(...integer): float
+                local x: float? = nil
+                x = ...
+                if x then return x + 0.5 else return -1.0 end
+            end
+        ]], [[
+            assert(math.type(test.f(7)) == 'float')
+            assert(test.f(7) == 7.5)
+            assert(test.f() == -1.0)
+        ]])
+    end)
+
+    it("optional `return ...integer` into a float? return converts to float", function()
+        run_coder([[
+            function f(...integer): float?
+                return ...
+            end
+        ]], [[
+            assert(math.type(test.f(7)) == 'float')
+            assert(test.f(7) == 7.0)
+            assert(test.f() == nil)
+        ]])
+    end)
+
+    it("optional call-arg `...integer` into a float? fixed param converts", function()
+        run_coder([[
+            function g(a: float?): float
+                if a then return a + 0.5 else return -1.0 end
+            end
+            function f(...integer): float
+                return g(...)
+            end
+        ]], [[
+            assert(math.type(test.f(7)) == 'float')
+            assert(test.f(7) == 7.5)
+            assert(test.f() == -1.0)
+        ]])
+    end)
+
+    it("optional decl `integer? = ...float` converts element to integer", function()
+        run_coder([[
+            function f(...float): integer
+                local x: integer? = ...
+                if x then return x + 1 else return -1 end
+            end
+        ]], [[
+            assert(math.type(test.f(7.0)) == 'integer')
+            assert(test.f(7.0) == 8)
+            assert(test.f() == -1)
+        ]])
+    end)
+
+    it("optional decl `value? = ...integer` boxes the element correctly", function()
+        run_coder([[
+            function f(...integer): value
+                local x: value? = ...
+                if x then return x else return -1 end
+            end
+        ]], [[
+            assert(math.type(test.f(65)) == 'integer')
+            assert(test.f(65) == 65)
+        ]])
+    end)
 end)
 
 describe("collectable variadic parameters (code generator)", function()
@@ -725,6 +809,50 @@ describe("building {...} / {e1, ..., ...} array from a vararg", function()
             -- empty vararg -> {} (just an empty array)
             local e = test.collect()
             assert(#e == 0)
+        ]])
+    end)
+
+    -- {...} into a MISMATCHED array element type (the context overrode the
+    -- element type away from the vararg element). Each element must be CONVERTED
+    -- from the real vararg element type to the array element type before storing,
+    -- driving the backing-struct read off the real element type. A raw cast of
+    -- the buffer to the array-element struct would bit-reinterpret each slot.
+    it("{...integer} into a {float} context converts each element to float", function()
+        run_coder([[
+            function f(...integer): {float}
+                return {...}
+            end
+        ]], [[
+            local t = test.f(3, 4)
+            assert(math.type(t[1]) == 'float' and math.type(t[2]) == 'float')
+            assert(t[1] == 3.0 and t[2] == 4.0)
+            assert(#test.f() == 0)
+        ]])
+    end)
+
+    it("{...integer} into a {value} context boxes each element", function()
+        run_coder([[
+            function f(...integer): {value}
+                return {...}
+            end
+        ]], [[
+            local t = test.f(7, 8)
+            assert(math.type(t[1]) == 'integer' and math.type(t[2]) == 'integer')
+            assert(t[1] == 7 and t[2] == 8)
+        ]])
+    end)
+
+    -- {e1, ..., ...} into a mismatched context: the static prefix already coerces
+    -- (3 -> 3.0); the spread tail must convert too.
+    it("{1, ..., ...integer} into a {float} context converts prefix and tail", function()
+        run_coder([[
+            function f(...integer): {float}
+                return {1, ...}
+            end
+        ]], [[
+            local t = test.f(2, 3)
+            assert(math.type(t[1]) == 'float')
+            assert(t[1] == 1.0 and t[2] == 2.0 and t[3] == 3.0)
         ]])
     end)
 

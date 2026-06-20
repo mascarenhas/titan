@@ -2941,6 +2941,88 @@ describe("variadic parameters (typechecker)", function()
             assert.truthy(#errs >= 1)
             assert.match("'%.%.%.' can only appear in an array constructor", errs[1])
         end)
+
+        it("accepts `{...integer}` into a {float} context (coerceable)", function()
+            assert_type_check([[
+                function foo(...integer): {float}
+                    return {...}
+                end
+            ]])
+        end)
+
+        it("accepts `{...integer}` into a {value} context (boxes)", function()
+            assert_type_check([[
+                function foo(...integer): {value}
+                    return {...}
+                end
+            ]])
+        end)
+
+        it("rejects `{...integer}` into a {string} context (not coerceable)", function()
+            -- The `...` element type must be coerceable to the (context-overridden)
+            -- array element type; an incompatible element is a clean compile error,
+            -- not a silent bit-reinterpretation at runtime.
+            local errs = check_errs([[
+                function foo(...integer): {string}
+                    return {...}
+                end
+            ]])
+            assert.truthy(#errs >= 1)
+            assert.match("'%.%.%.' element type integer is not coerceable to "
+                .. "array element type string", errs[1])
+        end)
+    end)
+
+    -- An optional adjust-up slot whose base is NOT coerceable from the vararg
+    -- element type must be a clean compile error, NOT a silent miscompile /
+    -- segfault (a raw store of e.g. integer into a string? slot would later be
+    -- read as a TString*). One case per adjust-up site.
+    describe("optional adjust-up across incompatible representations", function()
+        it("rejects `local x: string? = ...integer`", function()
+            local errs = check_errs([[
+                function f(...integer): integer
+                    local x: string? = ...
+                    if x then return #x else return -1 end
+                end
+            ]])
+            assert.truthy(#errs >= 1)
+            assert.match("expected string%? but found integer%?", errs[1])
+        end)
+
+        it("rejects `x = ...integer` into a string? variable", function()
+            local errs = check_errs([[
+                function f(...integer): integer
+                    local x: string? = nil
+                    x = ...
+                    if x then return #x else return -1 end
+                end
+            ]])
+            assert.truthy(#errs >= 1)
+            assert.match("expected string%? but found integer%?", errs[1])
+        end)
+
+        it("rejects `return ...integer` from a function returning string?", function()
+            local errs = check_errs([[
+                function f(...integer): string?
+                    return ...
+                end
+            ]])
+            assert.truthy(#errs >= 1)
+            assert.match("expected string%? but found integer%?", errs[1])
+        end)
+
+        it("rejects `...integer` into a string? fixed param of a callee", function()
+            local errs = check_errs([[
+                function g(a: string?): integer
+                    if a then return #a else return -1 end
+                end
+                function f(...integer): integer
+                    return g(...)
+                end
+            ]])
+            assert.truthy(#errs >= 1)
+            assert.match("expected string%? but found integer%?", errs[1])
+        end)
     end)
 
     describe("calls passing `...`", function()

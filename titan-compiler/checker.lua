@@ -331,8 +331,15 @@ local function expand_dots_adjustup(exps, nslots, slottype, term, errors)
         idxexp._type = types.Integer()
         local node = ast.ExpDotsIndex(dotsnode.loc, idxexp)
         if stype and stype._tag == "Type.Option" then
+            -- Optional slot: nil-fill out-of-range. Type the read as the REAL
+            -- element wrapped (`optionize(elem)`), NOT the slot type, so the
+            -- caller's trycoerce/checkmatch inserts the genuine element->base
+            -- conversion (e.g. integer? -> float?) and rejects an incompatible
+            -- element (e.g. integer into a string? slot). Force-setting the slot
+            -- type here would make trycoerce a no-op and bit-reinterpret the
+            -- element in codegen.
             node._nilfill = true
-            node._type = stype
+            node._type = optionize(elem)
         else
             node._nilfill = false
             node._type = elem
@@ -525,8 +532,13 @@ checkstat = util.make_visitor({
                     if decl.type then
                         checkdecl(decl, st, errors)
                         if decl._type._tag == "Type.Option" then
+                            -- Type the nil-fill read as the REAL element wrapped
+                            -- (`optionize(elem)`), not the slot type, so the
+                            -- trycoerce below inserts the genuine element->base
+                            -- conversion (e.g. integer? -> float?) and rejects an
+                            -- incompatible element (e.g. integer into string?).
                             exp._nilfill = true
-                            exp._type = decl._type
+                            exp._type = optionize(elem)
                         else
                             exp._nilfill = false
                             exp._type = elem
@@ -1177,6 +1189,19 @@ checkexp = util.make_visitor({
                     checkmatch("array initializer at position " .. i, etype,
                                exp._type, errors, exp.loc)
                 end
+            end
+            -- The whole-tail `...` element type must be coerceable to the array
+            -- element type (the context may have overridden `etype` to something
+            -- other than the vararg element, e.g. `{...integer}` in a `{float}`
+            -- context). The codegen converts each element from the real vararg
+            -- element to `etype`; reject an incompatible element here (e.g.
+            -- `{...integer}` into `{string}`) instead of bit-reinterpreting it.
+            if dots_elem and dots_elem._tag ~= "Type.Invalid"
+               and not types.equals(dots_elem, etype)
+               and not types.coerceable(dots_elem, etype) then
+                checker.typeerror(errors, dots_field.loc,
+                    "'...' element type %s is not coerceable to array element "
+                    .. "type %s", types.tostring(dots_elem), types.tostring(etype))
             end
         elseif expected == "Type.Map" then
             local kcontext = context and context.keys
