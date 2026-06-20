@@ -165,4 +165,75 @@ describe("typechecker rehydration of .so-only imports", function()
         ]])
         assert.equal(0, #good, table.concat(good, "\n"))
     end)
+
+    it("rehydrates a variadic function's varargtype through <mangled>_types", function ()
+        -- The exported `sum` is `(...integer) -> integer`; its serialized
+        -- interface must carry the `varargtype` so the importer recovers the
+        -- vararg element type. A correct variadic call (any count, integer
+        -- elements) type-checks; passing a non-integer element is rejected against
+        -- the recovered element type, and forwarding `...` from a caller whose own
+        -- `...` element type is incompatible is rejected.
+        local dep = { name = "vrhfoo", src = [[
+            function sum(...integer): integer
+                local s = 0
+                local i = 1
+                local n = #...
+                while i <= n do s = s + ...[i]; i = i + 1 end
+                return s
+            end
+        ]] }
+        local good = so_check({ dep }, "vrhbar", [[
+            local f = import "vrhfoo"
+            function bar(): integer return f.sum(1, 2, 3) end
+            function empty(): integer return f.sum() end
+            function asvalue(): integer
+                local g: (...integer) -> integer = f.sum  -- recovered varargtype
+                return g(4, 5)
+            end
+        ]])
+        assert.equal(0, #good, table.concat(good, "\n"))
+
+        local bad = so_check({ dep }, "vrhbar", [[
+            local f = import "vrhfoo"
+            function bar(): integer return f.sum(1, "x", 3) end  -- non-integer element
+        ]])
+        assert.truthy(#bad >= 1)
+        assert.match("expected integer but found string", table.concat(bad, "\n"))
+    end)
+
+    it("rehydrates a variadic method's varargtype through <mangled>_types", function ()
+        -- A variadic METHOD's varargtype must survive serialization too; a correct
+        -- method call against the recovered signature type-checks.
+        local dep = { name = "vmrhfoo", src = [[
+            record Acc
+              base: integer
+            end
+            function Acc:total(...integer): integer
+                local s = self.base
+                local i = 1
+                local n = #...
+                while i <= n do s = s + ...[i]; i = i + 1 end
+                return s
+            end
+            function make(b: integer): Acc return { base = b } end
+        ]] }
+        local good = so_check({ dep }, "vmrhbar", [[
+            local f = import "vmrhfoo"
+            function bar(): integer
+                local a = f.make(10)
+                return a:total(1, 2, 3)
+            end
+        ]])
+        assert.equal(0, #good, table.concat(good, "\n"))
+
+        local bad = so_check({ dep }, "vmrhbar", [[
+            local f = import "vmrhfoo"
+            function bar(): integer
+                local a = f.make(10)
+                return a:total(1, "x")   -- non-integer element against recovered type
+            end
+        ]])
+        assert.truthy(#bad >= 1)
+        assert.match("expected integer but found string", table.concat(bad, "\n"))
+    end)
 end)

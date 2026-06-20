@@ -32,9 +32,15 @@
    (luaS_newudata(L, 0, N)), and a type check compares uvalue(v)->metatable
    against the expected record metatable. A 0.7 checker reading a 0.8 record's
    getudatamem would read out-of-bounds, so 0.7 and 0.8 .so modules are
-   ABI-incompatible and live under a different TITAN_PATH dir. */
-#define TITAN_VER          "0.8"
-#define TITAN_VER_SUFFIX   "_0_8"
+   ABI-incompatible and live under a different TITAN_PATH dir.
+   0.8 -> 0.9: variadic parameters. A variadic function's native signature gained
+   a trailing `TitanVargX *_varargs, int _start` pair (after the declared params,
+   before the out-params), and <mangled>_types now encodes the `varargtype`
+   element type for variadic functions and methods. A 0.8 module has neither, so
+   0.8 and 0.9 .so modules are ABI-incompatible and live under a different
+   TITAN_PATH dir. */
+#define TITAN_VER          "0.9"
+#define TITAN_VER_SUFFIX   "_0_9"
 #define TITAN_PATH_VAR     "TITAN_PATH"
 #define TITAN_PATH_SEP     "/"
 #define TITAN_PATH_DEFAULT ".;/usr/local/lib/titan/" TITAN_VER

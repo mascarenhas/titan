@@ -245,4 +245,47 @@ describe(".so-only cross-module imports", function()
             "local ok, e = pcall(ppbar.px, ppbar); assert(not ok); assert(e:find('but found'))")
         assert.truthy(rok2, out2)
     end)
+
+    it("imports a .so-only variadic function, called statically and from Lua", function ()
+        -- The dependency is reachable ONLY as a compiled `.so`: the importer
+        -- recovers `sum`'s `(...integer) -> integer` interface (incl. varargtype)
+        -- from `<mangled>_types`, calls it STATICALLY across the dynamic boundary
+        -- (the native vararg ABI: `_varargs` + `_start` at the pinned slot), and
+        -- the dependency's own Lua entry (genluaentry) handles the call FROM LUA.
+        local ok, err = build_so_chain({
+            { name = "vsfoo", src = [[
+                function sum(...integer): integer
+                    local s = 0
+                    local i = 1
+                    local n = #...
+                    while i <= n do s = s + ...[i]; i = i + 1 end
+                    return s
+                end
+            ]] },
+            { name = "vsbar", src = [[
+                local foo = import "vsfoo"
+                function viastatic(): integer
+                    return foo.sum(1, 2, 3, 4)   -- static call across the .so
+                end
+                function empty(): integer
+                    return foo.sum()             -- empty vararg across the .so
+                end
+                function asvalue(): integer
+                    local f: (...integer) -> integer = foo.sum  -- value across .so
+                    return f(10, 20)
+                end
+            ]] },
+        })
+        assert.truthy(ok, err)
+        local rok, out = call("vsbar", [[
+            assert(vsbar.viastatic() == 10)
+            assert(vsbar.empty() == 0)
+            assert(vsbar.asvalue() == 30)
+            -- call the .so-only variadic function directly FROM LUA (genluaentry)
+            local foo = require 'vsfoo'
+            assert(foo.sum(5, 6, 7) == 18)
+            assert(foo.sum() == 0)
+        ]])
+        assert.truthy(rok, out)
+    end)
 end)

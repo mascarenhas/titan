@@ -1441,280 +1441,21 @@ local function is_static_callee(node)
         or decl._tag == "Type.StaticMethod")
 end
 
--- Generate a call through a first-class function *value* (a boxed TValue of
--- type Type.Function). The value may be a Titan closure, a Lua closure, a C
--- function, or a `__call` object, so the call goes through the Lua stack with
--- `luaD_callnoyield`, which raises cleanly if the value is not callable.
---
--- luaD_callnoyield can grow (and relocate) the Lua stack for the callee's
--- frame, which would dangle this native function's `_base`. We therefore use
--- savestack/restorestack offsets for everything that must survive the call and
--- recompute `_base` from `_base_off` afterwards (see codefuncdec).
-local function codevaluecall(ctx, node)
-    ctx.uses_base_off = true
-    local ftype = node.exp._type     -- Type.Function: the callee's static type
-    local nresults = #node._types
-    local stats = {}
-
-    -- 1. evaluate the callee into an anchored TValue
-    local fstat, fexp = codeexp(ctx, node.exp)
-    local fdecl, fname, fslot = newtmp(ctx, ftype, true)
-    table.insert(stats, fstat)
-    table.insert(stats, fdecl)
-    table.insert(stats, fname .. " = " .. fexp .. ";")
-    table.insert(stats, setslot(ftype, fslot, fname))
-
-    -- 2. evaluate arguments into anchored temps, boxed per the callee's
-    --    declared parameter types
-    local argnames, argtypes = {}, {}
-    for i, arg in ipairs(node.args.args) do
-        local atype = ftype.params[i]
-        argtypes[i] = atype
-        local astat, aexp = codeexp(ctx, arg)
-        local adecl, aname, aslot = newtmp(ctx, atype, types.is_gc(atype))
-        table.insert(stats, astat)
-        table.insert(stats, adecl)
-        table.insert(stats, aname .. " = " .. aexp .. ";")
-        if aslot then
-            table.insert(stats, setslot(atype, aslot, aname))
-        end
-        argnames[i] = aname
-    end
-
-    -- 3. declare result holders (filled by whichever path runs) and remember
-    --    which need anchoring against the GC after the call
-    local resultnames, rslots, rtypes = {}, {}, {}
-    for i = 1, nresults do
-        local rtype = node._types[i]
-        local rdecl, rname, rslot = newtmp(ctx, rtype, types.is_gc(rtype))
-        table.insert(stats, rdecl)
-        resultnames[i] = rname
-        rslots[i] = rslot
-        rtypes[i] = rtype
-    end
-
-    -- 4a. fast path: the value is a Titan closure whose exact type tag matches
-    --     the callee's static type -> unboxed direct native call
-    ctx.valuecall_count = (ctx.valuecall_count or 0) + 1
-    local fptype = "_vc_fp_t_" .. ctx.valuecall_count
-    -- _fn on the fast path is the callee closure itself, so its native entry can
-    -- reach any captured upvalues (slots 3+).
-    local fastargs = { "L", "_vc_mod", "_vc_callee" }
-    for _, aname in ipairs(argnames) do table.insert(fastargs, aname) end
-    for i = 2, nresults do table.insert(fastargs, "&" .. resultnames[i]) end
-    local fastcall = "_vc_fp(" .. table.concat(fastargs, ", ") .. ");"
-    if nresults > 0 then
-        fastcall = resultnames[1] .. " = " .. fastcall
-    end
-
-    -- 4b. generic path: box function + args and call through the Lua stack
-    local pushes = { "setobj2s(L, L->top.p, &" .. fname .. "); L->top.p++;" }
-    for i, aname in ipairs(argnames) do
-        table.insert(pushes,
-            setslot(argtypes[i], "s2v(L->top.p)", aname) .. " L->top.p++;")
-    end
-    local slowreads = {}
-    for i = 1, nresults do
-        table.insert(slowreads, checkandget(ctx, rtypes[i], resultnames[i],
-            "s2v(restorestack(L, _vc_func) + " .. (i-1) .. ")", node.loc))
-    end
-
-    -- anchoring of gc-able results, run after the stack is restored and `_base`
-    -- recomputed, common to both paths
-    local anchors = {}
-    for i = 1, nresults do
-        if rslots[i] then
-            table.insert(anchors, setslot(rtypes[i], rslots[i], resultnames[i]))
-        end
-    end
-
-    table.insert(stats, render([[
-        if (ttisCclosure(&$FNAME) && clCvalue(&$FNAME)->nupvalues >= 3
-            && ttislightuserdata(&clCvalue(&$FNAME)->upvalue[1])
-            && pvalue(&clCvalue(&$FNAME)->upvalue[1]) == $FUNCTAG) {
-            /* fast path: exact function-type match, unboxed native call */
-            CClosure *_vc_callee = clCvalue(&$FNAME);
-            Udata *_vc_mod = uvalue(&_vc_callee->upvalue[0]);
-            $FPTYPEDEF;
-            $FPTYPE _vc_fp = titan_cast_func($FPTYPE,
-                pvalue(&_vc_callee->upvalue[2]));
-            $FASTCALL
-        } else {
-            /* generic path: call any callable value through the Lua stack;
-               luaD_callnoyield raises if it is not callable */
-            lua_checkstack(L, $NPUSH);
-            ptrdiff_t _vc_func = savestack(L, L->top.p);
-            $PUSHES
-            luaD_callnoyield(L, restorestack(L, _vc_func), $NRESULTS);
-            $SLOWREADS
-            L->top.p = restorestack(L, _vc_func);
-        }
-        _base = restorestack(L, _base_off);
-        $ANCHORS
-    ]], {
-        FNAME = fname,
-        FUNCTAG = function_type_tag(ctx.tlcontext, ftype),
-        FPTYPEDEF = "typedef " .. function_sig(fptype, ftype, true),
-        FPTYPE = fptype,
-        FASTCALL = fastcall,
-        NPUSH = c_integer_literal(1 + #argnames),
-        PUSHES = table.concat(pushes, "\n"),
-        NRESULTS = c_integer_literal(nresults),
-        SLOWREADS = table.concat(slowreads, "\n"),
-        ANCHORS = table.concat(anchors, "\n"),
-    }))
-
-    -- 5. expose extra return values for ExpExtra readers
-    if nresults >= 2 then
-        node._extras = node._extras or {}
-        for i = 2, nresults do
-            node._extras[i] = resultnames[i]
-        end
-    end
-
-    local cstats = table.concat(stats, "\n")
-    if nresults == 0 then
-        return cstats, "((void)0)"
-    else
-        return cstats, resultnames[1]
-    end
-end
-
-local function codecall(ctx, node)
-    if not is_static_callee(node) then
-        return codevaluecall(ctx, node)
-    end
-    local castats, caexps, tmpnames, retslots = {}, { "L" }, {}, {}
-    local fname
-    local fnode = node.exp.var
-    local modarg = "_mod"
-    if node.args._tag == "Ast.ArgsFunc" then
-        if fnode._tag == "Ast.VarName" then
-            fname = func_name(ctx.module, fnode.name)
-        elseif fnode._tag == "Ast.VarDot" then
-            if fnode.exp._type._tag == "Type.ForeignModule" then
-                return codeforeigncall(ctx, node)
-            elseif fnode._decl._tag == "Type.StaticMethod" then
-                fname = static_name(fnode._decl)
-                local mod, record = fnode._decl.fqtn:match("^(.*)%.(%a+)$")
-                if mod ~= ctx.module then
-                    assert(fnode.exp.var._tag == "Ast.VarDot")
-                    ctx.functions[fnode._decl.fqtn .. "." .. fnode._decl.name] = {
-                        module = mod,
-                        record = record,
-                        type = fnode._decl,
-                        name = fnode._decl.name,
-                        mangled = fname
-                    }
-                    modarg = render("uvalue(&_mod->uv[$INDEX].uv)", {
-                        INDEX = c_integer_literal(fnode.exp.var.exp.var._decl._upvalue) -- whew!
-                    })
-                end
-            else
-                assert(fnode._decl._tag == "Type.ModuleMember")
-                fname = func_name(fnode._decl.modname, fnode.name)
-                local mod = fnode._decl.modname
-                if mod ~= ctx.module then
-                    ctx.functions[mod .. "." .. fnode.name] = {
-                        module = mod,
-                        name = fnode.name,
-                        type = fnode._type,
-                        mangled = fname
-                    }
-                end
-                modarg = render("uvalue(&_mod->uv[$INDEX].uv)", {
-                    INDEX = c_integer_literal(fnode.exp.var._decl._upvalue)
-                })
-            end
-        end
-        table.insert(caexps, modarg)
-        table.insert(caexps, "NULL")  -- _fn: a static top-level call has no closure
-    else
-        assert(node.args._tag == "Ast.ArgsMethod")
-        local mtype = node._method
-        fname = method_name(mtype)
-        local mod, record = mtype.fqtn:match("^(.*)%.(%a+)$")
-        if mod ~= ctx.module then
-            ctx.functions[mtype.fqtn .. ":" .. mtype.name] = {
-                module = mod,
-                record = record,
-                name = mtype.name,
-                type = mtype,
-                mangled = fname
-            }
-            if not ctx.modules[mod] then
-                ctx.modules[mod] = nextupvalue(ctx.tlcontext)
-            end
-            modarg = render("uvalue(&_mod->uv[$INDEX].uv)", {
-                INDEX = c_integer_literal(ctx.modules[mod])
-            })
-        end
-        local cstat, cexp = codeexp(ctx, node.exp)
-        table.insert(castats, cstat)
-        table.insert(caexps, modarg)
-        table.insert(caexps, "NULL")  -- _fn: a static method call has no closure
-        table.insert(caexps, cexp)
-    end
-    -- The callee's static type, to detect a variadic callee and its fixed arity.
-    -- ArgsMethod -> node._method; a static-method VarDot -> fnode._decl; otherwise
-    -- the var's resolved Type.Function on fnode._type.
-    local callee_ftype
-    if node.args._tag == "Ast.ArgsMethod" then
-        callee_ftype = node._method
-    elseif fnode._tag == "Ast.VarDot"
-           and fnode._decl and fnode._decl._tag == "Type.StaticMethod" then
-        callee_ftype = fnode._decl
-    else
-        callee_ftype = fnode._type
-    end
-    local callee_vararg = callee_ftype and callee_ftype.varargtype
-    local args = node.args.args
-    local nargs = #args
-    -- A trailing `Ast.ExpDots` marker means this call FORWARDS the current
-    -- function's own `...` into the (variadic) callee (the checker kept it for a
-    -- variadic callee; §5.7). The static-prefix args are args[1..nargs-1]; the
-    -- marker itself never reaches codeexp.
-    local dots_tail = nargs > 0 and args[nargs]._tag == "Ast.ExpDots"
-    local nstatic = dots_tail and (nargs - 1) or nargs
-    local nfixed = callee_vararg and #callee_ftype.params or nargs
-    local vargexps = {} -- surplus static args destined for the backing struct
-    for i = 1, nstatic do
-        local arg = args[i]
-        local cstat, cexp = codeexp(ctx, arg)
-        table.insert(castats, cstat)
-        if arg._tag == "Ast.ExpCall" and arg._extras then
-            -- A multi-return call expanded in this argument list: force it to
-            -- run now (into a temp), filling its out-param temps, before the
-            -- ExpExtra arguments that read those temps are evaluated -- C does
-            -- not specify the evaluation order of a call's arguments.
-            local ctmp, tmpname = newtmp(ctx, arg._type)
-            table.insert(castats, render([[
-                $CTMP
-                $TMPNAME = $CEXP;
-            ]], { CTMP = ctmp, TMPNAME = tmpname, CEXP = cexp }))
-            cexp = tmpname
-        end
-        if callee_vararg and i > nfixed then
-            -- a surplus static arg -> a backing-struct element (already coerced
-            -- to the element type by the checker)
-            table.insert(vargexps, cexp)
-        else
-            table.insert(caexps, cexp)
-        end
-    end
-    -- True when the call carries collectable vararg elements whose only Lua-stack
-    -- anchors are the source temp/local slots below L->top.p, NOT the backing
-    -- struct (its raw-pointer payload is untraced, §2.D). The call must therefore
-    -- execute while those anchors are still live; see the forced
-    -- result-materialization below (it keeps a tail `return $CEXP` from emitting
-    -- `L->top.p = _base;` before the call and dropping the anchors).
+-- Build and append the backing-struct argument (`_varargs` + `_start`) for a
+-- native call to a variadic callee. Appends the two C expressions to `caexps`
+-- and any setup statements to `castats`; returns `(varg_collectable,
+-- dots_tail_close)` (see their declarations in the caller). `vargexps` holds the
+-- already-coerced surplus static args (those beyond the callee's fixed params);
+-- `dots_tail` is true when the call forwards the current function's own `...`
+-- (a trailing `Ast.ExpDots` marker); `nstatic` is the static-prefix arg count.
+-- Shared by codecall (static call site) and codevaluecall (first-class value
+-- fast path) -- both build the struct identically (§5.7).
+local function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
+                                  dots_tail, nstatic, caexps, castats)
+    local callee_vararg = callee_ftype.varargtype
     local varg_collectable = false
-    -- True for forwarding case 3 (fresh Udata0 copy): the freshly-built struct is
-    -- a heap Udata0 anchored on a reserved stack slot, so a tail `return` resetting
-    -- L->top.p would drop the anchor before the call runs. Forces the call to
-    -- materialize NOW (like varg_collectable) regardless of element gc-ness.
     local dots_tail_close = false
-    if callee_vararg and not dots_tail then
+    if not dots_tail then
         -- STATIC arg list into a variadic callee: build the concrete-array struct
         -- local from the surplus static args and pass its address + _start=0 at
         -- the pinned ABI slot (after fixed params, before out-params).
@@ -1741,11 +1482,10 @@ local function codecall(ctx, node)
         }))
         table.insert(caexps, render("($STRUCT *)&$VNAME", { STRUCT = struct, VNAME = vname }))
         table.insert(caexps, "0")
-    elseif dots_tail then
+    else
         -- FORWARDING the current `...` into a variadic callee. `vargexps` holds the
         -- over-supplied static args (those beyond the callee's fixed params), all
         -- already coerced to the callee element type by the checker.
-        assert(callee_vararg, "trailing '...' marker but callee is not variadic")
         local va = assert(ctx.varargs, "forwarding '...' outside a variadic function")
         local eg = callee_vararg          -- callee element type
         local ef = va.elem                -- this function's `...` element type
@@ -1941,6 +1681,357 @@ local function codecall(ctx, node)
             table.insert(caexps, render("($STRUCT *)$VNAME", { STRUCT = struct, VNAME = vname }))
             table.insert(caexps, "0")
         end
+    end
+    return varg_collectable, dots_tail_close
+end
+
+-- Generate a call through a first-class function *value* (a boxed TValue of
+-- type Type.Function). The value may be a Titan closure, a Lua closure, a C
+-- function, or a `__call` object, so the call goes through the Lua stack with
+-- `luaD_callnoyield`, which raises cleanly if the value is not callable.
+--
+-- luaD_callnoyield can grow (and relocate) the Lua stack for the callee's
+-- frame, which would dangle this native function's `_base`. We therefore use
+-- savestack/restorestack offsets for everything that must survive the call and
+-- recompute `_base` from `_base_off` afterwards (see codefuncdec).
+local function codevaluecall(ctx, node)
+    ctx.uses_base_off = true
+    local ftype = node.exp._type     -- Type.Function: the callee's static type
+    local nresults = #node._types
+    local stats = {}
+
+    -- 1. evaluate the callee into an anchored TValue
+    local fstat, fexp = codeexp(ctx, node.exp)
+    local fdecl, fname, fslot = newtmp(ctx, ftype, true)
+    table.insert(stats, fstat)
+    table.insert(stats, fdecl)
+    table.insert(stats, fname .. " = " .. fexp .. ";")
+    table.insert(stats, setslot(ftype, fslot, fname))
+
+    -- A variadic callee value: `ftype.varargtype` is set. The argument list holds
+    -- the fixed-param args (1..nfixed) followed by any surplus static args (each
+    -- destined for the backing struct), and a trailing `Ast.ExpDots` marker when
+    -- the call forwards the current function's own `...` (§2.B). The marker never
+    -- reaches codeexp. Dispatch is identical to a non-variadic value: the fast
+    -- path (exact tag match) builds the struct and calls the native pointer with
+    -- `_varargs` + `_start`; the generic path pushes every arg (expanding any
+    -- forwarded `...` element-by-element) and lets the callee's genluaentry
+    -- coerce + rebuild.
+    local callee_vararg = ftype.varargtype
+    local args = node.args.args
+    local nargs = #args
+    local dots_tail = nargs > 0 and args[nargs]._tag == "Ast.ExpDots"
+    local nstatic = dots_tail and (nargs - 1) or nargs
+    local nfixed = callee_vararg and #ftype.params or nargs
+
+    -- 2. evaluate arguments into anchored temps. Fixed-param args (1..nfixed) are
+    --    boxed per the callee's declared parameter type; surplus static args are
+    --    boxed per the vararg element type (they become backing-struct elements).
+    local argnames, argtypes = {}, {}   -- fixed-param args (both paths)
+    local vargexps = {}                 -- surplus static-arg C exprs (struct + push)
+    for i = 1, nstatic do
+        local arg = args[i]
+        local atype = (callee_vararg and i > nfixed) and callee_vararg
+                      or ftype.params[i]
+        local astat, aexp = codeexp(ctx, arg)
+        local adecl, aname, aslot = newtmp(ctx, atype, types.is_gc(atype))
+        table.insert(stats, astat)
+        table.insert(stats, adecl)
+        table.insert(stats, aname .. " = " .. aexp .. ";")
+        if aslot then
+            table.insert(stats, setslot(atype, aslot, aname))
+        end
+        if callee_vararg and i > nfixed then
+            table.insert(vargexps, aname)
+        else
+            argnames[i] = aname
+            argtypes[i] = atype
+        end
+    end
+
+    -- 3. declare result holders (filled by whichever path runs) and remember
+    --    which need anchoring against the GC after the call
+    local resultnames, rslots, rtypes = {}, {}, {}
+    for i = 1, nresults do
+        local rtype = node._types[i]
+        local rdecl, rname, rslot = newtmp(ctx, rtype, types.is_gc(rtype))
+        table.insert(stats, rdecl)
+        resultnames[i] = rname
+        rslots[i] = rslot
+        rtypes[i] = rtype
+    end
+
+    -- Build the backing struct (`_varargs`, `_start`) as setup statements when the
+    -- callee is variadic: the fast path passes these C exprs to the native
+    -- pointer. The two struct C exprs go into `vargca`; the setup statements into
+    -- `stats`. The struct is built unconditionally (it depends only on this
+    -- function's `...`, not on the runtime tag); the generic path ignores it and
+    -- pushes elements directly. `varg_collectable`/`dots_tail_close` feed the
+    -- materialize guard at the end (the struct/its elements outlive the call).
+    -- The whole dispatch (struct build + the native or generic call) runs inside
+    -- `stats`, so the call always materializes here -- before any caller resets
+    -- L->top.p. Collectable vararg elements anchored on source slots (and a
+    -- case-3 fresh Udata0) therefore stay live across the call without a separate
+    -- materialize guard, so the helper's `varg_collectable`/`dots_tail_close`
+    -- results need no further action here.
+    local vargca = {}   -- the two struct C exprs (_varargs ptr, _start)
+    if callee_vararg then
+        emit_vararg_struct(ctx, node, ftype, vargexps, dots_tail, nstatic,
+                           vargca, stats)
+    end
+
+    -- 4a. fast path: the value is a Titan closure whose exact type tag matches
+    --     the callee's static type -> unboxed direct native call
+    ctx.valuecall_count = (ctx.valuecall_count or 0) + 1
+    local fptype = "_vc_fp_t_" .. ctx.valuecall_count
+    -- _fn on the fast path is the callee closure itself, so its native entry can
+    -- reach any captured upvalues (slots 3+).
+    local fastargs = { "L", "_vc_mod", "_vc_callee" }
+    for _, aname in ipairs(argnames) do table.insert(fastargs, aname) end
+    -- A variadic callee: `vargca` holds the trailing native args at the pinned ABI
+    -- slot -- the backing-struct pointer + `_start`, preceded (in the start-adjust
+    -- case) by the fixed params borrowed from this function's own `...`. They sit
+    -- after the static fixed-param args and before the out-params (function_sig).
+    for _, vexp in ipairs(vargca) do table.insert(fastargs, vexp) end
+    for i = 2, nresults do table.insert(fastargs, "&" .. resultnames[i]) end
+    local fastcall = "_vc_fp(" .. table.concat(fastargs, ", ") .. ");"
+    if nresults > 0 then
+        fastcall = resultnames[1] .. " = " .. fastcall
+    end
+
+    -- 4b. generic path: box function + args and call through the Lua stack. For a
+    -- variadic callee, push every fixed and surplus static arg, then (when
+    -- forwarding) each `...` element one by one; the callee's genluaentry reads
+    -- `nfixed` fixed params and the rest as vararg, coercing each.
+    local pushes = { "setobj2s(L, L->top.p, &" .. fname .. "); L->top.p++;" }
+    for i = 1, nstatic do
+        if argnames[i] then
+            table.insert(pushes,
+                setslot(argtypes[i], "s2v(L->top.p)", argnames[i]) .. " L->top.p++;")
+        end
+    end
+    for _, vexp in ipairs(vargexps) do
+        table.insert(pushes,
+            setslot(callee_vararg, "s2v(L->top.p)", vexp) .. " L->top.p++;")
+    end
+    local npush_dynamic = ""
+    if dots_tail then
+        -- forward the current `...`: push each element start-relative. The element
+        -- C type matches the vararg struct exactly, so this is a wrapped store.
+        local va = assert(ctx.varargs, "forwarding '...' in a value call outside a variadic function")
+        npush_dynamic = render(" + ((int)$SRC->n_args - $START)",
+            { SRC = va.cname, START = va.start })
+        table.insert(pushes, render([[
+            for (int _vpj = 0; _vpj < (int)$SRC->n_args - $START; _vpj++) {
+                $SETSLOT L->top.p++;
+            }
+        ]], {
+            SRC = va.cname,
+            START = va.start,
+            SETSLOT = setslot(va.elem, "s2v(L->top.p)",
+                render("$SRC->args[$START + _vpj]", { SRC = va.cname, START = va.start })),
+        }))
+    end
+    local slowreads = {}
+    for i = 1, nresults do
+        table.insert(slowreads, checkandget(ctx, rtypes[i], resultnames[i],
+            "s2v(restorestack(L, _vc_func) + " .. (i-1) .. ")", node.loc))
+    end
+
+    -- anchoring of gc-able results, run after the stack is restored and `_base`
+    -- recomputed, common to both paths
+    local anchors = {}
+    for i = 1, nresults do
+        if rslots[i] then
+            table.insert(anchors, setslot(rtypes[i], rslots[i], resultnames[i]))
+        end
+    end
+
+    table.insert(stats, render([[
+        if (ttisCclosure(&$FNAME) && clCvalue(&$FNAME)->nupvalues >= 3
+            && ttislightuserdata(&clCvalue(&$FNAME)->upvalue[1])
+            && pvalue(&clCvalue(&$FNAME)->upvalue[1]) == $FUNCTAG) {
+            /* fast path: exact function-type match, unboxed native call */
+            CClosure *_vc_callee = clCvalue(&$FNAME);
+            Udata *_vc_mod = uvalue(&_vc_callee->upvalue[0]);
+            $FPTYPEDEF;
+            $FPTYPE _vc_fp = titan_cast_func($FPTYPE,
+                pvalue(&_vc_callee->upvalue[2]));
+            $FASTCALL
+        } else {
+            /* generic path: call any callable value through the Lua stack;
+               luaD_callnoyield raises if it is not callable */
+            lua_checkstack(L, $NPUSH);
+            ptrdiff_t _vc_func = savestack(L, L->top.p);
+            $PUSHES
+            luaD_callnoyield(L, restorestack(L, _vc_func), $NRESULTS);
+            $SLOWREADS
+            L->top.p = restorestack(L, _vc_func);
+        }
+        _base = restorestack(L, _base_off);
+        $ANCHORS
+    ]], {
+        FNAME = fname,
+        FUNCTAG = function_type_tag(ctx.tlcontext, ftype),
+        FPTYPEDEF = "typedef " .. function_sig(fptype, ftype, true),
+        FPTYPE = fptype,
+        FASTCALL = fastcall,
+        NPUSH = c_integer_literal(1 + nstatic) .. npush_dynamic,
+        PUSHES = table.concat(pushes, "\n"),
+        NRESULTS = c_integer_literal(nresults),
+        SLOWREADS = table.concat(slowreads, "\n"),
+        ANCHORS = table.concat(anchors, "\n"),
+    }))
+
+    -- 5. expose extra return values for ExpExtra readers
+    if nresults >= 2 then
+        node._extras = node._extras or {}
+        for i = 2, nresults do
+            node._extras[i] = resultnames[i]
+        end
+    end
+
+    local cstats = table.concat(stats, "\n")
+    if nresults == 0 then
+        return cstats, "((void)0)"
+    else
+        return cstats, resultnames[1]
+    end
+end
+
+local function codecall(ctx, node)
+    if not is_static_callee(node) then
+        return codevaluecall(ctx, node)
+    end
+    local castats, caexps, tmpnames, retslots = {}, { "L" }, {}, {}
+    local fname
+    local fnode = node.exp.var
+    local modarg = "_mod"
+    if node.args._tag == "Ast.ArgsFunc" then
+        if fnode._tag == "Ast.VarName" then
+            fname = func_name(ctx.module, fnode.name)
+        elseif fnode._tag == "Ast.VarDot" then
+            if fnode.exp._type._tag == "Type.ForeignModule" then
+                return codeforeigncall(ctx, node)
+            elseif fnode._decl._tag == "Type.StaticMethod" then
+                fname = static_name(fnode._decl)
+                local mod, record = fnode._decl.fqtn:match("^(.*)%.(%a+)$")
+                if mod ~= ctx.module then
+                    assert(fnode.exp.var._tag == "Ast.VarDot")
+                    ctx.functions[fnode._decl.fqtn .. "." .. fnode._decl.name] = {
+                        module = mod,
+                        record = record,
+                        type = fnode._decl,
+                        name = fnode._decl.name,
+                        mangled = fname
+                    }
+                    modarg = render("uvalue(&_mod->uv[$INDEX].uv)", {
+                        INDEX = c_integer_literal(fnode.exp.var.exp.var._decl._upvalue) -- whew!
+                    })
+                end
+            else
+                assert(fnode._decl._tag == "Type.ModuleMember")
+                fname = func_name(fnode._decl.modname, fnode.name)
+                local mod = fnode._decl.modname
+                if mod ~= ctx.module then
+                    ctx.functions[mod .. "." .. fnode.name] = {
+                        module = mod,
+                        name = fnode.name,
+                        type = fnode._type,
+                        mangled = fname
+                    }
+                end
+                modarg = render("uvalue(&_mod->uv[$INDEX].uv)", {
+                    INDEX = c_integer_literal(fnode.exp.var._decl._upvalue)
+                })
+            end
+        end
+        table.insert(caexps, modarg)
+        table.insert(caexps, "NULL")  -- _fn: a static top-level call has no closure
+    else
+        assert(node.args._tag == "Ast.ArgsMethod")
+        local mtype = node._method
+        fname = method_name(mtype)
+        local mod, record = mtype.fqtn:match("^(.*)%.(%a+)$")
+        if mod ~= ctx.module then
+            ctx.functions[mtype.fqtn .. ":" .. mtype.name] = {
+                module = mod,
+                record = record,
+                name = mtype.name,
+                type = mtype,
+                mangled = fname
+            }
+            if not ctx.modules[mod] then
+                ctx.modules[mod] = nextupvalue(ctx.tlcontext)
+            end
+            modarg = render("uvalue(&_mod->uv[$INDEX].uv)", {
+                INDEX = c_integer_literal(ctx.modules[mod])
+            })
+        end
+        local cstat, cexp = codeexp(ctx, node.exp)
+        table.insert(castats, cstat)
+        table.insert(caexps, modarg)
+        table.insert(caexps, "NULL")  -- _fn: a static method call has no closure
+        table.insert(caexps, cexp)
+    end
+    -- The callee's static type, to detect a variadic callee and its fixed arity.
+    -- ArgsMethod -> node._method; a static-method VarDot -> fnode._decl; otherwise
+    -- the var's resolved Type.Function on fnode._type.
+    local callee_ftype
+    if node.args._tag == "Ast.ArgsMethod" then
+        callee_ftype = node._method
+    elseif fnode._tag == "Ast.VarDot"
+           and fnode._decl and fnode._decl._tag == "Type.StaticMethod" then
+        callee_ftype = fnode._decl
+    else
+        callee_ftype = fnode._type
+    end
+    local callee_vararg = callee_ftype and callee_ftype.varargtype
+    local args = node.args.args
+    local nargs = #args
+    -- A trailing `Ast.ExpDots` marker means this call FORWARDS the current
+    -- function's own `...` into the (variadic) callee (the checker kept it for a
+    -- variadic callee; §5.7). The static-prefix args are args[1..nargs-1]; the
+    -- marker itself never reaches codeexp.
+    local dots_tail = nargs > 0 and args[nargs]._tag == "Ast.ExpDots"
+    local nstatic = dots_tail and (nargs - 1) or nargs
+    local nfixed = callee_vararg and #callee_ftype.params or nargs
+    local vargexps = {} -- surplus static args destined for the backing struct
+    for i = 1, nstatic do
+        local arg = args[i]
+        local cstat, cexp = codeexp(ctx, arg)
+        table.insert(castats, cstat)
+        if arg._tag == "Ast.ExpCall" and arg._extras then
+            -- A multi-return call expanded in this argument list: force it to
+            -- run now (into a temp), filling its out-param temps, before the
+            -- ExpExtra arguments that read those temps are evaluated -- C does
+            -- not specify the evaluation order of a call's arguments.
+            local ctmp, tmpname = newtmp(ctx, arg._type)
+            table.insert(castats, render([[
+                $CTMP
+                $TMPNAME = $CEXP;
+            ]], { CTMP = ctmp, TMPNAME = tmpname, CEXP = cexp }))
+            cexp = tmpname
+        end
+        if callee_vararg and i > nfixed then
+            -- a surplus static arg -> a backing-struct element (already coerced
+            -- to the element type by the checker)
+            table.insert(vargexps, cexp)
+        else
+            table.insert(caexps, cexp)
+        end
+    end
+    -- Build + append the backing struct (`_varargs`, `_start`) for a variadic
+    -- callee. `varg_collectable` is true when the call carries collectable vararg
+    -- elements anchored only on source slots below L->top.p (NOT the backing
+    -- struct, whose raw-pointer payload is untraced, §2.D), so the call must run
+    -- while those anchors are live; `dots_tail_close` is true for forwarding case
+    -- 3 (a fresh stack-anchored Udata0). Both force the call to materialize before
+    -- a tail `L->top.p = _base` reset (codereturn) would drop the anchors.
+    local varg_collectable, dots_tail_close = false, false
+    if callee_vararg then
+        varg_collectable, dots_tail_close = emit_vararg_struct(
+            ctx, node, callee_ftype, vargexps, dots_tail, nstatic, caexps, castats)
     end
     for i = 2, #node._types do
         node._extras = node._extras or {}
