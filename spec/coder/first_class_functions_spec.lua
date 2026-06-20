@@ -11,6 +11,7 @@
 local h = require 'spec.support.helpers'
 
 local run_coder = h.run_coder
+local run_coder_app = h.run_coder_app
 local generate_modules = h.generate_modules
 local call = h.call
 
@@ -547,6 +548,49 @@ describe("variadic function values (end-to-end)", function()
         ]], [[
             assert(test.run() == 60)
         ]])
+    end)
+
+    -- The struct build is now FAST-PATH-ONLY, so the generic path never narrows.
+    -- This pins the corrected gradual-mismatch-narrowing behaviour: `h` is a
+    -- Titan `(...value) -> integer`; round-tripped through `value` it is stored in
+    -- a slot whose STATIC type is `(...integer) -> integer` (compatible both ways).
+    -- A `...value` forwarder `f` forwards its `...value` tail into that slot. The
+    -- forward into a STATIC `(...integer)` type hits the struct build's CASE 3
+    -- (different element representation => per-element conversion), whose narrowing
+    -- arm is a `checkandget` value->integer. But the slot's RUNTIME tag is `h`'s
+    -- `(...value)`, so the call must go GENERIC and dispatch to `h`, which accepts
+    -- every value. Pre-fix the struct build ran unconditionally (before the runtime
+    -- tag check), so case-3's `checkandget` narrowed value->integer and RAISED on
+    -- the non-integer tail elements ("x", 3.5) before the generic path could run;
+    -- fast-path-only build => no spurious raise, all three values reach `h`.
+    --
+    -- NOTE: this is asserted through the standalone-app path (no enclosing pcall).
+    -- A *generic* (tag-mismatch) value call made from inside a VARIADIC Titan
+    -- function is corrupted by a SEPARATE, pre-existing bug when an enclosing pcall
+    -- frame is present (the `run_coder`/busted harness wraps every call in pcall):
+    -- the result comes back as the callee closure instead of its return value.
+    -- That bug is orthogonal to the struct-build placement (it reproduces
+    -- identically on the unmodified compiler and the generic branch is byte-for-byte
+    -- unchanged here) -- the app path sidesteps it so this test isolates the
+    -- narrowing fix.
+    it("does not narrow a forwarded ...value tail on a gradual-mismatch generic call", function()
+        run_coder_app([[
+            function h(...value): integer
+                -- `h` accepts ANY value; report the count, proving all the
+                -- (non-integer) elements reached it without a narrowing raise.
+                return #...
+            end
+            function f(...value): integer
+                local v: value = h
+                local g: (...value) -> integer = v   -- runtime tag is h's (...value)
+                local gi: (...integer) -> integer = g -- STATIC (...integer): case-3 narrows
+                return gi(...)                        -- forward f's ...value tail
+            end
+        ]], [[
+            -- pre-fix: case-3 checkandget narrows "x"/3.5 -> integer and RAISES;
+            -- post-fix: generic path forwards all 3 values to h -> #... == 3
+            if f(1, "x", 3.5) == 3 then return 0 else return 1 end
+        ]], 0)
     end)
 
     it("calls a Lua closure through a variadic value type", function()

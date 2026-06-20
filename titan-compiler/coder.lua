@@ -1761,23 +1761,30 @@ local function codevaluecall(ctx, node)
         rtypes[i] = rtype
     end
 
-    -- Build the backing struct (`_varargs`, `_start`) as setup statements when the
-    -- callee is variadic: the fast path passes these C exprs to the native
-    -- pointer. The two struct C exprs go into `vargca`; the setup statements into
-    -- `stats`. The struct is built unconditionally (it depends only on this
-    -- function's `...`, not on the runtime tag); the generic path ignores it and
-    -- pushes elements directly. `varg_collectable`/`dots_tail_close` feed the
-    -- materialize guard at the end (the struct/its elements outlive the call).
-    -- The whole dispatch (struct build + the native or generic call) runs inside
-    -- `stats`, so the call always materializes here -- before any caller resets
-    -- L->top.p. Collectable vararg elements anchored on source slots (and a
-    -- case-3 fresh Udata0) therefore stay live across the call without a separate
-    -- materialize guard, so the helper's `varg_collectable`/`dots_tail_close`
-    -- results need no further action here.
+    -- Build the backing struct (`_varargs`, `_start`) when the callee is variadic.
+    -- The two struct C exprs go into `vargca` (consumed by `fastargs`); the setup
+    -- statements go into a FRESH local list `vargstats` -- NOT the shared `stats`
+    -- prelude -- and are spliced into the FAST branch only (the `$VARGSTATS` slot,
+    -- right before `$FASTCALL`). The struct is therefore built ONLY on the fast
+    -- path (exact tag match): the generic `else` path neither allocates the struct
+    -- nor narrows (its case-3 `checkandget` could raise spuriously on a gradual
+    -- `value` mismatch, before the generic path -- which must dispatch to the real
+    -- runtime function -- ever ran). The generic path re-pushes elements directly
+    -- from `vargexps`/`ctx.varargs` and does not read the struct.
+    --
+    -- Because the build and the native call both live in the fast branch's
+    -- `if`-true block, they materialize together before any caller resets
+    -- L->top.p: collectable vararg elements anchored on source slots (and a
+    -- case-3 fresh Udata0 on its reserved slot) stay live across `$FASTCALL`
+    -- without a separate materialize guard, so the helper's
+    -- `varg_collectable`/`dots_tail_close` results need no further action here.
+    -- The common `_base = restorestack(L, _base_off);` after the if/else still
+    -- runs on both paths (a case-3 allocation may have relocated the stack).
     local vargca = {}   -- the two struct C exprs (_varargs ptr, _start)
+    local vargstats = {}   -- the struct-build setup statements (fast path only)
     if callee_vararg then
         emit_vararg_struct(ctx, node, ftype, vargexps, dots_tail, nstatic,
-                           vargca, stats)
+                           vargca, vargstats)
     end
 
     -- 4a. fast path: the value is a Titan closure whose exact type tag matches
@@ -1857,6 +1864,7 @@ local function codevaluecall(ctx, node)
             $FPTYPEDEF;
             $FPTYPE _vc_fp = titan_cast_func($FPTYPE,
                 pvalue(&_vc_callee->upvalue[2]));
+            $VARGSTATS
             $FASTCALL
         } else {
             /* generic path: call any callable value through the Lua stack;
@@ -1875,6 +1883,7 @@ local function codevaluecall(ctx, node)
         FUNCTAG = function_type_tag(ctx.tlcontext, ftype),
         FPTYPEDEF = "typedef " .. function_sig(fptype, ftype, true),
         FPTYPE = fptype,
+        VARGSTATS = table.concat(vargstats, "\n"),
         FASTCALL = fastcall,
         NPUSH = c_integer_literal(1 + nstatic) .. npush_dynamic,
         PUSHES = table.concat(pushes, "\n"),
