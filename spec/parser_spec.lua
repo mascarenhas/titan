@@ -1549,6 +1549,38 @@ describe("Titan parser", function()
                 end
             ]], "TypeDecl")
         end)
+
+        -- A BARE function type as the vararg element parses fine: `...() -> integer`
+        -- reads the element type as the function type `() -> integer` (the `...`
+        -- element grammar is `simpletype`, and a bare function type is a
+        -- simpletype). Pin the AST so a future grammar change is noticed.
+        it("parses a bare function-type vararg element `...() -> integer`", function()
+            assert_program_ast([[
+                function foo(...() -> integer): nil
+                end
+            ]], {
+                { _tag = "Ast.TopLevelFunc",
+                    name = "foo",
+                    params = {
+                        { _tag = "Ast.Decl", name = false,
+                          type = { _tag = "Ast.TypeFunction",
+                                   argtypes = {},
+                                   rettypes = { { _tag = "Ast.TypeInteger" } } } },
+                    } },
+            })
+        end)
+
+        -- KNOWN PRE-EXISTING LIMITATION (not varargs-specific): a PARENTHESIZED
+        -- type is not a `simpletype` anywhere in the grammar, so `...(() -> integer)`
+        -- -- which tries to use a parenthesized function type as the element --
+        -- fails to parse with the `TypeDecl` label. Pinned so that if the grammar
+        -- ever learns parenthesized simpletypes, this test flips and we notice.
+        it("rejects a PARENTHESIZED function-type vararg element (known limitation)", function()
+            assert_program_syntax_error([[
+                function foo(...(() -> integer)): nil
+                end
+            ]], "TypeDecl")
+        end)
     end)
 
     describe("can parse variadic function-type annotations", function()

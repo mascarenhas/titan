@@ -821,6 +821,37 @@ describe("forwarding an existing ... to another variadic callee", function()
             end
         ]])
     end)
+
+    -- CAP BOUNDARY: a forwarding chain that grows the merged count by EXACTLY one
+    -- per step. At 200 merged elements the cap is satisfied (TITAN_VARARG_MAX is
+    -- 200) and `#...` reports 200; the very next element (201) trips the clean
+    -- "too many variadic arguments" Titan error. Pins both sides of the boundary.
+    it("a forwarding chain of exactly 200 elements passes (the cap boundary)", function()
+        run_coder([[
+            function grow(depth: integer, ...integer): integer
+                if depth <= 0 then
+                    return #...
+                end
+                return grow(depth - 1, 1, ...)   -- +1 element per step
+            end
+        ]], [[
+            -- 200 steps each add one element -> 200 merged, exactly at the cap.
+            assert(test.grow(200) == 200)
+        ]])
+    end)
+
+    it("a forwarding chain of exactly 201 elements raises the cap error", function()
+        run_coder([[
+            function grow(depth: integer, ...integer): integer
+                if depth <= 0 then
+                    return #...
+                end
+                return grow(depth - 1, 1, ...)
+            end
+        ]], [[
+            test.grow(201)   -- one past the cap
+        ]], "too many variadic arguments")
+    end)
 end)
 
 describe("building {...} / {e1, ..., ...} array from a vararg", function()
@@ -1043,6 +1074,495 @@ describe("building {...} / {e1, ..., ...} array from a vararg", function()
             -- and consumed entirely inside Titan with an internal GC churn
             assert(test.sumfields(a, b, c) == 15)
             assert(test.sumfields() == 0)
+        ]])
+    end)
+end)
+
+-- The default busted suite runs INCREMENTAL GC, which cannot observe a missing
+-- write barrier or a dropped stack anchor: a missed mark is reconciled by the
+-- next sweep regardless. GENERATIONAL mode is different -- a minor collection
+-- sweeps the young generation in one shot, so an unanchored fresh value (or an
+-- unbarriered store of a fresh value into an aged container) is reclaimed
+-- deterministically. Every test here selects generational mode, churns the
+-- young generation, and forces a minor collection (a `step` in generational
+-- mode is a minor collection) BEFORE the element read -- so a dropped anchor
+-- becomes near-deterministic corruption rather than a rare race.
+describe("variadic GC anchoring under generational mode", function()
+    setup(function () os.remove("titan-runtime/titan.o") end)
+    after_each(clean)
+
+    -- 1. `...value` from Lua (genluaentry path): the backing struct holds tagged
+    -- TValues whose collectable payload (a long fresh string, fresh tables,
+    -- a fresh record) is untraced. The values survive only because they ride the
+    -- caller's Lua-stack anchors. A forced minor collection runs after heavy
+    -- young churn, before `#...`/`...[i]` are read.
+    it("...value from Lua survives a generational minor collection", function()
+        run_coder([[
+            record P
+                x: integer
+            end
+            function howmany(...value): integer
+                return #...
+            end
+            function at(i: integer, ...value): value
+                return ...[i]
+            end
+            function mkP(x: integer): P
+                return { x = x }
+            end
+        ]], [[
+            collectgarbage("generational")
+            -- fresh, non-interned: a long heap string (built char-by-char so it is
+            -- a genuine heap allocation, never an interned constant) + fresh tables
+            -- + a fresh record
+            local longs = ("z"):rep(5000) .. "_tail"
+            local longlen = #longs
+            local t1 = { 1, 2, 3 }
+            local t2 = { a = "x" }
+            local rec = test.mkP(77)
+            -- churn the young generation hard, then force a minor collection
+            for i = 1, 4000 do local _ = { i, i + 1 } end
+            collectgarbage("step")
+            assert(test.howmany(longs, t1, t2, rec, 42) == 5)
+            assert(test.at(1, longs, t1, t2, rec, 42) == longs)
+            -- the returned string must be byte-identical (content survived intact)
+            assert(#(test.at(1, longs, t1, t2, rec, 42)) == longlen)
+            assert(test.at(2, longs, t1, t2, rec, 42) == t1)
+            assert(test.at(4, longs, t1, t2, rec, 42) == rec)
+            assert(test.at(5, longs, t1, t2, rec, 42) == 42)
+        ]])
+    end)
+
+    -- 2. `...R` (record / Udata*) from Lua under generational GC: the record
+    -- fields must survive a minor collection forced before they are read.
+    it("...R (record) from Lua survives a generational minor collection", function()
+        run_coder([[
+            record R
+                v: integer
+                s: string
+            end
+            function mk(v: integer, s: string): R
+                return { v = v, s = s }
+            end
+            function checksum(...R): integer
+                local n = #...
+                local s = 0
+                local i = 1
+                while i <= n do
+                    local r = ...[i]
+                    s = s + r.v + #(r.s)
+                    i = i + 1
+                end
+                return s
+            end
+        ]], [[
+            collectgarbage("generational")
+            -- fresh records carrying fresh non-interned strings
+            local a = test.mk(3, ("a"):rep(4) .. "!")   -- v=3, #s=5
+            local b = test.mk(5, ("b"):rep(6) .. "!")   -- v=5, #s=7
+            local c = test.mk(7, ("c"):rep(2) .. "!")   -- v=7, #s=3
+            for i = 1, 4000 do local _ = { i } end
+            collectgarbage("step")
+            assert(test.checksum(a, b, c) == (3 + 5) + (5 + 7) + (7 + 3))
+        ]])
+    end)
+
+    -- 3. CASE 3 forwarding, PREFIX-GROW with a collectable element type, under
+    -- generational GC: a forwarder prepends a FRESH string ahead of its whole
+    -- forwarded `...string` (prefix grows the tail -> a fresh Udata0 copy), and a
+    -- sink forces a minor collection before concatenating every element. The
+    -- spilled prefix string and the forwarded tail strings must all be anchored
+    -- across the fresh-struct allocation and the collection. Asserts exact
+    -- concatenation (not just total length) so a swapped/dropped element shows.
+    it("case-3 prefix-grow forwarding of ...string survives a minor collection", function()
+        run_coder([[
+            function sink(...string): string
+                -- force a minor collection before reading the elements
+                local junk: {integer} = {}
+                local k = 1
+                while k <= 400 do junk = { k, k + 1 }; k = k + 1 end
+                local out: string = ""
+                local i = 1
+                local n = #...
+                while i <= n do out = out .. ...[i]; i = i + 1 end
+                return out
+            end
+            function fwd(p: string, ...string): string
+                -- p .. "|" is a FRESH heap string prepended ahead of the whole
+                -- forwarded tail: case-3 prefix-grow into a fresh Udata0 copy.
+                return sink(p .. "|", ...)
+            end
+        ]], [[
+            collectgarbage("generational")
+            local p = ("p"):rep(3) .. "?"   -- "ppp?"
+            local a = ("a"):rep(4) .. "1"   -- "aaaa1"
+            local b = ("b"):rep(6) .. "2"   -- "bbbbbb2"
+            for i = 1, 3000 do local _ = { i } end
+            collectgarbage("step")
+            -- fwd prepends (p.."|") then forwards {a, b}
+            assert(test.fwd(p, a, b) == (p .. "|") .. a .. b)
+            -- empty forwarded tail: just the prefix
+            assert(test.fwd(p) == (p .. "|"))
+        ]])
+    end)
+
+    -- 4. `{...string}` built into a table that has been AGED into the OLD
+    -- generation (two full collects), then young-allocate + step to force minor
+    -- collections. A minor collection does NOT rescan old objects, so the table's
+    -- per-element `obj2arr` store must have run `luaC_barrierback` to keep the
+    -- (then-young) strings reachable from the (now-old) table; a missing barrier
+    -- lets the minor collection sweep them. Asserts the elements survive.
+    it("{...string} aged into the old generation survives later minor collections", function()
+        run_coder([[
+            function gather(...string): {string}
+                return {...}
+            end
+            function readlen(t: {string}, i: integer): integer
+                return #(t[i])
+            end
+        ]], [[
+            collectgarbage("generational")
+            local a = ("x"):rep(5) .. "1"   -- 6
+            local b = ("y"):rep(7) .. "2"   -- 8
+            local c = ("z"):rep(3) .. "3"   -- 4
+            local t = test.gather(a, b, c)
+            -- promote the table (and its array part) into the old generation
+            collectgarbage("collect")
+            collectgarbage("collect")
+            -- now allocate fresh young garbage and run minor collections; these
+            -- must not sweep the old-gen-referenced string elements
+            for i = 1, 5000 do local _ = { i } end
+            collectgarbage("step")
+            collectgarbage("step")
+            assert(#t == 3)
+            assert(test.readlen(t, 1) == 6)
+            assert(test.readlen(t, 2) == 8)
+            assert(test.readlen(t, 3) == 4)
+            assert(t[1] == a and t[2] == b and t[3] == c)
+        ]])
+    end)
+
+    -- 5. STATIC `...value` call (Titan -> Titan) under generational GC: the
+    -- caller builds the backing struct on its C stack from fresh strings, then
+    -- tail-calls the variadic callee, which forces a minor collection before
+    -- reading the boxed values. Tail-call anchoring across the static site.
+    it("static ...value (Titan->Titan) survives a generational minor collection", function()
+        run_coder([[
+            function totallen(...value): integer
+                local junk: {integer} = {}
+                local k = 1
+                while k <= 400 do junk = { k }; k = k + 1 end
+                local s = 0
+                local i = 1
+                local n = #...
+                while i <= n do
+                    s = s + #(...[i] as string)
+                    i = i + 1
+                end
+                return s
+            end
+            function caller(a: string, b: string): integer
+                -- fresh strings flow into the value struct; tail position
+                return totallen(a, b, "lit3")
+            end
+        ]], [[
+            collectgarbage("generational")
+            local a = ("a"):rep(4) .. "!"   -- 5
+            local b = ("b"):rep(6) .. "!"   -- 7
+            for i = 1, 3000 do local _ = { i } end
+            collectgarbage("step")
+            assert(test.caller(a, b) == 5 + 7 + 4)
+        ]])
+    end)
+end)
+
+-- Functional coverage that the earlier phases left uncovered: nested variadic
+-- lambdas (scope rule 4 at run time), map-typed elements, variadic methods,
+-- a side-effecting `...[i]` index, `...boolean` through the build/forward/static
+-- paths, and the `{...value}`-with-a-nil border semantics.
+describe("variadic parameters: functional coverage gaps (code generator)", function()
+    setup(function () os.remove("titan-runtime/titan.o") end)
+    after_each(clean)
+
+    -- A variadic lambda stored in a local and called: the value-call path on an
+    -- anonymous variadic function, exercised purely inside Titan.
+    it("variadic lambda stored in a local and called", function()
+        run_coder([[
+            function go(): integer
+                local f = function(...integer): integer
+                    local s = 0
+                    local i = 1
+                    local n = #...
+                    while i <= n do s = s + ...[i]; i = i + 1 end
+                    return s
+                end
+                return f(1, 2, 3, 4)
+            end
+        ]], [[
+            assert(test.go() == 10)
+        ]])
+    end)
+
+    -- SCOPE RULE 4 at run time: a variadic lambda nested inside a variadic
+    -- top-level function. The inner lambda's `...` is its OWN `...` (depth-stamped
+    -- `$vararg`), so `inner(99)` reads 99 -- NOT the outer call's first arg. The
+    -- outer `...` is read by a sibling helper. With outer(7, 8) and inner(99):
+    -- helper sees 7 (-> 7000) and the inner lambda sees 99, summing to 7099.
+    it("nested variadic lambda reads the inner ... (scope rule 4)", function()
+        run_coder([[
+            function outer_helper(...integer): integer
+                return ...[1] * 1000
+            end
+            function outer(...integer): integer
+                local inner = function(...integer): integer
+                    return ...[1]            -- the INNER call's first arg
+                end
+                return outer_helper(...) + inner(99)
+            end
+        ]], [[
+            -- outer(7, 8): helper(7,8) -> 7000 ; inner(99) -> 99 ; 7099
+            assert(test.outer(7, 8) == 7099)
+            assert(test.outer(3, 100) == 3099)
+        ]])
+    end)
+
+    -- MAP-typed vararg element (`...{string:integer}`): the element is a
+    -- collectable Table*. Exercise `#...`, `...[i]`, the `{...}` build, and
+    -- forwarding, with a forced GC since each element is GC-able.
+    it("map-typed vararg element ...{string:integer}", function()
+        run_coder([[
+            function lookup(key: string, ...{string:integer}): integer
+                local junk: {integer} = {}
+                local k = 1
+                while k <= 300 do junk = { k }; k = k + 1 end
+                local n = #...
+                local s = 0
+                local i = 1
+                while i <= n do
+                    local m = ...[i]
+                    s = s + m[key]
+                    i = i + 1
+                end
+                return s
+            end
+            function howmany(...{string:integer}): integer
+                local t = {...}
+                return #t
+            end
+            function fwd(key: string, ...{string:integer}): integer
+                return lookup(key, ...)        -- forward the whole tail
+            end
+        ]], [[
+            collectgarbage("incremental")
+            local a = { a = 1, b = 2 }
+            local b = { a = 10, b = 20 }
+            assert(test.lookup("a", a, b) == 11)
+            assert(test.lookup("b", a, b) == 22)
+            assert(test.howmany(a, b, {}) == 3)
+            assert(test.howmany() == 0)
+            assert(test.fwd("a", a, b) == 11)
+        ]])
+    end)
+
+    -- A variadic METHOD reading collectable elements, exercised from Lua, via a
+    -- STATIC Titan call site (`obj:m(...)`), and forwarding `...` to itself
+    -- (start-adjust). Generational where the element type is collectable.
+    it("variadic method ...string from Lua, static, and self-forwarding", function()
+        run_coder([[
+            record Acc
+                base: integer
+            end
+            function Acc:total(...string): integer
+                local junk: {integer} = {}
+                local k = 1
+                while k <= 300 do junk = { k, k + 1 }; k = k + 1 end
+                local s = self.base
+                local i = 1
+                local n = #...
+                while i <= n do s = s + #(...[i]); i = i + 1 end
+                return s
+            end
+            function Acc:add(skip: string, ...string): integer
+                -- forward ... to itself; `skip` is dropped (start-adjust)
+                return self:total(...)
+            end
+            function viastatic(a: Acc, x: string, y: string): integer
+                return a:total(x, y)            -- static Titan call site obj:m(...)
+            end
+        ]], [[
+            collectgarbage("generational")
+            local a = test.Acc.new(100)
+            local s1 = ("p"):rep(5) .. "!"   -- 6
+            local s2 = ("q"):rep(7) .. "!"   -- 8
+            for i = 1, 2000 do local _ = { i } end
+            collectgarbage("step")
+            assert(a:total(s1, s2) == 100 + 6 + 8)        -- from Lua
+            assert(test.viastatic(a, s1, s2) == 100 + 6 + 8) -- static call site
+            assert(a:add(("z"):rep(3), s1, s2) == 100 + 6 + 8) -- self-forward
+            assert(a:total() == 100)
+        ]])
+    end)
+
+    -- A variadic method over a RECORD element type (Udata*) from Lua, under
+    -- generational GC.
+    it("variadic method ...R (record) from Lua under generational GC", function()
+        run_coder([[
+            record R
+                v: integer
+            end
+            record Acc
+                base: integer
+            end
+            function Acc:sumv(...R): integer
+                local junk: {integer} = {}
+                local k = 1
+                while k <= 300 do junk = { k }; k = k + 1 end
+                local s = self.base
+                local i = 1
+                local n = #...
+                while i <= n do s = s + (...[i]).v; i = i + 1 end
+                return s
+            end
+            function mk(v: integer): R
+                return { v = v }
+            end
+        ]], [[
+            collectgarbage("generational")
+            local a = test.Acc.new(10)
+            local r1, r2, r3 = test.mk(3), test.mk(5), test.mk(7)
+            for i = 1, 2000 do local _ = { i } end
+            collectgarbage("step")
+            assert(a:sumv(r1, r2, r3) == 25)
+            assert(a:sumv() == 10)
+        ]])
+    end)
+
+    -- A side-effecting `...[i]` index expression: the index `counter()` bumps a
+    -- module counter. The index must be evaluated EXACTLY ONCE (operands are not
+    -- auto-hoisted, so a template splicing the index more than once would call
+    -- `counter()` repeatedly -- see the pretty.lua multiply-evaluation gotcha).
+    it("a side-effecting ...[counter()] index is evaluated exactly once", function()
+        run_coder([[
+            calls: integer = 0
+            function counter(): integer
+                calls = calls + 1
+                return 2
+            end
+            function pick(...integer): integer
+                return ...[counter()]
+            end
+        ]], [[
+            test.calls = 0
+            assert(test.pick(10, 20, 30) == 20)
+            assert(test.calls == 1)
+            -- a second call bumps it exactly once more
+            assert(test.pick(40, 50, 60) == 50)
+            assert(test.calls == 2)
+        ]])
+    end)
+
+    -- `...boolean` (a scalar, no-payload element: booleans carry no GC payload)
+    -- through the `{...}` build, pass-through forwarding, start-adjust
+    -- forwarding, and a fully-static call site. Earlier phases covered only
+    -- `#...`/`...[i]` for booleans.
+    it("...boolean through {...}, forwarding, and a static call", function()
+        run_coder([[
+            function count_true(...boolean): integer
+                local t: {boolean} = {...}
+                local c = 0
+                local i = 1
+                while i <= #t do
+                    if t[i] then c = c + 1 end
+                    i = i + 1
+                end
+                return c
+            end
+            function fwd(...boolean): integer
+                return count_true(...)              -- pass-through
+            end
+            function fwd_adjust(first: boolean, ...boolean): integer
+                return count_true(first, ...)       -- start-adjust borrow
+            end
+            function static_call(): integer
+                return count_true(true, false, true, true)
+            end
+        ]], [[
+            assert(test.count_true(true, false, true) == 2)
+            assert(test.count_true() == 0)
+            assert(test.fwd(true, true, false, true) == 3)
+            assert(test.fwd_adjust(true, false, true) == 2)
+            assert(test.static_call() == 3)
+        ]])
+    end)
+
+    -- GENERIC (tag-mismatch) value-call path carrying a FORWARDED `...` with
+    -- collectable (string) elements, under generational GC. A `(...value)`-typed
+    -- value actually holds a `(...string)` function, so its runtime tag does not
+    -- match the call site and the call routes through the generic path, which
+    -- rebuilds the struct through genluaentry. The forwarded fresh strings must
+    -- survive a minor collection in the deepest callee.
+    it("generic value-call carrying a forwarded ...string survives a minor collection", function()
+        run_coder([[
+            function totallen(...string): integer
+                local junk: {integer} = {}
+                local k = 1
+                while k <= 400 do junk = { k }; k = k + 1 end
+                local s = 0
+                local i = 1
+                local n = #...
+                while i <= n do s = s + #(...[i]); i = i + 1 end
+                return s
+            end
+            function call_generic(f: (...value) -> integer, ...string): integer
+                -- f holds a ...string function viewed as ...value -> tag mismatch
+                -- -> the generic path; we forward our own ...string into it.
+                return f(...)
+            end
+            function run(a: string, b: string): integer
+                local v: (...value) -> integer = totallen
+                return call_generic(v, a, b)
+            end
+        ]], [[
+            collectgarbage("generational")
+            local a = ("a"):rep(4) .. "!"   -- 5
+            local b = ("b"):rep(6) .. "!"   -- 7
+            for i = 1, 3000 do local _ = { i } end
+            collectgarbage("step")
+            assert(test.run(a, b) == 5 + 7)
+        ]])
+    end)
+
+    -- DESIGN-DECISION PIN: `{...value}` with a GENUINE nil element. `#...` counts
+    -- all the slots passed (3), `...[2]` reads the nil, but `#{...}` follows Lua's
+    -- table-border semantics for an array with a nil hole: the length is a border,
+    -- so `#t == 1` here. This MATCHES stock Lua `{...}`-with-nil (e.g. in plain
+    -- Lua `#({(function(...) return ... end)(1, nil, 3)}) == 1`); it is an
+    -- intentional consequence of the border rule, NOT a variadic miscompile.
+    it("{...value} with a genuine nil element follows Lua border semantics", function()
+        run_coder([[
+            function dotslen(...value): integer
+                return #...
+            end
+            function at(i: integer, ...value): value
+                return ...[i]
+            end
+            function tablelen(...value): integer
+                local t = {...}
+                return #t
+            end
+        ]], [[
+            -- #... counts every slot, including the nil hole
+            assert(test.dotslen(1, nil, 3) == 3)
+            -- ...[2] reads the genuine nil
+            assert(test.at(2, 1, nil, 3) == nil)
+            assert(test.at(1, 1, nil, 3) == 1)
+            assert(test.at(3, 1, nil, 3) == 3)
+            -- #{...} is a Lua table border: an array with a nil hole at index 2 has
+            -- a valid border at 1, so #t == 1. This matches stock Lua's behaviour
+            -- for `#{1, nil, 3}` packed from a vararg and is intentional, not a bug.
+            assert(test.tablelen(1, nil, 3) == 1)
+            -- a trailing nil also borders at the last non-nil
+            assert(test.tablelen(1, 2, nil) == 2)
         ]])
     end)
 end)
