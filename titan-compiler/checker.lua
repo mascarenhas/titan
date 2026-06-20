@@ -967,11 +967,25 @@ local function checkargs(ftype, args, loc, fname, st, errors)
         if ftype.varargtype then
             -- WHOLE-TAIL: keep the `...` marker; check element compatibility.
             local nstatic = nargs - 1
+            local caller_elem = lastarg._vararg_elem
             if nstatic < nparams then
-                checker.typeerror(errors, loc,
-                    "%s called with too few fixed arguments before '...': "
-                    .. "got %d but expects at least %d.\n%s",
-                    fname, nstatic, nparams, types.tostring(ftype))
+                -- START-ADJUST (§5.7 case 2): the static prefix fills only the
+                -- first `nstatic` fixed params; the remaining `nparams - nstatic`
+                -- fixed params are BORROWED from the caller's own `...` (bounds-
+                -- checked at runtime, raising if too few). Each borrowed fixed
+                -- param type must accept the caller's `...` element type.
+                if caller_elem and caller_elem._tag ~= "Type.Invalid" then
+                    for i = nstatic + 1, nparams do
+                        local ptype = ftype.params[i]
+                        if not types.compatible(ptype, caller_elem) then
+                            checker.typeerror(errors, lastarg.loc,
+                                "cannot borrow a '...' element of type %s for "
+                                .. "fixed parameter %d (type %s) of %s",
+                                types.tostring(caller_elem), i,
+                                types.tostring(ptype), fname)
+                        end
+                    end
+                end
             else
                 -- Over-supplied static args (beyond the fixed params) are passed
                 -- as leading vararg elements; coerce each to the element type.
@@ -981,7 +995,6 @@ local function checkargs(ftype, args, loc, fname, st, errors)
                         ftype.varargtype, args[i]._type, errors, args[i].loc)
                 end
             end
-            local caller_elem = lastarg._vararg_elem
             if caller_elem and caller_elem._tag ~= "Type.Invalid"
                and not types.compatible(ftype.varargtype, caller_elem) then
                 checker.typeerror(errors, lastarg.loc,

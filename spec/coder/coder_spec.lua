@@ -428,6 +428,285 @@ describe("collectable variadic parameters (code generator)", function()
     end)
 end)
 
+describe("forwarding an existing ... to another variadic callee", function()
+    setup(function () os.remove("titan-runtime/titan.o") end)
+    after_each(clean)
+
+    -- CASE 1 (pass-through): caller static prefix exactly fills the callee fixed
+    -- params and the element type matches; the current backing struct + start are
+    -- passed through unchanged (no allocation, no copy). `g` must see the same
+    -- elements the forwarder received.
+    it("case 1 pass-through: g(a, ...) with matching fixed arity and element type", function()
+        run_coder([[
+            function g(a: integer, ...integer): integer
+                local s = a
+                local i = 1
+                local n = #...
+                while i <= n do
+                    s = s + ...[i]
+                    i = i + 1
+                end
+                return s
+            end
+            function f(...integer): integer
+                return g(1000, ...)
+            end
+        ]], [[
+            assert(test.f() == 1000)            -- empty tail passes through
+            assert(test.f(1, 2, 3) == 1006)     -- a=1000, tail {1,2,3}
+            assert(test.f(7) == 1007)
+        ]])
+    end)
+
+    -- CASE 2 (start-adjust): the callee has MORE fixed params than the caller
+    -- supplies static args, so a vararg element is consumed as a fixed param. The
+    -- same backing struct is passed with `_start + delta`; no struct mutation,
+    -- no save/restore. Verify both the borrowed fixed element and the shortened
+    -- tail the callee sees.
+    it("case 2 start-adjust: g(x, y, ...) consumes a vararg element as a fixed param", function()
+        run_coder([[
+            function g(x: integer, y: integer, ...integer): integer
+                -- encode: x*100000 + y*1000 + (#... is tail length)*10 + first-tail
+                local n = #...
+                local first = 0
+                if n > 0 then
+                    first = ...[1]
+                end
+                return x * 100000 + y * 1000 + n * 10 + first
+            end
+            function f(...integer): integer
+                -- caller supplies one static arg (x=5); g needs two fixed params,
+                -- so y is borrowed from ...[1] and the tail starts at ...[2].
+                return g(5, ...)
+            end
+        ]], [[
+            -- f(11, 22, 33): x=5, y=11 (borrowed), tail={22,33} so n=2, first=22
+            assert(test.f(11, 22, 33) == 5 * 100000 + 11 * 1000 + 2 * 10 + 22)
+            -- f(11): x=5, y=11 (borrowed), tail={} so n=0, first=0
+            assert(test.f(11) == 5 * 100000 + 11 * 1000 + 0)
+        ]])
+    end)
+
+    -- Two forwarding args in one expression (g(h1(...), h2(...))). Because case 2
+    -- never mutates the backing struct (start is a parameter), correctness does not
+    -- depend on the C argument-evaluation order. Both h1 and h2 forward the SAME
+    -- `...` start-adjusted independently.
+    it("case 2: g(h1(...), h2(...)) is order-independent (no struct mutation)", function()
+        run_coder([[
+            function h1(a: integer, ...integer): integer
+                -- a borrowed as fixed; returns a + first tail element (or a)
+                local n = #...
+                if n > 0 then
+                    return a + ...[1]
+                end
+                return a
+            end
+            function h2(a: integer, b: integer, ...integer): integer
+                -- two fixed params: a, b borrowed; returns a*1000 + b
+                return a * 1000 + b
+            end
+            function g(p: integer, q: integer): integer
+                return p * 1000000 + q
+            end
+            function f(...integer): integer
+                -- h1 borrows ...[1] as `a`, tail starts at ...[2]
+                -- h2 borrows ...[1],...[2] as a,b
+                return g(h1(...), h2(...))
+            end
+        ]], [[
+            -- f(3, 4, 5):
+            --   h1: a=3, tail={4,5}, returns 3+4 = 7
+            --   h2: a=3, b=4, returns 3004
+            --   g(7, 3004) = 7000000 + 3004 = 7003004
+            assert(test.f(3, 4, 5) == 7003004)
+        ]])
+    end)
+
+    -- CASE 3 (fresh copy), element-type MISMATCH: forward `...integer` into a
+    -- `...value` callee. Each integer element is boxed into a TValue in a fresh
+    -- Udata0 backing struct. A forced GC in the deepest callee proves the case-3
+    -- anchoring (the fresh struct is stack-anchored; its elements ride upstream).
+    it("case 3 type-mismatch: ...integer forwarded to ...value (each element boxed)", function()
+        run_coder([[
+            -- sink takes ...value; the forwarder forwards ...integer, so each
+            -- integer element is BOXED into a TValue in a fresh Udata0 (case 3,
+            -- element-representation mismatch). sink returns the which-th value
+            -- back to Lua unchanged, proving the boxed elements are intact.
+            function sink(which: integer, ...value): value
+                local junk: {integer} = {}
+                local k = 1
+                while k <= 300 do
+                    junk = { k }
+                    k = k + 1
+                end
+                return ...[which]
+            end
+            function count(...value): integer
+                return #...
+            end
+            function f(which: integer, ...integer): value
+                return sink(which, ...)
+            end
+            function n(...integer): integer
+                return count(...)
+            end
+        ]], [[
+            collectgarbage("incremental")
+            assert(test.n() == 0)
+            assert(test.n(10, 20, 30) == 3)
+            -- stepped GC across the boxed-element forward + the value-typed result
+            -- (the gc-result rebase path)
+            for trial = 1, 50 do
+                collectgarbage("step")
+                assert(test.f(1, 10, 20, 30) == 10)
+                assert(test.f(2, 10, 20, 30) == 20)
+                assert(test.f(3, 10, 20, 30) == 30)
+            end
+        ]])
+    end)
+
+    -- CASE 3 (fresh copy), PREFIX-GROW: the callee has FEWER fixed params than the
+    -- caller supplies static args, so the surplus static args spill into the tail
+    -- (prepended to the forwarded `...` elements). Element type matches but the
+    -- tail grows, forcing a fresh copy. Force a GC in the callee.
+    it("case 3 prefix-grow: static args spill into the forwarded tail", function()
+        run_coder([[
+            function sink(a: integer, ...integer): integer
+                local junk: {integer} = {}
+                local k = 1
+                while k <= 300 do
+                    junk = { k }
+                    k = k + 1
+                end
+                local n = #...
+                local s = a
+                local i = 1
+                while i <= n do
+                    s = s + ...[i]
+                    i = i + 1
+                end
+                return s
+            end
+            function f(...integer): integer
+                -- sink has ONE fixed param; we supply three static args (a, then
+                -- 100, 200 spill into the tail) followed by the forwarded `...`.
+                return sink(1, 100, 200, ...)
+            end
+        ]], [[
+            collectgarbage("incremental")
+            -- a=1, tail prefix {100,200}, then forwarded {}
+            assert(test.f() == 301)
+            -- a=1, tail prefix {100,200}, then forwarded {3,4}
+            assert(test.f(3, 4) == 1 + 100 + 200 + 3 + 4)
+        ]])
+    end)
+
+    -- CASE 3 with a COLLECTABLE element type (string), prefix-grow: the spilled
+    -- static prefix string AND the forwarded tail strings must all survive the
+    -- Udata0 allocation and a forced GC in the callee.
+    it("case 3 prefix-grow with collectable (string) elements survives GC", function()
+        run_coder([[
+            function sink(...string): integer
+                local junk: {integer} = {}
+                local k = 1
+                while k <= 300 do
+                    junk = { k }
+                    k = k + 1
+                end
+                local n = #...
+                local s = 0
+                local i = 1
+                while i <= n do
+                    s = s + #(...[i])
+                    i = i + 1
+                end
+                return s
+            end
+            function f(p: string, ...string): integer
+                -- p is a fixed param of f; it spills as a leading tail element
+                -- into sink (sink has zero fixed params), ahead of the forwarded
+                -- `...`. A fresh string built here must be anchored before alloc.
+                return sink(p .. "X", ...)
+            end
+        ]], [[
+            collectgarbage("incremental")
+            local a = ("a"):rep(4) .. "!"   -- length 5
+            local b = ("b"):rep(6) .. "!"   -- length 7
+            -- f(a, b): prefix {a.."X"} (len 6), forwarded {b} (len 7) -> 13
+            assert(test.f(a, b) == 6 + 7)
+            -- f(a): prefix {a.."X"} (len 6), forwarded {} -> 6
+            assert(test.f(a) == 6)
+        ]])
+    end)
+
+    -- RECURSION: a variadic function forwards `...` to ITSELF (case 2 start-adjust
+    -- on each step), with a base case. Each recursive call supplies ZERO static
+    -- args to a one-fixed-param callee, so the first vararg element is BORROWED as
+    -- the fixed param and the tail shrinks by one -- genuine start-adjust that
+    -- terminates (unlike a pass-through, which would never shrink the tail).
+    it("recursion: a variadic function forwards ... to itself", function()
+        run_coder([[
+            function summer(acc: integer, head: integer, ...integer): integer
+                -- fold `head` into `acc`. If the tail is empty we are done;
+                -- otherwise recurse supplying ONE static arg (the new acc) to a
+                -- TWO-fixed-param callee, so the next `head` is BORROWED from
+                -- ...[1] (start-adjust, k=1 < m=2) and the tail shrinks by one.
+                local n = #...
+                if n == 0 then
+                    return acc + head
+                end
+                return summer(acc + head, ...)
+            end
+        ]], [[
+            assert(test.summer(0, 0) == 0)
+            assert(test.summer(0, 1, 2, 3, 4, 5) == 15)
+            assert(test.summer(100, 10, 20) == 130)
+        ]])
+    end)
+
+    -- OVERFLOW: a forwarding chain that GROWS the tail each step (case 3
+    -- prefix-grow) eventually exceeds TITAN_VARARG_MAX (200) and must raise a clean
+    -- Titan error rather than corrupt memory (lu_byte n_args would otherwise wrap).
+    it("overflow: a forwarding chain past TITAN_VARARG_MAX raises cleanly", function()
+        run_coder([[
+            function grow(depth: integer, ...integer): integer
+                if depth <= 0 then
+                    return #...
+                end
+                -- each step prepends two static args ahead of the forwarded tail,
+                -- growing the merged count -- case 3 prefix-grow with a cap check.
+                return grow(depth - 1, 1, 1, ...)
+            end
+        ]], [[
+            -- 150 steps * 2 prepended each = 300 > 200; the cap check must fire.
+            test.grow(150)
+        ]], "too many variadic arguments")
+    end)
+
+    -- Sanity: the same overflow chain stays BELOW the cap and returns the count,
+    -- confirming the cap is the only thing that raises (not the chain itself).
+    it("forwarding chain below the cap merges correctly", function()
+        run_coder([[
+            function grow(depth: integer, ...integer): integer
+                if depth <= 0 then
+                    return #...
+                end
+                return grow(depth - 1, 1, 1, ...)
+            end
+        ]], [[
+            -- Stress under stepped GC: deep case-3 recursion allocates a fresh
+            -- Udata0 per frame, which can relocate the Lua stack; the forward
+            -- recomputes `_base` after each call, so the merged count stays correct.
+            collectgarbage("incremental")
+            for trial = 1, 100 do
+                collectgarbage("step")
+                local r = test.grow(50)   -- 50 steps * 2 = 100, under the 200 cap
+                assert(r == 100, "trial "..trial.." grow(50)="..tostring(r))
+            end
+        ]])
+    end)
+end)
+
 describe("Titan code generator", function()
     setup(function ()
         os.remove("titan-runtime/titan.o")

@@ -4,6 +4,7 @@ local util  = require "titan-compiler.util"
 local coder = {}
 
 local codeexp, codestat, codeforeignexp, codelambda, codelambdadec, codemethodref
+local codedotsindex   -- forward: codecall (case-2 borrow) calls it; defined below
 
 local render = util.render
 
@@ -1669,12 +1670,16 @@ local function codecall(ctx, node)
     local callee_vararg = callee_ftype and callee_ftype.varargtype
     local args = node.args.args
     local nargs = #args
-    -- A bare trailing `...` (forwarding an existing vararg) is Phase 4; this
-    -- phase handles only a STATIC arg list into a variadic callee.
+    -- A trailing `Ast.ExpDots` marker means this call FORWARDS the current
+    -- function's own `...` into the (variadic) callee (the checker kept it for a
+    -- variadic callee; §5.7). The static-prefix args are args[1..nargs-1]; the
+    -- marker itself never reaches codeexp.
     local dots_tail = nargs > 0 and args[nargs]._tag == "Ast.ExpDots"
+    local nstatic = dots_tail and (nargs - 1) or nargs
     local nfixed = callee_vararg and #callee_ftype.params or nargs
     local vargexps = {} -- surplus static args destined for the backing struct
-    for i, arg in ipairs(args) do
+    for i = 1, nstatic do
+        local arg = args[i]
         local cstat, cexp = codeexp(ctx, arg)
         table.insert(castats, cstat)
         if arg._tag == "Ast.ExpCall" and arg._extras then
@@ -1697,16 +1702,22 @@ local function codecall(ctx, node)
             table.insert(caexps, cexp)
         end
     end
-    -- True when the static call site builds a struct whose elements are
-    -- collectable: their only Lua-stack anchors are the source temp/local slots
-    -- below L->top.p, NOT the C-stack struct (its raw-pointer payload is untraced,
-    -- §2.D). The call must therefore execute while those anchors are still live;
-    -- see the forced result-materialization below.
+    -- True when the call carries collectable vararg elements whose only Lua-stack
+    -- anchors are the source temp/local slots below L->top.p, NOT the backing
+    -- struct (its raw-pointer payload is untraced, §2.D). The call must therefore
+    -- execute while those anchors are still live; see the forced
+    -- result-materialization below (it keeps a tail `return $CEXP` from emitting
+    -- `L->top.p = _base;` before the call and dropping the anchors).
     local varg_collectable = false
-    -- Build the concrete-array struct local from the static surplus args and pass
-    -- its address + _start=0 at the pinned ABI slot (after fixed params, before
-    -- out-params). Forwarding a bare `...` is Phase 4 and not handled here.
+    -- True for forwarding case 3 (fresh Udata0 copy): the freshly-built struct is
+    -- a heap Udata0 anchored on a reserved stack slot, so a tail `return` resetting
+    -- L->top.p would drop the anchor before the call runs. Forces the call to
+    -- materialize NOW (like varg_collectable) regardless of element gc-ness.
+    local dots_tail_close = false
     if callee_vararg and not dots_tail then
+        -- STATIC arg list into a variadic callee: build the concrete-array struct
+        -- local from the surplus static args and pass its address + _start=0 at
+        -- the pinned ABI slot (after fixed params, before out-params).
         assert(#vargexps <= 200, "static variadic arg count exceeds TITAN_VARARG_MAX")
         varg_collectable = types.is_gc(callee_vararg)
         local n = #vargexps
@@ -1730,6 +1741,206 @@ local function codecall(ctx, node)
         }))
         table.insert(caexps, render("($STRUCT *)&$VNAME", { STRUCT = struct, VNAME = vname }))
         table.insert(caexps, "0")
+    elseif dots_tail then
+        -- FORWARDING the current `...` into a variadic callee. `vargexps` holds the
+        -- over-supplied static args (those beyond the callee's fixed params), all
+        -- already coerced to the callee element type by the checker.
+        assert(callee_vararg, "trailing '...' marker but callee is not variadic")
+        local va = assert(ctx.varargs, "forwarding '...' outside a variadic function")
+        local eg = callee_vararg          -- callee element type
+        local ef = va.elem                -- this function's `...` element type
+        local same_ct = ctype(ef) == ctype(eg)
+        local k = nstatic                 -- static-prefix arg count
+        local m = #callee_ftype.params    -- callee fixed-param count
+        if same_ct and k == m then
+            -- CASE 1 (pass-through): static prefix exactly fills the callee fixed
+            -- params and the element representation matches; pass the current
+            -- backing struct and start unchanged. No allocation, no copy.
+            varg_collectable = false      -- nothing new anchored here
+            table.insert(caexps, render("($STRUCT *)$NAME",
+                { STRUCT = varg_struct_name(eg), NAME = va.cname }))
+            table.insert(caexps, va.start)
+        elseif same_ct and k < m then
+            -- CASE 2 (start-adjust): the static prefix fills the first k fixed
+            -- params; borrow `...[1 .. (m-k)]` for the remaining fixed params, then
+            -- pass the SAME backing struct with `_start + (m - k)`. No struct
+            -- mutation, no save/restore -- `start` is a parameter (§2.G). `...[i]`
+            -- reads are bounds-checked, so an under-supplied tail raises cleanly.
+            varg_collectable = false
+            local delta = m - k
+            for j = 1, delta do
+                -- synthesize a `...[j]` read (non-nilfill: raise if too few) using
+                -- the same lowering as a user-written `...[i]`. It fills callee
+                -- fixed param `k + j` (the checker proved its type accepts ef).
+                local idxnode = {
+                    _tag = "Ast.ExpDotsIndex",
+                    loc = node.loc,
+                    exp = { _tag = "Ast.ExpInteger", value = j, loc = node.loc,
+                            _type = types.Integer() },
+                    _type = ef,
+                    _nilfill = false,
+                }
+                local bstat, bexp = codedotsindex(ctx, idxnode)
+                table.insert(castats, bstat)
+                local ptype = callee_ftype.params[k + j]
+                if ctype(ptype) == ctype(ef) then
+                    table.insert(caexps, bexp)
+                elseif ptype._tag == "Type.Value" or ptype._tag == "Type.Option"
+                       or ptype._tag == "Type.Function" then
+                    -- borrowed element widened into a tagged TValue fixed param.
+                    local ctmp, tmpname = newtmp(ctx, ptype)
+                    table.insert(castats, render([[
+                        $CTMP
+                        $SETWRAPPED
+                    ]], {
+                        CTMP = ctmp,
+                        SETWRAPPED = setwrapped(ef, "&" .. tmpname, bexp),
+                    }))
+                    table.insert(caexps, tmpname)
+                else
+                    -- borrowed element narrowed out of a TValue fixed param.
+                    local ctmp, tmpname = newtmp(ctx, ptype)
+                    table.insert(castats, render([[
+                        $CTMP
+                        $CHECKGET
+                    ]], {
+                        CTMP = ctmp,
+                        CHECKGET = checkandget(ctx, ptype, tmpname, "&(" .. bexp .. ")", node.loc),
+                    }))
+                    table.insert(caexps, tmpname)
+                end
+            end
+            table.insert(caexps, render("($STRUCT *)$NAME",
+                { STRUCT = varg_struct_name(eg), NAME = va.cname }))
+            table.insert(caexps, render("($START + $DELTA)",
+                { START = va.start, DELTA = c_integer_literal(delta) }))
+        else
+            -- CASE 3 (fresh copy): k > m (the static prefix grows the tail) OR the
+            -- element representation differs (ctype(ef) != ctype(eg), each element
+            -- converted). Build a fresh Udata0 backing struct of element type eg
+            -- holding [ surplus static args (only when k > m), then each current
+            -- `...` element converted to eg ], sized at RUNTIME, cap-checked
+            -- against TITAN_VARARG_MAX, anchored per §2.D, and passed with
+            -- _start = 0.
+            -- The Udata0 holding the fresh struct is anchored on a RESERVED stack
+            -- slot (newslot -> s2v(_base + depth)), which persists for the whole
+            -- function -- not a lexical C block. The struct-pointer C local is
+            -- declared at statement scope (unique _varg_N name) so it stays visible
+            -- at the call. Force-materializing the call before any tail `L->top.p =
+            -- _base` reset keeps the anchor live across the call (dots_tail_close).
+            dots_tail_close = true
+            -- The fresh Udata0 allocation can trigger a GC that shrinks/relocates
+            -- the Lua stack (luaD_shrinkstack), dangling the raw `_base` pointer;
+            -- and the forwarded call itself may grow the stack. Save `_base` as an
+            -- offset (uses_base_off) and recompute it after the call so the tail
+            -- `L->top.p = _base` reset is valid.
+            ctx.uses_base_off = true
+            local struct = varg_struct_name(eg)
+            local elem_ct = ctype(eg)
+            local nprefix = #vargexps      -- static-prefix elements (only k > m)
+            local suffix = tostring(ctx.tmp)
+            ctx.tmp = ctx.tmp + 1
+            local udname = "_vargud_" .. suffix
+            local slotname = "_vargslot_" .. suffix
+            local vname = "_varg_" .. suffix
+            local cntname = "_vcount_" .. suffix
+            local nname = "_nvarargs_" .. suffix
+            -- Prefix-element stores (already coerced to eg by the checker). When eg
+            -- is collectable, a fresh prefix value held only in a C temp would be
+            -- swept by the Udata0 allocation below (which may GC). Anchor each gc
+            -- prefix value on a reserved stack slot FIRST (the slot persists per
+            -- §2.D), so it survives both the allocation and the call; then store the
+            -- raw pointer into the (untraced) struct payload.
+            local prefix_anchor = {}
+            local prefix_inits = {}
+            for j, cexp in ipairs(vargexps) do
+                local pexp = cexp
+                if types.is_gc(eg) then
+                    local ctmp, tmpname, tmpslot = newtmp(ctx, eg, true)
+                    table.insert(prefix_anchor, render([[
+                        $CTMP
+                        $TMPNAME = $CEXP;
+                        $SETSLOT
+                    ]], {
+                        CTMP = ctmp,
+                        TMPNAME = tmpname,
+                        CEXP = cexp,
+                        SETSLOT = setslot(eg, tmpslot, tmpname),
+                    }))
+                    pexp = tmpname
+                end
+                table.insert(prefix_inits, render([[
+                    $VNAME->args[$IDX] = $PEXP;
+                ]], { VNAME = vname, IDX = c_integer_literal(j - 1), PEXP = pexp }))
+            end
+            -- Per-element conversion of the incoming `...` into the callee element
+            -- type. The checker has proven ef/eg compatible, so this is the
+            -- standard coercion: identical ctype -> raw copy; integer->value (and
+            -- other gradual `value` widenings) -> setwrapped into a TValue;
+            -- value->integer (and similar narrowings) -> checkandget runtime check.
+            local convbody
+            if same_ct then
+                convbody = render("$VNAME->args[$NPREFIX + _vj] = $SRC;", {
+                    VNAME = vname,
+                    NPREFIX = c_integer_literal(nprefix),
+                    SRC = render("$SRC->args[$START + _vj]",
+                        { SRC = va.cname, START = va.start }),
+                })
+            else
+                local src = render("$SRC->args[$START + _vj]",
+                    { SRC = va.cname, START = va.start })
+                local dst = render("$VNAME->args[$NPREFIX + _vj]",
+                    { VNAME = vname, NPREFIX = c_integer_literal(nprefix) })
+                if eg._tag == "Type.Value" or eg._tag == "Type.Option"
+                   or eg._tag == "Type.Function" then
+                    -- widening into a tagged TValue (e.g. integer -> value).
+                    convbody = setwrapped(ef, "&(" .. dst .. ")", src)
+                else
+                    -- narrowing out of a TValue (e.g. value -> integer): runtime
+                    -- check via checkandget (ef is the boxed source element type).
+                    convbody = checkandget(ctx, eg, dst, "&(" .. src .. ")", node.loc)
+                end
+            end
+            table.insert(castats, render([[
+                $PREFIX_ANCHOR
+                ptrdiff_t $CNT = (ptrdiff_t)$NPREFIX + ((ptrdiff_t)$SRC->n_args - $START);
+                if (TITAN_UNLIKELY($CNT > TITAN_VARARG_MAX)) {
+                    luaL_error(L, "%s:%d:%d: too many variadic arguments forwarded (%d, max %d)", $FILE, $LINE, $COL, (int)$CNT, (int)TITAN_VARARG_MAX);
+                }
+                lu_byte $NN = (lu_byte)$CNT;
+                $NEWSLOT
+                Udata *$UDNAME = gco2u(luaC_newobj(L, LUA_VUSERDATA, sizeudata(0, sizeof($STRUCT) + (size_t)$NN * sizeof($ELEM_CT))));
+                $UDNAME->len = sizeof($STRUCT) + (size_t)$NN * sizeof($ELEM_CT);
+                $UDNAME->nuvalue = 0; $UDNAME->metatable = NULL;
+                setuvalue(L, $SLOTNAME, $UDNAME);
+                $STRUCT *$VNAME = ($STRUCT *)getudatamem($UDNAME);
+                $VNAME->n_args = $NN;
+                $PREFIX_INITS
+                for (int _vj = 0; _vj < (int)$SRC->n_args - $START; _vj++) {
+                    $CONVBODY
+                }
+            ]], {
+                PREFIX_ANCHOR = table.concat(prefix_anchor, "\n"),
+                CNT = cntname,
+                NN = nname,
+                NPREFIX = c_integer_literal(nprefix),
+                SRC = va.cname,
+                START = va.start,
+                FILE = c_string_literal(node.loc.filename),
+                LINE = c_integer_literal(node.loc.line),
+                COL = c_integer_literal(node.loc.col),
+                NEWSLOT = newslot(ctx, slotname),
+                UDNAME = udname,
+                SLOTNAME = slotname,
+                STRUCT = struct,
+                ELEM_CT = elem_ct,
+                VNAME = vname,
+                PREFIX_INITS = table.concat(prefix_inits, "\n"),
+                CONVBODY = convbody,
+            }))
+            table.insert(caexps, render("($STRUCT *)$VNAME", { STRUCT = struct, VNAME = vname }))
+            table.insert(caexps, "0")
+        end
     end
     for i = 2, #node._types do
         node._extras = node._extras or {}
@@ -1746,7 +1957,40 @@ local function codecall(ctx, node)
         NAME = fname,
         CAEXPS = table.concat(caexps, ", "),
     })
-    if util.any(types.is_gc, node._types) then
+    -- A case-3 forward allocated a Udata0 and may have relocated the Lua stack
+    -- during the call; recompute `_base` from its saved offset so any subsequent
+    -- raw-slot store (gc-result anchoring) and the tail `L->top.p = _base` reset
+    -- use the live stack. The preamble declares `_base_off` (uses_base_off set).
+    local rebase = dots_tail_close and "\n_base = restorestack(L, _base_off);" or ""
+    if dots_tail_close and util.any(types.is_gc, node._types) then
+        -- case-3 forward with a GC result: the result-anchor slot pointer must be
+        -- computed AFTER `_base` is recomputed (a stack relocation during the call
+        -- would dangle a slot pointer taken before it). Declare the value temp,
+        -- run the call, rebase, THEN take the anchor slot and store.
+        assert(#node._types == 1,
+            "case-3 forward into a multi-return callee is unsupported")
+        local typ = node._type
+        local slotname = "_tmp_" .. ctx.tmp .. "_slot"
+        local valname = "_tmp_" .. ctx.tmp
+        ctx.tmp = ctx.tmp + 1
+        tmpnames[1] = valname
+        return render([[
+            $CSTATS
+            $CTYPE $VAL = $INIT;
+            $VAL = $CCALL;$REBASE
+            $NEWSLOT
+            $SETSLOT;
+        ]], {
+            CSTATS = cstats,
+            CTYPE = ctype(typ),
+            VAL = valname,
+            INIT = initval(typ),
+            CCALL = ccall,
+            REBASE = rebase,
+            NEWSLOT = newslot(ctx, slotname),
+            SETSLOT = setslot(typ, slotname, valname),
+        }), valname
+    elseif util.any(types.is_gc, node._types) then
         local ctmp, tmpname, tmpslot = newtmp(ctx, node._type, types.is_gc(node._type))
         tmpnames[1] = tmpname
         retslots[1] = tmpslot
@@ -1759,34 +2003,47 @@ local function codecall(ctx, node)
         return render([[
             $CSTATS
             $CTMP
-            $TMPNAME = $CCALL;
+            $TMPNAME = $CCALL;$REBASE
             $SLOTS
         ]], {
             CSTATS = cstats,
             CTMP = ctmp,
             TMPNAME = tmpname,
             CCALL = ccall,
+            REBASE = rebase,
             SLOTS = table.concat(cslots, "\n"),
         }), tmpname
-    elseif varg_collectable then
-        -- The result is non-GC (no materialization above), but the call carries
-        -- collectable vararg elements anchored only on the source slots below
-        -- L->top.p. If we left the bare call in `cexp`, a tail `return $CEXP`
-        -- (codereturn) would emit `L->top.p = _base;` BEFORE the call, dropping
-        -- those anchors while the untraced struct still holds raw pointers into
-        -- them -- a GC at the callee's entry could then collect a live element.
-        -- Force the call to run now, inside `cstats`, while the anchors are live;
-        -- the result is a plain non-GC scalar that needs no anchoring afterward.
+    elseif dots_tail_close and node._type._tag == "Type.Void" then
+        -- void-returning case-3 forward: run the call for effect now (while the
+        -- Udata0 anchor slot is live), then the call expression is `((void)0)`.
+        return render([[
+            $CSTATS
+            $CCALL;$REBASE
+        ]], {
+            CSTATS = cstats,
+            CCALL = ccall,
+            REBASE = rebase,
+        }), "((void)0)"
+    elseif varg_collectable or dots_tail_close then
+        -- The result is non-GC, but the call either carries collectable vararg
+        -- elements anchored only on source slots below L->top.p, or (case 3) holds
+        -- a stack-anchored Udata0 backing struct. If we left the bare call in
+        -- `cexp`, a tail `return $CEXP` (codereturn) would emit `L->top.p = _base;`
+        -- BEFORE the call, dropping those anchors while the untraced struct still
+        -- holds raw pointers into them -- a GC at the callee's entry could then
+        -- collect a live element. Force the call to run now, inside `cstats`, while
+        -- the anchors are live; the non-GC result needs no anchoring afterward.
         local ctmp, tmpname = newtmp(ctx, node._type)
         return render([[
             $CSTATS
             $CTMP
-            $TMPNAME = $CCALL;
+            $TMPNAME = $CCALL;$REBASE
         ]], {
             CSTATS = cstats,
             CTMP = ctmp,
             TMPNAME = tmpname,
             CCALL = ccall,
+            REBASE = rebase,
         }), tmpname
     else
         return cstats, ccall
@@ -2889,7 +3146,7 @@ end
 --     RAISES a Titan runtime error; result is the unboxed element value, type t.
 --   _nilfill == true (optional adjust-up): out-of-range yields nil; result is a
 --     t? option TValue (mirrors the codeindexarray option branch).
-local function codedotsindex(ctx, node)
+function codedotsindex(ctx, node)
     local va = assert(ctx.varargs, "...[i] outside a variadic function")
     local elem = va.elem
     local cistats, ciexp = codeexp(ctx, node.exp)
