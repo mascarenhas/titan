@@ -11,7 +11,6 @@
 local h = require 'spec.support.helpers'
 
 local run_coder = h.run_coder
-local run_coder_app = h.run_coder_app
 local generate_modules = h.generate_modules
 local call = h.call
 
@@ -564,17 +563,13 @@ describe("variadic function values (end-to-end)", function()
     -- the non-integer tail elements ("x", 3.5) before the generic path could run;
     -- fast-path-only build => no spurious raise, all three values reach `h`.
     --
-    -- NOTE: this is asserted through the standalone-app path (no enclosing pcall).
-    -- A *generic* (tag-mismatch) value call made from inside a VARIADIC Titan
-    -- function is corrupted by a SEPARATE, pre-existing bug when an enclosing pcall
-    -- frame is present (the `run_coder`/busted harness wraps every call in pcall):
-    -- the result comes back as the callee closure instead of its return value.
-    -- That bug is orthogonal to the struct-build placement (it reproduces
-    -- identically on the unmodified compiler and the generic branch is byte-for-byte
-    -- unchanged here) -- the app path sidesteps it so this test isolates the
-    -- narrowing fix.
+    -- Driven through the normal pcall-wrapping harness: a *generic* (tag-mismatch)
+    -- value call made from inside a VARIADIC Titan function under an enclosing pcall
+    -- frame returns its result correctly (the generic path's savestack/restorestack
+    -- on `_vc_func` is relocation-safe and reads result slot 0 at `_vc_func + 0`,
+    -- where luaD_callnoyield places the callee's return).
     it("does not narrow a forwarded ...value tail on a gradual-mismatch generic call", function()
-        run_coder_app([[
+        run_coder([[
             function h(...value): integer
                 -- `h` accepts ANY value; report the count, proving all the
                 -- (non-integer) elements reached it without a narrowing raise.
@@ -587,10 +582,38 @@ describe("variadic function values (end-to-end)", function()
                 return gi(...)                        -- forward f's ...value tail
             end
         ]], [[
-            -- pre-fix: case-3 checkandget narrows "x"/3.5 -> integer and RAISES;
-            -- post-fix: generic path forwards all 3 values to h -> #... == 3
-            if f(1, "x", 3.5) == 3 then return 0 else return 1 end
-        ]], 0)
+            -- the generic path forwards all 3 values to h -> #... == 3
+            -- (case-3 narrowing would have spuriously RAISED on "x"/3.5 pre-fix)
+            assert(test.f(1, "x", 3.5) == 3)
+        ]])
+    end)
+
+    -- Regression for the exact conjunction that was suspected of corrupting the
+    -- result (variadic CALLER + a generic/tag-mismatch value call + an enclosing
+    -- pcall, which is what the run_coder/busted harness installs around every
+    -- call). `f` is variadic; the value it calls is `sum` viewed at a COMPATIBLE
+    -- but differently-tagged type (`(...value) -> integer` over a `(...integer)`
+    -- function), so the runtime tag never matches and the call takes the GENERIC
+    -- Lua-stack path. The result must be the callee's return value, NOT the callee
+    -- closure that the generic path pushed at `_vc_func`.
+    it("generic value call from a variadic caller returns its result (not the callee) under pcall", function()
+        run_coder([[
+            function sum(...integer): integer
+                local s = 0
+                local i = 1
+                local n = #...
+                while i <= n do s = s + ...[i]; i = i + 1 end
+                return s
+            end
+            function f(...integer): integer
+                local v: value = sum
+                local g: (...value) -> integer = v   -- compatible, different tag => generic
+                return g(...)
+            end
+        ]], [[
+            local r = test.f(10, 20, 30)
+            assert(r == 60, "expected 60, got "..tostring(r).." ("..type(r)..")")
+        ]])
     end)
 
     it("calls a Lua closure through a variadic value type", function()
