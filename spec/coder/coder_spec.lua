@@ -77,6 +77,192 @@ describe("zero-return () functions (code generator)", function()
     end)
 end)
 
+describe("scalar variadic parameters (code generator)", function()
+    setup(function () os.remove("titan-runtime/titan.o") end)
+    after_each(clean)
+
+    it("integer vararg: #... and ...[i] called from Lua", function()
+        run_coder([[
+            function sum(base: integer, ...integer): integer
+                local n = #...
+                local s = base
+                local i = 1
+                while i <= n do
+                    s = s + ...[i]
+                    i = i + 1
+                end
+                return s
+            end
+        ]], [[
+            assert(test.sum(0) == 0)
+            assert(test.sum(0, 1, 2, 3) == 6)
+            assert(test.sum(100, 1, 2, 3) == 106)
+            assert(test.sum(10, 5) == 15)
+        ]])
+    end)
+
+    it("float vararg: #... and ...[i] called from Lua", function()
+        run_coder([[
+            function fsum(...float): float
+                local n = #...
+                local s = 0.0
+                local i = 1
+                while i <= n do
+                    s = s + ...[i]
+                    i = i + 1
+                end
+                return s
+            end
+        ]], [[
+            assert(test.fsum() == 0.0)
+            assert(math.abs(test.fsum(1.5, 2.25, 0.25) - 4.0) < 1e-9)
+        ]])
+    end)
+
+    it("boolean vararg: #... and ...[i] called from Lua", function()
+        run_coder([[
+            function allset(...boolean): boolean
+                local n = #...
+                local i = 1
+                while i <= n do
+                    if not ...[i] then
+                        return false
+                    end
+                    i = i + 1
+                end
+                return true
+            end
+        ]], [[
+            assert(test.allset() == true)
+            assert(test.allset(true, true, true) == true)
+            assert(test.allset(true, false, true) == false)
+        ]])
+    end)
+
+    it("#... is 0 and ...[1] raises for the empty vararg", function()
+        run_coder([[
+            function count(...integer): integer
+                return #...
+            end
+            function first(...integer): integer
+                return ...[1]
+            end
+        ]], [[
+            assert(test.count() == 0)
+            assert(test.first(7) == 7)
+        ]])
+    end)
+
+    it("...[i] raises a runtime error when out of range", function()
+        run_coder([[
+            function first(...integer): integer
+                return ...[1]
+            end
+        ]], [[
+            test.first()
+        ]], "out of range")
+    end)
+
+    it("...[i] raises a runtime error when i <= 0", function()
+        run_coder([[
+            function at(i: integer, ...integer): integer
+                return ...[i]
+            end
+        ]], [[
+            test.at(0, 10, 20, 30)
+        ]], "out of range")
+    end)
+
+    it("...[i] past the end raises a runtime error", function()
+        run_coder([[
+            function at(i: integer, ...integer): integer
+                return ...[i]
+            end
+        ]], [[
+            test.at(4, 10, 20, 30)
+        ]], "out of range")
+    end)
+
+    it("calls a variadic callee with a static arg list from Titan", function()
+        run_coder([[
+            function sum(base: integer, ...integer): integer
+                local n = #...
+                local s = base
+                local i = 1
+                while i <= n do
+                    s = s + ...[i]
+                    i = i + 1
+                end
+                return s
+            end
+            function caller(): integer
+                return sum(100, 1, 2, 3, 4)
+            end
+            function caller_empty(): integer
+                return sum(50)
+            end
+        ]], [[
+            assert(test.caller() == 110)
+            assert(test.caller_empty() == 50)
+        ]])
+    end)
+
+    it("static call site builds a struct for a no-fixed-param variadic callee", function()
+        run_coder([[
+            function fsum(...float): float
+                local n = #...
+                local s = 0.0
+                local i = 1
+                while i <= n do
+                    s = s + ...[i]
+                    i = i + 1
+                end
+                return s
+            end
+            function caller(): float
+                return fsum(1.0, 2.0, 3.0)
+            end
+        ]], [[
+            assert(math.abs(test.caller() - 6.0) < 1e-9)
+        ]])
+    end)
+
+    it("return ... adjust-up fills a fixed return arity from the vararg", function()
+        run_coder([[
+            function pair(...integer): (integer, integer)
+                return ...
+            end
+        ]], [[
+            local a, b = test.pair(11, 22, 33)
+            assert(a == 11)
+            assert(b == 22)
+        ]])
+    end)
+
+    it("local-hydration adjust-up reads ...[k] for each slot", function()
+        run_coder([[
+            function third(...integer): integer
+                local a, b, c = ...
+                return c
+            end
+        ]], [[
+            assert(test.third(7, 8, 9) == 9)
+        ]])
+    end)
+
+    it("local-hydration into an optional slot nil-fills out of range", function()
+        run_coder([[
+            function maybe(...integer): integer?
+                local a: integer, b: integer? = ...
+                return b
+            end
+        ]], [[
+            assert(test.maybe(1) == nil)
+            assert(test.maybe(1, 2) == 2)
+        ]])
+    end)
+end)
+
 describe("Titan code generator", function()
     setup(function ()
         os.remove("titan-runtime/titan.o")

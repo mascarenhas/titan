@@ -560,6 +560,43 @@ local function initval(typ --[[:table]])
     else return "0" end
 end
 
+-- The `TitanVarg*` struct backing a vararg of element type `elemtype`, keyed on
+-- `ctype(elemtype)` so the struct's flexible array member matches the element C
+-- type exactly (§2.F). Mirrors titan.h's seven typedefs.
+local varg_struct_by_ctype = {
+    ["lua_Integer"] = "TitanVargInteger",
+    ["lua_Number"]  = "TitanVargFloat",
+    ["int"]         = "TitanVargBoolean",
+    ["TString*"]    = "TitanVargString",
+    ["Table*"]      = "TitanVargArrayOrMap",
+    ["TValue"]      = "TitanVargValue",
+    ["Udata*"]      = "TitanVargNominal",
+}
+local function varg_struct_name(elemtype --[[:table]])
+    local ct = ctype(elemtype)
+    local name = varg_struct_by_ctype[ct]
+    if not name then
+        error("no variadic struct for element ctype " .. ct
+              .. " (type " .. types.tostring(elemtype) .. ")")
+    end
+    return name
+end
+
+-- The AST `node.params` keeps the trailing vararg marker Decl (`name == false`)
+-- even after the checker lifts its element type onto the function type's
+-- `varargtype` slot. The coder's param loops generate per-name C parameters, so
+-- they must skip that marker (the vararg is emitted separately as the backing
+-- struct + start). Returns the fixed-parameter Decls only.
+local function fixed_params(params)
+    local n = #params
+    if n > 0 and params[n].name == false then
+        local out = {}
+        for i = 1, n - 1 do out[i] = params[i] end
+        return out
+    end
+    return params
+end
+
 
 local function function_sig(fname, ftype, is_pointer)
     -- Every native entry takes the function's own closure (_fn) right after the
@@ -573,6 +610,13 @@ local function function_sig(fname, ftype, is_pointer)
     end
     for _, ptype in ipairs(ftype.params) do
         table.insert(params, ctype(ptype))
+    end
+    -- A variadic function takes its backing struct + start offset right after the
+    -- declared params and before the out-params (§5.2). `varargtype` is the Titan
+    -- vararg element type (false for non-variadic, and for C-FFI `vararg`).
+    if ftype.varargtype then
+        table.insert(params, varg_struct_name(ftype.varargtype) .. " *_varargs")
+        table.insert(params, "int _start")
     end
     for i = 2, #ftype.rettypes do
         table.insert(params, ctype(ftype.rettypes[i]) .. "*")
@@ -1610,7 +1654,27 @@ local function codecall(ctx, node)
         table.insert(caexps, "NULL")  -- _fn: a static method call has no closure
         table.insert(caexps, cexp)
     end
-    for _, arg in ipairs(node.args.args) do
+    -- The callee's static type, to detect a variadic callee and its fixed arity.
+    -- ArgsMethod -> node._method; a static-method VarDot -> fnode._decl; otherwise
+    -- the var's resolved Type.Function on fnode._type.
+    local callee_ftype
+    if node.args._tag == "Ast.ArgsMethod" then
+        callee_ftype = node._method
+    elseif fnode._tag == "Ast.VarDot"
+           and fnode._decl and fnode._decl._tag == "Type.StaticMethod" then
+        callee_ftype = fnode._decl
+    else
+        callee_ftype = fnode._type
+    end
+    local callee_vararg = callee_ftype and callee_ftype.varargtype
+    local args = node.args.args
+    local nargs = #args
+    -- A bare trailing `...` (forwarding an existing vararg) is Phase 4; this
+    -- phase handles only a STATIC arg list into a variadic callee.
+    local dots_tail = nargs > 0 and args[nargs]._tag == "Ast.ExpDots"
+    local nfixed = callee_vararg and #callee_ftype.params or nargs
+    local vargexps = {} -- surplus static args destined for the backing struct
+    for i, arg in ipairs(args) do
         local cstat, cexp = codeexp(ctx, arg)
         table.insert(castats, cstat)
         if arg._tag == "Ast.ExpCall" and arg._extras then
@@ -1625,7 +1689,40 @@ local function codecall(ctx, node)
             ]], { CTMP = ctmp, TMPNAME = tmpname, CEXP = cexp }))
             cexp = tmpname
         end
-        table.insert(caexps, cexp)
+        if callee_vararg and i > nfixed then
+            -- a surplus static arg -> a backing-struct element (already coerced
+            -- to the element type by the checker)
+            table.insert(vargexps, cexp)
+        else
+            table.insert(caexps, cexp)
+        end
+    end
+    -- Build the concrete-array struct local from the static surplus args and pass
+    -- its address + _start=0 at the pinned ABI slot (after fixed params, before
+    -- out-params). Forwarding a bare `...` is Phase 4 and not handled here.
+    if callee_vararg and not dots_tail then
+        assert(#vargexps <= 200, "static variadic arg count exceeds TITAN_VARARG_MAX")
+        local n = #vargexps
+        local struct = varg_struct_name(callee_vararg)
+        local elem_ct = ctype(callee_vararg)
+        local vname = "_varg_" .. ctx.tmp
+        ctx.tmp = ctx.tmp + 1
+        -- ISO C forbids `args[0]`; for an empty vararg emit a 1-element array with
+        -- n_args == 0 (the callee's bounds checks never read args[]).
+        local arrlen = math.max(n, 1)
+        local inits = n > 0 and ("{ " .. table.concat(vargexps, ", ") .. " }")
+                              or "{ 0 }"
+        table.insert(castats, render([[
+            struct { lu_byte n_args; $ELEM_CT args[$ARRLEN]; } $VNAME = { $N, $INITS };
+        ]], {
+            ELEM_CT = elem_ct,
+            ARRLEN = c_integer_literal(arrlen),
+            VNAME = vname,
+            N = c_integer_literal(n),
+            INITS = inits,
+        }))
+        table.insert(caexps, render("($STRUCT *)&$VNAME", { STRUCT = struct, VNAME = vname }))
+        table.insert(caexps, "0")
     end
     for i = 2, #node._types do
         node._extras = node._extras or {}
@@ -2757,6 +2854,93 @@ local function codeindexmap(ctx, node)
     return stats, tmpname
 end
 
+-- `...[i]` (Ast.ExpDotsIndex). The current frame's vararg view is
+-- `args[_start .. n_args-1]`, 1-based for the user, so `...[i]` reads
+-- `args[_start + i - 1]` after a `1 <= i <= n_args - _start` bounds check.
+-- Two modes set by the checker:
+--   _nilfill == false (user `...[i]`, non-optional adjust-up): out-of-range
+--     RAISES a Titan runtime error; result is the unboxed element value, type t.
+--   _nilfill == true (optional adjust-up): out-of-range yields nil; result is a
+--     t? option TValue (mirrors the codeindexarray option branch).
+local function codedotsindex(ctx, node)
+    local va = assert(ctx.varargs, "...[i] outside a variadic function")
+    local elem = va.elem
+    local cistats, ciexp = codeexp(ctx, node.exp)
+    -- Materialize the index into a temp first: the bounds check and the element
+    -- read both reference it, and the operand may have side effects.
+    local cidx, idxname = newtmp(ctx, types.Integer())
+    -- length expression: n_args - _start
+    local lenexp = render("((lua_Integer)$NAME->n_args - $START)",
+        { NAME = va.cname, START = va.start })
+    local elemexp = render("$NAME->args[$START + $IDX - 1]",
+        { NAME = va.cname, START = va.start, IDX = idxname })
+    if not node._nilfill then
+        -- non-optional: bounds check raises; result is the unboxed element.
+        local ctmp, tmpname, tmpslot = newtmp(ctx, elem, types.is_gc(elem))
+        local cset = types.is_gc(elem) and setslot(elem, tmpslot, tmpname) or ""
+        local throw = render([[
+            luaL_error(L, "%s:%d:%d: variadic index %d out of range [1, %d]", $FILE, $LINE, $COL, (int)$IDX, (int)$LEN);
+        ]], {
+            FILE = c_string_literal(node.loc.filename),
+            LINE = c_integer_literal(node.loc.line),
+            COL = c_integer_literal(node.loc.col),
+            IDX = idxname,
+            LEN = lenexp,
+        }, true)
+        return render([[
+            $CTMP
+            {
+                $CISTATS
+                $CIDX
+                $IDX = $CIEXP;
+                if (TITAN_UNLIKELY($IDX < 1 || $IDX > $LEN)) {
+                    $THROW
+                }
+                $TMPNAME = $ELEMEXP;
+                $CSET
+            }
+        ]], {
+            CTMP = ctmp,
+            CISTATS = cistats,
+            CIDX = cidx,
+            IDX = idxname,
+            CIEXP = ciexp,
+            LEN = lenexp,
+            THROW = throw,
+            TMPNAME = tmpname,
+            ELEMEXP = elemexp,
+            CSET = cset,
+        }), tmpname
+    else
+        -- optional: out-of-range -> nil; in-range -> wrap the element into a t?
+        -- TValue. node._type is the option type; elem is its base.
+        local opttype = node._type
+        local ctmp, tmpname = newtmp(ctx, opttype)
+        return render([[
+            $CTMP
+            {
+                $CISTATS
+                $CIDX
+                $IDX = $CIEXP;
+                if ($IDX < 1 || $IDX > $LEN) {
+                    setnilvalue(&$TMPNAME);
+                } else {
+                    $SETSLOT
+                }
+            }
+        ]], {
+            CTMP = ctmp,
+            CISTATS = cistats,
+            CIDX = cidx,
+            IDX = idxname,
+            CIEXP = ciexp,
+            LEN = lenexp,
+            TMPNAME = tmpname,
+            SETSLOT = setslot(elem, "&" .. tmpname, elemexp),
+        }), tmpname
+    end
+end
+
 -- Generate code for expression 'node'
 -- 'iscondition' is 'true' if expression is used not for value but for
 --    controlling conditinal execution
@@ -3120,6 +3304,14 @@ function codeexp(ctx, node, iscondition, target)
             return cstats .. "\n    " .. cexp .. ";", "0"
         end
         return codeexp(ctx, node.exp, iscondition, target)
+    elseif tag == "Ast.ExpDotsLen" then
+        -- `#...` -> logical length of the current frame's vararg view, which is
+        -- the total backing count minus the start offset.
+        local va = assert(ctx.varargs, "#... outside a variadic function")
+        return "", render("((lua_Integer)$NAME->n_args - $START)",
+            { NAME = va.cname, START = va.start })
+    elseif tag == "Ast.ExpDotsIndex" then
+        return codedotsindex(ctx, node)
     elseif tag == "Ast.ExpFunction" then
         return codelambda(ctx, node)
     elseif tag == "Ast.ExpMethodRef" then
@@ -3169,6 +3361,58 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
         table.insert(pnames, pname)
         table.insert(stats, ctype(param) .. " " .. pname .. " = " .. initval(param) .. ";")
         table.insert(stats, checkandget(tlcontext, param, pname, slot, loc))
+    end
+    -- Variadic: build the backing struct from the surplus Lua-stack args. Pinned
+    -- after the fixed params and before the out-params in the native call. The
+    -- struct is a GC-anchored Udata0 (not a C-stack VLA): it must survive the
+    -- error-handler frame and any GC the per-element coercion triggers. Surplus
+    -- arg slots `func + nfixed + j` stay on the Lua stack below L->top.p for the
+    -- whole native call, so they remain the anchors for any collectable element
+    -- (§2.D); this struct's payload (getudatamem) is untraced.
+    local varargtype = typ.varargtype
+    if varargtype then
+        local nfixed = #params
+        local elem_ct = ctype(varargtype)
+        local struct = varg_struct_name(varargtype)
+        -- Allocate the backing struct as a 0-uservalue Udata sized to hold the
+        -- FAM inline (sizeudata(0, sizeof(struct) + n*sizeof(elem))), anchor it on
+        -- the Lua stack so the GC keeps its storage alive across the native call,
+        -- then read each surplus arg through the same checkandget coercion the
+        -- fixed params use, into `_varargs->args[j]`. `_start` is 0 (the generic
+        -- entry always builds a fresh, fully-backing struct). The entry guard
+        -- below has already ensured the arg count is >= nfixed.
+        local readone = checkandget(tlcontext, varargtype,
+            "_varargs->args[_vj]", "s2v(_vfunc + " .. nfixed .. " + 1 + _vj)", loc)
+        table.insert(stats, render([[
+            ptrdiff_t _vcount = _nargs - $NFIXED;
+            if (TITAN_UNLIKELY(_vcount > TITAN_VARARG_MAX)) {
+                luaL_error(L, "too many variadic arguments to Titan function %s (%d, max %d)", $NAME, (int)_vcount, (int)TITAN_VARARG_MAX);
+            }
+            lu_byte _nvarargs = (lu_byte)_vcount;
+            lua_checkstack(L, 1);
+            Udata *_varargs_ud = gco2u(luaC_newobj(L, LUA_VUSERDATA, sizeudata(0, sizeof($STRUCT) + (size_t)_nvarargs * sizeof($ELEM_CT))));
+            _varargs_ud->len = sizeof($STRUCT) + (size_t)_nvarargs * sizeof($ELEM_CT);
+            _varargs_ud->nuvalue = 0; _varargs_ud->metatable = NULL;
+            setuvalue(L, s2v(L->top.p), _varargs_ud);
+            L->top.p++;
+            /* recompute the arg base AFTER the lua_checkstack/push that may have
+               relocated the Lua stack, so the surplus-arg slot reads are valid */
+            StkId _vfunc = L->ci->func.p;
+            $STRUCT *_varargs = ($STRUCT *)getudatamem(_varargs_ud);
+            _varargs->n_args = _nvarargs;
+            for (int _vj = 0; _vj < (int)_nvarargs; _vj++) {
+                $READONE
+            }
+            int _start = 0;
+        ]], {
+            NFIXED = c_integer_literal(nfixed),
+            NAME = c_string_literal(titan_name),
+            STRUCT = struct,
+            ELEM_CT = elem_ct,
+            READONE = readone,
+        }))
+        table.insert(pnames, "_varargs")
+        table.insert(pnames, "_start")
     end
     for i = 2, #typ.rettypes do
         local ptype = typ.rettypes[i]
@@ -3227,12 +3471,35 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
     ]], {
         NRET = #typ.rettypes
     }))
+    -- A variadic function accepts AT LEAST nfixed args (the surplus become `...`);
+    -- a fixed-arity function requires EXACTLY nfixed.
+    local argcheck
+    if varargtype then
+        argcheck = render([[
+        if((L->top.p - func - 1) < $EXPECTED) {
+            luaL_error(L, "calling Titan function %s with %d arguments, but expected at least %d", $NAME, (int)(L->top.p - func - 1), $EXPECTED);
+        }]], {
+            EXPECTED = c_integer_literal(#params),
+            NAME = c_string_literal(titan_name),
+        })
+    else
+        argcheck = render([[
+        if((L->top.p - func - 1) != $EXPECTED) {
+            luaL_error(L, "calling Titan function %s with %d arguments, but expected %d", $NAME, (int)(L->top.p - func - 1), $EXPECTED);
+        }]], {
+            EXPECTED = c_integer_literal(#params),
+            NAME = c_string_literal(titan_name),
+        })
+    end
+    -- A variadic entry must know the incoming arg count BEFORE the error-slot /
+    -- errorhandler pushes inflate L->top.p, so capture it up front.
+    local nargsdecl = varargtype
+        and "ptrdiff_t _nargs = L->top.p - func - 1;" or ""
     return render([[
     static int $LUANAME(lua_State *L) {
         StkId func = L->ci->func.p;
-        if((L->top.p - func - 1) != $EXPECTED) {
-            luaL_error(L, "calling Titan function %s with %d arguments, but expected %d", $NAME, (int)(L->top.p - func - 1), $EXPECTED);
-        }
+        $ARGCHECK
+        $NARGSDECL
         $ERRORSLOT
         ptrdiff_t __save_errfunc = L->errfunc;
         lua_pushcclosure(L, errorhandler, 0);
@@ -3242,7 +3509,8 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
         $BODY
     }]], {
         LUANAME = lua_name,
-        EXPECTED = c_integer_literal(#params),
+        ARGCHECK = argcheck,
+        NARGSDECL = nargsdecl,
         ERRORSLOT = #params == 0 and "lua_pushnil(L);" or "",
         NAME = c_string_literal(titan_name),
         BODY = table.concat(stats, "\n"),
@@ -3312,7 +3580,7 @@ local function codefuncdec(tlcontext, node)
         end
         table.insert(cparams, ctype(self._type) .. " " .. self._cvar)
     end
-    for _, param in ipairs(node.params) do
+    for _, param in ipairs(fixed_params(node.params)) do
         param._cvar = "_param_" .. param.name
         param._boxed = param._captured and param._assigned
         if types.is_gc(param._type) and param._assigned then
@@ -3326,6 +3594,14 @@ local function codefuncdec(tlcontext, node)
             table.insert(stats, codeboxparam(ctx, param))
         end
         table.insert(cparams, ctype(param._type) .. " " .. param._cvar)
+    end
+    -- Variadic: the backing struct + start offset, pinned after the declared
+    -- params and before the out-params, and threaded into ctx for `...` lowering.
+    local varargtype = node._type.varargtype
+    if varargtype then
+        table.insert(cparams, varg_struct_name(varargtype) .. " *_varargs")
+        table.insert(cparams, "int _start")
+        ctx.varargs = { cname = "_varargs", start = "_start", elem = varargtype }
     end
     for i = 2, #node._type.rettypes do
         local outtype = node._type.rettypes[i]
@@ -3424,6 +3700,15 @@ local function codemethodtrampoline(tlcontext, node)
         local pname = "_bp_" .. i
         table.insert(cparams, ctype(ptype) .. " " .. pname)
         table.insert(callargs, pname)
+    end
+    -- A variadic method's bound trampoline forwards the backing struct + start
+    -- offset verbatim, at the pinned position (after params, before out-params),
+    -- so it matches function_sig(ftype) byte-for-byte.
+    if mtype.varargtype then
+        table.insert(cparams, varg_struct_name(mtype.varargtype) .. " *_varargs")
+        table.insert(cparams, "int _start")
+        table.insert(callargs, "_varargs")
+        table.insert(callargs, "_start")
     end
     for i = 2, #mtype.rettypes do
         local oname = "_outparam_" .. i
@@ -3704,7 +3989,7 @@ function codelambdadec(tlcontext, node)
     end
 
     local cparams = { "lua_State *L", "Udata *_mod", "CClosure *_fn" }
-    for _, param in ipairs(node.params) do
+    for _, param in ipairs(fixed_params(node.params)) do
         param._cvar = "_param_" .. param.name
         param._boxed = param._captured and param._assigned
         if types.is_gc(param._type) and param._assigned then
@@ -3716,6 +4001,15 @@ function codelambdadec(tlcontext, node)
             table.insert(stats, codeboxparam(ctx, param))
         end
         table.insert(cparams, ctype(param._type) .. " " .. param._cvar)
+    end
+    -- A lambda's `ctx` is fresh (newcontext), so ctx.varargs starts nil; set it
+    -- only for a variadic lambda. An inner lambda thus NEVER inherits an enclosing
+    -- function's `...` (scope rule 4) — its own ctx governs `...` lowering.
+    local varargtype = node._type.varargtype
+    if varargtype then
+        table.insert(cparams, varg_struct_name(varargtype) .. " *_varargs")
+        table.insert(cparams, "int _start")
+        ctx.varargs = { cname = "_varargs", start = "_start", elem = varargtype }
     end
     for i = 2, #node._type.rettypes do
         local outtype = node._type.rettypes[i]
