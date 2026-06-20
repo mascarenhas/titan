@@ -707,6 +707,186 @@ describe("forwarding an existing ... to another variadic callee", function()
     end)
 end)
 
+describe("building {...} / {e1, ..., ...} array from a vararg", function()
+    setup(function () os.remove("titan-runtime/titan.o") end)
+    after_each(clean)
+
+    -- {...} with a scalar element type: the build is runtime-sized
+    -- (#prefix + n_args - _start), resized once and filled from the struct.
+    it("scalar {...}: length and element values, returned to Lua", function()
+        run_coder([[
+            function collect(...integer): {integer}
+                return {...}
+            end
+        ]], [[
+            local t = test.collect(10, 20, 30)
+            assert(#t == 3)
+            assert(t[1] == 10 and t[2] == 20 and t[3] == 30)
+            -- empty vararg -> {} (just an empty array)
+            local e = test.collect()
+            assert(#e == 0)
+        ]])
+    end)
+
+    -- {e1, e2, ...}: a static prefix precedes the spread; the prefix occupies
+    -- array indices [1..nprefix] and the vararg tail follows.
+    it("scalar {e1, e2, ...}: static prefix then the vararg tail", function()
+        run_coder([[
+            function withprefix(...integer): {integer}
+                return {100, 200, ...}
+            end
+        ]], [[
+            local t = test.withprefix(1, 2, 3)
+            assert(#t == 5)
+            assert(t[1] == 100 and t[2] == 200)
+            assert(t[3] == 1 and t[4] == 2 and t[5] == 3)
+            -- N == 0: just the static prefix
+            local p = test.withprefix()
+            assert(#p == 2)
+            assert(p[1] == 100 and p[2] == 200)
+        ]])
+    end)
+
+    -- {...} consumed entirely inside Titan (length read back via #), so the
+    -- result never crosses the Lua boundary as a table -- exercises the build in
+    -- a purely native context.
+    it("scalar {...} consumed inside the function (# of the result)", function()
+        run_coder([[
+            function howmany(...integer): integer
+                local t: {integer} = {0, 0, ...}
+                return #t
+            end
+        ]], [[
+            assert(test.howmany() == 2)
+            assert(test.howmany(1, 2, 3, 4) == 6)
+        ]])
+    end)
+
+    -- COLLECTABLE element type ({string}) with a FORCED GC after the array is
+    -- built but before it is read back. The store path is obj2arr +
+    -- luaC_barrierback per element; the resize can relocate the stack (rebased).
+    -- Fresh non-interned strings make a dropped barrier/element deterministic
+    -- corruption. This is the back-barrier "teeth": removing the barrier (or the
+    -- resize-GC rebase) corrupts the result.
+    -- The {...string} build path proper, with the strings minted INSIDE Titan and
+    -- passed straight into the variadic callee's {prefix, ...} build, then a heavy
+    -- GC churn after the build before reading them back. Nothing on the Lua side
+    -- anchors the strings, so the table's array part is their sole root; a missing
+    -- obj2arr per-element back barrier (or a botched resize-GC rebase) leaves the
+    -- marked table pointing at unmarked/swept strings and the length sums wrong.
+    -- This is the barrier teeth: an external Lua anchor would hide a missing one.
+    it("{...string} elements survive a forced GC (back barrier + rebase)", function()
+        run_coder([[
+            function rep(ch: string, n: integer): string
+                local s: string = ""           -- fresh, non-interned heap string
+                local i = 1
+                while i <= n do
+                    s = s .. ch
+                    i = i + 1
+                end
+                return s
+            end
+            function totallen(...string): integer
+                local prefix: string = rep("p", 4)   -- length 4
+                local t: {string} = {prefix, ...}
+                local junk: {integer} = {}           -- churn AFTER the build
+                local k = 1
+                while k <= 400 do
+                    junk = { k, k + 1, k + 2 }
+                    k = k + 1
+                end
+                local s = 0
+                local i = 1
+                while i <= #t do
+                    s = s + #(t[i])
+                    i = i + 1
+                end
+                return s
+            end
+            function go(): integer
+                -- strings minted here, no Lua-side anchor
+                return totallen(rep("a", 5), rep("b", 7), rep("c", 3))
+            end
+            function empty(): integer
+                return totallen()                    -- {prefix} only, N == 0
+            end
+        ]], [[
+            collectgarbage("incremental")
+            assert(test.go() == 4 + 5 + 7 + 3)
+            assert(test.empty() == 4)
+        ]], nil)
+    end)
+
+    -- {...string} returned to Lua and read back after forced collections.
+    it("{...string} returned to Lua survives a forced GC", function()
+        run_coder([[
+            function gather(...string): {string}
+                local prefix: string = "p" .. "fx"
+                return {prefix, ...}
+            end
+        ]], [[
+            collectgarbage("incremental")
+            local a = ("x"):rep(5) .. "1"
+            local b = ("y"):rep(7) .. "2"
+            local c = ("z"):rep(3) .. "3"
+            local t = test.gather(a, b, c)
+            for _ = 1, 50 do collectgarbage("step") end
+            collectgarbage("collect")
+            assert(#t == 4)
+            assert(t[1] == "pfx")
+            assert(t[2] == a and t[3] == b and t[4] == c)
+            assert(#t[2] == 6 and #t[3] == 8 and #t[4] == 4)
+            local e = test.gather()
+            assert(#e == 1 and e[1] == "pfx")
+        ]], nil)
+    end)
+
+    -- Same back-barrier teeth with a RECORD element type ({R}, Udata*): build the
+    -- array, churn the heap to force a collection, then read each record field.
+    it("{...R} (record) elements survive a forced GC", function()
+        run_coder([[
+            record R
+                v: integer
+            end
+            function mk(v: integer): R
+                return { v = v }
+            end
+            function pack(...R): {R}
+                return {...}
+            end
+            function sumfields(...R): integer
+                local t: {R} = {...}
+                -- churn AFTER the array is built so a collection runs while the
+                -- records are reachable only through the table's array part.
+                local junk: {integer} = {}
+                local k = 1
+                while k <= 300 do
+                    junk = { k, k + 1 }
+                    k = k + 1
+                end
+                local s = 0
+                local i = 1
+                while i <= #t do
+                    s = s + t[i].v
+                    i = i + 1
+                end
+                return s
+            end
+        ]], [[
+            collectgarbage("incremental")
+            local a, b, c = test.mk(3), test.mk(5), test.mk(7)
+            -- {...R} returned to Lua, then a forced GC, then field reads
+            local t = test.pack(a, b, c)
+            for _ = 1, 50 do collectgarbage("step") end
+            assert(#t == 3)
+            assert(t[1].v == 3 and t[2].v == 5 and t[3].v == 7)
+            -- and consumed entirely inside Titan with an internal GC churn
+            assert(test.sumfields(a, b, c) == 15)
+            assert(test.sumfields() == 0)
+        ]])
+    end)
+end)
+
 describe("Titan code generator", function()
     setup(function ()
         os.remove("titan-runtime/titan.o")

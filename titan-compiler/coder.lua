@@ -2339,11 +2339,26 @@ local function codearray(ctx, node, target)
         TMPSLOT = tmpslot,
     })
     table.insert(stats, cinit)
+    -- A trailing `...` field (key-less `Ast.ExpDots`, §4.7) makes this a
+    -- runtime-sized build: the static prefix fields precede it, then the current
+    -- frame's whole `...` tail (`args[_start .. n_args-1]`) is appended (§5.6).
+    local elemtype = node._type.elem
+    local nfields = #node.fields
+    local dots_tail = nfields > 0
+        and node.fields[nfields].exp._tag == "Ast.ExpDots"
+    local nprefix = dots_tail and nfields - 1 or nfields
     local slots = {}
-    for _, field in ipairs(node.fields) do
-        local exp = field.exp
+    local slot_depths = {}
+    for i = 1, nprefix do
+        local exp = node.fields[i].exp
         local cstats, cexp = codeexp(ctx, exp)
-        local ctmpe, tmpename, tmpeslot = newtmp(ctx, node._type.elem, true)
+        local ctmpe, tmpename, tmpeslot = newtmp(ctx, elemtype, true)
+        -- The reserved-slot index this temp occupies; `newslot` (inside `newtmp`)
+        -- placed it at the pre-increment depth, i.e. ctx.depth - 1. We need this to
+        -- RE-derive the slot pointer after a resize-GC relocates the stack (the
+        -- captured `tmpeslot` C-pointer local would then dangle); only the dots
+        -- path below uses it.
+        slot_depths[i] = ctx.depth - 1
 
         local code = render([[
             $CSTATS
@@ -2355,18 +2370,85 @@ local function codearray(ctx, node, target)
             CTMPE = ctmpe,
             TMPENAME = tmpename,
             CEXP = cexp,
-            SETSLOT = setwrapped(node._type.elem, tmpeslot, tmpename),
+            SETSLOT = setwrapped(elemtype, tmpeslot, tmpename),
         })
 
         table.insert(slots, tmpeslot)
         table.insert(stats, code)
     end
-    if #node.fields > 0 then
+    if dots_tail then
+        -- Runtime-sized array build. The vararg elements are already anchored
+        -- upstream (§2.D) and the GC is non-moving, so reading `args[]` across the
+        -- resize is safe -- no pre-copy needed; this is the case-3 forward copy
+        -- (§5.7) plus the table back barrier on each store. The prefix temps are
+        -- on reserved stack slots, so they too survive the resize-GC.
+        local va = assert(ctx.varargs, "'...' in array build outside a variadic function")
+        local struct = varg_struct_name(elemtype)
+        -- `luaH_resizearray` -> `luaM_reallocvector` can GC, which may shrink and
+        -- relocate the Lua stack (`luaD_shrinkstack`), dangling the raw `_base`
+        -- pointer. Save it as an offset and recompute it after the resize (the
+        -- Phase-4 lesson) so the prefix-slot reads and `obj2arr` stores below use
+        -- the live stack. The preamble declares `_base_off` when uses_base_off.
+        ctx.uses_base_off = true
+        -- A reusable TValue scratch to wrap each vararg element before `obj2arr`
+        -- (which takes a `TValue *`); for value/option/function the struct element
+        -- already IS a TValue and `setwrapped` copies it verbatim.
+        local vslot = "_vaslot_" .. ctx.tmp
+        ctx.tmp = ctx.tmp + 1
+        local barrier = types.is_gc(elemtype) and render([[
+            luaC_barrierback(L, obj2gco($TMPNAME), &$VSLOT);
+        ]], { TMPNAME = tmpname, VSLOT = vslot }) or ""
+        table.insert(stats, render([[
+            {
+                int _vacount = (int)$SRC->n_args - $START;
+                luaH_resizearray(L, $TMPNAME, (unsigned int)($NPREFIX + _vacount));
+                _base = restorestack(L, _base_off);
+                $PREFIX_STORES
+                TValue $VSLOT;
+                for (int _vj = 0; _vj < _vacount; _vj++) {
+                    $SETWRAPPED
+                    obj2arr($TMPNAME, $NPREFIX + _vj, &$VSLOT);
+                    $BARRIER
+                }
+            }
+        ]], {
+            SRC = render("(($STRUCT *)$NAME)", { STRUCT = struct, NAME = va.cname }),
+            START = va.start,
+            TMPNAME = tmpname,
+            NPREFIX = c_integer_literal(nprefix),
+            VSLOT = vslot,
+            SETWRAPPED = setwrapped(elemtype, "&" .. vslot,
+                render("(($STRUCT *)$NAME)->args[$START + _vj]",
+                       { STRUCT = struct, NAME = va.cname, START = va.start })),
+            BARRIER = barrier,
+            PREFIX_STORES = (function()
+                local ps = {}
+                for i = 1, nprefix do
+                    -- Re-derive the prefix slot pointer from the rebased `_base`:
+                    -- the resize above may have relocated the stack, dangling the
+                    -- C-local slot pointer taken before it (§2.D / Phase-4 lesson).
+                    local slot = render("s2v(_base + $D)",
+                        { D = c_integer_literal(slot_depths[i]) })
+                    table.insert(ps, render([[
+                        obj2arr($TMPNAME, $INDEX, $SLOT);
+                    ]], { TMPNAME = tmpname, INDEX = c_integer_literal(i - 1), SLOT = slot }))
+                    if types.is_gc(elemtype) then
+                        table.insert(ps, render([[
+                            luaC_barrierback(L, obj2gco($TMPNAME), $SLOT);
+                        ]], { TMPNAME = tmpname, SLOT = slot }))
+                    end
+                end
+                return table.concat(ps, "\n")
+            end)(),
+        }))
+        return table.concat(stats, "\n"), tmpname
+    end
+    if nprefix > 0 then
         table.insert(stats, render([[
             luaH_resizearray(L, $TMPNAME, $SIZE);
         ]], {
             TMPNAME = tmpname,
-            SIZE = #node.fields
+            SIZE = nprefix
         }))
 
     end
@@ -2378,7 +2460,7 @@ local function codearray(ctx, node, target)
             INDEX = i-1,
             SLOT = slot
         }))
-        if types.is_gc(node._type.elem) then
+        if types.is_gc(elemtype) then
             table.insert(stats, render([[
                 luaC_barrierback(L, obj2gco($TMPNAME), $SLOT);
             ]], {
