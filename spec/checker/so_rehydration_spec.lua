@@ -12,6 +12,7 @@
 -- the importer. No importer code is generated or executed here -- the end-to-end
 -- run-time behaviour of the same path lives in spec/coder/so_import_spec.lua.
 local h = require 'spec.support.helpers'
+local types = require 'titan-compiler.types'
 local so_check = h.check_against_so
 
 describe("typechecker rehydration of .so-only imports", function()
@@ -164,6 +165,42 @@ describe("typechecker rehydration of .so-only imports", function()
             end
         ]])
         assert.equal(0, #good, table.concat(good, "\n"))
+    end)
+
+    it("recovers a record referenced ONLY as a vararg element type through a .so chain", function ()
+        -- vrec defines Box; vrecwrap (a .so) exports a function whose ONLY
+        -- reference to Box is as the `...` element type (`...vrec.Box`), and does
+        -- not re-export Box; vrectop imports only vrecwrap. The transitive
+        -- record-recovery walker must descend into the Function type's
+        -- `varargtype` (not just params/rettypes) to recover Box from vrec's .so,
+        -- so the `vrec.Box` nominal resolves and the variadic call type-checks.
+        local good = so_check({
+            { name = "vrec", src = [[
+                record Box
+                  v: integer
+                end
+            ]] },
+            { name = "vrecwrap", src = [[
+                local r = import "vrec"
+                function take(...r.Box): integer
+                    return #...
+                end
+            ]] },
+        }, "vrectop", [[
+            local w = import "vrecwrap"
+            -- vrectop does NOT import vrec directly: the `vrec.Box` nominal in
+            -- `take`'s recovered signature can only resolve if the recovery walker
+            -- descended into the Function's varargtype. The empty-vararg call
+            -- needs no Box value yet still type-checks against the recovered type.
+            function bar(): integer
+                return w.take()
+            end
+        ]])
+        assert.equal(0, #good, table.concat(good, "\n"))
+        -- The record reached solely via the vararg element type must be registered
+        -- (it would be nil before the varargtype arm was added to the walker).
+        assert.truthy(types.registry["vrec.Box"],
+            "vrec.Box should be registered via the varargtype recovery walker")
     end)
 
     it("rehydrates a variadic function's varargtype through <mangled>_types", function ()

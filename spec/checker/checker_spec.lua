@@ -3084,6 +3084,39 @@ describe("variadic parameters (typechecker)", function()
                 end
             ]])
         end)
+
+        -- A scalar representation MISMATCH between the caller's `...` element and
+        -- the callee's `...` element (integer<->float) is NOT a legal forward:
+        -- `types.compatible` rejects it, so the forwarding codegen never has to
+        -- bit-reinterpret one scalar slot as the other. (Only `value` widen/narrow
+        -- is gradual; the int/float pair is not.)
+        it("rejects forwarding `...integer` to a `...float` callee", function()
+            local errs = check_errs([[
+                function g(...float): float
+                    return 0.0
+                end
+                function f(...integer): float
+                    return g(...)
+                end
+            ]])
+            assert.truthy(#errs >= 1)
+            assert.match("'...' element type integer is not compatible with the "
+                .. "'...' element type float", errs[1])
+        end)
+
+        it("rejects forwarding `...float` to a `...integer` callee", function()
+            local errs = check_errs([[
+                function g(...integer): integer
+                    return 0
+                end
+                function f(...float): integer
+                    return g(...)
+                end
+            ]])
+            assert.truthy(#errs >= 1)
+            assert.match("'...' element type float is not compatible with the "
+                .. "'...' element type integer", errs[1])
+        end)
     end)
 
     describe("return ...", function()

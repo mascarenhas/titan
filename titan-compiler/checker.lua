@@ -1144,6 +1144,12 @@ checkexp = util.make_visitor({
             local econtext = context and context.elem
             local etypes = {}
             local dots_elem
+            -- Location of the `...` field, for the coerceability diagnostic below.
+            -- `dots_field` is nil when the `...` is not the last field
+            -- (`find_dots_field` reported and dropped it), but the loop still
+            -- visits that field and sets `dots_elem`, so we cannot rely on
+            -- `dots_field.loc` there — capture the field's own loc instead.
+            local dots_loc
             for _, field in ipairs(node.fields) do
                 if field.name then
                     checker.typeerror(errors, field.loc,
@@ -1154,6 +1160,7 @@ checkexp = util.make_visitor({
                     -- type seeds (or is checked against) the array element type.
                     check_dots_marker(field.exp, st, errors)
                     dots_elem = field.exp._vararg_elem
+                    dots_loc = field.loc
                 else
                     local exp = field.exp
                     checkexp(exp, st, errors, econtext)
@@ -1199,7 +1206,7 @@ checkexp = util.make_visitor({
             if dots_elem and dots_elem._tag ~= "Type.Invalid"
                and not types.equals(dots_elem, etype)
                and not types.coerceable(dots_elem, etype) then
-                checker.typeerror(errors, dots_field.loc,
+                checker.typeerror(errors, dots_loc,
                     "'...' element type %s is not coerceable to array element "
                     .. "type %s", types.tostring(dots_elem), types.tostring(etype))
             end
@@ -2429,6 +2436,9 @@ local function register_referenced_records(t, loader, seen)
         end
         for _, r in ipairs(t.rettypes or {}) do
             register_referenced_records(r, loader, seen)
+        end
+        if t.varargtype then
+            register_referenced_records(t.varargtype, loader, seen)
         end
     elseif tag == "Type.Record" then
         for _, f in ipairs(t.fields or {}) do

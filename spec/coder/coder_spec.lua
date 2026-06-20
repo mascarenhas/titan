@@ -649,6 +649,38 @@ describe("forwarding an existing ... to another variadic callee", function()
         ]])
     end)
 
+    -- CASE 3 (fresh copy), element-type MISMATCH, NARROWING direction: forward
+    -- `...value` into a `...integer` callee. The source element IS a TValue, so
+    -- the per-element conversion goes through `checkandget` (the case-3 else
+    -- branch), runtime-checking each value is an integer and unboxing it. This is
+    -- the only scalar mismatch the checker permits (int<->float pairs are
+    -- rejected upstream); the source being a real TValue is what makes the
+    -- `checkandget` source valid.
+    it("case 3 type-mismatch: ...value forwarded to ...integer (each element unboxed)", function()
+        run_coder([[
+            function sink(...integer): integer
+                local s = 0
+                local i = 1
+                local n = #...
+                while i <= n do
+                    s = s + ...[i]
+                    i = i + 1
+                end
+                return s
+            end
+            function f(...value): integer
+                return sink(...)
+            end
+        ]], [[
+            assert(test.f() == 0)
+            assert(test.f(1, 2, 3) == 6)
+            assert(test.f(10, 20) == 30)
+            -- a non-integer value forwarded raises a clean runtime type error
+            local ok = pcall(function() return test.f(1, "x") end)
+            assert(not ok)
+        ]])
+    end)
+
     -- CASE 3 (fresh copy), PREFIX-GROW: the callee has FEWER fixed params than the
     -- caller supplies static args, so the surplus static args spill into the tail
     -- (prepended to the forwarded `...` elements). Element type matches but the

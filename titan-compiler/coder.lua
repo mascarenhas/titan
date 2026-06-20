@@ -2534,7 +2534,11 @@ local function codearray(ctx, node, target)
                 luaH_resizearray(L, $TMPNAME, (unsigned int)($NPREFIX + _vacount));
                 _base = restorestack(L, _base_off);
                 $PREFIX_STORES
-                TValue $VSLOT;
+                /* zero-init: a boolean store sets only the tag (booleans carry
+                ** no payload), but obj2arr copies value_ too — leaving it
+                ** undefined would warn under -Wmaybe-uninitialized / break
+                ** -Werror. */
+                TValue $VSLOT = {0};
                 for (int _vj = 0; _vj < _vacount; _vj++) {
                     $SETWRAPPED
                     obj2arr($TMPNAME, $NPREFIX + _vj, &$VSLOT);
@@ -3373,7 +3377,7 @@ function codedotsindex(ctx, node)
         local ctmp, tmpname, tmpslot = newtmp(ctx, elem, types.is_gc(elem))
         local cset = types.is_gc(elem) and setslot(elem, tmpslot, tmpname) or ""
         local throw = render([[
-            luaL_error(L, "%s:%d:%d: variadic index %d out of range [1, %d]", $FILE, $LINE, $COL, (int)$IDX, (int)$LEN);
+            luaL_error(L, "%s:%d:%d: variadic index %I out of range [1, %d]", $FILE, $LINE, $COL, (l_uacInt)$IDX, (int)$LEN);
         ]], {
             FILE = c_string_literal(node.loc.filename),
             LINE = c_integer_literal(node.loc.line),
