@@ -145,10 +145,10 @@ they are in the roadmap:
 * first-class functions
 * anonymous functions and closures, with proper lexical scoping
 * bound methods (`obj:method`) as first-class values
+* variadic parameters in functions (Lua `...`)
 
 ## Next
 
-* variadic parameters in functions (Lua `...`)
 * error handling integrated with Lua's, nice backtraces (details TBD)
 * FFI with C, continued (other C primitive types, C arrays, C structs/unions including pointers, function pointers)
 * standard library that is a subset of Lua's standard library, built using the C FFI (the previous C FFI should be strong enough to call Lua API functions)
