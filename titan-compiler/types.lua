@@ -10,17 +10,17 @@ local types = typedecl("Type", {
         Float       = {},
         String      = {},
         Value       = {},
-        Function    = {"params", "rettypes", "vararg"},
+        Function    = {"params", "rettypes", "vararg", "varargtype"},
         Array       = {"elem"},
         Map         = {"keys", "values"},
         Record      = {"name", "fields", "functions", "methods"},
         Nominal     = {"fqtn"},
         Field       = {"fqtn", "name", "type", "index"},
-        Method      = {"fqtn", "name", "params", "rettypes"},
+        Method      = {"fqtn", "name", "params", "rettypes", "varargtype"},
         ForeignModule = {"name", "members"},
         ModuleMember = {"modname", "name", "type"},
         ModuleVariable = {"modname", "name", "type"},
-        StaticMethod = {"fqtn", "name", "params", "rettypes"},
+        StaticMethod = {"fqtn", "name", "params", "rettypes", "varargtype"},
         Option       = {"base"}
     }
 })
@@ -194,6 +194,20 @@ function types.compatible(t1, t2)
             end
         end
 
+        -- Titan vararg presence must match (a variadic and a non-variadic
+        -- function are structurally distinct, never compatible); when both are
+        -- Titan-variadic, the element types must be `compatible` (gradual, so
+        -- `(integer, ...integer)` is compatible with `(integer, ...value)` both
+        -- ways via `value`). The C-FFI `vararg` boolean is disjoint and not
+        -- part of first-class Titan function compatibility.
+        local v1, v2 = t1.varargtype, t2.varargtype
+        if (v1 and true) ~= (v2 and true) then
+            return false
+        end
+        if v1 and v2 and not types.compatible(v1, v2) then
+            return false
+        end
+
         return true
     else
         return false
@@ -230,6 +244,18 @@ function types.equals(t1, t2)
             if not types.equals(t1.rettypes[i], t2.rettypes[i]) then
                 return false
             end
+        end
+
+        -- Same Titan vararg presence rule as `compatible`, but element types are
+        -- compared with `equals` (this drives the runtime type tag, so
+        -- `...integer` and `...value` are NOT equal → different tags → the
+        -- first-class fast path correctly falls back to the generic path).
+        local v1, v2 = t1.varargtype, t2.varargtype
+        if (v1 and true) ~= (v2 and true) then
+            return false
+        end
+        if v1 and v2 and not types.equals(v1, v2) then
+            return false
         end
 
         return true
@@ -272,6 +298,9 @@ function types.tostring(t)
         for _, param in ipairs(t.params) do
             table.insert(ptypes, types.tostring(param))
         end
+        if t.varargtype then
+            table.insert(ptypes, "..." .. types.tostring(t.varargtype))
+        end
         table.insert(out, table.concat(ptypes, ", "))
         table.insert(out, ")")
         local rtypes = {}
@@ -298,6 +327,9 @@ function types.tostring(t)
         local ptypes = {}
         for _, param in ipairs(t.params) do
             table.insert(ptypes, types.tostring(param))
+        end
+        if t.varargtype then
+            table.insert(ptypes, "..." .. types.tostring(t.varargtype))
         end
         table.insert(out, table.concat(ptypes, ", "))
         table.insert(out, ")")
@@ -358,7 +390,8 @@ function types.serialize(t)
         return "Function(" ..
             "{" .. table.concat(ptypes, ",") .. "}" .. "," ..
             "{" .. table.concat(rettypes, ",") .. "}" .. "," ..
-            tostring(t.vararg) .. ")"
+            tostring(t.vararg) .. "," ..
+            (t.varargtype and types.serialize(t.varargtype) or "false") .. ")"
     elseif tag == "Type.Nominal" then
         return "Nominal('" .. t.fqtn .. "')"
     elseif tag == "Type.Field" then
@@ -377,7 +410,8 @@ function types.serialize(t)
         return (tag == "Type.Method" and "Method('" or "StaticMethod('") ..
             t.fqtn .. "', '" .. t.name .. "'," ..
             "{" .. table.concat(ptypes, ",") .. "}" .. "," ..
-            "{" .. table.concat(rettypes, ",") .. "})"
+            "{" .. table.concat(rettypes, ",") .. "}," ..
+            (t.varargtype and types.serialize(t.varargtype) or "false") .. ")"
     elseif tag == "Type.Record" then
         local functions, fields, methods = {}, {}, {}
         for _, field in ipairs(t.fields) do

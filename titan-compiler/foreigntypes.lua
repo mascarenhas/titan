@@ -61,7 +61,9 @@ local function convert_function(st, ftype)
     local rt, err = foreigntypes.convert(st, ftype.ret)
     if not rt then return nil, err end
     local rettypes = { rt }
-    decl._type = types.Function(ptypes, rettypes, ftype.vararg)
+    -- C-FFI varargs keep the `vararg` boolean (and `varargtype = false`); the
+    -- Titan vararg element slot is disjoint and never set on a foreign function.
+    decl._type = types.Function(ptypes, rettypes, ftype.vararg, false)
     decl.params = ptypes
     decl.rettypes = rettypes
     return decl._type

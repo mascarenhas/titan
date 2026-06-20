@@ -3405,7 +3405,8 @@ end
 local function codemethodtrampoline(tlcontext, node)
     local mtype = node._type
     -- the self-removed function type whose ABI the native trampoline matches
-    local ftype = types.Function(mtype.params, mtype.rettypes, false)
+    local ftype = types.Function(mtype.params, mtype.rettypes, false,
+        mtype.varargtype)
     local nativename = bound_method_name(mtype)
     local luaname = bound_method_luaname(mtype)
     local mnative = method_name(mtype)
@@ -4451,7 +4452,8 @@ function coder.generate(modname, ast, static_deps)
                         NAMESTR = c_string_literal(node.name),
                         SLOT = c_integer_literal(node._closure_upvalue),
                         FUNCTAG = function_type_tag(tlcontext,
-                            types.Function(node._type.params, node._type.rettypes, false)),
+                            types.Function(node._type.params, node._type.rettypes, false,
+                                node._type.varargtype)),
                         NATIVE = static_name(node._type),
                     }))
                 end
