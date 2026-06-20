@@ -169,6 +169,8 @@ local errors = {
 
     NameMethod = "Expected a method name after the colon.",
 
+    ListTooLong = "List exceeds the maximum of 100 elements.",
+
 }
 
 syntax_errors.errors = errors

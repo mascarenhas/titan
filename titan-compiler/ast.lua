@@ -12,7 +12,7 @@ return typedecl("Ast", {
         TypeName        = {"loc", "name"},
         TypeArray       = {"loc", "subtype"},
         TypeMap         = {"loc", "keystype", "valuestype"},
-        TypeFunction    = {"loc", "argtypes", "rettypes"},
+        TypeFunction    = {"loc", "argtypes", "rettypes", "varargtype"},
         TypeOption      = {"loc", "basetype"}
     },
 
@@ -69,7 +69,10 @@ return typedecl("Ast", {
         ExpAdjust       = {"loc", "exp"},                   -- adjust call to just first value
         ExpExtra        = {"loc", "exp", "index", "_type"}, -- index-th (>1) value of call
         ExpFunction     = {"loc", "params", "rettypes", "block"}, -- anonymous function expression
-        ExpMethodRef    = {"loc", "exp", "name"} -- bound method reference `obj:m` (no call)
+        ExpMethodRef    = {"loc", "exp", "name"}, -- bound method reference `obj:m` (no call)
+        ExpDots         = {"loc"},          -- bare `...`
+        ExpDotsIndex    = {"loc", "exp"},   -- `...[e]` (checker sets _nilfill, _type)
+        ExpDotsLen      = {"loc"}           -- `#...` (checker-normalized, §3.5)
     },
 
     Args = {
