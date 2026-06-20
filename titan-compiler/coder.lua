@@ -1697,11 +1697,18 @@ local function codecall(ctx, node)
             table.insert(caexps, cexp)
         end
     end
+    -- True when the static call site builds a struct whose elements are
+    -- collectable: their only Lua-stack anchors are the source temp/local slots
+    -- below L->top.p, NOT the C-stack struct (its raw-pointer payload is untraced,
+    -- §2.D). The call must therefore execute while those anchors are still live;
+    -- see the forced result-materialization below.
+    local varg_collectable = false
     -- Build the concrete-array struct local from the static surplus args and pass
     -- its address + _start=0 at the pinned ABI slot (after fixed params, before
     -- out-params). Forwarding a bare `...` is Phase 4 and not handled here.
     if callee_vararg and not dots_tail then
         assert(#vargexps <= 200, "static variadic arg count exceeds TITAN_VARARG_MAX")
+        varg_collectable = types.is_gc(callee_vararg)
         local n = #vargexps
         local struct = varg_struct_name(callee_vararg)
         local elem_ct = ctype(callee_vararg)
@@ -1760,6 +1767,26 @@ local function codecall(ctx, node)
             TMPNAME = tmpname,
             CCALL = ccall,
             SLOTS = table.concat(cslots, "\n"),
+        }), tmpname
+    elseif varg_collectable then
+        -- The result is non-GC (no materialization above), but the call carries
+        -- collectable vararg elements anchored only on the source slots below
+        -- L->top.p. If we left the bare call in `cexp`, a tail `return $CEXP`
+        -- (codereturn) would emit `L->top.p = _base;` BEFORE the call, dropping
+        -- those anchors while the untraced struct still holds raw pointers into
+        -- them -- a GC at the callee's entry could then collect a live element.
+        -- Force the call to run now, inside `cstats`, while the anchors are live;
+        -- the result is a plain non-GC scalar that needs no anchoring afterward.
+        local ctmp, tmpname = newtmp(ctx, node._type)
+        return render([[
+            $CSTATS
+            $CTMP
+            $TMPNAME = $CCALL;
+        ]], {
+            CSTATS = cstats,
+            CTMP = ctmp,
+            TMPNAME = tmpname,
+            CCALL = ccall,
         }), tmpname
     else
         return cstats, ccall

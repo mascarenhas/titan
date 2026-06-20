@@ -263,6 +263,171 @@ describe("scalar variadic parameters (code generator)", function()
     end)
 end)
 
+describe("collectable variadic parameters (code generator)", function()
+    setup(function () os.remove("titan-runtime/titan.o") end)
+    after_each(clean)
+
+    -- A `...string` callee that FORCES a garbage collection in its body (an
+    -- allocating loop trips luaC_checkGC) BEFORE reading any `...[i]`. The vararg
+    -- struct's payload (raw TString*) is untraced (§2.D); the elements survive
+    -- only because they stay anchored on the caller's Lua stack. A dropped anchor
+    -- is near-deterministic corruption, so this test pins the anchoring invariant.
+    it("...string survives a forced GC in the callee, called from Lua", function()
+        run_coder([[
+            function totallen(...string): integer
+                -- churn the heap so a minor collection runs before we touch ...[i]
+                local junk: {integer} = {}
+                local k = 1
+                while k <= 300 do
+                    junk = { k, k + 1, k + 2 }
+                    k = k + 1
+                end
+                local n = #...
+                local s = 0
+                local i = 1
+                while i <= n do
+                    s = s + #(...[i])
+                    i = i + 1
+                end
+                return s
+            end
+        ]], [[
+            collectgarbage("incremental")
+            assert(test.totallen() == 0)
+            -- fresh strings (not interned constants) so a dropped anchor collects them
+            local a = ("x"):rep(5) .. "1"
+            local b = ("y"):rep(7) .. "2"
+            local c = ("z"):rep(3) .. "3"
+            assert(test.totallen(a, b, c) == 6 + 8 + 4)
+        ]])
+    end)
+
+    -- Same discipline through the STATIC call site: a Titan caller builds the
+    -- backing struct on its C stack from fresh strings, then tail-calls the
+    -- variadic callee which forces a GC before reading the elements. This is the
+    -- tail-call anchoring path (`return callee(...)` resets L->top.p = _base):
+    -- the call must run while the source string slots are still anchored.
+    it("...string survives a forced GC across a static (Titan) call site", function()
+        run_coder([[
+            function totallen(...string): integer
+                local junk: {integer} = {}
+                local k = 1
+                while k <= 300 do
+                    junk = { k, k + 1, k + 2 }
+                    k = k + 1
+                end
+                local n = #...
+                local s = 0
+                local i = 1
+                while i <= n do
+                    s = s + #(...[i])
+                    i = i + 1
+                end
+                return s
+            end
+            function caller(p: string, q: string): integer
+                -- fresh strings flow straight into the struct; tail position
+                return totallen(p, q, "lit3")
+            end
+        ]], [[
+            collectgarbage("incremental")
+            local a = ("a"):rep(4) .. "!"   -- length 5
+            local b = ("b"):rep(6) .. "!"   -- length 7
+            assert(test.caller(a, b) == 5 + 7 + 4)
+        ]])
+    end)
+
+    -- A `...{integer}` (array element type, Table*) callee: read the first
+    -- element of each forwarded array after a forced GC.
+    it("...{integer} (array) survives a forced GC in the callee", function()
+        run_coder([[
+            function firstsum(...{integer}): integer
+                local junk: {integer} = {}
+                local k = 1
+                while k <= 300 do
+                    junk = { k }
+                    k = k + 1
+                end
+                local n = #...
+                local s = 0
+                local i = 1
+                while i <= n do
+                    s = s + (...[i])[1]
+                    i = i + 1
+                end
+                return s
+            end
+        ]], [[
+            collectgarbage("incremental")
+            assert(test.firstsum() == 0)
+            assert(test.firstsum({10}, {20, 99}, {30}) == 60)
+        ]])
+    end)
+
+    -- A `...R` (record/Nominal, Udata*) callee, exercised from BOTH Lua and Titan
+    -- with a static arg list, with a forced GC before reading the record fields.
+    it("...R (record) survives a forced GC, from Lua and from Titan", function()
+        run_coder([[
+            record P
+                x: integer
+            end
+            function sumx(...P): integer
+                local junk: {integer} = {}
+                local k = 1
+                while k <= 300 do
+                    junk = { k }
+                    k = k + 1
+                end
+                local n = #...
+                local s = 0
+                local i = 1
+                while i <= n do
+                    s = s + (...[i]).x
+                    i = i + 1
+                end
+                return s
+            end
+            function callsumx(a: P, b: P, c: P): integer
+                return sumx(a, b, c)
+            end
+            function mk(v: integer): P
+                return { x = v }
+            end
+        ]], [[
+            collectgarbage("incremental")
+            local a, b, c = test.mk(3), test.mk(5), test.mk(7)
+            assert(test.sumx(a, b, c) == 15)          -- from Lua (genluaentry)
+            assert(test.callsumx(a, b, c) == 15)      -- from Titan (static struct)
+            assert(test.sumx() == 0)
+        ]])
+    end)
+
+    -- A `...value` (TValue element) slice carrying MIXED types, read back after a
+    -- forced GC. The struct holds 16-byte tagged TValues whose collectable payload
+    -- is untraced; the values must ride the caller's stack anchors.
+    it("...value carries mixed types through a forced GC", function()
+        run_coder([[
+            function pick(which: integer, ...value): value
+                local junk: {integer} = {}
+                local k = 1
+                while k <= 300 do
+                    junk = { k }
+                    k = k + 1
+                end
+                return ...[which]
+            end
+        ]], [[
+            collectgarbage("incremental")
+            local s = ("m"):rep(9) .. "?"
+            -- mixed: integer, fresh string, float, boolean
+            assert(test.pick(1, 42, s, 3.5, true) == 42)
+            assert(test.pick(2, 42, s, 3.5, true) == s)
+            assert(math.abs(test.pick(3, 42, s, 3.5, true) - 3.5) < 1e-9)
+            assert(test.pick(4, 42, s, 3.5, true) == true)
+        ]])
+    end)
+end)
+
 describe("Titan code generator", function()
     setup(function ()
         os.remove("titan-runtime/titan.o")
