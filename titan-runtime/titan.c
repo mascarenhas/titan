@@ -82,9 +82,14 @@ static int titan_is_lua_source(const char *base) {
 /* One captured native frame that survived filtering: either a Titan native
 ** function (a `.titan`-attributed frame) or a Titan entry-wrapper boundary
 ** (`is_entry`). The interpreter, libraries, runtime and unsymbolized frames are
-** dropped at capture time and never reach this array. */
+** dropped at capture time and never reach this array. The raw DWARF base
+** filename / line / symbol are kept (not preformatted) so the merge can look the
+** symbol up in registry[TITAN_NAMES_KEY] and substitute the qualified Titan
+** source name — which the collect callback cannot do (it has no lua_State). */
 typedef struct {
-    char text[512];   /* preformatted "\t<file>:<line>: in <fn>" for a function */
+    char base[256];   /* DWARF base filename, e.g. "test.titan" */
+    char function[256]; /* the (mangled) C symbol name */
+    int lineno;       /* DWARF line of the current execution point */
     int is_entry;     /* nonzero: this frame is an entry-wrapper boundary */
 } titan_native_frame;
 
@@ -119,8 +124,10 @@ static int titan_bt_collect_cb(void *data, uintptr_t pc, const char *filename,
     {
         titan_native_frame *f = &st->frames[st->n++];
         f->is_entry = is_entry;
-        snprintf(f->text, sizeof(f->text), "\t%s:%d: in %s",
-                 base ? base : "?", lineno, function ? function : "?");
+        f->lineno = lineno;
+        snprintf(f->base, sizeof(f->base), "%s", base ? base : "?");
+        snprintf(f->function, sizeof(f->function), "%s",
+                 function ? function : "?");
     }
     return 0;
 }
@@ -162,6 +169,39 @@ static const char *titan_funcname(lua_Debug *ar, char *out, size_t outsz) {
     return out;
 }
 
+/* Look up `sym` (a native frame's mangled C symbol) in registry[TITAN_NAMES_KEY]
+** and copy the qualified Titan source name into `out`, returning it; if the
+** sub-table or the key is absent, copy the raw `sym` and return that (fallback).
+** Leaves the Lua stack exactly as found (the merge runs with a luaL_Buffer open
+** at the top, so this MUST be stack-neutral). */
+static const char *titan_qualified_name(lua_State *L, const char *sym,
+                                        char *out, size_t outsz) {
+    int top = lua_gettop(L);
+    const char *qn = sym;
+    lua_pushliteral(L, TITAN_NAMES_KEY);
+    lua_rawget(L, LUA_REGISTRYINDEX);          /* names sub-table or nil */
+    if (lua_istable(L, -1)) {
+        lua_pushstring(L, sym);
+        lua_rawget(L, -2);                      /* names[sym] or nil */
+        if (lua_type(L, -1) == LUA_TSTRING) {
+            qn = lua_tostring(L, -1);
+        }
+    }
+    snprintf(out, outsz, "%s", qn ? qn : "?");
+    lua_settop(L, top);                         /* restore: stack-neutral */
+    return out;
+}
+
+/* Format one surviving native Titan FUNCTION frame (never an entry-wrapper
+** boundary — those are suppressed by the caller) as a trace line, substituting
+** the qualified Titan name for the mangled C symbol. */
+static void titan_format_native(lua_State *L, char *line, size_t linesz,
+                                const titan_native_frame *f) {
+    char nm[256];
+    titan_qualified_name(L, f->function, nm, sizeof(nm));
+    snprintf(line, linesz, "\t%s:%d: in %s", f->base, f->lineno, nm);
+}
+
 /* Build ONE intermingled, innermost->outer trace mixing pure-Lua and Titan
 ** frames in call order (plan A.2). The CallInfo chain is the backbone: it
 ** enumerates every Lua activation (so a single native luaV_execute correctly
@@ -172,11 +212,22 @@ static const char *titan_funcname(lua_Debug *ar, char *out, size_t outsz) {
 ** Alignment: walk both stacks innermost->outer in lockstep. At every C-level
 ** CallInfo (a Titan entry wrapper appears here as a C function, as do genuine
 ** Lua C-functions) we drain the next run of native Titan frames up to and
-** including the next entry-wrapper sentinel and emit them; that sentinel-
-** terminated run is the Titan native subtree that this Lua->Titan call ran.
-** Pure-Lua CallInfo frames are emitted directly with src:line:in name; genuine
-** Lua C-functions as [C]:in name. The deepest (innermost) Titan native run is
-** drained before the first CallInfo so the error site leads the trace.
+** including the next entry-wrapper sentinel; that sentinel-terminated run is the
+** Titan native subtree that this Lua->Titan call ran. Pure-Lua CallInfo frames
+** are emitted directly with src:line:in name; genuine Lua C-functions as
+** [C]:in name. The deepest (innermost) Titan native run is drained before the
+** first CallInfo so the error site leads the trace.
+**
+** Trampoline collapse: each logical Titan call lands TWO native frames — the
+** generated entry-wrapper (sentinel `titanentry`) and the native function it
+** invokes. The entry-wrapper is a BOUNDARY MARKER ONLY: it still delimits a
+** native run in the splice (`is_entry` terminates a drain), but it is NEVER
+** emitted as a visible frame. Only the native function frame is shown (it
+** carries the current execution line), so each Lua->Titan / method / closure
+** call becomes a SINGLE Titan frame. Each emitted native frame's mangled C
+** symbol is replaced by its qualified Titan source name from
+** registry[TITAN_NAMES_KEY] (titan_format_native), falling back to the raw
+** symbol if absent.
 **
 ** Caveat (documented for review): a Titan entry wrapper and a genuine Lua
 ** C-function are indistinguishable at a C-level CallInfo, so the native Titan
@@ -207,10 +258,15 @@ static void titan_push_unified_trace(lua_State *L, luaL_Buffer *buf,
     titan_capture_native(&st);
 
     /* Drain the deepest native Titan run (the error site) before any CallInfo
-    ** so the innermost Titan frames lead. */
+    ** so the innermost Titan frames lead. Entry-wrapper frames are boundary
+    ** markers only (consumed, never emitted); only native functions are shown. */
     while (ni < st.n) {
         int was_entry = frames[ni].is_entry;
-        titan_bt_addframe(buf, &wrote_any, frames[ni].text);
+        if (!was_entry) {
+            char line[768];
+            titan_format_native(L, line, sizeof(line), &frames[ni]);
+            titan_bt_addframe(buf, &wrote_any, line);
+        }
         ni++;
         if (was_entry) break;
     }
@@ -224,7 +280,11 @@ static void titan_push_unified_trace(lua_State *L, luaL_Buffer *buf,
             int drained = 0;
             while (ni < st.n) {
                 int was_entry = frames[ni].is_entry;
-                titan_bt_addframe(buf, &wrote_any, frames[ni].text);
+                if (!was_entry) {
+                    char line[768];
+                    titan_format_native(L, line, sizeof(line), &frames[ni]);
+                    titan_bt_addframe(buf, &wrote_any, line);
+                }
                 ni++;
                 drained = 1;
                 if (was_entry) break;
@@ -258,9 +318,14 @@ static void titan_push_unified_trace(lua_State *L, luaL_Buffer *buf,
     }
 
     /* Defensive: any native Titan frames the CallInfo walk did not consume
-    ** (e.g. native depth exceeding the Lua-visible boundaries) still appear. */
+    ** (e.g. native depth exceeding the Lua-visible boundaries) still appear.
+    ** Entry-wrapper boundary markers remain suppressed. */
     while (ni < st.n) {
-        titan_bt_addframe(buf, &wrote_any, frames[ni].text);
+        if (!frames[ni].is_entry) {
+            char line[768];
+            titan_format_native(L, line, sizeof(line), &frames[ni]);
+            titan_bt_addframe(buf, &wrote_any, line);
+        }
         ni++;
     }
 }

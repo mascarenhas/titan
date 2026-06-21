@@ -53,6 +53,17 @@
 
 #define TITAN_BACKTRACE_KEY "57d80578-2534-4856-ad3b-bde8cba4c445"
 
+/* Registry sub-table mapping a native Titan C symbol name (the mangled name the
+** coder emits for a function/method/static/anonymous native entry) -> the
+** qualified Titan source name to display in a trace ("<module>.<func>",
+** "<module>.<record>:<method>", "<module>.<record>.<static>", or "anonymous
+** function at <file>.titan:<linedefined>"). Each module's _init lazily creates
+** the sub-table (multiple modules contribute) and populates it for every native
+** function it generates. errorhandler looks each native frame's DWARF symbol up
+** here and shows the qualified name when found, falling back to the raw symbol.
+** A runtime/_init addition only — ABI (0.9) is unchanged. */
+#define TITAN_NAMES_KEY "a7c4e2f0-1d6b-4e3a-9c5f-8b2d7e0a4f16"
+
 /* When set (boolean true) in the registry, errorhandler() KEEPS the existing
 ** TITAN_BACKTRACE_KEY slot instead of regenerating it, and clears the pin. A
 ** pending re-raise sets the pin so the original error's trace is preserved; a

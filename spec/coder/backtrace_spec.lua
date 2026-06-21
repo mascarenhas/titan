@@ -54,10 +54,11 @@ describe("libbacktrace unified stack trace (error-handling Phase 0)", function()
     setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
-    it("merges symbolized native frames with the Lua traceback", function()
+    it("merges native frames, showing qualified Titan names not mangled symbols", function()
         -- A Titan error raised two native frames deep. The merged trace must
-        -- carry both the Lua-side traceback and the symbolized native frames
-        -- (shown by C symbol name <module>_<fn>_titan).
+        -- carry both the Lua-side traceback and the Titan native frames, the
+        -- latter shown by their QUALIFIED Titan name (<module>.<func>), not the
+        -- mangled C symbol, and with NO entry-wrapper (titanentry) frame.
         local out = compile_and_run([[
             function inner(): integer
                 local x: value = {}
@@ -74,9 +75,12 @@ describe("libbacktrace unified stack trace (error-handling Phase 0)", function()
             -- error message and Lua traceback present
             assert(bt:find(err, 1, true), "missing error message")
             assert(bt:find("stack traceback:", 1, true), "missing Lua traceback")
-            -- symbolized native frames for BOTH Titan functions present
-            assert(bt:find("test_inner_titan", 1, true), "missing inner frame")
-            assert(bt:find("test_outer_titan", 1, true), "missing outer frame")
+            -- qualified Titan names for BOTH functions present
+            assert(bt:find("in test.inner", 1, true), "missing inner frame\n"..bt)
+            assert(bt:find("in test.outer", 1, true), "missing outer frame\n"..bt)
+            -- NO mangled C symbol and NO trampoline sentinel leaks through
+            assert(not bt:find("titanentry", 1, true), "leaked trampoline frame\n"..bt)
+            assert(not bt:find("_titan", 1, true), "leaked mangled symbol\n"..bt)
             -- interpreter/runtime/libc frames filtered out of the native part
             assert(not bt:find("lua-5.5.0/src/", 1, true), "leaked interp frame")
             assert(not bt:find("titan-runtime/", 1, true), "leaked runtime frame")
@@ -102,20 +106,20 @@ describe("libbacktrace unified stack trace (error-handling Phase 0)", function()
             local titan = require 'titan'
             assert(not pcall(test.outer))
             local bt = titan.backtrace()
-            -- Native Titan frames now carry the .titan path + a line number,
-            -- e.g. "test.titan:3: in test_inner_titan".
-            assert(bt:find("test%.titan:%d+: in test_inner_titan"),
+            -- Native Titan frames now carry the .titan path + a line number and
+            -- the QUALIFIED Titan name, e.g. "test.titan:3: in test.inner".
+            assert(bt:find("test%.titan:%d+: in test%.inner"),
                    "inner native frame not attributed to test.titan:<line>\n" .. bt)
-            assert(bt:find("test%.titan:%d+: in test_outer_titan"),
+            assert(bt:find("test%.titan:%d+: in test%.outer"),
                    "outer native frame not attributed to test.titan:<line>\n" .. bt)
             -- The whole point of #line: the generated .c must NOT appear as the
             -- source of any native Titan frame.
-            assert(not bt:find("test%.c:%d+: in test_"),
+            assert(not bt:find("test%.c:%d+: in test"),
                    "native frame still attributed to generated .c\n" .. bt)
             -- The error is the bad coercion in `inner`'s body; that statement is
             -- the third line of the module, so the inner frame's line must land
             -- there (codethrow stamps the exact raise line).
-            assert(bt:find("test%.titan:3: in test_inner_titan"),
+            assert(bt:find("test%.titan:3: in test%.inner"),
                    "inner frame line is not the raise statement (3)\n" .. bt)
             print("OK")
         ]==])
@@ -141,23 +145,23 @@ describe("libbacktrace unified stack trace (error-handling Phase 0)", function()
 
             pcall(test.fa)
             local t1 = titan.backtrace()
-            assert(t1:find("test_fa_titan", 1, true), "first error not captured")
+            assert(t1:find("in test.fa", 1, true), "first error not captured")
 
             -- pin, then raise a DIFFERENT error: slot must be kept verbatim
             titan.pin()
             pcall(test.fb)
             local t2 = titan.backtrace()
             assert(t2 == t1, "pin did not preserve the original trace")
-            assert(not t2:find("test_fb_titan", 1, true),
+            assert(not t2:find("in test.fb", 1, true),
                    "pinned trace was regenerated to fb")
 
             -- clear the slot, then raise again: must regenerate fresh
             titan.clear()
             pcall(test.fb)
             local t3 = titan.backtrace()
-            assert(t3:find("test_fb_titan", 1, true),
+            assert(t3:find("in test.fb", 1, true),
                    "cleared slot did not regenerate")
-            assert(not t3:find("test_fa_titan", 1, true),
+            assert(not t3:find("in test.fa", 1, true),
                    "regenerated trace still mentions the old error")
             print("OK")
         ]==])
@@ -193,13 +197,17 @@ describe("libbacktrace unified stack trace (error-handling Phase 0)", function()
             -- single section, innermost->outer
             assert(bt:find("stack traceback:", 1, true), "missing trace header\n"..bt)
             assert(not bt:find("C traceback:", 1, true), "regressed to two sections\n"..bt)
-            -- EVERY Titan native frame present (apply runs 3x; boom once)
-            assert(bt:find("test_boom_titan", 1, true), "missing boom native\n"..bt)
-            -- apply is entered three times along the chain; all three native runs
-            -- survive (no dropped Titan frame). Count the native function lines
-            -- specifically: "test_apply_titan\n" (NOT the entry-wrapper symbol
-            -- "test_apply_titanentry_lua", which shares the prefix).
-            local _, napply = bt:gsub("in test_apply_titan\n", "")
+            -- no trampoline / mangled-symbol leakage anywhere in the trace
+            assert(not bt:find("titanentry", 1, true), "leaked trampoline frame\n"..bt)
+            assert(not bt:find("_titan", 1, true), "leaked mangled symbol\n"..bt)
+            -- EVERY Titan native frame present (apply runs 3x; boom once),
+            -- shown by qualified name, ONE frame per logical call (the
+            -- entry-wrapper trampoline is collapsed away).
+            assert(bt:find("in test.boom", 1, true), "missing boom native\n"..bt)
+            -- apply is entered three times along the chain; all three frames
+            -- survive (no dropped Titan frame), and each is a SINGLE frame
+            -- (no separate entry-wrapper line).
+            local _, napply = bt:gsub("in test%.apply\n", "")
             assert(napply == 3, "expected 3 apply native frames, got "..napply.."\n"..bt)
             -- EVERY intermediate pure-Lua frame present. The two Lua callbacks are
             -- invoked as values, so they carry no call-site name; they appear by
@@ -211,6 +219,72 @@ describe("libbacktrace unified stack trace (error-handling Phase 0)", function()
             -- interpreter/runtime frames still filtered from the native side
             assert(not bt:find("lua%-5%.5%.0/src/"), "leaked interp frame\n"..bt)
             assert(not bt:find("titan%-runtime/"), "leaked runtime frame\n"..bt)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("shows a method frame as <module>.<Rec>:<method>", function()
+        -- An error inside a record method must show the qualified method name
+        -- with the `:` separator, a SINGLE frame (no trampoline), and the
+        -- top-level caller as <module>.<func>.
+        local out = compile_and_run([[
+            record Point
+                x: integer
+            end
+            function Point:bad(): integer
+                local v: value = {}
+                return v
+            end
+            function run(p: Point): integer
+                return p:bad()
+            end
+        ]], [==[
+            local titan = require 'titan'
+            local p = test.Point.new(1)
+            assert(not pcall(test.run, p))
+            local bt = titan.backtrace()
+            assert(bt:find("in test.Point:bad", 1, true),
+                   "missing method frame as test.Point:bad\n"..bt)
+            assert(bt:find("in test.run", 1, true), "missing caller frame\n"..bt)
+            assert(not bt:find("titanentry", 1, true), "leaked trampoline frame\n"..bt)
+            assert(not bt:find("_titan", 1, true), "leaked mangled symbol\n"..bt)
+            -- one frame per logical call: exactly one method line
+            local _, nbad = bt:gsub("in test%.Point:bad", "")
+            assert(nbad == 1, "expected 1 method frame, got "..nbad.."\n"..bt)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("shows an anonymous function as 'anonymous function at <file>.titan:<line>'", function()
+        -- An error inside an anonymous Titan function must show it by its
+        -- DEFINITION line, not the mangled lambda symbol. The lambda is defined
+        -- on the module's 3rd line, so the frame names that line.
+        local out = compile_and_run(
+            "function run(): integer\n" ..
+            "    local f: () -> integer = function(): integer\n" ..
+            "        local v: value = {}\n" ..
+            "        return v\n" ..
+            "    end\n" ..
+            "    return f()\n" ..
+            "end\n",
+        [==[
+            local titan = require 'titan'
+            assert(not pcall(test.run))
+            local bt = titan.backtrace()
+            -- the anonymous function is defined on line 2 of the module (the
+            -- `function(): integer` literal), reported by its DEFINITION line,
+            -- distinct from the body/error line (3).
+            assert(bt:find("anonymous function at test%.titan:2"),
+                   "missing/mis-lined anonymous-function frame\n"..bt)
+            -- the frame's leading execution point is the throw line in the body
+            -- (the `return v` coercion, line 4), distinct from the def line (2)
+            assert(bt:find("test%.titan:4: in anonymous function at test%.titan:2"),
+                   "anonymous frame not showing exec-line:def-line\n"..bt)
+            assert(bt:find("in test.run", 1, true), "missing caller frame\n"..bt)
+            assert(not bt:find("titanentry", 1, true), "leaked trampoline frame\n"..bt)
+            assert(not bt:find("lambda_", 1, true), "leaked mangled lambda symbol\n"..bt)
             print("OK")
         ]==])
         assert.match("OK", out)
@@ -231,11 +305,11 @@ describe("libbacktrace unified stack trace (error-handling Phase 0)", function()
         ]], [==[
             local titan = require 'titan'
             pcall(test.ga)
-            assert(titan.backtrace():find("test_ga_titan", 1, true))
+            assert(titan.backtrace():find("in test.ga", 1, true))
             pcall(test.gb)                       -- no pin: must regenerate
             local bt = titan.backtrace()
-            assert(bt:find("test_gb_titan", 1, true), "did not regenerate")
-            assert(not bt:find("test_ga_titan", 1, true), "stale trace stuck")
+            assert(bt:find("in test.gb", 1, true), "did not regenerate")
+            assert(not bt:find("in test.ga", 1, true), "stale trace stuck")
             print("OK")
         ]==])
         assert.match("OK", out)
@@ -296,11 +370,14 @@ describe("standalone main top-level error handler (error-handling A.6)", functio
         assert.truthy(out:find("stack traceback:", 1, true),
                       "no unified trace on stderr\n"..out)
         assert.falsy(out:find("C traceback:", 1, true))
-        -- Titan native frames present (deep is the error site)
-        assert.truthy(out:find("test_deep_titan", 1, true),
+        -- Titan native frames present (deep is the error site), shown by their
+        -- qualified Titan names, one frame per logical call (no trampoline).
+        assert.truthy(out:find("in test.deep", 1, true),
                       "missing Titan deep frame\n"..out)
-        assert.truthy(out:find("test_mid_titan", 1, true),
+        assert.truthy(out:find("in test.mid", 1, true),
                       "missing Titan mid frame\n"..out)
+        assert.falsy(out:find("titanentry", 1, true))
+        assert.falsy(out:find("_titan", 1, true))
         -- and a Lua-level frame: the bootstrap require-chunk that called main
         assert.truthy(out:find("in main chunk", 1, true)
                       or out:find("in function") or out:find(":%d+: in"),

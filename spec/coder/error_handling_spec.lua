@@ -80,13 +80,14 @@ describe("raise <exp> (error-handling Phase 2)", function()
             assert(err == "deep failure", "wrong error value: " .. tostring(err))
             local bt = titan.backtrace()
             assert(bt:find("stack traceback:", 1, true), "missing trace header\n" .. bt)
-            -- the raising Titan function symbolizes as a native frame
-            assert(bt:find("test_inner_titan", 1, true), "missing inner frame\n" .. bt)
-            assert(bt:find("test_outer_titan", 1, true), "missing outer frame\n" .. bt)
+            -- the raising Titan function symbolizes as a native frame, shown by
+            -- its qualified Titan name (not the mangled C symbol)
+            assert(bt:find("in test.inner", 1, true), "missing inner frame\n" .. bt)
+            assert(bt:find("in test.outer", 1, true), "missing outer frame\n" .. bt)
             -- attributed to the raise's .titan line via #line, not the generated .c
-            assert(bt:find("test%.titan:%d+: in test_inner_titan"),
+            assert(bt:find("test%.titan:%d+: in test%.inner"),
                    "inner frame not attributed to test.titan:<line>\n" .. bt)
-            assert(not bt:find("test%.c:%d+: in test_"),
+            assert(not bt:find("test%.c:%d+: in test"),
                    "native frame still attributed to generated .c\n" .. bt)
             print("OK")
         ]==])
@@ -232,7 +233,7 @@ describe("catch (error-handling Phase 4)", function()
             local tb = test.run()
             assert(type(tb) == "string", "traceback not a string: " .. type(tb))
             assert(tb:find("stack traceback:", 1, true), "no trace header\n" .. tb)
-            assert(tb:find("test_deep_titan", 1, true), "trace lacks deep frame\n" .. tb)
+            assert(tb:find("in test.deep", 1, true), "trace lacks deep frame\n" .. tb)
             print("OK")
         ]==])
         assert.match("OK", out)
@@ -261,7 +262,7 @@ describe("catch (error-handling Phase 4)", function()
             assert(err == "deep-boom", "wrong re-raised value: " .. tostring(err))
             local bt = titan.backtrace()
             -- the ORIGINAL trace names the deep raising frame, not just the catch site
-            assert(bt:find("test_deep_titan", 1, true),
+            assert(bt:find("in test.deep", 1, true),
                    "re-raise lost the original deep frame\n" .. bt)
             print("OK")
         ]==])
@@ -289,9 +290,9 @@ describe("catch (error-handling Phase 4)", function()
             local bt = titan.backtrace()
             -- a fresh trace is captured at the catch's raise: it must NOT mention
             -- the original deep frame (which is no longer on the stack)
-            assert(not bt:find("test_deep_titan", 1, true),
+            assert(not bt:find("in test.deep", 1, true),
                    "fresh trace wrongly kept the original deep frame\n" .. bt)
-            assert(bt:find("test_run_titan", 1, true),
+            assert(bt:find("in test.run", 1, true),
                    "fresh trace lacks the raise-site frame\n" .. bt)
             print("OK")
         ]==])
@@ -386,7 +387,7 @@ describe("catch (error-handling Phase 4)", function()
             local ok, err = pcall(test.boom)
             assert(not ok and err == "second")
             local bt = titan.backtrace()
-            assert(bt:find("test_boom_titan", 1, true), "fresh trace missing\n" .. bt)
+            assert(bt:find("in test.boom", 1, true), "fresh trace missing\n" .. bt)
             print("OK")
         ]==])
         assert.match("OK", out)

@@ -174,6 +174,28 @@ local function func_luaname(modname, name)
     return modprefix(modname) .. name .. "_" .. TITAN_ENTRY_TAG .. "_lua"
 end
 
+-- Record the mapping from a native function's mangled C symbol to its qualified
+-- Titan source name, for the trace name table emitted in _init (deliverable 2).
+-- The runtime (errorhandler) looks each native frame's DWARF symbol up here and
+-- shows the qualified name instead of the mangled symbol. Forms:
+--   top-level func  -> "<module>.<func>"
+--   method          -> "<module>.<record>:<method>"
+--   record static   -> "<module>.<record>.<static>"
+--   anonymous/lambda-> "anonymous function at <file>.titan:<linedefined>"
+local function register_trace_name(tlcontext, symbol, qualname)
+    table.insert(tlcontext.names, { symbol, qualname })
+end
+
+-- The qualified Titan name of an anonymous function, formatted at codegen from
+-- its DEFINITION location (the lambda's `loc`). The trace's leading
+-- `<file>:<current-line>` already shows the execution point; this names it.
+local function anon_qualname(loc)
+    if loc and loc.line and loc.filename then
+        return "anonymous function at " .. loc.filename .. ":" .. tostring(loc.line)
+    end
+    return "anonymous function"
+end
+
 -- get name of the variable holding the metatable for this type.
 -- `ctx` may be a per-function context (has `.tlcontext`) or the top-level
 -- tlcontext itself — genluaentry passes the latter into checkandget when
@@ -4545,13 +4567,21 @@ local function codefuncdec(tlcontext, node)
     if node._tag == "Ast.TopLevelFunc" then
         fname = func_name(tlcontext.module, node.name)
         luaname = func_luaname(tlcontext.module, node.name)
+        register_trace_name(tlcontext, fname,
+            tlcontext.module .. "." .. node.name)
     elseif node._tag == "Ast.TopLevelStatic" then
         fname = static_name(node._type)
         luaname = static_luaname(node._type)
+        -- fqtn is "<module>.<record>"; a static is "<module>.<record>.<static>".
+        register_trace_name(tlcontext, fname,
+            node._type.fqtn .. "." .. node._type.name)
     else
         assert(node._tag == "Ast.TopLevelMethod")
         fname = method_name(node._type)
         luaname = method_luaname(node._type)
+        -- fqtn is "<module>.<record>"; a method is "<module>.<record>:<method>".
+        register_trace_name(tlcontext, fname,
+            node._type.fqtn .. ":" .. node._type.name)
     end
     -- Detect a `StatTry` in this function's body up front (the param cdecls below
     -- and local cdecls in the body consult `ctx.has_try` for the `volatile`
@@ -4705,6 +4735,10 @@ local function codemethodtrampoline(tlcontext, node)
     local luaname = bound_method_luaname(mtype)
     local mnative = method_name(mtype)
     local mlua = method_luaname(mtype)
+    -- The bound trampoline forwards to the method; if its own native frame ever
+    -- appears in a trace, name it after the method (<module>.<record>:<method>).
+    register_trace_name(tlcontext, nativename,
+        mtype.fqtn .. ":" .. mtype.name)
     local rettype = mtype.rettypes[1]
     local crettype = rettype and ctype(rettype) or "void"
 
@@ -4802,6 +4836,9 @@ local function lambda_register(tlcontext, node)
         tlcontext.lambda_count = n + 1
         node._lambda_native = tlcontext.prefix .. "lambda_" .. n
         node._lambda_lua = tlcontext.prefix .. "lambda_" .. n .. "_" .. TITAN_ENTRY_TAG .. "_lua"
+        -- An anonymous function shows as "anonymous function at <file>:<defline>"
+        -- (the lambda's DEFINITION loc), formatted into the name table here.
+        register_trace_name(tlcontext, node._lambda_native, anon_qualname(node.loc))
         table.insert(tlcontext.lambdas, node)
     end
 end
@@ -5217,6 +5254,7 @@ Udata *$INITNAME(lua_State *L) {
         $INITVARS
         $INITFUNCTAGS
         $FUNCS
+        $INITNAMES
         $CREATEMETA
         return _mod;
     } else {
@@ -5594,6 +5632,7 @@ function coder.generate(modname, ast, static_deps)
         record_namespace_slots = {}, -- record fqtn -> module uv slot of its static-namespace table
         lambdas = {},        -- ExpFunction nodes pending file-scope emission
         lambda_count = 0,    -- counter for unique lambda native/Lua names
+        names = {},          -- { native C symbol, qualified Titan name } pairs for the trace name table
         upvalue = 0
     }
 
@@ -5934,6 +5973,39 @@ function coder.generate(modname, ast, static_deps)
         }))
     end
 
+    -- Trace name table (deliverable 2): map each native C symbol this module
+    -- generates -> its qualified Titan source name, into the shared registry
+    -- sub-table registry[TITAN_NAMES_KEY] (lazily created — multiple modules
+    -- contribute). errorhandler looks each native frame's symbol up here to show
+    -- the qualified name instead of the mangled C symbol.
+    local initnames = ""
+    if #tlcontext.names > 0 then
+        local setnames = {}
+        for _, pair in ipairs(tlcontext.names) do
+            table.insert(setnames, render([[
+                lua_pushliteral(L, $QUAL);
+                lua_setfield(L, -2, $SYM);
+            ]], {
+                SYM = c_string_literal(pair[1]),
+                QUAL = c_string_literal(pair[2]),
+            }))
+        end
+        initnames = render([[
+            lua_getfield(L, LUA_REGISTRYINDEX, $NAMESKEY);
+            if(lua_isnil(L, -1)) {
+                lua_pop(L, 1);
+                lua_newtable(L);
+                lua_pushvalue(L, -1);
+                lua_setfield(L, LUA_REGISTRYINDEX, $NAMESKEY);
+            }
+            $SETNAMES
+            lua_pop(L, 1); /* pop the names table */
+        ]], {
+            NAMESKEY = "TITAN_NAMES_KEY",
+            SETNAMES = table.concat(setnames, "\n"),
+        })
+    end
+
     table.insert(code, render(init, {
         INITNAME = tlcontext.prefix .. 'init',
         INITMODULES = table.concat(initmods, "\n"),
@@ -5943,6 +6015,7 @@ function coder.generate(modname, ast, static_deps)
         INITVARS = table.concat(initvars, "\n"),
         INITRECORDS = table.concat(initrecs, "\n"),
         FUNCS = table.concat(funcs, "\n"),
+        INITNAMES = initnames,
         MODNAMESTR = c_string_literal("Titan module "..modname),
         CREATEMETA = create_meta,
         NUPVALS = tlcontext.upvalue
