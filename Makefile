@@ -29,12 +29,19 @@ endif
 
 # Kept in sync with titan-compiler/driver.lua (driver.CC / driver.CFLAGS).
 CC        ?= cc
-CFLAGS    ?= --std=c99 -O2 -Wall -fPIC
+CFLAGS    ?= --std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls
 RUNTIME_O := titan-runtime/titan.o
 
-.PHONY: all help lua runtime test examples clean clean-lua distclean
+# libbacktrace is cloned + built into ./libbacktrace (gitignored), mirroring the
+# ./lua-5.5.0 tree. The generated C and the runtime include its backtrace.h and
+# link its static archive (driver.lua references ./libbacktrace/.libs/...).
+LIBBT_DIR := libbacktrace
+LIBBT_URL := https://github.com/ianlancetaylor/libbacktrace.git
+LIBBT_LIB := $(LIBBT_DIR)/.libs/libbacktrace.a
 
-all: lua ## Build everything needed to run the test suite (default)
+.PHONY: all help lua libbacktrace runtime test examples clean clean-lua clean-libbacktrace distclean
+
+all: lua libbacktrace ## Build everything needed to run the test suite (default)
 
 help: ## Show this help
 	@echo "Titan developer tasks:"
@@ -59,12 +66,22 @@ $(LUA_LIB):
 	@echo "==> Building Lua ($(LUA_PLATFORM), MYCFLAGS=-fPIC)"
 	$(MAKE) -C "$(LUA_DIR)" $(LUA_PLATFORM) MYCFLAGS=-fPIC
 
+libbacktrace: $(LIBBT_LIB) ## Clone and build the bundled libbacktrace source tree
+
+$(LIBBT_LIB):
+	@if [ ! -d "$(LIBBT_DIR)" ]; then \
+	  echo "==> Cloning $(LIBBT_URL)"; \
+	  git clone "$(LIBBT_URL)" "$(LIBBT_DIR)"; \
+	fi
+	@echo "==> Building libbacktrace (configure + make, -fPIC)"
+	cd "$(LIBBT_DIR)" && ./configure CFLAGS="-fPIC -g -O2" && $(MAKE)
+
 runtime: $(RUNTIME_O) ## Build the Titan C runtime object (also built lazily by the compiler)
 
-$(RUNTIME_O): titan-runtime/titan.c titan-runtime/titan.h | $(LUA_LIB)
-	$(CC) $(CFLAGS) -c titan-runtime/titan.c -I titan-runtime -I $(LUA_DIR)/src -o $@
+$(RUNTIME_O): titan-runtime/titan.c titan-runtime/titan.h | $(LUA_LIB) $(LIBBT_LIB)
+	$(CC) $(CFLAGS) -c titan-runtime/titan.c -I titan-runtime -I $(LUA_DIR)/src -I $(LIBBT_DIR) -o $@
 
-test: lua ## Build/install the rock and run the suite via `luarocks test`
+test: lua libbacktrace ## Build/install the rock and run the suite via `luarocks test`
 	luarocks make
 	luarocks test
 
@@ -82,4 +99,7 @@ clean-lua: ## Remove the downloaded Lua source tree(s) and tarball
 	rm -rf $(LUA_DIR) lua-5.*/
 	rm -f $(LUA_TARBALL) lua-5.*.tar.gz
 
-distclean: clean clean-lua ## Remove everything: artifacts and the Lua tree
+clean-libbacktrace: ## Remove the cloned libbacktrace source tree
+	rm -rf $(LIBBT_DIR)
+
+distclean: clean clean-lua clean-libbacktrace ## Remove everything: artifacts, the Lua tree, and libbacktrace

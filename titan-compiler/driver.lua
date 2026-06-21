@@ -15,7 +15,11 @@ driver.TITAN_BIN_PATH = os.getenv("TITAN_PATH_0_9") or os.getenv("TITAN_PATH") o
 driver.TITAN_SOURCE_PATH = "."
 driver.LUA_SOURCE_PATH = "lua-5.5.0/src/"
 driver.TITAN_RUNTIME_PATH = "titan-runtime/"
-driver.CFLAGS = "--std=c99 -O2 -Wall -fPIC"
+driver.LIBBACKTRACE_PATH = "libbacktrace"
+-- -g emits DWARF (carries the #line file/line a traceback needs) and
+-- -fno-optimize-sibling-calls keeps tail frames on the stack so libbacktrace
+-- can unwind them.
+driver.CFLAGS = "--std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls"
 driver.CC = "cc"
 
 local CIRCULAR_MARK = {}
@@ -138,6 +142,7 @@ local function check_runtime()
     if (not titano_mtime) or (titano_mtime < titanc_mtime) then
         local args = {driver.CC, driver.CFLAGS, "-c", runtime_c,
             "-I", driver.TITAN_RUNTIME_PATH, "-I", driver.LUA_SOURCE_PATH,
+            "-I", driver.LIBBACKTRACE_PATH,
             "-o", runtime_o }
         os.execute(table.concat(args, " "))
     end
@@ -158,7 +163,8 @@ function driver.compile(modname, ast, sourcef, static_deps, verbose)
     local libflag = static_flag()
     local args = {driver.CC, driver.CFLAGS, libflag, filename,
                   "-I", "titan-runtime",
-                  "-I", driver.LUA_SOURCE_PATH, "-o", libname}
+                  "-I", driver.LUA_SOURCE_PATH,
+                  "-I", driver.LIBBACKTRACE_PATH, "-o", libname}
     local cmd = table.concat(args, " ")
     if verbose then
         print(cmd)
@@ -291,6 +297,7 @@ function driver.compile_library(modname, libnames, link, verbose)
 
     table.insert(args, driver.TITAN_RUNTIME_PATH .. "titan.o")
 
+    table.insert(args, driver.LIBBACKTRACE_PATH .. "/.libs/libbacktrace.a")
     table.insert(args, driver.LUA_SOURCE_PATH .. "/liblua.a")
     table.insert(args, "-ldl")
     table.insert(args, "-lm")
@@ -325,6 +332,7 @@ function driver.compile_program(modname, libnames, link, verbose)
 
     table.insert(args, driver.TITAN_RUNTIME_PATH .. "titan.o")
 
+    table.insert(args, driver.LIBBACKTRACE_PATH .. "/.libs/libbacktrace.a")
     table.insert(args, driver.LUA_SOURCE_PATH .. "/liblua.a")
     table.insert(args, "-ldl")
     table.insert(args, "-lm")

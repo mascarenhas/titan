@@ -49,6 +49,12 @@
 
 #define TITAN_BACKTRACE_KEY "57d80578-2534-4856-ad3b-bde8cba4c445"
 
+/* When set (boolean true) in the registry, errorhandler() KEEPS the existing
+** TITAN_BACKTRACE_KEY slot instead of regenerating it, and clears the pin. A
+** pending re-raise sets the pin so the original error's trace is preserved; a
+** fresh error leaves it clear so it gets a freshly-captured trace. */
+#define TITAN_TRACE_PINNED "5b3f0f7e-4b1a-4d2e-9a8c-2f6d4c1e7a90"
+
 #define TITAN_LUAINTEGER_NBITS cast_int(sizeof(lua_Integer) * CHAR_BIT)
 
 /* Variadic-parameter backing structs. One per `ctype` so the flexible array
