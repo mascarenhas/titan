@@ -64,6 +64,13 @@ jobs:
       - name: Build the bundled Lua 5.5 source tree
         run: make lua LUA_PLATFORM=${{ matrix.lua_os }}
 
+      # The runtime (titan.o) and every generated module/executable link
+      # ./libbacktrace/.libs/libbacktrace.a (unified stack traces). CI runs
+      # luarocks directly rather than `make test`, so build the tree explicitly,
+      # mirroring `make lua` above.
+      - name: Build the bundled libbacktrace
+        run: make libbacktrace
+
       # Build and install the rock so the `titan` C runtime module (titanlib.c,
       # required by one coder spec via `require 'titan'`) is on the Lua path.
       # `luarocks test` does not build the rock-under-test, only its dependencies.
