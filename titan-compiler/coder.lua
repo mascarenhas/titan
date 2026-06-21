@@ -55,6 +55,20 @@ local function c_float_literal(n)
     return s
 end
 
+-- Emit a standalone C `#line` directive pointing at `node`'s .titan source
+-- location, so DWARF (and any libbacktrace symbolization, error-handling
+-- Phase 0) attributes the *following* generated C to the original .titan file
+-- and line rather than the generated .c. Returned as its own line with a
+-- trailing newline so it never fuses with adjacent code; the `#` may be
+-- indented (reindent_c re-indents it) since leading whitespace before a
+-- directive is legal C. Nodes without a `loc` (synthesized AST) emit nothing.
+local function emitline(node)
+    local loc = node and node.loc
+    if not loc or not loc.line or not loc.filename then return "" end
+    return "#line " .. tostring(loc.line) .. " "
+        .. c_string_literal(loc.filename) .. "\n"
+end
+
 
 local function getslot(typ --[[:table]], dst --[[:string?]], src --[[:string]])
     dst = dst and dst .. " =" or ""
@@ -188,10 +202,21 @@ end
 
 local checkandset
 
-local function codethrow(_, template, params)
+-- `loc` is the .titan source location of the raise; it stamps a fully-resolved
+-- `#line` directly above the luaL_error (error-handling Phase 0) so the native
+-- frame that throws symbolizes to the throw's exact .titan line instead of a
+-- line drifted N rows into the surrounding expanded coercion C. The `#line`
+-- uses resolved values (not $LINE/$FILE placeholders) so it is independent of
+-- whatever render vars the caller's enclosing template happens to define. The
+-- `$LINE`/`$FILE`/etc. placeholders left in $PARAMS are still filled by that
+-- enclosing template (ignore_missing=true keeps them intact here).
+local function codethrow(loc, template, params)
+    local line = loc and emitline({ loc = loc }) or ""
     return render([[
+        $LINEDIR
         luaL_error(L, "$TEMPLATE", $PARAMS);
     ]], {
+        LINEDIR = line,
         TEMPLATE = template,
         PARAMS = table.concat(params, ',')
     }, true)
@@ -220,8 +245,8 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
             FILE = c_string_literal(loc.filename),
             LINE = c_integer_literal(loc.line),
             COL = c_integer_literal(loc.col),
-            THROWFLOAT = codethrow(ctx, "%s:%d:%d: type error, number '%f' has no integer representation", { "$FILE", "$LINE", "$COL", "_v" }),
-            THROWINTEGER = codethrow(ctx, "%s:%d:%d: type error, expected integer but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($EXP))" })
+            THROWFLOAT = codethrow(loc, "%s:%d:%d: type error, number '%f' has no integer representation", { "$FILE", "$LINE", "$COL", "_v" }),
+            THROWINTEGER = codethrow(loc, "%s:%d:%d: type error, expected integer but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($EXP))" })
         })
     elseif typ._tag == "Type.Float" then
         return render([[
@@ -238,7 +263,7 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
             FILE = c_string_literal(loc.filename),
             LINE = c_integer_literal(loc.line),
             COL = c_integer_literal(loc.col),
-            THROW = codethrow(ctx, "%s:%d:%d: type error, expected float but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($EXP))" })
+            THROW = codethrow(loc, "%s:%d:%d: type error, expected float but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($EXP))" })
         })
     elseif typ._tag == "Type.Boolean" then
         return render([[
@@ -311,9 +336,9 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
             EXP = exp,
             VAR = cvar,
             NAME = types.tostring(typ),
-            THROWNIL = codethrow(ctx, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "luaL_tolstring(L, -1, NULL)" }),
-            THROWUD = codethrow(ctx, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "lua_tostring(L, -1)" }),
-            THROWPRIM = codethrow(ctx, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "lua_typename(L, ttype($EXP))" })
+            THROWNIL = codethrow(loc, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "luaL_tolstring(L, -1, NULL)" }),
+            THROWUD = codethrow(loc, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "lua_tostring(L, -1)" }),
+            THROWPRIM = codethrow(loc, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "lua_typename(L, ttype($EXP))" })
         })
     else
         error("invalid type " .. types.tostring(typ))
@@ -332,7 +357,7 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
         FILE = c_string_literal(loc.filename),
         LINE = c_integer_literal(loc.line),
         COL = c_integer_literal(loc.col),
-        THROW = codethrow(ctx, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", "$TAG", "lua_typename(L, ttype($EXP))" })
+        THROW = codethrow(loc, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", "$TAG", "lua_typename(L, ttype($EXP))" })
     })
 end
 
@@ -365,8 +390,8 @@ function checkandset(ctx, typ --[[:table]], dst --[[:string]], src --[[:string]]
             FILE = c_string_literal(loc.filename),
             LINE = c_integer_literal(loc.line),
             COL = c_integer_literal(loc.col),
-            THROWFLOAT = codethrow(ctx, "%s:%d:%d: type error, number '%f' has no integer representation", { "$FILE", "$LINE", "$COL", "_v" }),
-            THROWINT = codethrow(ctx, "%s:%d:%d: type error, expected integer but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($SRC))" })
+            THROWFLOAT = codethrow(loc, "%s:%d:%d: type error, number '%f' has no integer representation", { "$FILE", "$LINE", "$COL", "_v" }),
+            THROWINT = codethrow(loc, "%s:%d:%d: type error, expected integer but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($SRC))" })
         })
     elseif typ._tag == "Type.Float" then
         return render([[
@@ -384,7 +409,7 @@ function checkandset(ctx, typ --[[:table]], dst --[[:string]], src --[[:string]]
             FILE = c_string_literal(loc.filename),
             LINE = c_integer_literal(loc.line),
             COL = c_integer_literal(loc.col),
-            THROW = codethrow(ctx, "%s:%d:%d: type error, expected float but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($SRC))" })
+            THROW = codethrow(loc, "%s:%d:%d: type error, expected float but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($SRC))" })
         })
     elseif typ._tag == "Type.Boolean" then tag = "boolean"
     elseif typ._tag == "Type.Nil" then tag = "nil"
@@ -448,7 +473,7 @@ function checkandset(ctx, typ --[[:table]], dst --[[:string]], src --[[:string]]
         FILE = c_string_literal(loc.filename),
         LINE = c_integer_literal(loc.line),
         COL = c_integer_literal(loc.col),
-        THROW = codethrow(ctx, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", "$TAG", "lua_typename(L, ttype($SRC))" })
+        THROW = codethrow(loc, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", "$TAG", "lua_typename(L, ttype($SRC))" })
     })
 end
 
@@ -916,11 +941,15 @@ local function codeif(ctx, node, idx)
     if idx == #node.thens then -- last condition
         cstats, cexp = codeexp(ctx, node.thens[idx].condition, true)
         cthn = codestat(ctx, node.thens[idx].block)
-        cels = node.elsestat and "else " .. codestat(ctx, node.elsestat):match("^[ \t]*(.*)") or ""
+        -- Put the else body on its own line(s): a statement's code now begins
+        -- with a `#line` directive (error-handling Phase 0), which must start
+        -- a line — gluing it after `else ` on one line would put the `#` off
+        -- column 1 and break compilation. `else\n<body>` is equally valid C.
+        cels = node.elsestat and "else\n" .. codestat(ctx, node.elsestat) or ""
     else
         cstats, cexp = codeexp(ctx, node.thens[idx].condition, true)
         cthn = codestat(ctx, node.thens[idx].block)
-        cels = "else " .. codeif(ctx, node, idx + 1):match("^[ \t]*(.*)")
+        cels = "else\n" .. codeif(ctx, node, idx + 1)
     end
     return render([[
         {
@@ -967,7 +996,7 @@ local function codefor(ctx, node)
         FILE = c_string_literal(node.loc.filename),
         LINE = node.loc.line,
         COL = node.loc.col,
-        STEP0 = codethrow(ctx, "%s:%d:%d: 'for' step is zero",
+        STEP0 = codethrow(node.loc, "%s:%d:%d: 'for' step is zero",
                           { "$FILE", "$LINE", "$COL" }),
     }
     if node.decl._type._tag == "Type.Integer" then
@@ -2208,7 +2237,7 @@ local function localname(ctx, name)
     return name .. "_" .. tostring(idx)
 end
 
-function codestat(ctx, node)
+local function codestat_dispatch(ctx, node)
     local tag = node._tag
     if tag == "Ast.StatDecl" then
         local code = {}
@@ -2324,6 +2353,15 @@ function codestat(ctx, node)
     else
         error("invalid node tag " .. tag)
     end
+end
+
+-- Prepend a `#line` directive (error-handling Phase 0) so each statement's
+-- generated C attributes back to its .titan source line, then dispatch.
+-- The directive is a standalone leading line; codestat_dispatch never splices
+-- between multiply-referenced operand slots, so this cannot misattribute or
+-- break an un-hoisted operand.
+function codestat(ctx, node)
+    return emitline(node) .. codestat_dispatch(ctx, node)
 end
 
 -- All the code generation functions for EXPRESSIONS return
@@ -2869,7 +2907,7 @@ local function generate_binop_idiv_int(exp, ctx)
         Q = qname,
         Q_DECL = qdecl,
         LINE = c_integer_literal(exp.loc.line),
-        THROW_DIV0 = codethrow(ctx, "error at line %d, divide by zero", { "$LINE" })
+        THROW_DIV0 = codethrow(exp.loc, "error at line %d, divide by zero", { "$LINE" })
     })
     return cstats, qname
 end
@@ -2935,7 +2973,7 @@ local function generate_binop_mod_int(exp, ctx)
         R = rname,
         R_DECL = rdecl,
         LINE = c_integer_literal(exp.loc.line),
-        THROW_MOD0 = codethrow(ctx, "error at line %d, %% by zero", { "$LINE" })
+        THROW_MOD0 = codethrow(exp.loc, "error at line %d, %% by zero", { "$LINE" })
     })
     return cstats, rname
 end
@@ -3455,7 +3493,7 @@ end
 --    controlling conditinal execution
 -- 'target' is not nil if expression is rvalue for a 'Ast.VarName' lvalue,
 --    in this case it will be the '_decl' of the lvalue
-function codeexp(ctx, node, iscondition, target)
+local function codeexp_dispatch(ctx, node, iscondition, target)
     local tag = node._tag
     if tag == "Ast.VarDot" and node.exp._type._tag == "Type.ForeignModule" then
         local fstats, fexp = codeforeignvar(ctx, node)
@@ -3621,7 +3659,7 @@ function codeexp(ctx, node, iscondition, target)
             TMPNAME2 = tmpname2,
             TMPNAME3 = tmpname3,
             LINE = c_integer_literal(node.loc.line),
-            THROW_WRONG_INT = codethrow(ctx, "type error at line %d, number '%f' has no integer representation", { "$LINE", "$TMPNAME1" })
+            THROW_WRONG_INT = codethrow(node.loc, "type error at line %d, number '%f' has no integer representation", { "$LINE", "$TMPNAME1" })
         })
         return cfloor, tmpname3
     elseif tag == "Ast.ExpCast" and node._type._tag == "Type.String"
@@ -3748,7 +3786,7 @@ function codeexp(ctx, node, iscondition, target)
             COL = node.loc.col,
             TYPENAME = c_string_literal(types.tostring(node._type)),
             GETSLOT = getslot(node._type, tmpname, "&" .. srcname),
-            THROW_WRONG_CAST = codethrow(ctx, "%s:%d:%d: type error, expected %s but found nil", { "$FILE", "$LINE", "$COL", "$TYPENAME" })
+            THROW_WRONG_CAST = codethrow(node.loc, "%s:%d:%d: type error, expected %s but found nil", { "$FILE", "$LINE", "$COL", "$TYPENAME" })
         }), tmpname
     elseif tag == "Ast.ExpCast" and node._type._tag == "Type.Pointer" then
         local cstats, cexp = codeexp(ctx, node.exp)
@@ -3828,6 +3866,17 @@ function codeexp(ctx, node, iscondition, target)
     else
         error("invalid node tag " .. tag)
     end
+end
+
+-- codeexp's `stats` half is frequently spliced *mid-line* into a larger
+-- template (e.g. an expression-position slot), so a blanket `#line` prepend
+-- here would land a `#` off column 1 and break compilation. Instead, error
+-- attribution within an expression's expanded C is pinned where it matters —
+-- directly above each luaL_error in codethrow — so we keep codeexp a plain
+-- dispatch passthrough (the function-entry/statement/throw stamps cover the
+-- rest, error-handling Phase 0).
+function codeexp(ctx, node, iscondition, target)
+    return codeexp_dispatch(ctx, node, iscondition, target)
 end
 
 function codeforeignexp(ctx, node)
@@ -4015,13 +4064,18 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
         L->errfunc = savestack(L, L->top.p - 1);
         CClosure *_fn = clCvalue(s2v(func));
         Udata *_mod = uvalue(&_fn->upvalue[0]);
-        $BODY
+        $ENTRYLINE$BODY
     }]], {
         LUANAME = lua_name,
         ARGCHECK = argcheck,
         NARGSDECL = nargsdecl,
         ERRORSLOT = #params == 0 and "lua_pushnil(L);" or "",
         NAME = c_string_literal(titan_name),
+        -- Stamp the Lua-entry wrapper to the function definition's .titan loc
+        -- (error-handling Phase 0) so its native frame, and any arg-coercion
+        -- throw within it, symbolizes to the .titan source rather than drifting
+        -- through the wrapper's generated C.
+        ENTRYLINE = emitline({ loc = loc }),
         BODY = table.concat(stats, "\n"),
     })
 end
@@ -4116,7 +4170,11 @@ local function codefuncdec(tlcontext, node)
         local outtype = node._type.rettypes[i]
         table.insert(cparams, ctype(outtype) .. " *" .. "_outparam_" .. i)
     end
-    local body = codestat(ctx, node.block)
+    -- Attribute the first native frame to the function definition: a `#line`
+    -- at function entry (after parameter setup, before the body) so a
+    -- backtrace through the entry shows the .titan definition line, not the
+    -- generated .c (error-handling Phase 0).
+    local body = emitline(node) .. codestat(ctx, node.block)
     local nslots = ctx.nslots
     -- A value-call (codevaluecall) can relocate the Lua stack, which would
     -- dangle `_base`; such a function saves `_base` as an offset so it can be

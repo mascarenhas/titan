@@ -6,6 +6,13 @@
 -- assert on the merged `titan.backtrace()` string: the native (libbacktrace)
 -- frames symbolized and merged with the Lua-side luaL_traceback, plus the
 -- registry pin-flag discipline (preserve vs. regenerate).
+--
+-- Phase 1 (#line emission) added: the native Titan frames now symbolize to the
+-- original .titan source file and line (carried in the .so's DWARF via the
+-- `#line` directives the coder emits at function entry, statement starts, and
+-- every raise site), NOT to the generated .c. The merge filter (Phase 0)
+-- already classifies .titan filenames as "show", so they appear automatically
+-- as `<file>.titan:<line>: in <symbol>`.
 local checker = require 'titan-compiler.checker'
 local h = require 'spec.support.helpers'
 
@@ -21,7 +28,11 @@ end
 -- with `test` and `titan` available; returns the script's stdout.
 local function compile_and_run(titan_code, lua_test)
     h.reset()
-    local ast, perr = parse(titan_code)
+    -- Parse under the "test.titan" chunkname (not the helper's default "(spec)")
+    -- so the AST locs — and thus the `#line` directives the coder emits — carry
+    -- the .titan path, matching what `titanc` produces and what the Phase 1
+    -- assertions below check for in the symbolized native frames.
+    local ast, perr = parse(titan_code, "test.titan")
     assert.truthy(ast, perr)
     local _, errs = checker.check("test", ast, titan_code, "test.titan")
     assert.equal(0, #errs, table.concat(errs, "\n"))
@@ -46,7 +57,7 @@ describe("libbacktrace unified stack trace (error-handling Phase 0)", function()
     it("merges symbolized native frames with the Lua traceback", function()
         -- A Titan error raised two native frames deep. The merged trace must
         -- carry both the Lua-side traceback and the symbolized native frames
-        -- (shown by C symbol name pre-#line: <module>_<fn>_titan).
+        -- (shown by C symbol name <module>_<fn>_titan).
         local out = compile_and_run([[
             function inner(): integer
                 local x: value = {}
@@ -69,6 +80,43 @@ describe("libbacktrace unified stack trace (error-handling Phase 0)", function()
             -- interpreter/runtime/libc frames filtered out of the native part
             assert(not bt:find("lua-5.5.0/src/", 1, true), "leaked interp frame")
             assert(not bt:find("titan-runtime/", 1, true), "leaked runtime frame")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("attributes native frames to the .titan source via #line (Phase 1)", function()
+        -- With `#line`, the native frames symbolize to the ORIGINAL .titan file
+        -- and line carried in the .so's DWARF, NOT the generated .c. The raise
+        -- site (the bad `return x` coercion) is stamped by codethrow with the
+        -- exact statement line, so the inner frame reports its own line.
+        local out = compile_and_run([[
+            function inner(): integer
+                local x: value = {}
+                return x
+            end
+            function outer(): integer
+                return inner()
+            end
+        ]], [==[
+            local titan = require 'titan'
+            assert(not pcall(test.outer))
+            local bt = titan.backtrace()
+            -- Native Titan frames now carry the .titan path + a line number,
+            -- e.g. "test.titan:3: in test_inner_titan".
+            assert(bt:find("test%.titan:%d+: in test_inner_titan"),
+                   "inner native frame not attributed to test.titan:<line>\n" .. bt)
+            assert(bt:find("test%.titan:%d+: in test_outer_titan"),
+                   "outer native frame not attributed to test.titan:<line>\n" .. bt)
+            -- The whole point of #line: the generated .c must NOT appear as the
+            -- source of any native Titan frame.
+            assert(not bt:find("test%.c:%d+: in test_"),
+                   "native frame still attributed to generated .c\n" .. bt)
+            -- The error is the bad coercion in `inner`'s body; that statement is
+            -- the third line of the module, so the inner frame's line must land
+            -- there (codethrow stamps the exact raise line).
+            assert(bt:find("test%.titan:3: in test_inner_titan"),
+                   "inner frame line is not the raise statement (3)\n" .. bt)
             print("OK")
         ]==])
         assert.match("OK", out)
