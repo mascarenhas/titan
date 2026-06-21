@@ -481,23 +481,55 @@ the source-vs-`.so` decision that selects dynamic linking from a compiled
 
 `errorhandler` (`titan-runtime/titan.c`) is the message handler every
 wrapper installs in `L->errfunc`. When an error is raised during the
-call, it captures up to 255 C frames with
-`backtrace`/`backtrace_symbols` (`<execinfo.h>`, a glibc/BSD
-extension), builds the concatenation
+call, it builds **one unified, intermingled, innermost→outer stack
+trace** mixing pure-Lua and Titan frames in call order, stores it in the
+registry under `TITAN_BACKTRACE_KEY`, then restores the stack top and
+returns the **original** error object unchanged — a Lua-side `pcall` sees
+exactly the error Titan raised, and the backtrace is retrieved out of
+band.
 
-```
-tostring(err) .. "\n" .. luaL_traceback(...) .. "C traceback:\n" .. <newline-joined C frames>
-```
+The trace is built from **two stacks walked innermost→outer in
+lockstep**:
 
-stores it in the registry under `TITAN_BACKTRACE_KEY`, then restores the
-stack top and returns the **original** error object unchanged — a
-Lua-side `pcall` sees exactly the error Titan raised, and the backtrace
-is retrieved out of band. The retrieval side is the separate, optional
-`titan` Lua module (`titan-runtime/titanlib.c`, built by the rockspec):
-`titan.backtrace()` rawgets that registry key. The spec asserts that
-after a failed `pcall` of a Titan function, `titan.backtrace()` contains
-the pcall error message. See also the
-[language error-handling chapter](../language/error-handling.md).
+* The **CallInfo chain** (via `lua_getstack`+`lua_getinfo`, exactly as
+  `luaL_traceback` does) is the backbone — it enumerates every Lua
+  activation, so a single native `luaV_execute` correctly expands into
+  the *multiple* Lua frames it ran (the point of the merge: a
+  `Lua→Titan→Lua→Titan→…` chain yields several pure-Lua frames per
+  `luaV_execute`). Lua closures become `source:line: in <name>`; genuine
+  Lua C-functions (`pcall`, `string.format`, …) become `[C]: in <name>`.
+* The **native libbacktrace stack** (`backtrace_full`, symbolized to
+  `#line`-attributed `.titan` file/line via DWARF; on macOS this needs
+  the `dsymutil`-produced `.dSYM` bundle) is used **only** to recover the
+  **Titan native frames** — those whose DWARF filename ends in `.titan`,
+  plus the **entry-wrapper boundaries** (recognized by the C symbol
+  substring `titanentry`, which `coder.lua` stamps into every Lua
+  entry-wrapper name). These native runs are **spliced** at the
+  entry-wrapper boundaries. Everything else on the native side is
+  dropped: interpreter and standard-library frames (matched against a
+  maintained list of Lua 5.5 source filenames — dropping the *library*
+  files specifically prevents double-counting a Lua C-function that
+  already appears once as a CallInfo `[C]` frame), `titan-runtime/*`, and
+  unsymbolized frames.
+
+Alignment is greedy: at each C-level CallInfo the next sentinel-
+terminated native Titan run is drained (a Titan entry wrapper appears as
+a C function and is represented by its rich native frames, so no extra
+`[C]` line is emitted for it). In the strictly-alternating Lua↔Titan
+case this is exact; in the rarer `Titan→LuaC(e.g. pcall)→Titan` case an
+inner Titan native run may splice one C-frame too early, but **no frame
+is ever dropped** (every Lua frame and every Titan frame appears) and the
+trace remains a single innermost→outer section. When libbacktrace is
+unavailable (`TITAN_NO_LIBBACKTRACE`, e.g. musl/Alpine) it falls back to
+a two-section `luaL_traceback` + `execinfo` C traceback.
+
+The retrieval side is the separate, optional `titan` Lua module
+(`titan-runtime/titanlib.c`, built by the rockspec): `titan.backtrace()`
+rawgets that registry key. Regeneration follows the **pin discipline**
+(`TITAN_TRACE_PINNED`): a pinned slot (a pending re-raise) is preserved
+verbatim and the pin cleared; an unpinned (fresh) error regenerates. See
+also the [language error-handling
+chapter](../language/error-handling.md).
 
 ## The standalone entrypoint
 
@@ -518,13 +550,25 @@ objects, `titan-runtime/titan.o` and `liblua.a`:
 * **`msghandler`**, taken from `luac` (tostring-or-`__tostring` plus
   `luaL_traceback`), is the handler installed for the `lua_pcall` of
   `pmain`. It is *not* the Titan `errorhandler` — that one is still
-  installed per-call by each wrapper; `msghandler` only formats whatever
-  escapes to the top level.
-* **Exit-code protocol.** An error reaching the top prints
-  `<progname>: <message>` to stderr and exits with `EXIT_FAILURE`;
+  installed per-call by each wrapper. Crucially, a Lua message handler
+  fires **only once, at the innermost raise**: when an uncaught error
+  comes out of Titan `main`, the deepest `L->errfunc` is the Titan
+  `errorhandler`, so it (not `msghandler`) runs, capturing the unified
+  trace into `TITAN_BACKTRACE_KEY` on the intact stack. `msghandler` is
+  therefore only the **fallback** for an error that never crossed a Titan
+  wrapper (registry slot absent).
+* **Top-level reporting (plan A.6).** On `lua_pcall != 0`, `main` reads
+  `registry[TITAN_BACKTRACE_KEY]`: if it is a string (the usual case for
+  a Titan error), that **unified trace — message plus intermingled
+  Lua+Titan frames — is printed to stderr**; otherwise it falls back to
+  `msghandler`'s plain `luaL_traceback`. Either way the process exits
+  non-zero.
+* **Exit-code protocol.** An error reaching the top prints the report
+  (`<progname>: <report>`) to stderr and exits with `EXIT_FAILURE`;
   otherwise the process exit status is `lua_tointeger(L, -1)` — the
   integer returned by Titan `main`. The spec verifies statuses 0
-  and 42.
+  and 42, and that an uncaught deep `Lua↔Titan` error prints a trace
+  carrying both Lua and Titan frames.
 
 ## Safety summary
 

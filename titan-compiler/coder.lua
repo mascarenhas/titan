@@ -121,6 +121,14 @@ local function mangle_qn(qualname)
     return qualname:gsub("[%-.]", "_")
 end
 
+-- TITAN_ENTRY_TAG marks every generated Lua entry-wrapper C symbol with a name
+-- Titan owns and no Lua/libc symbol shares. The unified backtrace merge
+-- (titan-runtime/titan.c) keys on this substring to locate Titan native-stack
+-- boundaries — each entry wrapper is where one Lua->Titan call splices a run of
+-- native Titan frames into the CallInfo-driven Lua trace. The `#line` from
+-- Phase 1 still attributes these wrappers to the .titan source.
+local TITAN_ENTRY_TAG = "titanentry"
+
 local function fname_prefix(typ)
     return mangle_qn(typ.fqtn) .. "_" .. typ.name
 end
@@ -130,7 +138,7 @@ local function static_name(typ)
 end
 
 local function static_luaname(typ)
-    return fname_prefix(typ) .. "_luastatic"
+    return fname_prefix(typ) .. "_" .. TITAN_ENTRY_TAG .. "_luastatic"
 end
 
 local function method_name(typ)
@@ -138,7 +146,7 @@ local function method_name(typ)
 end
 
 local function method_luaname(typ)
-    return fname_prefix(typ) .. "_luamethod"
+    return fname_prefix(typ) .. "_" .. TITAN_ENTRY_TAG .. "_luamethod"
 end
 
 -- Bound-method trampolines: the native one (`_boundmethod`) matches the
@@ -151,7 +159,7 @@ local function bound_method_name(typ)
 end
 
 local function bound_method_luaname(typ)
-    return fname_prefix(typ) .. "_boundlua"
+    return fname_prefix(typ) .. "_" .. TITAN_ENTRY_TAG .. "_boundlua"
 end
 
 local function modprefix(modname)
@@ -163,7 +171,7 @@ local function func_name(modname, name)
 end
 
 local function func_luaname(modname, name)
-    return modprefix(modname) .. name .. "_lua"
+    return modprefix(modname) .. name .. "_" .. TITAN_ENTRY_TAG .. "_lua"
 end
 
 -- get name of the variable holding the metatable for this type.
@@ -4350,7 +4358,7 @@ local function lambda_register(tlcontext, node)
         local n = tlcontext.lambda_count
         tlcontext.lambda_count = n + 1
         node._lambda_native = tlcontext.prefix .. "lambda_" .. n
-        node._lambda_lua = tlcontext.prefix .. "lambda_" .. n .. "_lua"
+        node._lambda_lua = tlcontext.prefix .. "lambda_" .. n .. "_" .. TITAN_ENTRY_TAG .. "_lua"
         table.insert(tlcontext.lambdas, node)
     end
 end

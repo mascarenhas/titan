@@ -142,10 +142,14 @@ checked AST into an object file:
 4. The object is compiled with `driver.CC` and `driver.CFLAGS`:
 
    ```sh
-   cc --std=c99 -O2 -Wall -fPIC -c foo/bar.c -I titan-runtime -I lua-5.5.0/src/ -o foo/bar.o
+   cc --std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls -c foo/bar.c \
+      -I titan-runtime -I lua-5.5.0/src/ -I libbacktrace -o foo/bar.o
    ```
 
-   Note the first include directory is the string literal
+   `-g` emits the DWARF that carries the `#line` file/line a unified
+   trace needs; `-fno-optimize-sibling-calls` keeps tail frames on the
+   stack so libbacktrace can unwind them; `-I libbacktrace` finds
+   `backtrace.h`. Note the first include directory is the string literal
    `"titan-runtime"`, not the configurable `driver.TITAN_RUNTIME_PATH`
    used everywhere else — overriding `TITAN_RUNTIME_PATH` does not move
    the header search for module compilation.
@@ -168,21 +172,28 @@ wrapper `titanc` uses: it skips modules whose cache entry says
 next to the source like the `.c`/`.o` — from a list of object files:
 
 ```sh
-cc --std=c99 -O2 -Wall -fPIC -shared -o foo/bar.so \
-   foo/bar.o dep.o ... titan-runtime/titan.o lua-5.5.0/src//liblua.a -ldl -lm [-lSDL2 ...]
+cc --std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls -shared -o foo/bar.so \
+   foo/bar.o dep.o ... titan-runtime/titan.o libbacktrace/.libs/libbacktrace.a \
+   lua-5.5.0/src//liblua.a -ldl -lm [-lSDL2 ...]
 ```
 
 The link set is: every object in `libnames` (the module itself plus its
 statically-linked Titan dependencies), then `titan-runtime/titan.o`
 (the dynamic loader and error handler every module needs), then
-`liblua.a` from `driver.LUA_SOURCE_PATH` (the doubled slash is a
-cosmetic artifact of `LUA_SOURCE_PATH` ending in `/`), then `-ldl -lm`,
-then one `-l<lib>` per entry of the comma-separated `link` string
-(`titanc -l`). On Darwin (`driver.UNAME`, captured by shelling out to
-`uname` when `driver.lua` is loaded) the shared flag becomes
-`-shared -undefined dynamic_lookup` — the standard macOS idiom for Lua
-C modules, letting symbols still undefined at link time resolve when
-the module is loaded into the host process.
+`libbacktrace/.libs/libbacktrace.a` (the native unwinder/symbolizer,
+**before** `liblua.a`), then `liblua.a` from `driver.LUA_SOURCE_PATH`
+(the doubled slash is a cosmetic artifact of `LUA_SOURCE_PATH` ending in
+`/`), then `-ldl -lm`, then one `-l<lib>` per entry of the
+comma-separated `link` string (`titanc -l`). On Darwin
+(`driver.IS_DARWIN`, cached from a `uname` shell-out when `driver.lua`
+is loaded) the shared flag becomes `-shared -undefined dynamic_lookup` —
+the standard macOS idiom for Lua C modules — and, **after the link**,
+`driver.compile_library` runs `dsymutil <output>` to produce the
+companion `.dSYM` bundle libbacktrace needs to symbolize Mach-O PCs to
+`.titan` file/line (the Mach-O linker does not embed DWARF in the
+binary). `compile_program` does the same for the executable. On Linux
+`dsymutil` is **not** invoked (DWARF is embedded; `dsymutil` may be
+absent).
 
 ## Linking a standalone program: `driver.compile_program`
 
@@ -230,11 +241,16 @@ error alerts):
   object (via `__tostring` if needed) and append `luaL_traceback`. It
   fires only for errors raised while it is the active handler, though:
   an error raised *inside* a Titan function is intercepted by the
-  per-function Titan error handler, which replaced `L->errfunc` for the
-  duration of the native call and returns the error unchanged — so a
-  Titan run-time error reaches `fatal` *without* a Lua traceback (the
-  enriched backtrace went to the registry instead; see
-  [the runtime library](#titanc-the-dynamic-loader)).
+  per-function Titan `errorhandler`, which replaced `L->errfunc` for the
+  duration of the native call (a Lua message handler fires only once, at
+  the innermost raise) and returns the error unchanged — so `msghandler`
+  does **not** run for a Titan run-time error. Instead, on
+  `lua_pcall != 0`, `main` reads the unified trace `errorhandler` left in
+  `registry[TITAN_BACKTRACE_KEY]` and prints **that** (message +
+  intermingled Lua+Titan frames) to stderr, falling back to
+  `msghandler`'s plain traceback only when no Titan trace was captured.
+  Either way the process exits non-zero (plan A.6); see
+  [the runtime library](#titanc-the-dynamic-loader).
 
 Mechanically, then, a standalone Titan program is an embedded Lua
 interpreter whose only preloaded module is the compiled main module;
@@ -412,15 +428,22 @@ It also declares the three C functions exported by `titan.c`:
   ([static vs dynamic wiring](codegen-overview.md)).
 * **`errorhandler(L)`** — the message handler that every generated Lua
   entry wrapper installs in `L->errfunc` around the native call
-  ([Lua interop internals](lua-interop-internals.md)). It captures up
-  to 255 C frames with `backtrace`/`backtrace_symbols` (`execinfo.h`),
-  concatenates *stringified error* + `"\n"` + Lua traceback +
-  `"C traceback:\n"` + the symbolized C frames, and stores the result
-  in the registry under `TITAN_BACKTRACE_KEY`. It then restores the
-  stack top and returns 1 — so the **original error value** reaches
-  `pcall` unchanged, and the enriched backtrace is fetched separately.
-  (Its push-everything-first ordering exists because a Lua 5.5
-  `luaL_Buffer` must stay at the stack top while in use.)
+  ([Lua interop internals](lua-interop-internals.md)). It builds **one
+  unified, intermingled trace** (innermost→outer): the CallInfo chain
+  supplies every Lua frame, and libbacktrace (`backtrace_full`,
+  DWARF/`#line`-symbolized to `.titan` file/line) supplies the Titan
+  native frames, spliced at the entry-wrapper boundaries (identified by
+  the `titanentry` symbol substring). Interpreter, standard-library,
+  `titan-runtime` and unsymbolized native frames are filtered out. The
+  result — *stringified error* + `"\n"` + the merged
+  `stack traceback:` — is stored in the registry under
+  `TITAN_BACKTRACE_KEY` (subject to the `TITAN_TRACE_PINNED` pin
+  discipline). It then restores the stack top and returns 1 — so the
+  **original error value** reaches `pcall` unchanged, and the enriched
+  backtrace is fetched separately. (Its push-everything-first ordering
+  exists because a Lua 5.5 `luaL_Buffer` must stay at the stack top while
+  in use.) Without libbacktrace (`TITAN_NO_LIBBACKTRACE`) it falls back
+  to a two-section `luaL_traceback` + `execinfo` C traceback.
 
 ### `titanlib.c`: the `titan` Lua module
 
@@ -433,7 +456,7 @@ modules). It exposes exactly one function:
 local titan = require "titan"
 local ok, err = pcall(mod.f)        -- a Titan function that raises
 if not ok then
-    print(titan.backtrace())        -- error + Lua traceback + C traceback
+    print(titan.backtrace())        -- error + unified Lua+Titan traceback
 end
 ```
 

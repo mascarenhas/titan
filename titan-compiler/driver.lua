@@ -217,6 +217,12 @@ static void fatal(const char* message) {
     exit(EXIT_FAILURE);
 }
 
+/* The registry key under which the Titan runtime's errorhandler stores the
+** unified Lua+Titan stack trace (must match titan-runtime/titan.h's
+** TITAN_BACKTRACE_KEY). The standalone msghandler below prefers this rich,
+** intermingled trace over a plain luaL_traceback. */
+#define TITAN_BACKTRACE_KEY "57d80578-2534-4856-ad3b-bde8cba4c445"
+
 /* main script launcher, based on srlua */
 static int pmain(lua_State *L) {
     int argc = lua_tointeger(L, 1);
@@ -236,20 +242,23 @@ static int pmain(lua_State *L) {
     return 1;
 }
 
-/* error handler, from luac */
+/* Top-level message handler (mirrors lua.c's msghandler). It is a fallback for
+** the rare case an uncaught error reaches the protected pmain WITHOUT having
+** passed through a Titan entry wrapper's errorhandler (so no unified trace was
+** captured): a Lua message handler fires only once, at the innermost raise, so
+** when the deepest errfunc is Titan's errorhandler THIS handler never runs and
+** the unified trace is read from the registry directly in main() below.
+** Handles non-string error objects via __tostring or a typed placeholder. */
 static int msghandler (lua_State *L) {
-    /* is error object not a string? */
     const char *msg = lua_tostring(L, 1);
     if (msg == NULL) {
-        /* does it have a metamethod that produces a string */
         if (luaL_callmeta(L, 1, "__tostring") && lua_type(L, -1) == LUA_TSTRING) {
-            /* then that is the message */
-            return 1;
+            msg = lua_tostring(L, -1);
         } else {
-            msg = lua_pushfstring(L, "(error object is a %s value)", luaL_typename(L, 1));
+            msg = lua_pushfstring(L, "(error object is a %s value)",
+                                  luaL_typename(L, 1));
         }
     }
-    /* append a standard traceback */
     luaL_traceback(L, L, msg, 1);
     return 1;
 }
@@ -277,8 +286,24 @@ int main(int argc, char** argv) {
     lua_pushcfunction(L, pmain);
     lua_pushinteger(L, argc);
     lua_pushlightuserdata(L, argv);
+    /* Protected mode with msghandler installed: an uncaught error from the Titan
+    ** main fires the Titan errorhandler (deeper than msghandler) on the intact
+    ** stack, which captures the unified Lua+Titan trace into
+    ** registry[TITAN_BACKTRACE_KEY]. A Lua message handler fires only once, at
+    ** the innermost raise, so msghandler does NOT run in that case; we therefore
+    ** read the unified trace from the registry here and print it. The msghandler
+    ** result (a plain luaL_traceback) is the fallback when no Titan errorhandler
+    ** captured a trace (registry slot absent). Either way: print to stderr and
+    ** exit non-zero. On success, return main's integer. */
     if (lua_pcall(L, 2, 1, -4) != 0) {
-        fatal(lua_tostring(L, -1));
+        const char *report;
+        if (lua_getfield(L, LUA_REGISTRYINDEX, TITAN_BACKTRACE_KEY) == LUA_TSTRING) {
+            report = lua_tostring(L, -1);  /* unified trace: message + frames */
+        } else {
+            lua_pop(L, 1);                 /* nil/non-string slot */
+            report = lua_tostring(L, -1);  /* msghandler's plain traceback */
+        }
+        fatal(report);
     }
     ret = lua_tointeger(L, -1);
     lua_close(L);

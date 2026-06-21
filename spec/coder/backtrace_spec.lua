@@ -164,6 +164,58 @@ describe("libbacktrace unified stack trace (error-handling Phase 0)", function()
         assert.match("OK", out)
     end)
 
+    it("intermingles ALL Lua and Titan frames of a Lua<->Titan chain", function()
+        -- A Lua->Titan->Lua->Titan->...->error chain: the Lua driver calls a
+        -- Titan function that invokes a Lua callback that calls back into Titan
+        -- that invokes another Lua callback that calls the erroring Titan
+        -- function. A single luaV_execute runs several pure-Lua activations, so
+        -- the unified trace must show EVERY one of those pure-Lua frames AND
+        -- every Titan native frame, in one innermost->outer section.
+        local out = compile_and_run([[
+            function apply(f: integer -> integer, n: integer): integer
+                return f(n)
+            end
+            function boom(n: integer): integer
+                local x: value = {}
+                return x
+            end
+        ]], [==[
+            local titan = require 'titan'
+            local function lua_inner(n)         -- pure-Lua frame #2
+                return test.apply(test.boom, n) -- Titan -> erroring Titan
+            end
+            local function lua_outer(n)         -- pure-Lua frame #1
+                return test.apply(lua_inner, n) -- Titan -> Lua callback
+            end
+            local ok = pcall(test.apply, lua_outer, 1) -- Titan -> Lua callback
+            assert(not ok)
+            local bt = titan.backtrace()
+            -- single section, innermost->outer
+            assert(bt:find("stack traceback:", 1, true), "missing trace header\n"..bt)
+            assert(not bt:find("C traceback:", 1, true), "regressed to two sections\n"..bt)
+            -- EVERY Titan native frame present (apply runs 3x; boom once)
+            assert(bt:find("test_boom_titan", 1, true), "missing boom native\n"..bt)
+            -- apply is entered three times along the chain; all three native runs
+            -- survive (no dropped Titan frame). Count the native function lines
+            -- specifically: "test_apply_titan\n" (NOT the entry-wrapper symbol
+            -- "test_apply_titanentry_lua", which shares the prefix).
+            local _, napply = bt:gsub("in test_apply_titan\n", "")
+            assert(napply == 3, "expected 3 apply native frames, got "..napply.."\n"..bt)
+            -- EVERY intermediate pure-Lua frame present. The two Lua callbacks are
+            -- invoked as values, so they carry no call-site name; they appear by
+            -- source line as `function <script:defline>` activations.
+            local _, nfn = bt:gsub("in function <", "")
+            assert(nfn >= 2, "expected >=2 pure-Lua callback frames, got "..nfn.."\n"..bt)
+            -- the main chunk appears (the Lua side of the boundary)
+            assert(bt:find("in main chunk", 1, true), "missing main chunk\n"..bt)
+            -- interpreter/runtime frames still filtered from the native side
+            assert(not bt:find("lua%-5%.5%.0/src/"), "leaked interp frame\n"..bt)
+            assert(not bt:find("titan%-runtime/"), "leaked runtime frame\n"..bt)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
     it("an unpinned fresh error always regenerates (no last-trace stickiness)", function()
         -- Without a pin, every error overwrites the slot: a second error after
         -- a handled first one must reflect the second, not stay on the first.
@@ -187,5 +239,74 @@ describe("libbacktrace unified stack trace (error-handling Phase 0)", function()
             print("OK")
         ]==])
         assert.match("OK", out)
+    end)
+end)
+
+-- Standalone-executable top-level handler (plan A.6). A module that defines
+-- `main(args:{string}):integer` is linked into an executable whose C bootstrap
+-- runs the Titan main in protected mode with `errorhandler` installed; an
+-- uncaught error must print the message + the unified Lua+Titan trace to stderr
+-- and exit non-zero, mirroring lua.c's msghandler/report.
+describe("standalone main top-level error handler (error-handling A.6)", function()
+    setup(function () os.remove("titan-runtime/titan.o") end)
+    after_each(function()
+        os.execute("rm -rf *.o *.so *.dSYM test test__entrypoint.c")
+        if not h.verbose then os.execute("rm -f *.c") end
+    end)
+
+    -- Build `titan_code` (which must define main) as a standalone "test", run it,
+    -- and return (exit_status, combined_stdout_stderr).
+    local function build_and_run_app(titan_code)
+        h.reset()
+        local ast, perr = parse(titan_code, "test.titan")
+        assert.truthy(ast, perr)
+        local _, errs = checker.check("test", ast, titan_code, "test.titan")
+        assert.equal(0, #errs, table.concat(errs, "\n"))
+        local ok, err = h.compile_app("test", ast)
+        assert.truthy(ok, err)
+        -- run capturing both streams; `; echo "EXIT:$?"` carries the status out
+        local f = assert(io.popen("./test 2>&1; echo \"EXIT:$?\""))
+        local out = f:read("*a")
+        f:close()
+        local status = tonumber(out:match("EXIT:(%d+)%s*$"))
+        return status, out
+    end
+
+    it("prints message + unified trace to stderr and exits non-zero", function()
+        -- main -> mid (Titan) -> deep (Titan) -> uncaught error. The bootstrap
+        -- runs main under lua_pcall with errorhandler installed; the unified
+        -- trace captured on the intact stack must reach stderr, carrying BOTH
+        -- the Lua bootstrap frame(s) and the Titan native frames, and the
+        -- process must exit non-zero.
+        local status, out = build_and_run_app([[
+            function deep(): integer
+                local x: value = {}
+                return x
+            end
+            function mid(): integer
+                return deep()
+            end
+            function main(args: {string}): integer
+                return mid()
+            end
+        ]])
+        assert.truthy(status and status ~= 0,
+                      "expected non-zero exit, got "..tostring(status).."\n"..out)
+        -- single unified trace section reached stderr
+        assert.truthy(out:find("stack traceback:", 1, true),
+                      "no unified trace on stderr\n"..out)
+        assert.falsy(out:find("C traceback:", 1, true))
+        -- Titan native frames present (deep is the error site)
+        assert.truthy(out:find("test_deep_titan", 1, true),
+                      "missing Titan deep frame\n"..out)
+        assert.truthy(out:find("test_mid_titan", 1, true),
+                      "missing Titan mid frame\n"..out)
+        -- and a Lua-level frame: the bootstrap require-chunk that called main
+        assert.truthy(out:find("in main chunk", 1, true)
+                      or out:find("in function") or out:find(":%d+: in"),
+                      "missing Lua-side frame\n"..out)
+        -- the error message itself is part of the printed report
+        assert.truthy(out:find("type error", 1, true) or out:find("expected", 1, true),
+                      "missing error message\n"..out)
     end)
 end)

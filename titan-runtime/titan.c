@@ -44,71 +44,225 @@ static const char *titan_basename(const char *path) {
     return slash ? slash + 1 : path;
 }
 
-/* Classify a native frame's DWARF source filename:
-**   0 = show it (a user/Titan .titan or .c file),
-**   1 = a lua-5.5.0 interpreter source frame (collapse to a single [Lua]),
-**   2 = a titan-runtime frame (hide), or an unsymbolized frame (drop). */
-static int titan_frame_class(const char *filename) {
-    if (filename == NULL) return 2;             /* unsymbolized libc/etc.: drop */
-    if (strstr(filename, "lua-5.5.0/src/")) return 1;
-    if (strstr(filename, "titan-runtime/")) return 2;
+/* TITAN_ENTRY_TAG must match coder.lua's: every generated Lua entry-wrapper C
+** symbol carries this substring, marking a Lua->Titan boundary in the native
+** stack. (The native functions a wrapper invokes are *_titan / *_titanstatic /
+** *_titanmethod / *_boundmethod and do NOT contain it.) */
+#define TITAN_ENTRY_TAG "titanentry"
+
+/* The maintained list of Lua 5.5 source filenames (core + libraries). A native
+** frame whose DWARF filename ends in one of these is a Lua interpreter or
+** standard-library frame: it is DROPPED from the native side, because the Lua
+** activations it ran are already enumerated, with names, from the CallInfo
+** chain (a pure-Lua frame as `src:line:`, a Lua C-function as `[C]:`). Dropping
+** the *library* files specifically prevents double-counting a Lua C-function
+** that would otherwise appear both here and as its CallInfo `[C]` frame. */
+static const char *const titan_lua_sources[] = {
+    /* core */
+    "lvm.c", "ldo.c", "lapi.c", "lgc.c", "ldebug.c", "lstate.c", "lfunc.c",
+    "ltable.c", "lobject.c", "lstring.c", "ltm.c", "lmem.c", "lzio.c",
+    "lctype.c", "lopcodes.c", "lcode.c", "lparser.c", "llex.c", "lundump.c",
+    "ldump.c",
+    /* libraries */
+    "lauxlib.c", "lbaselib.c", "lstrlib.c", "ltablib.c", "lmathlib.c",
+    "liolib.c", "loslib.c", "lcorolib.c", "ldblib.c", "lutf8lib.c", "loadlib.c",
+    "linit.c",
+    NULL
+};
+
+static int titan_is_lua_source(const char *base) {
+    int i;
+    if (base == NULL) return 0;
+    for (i = 0; titan_lua_sources[i] != NULL; i++) {
+        if (strcmp(base, titan_lua_sources[i]) == 0) return 1;
+    }
     return 0;
 }
+
+/* One captured native frame that survived filtering: either a Titan native
+** function (a `.titan`-attributed frame) or a Titan entry-wrapper boundary
+** (`is_entry`). The interpreter, libraries, runtime and unsymbolized frames are
+** dropped at capture time and never reach this array. */
+typedef struct {
+    char text[512];   /* preformatted "\t<file>:<line>: in <fn>" for a function */
+    int is_entry;     /* nonzero: this frame is an entry-wrapper boundary */
+} titan_native_frame;
+
+#define TITAN_MAX_NATIVE 512
 
 typedef struct {
-    lua_State *L;
-    luaL_Buffer *buf;
-    int wrote_any;      /* emitted at least one frame (controls leading '\n') */
-    int in_lua_run;     /* currently inside a collapsed [Lua] run */
-} titan_bt_ctx;
+    titan_native_frame *frames;
+    int n;
+    int cap;
+} titan_native_stack;
 
-static void titan_bt_addframe(titan_bt_ctx *ctx, const char *text) {
-    if (ctx->wrote_any) luaL_addchar(ctx->buf, '\n');
-    luaL_addstring(ctx->buf, text);
-    ctx->wrote_any = 1;
-}
-
-static int titan_bt_full_cb(void *data, uintptr_t pc, const char *filename,
-                            int lineno, const char *function) {
-    titan_bt_ctx *ctx = (titan_bt_ctx *)data;
-    int cls = titan_frame_class(filename);
-    if (cls == 1) {
-        /* Collapse a contiguous run of interpreter frames to one marker. */
-        if (!ctx->in_lua_run) {
-            titan_bt_addframe(ctx, "\t[Lua]");
-            ctx->in_lua_run = 1;
-        }
-        return 0;
+static int titan_bt_collect_cb(void *data, uintptr_t pc, const char *filename,
+                               int lineno, const char *function) {
+    titan_native_stack *st = (titan_native_stack *)data;
+    const char *base;
+    int is_titan, is_entry;
+    (void)pc;
+    if (st->n >= st->cap) return 0;             /* full: stop collecting */
+    if (filename == NULL) return 0;             /* unsymbolized: drop */
+    base = titan_basename(filename);
+    if (strstr(filename, "titan-runtime/")) return 0;  /* runtime: drop */
+    if (titan_is_lua_source(base)) return 0;    /* Lua core/library: drop */
+    is_entry = (function != NULL && strstr(function, TITAN_ENTRY_TAG) != NULL);
+    /* A surviving frame is a Titan frame iff its source is a .titan chunk
+    ** (post-#line) or it is recognizably an entry wrapper by symbol name. */
+    is_titan = is_entry;
+    if (!is_titan) {
+        size_t blen = base ? strlen(base) : 0;
+        if (blen >= 6 && strcmp(base + blen - 6, ".titan") == 0) is_titan = 1;
     }
-    ctx->in_lua_run = 0;
-    if (cls == 2) return 0;  /* hidden: titan-runtime or unsymbolized */
-    /* A user/Titan frame: "\t<file>:<line>: in <function>". Without #line
-    ** (Phase 1) the file is the generated .c and the function is the C symbol;
-    ** that is expected and still useful. */
+    if (!is_titan) return 0;                     /* not a Titan frame: drop */
     {
-        char line[512];
-        const char *base = titan_basename(filename);
-        snprintf(line, sizeof(line), "\t%s:%d: in %s",
-                 base ? base : "?", lineno,
-                 function ? function : "?");
-        titan_bt_addframe(ctx, line);
+        titan_native_frame *f = &st->frames[st->n++];
+        f->is_entry = is_entry;
+        snprintf(f->text, sizeof(f->text), "\t%s:%d: in %s",
+                 base ? base : "?", lineno, function ? function : "?");
     }
     return 0;
 }
 
-/* Append the filtered native (libbacktrace) trace to the open luaL_Buffer. */
-static void titan_push_native_trace(lua_State *L, luaL_Buffer *buf) {
+/* Capture the filtered native stack (Titan frames + entry-wrapper boundaries
+** only) into `st`, innermost->outer. Returns 0 if libbacktrace is unavailable. */
+static int titan_capture_native(titan_native_stack *st) {
     if (titan_bt_state == NULL) {
         titan_bt_state = backtrace_create_state(NULL, 1, titan_bt_error, NULL);
     }
-    if (titan_bt_state == NULL) return;
-    titan_bt_ctx ctx;
-    ctx.L = L;
-    ctx.buf = buf;
-    ctx.wrote_any = 0;
-    ctx.in_lua_run = 0;
+    if (titan_bt_state == NULL) return 0;
     /* skip=1: drop errorhandler's own frame. */
-    backtrace_full(titan_bt_state, 1, titan_bt_full_cb, titan_bt_error, &ctx);
+    backtrace_full(titan_bt_state, 1, titan_bt_collect_cb, titan_bt_error, st);
+    return 1;
+}
+
+static void titan_bt_addframe(luaL_Buffer *buf, int *wrote_any,
+                              const char *text) {
+    if (*wrote_any) luaL_addchar(buf, '\n');
+    luaL_addstring(buf, text);
+    *wrote_any = 1;
+}
+
+/* A best-effort function name for a CallInfo, mirroring luaL_traceback's
+** pushfuncname but without the global-name search (which would manipulate the
+** Lua stack while a luaL_Buffer is open at the top). Writes into `out` and
+** returns it; never pushes to the stack. */
+static const char *titan_funcname(lua_Debug *ar, char *out, size_t outsz) {
+    if (ar->namewhat != NULL && ar->namewhat[0] != '\0' && ar->name != NULL) {
+        snprintf(out, outsz, "%s '%s'", ar->namewhat, ar->name);
+    } else if (ar->what != NULL && ar->what[0] == 'm') {
+        snprintf(out, outsz, "main chunk");
+    } else if (ar->what != NULL && ar->what[0] != 'C') {
+        snprintf(out, outsz, "function <%s:%d>", ar->short_src,
+                 ar->linedefined);
+    } else {
+        snprintf(out, outsz, "?");
+    }
+    return out;
+}
+
+/* Build ONE intermingled, innermost->outer trace mixing pure-Lua and Titan
+** frames in call order (plan A.2). The CallInfo chain is the backbone: it
+** enumerates every Lua activation (so a single native luaV_execute correctly
+** expands into the multiple Lua frames it ran). The native libbacktrace stack
+** supplies only the Titan native frames, spliced in at the entry-wrapper
+** boundaries.
+**
+** Alignment: walk both stacks innermost->outer in lockstep. At every C-level
+** CallInfo (a Titan entry wrapper appears here as a C function, as do genuine
+** Lua C-functions) we drain the next run of native Titan frames up to and
+** including the next entry-wrapper sentinel and emit them; that sentinel-
+** terminated run is the Titan native subtree that this Lua->Titan call ran.
+** Pure-Lua CallInfo frames are emitted directly with src:line:in name; genuine
+** Lua C-functions as [C]:in name. The deepest (innermost) Titan native run is
+** drained before the first CallInfo so the error site leads the trace.
+**
+** Caveat (documented for review): a Titan entry wrapper and a genuine Lua
+** C-function are indistinguishable at a C-level CallInfo, so the native Titan
+** run is drained greedily at the first C-level CallInfo at or after its place.
+** In the strictly-alternating Lua<->Titan case (the common one, and the tested
+** one) this is exact. In the rarer Titan -> LuaC(e.g. pcall) -> Titan case the
+** inner Titan native run may splice one C-frame too early; no frame is ever
+** dropped (every Lua frame and every Titan frame appears) and the trace stays a
+** single innermost->outer section. */
+static void titan_push_unified_trace(lua_State *L, luaL_Buffer *buf,
+                                     const char *msg) {
+    titan_native_frame frames[TITAN_MAX_NATIVE];
+    titan_native_stack st;
+    int ni = 0;          /* next un-emitted native frame index */
+    int wrote_any = 0;
+    int level = 1;       /* skip errorhandler's own CallInfo (level 0) */
+    lua_Debug ar;
+
+    if (msg != NULL) {
+        luaL_addstring(buf, msg);
+        luaL_addchar(buf, '\n');
+    }
+    luaL_addstring(buf, "stack traceback:");
+
+    st.frames = frames;
+    st.n = 0;
+    st.cap = TITAN_MAX_NATIVE;
+    titan_capture_native(&st);
+
+    /* Drain the deepest native Titan run (the error site) before any CallInfo
+    ** so the innermost Titan frames lead. */
+    while (ni < st.n) {
+        int was_entry = frames[ni].is_entry;
+        titan_bt_addframe(buf, &wrote_any, frames[ni].text);
+        ni++;
+        if (was_entry) break;
+    }
+
+    while (lua_getstack(L, level++, &ar)) {
+        lua_getinfo(L, "Slnt", &ar);
+        if (ar.what != NULL && ar.what[0] == 'C') {
+            /* A C-level CallInfo: a Titan entry wrapper or a Lua C-function.
+            ** Splice the next native Titan run (up to & including its sentinel)
+            ** for the Titan-entry case. */
+            int drained = 0;
+            while (ni < st.n) {
+                int was_entry = frames[ni].is_entry;
+                titan_bt_addframe(buf, &wrote_any, frames[ni].text);
+                ni++;
+                drained = 1;
+                if (was_entry) break;
+            }
+            /* If we drained a sentinel-terminated run, this CallInfo was the
+            ** Titan entry wrapper, already represented by the native frames; do
+            ** not also emit a [C] line for it. Otherwise it is a genuine Lua
+            ** C-function: name it. */
+            if (!drained) {
+                char line[512], nm[256];
+                snprintf(line, sizeof(line), "\t%s: in %s",
+                         ar.short_src, titan_funcname(&ar, nm, sizeof(nm)));
+                titan_bt_addframe(buf, &wrote_any, line);
+            }
+        } else {
+            /* A pure-Lua activation: src:line: in name. */
+            char line[512], nm[256];
+            const char *fn = titan_funcname(&ar, nm, sizeof(nm));
+            if (ar.currentline > 0) {
+                snprintf(line, sizeof(line), "\t%s:%d: in %s",
+                         ar.short_src, ar.currentline, fn);
+            } else {
+                snprintf(line, sizeof(line), "\t%s: in %s",
+                         ar.short_src, fn);
+            }
+            titan_bt_addframe(buf, &wrote_any, line);
+        }
+        if (ar.istailcall) {
+            titan_bt_addframe(buf, &wrote_any, "\t(...tail calls...)");
+        }
+    }
+
+    /* Defensive: any native Titan frames the CallInfo walk did not consume
+    ** (e.g. native depth exceeding the Lua-visible boundaries) still appear. */
+    while (ni < st.n) {
+        titan_bt_addframe(buf, &wrote_any, frames[ni].text);
+        ni++;
+    }
 }
 #else
 void titan_invalidate_backtrace_state(void) { /* no cached state to reset */ }
@@ -258,30 +412,36 @@ int errorhandler(lua_State *L) {
   lua_pushliteral(L, TITAN_BACKTRACE_KEY);
   luaL_tolstring(L, top, NULL);
   lua_pushliteral(L, "\n");
-  luaL_traceback(L, L, NULL, 0);
-  lua_pushliteral(L, "\nC traceback:\n");
   luaL_Buffer buf;
   luaL_buffinit(L, &buf);
 #ifdef TITAN_HAVE_LIBBACKTRACE
-  /* Merge native (Titan/C) frames captured by libbacktrace: show user/Titan
-  ** files, collapse interpreter frames to a single [Lua], hide runtime and
-  ** unsymbolized frames. */
-  titan_push_native_trace(L, &buf);
+  /* ONE intermingled, innermost->outer trace (plan A.2): the CallInfo chain
+  ** supplies every Lua frame, libbacktrace supplies the Titan native frames
+  ** spliced at the entry-wrapper boundaries. No separate "C traceback:" section,
+  ** no collapsed [Lua] marker. */
+  titan_push_unified_trace(L, &buf, NULL);
 #else
-  /* Fallback: execinfo with no DWARF line info (also covers musl/Alpine). */
+  /* Fallback (no libbacktrace, e.g. musl/Alpine): the Lua-side traceback only,
+  ** plus an execinfo C traceback with no DWARF line info. Two sections, since
+  ** without libbacktrace we cannot splice Titan frames into the Lua trace.
+  ** luaL_traceback pushes its own string; add it to the buffer immediately. */
+  luaL_traceback(L, L, NULL, 1);
+  luaL_addvalue(&buf);
   {
+    int nested = 0;
     void *nbuf[255];
     const int calls = backtrace(nbuf, sizeof(nbuf) / sizeof(void *));
     char **bt = backtrace_symbols(nbuf, calls);
+    luaL_addstring(&buf, "\nC traceback:\n");
     for (int i = 0; i < calls; i++) {
-      if (i > 0) { luaL_addchar(&buf, '\n'); }
+      if (nested++) { luaL_addchar(&buf, '\n'); }
       luaL_addstring(&buf, bt[i]);
     }
     free(bt);
   }
 #endif
   luaL_pushresult(&buf);
-  lua_concat(L, 5);
+  lua_concat(L, 3);
   lua_rawset(L, LUA_REGISTRYINDEX);
   lua_settop(L, top);
   return 1;

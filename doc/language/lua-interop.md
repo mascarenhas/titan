@@ -417,10 +417,11 @@ print(ok)   --> false
 print(err)  --> test.titan:...: type error, expected integer but found string
 ```
 
-In addition, whenever an error is raised inside a Titan call, an extended
-traceback (the Lua traceback plus the C-level call stack) is recorded and
-can be retrieved afterwards with `titan.backtrace()` from the optional
-`titan` Lua module. The error value seen by `pcall` is unchanged. See
+In addition, whenever an error is raised inside a Titan call, a single
+**unified, intermingled traceback** — pure-Lua and Titan frames in call
+order, innermost first — is recorded and can be retrieved afterwards with
+`titan.backtrace()` from the optional `titan` Lua module. The error value
+seen by `pcall` is unchanged. See
 [Error handling](error-handling.md) for the full error model and the
 option-type idiom for recoverable failures.
 
