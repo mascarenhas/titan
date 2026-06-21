@@ -137,3 +137,277 @@ describe("raise <exp> (error-handling Phase 2)", function()
         assert.match("bare 'raise'", table.concat(errs, "\n"))
     end)
 end)
+
+describe("catch (error-handling Phase 4)", function()
+    setup(function () os.remove("titan-runtime/titan.o") end)
+    after_each(clean)
+
+    it("catches a body error and continues after the try", function()
+        local out = compile_and_run([[
+            function run(): integer
+                do
+                    raise "boom"
+                    return 1
+                catch
+                    return 42
+                end
+            end
+        ]], [==[
+            local r = test.run()
+            assert(r == 42, "expected 42, got " .. tostring(r))
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("falls through to code after the try when the catch handles", function()
+        local out = compile_and_run([[
+            function run(): integer
+                local n: integer = 0
+                do
+                    raise "boom"
+                catch
+                    n = 7
+                end
+                return n + 1
+            end
+        ]], [==[
+            assert(test.run() == 8, "expected 8")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("binds the caught `error` value to what was raised", function()
+        local out = compile_and_run([[
+            function run(): string
+                do
+                    raise "the-message"
+                    return "unreached"
+                catch
+                    return error
+                end
+            end
+        ]], [==[
+            assert(test.run() == "the-message", "wrong caught error")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("binds a non-string caught error verbatim", function()
+        local out = compile_and_run([[
+            function run(): integer
+                do
+                    local t: {integer} = {10, 20, 30}
+                    raise t
+                    return 0
+                catch
+                    local got: {integer} = error as {integer}
+                    return got[2]
+                end
+            end
+        ]], [==[
+            assert(test.run() == 20, "wrong caught table value")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("binds `traceback` to a string containing the unified trace", function()
+        local out = compile_and_run([[
+            function deep(): integer
+                raise "fail-here"
+                return 0
+            end
+            function run(): string
+                do
+                    local x: integer = deep()
+                    return "no-error"
+                catch
+                    return traceback
+                end
+            end
+        ]], [==[
+            local tb = test.run()
+            assert(type(tb) == "string", "traceback not a string: " .. type(tb))
+            assert(tb:find("stack traceback:", 1, true), "no trace header\n" .. tb)
+            assert(tb:find("test_deep_titan", 1, true), "trace lacks deep frame\n" .. tb)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("bare re-raise preserves the ORIGINAL deep trace", function()
+        local out = compile_and_run([[
+            function deep(): integer
+                raise "deep-boom"
+                return 0
+            end
+            function mid(): integer
+                return deep()
+            end
+            function run(): integer
+                do
+                    return mid()
+                catch
+                    raise
+                end
+            end
+        ]], [==[
+            local titan = require 'titan'
+            local ok, err = pcall(test.run)
+            assert(not ok)
+            assert(err == "deep-boom", "wrong re-raised value: " .. tostring(err))
+            local bt = titan.backtrace()
+            -- the ORIGINAL trace names the deep raising frame, not just the catch site
+            assert(bt:find("test_deep_titan", 1, true),
+                   "re-raise lost the original deep frame\n" .. bt)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("raise <exp> in a catch builds a FRESH trace at the raise site", function()
+        local out = compile_and_run([[
+            function deep(): integer
+                raise "deep-boom"
+                return 0
+            end
+            function run(): integer
+                do
+                    return deep()
+                catch
+                    raise "fresh-error"
+                end
+            end
+        ]], [==[
+            local titan = require 'titan'
+            local ok, err = pcall(test.run)
+            assert(not ok)
+            assert(err == "fresh-error", "wrong fresh value: " .. tostring(err))
+            local bt = titan.backtrace()
+            -- a fresh trace is captured at the catch's raise: it must NOT mention
+            -- the original deep frame (which is no longer on the stack)
+            assert(not bt:find("test_deep_titan", 1, true),
+                   "fresh trace wrongly kept the original deep frame\n" .. bt)
+            assert(bt:find("test_run_titan", 1, true),
+                   "fresh trace lacks the raise-site frame\n" .. bt)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("a return out of a protected body works (errorjmp restored)", function()
+        local out = compile_and_run([[
+            function run(): integer
+                do
+                    return 99
+                catch
+                    return -1
+                end
+            end
+        ]], [==[
+            assert(test.run() == 99, "early return out of try failed")
+            -- a subsequent error must still be caught/handled correctly,
+            -- proving L->errorJmp was restored (not dangling)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("a break out of a protected body in a loop works", function()
+        local out = compile_and_run([[
+            function run(): integer
+                local sum: integer = 0
+                local i: integer = 0
+                while i < 10 do
+                    i = i + 1
+                    do
+                        if i == 5 then
+                            break
+                        end
+                        sum = sum + i
+                    catch
+                        sum = sum + 1000
+                    end
+                end
+                return sum
+            end
+        ]], [==[
+            -- breaks at i==5: sums 1+2+3+4 = 10
+            assert(test.run() == 10, "break out of try-in-loop failed: " .. tostring(test.run()))
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("a non-GC local mutated in the body reads correctly after the catch (volatile)", function()
+        local out = compile_and_run([[
+            function boom(): integer
+                raise "boom"
+                return 0
+            end
+            function run(): integer
+                local n: integer = 1
+                do
+                    n = 5
+                    n = n + boom()
+                catch
+                    n = n + 100
+                end
+                return n
+            end
+        ]], [==[
+            -- n is set to 5 in the body, then the catch reads it (5) and adds 100
+            assert(test.run() == 105, "volatile local wrong: " .. tostring(test.run()))
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("a fresh error after a handled one regenerates the trace", function()
+        local out = compile_and_run([[
+            function handled(): integer
+                do
+                    raise "first"
+                catch
+                    return 0
+                end
+            end
+            function boom(): integer
+                raise "second"
+                return 0
+            end
+        ]], [==[
+            local titan = require 'titan'
+            assert(test.handled() == 0)
+            -- after handling, a brand-new error must get its own fresh trace
+            local ok, err = pcall(test.boom)
+            assert(not ok and err == "second")
+            local bt = titan.backtrace()
+            assert(bt:find("test_boom_titan", 1, true), "fresh trace missing\n" .. bt)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("rejects finally codegen with a clear Phase-5 message", function()
+        h.reset()
+        local ast, perr = parse([[
+            function run(): integer
+                do
+                    return 1
+                finally
+                    local x: integer = 2
+                end
+            end
+        ]], "test.titan")
+        assert.truthy(ast, perr)
+        local _, errs = checker.check("test", ast, "src", "test.titan")
+        assert.equal(0, #errs, table.concat(errs, "\n"))
+        local ok, err = pcall(compile, "test", ast)
+        assert.falsy(ok, "finally should not compile in Phase 4")
+        assert.match("finally codegen not yet implemented", tostring(err))
+    end)
+end)

@@ -11,6 +11,10 @@
 #include "llimits.h"
 #include "lvm.h"
 
+/* The vendored `lua_longjmp` struct + statement-form `TITAN_SETJMP`, used by the
+** generated module C to install the inline catch/finally setjmp boundary. */
+#include "titan_longjmp.h"
+
 #ifdef __GNUC__
 #define TITAN_LIKELY(x)   __builtin_expect((x), 1)
 #define TITAN_UNLIKELY(x) __builtin_expect((x), 0)

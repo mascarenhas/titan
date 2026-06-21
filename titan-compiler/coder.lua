@@ -594,6 +594,74 @@ local function initval(typ --[[:table]])
     else return "0" end
 end
 
+-- C `setjmp` correctness (C11 §7.13.2.1): a non-`volatile` automatic of a
+-- function that calls `setjmp` and is changed between the `setjmp` and the
+-- matching `longjmp` has an indeterminate value after the longjmp. The inline
+-- try boundary makes the whole native function a setjmp scope, so a non-GC local
+-- or parameter from an enclosing scope that is assigned inside a protected region
+-- and read afterward (in catch, or after a handled error) is at risk. GC-typed
+-- locals live in Lua stack slots (memory, not C autos) and are already safe.
+-- Conservative first cut (correctness over a few extra `volatile`s; narrowing the
+-- liveness set is a later optimization): when the function contains ANY StatTry
+-- (`ctx.has_try`), qualify every non-GC C scalar declaration `volatile`. Returns
+-- the leading qualifier ("volatile " or "").
+local function vqual(ctx, typ)
+    if ctx.has_try and not types.is_gc(typ) then return "volatile " end
+    return ""
+end
+
+-- A statement after which control never falls through (return/break/raise). The
+-- checker does NOT type-check statements that follow such a terminator within a
+-- block (they are dead code: their var uses get no `_decl`/`_type`), so the coder
+-- MUST NOT attempt to generate them — doing so dereferences those nil
+-- annotations. Stopping at the terminator also drops the unreachable C. (This
+-- predates error handling: `raise`/`return` followed by any var-using statement
+-- always produced unchecked nodes; it only became reachable now that `raise`
+-- routinely precedes dead code in try bodies.)
+local function is_terminator(node)
+    local tag = node._tag
+    return tag == "Ast.StatReturn" or tag == "Ast.StatBreak"
+        or tag == "Ast.StatRaise"
+end
+
+-- The last statement that control can reach in a block's `stats` (the first
+-- terminator, or the final statement if none terminates). Mirrors codestats'
+-- dead-code stop, so it reflects exactly what the coder emitted.
+local function last_reachable_stat(block)
+    local last
+    for _, s in ipairs(block.stats) do
+        last = s
+        if is_terminator(s) then break end
+    end
+    return last
+end
+
+-- A non-void/non-nil function whose last reachable statement is something other
+-- than a plain `StatReturn` (a `raise`, or a `StatTry`/`if` whose arms all
+-- return) falls off the end of the generated C even though Titan control never
+-- reaches there: the returns live inside an inner C scope or after a `lua_error`
+-- (which Lua 5.5 declares returning `int`, NOT `l_noret`), so the C compiler
+-- cannot prove no-fall-through and warns "control reaches end of non-void
+-- function". The checker has already proven the function always-returns, so emit
+-- an unreachable trailing `return` of the zero value to satisfy the C control-
+-- flow check (dead code; never executed). A function whose last reachable
+-- statement IS a `StatReturn` needs nothing (the C return is right there).
+local function unreachable_return(rettype, block)
+    if not rettype or rettype._tag == "Type.Nil" then return nil end
+    local last = last_reachable_stat(block)
+    if last and last._tag == "Ast.StatReturn" then return nil end
+    -- A braced initializer (`{ {0}, 0 }` for TValue-boxed types) is illegal in a
+    -- bare `return`, so zero a temp first and return it.
+    return render([[
+        /* unreachable: every path above already returned/raised; this satisfies
+        ** the C control-flow check (Titan never falls through here) */
+        {
+            $TYPE _ur = $INIT;
+            L->top.p = _base;
+            return _ur;
+        }]], { TYPE = ctype(rettype), INIT = initval(rettype) })
+end
+
 -- The `TitanVarg*` struct backing a vararg of element type `elemtype`, keyed on
 -- `ctype(elemtype)` so the struct's flexible array member matches the element C
 -- type exactly (§2.F). Mirrors titan.h's seven typedefs.
@@ -698,6 +766,19 @@ local function newslot(ctx --[[:table]], name --[[:string]])
         NAME = name,
         SDEPTH = c_integer_literal(sdepth),
     })
+end
+
+-- Reserve a stack slot's DEPTH without emitting a C pointer declaration. The try
+-- recovery needs slots whose addresses it recomputes inline from a freshly
+-- restored `_base` (a `newslot`-declared `TValue *` would dangle after a
+-- longjmp/GC relocation), so it only needs the slot's depth index. Mirrors
+-- `newslot`'s bookkeeping (depth/allocations/nslots) but returns the depth.
+local function reserveslot(ctx --[[:table]])
+    local d = ctx.depth
+    ctx.depth = ctx.depth + 1
+    ctx.allocations = ctx.allocations + 1
+    if ctx.depth > ctx.nslots then ctx.nslots = ctx.depth end
+    return d
 end
 
 local function newtmp(ctx --[[:table]], typ --[[:table]], isgc --[[:boolean]])
@@ -862,30 +943,103 @@ local function popd(ctx)
     ctx.depth = table.remove(ctx.dstack)
 end
 
+-- Does `node` (a statement, typically a StatBlock) lexically contain a `StatTry`,
+-- WITHOUT descending into nested function bodies (ExpFunction has its own codegen
+-- context, entry-wrapper boundary, and errorjmp save)? Used to (a) mark a whole
+-- function as try-using (conservative `volatile` for non-GC enclosing locals +
+-- entry errorjmp-save), and (b) decide whether a loop must save its errorjmp at
+-- entry so a `break` crossing a try boundary can restore it.
+local function stat_contains_try(node)
+    if node == nil or node == false then return false end
+    local tag = node._tag
+    if tag == "Ast.StatTry" then
+        return true
+    elseif tag == "Ast.StatBlock" then
+        for _, s in ipairs(node.stats) do
+            if stat_contains_try(s) then return true end
+        end
+        return false
+    elseif tag == "Ast.StatWhile" or tag == "Ast.StatFor"
+           or tag == "Ast.StatRepeat" then
+        return stat_contains_try(node.block)
+    elseif tag == "Ast.StatIf" then
+        for _, t in ipairs(node.thens) do
+            if stat_contains_try(t.block) then return true end
+        end
+        return stat_contains_try(node.elsestat)
+    else
+        -- StatDecl/StatAssign/StatCall/StatReturn/StatBreak/StatRaise and any
+        -- expression-bearing statement: no nested block that is not a function
+        -- body of its own. ExpFunction bodies are intentionally NOT scanned.
+        return false
+    end
+end
+
+-- Emit the statements of a block's `stats` list, stopping after the first
+-- terminator (the rest is unreachable, unchecked dead code).
+local function codestats(ctx, stats_list)
+    local out = {}
+    for _, stat in ipairs(stats_list) do
+        table.insert(out, codestat(ctx, stat))
+        if is_terminator(stat) then break end
+    end
+    return out
+end
+
 -- All the code generation functions for STATEMENTS take
 -- the function context and the AST node and return the
 -- generated C code for the statement, as a string
 
 local function codeblock(ctx, node)
-    local stats = {}
     pushd(ctx)
-    for _, stat in ipairs(node.stats) do
-        table.insert(stats, codestat(ctx, stat))
-    end
+    local stats = codestats(ctx, node.stats)
     popd(ctx)
     return " {\n " .. table.concat(stats, "\n ") .. "\n }"
 end
 
+-- Open a loop frame (#3): if the loop body contains a try, allocate a save id so
+-- a `break` crossing that try boundary can restore the loop-entry errorjmp/nC.
+-- Returns the frame; the caller must `close_loop` after coding the body, then
+-- splice `loop_save_lines(frame)` at loop entry.
+local function open_loop(ctx, node)
+    local frame = { try_depth = ctx.try_depth or 0 }
+    if stat_contains_try(node.block) then
+        ctx.loop_save_id = (ctx.loop_save_id or 0) + 1
+        frame.save_id = ctx.loop_save_id
+    end
+    ctx.loopstack = ctx.loopstack or {}
+    table.insert(ctx.loopstack, frame)
+    return frame
+end
+
+local function close_loop(ctx)
+    table.remove(ctx.loopstack)
+end
+
+-- The loop-entry errorjmp/nC save lines, emitted ONLY if a `break` inside the
+-- loop actually crossed a try boundary (frame.used, set in the StatBreak arm).
+local function loop_save_lines(frame)
+    if not (frame.save_id and frame.used) then return "" end
+    return render([[
+        lua_longjmp *_loop_errorjmp_$ID = L->errorJmp;
+        l_uint32 _loop_nC_$ID = L->nCcalls;
+    ]], { ID = c_integer_literal(frame.save_id) })
+end
+
 local function codewhile(ctx, node)
     pushd(ctx)
+    local frame = open_loop(ctx, node)
     local nallocs = ctx.allocations
     local cstats, cexp = codeexp(ctx, node.condition, true)
     local cblk = codestat(ctx, node.block)
     nallocs = ctx.allocations - nallocs
+    close_loop(ctx)
     popd(ctx)
+    local loopsave = loop_save_lines(frame)
     local tmpl
     if cstats == "" then
         tmpl = [[
+            $LOOPSAVE
             while($CEXP) {
                 $CBLK
                 $CHECKGC
@@ -893,6 +1047,7 @@ local function codewhile(ctx, node)
         ]]
     else
         tmpl = [[
+            $LOOPSAVE
             while(1) {
                 $CSTATS
                 if(!($CEXP)) {
@@ -904,6 +1059,7 @@ local function codewhile(ctx, node)
         ]]
     end
     return render(tmpl, {
+        LOOPSAVE = loopsave,
         CSTATS = cstats,
         CEXP = toboolean(node.condition._type, cexp),
         CBLK = cblk,
@@ -913,20 +1069,20 @@ end
 
 local function coderepeat(ctx, node)
     pushd(ctx)
+    local frame = open_loop(ctx, node)
     local nallocs = ctx.allocations
     -- In Lua the `until` condition is in the scope of the body, so it may
     -- reference body-local variables. Code the body's statements INLINE (not
     -- wrapped in a nested C block) and then the condition, so both share one
     -- C scope and the body locals' C names are bound and still visible.
-    local stats = {}
-    for _, stat in ipairs(node.block.stats) do
-        table.insert(stats, codestat(ctx, stat))
-    end
-    local cblk = table.concat(stats, "\n")
+    local cblk = table.concat(codestats(ctx, node.block.stats), "\n")
     local cstats, cexp = codeexp(ctx, node.condition, true)
     nallocs = ctx.allocations - nallocs
+    close_loop(ctx)
     popd(ctx)
+    local loopsave = loop_save_lines(frame)
     return render([[
+        $LOOPSAVE
         while(1) {
             $CBLK
             $CSTATS
@@ -936,6 +1092,7 @@ local function coderepeat(ctx, node)
             $CHECKGC
         }
     ]], {
+        LOOPSAVE = loopsave,
         CBLK = cblk,
         CSTATS = cstats,
         CEXP = toboolean(node.condition._type, cexp),
@@ -976,6 +1133,7 @@ end
 
 local function codefor(ctx, node)
     pushd(ctx)
+    local frame = open_loop(ctx, node)
     node.decl._cvar = "_local_" .. node.decl.name
     local csstats, csexp = codeexp(ctx, node.start)
     local cfstats, cfexp = codeexp(ctx, node.finish)
@@ -983,7 +1141,9 @@ local function codefor(ctx, node)
     local nallocs = ctx.allocations
     local cblock = codestat(ctx, node.block)
     nallocs = ctx.allocations - nallocs
+    close_loop(ctx)
     popd(ctx)
+    local loopsave = loop_save_lines(frame)
     -- Lua-faithful numeric for (see lvm.c forprep/forloop/floatforloop):
     -- a zero step raises a run-time error; the integer loop is driven by an
     -- unsigned iteration count so it cannot overflow past the integer limits
@@ -992,10 +1152,13 @@ local function codefor(ctx, node)
     -- is independent of the iteration and read-only.
     local cvtyp = node.decl._type._tag == "Type.Integer" and "lua_Integer" or "lua_Number"
     local subs = {
+        LOOPSAVE = loopsave,
         CVAR = node.decl._cvar,
-        -- declare the visible control variable only if the body uses it
+        -- declare the visible control variable only if the body uses it; mark it
+        -- volatile if the function contains a try (it is an enclosing-scope C auto
+        -- relative to a try in the loop body — C setjmp rule).
         CVARDECL = node.decl._used
-            and (cvtyp .. " " .. node.decl._cvar .. " = _foridx;") or "",
+            and (vqual(ctx, node.decl._type) .. cvtyp .. " " .. node.decl._cvar .. " = _foridx;") or "",
         CSSTATS = csstats, CSEXP = csexp,
         CFSTATS = cfstats, CFEXP = cfexp,
         CISTATS = cistats, CIEXP = ciexp,
@@ -1010,6 +1173,7 @@ local function codefor(ctx, node)
     if node.decl._type._tag == "Type.Integer" then
         return render([[
             {
+                $LOOPSAVE
                 $CSSTATS
                 lua_Integer _forstart = $CSEXP;
                 $CFSTATS
@@ -1040,6 +1204,7 @@ local function codefor(ctx, node)
     else
         return render([[
             {
+                $LOOPSAVE
                 $CSSTATS
                 lua_Number _forstart = $CSEXP;
                 $CFSTATS
@@ -2189,16 +2354,44 @@ local function codecall(ctx, node)
     end
 end
 
+-- A `StatTry` body/catch is emitted as straight-line C inside an inline setjmp
+-- boundary, so the `lua_longjmp _lj` is an automatic of an inner C scope. A
+-- `return` that jumps out of the whole native function, or a `break` that jumps
+-- out of an enclosing loop, must first restore `L->errorJmp` (and `nCcalls`) to
+-- the values they held BEFORE the protected region was entered, or `L->errorJmp`
+-- would dangle to an out-of-scope `_lj`. We snapshot those once at function entry
+-- (`_entry_errorjmp`/`_entry_nC`) and at each loop entry whose body contains a
+-- try (`_loop_errorjmp_N`/`_loop_nC_N`), then restore at the crossing transfer.
+-- Only emitted when a try is actually in scope, to keep try-free code untouched.
+local function restore_entry_errorjmp()
+    return [[
+        L->errorJmp = _entry_errorjmp;
+        L->nCcalls = _entry_nC;]]
+end
+
 local function codereturn(ctx, node)
+    -- Clean-exit restore (#3): a `return` crossing one or more protected regions
+    -- must put L->errorJmp/nCcalls back to their function-entry values before the
+    -- epilogue, so the dangling inner `_lj` is never reachable.
+    local crossing = ctx.try_depth and ctx.try_depth > 0
+    if crossing then ctx.used_entry_restore = true end
+    local restore = crossing and restore_entry_errorjmp() .. "\n" or ""
     if #node.exps == 0 then
         -- bare `return` in a zero-return `() -> ()` function: no value to
         -- produce, just reset the stack and return from the void native entry
-        return [[
+        return restore .. [[
         L->top.p = _base;
         return;]]
     end
     local cs, cexp = codeexp(ctx, node.exps[1])
     local cstats = { cs }
+    -- Materialize the first return value into a temp BEFORE the clean-exit restore
+    -- when this return crosses a protected region: a deferred call left in `cexp`
+    -- (the common `return f()` case) would otherwise run AFTER the restore has
+    -- removed the try's boundary from L->errorJmp, so an error inside the call
+    -- would longjmp past the enclosing try instead of being caught by it. Forcing
+    -- the call here runs it while the boundary is still live. (The multi-return
+    -- case below already materializes for its own reason — see comment.)
     if #node.exps > 1 then
         -- The first return expression may itself be a bare multi-return
         -- call whose 2..n values are produced through out-param temps that
@@ -2207,6 +2400,17 @@ local function codereturn(ctx, node)
         -- before we copy them into our own *_outparam_i. Otherwise the call
         -- would be deferred into the trailing 'return $CEXP' and the extra
         -- values would be read uninitialized.
+        local ctmp, tmpname = newtmp(ctx, node.exps[1]._type)
+        table.insert(cstats, render([[
+            $CTMP
+            $TMPNAME = $CEXP;
+        ]], {
+            CTMP = ctmp,
+            TMPNAME = tmpname,
+            CEXP = cexp,
+        }))
+        cexp = tmpname
+    elseif restore ~= "" then
         local ctmp, tmpname = newtmp(ctx, node.exps[1]._type)
         table.insert(cstats, render([[
             $CTMP
@@ -2231,10 +2435,12 @@ local function codereturn(ctx, node)
     -- L->top.p one or more slots too high).
     return render([[
         $CSTATS
+        $RESTORE
         L->top.p = _base;
         return $CEXP;
     ]], {
         CSTATS = table.concat(cstats, "\n"),
+        RESTORE = restore,
         CEXP = cexp,
     })
 end
@@ -2249,6 +2455,34 @@ end
 -- An `emitline` stamps the throw to the raise's exact `.titan` line so the native
 -- frame symbolizes there (mirrors `codethrow`).
 local function coderaise(ctx, node)
+    if not node.exp then
+        -- Bare `raise` (re-raise) — legal only inside a catch (checker-enforced).
+        -- Reinstall the catch's saved `traceback` into registry[TITAN_BACKTRACE_KEY]
+        -- and SET the pin (TITAN_TRACE_PINNED), so errorhandler KEEPS the ORIGINAL
+        -- trace rather than capturing a fresh one at this (shallower) re-raise
+        -- site; then push the saved `error` value and lua_error(L). The enclosing
+        -- catch's implicit locals are threaded through ctx (`ctx.catch_*_decl`).
+        local errcvar = ctx.catch_error_decl._cvar      -- TValue (the error value)
+        local tbcvar = ctx.catch_traceback_decl._cvar   -- TString* (the trace)
+        return render([[
+            $LINEDIR
+            lua_checkstack(L, 2);
+            lua_pushliteral(L, TITAN_BACKTRACE_KEY);
+            setsvalue2s(L, L->top.p, $TB);
+            L->top.p++;
+            lua_rawset(L, LUA_REGISTRYINDEX);
+            lua_pushliteral(L, TITAN_TRACE_PINNED);
+            lua_pushboolean(L, 1);
+            lua_rawset(L, LUA_REGISTRYINDEX);
+            setobj2s(L, L->top.p, &$ERR);
+            L->top.p++;
+            lua_error(L);
+        ]], {
+            LINEDIR = emitline(node),
+            TB = tbcvar,
+            ERR = errcvar,
+        })
+    end
     local cstats, cexp = codeexp(ctx, node.exp)
     local ctmp, tmpname, tmpslot = newtmp(ctx, types.Value(), true)
     return render([[
@@ -2268,6 +2502,139 @@ local function coderaise(ctx, node)
         CEXP = cexp,
         ANCHOR = setslot(types.Value(), tmpslot, tmpname),
         LINEDIR = emitline(node),
+    })
+end
+
+-- `catch`/`finally` (error-handling Phase 4 — catch-only; finally is Phase 5).
+--
+-- A StatTry wraps its body in an inline setjmp boundary that replicates
+-- luaD_rawrunprotected + luaD_pcall's error recovery, emitted as straight-line C
+-- in the native function (no thunk, no capture conversion). The Lua entry wrapper
+-- already installed errorhandler on L->errfunc, and luaG_errormsg invokes it
+-- regardless of which boundary is on L->errorJmp, so the unified trace is already
+-- in registry[TITAN_BACKTRACE_KEY] by the time the longjmp lands here.
+--
+-- Per-try anchored slots (reserveslot -> depths within the function's _base..nslots
+-- region) hold the caught error value and the snapshotted trace string; a write
+-- into a stack slot needs no GC barrier (the stack is a root). A boundary error
+-- in the catch propagates to the OUTER boundary (no own boundary for catch in
+-- Phase 4; that's only needed once a following finally must still run — Phase 5).
+local function codetry(ctx, node)
+    assert(not node.finallyblock,
+        "internal error: finally codegen not yet implemented (Phase 5)")
+    -- A function containing a try always needs `_base` recomputed from an offset
+    -- after a caught longjmp (a value-call or GC inside the body may have
+    -- relocated the stack), so force the base-offset preamble.
+    ctx.uses_base_off = true
+    ctx.try_id = (ctx.try_id or 0) + 1
+    local id = ctx.try_id
+    -- Reserve the per-try anchored slots up front (their depths persist across the
+    -- body and catch). The recovery recomputes their addresses inline from the
+    -- restored `_base`, so only the depth index is needed.
+    local d_err = reserveslot(ctx)
+    local d_tb = reserveslot(ctx)
+
+    -- The body and catch run as protected straight-line C. Within them, a
+    -- `return`/`break` must clean-exit-restore the errorjmp chain (#3), tracked by
+    -- ctx.try_depth.
+    ctx.try_depth = (ctx.try_depth or 0) + 1
+    local cbody = codestat(ctx, node.block)
+    ctx.try_depth = ctx.try_depth - 1
+
+    -- Bind the catch's implicit locals to C autos populated in the recovery. They
+    -- are read by codevar through `_decl._cvar` (not boxed, not captured).
+    local errdecl = node._error_decl
+    local tbdecl = node._traceback_decl
+    local errcvar = "_catch_error_" .. id
+    local tbcvar = "_catch_tb_" .. id
+    errdecl._cvar = errcvar
+    tbdecl._cvar = tbcvar
+
+    -- Thread the catch's decls so a bare `raise` inside reaches them.
+    local saved_err, saved_tb = ctx.catch_error_decl, ctx.catch_traceback_decl
+    ctx.catch_error_decl = errdecl
+    ctx.catch_traceback_decl = tbdecl
+    ctx.try_depth = ctx.try_depth + 1
+    local ccatch = codestat(ctx, node.catchblock)
+    ctx.try_depth = ctx.try_depth - 1
+    ctx.catch_error_decl, ctx.catch_traceback_decl = saved_err, saved_tb
+
+    return render([[
+        {
+            /* inline protected boundary (rawrunprotected save) */
+            l_uint32 _oldnC_$ID = L->nCcalls;
+            CallInfo *_oldci_$ID = L->ci;
+            lu_byte _oldah_$ID = L->allowhook;
+            ptrdiff_t _oldtop_$ID = savestack(L, L->top.p);
+            lua_longjmp _lj_$ID;
+            _lj_$ID.status = LUA_OK;
+            _lj_$ID.previous = L->errorJmp;
+            L->errorJmp = &_lj_$ID;
+            if (TITAN_SETJMP(_lj_$ID.b) == 0) {
+                $CBODY
+            }
+            /* restore the error-handler chain (rawrunprotected tail) */
+            L->errorJmp = _lj_$ID.previous;
+            L->nCcalls = _oldnC_$ID;
+            if (_lj_$ID.status != LUA_OK) {
+                /* body raised; errorhandler already filled the trace slot. Mirror
+                ** luaD_pcall's recovery: restore ci/allowhook, close any to-be-
+                ** closed vars from called Lua, materialize the error object. */
+                TValue $ERR;
+                TString *$TB;
+                L->ci = _oldci_$ID;
+                L->allowhook = _oldah_$ID;
+                _lj_$ID.status = luaD_closeprotected(L, _oldtop_$ID, _lj_$ID.status);
+                luaD_seterrorobj(L, _lj_$ID.status, restorestack(L, _oldtop_$ID));
+                lua_checkstack(L, 4);
+                /* a value-call/GC inside the body may have relocated the stack;
+                ** recompute _base before touching any reserved slot */
+                _base = restorestack(L, _base_off);
+                /* save the error object into its anchored slot, then drop it from
+                ** the top; the registry snapshot/clear below pushes within the
+                ** lua_checkstack(4) margin established above. */
+                setobj2s(L, _base + $DERR, s2v(L->top.p - 1));
+                L->top.p = restorestack(L, _oldtop_$ID);
+                $ERR = *s2v(_base + $DERR);
+                /* snapshot registry[TITAN_BACKTRACE_KEY] into the traceback slot */
+                lua_pushliteral(L, TITAN_BACKTRACE_KEY);
+                lua_rawget(L, LUA_REGISTRYINDEX);
+                if (!ttisstring(s2v(L->top.p - 1))) {
+                    L->top.p--;
+                    lua_pushliteral(L, "");
+                }
+                setobj2s(L, _base + $DTB, s2v(L->top.p - 1));
+                L->top.p--;
+                $TB = tsvalue(s2v(_base + $DTB));
+                /* the implicit catch locals are bound unconditionally even when
+                ** the catch body reads neither (silence -Wunused-but-set) */
+                (void)$ERR;
+                (void)$TB;
+                /* clear slot + pin so a fresh error raised in the catch is
+                ** captured anew (a bare re-raise re-pins the saved trace) */
+                lua_pushliteral(L, TITAN_BACKTRACE_KEY);
+                lua_pushnil(L);
+                lua_rawset(L, LUA_REGISTRYINDEX);
+                lua_pushliteral(L, TITAN_TRACE_PINNED);
+                lua_pushnil(L);
+                lua_rawset(L, LUA_REGISTRYINDEX);
+                /* re-establish the function's steady-state reserved top
+                ** (`_base + nslots`, what the preamble installs) so the catch's
+                ** own reserved slots sit below L->top.p and are GC-scanned. The
+                ** literal nslots is patched in by codefuncdec/codelambdadec once
+                ** the high-water mark is known. */
+                L->top.p = _base + TITAN_RESERVED_NSLOTS;
+                $CCATCH
+            }
+        }
+    ]], {
+        ID = c_integer_literal(id),
+        CBODY = cbody,
+        CCATCH = ccatch,
+        ERR = errcvar,
+        TB = tbcvar,
+        DERR = c_integer_literal(d_err),
+        DTB = c_integer_literal(d_tb),
     })
 end
 
@@ -2322,7 +2689,7 @@ local function codestat_dispatch(ctx, node)
             elseif decl._used then
                 local typ = decl._type
                 decl._cvar = "_local_" .. localname(ctx, decl.name)
-                local cdecl = ctype(typ) .. " " .. decl._cvar .. ";"
+                local cdecl = vqual(ctx, typ) .. ctype(typ) .. " " .. decl._cvar .. ";"
                 local cslot = ""
                 local cset = ""
                 if types.is_gc(typ) then
@@ -2389,13 +2756,30 @@ local function codestat_dispatch(ctx, node)
     elseif tag == "Ast.StatReturn" then
         return codereturn(ctx, node)
     elseif tag == "Ast.StatBreak" then
+        -- Clean-exit restore (#3): a `break` crossing one or more protected
+        -- regions inside its target loop must restore L->errorJmp/nCcalls to the
+        -- loop's entry values (saved when the loop body contains a try) before
+        -- the C `break`, else L->errorJmp dangles to an out-of-scope `_lj`. The
+        -- target loop is the innermost loop frame; a restore is needed only when
+        -- a try boundary is open between this break and that loop entry.
+        local frame = ctx.loopstack and ctx.loopstack[#ctx.loopstack]
+        if frame and frame.save_id and (ctx.try_depth or 0) > frame.try_depth then
+            frame.used = true   -- the loop must emit its entry errorjmp/nC save
+            return render([[
+                L->errorJmp = _loop_errorjmp_$ID;
+                L->nCcalls = _loop_nC_$ID;
+                break;]], { ID = c_integer_literal(frame.save_id) })
+        end
         return "break;"
     elseif tag == "Ast.StatRaise" then
         return coderaise(ctx, node)
     elseif tag == "Ast.StatTry" then
-        -- Unreachable: the checker rejects StatTry until the catch/finally
-        -- phases land. Kept so the dispatch is total and any leak fails loudly.
-        error("internal error: catch/finally codegen not yet implemented")
+        if node.finallyblock then
+            -- Phase 5 lands the pending-action machinery for finally; until then
+            -- only catch-only (and finally-absent) StatTry compiles.
+            error("finally codegen not yet implemented (Phase 5)")
+        end
+        return codetry(ctx, node)
     else
         error("invalid node tag " .. tag)
     end
@@ -4169,6 +4553,11 @@ local function codefuncdec(tlcontext, node)
         fname = method_name(node._type)
         luaname = method_luaname(node._type)
     end
+    -- Detect a `StatTry` in this function's body up front (the param cdecls below
+    -- and local cdecls in the body consult `ctx.has_try` for the `volatile`
+    -- qualifier; nested function/lambda bodies have their own contexts and are not
+    -- scanned). Also sets the entry errorjmp-save and base-offset preamble.
+    ctx.has_try = stat_contains_try(node.block)
     local cparams = { "lua_State *L", "Udata *_mod", "CClosure *_fn" }
     if node._tag == "Ast.TopLevelMethod" then
         -- `self` is a real Decl that capture analysis can mark captured/assigned,
@@ -4187,7 +4576,7 @@ local function codefuncdec(tlcontext, node)
         if self._boxed then
             table.insert(stats, codeboxparam(ctx, self))
         end
-        table.insert(cparams, ctype(self._type) .. " " .. self._cvar)
+        table.insert(cparams, vqual(ctx, self._type) .. ctype(self._type) .. " " .. self._cvar)
     end
     for _, param in ipairs(fixed_params(node.params)) do
         param._cvar = "_param_" .. param.name
@@ -4202,7 +4591,7 @@ local function codefuncdec(tlcontext, node)
         if param._boxed then
             table.insert(stats, codeboxparam(ctx, param))
         end
-        table.insert(cparams, ctype(param._type) .. " " .. param._cvar)
+        table.insert(cparams, vqual(ctx, param._type) .. ctype(param._type) .. " " .. param._cvar)
     end
     -- Variadic: the backing struct + start offset, pinned after the declared
     -- params and before the out-params, and threaded into ctx for `...` lowering.
@@ -4222,11 +4611,23 @@ local function codefuncdec(tlcontext, node)
     -- generated .c (error-handling Phase 0).
     local body = emitline(node) .. codestat(ctx, node.block)
     local nslots = ctx.nslots
+    -- Patch the try-recovery's reserved-top restore (codetry emits the symbolic
+    -- TITAN_RESERVED_NSLOTS so a catch's own slots are GC-scanned) now that the
+    -- function-wide high-water mark is final.
+    body = body:gsub("TITAN_RESERVED_NSLOTS", c_integer_literal(nslots))
     -- A value-call (codevaluecall) can relocate the Lua stack, which would
     -- dangle `_base`; such a function saves `_base` as an offset so it can be
     -- recomputed after each value-call.
     local baseoff = ctx.uses_base_off
         and "\n        ptrdiff_t _base_off = savestack(L, _base);" or ""
+    -- Clean-exit restore foundation (#3): snapshot the errorjmp chain at function
+    -- entry so a `return` crossing a protected region can restore it before the
+    -- epilogue (the inner `_lj` would otherwise be out of scope). Emitted only
+    -- when a `return` actually crossed a try (codereturn set used_entry_restore),
+    -- so a try with no escaping return adds no dead locals.
+    local entrysave = ctx.used_entry_restore
+        and "\n        lua_longjmp *_entry_errorjmp = L->errorJmp;"
+            .. "\n        l_uint32 _entry_nC = L->nCcalls;" or ""
     if nslots > 0 then
         table.insert(stats, 1, render([[
         luaC_checkGC(L);
@@ -4240,15 +4641,16 @@ local function codefuncdec(tlcontext, node)
         L->top.p += $NSLOTS;
         for(StkId _s = L->top.p - 1; _base <= _s; _s--) {
             setnilvalue(s2v(_s));
-        }$BASEOFF
+        }$BASEOFF$ENTRYSAVE
         ]], {
             NSLOTS = c_integer_literal(nslots),
             BASEOFF = baseoff,
+            ENTRYSAVE = entrysave,
         }))
     else
         -- No reserved slots, but still anchor _base so every return path can
         -- reset L->top.p uniformly (the reset is then a no-op).
-        table.insert(stats, 1, "        StkId _base = L->top.p;" .. baseoff)
+        table.insert(stats, 1, "        StkId _base = L->top.p;" .. baseoff .. entrysave)
     end
     table.insert(stats, body)
     -- A zero-return `() -> ()` function has no `rettypes[1]`: its native entry
@@ -4263,6 +4665,9 @@ local function codefuncdec(tlcontext, node)
         table.insert(stats, [[
             L->top.p = _base;
             return 0;]])
+    else
+        local ur = unreachable_return(rettype, node.block)
+        if ur then table.insert(stats, ur) end
     end
     node._body = render([[
     $ISLOCAL $RETTYPE $NAME($PARAMS) {
@@ -4583,6 +4988,10 @@ function codelambdadec(tlcontext, node)
     local rettype = node._type.rettypes[1]
     local fname = node._lambda_native
     local luaname = node._lambda_lua
+    -- A try inside this lambda's own body makes its non-GC enclosing locals/params
+    -- volatile and installs the entry errorjmp-save (an enclosing function's try
+    -- does not, since the lambda has its own context and boundary).
+    ctx.has_try = stat_contains_try(node.block)
 
     -- Build the capture map and bind each boxed capture's box pointer once at
     -- body entry. By-value captures are read directly from _fn (immutable).
@@ -4613,7 +5022,7 @@ function codelambdadec(tlcontext, node)
         if param._boxed then
             table.insert(stats, codeboxparam(ctx, param))
         end
-        table.insert(cparams, ctype(param._type) .. " " .. param._cvar)
+        table.insert(cparams, vqual(ctx, param._type) .. ctype(param._type) .. " " .. param._cvar)
     end
     -- A lambda's `ctx` is fresh (newcontext), so ctx.varargs starts nil; set it
     -- only for a variadic lambda. An inner lambda thus NEVER inherits an enclosing
@@ -4631,8 +5040,12 @@ function codelambdadec(tlcontext, node)
 
     local body = codestat(ctx, node.block)
     local nslots = ctx.nslots
+    body = body:gsub("TITAN_RESERVED_NSLOTS", c_integer_literal(nslots))
     local baseoff = ctx.uses_base_off
         and "\n        ptrdiff_t _base_off = savestack(L, _base);" or ""
+    local entrysave = ctx.used_entry_restore
+        and "\n        lua_longjmp *_entry_errorjmp = L->errorJmp;"
+            .. "\n        l_uint32 _entry_nC = L->nCcalls;" or ""
     if nslots > 0 then
         table.insert(stats, 1, render([[
         luaC_checkGC(L);
@@ -4646,13 +5059,14 @@ function codelambdadec(tlcontext, node)
         L->top.p += $NSLOTS;
         for(StkId _s = L->top.p - 1; _base <= _s; _s--) {
             setnilvalue(s2v(_s));
-        }$BASEOFF
+        }$BASEOFF$ENTRYSAVE
         ]], {
             NSLOTS = c_integer_literal(nslots),
             BASEOFF = baseoff,
+            ENTRYSAVE = entrysave,
         }))
     else
-        table.insert(stats, 1, "        StkId _base = L->top.p;" .. baseoff)
+        table.insert(stats, 1, "        StkId _base = L->top.p;" .. baseoff .. entrysave)
     end
     -- box-capture bindings come first, before any body code or preamble use
     for i = #capbinds, 1, -1 do
@@ -4668,6 +5082,9 @@ function codelambdadec(tlcontext, node)
         table.insert(stats, [[
             L->top.p = _base;
             return 0;]])
+    else
+        local ur = unreachable_return(rettype, node.block)
+        if ur then table.insert(stats, ur) end
     end
     node._body = render([[
     static $RETTYPE $NAME($PARAMS) {
