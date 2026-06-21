@@ -245,4 +245,141 @@ describe(".so-only cross-module imports", function()
             "local ok, e = pcall(ppbar.px, ppbar); assert(not ok); assert(e:find('but found'))")
         assert.truthy(rok2, out2)
     end)
+
+    it("imports a .so-only variadic function, called statically and from Lua", function ()
+        -- The dependency is reachable ONLY as a compiled `.so`: the importer
+        -- recovers `sum`'s `(...: integer) -> integer` interface (incl. varargtype)
+        -- from `<mangled>_types`, calls it STATICALLY across the dynamic boundary
+        -- (the native vararg ABI: `_varargs` + `_start` at the pinned slot), and
+        -- the dependency's own Lua entry (genluaentry) handles the call FROM LUA.
+        local ok, err = build_so_chain({
+            { name = "vsfoo", src = [[
+                function sum(...: integer): integer
+                    local s = 0
+                    local i = 1
+                    local n = #...
+                    while i <= n do s = s + ...[i]; i = i + 1 end
+                    return s
+                end
+            ]] },
+            { name = "vsbar", src = [[
+                local foo = import "vsfoo"
+                function viastatic(): integer
+                    return foo.sum(1, 2, 3, 4)   -- static call across the .so
+                end
+                function empty(): integer
+                    return foo.sum()             -- empty vararg across the .so
+                end
+                function asvalue(): integer
+                    local f: (...: integer) -> integer = foo.sum  -- value across .so
+                    return f(10, 20)
+                end
+            ]] },
+        })
+        assert.truthy(ok, err)
+        local rok, out = call("vsbar", [[
+            assert(vsbar.viastatic() == 10)
+            assert(vsbar.empty() == 0)
+            assert(vsbar.asvalue() == 30)
+            -- call the .so-only variadic function directly FROM LUA (genluaentry)
+            local foo = require 'vsfoo'
+            assert(foo.sum(5, 6, 7) == 18)
+            assert(foo.sum() == 0)
+        ]])
+        assert.truthy(rok, out)
+    end)
+
+    it("imports a .so-only ...: string variadic, called statically and from Lua under GC", function ()
+        -- COLLECTABLE element type across the dynamic boundary. The static call
+        -- builds the backing struct on the importer's C stack from fresh strings;
+        -- the .so callee forces a minor collection before reading any element, so
+        -- a dropped anchor across the dlsym'd native pointer is deterministic
+        -- corruption under generational mode.
+        local ok, err = build_so_chain({
+            { name = "vstrfoo", src = [[
+                function totallen(...: string): integer
+                    local junk: {integer} = {}
+                    local k = 1
+                    while k <= 300 do junk = { k }; k = k + 1 end
+                    local s = 0
+                    local i = 1
+                    local n = #...
+                    while i <= n do s = s + #(...[i]); i = i + 1 end
+                    return s
+                end
+            ]] },
+            { name = "vstrbar", src = [[
+                local foo = import "vstrfoo"
+                function viastatic(a: string, b: string): integer
+                    return foo.totallen(a, b, "lit3")   -- static call across the .so
+                end
+            ]] },
+        })
+        assert.truthy(ok, err)
+        local rok, out = call("vstrbar", [[
+            collectgarbage("generational")
+            local a = ("a"):rep(4) .. "!"   -- 5
+            local b = ("b"):rep(6) .. "!"   -- 7
+            for i = 1, 2000 do local _ = { i } end
+            collectgarbage("step")
+            assert(vstrbar.viastatic(a, b) == 5 + 7 + 4)
+            -- and directly FROM LUA (genluaentry on the .so module)
+            local foo = require 'vstrfoo'
+            local c = ("c"):rep(2) .. "!"   -- 3
+            assert(foo.totallen(a, b, c) == 5 + 7 + 3)
+            assert(foo.totallen() == 0)
+        ]])
+        assert.truthy(rok, out)
+    end)
+
+    it("imports a .so-only ...: R variadic and a variadic method across the .so", function ()
+        -- A RECORD element type (Udata*) and a variadic METHOD both recovered from
+        -- `<mangled>_types` across the dynamic boundary, called statically and
+        -- from Lua. The record's type tag is recovered from the .so's published
+        -- registry; the method's varargtype survives serialization.
+        local ok, err = build_so_chain({
+            { name = "vrecfoo", src = [[
+                record R
+                    v: integer
+                end
+                record Acc
+                    base: integer
+                end
+                function mk(v: integer): R
+                    return { v = v }
+                end
+                function Acc:sumv(...: R): integer
+                    local junk: {integer} = {}
+                    local k = 1
+                    while k <= 300 do junk = { k }; k = k + 1 end
+                    local s = self.base
+                    local i = 1
+                    local n = #...
+                    while i <= n do s = s + (...[i]).v; i = i + 1 end
+                    return s
+                end
+            ]] },
+            { name = "vrecbar", src = [[
+                local foo = import "vrecfoo"
+                function viastatic(a: foo.Acc, x: foo.R, y: foo.R): integer
+                    return a:sumv(x, y)             -- static method call across .so
+                end
+            ]] },
+        })
+        assert.truthy(ok, err)
+        local rok, out = call("vrecbar", [[
+            collectgarbage("generational")
+            local foo = require 'vrecfoo'
+            local a = foo.Acc.new(10)
+            local r1, r2, r3 = foo.mk(3), foo.mk(5), foo.mk(7)
+            for i = 1, 2000 do local _ = { i } end
+            collectgarbage("step")
+            -- static call site across the .so boundary
+            assert(vrecbar.viastatic(a, r1, r2) == 10 + 3 + 5)
+            -- variadic method directly FROM LUA across the .so boundary
+            assert(a:sumv(r1, r2, r3) == 10 + 3 + 5 + 7)
+            assert(a:sumv() == 10)
+        ]])
+        assert.truthy(rok, out)
+    end)
 end)

@@ -455,8 +455,8 @@ Udata* (*some_dep_init)(lua_State *L) =
 
 `loadlib(L, file)` first consults the handle cache under
 `TITAN_LIBS_KEY`; on a miss it walks the Titan path — environment
-variable `TITAN_PATH_0_8`, then `TITAN_PATH`, then the default
-`".;/usr/local/lib/titan/0.8"`, with `;;` in an env value splicing the
+variable `TITAN_PATH_0_9`, then `TITAN_PATH`, then the default
+`".;/usr/local/lib/titan/0.9"`, with `;;` in an env value splicing the
 default in — trying `dlopen(dir "/" file, RTLD_NOW | RTLD_LOCAL)` per
 `;`-separated directory. Successes are cached; the cache table's
 metatable has a `__gc` that `dlclose`s every handle in reverse insertion

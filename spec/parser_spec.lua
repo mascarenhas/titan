@@ -1433,4 +1433,463 @@ describe("Titan parser", function()
 
         assert_expression_syntax_error([[ foo as ]], "CastMissingType")
     end)
+
+    describe("can parse variadic parameters", function()
+        it("as the last parameter of a top-level function", function()
+            assert_program_ast([[
+                function foo(a: integer, ...: integer): nil
+                end
+            ]], {
+                { _tag = "Ast.TopLevelFunc",
+                    name = "foo",
+                    params = {
+                        { _tag = "Ast.Decl", name = "a" },
+                        { _tag = "Ast.Decl", name = false,
+                          type = { _tag = "Ast.TypeInteger" } },
+                    } },
+            })
+        end)
+
+        it("as the sole parameter of a top-level function", function()
+            assert_program_ast([[
+                function foo(...: string): nil
+                end
+            ]], {
+                { _tag = "Ast.TopLevelFunc",
+                    name = "foo",
+                    params = {
+                        { _tag = "Ast.Decl", name = false,
+                          type = { _tag = "Ast.TypeString" } },
+                    } },
+            })
+        end)
+
+        it("as the last parameter of a method", function()
+            assert_program_ast([[
+                function Record:m(a: integer, ...: integer): nil
+                end
+            ]], {
+                { _tag = "Ast.TopLevelMethod",
+                    class = "Record",
+                    name = "m",
+                    params = {
+                        { _tag = "Ast.Decl", name = "a" },
+                        { _tag = "Ast.Decl", name = false,
+                          type = { _tag = "Ast.TypeInteger" } },
+                    } },
+            })
+        end)
+
+        it("as the last parameter of a record static (synthesized `new`)", function()
+            -- Records desugar each field into a `new` static; the shared
+            -- `paramlist` rule used by statics is exercised here. There is no
+            -- surface syntax for a user-written vararg static, so we confirm the
+            -- record's `new` parses through the same param machinery.
+            assert_program_ast([[
+                record Point
+                    x: integer
+                    y: integer
+                end
+            ]], {
+                { _tag = "Ast.TopLevelRecord", name = "Point" },
+                { _tag = "Ast.TopLevelStatic", name = "new",
+                    params = {
+                        { _tag = "Ast.Decl", name = "x" },
+                        { _tag = "Ast.Decl", name = "y" },
+                    } },
+            })
+        end)
+
+        it("as the last parameter of a lambda", function()
+            assert_program_ast([[
+                function f(): integer
+                    local g = function(a, ...: integer) return a end
+                    return 1
+                end
+            ]], {
+                { _tag = "Ast.TopLevelFunc",
+                    block = { stats = {
+                        { _tag = "Ast.StatDecl",
+                            exps = {
+                                { _tag = "Ast.ExpFunction",
+                                    params = {
+                                        { _tag = "Ast.Decl", name = "a" },
+                                        { _tag = "Ast.Decl", name = false,
+                                          type = { _tag = "Ast.TypeInteger" } },
+                                    } } } } } } },
+            })
+        end)
+
+        it("rejects a vararg that is not the last function parameter", function()
+            assert_program_syntax_error([[
+                function foo(...: integer, a: integer): nil
+                end
+            ]], "RParPList")
+        end)
+
+        it("rejects a vararg that is not the last lambda parameter", function()
+            assert_program_syntax_error([[
+                function f(): nil
+                    local g = function(...: integer, a) return a end
+                end
+            ]], "RParPList")
+        end)
+
+        it("rejects an untyped vararg parameter (top-level requires `: type`)", function()
+            -- `...` with no `:` in a top-level function: the colon is mandatory.
+            assert_program_syntax_error([[
+                function foo(...): nil
+                end
+            ]], "VarargColon")
+        end)
+
+        it("rejects the OLD no-colon vararg form `...integer`", function()
+            -- The pre-colon surface syntax `...integer` (no `:`) is now a syntax
+            -- error: after `...` the grammar demands a `:`.
+            assert_program_syntax_error([[
+                function foo(...integer): nil
+                end
+            ]], "VarargColon")
+        end)
+
+        it("rejects the OLD no-colon vararg form in a lambda", function()
+            -- A lambda's vararg colon is OPTIONAL, so `...integer` parses `...` as
+            -- an untyped vararg and then the stray `integer` makes the param list
+            -- fail to close: the no-colon form no longer reads `integer` as the
+            -- element type.
+            assert_program_syntax_error([[
+                function f(): nil
+                    local g = function(...integer) return 1 end
+                end
+            ]], "RParPList")
+        end)
+
+        it("accepts an UNTYPED vararg lambda parameter `function (a, ...)`", function()
+            -- A lambda's `...` may omit the element type (inferred from context).
+            -- The vararg Decl carries name == false AND type == false.
+            assert_program_ast([[
+                function f(): integer
+                    local g = function(a, ...) return a end
+                    return 1
+                end
+            ]], {
+                { _tag = "Ast.TopLevelFunc",
+                    block = { stats = {
+                        { _tag = "Ast.StatDecl",
+                            exps = {
+                                { _tag = "Ast.ExpFunction",
+                                    params = {
+                                        { _tag = "Ast.Decl", name = "a",
+                                          type = false },
+                                        { _tag = "Ast.Decl", name = false,
+                                          type = false },
+                                    } } } } } } },
+            })
+        end)
+
+        it("accepts a SOLE untyped vararg lambda parameter `function (...)`", function()
+            assert_program_ast([[
+                function f(): integer
+                    local g = function(...) return 1 end
+                    return 1
+                end
+            ]], {
+                { _tag = "Ast.TopLevelFunc",
+                    block = { stats = {
+                        { _tag = "Ast.StatDecl",
+                            exps = {
+                                { _tag = "Ast.ExpFunction",
+                                    params = {
+                                        { _tag = "Ast.Decl", name = false,
+                                          type = false },
+                                    } } } } } } },
+            })
+        end)
+
+        -- Disambiguation: `function(...): T` is an UNTYPED vararg whose `)`
+        -- precedes the return-type `:`, while `function(...: T)` is a TYPED
+        -- vararg. Pin both parses.
+        it("parses `function(...): integer` as untyped-vararg + integer return", function()
+            assert_program_ast([[
+                function f(): integer
+                    local g = function(...): integer return 1 end
+                    return 1
+                end
+            ]], {
+                { _tag = "Ast.TopLevelFunc",
+                    block = { stats = {
+                        { _tag = "Ast.StatDecl",
+                            exps = {
+                                { _tag = "Ast.ExpFunction",
+                                    params = {
+                                        { _tag = "Ast.Decl", name = false,
+                                          type = false },
+                                    },
+                                    rettypes = { { _tag = "Ast.TypeInteger" } },
+                                } } } } } },
+            })
+        end)
+
+        it("parses `function(...: integer)` as a typed vararg", function()
+            assert_program_ast([[
+                function f(): integer
+                    local g = function(...: integer) return 1 end
+                    return 1
+                end
+            ]], {
+                { _tag = "Ast.TopLevelFunc",
+                    block = { stats = {
+                        { _tag = "Ast.StatDecl",
+                            exps = {
+                                { _tag = "Ast.ExpFunction",
+                                    params = {
+                                        { _tag = "Ast.Decl", name = false,
+                                          type = { _tag = "Ast.TypeInteger" } },
+                                    } } } } } } },
+            })
+        end)
+
+        it("rejects an untyped vararg in a function-type annotation", function()
+            -- A function-TYPE annotation still requires `...: type` (no inference).
+            assert_program_syntax_error([[
+                function f(g: (...) -> integer): nil
+                end
+            ]], "VarargColon")
+        end)
+
+        -- A BARE function type as the vararg element parses fine: `...: () -> integer`
+        -- reads the element type as the function type `() -> integer` (the `...`
+        -- element grammar is `simpletype`, and a bare function type is a
+        -- simpletype). Pin the AST so a future grammar change is noticed.
+        it("parses a bare function-type vararg element `...: () -> integer`", function()
+            assert_program_ast([[
+                function foo(...: () -> integer): nil
+                end
+            ]], {
+                { _tag = "Ast.TopLevelFunc",
+                    name = "foo",
+                    params = {
+                        { _tag = "Ast.Decl", name = false,
+                          type = { _tag = "Ast.TypeFunction",
+                                   argtypes = {},
+                                   rettypes = { { _tag = "Ast.TypeInteger" } } } },
+                    } },
+            })
+        end)
+
+        -- KNOWN PRE-EXISTING LIMITATION (not varargs-specific): a PARENTHESIZED
+        -- type is not a `simpletype` anywhere in the grammar, so `...: (() -> integer)`
+        -- -- which tries to use a parenthesized function type as the element --
+        -- fails to parse with the `TypeDecl` label. Pinned so that if the grammar
+        -- ever learns parenthesized simpletypes, this test flips and we notice.
+        it("rejects a PARENTHESIZED function-type vararg element (known limitation)", function()
+            assert_program_syntax_error([[
+                function foo(...: (() -> integer)): nil
+                end
+            ]], "TypeDecl")
+        end)
+    end)
+
+    describe("can parse variadic function-type annotations", function()
+        it("with a fixed prefix and a vararg element type", function()
+            assert_type_ast("(integer, ...: string) -> integer",
+                { _tag = "Ast.TypeFunction",
+                    argtypes = { { _tag = "Ast.TypeInteger" } },
+                    rettypes = { { _tag = "Ast.TypeInteger" } },
+                    varargtype = { _tag = "Ast.TypeString" } })
+        end)
+
+        it("with a sole vararg element type", function()
+            assert_type_ast("(...: integer) -> integer",
+                { _tag = "Ast.TypeFunction",
+                    argtypes = { },
+                    rettypes = { { _tag = "Ast.TypeInteger" } },
+                    varargtype = { _tag = "Ast.TypeInteger" } })
+        end)
+
+        it("a non-variadic function type carries varargtype = false", function()
+            assert_type_ast("(integer, string) -> integer",
+                { _tag = "Ast.TypeFunction",
+                    argtypes = {
+                        { _tag = "Ast.TypeInteger" },
+                        { _tag = "Ast.TypeString" },
+                    },
+                    rettypes = { { _tag = "Ast.TypeInteger" } },
+                    varargtype = false })
+        end)
+    end)
+
+    describe("can parse the `...` spread expression", function()
+        local function vararg_program(body)
+            return util.render([[
+                function foo(...: integer): nil
+                    $BODY
+                end
+            ]], { BODY = body })
+        end
+
+        local function vararg_stats(body)
+            local ast = assert_parses_successfuly(vararg_program(body))
+            return ast[1].block.stats
+        end
+
+        it("as a sole call argument: f(...)", function()
+            local stats = vararg_stats("f(...)")
+            assert_is_subset({
+                { _tag = "Ast.StatCall",
+                    callexp = { args = { args = {
+                        { _tag = "Ast.ExpDots" },
+                    } } } },
+            }, stats)
+        end)
+
+        it("as a trailing call argument: f(a, ...)", function()
+            local stats = vararg_stats("f(a, ...)")
+            assert_is_subset({
+                { _tag = "Ast.StatCall",
+                    callexp = { args = { args = {
+                        { _tag = "Ast.ExpVar" },
+                        { _tag = "Ast.ExpDots" },
+                    } } } },
+            }, stats)
+        end)
+
+        it("as a sole return value: return ...", function()
+            local stats = vararg_stats("return ...")
+            assert_is_subset({
+                { _tag = "Ast.StatReturn",
+                    exps = { { _tag = "Ast.ExpDots" } } },
+            }, stats)
+        end)
+
+        it("as a trailing return value: return a, ...", function()
+            local stats = vararg_stats("return a, ...")
+            assert_is_subset({
+                { _tag = "Ast.StatReturn",
+                    exps = {
+                        { _tag = "Ast.ExpVar" },
+                        { _tag = "Ast.ExpDots" },
+                    } },
+            }, stats)
+        end)
+
+        it("as a sole array-constructor field: {...}", function()
+            local stats = vararg_stats("x = {...}")
+            assert_is_subset({
+                { _tag = "Ast.StatAssign",
+                    exps = { { _tag = "Ast.ExpInitList",
+                        fields = {
+                            { _tag = "Ast.Field", name = false,
+                              exp = { _tag = "Ast.ExpDots" } },
+                        } } } },
+            }, stats)
+        end)
+
+        it("as a trailing array-constructor field: {a, ...}", function()
+            local stats = vararg_stats("x = {a, ...}")
+            assert_is_subset({
+                { _tag = "Ast.StatAssign",
+                    exps = { { _tag = "Ast.ExpInitList",
+                        fields = {
+                            { _tag = "Ast.Field",
+                              exp = { _tag = "Ast.ExpVar" } },
+                            { _tag = "Ast.Field", name = false,
+                              exp = { _tag = "Ast.ExpDots" } },
+                        } } } },
+            }, stats)
+        end)
+
+        it("indexes `...[e]` as a sole array-constructor field: {...[1]}", function()
+            local stats = vararg_stats("x = {...[1]}")
+            assert_is_subset({
+                { _tag = "Ast.StatAssign",
+                    exps = { { _tag = "Ast.ExpInitList",
+                        fields = {
+                            { _tag = "Ast.Field", name = false,
+                              exp = { _tag = "Ast.ExpDotsIndex",
+                                  exp = { _tag = "Ast.ExpInteger", value = 1 } } },
+                        } } } },
+            }, stats)
+        end)
+
+        it("indexes `...[e]` as a trailing array-constructor field: {a, ...[i]}", function()
+            local stats = vararg_stats("x = {a, ...[i]}")
+            assert_is_subset({
+                { _tag = "Ast.StatAssign",
+                    exps = { { _tag = "Ast.ExpInitList",
+                        fields = {
+                            { _tag = "Ast.Field",
+                              exp = { _tag = "Ast.ExpVar" } },
+                            { _tag = "Ast.Field", name = false,
+                              exp = { _tag = "Ast.ExpDotsIndex",
+                                  exp = { _tag = "Ast.ExpVar" } } },
+                        } } } },
+            }, stats)
+        end)
+
+        it("indexes `...[e]` as an ExpDotsIndex", function()
+            local stats = vararg_stats("x = ...[1]")
+            assert_is_subset({
+                { _tag = "Ast.StatAssign",
+                    exps = { { _tag = "Ast.ExpDotsIndex",
+                        exp = { _tag = "Ast.ExpInteger", value = 1 } } } },
+            }, stats)
+        end)
+
+        it("indexes `...[e]` with a compound index expression", function()
+            local stats = vararg_stats("x = ...[i + 1]")
+            assert_is_subset({
+                { _tag = "Ast.StatAssign",
+                    exps = { { _tag = "Ast.ExpDotsIndex",
+                        exp = { _tag = "Ast.ExpBinop", op = "+" } } } },
+            }, stats)
+        end)
+
+        it("parses `#...` as ExpUnop('#', ExpDots)", function()
+            local stats = vararg_stats("x = #...")
+            assert_is_subset({
+                { _tag = "Ast.StatAssign",
+                    exps = { { _tag = "Ast.ExpUnop", op = "#",
+                        exp = { _tag = "Ast.ExpDots" } } } },
+            }, stats)
+        end)
+    end)
+
+    describe("enforces the parser list length limit", function()
+        local function repeated(template, n, sep)
+            local parts = {}
+            for i = 1, n do parts[i] = string.format(template, i) end
+            return table.concat(parts, sep)
+        end
+
+        it("accepts a 100-element parameter list", function()
+            local src = "function foo(" ..
+                repeated("p%d: integer", 100, ", ") .. "): nil\nend"
+            assert_parses_successfuly(src)
+        end)
+
+        it("rejects a 101-element parameter list with ListTooLong", function()
+            local src = "function foo(" ..
+                repeated("p%d: integer", 101, ", ") .. "): nil\nend"
+            assert_program_syntax_error(src, "ListTooLong")
+        end)
+
+        it("accepts a 100-element expression list", function()
+            local src = "function foo(): nil\n  return " ..
+                repeated("%d", 100, ", ") .. "\nend"
+            assert_parses_successfuly(src)
+        end)
+
+        it("rejects a 101-element expression list with ListTooLong", function()
+            local src = "function foo(): nil\n  return " ..
+                repeated("%d", 101, ", ") .. "\nend"
+            assert_program_syntax_error(src, "ListTooLong")
+        end)
+
+        it("rejects a 101-element lambda parameter list with ListTooLong", function()
+            local src = "function f(): nil\n  local g = function(" ..
+                repeated("p%d", 101, ", ") .. ") return 1 end\nend"
+            assert_program_syntax_error(src, "ListTooLong")
+        end)
+    end)
 end)

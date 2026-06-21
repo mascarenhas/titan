@@ -13,6 +13,10 @@ local syntax_errors = require "titan-compiler.syntax_errors"
 -- a better way yet. (If only lpeg.re had Carg...)
 local THIS_FILENAME = nil
 
+-- Parse-time guardrail on the length of parameter/expression lists (not a
+-- runtime bound; runtime vararg counts have their own cap, TITAN_VARARG_MAX).
+local LIST_LIMIT = 100
+
 --
 -- Functions used by the PEG grammar
 --
@@ -265,6 +269,49 @@ function defs.inferreddecl(pos, name)
     return ast.Decl(pos, name, false, false)
 end
 
+-- A variadic parameter `...: t` (or, for lambdas only, an untyped `...`):
+-- encoded as a trailing Decl whose name is `false`. A typed vararg carries its
+-- element type; an untyped lambda vararg has `type == false`, mirroring the
+-- inferred-parameter encoding (name set / type false) but inverted (name false /
+-- type false). Detect a variadic function with `params[#params].name == false`.
+-- The `type` capture is absent (nil) for the untyped lambda form; normalise it
+-- to `false`.
+function defs.varargdecl(pos, type)
+    return ast.Decl(pos, false, type or false, false)
+end
+
+-- A trailing `...` field in an array constructor: `{ a, ... }`. Encoded as a
+-- key-less Field whose expression is a bare `ExpDots`.
+function defs.dots_field(pos)
+    return ast.Field(pos, false, ast.ExpDots(pos))
+end
+
+-- Vararg element type for a function-type annotation `(t, ...: u) -> r`. Returns
+-- the element type node (dropping the position capture).
+function defs.varargtype(_, type)
+    return type
+end
+
+-- Build a TypeFunction node, reordering the captures so the optional vararg
+-- element type (false when absent) lands in the node's `varargtype` field. A
+-- function-type annotation parses its arg list then the return types, so the
+-- captures arrive as (loc, argtypes, varargtype, rettypes).
+function defs.typefunc(pos, argtypes, varargtype, rettypes)
+    return ast.TypeFunction(pos, argtypes, rettypes, varargtype)
+end
+
+-- Match-time guard against absurdly long parameter/expression lists. Used as a
+-- `=>` predicate over a captured list: succeeds (re-yielding the list capture)
+-- when within LIST_LIMIT, fails when over so the grammar can throw
+-- `%{ListTooLong}`. The list must be returned explicitly so the surrounding
+-- production keeps it (a bare `true` discards the inner capture).
+function defs.checklist(_, _, list)
+    if #list > LIST_LIMIT then
+        return false
+    end
+    return true, list
+end
+
 local grammar = re.compile([[
 
     program         <-  SKIP*
@@ -308,14 +355,31 @@ local grammar = re.compile([[
     -- Lambda return-type: `false` when absent (infer), distinct from `: ()`.
     lambdarettypeopt<- (P  (COLON rettype^TypeFunc)?)            -> lambdarettypeopt
 
-    paramlist       <- {| (param (COMMA param^DeclParList)*)? |} -- produces {Decl}
+    -- A trailing, last-only typed variadic parameter `...: t` (no name). The
+    -- element type is mandatory for top-level functions and methods (the `: t`
+    -- declaration style, matching `name: type` everywhere else).
+    varargparam     <- (P  DOTS COLON^VarargColon type^TypeDecl) -> varargdecl
+
+    -- A lambda's trailing vararg `...` may OMIT the `: t` (the element type is
+    -- then inferred from context, like an unannotated lambda parameter). There is
+    -- no ambiguity: `function(...): T` is an untyped vararg whose `)` precedes the
+    -- return-type `:`, while `function(...: T)` is a typed vararg.
+    lambdavarargparam <- (P  DOTS (COLON type^TypeDecl)?)        -> varargdecl
+
+    -- The fixed-param loop stops before a `, ...` (the `!DOTS` guard) so the
+    -- optional trailing `varargparam` consumes that comma itself.
+    paramlist       <- ({| (param (COMMA !DOTS param^DeclParList)*
+                              (COMMA varargparam)? / varargparam)? |}
+                        => checklist) / %{ListTooLong}           -- produces {Decl}
 
     param           <- (P  NAME COLON^ParamSemicolon
                            type^TypeDecl)                        -> typeddecl
 
-    -- Lambda parameters: the type annotation is optional.
-    lambdaparamlist <- {| (lambdaparam
-                           (COMMA lambdaparam^DeclParList)*)? |} -- produces {Decl}
+    -- Lambda parameters: the type annotation is optional, and a trailing `...`
+    -- vararg may likewise omit its element type (inferred from context).
+    lambdaparamlist <- ({| (lambdaparam (COMMA !DOTS lambdaparam^DeclParList)*
+                              (COMMA lambdavarargparam)? / lambdavarargparam)? |}
+                        => checklist) / %{ListTooLong}           -- produces {Decl}
 
     lambdaparam     <- (P  NAME COLON type^TypeDecl)             -> typeddecl
                      / (P  NAME)                                 -> inferreddecl
@@ -347,21 +411,37 @@ local grammar = re.compile([[
                            RCURLY^RCurlyType)                    -> TypeArray)
                                                   (OPT -> '?')?) -> typeopt
 
+    -- A trailing, last-only `...: t` in a function-type arg list. The element
+    -- type is mandatory (the `: t` declaration style). Produces the element type
+    -- node; `varargtypeopt` defaults to `false` when absent. Only consumed in the
+    -- arrow (function-type) productions below, never in a bare `typelist` used as
+    -- a return-type list.
+    varargtypeann   <- (P  DOTS COLON^VarargColon type^TypeDecl) -> varargtype
+
+    varargtypeopt   <- ((COMMA varargtypeann / varargtypeann)?)  -> opt
+
+    -- The fixed-type loop stops before a `, ...` so the optional trailing
+    -- vararg (`varargtypeopt`) consumes that comma itself.
+    arglist         <- ( LPAREN
+                         {| (type (COMMA !DOTS type^TypelistType)*)? |}
+                         varargtypeopt
+                         RPAREN^RParenTypelist )                 -- produces {Type}, varargtypeopt
+
     typelist        <- ( LPAREN
                          {| (type (COMMA type^TypelistType)*)? |}
                          RPAREN^RParenTypelist )                 -- produces {Type}
 
-    rettype         <- {| (P  typelist RARROW
-                            rettype^TypeReturnTypes)             -> TypeFunction |}
-                     / {| (P  {| simpletype |} RARROW
-                             rettype^TypeReturnTypes)            -> TypeFunction |}
+    rettype         <- {| (P  arglist RARROW
+                            rettype^TypeReturnTypes)             -> typefunc |}
+                     / {| (P  {| simpletype |} (''->tofalse) RARROW
+                             rettype^TypeReturnTypes)            -> typefunc |}
                      / typelist
                      / {| simpletype |}
 
-    type            <- (P  typelist RARROW
-                           rettype^TypeReturnTypes)              -> TypeFunction
-                     / (P  {| simpletype |} RARROW
-                           rettype^TypeReturnTypes)              -> TypeFunction
+    type            <- (P  arglist RARROW
+                           rettype^TypeReturnTypes)              -> typefunc
+                     / (P  {| simpletype |} (''->tofalse) RARROW
+                           rettype^TypeReturnTypes)              -> typefunc
                      / simpletype
 
     recordfields    <- {| recordfield* |}                        -- produces {Decl}
@@ -453,6 +533,9 @@ local grammar = re.compile([[
                      / (P  TRUE -> totrue)                       -> ExpBool
                      / (P  NUMBER)                               -> number_exp
                      / (P  STRINGLIT)                            -> ExpString
+                     / (P  DOTS LBRACKET exp^ExpExpSuf
+                                RBRACKET^RBracketExpSuf)         -> ExpDotsIndex
+                     / (P  DOTS)                                 -> ExpDots
                      / initlist                                  -- produces Exp
                      / funcexp                                   -- produces Exp
                      / suffixedexp                               -- produces Exp
@@ -467,7 +550,22 @@ local grammar = re.compile([[
                      / {| initlist |}                            -- produces {Exp}
                      / {| (P  STRINGLIT) -> ExpString |}         -- produces {Exp}
 
-    explist         <- {| exp (COMMA exp^ExpExpList)* |}      -- produces {Exp}
+    -- A trailing `...` spread is allowed as the last item of an explist (call
+    -- args, return, assignment/decl RHS). A bare `...` is a one-element list;
+    -- the `!LBRACKET` guards against `...[e]`, which is an ordinary expression
+    -- (an ExpDotsIndex) handled by the general alternative below.
+    --
+    -- The fixed-exp repetition is bounded to LIST_LIMIT elements (1 +
+    -- LIST_LIMIT-1 trailing); a LIST_LIMIT+1-th expression makes the trailing
+    -- `&(COMMA exp)` succeed and throw `%{ListTooLong}`. Bounding the
+    -- repetition (rather than guarding the whole list with `&exp`) keeps a
+    -- labeled failure thrown inside an expression — e.g. a malformed lambda
+    -- parameter — propagating, since a positive lookahead would convert it to
+    -- an ordinary failure and mask the real label.
+    explist         <- {| ((P  DOTS !LBRACKET) -> ExpDots) |}
+                     / {| exp (COMMA exp^ExpExpList)^-99
+                           (COMMA ((P  DOTS) -> ExpDots))? |}
+                       (&(COMMA exp) %{ListTooLong})?         -- produces {Exp}
 
     initlist        <- (P  LCURLY {| fieldlist? |}
                                   RCURLY^RCurlyInitList)         -> ExpInitList
@@ -478,7 +576,8 @@ local grammar = re.compile([[
                           !RCURLY %{ExpFieldList}))*
                         fieldsep?)                          -- produces Field...
 
-    field           <- (P  (key ASSIGN)? -> opt exp)       -> Field
+    field           <- (P  DOTS !LBRACKET)                 -> dots_field
+                     / (P  (key ASSIGN)? -> opt exp)       -> Field
 
     key             <- NAME
                      / LBRACKET exp^ExpExpSuf

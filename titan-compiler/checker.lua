@@ -83,6 +83,71 @@ local function deoptionize(t)
     end
 end
 
+-- Validate a variadic parameter / function-type element type `t` (the type of
+-- each `...` element). Bans a `nil` element (a typed `...: t` cannot hold nil) and
+-- a foreign (C FFI) pointer element (no `TitanVarg*` struct exists for it, §2.F).
+-- Returns the original type when legal, or `types.Invalid()` after reporting.
+local function check_vararg_elem(t, loc, errors)
+    if t._tag == "Type.Nil" then
+        checker.typeerror(errors, loc,
+            "a variadic parameter cannot have type nil")
+        return types.Invalid()
+    elseif t._tag == "Type.Pointer" then
+        checker.typeerror(errors, loc,
+            "a variadic parameter cannot have a foreign pointer type")
+        return types.Invalid()
+    end
+    return t
+end
+
+-- Resolve the fixed parameter types of a function/method/static/lambda and, if
+-- the last `Ast.Decl` is the trailing vararg marker (`name == false`), drop it
+-- from the fixed list and return its (validated) element type as the second
+-- value. `params` is the AST param list; this is the single place the signature
+-- pass + lambda checker turn the parser's vararg encoding into a `varargtype`.
+--   returns (ptypes, varargtype) where varargtype is a type or false.
+local function param_types(params, st, errors)
+    local ptypes = {}
+    local varargtype = false
+    local n = #params
+    for i, pdecl in ipairs(params) do
+        if i == n and pdecl.name == false then
+            varargtype = check_vararg_elem(
+                typefromnode(pdecl.type, st, errors), pdecl.loc, errors)
+        else
+            table.insert(ptypes, typefromnode(pdecl.type, st, errors))
+        end
+    end
+    return ptypes, varargtype
+end
+
+-- Resolve the in-scope `...` for a `...`/`#...`/`...[e]` use. Returns the
+-- element type `t`, or `types.Invalid()` after reporting. Enforces both that the
+-- enclosing function is variadic and scope rule 4: `$vararg` is depth-stamped, so
+-- a use from an inner lambda (a deeper `#func_stack`) finds the symbol but is
+-- rejected — `...` is invisible across a function boundary, unlike ordinary
+-- lexical scoping.
+local function resolve_vararg(st, loc, errors)
+    local vararg = st:find_symbol("$vararg")
+    if not vararg then
+        return invalid(errors, loc,
+            "'...' can only be used inside a variadic function")
+    elseif vararg.funcdepth ~= #func_stack then
+        return invalid(errors, loc,
+            "'...' is not visible inside an inner function")
+    end
+    return vararg.elem
+end
+
+-- Resolve `$vararg` for a trailing `Ast.ExpDots` that a consuming explist loop
+-- (§4.6) or array constructor (§4.7) is about to expand, stamping its element
+-- type on `_vararg_elem`. Unlike the `ExpDots` checkexp arm, this does NOT report
+-- the "bare `...`" error — the node IS in a legal trailing position here.
+local function check_dots_marker(node, st, errors)
+    node._vararg_elem = resolve_vararg(st, node.loc, errors)
+    node._type = node._vararg_elem
+end
+
 -- Converts an AST type declaration into a typechecker type
 --   node: AST node
 --   errors: list of compile-time errors
@@ -154,7 +219,14 @@ typefromnode = util.make_visitor({
         for _, rt in ipairs(node.rettypes) do
             table.insert(rettypes, typefromnode(rt, st, errors))
         end
-        return types.Function(ptypes, rettypes, false)
+        -- A first-class variadic function type `(P..., ...: t) -> (R...)` carries
+        -- its element type node on `node.varargtype` (false when absent); set
+        -- the resulting Type.Function's `varargtype` slot accordingly.
+        local varargtype = node.varargtype
+            and check_vararg_elem(typefromnode(node.varargtype, st, errors),
+                                  node.varargtype.loc, errors)
+            or false
+        return types.Function(ptypes, rettypes, false, varargtype)
     end,
 
     ["Ast.TypeOption"] = function(node, st, errors)
@@ -223,6 +295,75 @@ local function trytostr(node)
     else
         return node
     end
+end
+
+-- Adjust-up expansion of a trailing `...` into a fixed-arity context (a `local`,
+-- an assignment, a `return`, or a call to a NON-variadic callee). `exps` is the
+-- expression list, already with the trailing `Ast.ExpDots` at its end and every
+-- entry already `checkexp`'d. `nslots` is the number of target positions;
+-- `slottype(i)` returns the declared type of slot `i` (or nil when a slot's type
+-- is unknown — e.g. an inferred `local`, where the element type is used). The
+-- trailing `...` is replaced in place by `deficit = nslots - (#exps - 1)`
+-- synthesized `Ast.ExpDotsIndex` nodes reading `...[1..deficit]`, with per-element
+-- out-of-range mode following the slot's optionality:
+--   optional `s?`     -> _nilfill = true,  _type = s? (out-of-range nil-fills);
+--   non-optional `t`  -> _nilfill = false, _type = t  (out-of-range raises).
+-- The synthesized nodes carry their `_type`/`_nilfill`; the caller's existing
+-- coerce/checkmatch loop then coerces each against its slot exactly like any
+-- other expression. `deficit < 0` is a compile error (too many values for the
+-- slots); `deficit == 0` is a legal no-op (the `...` is simply dropped). `term`
+-- names the context for the over-supply diagnostic.
+local function expand_dots_adjustup(exps, nslots, slottype, term, errors)
+    local dotsnode = table.remove(exps) -- pop the trailing ExpDots
+    local elem = dotsnode._vararg_elem
+    local nstatic = #exps
+    local deficit = nslots - nstatic
+    if deficit < 0 then
+        checker.typeerror(errors, dotsnode.loc,
+            "%s expects %d value(s) but the expression list (with '...') "
+            .. "already supplies %d", term, nslots, nstatic)
+        return
+    end
+    for k = 1, deficit do
+        local slotidx = nstatic + k
+        local stype = slottype(slotidx)
+        local idxexp = ast.ExpInteger(dotsnode.loc, k)
+        idxexp._type = types.Integer()
+        local node = ast.ExpDotsIndex(dotsnode.loc, idxexp)
+        if stype and stype._tag == "Type.Option" then
+            -- Optional slot: nil-fill out-of-range. Type the read as the REAL
+            -- element wrapped (`optionize(elem)`), NOT the slot type, so the
+            -- caller's trycoerce/checkmatch inserts the genuine element->base
+            -- conversion (e.g. integer? -> float?) and rejects an incompatible
+            -- element (e.g. integer into a string? slot). Force-setting the slot
+            -- type here would make trycoerce a no-op and bit-reinterpret the
+            -- element in codegen.
+            node._nilfill = true
+            node._type = optionize(elem)
+        else
+            node._nilfill = false
+            node._type = elem
+        end
+        table.insert(exps, node)
+    end
+end
+
+-- Find a `...` field in an `ExpInitList` (a key-less field whose expression is a
+-- bare `Ast.ExpDots`). Returns (field, index) or nil. Reports an error and
+-- returns nil if a `...` field exists but is not the last field (`{..., 1}`):
+-- `...` consumes the whole runtime tail, so nothing may follow it.
+local function find_dots_field(node, errors)
+    for i, field in ipairs(node.fields) do
+        if not field.name and field.exp._tag == "Ast.ExpDots" then
+            if i ~= #node.fields then
+                checker.typeerror(errors, field.loc,
+                    "'...' must be the last field in an array constructor")
+                return nil
+            end
+            return field, i
+        end
+    end
+    return nil
 end
 
 --
@@ -340,6 +481,95 @@ checkstat = util.make_visitor({
     ["Ast.StatDecl"] = function(node, st, errors)
         local nlastexp = #node.exps
         local lastexp = node.exps[nlastexp]
+        if lastexp and lastexp._tag == "Ast.ExpDots" then
+            -- `local a, b, ... = e1, ...` adjust-up: the trailing `...` fills the
+            -- remaining declarations. Resolve `$vararg` (scope/error checks),
+            -- check + coerce the static-prefix initializers, then synthesize one
+            -- `...[k]` read per remaining decl with OOB mode by the decl's
+            -- declared / option-ness, exactly like the non-dots multi-return path.
+            check_dots_marker(lastexp, st, errors)
+            local elem = lastexp._vararg_elem
+            -- Static prefix (everything before the `...`).
+            for i = 1, #node.exps - 1 do
+                local decl = node.decls[i]
+                local exp = node.exps[i]
+                if decl then
+                    if decl.type then
+                        checkdecl(decl, st, errors)
+                        checkexp(exp, st, errors, decl._type)
+                    else
+                        checkexp(exp, st, errors)
+                        if not decl.option then
+                            exp = tryforce(exp)
+                            decl._type = exp._type
+                        else
+                            decl._type = optionize(exp._type)
+                        end
+                        checkdecl(decl, st, errors)
+                    end
+                    exp = trycoerce(exp, decl._type, errors)
+                    node.exps[i] = exp
+                    checkmatch("declaration of local variable " .. decl.name,
+                        decl._type, exp._type, errors, decl.loc)
+                else
+                    checkexp(exp, st, errors)
+                end
+            end
+            local nstatic = #node.exps - 1
+            local deficit = #node.decls - nstatic
+            if deficit < 0 then
+                checker.typeerror(errors, lastexp.loc,
+                    "left-hand side expects %d value(s) but the expression list "
+                    .. "(with '...') already supplies %d", #node.decls, nstatic)
+                table.remove(node.exps)
+            else
+                table.remove(node.exps) -- drop the ExpDots marker
+                for k = 1, deficit do
+                    local decl = node.decls[nstatic + k]
+                    local idxexp = ast.ExpInteger(lastexp.loc, k)
+                    idxexp._type = types.Integer()
+                    local exp = ast.ExpDotsIndex(lastexp.loc, idxexp)
+                    if decl.type then
+                        checkdecl(decl, st, errors)
+                        if decl._type._tag == "Type.Option" then
+                            -- Type the nil-fill read as the REAL element wrapped
+                            -- (`optionize(elem)`), not the slot type, so the
+                            -- trycoerce below inserts the genuine element->base
+                            -- conversion (e.g. integer? -> float?) and rejects an
+                            -- incompatible element (e.g. integer into string?).
+                            exp._nilfill = true
+                            exp._type = optionize(elem)
+                        else
+                            exp._nilfill = false
+                            exp._type = elem
+                        end
+                        exp = trycoerce(exp, decl._type, errors)
+                    elseif decl.option then
+                        decl._type = optionize(elem)
+                        exp._nilfill = true
+                        exp._type = decl._type
+                    else
+                        decl._type = elem
+                        exp._nilfill = false
+                        exp._type = elem
+                    end
+                    checkmatch("declaration of local variable " .. decl.name,
+                        decl._type, exp._type, errors, decl.loc)
+                    table.insert(node.exps, exp)
+                end
+            end
+            for _, decl in ipairs(node.decls) do
+                if not decl._type then
+                    if decl.type then
+                        checkdecl(decl, st, errors)
+                    else
+                        decl._type = types.Invalid()
+                    end
+                end
+                declare(decl, st)
+            end
+            return
+        end
         for i = 1, #node.exps do
             local decl = node.decls[i]
             local exp = node.exps[i]
@@ -438,12 +668,25 @@ checkstat = util.make_visitor({
         for _, var in ipairs(node.vars) do
             checkvar(var, st, errors)
         end
-        for i, exp in ipairs(node.exps) do
-            checkexp(exp, st, errors, node.vars[i] and node.vars[i]._type)
-        end
         local nexps = #node.exps
         local lastexp = node.exps[nexps]
-        if lastexp._types and #lastexp._types > 1 then
+        local dots = lastexp._tag == "Ast.ExpDots"
+        for i, exp in ipairs(node.exps) do
+            -- A trailing `...` is a marker resolved below, not a value to check
+            -- here (checking it as an expression reports the "bare `...`" error).
+            if not (dots and i == nexps) then
+                checkexp(exp, st, errors, node.vars[i] and node.vars[i]._type)
+            end
+        end
+        if dots then
+            -- `a, b, c = e1, ...` adjust-up into the LHS variables; OOB mode by
+            -- each target variable's optionality. The final coerce/checkmatch
+            -- loop below handles the synthesized `...[k]` reads uniformly.
+            check_dots_marker(lastexp, st, errors)
+            expand_dots_adjustup(node.exps, #node.vars,
+                function(i) return node.vars[i] and node.vars[i]._type end,
+                "assignment", errors)
+        elseif lastexp._types and #lastexp._types > 1 then
             for i = 2, #lastexp._types do
                 table.insert(node.exps, ast.ExpExtra(lastexp.loc, lastexp, i, lastexp._types[i]))
             end
@@ -496,8 +739,13 @@ checkstat = util.make_visitor({
 
     ["Ast.StatReturn"] = function(node, st, errors)
         local ftype = st:find_symbol("$function")._type
+        local nexps = #node.exps
+        local dots = nexps > 0 and node.exps[nexps]._tag == "Ast.ExpDots"
         for i, exp in ipairs(node.exps) do
-            checkexp(exp, st, errors, ftype.rettypes[i])
+            -- The trailing `...` is a marker, not a value to check here.
+            if not (dots and i == nexps) then
+                checkexp(exp, st, errors, ftype.rettypes[i])
+            end
         end
         if #node.exps == 0 and #ftype.rettypes == 1
            and ftype.rettypes[1]._tag == "Type.Nil" then
@@ -507,7 +755,20 @@ checkstat = util.make_visitor({
             table.insert(node.exps, nilexp)
         end
         local lastexp = node.exps[#node.exps]
-        if lastexp and lastexp._types and #lastexp._types > 1 then
+        if lastexp and lastexp._tag == "Ast.ExpDots" then
+            -- `return ...` is adjust-up into the function's FIXED return arity
+            -- (there is no runtime mechanism for a variable return count). A
+            -- function returning no values cannot use `return ...` at all.
+            check_dots_marker(lastexp, st, errors)
+            if #ftype.rettypes == 0 then
+                checker.typeerror(errors, lastexp.loc,
+                    "cannot use '...' to return from a function that returns no values")
+                table.remove(node.exps)
+            else
+                expand_dots_adjustup(node.exps, #ftype.rettypes,
+                    function(i) return ftype.rettypes[i] end, "return", errors)
+            end
+        elseif lastexp and lastexp._types and #lastexp._types > 1 then
             for i = 2, #lastexp._types do
                 table.insert(node.exps, ast.ExpExtra(lastexp.loc, lastexp, i, lastexp._types[i]))
             end
@@ -607,7 +868,8 @@ checkvar = util.make_visitor({
             local decl = ltype.functions[node.name]
             if decl then
                 node._decl = decl
-                node._type = types.Function(decl.params, decl.rettypes, false)
+                node._type = types.Function(decl.params, decl.rettypes, false,
+                    decl.varargtype)
             else
                 node._type = invalid(errors, node.loc,
                     "trying to access invalid record function '%s'", node.name)
@@ -692,9 +954,105 @@ local function checkargs(ftype, args, loc, fname, st, errors)
     local nparams = #ftype.params
     local nargs = #args
     local lastarg = args[nargs]
+
+    -- A trailing `...` in the argument list. Dispatch on the CALLEE's vararg
+    -- shape (read BEFORE the multi-return `_types` expansion below):
+    --   * Titan-variadic callee (`ftype.varargtype`): WHOLE-TAIL. The `...` is
+    --     kept as a marker for codegen; the caller's `...` element type must be
+    --     `compatible` (gradual) with the callee's, and any over-supplied static
+    --     args (beyond the fixed params) are coerced to the callee's element type.
+    --   * C-FFI vararg callee (`ftype.vararg` boolean): forbidden — a Titan `...`
+    --     cannot flow into a foreign function (no struct ABI for it).
+    --   * non-variadic callee: ADJUST-UP into the fixed params.
+    if lastarg and lastarg._tag == "Ast.ExpDots" then
+        -- Check the static-prefix args (everything before the `...`).
+        for i = 1, nargs - 1 do
+            local arg = args[i]
+            local ptype = ftype.params[i]
+            checkexp(arg, st, errors, ptype)
+            ptype = ptype or arg._type
+            args[i] = trycoerce(args[i], ptype, errors)
+            checkmatch("argument " .. i .. " of call to " .. fname,
+                ptype, args[i]._type, errors, arg.loc)
+        end
+        check_dots_marker(lastarg, st, errors) -- resolve `$vararg`
+        if ftype.varargtype then
+            -- WHOLE-TAIL: keep the `...` marker; check element compatibility.
+            local nstatic = nargs - 1
+            local caller_elem = lastarg._vararg_elem
+            if nstatic < nparams then
+                -- START-ADJUST (§5.7 case 2): the static prefix fills only the
+                -- first `nstatic` fixed params; the remaining `nparams - nstatic`
+                -- fixed params are BORROWED from the caller's own `...` (bounds-
+                -- checked at runtime, raising if too few). Each borrowed fixed
+                -- param type must accept the caller's `...` element type.
+                if caller_elem and caller_elem._tag ~= "Type.Invalid" then
+                    for i = nstatic + 1, nparams do
+                        local ptype = ftype.params[i]
+                        if not types.compatible(ptype, caller_elem) then
+                            checker.typeerror(errors, lastarg.loc,
+                                "cannot borrow a '...' element of type %s for "
+                                .. "fixed parameter %d (type %s) of %s",
+                                types.tostring(caller_elem), i,
+                                types.tostring(ptype), fname)
+                        end
+                    end
+                end
+            else
+                -- Over-supplied static args (beyond the fixed params) are passed
+                -- as leading vararg elements; coerce each to the element type.
+                for i = nparams + 1, nstatic do
+                    args[i] = trycoerce(args[i], ftype.varargtype, errors)
+                    checkmatch("argument " .. i .. " of call to " .. fname,
+                        ftype.varargtype, args[i]._type, errors, args[i].loc)
+                end
+            end
+            if caller_elem and caller_elem._tag ~= "Type.Invalid"
+               and not types.compatible(ftype.varargtype, caller_elem) then
+                checker.typeerror(errors, lastarg.loc,
+                    "'...' element type %s is not compatible with the '...' "
+                    .. "element type %s of %s",
+                    types.tostring(caller_elem),
+                    types.tostring(ftype.varargtype), fname)
+            end
+        elseif ftype.vararg then
+            checker.typeerror(errors, lastarg.loc,
+                "cannot pass '...' to a foreign (C) variadic function")
+            table.remove(args)
+            return
+        else
+            -- ADJUST-UP into the fixed params.
+            expand_dots_adjustup(args, nparams,
+                function(i) return ftype.params[i] end,
+                "call to " .. fname, errors)
+            for i = nargs, #args do
+                local ptype = ftype.params[i]
+                if ptype then
+                    args[i] = trycoerce(args[i], ptype, errors)
+                    checkmatch("argument " .. i .. " of call to " .. fname,
+                        ptype, args[i]._type, errors, args[i].loc)
+                end
+            end
+        end
+        if ftype.varargtype then
+            -- A whole-tail variadic call always satisfies the fixed-param arity
+            -- (checked above); skip the static arity check below.
+            return
+        end
+        if #args ~= nparams then
+            checker.typeerror(errors, loc,
+                "%s called with %d arguments but expects %d.\n%s",
+                fname, #args, nparams, types.tostring(ftype))
+        end
+        return
+    end
+
     for i = 1, nargs do
         local arg = args[i]
-        local ptype = ftype.params[i]
+        -- A surplus arg (beyond the fixed params) to a Titan-variadic callee is
+        -- typed against the vararg element type, so it is coerced/checked like a
+        -- vararg element rather than left unchecked.
+        local ptype = ftype.params[i] or ftype.varargtype
         checkexp(arg, st, errors, ptype)
         ptype = ptype or arg._type
         args[i] = trycoerce(args[i], ptype, errors)
@@ -704,7 +1062,7 @@ local function checkargs(ftype, args, loc, fname, st, errors)
     if lastarg and lastarg._types then
         for i = 2, #lastarg._types do
             local pidx = nargs + i - 1
-            local ptype = ftype.params[pidx]
+            local ptype = ftype.params[pidx] or ftype.varargtype
             local exp = ast.ExpExtra(lastarg.loc, lastarg, i, lastarg._types[i])
             ptype = ptype or exp._type
             exp = trycoerce(exp, ptype, errors)
@@ -712,7 +1070,10 @@ local function checkargs(ftype, args, loc, fname, st, errors)
             checkmatch("argument " .. pidx .. " of call to " .. fname, ptype, exp._type, errors, exp.loc)
         end
     end
-    if not (#args == nparams or (ftype.vararg and #args > nparams)) then
+    -- A Titan-variadic callee (`varargtype`) or a C-FFI variadic (`vararg`)
+    -- accepts at least `nparams` arguments; a fixed callee needs exactly that.
+    local variadic = ftype.vararg or (ftype.varargtype and true)
+    if not (#args == nparams or (variadic and #args >= nparams)) then
         checker.typeerror(errors, loc,
             "%s called with %d arguments but expects %d.\n%s",
             fname, #args, nparams, types.tostring(ftype))
@@ -765,14 +1126,41 @@ checkexp = util.make_visitor({
             end
         end
 
+        -- A trailing `...` field (`{e1, ..., ...}` / `{...}`) is array-shaped:
+        -- it whole-tail-spreads the vararg into the array. It is only legal in an
+        -- array constructor; in a map/record constructor it is an error.
+        local dots_field = find_dots_field(node, errors)
+        if dots_field and expected ~= "Type.Array" then
+            checker.typeerror(errors, dots_field.loc,
+                "'...' can only appear in an array constructor")
+            -- Still resolve `$vararg` so scope diagnostics fire; drop the field
+            -- so the map/record arm below does not choke on the bare `...`.
+            check_dots_marker(dots_field.exp, st, errors)
+            table.remove(node.fields)
+            dots_field = nil
+        end
+
         if expected == "Type.Array" then
             local econtext = context and context.elem
             local etypes = {}
+            local dots_elem
+            -- Location of the `...` field, for the coerceability diagnostic below.
+            -- `dots_field` is nil when the `...` is not the last field
+            -- (`find_dots_field` reported and dropped it), but the loop still
+            -- visits that field and sets `dots_elem`, so we cannot rely on
+            -- `dots_field.loc` there — capture the field's own loc instead.
+            local dots_loc
             for _, field in ipairs(node.fields) do
                 if field.name then
                     checker.typeerror(errors, field.loc,
                         "initializing field '%s' when expecting array", field.name)
                     checkexp(field.exp, st, errors)
+                elseif field.exp._tag == "Ast.ExpDots" then
+                    -- whole-tail `...`: kept as a marker for codegen; its element
+                    -- type seeds (or is checked against) the array element type.
+                    check_dots_marker(field.exp, st, errors)
+                    dots_elem = field.exp._vararg_elem
+                    dots_loc = field.loc
                 else
                     local exp = field.exp
                     checkexp(exp, st, errors, econtext)
@@ -783,7 +1171,9 @@ checkexp = util.make_visitor({
             -- adjust last entry if it's a function call that expands to multiple values
             -- e.g. { 1, 2, f() }
             local lastfield = node.fields[#node.fields]
-            if lastfield and not lastfield.name and lastfield.exp._types and #lastfield.exp._types > 1 then
+            if lastfield and not lastfield.name
+               and lastfield.exp._tag ~= "Ast.ExpDots"
+               and lastfield.exp._types and #lastfield.exp._types > 1 then
                 for i = 2, #lastfield.exp._types do
                     table.insert(node.fields,
                         ast.Field(lastfield.loc, nil,
@@ -792,15 +1182,33 @@ checkexp = util.make_visitor({
                 end
             end
 
-            local etype = econtext or (etypes[1] and deoptionize(etypes[1])) or types.Integer()
+            -- Seed the element type from the vararg element first (`{...}` is
+            -- `{t}`, not `{t?}`), then a context, then the first static field.
+            local etype = econtext
+                or (dots_elem and dots_elem._tag ~= "Type.Invalid"
+                    and deoptionize(dots_elem))
+                or (etypes[1] and deoptionize(etypes[1])) or types.Integer()
             node._type = types.Array(etype)
             for i, field in ipairs(node.fields) do
-                if not field.name then
+                if not field.name and field.exp._tag ~= "Ast.ExpDots" then
                     field.exp = trycoerce(field.exp, etype, errors)
                     local exp = field.exp
                     checkmatch("array initializer at position " .. i, etype,
                                exp._type, errors, exp.loc)
                 end
+            end
+            -- The whole-tail `...` element type must be coerceable to the array
+            -- element type (the context may have overridden `etype` to something
+            -- other than the vararg element, e.g. `{...integer}` in a `{float}`
+            -- context). The codegen converts each element from the real vararg
+            -- element to `etype`; reject an incompatible element here (e.g.
+            -- `{...integer}` into `{string}`) instead of bit-reinterpreting it.
+            if dots_elem and dots_elem._tag ~= "Type.Invalid"
+               and not types.equals(dots_elem, etype)
+               and not types.coerceable(dots_elem, etype) then
+                checker.typeerror(errors, dots_loc,
+                    "'...' element type %s is not coerceable to array element "
+                    .. "type %s", types.tostring(dots_elem), types.tostring(etype))
             end
         elseif expected == "Type.Map" then
             local kcontext = context and context.keys
@@ -967,6 +1375,17 @@ checkexp = util.make_visitor({
 
     ["Ast.ExpUnop"] = function(node, st, errors, _)
         local op = node.op
+        -- `#...` parses as `ExpUnop("#", ExpDots)` because the unop cascade takes
+        -- `#` greedily. Rewrite it in place to an `ExpDotsLen` (which yields an
+        -- integer) before the operand is checked, bypassing the array/string `#`
+        -- path that cannot handle a bare `...` operand.
+        if op == "#" and node.exp._tag == "Ast.ExpDots" then
+            local lennode = ast.ExpDotsLen(node.loc)
+            checkexp(lennode, st, errors)
+            for k in pairs(node) do node[k] = nil end
+            for k, v in pairs(lennode) do node[k] = v end
+            return
+        end
         checkexp(node.exp, st, errors)
         local texp = node.exp._type
         local loc = node.loc
@@ -1369,13 +1788,49 @@ checkexp = util.make_visitor({
     -- defaults to zero-return `()`, exactly like an unannotated top-level
     -- function.
     ["Ast.ExpFunction"] = function(node, st, errors, context)
-        -- Checking mode iff the context is a function type whose arity matches.
-        local expected = (context and context._tag == "Type.Function"
-            and #context.params == #node.params) and context or nil
+        -- A trailing vararg `Decl` (`name == false`) is dropped from the fixed
+        -- params; its element type is resolved separately below. A lambda vararg
+        -- may be untyped (`type == false`), in which case the element type is
+        -- inferred from context, exactly like an untyped lambda parameter.
+        -- `nfixed` is the count compared against a context's arity.
+        local nparams = #node.params
+        local varargtype = false
+        local varargdecl = node.params[nparams]
+        local has_vararg = varargdecl and varargdecl.name == false
+        local nfixed = has_vararg and nparams - 1 or nparams
 
-        -- Resolve parameter types.
+        -- Checking mode iff the context is a function type whose fixed arity
+        -- matches; element-type matching is not enforced for inference here.
+        local expected = (context and context._tag == "Type.Function"
+            and #context.params == nfixed) and context or nil
+
+        -- Resolve the vararg element type (explicit annotation wins; otherwise
+        -- infer from the expected function type's `varargtype`). An untyped `...`
+        -- with a non-variadic context, or with no usable context at all, is an
+        -- error — mirroring an uninferable untyped lambda parameter.
+        if has_vararg then
+            if varargdecl.type then
+                varargdecl._type =
+                    typefromnode(varargdecl.type, st, errors)
+            elseif expected and expected.varargtype then
+                varargdecl._type = expected.varargtype
+            elseif expected then
+                varargdecl._type = invalid(errors, varargdecl.loc,
+                    "cannot infer the type of '...'; the lambda is variadic but "
+                    .. "the expected type is not")
+            else
+                varargdecl._type = invalid(errors, varargdecl.loc,
+                    "cannot infer the type of '...'; annotate it or use the "
+                    .. "lambda where its type is known")
+            end
+            varargtype =
+                check_vararg_elem(varargdecl._type, varargdecl.loc, errors)
+        end
+
+        -- Resolve fixed parameter types.
         local paramtypes = {}
-        for i, param in ipairs(node.params) do
+        for i = 1, nfixed do
+            local param = node.params[i]
             if param.type then
                 param._type = typefromnode(param.type, st, errors)
             elseif expected then
@@ -1407,7 +1862,7 @@ checkexp = util.make_visitor({
             rettypes = {}
         end
 
-        node._type = types.Function(paramtypes, rettypes, false)
+        node._type = types.Function(paramtypes, rettypes, false, varargtype)
 
         -- Open the lambda's own block so `$function`/params do not leak into the
         -- enclosing scope (mirrors checkbodies+checkfunc). `with_block` keeps
@@ -1452,7 +1907,8 @@ checkexp = util.make_visitor({
                     node.name, types.tostring(otype))
             else
                 node._method = mtype
-                node._type = types.Function(mtype.params, mtype.rettypes, false)
+                node._type = types.Function(mtype.params, mtype.rettypes, false,
+                    mtype.varargtype)
             end
         elseif otype._tag ~= "Type.Nominal" then
             node._type = invalid(errors, node.loc,
@@ -1468,6 +1924,42 @@ checkexp = util.make_visitor({
                 types.tostring(types.registry[otype.fqtn]))
         end
         return node._type
+    end,
+
+    -- Bare `...` in a value position. `...` is only legal as the sole, trailing
+    -- entry of an explist (a call argument, `return`, assignment/decl RHS) or an
+    -- array constructor, where the consuming loop (§4.6/§4.7) intercepts it as a
+    -- marker or rewrites it into `ExpDotsIndex` reads BEFORE reaching this arm.
+    -- Reaching this arm therefore means `...` appeared where a single value is
+    -- required (e.g. `1 + ...`, a non-trailing list position), which is an error.
+    -- We still resolve `$vararg` so the scope / not-variadic diagnostics fire.
+    ["Ast.ExpDots"] = function(node, st, errors, _)
+        node._vararg_elem = resolve_vararg(st, node.loc, errors)
+        node._type = node._vararg_elem
+        if node._vararg_elem._tag ~= "Type.Invalid" then
+            checker.typeerror(errors, node.loc,
+                "'...' can only be used as the last item of an argument list, "
+                .. "a return, an assignment, or an array constructor")
+        end
+    end,
+
+    ["Ast.ExpDotsLen"] = function(node, st, errors, _)
+        resolve_vararg(st, node.loc, errors)
+        node._type = types.Integer()
+    end,
+
+    -- `...[e]` (1-based). Type is the element type `t` (NOT `t?`): codegen
+    -- bounds-checks and raises on out-of-range, so an in-range access is always a
+    -- valid `t`. `_nilfill` defaults to false (raise); adjust-up synthesis (§4.6)
+    -- sets `_nilfill = true` / `_type = s?` for an optional target slot.
+    ["Ast.ExpDotsIndex"] = function(node, st, errors, _)
+        local elem = resolve_vararg(st, node.loc, errors)
+        checkexp(node.exp, st, errors, types.Integer())
+        node.exp = trycoerce(node.exp, types.Integer(), errors)
+        checkmatch("variadic index", types.Integer(), node.exp._type,
+            errors, node.exp.loc)
+        if node._nilfill == nil then node._nilfill = false end
+        node._type = node._type or elem
     end
 })
 
@@ -1496,6 +1988,14 @@ function checkfuncbody(node, st, errors, opts)
         opts.self_decl._funcdepth = #func_stack
         st:add_symbol("self", opts.self_decl)
     end
+    -- A variadic function makes its `...` visible to its own body only, via a
+    -- depth-stamped `$vararg` symbol. The depth (`#func_stack`, the frame just
+    -- pushed) enforces scope rule 4: an inner lambda walking the symbol table
+    -- finds this `$vararg` but rejects it because its stamped depth differs.
+    if node._type.varargtype then
+        st:add_symbol("$vararg",
+            { elem = node._type.varargtype, funcdepth = #func_stack })
+    end
     local ptypes = node._type.params
     local pnames = {}
     for i, rettype in ipairs(node._type.rettypes) do
@@ -1511,15 +2011,20 @@ function checkfuncbody(node, st, errors, opts)
     local fdesc = node.name and ("declaration of function '" .. node.name .. "'")
         or "anonymous function"
     for i, param in ipairs(node.params) do
-        param._type = ptypes[i]
-        param._funcdepth = #func_stack
-        st:add_symbol(param.name, param)
-        checktype(param._type, param.loc, errors)
-        if pnames[param.name] then
-            checker.typeerror(errors, node.loc,
-                "duplicate parameter '%s' in %s", param.name, fdesc)
-        else
-            pnames[param.name] = true
+        -- The trailing vararg marker (`name == false`) is not a real parameter:
+        -- it carries no name to declare and its type already lives on
+        -- `node._type.varargtype`; skip it so `ptypes`/`node.params` stay aligned.
+        if param.name ~= false then
+            param._type = ptypes[i]
+            param._funcdepth = #func_stack
+            st:add_symbol(param.name, param)
+            checktype(param._type, param.loc, errors)
+            if pnames[param.name] then
+                checker.typeerror(errors, node.loc,
+                    "duplicate parameter '%s' in %s", param.name, fdesc)
+            else
+                pnames[param.name] = true
+            end
         end
     end
     local ret = st:with_block(checkstat, node.block, st, errors)
@@ -1742,15 +2247,12 @@ local toplevel_visitor = util.make_visitor({
     end,
 
     ["Ast.TopLevelFunc"] = function(node, st, errors)
-        local ptypes = {}
-        for _, pdecl in ipairs(node.params) do
-            table.insert(ptypes, typefromnode(pdecl.type, st, errors))
-        end
+        local ptypes, varargtype = param_types(node.params, st, errors)
         local rettypes = {}
         for _, rt in ipairs(node.rettypes) do
             table.insert(rettypes, typefromnode(rt, st, errors))
         end
-        node._type = types.Function(ptypes, rettypes, false)
+        node._type = types.Function(ptypes, rettypes, false, varargtype)
     end,
 
     ["Ast.TopLevelRecord"] = function(node, st, errors)
@@ -1818,15 +2320,13 @@ local toplevel_visitor = util.make_visitor({
             return
         end
         node._record = record
-        local ptypes = {}
-        for _, pdecl in ipairs(node.params) do
-            table.insert(ptypes, typefromnode(pdecl.type, st, errors))
-        end
+        local ptypes, varargtype = param_types(node.params, st, errors)
         local rettypes = {}
         for _, rt in ipairs(node.rettypes) do
             table.insert(rettypes, typefromnode(rt, st, errors))
         end
-        node._type = types.StaticMethod(rectype.name, node.name, ptypes, rettypes)
+        node._type = types.StaticMethod(rectype.name, node.name, ptypes, rettypes,
+            varargtype)
         rectype.functions[node.name] = node._type
     end,
 
@@ -1870,15 +2370,13 @@ local toplevel_visitor = util.make_visitor({
             return
         end
         node._record = record
-        local ptypes = {}
-        for _, pdecl in ipairs(node.params) do
-            table.insert(ptypes, typefromnode(pdecl.type, st, errors))
-        end
+        local ptypes, varargtype = param_types(node.params, st, errors)
         local rettypes = {}
         for _, rt in ipairs(node.rettypes) do
             table.insert(rettypes, typefromnode(rt, st, errors))
         end
-        node._type = types.Method(rectype.name, node.name, ptypes, rettypes)
+        node._type = types.Method(rectype.name, node.name, ptypes, rettypes,
+            varargtype)
         rectype.methods[node.name] = node._type
     end,
 })
@@ -1959,6 +2457,9 @@ local function register_referenced_records(t, loader, seen)
         end
         for _, r in ipairs(t.rettypes or {}) do
             register_referenced_records(r, loader, seen)
+        end
+        if t.varargtype then
+            register_referenced_records(t.varargtype, loader, seen)
         end
     elseif tag == "Type.Record" then
         for _, f in ipairs(t.fields or {}) do

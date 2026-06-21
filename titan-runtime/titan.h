@@ -32,9 +32,15 @@
    (luaS_newudata(L, 0, N)), and a type check compares uvalue(v)->metatable
    against the expected record metatable. A 0.7 checker reading a 0.8 record's
    getudatamem would read out-of-bounds, so 0.7 and 0.8 .so modules are
-   ABI-incompatible and live under a different TITAN_PATH dir. */
-#define TITAN_VER          "0.8"
-#define TITAN_VER_SUFFIX   "_0_8"
+   ABI-incompatible and live under a different TITAN_PATH dir.
+   0.8 -> 0.9: variadic parameters. A variadic function's native signature gained
+   a trailing `TitanVargX *_varargs, int _start` pair (after the declared params,
+   before the out-params), and <mangled>_types now encodes the `varargtype`
+   element type for variadic functions and methods. A 0.8 module has neither, so
+   0.8 and 0.9 .so modules are ABI-incompatible and live under a different
+   TITAN_PATH dir. */
+#define TITAN_VER          "0.9"
+#define TITAN_VER_SUFFIX   "_0_9"
 #define TITAN_PATH_VAR     "TITAN_PATH"
 #define TITAN_PATH_SEP     "/"
 #define TITAN_PATH_DEFAULT ".;/usr/local/lib/titan/" TITAN_VER
@@ -44,6 +50,25 @@
 #define TITAN_BACKTRACE_KEY "57d80578-2534-4856-ad3b-bde8cba4c445"
 
 #define TITAN_LUAINTEGER_NBITS cast_int(sizeof(lua_Integer) * CHAR_BIT)
+
+/* Variadic-parameter backing structs. One per `ctype` so the flexible array
+** member always matches the element C type exactly (no punning between
+** different element types). `n_args` is the TOTAL backing count; `start` is NOT
+** a struct field — it travels as a separate `int _start` native parameter, so a
+** callee's logical view is `args[start .. n_args-1]` and forwarding never
+** mutates a shared struct. The FAM `args[]` is the pointer/ABI form only; a
+** static call site builds a concrete-array local and passes its address. */
+typedef struct { lu_byte n_args; lua_Integer args[]; } TitanVargInteger;
+typedef struct { lu_byte n_args; lua_Number  args[]; } TitanVargFloat;
+typedef struct { lu_byte n_args; int         args[]; } TitanVargBoolean;
+typedef struct { lu_byte n_args; TString    *args[]; } TitanVargString;
+typedef struct { lu_byte n_args; Table      *args[]; } TitanVargArrayOrMap;
+typedef struct { lu_byte n_args; TValue      args[]; } TitanVargValue;
+typedef struct { lu_byte n_args; Udata      *args[]; } TitanVargNominal;
+/* The `lu_byte` count is an intentional cap that keeps the struct small and
+** bounds static sizing; runtime counts (forwarding/merge, the generic entry)
+** are checked against this and raise a clean Titan error when exceeded. */
+#define TITAN_VARARG_MAX 200
 
 /* The module state object is a Udata (was a CClosure): push it as a full
    userdata value. Used to seed a function/method/metamethod closure's

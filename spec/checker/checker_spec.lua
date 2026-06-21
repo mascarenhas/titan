@@ -2807,4 +2807,3 @@ describe("Titan typecheck of records", function()
         ]])
     end)
 end)
-

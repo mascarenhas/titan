@@ -40,6 +40,8 @@ local errors = {
 
    ParamSemicolon = "Expected ':' after parameter name.",
 
+   VarargColon = "Expected ':' after '...' in a variadic parameter declaration.",
+
    AssignVar = "Expected '=' after variable declaration.",
 
    ExpVarDec = "Expected an expression to initialize variable.",
@@ -168,6 +170,8 @@ local errors = {
     QualName = "Expected a qualified type name.",
 
     NameMethod = "Expected a method name after the colon.",
+
+    ListTooLong = "List exceeds the maximum of 100 elements.",
 
 }
 

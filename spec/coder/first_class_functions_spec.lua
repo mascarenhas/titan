@@ -417,3 +417,313 @@ describe("first-class function values (end-to-end)", function()
         assert.truthy(rok, out)
     end)
 end)
+
+-- A variadic function IS a first-class value (§2.B). Dispatch is identical to a
+-- non-variadic value: the fast path (exact runtime tag match) builds the backing
+-- struct and calls the native pointer with `_varargs` + `_start`; a gradual
+-- mismatch (a `...: value` slot holding a `...: integer` function) routes to the
+-- generic Lua-stack path, where the callee's genluaentry coerces each surplus
+-- arg and rebuilds the struct. The type tag folds in `varargtype` (via
+-- function_sig + types.tostring), so the two element types get different tags.
+describe("variadic function values (end-to-end)", function()
+    setup(function () os.remove("titan-runtime/titan.o") end)
+    after_each(function ()
+        os.execute("rm -f *.o *.so")
+        if not h.verbose then os.execute("rm -f *.c") end
+    end)
+
+    it("stores a variadic function in a local and calls it (fast path)", function()
+        -- The local's static type EXACTLY matches sum's runtime type tag
+        -- (`(...: integer) -> integer` both sides) -> fast native path: the value
+        -- call builds the struct on the C stack and passes `_varargs` + `_start`.
+        run_coder([[
+            function sum(...: integer): integer
+                local s = 0
+                local i = 1
+                local n = #...
+                while i <= n do s = s + ...[i]; i = i + 1 end
+                return s
+            end
+            function run(): integer
+                local f: (...: integer) -> integer = sum
+                return f(1, 2, 3, 4) + f() + f(10)
+            end
+        ]], [[
+            assert(test.run() == 10 + 0 + 10)
+        ]])
+    end)
+
+    it("passes a variadic function as an argument and calls it", function()
+        run_coder([[
+            function sum(...: integer): integer
+                local s = 0
+                local i = 1
+                local n = #...
+                while i <= n do s = s + ...[i]; i = i + 1 end
+                return s
+            end
+            function apply3(f: (...: integer) -> integer): integer
+                return f(1, 2, 3)
+            end
+            function run(): integer
+                return apply3(sum)
+            end
+        ]], [[
+            assert(test.run() == 6)
+        ]])
+    end)
+
+    it("returns a variadic function then calls it as a value", function()
+        run_coder([[
+            function sum(...: integer): integer
+                local s = 0
+                local i = 1
+                local n = #...
+                while i <= n do s = s + ...[i]; i = i + 1 end
+                return s
+            end
+            function get(): (...: integer) -> integer
+                return sum
+            end
+            function run(): integer
+                local f = get()
+                return f(5, 6, 7)
+            end
+        ]], [[
+            assert(test.run() == 18)
+            assert(test.get()(2, 2, 2, 2) == 8)
+        ]])
+    end)
+
+    it("calls a variadic value forwarding the caller's own ...", function()
+        -- The forwarder is ITSELF variadic; it forwards `...` into a variadic
+        -- VALUE (not a static callee). The fast path builds the struct via the
+        -- pass-through / start-adjust / fresh-copy cases just like a static call.
+        run_coder([[
+            function sum(...: integer): integer
+                local s = 0
+                local i = 1
+                local n = #...
+                while i <= n do s = s + ...[i]; i = i + 1 end
+                return s
+            end
+            function forward(f: (...: integer) -> integer, ...: integer): integer
+                return f(...)          -- pass-through: forward ... into the value
+            end
+            function forward_prefix(f: (...: integer) -> integer, ...: integer): integer
+                return f(100, ...)     -- fresh copy: prefix grows the tail
+            end
+            function run(): (integer, integer)
+                return forward(sum, 1, 2, 3), forward_prefix(sum, 4, 5)
+            end
+        ]], [[
+            local a, b = test.run()
+            assert(a == 6, "forward="..a)
+            assert(b == 109, "forward_prefix="..b)
+        ]])
+    end)
+
+    it("routes a gradual mismatch (...: value holding ...: integer) through the generic path", function()
+        -- `sum` is a Titan `(...: integer) -> integer`. Viewed at the COMPATIBLE
+        -- type `(...: value) -> integer` (via a `value` round-trip), its runtime tag
+        -- no longer matches the call site (the tags fold in varargtype, and
+        -- `...: integer` != `...: value` under types.equals). So the value call cannot
+        -- take the fast path: it goes generic, pushing each arg onto the Lua stack,
+        -- and sum's genluaentry coerces each `value` surplus arg back to `integer`
+        -- (the value->integer check lives in genluaentry, not the struct store).
+        run_coder([[
+            function sum(...: integer): integer
+                local s = 0
+                local i = 1
+                local n = #...
+                while i <= n do s = s + ...[i]; i = i + 1 end
+                return s
+            end
+            function run(): integer
+                local v: value = sum
+                local g: (...: value) -> integer = v   -- compatible, different tag
+                return g(10, 20, 30)
+            end
+        ]], [[
+            assert(test.run() == 60)
+        ]])
+    end)
+
+    -- The struct build is now FAST-PATH-ONLY, so the generic path never narrows.
+    -- This pins the corrected gradual-mismatch-narrowing behaviour: `h` is a
+    -- Titan `(...: value) -> integer`; round-tripped through `value` it is stored in
+    -- a slot whose STATIC type is `(...: integer) -> integer` (compatible both ways).
+    -- A `...: value` forwarder `f` forwards its `...: value` tail into that slot. The
+    -- forward into a STATIC `(...: integer)` type hits the struct build's CASE 3
+    -- (different element representation => per-element conversion), whose narrowing
+    -- arm is a `checkandget` value->integer. But the slot's RUNTIME tag is `h`'s
+    -- `(...: value)`, so the call must go GENERIC and dispatch to `h`, which accepts
+    -- every value. Pre-fix the struct build ran unconditionally (before the runtime
+    -- tag check), so case-3's `checkandget` narrowed value->integer and RAISED on
+    -- the non-integer tail elements ("x", 3.5) before the generic path could run;
+    -- fast-path-only build => no spurious raise, all three values reach `h`.
+    --
+    -- Driven through the normal pcall-wrapping harness: a *generic* (tag-mismatch)
+    -- value call made from inside a VARIADIC Titan function under an enclosing pcall
+    -- frame returns its result correctly (the generic path's savestack/restorestack
+    -- on `_vc_func` is relocation-safe and reads result slot 0 at `_vc_func + 0`,
+    -- where luaD_callnoyield places the callee's return).
+    it("does not narrow a forwarded ...: value tail on a gradual-mismatch generic call", function()
+        run_coder([[
+            function h(...: value): integer
+                -- `h` accepts ANY value; report the count, proving all the
+                -- (non-integer) elements reached it without a narrowing raise.
+                return #...
+            end
+            function f(...: value): integer
+                local v: value = h
+                local g: (...: value) -> integer = v   -- runtime tag is h's (...: value)
+                local gi: (...: integer) -> integer = g -- STATIC (...: integer): case-3 narrows
+                return gi(...)                        -- forward f's ...: value tail
+            end
+        ]], [[
+            -- the generic path forwards all 3 values to h -> #... == 3
+            -- (case-3 narrowing would have spuriously RAISED on "x"/3.5 pre-fix)
+            assert(test.f(1, "x", 3.5) == 3)
+        ]])
+    end)
+
+    -- Regression for the exact conjunction that was suspected of corrupting the
+    -- result (variadic CALLER + a generic/tag-mismatch value call + an enclosing
+    -- pcall, which is what the run_coder/busted harness installs around every
+    -- call). `f` is variadic; the value it calls is `sum` viewed at a COMPATIBLE
+    -- but differently-tagged type (`(...: value) -> integer` over a `(...: integer)`
+    -- function), so the runtime tag never matches and the call takes the GENERIC
+    -- Lua-stack path. The result must be the callee's return value, NOT the callee
+    -- closure that the generic path pushed at `_vc_func`.
+    it("generic value call from a variadic caller returns its result (not the callee) under pcall", function()
+        run_coder([[
+            function sum(...: integer): integer
+                local s = 0
+                local i = 1
+                local n = #...
+                while i <= n do s = s + ...[i]; i = i + 1 end
+                return s
+            end
+            function f(...: integer): integer
+                local v: value = sum
+                local g: (...: value) -> integer = v   -- compatible, different tag => generic
+                return g(...)
+            end
+        ]], [[
+            local r = test.f(10, 20, 30)
+            assert(r == 60, "expected 60, got "..tostring(r).." ("..type(r)..")")
+        ]])
+    end)
+
+    it("calls a Lua closure through a variadic value type", function()
+        -- A genuinely-foreign Lua closure stored at a variadic Titan function
+        -- type: tag never matches, so the generic path drives it; genluaentry on
+        -- the Lua side is the Lua function itself (no Titan entry), and the
+        -- arguments arrive as plain Lua values.
+        run_coder([[
+            function callwith(f: (...: integer) -> integer): integer
+                return f(3, 4, 5)
+            end
+        ]], [[
+            local r = test.callwith(function(...)
+                local s = 0
+                for _, n in ipairs({...}) do s = s + n end
+                return s
+            end)
+            assert(r == 12, "got "..r)
+        ]])
+    end)
+
+    it("survives a forced GC with collectable elements through a value call", function()
+        -- A `(...: string) -> integer` value call carrying FRESH (non-interned)
+        -- strings, with a forced GC in the callee before any `...[i]` read. The
+        -- struct payload is untraced (§2.D); the elements survive only via their
+        -- source-slot anchors, which the value-call path keeps live across the
+        -- call (the whole dispatch runs inside `stats`, before any L->top.p reset).
+        run_coder([[
+            function totallen(...: string): integer
+                local junk: {integer} = {}
+                local k = 1
+                while k <= 300 do junk = { k, k + 1 }; k = k + 1 end
+                local n = #...
+                local s = 0
+                local i = 1
+                while i <= n do s = s + #(...[i]); i = i + 1 end
+                return s
+            end
+            function run(a: string, b: string, c: string): integer
+                local f: (...: string) -> integer = totallen
+                return f(a, b, c)
+            end
+        ]], [[
+            collectgarbage("incremental")
+            local a = ("p"):rep(5) .. "1"   -- length 6
+            local b = ("q"):rep(7) .. "2"   -- length 8
+            local c = ("r"):rep(3) .. "3"   -- length 4
+            assert(test.run(a, b, c) == 6 + 8 + 4)
+        ]])
+    end)
+
+    it("uses a variadic bound method (obj:m) as a value", function()
+        -- A variadic METHOD's bound reference `obj:m` is a normal first-class
+        -- value; calling it dispatches through the bound-method trampoline, which
+        -- forwards the backing struct + start verbatim.
+        run_coder([[
+            record Acc
+                base: integer
+            end
+            function Acc:total(...: integer): integer
+                local s = self.base
+                local i = 1
+                local n = #...
+                while i <= n do s = s + ...[i]; i = i + 1 end
+                return s
+            end
+            function run(): integer
+                local a: Acc = Acc.new(100)
+                local m: (...: integer) -> integer = a:total
+                return m(1, 2, 3)
+            end
+        ]], [[
+            assert(test.run() == 106)
+        ]])
+    end)
+
+    it("takes the fast path on tag match and the slow path on mismatch", function()
+        -- Depth probe: an exact-typed variadic value call (the higher-order arg
+        -- `p` is itself called inside the variadic callee, so its frame depth is
+        -- observable) uses the native fast path -- no extra Lua frame -- when the
+        -- value's runtime tag matches; a real Lua closure (the slow `g`) is one
+        -- frame deeper. The probe `p` records the stack depth at which it runs.
+        run_coder([[
+            function inner(f: () -> integer, ...: integer): integer
+                local s = f()
+                local i = 1
+                local n = #...
+                while i <= n do s = s + ...[i]; i = i + 1 end
+                return s
+            end
+            function outer(g: (() -> integer, ...: integer) -> integer,
+                           p: () -> integer): integer
+                return g(p, 1, 2, 3)
+            end
+            function run_fast(p: () -> integer): integer
+                return outer(inner, p)   -- exact tag -> fast native path
+            end
+            function run_slow(p: () -> integer,
+                              g: (() -> integer, ...: integer) -> integer): integer
+                return outer(g, p)       -- a Lua closure g -> slow path
+            end
+        ]], h.DEPTH_PROBE .. [[
+            local function slow_g2(p, ...)
+                local s = p()
+                for _, n in ipairs({...}) do s = s + n end
+                return s
+            end
+            local fastd = test.run_fast(depth)
+            local slowd = test.run_slow(depth, slow_g2)
+            assert(slowd > fastd, ('fast=')..fastd..(' slow=')..slowd)
+        ]])
+    end)
+end)
