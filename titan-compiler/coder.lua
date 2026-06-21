@@ -2239,6 +2239,38 @@ local function codereturn(ctx, node)
     })
 end
 
+-- `raise <exp>`: evaluate the (already `value`-coerced) operand into an anchored
+-- temp, push it onto the Lua stack as the error object, then `lua_error(L)`. The
+-- entry wrapper installed `errorhandler` on `L->errfunc`, so the longjmp through
+-- `lua_error` runs that handler, which builds the unified Lua+Titan trace before
+-- unwinding. The temp is a `value`-typed (GC) TValue, so `newtmp` anchors it in a
+-- reserved stack slot; that anchor keeps it alive across the `lua_checkstack`
+-- (which may run the GC / relocate the stack) before we copy it to the new top.
+-- An `emitline` stamps the throw to the raise's exact `.titan` line so the native
+-- frame symbolizes there (mirrors `codethrow`).
+local function coderaise(ctx, node)
+    local cstats, cexp = codeexp(ctx, node.exp)
+    local ctmp, tmpname, tmpslot = newtmp(ctx, types.Value(), true)
+    return render([[
+        $CSTATS
+        $CTMP
+        $TMPNAME = $CEXP;
+        $ANCHOR
+        $LINEDIR
+        lua_checkstack(L, 1);
+        setobj2t(L, s2v(L->top.p), &$TMPNAME);
+        L->top.p++;
+        lua_error(L);
+    ]], {
+        CSTATS = cstats,
+        CTMP = ctmp,
+        TMPNAME = tmpname,
+        CEXP = cexp,
+        ANCHOR = setslot(types.Value(), tmpslot, tmpname),
+        LINEDIR = emitline(node),
+    })
+end
+
 local function localname(ctx, name)
     local idx = ctx.names[name] or 1
     ctx.names[name] = idx + 1
@@ -2358,6 +2390,12 @@ local function codestat_dispatch(ctx, node)
         return codereturn(ctx, node)
     elseif tag == "Ast.StatBreak" then
         return "break;"
+    elseif tag == "Ast.StatRaise" then
+        return coderaise(ctx, node)
+    elseif tag == "Ast.StatTry" then
+        -- Unreachable: the checker rejects StatTry until the catch/finally
+        -- phases land. Kept so the dispatch is total and any leak fails loudly.
+        error("internal error: catch/finally codegen not yet implemented")
     else
         error("invalid node tag " .. tag)
     end

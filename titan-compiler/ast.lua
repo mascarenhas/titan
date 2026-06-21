@@ -41,6 +41,8 @@ return typedecl("Ast", {
         StatCall        = {"loc", "callexp"},
         StatReturn      = {"loc", "exps"},
         StatBreak       = {"loc"},
+        StatRaise       = {"loc", "exp"},   -- `raise <exp>`; `exp` false ⇒ bare re-raise
+        StatTry         = {"loc", "block", "catchblock", "finallyblock"},
     },
 
     Then = {

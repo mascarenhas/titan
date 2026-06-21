@@ -121,6 +121,17 @@ function defs.adjust_exp(pos, exp)
     end
 end
 
+-- A `block` with optional `(catch …)? (finally …)?` trailers. When neither is
+-- present the block is the plain `StatBlock` (the common case, so no wrapper
+-- node is introduced); when either is present we wrap it in a `StatTry` whose
+-- `catchblock`/`finallyblock` are the clause bodies (false when absent).
+function defs.trywrap(pos, block, catchblock, finallyblock)
+    if not catchblock and not finallyblock then
+        return block
+    end
+    return ast.StatTry(pos, block, catchblock, finallyblock)
+end
+
 function defs.ifstat(pos, exp, block, thens, elseopt)
     table.insert(thens, 1, ast.Then(pos, exp, block))
     return ast.StatIf(pos, thens, elseopt)
@@ -449,10 +460,22 @@ local grammar = re.compile([[
     recordfield     <- (P  NAME COLON^ColonRecordField
                            type^TypeRecordField SEMICOLON?)      -> typeddecl
 
-    block           <- (P  {| statement* returnstat? |})         -> StatBlock
+    -- A `block` may optionally absorb `(catch <block>)? (finally <block>)?`
+    -- trailers. When either is present `trywrap` builds a `StatTry` wrapper;
+    -- otherwise it returns the plain `StatBlock`. Since every construct (function
+    -- body, loop body, if branch, bare `do`) consumes `block`, catch/finally
+    -- become available everywhere with no per-construct edits. The catch/finally
+    -- clause bodies are `simpleblock`s (plain statement lists with no trailers),
+    -- so an inner catch-block cannot greedily swallow the outer `finally`.
+    block           <- (P  simpleblock
+                            ((CATCH simpleblock^CatchBlock)? -> opt)
+                            ((FINALLY simpleblock^FinallyBlock)? -> opt)) -> trywrap
+
+    simpleblock     <- (P  {| statement* returnstat? |})         -> StatBlock
 
     statement       <- (SEMICOLON)                               -- ignore
                      / (P  BREAK)                                -> StatBreak
+                     / (P  RAISE (exp? -> opt))                  -> StatRaise
                      / (DO block END^EndBlock)                   -- produces StatBlock
                      / (P  WHILE exp^ExpWhile DO^DoWhile
                                  block END^EndWhile)             -> StatWhile
@@ -623,6 +646,9 @@ local grammar = re.compile([[
     IMPORT          <- %IMPORT SKIP*
     AS              <- %AS SKIP*
     FOREIGN         <- %FOREIGN SKIP*
+    CATCH           <- %CATCH SKIP*
+    FINALLY         <- %FINALLY SKIP*
+    RAISE           <- %RAISE SKIP*
 
     BOOLEAN         <- %BOOLEAN SKIP*
     INTEGER         <- %INTEGER SKIP*

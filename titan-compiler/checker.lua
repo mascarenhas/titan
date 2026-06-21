@@ -664,6 +664,35 @@ checkstat = util.make_visitor({
         return false
     end,
 
+    ["Ast.StatRaise"] = function(node, st, errors)
+        if not node.exp then
+            -- Bare `raise` (re-raise the in-flight error) is only legal inside a
+            -- catch block; full catch-context legality lands in a later phase, so
+            -- for now reject it outright.
+            checker.typeerror(errors, node.loc,
+                "bare 'raise' is not yet supported (a re-raise is only valid "
+                .. "inside a catch block, which is not yet implemented)")
+        else
+            -- `raise <exp>`: the error object may be any value, so check the
+            -- operand with `value` as the expected type (every value coerces to
+            -- `value`) and materialize the coercion so the coder boxes it.
+            checkexp(node.exp, st, errors, types.Value())
+            node.exp = trycoerce(node.exp, types.Value(), errors)
+            checkmatch("raise", types.Value(), node.exp._type, errors, node.loc)
+        end
+        -- `raise` is a terminator: control never falls through it.
+        return true
+    end,
+
+    ["Ast.StatTry"] = function(node, _, errors)
+        -- catch/finally parse but their checker scoping, always-returns rule and
+        -- codegen are later phases; report a clean error for now so the visitor
+        -- is total and the construct does not silently miscompile.
+        checker.typeerror(errors, node.loc,
+            "catch/finally is not yet implemented")
+        return false
+    end,
+
     ["Ast.StatAssign"] = function(node, st, errors)
         for _, var in ipairs(node.vars) do
             checkvar(var, st, errors)

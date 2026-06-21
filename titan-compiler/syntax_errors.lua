@@ -89,6 +89,10 @@ local errors = {
 
     EndBlock = "Expected 'end' to close block.",
 
+    CatchBlock = "Expected a block after 'catch'.",
+
+    FinallyBlock = "Expected a block after 'finally'.",
+
     ExpWhile = "Expected an expression after 'while'.",
 
     DoWhile = "Expected 'do' in while statement.",

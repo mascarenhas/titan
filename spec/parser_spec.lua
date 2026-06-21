@@ -1892,4 +1892,147 @@ describe("Titan parser", function()
             assert_program_syntax_error(src, "ListTooLong")
         end)
     end)
+
+    describe("can parse error handling", function()
+        it("parses `raise <exp>`", function()
+            assert_statements_ast([[ raise "boom" ]], {
+                { _tag = "Ast.StatRaise",
+                  exp = { _tag = "Ast.ExpString", value = "boom" } }
+            })
+            assert_statements_ast([[ raise x + 1 ]], {
+                { _tag = "Ast.StatRaise",
+                  exp = { _tag = "Ast.ExpBinop", op = "+" } }
+            })
+        end)
+
+        it("parses a bare `raise` (exp is false)", function()
+            assert_statements_ast([[ raise ]], {
+                { _tag = "Ast.StatRaise", exp = false }
+            })
+        end)
+
+        it("parses a `do` block with only a catch", function()
+            assert_statements_ast([[
+                do
+                    raise "x"
+                catch
+                    print(error)
+                end
+            ]], {
+                { _tag = "Ast.StatTry",
+                  block = { _tag = "Ast.StatBlock",
+                            stats = { { _tag = "Ast.StatRaise" } } },
+                  catchblock = { _tag = "Ast.StatBlock" },
+                  finallyblock = false }
+            })
+        end)
+
+        it("parses a `do` block with only a finally", function()
+            assert_statements_ast([[
+                do
+                    print(1)
+                finally
+                    print(2)
+                end
+            ]], {
+                { _tag = "Ast.StatTry",
+                  block = { _tag = "Ast.StatBlock" },
+                  catchblock = false,
+                  finallyblock = { _tag = "Ast.StatBlock" } }
+            })
+        end)
+
+        it("parses a `do` block with both catch and finally", function()
+            assert_statements_ast([[
+                do
+                    print(1)
+                catch
+                    print(error, traceback)
+                finally
+                    print(2)
+                end
+            ]], {
+                { _tag = "Ast.StatTry",
+                  block = { _tag = "Ast.StatBlock" },
+                  catchblock = { _tag = "Ast.StatBlock" },
+                  finallyblock = { _tag = "Ast.StatBlock" } }
+            })
+        end)
+
+        it("attaches catch/finally to a function body", function()
+            assert_program_ast([[
+                function f(): nil
+                    print(1)
+                catch
+                    print(error)
+                finally
+                    print(2)
+                end
+            ]], {
+                { _tag = "Ast.TopLevelFunc",
+                  name = "f",
+                  block = { _tag = "Ast.StatTry",
+                            block = { _tag = "Ast.StatBlock" },
+                            catchblock = { _tag = "Ast.StatBlock" },
+                            finallyblock = { _tag = "Ast.StatBlock" } } }
+            })
+        end)
+
+        it("attaches catch to a loop body", function()
+            assert_statements_ast([[
+                while true do
+                    raise "x"
+                catch
+                    break
+                end
+            ]], {
+                { _tag = "Ast.StatWhile",
+                  block = { _tag = "Ast.StatTry",
+                            catchblock = { _tag = "Ast.StatBlock" },
+                            finallyblock = false } }
+            })
+        end)
+
+        it("attaches finally to an if branch", function()
+            assert_statements_ast([[
+                if true then
+                    print(1)
+                finally
+                    print(2)
+                end
+            ]], {
+                { _tag = "Ast.StatIf",
+                  thens = {
+                      { _tag = "Ast.Then",
+                        block = { _tag = "Ast.StatTry",
+                                  catchblock = false,
+                                  finallyblock = { _tag = "Ast.StatBlock" } } }
+                  } }
+            })
+        end)
+
+        it("nests try blocks (inner catch does not swallow outer finally)", function()
+            assert_statements_ast([[
+                do
+                    do
+                        raise "x"
+                    catch
+                        print("inner")
+                    end
+                finally
+                    print("outer")
+                end
+            ]], {
+                { _tag = "Ast.StatTry",
+                  block = { _tag = "Ast.StatBlock",
+                            stats = {
+                                { _tag = "Ast.StatTry",
+                                  catchblock = { _tag = "Ast.StatBlock" },
+                                  finallyblock = false }
+                            } },
+                  catchblock = false,
+                  finallyblock = { _tag = "Ast.StatBlock" } }
+            })
+        end)
+    end)
 end)
