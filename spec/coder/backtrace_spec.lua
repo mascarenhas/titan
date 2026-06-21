@@ -20,7 +20,7 @@ local parse = h.parse
 local compile = h.compile
 
 local function clean()
-    os.execute("rm -f *.o *.so")
+    os.execute("rm -rf *.o *.so *.dSYM")
     if not h.verbose then os.execute("rm -f *.c") end
 end
 

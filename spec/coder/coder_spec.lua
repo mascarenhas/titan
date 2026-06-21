@@ -13,7 +13,7 @@ local run_coder_app = h.run_coder_app
 local generate_modules = h.generate_modules
 
 local function clean()
-    os.execute("rm -f *.o *.so")
+    os.execute("rm -rf *.o *.so *.dSYM")
     if not h.verbose then os.execute("rm -f *.c") end
 end
 

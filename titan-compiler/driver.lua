@@ -32,6 +32,21 @@ local function shell(cmd)
 end
 
 driver.UNAME = shell("uname")
+-- On Mach-O (macOS), libbacktrace needs a companion `.dSYM` bundle to symbolize
+-- PCs to #line-attributed .titan file/line — the linker does NOT produce one, so
+-- without `dsymutil` the native Titan frames are unsymbolized and dropped. Run
+-- `dsymutil` after every final link on Darwin only; on Linux DWARF is embedded in
+-- the binary and dsymutil may be absent, so it must be a no-op there.
+driver.IS_DARWIN = string.match(driver.UNAME, "Darwin") ~= nil
+
+local function run_dsymutil(output, verbose)
+    if not driver.IS_DARWIN then return end
+    local cmd = "dsymutil " .. output
+    if verbose then
+        print(cmd)
+    end
+    os.execute(cmd)
+end
 
 local function findmodule(paths, modname, extension)
     local modf = modname:gsub("[.]", "/") .. extension
@@ -313,7 +328,9 @@ function driver.compile_library(modname, libnames, link, verbose)
     if verbose then
         print(cmd)
     end
-    return os.execute(cmd)
+    local ok, term, code = os.execute(cmd)
+    run_dsymutil(soname, verbose)
+    return ok, term, code
 end
 
 function driver.compile_program(modname, libnames, link, verbose)
@@ -346,7 +363,9 @@ function driver.compile_program(modname, libnames, link, verbose)
     if verbose then
         print(cmd)
     end
-    return os.execute(cmd)
+    local ok, term, code = os.execute(cmd)
+    run_dsymutil(execname, verbose)
+    return ok, term, code
 end
 
 return driver

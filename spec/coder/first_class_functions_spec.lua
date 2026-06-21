@@ -17,7 +17,7 @@ local call = h.call
 describe("first-class function values (end-to-end)", function()
     setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(function ()
-        os.execute("rm -f *.o *.so")
+        os.execute("rm -rf *.o *.so *.dSYM")
         if not h.verbose then os.execute("rm -f *.c") end
     end)
 
@@ -428,7 +428,7 @@ end)
 describe("variadic function values (end-to-end)", function()
     setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(function ()
-        os.execute("rm -f *.o *.so")
+        os.execute("rm -rf *.o *.so *.dSYM")
         if not h.verbose then os.execute("rm -f *.c") end
     end)
 

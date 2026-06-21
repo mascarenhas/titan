@@ -77,7 +77,12 @@ function M.call_app(appname, ...)
     local out = f:read() or ""
     local ok, err, status = f:close()
     if err == "exit" then ok = true end
-    if not verbose() then os.remove(appname) end
+    if not verbose() then
+        os.remove(appname)
+        -- macOS: dsymutil leaves a `<exe>.dSYM` bundle (a directory) next to the
+        -- executable for libbacktrace symbolization; no-op elsewhere.
+        os.execute("rm -rf " .. appname .. ".dSYM")
+    end
     return ok, err, status, out
 end
 
