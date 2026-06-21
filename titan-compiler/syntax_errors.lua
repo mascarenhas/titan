@@ -40,6 +40,8 @@ local errors = {
 
    ParamSemicolon = "Expected ':' after parameter name.",
 
+   VarargColon = "Expected ':' after '...' in a variadic parameter declaration.",
+
    AssignVar = "Expected '=' after variable declaration.",
 
    ExpVarDec = "Expected an expression to initialize variable.",

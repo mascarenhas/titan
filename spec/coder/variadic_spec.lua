@@ -3,8 +3,8 @@
 -- `...` to another variadic callee, building `{...}` / `{e1, ..., ...}` arrays
 -- from a vararg, GC anchoring of variadic arguments under generational mode, and
 -- assorted functional coverage gaps (nested variadic lambdas, map-typed
--- elements, variadic methods, side-effecting `...[i]`, `...boolean`, and the
--- `{...value}`-with-a-nil border semantics).
+-- elements, variadic methods, side-effecting `...[i]`, `...: boolean`, and the
+-- `{...}`-of-a-`value`-vararg-with-a-nil border semantics).
 --
 -- The checker-only counterparts live in spec/checker/variadic_spec.lua.
 local h = require 'spec.support.helpers'
@@ -22,7 +22,7 @@ describe("scalar variadic parameters (code generator)", function()
 
     it("integer vararg: #... and ...[i] called from Lua", function()
         run_coder([[
-            function sum(base: integer, ...integer): integer
+            function sum(base: integer, ...: integer): integer
                 local n = #...
                 local s = base
                 local i = 1
@@ -42,7 +42,7 @@ describe("scalar variadic parameters (code generator)", function()
 
     it("float vararg: #... and ...[i] called from Lua", function()
         run_coder([[
-            function fsum(...float): float
+            function fsum(...: float): float
                 local n = #...
                 local s = 0.0
                 local i = 1
@@ -60,7 +60,7 @@ describe("scalar variadic parameters (code generator)", function()
 
     it("boolean vararg: #... and ...[i] called from Lua", function()
         run_coder([[
-            function allset(...boolean): boolean
+            function allset(...: boolean): boolean
                 local n = #...
                 local i = 1
                 while i <= n do
@@ -80,10 +80,10 @@ describe("scalar variadic parameters (code generator)", function()
 
     it("#... is 0 and ...[1] raises for the empty vararg", function()
         run_coder([[
-            function count(...integer): integer
+            function count(...: integer): integer
                 return #...
             end
-            function first(...integer): integer
+            function first(...: integer): integer
                 return ...[1]
             end
         ]], [[
@@ -94,7 +94,7 @@ describe("scalar variadic parameters (code generator)", function()
 
     it("...[i] raises a runtime error when out of range", function()
         run_coder([[
-            function first(...integer): integer
+            function first(...: integer): integer
                 return ...[1]
             end
         ]], [[
@@ -104,7 +104,7 @@ describe("scalar variadic parameters (code generator)", function()
 
     it("...[i] raises a runtime error when i <= 0", function()
         run_coder([[
-            function at(i: integer, ...integer): integer
+            function at(i: integer, ...: integer): integer
                 return ...[i]
             end
         ]], [[
@@ -114,7 +114,7 @@ describe("scalar variadic parameters (code generator)", function()
 
     it("...[i] past the end raises a runtime error", function()
         run_coder([[
-            function at(i: integer, ...integer): integer
+            function at(i: integer, ...: integer): integer
                 return ...[i]
             end
         ]], [[
@@ -124,7 +124,7 @@ describe("scalar variadic parameters (code generator)", function()
 
     it("calls a variadic callee with a static arg list from Titan", function()
         run_coder([[
-            function sum(base: integer, ...integer): integer
+            function sum(base: integer, ...: integer): integer
                 local n = #...
                 local s = base
                 local i = 1
@@ -148,7 +148,7 @@ describe("scalar variadic parameters (code generator)", function()
 
     it("static call site builds a struct for a no-fixed-param variadic callee", function()
         run_coder([[
-            function fsum(...float): float
+            function fsum(...: float): float
                 local n = #...
                 local s = 0.0
                 local i = 1
@@ -168,7 +168,7 @@ describe("scalar variadic parameters (code generator)", function()
 
     it("return ... adjust-up fills a fixed return arity from the vararg", function()
         run_coder([[
-            function pair(...integer): (integer, integer)
+            function pair(...: integer): (integer, integer)
                 return ...
             end
         ]], [[
@@ -180,7 +180,7 @@ describe("scalar variadic parameters (code generator)", function()
 
     it("local-hydration adjust-up reads ...[k] for each slot", function()
         run_coder([[
-            function third(...integer): integer
+            function third(...: integer): integer
                 local a, b, c = ...
                 return c
             end
@@ -191,7 +191,7 @@ describe("scalar variadic parameters (code generator)", function()
 
     it("local-hydration into an optional slot nil-fills out of range", function()
         run_coder([[
-            function maybe(...integer): integer?
+            function maybe(...: integer): integer?
                 local a: integer, b: integer? = ...
                 return b
             end
@@ -206,9 +206,9 @@ describe("scalar variadic parameters (code generator)", function()
     -- A raw store would bit-reinterpret the element (integer bits read as a
     -- double, or a tagless scalar read as a pointer). One case per adjust-up
     -- site (decl / assign / return / call-arg), plus the boxed `value?` form.
-    it("optional decl `float? = ...integer` converts element to float", function()
+    it("optional decl `float? = ...: integer` converts element to float", function()
         run_coder([[
-            function f(...integer): float
+            function f(...: integer): float
                 local x: float? = ...
                 if x then return x + 0.5 else return -1.0 end
             end
@@ -219,9 +219,9 @@ describe("scalar variadic parameters (code generator)", function()
         ]])
     end)
 
-    it("optional assign `x = ...integer` (x:float?) converts to float", function()
+    it("optional assign `x = ...: integer` (x:float?) converts to float", function()
         run_coder([[
-            function f(...integer): float
+            function f(...: integer): float
                 local x: float? = nil
                 x = ...
                 if x then return x + 0.5 else return -1.0 end
@@ -233,9 +233,9 @@ describe("scalar variadic parameters (code generator)", function()
         ]])
     end)
 
-    it("optional `return ...integer` into a float? return converts to float", function()
+    it("optional `return ...: integer` into a float? return converts to float", function()
         run_coder([[
-            function f(...integer): float?
+            function f(...: integer): float?
                 return ...
             end
         ]], [[
@@ -245,12 +245,12 @@ describe("scalar variadic parameters (code generator)", function()
         ]])
     end)
 
-    it("optional call-arg `...integer` into a float? fixed param converts", function()
+    it("optional call-arg `...: integer` into a float? fixed param converts", function()
         run_coder([[
             function g(a: float?): float
                 if a then return a + 0.5 else return -1.0 end
             end
-            function f(...integer): float
+            function f(...: integer): float
                 return g(...)
             end
         ]], [[
@@ -260,9 +260,9 @@ describe("scalar variadic parameters (code generator)", function()
         ]])
     end)
 
-    it("optional decl `integer? = ...float` converts element to integer", function()
+    it("optional decl `integer? = ...: float` converts element to integer", function()
         run_coder([[
-            function f(...float): integer
+            function f(...: float): integer
                 local x: integer? = ...
                 if x then return x + 1 else return -1 end
             end
@@ -273,9 +273,9 @@ describe("scalar variadic parameters (code generator)", function()
         ]])
     end)
 
-    it("optional decl `value? = ...integer` boxes the element correctly", function()
+    it("optional decl `value? = ...: integer` boxes the element correctly", function()
         run_coder([[
-            function f(...integer): value
+            function f(...: integer): value
                 local x: value? = ...
                 if x then return x else return -1 end
             end
@@ -290,14 +290,14 @@ describe("collectable variadic parameters (code generator)", function()
     setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
-    -- A `...string` callee that FORCES a garbage collection in its body (an
+    -- A `...: string` callee that FORCES a garbage collection in its body (an
     -- allocating loop trips luaC_checkGC) BEFORE reading any `...[i]`. The vararg
     -- struct's payload (raw TString*) is untraced (§2.D); the elements survive
     -- only because they stay anchored on the caller's Lua stack. A dropped anchor
     -- is near-deterministic corruption, so this test pins the anchoring invariant.
-    it("...string survives a forced GC in the callee, called from Lua", function()
+    it("...: string survives a forced GC in the callee, called from Lua", function()
         run_coder([[
-            function totallen(...string): integer
+            function totallen(...: string): integer
                 -- churn the heap so a minor collection runs before we touch ...[i]
                 local junk: {integer} = {}
                 local k = 1
@@ -330,9 +330,9 @@ describe("collectable variadic parameters (code generator)", function()
     -- variadic callee which forces a GC before reading the elements. This is the
     -- tail-call anchoring path (`return callee(...)` resets L->top.p = _base):
     -- the call must run while the source string slots are still anchored.
-    it("...string survives a forced GC across a static (Titan) call site", function()
+    it("...: string survives a forced GC across a static (Titan) call site", function()
         run_coder([[
-            function totallen(...string): integer
+            function totallen(...: string): integer
                 local junk: {integer} = {}
                 local k = 1
                 while k <= 300 do
@@ -360,11 +360,11 @@ describe("collectable variadic parameters (code generator)", function()
         ]])
     end)
 
-    -- A `...{integer}` (array element type, Table*) callee: read the first
+    -- A `...: {integer}` (array element type, Table*) callee: read the first
     -- element of each forwarded array after a forced GC.
-    it("...{integer} (array) survives a forced GC in the callee", function()
+    it("...: {integer} (array) survives a forced GC in the callee", function()
         run_coder([[
-            function firstsum(...{integer}): integer
+            function firstsum(...: {integer}): integer
                 local junk: {integer} = {}
                 local k = 1
                 while k <= 300 do
@@ -387,14 +387,14 @@ describe("collectable variadic parameters (code generator)", function()
         ]])
     end)
 
-    -- A `...R` (record/Nominal, Udata*) callee, exercised from BOTH Lua and Titan
+    -- A `...: R` (record/Nominal, Udata*) callee, exercised from BOTH Lua and Titan
     -- with a static arg list, with a forced GC before reading the record fields.
-    it("...R (record) survives a forced GC, from Lua and from Titan", function()
+    it("...: R (record) survives a forced GC, from Lua and from Titan", function()
         run_coder([[
             record P
                 x: integer
             end
-            function sumx(...P): integer
+            function sumx(...: P): integer
                 local junk: {integer} = {}
                 local k = 1
                 while k <= 300 do
@@ -425,12 +425,12 @@ describe("collectable variadic parameters (code generator)", function()
         ]])
     end)
 
-    -- A `...value` (TValue element) slice carrying MIXED types, read back after a
+    -- A `...: value` (TValue element) slice carrying MIXED types, read back after a
     -- forced GC. The struct holds 16-byte tagged TValues whose collectable payload
     -- is untraced; the values must ride the caller's stack anchors.
-    it("...value carries mixed types through a forced GC", function()
+    it("...: value carries mixed types through a forced GC", function()
         run_coder([[
-            function pick(which: integer, ...value): value
+            function pick(which: integer, ...: value): value
                 local junk: {integer} = {}
                 local k = 1
                 while k <= 300 do
@@ -450,16 +450,16 @@ describe("collectable variadic parameters (code generator)", function()
         ]])
     end)
 
-    -- A VOID-returning `...string` callee (collectable element type, returns
+    -- A VOID-returning `...: string` callee (collectable element type, returns
     -- nothing) called in STATEMENT position. The static call site sets
     -- varg_collectable = true / dots_tail_close = false, so the void result must
     -- be routed through the void branch and emit the call for effect -- NOT fall
     -- into the varg_collectable branch which would `newtmp(Type.Void)` and raise
     -- "invalid type void". Pins that void + collectable-vararg codegen compiles.
-    it("void-returning ...string called in statement position from Titan and Lua", function()
+    it("void-returning ...: string called in statement position from Titan and Lua", function()
         run_coder([[
             total: integer = 0
-            function sink(...string)
+            function sink(...: string)
                 local n = #...
                 local i = 1
                 while i <= n do
@@ -495,7 +495,7 @@ describe("forwarding an existing ... to another variadic callee", function()
     -- elements the forwarder received.
     it("case 1 pass-through: g(a, ...) with matching fixed arity and element type", function()
         run_coder([[
-            function g(a: integer, ...integer): integer
+            function g(a: integer, ...: integer): integer
                 local s = a
                 local i = 1
                 local n = #...
@@ -505,7 +505,7 @@ describe("forwarding an existing ... to another variadic callee", function()
                 end
                 return s
             end
-            function f(...integer): integer
+            function f(...: integer): integer
                 return g(1000, ...)
             end
         ]], [[
@@ -522,7 +522,7 @@ describe("forwarding an existing ... to another variadic callee", function()
     -- tail the callee sees.
     it("case 2 start-adjust: g(x, y, ...) consumes a vararg element as a fixed param", function()
         run_coder([[
-            function g(x: integer, y: integer, ...integer): integer
+            function g(x: integer, y: integer, ...: integer): integer
                 -- encode: x*100000 + y*1000 + (#... is tail length)*10 + first-tail
                 local n = #...
                 local first = 0
@@ -531,7 +531,7 @@ describe("forwarding an existing ... to another variadic callee", function()
                 end
                 return x * 100000 + y * 1000 + n * 10 + first
             end
-            function f(...integer): integer
+            function f(...: integer): integer
                 -- caller supplies one static arg (x=5); g needs two fixed params,
                 -- so y is borrowed from ...[1] and the tail starts at ...[2].
                 return g(5, ...)
@@ -550,7 +550,7 @@ describe("forwarding an existing ... to another variadic callee", function()
     -- `...` start-adjusted independently.
     it("case 2: g(h1(...), h2(...)) is order-independent (no struct mutation)", function()
         run_coder([[
-            function h1(a: integer, ...integer): integer
+            function h1(a: integer, ...: integer): integer
                 -- a borrowed as fixed; returns a + first tail element (or a)
                 local n = #...
                 if n > 0 then
@@ -558,14 +558,14 @@ describe("forwarding an existing ... to another variadic callee", function()
                 end
                 return a
             end
-            function h2(a: integer, b: integer, ...integer): integer
+            function h2(a: integer, b: integer, ...: integer): integer
                 -- two fixed params: a, b borrowed; returns a*1000 + b
                 return a * 1000 + b
             end
             function g(p: integer, q: integer): integer
                 return p * 1000000 + q
             end
-            function f(...integer): integer
+            function f(...: integer): integer
                 -- h1 borrows ...[1] as `a`, tail starts at ...[2]
                 -- h2 borrows ...[1],...[2] as a,b
                 return g(h1(...), h2(...))
@@ -579,17 +579,17 @@ describe("forwarding an existing ... to another variadic callee", function()
         ]])
     end)
 
-    -- CASE 3 (fresh copy), element-type MISMATCH: forward `...integer` into a
-    -- `...value` callee. Each integer element is boxed into a TValue in a fresh
+    -- CASE 3 (fresh copy), element-type MISMATCH: forward `...: integer` into a
+    -- `...: value` callee. Each integer element is boxed into a TValue in a fresh
     -- Udata0 backing struct. A forced GC in the deepest callee proves the case-3
     -- anchoring (the fresh struct is stack-anchored; its elements ride upstream).
-    it("case 3 type-mismatch: ...integer forwarded to ...value (each element boxed)", function()
+    it("case 3 type-mismatch: ...: integer forwarded to ...: value (each element boxed)", function()
         run_coder([[
-            -- sink takes ...value; the forwarder forwards ...integer, so each
+            -- sink takes ...: value; the forwarder forwards ...: integer, so each
             -- integer element is BOXED into a TValue in a fresh Udata0 (case 3,
             -- element-representation mismatch). sink returns the which-th value
             -- back to Lua unchanged, proving the boxed elements are intact.
-            function sink(which: integer, ...value): value
+            function sink(which: integer, ...: value): value
                 local junk: {integer} = {}
                 local k = 1
                 while k <= 300 do
@@ -598,13 +598,13 @@ describe("forwarding an existing ... to another variadic callee", function()
                 end
                 return ...[which]
             end
-            function count(...value): integer
+            function count(...: value): integer
                 return #...
             end
-            function f(which: integer, ...integer): value
+            function f(which: integer, ...: integer): value
                 return sink(which, ...)
             end
-            function n(...integer): integer
+            function n(...: integer): integer
                 return count(...)
             end
         ]], [[
@@ -623,15 +623,15 @@ describe("forwarding an existing ... to another variadic callee", function()
     end)
 
     -- CASE 3 (fresh copy), element-type MISMATCH, NARROWING direction: forward
-    -- `...value` into a `...integer` callee. The source element IS a TValue, so
+    -- `...: value` into a `...: integer` callee. The source element IS a TValue, so
     -- the per-element conversion goes through `checkandget` (the case-3 else
     -- branch), runtime-checking each value is an integer and unboxing it. This is
     -- the only scalar mismatch the checker permits (int<->float pairs are
     -- rejected upstream); the source being a real TValue is what makes the
     -- `checkandget` source valid.
-    it("case 3 type-mismatch: ...value forwarded to ...integer (each element unboxed)", function()
+    it("case 3 type-mismatch: ...: value forwarded to ...: integer (each element unboxed)", function()
         run_coder([[
-            function sink(...integer): integer
+            function sink(...: integer): integer
                 local s = 0
                 local i = 1
                 local n = #...
@@ -641,7 +641,7 @@ describe("forwarding an existing ... to another variadic callee", function()
                 end
                 return s
             end
-            function f(...value): integer
+            function f(...: value): integer
                 return sink(...)
             end
         ]], [[
@@ -660,7 +660,7 @@ describe("forwarding an existing ... to another variadic callee", function()
     -- tail grows, forcing a fresh copy. Force a GC in the callee.
     it("case 3 prefix-grow: static args spill into the forwarded tail", function()
         run_coder([[
-            function sink(a: integer, ...integer): integer
+            function sink(a: integer, ...: integer): integer
                 local junk: {integer} = {}
                 local k = 1
                 while k <= 300 do
@@ -676,7 +676,7 @@ describe("forwarding an existing ... to another variadic callee", function()
                 end
                 return s
             end
-            function f(...integer): integer
+            function f(...: integer): integer
                 -- sink has ONE fixed param; we supply three static args (a, then
                 -- 100, 200 spill into the tail) followed by the forwarded `...`.
                 return sink(1, 100, 200, ...)
@@ -695,7 +695,7 @@ describe("forwarding an existing ... to another variadic callee", function()
     -- Udata0 allocation and a forced GC in the callee.
     it("case 3 prefix-grow with collectable (string) elements survives GC", function()
         run_coder([[
-            function sink(...string): integer
+            function sink(...: string): integer
                 local junk: {integer} = {}
                 local k = 1
                 while k <= 300 do
@@ -711,7 +711,7 @@ describe("forwarding an existing ... to another variadic callee", function()
                 end
                 return s
             end
-            function f(p: string, ...string): integer
+            function f(p: string, ...: string): integer
                 -- p is a fixed param of f; it spills as a leading tail element
                 -- into sink (sink has zero fixed params), ahead of the forwarded
                 -- `...`. A fresh string built here must be anchored before alloc.
@@ -735,7 +735,7 @@ describe("forwarding an existing ... to another variadic callee", function()
     -- terminates (unlike a pass-through, which would never shrink the tail).
     it("recursion: a variadic function forwards ... to itself", function()
         run_coder([[
-            function summer(acc: integer, head: integer, ...integer): integer
+            function summer(acc: integer, head: integer, ...: integer): integer
                 -- fold `head` into `acc`. If the tail is empty we are done;
                 -- otherwise recurse supplying ONE static arg (the new acc) to a
                 -- TWO-fixed-param callee, so the next `head` is BORROWED from
@@ -758,7 +758,7 @@ describe("forwarding an existing ... to another variadic callee", function()
     -- Titan error rather than corrupt memory (lu_byte n_args would otherwise wrap).
     it("overflow: a forwarding chain past TITAN_VARARG_MAX raises cleanly", function()
         run_coder([[
-            function grow(depth: integer, ...integer): integer
+            function grow(depth: integer, ...: integer): integer
                 if depth <= 0 then
                     return #...
                 end
@@ -776,7 +776,7 @@ describe("forwarding an existing ... to another variadic callee", function()
     -- confirming the cap is the only thing that raises (not the chain itself).
     it("forwarding chain below the cap merges correctly", function()
         run_coder([[
-            function grow(depth: integer, ...integer): integer
+            function grow(depth: integer, ...: integer): integer
                 if depth <= 0 then
                     return #...
                 end
@@ -801,7 +801,7 @@ describe("forwarding an existing ... to another variadic callee", function()
     -- "too many variadic arguments" Titan error. Pins both sides of the boundary.
     it("a forwarding chain of exactly 200 elements passes (the cap boundary)", function()
         run_coder([[
-            function grow(depth: integer, ...integer): integer
+            function grow(depth: integer, ...: integer): integer
                 if depth <= 0 then
                     return #...
                 end
@@ -815,7 +815,7 @@ describe("forwarding an existing ... to another variadic callee", function()
 
     it("a forwarding chain of exactly 201 elements raises the cap error", function()
         run_coder([[
-            function grow(depth: integer, ...integer): integer
+            function grow(depth: integer, ...: integer): integer
                 if depth <= 0 then
                     return #...
                 end
@@ -835,7 +835,7 @@ describe("building {...} / {e1, ..., ...} array from a vararg", function()
     -- (#prefix + n_args - _start), resized once and filled from the struct.
     it("scalar {...}: length and element values, returned to Lua", function()
         run_coder([[
-            function collect(...integer): {integer}
+            function collect(...: integer): {integer}
                 return {...}
             end
         ]], [[
@@ -853,9 +853,9 @@ describe("building {...} / {e1, ..., ...} array from a vararg", function()
     -- from the real vararg element type to the array element type before storing,
     -- driving the backing-struct read off the real element type. A raw cast of
     -- the buffer to the array-element struct would bit-reinterpret each slot.
-    it("{...integer} into a {float} context converts each element to float", function()
+    it("{...: integer} into a {float} context converts each element to float", function()
         run_coder([[
-            function f(...integer): {float}
+            function f(...: integer): {float}
                 return {...}
             end
         ]], [[
@@ -866,9 +866,9 @@ describe("building {...} / {e1, ..., ...} array from a vararg", function()
         ]])
     end)
 
-    it("{...integer} into a {value} context boxes each element", function()
+    it("{...: integer} into a {value} context boxes each element", function()
         run_coder([[
-            function f(...integer): {value}
+            function f(...: integer): {value}
                 return {...}
             end
         ]], [[
@@ -880,9 +880,9 @@ describe("building {...} / {e1, ..., ...} array from a vararg", function()
 
     -- {e1, ..., ...} into a mismatched context: the static prefix already coerces
     -- (3 -> 3.0); the spread tail must convert too.
-    it("{1, ..., ...integer} into a {float} context converts prefix and tail", function()
+    it("{1, ..., ...: integer} into a {float} context converts prefix and tail", function()
         run_coder([[
-            function f(...integer): {float}
+            function f(...: integer): {float}
                 return {1, ...}
             end
         ]], [[
@@ -896,7 +896,7 @@ describe("building {...} / {e1, ..., ...} array from a vararg", function()
     -- array indices [1..nprefix] and the vararg tail follows.
     it("scalar {e1, e2, ...}: static prefix then the vararg tail", function()
         run_coder([[
-            function withprefix(...integer): {integer}
+            function withprefix(...: integer): {integer}
                 return {100, 200, ...}
             end
         ]], [[
@@ -916,7 +916,7 @@ describe("building {...} / {e1, ..., ...} array from a vararg", function()
     -- a purely native context.
     it("scalar {...} consumed inside the function (# of the result)", function()
         run_coder([[
-            function howmany(...integer): integer
+            function howmany(...: integer): integer
                 local t: {integer} = {0, 0, ...}
                 return #t
             end
@@ -932,14 +932,14 @@ describe("building {...} / {e1, ..., ...} array from a vararg", function()
     -- Fresh non-interned strings make a dropped barrier/element deterministic
     -- corruption. This is the back-barrier "teeth": removing the barrier (or the
     -- resize-GC rebase) corrupts the result.
-    -- The {...string} build path proper, with the strings minted INSIDE Titan and
+    -- The {...: string} build path proper, with the strings minted INSIDE Titan and
     -- passed straight into the variadic callee's {prefix, ...} build, then a heavy
     -- GC churn after the build before reading them back. Nothing on the Lua side
     -- anchors the strings, so the table's array part is their sole root; a missing
     -- obj2arr per-element back barrier (or a botched resize-GC rebase) leaves the
     -- marked table pointing at unmarked/swept strings and the length sums wrong.
     -- This is the barrier teeth: an external Lua anchor would hide a missing one.
-    it("{...string} elements survive a forced GC (back barrier + rebase)", function()
+    it("{...: string} elements survive a forced GC (back barrier + rebase)", function()
         run_coder([[
             function rep(ch: string, n: integer): string
                 local s: string = ""           -- fresh, non-interned heap string
@@ -950,7 +950,7 @@ describe("building {...} / {e1, ..., ...} array from a vararg", function()
                 end
                 return s
             end
-            function totallen(...string): integer
+            function totallen(...: string): integer
                 local prefix: string = rep("p", 4)   -- length 4
                 local t: {string} = {prefix, ...}
                 local junk: {integer} = {}           -- churn AFTER the build
@@ -981,10 +981,10 @@ describe("building {...} / {e1, ..., ...} array from a vararg", function()
         ]], nil)
     end)
 
-    -- {...string} returned to Lua and read back after forced collections.
-    it("{...string} returned to Lua survives a forced GC", function()
+    -- {...: string} returned to Lua and read back after forced collections.
+    it("{...: string} returned to Lua survives a forced GC", function()
         run_coder([[
-            function gather(...string): {string}
+            function gather(...: string): {string}
                 local prefix: string = "p" .. "fx"
                 return {prefix, ...}
             end
@@ -1007,7 +1007,7 @@ describe("building {...} / {e1, ..., ...} array from a vararg", function()
 
     -- Same back-barrier teeth with a RECORD element type ({R}, Udata*): build the
     -- array, churn the heap to force a collection, then read each record field.
-    it("{...R} (record) elements survive a forced GC", function()
+    it("{...: R} (record) elements survive a forced GC", function()
         run_coder([[
             record R
                 v: integer
@@ -1015,10 +1015,10 @@ describe("building {...} / {e1, ..., ...} array from a vararg", function()
             function mk(v: integer): R
                 return { v = v }
             end
-            function pack(...R): {R}
+            function pack(...: R): {R}
                 return {...}
             end
-            function sumfields(...R): integer
+            function sumfields(...: R): integer
                 local t: {R} = {...}
                 -- churn AFTER the array is built so a collection runs while the
                 -- records are reachable only through the table's array part.
@@ -1039,7 +1039,7 @@ describe("building {...} / {e1, ..., ...} array from a vararg", function()
         ]], [[
             collectgarbage("incremental")
             local a, b, c = test.mk(3), test.mk(5), test.mk(7)
-            -- {...R} returned to Lua, then a forced GC, then field reads
+            -- {...: R} returned to Lua, then a forced GC, then field reads
             local t = test.pack(a, b, c)
             for _ = 1, 50 do collectgarbage("step") end
             assert(#t == 3)
@@ -1057,10 +1057,10 @@ describe("building {...} / {e1, ..., ...} array from a vararg", function()
     -- ordinary single-value element.
     it("{...[i]} index field: a 1-element array of the indexed vararg element", function()
         run_coder([[
-            function first(...integer): {integer}
+            function first(...: integer): {integer}
                 return {...[1]}
             end
-            function withprefix(...integer): {integer}
+            function withprefix(...: integer): {integer}
                 return {99, ...[2]}
             end
         ]], [[
@@ -1085,20 +1085,20 @@ describe("variadic GC anchoring under generational mode", function()
     setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
-    -- 1. `...value` from Lua (genluaentry path): the backing struct holds tagged
+    -- 1. `...: value` from Lua (genluaentry path): the backing struct holds tagged
     -- TValues whose collectable payload (a long fresh string, fresh tables,
     -- a fresh record) is untraced. The values survive only because they ride the
     -- caller's Lua-stack anchors. A forced minor collection runs after heavy
     -- young churn, before `#...`/`...[i]` are read.
-    it("...value from Lua survives a generational minor collection", function()
+    it("...: value from Lua survives a generational minor collection", function()
         run_coder([[
             record P
                 x: integer
             end
-            function howmany(...value): integer
+            function howmany(...: value): integer
                 return #...
             end
-            function at(i: integer, ...value): value
+            function at(i: integer, ...: value): value
                 return ...[i]
             end
             function mkP(x: integer): P
@@ -1127,9 +1127,9 @@ describe("variadic GC anchoring under generational mode", function()
         ]])
     end)
 
-    -- 2. `...R` (record / Udata*) from Lua under generational GC: the record
+    -- 2. `...: R` (record / Udata*) from Lua under generational GC: the record
     -- fields must survive a minor collection forced before they are read.
-    it("...R (record) from Lua survives a generational minor collection", function()
+    it("...: R (record) from Lua survives a generational minor collection", function()
         run_coder([[
             record R
                 v: integer
@@ -1138,7 +1138,7 @@ describe("variadic GC anchoring under generational mode", function()
             function mk(v: integer, s: string): R
                 return { v = v, s = s }
             end
-            function checksum(...R): integer
+            function checksum(...: R): integer
                 local n = #...
                 local s = 0
                 local i = 1
@@ -1163,14 +1163,14 @@ describe("variadic GC anchoring under generational mode", function()
 
     -- 3. CASE 3 forwarding, PREFIX-GROW with a collectable element type, under
     -- generational GC: a forwarder prepends a FRESH string ahead of its whole
-    -- forwarded `...string` (prefix grows the tail -> a fresh Udata0 copy), and a
+    -- forwarded `...: string` (prefix grows the tail -> a fresh Udata0 copy), and a
     -- sink forces a minor collection before concatenating every element. The
     -- spilled prefix string and the forwarded tail strings must all be anchored
     -- across the fresh-struct allocation and the collection. Asserts exact
     -- concatenation (not just total length) so a swapped/dropped element shows.
-    it("case-3 prefix-grow forwarding of ...string survives a minor collection", function()
+    it("case-3 prefix-grow forwarding of ...: string survives a minor collection", function()
         run_coder([[
-            function sink(...string): string
+            function sink(...: string): string
                 -- force a minor collection before reading the elements
                 local junk: {integer} = {}
                 local k = 1
@@ -1181,7 +1181,7 @@ describe("variadic GC anchoring under generational mode", function()
                 while i <= n do out = out .. ...[i]; i = i + 1 end
                 return out
             end
-            function fwd(p: string, ...string): string
+            function fwd(p: string, ...: string): string
                 -- p .. "|" is a FRESH heap string prepended ahead of the whole
                 -- forwarded tail: case-3 prefix-grow into a fresh Udata0 copy.
                 return sink(p .. "|", ...)
@@ -1200,15 +1200,15 @@ describe("variadic GC anchoring under generational mode", function()
         ]])
     end)
 
-    -- 4. `{...string}` built into a table that has been AGED into the OLD
+    -- 4. `{...: string}` built into a table that has been AGED into the OLD
     -- generation (two full collects), then young-allocate + step to force minor
     -- collections. A minor collection does NOT rescan old objects, so the table's
     -- per-element `obj2arr` store must have run `luaC_barrierback` to keep the
     -- (then-young) strings reachable from the (now-old) table; a missing barrier
     -- lets the minor collection sweep them. Asserts the elements survive.
-    it("{...string} aged into the old generation survives later minor collections", function()
+    it("{...: string} aged into the old generation survives later minor collections", function()
         run_coder([[
-            function gather(...string): {string}
+            function gather(...: string): {string}
                 return {...}
             end
             function readlen(t: {string}, i: integer): integer
@@ -1236,13 +1236,13 @@ describe("variadic GC anchoring under generational mode", function()
         ]])
     end)
 
-    -- 5. STATIC `...value` call (Titan -> Titan) under generational GC: the
+    -- 5. STATIC `...: value` call (Titan -> Titan) under generational GC: the
     -- caller builds the backing struct on its C stack from fresh strings, then
     -- tail-calls the variadic callee, which forces a minor collection before
     -- reading the boxed values. Tail-call anchoring across the static site.
-    it("static ...value (Titan->Titan) survives a generational minor collection", function()
+    it("static ...: value (Titan->Titan) survives a generational minor collection", function()
         run_coder([[
-            function totallen(...value): integer
+            function totallen(...: value): integer
                 local junk: {integer} = {}
                 local k = 1
                 while k <= 400 do junk = { k }; k = k + 1 end
@@ -1272,8 +1272,8 @@ end)
 
 -- Functional coverage that the earlier phases left uncovered: nested variadic
 -- lambdas (scope rule 4 at run time), map-typed elements, variadic methods,
--- a side-effecting `...[i]` index, `...boolean` through the build/forward/static
--- paths, and the `{...value}`-with-a-nil border semantics.
+-- a side-effecting `...[i]` index, `...: boolean` through the build/forward/static
+-- paths, and the `{...: value}`-with-a-nil border semantics.
 describe("variadic parameters: functional coverage gaps (code generator)", function()
     setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(clean)
@@ -1283,7 +1283,7 @@ describe("variadic parameters: functional coverage gaps (code generator)", funct
     it("variadic lambda stored in a local and called", function()
         run_coder([[
             function go(): integer
-                local f = function(...integer): integer
+                local f = function(...: integer): integer
                     local s = 0
                     local i = 1
                     local n = #...
@@ -1304,11 +1304,11 @@ describe("variadic parameters: functional coverage gaps (code generator)", funct
     -- helper sees 7 (-> 7000) and the inner lambda sees 99, summing to 7099.
     it("nested variadic lambda reads the inner ... (scope rule 4)", function()
         run_coder([[
-            function outer_helper(...integer): integer
+            function outer_helper(...: integer): integer
                 return ...[1] * 1000
             end
-            function outer(...integer): integer
-                local inner = function(...integer): integer
+            function outer(...: integer): integer
+                local inner = function(...: integer): integer
                     return ...[1]            -- the INNER call's first arg
                 end
                 return outer_helper(...) + inner(99)
@@ -1320,12 +1320,12 @@ describe("variadic parameters: functional coverage gaps (code generator)", funct
         ]])
     end)
 
-    -- MAP-typed vararg element (`...{string:integer}`): the element is a
+    -- MAP-typed vararg element (`...: {string:integer}`): the element is a
     -- collectable Table*. Exercise `#...`, `...[i]`, the `{...}` build, and
     -- forwarding, with a forced GC since each element is GC-able.
-    it("map-typed vararg element ...{string:integer}", function()
+    it("map-typed vararg element ...: {string:integer}", function()
         run_coder([[
-            function lookup(key: string, ...{string:integer}): integer
+            function lookup(key: string, ...: {string:integer}): integer
                 local junk: {integer} = {}
                 local k = 1
                 while k <= 300 do junk = { k }; k = k + 1 end
@@ -1339,11 +1339,11 @@ describe("variadic parameters: functional coverage gaps (code generator)", funct
                 end
                 return s
             end
-            function howmany(...{string:integer}): integer
+            function howmany(...: {string:integer}): integer
                 local t = {...}
                 return #t
             end
-            function fwd(key: string, ...{string:integer}): integer
+            function fwd(key: string, ...: {string:integer}): integer
                 return lookup(key, ...)        -- forward the whole tail
             end
         ]], [[
@@ -1361,12 +1361,12 @@ describe("variadic parameters: functional coverage gaps (code generator)", funct
     -- A variadic METHOD reading collectable elements, exercised from Lua, via a
     -- STATIC Titan call site (`obj:m(...)`), and forwarding `...` to itself
     -- (start-adjust). Generational where the element type is collectable.
-    it("variadic method ...string from Lua, static, and self-forwarding", function()
+    it("variadic method ...: string from Lua, static, and self-forwarding", function()
         run_coder([[
             record Acc
                 base: integer
             end
-            function Acc:total(...string): integer
+            function Acc:total(...: string): integer
                 local junk: {integer} = {}
                 local k = 1
                 while k <= 300 do junk = { k, k + 1 }; k = k + 1 end
@@ -1376,7 +1376,7 @@ describe("variadic parameters: functional coverage gaps (code generator)", funct
                 while i <= n do s = s + #(...[i]); i = i + 1 end
                 return s
             end
-            function Acc:add(skip: string, ...string): integer
+            function Acc:add(skip: string, ...: string): integer
                 -- forward ... to itself; `skip` is dropped (start-adjust)
                 return self:total(...)
             end
@@ -1399,7 +1399,7 @@ describe("variadic parameters: functional coverage gaps (code generator)", funct
 
     -- A variadic method over a RECORD element type (Udata*) from Lua, under
     -- generational GC.
-    it("variadic method ...R (record) from Lua under generational GC", function()
+    it("variadic method ...: R (record) from Lua under generational GC", function()
         run_coder([[
             record R
                 v: integer
@@ -1407,7 +1407,7 @@ describe("variadic parameters: functional coverage gaps (code generator)", funct
             record Acc
                 base: integer
             end
-            function Acc:sumv(...R): integer
+            function Acc:sumv(...: R): integer
                 local junk: {integer} = {}
                 local k = 1
                 while k <= 300 do junk = { k }; k = k + 1 end
@@ -1442,7 +1442,7 @@ describe("variadic parameters: functional coverage gaps (code generator)", funct
                 calls = calls + 1
                 return 2
             end
-            function pick(...integer): integer
+            function pick(...: integer): integer
                 return ...[counter()]
             end
         ]], [[
@@ -1455,13 +1455,13 @@ describe("variadic parameters: functional coverage gaps (code generator)", funct
         ]])
     end)
 
-    -- `...boolean` (a scalar, no-payload element: booleans carry no GC payload)
+    -- `...: boolean` (a scalar, no-payload element: booleans carry no GC payload)
     -- through the `{...}` build, pass-through forwarding, start-adjust
     -- forwarding, and a fully-static call site. Earlier phases covered only
     -- `#...`/`...[i]` for booleans.
-    it("...boolean through {...}, forwarding, and a static call", function()
+    it("...: boolean through {...}, forwarding, and a static call", function()
         run_coder([[
-            function count_true(...boolean): integer
+            function count_true(...: boolean): integer
                 local t: {boolean} = {...}
                 local c = 0
                 local i = 1
@@ -1471,10 +1471,10 @@ describe("variadic parameters: functional coverage gaps (code generator)", funct
                 end
                 return c
             end
-            function fwd(...boolean): integer
+            function fwd(...: boolean): integer
                 return count_true(...)              -- pass-through
             end
-            function fwd_adjust(first: boolean, ...boolean): integer
+            function fwd_adjust(first: boolean, ...: boolean): integer
                 return count_true(first, ...)       -- start-adjust borrow
             end
             function static_call(): integer
@@ -1490,14 +1490,14 @@ describe("variadic parameters: functional coverage gaps (code generator)", funct
     end)
 
     -- GENERIC (tag-mismatch) value-call path carrying a FORWARDED `...` with
-    -- collectable (string) elements, under generational GC. A `(...value)`-typed
-    -- value actually holds a `(...string)` function, so its runtime tag does not
+    -- collectable (string) elements, under generational GC. A `(...: value)`-typed
+    -- value actually holds a `(...: string)` function, so its runtime tag does not
     -- match the call site and the call routes through the generic path, which
     -- rebuilds the struct through genluaentry. The forwarded fresh strings must
     -- survive a minor collection in the deepest callee.
-    it("generic value-call carrying a forwarded ...string survives a minor collection", function()
+    it("generic value-call carrying a forwarded ...: string survives a minor collection", function()
         run_coder([[
-            function totallen(...string): integer
+            function totallen(...: string): integer
                 local junk: {integer} = {}
                 local k = 1
                 while k <= 400 do junk = { k }; k = k + 1 end
@@ -1507,13 +1507,13 @@ describe("variadic parameters: functional coverage gaps (code generator)", funct
                 while i <= n do s = s + #(...[i]); i = i + 1 end
                 return s
             end
-            function call_generic(f: (...value) -> integer, ...string): integer
-                -- f holds a ...string function viewed as ...value -> tag mismatch
-                -- -> the generic path; we forward our own ...string into it.
+            function call_generic(f: (...: value) -> integer, ...: string): integer
+                -- f holds a ...: string function viewed as ...: value -> tag mismatch
+                -- -> the generic path; we forward our own ...: string into it.
                 return f(...)
             end
             function run(a: string, b: string): integer
-                local v: (...value) -> integer = totallen
+                local v: (...: value) -> integer = totallen
                 return call_generic(v, a, b)
             end
         ]], [[
@@ -1526,21 +1526,21 @@ describe("variadic parameters: functional coverage gaps (code generator)", funct
         ]])
     end)
 
-    -- DESIGN-DECISION PIN: `{...value}` with a GENUINE nil element. `#...` counts
+    -- DESIGN-DECISION PIN: `{...: value}` with a GENUINE nil element. `#...` counts
     -- all the slots passed (3), `...[2]` reads the nil, but `#{...}` follows Lua's
     -- table-border semantics for an array with a nil hole: the length is a border,
     -- so `#t == 1` here. This MATCHES stock Lua `{...}`-with-nil (e.g. in plain
     -- Lua `#({(function(...) return ... end)(1, nil, 3)}) == 1`); it is an
     -- intentional consequence of the border rule, NOT a variadic miscompile.
-    it("{...value} with a genuine nil element follows Lua border semantics", function()
+    it("{...: value} with a genuine nil element follows Lua border semantics", function()
         run_coder([[
-            function dotslen(...value): integer
+            function dotslen(...: value): integer
                 return #...
             end
-            function at(i: integer, ...value): value
+            function at(i: integer, ...: value): value
                 return ...[i]
             end
-            function tablelen(...value): integer
+            function tablelen(...: value): integer
                 local t = {...}
                 return #t
             end
@@ -1557,6 +1557,71 @@ describe("variadic parameters: functional coverage gaps (code generator)", funct
             assert(test.tablelen(1, nil, 3) == 1)
             -- a trailing nil also borders at the last non-nil
             assert(test.tablelen(1, 2, nil) == 2)
+        ]])
+    end)
+end)
+
+-- Context inference of an UNTYPED lambda vararg `...` (no `: type`): the element
+-- type is taken from the expected `(...: T) -> R` function type, exactly like an
+-- untyped lambda parameter. End-to-end: compile and value-call through it.
+describe("untyped lambda vararg inference (code generator)", function()
+    setup(function () os.remove("titan-runtime/titan.o") end)
+    after_each(clean)
+
+    -- An untyped `...` lambda assigned to a `(...: integer) -> integer` local
+    -- infers the element type as integer, then a value call works at run time.
+    it("infers ...:integer from a typed local and value-calls it", function()
+        run_coder([[
+            function go(): integer
+                local f: (...: integer) -> integer = function(...)
+                    local s = 0
+                    local i = 1
+                    local n = #...
+                    while i <= n do s = s + ...[i]; i = i + 1 end
+                    return s
+                end
+                return f(1, 2, 3, 4)
+            end
+        ]], [[
+            assert(test.go() == 10)
+        ]])
+    end)
+
+    -- The untyped `...` lambda is passed as an argument whose param type is the
+    -- variadic function type; inference flows from the callee's parameter type.
+    it("infers the vararg element from a parameter context (passed as arg)", function()
+        run_coder([[
+            function apply(f: (...: integer) -> integer): integer
+                return f(10, 20, 30)
+            end
+            function go(): integer
+                return apply(function(...)
+                    return #... * (...[1] + ...[2] + ...[3])
+                end)
+            end
+        ]], [[
+            assert(test.go() == 180)  -- 3 * (10+20+30)
+        ]])
+    end)
+
+    -- The untyped `...` lambda is RETURNED at a variadic function-type return,
+    -- then value-called by the caller.
+    it("infers the vararg element from a return-type context", function()
+        run_coder([[
+            function make(): (...: integer) -> integer
+                return function(...)
+                    local s = 0
+                    local i = 1
+                    while i <= #... do s = s + ...[i]; i = i + 1 end
+                    return s
+                end
+            end
+            function go(): integer
+                local f = make()
+                return f(5, 6, 7)
+            end
+        ]], [[
+            assert(test.go() == 18)
         ]])
     end)
 end)

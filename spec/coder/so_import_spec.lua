@@ -248,13 +248,13 @@ describe(".so-only cross-module imports", function()
 
     it("imports a .so-only variadic function, called statically and from Lua", function ()
         -- The dependency is reachable ONLY as a compiled `.so`: the importer
-        -- recovers `sum`'s `(...integer) -> integer` interface (incl. varargtype)
+        -- recovers `sum`'s `(...: integer) -> integer` interface (incl. varargtype)
         -- from `<mangled>_types`, calls it STATICALLY across the dynamic boundary
         -- (the native vararg ABI: `_varargs` + `_start` at the pinned slot), and
         -- the dependency's own Lua entry (genluaentry) handles the call FROM LUA.
         local ok, err = build_so_chain({
             { name = "vsfoo", src = [[
-                function sum(...integer): integer
+                function sum(...: integer): integer
                     local s = 0
                     local i = 1
                     local n = #...
@@ -271,7 +271,7 @@ describe(".so-only cross-module imports", function()
                     return foo.sum()             -- empty vararg across the .so
                 end
                 function asvalue(): integer
-                    local f: (...integer) -> integer = foo.sum  -- value across .so
+                    local f: (...: integer) -> integer = foo.sum  -- value across .so
                     return f(10, 20)
                 end
             ]] },
@@ -289,7 +289,7 @@ describe(".so-only cross-module imports", function()
         assert.truthy(rok, out)
     end)
 
-    it("imports a .so-only ...string variadic, called statically and from Lua under GC", function ()
+    it("imports a .so-only ...: string variadic, called statically and from Lua under GC", function ()
         -- COLLECTABLE element type across the dynamic boundary. The static call
         -- builds the backing struct on the importer's C stack from fresh strings;
         -- the .so callee forces a minor collection before reading any element, so
@@ -297,7 +297,7 @@ describe(".so-only cross-module imports", function()
         -- corruption under generational mode.
         local ok, err = build_so_chain({
             { name = "vstrfoo", src = [[
-                function totallen(...string): integer
+                function totallen(...: string): integer
                     local junk: {integer} = {}
                     local k = 1
                     while k <= 300 do junk = { k }; k = k + 1 end
@@ -332,7 +332,7 @@ describe(".so-only cross-module imports", function()
         assert.truthy(rok, out)
     end)
 
-    it("imports a .so-only ...R variadic and a variadic method across the .so", function ()
+    it("imports a .so-only ...: R variadic and a variadic method across the .so", function ()
         -- A RECORD element type (Udata*) and a variadic METHOD both recovered from
         -- `<mangled>_types` across the dynamic boundary, called statically and
         -- from Lua. The record's type tag is recovered from the .so's published
@@ -348,7 +348,7 @@ describe(".so-only cross-module imports", function()
                 function mk(v: integer): R
                     return { v = v }
                 end
-                function Acc:sumv(...R): integer
+                function Acc:sumv(...: R): integer
                     local junk: {integer} = {}
                     local k = 1
                     while k <= 300 do junk = { k }; k = k + 1 end

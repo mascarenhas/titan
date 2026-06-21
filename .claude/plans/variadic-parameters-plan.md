@@ -1,5 +1,13 @@
 # Variadic parameters — implementation plan
 
+**UPDATE (post-implementation):** the surface syntax shipped as `...: <type>` (with a colon,
+matching the `name: type` declaration style), NOT the no-colon `...t` this plan describes —
+the [OWNER §2 / §8] no-colon decision was reversed during review. Anonymous functions may also
+write a bare untyped `...` whose element type is inferred from context. The grammar/checker
+sections below that say "no colon" are superseded; everything else (semantics, runtime
+representation, GC discipline) stands. See `doc/language/variadic-parameters.md` and
+`doc/implementation/variadic-parameters.md` for the as-built reference.
+
 Status: plan for owner review (no code written yet). Expands the sketch at
 `doc/variadic-parameters.md` into a full implementation plan, grounded in the current tree
 with `file:line` citations from a seam-mapping pass (parser/checker/coder + Lua 5.5

@@ -84,7 +84,7 @@ local function deoptionize(t)
 end
 
 -- Validate a variadic parameter / function-type element type `t` (the type of
--- each `...` element). Bans a `nil` element (a typed `...t` cannot hold nil) and
+-- each `...` element). Bans a `nil` element (a typed `...: t` cannot hold nil) and
 -- a foreign (C FFI) pointer element (no `TitanVarg*` struct exists for it, §2.F).
 -- Returns the original type when legal, or `types.Invalid()` after reporting.
 local function check_vararg_elem(t, loc, errors)
@@ -219,7 +219,7 @@ typefromnode = util.make_visitor({
         for _, rt in ipairs(node.rettypes) do
             table.insert(rettypes, typefromnode(rt, st, errors))
         end
-        -- A first-class variadic function type `(P..., ...t) -> (R...)` carries
+        -- A first-class variadic function type `(P..., ...: t) -> (R...)` carries
         -- its element type node on `node.varargtype` (false when absent); set
         -- the resulting Type.Function's `varargtype` slot accordingly.
         local varargtype = node.varargtype
@@ -1788,23 +1788,44 @@ checkexp = util.make_visitor({
     -- defaults to zero-return `()`, exactly like an unannotated top-level
     -- function.
     ["Ast.ExpFunction"] = function(node, st, errors, context)
-        -- A trailing vararg `Decl` (`name == false`, always with an explicit
-        -- type) is dropped from the fixed params and its element type computed
-        -- separately. `nfixed` is the count compared against a context's arity.
+        -- A trailing vararg `Decl` (`name == false`) is dropped from the fixed
+        -- params; its element type is resolved separately below. A lambda vararg
+        -- may be untyped (`type == false`), in which case the element type is
+        -- inferred from context, exactly like an untyped lambda parameter.
+        -- `nfixed` is the count compared against a context's arity.
         local nparams = #node.params
         local varargtype = false
         local varargdecl = node.params[nparams]
-        local nfixed = nparams
-        if varargdecl and varargdecl.name == false then
-            varargdecl._type = typefromnode(varargdecl.type, st, errors)
-            varargtype = check_vararg_elem(varargdecl._type, varargdecl.loc, errors)
-            nfixed = nparams - 1
-        end
+        local has_vararg = varargdecl and varargdecl.name == false
+        local nfixed = has_vararg and nparams - 1 or nparams
 
         -- Checking mode iff the context is a function type whose fixed arity
         -- matches; element-type matching is not enforced for inference here.
         local expected = (context and context._tag == "Type.Function"
             and #context.params == nfixed) and context or nil
+
+        -- Resolve the vararg element type (explicit annotation wins; otherwise
+        -- infer from the expected function type's `varargtype`). An untyped `...`
+        -- with a non-variadic context, or with no usable context at all, is an
+        -- error — mirroring an uninferable untyped lambda parameter.
+        if has_vararg then
+            if varargdecl.type then
+                varargdecl._type =
+                    typefromnode(varargdecl.type, st, errors)
+            elseif expected and expected.varargtype then
+                varargdecl._type = expected.varargtype
+            elseif expected then
+                varargdecl._type = invalid(errors, varargdecl.loc,
+                    "cannot infer the type of '...'; the lambda is variadic but "
+                    .. "the expected type is not")
+            else
+                varargdecl._type = invalid(errors, varargdecl.loc,
+                    "cannot infer the type of '...'; annotate it or use the "
+                    .. "lambda where its type is known")
+            end
+            varargtype =
+                check_vararg_elem(varargdecl._type, varargdecl.loc, errors)
+        end
 
         -- Resolve fixed parameter types.
         local paramtypes = {}

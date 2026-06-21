@@ -169,7 +169,7 @@ describe("typechecker rehydration of .so-only imports", function()
 
     it("recovers a record referenced ONLY as a vararg element type through a .so chain", function ()
         -- vrec defines Box; vrecwrap (a .so) exports a function whose ONLY
-        -- reference to Box is as the `...` element type (`...vrec.Box`), and does
+        -- reference to Box is as the `...` element type (`...: vrec.Box`), and does
         -- not re-export Box; vrectop imports only vrecwrap. The transitive
         -- record-recovery walker must descend into the Function type's
         -- `varargtype` (not just params/rettypes) to recover Box from vrec's .so,
@@ -182,7 +182,7 @@ describe("typechecker rehydration of .so-only imports", function()
             ]] },
             { name = "vrecwrap", src = [[
                 local r = import "vrec"
-                function take(...r.Box): integer
+                function take(...: r.Box): integer
                     return #...
                 end
             ]] },
@@ -204,14 +204,14 @@ describe("typechecker rehydration of .so-only imports", function()
     end)
 
     it("rehydrates a variadic function's varargtype through <mangled>_types", function ()
-        -- The exported `sum` is `(...integer) -> integer`; its serialized
+        -- The exported `sum` is `(...: integer) -> integer`; its serialized
         -- interface must carry the `varargtype` so the importer recovers the
         -- vararg element type. A correct variadic call (any count, integer
         -- elements) type-checks; passing a non-integer element is rejected against
         -- the recovered element type, and forwarding `...` from a caller whose own
         -- `...` element type is incompatible is rejected.
         local dep = { name = "vrhfoo", src = [[
-            function sum(...integer): integer
+            function sum(...: integer): integer
                 local s = 0
                 local i = 1
                 local n = #...
@@ -224,7 +224,7 @@ describe("typechecker rehydration of .so-only imports", function()
             function bar(): integer return f.sum(1, 2, 3) end
             function empty(): integer return f.sum() end
             function asvalue(): integer
-                local g: (...integer) -> integer = f.sum  -- recovered varargtype
+                local g: (...: integer) -> integer = f.sum  -- recovered varargtype
                 return g(4, 5)
             end
         ]])
@@ -245,7 +245,7 @@ describe("typechecker rehydration of .so-only imports", function()
             record Acc
               base: integer
             end
-            function Acc:total(...integer): integer
+            function Acc:total(...: integer): integer
                 local s = self.base
                 local i = 1
                 local n = #...

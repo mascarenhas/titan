@@ -1,12 +1,15 @@
 # Variadic parameters
 
 A Titan function, lambda, method or record static may end its parameter list
-with a single **typed variadic parameter** `...t` — no colon, no name, always
-the last parameter, with a mandatory element type. Inside the declaring
+with a single **variadic parameter** `...: t` — the `name: type` declaration
+style with no name, always the last parameter. Its element type is mandatory on
+top-level functions, methods and function-type annotations; an anonymous
+function may instead write a bare untyped `...` whose element type is inferred
+from context (the [lambda inference](#untyped-lambda-vararg) path). Inside the declaring
 function the parameter is reached through three forms — `#...` (count),
 `...[e]` (1-based element), and a trailing **spread** (`f(a, ...)`,
-`return a, ...`, `{a, ...}`, `{...}`) — and the same `...t` syntax annotates a
-first-class variadic **function type** (`(integer, ...string) -> integer`).
+`return a, ...`, `{a, ...}`, `{...}`) — and the same `...: t` syntax annotates a
+first-class variadic **function type** (`(integer, ...: string) -> integer`).
 
 The feature is deliberately *lightweight*: there is no slice type. The `...`
 expression/parameter is **not first-class** — it cannot be captured by a
@@ -25,7 +28,7 @@ collector invariants in [values and the GC](values-and-gc.md).
 Variadic support bumped the compiled-module **ABI to 0.9** (see
 [the ABI bump](#the-abi-bump-09)).
 
-## Parser: the `...t` grammar
+## Parser: the `...: t` grammar
 
 `lexer.lua` needs no change: `DOTS` (`...`) already lexes (the longest-match
 loop makes `CONCAT`/`DOT` subtract it), and was previously a reserved-but-unused
@@ -43,34 +46,47 @@ ExpDotsLen      = {"loc"}           -- `#...`    (checker-normalized, below)
 
 There is **no** new parameter node. A variadic parameter is encoded as an
 ordinary trailing `Ast.Decl` whose `name` field is `false`
-(`defs.varargdecl(pos, type)` builds `ast.Decl(pos, false, type, false)`), so a
-function is variadic exactly when `params[#params].name == false`. The same
-`false`-name convention threads through the checker and coder, which detect and
-strip that marker. The function-type annotation likewise gains no node flag: the
-new field `varargtype` is appended to `Ast.TypeFunction`
-(`{"loc","argtypes","rettypes","varargtype"}`), `false` when absent.
+(`defs.varargdecl(pos, type)` builds `ast.Decl(pos, false, type or false, false)`),
+so a function is variadic exactly when `params[#params].name == false`. An
+**untyped** lambda vararg additionally has `type == false` — the same inverted
+encoding an inferred lambda parameter uses (`name` set / `type == false`), but
+with `name == false` too. The `false`-name convention threads through the
+checker and coder, which detect and strip that marker. The function-type
+annotation likewise gains no node flag: the new field `varargtype` is appended
+to `Ast.TypeFunction` (`{"loc","argtypes","rettypes","varargtype"}`), `false`
+when absent.
 
-### No colon, last-only, trailing — the productions
+### Colon, last-only, trailing — the productions
 
-The vararg parameter rule consumes a bare `DOTS` then a required element type
-(no colon, no name):
+A variadic parameter follows the `name: type` style with no name, so the rule
+consumes `DOTS COLON` then a required element type. Two variants:
 
 ```
-varargparam     <- (P  DOTS type^TypeDecl)                   -> varargdecl
+varargparam       <- (P  DOTS COLON^VarargColon type^TypeDecl) -> varargdecl
+lambdavarargparam <- (P  DOTS (COLON type^TypeDecl)?)          -> varargdecl
 ```
 
-It is admitted only in trailing position. Both `paramlist` and
+`paramlist` uses `varargparam` (the `: t` is mandatory); `lambdaparamlist` uses
+`lambdavarargparam`, where the `(COLON type)?` is **optional** — an absent type
+yields an untyped vararg `Decl` whose element type the checker infers from
+context. There is no ambiguity with the lambda return type: `function(...): T`
+parses as an untyped vararg whose `)` precedes the return `:`, while
+`function(...: T)` parses as a typed vararg (the `:` precedes the `)`). The
+`VarargColon` syntax error fires when a top-level/method/function-type vararg
+omits the colon (`...integer` and `function f(...)`).
+
+Both are admitted only in trailing position. Both `paramlist` and
 `lambdaparamlist` run the fixed-parameter loop with a `!DOTS` guard so the loop
 stops before a `, ...`, letting the optional trailing `(COMMA varargparam)?`
 (or a sole `varargparam`) consume that comma itself — which is what makes the
-vararg structurally **last-only** (a `..., x` cannot parse). A lambda's vararg
-still requires its element type even though its fixed parameters may be
-inferred. The whole list is wrapped in a `=> checklist` predicate that throws
-`%{ListTooLong}` past `LIST_LIMIT = 100` (a *parse-time* guardrail near
-`THIS_FILENAME`, distinct from the runtime `TITAN_VARARG_MAX` cap).
+vararg structurally **last-only** (a `..., x` cannot parse). The whole list is
+wrapped in a `=> checklist` predicate that throws `%{ListTooLong}` past
+`LIST_LIMIT = 100` (a *parse-time* guardrail near `THIS_FILENAME`, distinct from
+the runtime `TITAN_VARARG_MAX` cap).
 
 The **function-type annotation** uses a parallel pair, `varargtypeann` /
-`varargtypeopt`, inside `arglist` (the arrow productions), defaulting to `false`
+`varargtypeopt`, inside `arglist` (the arrow productions); `varargtypeann`
+requires the colon (`DOTS COLON^VarargColon type`) and defaults to `false`
 when absent; `arglist`'s fixed-type loop carries the same `!DOTS` guard. The
 bare `typelist` (a return-type list) deliberately does not accept a vararg.
 `defs.typefunc` reorders the captures `(loc, argtypes, varargtype, rettypes)` so
@@ -129,18 +145,18 @@ Consumers test `varargtype`; the two never mix. Four relations change:
   `compatible`/`equals` arm): after the fixed params and rettypes, the vararg
   *presence* must match (a variadic is never compatible with a non-variadic —
   they are structurally distinct), and when both are Titan-variadic the element
-  types must be `compatible`. Because that is gradual, `(integer, ...integer)`
-  is compatible with `(integer, ...value)` **both ways** (through `value`). The
+  types must be `compatible`. Because that is gradual, `(integer, ...: integer)`
+  is compatible with `(integer, ...: value)` **both ways** (through `value`). The
   check is `if (v1 and true) ~= (v2 and true) then return false end`, then
   `compatible(v1, v2)`.
 * **`equals`** (the `Type.Function` arm): the same presence rule, but element
-  types compared with `equals`. So `...integer` and `...value` are **not** equal
+  types compared with `equals`. So `...: integer` and `...: value` are **not** equal
   — which is exactly what gives them different runtime type tags and makes the
   first-class fast path fall back correctly on a gradual mismatch.
 * **`serialize`**: emits the `varargtype` for Function and Method (so `.so`
   imports rehydrate it — part of the 0.9 ABI), keeping the C-FFI `vararg`
   boolean serialized and disjoint.
-* **`tostring`**: appends `, ...t` to the parameter list.
+* **`tostring`**: appends `, ...: t` to the parameter list.
 
 `typefromnode`'s `Ast.TypeFunction` handler reads `node.varargtype` and sets the
 resulting `Type.Function.varargtype` (after validating the element type).
@@ -155,15 +171,36 @@ the caller passes as `varargtype` to the type constructor. The lambda checker
 (`Ast.ExpFunction`) does the same detection inline rather than calling
 `param_types` (it also needs the `nfixed` count for context-arity matching), but
 shares the same validation. Validation is `check_vararg_elem`, which enforces the
-two **bans**:
+two **bans** (applied to the inferred/explicit lambda vararg element too):
 
-* `...nil` → `a variadic parameter cannot have type nil` (a typed `...t` cannot
+* `...: nil` → `a variadic parameter cannot have type nil` (a typed `...: t` cannot
   hold nil, except where `t` is `value`/an option that already includes nil);
 * a foreign-C-pointer element → `a variadic parameter cannot have a foreign
   pointer type` (no `TitanVarg*` struct exists for it).
 
 Both return `types.Invalid()` so checking continues. `check_vararg_elem` also
 validates the first-class-annotation element type, in `typefromnode`.
+
+### Untyped lambda vararg inference {#untyped-lambda-vararg}
+
+A lambda's vararg `Decl` may carry `type == false` (the parser's untyped form).
+The `Ast.ExpFunction` visitor resolves the vararg element type after it has
+computed `nfixed` and the `expected` context type (so the order is: count the
+fixed params, derive `expected` from the context iff it is a `Type.Function`
+whose `#params == nfixed`, then resolve the vararg). The resolution mirrors the
+untyped-fixed-parameter path:
+
+* explicit `...: t` → `typefromnode(varargdecl.type, …)` (context ignored);
+* untyped `...`, variadic context → take `expected.varargtype` as the element;
+* untyped `...`, context present but **non-variadic** (`expected.varargtype` is
+  `false`) → `cannot infer the type of '...'; the lambda is variadic but the
+  expected type is not`;
+* untyped `...`, **no usable context** → `cannot infer the type of '...';
+  annotate it or use the lambda where its type is known`.
+
+The resolved element is then run through `check_vararg_elem` (the same `nil` /
+foreign-pointer bans). Top-level functions, methods and function-type
+annotations never reach this path — their `...: t` is mandatory at the parser.
 
 ### Depth-stamped `$vararg` and scope rule 4
 
@@ -260,7 +297,7 @@ error (`'...' can only appear in an array constructor`). The element type is
 **seeded from the vararg element first** — `etype = econtext or
 deoptionize(dots_elem) or ...` — so `{...}` is `Array(t)`, **not** `Array(t?)`,
 and a no-context `{...}` is `{t}`. The kept `ExpDots` marker carries through to
-codegen. When a context overrides `etype` (e.g. `{...integer}` in a `{float}`
+codegen. When a context overrides `etype` (e.g. `{...: integer}` in a `{float}`
 context), the vararg element type must be `equals` or `coerceable` to `etype`,
 else `'...' element type %s is not coerceable to array element type %s`.
 
@@ -451,7 +488,7 @@ it exactly like a non-variadic value. The runtime function-type tag (a
 `static const void *` published/recovered through the Lua registry, keyed by
 `types.tostring(ftype)` so two modules agree) **folds in the vararg element**,
 because `function_type_tag` keys on the full type string and `equals`
-distinguishes `...integer` from `...value`. So:
+distinguishes `...: integer` from `...: value`. So:
 
 * **Tag matches the static type** → the **native fast path**: build the struct
   (the same `emit_vararg_struct` cases 1–3, including a forwarded `...`) and
@@ -461,7 +498,7 @@ distinguishes `...integer` from `...value`. So:
   gradual mismatch never allocates it (and a case-3 `checkandget` cannot raise
   spuriously before the generic path runs).
 * **Tag does not match** (a gradual `value` difference — e.g. a
-  `(integer, ...value)`-typed value holding a `(integer, ...integer)` function)
+  `(integer, ...: value)`-typed value holding a `(integer, ...: integer)` function)
   → the **generic Lua-stack path**: push the function and every fixed and
   surplus static arg, then (when forwarding) each `...` element one by one
   start-relative, and `luaD_callnoyield`; the callee's `genluaentry` coerces

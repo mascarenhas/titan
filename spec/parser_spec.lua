@@ -1437,7 +1437,7 @@ describe("Titan parser", function()
     describe("can parse variadic parameters", function()
         it("as the last parameter of a top-level function", function()
             assert_program_ast([[
-                function foo(a: integer, ...integer): nil
+                function foo(a: integer, ...: integer): nil
                 end
             ]], {
                 { _tag = "Ast.TopLevelFunc",
@@ -1452,7 +1452,7 @@ describe("Titan parser", function()
 
         it("as the sole parameter of a top-level function", function()
             assert_program_ast([[
-                function foo(...string): nil
+                function foo(...: string): nil
                 end
             ]], {
                 { _tag = "Ast.TopLevelFunc",
@@ -1466,7 +1466,7 @@ describe("Titan parser", function()
 
         it("as the last parameter of a method", function()
             assert_program_ast([[
-                function Record:m(a: integer, ...integer): nil
+                function Record:m(a: integer, ...: integer): nil
                 end
             ]], {
                 { _tag = "Ast.TopLevelMethod",
@@ -1503,7 +1503,7 @@ describe("Titan parser", function()
         it("as the last parameter of a lambda", function()
             assert_program_ast([[
                 function f(): integer
-                    local g = function(a, ...integer) return a end
+                    local g = function(a, ...: integer) return a end
                     return 1
                 end
             ]], {
@@ -1522,7 +1522,7 @@ describe("Titan parser", function()
 
         it("rejects a vararg that is not the last function parameter", function()
             assert_program_syntax_error([[
-                function foo(...integer, a: integer): nil
+                function foo(...: integer, a: integer): nil
                 end
             ]], "RParPList")
         end)
@@ -1530,33 +1530,140 @@ describe("Titan parser", function()
         it("rejects a vararg that is not the last lambda parameter", function()
             assert_program_syntax_error([[
                 function f(): nil
-                    local g = function(...integer, a) return a end
+                    local g = function(...: integer, a) return a end
                 end
             ]], "RParPList")
         end)
 
-        it("rejects an untyped vararg parameter", function()
+        it("rejects an untyped vararg parameter (top-level requires `: type`)", function()
+            -- `...` with no `:` in a top-level function: the colon is mandatory.
             assert_program_syntax_error([[
                 function foo(...): nil
                 end
-            ]], "TypeDecl")
+            ]], "VarargColon")
         end)
 
-        it("rejects an untyped vararg lambda parameter", function()
+        it("rejects the OLD no-colon vararg form `...integer`", function()
+            -- The pre-colon surface syntax `...integer` (no `:`) is now a syntax
+            -- error: after `...` the grammar demands a `:`.
+            assert_program_syntax_error([[
+                function foo(...integer): nil
+                end
+            ]], "VarargColon")
+        end)
+
+        it("rejects the OLD no-colon vararg form in a lambda", function()
+            -- A lambda's vararg colon is OPTIONAL, so `...integer` parses `...` as
+            -- an untyped vararg and then the stray `integer` makes the param list
+            -- fail to close: the no-colon form no longer reads `integer` as the
+            -- element type.
             assert_program_syntax_error([[
                 function f(): nil
-                    local g = function(...) return 1 end
+                    local g = function(...integer) return 1 end
                 end
-            ]], "TypeDecl")
+            ]], "RParPList")
         end)
 
-        -- A BARE function type as the vararg element parses fine: `...() -> integer`
+        it("accepts an UNTYPED vararg lambda parameter `function (a, ...)`", function()
+            -- A lambda's `...` may omit the element type (inferred from context).
+            -- The vararg Decl carries name == false AND type == false.
+            assert_program_ast([[
+                function f(): integer
+                    local g = function(a, ...) return a end
+                    return 1
+                end
+            ]], {
+                { _tag = "Ast.TopLevelFunc",
+                    block = { stats = {
+                        { _tag = "Ast.StatDecl",
+                            exps = {
+                                { _tag = "Ast.ExpFunction",
+                                    params = {
+                                        { _tag = "Ast.Decl", name = "a",
+                                          type = false },
+                                        { _tag = "Ast.Decl", name = false,
+                                          type = false },
+                                    } } } } } } },
+            })
+        end)
+
+        it("accepts a SOLE untyped vararg lambda parameter `function (...)`", function()
+            assert_program_ast([[
+                function f(): integer
+                    local g = function(...) return 1 end
+                    return 1
+                end
+            ]], {
+                { _tag = "Ast.TopLevelFunc",
+                    block = { stats = {
+                        { _tag = "Ast.StatDecl",
+                            exps = {
+                                { _tag = "Ast.ExpFunction",
+                                    params = {
+                                        { _tag = "Ast.Decl", name = false,
+                                          type = false },
+                                    } } } } } } },
+            })
+        end)
+
+        -- Disambiguation: `function(...): T` is an UNTYPED vararg whose `)`
+        -- precedes the return-type `:`, while `function(...: T)` is a TYPED
+        -- vararg. Pin both parses.
+        it("parses `function(...): integer` as untyped-vararg + integer return", function()
+            assert_program_ast([[
+                function f(): integer
+                    local g = function(...): integer return 1 end
+                    return 1
+                end
+            ]], {
+                { _tag = "Ast.TopLevelFunc",
+                    block = { stats = {
+                        { _tag = "Ast.StatDecl",
+                            exps = {
+                                { _tag = "Ast.ExpFunction",
+                                    params = {
+                                        { _tag = "Ast.Decl", name = false,
+                                          type = false },
+                                    },
+                                    rettypes = { { _tag = "Ast.TypeInteger" } },
+                                } } } } } },
+            })
+        end)
+
+        it("parses `function(...: integer)` as a typed vararg", function()
+            assert_program_ast([[
+                function f(): integer
+                    local g = function(...: integer) return 1 end
+                    return 1
+                end
+            ]], {
+                { _tag = "Ast.TopLevelFunc",
+                    block = { stats = {
+                        { _tag = "Ast.StatDecl",
+                            exps = {
+                                { _tag = "Ast.ExpFunction",
+                                    params = {
+                                        { _tag = "Ast.Decl", name = false,
+                                          type = { _tag = "Ast.TypeInteger" } },
+                                    } } } } } } },
+            })
+        end)
+
+        it("rejects an untyped vararg in a function-type annotation", function()
+            -- A function-TYPE annotation still requires `...: type` (no inference).
+            assert_program_syntax_error([[
+                function f(g: (...) -> integer): nil
+                end
+            ]], "VarargColon")
+        end)
+
+        -- A BARE function type as the vararg element parses fine: `...: () -> integer`
         -- reads the element type as the function type `() -> integer` (the `...`
         -- element grammar is `simpletype`, and a bare function type is a
         -- simpletype). Pin the AST so a future grammar change is noticed.
-        it("parses a bare function-type vararg element `...() -> integer`", function()
+        it("parses a bare function-type vararg element `...: () -> integer`", function()
             assert_program_ast([[
-                function foo(...() -> integer): nil
+                function foo(...: () -> integer): nil
                 end
             ]], {
                 { _tag = "Ast.TopLevelFunc",
@@ -1571,13 +1678,13 @@ describe("Titan parser", function()
         end)
 
         -- KNOWN PRE-EXISTING LIMITATION (not varargs-specific): a PARENTHESIZED
-        -- type is not a `simpletype` anywhere in the grammar, so `...(() -> integer)`
+        -- type is not a `simpletype` anywhere in the grammar, so `...: (() -> integer)`
         -- -- which tries to use a parenthesized function type as the element --
         -- fails to parse with the `TypeDecl` label. Pinned so that if the grammar
         -- ever learns parenthesized simpletypes, this test flips and we notice.
         it("rejects a PARENTHESIZED function-type vararg element (known limitation)", function()
             assert_program_syntax_error([[
-                function foo(...(() -> integer)): nil
+                function foo(...: (() -> integer)): nil
                 end
             ]], "TypeDecl")
         end)
@@ -1585,7 +1692,7 @@ describe("Titan parser", function()
 
     describe("can parse variadic function-type annotations", function()
         it("with a fixed prefix and a vararg element type", function()
-            assert_type_ast("(integer, ...string) -> integer",
+            assert_type_ast("(integer, ...: string) -> integer",
                 { _tag = "Ast.TypeFunction",
                     argtypes = { { _tag = "Ast.TypeInteger" } },
                     rettypes = { { _tag = "Ast.TypeInteger" } },
@@ -1593,7 +1700,7 @@ describe("Titan parser", function()
         end)
 
         it("with a sole vararg element type", function()
-            assert_type_ast("(...integer) -> integer",
+            assert_type_ast("(...: integer) -> integer",
                 { _tag = "Ast.TypeFunction",
                     argtypes = { },
                     rettypes = { { _tag = "Ast.TypeInteger" } },
@@ -1615,7 +1722,7 @@ describe("Titan parser", function()
     describe("can parse the `...` spread expression", function()
         local function vararg_program(body)
             return util.render([[
-                function foo(...integer): nil
+                function foo(...: integer): nil
                     $BODY
                 end
             ]], { BODY = body })

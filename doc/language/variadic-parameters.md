@@ -1,6 +1,6 @@
 # Variadic parameters
 
-A Titan function can take a **variadic parameter** `...t`: a trailing,
+A Titan function can take a **variadic parameter** `...: t`: a trailing,
 homogeneously typed run of extra arguments, all of element type `t`. It is
 Titan's lightweight stand-in for a slice type — a function can accept *any
 number* of trailing `t` values without an explicit array — but it is
@@ -8,7 +8,7 @@ deliberately limited so the compiler can pass those values on the C stack
 with no allocation in the common case.
 
 ```lua
-function sum(base: integer, ...integer): integer
+function sum(base: integer, ...: integer): integer
     local n = #...
     local s = base
     for i = 1, n do
@@ -37,19 +37,21 @@ the limits and bans.
 
 ## Declaring a variadic parameter
 
-A variadic parameter is written `...t` — the literal three dots followed by
-its element type, with **no colon and no name**. It must be the **last**
-parameter of the function, and its type is **mandatory** (there is no
-inference for it, just as for any parameter). The same form works on
-top-level functions, [anonymous functions](closures.md), and
-[methods](records.md#methods):
+A variadic parameter is written `...: t` — the literal three dots, a colon, and
+its element type, with **no name** (the `name: type` declaration style used
+everywhere else, just with no name before the colon). It must be the **last**
+parameter of the function. On a top-level function or a method the element type
+is **mandatory** (there is no inference for it, just as for any parameter); an
+[anonymous function](closures.md) may instead write a bare `...` whose element
+type is [inferred from context](#untyped-lambda-vararg). The same form works on
+top-level functions, anonymous functions, and [methods](records.md#methods):
 
 ```lua
-function log(level: string, ...string)          -- top-level function
+function log(level: string, ...: string)          -- top-level function
     -- ...
 end
 
-local fmt = function (...integer): integer       -- anonymous function
+local fmt = function (...: integer): integer       -- anonymous function
     return #...
 end
 
@@ -57,26 +59,52 @@ record Acc
     base: integer
 end
 
-function Acc:total(...integer): integer          -- method
+function Acc:total(...: integer): integer          -- method
     local s = self.base
     for i = 1, #... do s = s + ...[i] end
     return s
 end
 ```
 
-A function may also have *only* the variadic parameter (`function f(...integer)`),
-or a fixed prefix followed by it (`function f(a: integer, ...string)`). Because
-the grammar admits `...t` only as the trailing parameter and always with its
-type, both rejected forms below are caught as **syntax errors** at parse time:
+A function may also have *only* the variadic parameter (`function f(...: integer)`),
+or a fixed prefix followed by it (`function f(a: integer, ...: string)`). Because
+the grammar admits `...: t` only as the trailing parameter, and requires the
+`: t` on top-level functions and methods, both rejected forms below are caught as
+**syntax errors** at parse time:
 
 ```lua
-function bad1(...integer, a: integer)   -- syntax error: nothing may follow ...
-function bad2(...)                       -- syntax error: a type must follow ...
+function bad1(...: integer, a: integer)  -- syntax error: nothing may follow ...
+function bad2(...)                       -- syntax error: a top-level vararg needs `: t`
+function bad3(...integer)                -- syntax error: the colon is required
 ```
 
 The element type may be almost any Titan type — a scalar, a `string`, an
 array, a map, a record, `value`, or an option type — with two exceptions
 (`nil` and foreign C pointers) described under [Limits and bans](#limits-and-bans).
+
+### Untyped variadic in an anonymous function {#untyped-lambda-vararg}
+
+An [anonymous function](closures.md) may write a bare `...` with **no** element
+type, exactly as it may write an untyped parameter `a`. The element type is then
+**inferred from the context** — the expected variadic function type at the point
+where the lambda is assigned, passed, or returned:
+
+```lua
+function apply(f: (...: integer) -> integer): integer
+    return f(1, 2, 3)
+end
+
+local r = apply(function (...)           -- ... inferred as integer
+    return #... + ...[1]
+end)
+```
+
+Inference comes only from the context type. If the context is a variadic
+function type, its element type is used; if the context is non-variadic (or
+there is no usable context at all), the bare `...` is a type error (`cannot infer
+the type of '...'`), just like an uninferable untyped parameter. A lambda that
+writes an explicit `...: t` keeps that type regardless of context. Top-level
+functions and methods get no such inference — their `...: t` is mandatory.
 
 ## `...` is usable only inside its own function
 
@@ -86,7 +114,7 @@ lambda has its own (possibly absent) `...`, and reaching for the enclosing
 one is a compile-time error.
 
 ```lua
-function outer(...integer): integer
+function outer(...: integer): integer
     local g = function (): integer
         return ...[1]        -- compile-time error
     end
@@ -103,7 +131,7 @@ only forbids reaching *outward*:
 
 ```lua
 function outer(): integer
-    local g = function (...integer): integer return ...[1] end
+    local g = function (...: integer): integer return ...[1] end
     return g(1, 2)           -- ok: g's own ...
 end
 ```
@@ -122,7 +150,7 @@ assignment, or an array constructor`.
 `integer`:
 
 ```lua
-function count(...integer): integer
+function count(...: integer): integer
     return #...
 end
 ```
@@ -148,7 +176,7 @@ run-time error** instead of reading as `nil`. An index `e < 1` or `e` past
 `#...` both raise:
 
 ```lua
-function at(i: integer, ...integer): integer
+function at(i: integer, ...: integer): integer
     return ...[i]            -- type integer; raises if i is out of range
 end
 ```
@@ -177,26 +205,26 @@ the surrounding list. As with the [expansion of a multi-return call](functions.m
 * **an array constructor** — `{a, ...}` or `{...}`.
 
 ```lua
-function tail_call(...integer): integer
+function tail_call(...: integer): integer
     return sum(0, ...)         -- forward this function's ... into sum
 end
 
-function build(...integer): {integer}
+function build(...: integer): {integer}
     return {...}               -- collect the run into a fresh array
 end
 ```
 
 `{...}` (and `{e1, e2, ...}`) builds an array whose element type is the
-variadic element type `t` — `{...}` from a `...string` function has type
+variadic element type `t` — `{...}` from a `...: string` function has type
 `{string}`, and `{}` when the run is empty. The element type can also be
 overridden by context, as long as `t` coerces to it: `{...}` of a
-`...integer` run typed as `{float}` converts each element to a float, and
+`...: integer` run typed as `{float}` converts each element to a float, and
 typed as `{value}` boxes each element. A type that `t` cannot coerce to is
 the compile-time error `'...' element type integer is not coerceable to
 array element type string`.
 
 ```lua
-function as_floats(...integer): {float}
+function as_floats(...: integer): {float}
     return {...}               -- {3, 4} of integers becomes {3.0, 4.0}
 end
 ```
@@ -227,20 +255,20 @@ slot's type**, generalizing the `...[e]` rule above:
   leaves `b` as `nil` when only one argument was supplied).
 
 ```lua
-function third(...integer): integer
+function third(...: integer): integer
     local a, b, c = ...        -- three non-optional slots: needs #... >= 3
     return a + b + c
 end
 
-function maybe(...integer): integer?
+function maybe(...: integer): integer?
     local a: integer, b: integer? = ...   -- b nil-fills when ... has < 2 args
     return b
 end
 ```
 
 Each filled position is coerced to its slot's type the usual way, so the
-adjust-up is type-checked: an `...integer` run filling a `float?` slot
-converts each element to float, while an `...integer` run filling a
+adjust-up is type-checked: an `...: integer` run filling a `float?` slot
+converts each element to float, while an `...: integer` run filling a
 `string?` slot is the compile-time error `expected string? but found
 integer?` — a representation mismatch is caught, never silently
 reinterpreted.
@@ -251,13 +279,13 @@ ordinary over-supply error. `return 1, 2, ...` into a one-value return, or
 values:
 
 ```lua
-function over(...integer): integer
+function over(...: integer): integer
     return 1, 2, ...           -- error: list already supplies the one return slot
 end
 ```
 
 `return ...` is itself adjust-up into the function's **fixed** return arity,
-not a run-time-sized spread — `function pair(...integer): (integer, integer)
+not a run-time-sized spread — `function pair(...: integer): (integer, integer)
 return ... end` returns `...[1], ...[2]` (and raises if fewer than two were
 supplied). A `return ...` from a function that returns no values (`: ()`) is
 the error `cannot use '...' to return from a function that returns no values`.
@@ -271,14 +299,14 @@ adjust-up). This is the one spread that carries the count through. The two
 runs' element types must be **compatible**:
 
 ```lua
-function forward(...integer): integer
+function forward(...: integer): integer
     return sum(0, ...)         -- forward the run; element types must match
 end
 ```
 
 `integer` and `value` forward both ways (the gradual `value` relationship),
-so an `...integer` run forwards into a `...value` callee and vice versa. A
-representation mismatch such as `...integer` into a `...float` callee is the
+so an `...: integer` run forwards into a `...: value` callee and vice versa. A
+representation mismatch such as `...: integer` into a `...: float` callee is the
 compile-time error `'...' element type integer is not compatible with the
 '...' element type float of function 'sink'` (naming the callee).
 
@@ -288,31 +316,31 @@ Only the `...` *expression* is non-first-class. A **variadic function** — and
 a variadic method's [bound reference](closures.md#bound-method-references)
 `obj:m` — is a perfectly ordinary value: store it, pass it, return it, call
 it indirectly, hand it across the Lua boundary. Its function type carries the
-variadic element, written with the same `...t` syntax inside the arrow type:
+variadic element, written with the same `...: t` syntax inside the arrow type:
 
 ```lua
-function sum(...integer): integer
+function sum(...: integer): integer
     local s = 0
     for i = 1, #... do s = s + ...[i] end
     return s
 end
 
 function run(): integer
-    local f: (...integer) -> integer = sum      -- store a variadic function
+    local f: (...: integer) -> integer = sum      -- store a variadic function
     return f(1, 2, 3) + f() + f(10)             --> 6 + 0 + 10
 end
 ```
 
 A function type with a fixed prefix and a variadic tail is written the
-obvious way, `(integer, ...integer) -> integer`. Calling a variadic value
+obvious way, `(integer, ...: integer) -> integer`. Calling a variadic value
 works exactly like calling any [function value](functions.md#functions-as-values):
 when the value's run-time type matches the call's static type, the call takes
 the zero-overhead native path; a merely *compatible* type (for example a
-`(...value) -> integer` slot holding a `(...integer) -> integer` function, or
+`(...: value) -> integer` slot holding a `(...: integer) -> integer` function, or
 a plain Lua function), goes through the generic Lua-stack path, which checks
 and converts each variadic argument at the boundary.
 
-`(...integer) -> integer` and `(...value) -> integer` are mutually
+`(...: integer) -> integer` and `(...: value) -> integer` are mutually
 **compatible** (gradually, through `value`), so a variadic function flows
 into either; but a variadic function type is **never** compatible with a
 non-variadic one — `local f: (integer) -> integer = sum` where `sum` is
@@ -330,7 +358,7 @@ parameter of type `t` would be, and a wrong-typed one raises the usual
 boundary error.
 
 ```lua
-function greet(prefix: string, ...string): string
+function greet(prefix: string, ...: string): string
     local out = prefix
     for i = 1, #... do out = out .. " " .. ...[i] end
     return out
@@ -351,9 +379,9 @@ result arrives in Lua as a plain table.
 
 ## Limits and bans
 
-* **`...nil` is rejected.** A typed `...t` run cannot hold `nil`, so a `nil`
-  element type makes no sense: `function f(...nil)` is the compile-time error
-  `a variadic parameter cannot have type nil`. (Use `...value` or `...t?` if
+* **`...: nil` is rejected.** A typed `...: t` run cannot hold `nil`, so a `nil`
+  element type makes no sense: `function f(...: nil)` is the compile-time error
+  `a variadic parameter cannot have type nil`. (Use `...: value` or `...: t?` if
   you genuinely need nil among the elements; those types already include
   it.)
 * **A foreign C pointer element is rejected.** A `...` whose element type is

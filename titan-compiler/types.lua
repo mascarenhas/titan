@@ -197,7 +197,7 @@ function types.compatible(t1, t2)
         -- Titan vararg presence must match (a variadic and a non-variadic
         -- function are structurally distinct, never compatible); when both are
         -- Titan-variadic, the element types must be `compatible` (gradual, so
-        -- `(integer, ...integer)` is compatible with `(integer, ...value)` both
+        -- `(integer, ...: integer)` is compatible with `(integer, ...: value)` both
         -- ways via `value`). The C-FFI `vararg` boolean is disjoint and not
         -- part of first-class Titan function compatibility.
         local v1, v2 = t1.varargtype, t2.varargtype
@@ -248,7 +248,7 @@ function types.equals(t1, t2)
 
         -- Same Titan vararg presence rule as `compatible`, but element types are
         -- compared with `equals` (this drives the runtime type tag, so
-        -- `...integer` and `...value` are NOT equal → different tags → the
+        -- `...: integer` and `...: value` are NOT equal → different tags → the
         -- first-class fast path correctly falls back to the generic path).
         local v1, v2 = t1.varargtype, t2.varargtype
         if (v1 and true) ~= (v2 and true) then
@@ -299,7 +299,7 @@ function types.tostring(t)
             table.insert(ptypes, types.tostring(param))
         end
         if t.varargtype then
-            table.insert(ptypes, "..." .. types.tostring(t.varargtype))
+            table.insert(ptypes, "...: " .. types.tostring(t.varargtype))
         end
         table.insert(out, table.concat(ptypes, ", "))
         table.insert(out, ")")
@@ -329,7 +329,7 @@ function types.tostring(t)
             table.insert(ptypes, types.tostring(param))
         end
         if t.varargtype then
-            table.insert(ptypes, "..." .. types.tostring(t.varargtype))
+            table.insert(ptypes, "...: " .. types.tostring(t.varargtype))
         end
         table.insert(out, table.concat(ptypes, ", "))
         table.insert(out, ")")

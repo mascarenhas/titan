@@ -269,11 +269,15 @@ function defs.inferreddecl(pos, name)
     return ast.Decl(pos, name, false, false)
 end
 
--- A typed variadic parameter `...t`: encoded as a trailing Decl whose name is
--- `false`, carrying the element type. Detect a variadic function with
--- `params[#params].name == false`.
+-- A variadic parameter `...: t` (or, for lambdas only, an untyped `...`):
+-- encoded as a trailing Decl whose name is `false`. A typed vararg carries its
+-- element type; an untyped lambda vararg has `type == false`, mirroring the
+-- inferred-parameter encoding (name set / type false) but inverted (name false /
+-- type false). Detect a variadic function with `params[#params].name == false`.
+-- The `type` capture is absent (nil) for the untyped lambda form; normalise it
+-- to `false`.
 function defs.varargdecl(pos, type)
-    return ast.Decl(pos, false, type, false)
+    return ast.Decl(pos, false, type or false, false)
 end
 
 -- A trailing `...` field in an array constructor: `{ a, ... }`. Encoded as a
@@ -282,7 +286,7 @@ function defs.dots_field(pos)
     return ast.Field(pos, false, ast.ExpDots(pos))
 end
 
--- Vararg element type for a function-type annotation `(t, ...u) -> r`. Returns
+-- Vararg element type for a function-type annotation `(t, ...: u) -> r`. Returns
 -- the element type node (dropping the position capture).
 function defs.varargtype(_, type)
     return type
@@ -351,8 +355,16 @@ local grammar = re.compile([[
     -- Lambda return-type: `false` when absent (infer), distinct from `: ()`.
     lambdarettypeopt<- (P  (COLON rettype^TypeFunc)?)            -> lambdarettypeopt
 
-    -- A trailing, last-only typed variadic parameter `...t` (no colon, no name).
-    varargparam     <- (P  DOTS type^TypeDecl)                   -> varargdecl
+    -- A trailing, last-only typed variadic parameter `...: t` (no name). The
+    -- element type is mandatory for top-level functions and methods (the `: t`
+    -- declaration style, matching `name: type` everywhere else).
+    varargparam     <- (P  DOTS COLON^VarargColon type^TypeDecl) -> varargdecl
+
+    -- A lambda's trailing vararg `...` may OMIT the `: t` (the element type is
+    -- then inferred from context, like an unannotated lambda parameter). There is
+    -- no ambiguity: `function(...): T` is an untyped vararg whose `)` precedes the
+    -- return-type `:`, while `function(...: T)` is a typed vararg.
+    lambdavarargparam <- (P  DOTS (COLON type^TypeDecl)?)        -> varargdecl
 
     -- The fixed-param loop stops before a `, ...` (the `!DOTS` guard) so the
     -- optional trailing `varargparam` consumes that comma itself.
@@ -363,10 +375,10 @@ local grammar = re.compile([[
     param           <- (P  NAME COLON^ParamSemicolon
                            type^TypeDecl)                        -> typeddecl
 
-    -- Lambda parameters: the type annotation is optional; a trailing `...t`
-    -- vararg still requires its element type.
+    -- Lambda parameters: the type annotation is optional, and a trailing `...`
+    -- vararg may likewise omit its element type (inferred from context).
     lambdaparamlist <- ({| (lambdaparam (COMMA !DOTS lambdaparam^DeclParList)*
-                              (COMMA varargparam)? / varargparam)? |}
+                              (COMMA lambdavarargparam)? / lambdavarargparam)? |}
                         => checklist) / %{ListTooLong}           -- produces {Decl}
 
     lambdaparam     <- (P  NAME COLON type^TypeDecl)             -> typeddecl
@@ -399,11 +411,12 @@ local grammar = re.compile([[
                            RCURLY^RCurlyType)                    -> TypeArray)
                                                   (OPT -> '?')?) -> typeopt
 
-    -- A trailing, last-only `...t` in a function-type arg list. Produces the
-    -- element type node; `varargtypeopt` defaults to `false` when absent. Only
-    -- consumed in the arrow (function-type) productions below, never in a bare
-    -- `typelist` used as a return-type list.
-    varargtypeann   <- (P  DOTS type^TypeDecl)                   -> varargtype
+    -- A trailing, last-only `...: t` in a function-type arg list. The element
+    -- type is mandatory (the `: t` declaration style). Produces the element type
+    -- node; `varargtypeopt` defaults to `false` when absent. Only consumed in the
+    -- arrow (function-type) productions below, never in a bare `typelist` used as
+    -- a return-type list.
+    varargtypeann   <- (P  DOTS COLON^VarargColon type^TypeDecl) -> varargtype
 
     varargtypeopt   <- ((COMMA varargtypeann / varargtypeann)?)  -> opt
 
