@@ -166,7 +166,12 @@ end
 local function build_one_so(name, src, names)
     reset(true)
     local static_deps = {}
-    local ast = M.parse(src)
+    -- Parse under the `<name>.titan` chunkname so the generated `#line`
+    -- directives attribute native frames to that `.titan` file (the unified
+    -- backtrace keeps a native frame only when its DWARF filename ends in
+    -- `.titan`). The default `(spec)` chunkname would make every Titan frame in
+    -- a `.so`-only module invisible in traces.
+    local ast = M.parse(src, name .. ".titan")
     if not ast then return nil, "parse error in " .. name end
     local _, errs = checker.check(name, ast, src, name .. ".titan",
         driver.defaultloader(static_deps))

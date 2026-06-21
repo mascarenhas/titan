@@ -393,22 +393,21 @@ describe("catch (error-handling Phase 4)", function()
         assert.match("OK", out)
     end)
 
-    it("rejects finally codegen with a clear Phase-5 message", function()
-        h.reset()
-        local ast, perr = parse([[
+    it("compiles a finally and runs it on normal completion (Phase 5)", function()
+        local out = compile_and_run([[
             function run(): integer
+                local n: integer = 0
                 do
-                    return 1
+                    n = 1
                 finally
-                    local x: integer = 2
+                    n = n + 10
                 end
+                return n
             end
-        ]], "test.titan")
-        assert.truthy(ast, perr)
-        local _, errs = checker.check("test", ast, "src", "test.titan")
-        assert.equal(0, #errs, table.concat(errs, "\n"))
-        local ok, err = pcall(compile, "test", ast)
-        assert.falsy(ok, "finally should not compile in Phase 4")
-        assert.match("finally codegen not yet implemented", tostring(err))
+        ]], [==[
+            assert(test.run() == 11, "finally on normal completion failed")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
     end)
 end)

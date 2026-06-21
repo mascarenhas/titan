@@ -1024,7 +1024,8 @@ end
 -- Returns the frame; the caller must `close_loop` after coding the body, then
 -- splice `loop_save_lines(frame)` at loop entry.
 local function open_loop(ctx, node)
-    local frame = { try_depth = ctx.try_depth or 0 }
+    ctx.loop_after_id = (ctx.loop_after_id or 0) + 1
+    local frame = { try_depth = ctx.try_depth or 0, after_id = ctx.loop_after_id }
     if stat_contains_try(node.block) then
         ctx.loop_save_id = (ctx.loop_save_id or 0) + 1
         frame.save_id = ctx.loop_save_id
@@ -1048,6 +1049,14 @@ local function loop_save_lines(frame)
     ]], { ID = c_integer_literal(frame.save_id) })
 end
 
+-- The label spliced immediately AFTER a loop so a PA_BREAK dispatch inside a
+-- finally (which cannot use a bare C `break`) can `goto` past the loop. Emitted
+-- only when such a break was actually generated (frame.uses_after_label).
+local function after_loop_label(frame)
+    if not frame.uses_after_label then return "" end
+    return "\n_after_loop_" .. frame.after_id .. ": ;"
+end
+
 local function codewhile(ctx, node)
     pushd(ctx)
     local frame = open_loop(ctx, node)
@@ -1065,7 +1074,7 @@ local function codewhile(ctx, node)
             while($CEXP) {
                 $CBLK
                 $CHECKGC
-            }
+            }$AFTER
         ]]
     else
         tmpl = [[
@@ -1077,7 +1086,7 @@ local function codewhile(ctx, node)
                 }
                 $CBLK
                 $CHECKGC
-            }
+            }$AFTER
         ]]
     end
     return render(tmpl, {
@@ -1085,7 +1094,8 @@ local function codewhile(ctx, node)
         CSTATS = cstats,
         CEXP = toboolean(node.condition._type, cexp),
         CBLK = cblk,
-        CHECKGC = nallocs > 0 and "luaC_checkGC(L);" or ""
+        CHECKGC = nallocs > 0 and "luaC_checkGC(L);" or "",
+        AFTER = after_loop_label(frame),
     })
 end
 
@@ -1112,13 +1122,14 @@ local function coderepeat(ctx, node)
                 break;
             }
             $CHECKGC
-        }
+        }$AFTER
     ]], {
         LOOPSAVE = loopsave,
         CBLK = cblk,
         CSTATS = cstats,
         CEXP = toboolean(node.condition._type, cexp),
-        CHECKGC = nallocs > 0 and "luaC_checkGC(L);" or ""
+        CHECKGC = nallocs > 0 and "luaC_checkGC(L);" or "",
+        AFTER = after_loop_label(frame),
     })
 end
 
@@ -1191,6 +1202,7 @@ local function codefor(ctx, node)
         COL = node.loc.col,
         STEP0 = codethrow(node.loc, "%s:%d:%d: 'for' step is zero",
                           { "$FILE", "$LINE", "$COL" }),
+        AFTER = after_loop_label(frame),
     }
     if node.decl._type._tag == "Type.Integer" then
         return render([[
@@ -1221,7 +1233,7 @@ local function codefor(ctx, node)
                         _foridx = l_castU2S(l_castS2U(_foridx) + l_castS2U(_forstep));
                     }
                 }
-            }
+            }$AFTER
         ]], subs)
     else
         return render([[
@@ -1248,7 +1260,7 @@ local function codefor(ctx, node)
                         }
                     }
                 }
-            }
+            }$AFTER
         ]], subs)
     end
 end
@@ -2391,7 +2403,137 @@ local function restore_entry_errorjmp()
         L->nCcalls = _entry_nC;]]
 end
 
+-- Pending-action discriminator values (B.3). A `StatTry` with a finally records,
+-- on every exit of its protected region, a pending action; the finally runs
+-- straight-line; then an if-chain dispatch (NEVER a C `switch`, which would
+-- capture the PA_BREAK arm's `break`) performs it. PA_NONE falls through.
+local PA_NONE   = "0"
+local PA_RETURN = "1"
+local PA_BREAK  = "2"
+local PA_RAISE  = "3"
+
+-- Compute the per-return saved-value storage for a try-with-finally (B.4 "GC
+-- anchoring"). Each declared return value gets either a stack-anchored slot (GC
+-- types — written with no barrier since the stack is a root) or a `volatile` C
+-- temp (non-GC scalars, already setjmp-safe via the function-wide `volatile`
+-- rule). Returns a list of descriptors {typ, cvar, slot?, decl} and the C
+-- declarations to splice at the try's top, plus a `write(cstats_list, exprs)`
+-- closure the body/catch `return` lowering uses to fill them.
+local function make_return_saves(ctx, id)
+    local rettypes = ctx.rettypes or {}
+    local saves = {}
+    local decls = {}
+    for i = 1, #rettypes do
+        local typ = rettypes[i]
+        local cvar = "_pa_ret_" .. id .. "_" .. i
+        local isgc = types.is_gc(typ)
+        local slot
+        if isgc then
+            -- GC saved return: anchor in a reserved stack slot so it survives the
+            -- finally (which may allocate / run the GC). The C temp just caches a
+            -- copy; the slot is the live root.
+            slot = reserveslot(ctx)
+            table.insert(decls, render("$VQ$CT $CVAR = $INIT;", {
+                VQ = "", CT = ctype(typ), CVAR = cvar, INIT = initval(typ),
+            }))
+        else
+            -- Non-GC saved return: a plain C temp. The whole native function is a
+            -- setjmp scope, so mark it volatile (the value is set before the
+            -- finally — which may longjmp out on a raise — and read in dispatch).
+            table.insert(decls, render("volatile $CT $CVAR = $INIT;", {
+                CT = ctype(typ), CVAR = cvar, INIT = initval(typ),
+            }))
+        end
+        -- A try-with-finally that contains no `return` leaves these temps written
+        -- nowhere (or, for GC types, written but only ever read via the slot), so
+        -- silence -Wunused-variable / -Wunused-but-set unconditionally.
+        table.insert(decls, "(void)" .. cvar .. ";")
+        saves[i] = { typ = typ, cvar = cvar, slot = slot }
+    end
+    return saves, table.concat(decls, "\n")
+end
+
+-- Emit the C that copies the saved return values into a fresh return — either the
+-- real function epilogue (no enclosing finally) or, when chaining to an outer
+-- try-with-finally, the outer try's saved slots. `from` is this try's saves list.
+-- For the real epilogue: first value via `return`, the rest via `*_outparam_i`.
+local function dispatch_return_epilogue(ctx, from)
+    local lines = {}
+    -- restore the errorjmp chain to the function-entry values (this return is
+    -- crossing the finally's torn-down boundary back to the caller)
+    ctx.used_entry_restore = true
+    table.insert(lines, restore_entry_errorjmp())
+    if #from == 0 then
+        table.insert(lines, "L->top.p = _base;")
+        table.insert(lines, "return;")
+        return table.concat(lines, "\n")
+    end
+    -- Read each saved value into a fresh C temp BEFORE resetting the stack top:
+    -- a GC saved return lives in a slot at `_base + d` (>= _base), so reading it
+    -- after `L->top.p = _base` would touch a slot above top. No allocation runs
+    -- here, so the temps hold valid (register-held) values across the reset.
+    local function read(save)
+        if save.slot then
+            return getslot(save.typ, nil, "s2v(_base + " .. c_integer_literal(save.slot) .. ")")
+        end
+        return save.cvar
+    end
+    for i = 1, #from do
+        table.insert(lines, render("$CT _pa_dret_$I = $READ;", {
+            CT = ctype(from[i].typ), I = c_integer_literal(i), READ = read(from[i]),
+        }))
+    end
+    table.insert(lines, "L->top.p = _base;")
+    for i = 2, #from do
+        table.insert(lines, "*_outparam_" .. i .. " = _pa_dret_" .. i .. ";")
+    end
+    table.insert(lines, "return _pa_dret_1;")
+    return table.concat(lines, "\n")
+end
+
+-- A `return`/`break` inside the body or catch of an enclosing try-with-finally
+-- is NOT realized as the real control transfer: it sets that try's pending
+-- action (+ saves the return values), then `goto`s the try's `_finally` label so
+-- the finally still runs before the action is performed (B.3 rule d/h). The
+-- innermost enclosing try-with-finally is `ctx.finally_stack[#ctx.finally_stack]`.
+local function innermost_finally(ctx)
+    local fs = ctx.finally_stack
+    return fs and fs[#fs] or nil
+end
+
 local function codereturn(ctx, node)
+    -- Route through an enclosing finally: save the return values into the
+    -- innermost finally frame's saved slots, mark its pending action RETURN, and
+    -- jump to its finally. The finally's dispatch then performs (or chains) it.
+    local fin = innermost_finally(ctx)
+    if fin then
+        fin.label_used = true
+        local cstats = {}
+        for i = 1, #node.exps do
+            local cs, cexp = codeexp(ctx, node.exps[i])
+            table.insert(cstats, cs)
+            local save = fin.ret_saves[i]
+            if save.slot then
+                -- materialize into the C temp (which the dispatch may also read),
+                -- then anchor a copy in the slot (no barrier: the stack is a root)
+                table.insert(cstats, save.cvar .. " = " .. cexp .. ";")
+                table.insert(cstats, setslot(save.typ,
+                    "s2v(_base + " .. c_integer_literal(save.slot) .. ")", save.cvar))
+            else
+                table.insert(cstats, save.cvar .. " = " .. cexp .. ";")
+            end
+        end
+        return render([[
+            $CSTATS
+            $PA = $PARETURN;
+            goto $LABEL;
+        ]], {
+            CSTATS = table.concat(cstats, "\n"),
+            PA = fin.pa_var,
+            PARETURN = PA_RETURN,
+            LABEL = fin.label,
+        })
+    end
     -- Clean-exit restore (#3): a `return` crossing one or more protected regions
     -- must put L->errorJmp/nCcalls back to their function-entry values before the
     -- epilogue, so the dangling inner `_lj` is never reachable.
@@ -2527,7 +2669,213 @@ local function coderaise(ctx, node)
     })
 end
 
--- `catch`/`finally` (error-handling Phase 4 — catch-only; finally is Phase 5).
+-- Find the innermost enclosing finally frame that is in the SAME target loop as a
+-- `break` issued at the current point (i.e. opened at or below the innermost
+-- loop). A break inside a finally-protected region must run that finally before it
+-- can reach the loop; if there is none in the loop, the break is realized directly
+-- (restore loop errorjmp + goto past the loop). `ctx.loopstack`/`ctx.finally_stack`
+-- reflect the lexical context of the call site.
+local function enclosing_break_finally(ctx)
+    local fs = ctx.finally_stack
+    if not fs or #fs == 0 then return nil end
+    local loop_len = ctx.loopstack and #ctx.loopstack or 0
+    local fin = fs[#fs]
+    -- The frame is between the break and the innermost loop iff it was opened while
+    -- that loop (or a deeper one) was already on the stack.
+    if fin.loopstack_len >= loop_len and loop_len > 0 then
+        return fin
+    end
+    return nil
+end
+
+-- Realize a `break` at the current point: if an enclosing finally lies between the
+-- break and its target loop, route through it (set pending BREAK, goto its
+-- finally); otherwise restore the loop-entry errorjmp/nC (if a try boundary is
+-- open) and `goto` the label past the enclosing loop (NOT a bare `break`, which a
+-- dispatch if-chain could not safely sit inside). Used by both the StatBreak arm
+-- and the PA_BREAK dispatch arm (which chains finallys inside-out).
+local function realize_break(ctx)
+    local fin = enclosing_break_finally(ctx)
+    if fin then
+        fin.label_used = true
+        return render([[
+            $PA = $PABREAK;
+            goto $LABEL;
+        ]], { PA = fin.pa_var, PABREAK = PA_BREAK, LABEL = fin.label })
+    end
+    -- direct break: target the innermost loop frame, restoring its entry errorjmp
+    -- if a try boundary is open between here and the loop entry.
+    local frame = ctx.loopstack and ctx.loopstack[#ctx.loopstack]
+    assert(frame, "internal error: break with no enclosing loop")
+    frame.uses_after_label = true
+    local restore = ""
+    if frame.save_id and (ctx.try_depth or 0) > frame.try_depth then
+        frame.used = true
+        restore = render([[
+            L->errorJmp = _loop_errorjmp_$ID;
+            L->nCcalls = _loop_nC_$ID;
+        ]], { ID = c_integer_literal(frame.save_id) })
+    end
+    return render([[
+        $RESTORE
+        goto $AFTER;
+    ]], { RESTORE = restore, AFTER = "_after_loop_" .. frame.after_id })
+end
+
+-- The pending-action dispatch if-chain emitted after a finally (B.3 rule i). Never
+-- a C `switch` (which would capture PA_BREAK's `break`). PA_RETURN/PA_BREAK chain
+-- through any enclosing finally; PA_RAISE reinstalls the saved trace + pin and
+-- re-raises; PA_NONE falls through.
+local function dispatch_after_finally(ctx, pa_var, ret_saves, d_pa_err, d_pa_tb)
+    -- RETURN arm: chain to an outer finally if one encloses this try, else emit
+    -- the real return epilogue with the saved values.
+    local outer_fin = innermost_finally(ctx)
+    local return_arm
+    if outer_fin then
+        outer_fin.label_used = true
+        -- copy this try's saved returns into the outer try's saved slots, mark the
+        -- outer pending RETURN, and jump to the outer finally.
+        local lines = {}
+        for i = 1, #ret_saves do
+            local from = ret_saves[i]
+            local to = outer_fin.ret_saves[i]
+            local rd
+            if from.slot then
+                rd = getslot(from.typ, nil,
+                    "s2v(_base + " .. c_integer_literal(from.slot) .. ")")
+            else
+                rd = from.cvar
+            end
+            table.insert(lines, to.cvar .. " = " .. rd .. ";")
+            if to.slot then
+                table.insert(lines, setslot(to.typ,
+                    "s2v(_base + " .. c_integer_literal(to.slot) .. ")", to.cvar))
+            end
+        end
+        table.insert(lines, outer_fin.pa_var .. " = " .. PA_RETURN .. ";")
+        table.insert(lines, "goto " .. outer_fin.label .. ";")
+        return_arm = table.concat(lines, "\n")
+    else
+        return_arm = dispatch_return_epilogue(ctx, ret_saves)
+    end
+
+    -- BREAK arm: chain through enclosing finallys or break past the loop. Only a
+    -- try that is itself inside a loop can ever observe a pending BREAK (a break in
+    -- the body/catch targets the innermost ENCLOSING loop; a break to a loop
+    -- written inside the body is handled by that inner loop's own frame). With no
+    -- enclosing loop, PA_BREAK is unreachable, so emit nothing.
+    local break_arm = (ctx.loopstack and #ctx.loopstack > 0)
+        and realize_break(ctx) or "/* unreachable: no enclosing loop */ ;"
+
+    -- RAISE arm: reinstall the saved trace + pin (preserve original trace), push
+    -- the saved error, lua_error.
+    local raise_arm = render([[
+        lua_checkstack(L, 2);
+        lua_pushliteral(L, TITAN_BACKTRACE_KEY);
+        setsvalue2s(L, L->top.p, tsvalue(s2v(_base + $DPATB)));
+        L->top.p++;
+        lua_rawset(L, LUA_REGISTRYINDEX);
+        lua_pushliteral(L, TITAN_TRACE_PINNED);
+        lua_pushboolean(L, 1);
+        lua_rawset(L, LUA_REGISTRYINDEX);
+        setobj2s(L, L->top.p, s2v(_base + $DPAERR));
+        L->top.p++;
+        lua_error(L);
+    ]], {
+        DPATB = c_integer_literal(d_pa_tb),
+        DPAERR = c_integer_literal(d_pa_err),
+    })
+
+    return render([[
+        if ($PA == $PARETURN) {
+            $RETARM
+        } else if ($PA == $PABREAK) {
+            $BREAKARM
+        } else if ($PA == $PARAISE) {
+            $RAISEARM
+        }
+        /* PA_NONE: fall through past the try */
+    ]], {
+        PA = pa_var,
+        PARETURN = PA_RETURN,
+        PABREAK = PA_BREAK,
+        PARAISE = PA_RAISE,
+        RETARM = return_arm,
+        BREAKARM = break_arm,
+        RAISEARM = raise_arm,
+    })
+end
+
+-- The "save" prologue of an inline setjmp boundary (rawrunprotected save), tagged
+-- with `tag` so a try with two boundaries (body + catch) keeps distinct locals.
+local function boundary_save(tag)
+    return render([[
+        /* inline protected boundary (rawrunprotected save) */
+        l_uint32 _oldnC_$T = L->nCcalls;
+        CallInfo *_oldci_$T = L->ci;
+        lu_byte _oldah_$T = L->allowhook;
+        ptrdiff_t _oldtop_$T = savestack(L, L->top.p);
+        lua_longjmp _lj_$T;
+        _lj_$T.status = LUA_OK;
+        _lj_$T.previous = L->errorJmp;
+        L->errorJmp = &_lj_$T;
+        if (TITAN_SETJMP(_lj_$T.b) == 0) {
+    ]], { T = tag })
+end
+
+-- The "tail" that closes a boundary's protected block and restores the
+-- error-handler chain (rawrunprotected tail), opening the `if (status != OK)`
+-- recovery arm and saving the caught error into slot `d_err` and its snapshotted
+-- trace into slot `d_tb`. The caller supplies the recovery body and closes braces.
+local function boundary_recover_open(tag, d_err, d_tb)
+    return render([[
+        }
+        /* restore the error-handler chain (rawrunprotected tail) */
+        L->errorJmp = _lj_$T.previous;
+        L->nCcalls = _oldnC_$T;
+        if (_lj_$T.status != LUA_OK) {
+            /* raised; errorhandler already filled the trace slot. Mirror
+            ** luaD_pcall's recovery: restore ci/allowhook, close any to-be-
+            ** closed vars from called Lua, materialize the error object. */
+            L->ci = _oldci_$T;
+            L->allowhook = _oldah_$T;
+            _lj_$T.status = luaD_closeprotected(L, _oldtop_$T, _lj_$T.status);
+            luaD_seterrorobj(L, _lj_$T.status, restorestack(L, _oldtop_$T));
+            lua_checkstack(L, 4);
+            /* a value-call/GC inside the protected region may have relocated the
+            ** stack; recompute _base before touching any reserved slot */
+            _base = restorestack(L, _base_off);
+            /* save the error object into its anchored slot, then drop it from the
+            ** top; the registry snapshot/clear below pushes within the
+            ** lua_checkstack(4) margin established above. */
+            setobj2s(L, _base + $DERR, s2v(L->top.p - 1));
+            L->top.p = restorestack(L, _oldtop_$T);
+            /* snapshot registry[TITAN_BACKTRACE_KEY] into the traceback slot */
+            lua_pushliteral(L, TITAN_BACKTRACE_KEY);
+            lua_rawget(L, LUA_REGISTRYINDEX);
+            if (!ttisstring(s2v(L->top.p - 1))) {
+                L->top.p--;
+                lua_pushliteral(L, "");
+            }
+            setobj2s(L, _base + $DTB, s2v(L->top.p - 1));
+            L->top.p--;
+            /* clear slot + pin so a fresh error raised later is captured anew
+            ** (a bare re-raise re-pins the saved trace) */
+            lua_pushliteral(L, TITAN_BACKTRACE_KEY);
+            lua_pushnil(L);
+            lua_rawset(L, LUA_REGISTRYINDEX);
+            lua_pushliteral(L, TITAN_TRACE_PINNED);
+            lua_pushnil(L);
+            lua_rawset(L, LUA_REGISTRYINDEX);
+            /* re-establish the function's steady-state reserved top
+            ** (`_base + nslots`) so any reserved slots used in the recovery sit
+            ** below L->top.p and are GC-scanned. The literal nslots is patched in
+            ** by codefuncdec/codelambdadec once the high-water mark is known. */
+            L->top.p = _base + TITAN_RESERVED_NSLOTS;
+    ]], { T = tag, DERR = c_integer_literal(d_err), DTB = c_integer_literal(d_tb) })
+end
+
+-- `catch`/`finally` codegen.
 --
 -- A StatTry wraps its body in an inline setjmp boundary that replicates
 -- luaD_rawrunprotected + luaD_pcall's error recovery, emitted as straight-line C
@@ -2538,125 +2886,202 @@ end
 --
 -- Per-try anchored slots (reserveslot -> depths within the function's _base..nslots
 -- region) hold the caught error value and the snapshotted trace string; a write
--- into a stack slot needs no GC barrier (the stack is a root). A boundary error
--- in the catch propagates to the OUTER boundary (no own boundary for catch in
--- Phase 4; that's only needed once a following finally must still run — Phase 5).
+-- into a stack slot needs no GC barrier (the stack is a root).
+--
+-- Boundary accounting (B.4): the BODY always gets a boundary. A CATCH gets its
+-- OWN boundary only when a FINALLY follows (so a raise in the catch still runs the
+-- finally); without a finally a catch error propagates to the outer boundary
+-- (Phase-4 behavior). A FINALLY itself installs no boundary: it is straight-line,
+-- and a raise/runtime error in it longjmps out, skipping the dispatch (override).
 local function codetry(ctx, node)
-    assert(not node.finallyblock,
-        "internal error: finally codegen not yet implemented (Phase 5)")
     -- A function containing a try always needs `_base` recomputed from an offset
     -- after a caught longjmp (a value-call or GC inside the body may have
     -- relocated the stack), so force the base-offset preamble.
     ctx.uses_base_off = true
     ctx.try_id = (ctx.try_id or 0) + 1
     local id = ctx.try_id
-    -- Reserve the per-try anchored slots up front (their depths persist across the
-    -- body and catch). The recovery recomputes their addresses inline from the
+    local has_finally = node.finallyblock and true or false
+    local has_catch = node.catchblock and true or false
+
+    -- Reserve the per-try anchored slots up front (depths persist across the body,
+    -- catch, and finally). The recovery recomputes addresses inline from a freshly
     -- restored `_base`, so only the depth index is needed.
-    local d_err = reserveslot(ctx)
-    local d_tb = reserveslot(ctx)
+    local d_err = reserveslot(ctx)   -- the BODY-boundary caught error
+    local d_tb = reserveslot(ctx)    -- ... and its snapshotted trace
+    -- For a try-with-finally, the pending RAISE carries its own saved error +
+    -- trace slots (set on a body raise with no catch, or on a catch raise), since
+    -- the dispatch re-raises after the finally runs.
+    local d_pa_err, d_pa_tb
+    if has_finally then
+        d_pa_err = reserveslot(ctx)
+        d_pa_tb = reserveslot(ctx)
+    end
+
+    -- Per-try pending-action discriminator + saved-return storage (finally only).
+    local pa_var = "_pa_" .. id
+    local fin_label = "_finally_" .. id
+    local ret_saves, ret_decls, fin_frame
+    if has_finally then
+        ret_saves, ret_decls = make_return_saves(ctx, id)
+        -- Push the finally frame so body/catch `return`/`break` route here. Record
+        -- the current loop nesting so a break can decide whether an OUTER finally
+        -- in the same target loop must also run (chaining).
+        ctx.finally_stack = ctx.finally_stack or {}
+        table.insert(ctx.finally_stack, {
+            id = id,
+            pa_var = pa_var,
+            label = fin_label,
+            ret_saves = ret_saves,
+            loopstack_len = ctx.loopstack and #ctx.loopstack or 0,
+            label_used = false,  -- set when a return/break actually gotos it
+        })
+        fin_frame = ctx.finally_stack[#ctx.finally_stack]
+    end
 
     -- The body and catch run as protected straight-line C. Within them, a
-    -- `return`/`break` must clean-exit-restore the errorjmp chain (#3), tracked by
-    -- ctx.try_depth.
+    -- `return`/`break` that escapes a NON-finally try must clean-exit-restore the
+    -- errorjmp chain (#3); for a finally try, return/break route to the finally
+    -- instead (codereturn / the StatBreak arm consult ctx.finally_stack first).
     ctx.try_depth = (ctx.try_depth or 0) + 1
     local cbody = codestat(ctx, node.block)
     ctx.try_depth = ctx.try_depth - 1
 
-    -- Bind the catch's implicit locals to C autos populated in the recovery. They
-    -- are read by codevar through `_decl._cvar` (not boxed, not captured).
-    local errdecl = node._error_decl
-    local tbdecl = node._traceback_decl
+    -- Bind the catch's implicit locals to C autos populated in the recovery.
     local errcvar = "_catch_error_" .. id
     local tbcvar = "_catch_tb_" .. id
-    errdecl._cvar = errcvar
-    tbdecl._cvar = tbcvar
+    local ccatch = ""
+    if has_catch then
+        local errdecl = node._error_decl
+        local tbdecl = node._traceback_decl
+        errdecl._cvar = errcvar
+        tbdecl._cvar = tbcvar
+        local saved_err, saved_tb = ctx.catch_error_decl, ctx.catch_traceback_decl
+        ctx.catch_error_decl = errdecl
+        ctx.catch_traceback_decl = tbdecl
+        ctx.try_depth = ctx.try_depth + 1
+        ccatch = codestat(ctx, node.catchblock)
+        ctx.try_depth = ctx.try_depth - 1
+        ctx.catch_error_decl, ctx.catch_traceback_decl = saved_err, saved_tb
+    end
 
-    -- Thread the catch's decls so a bare `raise` inside reaches them.
-    local saved_err, saved_tb = ctx.catch_error_decl, ctx.catch_traceback_decl
-    ctx.catch_error_decl = errdecl
-    ctx.catch_traceback_decl = tbdecl
-    ctx.try_depth = ctx.try_depth + 1
-    local ccatch = codestat(ctx, node.catchblock)
-    ctx.try_depth = ctx.try_depth - 1
-    ctx.catch_error_decl, ctx.catch_traceback_decl = saved_err, saved_tb
+    -- Pop the finally frame BEFORE coding the finally block: a `return`/`break`
+    -- inside the finally must NOT loop back to this finally (it would be illegal —
+    -- the checker bans escaping return/break in a finally — and a contained break
+    -- targets a loop opened inside the finally, handled by the normal loop frame).
+    if has_finally then
+        table.remove(ctx.finally_stack)
+    end
+    local cfinally = has_finally and codestat(ctx, node.finallyblock) or ""
+
+    if not has_finally then
+        -- Phase-4 shape: body boundary; on error, materialize+bind catch locals
+        -- and run the catch directly (no own boundary — its raise propagates out).
+        return render([[
+            {
+                $SAVE
+                    $CBODY
+                $RECOVER
+                    TValue $ERR = *s2v(_base + $DERR);
+                    TString *$TB = tsvalue(s2v(_base + $DTB));
+                    (void)$ERR;
+                    (void)$TB;
+                    $CCATCH
+                }
+            }
+        ]], {
+            SAVE = boundary_save(tostring(id)),
+            CBODY = cbody,
+            RECOVER = boundary_recover_open(tostring(id), d_err, d_tb),
+            CCATCH = ccatch,
+            ERR = errcvar,
+            TB = tbcvar,
+            DERR = c_integer_literal(d_err),
+            DTB = c_integer_literal(d_tb),
+        })
+    end
+
+    -- ===== try WITH finally =====
+
+    -- On a caught error with NO catch: stash error+trace into the PA_RAISE slots
+    -- and set pending RAISE (reinstall the original trace when re-raising).
+    local no_catch_raise = render([[
+        setobj2s(L, _base + $DPAERR, s2v(_base + $DERR));
+        setsvalue(L, s2v(_base + $DPATB), tsvalue(s2v(_base + $DTB)));
+        $PA = $PARAISE;
+    ]], {
+        DPAERR = c_integer_literal(d_pa_err),
+        DPATB = c_integer_literal(d_pa_tb),
+        DERR = c_integer_literal(d_err),
+        DTB = c_integer_literal(d_tb),
+        PA = pa_var,
+        PARAISE = PA_RAISE,
+    })
+
+    -- The catch body, run under ITS OWN boundary so a raise in it still runs the
+    -- finally. The body boundary's recovery binds the catch locals, then opens a
+    -- second boundary around the catch; on a catch error -> stash to PA_RAISE
+    -- slots + pending RAISE; on catch normal completion the pending stays whatever
+    -- the body set it to (NONE unless a return/break in the body routed here, but
+    -- a body that raised reached here by error, so it is NONE -> finally swallows).
+    local catch_under_boundary = ""
+    if has_catch then
+        catch_under_boundary = render([[
+            TValue $ERR = *s2v(_base + $DERR);
+            TString *$TB = tsvalue(s2v(_base + $DTB));
+            (void)$ERR;
+            (void)$TB;
+            $CSAVE
+                $CCATCH
+            $CRECOVER
+                $NOCATCHRAISE
+            }
+        ]], {
+            ERR = errcvar,
+            TB = tbcvar,
+            DERR = c_integer_literal(d_err),
+            DTB = c_integer_literal(d_tb),
+            CSAVE = boundary_save(id .. "c"),
+            CCATCH = ccatch,
+            CRECOVER = boundary_recover_open(id .. "c", d_err, d_tb),
+            NOCATCHRAISE = no_catch_raise,
+        })
+    else
+        -- finally-only: a body error becomes a pending RAISE re-propagated after
+        -- the finally (rule c).
+        catch_under_boundary = no_catch_raise
+    end
+
+    local dispatch = dispatch_after_finally(ctx, pa_var, ret_saves,
+        d_pa_err, d_pa_tb)
 
     return render([[
         {
-            /* inline protected boundary (rawrunprotected save) */
-            l_uint32 _oldnC_$ID = L->nCcalls;
-            CallInfo *_oldci_$ID = L->ci;
-            lu_byte _oldah_$ID = L->allowhook;
-            ptrdiff_t _oldtop_$ID = savestack(L, L->top.p);
-            lua_longjmp _lj_$ID;
-            _lj_$ID.status = LUA_OK;
-            _lj_$ID.previous = L->errorJmp;
-            L->errorJmp = &_lj_$ID;
-            if (TITAN_SETJMP(_lj_$ID.b) == 0) {
-                $CBODY
-            }
-            /* restore the error-handler chain (rawrunprotected tail) */
-            L->errorJmp = _lj_$ID.previous;
-            L->nCcalls = _oldnC_$ID;
-            if (_lj_$ID.status != LUA_OK) {
-                /* body raised; errorhandler already filled the trace slot. Mirror
-                ** luaD_pcall's recovery: restore ci/allowhook, close any to-be-
-                ** closed vars from called Lua, materialize the error object. */
-                TValue $ERR;
-                TString *$TB;
-                L->ci = _oldci_$ID;
-                L->allowhook = _oldah_$ID;
-                _lj_$ID.status = luaD_closeprotected(L, _oldtop_$ID, _lj_$ID.status);
-                luaD_seterrorobj(L, _lj_$ID.status, restorestack(L, _oldtop_$ID));
-                lua_checkstack(L, 4);
-                /* a value-call/GC inside the body may have relocated the stack;
-                ** recompute _base before touching any reserved slot */
-                _base = restorestack(L, _base_off);
-                /* save the error object into its anchored slot, then drop it from
-                ** the top; the registry snapshot/clear below pushes within the
-                ** lua_checkstack(4) margin established above. */
-                setobj2s(L, _base + $DERR, s2v(L->top.p - 1));
-                L->top.p = restorestack(L, _oldtop_$ID);
-                $ERR = *s2v(_base + $DERR);
-                /* snapshot registry[TITAN_BACKTRACE_KEY] into the traceback slot */
-                lua_pushliteral(L, TITAN_BACKTRACE_KEY);
-                lua_rawget(L, LUA_REGISTRYINDEX);
-                if (!ttisstring(s2v(L->top.p - 1))) {
-                    L->top.p--;
-                    lua_pushliteral(L, "");
+            int $PA = $PANONE;
+            $RETDECLS
+            {
+                $SAVE
+                    $CBODY
+                $RECOVER
+                    $CATCHARM
                 }
-                setobj2s(L, _base + $DTB, s2v(L->top.p - 1));
-                L->top.p--;
-                $TB = tsvalue(s2v(_base + $DTB));
-                /* the implicit catch locals are bound unconditionally even when
-                ** the catch body reads neither (silence -Wunused-but-set) */
-                (void)$ERR;
-                (void)$TB;
-                /* clear slot + pin so a fresh error raised in the catch is
-                ** captured anew (a bare re-raise re-pins the saved trace) */
-                lua_pushliteral(L, TITAN_BACKTRACE_KEY);
-                lua_pushnil(L);
-                lua_rawset(L, LUA_REGISTRYINDEX);
-                lua_pushliteral(L, TITAN_TRACE_PINNED);
-                lua_pushnil(L);
-                lua_rawset(L, LUA_REGISTRYINDEX);
-                /* re-establish the function's steady-state reserved top
-                ** (`_base + nslots`, what the preamble installs) so the catch's
-                ** own reserved slots sit below L->top.p and are GC-scanned. The
-                ** literal nslots is patched in by codefuncdec/codelambdadec once
-                ** the high-water mark is known. */
-                L->top.p = _base + TITAN_RESERVED_NSLOTS;
-                $CCATCH
             }
+            $FINLABEL
+            $CFINALLY
+            /* dispatch the pending action (if-chain — never a C switch, which
+            ** would capture the PA_BREAK arm's `break`) */
+            $DISPATCH
         }
     ]], {
-        ID = c_integer_literal(id),
+        PA = pa_var,
+        PANONE = PA_NONE,
+        RETDECLS = ret_decls,
+        SAVE = boundary_save(tostring(id)),
         CBODY = cbody,
-        CCATCH = ccatch,
-        ERR = errcvar,
-        TB = tbcvar,
-        DERR = c_integer_literal(d_err),
-        DTB = c_integer_literal(d_tb),
+        RECOVER = boundary_recover_open(tostring(id), d_err, d_tb),
+        CATCHARM = catch_under_boundary,
+        FINLABEL = fin_frame.label_used and (fin_label .. ": ;") or "",
+        CFINALLY = cfinally,
+        DISPATCH = dispatch,
     })
 end
 
@@ -2778,6 +3203,12 @@ local function codestat_dispatch(ctx, node)
     elseif tag == "Ast.StatReturn" then
         return codereturn(ctx, node)
     elseif tag == "Ast.StatBreak" then
+        -- A `break` inside the body/catch of an enclosing try-with-finally (in the
+        -- same target loop) must run that finally first: set its pending BREAK and
+        -- `goto` the finally (which then chains outward or breaks past the loop).
+        if enclosing_break_finally(ctx) then
+            return realize_break(ctx)
+        end
         -- Clean-exit restore (#3): a `break` crossing one or more protected
         -- regions inside its target loop must restore L->errorJmp/nCcalls to the
         -- loop's entry values (saved when the loop body contains a try) before
@@ -2796,11 +3227,6 @@ local function codestat_dispatch(ctx, node)
     elseif tag == "Ast.StatRaise" then
         return coderaise(ctx, node)
     elseif tag == "Ast.StatTry" then
-        if node.finallyblock then
-            -- Phase 5 lands the pending-action machinery for finally; until then
-            -- only catch-only (and finally-absent) StatTry compiles.
-            error("finally codegen not yet implemented (Phase 5)")
-        end
         return codetry(ctx, node)
     else
         error("invalid node tag " .. tag)
@@ -4588,6 +5014,9 @@ local function codefuncdec(tlcontext, node)
     -- qualifier; nested function/lambda bodies have their own contexts and are not
     -- scanned). Also sets the entry errorjmp-save and base-offset preamble.
     ctx.has_try = stat_contains_try(node.block)
+    -- The declared return types, so a `return` routed through a finally
+    -- (codetry/codereturn) can size + fill the per-try saved-return temps.
+    ctx.rettypes = node._type.rettypes
     local cparams = { "lua_State *L", "Udata *_mod", "CClosure *_fn" }
     if node._tag == "Ast.TopLevelMethod" then
         -- `self` is a real Decl that capture analysis can mark captured/assigned,
@@ -5029,6 +5458,8 @@ function codelambdadec(tlcontext, node)
     -- volatile and installs the entry errorjmp-save (an enclosing function's try
     -- does not, since the lambda has its own context and boundary).
     ctx.has_try = stat_contains_try(node.block)
+    -- The lambda's own return types (sizes finally saved-return temps).
+    ctx.rettypes = node._type.rettypes
 
     -- Build the capture map and bind each boxed capture's box pointer once at
     -- body entry. By-value captures are read directly from _fn (immutable).
