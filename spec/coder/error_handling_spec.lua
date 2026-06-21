@@ -7,9 +7,10 @@
 -- Titan function caught by a Lua `pcall` therefore surfaces the raised value as
 -- the pcall error and a trace mentioning the Titan native frame.
 --
--- catch/finally parse (parser_spec) but are not yet compiled: the checker rejects
--- a StatTry with "catch/finally is not yet implemented", and a bare `raise` (a
--- re-raise, only valid inside a catch) is likewise a checker error for now.
+-- catch/finally parse (parser_spec) and typecheck (Phase 3, spec/checker/
+-- error_handling_spec.lua) but are not yet compiled (Phases 4-5), so this
+-- end-to-end file only exercises `raise <exp>`. A bare `raise` outside a catch
+-- is still a checker error.
 local checker = require 'titan-compiler.checker'
 local h = require 'spec.support.helpers'
 
@@ -134,21 +135,5 @@ describe("raise <exp> (error-handling Phase 2)", function()
         ]])
         assert.truthy(#errs > 0, "bare raise should be a checker error")
         assert.match("bare 'raise'", table.concat(errs, "\n"))
-    end)
-
-    it("rejects a catch/finally block at compile time (not yet implemented)", function()
-        h.reset()
-        local errs = h.check_errs([[
-            function boom(): integer
-                do
-                    raise "x"
-                catch
-                    return 0
-                end
-                return 0
-            end
-        ]])
-        assert.truthy(#errs > 0, "catch/finally should be a checker error")
-        assert.match("catch/finally is not yet implemented", table.concat(errs, "\n"))
     end)
 end)
