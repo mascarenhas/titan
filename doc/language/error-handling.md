@@ -62,12 +62,10 @@ rather than replacing it with the shallower catch-site stack:
 
 ```lua
 function checked_open(path: string): value
-    do
-        return raw_open(path)
-    catch
-        log("open failed: " .. traceback)
-        raise
-    end
+    return raw_open(path)
+catch
+    log("open failed: " .. traceback)
+    raise
 end
 ```
 
@@ -158,11 +156,9 @@ traceback, so a new error in a catch or finally replaces the previous one.
 
 ```lua
 function f(): integer
-    do
-        return 10
-    finally
-        raise "cleanup failed"   -- overrides the pending return
-    end
+    return 10
+finally
+    raise "cleanup failed"   -- overrides the pending return
 end
 ```
 
@@ -183,12 +179,10 @@ the enclosing finally.
 
 ```lua
 while true do
-    do
-        risky()
-    finally
-        -- compile-time error: this break would leave the finally
-        break
-    end
+    risky()
+finally
+    -- compile-time error: this break would leave the finally
+    break
 end
 
 do

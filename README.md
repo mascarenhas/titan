@@ -146,8 +146,7 @@ they are in the roadmap:
 
 ## Next
 
-* richer error-handling ergonomics beyond plain Lua values and tracebacks
-* FFI with C, continued (other C primitive types, C arrays, C structs/unions including pointers, function pointers)
+* FFI with C, continued (other C primitive types, C arrays, C structs/unions including pointers, function pointers), address FIXMEs
 * standard library that is a subset of Lua's standard library, built using the C FFI (the previous C FFI should be strong enough to call Lua API functions)
 * tagged variants (unions of records with some syntax for switch/case on the record tag)
 * parametric polymorphism (via type erasure and boxed values)
