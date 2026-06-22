@@ -1,6 +1,7 @@
 local checker = require 'titan-compiler.checker'
 local types = require 'titan-compiler.types'
 local coder = require 'titan-compiler.coder'
+local driver = require 'titan-compiler.driver'
 local util = require 'titan-compiler.util'
 local h = require 'spec.support.helpers'
 
@@ -74,6 +75,85 @@ describe("zero-return () functions (code generator)", function()
             assert(select('#', test.n()) == 1)
             assert(test.n() == nil)
         ]])
+    end)
+end)
+
+describe("call sequencing regressions", function()
+    setup(function () os.remove("titan-runtime/titan.o") end)
+    after_each(clean)
+
+    it("short-circuits boolean calls with side effects", function()
+        run_coder([[
+            seen: integer = 0
+            function yes(): boolean return true end
+            function no(): boolean return false end
+            function mark(): boolean
+                seen = seen + 1
+                return true
+            end
+            function run_or(): integer
+                seen = 0
+                if yes() or mark() then end
+                return seen
+            end
+            function run_and(): integer
+                seen = 0
+                if no() and mark() then end
+                return seen
+            end
+        ]], [[
+            assert(test.run_or() == 0)
+            assert(test.run_and() == 0)
+        ]])
+    end)
+
+    it("evaluates static-call arguments and binary operands left-to-right", function()
+        run_coder([[
+            seen: integer = 0
+            function bump(): integer
+                seen = seen + 1
+                return seen
+            end
+            function take(a: integer, b: integer): integer
+                return a * 10 + b
+            end
+            function args(): integer
+                seen = 0
+                return take(seen, bump())
+            end
+            function trailing_read(): integer
+                seen = 0
+                return take(bump(), seen)
+            end
+            function two_calls(): integer
+                seen = 0
+                return take(bump(), bump())
+            end
+            function binary(): integer
+                seen = 0
+                return seen * 10 + bump()
+            end
+        ]], [[
+            assert(test.args() == 1)
+            assert(test.trailing_read() == 11)
+            assert(test.two_calls() == 12)
+            assert(test.binary() == 1)
+        ]])
+    end)
+
+    it("discards a non-void static result without compiler warnings", function()
+        local oldflags = driver.CFLAGS
+        driver.CFLAGS = oldflags .. " -Werror"
+        local ok, err = pcall(run_coder, [[
+            function answer(): integer return 42 end
+            function discard()
+                answer()
+            end
+        ]], [[
+            test.discard()
+        ]])
+        driver.CFLAGS = oldflags
+        assert.truthy(ok, err)
     end)
 end)
 
@@ -3186,5 +3266,3 @@ describe("single-Udata representation (GC stress)", function()
         ]], "cannot assign")
     end)
 end)
-
-

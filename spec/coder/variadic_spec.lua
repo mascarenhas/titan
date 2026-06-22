@@ -690,6 +690,29 @@ describe("forwarding an existing ... to another variadic callee", function()
         ]])
     end)
 
+    it("case 3 prefix-grow returns multiple GC and scalar values", function()
+        run_coder([[
+            function sink(...: string): (string, integer, string)
+                local junk: {integer} = {}
+                local k = 1
+                while k <= 400 do
+                    junk = { k, k + 1, k + 2 }
+                    k = k + 1
+                end
+                return ...[1], #..., ...[2]
+            end
+            function forward(...: string): (string, integer, string)
+                return sink("prefix", ...)
+            end
+        ]], [[
+            collectgarbage("incremental")
+            local a, n, b = test.forward("tail")
+            assert(a == "prefix")
+            assert(n == 2)
+            assert(b == "tail")
+        ]])
+    end)
+
     -- CASE 3 with a COLLECTABLE element type (string), prefix-grow: the spilled
     -- static prefix string AND the forwarded tail strings must all survive the
     -- Udata0 allocation and a forced GC in the callee.
