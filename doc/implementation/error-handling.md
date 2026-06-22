@@ -190,7 +190,9 @@ included by `titan.h`. It mirrors the parts of `luaD_rawrunprotected` and
 The saved error object, saved traceback, pending raise object, and
 GC-typed saved return values live in reserved Lua stack slots below the
 function's steady-state top. Stack slots are roots and need no write
-barrier. Non-GC pending return values live in C temporaries.
+barrier. Non-GC pending return values live in internal `volatile` C
+temporaries, because they can be written before a finally runs and read
+after a longjmp out of that finally.
 
 ### Pending actions for finally
 
@@ -247,23 +249,47 @@ entry `errorJmp`/`nCcalls` if the loop contains a try; a direct break that
 crosses a try boundary restores that loop-entry state before jumping to
 the loop's after-label.
 
-### setjmp and `volatile`
+### setjmp-sensitive local/parameter spills
 
 C's `setjmp` rule makes the value of a non-`volatile` automatic variable
 indeterminate after a longjmp if it was changed between `setjmp` and the
-longjmp and is then read. Titan avoids the precise liveness problem with
-a conservative rule: if a generated function contains any `StatTry`,
-Titan local/parameter C autos are declared `volatile`, including GC
-pointer values and boxed `TValue` values. Pointer-shaped declarations use
-`T * volatile x` so the pointer variable, not the pointed-to Lua object,
-is volatile.
+longjmp and is then read. Titan does not make every local/parameter C
+auto `volatile`. Instead, each function/lambda that contains a `StatTry`
+runs a small liveness pass before code generation.
 
-The Lua stack slots still matter: they keep GC objects alive and provide
-stable roots. Lua's GC is non-moving, so pointers to GC objects remain
-valid across collections. Stack relocation only invalidates pointers to
-Lua stack locations; code that may run after `lua_checkstack`,
-`luaD_callnoyield`, or protected recovery must recompute stack addresses
-from saved offsets such as `_base_off`.
+The pass marks a Decl as needing a spill only when all of these are true:
+
+* the Decl is a Titan local, parameter, or method `self` in the current
+  generated C function;
+* it is not boxed through a capture cell;
+* it is assigned in a protected body whose error path can later read it
+  from a catch, finally, or handled post-try path; or it is assigned in a
+  catch that has its own protected boundary and its finally can read it.
+
+Marked GC-typed Decls use their existing reserved Lua stack slots as the
+stable storage. Assignments keep the slot current, and protected recovery
+reloads the ordinary C auto from the slot after `_base` and the reserved
+top have been restored. Lua's GC is non-moving, so pointers to GC objects
+remain valid across collections; the relocation hazard is only pointers to
+Lua stack locations, which are always recomputed from saved offsets such
+as `_base_off`.
+
+Marked non-GC scalar Decls get a tiny internal C-stack spill:
+
+```c
+lua_Integer _local_n_1;
+volatile lua_Integer _spill_local_n_1;
+```
+
+Codegen updates the spill after assignments that update the Titan
+local/parameter, and protected recovery reloads the ordinary C auto from
+the volatile spill before catch/finally/post-try code can read it. The
+`volatile` qualifier is therefore limited to internal spill storage; the
+Titan-visible local/parameter variables and the native function ABI remain
+plain C declarations.
+
+`coder.lua` also tracks lexical spill scopes, so a recovery boundary
+reloads only spill slots whose Decls are currently in C scope.
 
 The variadic descriptor structs follow the same rule. Their C-stack
 records contain counts and pointers to GC objects or typed C arrays, not
