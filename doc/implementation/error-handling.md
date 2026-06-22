@@ -177,7 +177,8 @@ longjmp macro choices, vendored into `titan-runtime/titan_longjmp.h` and
 included by `titan.h`. It mirrors the parts of `luaD_rawrunprotected` and
 `luaD_pcall` that matter for generated code:
 
-1. save `L->nCcalls`, `L->ci`, `L->allowhook`, and the old top offset;
+1. save `L->nCcalls`, `L->ci`, `L->allowhook`, `L->errfunc`, and the
+   old top offset;
 2. link a stack-allocated `lua_longjmp` into `L->errorJmp`;
 3. run the protected body under `TITAN_SETJMP`;
 4. restore `L->errorJmp` and `L->nCcalls` on normal fallthrough;
@@ -186,6 +187,13 @@ included by `titan.h`. It mirrors the parts of `luaD_rawrunprotected` and
    from `_base_off`, snapshot the error and trace into reserved slots, clear
    the registry trace/pin, and restore `L->top.p` to the function's reserved
    stack area.
+
+Before `luaD_closeprotected`, Titan restores the `errfunc` value saved at
+boundary entry. This matters when the longjmp skipped an inner Titan
+Lua-entry wrapper before that wrapper could restore its own message
+handler. Lua `__close` metamethods can raise while cleanup runs; those
+replacement errors should be handled by a valid Titan error handler, not
+by a stale stack slot belonging to a skipped inner entry wrapper.
 
 The saved error object, saved traceback, pending raise object, and
 GC-typed saved return values live in reserved Lua stack slots below the

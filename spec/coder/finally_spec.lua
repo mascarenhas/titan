@@ -388,6 +388,58 @@ describe("finally (error-handling Phase 5)", function()
         assert.match("OK", out)
     end)
 
+    it("catch-boundary recovery closes Lua to-be-closed variables before finally", function()
+        local out = compile_and_run([[
+            log: integer = 0
+            function note()
+                log = log + 1
+            end
+            function lognum(): integer
+                return log
+            end
+            function call_lua3(f: () -> integer): integer
+                return f()
+            end
+            function run(f: () -> integer): integer
+                do
+                    raise "body"
+                catch
+                    return f()
+                finally
+                    note()
+                end
+                return 0
+            end
+        ]], [==[
+            local closed = 0
+            local close_error
+            local mt = {
+                __close = function(_, err)
+                    closed = closed + 1
+                    close_error = tostring(err)
+                end
+            }
+            local function lua3()
+                error("catch-lua3-boom", 0)
+            end
+            local function lua2()
+                local x <close> = setmetatable({}, mt)
+                return test.call_lua3(lua3)
+            end
+
+            local ok, err = pcall(test.run, lua2)
+            assert(not ok, "catch callback error should propagate after finally")
+            assert(tostring(err):find("catch-lua3-boom", 1, true),
+                   "wrong propagated error: " .. tostring(err))
+            assert(closed == 1, "Lua __close in catch callback did not run exactly once: " .. closed)
+            assert(close_error:find("catch-lua3-boom", 1, true),
+                   "__close did not receive catch callback error: " .. tostring(close_error))
+            assert(test.lognum() == 1, "finally did not run after catch callback error")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
     it("preserves a non-GC enclosing local across the finally (spill)", function()
         local out = compile_and_run([[
             function boom(): integer

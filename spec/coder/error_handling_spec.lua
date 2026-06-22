@@ -291,6 +291,87 @@ describe("catch (error-handling Phase 4)", function()
         assert.match("OK", out)
     end)
 
+    it("closes Lua to-be-closed variables while unwinding through Lua callbacks into a Titan catch", function()
+        local out = compile_and_run([[
+            function call_lua3(f: () -> integer): integer
+                return f()
+            end
+            function catch_lua2(f: () -> integer): integer
+                do
+                    return f()
+                catch
+                    return 77
+                end
+            end
+        ]], [==[
+            local closed = 0
+            local close_error
+            local mt = {
+                __close = function(_, err)
+                    closed = closed + 1
+                    close_error = tostring(err)
+                end
+            }
+            local function lua3()
+                error("lua3-boom", 0)
+            end
+            local function lua2()
+                local x <close> = setmetatable({}, mt)
+                return test.call_lua3(lua3)
+            end
+
+            -- Lua -> Titan catch_lua2 [1] -> Lua lua2 [2] -> Titan call_lua3
+            -- -> Lua lua3 [3]. The error from [3] is caught by [1]; recovery
+            -- must close [2]'s to-be-closed local during unwinding.
+            assert(test.catch_lua2(lua2) == 77, "Titan catch did not handle Lua error")
+            assert(closed == 1, "Lua __close did not run exactly once: " .. closed)
+            assert(close_error:find("lua3-boom", 1, true),
+                   "__close did not receive the original error: " .. tostring(close_error))
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("catches a Lua __close error raised during protected-boundary recovery", function()
+        local out = compile_and_run([[
+            function call_lua3(f: () -> integer): integer
+                return f()
+            end
+            function catch_lua2_error(f: () -> integer): (string, string)
+                do
+                    local n: integer = f()
+                    return "unreached " .. n, ""
+                catch
+                    return error as string, traceback
+                end
+            end
+        ]], [==[
+            local close_seen_original = false
+            local mt = {
+                __close = function(_, err)
+                    close_seen_original = tostring(err):find("original-lua3-error", 1, true) ~= nil
+                    error("close-error", 0)
+                end
+            }
+            local function lua3()
+                error("original-lua3-error", 0)
+            end
+            local function lua2()
+                local x <close> = setmetatable({}, mt)
+                return test.call_lua3(lua3)
+            end
+
+            local caught, tb = test.catch_lua2_error(lua2)
+            assert(close_seen_original, "__close did not see the original Lua error")
+            assert(caught:find("close-error", 1, true),
+                   "Titan catch did not receive the __close replacement error: " .. caught)
+            assert(tb:find("close-error", 1, true),
+                   "Titan errorhandler did not recapture the __close replacement trace:\n" .. tb)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
     it("catches an error raised while evaluating a return expression", function()
         local out = compile_and_run([[
             function boom(): integer

@@ -3257,6 +3257,7 @@ local function boundary_save(tag)
         CallInfo *_oldci_$T = L->ci;
         lu_byte _oldah_$T = L->allowhook;
         ptrdiff_t _oldtop_$T = savestack(L, L->top.p);
+        ptrdiff_t _olderrfunc_$T = L->errfunc;
         lua_longjmp _lj_$T;
         _lj_$T.status = LUA_OK;
         _lj_$T.previous = L->errorJmp;
@@ -3281,6 +3282,12 @@ local function boundary_recover_open(ctx, tag, d_err, d_tb)
             ** closed vars from called Lua, materialize the error object. */
             L->ci = _oldci_$T;
             L->allowhook = _oldah_$T;
+            /* A longjmp can skip an inner Titan Lua-entry wrapper before that
+            ** wrapper restores L->errfunc. Put the boundary-entry message
+            ** handler back before closing Lua frames, so any __close error is
+            ** handled by a valid Titan errorhandler instead of a stale stack
+            ** slot from the skipped inner entry. */
+            L->errfunc = _olderrfunc_$T;
             _lj_$T.status = luaD_closeprotected(L, _oldtop_$T, _lj_$T.status);
             luaD_seterrorobj(L, _lj_$T.status, restorestack(L, _oldtop_$T));
             lua_checkstack(L, 4);
