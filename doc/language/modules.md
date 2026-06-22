@@ -252,8 +252,10 @@ static `import` and the dynamic `require`."
 
 There is consequently no way to `require` a Lua module from Titan code
 today: `import` loads Titan modules and `foreign import` loads C
-headers (see [the C FFI](ffi.md)); calling into Lua is a roadmap item
-(see [Lua interoperability](lua-interop.md#calling-lua-from-titan)).
+headers (see [the C FFI](ffi.md)). Lua callables can still enter Titan
+as function-typed values — for example, as an argument from Lua — and
+Titan can call them normally (see
+[Lua interoperability](lua-interop.md#calling-lua-from-titan)).
 
 ## Compiling modules: `titanc`
 
@@ -361,8 +363,8 @@ the binary — no dynamic loading of Titan modules is involved. `args` is
 Lua-style: `args[0]` is the program name and `args[1]` onward are the
 arguments, so `#args` is the argument count. The integer returned by
 `main` becomes the process exit status; an uncaught run-time error
-prints an error message (with no traceback) to standard error and exits
-with a failure status (see [Error handling](error-handling.md)).
+prints the error message plus Titan's unified traceback to standard error
+and exits with a failure status (see [Error handling](error-handling.md)).
 
 ```lua
 -- Titan: hello.titan

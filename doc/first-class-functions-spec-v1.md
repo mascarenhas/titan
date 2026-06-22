@@ -74,9 +74,9 @@ layout for the upvalues:
 2: module reference (position 0 in the current layout)
 ```
 
-The unique tag uses a similar system as record tags, but using the canonical string representation of
+The unique tag uses a similar system as record type identity, but using the canonical string representation of
 the function type as a nominal type. This gets encoded in a `static const void*` with a name derived from
-the type string representation, and published in the same registry used for record type tags by the
+the type string representation, and published in the registry by the
 first loaded module that uses that function type.
 
 The actual function for the C closure is still the Lua entry point for the function.

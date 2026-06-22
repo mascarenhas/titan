@@ -395,7 +395,7 @@ passes a table with holes, and the holes surface in Titan as nil options.
 
 ## Limitations
 
-Beyond the notes already made above, the 0.5 prototype has these known
+Beyond the notes already made above, the current prototype has these known
 rough edges:
 
 * **Option function types cannot be written.** `?` suffixes simple types

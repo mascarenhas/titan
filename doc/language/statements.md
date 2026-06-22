@@ -348,7 +348,10 @@ error. An optional `;` may follow the statement.
 `return` is forbidden inside a `finally` block, because explicit control
 transfer out of cleanup would otherwise override a pending return, break,
 or error. Use a normal fallthrough from finally, or raise a new error if
-cleanup failure should replace the pending action.
+cleanup failure should replace the pending action. This restriction applies
+to the finally block's own statements; a nested anonymous function defined
+inside a finally has its own body and may return normally from that nested
+function.
 
 Arity is strict at compile time: the number of returned values must equal
 the number of declared return types, or the checker reports
@@ -378,12 +381,12 @@ function bump(n: integer)    -- no annotation: returns zero values
 end
 ```
 
-`return` and `return nil` are therefore **not** equivalent. A bare `return`
-returns no values; `return nil` returns one value and is only legal in a
-function whose return type includes a value — for instance one declared
-`: nil` (the explicit one-`nil`-return form), `: integer?`, or any other
-type. The explicit `: nil` annotation is how you ask for a function that
-returns a single `nil`.
+`return` and `return nil` are therefore **not** equivalent. In a
+zero-return function, a bare `return` returns no values. In an explicit
+`: nil` function, the checker accepts a bare `return` as the one `nil`
+return. In option- or `value`-returning functions, write `return nil`
+explicitly. The explicit `: nil` annotation is how you ask for a function
+that returns a single `nil`.
 
 A function whose return type carries one or more values must provably
 return on every control path; otherwise the compiler rejects it. (A

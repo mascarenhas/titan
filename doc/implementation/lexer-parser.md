@@ -32,11 +32,10 @@ comments work) and ends with `!.` — trailing garbage is a parse failure. Two
 synonym rules, `NEG <- SUB` and `BNEG <- BXOR`, let unary minus and unary
 `~` reuse the `-` and `~` tokens.
 
-A few tokens get the whitespace wrapper but are referenced by no
-production: the keywords `break`, `goto` and `in`, and the symbols `DOTS`
-(`...`) and `DBLCOLON` (`::`). They are reserved — `break` cannot be an
-identifier — but there is no syntax for them; a `break` statement fails to
-parse (typically with `EndFunc`).
+A few tokens get the whitespace wrapper even when they are rarely used.
+`break` and `DOTS` (`...`) are real syntax; `goto`, `in`, and `DBLCOLON`
+(`::`) remain reserved but unused, so there is no `goto` statement,
+generic `for ... in` loop, or label syntax.
 
 ## Longest match by construction
 

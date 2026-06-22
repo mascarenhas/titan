@@ -4932,12 +4932,12 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
         local nfixed = #params
         local elem_ct = ctype(varargtype)
         local struct = varg_struct_name(varargtype)
-        -- Allocate the backing struct as a 0-uservalue Udata sized to hold the
-        -- FAM inline (sizeudata(0, sizeof(struct) + n*sizeof(elem))), anchor it on
-        -- the Lua stack so the GC keeps its storage alive across the native call,
-        -- then read each surplus arg through the same checkandget coercion the
-        -- fixed params use, into `_varargs->args[j]`. `_start` is 0 (the generic
-        -- entry always builds a fresh, fully-backing struct). The entry guard
+        -- Allocate 0-uservalue Udata for the runtime-sized element storage,
+        -- anchor it on the Lua stack so the GC keeps that storage alive across
+        -- the native call, then make a small C-stack descriptor point at the
+        -- payload. Each surplus arg is read through the same checkandget coercion
+        -- the fixed params use, into `_varargs->args[j]`. `_start` is 0 (the
+        -- generic entry always builds a fresh, fully-backed run). The entry guard
         -- below has already ensured the arg count is >= nfixed.
         local readone = checkandget(tlcontext, varargtype,
             "_varargs->args[_vj]", "s2v(_vfunc + " .. nfixed .. " + 1 + _vj)", loc)

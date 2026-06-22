@@ -131,7 +131,9 @@ checked AST into an object file:
    whenever it is missing or older than `titan-runtime/titan.c`:
 
    ```sh
-   cc --std=c99 -O2 -Wall -fPIC -c titan-runtime/titan.c -I titan-runtime/ -I lua-5.5.0/src/ -o titan-runtime/titan.o
+   cc --std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls \
+      -c titan-runtime/titan.c -I titan-runtime/ -I lua-5.5.0/src/ \
+      -I libbacktrace -o titan-runtime/titan.o
    ```
 
    (`coder_spec.lua`'s `setup()` deletes `titan.o` precisely to force
@@ -208,8 +210,10 @@ srlua-derived C `main` — and then links it with the same object set as
 a library, plus the entrypoint:
 
 ```sh
-cc --std=c99 -O2 -Wall -fPIC -o foo/bar -I titan-runtime/ -I lua-5.5.0/src/ \
-   foo/bar__entrypoint.c foo/bar.o ... titan-runtime/titan.o lua-5.5.0/src//liblua.a -ldl -lm
+cc --std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls -o foo/bar \
+   -I titan-runtime/ -I lua-5.5.0/src/ foo/bar__entrypoint.c foo/bar.o ... \
+   titan-runtime/titan.o libbacktrace/.libs/libbacktrace.a \
+   lua-5.5.0/src//liblua.a -ldl -lm
 ```
 
 The generated entrypoint, walked through (template substitutions:
@@ -378,6 +382,7 @@ uses directly.
   `TITAN_PATH_DEFAULT ".;/usr/local/lib/titan/0.10"`, and UUID
   strings used as Lua-registry keys: `TITAN_PATH_KEY` (cached search
   path), `TITAN_LIBS_KEY` (dlopen handle table),
+  `TITAN_BT_GENERATION_KEY` (shared libbacktrace invalidation generation),
   `TITAN_BACKTRACE_KEY` (last error backtrace), `TITAN_NAMES_KEY`
   (native-symbol display-name table), and `TITAN_TRACE_PINNED`
   (re-raise traceback pin).
@@ -485,8 +490,8 @@ user-facing story.
 | `driver.CC` | `driver.lua` | `"cc"` | The C compiler command. |
 | `driver.CFLAGS` | `driver.lua` | `"--std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls"` | Flags for every compile and link step. |
 | shared-library flags | `shared_flag()` | `-shared`; on Darwin `-shared -undefined dynamic_lookup` | Platform from `driver.UNAME` (output of `uname`). |
-| link set (library) | `compile_library` | module `.o`s + `titan.o` + `liblua.a` + `-ldl -lm` + `-l<lib>`… | `-l` list from `titanc -l a,b,c`. |
-| link set (program) | `compile_program` | `<mod>__entrypoint.c` + all `.o`s + `titan.o` + `liblua.a` + `-ldl -lm` + `-l<lib>`… | Standalone programs bundle every compiled module. |
+| link set (library) | `compile_library` | module `.o`s + `titan.o` + `libbacktrace.a` + `liblua.a` + `-ldl -lm` + `-l<lib>`… | `-l` list from `titanc -l a,b,c`; libbacktrace is linked before Lua. |
+| link set (program) | `compile_program` | `<mod>__entrypoint.c` + all `.o`s + `titan.o` + `libbacktrace.a` + `liblua.a` + `-ldl -lm` + `-l<lib>`… | Standalone programs bundle every compiled module; libbacktrace is linked before Lua. |
 | `TITAN_PATH_DEFAULT` | `titan.h` | `".;/usr/local/lib/titan/0.10"` | Run-time default search path (mirrors `TITAN_BIN_PATH`'s default). |
 | registry keys | `titan.h` | `TITAN_PATH_KEY`, `TITAN_LIBS_KEY`, `TITAN_BT_GENERATION_KEY`, `TITAN_BACKTRACE_KEY`, `TITAN_NAMES_KEY`, `TITAN_TRACE_PINNED` (UUID strings) | Per-state caches: search path, dlopen handles, shared libbacktrace invalidation generation, last backtrace, native-frame display names, and re-raise traceback pin. |
 | generated ABI symbol | `coder.lua` | `<mangled>_abi` returning `TITAN_VER` | Checked before `.so` type rehydration and before run-time dynamic-import `dlsym`; markerless modules are treated as incompatible. |

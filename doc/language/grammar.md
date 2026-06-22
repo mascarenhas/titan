@@ -1,7 +1,7 @@
 # The Titan grammar
 
 This chapter is the reference grammar of Titan as implemented by the
-0.5 prototype compiler: lexical conventions, the complete syntactic
+0.10 prototype compiler: lexical conventions, the complete syntactic
 grammar, operator precedence, and the restrictions the EBNF alone does
 not show. It replaces the old manual's stale grammar.
 
@@ -48,7 +48,7 @@ The symbolic tokens are:
 ```
 +   -   *   /   //  %   ^   #   &   ~   |   <<  >>  ..
 ==  ~=  <   >   <=  >=  =
-(   )   [   ]   {   }   ;   :   ,   .   ->  ?
+(   )   [   ]   {   }   ;   :   ,   .   ... ->  ?
 ```
 
 `->` (function types), `?` (option types), and `...` (variadic
@@ -144,8 +144,10 @@ recordfield     ::= Name ':' type [';']
 tlimport        ::= local Name '=' import importname
 tlforeignimport ::= local Name '=' foreign import importname
 importname      ::= LiteralString | '(' LiteralString ')'
-parlist         ::= param {',' param}
+parlist         ::= param {',' param} [',' varargparam]
+                 |  varargparam
 param           ::= Name ':' type
+varargparam     ::= '...' ':' type
 ```
 
 ```lua
@@ -183,7 +185,7 @@ Notes on the top level:
 decl       ::= Name ['?'] [':' type]
 decllist   ::= decl {',' decl}
 type       ::= simpletype
-            |  typelist '->' rettype
+            |  funargtypes '->' rettype
             |  simpletype '->' rettype
 simpletype ::= basictype ['?']
 basictype  ::= nil | boolean | integer | float | string | value
@@ -191,6 +193,8 @@ basictype  ::= nil | boolean | integer | float | string | value
             |  Name
             |  '{' type ':' type '}'
             |  '{' type '}'
+funargtypes::= '(' [type {',' type} [',' varargtype] | varargtype] ')'
+varargtype ::= '...' ':' type
 typelist   ::= '(' [type {',' type}] ')'
 rettype    ::= typelist '->' rettype
             |  simpletype '->' rettype
@@ -214,7 +218,8 @@ These forms are accepted wherever a `decl` appears: module variables,
 
 In types: `Name` is a record type and `mod.Name` one from an imported
 module; `{T}` is an array, `{K: V}` a map, `T?` an option type, and
-`t -> t` a function type. `->` is right-associative (`a -> b -> c` is
+`t -> t` a function type. A function type may end its argument list with
+`...: T` to describe a variadic function value. `->` is right-associative (`a -> b -> c` is
 `a -> (b -> c)`) and binds tighter than the commas of an enclosing
 `typelist`. A bare parenthesized `typelist` is a valid type only in
 `rettype` position — a function's return annotation or the right side
@@ -255,10 +260,12 @@ statement  ::= ';'
             |  local decllist '=' explist
             |  varlist '=' explist
             |  functioncall
+            |  break
             |  raise [exp]
 returnstat ::= return [explist] [';']
 varlist    ::= var {',' var}
-explist    ::= exp {',' exp}
+explist    ::= exp {',' exp} [',' '...']
+            |  '...'
 var        ::= Name
             |  prefixexp {suffix} '[' exp ']'
             |  prefixexp {suffix} '.' Name
@@ -270,11 +277,11 @@ and `f().x = v` are assignable, as is reading `f().x`; a bare call is
 not. Multiple assignment and multiple `local`
 declaration mirror Lua, but a `local` declaration *requires* an
 initializer — plain `local x: integer` is a syntax error. `return`
-takes zero or more expressions, only as the last statement of a block —
-but a bare `return` (zero expressions), while it parses, aborts the
-current compiler with an internal error (a Lua traceback, not a clean
-diagnostic); write `return nil`, or omit the statement, in
-nil-returning functions.
+takes zero or more expressions, only as the last statement of a block.
+In a zero-return function (`(...) -> ()`), a bare `return` returns zero
+values and `return nil` is a type error. In an explicit `: nil` function,
+a bare `return` is accepted as the one `nil` return. In option- or
+`value`-returning functions, write `return nil` explicitly.
 
 ```lua
 function demo(xs: {integer}, p: Point): (integer, integer)
@@ -314,14 +321,18 @@ e12         ::= castexp ['^' e11]
 castexp     ::= simpleexp [as type]
 unop        ::= not | '#' | '-' | '~'
 simpleexp   ::= nil | false | true | Numeral | LiteralString
+             |  '...'
+             |  '...' '[' exp ']'
              |  constructor | funcexp | suffixedexp | prefixexp
 funcexp     ::= function '(' [lambdaparlist] ')' [':' rettype] block end
-lambdaparlist ::= lambdaparam {',' lambdaparam}
+lambdaparlist ::= lambdaparam {',' lambdaparam} [',' lambdavarargparam]
+                |  lambdavarargparam
 lambdaparam ::= Name [':' type]
+lambdavarargparam ::= '...' [':' type]
 prefixexp   ::= Name | '(' exp ')'
 suffixedexp ::= prefixexp suffix {suffix}
 suffix      ::= funcargs
-             |  ':' Name funcargs
+             |  ':' Name [funcargs]
              |  '[' exp ']'
              |  '.' Name
 functioncall ::= prefixexp {suffix} funcargs
@@ -332,6 +343,7 @@ funcargs    ::= '(' [explist] ')'
 constructor ::= '{' [fieldlist] '}'
 fieldlist   ::= field {fieldsep field} [fieldsep]
 field       ::= exp
+             |  '...'
              |  Name '=' exp
              |  '[' exp ']' '=' exp
 fieldsep    ::= ',' | ';'

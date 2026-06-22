@@ -58,7 +58,7 @@ Start with the [design philosophy](philosophy.md) if you want to know
 
 ## Status and limitations
 
-Titan is a working prototype, version 0.5. The language documented here is
+Titan is a working prototype, version 0.10. The language documented here is
 implemented and covered by the compiler's test suite. Its boundaries are
 mostly missing features, plus a handful of constructs the compiler rejects
 with a clean error; each links to the chapter that documents it in full.

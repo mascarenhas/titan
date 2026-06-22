@@ -61,8 +61,8 @@ a return annotation — the only legal `return` is a bare `return` with no
 expression. `return nil` is **not** the same thing: it tries to return one
 value and is the arity error `returned 1 value(s) but function expected 0`.
 A bare `return` and `return nil` are equivalent only inside a function
-whose declared return type is `nil` (or another value type that `nil`
-fits, such as `integer?`).
+whose declared return type is exactly `nil`. For option- or
+`value`-returning functions, write `return nil` explicitly.
 
 ## Exported and `local` functions
 

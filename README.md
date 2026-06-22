@@ -53,13 +53,14 @@ your compilation as a native binary:
   `function({string}):integer`, then `titanc` will bundle all modules
   given in the command-line, along with all their dependencies where
   source code was available, as a stand-alone executable program.
-* Otherwise, it will compile each module into a shared library
-  (in the same path as the module source) that you can `import` from
-  Titan as well as `require` from Lua, and call any exported
-  functions/access exported variables. For each generated module, any
-  of its transitive imports is statically linked if source code was
-  found; dependencies that were only available as a shared library
-  will be dynamically loaded.
+* Otherwise, it will compile each module into a shared library that you
+  can `import` from Titan as well as `require` from Lua, and call any
+  exported functions/access exported variables. The generated `.c` and
+  `.o` files are written next to the `.titan` source; linked `.so` files
+  are written relative to the directory where `titanc` runs. For each
+  generated module, any of its transitive imports is statically linked if
+  source code was found; dependencies that were only available as a shared
+  library will be dynamically loaded.
 
 # Running the test suite
 
@@ -140,10 +141,12 @@ they are in the roadmap:
 * anonymous functions and closures, with proper lexical scoping
 * bound methods (`obj:method`) as first-class values
 * variadic parameters in functions (Lua `...`)
+* error handling with `raise`, `catch`, `finally`, Lua `pcall`, and
+  unified Lua/Titan backtraces via `titan.backtrace()`
 
 ## Next
 
-* error handling integrated with Lua's, nice backtraces (details TBD)
+* richer error-handling ergonomics beyond plain Lua values and tracebacks
 * FFI with C, continued (other C primitive types, C arrays, C structs/unions including pointers, function pointers)
 * standard library that is a subset of Lua's standard library, built using the C FFI (the previous C FFI should be strong enough to call Lua API functions)
 * tagged variants (unions of records with some syntax for switch/case on the record tag)

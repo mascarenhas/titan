@@ -366,7 +366,7 @@ dep_mk_titan = titan_cast_func(lua_Integer (*)(lua_State *L, Udata *_mod, CClosu
 
 Records cross the Lua boundary unchanged — the value Titan computes with
 *is* the Udata Lua sees (`setwrapped`); coming back, `checkandget`
-verifies the embedded tag pointer and uses the udata directly
+verifies the record metatable/type identity and uses the udata directly
 ([Lua interop internals](lua-interop-internals.md)).
 
 ## Strings

@@ -49,15 +49,16 @@ Every Titan function exists as [two C functions](codegen-overview.md):
 the native-convention one used by Titan→Titan calls, and a
 `lua_CFunction` wrapper that Lua calls. `genluaentry` in `coder.lua`
 emits the wrapper for every non-`local` top-level function
-(`<mod>_<name>_lua`), every method (`…_luamethod`) and every static
-(`…_luastatic`); `local` functions get **no wrapper at all** and are
+(`<mod>_<name>_titanentry_lua`, modulo C identifier mangling), every
+method (`…_titanentry_luamethod`) and every static
+(`…_titanentry_luastatic`); `local` functions get **no wrapper at all** and are
 unreachable from Lua. For methods, the parameter list is prefixed with
 the record's nominal type, so `self` is checked like any record-typed
 argument. The generated wrapper for `fmod`, trimmed only of the two
 argument checks (shown in the next section):
 
 ```c
-static int interop_fmod_lua(lua_State *L) {
+static int interop_fmod_titanentry_lua(lua_State *L) {
     StkId func = L->ci->func.p;
     if((L->top.p - func - 1) != 2) {
         luaL_error(L, "calling Titan function %s with %d arguments, but expected %d", "fmod", (int)(L->top.p - func - 1), 2);
@@ -65,7 +66,8 @@ static int interop_fmod_lua(lua_State *L) {
     ptrdiff_t __save_errfunc = L->errfunc;
     lua_pushcclosure(L, errorhandler, 0);
     L->errfunc = savestack(L, L->top.p - 1);
-    Udata *_mod = uvalue(&clCvalue(s2v(func))->upvalue[0]);
+    CClosure *_fn = clCvalue(s2v(func));
+    Udata *_mod = uvalue(&_fn->upvalue[0]);
     lua_Number _param_1 = 0;
     /* ...checkandget(float) from s2v(func + 1)... */
     lua_Integer _param_2 = 0;
@@ -75,9 +77,10 @@ static int interop_fmod_lua(lua_State *L) {
     lua_pushnil(L);
     lua_replace(L, 1); /* replace first stack element with nil, this is our error slot */
     lua_checkstack(L, 2);
-    StkId _firstret = L->top.p;
+    ptrdiff_t _firstret_off = savestack(L, L->top.p);
     L->top.p += 2;
-    lua_Number res = interop_fmod_titan(L, _mod, _param_1, _param_2, &_outparam_2);
+    lua_Number res = interop_fmod_titan(L, _mod, _fn, _param_1, _param_2, &_outparam_2);
+    StkId _firstret = restorestack(L, _firstret_off);
     setfltvalue(s2v(_firstret), res);;
     _firstret++;
     setsvalue(L, s2v(_firstret), _outparam_2);;
@@ -121,8 +124,10 @@ Walking through it:
   the **function declaration's** — errors point at the declaration, not
   the call site.
 * **Results.** The wrapper reserves one stack slot per declared return
-  value, calls the native function (extra returns come back through
-  out-parameters), and writes each result into its slot with
+  value, saves the first return slot as a stack offset, calls the native
+  function (extra returns come back through out-parameters), restores the
+  slot pointer from the offset in case the native callee relocated the
+  Lua stack with `lua_checkstack`, and writes each result into its slot with
   `setwrapped` — which for a record is just `setslot`, since the record
   *is* its Udata. `return NRET;` makes multiple Titan returns multiple
   Lua returns (`local x, y = titan_test.f(2)` works).
@@ -239,7 +244,7 @@ lua_rawset(L, -3);
 lua_pushliteral(L, "move");
 /* Module is upvalue of Lua entry point of method */
 titan_pushmodule(L, _mod);
-lua_pushcclosure(L, interop_Point_move_luamethod, 1);
+lua_pushcclosure(L, interop_Point_move_titanentry_luamethod, 1);
 lua_rawset(L, -3);
 lua_pushliteral(L, "__index");
 lua_pushvalue(L, -2);
@@ -347,24 +352,25 @@ into a static method by the parser long before codegen.
 From Lua, a record is a full userdata with stable identity: the same
 instance always crosses out as the same Udata, two fresh instances are
 `~=` (there is no `__eq`), and all instances of a type share one
-metatable per state. Type identity, however, is **not** the metatable:
-`checkandget` looks only at the tag pointer in the userdata body. That
-is the security argument — metatable spoofing cannot launder a foreign
-userdata into Titan. Even a `debug.setmetatable` that dressed an alien
-userdata in a record's metatable changes nothing: only a payload equal
-to the record's tag address admits a value, and only Titan-generated
-constructor code writes that tag. Pure Lua cannot create full userdata at
-all, so pure-Lua forgery is impossible. Same-named records from
-different modules have different FQTNs, hence different tags, and reject
-each other with both names in the message; conversely, the
-[registry synchronization of tags](values-and-gc.md#type-tags-address-identity-synchronized-through-the-registry)
+metatable per state. That metatable pointer **is** the record's type
+identity: `checkandget` reads the candidate `Udata*` and compares
+`uvalue(v)->metatable` against the canonical metatable for the fully
+qualified record type.
+
+Same-named records from different modules have different FQTNs, hence
+different metatables, and reject each other with both names in the error
+message. Conversely, the registry synchronization of record metatables
 means records built by any copy of a module's code in the state are
-accepted by every other. The remaining gap is C code: the nominal check
-reads `sizeof(void*)` bytes from the userdata body without validating
-its size or user-value count, so a malicious C library can forge a
-record outright (and an undersized userdata causes an out-of-bounds
-read). C libraries are outside the trust boundary; an *accidental*
-pointer match from an innocent userdata is implausible.
+accepted by every other.
+
+The trust boundary is therefore Lua code that cannot manufacture or
+retag full userdata. Plain Lua cannot create full userdata at all, so
+pure-Lua forgery is impossible. Debug-library or C-capable code is
+outside that boundary: it can put a record metatable on foreign userdata,
+which is enough to satisfy the nominal check, and an undersized or
+malformed userdata may still become unsafe when later record field slots
+are accessed. The current metatable check avoids the old raw-payload tag
+read, but it is not a sandbox boundary against privileged Lua/C code.
 
 ## The module metatable and its members
 
@@ -437,9 +443,13 @@ lives in the Lua registry. The complete key inventory:
 | the metatable pointer itself (via `lua_rawsetp`) | the FQTN string — the reverse map, metatable → name, used only in error messages |
 | `TITAN_PATH_KEY` (`"ec10e486-d8fd-11e7-87f4-e7e9581a929c"`) | the resolved Titan search path (cached by `pushpath`) |
 | `TITAN_LIBS_KEY` (`"ecfc9174-d8fd-11e7-8be2-abbaa3ded45f"`) | the dlopen-handle cache table (below) |
+| `TITAN_BT_GENERATION_KEY` (`"a222927d-0e7b-4f7a-93d9-1a6ce7111a5c"`) | a shared generation counter that tells every loaded module's local libbacktrace state to resnapshot after any Titan `.so` is dlopened |
 | `TITAN_BACKTRACE_KEY` (`"57d80578-2534-4856-ad3b-bde8cba4c445"`) | the last error's merged backtrace string |
+| `TITAN_NAMES_KEY` (`"a7c4e2f0-1d6b-4e3a-9c5f-8b2d7e0a4f16"`) | the native-symbol display-name table used by unified trace formatting |
+| `TITAN_TRACE_PINNED` (`"5b3f0f7e-4b1a-4d2e-9a8c-2f6d4c1e7a90"`) | the one-shot flag that preserves an existing traceback for bare re-raise |
+| `"Titan function type <serialized type> tag"` | a shared light-userdata identity tag for each first-class function type |
 
-The three UUID-string constants are defined in `titan-runtime/titan.h`.
+The UUID-string constants are defined in `titan-runtime/titan.h`.
 
 ## Dynamic loading: `loadlib` and `loadsym`
 
@@ -449,6 +459,7 @@ When a dependency exists only as a compiled `.so`, the importer's
 
 ```c
 void *some_dep_handle = loadlib(L, "some/dep.so");
+titan_check_abi(L, some_dep_handle, "some_dep_abi", "some/dep.so");
 Udata* (*some_dep_init)(lua_State *L) =
     titan_cast_func(Udata* (*)(lua_State*), loadsym(L, some_dep_handle, "some_dep_init"));
 ```
@@ -538,7 +549,7 @@ chapter](../language/error-handling.md).
 When exactly one requested module defines `main(args: {string}):
 integer`, `driver.compile_program` emits a srlua-derived C entrypoint
 (`entrypoint_template` in `driver.lua`) and links it with all module
-objects, `titan-runtime/titan.o` and `liblua.a`:
+objects, `titan-runtime/titan.o`, `libbacktrace.a`, and `liblua.a`:
 
 * **Preload registration, not eager loading.** The C `main` creates a
   state, runs `luaL_openlibs`, and registers the module's `luaopen_`
@@ -609,7 +620,8 @@ Known soft spots, all verified in code:
    run-time error, never type confusion.
 3. **`value` is a free pass-through by design**, but every `value`→`T`
    conversion is checked, so it is not a laundering hole.
-4. **Forged userdata from C** can defeat the tag check (and undersized
-   userdata cause an out-of-bounds payload read); pure Lua cannot
-   construct full userdata, so the trust boundary holds against Lua
-   code — which is the boundary Titan promises to defend.
+4. **Forged userdata from privileged Lua/C code** can defeat the
+   metatable-based nominal check, and undersized userdata can become
+   unsafe when record field slots are accessed; plain Lua cannot
+   construct or retag full userdata, so the trust boundary holds against
+   ordinary Lua code — which is the boundary Titan promises to defend.

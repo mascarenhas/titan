@@ -175,6 +175,11 @@ transfers that would leave a finally:
 * `raise <exp>` inside a finally is allowed, because run-time errors can
   always happen during cleanup and must propagate.
 
+The rule is lexical to the finally block itself. Nested anonymous
+functions are checked as their own function bodies, so a `return` inside
+such a nested function is legal and returns from that function, not from
+the enclosing finally.
+
 ```lua
 while true do
     do
