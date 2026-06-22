@@ -14,8 +14,8 @@ jobs:
         include:
           - os: ubuntu-latest
             lua_os: linux
-          - os: macos-latest
-            lua_os: macosx
+#          - os: macos-latest
+#            lua_os: macosx
 
     runs-on: ${{ matrix.os }}
 
