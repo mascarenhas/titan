@@ -8,17 +8,25 @@ on:
   workflow_dispatch:  # Manual trigger to include macOS builds
 
 jobs:
+  # macOS runners are expensive; only include them on manual dispatch.
+  matrix-setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo 'matrix={"include":[{"os":"ubuntu-latest","lua_os":"linux"},{"os":"macos-latest","lua_os":"macosx"}]}' >> "$GITHUB_OUTPUT"
+          else
+            echo 'matrix={"include":[{"os":"ubuntu-latest","lua_os":"linux"}]}' >> "$GITHUB_OUTPUT"
+          fi
+
   test:
-    # macOS runners are expensive; only run them on manual dispatch.
-    if: matrix.os != 'macos-latest' || github.event_name == 'workflow_dispatch'
+    needs: matrix-setup
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            lua_os: linux
-          - os: macos-latest
-            lua_os: macosx
+      matrix: ${{ fromJson(needs.matrix-setup.outputs.matrix) }}
 
     runs-on: ${{ matrix.os }}
 
