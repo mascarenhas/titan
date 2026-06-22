@@ -45,6 +45,20 @@ local function compile_and_run(titan_code, lua_test)
     return out
 end
 
+local function compile_and_read_c(titan_code)
+    h.reset()
+    local ast, perr = parse(titan_code, "test.titan")
+    assert.truthy(ast, perr)
+    local _, errs = checker.check("test", ast, titan_code, "test.titan")
+    assert.equal(0, #errs, table.concat(errs, "\n"))
+    local ok, err = compile("test", ast)
+    assert.truthy(ok, err)
+    local f = assert(io.open("test.c", "r"))
+    local csrc = f:read("*a")
+    f:close()
+    return csrc
+end
+
 describe("raise <exp> (error-handling Phase 2)", function()
     setup(function() os.remove("titan-runtime/titan.o") end)
     after_each(clean)
@@ -402,7 +416,7 @@ describe("catch (error-handling Phase 4)", function()
         assert.match("OK", out)
     end)
 
-    it("a non-GC local mutated in the body reads correctly after the catch (volatile)", function()
+    it("a non-GC local mutated in the body reads correctly after the catch (spill)", function()
         local out = compile_and_run([[
             function boom(): integer
                 raise "boom"
@@ -420,10 +434,47 @@ describe("catch (error-handling Phase 4)", function()
             end
         ]], [==[
             -- n is set to 5 in the body, then the catch reads it (5) and adds 100
-            assert(test.run() == 105, "volatile local wrong: " .. tostring(test.run()))
+            assert(test.run() == 105, "spilled local wrong: " .. tostring(test.run()))
             print("OK")
         ]==])
         assert.match("OK", out)
+    end)
+
+    it("spills only setjmp-sensitive non-GC locals and params, not their C vars", function()
+        local csrc = compile_and_read_c([[
+            function run(n: integer): integer
+                local m: integer = 10
+                do
+                    n = 5
+                    m = 6
+                    raise "x"
+                catch
+                    n = n + m
+                end
+                return n
+            end
+        ]])
+        assert.not_match("volatile%s+lua_Integer%s+_param_n", csrc)
+        assert.not_match("volatile%s+lua_Integer%s+_local_m_1", csrc)
+        assert.match("volatile%s+lua_Integer%s+_spill_param_n", csrc)
+        assert.match("volatile%s+lua_Integer%s+_spill_local_m_1", csrc)
+    end)
+
+    it("does not spill locals and params just because a function contains catch", function()
+        local csrc = compile_and_read_c([[
+            function run(n: integer): integer
+                local m: integer = 1
+                do
+                    raise "x"
+                catch
+                end
+                return n + m
+            end
+        ]])
+        assert.not_match("_spill_param_n", csrc)
+        assert.not_match("_spill_local_m_1", csrc)
+        assert.not_match("volatile%s+lua_Integer%s+_param_n", csrc)
+        assert.not_match("volatile%s+lua_Integer%s+_local_m_1", csrc)
     end)
 
     it("a GC local mutated in the body reads correctly after a handled error", function()

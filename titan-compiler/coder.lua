@@ -619,25 +619,11 @@ local function initval(typ --[[:table]])
     else return "0" end
 end
 
--- C `setjmp` correctness (C11 §7.13.2.1): an automatic variable of a function
--- that calls `setjmp`, is changed between the `setjmp` and matching `longjmp`,
--- and is read after the longjmp has an indeterminate value unless it is
--- `volatile`-qualified. The inline try boundary makes the whole native function
--- a setjmp scope. Conservative first cut (correctness over a few extra
--- `volatile`s; narrowing the liveness set is a later optimization): when the
--- function contains ANY StatTry (`ctx.has_try`), qualify every generated C
--- local/parameter that can represent a Titan local/parameter, including GC
--- pointer types. Stack slots keep GC objects alive, but reads still often go
--- through the C automatic, so the automatic itself must be volatile too.
+-- Plain C declaration for Titan-visible locals/parameters. Setjmp-sensitive
+-- values are protected by explicit spill/reload slots below, keeping the source
+-- local/param C autos ordinary (and avoiding volatile in the function ABI).
 local function cvardecl(ctx, typ, name)
-    local ct = ctype(typ)
-    if not ctx.has_try then
-        return ct .. " " .. name
-    end
-    if ct:sub(-1) == "*" then
-        return ct .. " volatile " .. name
-    end
-    return "volatile " .. ct .. " " .. name
+    return ctype(typ) .. " " .. name
 end
 
 -- A statement after which control never falls through (return/break/raise). The
@@ -664,6 +650,267 @@ local function last_reachable_stat(block)
         if is_terminator(s) then break end
     end
     return last
+end
+
+local function set_add(set, decl)
+    if decl then set[decl] = true end
+end
+
+local function set_union(dst, src)
+    if not src then return dst end
+    for k in pairs(src) do dst[k] = true end
+    return dst
+end
+
+local function set_copy(src)
+    return set_union({}, src)
+end
+
+-- C `setjmp` correctness (C11 §7.13.2.1): an automatic variable of a function
+-- that calls `setjmp`, is changed between that `setjmp` and its matching
+-- `longjmp`, and is read after the longjmp has an indeterminate value unless the
+-- read is made from volatile-backed storage. We do not make every local/param
+-- volatile. Instead this pass marks only Decl objects assigned in a protected
+-- region whose post-longjmp path can read them. Codegen then keeps GC values in
+-- their existing Lua-stack slots and uses tiny volatile C spill slots only for
+-- non-GC scalars.
+local collect_reads_exp, collect_reads_stat, collect_writes_stat
+
+local function collect_reads_var(node, out)
+    if not node then return out end
+    local tag = node._tag
+    if tag == "Ast.VarName" then
+        set_add(out, node._decl)
+    elseif tag == "Ast.VarDot" then
+        collect_reads_exp(node.exp, out)
+        if node._decl and node._decl._tag == "Ast.Decl" then
+            set_add(out, node._decl)
+        end
+    elseif tag == "Ast.VarBracket" then
+        collect_reads_exp(node.exp1, out)
+        collect_reads_exp(node.exp2, out)
+    end
+    return out
+end
+
+local function collect_lvalue_reads(node, out)
+    if not node then return out end
+    local tag = node._tag
+    if tag == "Ast.VarDot" then
+        collect_reads_exp(node.exp, out)
+    elseif tag == "Ast.VarBracket" then
+        collect_reads_exp(node.exp1, out)
+        collect_reads_exp(node.exp2, out)
+    end
+    return out
+end
+
+local function collect_lvalue_write(node, out)
+    if node and node._decl and node._decl._tag == "Ast.Decl" then
+        set_add(out, node._decl)
+    end
+    return out
+end
+
+local function collect_reads_block(node, out)
+    out = out or {}
+    if not node then return out end
+    for _, stat in ipairs(node.stats) do
+        collect_reads_stat(stat, out)
+        if is_terminator(stat) then break end
+    end
+    return out
+end
+
+local function collect_writes_block(node, out)
+    out = out or {}
+    if not node then return out end
+    for _, stat in ipairs(node.stats) do
+        collect_writes_stat(stat, out)
+        if is_terminator(stat) then break end
+    end
+    return out
+end
+
+collect_reads_exp = function(node, out)
+    out = out or {}
+    if not node or node == false then return out end
+    local tag = node._tag
+    if tag == "Ast.VarName" or tag == "Ast.VarDot"
+            or tag == "Ast.VarBracket" then
+        collect_reads_var(node, out)
+    elseif tag == "Ast.ExpVar" then
+        collect_reads_var(node.var, out)
+    elseif tag == "Ast.ExpInitList" then
+        for _, field in ipairs(node.fields) do
+            collect_reads_exp(field.exp, out)
+        end
+    elseif tag == "Ast.ExpCall" then
+        collect_reads_exp(node.exp, out)
+        for _, arg in ipairs(node.args.args) do
+            collect_reads_exp(arg, out)
+        end
+    elseif tag == "Ast.ExpUnop" or tag == "Ast.ExpCast"
+            or tag == "Ast.ExpAdjust" or tag == "Ast.ExpDotsIndex" then
+        collect_reads_exp(node.exp, out)
+    elseif tag == "Ast.ExpBinop" then
+        collect_reads_exp(node.lhs, out)
+        collect_reads_exp(node.rhs, out)
+    elseif tag == "Ast.ExpConcat" then
+        for _, exp in ipairs(node.exps) do
+            collect_reads_exp(exp, out)
+        end
+    elseif tag == "Ast.ExpExtra" then
+        collect_reads_exp(node.exp, out)
+    elseif tag == "Ast.ExpMethodRef" then
+        collect_reads_exp(node.exp, out)
+    elseif tag == "Ast.ExpFunction" then
+        -- Nested functions/lambdas have their own setjmp scopes and contexts.
+    else
+        -- literals, ExpDots, ExpDotsLen
+    end
+    return out
+end
+
+collect_reads_stat = function(node, out)
+    out = out or {}
+    if not node or node == false then return out end
+    local tag = node._tag
+    if tag == "Ast.StatBlock" then
+        collect_reads_block(node, out)
+    elseif tag == "Ast.StatDecl" then
+        for _, exp in ipairs(node.exps) do collect_reads_exp(exp, out) end
+    elseif tag == "Ast.StatAssign" then
+        for _, var in ipairs(node.vars) do collect_lvalue_reads(var, out) end
+        for _, exp in ipairs(node.exps) do collect_reads_exp(exp, out) end
+    elseif tag == "Ast.StatCall" then
+        collect_reads_exp(node.callexp, out)
+    elseif tag == "Ast.StatReturn" then
+        for _, exp in ipairs(node.exps) do collect_reads_exp(exp, out) end
+    elseif tag == "Ast.StatRaise" then
+        collect_reads_exp(node.exp, out)
+    elseif tag == "Ast.StatWhile" then
+        collect_reads_exp(node.condition, out)
+        collect_reads_block(node.block, out)
+    elseif tag == "Ast.StatRepeat" then
+        collect_reads_block(node.block, out)
+        collect_reads_exp(node.condition, out)
+    elseif tag == "Ast.StatFor" then
+        collect_reads_exp(node.start, out)
+        collect_reads_exp(node.finish, out)
+        collect_reads_exp(node.inc, out)
+        collect_reads_block(node.block, out)
+    elseif tag == "Ast.StatIf" then
+        for _, t in ipairs(node.thens) do
+            collect_reads_exp(t.condition, out)
+            collect_reads_block(t.block, out)
+        end
+        collect_reads_block(node.elsestat, out)
+    elseif tag == "Ast.StatTry" then
+        collect_reads_block(node.block, out)
+        collect_reads_block(node.catchblock, out)
+        collect_reads_block(node.finallyblock, out)
+    else
+        -- StatBreak has no reads.
+    end
+    return out
+end
+
+collect_writes_stat = function(node, out)
+    out = out or {}
+    if not node or node == false then return out end
+    local tag = node._tag
+    if tag == "Ast.StatBlock" then
+        collect_writes_block(node, out)
+    elseif tag == "Ast.StatDecl" then
+        for _, decl in ipairs(node.decls) do set_add(out, decl) end
+    elseif tag == "Ast.StatAssign" then
+        for _, var in ipairs(node.vars) do collect_lvalue_write(var, out) end
+    elseif tag == "Ast.StatWhile" or tag == "Ast.StatRepeat"
+            or tag == "Ast.StatFor" then
+        collect_writes_block(node.block, out)
+    elseif tag == "Ast.StatIf" then
+        for _, t in ipairs(node.thens) do collect_writes_block(t.block, out) end
+        collect_writes_block(node.elsestat, out)
+    elseif tag == "Ast.StatTry" then
+        collect_writes_block(node.block, out)
+        collect_writes_block(node.catchblock, out)
+        collect_writes_block(node.finallyblock, out)
+    end
+    return out
+end
+
+local function mark_spills(assigned, reads)
+    for decl in pairs(assigned) do
+        if reads[decl] then decl._needs_spill = true end
+    end
+end
+
+local function analyze_try_spills_block(block, after_reads)
+    if not block then return end
+    local stats = {}
+    for _, stat in ipairs(block.stats) do
+        table.insert(stats, stat)
+        if is_terminator(stat) then break end
+    end
+    local after = set_copy(after_reads or {})
+    for i = #stats, 1, -1 do
+        local stat = stats[i]
+        local tag = stat._tag
+        if tag == "Ast.StatBlock" then
+            analyze_try_spills_block(stat, after)
+        elseif tag == "Ast.StatWhile" or tag == "Ast.StatRepeat"
+                or tag == "Ast.StatFor" then
+            local loop_after = set_copy(after)
+            collect_reads_stat(stat, loop_after)
+            analyze_try_spills_block(stat.block, loop_after)
+        elseif tag == "Ast.StatIf" then
+            for _, t in ipairs(stat.thens) do
+                analyze_try_spills_block(t.block, after)
+            end
+            analyze_try_spills_block(stat.elsestat, after)
+        elseif tag == "Ast.StatTry" then
+            local catch_reads = collect_reads_block(stat.catchblock)
+            local finally_reads = collect_reads_block(stat.finallyblock)
+
+            -- A body error reaches code after the try only if a catch can handle
+            -- it. A finally-only body error re-raises after the finally, so only
+            -- the finally can observe body-written values on that longjmp path.
+            local body_boundary_reads = set_copy(catch_reads)
+            set_union(body_boundary_reads, finally_reads)
+            if stat.catchblock then set_union(body_boundary_reads, after) end
+            mark_spills(collect_writes_block(stat.block), body_boundary_reads)
+
+            -- The catch has a protected boundary only when a finally follows; if
+            -- it raises, dispatch re-raises after the finally, so post-try code is
+            -- not reached on that longjmp path.
+            if stat.catchblock and stat.finallyblock then
+                mark_spills(collect_writes_block(stat.catchblock), finally_reads)
+            end
+
+            local nested_body_after = set_copy(after)
+            set_union(nested_body_after, catch_reads)
+            set_union(nested_body_after, finally_reads)
+            analyze_try_spills_block(stat.block, nested_body_after)
+
+            local nested_catch_after = set_copy(after)
+            set_union(nested_catch_after, finally_reads)
+            analyze_try_spills_block(stat.catchblock, nested_catch_after)
+            analyze_try_spills_block(stat.finallyblock, after)
+        end
+
+        local reads = collect_reads_stat(stat)
+        if is_terminator(stat) then
+            after = reads
+        else
+            set_union(reads, after)
+            after = reads
+        end
+    end
+end
+
+local function analyze_try_spills(block)
+    analyze_try_spills_block(block, {})
 end
 
 -- A non-void/non-nil function whose last reachable statement is something other
@@ -809,6 +1056,90 @@ end
 
 local function newslot(ctx --[[:table]])
     return slotat(reserveslot(ctx))
+end
+
+local function decl_needs_spill(decl)
+    return decl and decl._needs_spill and decl._used and not decl._boxed
+end
+
+local function register_spill_decl(ctx, decl)
+    if not decl_needs_spill(decl) then return end
+    if ctx.spill_decl_seen and ctx.spill_decl_seen[decl] then return end
+    ctx.spill_decl_seen = ctx.spill_decl_seen or {}
+    ctx.spill_decl_seen[decl] = true
+    ctx.active_spill_decls = ctx.active_spill_decls or {}
+    table.insert(ctx.active_spill_decls, decl)
+end
+
+local function spill_cvar(decl)
+    if not decl._spill_cvar then
+        decl._spill_cvar = "_spill" .. decl._cvar
+    end
+    return decl._spill_cvar
+end
+
+local function spill_decl_init(ctx, decl)
+    if not decl_needs_spill(decl) then return "" end
+    register_spill_decl(ctx, decl)
+    if types.is_gc(decl._type) then
+        -- GC values already have a Lua-stack slot. That slot is the stable
+        -- storage; no separate C spill is needed.
+        return ""
+    end
+    return render([[
+        volatile $CT $SPILL = $CVAR;
+    ]], {
+        CT = ctype(decl._type),
+        SPILL = spill_cvar(decl),
+        CVAR = decl._cvar,
+    })
+end
+
+local function spill_decl_zero(ctx, decl)
+    if not decl_needs_spill(decl) then return "" end
+    register_spill_decl(ctx, decl)
+    if types.is_gc(decl._type) then return "" end
+    return render([[
+        volatile $CT $SPILL = $INIT;
+    ]], {
+        CT = ctype(decl._type),
+        SPILL = spill_cvar(decl),
+        INIT = initval(decl._type),
+    })
+end
+
+local function spill_update(decl)
+    if not decl_needs_spill(decl) or types.is_gc(decl._type) then return "" end
+    return render([[
+        $SPILL = $CVAR;
+    ]], {
+        SPILL = spill_cvar(decl),
+        CVAR = decl._cvar,
+    })
+end
+
+local function spill_reload(ctx)
+    local decls = ctx.active_spill_decls
+    if not decls then return "" end
+    local lines = {}
+    for _, decl in ipairs(decls) do
+        if decl_needs_spill(decl) then
+            if types.is_gc(decl._type) then
+                if decl._slot then
+                    table.insert(lines,
+                        getslot(decl._type, decl._cvar, decl._slot) .. ";")
+                end
+            elseif decl._spill_cvar then
+                table.insert(lines, render("$CVAR = $SPILL;", {
+                    CVAR = decl._cvar,
+                    SPILL = decl._spill_cvar,
+                }))
+            end
+        end
+    end
+    if #lines == 0 then return "" end
+    return "/* reload setjmp-sensitive Titan locals/params */\n"
+        .. table.concat(lines, "\n")
 end
 
 local function newtmp(ctx --[[:table]], typ --[[:table]], isgc --[[:boolean]])
@@ -1048,12 +1379,28 @@ local function popd(ctx)
     ctx.depth = table.remove(ctx.dstack)
 end
 
+local function push_spillscope(ctx)
+    ctx.spill_scope_stack = ctx.spill_scope_stack or {}
+    local n = ctx.active_spill_decls and #ctx.active_spill_decls or 0
+    table.insert(ctx.spill_scope_stack, n)
+end
+
+local function pop_spillscope(ctx)
+    local n = table.remove(ctx.spill_scope_stack)
+    if not ctx.active_spill_decls then return end
+    for i = #ctx.active_spill_decls, n + 1, -1 do
+        local decl = ctx.active_spill_decls[i]
+        ctx.active_spill_decls[i] = nil
+        if ctx.spill_decl_seen then ctx.spill_decl_seen[decl] = nil end
+    end
+end
+
 -- Does `node` (a statement, typically a StatBlock) lexically contain a `StatTry`,
 -- WITHOUT descending into nested function bodies (ExpFunction has its own codegen
--- context, entry-wrapper boundary, and errorjmp save)? Used to (a) mark a whole
--- function as try-using (conservative `volatile` for non-GC enclosing locals +
--- entry errorjmp-save), and (b) decide whether a loop must save its errorjmp at
--- entry so a `break` crossing a try boundary can restore it.
+-- context, entry-wrapper boundary, and errorjmp save)? Used to (a) run the
+-- per-function spill analysis and entry errorjmp-save setup, and (b) decide
+-- whether a loop must save its errorjmp at entry so a `break` crossing a try
+-- boundary can restore it.
 local function stat_contains_try(node)
     if node == nil or node == false then return false end
     local tag = node._tag
@@ -1097,7 +1444,9 @@ end
 
 local function codeblock(ctx, node)
     pushd(ctx)
+    push_spillscope(ctx)
     local stats = codestats(ctx, node.stats)
+    pop_spillscope(ctx)
     popd(ctx)
     return " {\n " .. table.concat(stats, "\n ") .. "\n }"
 end
@@ -1274,9 +1623,7 @@ local function codefor(ctx, node)
     local subs = {
         LOOPSAVE = loopsave,
         CVAR = node.decl._cvar,
-        -- declare the visible control variable only if the body uses it; mark it
-        -- volatile if the function contains a try (it is an enclosing-scope C auto
-        -- relative to a try in the loop body — C setjmp rule).
+        -- declare the visible control variable only if the body uses it.
         CVARDECL = node.decl._used
             and (cvardecl(ctx, node.decl._type, node.decl._cvar) .. " = _foridx;") or "",
         CSSTATS = csstats, CSEXP = csexp,
@@ -1518,10 +1865,12 @@ local function codeassignment(ctx, var, cexp, etype)
             return render([[
                 $CVAR = $CEXP;
                 $CSET
+                $SPILL
             ]], {
                 CVAR = var._decl._cvar,
                 CEXP = cexp,
                 CSET = cset,
+                SPILL = spill_update(var._decl),
             })
         else
             return render([[
@@ -2474,8 +2823,9 @@ local PA_RAISE  = "3"
 -- Compute the per-return saved-value storage for a try-with-finally (B.4 "GC
 -- anchoring"). Each declared return value gets either a stack-anchored slot (GC
 -- types — written with no barrier since the stack is a root) or a `volatile` C
--- temp (non-GC scalars, already setjmp-safe via the function-wide `volatile`
--- rule). Returns a list of descriptors {typ, cvar, slot?, decl} and the C
+-- temp (non-GC scalars, because a pending return can be written before a
+-- finally and read after a longjmp from that finally). Returns a list of
+-- descriptors {typ, cvar, slot?, decl} and the C
 -- declarations to splice at the try's top, plus a `write(cstats_list, exprs)`
 -- closure the body/catch `return` lowering uses to fill them.
 local function make_return_saves(ctx, id)
@@ -2919,7 +3269,7 @@ end
 -- error-handler chain (rawrunprotected tail), opening the `if (status != OK)`
 -- recovery arm and saving the caught error into slot `d_err` and its snapshotted
 -- trace into slot `d_tb`. The caller supplies the recovery body and closes braces.
-local function boundary_recover_open(tag, d_err, d_tb)
+local function boundary_recover_open(ctx, tag, d_err, d_tb)
     return render([[
         }
         /* restore the error-handler chain (rawrunprotected tail) */
@@ -2965,10 +3315,12 @@ local function boundary_recover_open(tag, d_err, d_tb)
             ** below L->top.p and are GC-scanned. The literal nslots is patched in
             ** by codefuncdec/codelambdadec once the high-water mark is known. */
             L->top.p = _base + TITAN_RESERVED_NSLOTS;
+            $SPILLRELOAD
     ]], {
         T = tag,
         ERRSTACK = stackslotat(d_err),
         TBSTACK = stackslotat(d_tb),
+        SPILLRELOAD = spill_reload(ctx),
     })
 end
 
@@ -3094,7 +3446,7 @@ local function codetry(ctx, node)
         ]], {
             SAVE = boundary_save(tostring(id)),
             CBODY = cbody,
-            RECOVER = boundary_recover_open(tostring(id), d_err, d_tb),
+            RECOVER = boundary_recover_open(ctx, tostring(id), d_err, d_tb),
             CCATCH = ccatch,
             ERR = errcvar,
             TB = tbcvar,
@@ -3145,7 +3497,7 @@ local function codetry(ctx, node)
             TBSLOT = slotat(d_tb),
             CSAVE = boundary_save(id .. "c"),
             CCATCH = ccatch,
-            CRECOVER = boundary_recover_open(id .. "c", d_err, d_tb),
+            CRECOVER = boundary_recover_open(ctx, id .. "c", d_err, d_tb),
             NOCATCHRAISE = no_catch_raise,
         })
     else
@@ -3180,7 +3532,7 @@ local function codetry(ctx, node)
         RETDECLS = ret_decls,
         SAVE = boundary_save(tostring(id)),
         CBODY = cbody,
-        RECOVER = boundary_recover_open(tostring(id), d_err, d_tb),
+        RECOVER = boundary_recover_open(ctx, tostring(id), d_err, d_tb),
         CATCHARM = catch_under_boundary,
         FINLABEL = fin_frame.label_used and (fin_label .. ": ;") or "",
         CFINALLY = cfinally,
@@ -3242,6 +3594,8 @@ local function codestat_dispatch(ctx, node)
                 local cdecl = cvardecl(ctx, typ, decl._cvar) .. ";"
                 local cslot = ""
                 local cset = ""
+                local cspilldecl = spill_decl_zero(ctx, decl)
+                local cspillset = spill_update(decl)
                 if types.is_gc(typ) then
                     decl._slot = newslot(ctx)
                     cset = render([[
@@ -3253,17 +3607,21 @@ local function codestat_dispatch(ctx, node)
                 end
                 table.insert(code, render([[
                     $CDECL
+                    $CSPILLDECL
                     $CSLOT
                     $CSTATS
                     $CVAR = $CEXP;
                     $CSET
+                    $CSPILLSET
                 ]], {
                     CDECL = cdecl,
+                    CSPILLDECL = cspilldecl,
                     CSLOT = cslot,
                     CSTATS = cstats,
                     CVAR = decl._cvar,
                     CEXP = cexp,
-                    CSET = cset
+                    CSET = cset,
+                    CSPILLSET = cspillset,
                 }))
             else
                 table.insert(code, render([[
@@ -5133,11 +5491,10 @@ local function codefuncdec(tlcontext, node)
         register_trace_name(tlcontext, fname,
             node._type.fqtn .. ":" .. node._type.name)
     end
-    -- Detect a `StatTry` in this function's body up front (the param cdecls below
-    -- and local cdecls in the body consult `ctx.has_try` for the `volatile`
-    -- qualifier; nested function/lambda bodies have their own contexts and are not
-    -- scanned). Also sets the entry errorjmp-save and base-offset preamble.
+    -- Detect a `StatTry` in this function's body up front. Nested
+    -- function/lambda bodies have their own contexts and are not scanned.
     ctx.has_try = stat_contains_try(node.block)
+    if ctx.has_try then analyze_try_spills(node.block) end
     -- The declared return types, so a `return` routed through a finally
     -- (codetry/codereturn) can size + fill the per-try saved-return temps.
     ctx.rettypes = node._type.rettypes
@@ -5149,7 +5506,7 @@ local function codefuncdec(tlcontext, node)
         local self = node._self
         self._cvar = "__self__"
         self._boxed = self._captured and self._assigned
-        if types.is_gc(self._type) and self._assigned then
+        if types.is_gc(self._type) and (self._assigned or self._needs_spill) then
             self._slot = newslot(ctx)
             -- anchor the incoming gc self before the box allocation (which can
             -- trigger GC), so a reassigned/captured self stays live
@@ -5158,12 +5515,13 @@ local function codefuncdec(tlcontext, node)
         if self._boxed then
             table.insert(stats, codeboxparam(ctx, self))
         end
+        table.insert(stats, spill_decl_init(ctx, self))
         table.insert(cparams, cvardecl(ctx, self._type, self._cvar))
     end
     for _, param in ipairs(fixed_params(node.params)) do
         param._cvar = "_param_" .. param.name
         param._boxed = param._captured and param._assigned
-        if types.is_gc(param._type) and param._assigned then
+        if types.is_gc(param._type) and (param._assigned or param._needs_spill) then
             param._slot = newslot(ctx)
             -- anchor the incoming gc param in its own slot before the box
             -- allocation (which can trigger GC) — see codeboxparam
@@ -5172,6 +5530,7 @@ local function codefuncdec(tlcontext, node)
         if param._boxed then
             table.insert(stats, codeboxparam(ctx, param))
         end
+        table.insert(stats, spill_decl_init(ctx, param))
         table.insert(cparams, cvardecl(ctx, param._type, param._cvar))
     end
     -- Variadic: the backing struct + start offset, pinned after the declared
@@ -5576,10 +5935,10 @@ function codelambdadec(tlcontext, node)
     local rettype = node._type.rettypes[1]
     local fname = node._lambda_native
     local luaname = node._lambda_lua
-    -- A try inside this lambda's own body makes its non-GC enclosing locals/params
-    -- volatile and installs the entry errorjmp-save (an enclosing function's try
-    -- does not, since the lambda has its own context and boundary).
+    -- A try inside this lambda's own body gets its own spill analysis and entry
+    -- errorjmp-save (an enclosing function's try does not affect this context).
     ctx.has_try = stat_contains_try(node.block)
+    if ctx.has_try then analyze_try_spills(node.block) end
     -- The lambda's own return types (sizes finally saved-return temps).
     ctx.rettypes = node._type.rettypes
 
@@ -5604,13 +5963,14 @@ function codelambdadec(tlcontext, node)
     for _, param in ipairs(fixed_params(node.params)) do
         param._cvar = "_param_" .. param.name
         param._boxed = param._captured and param._assigned
-        if types.is_gc(param._type) and param._assigned then
+        if types.is_gc(param._type) and (param._assigned or param._needs_spill) then
             param._slot = newslot(ctx)
             table.insert(stats, setslot(param._type, param._slot, param._cvar))
         end
         if param._boxed then
             table.insert(stats, codeboxparam(ctx, param))
         end
+        table.insert(stats, spill_decl_init(ctx, param))
         table.insert(cparams, cvardecl(ctx, param._type, param._cvar))
     end
     -- A lambda's `ctx` is fresh (newcontext), so ctx.varargs starts nil; set it

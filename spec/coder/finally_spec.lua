@@ -388,7 +388,7 @@ describe("finally (error-handling Phase 5)", function()
         assert.match("OK", out)
     end)
 
-    it("preserves a non-GC enclosing local across the finally (volatile)", function()
+    it("preserves a non-GC enclosing local across the finally (spill)", function()
         local out = compile_and_run([[
             function boom(): integer
                 raise "boom"
@@ -408,7 +408,34 @@ describe("finally (error-handling Phase 5)", function()
             end
         ]], [==[
             -- body sets n=5, errors; catch adds 100 (105); finally adds 1000 (1105)
-            assert(test.run() == 1105, "volatile-across-finally wrong: " .. tostring(test.run()))
+            assert(test.run() == 1105, "spill-across-finally wrong: " .. tostring(test.run()))
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("reloads a non-GC local assigned in catch before a catch raise reaches finally", function()
+        local out = compile_and_run([[
+            seen: integer = 0
+            function seen_value(): integer
+                return seen
+            end
+            function run()
+                local n: integer = 1
+                do
+                    raise "body"
+                catch
+                    n = 7
+                    raise "catch"
+                finally
+                    seen = n
+                end
+            end
+        ]], [==[
+            local ok, err = pcall(test.run)
+            assert(not ok)
+            assert(err == "catch", "wrong error from catch raise: " .. tostring(err))
+            assert(test.seen_value() == 7, "finally read stale catch-assigned local")
             print("OK")
         ]==])
         assert.match("OK", out)
