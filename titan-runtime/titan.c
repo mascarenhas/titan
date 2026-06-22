@@ -24,19 +24,46 @@
 #ifdef TITAN_HAVE_LIBBACKTRACE
 /* libbacktrace snapshots the set of loaded objects ONCE, on the first
 ** symbolization, and never re-scans (it caches the dl_iterate_phdr result). A
-** module dlopened after that snapshot would have no symbols, so loadlib()
-** invalidates this cached state (sets it NULL) after every successful dlopen on
-** the slow path; the next capture lazily re-creates it and re-snapshots. The
-** state is never freed (a small, bounded leak), never recreated per-error. */
+** module dlopened after that snapshot would have no symbols, so loadlib() and
+** generated luaopen_* functions invalidate this cached state after successful
+** loads; the next capture lazily re-creates it and re-snapshots. The state is
+** never freed (a small, bounded leak), never recreated per-error. */
 static struct backtrace_state *titan_bt_state = NULL;
+static lua_Integer titan_bt_generation_seen = -1;
 
 static void titan_bt_error(void *data, const char *msg, int errnum) {
     (void)data; (void)msg; (void)errnum;  /* swallow: a missing frame is fine */
 }
 
-/* Reset after a slow-path dlopen so the next capture sees the new .so. */
-void titan_invalidate_backtrace_state(void) {
+/* Reset after a slow-path dlopen or a Lua require that mapped a Titan .so. Each
+** Titan .so links its own titan.o, so also bump a per-state registry generation:
+** every module's errorhandler checks it before reusing its local C static state. */
+void titan_invalidate_backtrace_state(lua_State *L) {
+    lua_Integer gen = 0;
     titan_bt_state = NULL;
+    lua_pushliteral(L, TITAN_BT_GENERATION_KEY);
+    lua_rawget(L, LUA_REGISTRYINDEX);
+    if (lua_isinteger(L, -1)) {
+        gen = lua_tointeger(L, -1);
+    }
+    lua_pop(L, 1);
+    lua_pushliteral(L, TITAN_BT_GENERATION_KEY);
+    lua_pushinteger(L, gen + 1);
+    lua_rawset(L, LUA_REGISTRYINDEX);
+}
+
+static void titan_sync_backtrace_generation(lua_State *L) {
+    lua_Integer gen = 0;
+    lua_pushliteral(L, TITAN_BT_GENERATION_KEY);
+    lua_rawget(L, LUA_REGISTRYINDEX);
+    if (lua_isinteger(L, -1)) {
+        gen = lua_tointeger(L, -1);
+    }
+    lua_pop(L, 1);
+    if (titan_bt_generation_seen != gen) {
+        titan_bt_state = NULL;
+        titan_bt_generation_seen = gen;
+    }
 }
 
 static const char *titan_basename(const char *path) {
@@ -134,7 +161,8 @@ static int titan_bt_collect_cb(void *data, uintptr_t pc, const char *filename,
 
 /* Capture the filtered native stack (Titan frames + entry-wrapper boundaries
 ** only) into `st`, innermost->outer. Returns 0 if libbacktrace is unavailable. */
-static int titan_capture_native(titan_native_stack *st) {
+static int titan_capture_native(lua_State *L, titan_native_stack *st) {
+    (void)L;
     if (titan_bt_state == NULL) {
         titan_bt_state = backtrace_create_state(NULL, 1, titan_bt_error, NULL);
     }
@@ -216,9 +244,10 @@ static void titan_entry_syminfo_cb(void *data, uintptr_t pc,
     }
 }
 
-static int titan_cfunction_is_entry(lua_CFunction fn) {
+static int titan_cfunction_is_entry(lua_State *L, lua_CFunction fn) {
     titan_entry_probe probe;
     probe.is_entry = 0;
+    (void)L;
     if (titan_bt_state == NULL) {
         titan_bt_state = backtrace_create_state(NULL, 1, titan_bt_error, NULL);
     }
@@ -300,7 +329,7 @@ static void titan_push_unified_trace(lua_State *L, luaL_Buffer *buf,
     st.frames = frames;
     st.n = 0;
     st.cap = TITAN_MAX_NATIVE;
-    titan_capture_native(&st);
+    titan_capture_native(L, &st);
 
     /* Drain the deepest native Titan run (the error site) before any CallInfo
     ** so the innermost Titan frames lead. Entry-wrapper frames are boundary
@@ -314,7 +343,7 @@ static void titan_push_unified_trace(lua_State *L, luaL_Buffer *buf,
         lua_getinfo(L, "Slntf", &ar);           /* pushes function */
         if (ar.what != NULL && ar.what[0] == 'C') {
             cfunc = lua_tocfunction(L, -1);
-            is_titan_entry = (cfunc != NULL && titan_cfunction_is_entry(cfunc));
+            is_titan_entry = (cfunc != NULL && titan_cfunction_is_entry(L, cfunc));
         }
         lua_pop(L, 1);                          /* pop function from "f" */
         if (ar.what != NULL && ar.what[0] == 'C') {
@@ -362,7 +391,9 @@ static void titan_push_unified_trace(lua_State *L, luaL_Buffer *buf,
     }
 }
 #else
-void titan_invalidate_backtrace_state(void) { /* no cached state to reset */ }
+void titan_invalidate_backtrace_state(lua_State *L) {
+    (void)L;  /* no cached state to reset */
+}
 #endif
 
 static void pushpath (lua_State *L) {
@@ -455,7 +486,7 @@ void *loadlib (lua_State *L, const char *file) {
                 ** object snapshot so the next capture re-scans and can
                 ** symbolize frames inside this module (the cached-handle fast
                 ** path above loads nothing, so it must NOT invalidate). */
-                titan_invalidate_backtrace_state();
+                titan_invalidate_backtrace_state(L);
                 lua_pop(L, 3); // pop path, filename, and dir
                 lua_pushstring(L, file);
                 lua_pushlightuserdata(L, lib);
@@ -475,6 +506,42 @@ void *loadsym (lua_State *L, void *lib, const char *sym) {
     void *f = dlsym(lib, sym);
     if(f == NULL) luaL_error(L, dlerror());
     return f;
+}
+
+void titan_check_abi(lua_State *L, void *lib, const char *sym,
+                     const char *file) {
+    typedef int (*titan_abi_fn)(lua_State *);
+    void *raw;
+    titan_abi_fn fn;
+    int top = lua_gettop(L);
+    int nresults;
+    const char *actual;
+    dlerror();  /* clear stale error */
+    raw = dlsym(lib, sym);
+    if (raw == NULL) {
+        const char *err = dlerror();
+        luaL_error(L,
+            "Titan compiled module '%s' is missing ABI symbol '%s' "
+            "(expected ABI " TITAN_VER "): %s",
+            file, sym, err ? err : "symbol not found");
+    }
+    fn = titan_cast_func(titan_abi_fn, raw);
+    nresults = fn(L);
+    if (nresults != 1 || !lua_isstring(L, -1)) {
+        lua_settop(L, top);
+        luaL_error(L,
+            "Titan compiled module '%s' has an invalid ABI marker '%s' "
+            "(expected ABI " TITAN_VER ")",
+            file, sym);
+    }
+    actual = lua_tostring(L, -1);
+    if (strcmp(actual, TITAN_VER) != 0) {
+        luaL_error(L,
+            "Titan compiled module '%s' ABI mismatch: expected " TITAN_VER
+            " but found %s",
+            file, actual);
+    }
+    lua_settop(L, top);
 }
 
 /* Returns nonzero (and clears the pin) if the trace slot is pinned, i.e. a
@@ -506,6 +573,9 @@ int errorhandler(lua_State *L) {
 
   /* Regenerate the slot. luaL_Buffer lives on the stack from luaL_buffinit on
   ** and must stay at the top while in use, so push everything else first. */
+#ifdef TITAN_HAVE_LIBBACKTRACE
+  titan_sync_backtrace_generation(L);
+#endif
   lua_pushliteral(L, TITAN_BACKTRACE_KEY);
   luaL_tolstring(L, top, NULL);
   lua_pushliteral(L, "\n");

@@ -4,7 +4,7 @@ Titan's statements are a subset of Lua's, with the same surface syntax,
 plus static checking. This chapter covers blocks and scoping, local
 declarations, assignment (including multiple assignment), the control-flow
 statements (`if`, `while`, `repeat`, the numeric `for`), function calls in
-statement position, and `return`. For the expressions that appear inside
+statement position, `raise`, and `return`. For the expressions that appear inside
 statements see [Expressions](expressions.md); for the typing rules they
 trigger see [The type system](types.md); for the full statement grammar
 see [Grammar](grammar.md).
@@ -32,6 +32,12 @@ end of the enclosing block. Shadowing an outer variable (or even an
 earlier variable in the same block) is allowed and not diagnosed. As in
 Lua, a lone semicolon is an empty statement, and statements need no other
 separator.
+
+Any block may have `catch` and/or `finally` trailers. These are Titan's
+error-handling construct; there is no `try` keyword. The body, catch, and
+finally are sibling scopes, and the catch has implicit `error: value` and
+`traceback: string` locals. Those catch locals are read-only snapshots.
+See [Error handling](error-handling.md).
 
 Unused variables are not an error or a warning. The compiler notices
 variables that are never read and simply omits storage for them — the
@@ -307,6 +313,23 @@ statement position — `(f)`, `1 + 1` — is a compile-time syntax error:
 `Expected a statement but found an expression that is not a function
 call.`
 
+## `raise`
+
+`raise <exp>` raises a new run-time error with the expression coerced to
+`value`:
+
+```lua
+raise "bad input"
+raise { "structured", "error" }
+```
+
+A bare `raise` is a re-raise and is legal only inside a `catch` block; it
+preserves the original caught error value and traceback. Outside a catch,
+bare `raise` is a compile-time error. `raise` always terminates the
+current control-flow path, like `return` for the purpose of checking that
+a function with return values always returns. Full propagation and
+`finally` semantics are in [Error handling](error-handling.md).
+
 ## `return`
 
 `return` ends the function, supplying its return values:
@@ -321,6 +344,11 @@ Like in Lua, `return` may only appear as the **last** statement of a
 block — of the function body, or of any inner block such as an `if` arm or
 a loop body. A statement after a `return` in the same block is a syntax
 error. An optional `;` may follow the statement.
+
+`return` is forbidden inside a `finally` block, because explicit control
+transfer out of cleanup would otherwise override a pending return, break,
+or error. Use a normal fallthrough from finally, or raise a new error if
+cleanup failure should replace the pending action.
 
 Arity is strict at compile time: the number of returned values must equal
 the number of declared return types, or the checker reports

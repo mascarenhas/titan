@@ -111,6 +111,24 @@ describe("raise <exp> (error-handling Phase 2)", function()
         assert.match("OK", out)
     end)
 
+    it("raises non-GC scalar values verbatim", function()
+        local out = compile_and_run([[
+            function raise_int()
+                raise 42
+            end
+            function raise_false()
+                raise false
+            end
+        ]], [==[
+            local ok, err = pcall(test.raise_int)
+            assert(not ok and err == 42, "integer error not preserved: " .. tostring(err))
+            ok, err = pcall(test.raise_false)
+            assert(not ok and err == false, "false error not preserved: " .. tostring(err))
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
     it("raises a computed value expression", function()
         local out = compile_and_run([[
             function boom(n: integer): integer
@@ -239,6 +257,47 @@ describe("catch (error-handling Phase 4)", function()
         assert.match("OK", out)
     end)
 
+    it("catches non-raise runtime errors from protected bodies", function()
+        local out = compile_and_run([[
+            function run(): string
+                do
+                    local x: value = {}
+                    local n: integer = x as integer
+                    return "unreached " .. n
+                catch
+                    return traceback
+                end
+            end
+        ]], [==[
+            local tb = test.run()
+            assert(tb:find("in test.run", 1, true),
+                   "runtime type error was not caught with traceback\n" .. tostring(tb))
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("catches an error raised while evaluating a return expression", function()
+        local out = compile_and_run([[
+            function boom(): integer
+                raise "boom"
+                return 0
+            end
+            function run(): integer
+                do
+                    return boom()
+                catch
+                    return 42
+                end
+            end
+        ]], [==[
+            assert(test.run() == 42,
+                   "return expression error restored the boundary too early")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
     it("bare re-raise preserves the ORIGINAL deep trace", function()
         local out = compile_and_run([[
             function deep(): integer
@@ -362,6 +421,41 @@ describe("catch (error-handling Phase 4)", function()
         ]], [==[
             -- n is set to 5 in the body, then the catch reads it (5) and adds 100
             assert(test.run() == 105, "volatile local wrong: " .. tostring(test.run()))
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("a GC local mutated in the body reads correctly after a handled error", function()
+        local out = compile_and_run([[
+            function run(): string
+                local s: string = "old"
+                do
+                    s = "new"
+                    raise "x"
+                catch
+                end
+                return s
+            end
+        ]], [==[
+            assert(test.run() == "new", "GC local changed across longjmp")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("a GC parameter mutated in the body reads correctly after a handled error", function()
+        local out = compile_and_run([[
+            function run(s: string): string
+                do
+                    s = "new"
+                    raise "x"
+                catch
+                end
+                return s
+            end
+        ]], [==[
+            assert(test.run("old") == "new", "GC parameter changed across longjmp")
             print("OK")
         ]==])
         assert.match("OK", out)

@@ -247,6 +247,63 @@ describe("libbacktrace unified stack trace (error-handling Phase 0)", function()
         assert.match("OK", out)
     end)
 
+    it("keeps genuine Lua C functions in a Lua<->Titan trace chain", function()
+        local out = compile_and_run([[
+            function call(f: () -> integer): integer
+                return f()
+            end
+            function boom(): integer
+                raise "boom"
+                return 0
+            end
+        ]], [==[
+            local titan = require 'titan'
+            local function via_pcall()
+                local ok, err = pcall(test.boom)
+                assert(not ok and err == "boom")
+                return 0
+            end
+            assert(test.call(via_pcall) == 0)
+            local bt = titan.backtrace()
+            local p_boom = assert(bt:find("in test.boom", 1, true), bt)
+            local p_pcall = assert(bt:find("[C]: in global 'pcall'", p_boom, true)
+                                   or bt:find("[C]: in function 'pcall'", p_boom, true),
+                                   "missing genuine pcall C frame\n" .. bt)
+            local p_lua = assert(bt:find("in function <", p_pcall, true), bt)
+            local p_call = assert(bt:find("in test.call", p_lua, true), bt)
+            assert(p_boom < p_pcall and p_pcall < p_lua and p_lua < p_call,
+                   "genuine Lua C frame was dropped or spliced out of order\n" .. bt)
+            assert(not bt:find("titanentry", 1, true), "leaked Titan entry frame\n" .. bt)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("attributes a direct static caller frame to the exact call line", function()
+        local out = compile_and_run(
+            "function callee(): integer\n" ..
+            "    raise \"line\"\n" ..
+            "    return 0\n" ..
+            "end\n" ..
+            "function caller(): integer\n" ..
+            "    local pad: integer = 1\n" ..
+            "    pad = pad + 1\n" ..
+            "    return callee()\n" ..
+            "end\n",
+            [==[
+            local titan = require 'titan'
+            assert(not pcall(test.caller))
+            local bt = titan.backtrace()
+            assert(bt:find("test%.titan:8: in test%.caller"),
+                   "caller frame is not attributed to the direct call line\n" .. bt)
+            assert(not bt:find("test%.titan:6: in test%.caller")
+                   and not bt:find("test%.titan:7: in test%.caller"),
+                   "caller frame drifted before the call line\n" .. bt)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
     it("shows a method frame as <module>.<Rec>:<method>", function()
         -- An error inside a record method must show the qualified method name
         -- with the `:` separator, a SINGLE frame (no trampoline), and the

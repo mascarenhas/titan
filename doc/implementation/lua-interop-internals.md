@@ -455,14 +455,16 @@ Udata* (*some_dep_init)(lua_State *L) =
 
 `loadlib(L, file)` first consults the handle cache under
 `TITAN_LIBS_KEY`; on a miss it walks the Titan path — environment
-variable `TITAN_PATH_0_9`, then `TITAN_PATH`, then the default
-`".;/usr/local/lib/titan/0.9"`, with `;;` in an env value splicing the
+variable `TITAN_PATH_0_10`, then `TITAN_PATH`, then the default
+`".;/usr/local/lib/titan/0.10"`, with `;;` in an env value splicing the
 default in — trying `dlopen(dir "/" file, RTLD_NOW | RTLD_LOCAL)` per
 `;`-separated directory. Successes are cached; the cache table's
 metatable has a `__gc` that `dlclose`s every handle in reverse insertion
 order when the state closes. Total failure raises
-`luaL_error(L, dlerror())`. `loadsym` is `dlsym` plus the same
-`dlerror()` raise on a missing symbol.
+`luaL_error(L, dlerror())`. After `loadlib`, generated dynamic-import
+code calls `titan_check_abi(L, handle, "<mangled>_abi", file)`, rejecting
+missing or mismatched ABI markers before any native entry point is used.
+`loadsym` is `dlsym` plus the same `dlerror()` raise on a missing symbol.
 
 Every cross-module function called from a dynamic dependency is declared
 as a `static` C *function pointer* and stitched by symbol name in

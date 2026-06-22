@@ -43,7 +43,7 @@ The compiler takes a list of module names that you want to compile. Modules
 are looked up in the source tree (defaults to the current working directory,
 but you can override this with the `--tree` option), as well as in the Titan
 binary path, a semicolon-separated list of paths 
-(defaults to `.;/usr/local/lib/titan/0.5`, you can override with a `TITAN_PATH_0_5`
+(defaults to `.;/usr/local/lib/titan/0.10`, you can override with a `TITAN_PATH_0_10`
 or `TITAN_PATH` environment variable).
 
 If everything is all right with your modules, you will get the result of

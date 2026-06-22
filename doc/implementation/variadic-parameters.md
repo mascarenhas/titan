@@ -20,13 +20,14 @@ the [parser](#parser-the-t-grammar) (`parser.lua`, `ast.lua`), the
 [checker](#checker-varargtype-scope-and-the-explist-loops) (`checker.lua`,
 `types.lua`), the [code generator](#code-generator-the-seven-structs-and-the-native-abi)
 (`coder.lua`, the seven `TitanVarg*` structs in `titan-runtime/titan.h`), and
-the [GC discipline](#gc-discipline-an-untraced-payload) the backing struct must
-respect. Background on the calling convention is in the
+the [GC discipline](#gc-discipline-an-untraced-payload) the descriptor and
+backing storage must respect. Background on the calling convention is in the
 [code generator overview](codegen-overview.md); value representation and the
 collector invariants in [values and the GC](values-and-gc.md).
 
-Variadic support bumped the compiled-module **ABI to 0.9** (see
-[the ABI bump](#the-abi-bump-09)).
+Variadic support originally bumped the compiled-module **ABI to 0.9**; the
+current descriptor layout is ABI **0.10** (see
+[the ABI bumps](#the-abi-bumps-09-and-010)).
 
 ## Parser: the `...: t` grammar
 
@@ -313,18 +314,17 @@ struct store.
 
 ### Seven `TitanVarg*` structs, one per `ctype`
 
-`titan-runtime/titan.h` declares seven backing structs, one per element
-`ctype`, so the flexible array member always matches the element C type exactly
-(no punning):
+`titan-runtime/titan.h` declares seven descriptor structs, one per element
+`ctype`, so `args` has the exact element pointer type (no punning):
 
 ```c
-typedef struct { lu_byte n_args; lua_Integer args[]; } TitanVargInteger;
-typedef struct { lu_byte n_args; lua_Number  args[]; } TitanVargFloat;
-typedef struct { lu_byte n_args; int         args[]; } TitanVargBoolean;
-typedef struct { lu_byte n_args; TString    *args[]; } TitanVargString;
-typedef struct { lu_byte n_args; Table      *args[]; } TitanVargArrayOrMap;
-typedef struct { lu_byte n_args; TValue      args[]; } TitanVargValue;
-typedef struct { lu_byte n_args; Udata      *args[]; } TitanVargNominal;
+typedef struct { lu_byte n_args; lua_Integer *args; } TitanVargInteger;
+typedef struct { lu_byte n_args; lua_Number  *args; } TitanVargFloat;
+typedef struct { lu_byte n_args; int         *args; } TitanVargBoolean;
+typedef struct { lu_byte n_args; TString    **args; } TitanVargString;
+typedef struct { lu_byte n_args; Table      **args; } TitanVargArrayOrMap;
+typedef struct { lu_byte n_args; TValue      *args; } TitanVargValue;
+typedef struct { lu_byte n_args; Udata      **args; } TitanVargNominal;
 #define TITAN_VARARG_MAX 200
 ```
 
@@ -351,21 +351,25 @@ Two design points [§2.C / §2.G]:
   out of the struct makes forwarding mutation-free: a callee just computes and
   passes a different `_start` against a shared, immutable struct.
 
-The flexible array member `args[]` is the **pointer/ABI form only**. At a static
-call site where the count `N` is a compile-time constant, the coder emits a
-*concrete-array local* and passes its address (a literal FAM type cannot be a
-stack local — an ISO C constraint):
+At a static call site where the count `N` is a compile-time constant, the coder
+emits a typed C array for the elements plus a named descriptor that points at
+that array:
 
 ```c
-struct { lu_byte n_args; lua_Integer args[N]; } _varg_3 = { N, { a, b } };
-f(L, _mod, _fn, /* params... */ (TitanVargInteger *)&_varg_3, /* _start = */ 0, /* out... */);
+lua_Integer _vargargs_3[N] = { a, b };
+TitanVargInteger _varg_3 = { N, _vargargs_3 };
+f(L, _mod, _fn, /* params... */ &_varg_3, /* _start = */ 0, /* out... */);
 ```
 
-`args` is reached only via member access, so the padding after the single
-`lu_byte n_args` is identical between the concrete write type and the FAM read
-type (common-initial-sequence). For an **empty** vararg ISO C forbids `args[0]`,
-so the coder emits `args[1]` with `n_args == 0` and `{ 0 }`; the bounds checks
-guarantee `args` is never read.
+Both locals are ordinary C-stack objects. That is safe because the descriptor
+stores only a count and a pointer to element storage. For collectable element
+types, the elements are pointers to Lua GC objects (`TString*`, `Table*`,
+`Udata*`) or tagged `TValue`s; Lua's GC does not move those objects. The stack
+relocation hazard is pointers to Lua **stack slots**, and the descriptor does
+not store those.
+
+For an **empty** static vararg the coder still emits a one-element C array with
+`n_args == 0` and `{ 0 }`; the bounds checks guarantee `args` is never read.
 
 ### The native ABI: trailing `_varargs` + `_start`
 
@@ -396,7 +400,7 @@ A lambda's `ctx` is fresh (`newcontext`), so `ctx.varargs` starts nil and is set
 only for a variadic lambda — an inner lambda **never inherits** the enclosing
 function's `...` (scope rule 4 enforced a second time, in codegen).
 
-### `genluaentry` builds a GC-anchored `Udata0`
+### `genluaentry` builds GC-anchored element storage plus a C-stack descriptor
 
 The Lua entry wrapper (`genluaentry`), reached from `require`/Lua and the
 generic value-call path, captures the incoming arg count *before* the
@@ -406,15 +410,15 @@ at least %d`), then builds the struct from the surplus args:
 
 1. `_vcount = _nargs − nfixed`; **cap-check** `_vcount <= TITAN_VARARG_MAX`,
    else raise; `lu_byte _nvarargs = (lu_byte)_vcount`.
-2. Allocate the struct as a **0-uservalue `Udata`** sized to hold the FAM inline
-   (`sizeudata(0, sizeof(struct) + n*sizeof(elem))`), with `nuvalue = 0` and
-   `metatable = NULL`, and **anchor it on the Lua stack** — not a C-stack VLA,
-   because it must survive the error-handler frame and any GC the per-element
-   coercion triggers.
-3. Read each surplus arg `s2v(_vfunc + nfixed + 1 + j)` through the same
+2. Allocate the **element array** as a 0-uservalue `Udata` payload
+   (`sizeudata(0, n * sizeof(elem))`), with `nuvalue = 0` and
+   `metatable = NULL`, and **anchor it on the Lua stack**. The payload is
+   runtime-sized and must survive any GC the per-element coercion triggers.
+3. Build a small `TitanVarg*` descriptor on the C stack:
+   `{ _nvarargs, (ElemCT *)getudatamem(_varargs_ud) }`.
+4. Read each surplus arg `s2v(_vfunc + nfixed + 1 + j)` through the same
    `checkandget` coercion the fixed params use, into `_varargs->args[j]`; this
-   is where the gradual `value → t` boundary check lives. Set `n_args`, pass
-   `_start = 0`.
+   is where the gradual `value → t` boundary check lives. Pass `_start = 0`.
 
 The arg-base pointer (`_vfunc`) is recomputed after the `lua_checkstack`/push
 that may have relocated the stack.
@@ -470,14 +474,15 @@ parameter:
    fixed params (bounds-checked, raising if too few), then pass the **same**
    struct with `_start + delta`. No struct mutation, no save/restore.
 3. **Fresh copy** — element representations differ, or caller static args exceed
-   the callee's fixed params (the prefix grows the tail). Allocate a fresh
-   `Udata0` backing struct (with `luaC_newobj` + `getudatamem`), **cap-check**
-   the runtime count against `TITAN_VARARG_MAX`, anchor it on a reserved slot,
-   copy the static prefix (each gc prefix value anchored on its own slot first —
-   §2.D) then each incoming `...` element converted to the callee element type
-   (identical ctype → raw copy; a `value` widening → `setwrapped`; a `value`
-   narrowing → `checkandget`), set `n_args`, pass `_start = 0`. The fresh
-   allocation can relocate the Lua stack, so the function records
+   the callee's fixed params (the prefix grows the tail). Allocate fresh
+   `Udata0` element storage (with `luaC_newobj` + `getudatamem`), build a
+   C-stack descriptor pointing at it, **cap-check** the runtime count against
+   `TITAN_VARARG_MAX`, anchor the `Udata0` on a reserved slot, copy the static
+   prefix (each gc prefix value anchored on its own slot first — §2.D) then each
+   incoming `...` element converted to the callee element type (identical ctype →
+   raw copy; a `value` widening → `setwrapped`; a `value` narrowing →
+   `checkandget`), set `n_args`, pass `_start = 0`. The fresh allocation can
+   relocate the Lua stack, so the function records
    `ctx.uses_base_off` and `_base` is recomputed from `_base_off` after the
    call.
 
@@ -508,31 +513,44 @@ distinguishes `...: integer` from `...: value`. So:
 `luaD_callnoyield` can relocate the stack, so `codevaluecall` sets
 `ctx.uses_base_off` and recomputes `_base` afterward on both paths.
 
-## The ABI bump (0.9)
+## The ABI bumps (0.9 and 0.10)
 
-`titan-runtime/titan.h` bumps `TITAN_VER "0.8" → "0.9"` and `TITAN_VER_SUFFIX
-"_0_8" → "_0_9"` (which also moves the compiled-module search-path suffix and
-the `TITAN_PATH_0_9` env var). Two cross-`.so` ABI surfaces changed: a variadic
-function's native signature gained the trailing `TitanVargX *` + `int _start`
-pair, and `<mangled>_types` now encodes the `varargtype` element type for
-variadic functions and methods. A 0.8 module has neither, so 0.8 and 0.9 `.so`s
-are ABI-incompatible and live under different `TITAN_PATH` directories. (The
-internal `Udata0` reuse for `genluaentry`/case-3/`{...}` does not itself force a
-bump.) The `.so`-only import path round-trips `varargtype` through serialize and
-is covered by `spec/coder/so_import_spec.lua` and
-`spec/checker/so_rehydration_spec.lua`.
+Variadic support bumped `titan-runtime/titan.h` from `TITAN_VER "0.8"` to
+`"0.9"` and `TITAN_VER_SUFFIX "_0_8"` to `"_0_9"` (which also moved the
+compiled-module search-path suffix and the `TITAN_PATH_0_9` env var). Two
+cross-`.so` ABI surfaces changed: a variadic function's native signature gained
+the trailing `TitanVargX *` + `int _start` pair, and `<mangled>_types` began
+encoding the `varargtype` element type for variadic functions and methods. A
+0.8 module has neither, so 0.8 and 0.9 `.so`s are ABI-incompatible.
 
-## GC discipline: an untraced payload
+The current ABI is `0.10` (`TITAN_VER_SUFFIX "_0_10"`,
+`TITAN_PATH_0_10`). The `TitanVargX` family changed from an inline
+flexible-array object (`lu_byte n_args; T args[]`) to a descriptor
+(`lu_byte n_args; T *args`). The native parameter type name stayed the same, but
+the struct layout did not; mixing 0.9 and 0.10 modules would misread the bytes
+after `n_args`, so they must live under different `TITAN_PATH` directories.
 
-The backing struct's storage is a `Udata`'s raw payload (`getudatamem`), and
+The `.so`-only import path round-trips `varargtype` through serialize and is
+covered by `spec/coder/so_import_spec.lua` and
+`spec/checker/so_rehydration_spec.lua`. `spec/abi_spec.lua` pins the current
+compiler/runtime ABI constants.
+
+## GC discipline: descriptor pointers and untraced payloads
+
+Runtime-sized element arrays live in a `Udata` raw payload (`getudatamem`), and
 `traverseudata` marks only a userdata's `metatable` and its `uv[0..nuvalue-1]`
 user values — **never `getudatamem`**. A 0-uservalue `Udata` (`nuvalue == 0`)
 therefore has a payload that is *invisible* to the collector. The invariant the
 codegen maintains [§2.D]:
 
-> Every collectable element reachable through any vararg struct is independently
-> anchored on a live Lua-stack slot for the struct's lifetime; the struct object
-> anchors only its own storage.
+> Every collectable element reachable through any vararg descriptor is
+> independently anchored on a live Lua-stack slot for the descriptor's lifetime;
+> an anchored `Udata0` only keeps the element buffer itself alive.
+
+The descriptor may be a C-stack local. That is not a moving-GC hazard: Lua's GC
+does not move objects, so a pointer to a `TString`, `Table`, `Udata`, or a
+payload buffer remains valid across collection. Only pointers into Lua stack
+locations need rebasing after stack growth/shrink.
 
 This holds without per-element re-materialization, by LIFO stack discipline and
 the fact that Lua's GC is **non-moving** (the *object* addresses an element
@@ -547,7 +565,9 @@ points to never change; only the stack array can relocate):
   anchors each gc prefix value on a reserved slot *before* the `Udata0`
   allocation that may GC).
 * **The `Udata0` itself** is stack-anchored so its *buffer* survives a GC during
-  the copy/call; it has no `__gc`, no metatable, no `uv[]`.
+  the copy/call; it has no `__gc`, no metatable, no `uv[]`. The descriptor that
+  points at that buffer can stay on the C stack because it stores no Lua stack
+  slot addresses.
 
 Two more mechanical points:
 

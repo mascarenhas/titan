@@ -516,10 +516,10 @@ local function setslot(typ --[[:table]], dst --[[:string]], src --[[:string]])
     elseif typ._tag == "Type.String" then tmpl = "setsvalue(L, $DST, $SRC);"
     elseif typ._tag == "Type.Array" then tmpl = "sethvalue(L, $DST, $SRC);"
     elseif typ._tag == "Type.Map" then tmpl = "sethvalue(L, $DST, $SRC);"
-    elseif typ._tag == "Type.Value" then tmpl = "setobj2t(L, $DST, &$SRC);"
+    elseif typ._tag == "Type.Value" then tmpl = "do { TValue _titan_v = $SRC; setobj2t(L, $DST, &_titan_v); } while (0);"
     elseif typ._tag == "Type.Nominal" then tmpl = "setuvalue(L, $DST, $SRC);"
-    elseif typ._tag == "Type.Option" then tmpl = "setobj2t(L, $DST, &$SRC);"
-    elseif typ._tag == "Type.Function" then tmpl = "setobj2t(L, $DST, &$SRC);"
+    elseif typ._tag == "Type.Option" then tmpl = "do { TValue _titan_v = $SRC; setobj2t(L, $DST, &_titan_v); } while (0);"
+    elseif typ._tag == "Type.Function" then tmpl = "do { TValue _titan_v = $SRC; setobj2t(L, $DST, &_titan_v); } while (0);"
     else
         error("invalid type " .. types.tostring(typ))
     end
@@ -540,11 +540,14 @@ local function setwrapped(typ --[[:table]], dst --[[:string]], src --[[:string]]
     elseif typ._tag == "Type.Option" and typ.base._tag == "Type.Nominal" then
         -- $SRC is a TValue already holding the udata value.
         return render([[
-            if(ttisnil(&$SRC)) {
+            do {
+                TValue _titan_v = $SRC;
+                if(ttisnil(&_titan_v)) {
                 setnilvalue($DST);
-            } else {
-                setobj2t(L, $DST, &$SRC);
-            }
+                } else {
+                    setobj2t(L, $DST, &_titan_v);
+                }
+            } while (0);
         ]], {
             DST = dst,
             SRC = src
@@ -616,20 +619,25 @@ local function initval(typ --[[:table]])
     else return "0" end
 end
 
--- C `setjmp` correctness (C11 §7.13.2.1): a non-`volatile` automatic of a
--- function that calls `setjmp` and is changed between the `setjmp` and the
--- matching `longjmp` has an indeterminate value after the longjmp. The inline
--- try boundary makes the whole native function a setjmp scope, so a non-GC local
--- or parameter from an enclosing scope that is assigned inside a protected region
--- and read afterward (in catch, or after a handled error) is at risk. GC-typed
--- locals live in Lua stack slots (memory, not C autos) and are already safe.
--- Conservative first cut (correctness over a few extra `volatile`s; narrowing the
--- liveness set is a later optimization): when the function contains ANY StatTry
--- (`ctx.has_try`), qualify every non-GC C scalar declaration `volatile`. Returns
--- the leading qualifier ("volatile " or "").
-local function vqual(ctx, typ)
-    if ctx.has_try and not types.is_gc(typ) then return "volatile " end
-    return ""
+-- C `setjmp` correctness (C11 §7.13.2.1): an automatic variable of a function
+-- that calls `setjmp`, is changed between the `setjmp` and matching `longjmp`,
+-- and is read after the longjmp has an indeterminate value unless it is
+-- `volatile`-qualified. The inline try boundary makes the whole native function
+-- a setjmp scope. Conservative first cut (correctness over a few extra
+-- `volatile`s; narrowing the liveness set is a later optimization): when the
+-- function contains ANY StatTry (`ctx.has_try`), qualify every generated C
+-- local/parameter that can represent a Titan local/parameter, including GC
+-- pointer types. Stack slots keep GC objects alive, but reads still often go
+-- through the C automatic, so the automatic itself must be volatile too.
+local function cvardecl(ctx, typ, name)
+    local ct = ctype(typ)
+    if not ctx.has_try then
+        return ct .. " " .. name
+    end
+    if ct:sub(-1) == "*" then
+        return ct .. " volatile " .. name
+    end
+    return "volatile " .. ct .. " " .. name
 end
 
 -- A statement after which control never falls through (return/break/raise). The
@@ -1263,7 +1271,6 @@ local function codefor(ctx, node)
     -- into a non-terminating loop; and the visible control variable is a
     -- fresh copy each iteration (a separate internal index advances), so it
     -- is independent of the iteration and read-only.
-    local cvtyp = node.decl._type._tag == "Type.Integer" and "lua_Integer" or "lua_Number"
     local subs = {
         LOOPSAVE = loopsave,
         CVAR = node.decl._cvar,
@@ -1271,7 +1278,7 @@ local function codefor(ctx, node)
         -- volatile if the function contains a try (it is an enclosing-scope C auto
         -- relative to a try in the loop body — C setjmp rule).
         CVARDECL = node.decl._used
-            and (vqual(ctx, node.decl._type) .. cvtyp .. " " .. node.decl._cvar .. " = _foridx;") or "",
+            and (cvardecl(ctx, node.decl._type, node.decl._cvar) .. " = _foridx;") or "",
         CSSTATS = csstats, CSEXP = csexp,
         CFSTATS = cfstats, CFEXP = cfexp,
         CISTATS = cistats, CIEXP = ciexp,
@@ -3232,7 +3239,7 @@ local function codestat_dispatch(ctx, node)
             elseif decl._used then
                 local typ = decl._type
                 decl._cvar = "_local_" .. localname(ctx, decl.name)
-                local cdecl = vqual(ctx, typ) .. ctype(typ) .. " " .. decl._cvar .. ";"
+                local cdecl = cvardecl(ctx, typ, decl._cvar) .. ";"
                 local cslot = ""
                 local cset = ""
                 if types.is_gc(typ) then
@@ -5151,7 +5158,7 @@ local function codefuncdec(tlcontext, node)
         if self._boxed then
             table.insert(stats, codeboxparam(ctx, self))
         end
-        table.insert(cparams, vqual(ctx, self._type) .. ctype(self._type) .. " " .. self._cvar)
+        table.insert(cparams, cvardecl(ctx, self._type, self._cvar))
     end
     for _, param in ipairs(fixed_params(node.params)) do
         param._cvar = "_param_" .. param.name
@@ -5165,7 +5172,7 @@ local function codefuncdec(tlcontext, node)
         if param._boxed then
             table.insert(stats, codeboxparam(ctx, param))
         end
-        table.insert(cparams, vqual(ctx, param._type) .. ctype(param._type) .. " " .. param._cvar)
+        table.insert(cparams, cvardecl(ctx, param._type, param._cvar))
     end
     -- Variadic: the backing struct + start offset, pinned after the declared
     -- params and before the out-params, and threaded into ctx for `...` lowering.
@@ -5604,7 +5611,7 @@ function codelambdadec(tlcontext, node)
         if param._boxed then
             table.insert(stats, codeboxparam(ctx, param))
         end
-        table.insert(cparams, vqual(ctx, param._type) .. ctype(param._type) .. " " .. param._cvar)
+        table.insert(cparams, cvardecl(ctx, param._type, param._cvar))
     end
     -- A lambda's `ctx` is fresh (newcontext), so ctx.varargs starts nil; set it
     -- only for a variadic lambda. An inner lambda thus NEVER inherits an enclosing
@@ -5774,9 +5781,17 @@ $SIGS
 
 local postamble = [[
 int $LUAOPEN_NAME(lua_State *L) {
+    titan_invalidate_backtrace_state(L);
     Udata *mod = $INITNAME(L);
     setuvalue(L, s2v(L->top.p), mod);
     L->top.p++;
+    return 1;
+}
+]]
+
+local modabi = [[
+int $ABINAME(lua_State* L) {
+    lua_pushliteral(L, TITAN_VER);
     return 1;
 }
 ]]
@@ -5834,7 +5849,12 @@ local function import_module(loadmods, initmods, sigs, mprefixes, dynamic, node)
         local file = modname:gsub("[.]", "/") .. ".so"
         table.insert(loadmods, render([[
             void *$HANDLE = loadlib(L, "$FILE");
-        ]], { HANDLE = mprefix .. "handle", FILE = file }))
+            titan_check_abi(L, $HANDLE, "$ABI", "$FILE");
+        ]], {
+            HANDLE = mprefix .. "handle",
+            FILE = file,
+            ABI = mprefix .. "abi",
+        }))
         table.insert(initmods, render([[
             {
                 Udata* (*$INIT)(lua_State *L) = titan_cast_func(Udata* (*)(lua_State*), loadsym(L, $HANDLE, "$INIT"));
@@ -5894,7 +5914,12 @@ local function init_data_from_other_modules(tlcontext, includes, loadmods, initm
                 local file = func.module:gsub("[.]", "/") .. ".so"
                 table.insert(loadmods, render([[
                     void *$HANDLE = loadlib(L, "$FILE");
-                ]], { HANDLE = mprefix .. "handle", FILE = file }))
+                    titan_check_abi(L, $HANDLE, "$ABI", "$FILE");
+                ]], {
+                    HANDLE = mprefix .. "handle",
+                    FILE = file,
+                    ABI = mprefix .. "abi",
+                }))
             end
             table.insert(loadmods, render([[
                 $NAME = titan_cast_func($TYPE, loadsym(L, $HANDLE, "$NAME"));
@@ -6490,6 +6515,10 @@ function coder.generate(modname, ast, static_deps)
     table.insert(code, render(modtypes, {
         TYPESNAME = tlcontext.prefix .. "types",
         TYPES = string.format("%q", types.serialize(ast._type))
+    }))
+
+    table.insert(code, render(modabi, {
+        ABINAME = tlcontext.prefix .. "abi",
     }))
 
     init_data_from_other_modules(tlcontext, includes, loadmods, initrecs, mprefixes, static_deps)

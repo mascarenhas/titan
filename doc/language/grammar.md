@@ -26,10 +26,11 @@ is not a reserved word. Tokenization is longest-match, so `andy`,
 `return17`, and `_end` are names. The reserved words are:
 
 ```
-and     as      boolean  break     do     else    elseif  end
-false   float   for      foreign   function       goto    if
-import  in      integer  local     nil    not     or      record
-repeat  return  string   then      true   until   value   while
+and     as      boolean  break     catch   do      else    elseif
+end     false   finally  float     for     foreign function goto
+if      import  in       integer   local   nil     not      or
+raise   record  repeat   return    string  then    true     until
+value   while
 ```
 
 Note that `goto` and `in` are **reserved but unused**: no Titan construct
@@ -50,9 +51,9 @@ The symbolic tokens are:
 (   )   [   ]   {   }   ;   :   ,   .   ->  ?
 ```
 
-`->` (function types) and `?` (option types) are Titan additions; `...`
-and `::` are recognized by the lexer but used by no grammar rule —
-there are no varargs and no labels.
+`->` (function types), `?` (option types), and `...` (variadic
+parameters and spreads) are Titan additions. `::` is recognized by the
+lexer but used by no grammar rule — there are no labels.
 
 ### Comments
 
@@ -243,7 +244,8 @@ written directly. See [the type system](types.md#function-types).
 ## Statements
 
 ```
-block      ::= {statement} [returnstat]
+block      ::= simpleblock ['catch' simpleblock] ['finally' simpleblock]
+simpleblock::= {statement} [returnstat]
 statement  ::= ';'
             |  do block end
             |  while exp do block end
@@ -253,6 +255,7 @@ statement  ::= ';'
             |  local decllist '=' explist
             |  varlist '=' explist
             |  functioncall
+            |  raise [exp]
 returnstat ::= return [explist] [';']
 varlist    ::= var {',' var}
 explist    ::= exp {',' exp}
@@ -404,23 +407,27 @@ confused rule is not syntax at all:
    `x + 1`, the parser commits to an assignment and reports `Expected
    '=' after variable.` instead).
 2. **`return` only at the end of a block.** As in Lua, `returnstat` is
-   the optional final element of `block`; a statement after `return`
+   the optional final element of `simpleblock`; a statement after `return`
    (even another `return`) is a syntax error.
-3. **`as` does not chain.** `x as integer as float` is a syntax error;
+3. **`catch`/`finally` are block trailers.** There is no `try` keyword.
+   A block may have a `catch`, a `finally`, or both in that order; the
+   clause bodies are `simpleblock`s so an inner catch cannot consume an
+   outer finally.
+4. **`as` does not chain.** `x as integer as float` is a syntax error;
    the cast operand is a `simpleexp`, so chaining grammatically
    requires parentheses (`(x as integer) as value`). Which casts are
    then *accepted* is a typing matter ([Expressions](expressions.md)) —
    the checker rejects `(x as integer) as float`, for instance, with
    `cannot cast 'integer' to 'float'`.
-4. **Lvalues cannot be parenthesized.** `(x) = 1` is a syntax error
+5. **Lvalues cannot be parenthesized.** `(x) = 1` is a syntax error
    (`Expected a valid lvalue in the left side of assignment but found
    a regular expression.`).
-5. **Declarations need initializers.** Both module variables and
+6. **Declarations need initializers.** Both module variables and
    `local` statements require `= explist`.
-6. **Parenthesizing a call truncates it.** `(f())` adjusts a
+7. **Parenthesizing a call truncates it.** `(f())` adjusts a
    multiple-value call to exactly its first value, as in Lua. See
    [Functions](functions.md).
-7. **Record constructors needing a type from context is a typing rule,
+8. **Record constructors needing a type from context is a typing rule,
    not a syntax rule.** The grammar places `constructor` wherever any
    expression can go; the *type checker* then requires a named-field
    constructor to appear where the expected record type is known,

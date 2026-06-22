@@ -97,4 +97,46 @@ describe(".so-only cross-module trace names (Phase 5 deliverable 2)", function()
         ]])
         assert.truthy(rok, out)
     end)
+
+    it("resymbolizes a Lua-required plugin called under an older module's handler",
+       function ()
+        local ok, err = build_so_chain({
+            { name = "bthost", src = [[
+                function boom(): integer
+                    raise "host"
+                    return 0
+                end
+                function apply(f: () -> integer): integer
+                    return f()
+                end
+            ]] },
+            { name = "btplugin", src = [[
+                function boom(): integer
+                    raise "plugin"
+                    return 0
+                end
+            ]] },
+        })
+        assert.truthy(ok, err)
+        local rok, out = call("bthost", [[
+            local titan = require 'titan'
+            local ok1, err1 = pcall(bthost.boom)
+            assert(not ok1 and err1 == "host")
+            assert(titan.backtrace():find("in bthost.boom", 1, true))
+
+            -- Lua's own require dlopens btplugin after bthost's runtime has
+            -- already snapshotted libbacktrace. The subsequent error is raised by
+            -- btplugin's native function, but under bthost.apply's Titan entry
+            -- handler, so bthost's titan.o must notice the shared invalidation.
+            local plugin = require 'btplugin'
+            local ok2, err2 = pcall(bthost.apply, plugin.boom)
+            assert(not ok2 and err2 == "plugin")
+            local bt = titan.backtrace()
+            assert(bt:find("in btplugin.boom", 1, true),
+                   "plugin frame missing under host handler after Lua require\n" .. tostring(bt))
+            assert(bt:find("in bthost.apply", 1, true),
+                   "host caller frame missing under host handler\n" .. tostring(bt))
+        ]])
+        assert.truthy(rok, out)
+    end)
 end)

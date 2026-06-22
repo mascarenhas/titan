@@ -725,10 +725,12 @@ checkstat = util.make_visitor({
             local errdecl = ast.Decl(node.loc, "error", false, false)
             errdecl._type = types.Value()
             errdecl._used = true
+            errdecl._catch_implicit = true
             declare(errdecl, st)
             local tbdecl = ast.Decl(node.loc, "traceback", false, false)
             tbdecl._type = types.String()
             tbdecl._used = true
+            tbdecl._catch_implicit = true
             declare(tbdecl, st)
             node._error_decl = errdecl
             node._traceback_decl = tbdecl
@@ -817,6 +819,11 @@ checkstat = util.make_visitor({
                         if var._decl._forcontrol then
                             checker.typeerror(errors, var.loc,
                                 "cannot assign to 'for' control variable '%s'",
+                                var._decl.name)
+                        end
+                        if var._decl._catch_implicit then
+                            checker.typeerror(errors, var.loc,
+                                "cannot assign to catch local '%s'",
                                 var._decl.name)
                         end
                         var._decl._assigned = true

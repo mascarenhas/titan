@@ -312,5 +312,27 @@ describe("error handling (typechecker)", function()
                 end
             ]])
         end)
+
+        it("rejects assignment to the implicit catch error local", function()
+            bad("cannot assign to catch local 'error'", [[
+                function f(): value
+                    nop(1)
+                catch
+                    error = "replacement"
+                    return error
+                end
+            ]])
+        end)
+
+        it("rejects assignment to the implicit catch traceback local", function()
+            bad("cannot assign to catch local 'traceback'", [[
+                function f(): string
+                    nop(1)
+                catch
+                    traceback = "replacement"
+                    return traceback
+                end
+            ]])
+        end)
     end)
 end)

@@ -26,7 +26,7 @@ local m = require "sum"
 print(m.sum_list({1, 2, 3, 4})) --> 10
 ```
 
-This is the reference for the language as implemented by the Titan 0.5
+This is the reference for the language as implemented by the Titan 0.10
 prototype compiler in this repository. It replaces the old single-file
 manual. For how the compiler itself works — including how each construct
 is translated to C — see the
@@ -119,11 +119,11 @@ with a clean error; each links to the chapter that documents it in full.
 
 ### Other
 
-* **Error handling stops at the first step of its plan.** Titan has no
-  raise/catch construct of its own, and `titan.backtrace()` and the merged
-  Titan+Lua trace are experimental — Titan frames show mangled C names and
-  the two tracebacks sit side by side
-  ([error handling](error-handling.md#the-error-handler-and-titanbacktrace)).
+* **Error handling is intentionally small.** Titan has `raise`,
+  `catch`, and `finally`, but errors are still plain Lua values plus an
+  out-of-band traceback: there is no exception class hierarchy and no
+  chaining/cause mechanism. A new error in a catch or finally replaces the
+  previous one ([error handling](error-handling.md)).
 * **No standard library yet.** Titan code uses the FFI, imported Titan
   modules, or its Lua host for library functionality.
 

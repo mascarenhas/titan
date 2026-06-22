@@ -77,7 +77,21 @@ function driver.defaultloader(static_deps)
         local mtime_bin, binf = findmodule(driver.TITAN_BIN_PATH, modname, ".so")
         local mtime_src, srcf = findmodule(driver.TITAN_SOURCE_PATH, modname, ".titan")
         if mtime_bin and binf and ((not mtime_src) or mtime_bin >= mtime_src) then
-            local typesf, err = package.loadlib(binf, modname:gsub("[%-.]", "_") .. "_types")
+            local prefix = modname:gsub("[%-.]", "_")
+            local abif, err = package.loadlib(binf, prefix .. "_abi")
+            if not abif then
+                return false, "compiled module '" .. modname
+                    .. "' has no compatible Titan ABI marker (expected "
+                    .. driver.TITAN_VER .. "): " .. tostring(err)
+            end
+            local ok, abi_or_err = pcall(abif)
+            if not ok then return false, abi_or_err end
+            if abi_or_err ~= driver.TITAN_VER then
+                return false, "compiled module '" .. modname
+                    .. "' ABI mismatch: expected " .. driver.TITAN_VER
+                    .. " but found " .. tostring(abi_or_err)
+            end
+            local typesf, err = package.loadlib(binf, prefix .. "_types")
             if not typesf then return false, err end
             local ok, types_or_err = pcall(typesf)
             if not ok then return false, types_or_err end

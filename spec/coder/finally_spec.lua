@@ -214,6 +214,26 @@ describe("finally (error-handling Phase 5)", function()
         assert.match("OK", out)
     end)
 
+    it("a finally that RAISES overrides a pending catch return", function()
+        local out = compile_and_run([[
+            function run(): integer
+                do
+                    raise "body"
+                catch
+                    return 7
+                finally
+                    raise "from-finally"
+                end
+            end
+        ]], [==[
+            local ok, err = pcall(test.run)
+            assert(not ok, "finally raise should override the catch return")
+            assert(err == "from-finally", "wrong override value: " .. tostring(err))
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
     it("a finally that RAISES overrides a pending break", function()
         local out = compile_and_run([[
             function run(): integer
