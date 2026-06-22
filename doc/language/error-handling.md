@@ -9,7 +9,7 @@ programmer intent are run-time errors.
 
 Run-time errors are ordinary Lua errors. They can be caught by Lua
 `pcall`/`xpcall`, they can be raised from Titan with `raise`, and they can
-now be handled inside Titan with `catch` and `finally` block trailers.
+be handled inside Titan with `catch` and `finally` block trailers.
 
 ## Compile-time and run-time errors
 
@@ -113,8 +113,9 @@ end
 The `catch` block has two implicit locals:
 
 * `error: value` — the caught Lua error value.
-* `traceback: string` — the unified Titan/Lua traceback captured at the
-  original raise or run-time fault.
+* `traceback: string` — the raw unified Titan/Lua traceback captured at
+  the original raise or run-time fault. It contains frame lines only: no
+  error message, no `stack traceback:` header, and no tab indentation.
 
 These locals are read-only snapshots. Assigning to `error` or `traceback`
 inside the catch is a compile-time error.
@@ -217,9 +218,11 @@ Titan can also catch errors raised by Lua functions it calls. The caught
 `error` value is whatever Lua raised, and `traceback` is still a string.
 
 An uncaught error in a standalone Titan executable is reported by the
-generated top-level handler: it prints the error value and the unified
-traceback to standard error and exits non-zero. A successful `main`
-returns its integer result as the process exit status.
+generated top-level handler: it prints `<progname>: <error message>`,
+then `stack traceback:`, then the unified traceback with tab-indented
+frame lines through the Titan `main` frame, and exits non-zero. The
+synthetic Lua bootstrap used to call `main` is not shown. A successful
+`main` returns its integer result as the process exit status.
 
 ## `titan.backtrace()`
 
@@ -239,6 +242,8 @@ compiled Titan frames with Lua frames. Titan frames use source names such
 as `m.func`, `m.Record:method`, `m.Record.static`, or
 `anonymous function at m.titan:12`, and source lines are attributed to the
 Titan `.titan` call or raise site when debug information is available.
+The returned string is the raw frame list: it does not include the error
+message, a `stack traceback:` header, or tab indentation.
 
 When Titan catches and handles an error, the registry slot backing
 `titan.backtrace()` is cleared; the handled trace is available as the

@@ -9,6 +9,18 @@
 #include "llimits.h"
 #include "titan.h"
 
+static void titan_bt_addframe_lstring(luaL_Buffer *buf, int *wrote_any,
+                                      const char *text, size_t len) {
+    if (*wrote_any) luaL_addchar(buf, '\n');
+    luaL_addlstring(buf, text, len);
+    *wrote_any = 1;
+}
+
+static void titan_bt_addframe(luaL_Buffer *buf, int *wrote_any,
+                              const char *text) {
+    titan_bt_addframe_lstring(buf, wrote_any, text, strlen(text));
+}
+
 /* Native-stack capture backend. libbacktrace symbolizes PCs across every
 ** dlopened .so to a #line-attributed .titan file/line (and recovers inlined
 ** frames); the old execinfo path is kept as a no-DWARF fallback for platforms
@@ -19,6 +31,33 @@
 #define TITAN_HAVE_LIBBACKTRACE 1
 #else
 #include <execinfo.h>
+#endif
+
+#ifndef TITAN_HAVE_LIBBACKTRACE
+/* Convert a luaL_traceback-style string into Titan's raw traceback value:
+** remove the leading "stack traceback:" line and strip the presentation tab
+** from the beginning of each frame line. */
+static void titan_add_raw_lua_trace(luaL_Buffer *buf, int *wrote_any,
+                                    const char *trace) {
+    const char *p = trace;
+    if (p == NULL) return;
+    if (strncmp(p, "stack traceback:", 16) == 0) {
+        p += 16;
+        if (*p == '\n') p++;
+    }
+    while (*p != '\0') {
+        const char *e;
+        size_t len;
+        if (*p == '\t') p++;
+        e = strchr(p, '\n');
+        len = e ? (size_t)(e - p) : strlen(p);
+        if (len > 0) {
+            titan_bt_addframe_lstring(buf, wrote_any, p, len);
+        }
+        if (e == NULL) break;
+        p = e + 1;
+    }
+}
 #endif
 
 #ifdef TITAN_HAVE_LIBBACKTRACE
@@ -172,13 +211,6 @@ static int titan_capture_native(lua_State *L, titan_native_stack *st) {
     return 1;
 }
 
-static void titan_bt_addframe(luaL_Buffer *buf, int *wrote_any,
-                              const char *text) {
-    if (*wrote_any) luaL_addchar(buf, '\n');
-    luaL_addstring(buf, text);
-    *wrote_any = 1;
-}
-
 /* A best-effort function name for a CallInfo, mirroring luaL_traceback's
 ** pushfuncname but without the global-name search (which would manipulate the
 ** Lua stack while a luaL_Buffer is open at the top). Writes into `out` and
@@ -227,7 +259,7 @@ static void titan_format_native(lua_State *L, char *line, size_t linesz,
                                 const titan_native_frame *f) {
     char nm[256];
     titan_qualified_name(L, f->function, nm, sizeof(nm));
-    snprintf(line, linesz, "\t%s:%d: in %s", f->base, f->lineno, nm);
+    snprintf(line, linesz, "%s:%d: in %s", f->base, f->lineno, nm);
 }
 
 typedef struct {
@@ -310,8 +342,7 @@ static int titan_drain_native_run(lua_State *L, luaL_Buffer *buf,
 ** registry[TITAN_NAMES_KEY] (titan_format_native), falling back to the raw
 ** symbol if absent.
 */
-static void titan_push_unified_trace(lua_State *L, luaL_Buffer *buf,
-                                     const char *msg) {
+static void titan_push_unified_trace(lua_State *L, luaL_Buffer *buf) {
     titan_native_frame frames[TITAN_MAX_NATIVE];
     titan_native_stack st;
     int ni = 0;          /* next un-emitted native frame index */
@@ -319,12 +350,6 @@ static void titan_push_unified_trace(lua_State *L, luaL_Buffer *buf,
     int suppress_next_entry = 0;
     int level = 1;       /* skip errorhandler's own CallInfo (level 0) */
     lua_Debug ar;
-
-    if (msg != NULL) {
-        luaL_addstring(buf, msg);
-        luaL_addchar(buf, '\n');
-    }
-    luaL_addstring(buf, "stack traceback:");
 
     st.frames = frames;
     st.n = 0;
@@ -356,7 +381,7 @@ static void titan_push_unified_trace(lua_State *L, luaL_Buffer *buf,
                 /* entry-wrapper CallInfo is a boundary marker only */
             } else {
                 char line[512], nm[256];
-                snprintf(line, sizeof(line), "\t%s: in %s",
+                snprintf(line, sizeof(line), "%s: in %s",
                          ar.short_src, titan_funcname(&ar, nm, sizeof(nm)));
                 titan_bt_addframe(buf, &wrote_any, line);
             }
@@ -365,16 +390,16 @@ static void titan_push_unified_trace(lua_State *L, luaL_Buffer *buf,
             char line[512], nm[256];
             const char *fn = titan_funcname(&ar, nm, sizeof(nm));
             if (ar.currentline > 0) {
-                snprintf(line, sizeof(line), "\t%s:%d: in %s",
+                snprintf(line, sizeof(line), "%s:%d: in %s",
                          ar.short_src, ar.currentline, fn);
             } else {
-                snprintf(line, sizeof(line), "\t%s: in %s",
+                snprintf(line, sizeof(line), "%s: in %s",
                          ar.short_src, fn);
             }
             titan_bt_addframe(buf, &wrote_any, line);
         }
         if (ar.istailcall) {
-            titan_bt_addframe(buf, &wrote_any, "\t(...tail calls...)");
+            titan_bt_addframe(buf, &wrote_any, "(...tail calls...)");
         }
     }
 
@@ -571,14 +596,13 @@ int errorhandler(lua_State *L) {
     return 1;  /* keep existing TITAN_BACKTRACE_KEY slot; error obj stays on top */
   }
 
-  /* Regenerate the slot. luaL_Buffer lives on the stack from luaL_buffinit on
-  ** and must stay at the top while in use, so push everything else first. */
+  /* Regenerate the raw traceback slot. luaL_Buffer lives on the stack from
+  ** luaL_buffinit on and must stay at the top while in use, so push everything
+  ** else first. */
 #ifdef TITAN_HAVE_LIBBACKTRACE
   titan_sync_backtrace_generation(L);
 #endif
   lua_pushliteral(L, TITAN_BACKTRACE_KEY);
-  luaL_tolstring(L, top, NULL);
-  lua_pushliteral(L, "\n");
   luaL_Buffer buf;
   luaL_buffinit(L, &buf);
 #ifdef TITAN_HAVE_LIBBACKTRACE
@@ -586,29 +610,28 @@ int errorhandler(lua_State *L) {
   ** supplies every Lua frame, libbacktrace supplies the Titan native frames
   ** spliced at the entry-wrapper boundaries. No separate "C traceback:" section,
   ** no collapsed [Lua] marker. */
-  titan_push_unified_trace(L, &buf, NULL);
+  titan_push_unified_trace(L, &buf);
 #else
-  /* Fallback (no libbacktrace, e.g. musl/Alpine): the Lua-side traceback only,
-  ** plus an execinfo C traceback with no DWARF line info. Two sections, since
-  ** without libbacktrace we cannot splice Titan frames into the Lua trace.
-  ** luaL_traceback pushes its own string; add it to the buffer immediately. */
-  luaL_traceback(L, L, NULL, 1);
-  luaL_addvalue(&buf);
+  /* Fallback (no libbacktrace, e.g. musl/Alpine): store raw Lua traceback lines
+  ** plus raw execinfo C frames. Without libbacktrace we cannot splice Titan
+  ** frames into the Lua trace. */
   {
-    int nested = 0;
+    int wrote_any = 0;
     void *nbuf[255];
-    const int calls = backtrace(nbuf, sizeof(nbuf) / sizeof(void *));
-    char **bt = backtrace_symbols(nbuf, calls);
-    luaL_addstring(&buf, "\nC traceback:\n");
+    int calls;
+    char **bt;
+    luaL_traceback(L, L, NULL, 1);
+    titan_add_raw_lua_trace(&buf, &wrote_any, lua_tostring(L, -1));
+    lua_pop(L, 1);
+    calls = backtrace(nbuf, sizeof(nbuf) / sizeof(void *));
+    bt = backtrace_symbols(nbuf, calls);
     for (int i = 0; i < calls; i++) {
-      if (nested++) { luaL_addchar(&buf, '\n'); }
-      luaL_addstring(&buf, bt[i]);
+      titan_bt_addframe(&buf, &wrote_any, bt[i]);
     }
     free(bt);
   }
 #endif
   luaL_pushresult(&buf);
-  lua_concat(L, 3);
   lua_rawset(L, LUA_REGISTRYINDEX);
   lua_settop(L, top);
   return 1;

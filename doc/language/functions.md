@@ -400,6 +400,8 @@ $ ./answer; echo $?
 
 If a run-time error escapes `main` (or the module fails to load), the
 program prints `<program name>: <error message>` to standard error and
-exits with a failure status, without returning from `main`. For what can
-raise run-time errors and how to handle them, see
+exits with a failure status, without returning from `main`. The report
+also includes `stack traceback:` followed by tab-indented traceback
+frames through the Titan `main` frame; the synthetic Lua bootstrap is not
+shown. For what can raise run-time errors and how to handle them, see
 [Error handling](error-handling.md).

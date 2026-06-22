@@ -41,7 +41,7 @@ describe("raise <exp>", function()
         assert.match("OK", out)
     end)
 
-    it("surfaces the message with a unified trace mentioning the Titan frame", function()
+    it("surfaces the error value separately from the raw unified trace", function()
         local out = compile_and_run([[
             function inner(): integer
                 raise "deep failure"
@@ -56,7 +56,12 @@ describe("raise <exp>", function()
             assert(not ok)
             assert(err == "deep failure", "wrong error value: " .. tostring(err))
             local bt = titan.backtrace()
-            assert(bt:find("stack traceback:", 1, true), "missing trace header\n" .. bt)
+            assert(not bt:find("deep failure", 1, true),
+                   "raw trace should not include the error message\n" .. bt)
+            assert(not bt:find("stack traceback:", 1, true),
+                   "raw trace should not include a trace header\n" .. bt)
+            assert(not bt:find("\t", 1, true),
+                   "raw trace should not include presentation tabs\n" .. bt)
             -- the raising Titan function symbolizes as a native frame, shown by
             -- its qualified Titan name (not the mangled C symbol)
             assert(bt:find("in test.inner", 1, true), "missing inner frame\n" .. bt)
@@ -153,12 +158,28 @@ describe("standalone uncaught errors", function()
             "expected non-zero exit, got " .. tostring(status) .. "\n" .. out)
         assert.truthy(out:find("standalone-boom", 1, true),
             "missing raised error in standalone report\n" .. out)
-        assert.truthy(out:find("stack traceback:", 1, true),
-            "missing traceback in standalone report\n" .. out)
+        assert.truthy(out:find("^test: standalone%-boom\nstack traceback:\n\t"),
+            "standalone report is not Lua-shaped\n" .. out)
+        assert.falsy(out:find("stack traceback:\t", 1, true),
+            "standalone report put the first frame on the header line\n" .. out)
         assert.truthy(out:find("in test.deep", 1, true),
             "missing Titan raising frame in standalone report\n" .. out)
         assert.truthy(out:find("in test.main", 1, true),
             "missing Titan main frame in standalone report\n" .. out)
+    end)
+
+    it("formats a standalone non-string error object like lua.c", function()
+        local status, out = compile_and_run_app([[
+            function main(args: {string}): integer
+                raise false
+                return 0
+            end
+        ]])
+
+        assert.truthy(status and status ~= 0,
+            "expected non-zero exit, got " .. tostring(status) .. "\n" .. out)
+        assert.truthy(out:find("^test: %(error object is a boolean value%)\nstack traceback:\n\t"),
+            "standalone report did not use lua.c-style error conversion\n" .. out)
     end)
 end)
 
@@ -846,7 +867,10 @@ describe("catch", function()
         ]], [==[
             local tb = test.run()
             assert(type(tb) == "string", "traceback not a string: " .. type(tb))
-            assert(tb:find("stack traceback:", 1, true), "no trace header\n" .. tb)
+            assert(not tb:find("stack traceback:", 1, true),
+                   "catch traceback should not include a trace header\n" .. tb)
+            assert(not tb:find("\t", 1, true),
+                   "catch traceback should not include presentation tabs\n" .. tb)
             assert(tb:find("in test.deep", 1, true), "trace lacks deep frame\n" .. tb)
             print("OK")
         ]==])
@@ -947,8 +971,12 @@ describe("catch", function()
             assert(close_seen_original, "__close did not see the original Lua error")
             assert(caught:find("close-error", 1, true),
                    "Titan catch did not receive the __close replacement error: " .. caught)
-            assert(tb:find("close-error", 1, true),
-                   "Titan errorhandler did not recapture the __close replacement trace:\n" .. tb)
+            assert(not tb:find("close-error", 1, true),
+                   "raw traceback should not include the replacement error message:\n" .. tb)
+            assert(tb:find("in test.catch_lua2_error", 1, true),
+                   "Titan errorhandler did not recapture the replacement-error boundary:\n" .. tb)
+            assert(not tb:find("in test.call_lua3", 1, true),
+                   "traceback still points at the original Lua3 call instead of the __close replacement:\n" .. tb)
             print("OK")
         ]==])
         assert.match("OK", out)

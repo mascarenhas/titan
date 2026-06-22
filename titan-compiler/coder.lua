@@ -3050,8 +3050,8 @@ end
 
 -- `raise <exp>`: evaluate the (already `value`-coerced) operand into an anchored
 -- temp, push it onto the Lua stack as the error object, then `lua_error(L)`. The
--- entry wrapper installed `errorhandler` on `L->errfunc`, so the longjmp through
--- `lua_error` runs that handler, which builds the unified Lua+Titan trace before
+-- entry wrapper ensured `errorhandler` is active on `L->errfunc`, so the longjmp
+-- through `lua_error` runs that handler, which builds the unified Lua+Titan trace before
 -- unwinding. The temp is a `value`-typed (GC) TValue, so `newtmp` anchors it in a
 -- reserved stack slot; that anchor keeps it alive across the `lua_checkstack`
 -- (which may run the GC and reallocate the stack) before we copy it to the new top.
@@ -3337,9 +3337,9 @@ end
 -- A StatTry wraps its body in an inline setjmp boundary that replicates
 -- luaD_rawrunprotected + luaD_pcall's error recovery, emitted as straight-line C
 -- in the native function (no thunk, no capture conversion). The Lua entry wrapper
--- already installed errorhandler on L->errfunc, and luaG_errormsg invokes it
--- regardless of which boundary is on L->errorJmp, so the unified trace is already
--- in registry[TITAN_BACKTRACE_KEY] by the time the longjmp lands here.
+-- already ensured errorhandler is active on L->errfunc, and luaG_errormsg invokes
+-- it regardless of which boundary is on L->errorJmp, so the unified trace is
+-- already in registry[TITAN_BACKTRACE_KEY] by the time the longjmp lands here.
 --
 -- Per-try anchored slots (reserveslot -> depths within the function's _base..nslots
 -- region) hold the caught error value and the snapshotted trace string; a write
@@ -5392,7 +5392,9 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
         end
     end
     table.insert(stats, render([[
-        L->errfunc = __save_errfunc;
+        if (TITAN_UNLIKELY(__installed_errfunc)) {
+            L->errfunc = __save_errfunc;
+        }
         return $NRET;
     ]], {
         NRET = #typ.rettypes
@@ -5428,8 +5430,12 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
         $NARGSDECL
         $ERRORSLOT
         ptrdiff_t __save_errfunc = L->errfunc;
-        lua_pushcclosure(L, errorhandler, 0);
-        L->errfunc = savestack(L, L->top.p - 1);
+        int __installed_errfunc = 0;
+        if (TITAN_UNLIKELY(!titan_errfunc_is_errorhandler(L))) {
+            lua_pushcfunction(L, errorhandler);
+            L->errfunc = savestack(L, L->top.p - 1);
+            __installed_errfunc = 1;
+        }
         CClosure *_fn = clCvalue(s2v(func));
         Udata *_mod = uvalue(&_fn->upvalue[0]);
         $ENTRYLINE$BODY
@@ -6133,6 +6139,13 @@ local preamble = [[
 #include "ldo.h"
 
 #include "titan.h"
+
+static inline int titan_errfunc_is_errorhandler(lua_State *L) {
+    if (L->errfunc == 0) return 0;
+    StkId errfunc = restorestack(L, L->errfunc);
+    TValue *v = s2v(errfunc);
+    return ttislcf(v) && fvalue(v) == errorhandler;
+}
 
 $FOREIGNIMPORTS
 

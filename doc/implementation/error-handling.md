@@ -12,15 +12,17 @@ for contributors changing `titan-compiler/coder.lua`,
 
 ## Runtime trace model
 
-Every Lua-callable Titan entry wrapper installs `errorhandler` as
-`L->errfunc` for the duration of the call. When Lua raises an error,
+Every Lua-callable Titan entry wrapper ensures `errorhandler` is active
+as `L->errfunc` for the duration of the call, reusing an outer Titan
+handler when one is already installed. When Lua raises an error,
 `luaG_errormsg` invokes that handler before the longjmp reaches either a
 Lua `pcall` or Titan's inline catch/finally boundary.
 
-The handler stores the rendered traceback in
-`registry[TITAN_BACKTRACE_KEY]`. The error value itself is not wrapped:
-Lua `pcall`, Titan's catch-local `error`, and any re-raise see the exact
-Lua value that was raised.
+The handler stores the raw rendered traceback in
+`registry[TITAN_BACKTRACE_KEY]`: frame lines only, with no error message,
+no `stack traceback:` header, and no presentation tabs. The error value
+itself is not wrapped: Lua `pcall`, Titan's catch-local `error`, and any
+re-raise see the exact Lua value that was raised.
 
 ### Trace pinning
 
@@ -193,7 +195,7 @@ boundary entry. This matters when the longjmp skipped an inner Titan
 Lua-entry wrapper before that wrapper could restore its own message
 handler. Lua `__close` metamethods can raise while cleanup runs; those
 replacement errors should be handled by a valid Titan error handler, not
-by a stale stack slot belonging to a skipped inner entry wrapper.
+by a stale stack slot belonging to an inner entry wrapper.
 
 The saved error object, saved traceback, pending raise object, and
 GC-typed saved return values live in reserved Lua stack slots below the

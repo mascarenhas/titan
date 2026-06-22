@@ -42,9 +42,10 @@ describe("libbacktrace unified stack trace", function()
             local ok, err = pcall(test.outer)
             assert(not ok)
             local bt = titan.backtrace()
-            -- error message and Lua traceback present
-            assert(bt:find(err, 1, true), "missing error message")
-            assert(bt:find("stack traceback:", 1, true), "missing Lua traceback")
+            -- raw trace: no error message, no display header, no tab prefixing
+            assert(not bt:find(err, 1, true), "raw trace included error message")
+            assert(not bt:find("stack traceback:", 1, true), "raw trace included header")
+            assert(not bt:find("\t", 1, true), "raw trace included presentation tabs")
             -- qualified Titan names for BOTH functions present
             assert(bt:find("in test.inner", 1, true), "missing inner frame\n"..bt)
             assert(bt:find("in test.outer", 1, true), "missing outer frame\n"..bt)
@@ -164,9 +165,11 @@ describe("libbacktrace unified stack trace", function()
             local ok = pcall(test.apply, lua_outer, 1) -- Titan -> Lua callback
             assert(not ok)
             local bt = titan.backtrace()
-            -- single section, innermost->outer
-            assert(bt:find("stack traceback:", 1, true), "missing trace header\n"..bt)
+            -- raw trace, innermost->outer
+            assert(not bt:find("stack traceback:", 1, true),
+                   "raw trace included display header\n"..bt)
             assert(not bt:find("C traceback:", 1, true), "regressed to two sections\n"..bt)
+            assert(not bt:find("\t", 1, true), "raw trace included presentation tabs\n"..bt)
             -- no trampoline / mangled-symbol leakage anywhere in the trace
             assert(not bt:find("titanentry", 1, true), "leaked trampoline frame\n"..bt)
             assert(not bt:find("_titan", 1, true), "leaked mangled symbol\n"..bt)
@@ -378,9 +381,8 @@ describe("standalone main top-level error handler", function()
     it("prints message + unified trace to stderr and exits non-zero", function()
         -- main -> mid (Titan) -> deep (Titan) -> uncaught error. The bootstrap
         -- runs main under lua_pcall with errorhandler installed; the unified
-        -- trace captured on the intact stack must reach stderr, carrying BOTH
-        -- the Lua bootstrap frame(s) and the Titan native frames, and the
-        -- process must exit non-zero.
+        -- trace captured on the intact stack is formatted for standalone
+        -- reporting, stopping at the Titan main frame.
         local status, out = compile_and_run_app([[
             function deep(): integer
                 local x: value = {}
@@ -393,26 +395,12 @@ describe("standalone main top-level error handler", function()
                 return mid()
             end
         ]])
-        assert.truthy(status and status ~= 0,
-            "expected non-zero exit, got " .. tostring(status) .. "\n" .. out)
-        -- single unified trace section reached stderr
-        assert.truthy(out:find("stack traceback:", 1, true),
-            "no unified trace on stderr\n" .. out)
-        assert.falsy(out:find("C traceback:", 1, true))
-        -- Titan native frames present (deep is the error site), shown by their
-        -- qualified Titan names, one frame per logical call (no trampoline).
-        assert.truthy(out:find("in test.deep", 1, true),
-            "missing Titan deep frame\n" .. out)
-        assert.truthy(out:find("in test.mid", 1, true),
-            "missing Titan mid frame\n" .. out)
-        assert.falsy(out:find("titanentry", 1, true))
-        assert.falsy(out:find("_titan", 1, true))
-        -- and a Lua-level frame: the bootstrap require-chunk that called main
-        assert.truthy(out:find("in main chunk", 1, true)
-            or out:find("in function") or out:find(":%d+: in"),
-            "missing Lua-side frame\n" .. out)
-        -- the error message itself is part of the printed report
-        assert.truthy(out:find("type error", 1, true) or out:find("expected", 1, true),
-            "missing error message\n" .. out)
+        assert.equal(1, status)
+        assert.equal([=[test: test.titan:3:24: type error, expected integer but found table
+stack traceback:
+	test.titan:3: in test.deep
+	test.titan:6: in test.mid
+	test.titan:9: in test.main
+]=], out)
     end)
 end)

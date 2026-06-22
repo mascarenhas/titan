@@ -231,11 +231,11 @@ error alerts):
   lua_setfield(L, -2, "$MODNAME");
   ```
 
-  It then pushes `msghandler` and runs `pmain` under
+  It then pushes Titan's runtime `errorhandler` and runs `pmain` under
   `lua_pcall(L, 2, 1, -4)` with `argc` and `argv` as arguments; a
-  failed pcall prints the message via `fatal` and
-  exits with `EXIT_FAILURE`. On success the integer returned by the
-  Titan `main` becomes the **process exit status**:
+  failed pcall formats the still-available original error object and the
+  captured raw traceback before exiting with `EXIT_FAILURE`. On success
+  the integer returned by the Titan `main` becomes the **process exit status**:
   `ret = lua_tointeger(L, -1); lua_close(L); return ret;`.
 * **`pmain`** loads the fixed chunk
   `"local arg = ...;\nreturn\nrequire('$MODNAME').main(arg);"`, builds
@@ -244,20 +244,18 @@ error alerts):
   ... lua_rawseti(L, -2, i)`) — and calls the chunk. So a Titan
   `main(args: {string}): integer` sees `args[1]` as the first real
   argument and `#args == argc - 1`.
-* **`msghandler`** is luac's message handler: stringify the error
-  object (via `__tostring` if needed) and append `luaL_traceback`. It
-  fires only for errors raised while it is the active handler, though:
-  an error raised *inside* a Titan function is intercepted by the
-  per-function Titan `errorhandler`, which replaced `L->errfunc` for the
-  duration of the native call (a Lua message handler fires only once, at
-  the innermost raise) and returns the error unchanged — so `msghandler`
-  does **not** run for a Titan run-time error. Instead, on
-  `lua_pcall != 0`, `main` reads the unified trace `errorhandler` left in
-  `registry[TITAN_BACKTRACE_KEY]` and prints **that** (message +
-  intermingled Lua+Titan frames) to stderr, falling back to
-  `msghandler`'s plain traceback only when no Titan trace was captured.
-  Either way the process exits non-zero; see
-  [the runtime library](#titanc-the-dynamic-loader).
+* **Top-level reporting** uses Titan's own `errorhandler` as the
+  `lua_pcall` message handler. On error, that handler records the raw
+  unified trace in `registry[TITAN_BACKTRACE_KEY]` and returns the
+  original raised value unchanged. `main` then converts that value with
+  `lua.c`'s string/number, `__tostring`, or typed-placeholder policy and
+  prints a Lua-style report to stderr: `<progname>: <error message>`,
+  `stack traceback:`, then the raw trace with a tab prepended to each
+  frame line through the Titan `main` frame. The report strips the
+  synthetic bootstrap chunk prefix from the headline and omits bootstrap
+  Lua/C frames after `main`. If no Titan trace was captured, it reports
+  only the converted error message. Either way the process exits
+  non-zero; see [the runtime library](#titanc-the-dynamic-loader).
 
 Mechanically, then, a standalone Titan program is an embedded Lua
 interpreter whose only preloaded module is the compiled main module;
@@ -383,9 +381,9 @@ uses directly.
   strings used as Lua-registry keys: `TITAN_PATH_KEY` (cached search
   path), `TITAN_LIBS_KEY` (dlopen handle table),
   `TITAN_BT_GENERATION_KEY` (shared libbacktrace invalidation generation),
-  `TITAN_BACKTRACE_KEY` (last error backtrace), `TITAN_NAMES_KEY`
-  (native-symbol display-name table), and `TITAN_TRACE_PINNED`
-  (re-raise traceback pin).
+  `TITAN_BACKTRACE_KEY` (last raw error backtrace),
+  `TITAN_NAMES_KEY` (native-symbol display-name table), and
+  `TITAN_TRACE_PINNED` (re-raise traceback pin).
   `TITAN_LUAINTEGER_NBITS` is used by shift code generation.
 * **`titan_pushmodule(L, c)`** — pushes a `Udata*` (the module state
   object) onto the Lua stack by writing the slot and bumping
@@ -437,7 +435,7 @@ It also declares the three C functions exported by `titan.c`:
   cross-module function pointers
   ([static vs dynamic wiring](codegen-overview.md)).
 * **`errorhandler(L)`** — the message handler that every generated Lua
-  entry wrapper installs in `L->errfunc` around the native call
+  entry wrapper ensures is active in `L->errfunc` around the native call
   ([Lua interop internals](lua-interop-internals.md)). It builds **one
   unified, intermingled trace** (innermost→outer): the CallInfo chain
   supplies every Lua frame, and libbacktrace (`backtrace_full`,
@@ -445,15 +443,16 @@ It also declares the three C functions exported by `titan.c`:
   native frames, spliced at the entry-wrapper boundaries (identified by
   the `titanentry` symbol substring). Interpreter, standard-library,
   `titan-runtime` and unsymbolized native frames are filtered out. The
-  result — *stringified error* + `"\n"` + the merged
-  `stack traceback:` — is stored in the registry under
-  `TITAN_BACKTRACE_KEY` (subject to the `TITAN_TRACE_PINNED` pin
-  discipline). It then restores the stack top and returns 1 — so the
-  **original error value** reaches `pcall` unchanged, and the enriched
-  backtrace is fetched separately. (Its push-everything-first ordering
-  exists because a Lua 5.5 `luaL_Buffer` must stay at the stack top while
-  in use.) Without libbacktrace (`TITAN_NO_LIBBACKTRACE`) it falls back
-  to a two-section `luaL_traceback` + `execinfo` C traceback.
+  result — raw merged frame lines only, with no error message, no `stack
+  traceback:` header, and no presentation tabs — is stored in the
+  registry under `TITAN_BACKTRACE_KEY` (subject to the
+  `TITAN_TRACE_PINNED` pin discipline). It then restores the stack top
+  and returns 1 — so the **original error value** reaches `pcall`
+  unchanged, and the enriched backtrace is fetched separately. (Its
+  push-everything-first ordering exists because a Lua 5.5 `luaL_Buffer`
+  must stay at the stack top while in use.) Without libbacktrace
+  (`TITAN_NO_LIBBACKTRACE`) it falls back to raw Lua traceback lines plus
+  raw `execinfo` C frames.
 
 ### `titanlib.c`: the `titan` Lua module
 
@@ -466,7 +465,7 @@ modules). It exposes exactly one function:
 local titan = require "titan"
 local ok, err = pcall(mod.f)        -- a Titan function that raises
 if not ok then
-    print(titan.backtrace())        -- error + unified Lua+Titan traceback
+    print(titan.backtrace())        -- raw unified Lua+Titan frame lines
 end
 ```
 
@@ -493,12 +492,12 @@ user-facing story.
 | link set (library) | `compile_library` | module `.o`s + `titan.o` + `libbacktrace.a` + `liblua.a` + `-ldl -lm` + `-l<lib>`… | `-l` list from `titanc -l a,b,c`; libbacktrace is linked before Lua. |
 | link set (program) | `compile_program` | `<mod>__entrypoint.c` + all `.o`s + `titan.o` + `libbacktrace.a` + `liblua.a` + `-ldl -lm` + `-l<lib>`… | Standalone programs bundle every compiled module; libbacktrace is linked before Lua. |
 | `TITAN_PATH_DEFAULT` | `titan.h` | `".;/usr/local/lib/titan/0.10"` | Run-time default search path (mirrors `TITAN_BIN_PATH`'s default). |
-| registry keys | `titan.h` | `TITAN_PATH_KEY`, `TITAN_LIBS_KEY`, `TITAN_BT_GENERATION_KEY`, `TITAN_BACKTRACE_KEY`, `TITAN_NAMES_KEY`, `TITAN_TRACE_PINNED` (UUID strings) | Per-state caches: search path, dlopen handles, shared libbacktrace invalidation generation, last backtrace, native-frame display names, and re-raise traceback pin. |
+| registry keys | `titan.h` | `TITAN_PATH_KEY`, `TITAN_LIBS_KEY`, `TITAN_BT_GENERATION_KEY`, `TITAN_BACKTRACE_KEY`, `TITAN_NAMES_KEY`, `TITAN_TRACE_PINNED` (UUID strings) | Per-state caches: search path, dlopen handles, shared libbacktrace invalidation generation, last raw backtrace, native-frame display names, and re-raise traceback pin. |
 | generated ABI symbol | `coder.lua` | `<mangled>_abi` returning `TITAN_VER` | Checked before `.so` type rehydration and before run-time dynamic-import `dlsym`; markerless modules are treated as incompatible. |
 
 The pieces upstream of the driver are described in
 [the type checker](checker.md) (which calls the loader) and the
 [code generator overview](codegen-overview.md) (which produces what the
 driver compiles); the contents of `titan.o`'s callers — the generated
-`_init`, the Lua entry wrappers that install `errorhandler` — are in
-[Lua interop internals](lua-interop-internals.md).
+`_init`, the Lua entry wrappers that ensure `errorhandler` is active —
+are in [Lua interop internals](lua-interop-internals.md).

@@ -363,8 +363,10 @@ the binary — no dynamic loading of Titan modules is involved. `args` is
 Lua-style: `args[0]` is the program name and `args[1]` onward are the
 arguments, so `#args` is the argument count. The integer returned by
 `main` becomes the process exit status; an uncaught run-time error
-prints the error message plus Titan's unified traceback to standard error
-and exits with a failure status (see [Error handling](error-handling.md)).
+prints `<program name>: <error message>`, `stack traceback:`, and
+tab-indented unified traceback frames through the Titan `main` frame to
+standard error, then exits with a failure status. The synthetic Lua
+bootstrap is not shown (see [Error handling](error-handling.md)).
 
 ```lua
 -- Titan: hello.titan

@@ -64,8 +64,12 @@ static int interop_fmod_titanentry_lua(lua_State *L) {
         luaL_error(L, "calling Titan function %s with %d arguments, but expected %d", "fmod", (int)(L->top.p - func - 1), 2);
     }
     ptrdiff_t __save_errfunc = L->errfunc;
-    lua_pushcclosure(L, errorhandler, 0);
-    L->errfunc = savestack(L, L->top.p - 1);
+    int __installed_errfunc = 0;
+    if (TITAN_UNLIKELY(!titan_errfunc_is_errorhandler(L))) {
+        lua_pushcfunction(L, errorhandler);
+        L->errfunc = savestack(L, L->top.p - 1);
+        __installed_errfunc = 1;
+    }
     CClosure *_fn = clCvalue(s2v(func));
     Udata *_mod = uvalue(&_fn->upvalue[0]);
     lua_Number _param_1 = 0;
@@ -85,7 +89,9 @@ static int interop_fmod_titanentry_lua(lua_State *L) {
     _firstret++;
     setsvalue(L, s2v(_firstret), _outparam_2);;
     _firstret++;
-    L->errfunc = __save_errfunc;
+    if (TITAN_UNLIKELY(__installed_errfunc)) {
+        L->errfunc = __save_errfunc;
+    }
     return 2;
 }
 ```
@@ -98,11 +104,16 @@ Walking through it:
   the unqualified Titan name. There is no Lua-style adjustment. The spec
   suite asserts the failure (`pcall(titan_test.f, 2, 'foo') == false`)
   but not the message text.
-* **Error handler.** The wrapper saves `L->errfunc`, pushes the
-  runtime's `errorhandler`
-  ([below](#the-error-handler-and-titanbacktrace)) and points
-  `L->errfunc` at it; the old value is restored before returning. Every
-  error raised during the call passes through that handler first.
+* **Error handler.** The wrapper saves `L->errfunc` and checks whether it
+  already points at Titan's runtime `errorhandler`
+  ([below](#the-error-handler-and-titanbacktrace)). If not, it pushes the
+  handler, points `L->errfunc` at it, and restores the old value before
+  returning. If an outer Titan entry or standalone bootstrap already
+  installed the same handler, the wrapper reuses it instead of pushing a
+  duplicate light C function. The handler is always pushed with
+  `lua_pushcfunction`, because it has no upvalues and does not need a
+  full C closure. Every error raised during the call passes
+  through the active Titan handler first.
 * **The error slot.** With parameters present, the three-line juggle
   makes stack index 1 nil: a copy of argument 1 is pushed on top —
   keeping it anchored for the GC, since `checkandget` has already
@@ -444,7 +455,7 @@ lives in the Lua registry. The complete key inventory:
 | `TITAN_PATH_KEY` (`"ec10e486-d8fd-11e7-87f4-e7e9581a929c"`) | the resolved Titan search path (cached by `pushpath`) |
 | `TITAN_LIBS_KEY` (`"ecfc9174-d8fd-11e7-8be2-abbaa3ded45f"`) | the dlopen-handle cache table (below) |
 | `TITAN_BT_GENERATION_KEY` (`"a222927d-0e7b-4f7a-93d9-1a6ce7111a5c"`) | a shared generation counter that tells every loaded module's local libbacktrace state to resnapshot after any Titan `.so` is dlopened |
-| `TITAN_BACKTRACE_KEY` (`"57d80578-2534-4856-ad3b-bde8cba4c445"`) | the last error's merged backtrace string |
+| `TITAN_BACKTRACE_KEY` (`"57d80578-2534-4856-ad3b-bde8cba4c445"`) | the last error's raw merged backtrace string |
 | `TITAN_NAMES_KEY` (`"a7c4e2f0-1d6b-4e3a-9c5f-8b2d7e0a4f16"`) | the native-symbol display-name table used by unified trace formatting |
 | `TITAN_TRACE_PINNED` (`"5b3f0f7e-4b1a-4d2e-9a8c-2f6d4c1e7a90"`) | the one-shot flag that preserves an existing traceback for bare re-raise |
 | `"Titan function type <serialized type> tag"` | a shared light-userdata identity tag for each first-class function type |
@@ -493,13 +504,17 @@ the source-vs-`.so` decision that selects dynamic linking from a compiled
 ## The error handler and `titan.backtrace()`
 
 `errorhandler` (`titan-runtime/titan.c`) is the message handler every
-wrapper installs in `L->errfunc`. When an error is raised during the
-call, it builds **one unified, intermingled, innermost→outer stack
+wrapper ensures is active in `L->errfunc`. When an error is raised during
+the call, it builds **one unified, intermingled, innermost→outer stack
 trace** mixing pure-Lua and Titan frames in call order, stores it in the
 registry under `TITAN_BACKTRACE_KEY`, then restores the stack top and
 returns the **original** error object unchanged — a Lua-side `pcall` sees
 exactly the error Titan raised, and the backtrace is retrieved out of
 band.
+
+The stored trace is the raw frame list only: one line per frame, with no
+error message, no `stack traceback:` header, and no presentation tabs.
+Consumers that print a report add that formatting themselves.
 
 The trace is built from **two stacks walked innermost→outer in
 lockstep**:
@@ -534,7 +549,7 @@ inner Titan native run may splice one C-frame too early, but **no frame
 is ever dropped** (every Lua frame and every Titan frame appears) and the
 trace remains a single innermost→outer section. When libbacktrace is
 unavailable (`TITAN_NO_LIBBACKTRACE`, e.g. musl/Alpine) it falls back to
-a two-section `luaL_traceback` + `execinfo` C traceback.
+raw Lua traceback lines plus raw `execinfo` C frames.
 
 The retrieval side is the separate, optional `titan` Lua module
 (`titan-runtime/titanlib.c`, built by the rockspec): `titan.backtrace()`
@@ -560,21 +575,21 @@ objects, `titan-runtime/titan.o`, `libbacktrace.a`, and `liblua.a`:
   the argument table with `lua_rawseti(L, -2, i)` for `i = 0 .. argc-1`
   — so `args[0]` is the program name, Lua-convention — and calls it. (No
   spec passes or inspects command-line arguments.)
-* **`msghandler`**, taken from `luac` (tostring-or-`__tostring` plus
-  `luaL_traceback`), is the handler installed for the `lua_pcall` of
-  `pmain`. It is *not* the Titan `errorhandler` — that one is still
-  installed per-call by each wrapper. Crucially, a Lua message handler
-  fires **only once, at the innermost raise**: when an uncaught error
-  comes out of Titan `main`, the deepest `L->errfunc` is the Titan
-  `errorhandler`, so it (not `msghandler`) runs, capturing the unified
-  trace into `TITAN_BACKTRACE_KEY` on the intact stack. `msghandler` is
-  therefore only the **fallback** for an error that never crossed a Titan
-  wrapper (registry slot absent).
+* **Top-level error handler.** The standalone bootstrap installs Titan's
+  own `errorhandler` as the message handler for the `lua_pcall` of
+  `pmain`. On failure, `errorhandler` captures the raw unified trace into
+  `TITAN_BACKTRACE_KEY` and returns the original raised object unchanged,
+  so the error object is still on the stack after `lua_pcall` returns.
 * **Top-level reporting.** On `lua_pcall != 0`, `main` reads
   `registry[TITAN_BACKTRACE_KEY]`: if it is a string (the usual case for
-  a Titan error), that **unified trace — message plus intermingled
-  Lua+Titan frames — is printed to stderr**; otherwise it falls back to
-  `msghandler`'s plain `luaL_traceback`. Either way the process exits
+  a Titan error), it converts the original error object with the same
+  string/number, `__tostring`, or typed-placeholder policy as `lua.c`,
+  then prints `<progname>: <error message>`, `stack traceback:`, and the
+  raw unified trace with a tab prepended to each frame line through the
+  Titan `main` frame. The standalone report removes the synthetic
+  bootstrap chunk prefix from the headline and does not print the
+  bootstrap Lua/C frames beyond `main`. If no trace slot exists, it
+  reports only the converted error message. Either way the process exits
   non-zero.
 * **Exit-code protocol.** An error reaching the top prints the report
   (`<progname>: <report>`) to stderr and exits with `EXIT_FAILURE`;

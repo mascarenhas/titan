@@ -215,9 +215,11 @@ local entrypoint_template = [[
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <string.h>
 #include "lua.h"
 #include "lualib.h"
 #include "lauxlib.h"
+#include "titan.h"
 
 /* portable alerts, from srlua */
 #ifdef _WIN32
@@ -235,11 +237,66 @@ static void fatal(const char* message) {
     exit(EXIT_FAILURE);
 }
 
-/* The registry key under which the Titan runtime's errorhandler stores the
-** unified Lua+Titan stack trace (must match titan-runtime/titan.h's
-** TITAN_BACKTRACE_KEY). The standalone msghandler below prefers this rich,
-** intermingled trace over a plain luaL_traceback. */
-#define TITAN_BACKTRACE_KEY "57d80578-2534-4856-ad3b-bde8cba4c445"
+/* Same message conversion policy as lua.c's msghandler: strings/numbers through
+** lua_tostring, then __tostring if present and string-valued, otherwise a typed
+** placeholder. */
+static const char *errmsg_tostring(lua_State *L, int idx) {
+    const char *msg;
+    idx = lua_absindex(L, idx);
+    msg = lua_tostring(L, idx);
+    if (msg == NULL) {
+        if (luaL_callmeta(L, idx, "__tostring") && lua_type(L, -1) == LUA_TSTRING) {
+            msg = lua_tostring(L, -1);
+        } else {
+            msg = lua_pushfstring(L, "(error object is a %s value)",
+                                  luaL_typename(L, idx));
+        }
+    }
+    return msg;
+}
+
+static const char *strip_bootstrap_prefix(const char *message) {
+    static const char prefix[] = "[string \"local arg = ...;...\"]:3: ";
+    const size_t prefix_len = sizeof(prefix) - 1;
+    while (strncmp(message, prefix, prefix_len) == 0) {
+        message += prefix_len;
+    }
+    return message;
+}
+
+static int line_ends_with(const char *line, size_t len, const char *suffix) {
+    const size_t suffix_len = strlen(suffix);
+    if (suffix_len == 0 || len < suffix_len) return 0;
+    return memcmp(line + len - suffix_len, suffix, suffix_len) == 0;
+}
+
+static void write_tabbed_trace(const char *trace) {
+    const char *p = trace;
+    const char *last_frame_marker = " in $MODNAME.main";
+    if (p == NULL || *p == '\0') {
+        fputc('\n', stderr);
+        return;
+    }
+    while (*p != '\0') {
+        const char *e = strchr(p, '\n');
+        const size_t len = e ? (size_t)(e - p) : strlen(p);
+        fputs("\n\t", stderr);
+        fwrite(p, 1, len, stderr);
+        if (line_ends_with(p, len, last_frame_marker)) {
+            break;
+        }
+        if (e == NULL) break;
+        p = e + 1;
+    }
+    fputc('\n', stderr);
+}
+
+static void report_titan_error(const char *message, const char *trace) {
+    fprintf(stderr, "%s: %s\n", "$PROGNAME", strip_bootstrap_prefix(message));
+    fputs("stack traceback:", stderr);
+    write_tabbed_trace(trace);
+    exit(EXIT_FAILURE);
+}
 
 /* main script launcher, based on srlua */
 static int pmain(lua_State *L) {
@@ -257,27 +314,6 @@ static int pmain(lua_State *L) {
         lua_rawseti(L, -2, i);
     }
     lua_call(L, 1, 1);
-    return 1;
-}
-
-/* Top-level message handler (mirrors lua.c's msghandler). It is a fallback for
-** the rare case an uncaught error reaches the protected pmain WITHOUT having
-** passed through a Titan entry wrapper's errorhandler (so no unified trace was
-** captured): a Lua message handler fires only once, at the innermost raise, so
-** when the deepest errfunc is Titan's errorhandler THIS handler never runs and
-** the unified trace is read from the registry directly in main() below.
-** Handles non-string error objects via __tostring or a typed placeholder. */
-static int msghandler (lua_State *L) {
-    const char *msg = lua_tostring(L, 1);
-    if (msg == NULL) {
-        if (luaL_callmeta(L, 1, "__tostring") && lua_type(L, -1) == LUA_TSTRING) {
-            msg = lua_tostring(L, -1);
-        } else {
-            msg = lua_pushfstring(L, "(error object is a %s value)",
-                                  luaL_typename(L, 1));
-        }
-    }
-    luaL_traceback(L, L, msg, 1);
     return 1;
 }
 
@@ -300,26 +336,24 @@ int main(int argc, char** argv) {
     lua_getfield(L, -1, "preload");
     lua_pushcfunction(L, $LUAOPEN_FN);
     lua_setfield(L, -2, "$MODNAME");
-    lua_pushcfunction(L, msghandler);
+    lua_pushcfunction(L, errorhandler);
     lua_pushcfunction(L, pmain);
     lua_pushinteger(L, argc);
     lua_pushlightuserdata(L, argv);
-    /* Protected mode with msghandler installed: an uncaught error from the Titan
-    ** main fires the Titan errorhandler (deeper than msghandler) on the intact
-    ** stack, which captures the unified Lua+Titan trace into
-    ** registry[TITAN_BACKTRACE_KEY]. A Lua message handler fires only once, at
-    ** the innermost raise, so msghandler does NOT run in that case; we therefore
-    ** read the unified trace from the registry here and print it. The msghandler
-    ** result (a plain luaL_traceback) is the fallback when no Titan errorhandler
-    ** captured a trace (registry slot absent). Either way: print to stderr and
-    ** exit non-zero. On success, return main's integer. */
+    /* Protected mode with Titan's runtime errorhandler installed. On failure,
+    ** errorhandler captures the raw unified Lua+Titan trace into
+    ** registry[TITAN_BACKTRACE_KEY] and returns the original error object, so it
+    ** is still available here after lua_pcall. main() then adds the standalone
+    ** Lua-style presentation: "<progname>: <message>", "stack traceback:", and
+    ** the raw trace with a tab prepended to each frame line. */
     if (lua_pcall(L, 2, 1, -4) != 0) {
         const char *report;
         if (lua_getfield(L, LUA_REGISTRYINDEX, TITAN_BACKTRACE_KEY) == LUA_TSTRING) {
-            report = lua_tostring(L, -1);  /* unified trace: message + frames */
+            const char *trace = lua_tostring(L, -1);
+            report_titan_error(errmsg_tostring(L, -2), trace);
         } else {
             lua_pop(L, 1);                 /* nil/non-string slot */
-            report = lua_tostring(L, -1);  /* msghandler's plain traceback */
+            report = errmsg_tostring(L, -1);
         }
         fatal(report);
     }

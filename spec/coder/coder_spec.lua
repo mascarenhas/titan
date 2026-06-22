@@ -9,6 +9,7 @@ local parse = h.parse
 local compile = h.compile
 local call = h.call
 local call_app = h.call_app
+local compile_and_read_c = h.compile_and_read_c
 local run_coder = h.run_coder
 local run_coder_app = h.run_coder_app
 local generate_modules = h.generate_modules
@@ -2564,8 +2565,25 @@ describe("Titan code generator", function()
             local titan = require 'titan'
             local ok, err = pcall(test.wrong)
             assert(not ok)
-            assert(titan.backtrace():find(err, 1, true))
+            local bt = titan.backtrace()
+            assert(type(bt) == "string" and #bt > 0)
+            assert(not bt:find(err, 1, true))
+            assert(not bt:find("stack traceback:", 1, true))
+            assert(not bt:find("\t", 1, true))
         ]])
+    end)
+
+    it("reuses an already-installed Titan errorhandler in Lua entry wrappers", function ()
+        local csrc = compile_and_read_c([[
+            function id(x: integer): integer
+                return x
+            end
+        ]])
+        assert.truthy(csrc:find("titan_errfunc_is_errorhandler(L)", 1, true))
+        assert.truthy(csrc:find("if (TITAN_UNLIKELY(!titan_errfunc_is_errorhandler(L)))", 1, true))
+        assert.truthy(csrc:find("lua_pushcfunction(L, errorhandler)", 1, true))
+        assert.falsy(csrc:find("lua_pushcclosure(L, errorhandler, 0)", 1, true))
+        assert.truthy(csrc:find("if (TITAN_UNLIKELY(__installed_errfunc))", 1, true))
     end)
 
     describe("#maps", function()
