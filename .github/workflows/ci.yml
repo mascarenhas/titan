@@ -89,8 +89,10 @@ jobs:
         run: |
           export PATH="$PWD/lua_install/bin:$PATH"
           luarocks init --lua-dir="$PWD/.lua"
-          eval $(./luarocks path --bin)
-          echo "$PATH" >> "$GITHUB_PATH"
+          # Add the project root (./lua, ./luarocks wrappers) and the rocks
+          # bin dir (busted, titanc) to PATH for subsequent steps.
+          echo "$PWD" >> "$GITHUB_PATH"
+          echo "$PWD/lua_modules/bin" >> "$GITHUB_PATH"
           # Let subsequent steps inherit the project-local Lua paths
           echo "LUA_PATH=$(./lua -e 'print(package.path)')" >> "$GITHUB_ENV"
           echo "LUA_CPATH=$(./lua -e 'print(package.cpath)')" >> "$GITHUB_ENV"
