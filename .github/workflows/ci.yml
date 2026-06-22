@@ -89,27 +89,23 @@ jobs:
         run: |
           export PATH="$PWD/lua_install/bin:$PATH"
           luarocks init --lua-dir="$PWD/.lua"
-          # Add the project root (./lua, ./luarocks wrappers) and the rocks
-          # bin dir (busted, titanc) to PATH for subsequent steps.
-          echo "$PWD" >> "$GITHUB_PATH"
+          # Add the rocks bin dir (busted, titanc) to PATH for subsequent
+          # steps.  ./lua and ./luarocks are used directly with ./ prefix.
           echo "$PWD/lua_modules/bin" >> "$GITHUB_PATH"
-          # Let subsequent steps inherit the project-local Lua paths
-          echo "LUA_PATH=$(./lua -e 'print(package.path)')" >> "$GITHUB_ENV"
-          echo "LUA_CPATH=$(./lua -e 'print(package.cpath)')" >> "$GITHUB_ENV"
 
       - name: Print Lua version
-        run: lua -v
+        run: ./lua -v
 
       # Build and install the rock so the `titan` C runtime module (titanlib.c,
       # required by one coder spec via `require 'titan'`) is on the Lua path.
       # `luarocks test` does not build the rock-under-test, only its dependencies.
       - name: Build and install the rock
-        run: luarocks make
+        run: ./luarocks make
 
       # `luarocks test` installs the test_dependencies (busted, cluacov) declared
       # in the rockspec and runs the suite; flags after `--` are forwarded to busted.
       - name: Run tests
-        run: luarocks test -- -c -o gtest -v
+        run: ./luarocks test -- -c -o gtest -v
 
       - name: Generate coverage report
         if: success()

@@ -28,11 +28,12 @@ After installing luarocks, run these commands in the root of this repository:
         $ luarocks init --lua-dir=$PWD/.lua
         $ luarocks make
 
-Run this in your session to make sure titanc and the exact Lua interpreter you download
-in the previous steps are in your `$PATH` (put this in your shell startup file if you
-want to make this your default Lua):
+The `luarocks init` step creates `./lua` and `./luarocks` wrapper scripts in
+the project root; use them directly (with `./`) to run Lua and LuaRocks with
+the correct project paths baked in.  To also put `titanc` and `busted` (from
+`lua_modules/bin/`) on your `$PATH`, run:
 
-        $ cd <titan folder> && eval $(luarocks path --bin)
+        $ cd <titan folder> && eval $(./luarocks path --bin)
 
 # Usage
 

@@ -20,10 +20,10 @@ Titan is a statically-typed, ahead-of-time-compiled sister language to Lua. This
 
 ## Commands
 
-**First**, from the project root, activate the project-local environment so that bare `lua`, `luarocks`, `busted`, and `titanc` resolve to the project wrappers (in `./` and `lua_modules/bin/`) rather than system-wide binaries:
+**First**, from the project root, activate the project-local environment. The `./lua` and `./luarocks` wrapper scripts (created by `luarocks init`) have the correct `lua_modules` paths baked in — use them directly with `./`. To also put `busted` and `titanc` (from `lua_modules/bin/`) on your `$PATH`:
 
 ```sh
-eval $(luarocks path --bin)
+eval $(./luarocks path --bin)
 ```
 
 ```sh
