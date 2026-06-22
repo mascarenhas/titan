@@ -5,17 +5,20 @@ on:
     # "*" matches only top-level branch names; "**" also matches names with
     # slashes (e.g. "tooling/foo"), so every pushed branch triggers CI.
     branches: ["**"]
+  workflow_dispatch:  # Manual trigger to include macOS builds
 
 jobs:
   test:
+    # macOS runners are expensive; only run them on manual dispatch.
+    if: matrix.os != 'macos-latest' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             lua_os: linux
-#          - os: macos-latest
-#            lua_os: macosx
+          - os: macos-latest
+            lua_os: macosx
 
     runs-on: ${{ matrix.os }}
 
