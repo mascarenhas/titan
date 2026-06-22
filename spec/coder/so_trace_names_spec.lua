@@ -56,4 +56,45 @@ describe(".so-only cross-module trace names (Phase 5 deliverable 2)", function()
         ]])
         assert.truthy(rok, out)
     end)
+
+    it("symbolizes a .so that is dlopened after libbacktrace has already snapshotted",
+       function ()
+        local ok, err = build_so_chain({
+            { name = "btfirst", src = [[
+                function boom(): integer
+                    raise "first"
+                    return 0
+                end
+            ]] },
+            { name = "btsecond", src = [[
+                function boom(): integer
+                    raise "second"
+                    return 0
+                end
+            ]] },
+        })
+        assert.truthy(ok, err)
+        local rok, out = call("btfirst", [[
+            local titan = require 'titan'
+            local ok1, err1 = pcall(btfirst.boom)
+            assert(not ok1 and err1 == "first")
+            local t1 = titan.backtrace()
+            assert(t1:find("in btfirst.boom", 1, true),
+                   "first trace did not symbolize btfirst\n" .. tostring(t1))
+
+            -- This require dlopens btsecond AFTER the previous trace forced
+            -- libbacktrace to create/snapshot its state. loadlib must invalidate
+            -- that state on the slow dlopen path, or btsecond's native frames are
+            -- unsymbolized and get filtered out.
+            local second = require 'btsecond'
+            local ok2, err2 = pcall(second.boom)
+            assert(not ok2 and err2 == "second")
+            local t2 = titan.backtrace()
+            assert(t2:find("in btsecond.boom", 1, true),
+                   "post-dlopen trace did not symbolize btsecond\n" .. tostring(t2))
+            assert(not t2:find("in btfirst.boom", 1, true),
+                   "post-dlopen trace kept the previous module's frame\n" .. t2)
+        ]])
+        assert.truthy(rok, out)
+    end)
 end)

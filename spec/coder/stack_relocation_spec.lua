@@ -73,4 +73,42 @@ describe("Lua-stack relocation safety", function()
             end
         ]])
     end)
+
+    it("keeps try recovery slots and enclosing GC locals stable across stack relocation", function()
+        local decls, uses = {}, {}
+        for i = 1, 320 do
+            decls[#decls + 1] = 'local s' .. i .. ': string = "x"'
+            uses[#uses + 1] = 'total = total + #s' .. i
+        end
+        local growstack = [[
+            function growstack(): integer
+        ]] .. table.concat(decls, "\n") .. [[
+                local total = 0
+        ]] .. table.concat(uses, "\n") .. [[
+                return total
+            end
+        ]]
+        local code = growstack .. [[
+            function run(p: string): integer
+                local keep = p
+                do
+                    growstack()
+                    keep = keep .. "!"
+                    raise {10, 20}
+                catch
+                    local e: {integer} = error as {integer}
+                    return #keep + e[2]
+                finally
+                    growstack()
+                end
+            end
+        ]]
+        h.run_coder(code, [[
+            collectgarbage("incremental", 1, 1, 1)
+            for _ = 1, 100 do
+                collectgarbage("step", 1000)
+                assert(test.run("abc") == 24)
+            end
+        ]])
+    end)
 end)

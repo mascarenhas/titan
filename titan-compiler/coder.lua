@@ -2184,6 +2184,7 @@ local function codevaluecall(ctx, node)
             $FPTYPE _vc_fp = titan_cast_func($FPTYPE,
                 pvalue(&_vc_callee->upvalue[2]));
             $VARGSTATS
+            $LINEDIR
             $FASTCALL
         } else {
             /* generic path: call any callable value through the Lua stack;
@@ -2191,6 +2192,7 @@ local function codevaluecall(ctx, node)
             lua_checkstack(L, $NPUSH);
             ptrdiff_t _vc_func = savestack(L, L->top.p);
             $PUSHES
+            $LINEDIR
             luaD_callnoyield(L, restorestack(L, _vc_func), $NRESULTS);
             $SLOWREADS
             L->top.p = restorestack(L, _vc_func);
@@ -2203,6 +2205,7 @@ local function codevaluecall(ctx, node)
         FPTYPEDEF = "typedef " .. function_sig(fptype, ftype, true),
         FPTYPE = fptype,
         VARGSTATS = table.concat(vargstats, "\n"),
+        LINEDIR = emitline(node),
         FASTCALL = fastcall,
         NPUSH = c_integer_literal(1 + nstatic) .. npush_dynamic,
         PUSHES = table.concat(pushes, "\n"),
@@ -2391,11 +2394,13 @@ local function codecall(ctx, node)
         return render([[
             $CSTATS
             $CTMP
+            $LINEDIR
             $TMPNAME = $CCALL;$REBASE
             $SLOTS
         ]], {
             CSTATS = cstats,
             CTMP = ctmp,
+            LINEDIR = emitline(node),
             TMPNAME = tmpname,
             CCALL = ccall,
             REBASE = rebase,
@@ -2406,9 +2411,11 @@ local function codecall(ctx, node)
         -- following generated code uses it.
         return render([[
             $CSTATS
+            $LINEDIR
             $CCALL;$REBASE
         ]], {
             CSTATS = cstats,
+            LINEDIR = emitline(node),
             CCALL = ccall,
             REBASE = rebase,
         }), "((void)0)"
@@ -2420,10 +2427,12 @@ local function codecall(ctx, node)
         return render([[
             $CSTATS
             $CTMP
+            $LINEDIR
             $TMPNAME = $CCALL;$REBASE
         ]], {
             CSTATS = cstats,
             CTMP = ctmp,
+            LINEDIR = emitline(node),
             TMPNAME = tmpname,
             CCALL = ccall,
             REBASE = rebase,
@@ -2544,6 +2553,34 @@ local function innermost_finally(ctx)
     return fs and fs[#fs] or nil
 end
 
+local function push_boundary(ctx, tag)
+    ctx.protected_boundary_stack = ctx.protected_boundary_stack or {}
+    table.insert(ctx.protected_boundary_stack, tag)
+end
+
+local function pop_boundary(ctx)
+    assert(ctx.protected_boundary_stack and #ctx.protected_boundary_stack > 0)
+    table.remove(ctx.protected_boundary_stack)
+end
+
+-- A pending return/break that jumps to a finally label leaves the C scope of
+-- every inline boundary opened between the target try and the current point.
+-- Restore those `lua_longjmp` links before the `goto`; otherwise a raise from
+-- the finally would longjmp to an out-of-scope `_lj_*` object. Stop at `floor`
+-- so outer still-active boundaries remain installed and can catch/cascade a
+-- raise from the finally (the plan's inside-out finally semantics).
+local function restore_boundaries_to(ctx, floor)
+    local bs = ctx.protected_boundary_stack or {}
+    local lines = {}
+    for i = #bs, floor + 1, -1 do
+        table.insert(lines, render([[
+            L->errorJmp = _lj_$T.previous;
+            L->nCcalls = _oldnC_$T;
+        ]], { T = bs[i] }))
+    end
+    return table.concat(lines, "\n")
+end
+
 local function codereturn(ctx, node)
     -- Route through an enclosing finally: save the return values into the
     -- innermost finally frame's saved slots, mark its pending action RETURN, and
@@ -2568,11 +2605,13 @@ local function codereturn(ctx, node)
         return render([[
             $CSTATS
             $PA = $PARETURN;
+            $RESTORE
             goto $LABEL;
         ]], {
             CSTATS = table.concat(cstats, "\n"),
             PA = fin.pa_var,
             PARETURN = PA_RETURN,
+            RESTORE = restore_boundaries_to(ctx, fin.boundary_floor),
             LABEL = fin.label,
         })
     end
@@ -2671,7 +2710,6 @@ local function coderaise(ctx, node)
         local errcvar = ctx.catch_error_decl._cvar      -- TValue (the error value)
         local tbcvar = ctx.catch_traceback_decl._cvar   -- TString* (the trace)
         return render([[
-            $LINEDIR
             lua_checkstack(L, 2);
             lua_pushliteral(L, TITAN_BACKTRACE_KEY);
             setsvalue2s(L, L->top.p, $TB);
@@ -2682,6 +2720,7 @@ local function coderaise(ctx, node)
             lua_rawset(L, LUA_REGISTRYINDEX);
             setobj2s(L, L->top.p, &$ERR);
             L->top.p++;
+            $LINEDIR
             lua_error(L);
         ]], {
             LINEDIR = emitline(node),
@@ -2696,10 +2735,10 @@ local function coderaise(ctx, node)
         $CTMP
         $TMPNAME = $CEXP;
         $ANCHOR
-        $LINEDIR
         lua_checkstack(L, 1);
         setobj2t(L, s2v(L->top.p), &$TMPNAME);
         L->top.p++;
+        $LINEDIR
         lua_error(L);
     ]], {
         CSTATS = cstats,
@@ -2742,8 +2781,14 @@ local function realize_break(ctx)
         fin.label_used = true
         return render([[
             $PA = $PABREAK;
+            $RESTORE
             goto $LABEL;
-        ]], { PA = fin.pa_var, PABREAK = PA_BREAK, LABEL = fin.label })
+        ]], {
+            PA = fin.pa_var,
+            PABREAK = PA_BREAK,
+            RESTORE = restore_boundaries_to(ctx, fin.boundary_floor),
+            LABEL = fin.label,
+        })
     end
     -- direct break: target the innermost loop frame, restoring its entry errorjmp
     -- if a try boundary is open between here and the loop entry.
@@ -2978,6 +3023,8 @@ local function codetry(ctx, node)
             label = fin_label,
             ret_saves = ret_saves,
             loopstack_len = ctx.loopstack and #ctx.loopstack or 0,
+            boundary_floor = ctx.protected_boundary_stack
+                and #ctx.protected_boundary_stack or 0,
             label_used = false,  -- set when a return/break actually gotos it
         })
         fin_frame = ctx.finally_stack[#ctx.finally_stack]
@@ -2988,7 +3035,9 @@ local function codetry(ctx, node)
     -- errorjmp chain (#3); for a finally try, return/break route to the finally
     -- instead (codereturn / the StatBreak arm consult ctx.finally_stack first).
     ctx.try_depth = (ctx.try_depth or 0) + 1
+    push_boundary(ctx, tostring(id))
     local cbody = codestat(ctx, node.block)
+    pop_boundary(ctx)
     ctx.try_depth = ctx.try_depth - 1
 
     -- Bind the catch's implicit locals to C autos populated in the recovery.
@@ -3004,7 +3053,9 @@ local function codetry(ctx, node)
         ctx.catch_error_decl = errdecl
         ctx.catch_traceback_decl = tbdecl
         ctx.try_depth = ctx.try_depth + 1
+        if has_finally then push_boundary(ctx, id .. "c") end
         ccatch = codestat(ctx, node.catchblock)
+        if has_finally then pop_boundary(ctx) end
         ctx.try_depth = ctx.try_depth - 1
         ctx.catch_error_decl, ctx.catch_traceback_decl = saved_err, saved_tb
     end

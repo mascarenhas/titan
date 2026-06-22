@@ -393,6 +393,53 @@ describe("catch (error-handling Phase 4)", function()
         assert.match("OK", out)
     end)
 
+    it("clears handled traces and consumes a real re-raise pin before the next fresh error", function()
+        local out = compile_and_run([[
+            function deep(): integer
+                raise "old"
+                return 0
+            end
+            function rer(): integer
+                do
+                    return deep()
+                catch
+                    raise
+                end
+            end
+            function handled(): integer
+                do
+                    raise "handled"
+                catch
+                    return 0
+                end
+            end
+            function fresh(): integer
+                raise "fresh"
+                return 0
+            end
+        ]], [==[
+            local titan = require 'titan'
+            assert(test.handled() == 0)
+            assert(titan.backtrace() == nil, "handled catch left a stale trace")
+
+            local ok, err = pcall(test.rer)
+            assert(not ok and err == "old")
+            local old = titan.backtrace()
+            assert(old:find("in test.deep", 1, true),
+                   "re-raise did not preserve original deep trace\n" .. tostring(old))
+
+            ok, err = pcall(test.fresh)
+            assert(not ok and err == "fresh")
+            local new = titan.backtrace()
+            assert(new:find("in test.fresh", 1, true),
+                   "fresh error after re-raise did not regenerate\n" .. tostring(new))
+            assert(not new:find("in test.deep", 1, true),
+                   "re-raise pin leaked into next fresh error\n" .. new)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
     it("compiles a finally and runs it on normal completion (Phase 5)", function()
         local out = compile_and_run([[
             function run(): integer

@@ -42,9 +42,15 @@
    before the out-params), and <mangled>_types now encodes the `varargtype`
    element type for variadic functions and methods. A 0.8 module has neither, so
    0.8 and 0.9 .so modules are ABI-incompatible and live under a different
-   TITAN_PATH dir. */
-#define TITAN_VER          "0.9"
-#define TITAN_VER_SUFFIX   "_0_9"
+   TITAN_PATH dir.
+   0.9 -> 0.10: TitanVargX changed from an inline flexible-array backing object
+   (`lu_byte n_args; T args[]`) to a descriptor (`lu_byte n_args; T *args`).
+   The native parameter type name is unchanged, but its layout and the meaning
+   of the bytes following n_args are not: mixing the two forms across a .so
+   boundary misreads argument storage. 0.9 and 0.10 modules are therefore
+   ABI-incompatible and must live under different TITAN_PATH directories. */
+#define TITAN_VER          "0.10"
+#define TITAN_VER_SUFFIX   "_0_10"
 #define TITAN_PATH_VAR     "TITAN_PATH"
 #define TITAN_PATH_SEP     "/"
 #define TITAN_PATH_DEFAULT ".;/usr/local/lib/titan/" TITAN_VER
@@ -61,7 +67,8 @@
 ** the sub-table (multiple modules contribute) and populates it for every native
 ** function it generates. errorhandler looks each native frame's DWARF symbol up
 ** here and shows the qualified name when found, falling back to the raw symbol.
-** A runtime/_init addition only — ABI (0.9) is unchanged. */
+** A runtime/_init addition only: it does not by itself change the compiled
+** module ABI. */
 #define TITAN_NAMES_KEY "a7c4e2f0-1d6b-4e3a-9c5f-8b2d7e0a4f16"
 
 /* When set (boolean true) in the registry, errorhandler() KEEPS the existing

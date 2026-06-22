@@ -214,6 +214,29 @@ describe("libbacktrace unified stack trace (error-handling Phase 0)", function()
             -- source line as `function <script:defline>` activations.
             local _, nfn = bt:gsub("in function <", "")
             assert(nfn >= 2, "expected >=2 pure-Lua callback frames, got "..nfn.."\n"..bt)
+            -- And they must be interleaved in actual call order, not merely
+            -- present. A regression in the splice used to emit the middle/outer
+            -- Titan `apply` frames one C CallInfo too early around Lua callbacks.
+            local p_boom = assert(bt:find("in test.boom", 1, true), bt)
+            local p_apply_inner = assert(bt:find("in test.apply", p_boom, true), bt)
+            local p_lua_inner = assert(bt:find("in function <", p_apply_inner, true), bt)
+            local p_apply_middle = assert(bt:find("in test.apply", p_lua_inner, true), bt)
+            local p_lua_outer = assert(bt:find("in function <", p_apply_middle, true), bt)
+            local p_apply_outer = assert(bt:find("in test.apply", p_lua_outer, true), bt)
+            assert(p_boom < p_apply_inner
+                   and p_apply_inner < p_lua_inner
+                   and p_lua_inner < p_apply_middle
+                   and p_apply_middle < p_lua_outer
+                   and p_lua_outer < p_apply_outer,
+                   "Lua/Titan frames are not innermost-to-outer interleaved\n"..bt)
+            -- The native frame for a call expression should attribute to the
+            -- source call line, not a generated-C line drifted several helper
+            -- statements past the call-site #line directive.
+            assert(bt:find("test%.titan:2: in test%.apply"),
+                   "apply frame is not attributed to the call statement line\n"..bt)
+            assert(not bt:find("test%.titan:1%d+: in test%.apply")
+                   and not bt:find("test%.titan:2%d+: in test%.apply"),
+                   "apply frame drifted into generated helper lines\n"..bt)
             -- the main chunk appears (the Lua side of the boundary)
             assert(bt:find("in main chunk", 1, true), "missing main chunk\n"..bt)
             -- interpreter/runtime frames still filtered from the native side

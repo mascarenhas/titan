@@ -411,4 +411,125 @@ describe("finally (error-handling Phase 5)", function()
         ]==])
         assert.match("OK", out)
     end)
+
+    it("keeps GC-valued pending returns rooted while the finally allocates", function()
+        local out = compile_and_run([[
+            record R
+                s: string
+            end
+
+            function churn()
+                local junk: {string} = {}
+                local i = 1
+                while i <= 600 do
+                    junk = { "x", "y", "z" }
+                    i = i + 1
+                end
+            end
+
+            function ret(a: string, b: string): (string, {string}, R, value)
+                do
+                    local arr: {string} = { a, b }
+                    local r: R = { s = b }
+                    local v: value = r
+                    return a, arr, r, v
+                finally
+                    churn()
+                end
+            end
+        ]], [==[
+            collectgarbage("generational")
+            local a = ("a"):rep(5000) .. "!"
+            local b = ("b"):rep(6000) .. "?"
+            local s, arr, r, v = test.ret(a, b)
+            collectgarbage("step")
+            assert(s == a, "string return corrupted")
+            assert(arr[2] == b, "array return corrupted")
+            assert(r.s == b, "record return corrupted")
+            assert(v == r, "value return no longer points at the record")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("runs finally before a break issued from a catch", function()
+        local out = compile_and_run([[
+            function run(): integer
+                local n: integer = 0
+                while n < 10 do
+                    do
+                        raise "stop"
+                    catch
+                        break
+                    finally
+                        n = n + 100
+                    end
+                    n = n + 1
+                end
+                return n
+            end
+        ]], [==[
+            assert(test.run() == 100, "catch break did not run finally first")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("cascades nested finally blocks on a propagating raise", function()
+        local out = compile_and_run([[
+            log: string = ""
+            function resetlog()
+                log = ""
+            end
+            function note(s: string)
+                log = log .. s
+            end
+            function getlog(): string
+                return log
+            end
+
+            function cascade(): integer
+                do
+                    do
+                        raise "x"
+                    finally
+                        note("inner ")
+                    end
+                finally
+                    note("outer ")
+                end
+                return 0
+            end
+
+            function override_inside_finally(): integer
+                do
+                    raise "body"
+                catch
+                    note("catch ")
+                finally
+                    do
+                        raise "inner"
+                    finally
+                        note("cleanup ")
+                    end
+                end
+                return 0
+            end
+        ]], [==[
+            test.resetlog()
+            local ok, err = pcall(test.cascade)
+            assert(not ok and err == "x")
+            assert(test.getlog() == "inner outer ",
+                   "wrong nested-finally order: " .. test.getlog())
+
+            test.resetlog()
+            ok, err = pcall(test.override_inside_finally)
+            assert(not ok and err == "inner")
+            assert(test.getlog() == "catch cleanup ",
+                   "inner raise from finally did not override/cascade correctly: "
+                   .. test.getlog())
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
 end)

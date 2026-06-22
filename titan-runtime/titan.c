@@ -202,6 +202,57 @@ static void titan_format_native(lua_State *L, char *line, size_t linesz,
     snprintf(line, linesz, "\t%s:%d: in %s", f->base, f->lineno, nm);
 }
 
+typedef struct {
+    int is_entry;
+} titan_entry_probe;
+
+static void titan_entry_syminfo_cb(void *data, uintptr_t pc,
+                                   const char *symname, uintptr_t symval,
+                                   uintptr_t symsize) {
+    titan_entry_probe *probe = (titan_entry_probe *)data;
+    (void)pc; (void)symval; (void)symsize;
+    if (symname != NULL && strstr(symname, TITAN_ENTRY_TAG) != NULL) {
+        probe->is_entry = 1;
+    }
+}
+
+static int titan_cfunction_is_entry(lua_CFunction fn) {
+    titan_entry_probe probe;
+    probe.is_entry = 0;
+    if (titan_bt_state == NULL) {
+        titan_bt_state = backtrace_create_state(NULL, 1, titan_bt_error, NULL);
+    }
+    if (titan_bt_state == NULL) return 0;
+    backtrace_syminfo(titan_bt_state,
+                      (uintptr_t)titan_cast_func(void *, fn),
+                      titan_entry_syminfo_cb, titan_bt_error, &probe);
+    return probe.is_entry;
+}
+
+/* Consume the next native Titan run up to and including its entry-wrapper
+** sentinel. Entry-wrapper frames are boundary markers only (consumed, never
+** emitted); native function frames are appended in order. Returns nonzero if an
+** entry sentinel was consumed, proving this run corresponds to a Lua-visible
+** Titan entry-wrapper CallInfo. */
+static int titan_drain_native_run(lua_State *L, luaL_Buffer *buf,
+                                  titan_native_stack *st, int *ni,
+                                  int *wrote_any) {
+    int consumed_entry = 0;
+    while (*ni < st->n) {
+        int was_entry = st->frames[*ni].is_entry;
+        if (!was_entry) {
+            char line[768];
+            titan_format_native(L, line, sizeof(line), &st->frames[*ni]);
+            titan_bt_addframe(buf, wrote_any, line);
+        } else {
+            consumed_entry = 1;
+        }
+        (*ni)++;
+        if (was_entry) break;
+    }
+    return consumed_entry;
+}
+
 /* Build ONE intermingled, innermost->outer trace mixing pure-Lua and Titan
 ** frames in call order (plan A.2). The CallInfo chain is the backbone: it
 ** enumerates every Lua activation (so a single native luaV_execute correctly
@@ -209,14 +260,15 @@ static void titan_format_native(lua_State *L, char *line, size_t linesz,
 ** supplies only the Titan native frames, spliced in at the entry-wrapper
 ** boundaries.
 **
-** Alignment: walk both stacks innermost->outer in lockstep. At every C-level
-** CallInfo (a Titan entry wrapper appears here as a C function, as do genuine
-** Lua C-functions) we drain the next run of native Titan frames up to and
-** including the next entry-wrapper sentinel; that sentinel-terminated run is the
-** Titan native subtree that this Lua->Titan call ran. Pure-Lua CallInfo frames
-** are emitted directly with src:line:in name; genuine Lua C-functions as
-** [C]:in name. The deepest (innermost) Titan native run is drained before the
-** first CallInfo so the error site leads the trace.
+** Alignment: walk both stacks innermost->outer in lockstep. Each native Titan
+** run ends at an entry-wrapper sentinel. The deepest (innermost) run is drained
+** before the first CallInfo so the error site leads the trace; the very next
+** Titan entry-wrapper CallInfo is then suppressed as already represented. For
+** later C-level CallInfos, we first identify whether the C function really is a
+** generated Titan entry wrapper (by symbolizing its lua_CFunction pointer and
+** looking for TITAN_ENTRY_TAG). Genuine Lua C-functions are emitted as `[C]`;
+** Titan entry wrappers drain exactly one native run and are themselves hidden.
+** Pure-Lua CallInfo frames are emitted directly with src:line:in name.
 **
 ** Trampoline collapse: each logical Titan call lands TWO native frames — the
 ** generated entry-wrapper (sentinel `titanentry`) and the native function it
@@ -228,21 +280,14 @@ static void titan_format_native(lua_State *L, char *line, size_t linesz,
 ** symbol is replaced by its qualified Titan source name from
 ** registry[TITAN_NAMES_KEY] (titan_format_native), falling back to the raw
 ** symbol if absent.
-**
-** Caveat (documented for review): a Titan entry wrapper and a genuine Lua
-** C-function are indistinguishable at a C-level CallInfo, so the native Titan
-** run is drained greedily at the first C-level CallInfo at or after its place.
-** In the strictly-alternating Lua<->Titan case (the common one, and the tested
-** one) this is exact. In the rarer Titan -> LuaC(e.g. pcall) -> Titan case the
-** inner Titan native run may splice one C-frame too early; no frame is ever
-** dropped (every Lua frame and every Titan frame appears) and the trace stays a
-** single innermost->outer section. */
+*/
 static void titan_push_unified_trace(lua_State *L, luaL_Buffer *buf,
                                      const char *msg) {
     titan_native_frame frames[TITAN_MAX_NATIVE];
     titan_native_stack st;
     int ni = 0;          /* next un-emitted native frame index */
     int wrote_any = 0;
+    int suppress_next_entry = 0;
     int level = 1;       /* skip errorhandler's own CallInfo (level 0) */
     lua_Debug ar;
 
@@ -260,40 +305,27 @@ static void titan_push_unified_trace(lua_State *L, luaL_Buffer *buf,
     /* Drain the deepest native Titan run (the error site) before any CallInfo
     ** so the innermost Titan frames lead. Entry-wrapper frames are boundary
     ** markers only (consumed, never emitted); only native functions are shown. */
-    while (ni < st.n) {
-        int was_entry = frames[ni].is_entry;
-        if (!was_entry) {
-            char line[768];
-            titan_format_native(L, line, sizeof(line), &frames[ni]);
-            titan_bt_addframe(buf, &wrote_any, line);
-        }
-        ni++;
-        if (was_entry) break;
-    }
+    suppress_next_entry =
+        titan_drain_native_run(L, buf, &st, &ni, &wrote_any);
 
     while (lua_getstack(L, level++, &ar)) {
-        lua_getinfo(L, "Slnt", &ar);
+        lua_CFunction cfunc = NULL;
+        int is_titan_entry = 0;
+        lua_getinfo(L, "Slntf", &ar);           /* pushes function */
         if (ar.what != NULL && ar.what[0] == 'C') {
-            /* A C-level CallInfo: a Titan entry wrapper or a Lua C-function.
-            ** Splice the next native Titan run (up to & including its sentinel)
-            ** for the Titan-entry case. */
-            int drained = 0;
-            while (ni < st.n) {
-                int was_entry = frames[ni].is_entry;
-                if (!was_entry) {
-                    char line[768];
-                    titan_format_native(L, line, sizeof(line), &frames[ni]);
-                    titan_bt_addframe(buf, &wrote_any, line);
+            cfunc = lua_tocfunction(L, -1);
+            is_titan_entry = (cfunc != NULL && titan_cfunction_is_entry(cfunc));
+        }
+        lua_pop(L, 1);                          /* pop function from "f" */
+        if (ar.what != NULL && ar.what[0] == 'C') {
+            if (is_titan_entry) {
+                if (suppress_next_entry) {
+                    suppress_next_entry = 0;    /* deepest run already drained */
+                } else if (ni < st.n) {
+                    titan_drain_native_run(L, buf, &st, &ni, &wrote_any);
                 }
-                ni++;
-                drained = 1;
-                if (was_entry) break;
-            }
-            /* If we drained a sentinel-terminated run, this CallInfo was the
-            ** Titan entry wrapper, already represented by the native frames; do
-            ** not also emit a [C] line for it. Otherwise it is a genuine Lua
-            ** C-function: name it. */
-            if (!drained) {
+                /* entry-wrapper CallInfo is a boundary marker only */
+            } else {
                 char line[512], nm[256];
                 snprintf(line, sizeof(line), "\t%s: in %s",
                          ar.short_src, titan_funcname(&ar, nm, sizeof(nm)));
