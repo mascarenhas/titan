@@ -21,25 +21,18 @@ the `linux`/`macosx` build target from `uname` (override with
 `make lua LUA_PLATFORM=...`). To do it by hand instead, download and extract the
 tarball into a `lua-5.5.0` folder and run `make linux MYCFLAGS=-fPIC` inside it.
 
-You can install the Titan compiler itself using  [LuaRocks](http://luarocks.org)
-this will also install all dependencies automatically. The compiler itself
-runs on Lua 5.5.
+You can install the Titan compiler and its dependencies using  [LuaRocks](http://luarocks.org)
+making sure that the dependencies will use the same exact Lua version Titan is using.
+After installing luarocks, run these commands in the root of this repository:
 
-        $ [install luarocks]
-        $ luarocks make titan-dev-1.rockspec
-To install without `sudo` permissions.
+        $ luarocks init --lua-dir=$PWD/.lua
+        $ luarocks make
 
-        $ [cd into titan folder]
-        $ luarocks build --local
-You can also run the Titan compiler directly from the folder where you
-cloned this repository if you install all the dependencies for the compiler.
+Run this in your session to make sure titanc and the exact Lua interpreter you download
+in the previous steps are in your `$PATH` (put this in your shell startup file if you
+want to make this your default Lua):
 
-# Requirements for running the compiler
-
-1. [LPegLabel](https://github.com/sqmedeiros/lpeglabel) >= 1.5.0
-2. [inspect](https://github.com/kikito/inspect.lua) >= 3.1.0
-3. [argparse](https://github.com/mpeterv/argparse) >= 0.5.0
-4. [luafilesystem](https://github.com/keplerproject/luafilesystem) >= 1.7.0
+        $ cd <titan folder> && eval $(luarocks path --bin)
 
 # Usage
 
@@ -90,7 +83,7 @@ dependencies, so always `luarocks make` first (that is what `make test` does).
 Two related gotchas if you drive Busted directly:
 
 * A few tests need the `titan` runtime support module (for `titan.backtrace()`),
-  which `luarocks make` installs; make sure the in-tree `lua-5.5.0/src/lua`
+  which `luarocks make` installs; make sure the in-tree `.lua/bin/lua`
   interpreter can find it by including your rocks tree in `LUA_CPATH`, e.g.
   `LUA_CPATH="./?.so;$HOME/.luarocks/lib/lua/5.5/?.so;;" busted`.
 * Once the `titan` rock is installed, Busted loads the compiler modules from the

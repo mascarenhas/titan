@@ -35,7 +35,7 @@ local function compile_and_run(titan_code, lua_test)
     local sf = assert(io.open(script, "w"))
     sf:write(lua_test)
     sf:close()
-    local f = assert(io.popen("lua-5.5.0/src/lua -l test " .. script))
+    local f = assert(io.popen("./lua -l test " .. script))
     local out = f:read("*a")
     f:close()
     os.remove(script)
@@ -43,7 +43,7 @@ local function compile_and_run(titan_code, lua_test)
 end
 
 describe("finally (error-handling Phase 5)", function()
-    setup(function () os.remove("titan-runtime/titan.o") end)
+    setup(function() os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
     it("runs the finally on normal completion", function()

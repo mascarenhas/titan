@@ -5,5 +5,12 @@
 # lua source trees (downloaded from lua.org)
 /lua-5.*/
 
+# local lua install
+/.lua
+
 # libbacktrace source tree (cloned + built by `make libbacktrace`)
 /libbacktrace/
+/luarocks
+/lua
+/lua_modules
+/.luarocks

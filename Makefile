@@ -48,7 +48,7 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 	  awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
 
-lua: $(LUA_LIB) ## Download and build the bundled Lua source tree
+lua: $(LUA_LIB) .lua/bin/lua ## Download and build the bundled Lua source tree
 
 $(LUA_LIB):
 	@if [ ! -d "$(LUA_DIR)" ]; then \
@@ -63,8 +63,12 @@ $(LUA_LIB):
 	  echo "==> Extracting $(LUA_TARBALL)"; \
 	  tar zxf "$(LUA_TARBALL)"; \
 	fi
+	rm "$(LUA_TARBALL)"
 	@echo "==> Building Lua ($(LUA_PLATFORM), MYCFLAGS=-fPIC)"
 	$(MAKE) -C "$(LUA_DIR)" $(LUA_PLATFORM) MYCFLAGS=-fPIC
+
+.lua/bin/lua: $(LUA_LIB)
+	$(MAKE) -C "$(LUA_DIR)" install INSTALL_TOP="$(CURDIR)/.lua"	
 
 libbacktrace: $(LIBBT_LIB) ## Clone and build the bundled libbacktrace source tree
 
@@ -98,6 +102,7 @@ clean: ## Remove generated build/test artifacts (keeps the Lua tree)
 clean-lua: ## Remove the downloaded Lua source tree(s) and tarball
 	rm -rf $(LUA_DIR) lua-5.*/
 	rm -f $(LUA_TARBALL) lua-5.*.tar.gz
+	rm -rf .lua
 
 clean-libbacktrace: ## Remove the cloned libbacktrace source tree
 	rm -rf $(LIBBT_DIR)

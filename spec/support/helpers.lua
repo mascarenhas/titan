@@ -57,9 +57,11 @@ function M.call(modname, code)
     sf:write(string.format("print(pcall(function () %s end))\n", code))
     sf:close()
     local cmd = string.format(
-        "lua-5.5.0/src/lua -l %s %s", modname, script)
+        "./lua -l %s %s", modname, script)
     local f = io.popen(cmd)
-    if not f then os.remove(script); return false, "popen failed" end
+    if not f then
+        os.remove(script); return false, "popen failed"
+    end
     local out = f:read()
     local ok = f:close()
     os.remove(script)

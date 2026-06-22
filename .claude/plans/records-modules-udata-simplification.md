@@ -577,7 +577,7 @@ Udata.
 ### Regression oracle (existing specs — run from repo root after `luarocks make`)
 
 - **`spec/coder/coder_spec.lua`** (end-to-end: generate C, `cc`, run under
-  `lua-5.5.0/src/lua`). The authoritative record oracle — record construction,
+  `./lua`). The authoritative record oracle — record construction,
   field read/write, methods, nested records, `Rec.new`, records crossing to/from
   Lua (`type(p)=="userdata"`, identity, protected metatable, field type-check
   errors `expected float but found string`, nominal mismatch errors
