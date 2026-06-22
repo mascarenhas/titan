@@ -283,7 +283,7 @@ static int titan_drain_native_run(lua_State *L, luaL_Buffer *buf,
 }
 
 /* Build ONE intermingled, innermost->outer trace mixing pure-Lua and Titan
-** frames in call order (plan A.2). The CallInfo chain is the backbone: it
+** frames in call order. The CallInfo chain is the backbone: it
 ** enumerates every Lua activation (so a single native luaV_execute correctly
 ** expands into the multiple Lua frames it ran). The native libbacktrace stack
 ** supplies only the Titan native frames, spliced in at the entry-wrapper
@@ -582,7 +582,7 @@ int errorhandler(lua_State *L) {
   luaL_Buffer buf;
   luaL_buffinit(L, &buf);
 #ifdef TITAN_HAVE_LIBBACKTRACE
-  /* ONE intermingled, innermost->outer trace (plan A.2): the CallInfo chain
+  /* ONE intermingled, innermost->outer trace: the CallInfo chain
   ** supplies every Lua frame, libbacktrace supplies the Titan native frames
   ** spliced at the entry-wrapper boundaries. No separate "C traceback:" section,
   ** no collapsed [Lua] marker. */

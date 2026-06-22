@@ -56,9 +56,9 @@ local function c_float_literal(n)
 end
 
 -- Emit a standalone C `#line` directive pointing at `node`'s .titan source
--- location, so DWARF (and any libbacktrace symbolization, error-handling
--- Phase 0) attributes the *following* generated C to the original .titan file
--- and line rather than the generated .c. Returned as its own line with a
+-- location, so DWARF and libbacktrace symbolization attribute the *following*
+-- generated C to the original .titan file and line rather than the generated
+-- .c. Returned as its own line with a
 -- trailing newline so it never fuses with adjacent code; the `#` may be
 -- indented (reindent_c re-indents it) since leading whitespace before a
 -- directive is legal C. Nodes without a `loc` (synthesized AST) emit nothing.
@@ -126,7 +126,8 @@ end
 -- (titan-runtime/titan.c) keys on this substring to locate Titan native-stack
 -- boundaries — each entry wrapper is where one Lua->Titan call splices a run of
 -- native Titan frames into the CallInfo-driven Lua trace. The `#line` from
--- Phase 1 still attributes these wrappers to the .titan source.
+-- the function-definition `#line` still attributes these wrappers to the
+-- .titan source.
 local TITAN_ENTRY_TAG = "titanentry"
 
 local function fname_prefix(typ)
@@ -233,8 +234,8 @@ end
 local checkandset
 
 -- `loc` is the .titan source location of the raise; it stamps a fully-resolved
--- `#line` directly above the luaL_error (error-handling Phase 0) so the native
--- frame that throws symbolizes to the throw's exact .titan line instead of a
+-- `#line` directly above the luaL_error so the native frame that throws
+-- symbolizes to the throw's exact .titan line instead of a
 -- line drifted N rows into the surrounding expanded coercion C. The `#line`
 -- uses resolved values (not $LINE/$FILE placeholders) so it is independent of
 -- whatever render vars the caller's enclosing template happens to define. The
@@ -1576,7 +1577,7 @@ local function codeif(ctx, node, idx)
         cstats, cexp = codeexp(ctx, node.thens[idx].condition, true)
         cthn = codestat(ctx, node.thens[idx].block)
         -- Put the else body on its own line(s): a statement's code now begins
-        -- with a `#line` directive (error-handling Phase 0), which must start
+        -- with a `#line` directive, which must start
         -- a line — gluing it after `else ` on one line would put the `#` off
         -- column 1 and break compilation. `else\n<body>` is equally valid C.
         cels = node.elsestat and "else\n" .. codestat(ctx, node.elsestat) or ""
@@ -3346,8 +3347,8 @@ end
 --
 -- Boundary accounting (B.4): the BODY always gets a boundary. A CATCH gets its
 -- OWN boundary only when a FINALLY follows (so a raise in the catch still runs the
--- finally); without a finally a catch error propagates to the outer boundary
--- (Phase-4 behavior). A FINALLY itself installs no boundary: it is straight-line,
+-- finally); without a finally a catch error propagates to the outer boundary.
+-- A FINALLY itself installs no boundary: it is straight-line,
 -- and a raise/runtime error in it longjmps out, skipping the dispatch (override).
 local function codetry(ctx, node)
     -- A function containing a try always needs `_base` recomputed from an offset
@@ -3436,7 +3437,7 @@ local function codetry(ctx, node)
     local cfinally = has_finally and codestat(ctx, node.finallyblock) or ""
 
     if not has_finally then
-        -- Phase-4 shape: body boundary; on error, materialize+bind catch locals
+        -- Body boundary; on error, materialize+bind catch locals
         -- and run the catch directly (no own boundary — its raise propagates out).
         return render([[
             {
@@ -3700,8 +3701,8 @@ local function codestat_dispatch(ctx, node)
     end
 end
 
--- Prepend a `#line` directive (error-handling Phase 0) so each statement's
--- generated C attributes back to its .titan source line, then dispatch.
+-- Prepend a `#line` directive so each statement's generated C attributes back
+-- to its .titan source line, then dispatch.
 -- The directive is a standalone leading line; codestat_dispatch never splices
 -- between multiply-referenced operand slots, so this cannot misattribute or
 -- break an un-hoisted operand.
@@ -3872,8 +3873,8 @@ local function codearray(ctx, node, target)
         local struct = varg_struct_name(va.elem)
         -- `luaH_resizearray` -> `luaM_reallocvector` can GC, which may shrink and
         -- relocate the Lua stack (`luaD_shrinkstack`), dangling the raw `_base`
-        -- pointer. Save it as an offset and recompute it after the resize (the
-        -- Phase-4 lesson) so the prefix-slot reads and `obj2arr` stores below use
+        -- pointer. Save it as an offset and recompute it after the resize so
+        -- the prefix-slot reads and `obj2arr` stores below use
         -- the live stack. The preamble declares `_base_off` when uses_base_off.
         ctx.uses_base_off = true
         -- A reusable TValue scratch to wrap each vararg element before `obj2arr`
@@ -5239,7 +5240,7 @@ end
 -- attribution within an expression's expanded C is pinned where it matters —
 -- directly above each luaL_error in codethrow — so we keep codeexp a plain
 -- dispatch passthrough (the function-entry/statement/throw stamps cover the
--- rest, error-handling Phase 0).
+-- rest).
 function codeexp(ctx, node, iscondition, target)
     return codeexp_dispatch(ctx, node, iscondition, target)
 end
@@ -5439,9 +5440,9 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
         ERRORSLOT = #params == 0 and "lua_pushnil(L);" or "",
         NAME = c_string_literal(titan_name),
         -- Stamp the Lua-entry wrapper to the function definition's .titan loc
-        -- (error-handling Phase 0) so its native frame, and any arg-coercion
-        -- throw within it, symbolizes to the .titan source rather than drifting
-        -- through the wrapper's generated C.
+        -- so its native frame, and any arg-coercion throw within it, symbolizes
+        -- to the .titan source rather than drifting through the wrapper's
+        -- generated C.
         ENTRYLINE = emitline({ loc = loc }),
         BODY = table.concat(stats, "\n"),
     })
@@ -5555,7 +5556,7 @@ local function codefuncdec(tlcontext, node)
     -- Attribute the first native frame to the function definition: a `#line`
     -- at function entry (after parameter setup, before the body) so a
     -- backtrace through the entry shows the .titan definition line, not the
-    -- generated .c (error-handling Phase 0).
+    -- generated .c.
     local body = emitline(node) .. codestat(ctx, node.block)
     local nslots = ctx.nslots
     -- Patch the try-recovery's reserved-top restore (codetry emits the symbolic

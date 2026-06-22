@@ -12,8 +12,8 @@ static int getbacktrace(lua_State *L) {
 
 /* Pin the trace slot: the next error's message handler will KEEP the existing
 ** TITAN_BACKTRACE_KEY slot instead of regenerating it (one-shot; the handler
-** clears the pin). This is the re-raise discipline (plan A.5) surfaced for
-** testing; later phases (catch/re-raise) drive it from generated C. */
+** clears the pin). This is the re-raise discipline surfaced for testing;
+** catch/re-raise code drives it from generated C. */
 static int pintrace(lua_State *L) {
   lua_pushliteral(L, TITAN_TRACE_PINNED);
   lua_pushboolean(L, 1);

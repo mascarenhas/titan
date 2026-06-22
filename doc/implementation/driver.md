@@ -256,7 +256,7 @@ error alerts):
   `registry[TITAN_BACKTRACE_KEY]` and prints **that** (message +
   intermingled Lua+Titan frames) to stderr, falling back to
   `msghandler`'s plain traceback only when no Titan trace was captured.
-  Either way the process exits non-zero (plan A.6); see
+  Either way the process exits non-zero; see
   [the runtime library](#titanc-the-dynamic-loader).
 
 Mechanically, then, a standalone Titan program is an embedded Lua

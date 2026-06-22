@@ -1,7 +1,6 @@
--- Typechecker tests for the error-handling construct (`catch`/`finally`/`raise`)
--- — error-handling Phase 3. These run the type checker ONLY: catch/finally are
--- not compiled yet (Phases 4-5), so nothing here generates or runs code. The
--- end-to-end coder counterparts arrive with the codegen phases.
+-- Typechecker tests for the error-handling construct (`catch`/`finally`/`raise`).
+-- These run the type checker only; end-to-end code generation coverage lives in
+-- the coder specs.
 --
 -- Surface syntax (no `try` keyword): `catch`/`finally` attach to any block as
 -- optional trailers, parsing into a `StatTry { block, catchblock, finallyblock }`

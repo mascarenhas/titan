@@ -1,5 +1,4 @@
--- End-to-end coverage for the libbacktrace-based unified stack trace
--- (error-handling Phase 0: runtime + driver, no language syntax yet).
+-- End-to-end coverage for the libbacktrace-based unified stack trace.
 --
 -- These tests generate C, compile it (linking ./libbacktrace/.libs/libbacktrace.a
 -- before liblua.a, with -g), and run the result under ./lua. They
@@ -7,50 +6,21 @@
 -- frames symbolized and merged with the Lua-side luaL_traceback, plus the
 -- registry pin-flag discipline (preserve vs. regenerate).
 --
--- Phase 1 (#line emission) added: the native Titan frames now symbolize to the
--- original .titan source file and line (carried in the .so's DWARF via the
--- `#line` directives the coder emits at function entry, statement starts, and
--- every raise site), NOT to the generated .c. The merge filter (Phase 0)
--- already classifies .titan filenames as "show", so they appear automatically
--- as `<file>.titan:<line>: in <symbol>`.
-local checker = require 'titan-compiler.checker'
+-- Native Titan frames symbolize to the original .titan source file and line
+-- (carried in the .so's DWARF via generated `#line` directives), not to the
+-- generated .c. The merge filter classifies .titan filenames as visible, so
+-- they appear as `<file>.titan:<line>: in <symbol>`.
 local h = require 'spec.support.helpers'
 
-local parse = h.parse
-local compile = h.compile
+local compile_and_run = h.compile_and_run
+local compile_and_run_app = h.compile_and_run_app
 
 local function clean()
-    os.execute("rm -rf *.o *.so *.dSYM")
+    os.execute("rm -rf *.o *.so *.dSYM test test__entrypoint.c")
     if not h.verbose then os.execute("rm -f *.c") end
 end
 
--- Compile `titan_code` as module "test", then run `lua_test` under stock Lua
--- with `test` and `titan` available; returns the script's stdout.
-local function compile_and_run(titan_code, lua_test)
-    h.reset()
-    -- Parse under the "test.titan" chunkname (not the helper's default "(spec)")
-    -- so the AST locs — and thus the `#line` directives the coder emits — carry
-    -- the .titan path, matching what `titanc` produces and what the Phase 1
-    -- assertions below check for in the symbolized native frames.
-    local ast, perr = parse(titan_code, "test.titan")
-    assert.truthy(ast, perr)
-    local _, errs = checker.check("test", ast, titan_code, "test.titan")
-    assert.equal(0, #errs, table.concat(errs, "\n"))
-    local ok, err = compile("test", ast)
-    assert.truthy(ok, err)
-
-    local script = os.tmpname()
-    local sf = assert(io.open(script, "w"))
-    sf:write(lua_test)
-    sf:close()
-    local f = assert(io.popen("./lua -l test " .. script))
-    local out = f:read("*a")
-    f:close()
-    os.remove(script)
-    return out
-end
-
-describe("libbacktrace unified stack trace (error-handling Phase 0)", function()
+describe("libbacktrace unified stack trace", function()
     setup(function() os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
@@ -89,7 +59,7 @@ describe("libbacktrace unified stack trace (error-handling Phase 0)", function()
         assert.match("OK", out)
     end)
 
-    it("attributes native frames to the .titan source via #line (Phase 1)", function()
+    it("attributes native frames to the .titan source via #line", function()
         -- With `#line`, the native frames symbolize to the ORIGINAL .titan file
         -- and line carried in the .so's DWARF, NOT the generated .c. The raise
         -- site (the bad `return x` coercion) is stamped by codethrow with the
@@ -396,35 +366,14 @@ describe("libbacktrace unified stack trace (error-handling Phase 0)", function()
     end)
 end)
 
--- Standalone-executable top-level handler (plan A.6). A module that defines
+-- Standalone-executable top-level handler. A module that defines
 -- `main(args:{string}):integer` is linked into an executable whose C bootstrap
 -- runs the Titan main in protected mode with `errorhandler` installed; an
 -- uncaught error must print the message + the unified Lua+Titan trace to stderr
 -- and exit non-zero, mirroring lua.c's msghandler/report.
-describe("standalone main top-level error handler (error-handling A.6)", function()
+describe("standalone main top-level error handler", function()
     setup(function() os.remove("titan-runtime/titan.o") end)
-    after_each(function()
-        os.execute("rm -rf *.o *.so *.dSYM test test__entrypoint.c")
-        if not h.verbose then os.execute("rm -f *.c") end
-    end)
-
-    -- Build `titan_code` (which must define main) as a standalone "test", run it,
-    -- and return (exit_status, combined_stdout_stderr).
-    local function build_and_run_app(titan_code)
-        h.reset()
-        local ast, perr = parse(titan_code, "test.titan")
-        assert.truthy(ast, perr)
-        local _, errs = checker.check("test", ast, titan_code, "test.titan")
-        assert.equal(0, #errs, table.concat(errs, "\n"))
-        local ok, err = h.compile_app("test", ast)
-        assert.truthy(ok, err)
-        -- run capturing both streams; `; echo "EXIT:$?"` carries the status out
-        local f = assert(io.popen("./test 2>&1; echo \"EXIT:$?\""))
-        local out = f:read("*a")
-        f:close()
-        local status = tonumber(out:match("EXIT:(%d+)%s*$"))
-        return status, out
-    end
+    after_each(clean)
 
     it("prints message + unified trace to stderr and exits non-zero", function()
         -- main -> mid (Titan) -> deep (Titan) -> uncaught error. The bootstrap
@@ -432,7 +381,7 @@ describe("standalone main top-level error handler (error-handling A.6)", functio
         -- trace captured on the intact stack must reach stderr, carrying BOTH
         -- the Lua bootstrap frame(s) and the Titan native frames, and the
         -- process must exit non-zero.
-        local status, out = build_and_run_app([[
+        local status, out = compile_and_run_app([[
             function deep(): integer
                 local x: value = {}
                 return x

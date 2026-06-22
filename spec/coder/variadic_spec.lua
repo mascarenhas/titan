@@ -1293,10 +1293,10 @@ describe("variadic GC anchoring under generational mode", function()
     end)
 end)
 
--- Functional coverage that the earlier phases left uncovered: nested variadic
--- lambdas (scope rule 4 at run time), map-typed elements, variadic methods,
--- a side-effecting `...[i]` index, `...: boolean` through the build/forward/static
--- paths, and the `{...: value}`-with-a-nil border semantics.
+-- Functional coverage for nested variadic lambdas (scope rule 4 at run time),
+-- map-typed elements, variadic methods, a side-effecting `...[i]` index,
+-- `...: boolean` through the build/forward/static paths, and the
+-- `{...: value}`-with-a-nil border semantics.
 describe("variadic parameters: functional coverage gaps (code generator)", function()
     setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(clean)
@@ -1480,8 +1480,7 @@ describe("variadic parameters: functional coverage gaps (code generator)", funct
 
     -- `...: boolean` (a scalar, no-payload element: booleans carry no GC payload)
     -- through the `{...}` build, pass-through forwarding, start-adjust
-    -- forwarding, and a fully-static call site. Earlier phases covered only
-    -- `#...`/`...[i]` for booleans.
+    -- forwarding, and a fully-static call site.
     it("...: boolean through {...}, forwarding, and a static call", function()
         run_coder([[
             function count_true(...: boolean): integer

@@ -342,9 +342,8 @@ The highest-value regression tests are:
 * `spec/checker/error_handling_spec.lua` — catch/finally scopes, bare
   raise legality, finally transfer bans, always-returns.
 * `spec/coder/error_handling_spec.lua` — catch, fresh raise vs. re-raise,
-  trace clearing.
-* `spec/coder/finally_spec.lua` — pending actions, finally override,
-  nested finally order, GC-valued pending returns.
+  trace clearing, pending actions, finally override, nested finally order,
+  GC-valued pending returns, and standalone uncaught-error reporting.
 * `spec/coder/stack_relocation_spec.lua` — stack relocation through
   protected recovery.
 * `spec/abi_spec.lua` — runtime/compiler ABI constants.

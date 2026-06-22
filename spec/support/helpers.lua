@@ -107,6 +107,72 @@ function M.run_coder(titan_code, lua_test, errmsg)
     end
 end
 
+-- Check + compile `titan_code` as `modname` (default "test"), parsed under the
+-- matching `<modname>.titan` chunk name so generated `#line` directives carry a
+-- realistic source path, then run `lua_test` with the module loaded. Returns
+-- the script's stdout.
+function M.compile_and_run(titan_code, lua_test, modname)
+    modname = modname or "test"
+    reset()
+    local filename = modname:gsub("[.]", "/") .. ".titan"
+    local ast, perr = M.parse(titan_code, filename)
+    assert.truthy(ast, perr)
+    local _, errs = checker.check(modname, ast, titan_code, filename)
+    assert.equal(0, #errs, table.concat(errs, "\n"))
+    local ok, err = M.compile(modname, ast)
+    assert.truthy(ok, err)
+
+    local script = os.tmpname()
+    local sf = assert(io.open(script, "w"))
+    sf:write(lua_test)
+    sf:close()
+    local f = assert(io.popen("./lua -l " .. modname .. " " .. script))
+    local out = f:read("*a")
+    f:close()
+    os.remove(script)
+    return out
+end
+
+-- Check + compile `titan_code` as `modname` (default "test") and return the
+-- generated C source.
+function M.compile_and_read_c(titan_code, modname)
+    modname = modname or "test"
+    reset()
+    local filename = modname:gsub("[.]", "/") .. ".titan"
+    local ast, perr = M.parse(titan_code, filename)
+    assert.truthy(ast, perr)
+    local _, errs = checker.check(modname, ast, titan_code, filename)
+    assert.equal(0, #errs, table.concat(errs, "\n"))
+    local ok, err = M.compile(modname, ast)
+    assert.truthy(ok, err)
+    local f = assert(io.open(modname:gsub("[.]", "/") .. ".c", "r"))
+    local csrc = f:read("*a")
+    f:close()
+    return csrc
+end
+
+-- Check + compile `titan_code` as a standalone program and run it, capturing
+-- both stdout and stderr. Returns (exit_status, combined_output).
+function M.compile_and_run_app(titan_code, modname)
+    modname = modname or "test"
+    reset()
+    local filename = modname:gsub("[.]", "/") .. ".titan"
+    local ast, perr = M.parse(titan_code, filename)
+    assert.truthy(ast, perr)
+    local _, errs = checker.check(modname, ast, titan_code, filename)
+    assert.equal(0, #errs, table.concat(errs, "\n"))
+    local ok, err = M.compile_app(modname, ast)
+    assert.truthy(ok, err)
+
+    local execname = "./" .. modname:gsub("[.]", "/")
+    local f = assert(io.popen(execname .. " 2>&1; echo \"EXIT:$?\""))
+    local out = f:read("*a")
+    f:close()
+    local status = tonumber(out:match("EXIT:(%d+)%s*$"))
+    out = out:gsub("EXIT:%d+%s*$", "")
+    return status, out
+end
+
 -- Build a standalone executable from `titan_code` plus a synthesized `main` and
 -- run it, asserting the exit status (and optionally a substring of its output).
 function M.run_coder_app(titan_code, main, estatus, eout)

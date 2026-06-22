@@ -570,7 +570,7 @@ objects, `titan-runtime/titan.o`, `libbacktrace.a`, and `liblua.a`:
   trace into `TITAN_BACKTRACE_KEY` on the intact stack. `msghandler` is
   therefore only the **fallback** for an error that never crossed a Titan
   wrapper (registry slot absent).
-* **Top-level reporting (plan A.6).** On `lua_pcall != 0`, `main` reads
+* **Top-level reporting.** On `lua_pcall != 0`, `main` reads
   `registry[TITAN_BACKTRACE_KEY]`: if it is a string (the usual case for
   a Titan error), that **unified trace — message plus intermingled
   Lua+Titan frames — is printed to stderr**; otherwise it falls back to

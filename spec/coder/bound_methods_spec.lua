@@ -1,7 +1,7 @@
--- End-to-end tests for bound instance methods as first-class values (Phase 5 of
--- anonymous functions). `obj:m` with no argument list evaluates to a function
--- value of the method's type with the implicit `self` removed and the receiver
--- captured. Generate C, compile, run.
+-- End-to-end tests for bound instance methods as first-class values. `obj:m`
+-- with no argument list evaluates to a function value of the method's type with
+-- the implicit `self` removed and the receiver captured. Generate C, compile,
+-- run.
 --
 -- These exercise: both call paths (fast exact-type, slow via `value`), receiver
 -- state mutation through the captured self, a bound method handed to Lua, a

@@ -1,5 +1,4 @@
--- Cross-module trace-name coverage for the `.so`-ONLY import path (Phase-5
--- deliverable 2).
+-- Cross-module trace-name coverage for the `.so`-ONLY import path.
 --
 -- libbacktrace reports a native frame's MANGLED C symbol; the coder emits, in
 -- each module's `_init`, a name table mapping that symbol to the qualified Titan
@@ -15,7 +14,7 @@
 local h = require 'spec.support.helpers'
 local build_so_chain, call = h.build_so_chain, h.call
 
-describe(".so-only cross-module trace names (Phase 5 deliverable 2)", function()
+describe(".so-only cross-module trace names", function()
     setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(function ()
         os.execute("rm -rf *.o *.so *.dSYM")
