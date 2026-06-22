@@ -20,6 +20,12 @@ Titan is a statically-typed, ahead-of-time-compiled sister language to Lua. This
 
 ## Commands
 
+**First**, from the project root, activate the project-local environment so that bare `lua`, `luarocks`, `busted`, and `titanc` resolve to the project wrappers (in `./` and `lua_modules/bin/`) rather than system-wide binaries:
+
+```sh
+eval $(luarocks path --bin)
+```
+
 ```sh
 make lua                                            # download + build the ./lua-5.5.0 source tree (one-time setup)
 make test                                           # `luarocks make` + `luarocks test`: (re)install the rock, then run the full suite
@@ -29,7 +35,7 @@ make clean                                           # remove generated artifact
 busted                                              # full test suite — MUST run from repo root (all driver paths are relative); busted recurses into spec/ subdirs
 busted spec/parser_spec.lua                         # single spec file
 busted spec/coder/coder_spec.lua --filter='for loop' # single test (Lua pattern on test name)
-LUA_CPATH="./?.so;$HOME/.luarocks/lib/lua/5.5/?.so;;" busted   # if the 'titan' rock lives in a local rocks tree
+LUA_CPATH="./?.so;./lua_modules/lib/lua/5.5/?.so;;" busted   # if busted can't find the 'titan' C module (the ./lua wrapper already includes these paths)
 
 ./titanc [--print-ast] [-v] [--lua <luasrc>] [--tree <srcroot>] [-l lib1,lib2] <module>...
 ```
@@ -38,7 +44,7 @@ LUA_CPATH="./?.so;$HOME/.luarocks/lib/lua/5.5/?.so;;" busted   # if the 'titan' 
 
 `titanc` takes dot-separated **module names**, not file paths (dots map to directory separators under `--tree`, default `.`). Compiled-module lookup uses `TITAN_PATH_0_9`/`TITAN_PATH` (default `.;/usr/local/lib/titan/0.9`). The compiled-module ABI version is `0.9` (bumped from `0.8` for variadic parameters: a variadic function's native signature gained a trailing `TitanVargX *_varargs, int _start` pair after the declared params and before the out-params, and `<mangled>_types` now encodes the `varargtype` element type for variadic functions/methods; `0.8` itself was bumped from `0.7` when a record's type identity moved from a `getudatamem` tag word to the udata's metatable pointer — records now carry no raw payload; `0.7` itself was bumped from `0.6` when record instances and module state (`_mod`) collapsed from a `CClosure`+`Udata` pair to a single Lua 5.5 `Udata` — `ctype(Type.Nominal)` and `_mod` are now `Udata*` throughout the native ABI and `<mangled>_init` returns `Udata*`; `0.6` itself was bumped from `0.5` when the native calling convention gained the `_fn` closure parameter — see the coder section); `.so`s built by an older Titan are incompatible. `-v` prints the exact `cc` command lines. Without the `lua-5.5.0` build, only the pure specs pass (cpp, lexer, location, parser, symtab, types, util); `spec/checker/` and `spec/coder/` need the full setup.
 
-**Gotcha — the installed rock shadows the working tree under busted.** The busted launcher prepends the rocks tree to `package.path` and uses `luarocks.loader`, so once `luarocks make` has installed the `titan` rock, `require "titan-compiler.X"` inside specs resolves to the *installed snapshot*, not your edited files — edits silently don't take effect. Re-run `luarocks make --local titan-dev-1.rockspec` after changing compiler sources, before running busted. (`make test` re-runs `luarocks make` for you each time, so it always tests current sources; `luarocks test` on its own does **not** rebuild the rock.) **Two rocks trees are in play** — busted resolves the compiler through one, `titanc` through another — so after editing compiler sources run **both** `luarocks make` and `luarocks make --local` (or just `make test`) before any run whose result you intend to trust. A bare `busted` can silently load a *stale installed snapshot* and pass or fail misleadingly, even mid-session if builds happened at different times.
+**Gotcha — the installed rock shadows the working tree under busted.** The busted launcher prepends the project's `lua_modules/` rocks tree to `package.path` and uses `luarocks.loader`, so once `luarocks make` has installed the `titan` rock, `require "titan-compiler.X"` inside specs resolves to the *installed snapshot* in `lua_modules/`, not your edited source files — edits silently don't take effect. Re-run `luarocks make` after changing compiler sources, before running busted. (`make test` re-runs `luarocks make` for you each time, so it always tests current sources; `luarocks test` on its own does **not** rebuild the rock.) With the project-local `luarocks init --lua-dir` setup (see README), there is only **one** rocks tree (`lua_modules/`): both busted and `titanc` resolve modules from it, so a single `luarocks make` is sufficient. A bare `busted` without a preceding `luarocks make` can silently load a *stale installed snapshot* and pass or fail misleadingly.
 
 ### Lua 5.5 internals conventions in generated C
 
