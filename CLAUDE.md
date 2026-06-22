@@ -8,7 +8,7 @@ Titan is a statically-typed, ahead-of-time-compiled sister language to Lua. This
 
 ## Prerequisites (important — the suite cannot run without these)
 
-- **Lua 5.5.** Both the compiler's own Lua code and the generated C target Lua 5.5 (rockspec: `lua ~> 5.5`). CI (`.github/workflows/ci.yml`) uses hererocks (installed from git master — the PyPI release does not know Lua 5.5) to build a Lua 5.5 + LuaRocks environment.
+- **Lua 5.5.** Both the compiler's own Lua code and the generated C target Lua 5.5 (rockspec: `lua ~> 5.5`). `make lua` builds Lua 5.5 into `.lua/` and `lua-5.5.0/`. CI (`.github/workflows/ci.yml`) builds LuaRocks from source against the vendored `.lua/` tree (no hererocks or Python dependency), then runs `luarocks init --lua-dir=$PWD/.lua` to set up the same project-local tree (`lua_modules/`) as the README workflow.
 - **CI runs Linux only on push; macOS is manual-dispatch only.** The CI matrix dynamically includes macOS (`macos-latest`) only on `workflow_dispatch` events to save runner costs. Use macOS CI as a **pre-merge check** when a feature branch is ready, not during active development. Trigger it with: `gh workflow run ci.yml --ref <branch>`.
 - **A built Lua 5.5.0 source tree at `./lua-5.5.0`** (gitignored). Generated C includes Lua *internal* headers (`lobject.h`, `lgc.h`, `lvm.h`, ...) and links `lua-5.5.0/src/liblua.a`. Easiest: `make lua` (downloads the tarball, extracts, builds with `MYCFLAGS=-fPIC`, auto-picking the `linux`/`macosx` target from `uname`; override with `make lua LUA_PLATFORM=...`). By hand:
   ```
