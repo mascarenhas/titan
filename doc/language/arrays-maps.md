@@ -240,9 +240,6 @@ local m: {string: integer} = { x = 10 }
 
 Keeping the named-entry form exclusively for records is what lets the
 three constructor kinds be told apart syntactically.
-The compiler's test suite marks the string-keyed-map case with a
-`FIXME should this be allowed?`, so this restriction may yet be
-revisited.
 
 Note that an empty `{}` only becomes a map when the context expects a
 map type; with no context, `{}` defaults to the *array* type

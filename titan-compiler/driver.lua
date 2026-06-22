@@ -11,11 +11,19 @@ local driver = {}
 
 driver.imported = {}
 
-driver.TITAN_BIN_PATH = os.getenv("TITAN_PATH_0_9") or os.getenv("TITAN_PATH") or ".;/usr/local/lib/titan/0.9"
+driver.TITAN_VER = "0.10"
+driver.TITAN_VER_SUFFIX = "_0_10"
+driver.TITAN_BIN_PATH = os.getenv("TITAN_PATH" .. driver.TITAN_VER_SUFFIX)
+    or os.getenv("TITAN_PATH")
+    or ".;/usr/local/lib/titan/" .. driver.TITAN_VER
 driver.TITAN_SOURCE_PATH = "."
 driver.LUA_SOURCE_PATH = "lua-5.5.0/src/"
 driver.TITAN_RUNTIME_PATH = "titan-runtime/"
-driver.CFLAGS = "--std=c99 -O2 -Wall -fPIC"
+driver.LIBBACKTRACE_PATH = "libbacktrace"
+-- -g emits DWARF (carries the #line file/line a traceback needs) and
+-- -fno-optimize-sibling-calls keeps tail frames on the stack so libbacktrace
+-- can unwind them.
+driver.CFLAGS = "--std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls"
 driver.CC = "cc"
 
 local CIRCULAR_MARK = {}
@@ -28,6 +36,21 @@ local function shell(cmd)
 end
 
 driver.UNAME = shell("uname")
+-- On Mach-O (macOS), libbacktrace needs a companion `.dSYM` bundle to symbolize
+-- PCs to #line-attributed .titan file/line — the linker does NOT produce one, so
+-- without `dsymutil` the native Titan frames are unsymbolized and dropped. Run
+-- `dsymutil` after every final link on Darwin only; on Linux DWARF is embedded in
+-- the binary and dsymutil may be absent, so it must be a no-op there.
+driver.IS_DARWIN = string.match(driver.UNAME, "Darwin") ~= nil
+
+local function run_dsymutil(output, verbose)
+    if not driver.IS_DARWIN then return end
+    local cmd = "dsymutil " .. output
+    if verbose then
+        print(cmd)
+    end
+    os.execute(cmd)
+end
 
 local function findmodule(paths, modname, extension)
     local modf = modname:gsub("[.]", "/") .. extension
@@ -54,7 +77,21 @@ function driver.defaultloader(static_deps)
         local mtime_bin, binf = findmodule(driver.TITAN_BIN_PATH, modname, ".so")
         local mtime_src, srcf = findmodule(driver.TITAN_SOURCE_PATH, modname, ".titan")
         if mtime_bin and binf and ((not mtime_src) or mtime_bin >= mtime_src) then
-            local typesf, err = package.loadlib(binf, modname:gsub("[%-.]", "_") .. "_types")
+            local prefix = modname:gsub("[%-.]", "_")
+            local abif, err = package.loadlib(binf, prefix .. "_abi")
+            if not abif then
+                return false, "compiled module '" .. modname
+                    .. "' has no compatible Titan ABI marker (expected "
+                    .. driver.TITAN_VER .. "): " .. tostring(err)
+            end
+            local ok, abi_or_err = pcall(abif)
+            if not ok then return false, abi_or_err end
+            if abi_or_err ~= driver.TITAN_VER then
+                return false, "compiled module '" .. modname
+                    .. "' ABI mismatch: expected " .. driver.TITAN_VER
+                    .. " but found " .. tostring(abi_or_err)
+            end
+            local typesf, err = package.loadlib(binf, prefix .. "_types")
             if not typesf then return false, err end
             local ok, types_or_err = pcall(typesf)
             if not ok then return false, types_or_err end
@@ -138,6 +175,7 @@ local function check_runtime()
     if (not titano_mtime) or (titano_mtime < titanc_mtime) then
         local args = {driver.CC, driver.CFLAGS, "-c", runtime_c,
             "-I", driver.TITAN_RUNTIME_PATH, "-I", driver.LUA_SOURCE_PATH,
+            "-I", driver.LIBBACKTRACE_PATH,
             "-o", runtime_o }
         os.execute(table.concat(args, " "))
     end
@@ -158,7 +196,8 @@ function driver.compile(modname, ast, sourcef, static_deps, verbose)
     local libflag = static_flag()
     local args = {driver.CC, driver.CFLAGS, libflag, filename,
                   "-I", "titan-runtime",
-                  "-I", driver.LUA_SOURCE_PATH, "-o", libname}
+                  "-I", driver.LUA_SOURCE_PATH,
+                  "-I", driver.LIBBACKTRACE_PATH, "-o", libname}
     local cmd = table.concat(args, " ")
     if verbose then
         print(cmd)
@@ -176,9 +215,11 @@ local entrypoint_template = [[
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <string.h>
 #include "lua.h"
 #include "lualib.h"
 #include "lauxlib.h"
+#include "titan.h"
 
 /* portable alerts, from srlua */
 #ifdef _WIN32
@@ -193,6 +234,67 @@ local entrypoint_template = [[
 /* fatal error, from srlua */
 static void fatal(const char* message) {
     alert(message);
+    exit(EXIT_FAILURE);
+}
+
+/* Same message conversion policy as lua.c's msghandler: strings/numbers through
+** lua_tostring, then __tostring if present and string-valued, otherwise a typed
+** placeholder. */
+static const char *errmsg_tostring(lua_State *L, int idx) {
+    const char *msg;
+    idx = lua_absindex(L, idx);
+    msg = lua_tostring(L, idx);
+    if (msg == NULL) {
+        if (luaL_callmeta(L, idx, "__tostring") && lua_type(L, -1) == LUA_TSTRING) {
+            msg = lua_tostring(L, -1);
+        } else {
+            msg = lua_pushfstring(L, "(error object is a %s value)",
+                                  luaL_typename(L, idx));
+        }
+    }
+    return msg;
+}
+
+static const char *strip_bootstrap_prefix(const char *message) {
+    static const char prefix[] = "[string \"local arg = ...;...\"]:3: ";
+    const size_t prefix_len = sizeof(prefix) - 1;
+    while (strncmp(message, prefix, prefix_len) == 0) {
+        message += prefix_len;
+    }
+    return message;
+}
+
+static int line_ends_with(const char *line, size_t len, const char *suffix) {
+    const size_t suffix_len = strlen(suffix);
+    if (suffix_len == 0 || len < suffix_len) return 0;
+    return memcmp(line + len - suffix_len, suffix, suffix_len) == 0;
+}
+
+static void write_tabbed_trace(const char *trace) {
+    const char *p = trace;
+    const char *last_frame_marker = " in $MODNAME.main";
+    if (p == NULL || *p == '\0') {
+        fputc('\n', stderr);
+        return;
+    }
+    while (*p != '\0') {
+        const char *e = strchr(p, '\n');
+        const size_t len = e ? (size_t)(e - p) : strlen(p);
+        fputs("\n\t", stderr);
+        fwrite(p, 1, len, stderr);
+        if (line_ends_with(p, len, last_frame_marker)) {
+            break;
+        }
+        if (e == NULL) break;
+        p = e + 1;
+    }
+    fputc('\n', stderr);
+}
+
+static void report_titan_error(const char *message, const char *trace) {
+    fprintf(stderr, "%s: %s\n", "$PROGNAME", strip_bootstrap_prefix(message));
+    fputs("stack traceback:", stderr);
+    write_tabbed_trace(trace);
     exit(EXIT_FAILURE);
 }
 
@@ -215,24 +317,6 @@ static int pmain(lua_State *L) {
     return 1;
 }
 
-/* error handler, from luac */
-static int msghandler (lua_State *L) {
-    /* is error object not a string? */
-    const char *msg = lua_tostring(L, 1);
-    if (msg == NULL) {
-        /* does it have a metamethod that produces a string */
-        if (luaL_callmeta(L, 1, "__tostring") && lua_type(L, -1) == LUA_TSTRING) {
-            /* then that is the message */
-            return 1;
-        } else {
-            msg = lua_pushfstring(L, "(error object is a %s value)", luaL_typename(L, 1));
-        }
-    }
-    /* append a standard traceback */
-    luaL_traceback(L, L, msg, 1);
-    return 1;
-}
-
 int $LUAOPEN_FN(lua_State* L);
 
 /* main function, based on srlua */
@@ -252,12 +336,26 @@ int main(int argc, char** argv) {
     lua_getfield(L, -1, "preload");
     lua_pushcfunction(L, $LUAOPEN_FN);
     lua_setfield(L, -2, "$MODNAME");
-    lua_pushcfunction(L, msghandler);
+    lua_pushcfunction(L, errorhandler);
     lua_pushcfunction(L, pmain);
     lua_pushinteger(L, argc);
     lua_pushlightuserdata(L, argv);
+    /* Protected mode with Titan's runtime errorhandler installed. On failure,
+    ** errorhandler captures the raw unified Lua+Titan trace into
+    ** registry[TITAN_BACKTRACE_KEY] and returns the original error object, so it
+    ** is still available here after lua_pcall. main() then adds the standalone
+    ** Lua-style presentation: "<progname>: <message>", "stack traceback:", and
+    ** the raw trace with a tab prepended to each frame line. */
     if (lua_pcall(L, 2, 1, -4) != 0) {
-        fatal(lua_tostring(L, -1));
+        const char *report;
+        if (lua_getfield(L, LUA_REGISTRYINDEX, TITAN_BACKTRACE_KEY) == LUA_TSTRING) {
+            const char *trace = lua_tostring(L, -1);
+            report_titan_error(errmsg_tostring(L, -2), trace);
+        } else {
+            lua_pop(L, 1);                 /* nil/non-string slot */
+            report = errmsg_tostring(L, -1);
+        }
+        fatal(report);
     }
     ret = lua_tointeger(L, -1);
     lua_close(L);
@@ -291,6 +389,7 @@ function driver.compile_library(modname, libnames, link, verbose)
 
     table.insert(args, driver.TITAN_RUNTIME_PATH .. "titan.o")
 
+    table.insert(args, driver.LIBBACKTRACE_PATH .. "/.libs/libbacktrace.a")
     table.insert(args, driver.LUA_SOURCE_PATH .. "/liblua.a")
     table.insert(args, "-ldl")
     table.insert(args, "-lm")
@@ -306,7 +405,9 @@ function driver.compile_library(modname, libnames, link, verbose)
     if verbose then
         print(cmd)
     end
-    return os.execute(cmd)
+    local ok, term, code = os.execute(cmd)
+    run_dsymutil(soname, verbose)
+    return ok, term, code
 end
 
 function driver.compile_program(modname, libnames, link, verbose)
@@ -325,6 +426,7 @@ function driver.compile_program(modname, libnames, link, verbose)
 
     table.insert(args, driver.TITAN_RUNTIME_PATH .. "titan.o")
 
+    table.insert(args, driver.LIBBACKTRACE_PATH .. "/.libs/libbacktrace.a")
     table.insert(args, driver.LUA_SOURCE_PATH .. "/liblua.a")
     table.insert(args, "-ldl")
     table.insert(args, "-lm")
@@ -338,7 +440,9 @@ function driver.compile_program(modname, libnames, link, verbose)
     if verbose then
         print(cmd)
     end
-    return os.execute(cmd)
+    local ok, term, code = os.execute(cmd)
+    run_dsymutil(execname, verbose)
+    return ok, term, code
 end
 
 return driver

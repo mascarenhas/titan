@@ -1,6 +1,6 @@
 -- Checker-level coverage for anonymous functions (lambdas): capture analysis
 -- flags, parameter/return type inference, and the errors around them. These run
--- the checker only (no codegen) — end-to-end closure behavior is a later phase.
+-- the checker only; end-to-end closure behavior lives in the coder specs.
 local h = require 'spec.support.helpers'
 
 local run_checker = h.run_checker

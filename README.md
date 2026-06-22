@@ -21,25 +21,19 @@ the `linux`/`macosx` build target from `uname` (override with
 `make lua LUA_PLATFORM=...`). To do it by hand instead, download and extract the
 tarball into a `lua-5.5.0` folder and run `make linux MYCFLAGS=-fPIC` inside it.
 
-You can install the Titan compiler itself using  [LuaRocks](http://luarocks.org)
-this will also install all dependencies automatically. The compiler itself
-runs on Lua 5.5.
+You can install the Titan compiler and its dependencies using  [LuaRocks](http://luarocks.org)
+making sure that the dependencies will use the same exact Lua version Titan is using.
+After installing luarocks, run these commands in the root of this repository:
 
-        $ [install luarocks]
-        $ luarocks make titan-dev-1.rockspec
-To install without `sudo` permissions.
+        $ luarocks init --lua-dir=$PWD/.lua
+        $ luarocks make
 
-        $ [cd into titan folder]
-        $ luarocks build --local
-You can also run the Titan compiler directly from the folder where you
-cloned this repository if you install all the dependencies for the compiler.
+The `luarocks init` step creates `./lua` and `./luarocks` wrapper scripts in
+the project root; use them directly (with `./`) to run Lua and LuaRocks with
+the correct project paths baked in.  To also put `titanc` and `busted` (from
+`lua_modules/bin/`) on your `$PATH`, run:
 
-# Requirements for running the compiler
-
-1. [LPegLabel](https://github.com/sqmedeiros/lpeglabel) >= 1.5.0
-2. [inspect](https://github.com/kikito/inspect.lua) >= 3.1.0
-3. [argparse](https://github.com/mpeterv/argparse) >= 0.5.0
-4. [luafilesystem](https://github.com/keplerproject/luafilesystem) >= 1.7.0
+        $ cd <titan folder> && eval $(./luarocks path --bin)
 
 # Usage
 
@@ -49,7 +43,7 @@ The compiler takes a list of module names that you want to compile. Modules
 are looked up in the source tree (defaults to the current working directory,
 but you can override this with the `--tree` option), as well as in the Titan
 binary path, a semicolon-separated list of paths 
-(defaults to `.;/usr/local/lib/titan/0.5`, you can override with a `TITAN_PATH_0_5`
+(defaults to `.;/usr/local/lib/titan/0.10`, you can override with a `TITAN_PATH_0_10`
 or `TITAN_PATH` environment variable).
 
 If everything is all right with your modules, you will get the result of
@@ -59,13 +53,14 @@ your compilation as a native binary:
   `function({string}):integer`, then `titanc` will bundle all modules
   given in the command-line, along with all their dependencies where
   source code was available, as a stand-alone executable program.
-* Otherwise, it will compile each module into a shared library
-  (in the same path as the module source) that you can `import` from
-  Titan as well as `require` from Lua, and call any exported
-  functions/access exported variables. For each generated module, any
-  of its transitive imports is statically linked if source code was
-  found; dependencies that were only available as a shared library
-  will be dynamically loaded.
+* Otherwise, it will compile each module into a shared library that you
+  can `import` from Titan as well as `require` from Lua, and call any
+  exported functions/access exported variables. The generated `.c` and
+  `.o` files are written next to the `.titan` source; linked `.so` files
+  are written relative to the directory where `titanc` runs. For each
+  generated module, any of its transitive imports is statically linked if
+  source code was found; dependencies that were only available as a shared
+  library will be dynamically loaded.
 
 # Running the test suite
 
@@ -90,7 +85,7 @@ dependencies, so always `luarocks make` first (that is what `make test` does).
 Two related gotchas if you drive Busted directly:
 
 * A few tests need the `titan` runtime support module (for `titan.backtrace()`),
-  which `luarocks make` installs; make sure the in-tree `lua-5.5.0/src/lua`
+  which `luarocks make` installs; make sure the in-tree `.lua/bin/lua`
   interpreter can find it by including your rocks tree in `LUA_CPATH`, e.g.
   `LUA_CPATH="./?.so;$HOME/.luarocks/lib/lua/5.5/?.so;;" busted`.
 * Once the `titan` rock is installed, Busted loads the compiler modules from the
@@ -146,11 +141,12 @@ they are in the roadmap:
 * anonymous functions and closures, with proper lexical scoping
 * bound methods (`obj:method`) as first-class values
 * variadic parameters in functions (Lua `...`)
+* error handling with `raise`, `catch`, `finally`, Lua `pcall`, and
+  unified Lua/Titan backtraces via `titan.backtrace()`
 
 ## Next
 
-* error handling integrated with Lua's, nice backtraces (details TBD)
-* FFI with C, continued (other C primitive types, C arrays, C structs/unions including pointers, function pointers)
+* FFI with C, continued (other C primitive types, C arrays, C structs/unions including pointers, function pointers), address FIXMEs
 * standard library that is a subset of Lua's standard library, built using the C FFI (the previous C FFI should be strong enough to call Lua API functions)
 * tagged variants (unions of records with some syntax for switch/case on the record tag)
 * parametric polymorphism (via type erasure and boxed values)

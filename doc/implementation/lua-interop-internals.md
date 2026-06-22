@@ -49,23 +49,29 @@ Every Titan function exists as [two C functions](codegen-overview.md):
 the native-convention one used by Titan→Titan calls, and a
 `lua_CFunction` wrapper that Lua calls. `genluaentry` in `coder.lua`
 emits the wrapper for every non-`local` top-level function
-(`<mod>_<name>_lua`), every method (`…_luamethod`) and every static
-(`…_luastatic`); `local` functions get **no wrapper at all** and are
+(`<mod>_<name>_titanentry_lua`, modulo C identifier mangling), every
+method (`…_titanentry_luamethod`) and every static
+(`…_titanentry_luastatic`); `local` functions get **no wrapper at all** and are
 unreachable from Lua. For methods, the parameter list is prefixed with
 the record's nominal type, so `self` is checked like any record-typed
 argument. The generated wrapper for `fmod`, trimmed only of the two
 argument checks (shown in the next section):
 
 ```c
-static int interop_fmod_lua(lua_State *L) {
+static int interop_fmod_titanentry_lua(lua_State *L) {
     StkId func = L->ci->func.p;
     if((L->top.p - func - 1) != 2) {
         luaL_error(L, "calling Titan function %s with %d arguments, but expected %d", "fmod", (int)(L->top.p - func - 1), 2);
     }
     ptrdiff_t __save_errfunc = L->errfunc;
-    lua_pushcclosure(L, errorhandler, 0);
-    L->errfunc = savestack(L, L->top.p - 1);
-    Udata *_mod = uvalue(&clCvalue(s2v(func))->upvalue[0]);
+    int __installed_errfunc = 0;
+    if (TITAN_UNLIKELY(!titan_errfunc_is_errorhandler(L))) {
+        lua_pushcfunction(L, errorhandler);
+        L->errfunc = savestack(L, L->top.p - 1);
+        __installed_errfunc = 1;
+    }
+    CClosure *_fn = clCvalue(s2v(func));
+    Udata *_mod = uvalue(&_fn->upvalue[0]);
     lua_Number _param_1 = 0;
     /* ...checkandget(float) from s2v(func + 1)... */
     lua_Integer _param_2 = 0;
@@ -75,14 +81,17 @@ static int interop_fmod_lua(lua_State *L) {
     lua_pushnil(L);
     lua_replace(L, 1); /* replace first stack element with nil, this is our error slot */
     lua_checkstack(L, 2);
-    StkId _firstret = L->top.p;
+    ptrdiff_t _firstret_off = savestack(L, L->top.p);
     L->top.p += 2;
-    lua_Number res = interop_fmod_titan(L, _mod, _param_1, _param_2, &_outparam_2);
+    lua_Number res = interop_fmod_titan(L, _mod, _fn, _param_1, _param_2, &_outparam_2);
+    StkId _firstret = restorestack(L, _firstret_off);
     setfltvalue(s2v(_firstret), res);;
     _firstret++;
     setsvalue(L, s2v(_firstret), _outparam_2);;
     _firstret++;
-    L->errfunc = __save_errfunc;
+    if (TITAN_UNLIKELY(__installed_errfunc)) {
+        L->errfunc = __save_errfunc;
+    }
     return 2;
 }
 ```
@@ -95,11 +104,16 @@ Walking through it:
   the unqualified Titan name. There is no Lua-style adjustment. The spec
   suite asserts the failure (`pcall(titan_test.f, 2, 'foo') == false`)
   but not the message text.
-* **Error handler.** The wrapper saves `L->errfunc`, pushes the
-  runtime's `errorhandler`
-  ([below](#the-error-handler-and-titanbacktrace)) and points
-  `L->errfunc` at it; the old value is restored before returning. Every
-  error raised during the call passes through that handler first.
+* **Error handler.** The wrapper saves `L->errfunc` and checks whether it
+  already points at Titan's runtime `errorhandler`
+  ([below](#the-error-handler-and-titanbacktrace)). If not, it pushes the
+  handler, points `L->errfunc` at it, and restores the old value before
+  returning. If an outer Titan entry or standalone bootstrap already
+  installed the same handler, the wrapper reuses it instead of pushing a
+  duplicate light C function. The handler is always pushed with
+  `lua_pushcfunction`, because it has no upvalues and does not need a
+  full C closure. Every error raised during the call passes
+  through the active Titan handler first.
 * **The error slot.** With parameters present, the three-line juggle
   makes stack index 1 nil: a copy of argument 1 is pushed on top —
   keeping it anchored for the GC, since `checkandget` has already
@@ -121,8 +135,10 @@ Walking through it:
   the **function declaration's** — errors point at the declaration, not
   the call site.
 * **Results.** The wrapper reserves one stack slot per declared return
-  value, calls the native function (extra returns come back through
-  out-parameters), and writes each result into its slot with
+  value, saves the first return slot as a stack offset, calls the native
+  function (extra returns come back through out-parameters), restores the
+  slot pointer from the offset in case the native callee relocated the
+  Lua stack with `lua_checkstack`, and writes each result into its slot with
   `setwrapped` — which for a record is just `setslot`, since the record
   *is* its Udata. `return NRET;` makes multiple Titan returns multiple
   Lua returns (`local x, y = titan_test.f(2)` works).
@@ -239,7 +255,7 @@ lua_rawset(L, -3);
 lua_pushliteral(L, "move");
 /* Module is upvalue of Lua entry point of method */
 titan_pushmodule(L, _mod);
-lua_pushcclosure(L, interop_Point_move_luamethod, 1);
+lua_pushcclosure(L, interop_Point_move_titanentry_luamethod, 1);
 lua_rawset(L, -3);
 lua_pushliteral(L, "__index");
 lua_pushvalue(L, -2);
@@ -347,24 +363,25 @@ into a static method by the parser long before codegen.
 From Lua, a record is a full userdata with stable identity: the same
 instance always crosses out as the same Udata, two fresh instances are
 `~=` (there is no `__eq`), and all instances of a type share one
-metatable per state. Type identity, however, is **not** the metatable:
-`checkandget` looks only at the tag pointer in the userdata body. That
-is the security argument — metatable spoofing cannot launder a foreign
-userdata into Titan. Even a `debug.setmetatable` that dressed an alien
-userdata in a record's metatable changes nothing: only a payload equal
-to the record's tag address admits a value, and only Titan-generated
-constructor code writes that tag. Pure Lua cannot create full userdata at
-all, so pure-Lua forgery is impossible. Same-named records from
-different modules have different FQTNs, hence different tags, and reject
-each other with both names in the message; conversely, the
-[registry synchronization of tags](values-and-gc.md#type-tags-address-identity-synchronized-through-the-registry)
+metatable per state. That metatable pointer **is** the record's type
+identity: `checkandget` reads the candidate `Udata*` and compares
+`uvalue(v)->metatable` against the canonical metatable for the fully
+qualified record type.
+
+Same-named records from different modules have different FQTNs, hence
+different metatables, and reject each other with both names in the error
+message. Conversely, the registry synchronization of record metatables
 means records built by any copy of a module's code in the state are
-accepted by every other. The remaining gap is C code: the nominal check
-reads `sizeof(void*)` bytes from the userdata body without validating
-its size or user-value count, so a malicious C library can forge a
-record outright (and an undersized userdata causes an out-of-bounds
-read). C libraries are outside the trust boundary; an *accidental*
-pointer match from an innocent userdata is implausible.
+accepted by every other.
+
+The trust boundary is therefore Lua code that cannot manufacture or
+retag full userdata. Plain Lua cannot create full userdata at all, so
+pure-Lua forgery is impossible. Debug-library or C-capable code is
+outside that boundary: it can put a record metatable on foreign userdata,
+which is enough to satisfy the nominal check, and an undersized or
+malformed userdata may still become unsafe when later record field slots
+are accessed. The current metatable check avoids the old raw-payload tag
+read, but it is not a sandbox boundary against privileged Lua/C code.
 
 ## The module metatable and its members
 
@@ -437,9 +454,13 @@ lives in the Lua registry. The complete key inventory:
 | the metatable pointer itself (via `lua_rawsetp`) | the FQTN string — the reverse map, metatable → name, used only in error messages |
 | `TITAN_PATH_KEY` (`"ec10e486-d8fd-11e7-87f4-e7e9581a929c"`) | the resolved Titan search path (cached by `pushpath`) |
 | `TITAN_LIBS_KEY` (`"ecfc9174-d8fd-11e7-8be2-abbaa3ded45f"`) | the dlopen-handle cache table (below) |
-| `TITAN_BACKTRACE_KEY` (`"57d80578-2534-4856-ad3b-bde8cba4c445"`) | the last error's merged backtrace string |
+| `TITAN_BT_GENERATION_KEY` (`"a222927d-0e7b-4f7a-93d9-1a6ce7111a5c"`) | a shared generation counter that tells every loaded module's local libbacktrace state to resnapshot after any Titan `.so` is dlopened |
+| `TITAN_BACKTRACE_KEY` (`"57d80578-2534-4856-ad3b-bde8cba4c445"`) | the last error's raw merged backtrace string |
+| `TITAN_NAMES_KEY` (`"a7c4e2f0-1d6b-4e3a-9c5f-8b2d7e0a4f16"`) | the native-symbol display-name table used by unified trace formatting |
+| `TITAN_TRACE_PINNED` (`"5b3f0f7e-4b1a-4d2e-9a8c-2f6d4c1e7a90"`) | the one-shot flag that preserves an existing traceback for bare re-raise |
+| `"Titan function type <serialized type> tag"` | a shared light-userdata identity tag for each first-class function type |
 
-The three UUID-string constants are defined in `titan-runtime/titan.h`.
+The UUID-string constants are defined in `titan-runtime/titan.h`.
 
 ## Dynamic loading: `loadlib` and `loadsym`
 
@@ -449,20 +470,23 @@ When a dependency exists only as a compiled `.so`, the importer's
 
 ```c
 void *some_dep_handle = loadlib(L, "some/dep.so");
+titan_check_abi(L, some_dep_handle, "some_dep_abi", "some/dep.so");
 Udata* (*some_dep_init)(lua_State *L) =
     titan_cast_func(Udata* (*)(lua_State*), loadsym(L, some_dep_handle, "some_dep_init"));
 ```
 
 `loadlib(L, file)` first consults the handle cache under
 `TITAN_LIBS_KEY`; on a miss it walks the Titan path — environment
-variable `TITAN_PATH_0_9`, then `TITAN_PATH`, then the default
-`".;/usr/local/lib/titan/0.9"`, with `;;` in an env value splicing the
+variable `TITAN_PATH_0_10`, then `TITAN_PATH`, then the default
+`".;/usr/local/lib/titan/0.10"`, with `;;` in an env value splicing the
 default in — trying `dlopen(dir "/" file, RTLD_NOW | RTLD_LOCAL)` per
 `;`-separated directory. Successes are cached; the cache table's
 metatable has a `__gc` that `dlclose`s every handle in reverse insertion
 order when the state closes. Total failure raises
-`luaL_error(L, dlerror())`. `loadsym` is `dlsym` plus the same
-`dlerror()` raise on a missing symbol.
+`luaL_error(L, dlerror())`. After `loadlib`, generated dynamic-import
+code calls `titan_check_abi(L, handle, "<mangled>_abi", file)`, rejecting
+missing or mismatched ABI markers before any native entry point is used.
+`loadsym` is `dlsym` plus the same `dlerror()` raise on a missing symbol.
 
 Every cross-module function called from a dynamic dependency is declared
 as a `static` C *function pointer* and stitched by symbol name in
@@ -480,31 +504,67 @@ the source-vs-`.so` decision that selects dynamic linking from a compiled
 ## The error handler and `titan.backtrace()`
 
 `errorhandler` (`titan-runtime/titan.c`) is the message handler every
-wrapper installs in `L->errfunc`. When an error is raised during the
-call, it captures up to 255 C frames with
-`backtrace`/`backtrace_symbols` (`<execinfo.h>`, a glibc/BSD
-extension), builds the concatenation
+wrapper ensures is active in `L->errfunc`. When an error is raised during
+the call, it builds **one unified, intermingled, innermost→outer stack
+trace** mixing pure-Lua and Titan frames in call order, stores it in the
+registry under `TITAN_BACKTRACE_KEY`, then restores the stack top and
+returns the **original** error object unchanged — a Lua-side `pcall` sees
+exactly the error Titan raised, and the backtrace is retrieved out of
+band.
 
-```
-tostring(err) .. "\n" .. luaL_traceback(...) .. "C traceback:\n" .. <newline-joined C frames>
-```
+The stored trace is the raw frame list only: one line per frame, with no
+error message, no `stack traceback:` header, and no presentation tabs.
+Consumers that print a report add that formatting themselves.
 
-stores it in the registry under `TITAN_BACKTRACE_KEY`, then restores the
-stack top and returns the **original** error object unchanged — a
-Lua-side `pcall` sees exactly the error Titan raised, and the backtrace
-is retrieved out of band. The retrieval side is the separate, optional
-`titan` Lua module (`titan-runtime/titanlib.c`, built by the rockspec):
-`titan.backtrace()` rawgets that registry key. The spec asserts that
-after a failed `pcall` of a Titan function, `titan.backtrace()` contains
-the pcall error message. See also the
-[language error-handling chapter](../language/error-handling.md).
+The trace is built from **two stacks walked innermost→outer in
+lockstep**:
+
+* The **CallInfo chain** (via `lua_getstack`+`lua_getinfo`, exactly as
+  `luaL_traceback` does) is the backbone — it enumerates every Lua
+  activation, so a single native `luaV_execute` correctly expands into
+  the *multiple* Lua frames it ran (the point of the merge: a
+  `Lua→Titan→Lua→Titan→…` chain yields several pure-Lua frames per
+  `luaV_execute`). Lua closures become `source:line: in <name>`; genuine
+  Lua C-functions (`pcall`, `string.format`, …) become `[C]: in <name>`.
+* The **native libbacktrace stack** (`backtrace_full`, symbolized to
+  `#line`-attributed `.titan` file/line via DWARF; on macOS this needs
+  the `dsymutil`-produced `.dSYM` bundle) is used **only** to recover the
+  **Titan native frames** — those whose DWARF filename ends in `.titan`,
+  plus the **entry-wrapper boundaries** (recognized by the C symbol
+  substring `titanentry`, which `coder.lua` stamps into every Lua
+  entry-wrapper name). These native runs are **spliced** at the
+  entry-wrapper boundaries. Everything else on the native side is
+  dropped: interpreter and standard-library frames (matched against a
+  maintained list of Lua 5.5 source filenames — dropping the *library*
+  files specifically prevents double-counting a Lua C-function that
+  already appears once as a CallInfo `[C]` frame), `titan-runtime/*`, and
+  unsymbolized frames.
+
+Alignment is greedy: at each C-level CallInfo the next sentinel-
+terminated native Titan run is drained (a Titan entry wrapper appears as
+a C function and is represented by its rich native frames, so no extra
+`[C]` line is emitted for it). In the strictly-alternating Lua↔Titan
+case this is exact; in the rarer `Titan→LuaC(e.g. pcall)→Titan` case an
+inner Titan native run may splice one C-frame too early, but **no frame
+is ever dropped** (every Lua frame and every Titan frame appears) and the
+trace remains a single innermost→outer section. When libbacktrace is
+unavailable (`TITAN_NO_LIBBACKTRACE`, e.g. musl/Alpine) it falls back to
+raw Lua traceback lines plus raw `execinfo` C frames.
+
+The retrieval side is the separate, optional `titan` Lua module
+(`titan-runtime/titanlib.c`, built by the rockspec): `titan.backtrace()`
+rawgets that registry key. Regeneration follows the **pin discipline**
+(`TITAN_TRACE_PINNED`): a pinned slot (a pending re-raise) is preserved
+verbatim and the pin cleared; an unpinned (fresh) error regenerates. See
+also the [language error-handling
+chapter](../language/error-handling.md).
 
 ## The standalone entrypoint
 
 When exactly one requested module defines `main(args: {string}):
 integer`, `driver.compile_program` emits a srlua-derived C entrypoint
 (`entrypoint_template` in `driver.lua`) and links it with all module
-objects, `titan-runtime/titan.o` and `liblua.a`:
+objects, `titan-runtime/titan.o`, `libbacktrace.a`, and `liblua.a`:
 
 * **Preload registration, not eager loading.** The C `main` creates a
   state, runs `luaL_openlibs`, and registers the module's `luaopen_`
@@ -515,16 +575,28 @@ objects, `titan-runtime/titan.o` and `liblua.a`:
   the argument table with `lua_rawseti(L, -2, i)` for `i = 0 .. argc-1`
   — so `args[0]` is the program name, Lua-convention — and calls it. (No
   spec passes or inspects command-line arguments.)
-* **`msghandler`**, taken from `luac` (tostring-or-`__tostring` plus
-  `luaL_traceback`), is the handler installed for the `lua_pcall` of
-  `pmain`. It is *not* the Titan `errorhandler` — that one is still
-  installed per-call by each wrapper; `msghandler` only formats whatever
-  escapes to the top level.
-* **Exit-code protocol.** An error reaching the top prints
-  `<progname>: <message>` to stderr and exits with `EXIT_FAILURE`;
+* **Top-level error handler.** The standalone bootstrap installs Titan's
+  own `errorhandler` as the message handler for the `lua_pcall` of
+  `pmain`. On failure, `errorhandler` captures the raw unified trace into
+  `TITAN_BACKTRACE_KEY` and returns the original raised object unchanged,
+  so the error object is still on the stack after `lua_pcall` returns.
+* **Top-level reporting.** On `lua_pcall != 0`, `main` reads
+  `registry[TITAN_BACKTRACE_KEY]`: if it is a string (the usual case for
+  a Titan error), it converts the original error object with the same
+  string/number, `__tostring`, or typed-placeholder policy as `lua.c`,
+  then prints `<progname>: <error message>`, `stack traceback:`, and the
+  raw unified trace with a tab prepended to each frame line through the
+  Titan `main` frame. The standalone report removes the synthetic
+  bootstrap chunk prefix from the headline and does not print the
+  bootstrap Lua/C frames beyond `main`. If no trace slot exists, it
+  reports only the converted error message. Either way the process exits
+  non-zero.
+* **Exit-code protocol.** An error reaching the top prints the report
+  (`<progname>: <report>`) to stderr and exits with `EXIT_FAILURE`;
   otherwise the process exit status is `lua_tointeger(L, -1)` — the
   integer returned by Titan `main`. The spec verifies statuses 0
-  and 42.
+  and 42, and that an uncaught deep `Lua↔Titan` error prints a trace
+  carrying both Lua and Titan frames.
 
 ## Safety summary
 
@@ -563,7 +635,8 @@ Known soft spots, all verified in code:
    run-time error, never type confusion.
 3. **`value` is a free pass-through by design**, but every `value`→`T`
    conversion is checked, so it is not a laundering hole.
-4. **Forged userdata from C** can defeat the tag check (and undersized
-   userdata cause an out-of-bounds payload read); pure Lua cannot
-   construct full userdata, so the trust boundary holds against Lua
-   code — which is the boundary Titan promises to defend.
+4. **Forged userdata from privileged Lua/C code** can defeat the
+   metatable-based nominal check, and undersized userdata can become
+   unsafe when record field slots are accessed; plain Lua cannot
+   construct or retag full userdata, so the trust boundary holds against
+   ordinary Lua code — which is the boundary Titan promises to defend.

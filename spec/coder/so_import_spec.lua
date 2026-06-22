@@ -18,7 +18,7 @@ local build_so_chain, call = h.build_so_chain, h.call
 describe(".so-only cross-module imports", function()
     setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(function ()
-        os.execute("rm -f *.o *.so")
+        os.execute("rm -rf *.o *.so *.dSYM")
         os.execute("rm -f *.c")
     end)
 

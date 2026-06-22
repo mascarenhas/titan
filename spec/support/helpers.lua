@@ -57,9 +57,11 @@ function M.call(modname, code)
     sf:write(string.format("print(pcall(function () %s end))\n", code))
     sf:close()
     local cmd = string.format(
-        "lua-5.5.0/src/lua -l %s %s", modname, script)
+        "./lua -l %s %s", modname, script)
     local f = io.popen(cmd)
-    if not f then os.remove(script); return false, "popen failed" end
+    if not f then
+        os.remove(script); return false, "popen failed"
+    end
     local out = f:read()
     local ok = f:close()
     os.remove(script)
@@ -77,7 +79,12 @@ function M.call_app(appname, ...)
     local out = f:read() or ""
     local ok, err, status = f:close()
     if err == "exit" then ok = true end
-    if not verbose() then os.remove(appname) end
+    if not verbose() then
+        os.remove(appname)
+        -- macOS: dsymutil leaves a `<exe>.dSYM` bundle (a directory) next to the
+        -- executable for libbacktrace symbolization; no-op elsewhere.
+        os.execute("rm -rf " .. appname .. ".dSYM")
+    end
     return ok, err, status, out
 end
 
@@ -98,6 +105,72 @@ function M.run_coder(titan_code, lua_test, errmsg)
     else
         assert.truthy(rok, rerr)
     end
+end
+
+-- Check + compile `titan_code` as `modname` (default "test"), parsed under the
+-- matching `<modname>.titan` chunk name so generated `#line` directives carry a
+-- realistic source path, then run `lua_test` with the module loaded. Returns
+-- the script's stdout.
+function M.compile_and_run(titan_code, lua_test, modname)
+    modname = modname or "test"
+    reset()
+    local filename = modname:gsub("[.]", "/") .. ".titan"
+    local ast, perr = M.parse(titan_code, filename)
+    assert.truthy(ast, perr)
+    local _, errs = checker.check(modname, ast, titan_code, filename)
+    assert.equal(0, #errs, table.concat(errs, "\n"))
+    local ok, err = M.compile(modname, ast)
+    assert.truthy(ok, err)
+
+    local script = os.tmpname()
+    local sf = assert(io.open(script, "w"))
+    sf:write(lua_test)
+    sf:close()
+    local f = assert(io.popen("./lua -l " .. modname .. " " .. script))
+    local out = f:read("*a")
+    f:close()
+    os.remove(script)
+    return out
+end
+
+-- Check + compile `titan_code` as `modname` (default "test") and return the
+-- generated C source.
+function M.compile_and_read_c(titan_code, modname)
+    modname = modname or "test"
+    reset()
+    local filename = modname:gsub("[.]", "/") .. ".titan"
+    local ast, perr = M.parse(titan_code, filename)
+    assert.truthy(ast, perr)
+    local _, errs = checker.check(modname, ast, titan_code, filename)
+    assert.equal(0, #errs, table.concat(errs, "\n"))
+    local ok, err = M.compile(modname, ast)
+    assert.truthy(ok, err)
+    local f = assert(io.open(modname:gsub("[.]", "/") .. ".c", "r"))
+    local csrc = f:read("*a")
+    f:close()
+    return csrc
+end
+
+-- Check + compile `titan_code` as a standalone program and run it, capturing
+-- both stdout and stderr. Returns (exit_status, combined_output).
+function M.compile_and_run_app(titan_code, modname)
+    modname = modname or "test"
+    reset()
+    local filename = modname:gsub("[.]", "/") .. ".titan"
+    local ast, perr = M.parse(titan_code, filename)
+    assert.truthy(ast, perr)
+    local _, errs = checker.check(modname, ast, titan_code, filename)
+    assert.equal(0, #errs, table.concat(errs, "\n"))
+    local ok, err = M.compile_app(modname, ast)
+    assert.truthy(ok, err)
+
+    local execname = "./" .. modname:gsub("[.]", "/")
+    local f = assert(io.popen(execname .. " 2>&1; echo \"EXIT:$?\""))
+    local out = f:read("*a")
+    f:close()
+    local status = tonumber(out:match("EXIT:(%d+)%s*$"))
+    out = out:gsub("EXIT:%d+%s*$", "")
+    return status, out
 end
 
 -- Build a standalone executable from `titan_code` plus a synthesized `main` and
@@ -161,7 +234,12 @@ end
 local function build_one_so(name, src, names)
     reset(true)
     local static_deps = {}
-    local ast = M.parse(src)
+    -- Parse under the `<name>.titan` chunkname so the generated `#line`
+    -- directives attribute native frames to that `.titan` file (the unified
+    -- backtrace keeps a native frame only when its DWARF filename ends in
+    -- `.titan`). The default `(spec)` chunkname would make every Titan frame in
+    -- a `.so`-only module invisible in traces.
+    local ast = M.parse(src, name .. ".titan")
     if not ast then return nil, "parse error in " .. name end
     local _, errs = checker.check(name, ast, src, name .. ".titan",
         driver.defaultloader(static_deps))

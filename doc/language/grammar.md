@@ -1,7 +1,7 @@
 # The Titan grammar
 
 This chapter is the reference grammar of Titan as implemented by the
-0.5 prototype compiler: lexical conventions, the complete syntactic
+0.10 prototype compiler: lexical conventions, the complete syntactic
 grammar, operator precedence, and the restrictions the EBNF alone does
 not show. It replaces the old manual's stale grammar.
 
@@ -26,10 +26,11 @@ is not a reserved word. Tokenization is longest-match, so `andy`,
 `return17`, and `_end` are names. The reserved words are:
 
 ```
-and     as      boolean  break     do     else    elseif  end
-false   float   for      foreign   function       goto    if
-import  in      integer  local     nil    not     or      record
-repeat  return  string   then      true   until   value   while
+and     as      boolean  break     catch   do      else    elseif
+end     false   finally  float     for     foreign function goto
+if      import  in       integer   local   nil     not      or
+raise   record  repeat   return    string  then    true     until
+value   while
 ```
 
 Note that `goto` and `in` are **reserved but unused**: no Titan construct
@@ -47,12 +48,12 @@ The symbolic tokens are:
 ```
 +   -   *   /   //  %   ^   #   &   ~   |   <<  >>  ..
 ==  ~=  <   >   <=  >=  =
-(   )   [   ]   {   }   ;   :   ,   .   ->  ?
+(   )   [   ]   {   }   ;   :   ,   .   ... ->  ?
 ```
 
-`->` (function types) and `?` (option types) are Titan additions; `...`
-and `::` are recognized by the lexer but used by no grammar rule —
-there are no varargs and no labels.
+`->` (function types), `?` (option types), and `...` (variadic
+parameters and spreads) are Titan additions. `::` is recognized by the
+lexer but used by no grammar rule — there are no labels.
 
 ### Comments
 
@@ -143,8 +144,10 @@ recordfield     ::= Name ':' type [';']
 tlimport        ::= local Name '=' import importname
 tlforeignimport ::= local Name '=' foreign import importname
 importname      ::= LiteralString | '(' LiteralString ')'
-parlist         ::= param {',' param}
+parlist         ::= param {',' param} [',' varargparam]
+                 |  varargparam
 param           ::= Name ':' type
+varargparam     ::= '...' ':' type
 ```
 
 ```lua
@@ -182,7 +185,7 @@ Notes on the top level:
 decl       ::= Name ['?'] [':' type]
 decllist   ::= decl {',' decl}
 type       ::= simpletype
-            |  typelist '->' rettype
+            |  funargtypes '->' rettype
             |  simpletype '->' rettype
 simpletype ::= basictype ['?']
 basictype  ::= nil | boolean | integer | float | string | value
@@ -190,6 +193,8 @@ basictype  ::= nil | boolean | integer | float | string | value
             |  Name
             |  '{' type ':' type '}'
             |  '{' type '}'
+funargtypes::= '(' [type {',' type} [',' varargtype] | varargtype] ')'
+varargtype ::= '...' ':' type
 typelist   ::= '(' [type {',' type}] ')'
 rettype    ::= typelist '->' rettype
             |  simpletype '->' rettype
@@ -213,7 +218,8 @@ These forms are accepted wherever a `decl` appears: module variables,
 
 In types: `Name` is a record type and `mod.Name` one from an imported
 module; `{T}` is an array, `{K: V}` a map, `T?` an option type, and
-`t -> t` a function type. `->` is right-associative (`a -> b -> c` is
+`t -> t` a function type. A function type may end its argument list with
+`...: T` to describe a variadic function value. `->` is right-associative (`a -> b -> c` is
 `a -> (b -> c)`) and binds tighter than the commas of an enclosing
 `typelist`. A bare parenthesized `typelist` is a valid type only in
 `rettype` position — a function's return annotation or the right side
@@ -243,7 +249,8 @@ written directly. See [the type system](types.md#function-types).
 ## Statements
 
 ```
-block      ::= {statement} [returnstat]
+block      ::= simpleblock ['catch' simpleblock] ['finally' simpleblock]
+simpleblock::= {statement} [returnstat]
 statement  ::= ';'
             |  do block end
             |  while exp do block end
@@ -253,9 +260,12 @@ statement  ::= ';'
             |  local decllist '=' explist
             |  varlist '=' explist
             |  functioncall
+            |  break
+            |  raise [exp]
 returnstat ::= return [explist] [';']
 varlist    ::= var {',' var}
-explist    ::= exp {',' exp}
+explist    ::= exp {',' exp} [',' '...']
+            |  '...'
 var        ::= Name
             |  prefixexp {suffix} '[' exp ']'
             |  prefixexp {suffix} '.' Name
@@ -267,11 +277,11 @@ and `f().x = v` are assignable, as is reading `f().x`; a bare call is
 not. Multiple assignment and multiple `local`
 declaration mirror Lua, but a `local` declaration *requires* an
 initializer — plain `local x: integer` is a syntax error. `return`
-takes zero or more expressions, only as the last statement of a block —
-but a bare `return` (zero expressions), while it parses, aborts the
-current compiler with an internal error (a Lua traceback, not a clean
-diagnostic); write `return nil`, or omit the statement, in
-nil-returning functions.
+takes zero or more expressions, only as the last statement of a block.
+In a zero-return function (`(...) -> ()`), a bare `return` returns zero
+values and `return nil` is a type error. In an explicit `: nil` function,
+a bare `return` is accepted as the one `nil` return. In option- or
+`value`-returning functions, write `return nil` explicitly.
 
 ```lua
 function demo(xs: {integer}, p: Point): (integer, integer)
@@ -311,14 +321,18 @@ e12         ::= castexp ['^' e11]
 castexp     ::= simpleexp [as type]
 unop        ::= not | '#' | '-' | '~'
 simpleexp   ::= nil | false | true | Numeral | LiteralString
+             |  '...'
+             |  '...' '[' exp ']'
              |  constructor | funcexp | suffixedexp | prefixexp
 funcexp     ::= function '(' [lambdaparlist] ')' [':' rettype] block end
-lambdaparlist ::= lambdaparam {',' lambdaparam}
+lambdaparlist ::= lambdaparam {',' lambdaparam} [',' lambdavarargparam]
+                |  lambdavarargparam
 lambdaparam ::= Name [':' type]
+lambdavarargparam ::= '...' [':' type]
 prefixexp   ::= Name | '(' exp ')'
 suffixedexp ::= prefixexp suffix {suffix}
 suffix      ::= funcargs
-             |  ':' Name funcargs
+             |  ':' Name [funcargs]
              |  '[' exp ']'
              |  '.' Name
 functioncall ::= prefixexp {suffix} funcargs
@@ -329,6 +343,7 @@ funcargs    ::= '(' [explist] ')'
 constructor ::= '{' [fieldlist] '}'
 fieldlist   ::= field {fieldsep field} [fieldsep]
 field       ::= exp
+             |  '...'
              |  Name '=' exp
              |  '[' exp ']' '=' exp
 fieldsep    ::= ',' | ';'
@@ -404,23 +419,27 @@ confused rule is not syntax at all:
    `x + 1`, the parser commits to an assignment and reports `Expected
    '=' after variable.` instead).
 2. **`return` only at the end of a block.** As in Lua, `returnstat` is
-   the optional final element of `block`; a statement after `return`
+   the optional final element of `simpleblock`; a statement after `return`
    (even another `return`) is a syntax error.
-3. **`as` does not chain.** `x as integer as float` is a syntax error;
+3. **`catch`/`finally` are block trailers.** There is no `try` keyword.
+   A block may have a `catch`, a `finally`, or both in that order; the
+   clause bodies are `simpleblock`s so an inner catch cannot consume an
+   outer finally.
+4. **`as` does not chain.** `x as integer as float` is a syntax error;
    the cast operand is a `simpleexp`, so chaining grammatically
    requires parentheses (`(x as integer) as value`). Which casts are
    then *accepted* is a typing matter ([Expressions](expressions.md)) —
    the checker rejects `(x as integer) as float`, for instance, with
    `cannot cast 'integer' to 'float'`.
-4. **Lvalues cannot be parenthesized.** `(x) = 1` is a syntax error
+5. **Lvalues cannot be parenthesized.** `(x) = 1` is a syntax error
    (`Expected a valid lvalue in the left side of assignment but found
    a regular expression.`).
-5. **Declarations need initializers.** Both module variables and
+6. **Declarations need initializers.** Both module variables and
    `local` statements require `= explist`.
-6. **Parenthesizing a call truncates it.** `(f())` adjusts a
+7. **Parenthesizing a call truncates it.** `(f())` adjusts a
    multiple-value call to exactly its first value, as in Lua. See
    [Functions](functions.md).
-7. **Record constructors needing a type from context is a typing rule,
+8. **Record constructors needing a type from context is a typing rule,
    not a syntax rule.** The grammar places `constructor` wherever any
    expression can go; the *type checker* then requires a named-field
    constructor to appear where the expected record type is known,

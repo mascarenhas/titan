@@ -5,78 +5,107 @@ on:
     # "*" matches only top-level branch names; "**" also matches names with
     # slashes (e.g. "tooling/foo"), so every pushed branch triggers CI.
     branches: ["**"]
+  workflow_dispatch:  # Manual trigger to include macOS builds
 
 jobs:
+  # macOS runners are expensive; only include them on manual dispatch.
+  matrix-setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo 'matrix={"include":[{"os":"ubuntu-latest","lua_os":"linux"},{"os":"macos-latest","lua_os":"macosx"}]}' >> "$GITHUB_OUTPUT"
+          else
+            echo 'matrix={"include":[{"os":"ubuntu-latest","lua_os":"linux"}]}' >> "$GITHUB_OUTPUT"
+          fi
+
   test:
+    needs: matrix-setup
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            lua_os: linux
-          - os: macos-latest
-            lua_os: macosx
+      matrix: ${{ fromJson(needs.matrix-setup.outputs.matrix) }}
 
     runs-on: ${{ matrix.os }}
 
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-      INSTALL_LUA: "lua=5.5"
-      LUA: lua
+      LUAROCKS_VERSION: "3.13.0"
 
     steps:
       - uses: actions/checkout@v6
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.x"
-
-      - name: Cache lua_install and LuaRocks
+      - name: Cache LuaRocks bootstrap install
         uses: actions/cache@v5
         with:
-          path: |
-            lua_install
-            ~/.luarocks
-          key: ${{ runner.os }}-lua-${{ hashFiles('titan-dev-1.rockspec') }}
+          path: lua_install
+          key: ${{ runner.os }}-luarocks-${{ env.LUAROCKS_VERSION }}
+
+      - name: Cache project lua_modules
+        uses: actions/cache@v5
+        with:
+          path: lua_modules
+          key: ${{ runner.os }}-lua_modules-${{ hashFiles('titan-dev-1.rockspec') }}
           restore-keys: |
-            ${{ runner.os }}-lua-
+            ${{ runner.os }}-lua_modules-
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libreadline-dev
 
-      - name: Install hererocks and set up Lua 5.5
-        run: |
-          if [ ! -f lua_install/bin/luarocks ]; then
-            # PyPI hererocks (0.25.1) only knows Lua up to 5.4; 5.5 support
-            # is only in git master
-            pip install git+https://github.com/luarocks/hererocks
-            hererocks lua_install -r^ --$INSTALL_LUA
-          fi
-
-      - name: Set environment variables
-        run: |
-          echo "$PWD/lua_install/bin" >> "$GITHUB_PATH"
-          echo "LUA_PATH=./?.lua;$PWD/lua_install/share/lua/5.5/?.lua" >> "$GITHUB_ENV"
-          echo "LUA_CPATH=./?.so;$PWD/lua_install/lib/lua/5.5/?.so" >> "$GITHUB_ENV"
-
       - name: Build the bundled Lua 5.5 source tree
         run: make lua LUA_PLATFORM=${{ matrix.lua_os }}
+
+      # The runtime (titan.o) and every generated module/executable link
+      # ./libbacktrace/.libs/libbacktrace.a (unified stack traces). CI runs
+      # luarocks directly rather than `make test`, so build the tree explicitly.
+      - name: Build the bundled libbacktrace
+        run: make libbacktrace
+
+      # Install LuaRocks from source, pointing it at the vendored Lua 5.5 in
+      # .lua/.  This replaces hererocks and eliminates the Python dependency.
+      - name: Install LuaRocks from source
+        run: |
+          if [ ! -f lua_install/bin/luarocks ]; then
+            curl -fL -o "luarocks-${LUAROCKS_VERSION}.tar.gz" \
+              "https://luarocks.github.io/luarocks/releases/luarocks-${LUAROCKS_VERSION}.tar.gz"
+            tar zxf "luarocks-${LUAROCKS_VERSION}.tar.gz"
+            cd "luarocks-${LUAROCKS_VERSION}"
+            ./configure --prefix="$GITHUB_WORKSPACE/lua_install" \
+                        --with-lua="$GITHUB_WORKSPACE/.lua"
+            make
+            make install
+            cd ..
+            rm -rf "luarocks-${LUAROCKS_VERSION}" "luarocks-${LUAROCKS_VERSION}.tar.gz"
+          fi
+
+      # Set up the project-local luarocks tree (lua_modules/), matching the
+      # README's developer workflow.  The bootstrap luarocks binary is only
+      # needed for this one-time `luarocks init`; afterwards the project's
+      # ./luarocks wrapper is used for everything.
+      - name: Set up project-local luarocks tree
+        run: |
+          export PATH="$PWD/lua_install/bin:$PATH"
+          luarocks init --lua-dir="$PWD/.lua"
+          # Add the rocks bin dir (busted, titanc) to PATH for subsequent
+          # steps.  ./lua and ./luarocks are used directly with ./ prefix.
+          echo "$PWD/lua_modules/bin" >> "$GITHUB_PATH"
+
+      - name: Print Lua version
+        run: ./lua -v
 
       # Build and install the rock so the `titan` C runtime module (titanlib.c,
       # required by one coder spec via `require 'titan'`) is on the Lua path.
       # `luarocks test` does not build the rock-under-test, only its dependencies.
       - name: Build and install the rock
-        run: luarocks make
-
-      - name: Print Lua version
-        run: lua -v
+        run: ./luarocks make
 
       # `luarocks test` installs the test_dependencies (busted, cluacov) declared
       # in the rockspec and runs the suite; flags after `--` are forwarded to busted.
       - name: Run tests
-        run: luarocks test -- -c -o gtest -v
+        run: ./luarocks test -- -c -o gtest -v
 
       - name: Generate coverage report
         if: success()

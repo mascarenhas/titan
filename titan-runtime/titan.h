@@ -11,6 +11,10 @@
 #include "llimits.h"
 #include "lvm.h"
 
+/* The vendored `lua_longjmp` struct + statement-form `TITAN_SETJMP`, used by the
+** generated module C to install the inline catch/finally setjmp boundary. */
+#include "titan_longjmp.h"
+
 #ifdef __GNUC__
 #define TITAN_LIKELY(x)   __builtin_expect((x), 1)
 #define TITAN_UNLIKELY(x) __builtin_expect((x), 0)
@@ -38,33 +42,58 @@
    before the out-params), and <mangled>_types now encodes the `varargtype`
    element type for variadic functions and methods. A 0.8 module has neither, so
    0.8 and 0.9 .so modules are ABI-incompatible and live under a different
-   TITAN_PATH dir. */
-#define TITAN_VER          "0.9"
-#define TITAN_VER_SUFFIX   "_0_9"
+   TITAN_PATH dir.
+   0.9 -> 0.10: TitanVargX changed from an inline flexible-array backing object
+   (`lu_byte n_args; T args[]`) to a descriptor (`lu_byte n_args; T *args`).
+   The native parameter type name is unchanged, but its layout and the meaning
+   of the bytes following n_args are not: mixing the two forms across a .so
+   boundary misreads argument storage. 0.9 and 0.10 modules are therefore
+   ABI-incompatible and must live under different TITAN_PATH directories. */
+#define TITAN_VER          "0.10"
+#define TITAN_VER_SUFFIX   "_0_10"
 #define TITAN_PATH_VAR     "TITAN_PATH"
 #define TITAN_PATH_SEP     "/"
 #define TITAN_PATH_DEFAULT ".;/usr/local/lib/titan/" TITAN_VER
 #define TITAN_PATH_KEY     "ec10e486-d8fd-11e7-87f4-e7e9581a929c"
 #define TITAN_LIBS_KEY     "ecfc9174-d8fd-11e7-8be2-abbaa3ded45f"
+#define TITAN_BT_GENERATION_KEY "a222927d-0e7b-4f7a-93d9-1a6ce7111a5c"
 
 #define TITAN_BACKTRACE_KEY "57d80578-2534-4856-ad3b-bde8cba4c445"
 
+/* Registry sub-table mapping a native Titan C symbol name (the mangled name the
+** coder emits for a function/method/static/anonymous native entry) -> the
+** qualified Titan source name to display in a trace ("<module>.<func>",
+** "<module>.<record>:<method>", "<module>.<record>.<static>", or "anonymous
+** function at <file>.titan:<linedefined>"). Each module's _init lazily creates
+** the sub-table (multiple modules contribute) and populates it for every native
+** function it generates. errorhandler looks each native frame's DWARF symbol up
+** here and shows the qualified name when found, falling back to the raw symbol.
+** A runtime/_init addition only: it does not by itself change the compiled
+** module ABI. */
+#define TITAN_NAMES_KEY "a7c4e2f0-1d6b-4e3a-9c5f-8b2d7e0a4f16"
+
+/* When set (boolean true) in the registry, errorhandler() KEEPS the existing
+** TITAN_BACKTRACE_KEY slot instead of regenerating it, and clears the pin. A
+** pending re-raise sets the pin so the original error's trace is preserved; a
+** fresh error leaves it clear so it gets a freshly-captured trace. */
+#define TITAN_TRACE_PINNED "5b3f0f7e-4b1a-4d2e-9a8c-2f6d4c1e7a90"
+
 #define TITAN_LUAINTEGER_NBITS cast_int(sizeof(lua_Integer) * CHAR_BIT)
 
-/* Variadic-parameter backing structs. One per `ctype` so the flexible array
-** member always matches the element C type exactly (no punning between
-** different element types). `n_args` is the TOTAL backing count; `start` is NOT
-** a struct field — it travels as a separate `int _start` native parameter, so a
+/* Variadic-parameter descriptors. One per `ctype` so `args` has the exact
+** element pointer type. `n_args` is the TOTAL backing count; `start` is NOT a
+** struct field — it travels as a separate `int _start` native parameter, so a
 ** callee's logical view is `args[start .. n_args-1]` and forwarding never
-** mutates a shared struct. The FAM `args[]` is the pointer/ABI form only; a
-** static call site builds a concrete-array local and passes its address. */
-typedef struct { lu_byte n_args; lua_Integer args[]; } TitanVargInteger;
-typedef struct { lu_byte n_args; lua_Number  args[]; } TitanVargFloat;
-typedef struct { lu_byte n_args; int         args[]; } TitanVargBoolean;
-typedef struct { lu_byte n_args; TString    *args[]; } TitanVargString;
-typedef struct { lu_byte n_args; Table      *args[]; } TitanVargArrayOrMap;
-typedef struct { lu_byte n_args; TValue      args[]; } TitanVargValue;
-typedef struct { lu_byte n_args; Udata      *args[]; } TitanVargNominal;
+** mutates a shared descriptor. Static call sites point these descriptors at
+** typed C-stack arrays; runtime-sized forwarding points them at anchored
+** userdata storage. */
+typedef struct { lu_byte n_args; lua_Integer *args; } TitanVargInteger;
+typedef struct { lu_byte n_args; lua_Number  *args; } TitanVargFloat;
+typedef struct { lu_byte n_args; int         *args; } TitanVargBoolean;
+typedef struct { lu_byte n_args; TString    **args; } TitanVargString;
+typedef struct { lu_byte n_args; Table      **args; } TitanVargArrayOrMap;
+typedef struct { lu_byte n_args; TValue      *args; } TitanVargValue;
+typedef struct { lu_byte n_args; Udata      **args; } TitanVargNominal;
 /* The `lu_byte` count is an intentional cap that keeps the struct small and
 ** bounds static sizing; runtime counts (forwarding/merge, the generic entry)
 ** are checked against this and raise a clean Titan error when exceeded. */
@@ -171,6 +200,8 @@ inline static TString* _float2str (lua_State *L, lua_Number f) {
 
 LUAI_FUNC void *loadlib (lua_State *L, const char *file);
 LUAI_FUNC void *loadsym (lua_State *L, void *lib, const char *sym);
+LUAI_FUNC void titan_check_abi(lua_State *L, void *lib, const char *sym, const char *file);
+LUAI_FUNC void titan_invalidate_backtrace_state(lua_State *L);
 
 int errorhandler(lua_State *L);
 

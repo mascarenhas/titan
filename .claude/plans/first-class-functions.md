@@ -377,7 +377,7 @@ Follow existing conventions exactly: `spec/types_spec.lua` (pure, `types.*`
 asserts), `spec/checker_spec.lua` (`run_checker`/`run_checker_modules`, reset
 `types.registry`/`driver.imported`, `restrict`+subset asserts, `assert.match`
 substrings), `spec/coder_spec.lua` (end-to-end: generate C, compile with `cc`,
-run under `lua-5.5.0/src/lua`; multi-module via `generate_modules`+`call`;
+run under `./lua`; multi-module via `generate_modules`+`call`;
 `after_each` cleans repo-root artifacts).
 
 **types_spec:** tostring/equals/compatible/serialize for no-arg, higher-order,

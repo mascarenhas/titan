@@ -1,7 +1,7 @@
--- End-to-end tests for bound instance methods as first-class values (Phase 5 of
--- anonymous functions). `obj:m` with no argument list evaluates to a function
--- value of the method's type with the implicit `self` removed and the receiver
--- captured. Generate C, compile, run.
+-- End-to-end tests for bound instance methods as first-class values. `obj:m`
+-- with no argument list evaluates to a function value of the method's type with
+-- the implicit `self` removed and the receiver captured. Generate C, compile,
+-- run.
 --
 -- These exercise: both call paths (fast exact-type, slow via `value`), receiver
 -- state mutation through the captured self, a bound method handed to Lua, a
@@ -14,7 +14,7 @@ local run_coder = h.run_coder
 describe("bound methods (end-to-end)", function()
     setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(function ()
-        os.execute("rm -f *.o *.so")
+        os.execute("rm -rf *.o *.so *.dSYM")
         if not h.verbose then os.execute("rm -f *.c") end
     end)
 
@@ -190,7 +190,7 @@ describe("bound methods (end-to-end)", function()
         assert.truthy(ok, err)
         local rok, out = h.call("bmsobar", "assert(bmsobar.run() == 23)")
         assert.truthy(rok, out)
-        os.execute("rm -f *.o *.so *.c")
+        os.execute("rm -rf *.o *.so *.c *.dSYM")
     end)
 
     it("takes the fast path for a bound method passed into a .so", function()
@@ -235,6 +235,6 @@ describe("bound methods (end-to-end)", function()
             assert(slowd > fastd, ('fast=')..fastd..(' slow=')..slowd)
         ]])
         assert.truthy(rok, out)
-        os.execute("rm -f *.o *.so *.c")
+        os.execute("rm -rf *.o *.so *.c *.dSYM")
     end)
 end)

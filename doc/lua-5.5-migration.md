@@ -186,7 +186,7 @@ function-value/closure upvalue stores still take the forward barrier.)
   (cc invocation, linking, srlua-style entrypoint template) is
   public-API-only and unchanged.
 * `spec/coder_spec.lua`: the `call()` helper runs the in-tree
-  `lua-5.5.0/src/lua`; two regression specs were added (large array
+  `./lua`; two regression specs were added (large array
   indices, float-to-string format — see below).
 * `titan-dev-1.rockspec`: `lua ~> 5.3` → `lua ~> 5.5`.
 * CI (`.github/workflows/ci.yml`): provisions Lua 5.5 via hererocks

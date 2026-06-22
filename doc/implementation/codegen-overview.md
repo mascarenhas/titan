@@ -89,7 +89,7 @@ and records first; functions second). The pieces appear in this order:
    `__index`/`__newindex` pair serving all members — variables, functions
    and record namespaces — through the metatable installed on the module
    `Udata`.
-8. **`<prefix>_types`**, **`<prefix>_init`**, **`luaopen_<prefix>`**: the
+8. **`<prefix>_abi`**, **`<prefix>_types`**, **`<prefix>_init`**, **`luaopen_<prefix>`**: the
    module-protocol functions, described below.
 
 A trimmed but real example (elisions marked `...`) — this module:
@@ -116,7 +116,7 @@ lua_Integer counter_inc_titan(lua_State *L, Udata *_mod, CClosure *_fn, lua_Inte
     }
 }
 
-static int counter_inc_lua(lua_State *L) {
+static int counter_inc_titanentry_lua(lua_State *L) {
     ...    /* arity check, error handler, checkandget arguments */
     lua_Integer res = counter_inc_titan(L, _mod, _fn, _param_1);
     setivalue(s2v(_firstret), res);
@@ -125,12 +125,14 @@ static int counter_inc_lua(lua_State *L) {
 
 static int __index(lua_State *L) { ... }    /* module metatable: member read  */
 static int __newindex(lua_State *L) { ... } /* module metatable: member write */
+int counter_abi(lua_State* L) { ... }       /* returns TITAN_VER */
 int counter_types(lua_State* L) { ... }     /* serialized interface, below  */
 
 static int _initialized = 0; /* tags and external functions are set up */
 Udata *counter_init(lua_State *L) { ... }
 
 int luaopen_counter(lua_State *L) {
+    titan_invalidate_backtrace_state(L);
     Udata *mod = counter_init(L);
     setuvalue(L, s2v(L->top.p), mod);   /* require returns the module Udata */
     L->top.p++;
@@ -139,11 +141,12 @@ int luaopen_counter(lua_State *L) {
 ```
 
 Symbol names come from `mangle_qn` (`coder.lua`), which replaces `.` and
-`-` with `_`: module `foo.bar` yields `foo_bar_init`, `foo_bar_types` and
+`-` with `_`: module `foo.bar` yields `foo_bar_init`, `foo_bar_abi`,
+`foo_bar_types` and
 `luaopen_foo_bar`; a function `f` in it becomes `foo_bar_f_titan` /
-`foo_bar_f_lua`; methods and statics use
-`<mangled-fqtn>_<name>_titanmethod` / `_luamethod` and `_titanstatic` /
-`_luastatic`.
+`foo_bar_f_titanentry_lua`; methods and statics use
+`<mangled-fqtn>_<name>_titanmethod` / `_titanentry_luamethod` and
+`_titanstatic` / `_titanentry_luastatic`.
 
 ## Two C functions per Titan function
 
@@ -434,7 +437,7 @@ to re-stitch, and skipping it just avoids declaring an unused handle.
 (The converse is not exact: two dynamic deps with no functions called
 would still re-emit their handles.)
 
-### `luaopen_<prefix>` and `<prefix>_types`
+### `luaopen_<prefix>`, `<prefix>_abi`, and `<prefix>_types`
 
 `luaopen_<mangled-modname>` is what `require` finds: it calls `_init` and
 pushes the module `Udata` itself — so **`require` returns a userdata**,
@@ -442,9 +445,17 @@ not a table, with **no separate module table at all**. Its members —
 exported functions, exported variables, and one static-namespace table
 per record (carrying its statics) — are all served by a metatable on the
 `Udata` ([Lua interop internals](lua-interop-internals.md)).
-`<prefix>_types` is the separate-compilation interface:
+`<prefix>_abi` is a tiny marker function that returns the current
+`TITAN_VER`; both the compile-time `.so` loader and generated dynamic
+imports check it before trusting any other symbol. `<prefix>_types` is
+the separate-compilation interface:
 
 ```c
+int counter_abi(lua_State* L) {
+    lua_pushliteral(L, TITAN_VER);
+    return 1;
+}
+
 int counter_types(lua_State* L) {
     lua_pushliteral(L, "Module('counter',{ModuleVariable('counter', 'x', Integer()),...})");
     return 1;
@@ -454,12 +465,13 @@ int counter_types(lua_State* L) {
 The literal is `types.serialize(ast._type)`: a Lua *expression* that
 rebuilds the module's type when evaluated with `types.lua`'s constructors
 as its environment. When the driver's loader finds only a compiled `.so`
-for an import, it loads this one symbol with `package.loadlib`, calls it,
-and `load`s `"return " .. serialized` to recover the interface — letting
-the checker type the importing module against a dependency whose source
-is gone. The policy is static linkage when the source is present and
-dynamic linkage otherwise, and the tests' in-memory `tableloader`
-exercises the same serialization round-trip. See
+for an import, it first loads and calls `<prefix>_abi`, rejects missing or
+mismatched markers, then loads `<prefix>_types` and `load`s
+`"return " .. serialized` to recover the interface — letting the checker
+type the importing module against a dependency whose source is gone. The
+policy is static linkage when the source is present and dynamic linkage
+otherwise, and the tests' in-memory `tableloader` exercises the same
+serialization round-trip. See
 [driver and toolchain](driver.md).
 
 ## Static vs dynamic dependency wiring

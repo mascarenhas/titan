@@ -1,409 +1,283 @@
 # Error handling
 
-Titan's error philosophy is the one stated in the
-[design philosophy](philosophy.md): *fail early instead of falling back*.
-Where Lua reacts to an unexpected value by coercing it, consulting a
-metamethod, or taking a slower generic path, Titan raises an error at the
-first point where a value does not match its declared type. Most
-mismatches are caught at compile time; the rest — values arriving from
-Lua, dynamic conversions, a few arithmetic corner cases — raise at run
-time rather than letting a bad value propagate.
+Titan keeps the same fail-fast philosophy described in the
+[design philosophy](philosophy.md): type mistakes and invalid dynamic
+values should stop at the first point where Titan can prove something is
+wrong. Many such mistakes are compile-time errors; the ones that depend
+on Lua values, dynamic casts, arithmetic edge cases, or explicit
+programmer intent are run-time errors.
 
-Titan has **no error-handling construct of its own**: there is no
-`error`, no `pcall`, no `try`/`catch` in the language. A run-time error
-raised in Titan code is an ordinary Lua error: it unwinds out of the
-Titan code into the calling Lua program, where `pcall` catches it as
-usual. The recoverable-failure idiom *inside* Titan is
-[option types](option-types.md), shown
-[below](#recoverable-failures-without-errors-the-option-idiom).
+Run-time errors are ordinary Lua errors. They can be caught by Lua
+`pcall`/`xpcall`, they can be raised from Titan with `raise`, and they can
+be handled inside Titan with `catch` and `finally` block trailers.
 
 ## Compile-time and run-time errors
 
-The distinction between the two kinds of error is project policy (PR
-#119): whenever an error is mentioned, the documentation must "state
-explicitly whether it is run-time or compile-time (no matter how obvious
-it may be to us)" — a rule these chapters follow throughout.
+A **compile-time error** is reported by `titanc` before any C is emitted.
+The compiler typechecks all requested modules and their dependencies
+first, reports all errors it finds, and exits with status 1:
 
-A **compile-time error** is reported by the compiler and prevents any code
-from being produced: `titanc` typechecks every requested module and its
-dependencies first, reports *all* errors, and exits with status 1 before
-generating any C. Compile-time type errors share one format — note the
-colon after `type error`:
-
-```
+```text
 m.titan:3:11: type error: types in declaration of local variable x do not match, expected integer but found string
 ```
 
-A **run-time error** is raised by compiled Titan code while it runs, using
-Lua's standard error mechanism with a string message. Most run-time
-messages carry the same `file:line:col` prefix, but with a comma after
-`type error`:
+A **run-time error** is raised while compiled Titan code runs. It unwinds
+through Titan and Lua with Lua's normal error machinery. Most Titan
+run-time diagnostics carry a Titan source position:
 
-```
+```text
 m.titan:2:1: type error, expected integer but found string
 ```
 
-This chapter catalogues the run-time errors; compile-time errors are
-documented with the constructs that cause them, in the
-[types](types.md), [expressions](expressions.md),
-[statements](statements.md) and [functions](functions.md) chapters.
+The colon after `type error` marks a compile-time type error; the comma
+marks a run-time type error.
 
-## What raises run-time errors
+## Raising errors
 
-The list below is complete for the current prototype. Note its shape: in
-a well-typed, all-Titan program only the arithmetic guards, float→integer
-conversions and option unwraps can ever fire; everything else guards the
-Lua boundary (see [Lua interoperability](lua-interop.md) for the per-type
-boundary rules).
-
-### Wrong argument types from Lua
-
-Every argument of a Titan function, method or static called from Lua is
-checked against its declared type before the body runs:
+`raise <exp>` raises a new run-time error. The expression may have any
+Titan type; it is coerced to `value`, so strings, numbers, records,
+arrays, maps, `nil`, and arbitrary Lua values can all be raised:
 
 ```lua
--- Titan: m.titan
-function double(x: integer): integer
-    return x * 2
+function fail(name: string)
+    raise "unknown user: " .. name
 end
 
--- Lua
-local m = require "m"
-print(m.double(2.0))   --> 4  (a float with an integral value is accepted)
-print(pcall(m.double, "oops"))
---> false   m.titan:2:1: type error, expected integer but found string
+function fail_with_value(v: value)
+    raise v
+end
 ```
 
-The shape is `FILE:LINE:COL: type error, expected T but found U`, where
-`U` is the Lua type name of the offending value. The location is the
-*declaration site* of the function whose parameter was violated (here
-`m.titan:2:1`) — the call site is Lua code the Titan compiler never saw.
-Particular cases:
-
-* **Arrays and maps report as `table`** (`expected table but found
-  number`), and any table is accepted — the *contents* are not checked at
-  the boundary; see
-  [the deferred container check](#container-element-checks-the-deferred-check).
-* **Records report fully-qualified names on both sides** (and a
-  non-record argument reports its Lua type name, `found number` etc.):
-
-  ```lua
-  -- Titan: m.titan
-  record Point x: float y: float end
-  record Box w: float end
-
-  function norm(p: Point): float
-      return p.x * p.x + p.y * p.y
-  end
-
-  -- Lua
-  print(pcall(m.norm, m.Box.new(1)))
-  --> false   m.titan:5:1: type error, expected m.Point but found m.Box
-  ```
-
-* **`boolean` parameters never raise** (any Lua value is accepted, by
-  truthiness — inconsistently with boolean record-field and
-  module-variable writes from Lua, which require an actual boolean), and
-  **`value` parameters never raise** — checks happen later, when the
-  value is converted to a concrete type.
-
-### Wrong number of arguments from Lua
-
-Between Titan functions, arity is strict and checked at **compile time**
-(see [Functions](functions.md)). From Lua, the same strictness is enforced
-at **run time** — no padding with `nil`, no dropping of extras:
+From Lua, `pcall` receives exactly the raised value:
 
 ```lua
--- Lua
-print(pcall(m.double, 2, 3))
---> false   calling Titan function double with 2 arguments, but expected 1
+local ok, err = pcall(m.fail, "ada")
+print(ok)   --> false
+print(err)  --> unknown user: ada
 ```
 
-The shape is `calling Titan function NAME with N arguments, but expected
-M`; this one carries no Titan file/line prefix.
-
-### Failed `value` casts
-
-Converting a [`value`](types.md) to a concrete type — implicitly, where
-the context names a type, or explicitly with `as` — compiles to a run-time
-check with the same `expected ... but found ...` shape. The location
-points at the expression being converted:
+A bare `raise` is a re-raise. It is legal only inside a `catch` block and
+raises the original caught value again, preserving the original traceback
+rather than replacing it with the shallower catch-site stack:
 
 ```lua
--- Titan: m.titan
-function unbox(v: value): integer
-    return v
+function checked_open(path: string): value
+    return raw_open(path)
+catch
+    log("open failed: " .. traceback)
+    raise
+end
+```
+
+Using bare `raise` anywhere else is a compile-time error.
+
+## `catch` and `finally`
+
+Titan does not have a `try` keyword. Instead, `catch` and `finally`
+attach to a block. A `do ... end` block is the most explicit spelling:
+
+```lua
+do
+    risky()
+catch
+    handle(error, traceback)
+finally
+    cleanup()
+end
+```
+
+The same trailers may appear on any construct whose body is a block:
+function bodies, `while` bodies, `repeat` bodies, numeric `for` bodies,
+`if`/`elseif`/`else` arms, anonymous function bodies, and nested
+`do ... end` blocks. Either clause may appear by itself; if both appear,
+`catch` comes before `finally`.
+
+```lua
+function parse(s: string): integer
+    return parse_integer(s)
+catch
+    return 0
+finally
+    bump_attempt_counter()
 end
 
--- Lua
-print(pcall(m.unbox, {}))
---> false   m.titan:3:12: type error, expected integer but found table
+while running do
+    poll()
+finally
+    close_socket()
+end
 ```
 
-### Float-to-integer conversion failures
+The `catch` block has two implicit locals:
 
-Wherever a `float` becomes an `integer` — implicit coercion inside Titan,
-or a Lua float arriving where Titan expects an integer — an integral value
-is accepted and a fractional one is a run-time error:
+* `error: value` — the caught Lua error value.
+* `traceback: string` — the raw unified Titan/Lua traceback captured at
+  the original raise or run-time fault. It contains frame lines only: no
+  error message, no `stack traceback:` header, and no tab indentation.
+
+These locals are read-only snapshots. Assigning to `error` or `traceback`
+inside the catch is a compile-time error.
+
+The body, catch, and finally are sibling scopes. Locals declared in the
+body are not visible in the catch or finally, because the body may have
+failed before those locals were initialized:
 
 ```lua
--- Lua
-print(pcall(m.double, 2.5))
---> false   m.titan:2:1: type error, number '2.5' has no integer representation
+do
+    local tmp = compute()
+    risky(tmp)
+catch
+    -- tmp is not in scope here
+    log(traceback)
+end
 ```
 
-The boundary variant of the message is
-`FILE:LINE:COL: type error, number 'N' has no integer representation`; the
-Titan-internal cast (say, `return x` from a function returning `integer`
-when `x: float`) raises the same complaint without file or column:
-`type error at line N, number 'N' has no integer representation`.
+## Propagation and cleanup semantics
 
-Both integrality and range are checked, in full double precision. A float
-that is integral but too large for an integer (such as `2.0^64`) raises
-`number has no integer representation`, exactly as Lua does, and a
-fractional value whose fraction is beyond float precision (such as
-`16777216.5`) is likewise rejected. The same rules apply to an `integer?`
-parameter, which converts an integral float just like a plain `integer`
-parameter.
+`catch` handles errors raised by the body. If the catch completes normally,
+the error is swallowed and execution continues after the whole construct.
+If there is no catch, the error keeps propagating after any finally runs.
 
-### Integer division and modulo by zero
+`finally` runs on every exit from its body or catch:
 
-Titan arithmetic follows Lua's semantics exactly (see
-[Expressions](expressions.md)), including the error cases: integer floor
-division `//` and integer modulo `%` by zero are run-time errors, with
-messages that carry only a line number:
+* normal fallthrough;
+* a caught or uncaught run-time error;
+* `return`;
+* `break`.
+
+If the finally completes normally, Titan resumes the pending action: it
+falls through, returns the saved return values, breaks out of the target
+loop, or re-raises the saved error.
+
+If the finally raises — either with `raise <exp>` or by triggering another
+run-time error — that new error overrides the pending action. There is no
+exception chaining: errors are plain Lua values plus an out-of-band
+traceback, so a new error in a catch or finally replaces the previous one.
 
 ```lua
--- Titan: m.titan
-function idiv(a: integer, b: integer): integer
-    return a // b
+function f(): integer
+    return 10
+finally
+    raise "cleanup failed"   -- overrides the pending return
+end
+```
+
+To keep that rule simple and predictable, Titan forbids explicit control
+transfers that would leave a finally:
+
+* `return` inside a finally is a compile-time error.
+* `break` inside a finally is a compile-time error if it would break a
+  loop outside the finally.
+* A `break` that targets a loop written inside the finally is allowed.
+* `raise <exp>` inside a finally is allowed, because run-time errors can
+  always happen during cleanup and must propagate.
+
+The rule is lexical to the finally block itself. Nested anonymous
+functions are checked as their own function bodies, so a `return` inside
+such a nested function is legal and returns from that function, not from
+the enclosing finally.
+
+```lua
+while true do
+    risky()
+finally
+    -- compile-time error: this break would leave the finally
+    break
 end
 
-function imod(a: integer, b: integer): integer
-    return a % b
+do
+    risky()
+finally
+    while true do
+        break       -- ok: breaks the loop inside the finally
+    end
 end
-
--- Lua
-print(pcall(m.idiv, 1, 0))   --> false   error at line 3, divide by zero
-print(pcall(m.imod, 1, 0))   --> false   error at line 7, % by zero
 ```
 
-Float division never raises: as in Lua, `1.0 / 0.0` is `inf` and
-`0.0 / 0.0` is `nan`.
+Nested finally blocks run inside-out. A re-raised error keeps the original
+trace as it passes through each cleanup.
 
-### Option unwraps that find `nil`
+## Interacting with Lua
 
-Reading an array or map element gives an [option type](option-types.md)
-(`integer?` for an `{integer}` element), and using such a value where the
-plain base type is required compiles to a run-time nil-check:
+Lua sees Titan errors as normal Lua errors:
 
 ```lua
--- Titan: m.titan
-function first(xs: {integer}): integer
-    local x: integer = xs[1]
-    return x
+local ok, err = pcall(m.risky)
+if not ok then
+    print("Titan failed:", err)
 end
-
--- Lua
-print(pcall(m.first, {}))
---> false   m.titan:3:26: type error, expected integer but found nil
 ```
 
-This is the "fail fast" half of the option-type bargain; the graceful
-half is shown
-[below](#recoverable-failures-without-errors-the-option-idiom).
+Titan can also catch errors raised by Lua functions it calls. The caught
+`error` value is whatever Lua raised, and `traceback` is still a string.
 
-The implicit unwrap applies in every position: a value read directly
-from an array or map (as in `first` above), a variable *declared* with
-an option type (given `local y? = xs[1]`, a later `local z: integer = y`
-or `y + 1`), the result of an option-returning call
-(`local i: integer = find(xs, v)`), an option used as an array or map
-index, in arithmetic, as a call argument, and in string concatenation. A
-`nil` found at run time raises the same `expected T but found nil` error
-shown above.
+An uncaught error in a standalone Titan executable is reported by the
+generated top-level handler: it prints `<progname>: <error message>`,
+then `stack traceback:`, then the unified traceback with tab-indented
+frame lines through the Titan `main` frame, and exits non-zero. The
+synthetic Lua bootstrap used to call `main` is not shown. A successful
+`main` returns its integer result as the process exit status.
 
-### Container element checks (the deferred check)
+## `titan.backtrace()`
 
-Arrays and maps cross the Lua boundary by reference — they are the same
-Lua table on both sides — and their contents are *not* validated when they
-cross. Instead, **every** element read inside Titan re-checks the element
-type, so a wrongly-typed value planted by Lua surfaces later,
-deterministically, at the Titan read:
+The optional Lua module `titan` exposes the last uncaught or re-propagated
+Titan traceback for the current Lua state:
 
 ```lua
--- Titan: m.titan
-function bump(counts: {string:integer}, k: string): integer
-    counts[k] = counts[k] + 1
-    return counts[k] or 0
-end
-
--- Lua
-local t = { hits = 3 }
-print(m.bump(t, "hits"))   --> 4 (same table: t.hits is now 4)
-
-t.hits = "wat"             -- legal in Lua; the table is just a table
-print(pcall(m.bump, t, "hits"))
---> false   m.titan:3:23: type error, expected integer but found string
-```
-
-The location is the read expression inside Titan. The same deferred
-check fires for any container: `m.first({"a"})` above fails with
-`expected integer but found string`, and a non-integral float found in an
-integer array raises the `has no integer representation` error. See
-[Arrays and maps](arrays-maps.md) for the access rules themselves.
-
-### Record fields and module variables from Lua
-
-Records cross into Lua as userdata with checked accessors (see
-[Records](records.md)). Accessing a field that does not exist — reading or
-writing — is a run-time error located at the record declaration, and field
-writes from Lua are type-checked:
-
-```lua
--- Lua, with the Point record from above
-local p = m.Point.new(1, 2)
-print(pcall(function () return p.z end))
---> false   script.lua:3: m.titan:2:1: field 'z' not found in record 'm.Point'
-print(pcall(function () p.x = "a" end))
---> false   script.lua:5: m.titan:2:1: type error, expected float but found string
-```
-
-(The `script.lua:N:` prefix is the position of the pcall'd Lua closure
-the access runs in; see
-[the anatomy section](#anatomy-of-an-error-message) for the rule.)
-
-The shape is `FILE:LINE:COL: field 'NAME' not found in record 'FQTN'`;
-assigning to a *method* name raises the same `not found` error — methods
-are not assignable fields. Exported module variables behave the same way
-as members of the module value: writes from Lua are type-checked (writing
-a string to an `integer` variable raises `type error, expected integer
-but found string` at the variable's declaration), and touching a name
-that is not an existing member raises `member 'NAME' does not exist in
-Titan module 'MOD'`, with no Titan file/line prefix.
-
-## Anatomy of an error message
-
-| Error class | Shape |
-| --- | --- |
-| compile-time, syntax | `FILE:LINE:COL: syntax error: MESSAGE` |
-| compile-time, all others | `FILE:LINE:COL: type error: MESSAGE` |
-| boundary, cast, unwrap, element checks | `FILE:LINE:COL: type error, expected T but found U` |
-| float→integer, at the boundary | `FILE:LINE:COL: type error, number 'N' has no integer representation` |
-| float→integer, internal cast | `type error at line LINE, number 'N' has no integer representation` |
-| `//` and `%` by zero | `error at line LINE, divide by zero` / `error at line LINE, % by zero` |
-| arity from Lua | `calling Titan function NAME with N arguments, but expected M` |
-| record field from Lua | `FILE:LINE:COL: field 'NAME' not found in record 'FQTN'` |
-| module variable from Lua | `global variable 'NAME' does not exist in Titan module 'MOD'` |
-
-The `FILE:LINE:COL` prefix names the *Titan* source position
-responsible: the function declaration for argument checks, the record
-declaration for field errors, the expression for casts, unwraps and
-element reads. On top of that, the position of the calling Lua code is
-prepended when the immediate caller is Lua code, so a failure often
-prints as `script.lua:7: m.titan:2:1: type error, ...` — this applies to
-every error class above, including the prefix-less arity and
-module-variable messages. When the Titan function is passed straight to
-`pcall` (as in most examples above), the immediate caller is `pcall`
-itself — a C function — and no Lua position is prepended.
-
-## How errors propagate
-
-Titan has no catch construct, so a run-time error always unwinds out of
-Titan entirely. From there it is ordinary Lua error handling:
-
-```lua
--- Lua
-local ok, err = pcall(m.first, {})
-print(ok)    --> false
-print(err)   --> m.titan:3:26: type error, expected integer but found nil
-```
-
-Everything Lua programmers know applies: `pcall`/`xpcall` catch the
-error, the error value is the message string Titan raised, and an
-uncaught error terminates the program. One Titan-specific wrinkle: the
-interpreter's usual `stack traceback:` block is *not* printed for an
-uncaught Titan error — the Titan error handler (next section) takes the
-place of the interpreter's traceback-producing message handler for the
-duration of the call, so only the message line appears. If the failing
-function was called from other Titan functions, the error unwinds through
-those frames too — there is no way to intercept it on the way. In a
-[standalone Titan program](modules.md) the same rules hold under the
-generated entry point: an uncaught run-time error prints the message
-(again with no traceback) to standard error and the process exits with a
-failure status, while a normal return from `main` makes its integer
-result the process exit status.
-
-## The error handler and `titan.backtrace()`
-
-The beginnings of a richer error-reporting story landed in PR #257, in the
-project's own words "an experiment towards integrating Lua's error
-handling into Titan that makes errors thrown while executing Titan code
-throw an object that combines an error object with a stack trace that has
-both Titan and Lua functions."
-
-What is implemented today: every Titan function exported to Lua installs
-an error handler for the duration of the call. On a run-time error the
-handler captures the error message together with a *merged* trace — the
-Lua-level traceback plus the C-level backtrace through the compiled Titan
-frames — and stores it; the error value itself reaches `pcall` unchanged.
-The trace is retrieved from Lua with the `titan` runtime-support module
-(installed along with the compiler by `luarocks make
-titan-dev-1.rockspec`):
-
-```lua
--- Titan: m.titan
-function wrong(): integer
-    local x: value = {}
-    return x
-end
-
--- Lua
 local titan = require "titan"
-local m = require "m"
-
-local ok, err = pcall(m.wrong)
+local ok, err = pcall(m.risky)
 assert(not ok)
 print(titan.backtrace())
 ```
 
-This is the usage pattern from the compiler's own test suite. The
-output, trimmed:
+The trace is captured by Titan's error handler at the original failure
+site. It is one unified, innermost-to-outer traceback that interleaves
+compiled Titan frames with Lua frames. Titan frames use source names such
+as `m.func`, `m.Record:method`, `m.Record.static`, or
+`anonymous function at m.titan:12`, and source lines are attributed to the
+Titan `.titan` call or raise site when debug information is available.
+The returned string is the raw frame list: it does not include the error
+message, a `stack traceback:` header, or tab indentation.
 
-```
-m.titan:4:12: type error, expected integer but found table
-stack traceback:
-	[C]: in ?
-	[C]: in function 'm.wrong'
-	[C]: in global 'pcall'
-	(command line):4: in main chunk
-	[C]: in ?C traceback:
-./m.so(errorhandler+0x2b) [...]
-...
-./m.so(m_wrong_titan+0x92) [...]
-...
-```
+When Titan catches and handles an error, the registry slot backing
+`titan.backtrace()` is cleared; the handled trace is available as the
+catch-local `traceback`. A bare re-raise pins that saved trace so the
+outer handler sees the original stack. A fresh `raise <exp>` builds a
+fresh trace.
 
-`titan.backtrace()` returns the trace of the most recent Titan error in
-the Lua state; each new error overwrites it. The facility is
-**experimental**, merged deliberately as a first validation step ("merge
-this initial version as is, then build on top of this in other PRs" was
-the review plan); its rough edges show in the output, where Titan frames
-appear under their mangled C names (`m_wrong_titan`) and the C and Lua
-tracebacks sit side by side rather than interleaved.
+The merged trace uses libbacktrace and the generated C debug information.
+On macOS, the build may need `dsymutil` output for fully symbolized
+standalone executables; the test suite and CI exercise that path.
 
-## Recoverable failures without errors: the option idiom
+## Other run-time errors
 
-Since Titan code cannot catch errors, the way to make a failure
-*recoverable* is to keep it out of the error system entirely: return an
-[option type](option-types.md) and let the caller test or default it.
-This is the option-type design rationale (PR #239) — the programmer
-should not have to prove a value is present, but the language should
-"fail fast if he thinks he is handling a real value but the value is not
-actually there, so 'nulls' do not propagate." A worked example — a search
-function whose "not found" is a value, not an error:
+The explicit `raise` statement is only one source of run-time errors.
+Titan also raises when a dynamic condition violates a static type or Lua
+semantic rule:
+
+| Source | Error shape |
+| --- | --- |
+| wrong argument type from Lua | `FILE:LINE:COL: type error, expected T but found U` |
+| wrong arity from Lua | `calling Titan function NAME with N arguments, but expected M` or `expected at least M` for variadic functions |
+| failed `value as T` or implicit `value` conversion | `FILE:LINE:COL: type error, expected T but found U` |
+| float-to-integer conversion failure | `type error, number 'N' has no integer representation` |
+| integer `//` or `%` by zero | `error at line LINE, divide by zero` / `% by zero` |
+| option unwrap of `nil` | `FILE:LINE:COL: type error, expected T but found nil` |
+| array/map element read with wrong Lua value | `FILE:LINE:COL: type error, expected T but found U` |
+| unknown record field from Lua | `FILE:LINE:COL: field 'NAME' not found in record 'FQTN'` |
+| unknown module member from Lua | `member 'NAME' does not exist in Titan module 'MOD'` |
+
+For details of each source, see the chapters that define the construct:
+[types](types.md), [option types](option-types.md),
+[arrays and maps](arrays-maps.md), [records](records.md),
+[functions](functions.md), and [Lua interoperability](lua-interop.md).
+
+## Recoverable failures: prefer options
+
+Use errors for exceptional failures and violated assumptions. For ordinary
+"not found" or "not available" results, prefer [option types](option-types.md):
 
 ```lua
--- Titan: m.titan
 function find(xs: {integer}, v: integer): integer?
     for i = 1, #xs do
         if xs[i] == v then
@@ -417,44 +291,9 @@ function find_or_first(xs: {integer}, v: integer): integer
     local i? = find(xs, v)
     return i or 1
 end
-
--- Lua
-print(m.find({10, 20, 30}, 20))           --> 2
-print(m.find({10, 20, 30}, 99))           --> nil
-print(m.find_or_first({10, 20, 30}, 99))  --> 1
 ```
 
-The pieces, all covered in depth in [Option types](option-types.md):
-`return nil` and `return i` both coerce into the declared `integer?`;
-`local i? = ...` opts in to keeping the option (a plain `local i = ...`
-would instead unwrap immediately and raise on `nil` — see
-[the unwrap behaviour](#option-unwraps-that-find-nil)); `i or 1` collapses
-`integer?` to `integer` with a default — and `if i then` would test for
-presence instead. From Lua, an option return is simply the value or
-`nil`, the natural Lua convention for "no result".
-
-The `or`-default can also be applied to the option-returning call
-directly, without going through a variable: `return find(xs, v) or 1`
-collapses the call's `integer?` result to `integer` with a default,
-exactly as defaulting an indexing expression (`return xs[i] or 0`) does.
-
-## Design outlook
-
-Error handling is where the prototype stops, not where the design does.
-PR #257 — the last substantive feature merged into this compiler — spells
-out the intended destination: a Titan error should carry an error object
-combined with a single coherent stack trace spanning both languages. The
-machinery it anticipates: "The stack trace information for Titan
-functions has to be obtained through the C mechanisms (either the
-`backtrace` function or libbacktrace or libunwind), Titan functions have
-to be identified and demangled, and the Lua/Titan transitions identified
-and merged with the Lua stacktrace available through the `Callinfo`
-stack." No further error-handling work followed in this repository, so
-the language today sits at the first step of that plan: errors are plain
-Lua errors, the merged trace exists but is raw, and Titan-side raising
-and catching remain future work.
-
-*Implementation note:* the generated code already reserves a stack slot
-for an error value on every call from Lua — unused groundwork from PR
-#257 for the planned error-object protocol; see
-[the interop internals](../implementation/lua-interop-internals.md).
+`return nil` is a value-level result here, not an error. A caller can keep
+the option (`local i? = ...`), test it (`if i then`), default it
+(`i or 1`), or deliberately unwrap it into a plain `integer` and get a
+fail-fast run-time error if it is absent.

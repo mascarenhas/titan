@@ -13,7 +13,7 @@ local run_coder = h.run_coder
 describe("closures (end-to-end)", function()
     setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(function ()
-        os.execute("rm -f *.o *.so")
+        os.execute("rm -rf *.o *.so *.dSYM")
         if not h.verbose then os.execute("rm -f *.c") end
     end)
 
@@ -752,7 +752,7 @@ end)
 describe("closures inside methods (end-to-end)", function()
     setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(function ()
-        os.execute("rm -f *.o *.so")
+        os.execute("rm -rf *.o *.so *.dSYM")
         if not h.verbose then os.execute("rm -f *.c") end
     end)
 
@@ -812,7 +812,7 @@ end)
 describe("closures across modules (end-to-end)", function()
     setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(function ()
-        os.execute("rm -f *.o *.so")
+        os.execute("rm -rf *.o *.so *.dSYM")
         if not h.verbose then os.execute("rm -f *.c") end
     end)
 
@@ -850,7 +850,7 @@ end)
 describe("closures over foreign-typed boxes (end-to-end)", function()
     setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(function ()
-        os.execute("rm -f *.o *.so")
+        os.execute("rm -rf *.o *.so *.dSYM")
         if not h.verbose then os.execute("rm -f *.c") end
     end)
 

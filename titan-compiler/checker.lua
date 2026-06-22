@@ -26,6 +26,21 @@ local checkfuncbody
 -- nesting depth of enclosing loops, so `break` can be rejected outside a loop
 local loop_depth = 0
 
+-- Error-handling context counters (B.2), mirroring `loop_depth`: each is bumped
+-- only while checking the relevant block and is saved/reset to 0 across every
+-- nested function body (see `checkfuncbody`) and at `checker.check` entry, so a
+-- `raise`/`return`/`break` in a lambda is governed by the lambda, not by an
+-- enclosing catch/finally.
+--   catch_depth         -- > 0 while inside a `catch` block (bare-`raise` legality)
+--   in_finally          -- > 0 while inside a `finally` block (no `return`/escaping
+--                          `break` may leave it)
+--   finally_loop_floor  -- the `loop_depth` on entry to the innermost finally; a
+--                          `break` is finally-escaping iff `loop_depth` has not
+--                          risen above it (no loop opened inside the finally)
+local catch_depth = 0
+local in_finally = 0
+local finally_loop_floor = 0
+
 -- Stack of enclosing-function frames, used for closure capture analysis. Each
 -- frame is { depth, captures = {}, capture_set = {} }. A top-level function body
 -- is at depth 1; a lambda nested inside it is at depth 2; and so on. Reset
@@ -660,8 +675,94 @@ checkstat = util.make_visitor({
         if loop_depth == 0 then
             checker.typeerror(errors, node.loc,
                 "'break' outside a loop")
+        elseif in_finally > 0 and loop_depth <= finally_loop_floor then
+            -- Inside a finally with no loop opened *inside* it: the target loop
+            -- encloses the finally, so this `break` would escape it (forbidden).
+            -- A `break` to a loop written inside the finally (loop_depth above
+            -- the floor) is contained and legal.
+            checker.typeerror(errors, node.loc,
+                "'break' cannot escape a finally block")
         end
         return false
+    end,
+
+    ["Ast.StatRaise"] = function(node, st, errors)
+        if not node.exp then
+            -- Bare `raise` (re-raise the in-flight error) is legal only lexically
+            -- inside a catch block. `catch_depth` is reset across nested function
+            -- bodies, so a bare `raise` in a lambda defined in a catch is still
+            -- rejected (it has no in-flight error of its own).
+            if catch_depth == 0 then
+                checker.typeerror(errors, node.loc,
+                    "bare 'raise' (a re-raise) is only valid inside a catch block")
+            end
+        else
+            -- `raise <exp>`: the error object may be any value, so check the
+            -- operand with `value` as the expected type (every value coerces to
+            -- `value`) and materialize the coercion so the coder boxes it.
+            checkexp(node.exp, st, errors, types.Value())
+            node.exp = trycoerce(node.exp, types.Value(), errors)
+            checkmatch("raise", types.Value(), node.exp._type, errors, node.loc)
+        end
+        -- `raise` is a terminator: control never falls through it.
+        return true
+    end,
+
+    ["Ast.StatTry"] = function(node, st, errors)
+        -- The protected body, the catch handler, and the finally cleanup are
+        -- SIBLING scopes, not nested: a body local may be undeclared when the
+        -- error fires, so it must not be visible in catch/finally. Check each in
+        -- its own block, closing the previous one first.
+        local bret = st:with_block(checkstat, node.block, st, errors)
+
+        local cret = false
+        if node.catchblock then
+            -- The catch block binds two implicit locals: `error: value` (the
+            -- raised value) and `traceback: string` (its captured trace). They
+            -- live in a fresh sibling scope so the body's locals are out of
+            -- view. Mark them `_used` so the unused-local analysis ignores them.
+            st:open_block()
+            local errdecl = ast.Decl(node.loc, "error", false, false)
+            errdecl._type = types.Value()
+            errdecl._used = true
+            errdecl._catch_implicit = true
+            declare(errdecl, st)
+            local tbdecl = ast.Decl(node.loc, "traceback", false, false)
+            tbdecl._type = types.String()
+            tbdecl._used = true
+            tbdecl._catch_implicit = true
+            declare(tbdecl, st)
+            node._error_decl = errdecl
+            node._traceback_decl = tbdecl
+            catch_depth = catch_depth + 1
+            cret = checkstat(node.catchblock, st, errors)
+            catch_depth = catch_depth - 1
+            st:close_block()
+        end
+
+        local fret = false
+        if node.finallyblock then
+            -- A finally is straight-line: no `return` and no finally-escaping
+            -- `break` may leave it (only a `raise` overrides). Bump `in_finally`
+            -- and stamp `finally_loop_floor` to the current loop depth (so a
+            -- `break` to a loop opened INSIDE the finally is still legal),
+            -- saving/restoring the outer floor for nested constructs.
+            st:open_block()
+            in_finally = in_finally + 1
+            local saved_floor = finally_loop_floor
+            finally_loop_floor = loop_depth
+            fret = checkstat(node.finallyblock, st, errors)
+            finally_loop_floor = saved_floor
+            in_finally = in_finally - 1
+            st:close_block()
+        end
+
+        -- Always-returns (B.2): the construct returns on every path iff the
+        -- finally unconditionally returns, OR the body returns and (there is no
+        -- catch, or the catch also returns). `raise` counts as a terminator, so
+        -- a finally that unconditionally `raise`s satisfies `fret`.
+        return (node.finallyblock and fret)
+            or (bret and (not node.catchblock or cret))
     end,
 
     ["Ast.StatAssign"] = function(node, st, errors)
@@ -720,6 +821,11 @@ checkstat = util.make_visitor({
                                 "cannot assign to 'for' control variable '%s'",
                                 var._decl.name)
                         end
+                        if var._decl._catch_implicit then
+                            checker.typeerror(errors, var.loc,
+                                "cannot assign to catch local '%s'",
+                                var._decl.name)
+                        end
                         var._decl._assigned = true
                     end
                     exp = trycoerce(exp, var._type, errors)
@@ -738,6 +844,14 @@ checkstat = util.make_visitor({
     end,
 
     ["Ast.StatReturn"] = function(node, st, errors)
+        -- Nothing may statically leave a finally (only an unpreventable raise
+        -- can): a `return` lexically inside a finally is a compile error.
+        -- `in_finally` is reset across nested function bodies, so a `return` in a
+        -- lambda DEFINED in a finally is the lambda's own and is legal.
+        if in_finally > 0 then
+            checker.typeerror(errors, node.loc,
+                "cannot 'return' from inside a finally block")
+        end
         local ftype = st:find_symbol("$function")._type
         local nexps = #node.exps
         local dots = nexps > 0 and node.exps[nexps]._tag == "Ast.ExpDots"
@@ -2027,7 +2141,18 @@ function checkfuncbody(node, st, errors, opts)
             end
         end
     end
+    -- The error-handling context counters do not cross a function boundary: a
+    -- lambda body starts fresh (a bare `raise`/`return`/`break` inside it is the
+    -- lambda's own, not the enclosing catch/finally's). Save and reset to 0
+    -- around the body, restoring on the way out so the enclosing context is
+    -- unaffected. (`loop_depth` predates this; `break` already cannot target a
+    -- loop across a function boundary, so it is reset here too for consistency.)
+    local saved_catch, saved_in_finally, saved_floor, saved_loop =
+        catch_depth, in_finally, finally_loop_floor, loop_depth
+    catch_depth, in_finally, finally_loop_floor, loop_depth = 0, 0, 0, 0
     local ret = st:with_block(checkstat, node.block, st, errors)
+    catch_depth, in_finally, finally_loop_floor, loop_depth =
+        saved_catch, saved_in_finally, saved_floor, saved_loop
     -- A zero-return `() -> ()` function (empty rettypes) may fall off the end,
     -- exactly like a `nil`-returning one; only a function whose first declared
     -- return type is some non-`nil` value must return on every path.
@@ -2522,6 +2647,10 @@ function checker.check(modname, ast, subject, filename, loader)
         return nil, "you must pass a loader to import modules"
     end
     func_stack = {}
+    catch_depth = 0
+    in_finally = 0
+    finally_loop_floor = 0
+    loop_depth = 0
     local st = symtab.new(modname)
     local errors = {subject = subject, filename = filename}
     checktoplevel(ast, st, errors, loader)

@@ -252,8 +252,10 @@ static `import` and the dynamic `require`."
 
 There is consequently no way to `require` a Lua module from Titan code
 today: `import` loads Titan modules and `foreign import` loads C
-headers (see [the C FFI](ffi.md)); calling into Lua is a roadmap item
-(see [Lua interoperability](lua-interop.md#calling-lua-from-titan)).
+headers (see [the C FFI](ffi.md)). Lua callables can still enter Titan
+as function-typed values — for example, as an argument from Lua — and
+Titan can call them normally (see
+[Lua interoperability](lua-interop.md#calling-lua-from-titan)).
 
 ## Compiling modules: `titanc`
 
@@ -313,8 +315,8 @@ the structure of the generated C is in
   described above.
 * **Compiled modules** are looked up along the *binary search path*: a
   semicolon-separated list of directories taken from the environment
-  variable `TITAN_PATH_0_5`, or `TITAN_PATH` if that is unset,
-  defaulting to `.;/usr/local/lib/titan/0.5` — a list of plain
+  variable `TITAN_PATH_0_10`, or `TITAN_PATH` if that is unset,
+  defaulting to `.;/usr/local/lib/titan/0.10` — a list of plain
   directories, not a Lua-style template path. The same path is used at
   run time by compiled modules that load dependencies dynamically.
 
@@ -361,8 +363,10 @@ the binary — no dynamic loading of Titan modules is involved. `args` is
 Lua-style: `args[0]` is the program name and `args[1]` onward are the
 arguments, so `#args` is the argument count. The integer returned by
 `main` becomes the process exit status; an uncaught run-time error
-prints an error message (with no traceback) to standard error and exits
-with a failure status (see [Error handling](error-handling.md)).
+prints `<program name>: <error message>`, `stack traceback:`, and
+tab-indented unified traceback frames through the Titan `main` frame to
+standard error, then exits with a failure status. The synthetic Lua
+bootstrap is not shown (see [Error handling](error-handling.md)).
 
 ```lua
 -- Titan: hello.titan

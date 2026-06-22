@@ -55,6 +55,20 @@ local function c_float_literal(n)
     return s
 end
 
+-- Emit a standalone C `#line` directive pointing at `node`'s .titan source
+-- location, so DWARF and libbacktrace symbolization attribute the *following*
+-- generated C to the original .titan file and line rather than the generated
+-- .c. Returned as its own line with a
+-- trailing newline so it never fuses with adjacent code; the `#` may be
+-- indented (reindent_c re-indents it) since leading whitespace before a
+-- directive is legal C. Nodes without a `loc` (synthesized AST) emit nothing.
+local function emitline(node)
+    local loc = node and node.loc
+    if not loc or not loc.line or not loc.filename then return "" end
+    return "#line " .. tostring(loc.line) .. " "
+        .. c_string_literal(loc.filename) .. "\n"
+end
+
 
 local function getslot(typ --[[:table]], dst --[[:string?]], src --[[:string]])
     dst = dst and dst .. " =" or ""
@@ -107,6 +121,15 @@ local function mangle_qn(qualname)
     return qualname:gsub("[%-.]", "_")
 end
 
+-- TITAN_ENTRY_TAG marks every generated Lua entry-wrapper C symbol with a name
+-- Titan owns and no Lua/libc symbol shares. The unified backtrace merge
+-- (titan-runtime/titan.c) keys on this substring to locate Titan native-stack
+-- boundaries — each entry wrapper is where one Lua->Titan call splices a run of
+-- native Titan frames into the CallInfo-driven Lua trace. The `#line` from
+-- the function-definition `#line` still attributes these wrappers to the
+-- .titan source.
+local TITAN_ENTRY_TAG = "titanentry"
+
 local function fname_prefix(typ)
     return mangle_qn(typ.fqtn) .. "_" .. typ.name
 end
@@ -116,7 +139,7 @@ local function static_name(typ)
 end
 
 local function static_luaname(typ)
-    return fname_prefix(typ) .. "_luastatic"
+    return fname_prefix(typ) .. "_" .. TITAN_ENTRY_TAG .. "_luastatic"
 end
 
 local function method_name(typ)
@@ -124,7 +147,7 @@ local function method_name(typ)
 end
 
 local function method_luaname(typ)
-    return fname_prefix(typ) .. "_luamethod"
+    return fname_prefix(typ) .. "_" .. TITAN_ENTRY_TAG .. "_luamethod"
 end
 
 -- Bound-method trampolines: the native one (`_boundmethod`) matches the
@@ -137,7 +160,7 @@ local function bound_method_name(typ)
 end
 
 local function bound_method_luaname(typ)
-    return fname_prefix(typ) .. "_boundlua"
+    return fname_prefix(typ) .. "_" .. TITAN_ENTRY_TAG .. "_boundlua"
 end
 
 local function modprefix(modname)
@@ -149,7 +172,29 @@ local function func_name(modname, name)
 end
 
 local function func_luaname(modname, name)
-    return modprefix(modname) .. name .. "_lua"
+    return modprefix(modname) .. name .. "_" .. TITAN_ENTRY_TAG .. "_lua"
+end
+
+-- Record the mapping from a native function's mangled C symbol to its qualified
+-- Titan source name, for the trace name table emitted in _init (deliverable 2).
+-- The runtime (errorhandler) looks each native frame's DWARF symbol up here and
+-- shows the qualified name instead of the mangled symbol. Forms:
+--   top-level func  -> "<module>.<func>"
+--   method          -> "<module>.<record>:<method>"
+--   record static   -> "<module>.<record>.<static>"
+--   anonymous/lambda-> "anonymous function at <file>.titan:<linedefined>"
+local function register_trace_name(tlcontext, symbol, qualname)
+    table.insert(tlcontext.names, { symbol, qualname })
+end
+
+-- The qualified Titan name of an anonymous function, formatted at codegen from
+-- its DEFINITION location (the lambda's `loc`). The trace's leading
+-- `<file>:<current-line>` already shows the execution point; this names it.
+local function anon_qualname(loc)
+    if loc and loc.line and loc.filename then
+        return "anonymous function at " .. loc.filename .. ":" .. tostring(loc.line)
+    end
+    return "anonymous function"
 end
 
 -- get name of the variable holding the metatable for this type.
@@ -188,10 +233,21 @@ end
 
 local checkandset
 
-local function codethrow(_, template, params)
+-- `loc` is the .titan source location of the raise; it stamps a fully-resolved
+-- `#line` directly above the luaL_error so the native frame that throws
+-- symbolizes to the throw's exact .titan line instead of a
+-- line drifted N rows into the surrounding expanded coercion C. The `#line`
+-- uses resolved values (not $LINE/$FILE placeholders) so it is independent of
+-- whatever render vars the caller's enclosing template happens to define. The
+-- `$LINE`/`$FILE`/etc. placeholders left in $PARAMS are still filled by that
+-- enclosing template (ignore_missing=true keeps them intact here).
+local function codethrow(loc, template, params)
+    local line = loc and emitline({ loc = loc }) or ""
     return render([[
+        $LINEDIR
         luaL_error(L, "$TEMPLATE", $PARAMS);
     ]], {
+        LINEDIR = line,
         TEMPLATE = template,
         PARAMS = table.concat(params, ',')
     }, true)
@@ -220,8 +276,8 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
             FILE = c_string_literal(loc.filename),
             LINE = c_integer_literal(loc.line),
             COL = c_integer_literal(loc.col),
-            THROWFLOAT = codethrow(ctx, "%s:%d:%d: type error, number '%f' has no integer representation", { "$FILE", "$LINE", "$COL", "_v" }),
-            THROWINTEGER = codethrow(ctx, "%s:%d:%d: type error, expected integer but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($EXP))" })
+            THROWFLOAT = codethrow(loc, "%s:%d:%d: type error, number '%f' has no integer representation", { "$FILE", "$LINE", "$COL", "_v" }),
+            THROWINTEGER = codethrow(loc, "%s:%d:%d: type error, expected integer but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($EXP))" })
         })
     elseif typ._tag == "Type.Float" then
         return render([[
@@ -238,7 +294,7 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
             FILE = c_string_literal(loc.filename),
             LINE = c_integer_literal(loc.line),
             COL = c_integer_literal(loc.col),
-            THROW = codethrow(ctx, "%s:%d:%d: type error, expected float but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($EXP))" })
+            THROW = codethrow(loc, "%s:%d:%d: type error, expected float but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($EXP))" })
         })
     elseif typ._tag == "Type.Boolean" then
         return render([[
@@ -311,9 +367,9 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
             EXP = exp,
             VAR = cvar,
             NAME = types.tostring(typ),
-            THROWNIL = codethrow(ctx, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "luaL_tolstring(L, -1, NULL)" }),
-            THROWUD = codethrow(ctx, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "lua_tostring(L, -1)" }),
-            THROWPRIM = codethrow(ctx, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "lua_typename(L, ttype($EXP))" })
+            THROWNIL = codethrow(loc, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "luaL_tolstring(L, -1, NULL)" }),
+            THROWUD = codethrow(loc, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "lua_tostring(L, -1)" }),
+            THROWPRIM = codethrow(loc, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", '"$NAME"', "lua_typename(L, ttype($EXP))" })
         })
     else
         error("invalid type " .. types.tostring(typ))
@@ -332,7 +388,7 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
         FILE = c_string_literal(loc.filename),
         LINE = c_integer_literal(loc.line),
         COL = c_integer_literal(loc.col),
-        THROW = codethrow(ctx, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", "$TAG", "lua_typename(L, ttype($EXP))" })
+        THROW = codethrow(loc, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", "$TAG", "lua_typename(L, ttype($EXP))" })
     })
 end
 
@@ -365,8 +421,8 @@ function checkandset(ctx, typ --[[:table]], dst --[[:string]], src --[[:string]]
             FILE = c_string_literal(loc.filename),
             LINE = c_integer_literal(loc.line),
             COL = c_integer_literal(loc.col),
-            THROWFLOAT = codethrow(ctx, "%s:%d:%d: type error, number '%f' has no integer representation", { "$FILE", "$LINE", "$COL", "_v" }),
-            THROWINT = codethrow(ctx, "%s:%d:%d: type error, expected integer but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($SRC))" })
+            THROWFLOAT = codethrow(loc, "%s:%d:%d: type error, number '%f' has no integer representation", { "$FILE", "$LINE", "$COL", "_v" }),
+            THROWINT = codethrow(loc, "%s:%d:%d: type error, expected integer but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($SRC))" })
         })
     elseif typ._tag == "Type.Float" then
         return render([[
@@ -384,7 +440,7 @@ function checkandset(ctx, typ --[[:table]], dst --[[:string]], src --[[:string]]
             FILE = c_string_literal(loc.filename),
             LINE = c_integer_literal(loc.line),
             COL = c_integer_literal(loc.col),
-            THROW = codethrow(ctx, "%s:%d:%d: type error, expected float but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($SRC))" })
+            THROW = codethrow(loc, "%s:%d:%d: type error, expected float but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($SRC))" })
         })
     elseif typ._tag == "Type.Boolean" then tag = "boolean"
     elseif typ._tag == "Type.Nil" then tag = "nil"
@@ -448,7 +504,7 @@ function checkandset(ctx, typ --[[:table]], dst --[[:string]], src --[[:string]]
         FILE = c_string_literal(loc.filename),
         LINE = c_integer_literal(loc.line),
         COL = c_integer_literal(loc.col),
-        THROW = codethrow(ctx, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", "$TAG", "lua_typename(L, ttype($SRC))" })
+        THROW = codethrow(loc, "%s:%d:%d: type error, expected %s but found %s", { "$FILE", "$LINE", "$COL", "$TAG", "lua_typename(L, ttype($SRC))" })
     })
 end
 
@@ -461,10 +517,10 @@ local function setslot(typ --[[:table]], dst --[[:string]], src --[[:string]])
     elseif typ._tag == "Type.String" then tmpl = "setsvalue(L, $DST, $SRC);"
     elseif typ._tag == "Type.Array" then tmpl = "sethvalue(L, $DST, $SRC);"
     elseif typ._tag == "Type.Map" then tmpl = "sethvalue(L, $DST, $SRC);"
-    elseif typ._tag == "Type.Value" then tmpl = "setobj2t(L, $DST, &$SRC);"
+    elseif typ._tag == "Type.Value" then tmpl = "do { TValue _titan_v = $SRC; setobj2t(L, $DST, &_titan_v); } while (0);"
     elseif typ._tag == "Type.Nominal" then tmpl = "setuvalue(L, $DST, $SRC);"
-    elseif typ._tag == "Type.Option" then tmpl = "setobj2t(L, $DST, &$SRC);"
-    elseif typ._tag == "Type.Function" then tmpl = "setobj2t(L, $DST, &$SRC);"
+    elseif typ._tag == "Type.Option" then tmpl = "do { TValue _titan_v = $SRC; setobj2t(L, $DST, &_titan_v); } while (0);"
+    elseif typ._tag == "Type.Function" then tmpl = "do { TValue _titan_v = $SRC; setobj2t(L, $DST, &_titan_v); } while (0);"
     else
         error("invalid type " .. types.tostring(typ))
     end
@@ -485,11 +541,14 @@ local function setwrapped(typ --[[:table]], dst --[[:string]], src --[[:string]]
     elseif typ._tag == "Type.Option" and typ.base._tag == "Type.Nominal" then
         -- $SRC is a TValue already holding the udata value.
         return render([[
-            if(ttisnil(&$SRC)) {
+            do {
+                TValue _titan_v = $SRC;
+                if(ttisnil(&_titan_v)) {
                 setnilvalue($DST);
-            } else {
-                setobj2t(L, $DST, &$SRC);
-            }
+                } else {
+                    setobj2t(L, $DST, &_titan_v);
+                }
+            } while (0);
         ]], {
             DST = dst,
             SRC = src
@@ -561,9 +620,329 @@ local function initval(typ --[[:table]])
     else return "0" end
 end
 
--- The `TitanVarg*` struct backing a vararg of element type `elemtype`, keyed on
--- `ctype(elemtype)` so the struct's flexible array member matches the element C
--- type exactly (§2.F). Mirrors titan.h's seven typedefs.
+-- Plain C declaration for Titan-visible locals/parameters. Setjmp-sensitive
+-- values are protected by explicit spill/reload slots below, keeping the source
+-- local/param C autos ordinary (and avoiding volatile in the function ABI).
+local function cvardecl(ctx, typ, name)
+    return ctype(typ) .. " " .. name
+end
+
+-- A statement after which control never falls through (return/break/raise). The
+-- checker does NOT type-check statements that follow such a terminator within a
+-- block (they are dead code: their var uses get no `_decl`/`_type`), so the coder
+-- MUST NOT attempt to generate them — doing so dereferences those nil
+-- annotations. Stopping at the terminator also drops the unreachable C. (This
+-- predates error handling: `raise`/`return` followed by any var-using statement
+-- always produced unchecked nodes; it only became reachable now that `raise`
+-- routinely precedes dead code in try bodies.)
+local function is_terminator(node)
+    local tag = node._tag
+    return tag == "Ast.StatReturn" or tag == "Ast.StatBreak"
+        or tag == "Ast.StatRaise"
+end
+
+-- The last statement that control can reach in a block's `stats` (the first
+-- terminator, or the final statement if none terminates). Mirrors codestats'
+-- dead-code stop, so it reflects exactly what the coder emitted.
+local function last_reachable_stat(block)
+    local last
+    for _, s in ipairs(block.stats) do
+        last = s
+        if is_terminator(s) then break end
+    end
+    return last
+end
+
+local function set_add(set, decl)
+    if decl then set[decl] = true end
+end
+
+local function set_union(dst, src)
+    if not src then return dst end
+    for k in pairs(src) do dst[k] = true end
+    return dst
+end
+
+local function set_copy(src)
+    return set_union({}, src)
+end
+
+-- C `setjmp` correctness (C11 §7.13.2.1): an automatic variable of a function
+-- that calls `setjmp`, is changed between that `setjmp` and its matching
+-- `longjmp`, and is read after the longjmp has an indeterminate value unless the
+-- read is made from volatile-backed storage. We do not make every local/param
+-- volatile. Instead this pass marks only Decl objects assigned in a protected
+-- region whose post-longjmp path can read them. Codegen then keeps GC values in
+-- their existing Lua-stack slots and uses tiny volatile C spill slots only for
+-- non-GC scalars.
+local collect_reads_exp, collect_reads_stat, collect_writes_stat
+
+local function collect_reads_var(node, out)
+    if not node then return out end
+    local tag = node._tag
+    if tag == "Ast.VarName" then
+        set_add(out, node._decl)
+    elseif tag == "Ast.VarDot" then
+        collect_reads_exp(node.exp, out)
+        if node._decl and node._decl._tag == "Ast.Decl" then
+            set_add(out, node._decl)
+        end
+    elseif tag == "Ast.VarBracket" then
+        collect_reads_exp(node.exp1, out)
+        collect_reads_exp(node.exp2, out)
+    end
+    return out
+end
+
+local function collect_lvalue_reads(node, out)
+    if not node then return out end
+    local tag = node._tag
+    if tag == "Ast.VarDot" then
+        collect_reads_exp(node.exp, out)
+    elseif tag == "Ast.VarBracket" then
+        collect_reads_exp(node.exp1, out)
+        collect_reads_exp(node.exp2, out)
+    end
+    return out
+end
+
+local function collect_lvalue_write(node, out)
+    if node and node._decl and node._decl._tag == "Ast.Decl" then
+        set_add(out, node._decl)
+    end
+    return out
+end
+
+local function collect_reads_block(node, out)
+    out = out or {}
+    if not node then return out end
+    for _, stat in ipairs(node.stats) do
+        collect_reads_stat(stat, out)
+        if is_terminator(stat) then break end
+    end
+    return out
+end
+
+local function collect_writes_block(node, out)
+    out = out or {}
+    if not node then return out end
+    for _, stat in ipairs(node.stats) do
+        collect_writes_stat(stat, out)
+        if is_terminator(stat) then break end
+    end
+    return out
+end
+
+collect_reads_exp = function(node, out)
+    out = out or {}
+    if not node or node == false then return out end
+    local tag = node._tag
+    if tag == "Ast.VarName" or tag == "Ast.VarDot"
+            or tag == "Ast.VarBracket" then
+        collect_reads_var(node, out)
+    elseif tag == "Ast.ExpVar" then
+        collect_reads_var(node.var, out)
+    elseif tag == "Ast.ExpInitList" then
+        for _, field in ipairs(node.fields) do
+            collect_reads_exp(field.exp, out)
+        end
+    elseif tag == "Ast.ExpCall" then
+        collect_reads_exp(node.exp, out)
+        for _, arg in ipairs(node.args.args) do
+            collect_reads_exp(arg, out)
+        end
+    elseif tag == "Ast.ExpUnop" or tag == "Ast.ExpCast"
+            or tag == "Ast.ExpAdjust" or tag == "Ast.ExpDotsIndex" then
+        collect_reads_exp(node.exp, out)
+    elseif tag == "Ast.ExpBinop" then
+        collect_reads_exp(node.lhs, out)
+        collect_reads_exp(node.rhs, out)
+    elseif tag == "Ast.ExpConcat" then
+        for _, exp in ipairs(node.exps) do
+            collect_reads_exp(exp, out)
+        end
+    elseif tag == "Ast.ExpExtra" then
+        collect_reads_exp(node.exp, out)
+    elseif tag == "Ast.ExpMethodRef" then
+        collect_reads_exp(node.exp, out)
+    elseif tag == "Ast.ExpFunction" then
+        -- Nested functions/lambdas have their own setjmp scopes and contexts.
+    else
+        -- literals, ExpDots, ExpDotsLen
+    end
+    return out
+end
+
+collect_reads_stat = function(node, out)
+    out = out or {}
+    if not node or node == false then return out end
+    local tag = node._tag
+    if tag == "Ast.StatBlock" then
+        collect_reads_block(node, out)
+    elseif tag == "Ast.StatDecl" then
+        for _, exp in ipairs(node.exps) do collect_reads_exp(exp, out) end
+    elseif tag == "Ast.StatAssign" then
+        for _, var in ipairs(node.vars) do collect_lvalue_reads(var, out) end
+        for _, exp in ipairs(node.exps) do collect_reads_exp(exp, out) end
+    elseif tag == "Ast.StatCall" then
+        collect_reads_exp(node.callexp, out)
+    elseif tag == "Ast.StatReturn" then
+        for _, exp in ipairs(node.exps) do collect_reads_exp(exp, out) end
+    elseif tag == "Ast.StatRaise" then
+        collect_reads_exp(node.exp, out)
+    elseif tag == "Ast.StatWhile" then
+        collect_reads_exp(node.condition, out)
+        collect_reads_block(node.block, out)
+    elseif tag == "Ast.StatRepeat" then
+        collect_reads_block(node.block, out)
+        collect_reads_exp(node.condition, out)
+    elseif tag == "Ast.StatFor" then
+        collect_reads_exp(node.start, out)
+        collect_reads_exp(node.finish, out)
+        collect_reads_exp(node.inc, out)
+        collect_reads_block(node.block, out)
+    elseif tag == "Ast.StatIf" then
+        for _, t in ipairs(node.thens) do
+            collect_reads_exp(t.condition, out)
+            collect_reads_block(t.block, out)
+        end
+        collect_reads_block(node.elsestat, out)
+    elseif tag == "Ast.StatTry" then
+        collect_reads_block(node.block, out)
+        collect_reads_block(node.catchblock, out)
+        collect_reads_block(node.finallyblock, out)
+    else
+        -- StatBreak has no reads.
+    end
+    return out
+end
+
+collect_writes_stat = function(node, out)
+    out = out or {}
+    if not node or node == false then return out end
+    local tag = node._tag
+    if tag == "Ast.StatBlock" then
+        collect_writes_block(node, out)
+    elseif tag == "Ast.StatDecl" then
+        for _, decl in ipairs(node.decls) do set_add(out, decl) end
+    elseif tag == "Ast.StatAssign" then
+        for _, var in ipairs(node.vars) do collect_lvalue_write(var, out) end
+    elseif tag == "Ast.StatWhile" or tag == "Ast.StatRepeat"
+            or tag == "Ast.StatFor" then
+        collect_writes_block(node.block, out)
+    elseif tag == "Ast.StatIf" then
+        for _, t in ipairs(node.thens) do collect_writes_block(t.block, out) end
+        collect_writes_block(node.elsestat, out)
+    elseif tag == "Ast.StatTry" then
+        collect_writes_block(node.block, out)
+        collect_writes_block(node.catchblock, out)
+        collect_writes_block(node.finallyblock, out)
+    end
+    return out
+end
+
+local function mark_spills(assigned, reads)
+    for decl in pairs(assigned) do
+        if reads[decl] then decl._needs_spill = true end
+    end
+end
+
+local function analyze_try_spills_block(block, after_reads)
+    if not block then return end
+    local stats = {}
+    for _, stat in ipairs(block.stats) do
+        table.insert(stats, stat)
+        if is_terminator(stat) then break end
+    end
+    local after = set_copy(after_reads or {})
+    for i = #stats, 1, -1 do
+        local stat = stats[i]
+        local tag = stat._tag
+        if tag == "Ast.StatBlock" then
+            analyze_try_spills_block(stat, after)
+        elseif tag == "Ast.StatWhile" or tag == "Ast.StatRepeat"
+                or tag == "Ast.StatFor" then
+            local loop_after = set_copy(after)
+            collect_reads_stat(stat, loop_after)
+            analyze_try_spills_block(stat.block, loop_after)
+        elseif tag == "Ast.StatIf" then
+            for _, t in ipairs(stat.thens) do
+                analyze_try_spills_block(t.block, after)
+            end
+            analyze_try_spills_block(stat.elsestat, after)
+        elseif tag == "Ast.StatTry" then
+            local catch_reads = collect_reads_block(stat.catchblock)
+            local finally_reads = collect_reads_block(stat.finallyblock)
+
+            -- A body error reaches code after the try only if a catch can handle
+            -- it. A finally-only body error re-raises after the finally, so only
+            -- the finally can observe body-written values on that longjmp path.
+            local body_boundary_reads = set_copy(catch_reads)
+            set_union(body_boundary_reads, finally_reads)
+            if stat.catchblock then set_union(body_boundary_reads, after) end
+            mark_spills(collect_writes_block(stat.block), body_boundary_reads)
+
+            -- The catch has a protected boundary only when a finally follows; if
+            -- it raises, dispatch re-raises after the finally, so post-try code is
+            -- not reached on that longjmp path.
+            if stat.catchblock and stat.finallyblock then
+                mark_spills(collect_writes_block(stat.catchblock), finally_reads)
+            end
+
+            local nested_body_after = set_copy(after)
+            set_union(nested_body_after, catch_reads)
+            set_union(nested_body_after, finally_reads)
+            analyze_try_spills_block(stat.block, nested_body_after)
+
+            local nested_catch_after = set_copy(after)
+            set_union(nested_catch_after, finally_reads)
+            analyze_try_spills_block(stat.catchblock, nested_catch_after)
+            analyze_try_spills_block(stat.finallyblock, after)
+        end
+
+        local reads = collect_reads_stat(stat)
+        if is_terminator(stat) then
+            after = reads
+        else
+            set_union(reads, after)
+            after = reads
+        end
+    end
+end
+
+local function analyze_try_spills(block)
+    analyze_try_spills_block(block, {})
+end
+
+-- A non-void/non-nil function whose last reachable statement is something other
+-- than a plain `StatReturn` (a `raise`, or a `StatTry`/`if` whose arms all
+-- return) falls off the end of the generated C even though Titan control never
+-- reaches there: the returns live inside an inner C scope or after a `lua_error`
+-- (which Lua 5.5 declares returning `int`, NOT `l_noret`), so the C compiler
+-- cannot prove no-fall-through and warns "control reaches end of non-void
+-- function". The checker has already proven the function always-returns, so emit
+-- an unreachable trailing `return` of the zero value to satisfy the C control-
+-- flow check (dead code; never executed). A function whose last reachable
+-- statement IS a `StatReturn` needs nothing (the C return is right there).
+local function unreachable_return(rettype, block)
+    if not rettype or rettype._tag == "Type.Nil" then return nil end
+    local last = last_reachable_stat(block)
+    if last and last._tag == "Ast.StatReturn" then return nil end
+    -- A braced initializer (`{ {0}, 0 }` for TValue-boxed types) is illegal in a
+    -- bare `return`, so zero a temp first and return it.
+    return render([[
+        /* unreachable: every path above already returned/raised; this satisfies
+        ** the C control-flow check (Titan never falls through here) */
+        {
+            $TYPE _ur = $INIT;
+            L->top.p = _base;
+            return _ur;
+        }]], { TYPE = ctype(rettype), INIT = initval(rettype) })
+end
+
+-- The `TitanVarg*` descriptor for a vararg of element type `elemtype`, keyed on
+-- `ctype(elemtype)` so its element pointer has the exact C type (§2.F). Mirrors
+-- titan.h's seven typedefs.
 local varg_struct_by_ctype = {
     ["lua_Integer"] = "TitanVargInteger",
     ["lua_Number"]  = "TitanVargFloat",
@@ -654,17 +1033,114 @@ local function newcontext(tlcontext)
     }
 end
 
-local function newslot(ctx --[[:table]], name --[[:string]])
-    local sdepth = ctx.depth
+-- Address a reserved Lua-stack slot by its stable stack offset. Lua's GC is
+-- non-moving, so pointers to GC objects remain valid; only pointers into the
+-- Lua stack must be recomputed after an operation that can reallocate it.
+local function stackslotat(depth --[[:number]])
+    return render("(restorestack(L, _base_off) + $DEPTH)", {
+        DEPTH = c_integer_literal(depth),
+    })
+end
+
+local function slotat(depth --[[:number]])
+    return "s2v(" .. stackslotat(depth) .. ")"
+end
+
+local function reserveslot(ctx --[[:table]])
+    local d = ctx.depth
     ctx.depth = ctx.depth + 1
     ctx.allocations = ctx.allocations + 1
     if ctx.depth > ctx.nslots then ctx.nslots = ctx.depth end
+    ctx.uses_base_off = true
+    return d
+end
+
+local function newslot(ctx --[[:table]])
+    return slotat(reserveslot(ctx))
+end
+
+local function decl_needs_spill(decl)
+    return decl and decl._needs_spill and decl._used and not decl._boxed
+end
+
+local function register_spill_decl(ctx, decl)
+    if not decl_needs_spill(decl) then return end
+    if ctx.spill_decl_seen and ctx.spill_decl_seen[decl] then return end
+    ctx.spill_decl_seen = ctx.spill_decl_seen or {}
+    ctx.spill_decl_seen[decl] = true
+    ctx.active_spill_decls = ctx.active_spill_decls or {}
+    table.insert(ctx.active_spill_decls, decl)
+end
+
+local function spill_cvar(decl)
+    if not decl._spill_cvar then
+        decl._spill_cvar = "_spill" .. decl._cvar
+    end
+    return decl._spill_cvar
+end
+
+local function spill_decl_init(ctx, decl)
+    if not decl_needs_spill(decl) then return "" end
+    register_spill_decl(ctx, decl)
+    if types.is_gc(decl._type) then
+        -- GC values already have a Lua-stack slot. That slot is the stable
+        -- storage; no separate C spill is needed.
+        return ""
+    end
     return render([[
-        TValue *$NAME = s2v(_base + $SDEPTH);
+        volatile $CT $SPILL = $CVAR;
     ]], {
-        NAME = name,
-        SDEPTH = c_integer_literal(sdepth),
+        CT = ctype(decl._type),
+        SPILL = spill_cvar(decl),
+        CVAR = decl._cvar,
     })
+end
+
+local function spill_decl_zero(ctx, decl)
+    if not decl_needs_spill(decl) then return "" end
+    register_spill_decl(ctx, decl)
+    if types.is_gc(decl._type) then return "" end
+    return render([[
+        volatile $CT $SPILL = $INIT;
+    ]], {
+        CT = ctype(decl._type),
+        SPILL = spill_cvar(decl),
+        INIT = initval(decl._type),
+    })
+end
+
+local function spill_update(decl)
+    if not decl_needs_spill(decl) or types.is_gc(decl._type) then return "" end
+    return render([[
+        $SPILL = $CVAR;
+    ]], {
+        SPILL = spill_cvar(decl),
+        CVAR = decl._cvar,
+    })
+end
+
+local function spill_reload(ctx)
+    local decls = ctx.active_spill_decls
+    if not decls then return "" end
+    local lines = {}
+    for _, decl in ipairs(decls) do
+        if decl_needs_spill(decl) then
+            if types.is_gc(decl._type) then
+                if decl._slot then
+                    table.insert(lines,
+                        getslot(decl._type, decl._cvar, decl._slot) .. ";")
+                end
+            elseif decl._spill_cvar then
+                table.insert(lines, render("$CVAR = $SPILL;", {
+                    CVAR = decl._cvar,
+                    SPILL = decl._spill_cvar,
+                }))
+            end
+        end
+    end
+    if #lines == 0 then return "" end
+    return "/* reload setjmp-sensitive Titan locals/params */\n"
+        .. table.concat(lines, "\n")
 end
 
 local function newtmp(ctx --[[:table]], typ --[[:table]], isgc --[[:boolean]])
@@ -672,16 +1148,14 @@ local function newtmp(ctx --[[:table]], typ --[[:table]], isgc --[[:boolean]])
     ctx.tmp = ctx.tmp + 1
     local tmpname = "_tmp_" .. tmp
     if isgc then
-        local slotname = "_tmp_" .. tmp .. "_slot"
+        local slot = newslot(ctx)
         return render([[
-            $NEWSLOT
             $TYPE $TMPNAME = $INIT;
         ]], {
             TYPE = ctype(typ),
-            NEWSLOT = newslot(ctx, slotname),
             TMPNAME = tmpname,
             INIT = initval(typ)
-        }), tmpname, slotname
+        }), tmpname, slot
     else
         return render([[
             $TYPE $TMPNAME = $INIT;
@@ -691,6 +1165,87 @@ local function newtmp(ctx --[[:table]], typ --[[:table]], isgc --[[:boolean]])
             INIT = initval(typ)
         }), tmpname
     end
+end
+
+-- Evaluate already-generated expression code now, exactly once, and keep its
+-- value stable across later expression setup. GC-able values are anchored in a
+-- reserved stack slot so a subsequent collection cannot sweep them; the slot
+-- itself is addressed by offset because a call may reallocate the Lua stack.
+local function materialize_code(ctx, typ, stats, exp)
+    local decl, name, slot = newtmp(ctx, typ, types.is_gc(typ))
+    local anchor = slot and setslot(typ, slot, name) or ""
+    return render([[
+        $STATS
+        $DECL
+        $NAME = $EXP;
+        $ANCHOR
+    ]], {
+        STATS = stats,
+        DECL = decl,
+        NAME = name,
+        EXP = exp,
+        ANCHOR = anchor,
+    }), name
+end
+
+local function materialize(ctx, node)
+    local stats, exp = codeexp(ctx, node)
+    return materialize_code(ctx, node._type, stats, exp)
+end
+
+-- Generate call arguments in source order. A pure trailing suffix can remain as
+-- direct C expressions: with no intervening statements, reordering those reads
+-- is unobservable. Every argument at or before an effectful argument is frozen
+-- at its source position, preventing later calls/checks from changing a
+-- deferred local/global read. This preserves Titan's left-to-right semantics
+-- without copying already-rooted pure GC arguments on every call.
+local function expression_contains_call(node)
+    local tag = node._tag
+    if tag == "Ast.ExpCall" then
+        return true
+    elseif tag == "Ast.ExpCast" or tag == "Ast.ExpUnop" then
+        return expression_contains_call(node.exp)
+    elseif tag == "Ast.ExpBinop" then
+        return expression_contains_call(node.lhs)
+            or expression_contains_call(node.rhs)
+    end
+    return false
+end
+
+local function ordered_call_args(ctx, args, n)
+    local coded = {}
+    for i = 1, n do
+        local stats, exp = codeexp(ctx, args[i])
+        coded[i] = {
+            stats = stats,
+            exp = exp,
+            typ = args[i]._type,
+            contains_call = expression_contains_call(args[i]),
+        }
+    end
+
+    local freeze = {}
+    local later_has_stats = false
+    for i = n, 1, -1 do
+        -- Foreign scalar calls can remain bare C expressions (no setup
+        -- statements), so an AST call is effectful even when `stats` is empty.
+        local has_stats = coded[i].stats ~= "" or coded[i].contains_call
+        freeze[i] = has_stats or later_has_stats
+        later_has_stats = later_has_stats or has_stats
+    end
+
+    local stats, exps = {}, {}
+    for i = 1, n do
+        local c = coded[i]
+        if freeze[i] then
+            local cstats, cexp =
+                materialize_code(ctx, c.typ, c.stats, c.exp)
+            stats[i], exps[i] = cstats, cexp
+        else
+            stats[i], exps[i] = c.stats, c.exp
+        end
+    end
+    return stats, exps
 end
 
 local function newforeigntmp(ctx --[[:table]], typ --[[:table]])
@@ -792,31 +1347,27 @@ end
 -- stores the initial value afterwards (via box_write).
 --   typ:      the Titan type of the boxed variable (selects (G) vs (N))
 --   boxvar:   name of the `Udata*` C variable to declare
---   slotname: name of the anchor-slot `TValue*` C variable to declare
-local function newbox(ctx, typ, boxvar, slotname)
+--   slot: relocation-safe expression for the box's anchor slot
+local function newbox(ctx, typ, boxvar, slot)
     if is_rawbox(typ) then
         return render([[
-            $NEWSLOT
             Udata *$BOXVAR = gco2u(luaC_newobj(L, LUA_VUSERDATA, sizeudata(0, sizeof($CT))));
             $BOXVAR->len = sizeof($CT); $BOXVAR->nuvalue = 0; $BOXVAR->metatable = NULL;
-            setuvalue(L, $SLOTNAME, $BOXVAR);
+            setuvalue(L, $SLOT, $BOXVAR);
         ]], {
-            NEWSLOT = newslot(ctx, slotname),
             BOXVAR = boxvar,
-            SLOTNAME = slotname,
+            SLOT = slot,
             CT = ctype(typ),
         })
     else
         return render([[
-            $NEWSLOT
             Udata *$BOXVAR = gco2u(luaC_newobj(L, LUA_VUSERDATA, sizeudata(1, 0)));
             $BOXVAR->len = 0; $BOXVAR->nuvalue = 1; $BOXVAR->metatable = NULL;
             setnilvalue(&$BOXVAR->uv[0].uv);
-            setuvalue(L, $SLOTNAME, $BOXVAR);
+            setuvalue(L, $SLOT, $BOXVAR);
         ]], {
-            NEWSLOT = newslot(ctx, slotname),
             BOXVAR = boxvar,
-            SLOTNAME = slotname,
+            SLOT = slot,
         })
     end
 end
@@ -829,37 +1380,139 @@ local function popd(ctx)
     ctx.depth = table.remove(ctx.dstack)
 end
 
+local function push_spillscope(ctx)
+    ctx.spill_scope_stack = ctx.spill_scope_stack or {}
+    local n = ctx.active_spill_decls and #ctx.active_spill_decls or 0
+    table.insert(ctx.spill_scope_stack, n)
+end
+
+local function pop_spillscope(ctx)
+    local n = table.remove(ctx.spill_scope_stack)
+    if not ctx.active_spill_decls then return end
+    for i = #ctx.active_spill_decls, n + 1, -1 do
+        local decl = ctx.active_spill_decls[i]
+        ctx.active_spill_decls[i] = nil
+        if ctx.spill_decl_seen then ctx.spill_decl_seen[decl] = nil end
+    end
+end
+
+-- Does `node` (a statement, typically a StatBlock) lexically contain a `StatTry`,
+-- WITHOUT descending into nested function bodies (ExpFunction has its own codegen
+-- context, entry-wrapper boundary, and errorjmp save)? Used to (a) run the
+-- per-function spill analysis and entry errorjmp-save setup, and (b) decide
+-- whether a loop must save its errorjmp at entry so a `break` crossing a try
+-- boundary can restore it.
+local function stat_contains_try(node)
+    if node == nil or node == false then return false end
+    local tag = node._tag
+    if tag == "Ast.StatTry" then
+        return true
+    elseif tag == "Ast.StatBlock" then
+        for _, s in ipairs(node.stats) do
+            if stat_contains_try(s) then return true end
+        end
+        return false
+    elseif tag == "Ast.StatWhile" or tag == "Ast.StatFor"
+           or tag == "Ast.StatRepeat" then
+        return stat_contains_try(node.block)
+    elseif tag == "Ast.StatIf" then
+        for _, t in ipairs(node.thens) do
+            if stat_contains_try(t.block) then return true end
+        end
+        return stat_contains_try(node.elsestat)
+    else
+        -- StatDecl/StatAssign/StatCall/StatReturn/StatBreak/StatRaise and any
+        -- expression-bearing statement: no nested block that is not a function
+        -- body of its own. ExpFunction bodies are intentionally NOT scanned.
+        return false
+    end
+end
+
+-- Emit the statements of a block's `stats` list, stopping after the first
+-- terminator (the rest is unreachable, unchecked dead code).
+local function codestats(ctx, stats_list)
+    local out = {}
+    for _, stat in ipairs(stats_list) do
+        table.insert(out, codestat(ctx, stat))
+        if is_terminator(stat) then break end
+    end
+    return out
+end
+
 -- All the code generation functions for STATEMENTS take
 -- the function context and the AST node and return the
 -- generated C code for the statement, as a string
 
 local function codeblock(ctx, node)
-    local stats = {}
     pushd(ctx)
-    for _, stat in ipairs(node.stats) do
-        table.insert(stats, codestat(ctx, stat))
-    end
+    push_spillscope(ctx)
+    local stats = codestats(ctx, node.stats)
+    pop_spillscope(ctx)
     popd(ctx)
     return " {\n " .. table.concat(stats, "\n ") .. "\n }"
 end
 
+-- Open a loop frame (#3): if the loop body contains a try, allocate a save id so
+-- a `break` crossing that try boundary can restore the loop-entry errorjmp/nC.
+-- Returns the frame; the caller must `close_loop` after coding the body, then
+-- splice `loop_save_lines(frame)` at loop entry.
+local function open_loop(ctx, node)
+    ctx.loop_after_id = (ctx.loop_after_id or 0) + 1
+    local frame = { try_depth = ctx.try_depth or 0, after_id = ctx.loop_after_id }
+    if stat_contains_try(node.block) then
+        ctx.loop_save_id = (ctx.loop_save_id or 0) + 1
+        frame.save_id = ctx.loop_save_id
+    end
+    ctx.loopstack = ctx.loopstack or {}
+    table.insert(ctx.loopstack, frame)
+    return frame
+end
+
+local function close_loop(ctx)
+    table.remove(ctx.loopstack)
+end
+
+-- The loop-entry errorjmp/nC save lines, emitted ONLY if a `break` inside the
+-- loop actually crossed a try boundary (frame.used, set in the StatBreak arm).
+local function loop_save_lines(frame)
+    if not (frame.save_id and frame.used) then return "" end
+    return render([[
+        lua_longjmp *_loop_errorjmp_$ID = L->errorJmp;
+        l_uint32 _loop_nC_$ID = L->nCcalls;
+    ]], { ID = c_integer_literal(frame.save_id) })
+end
+
+-- The label spliced immediately AFTER a loop so a PA_BREAK dispatch inside a
+-- finally (which cannot use a bare C `break`) can `goto` past the loop. Emitted
+-- only when such a break was actually generated (frame.uses_after_label).
+local function after_loop_label(frame)
+    if not frame.uses_after_label then return "" end
+    return "\n_after_loop_" .. frame.after_id .. ": ;"
+end
+
 local function codewhile(ctx, node)
     pushd(ctx)
+    local frame = open_loop(ctx, node)
     local nallocs = ctx.allocations
     local cstats, cexp = codeexp(ctx, node.condition, true)
     local cblk = codestat(ctx, node.block)
     nallocs = ctx.allocations - nallocs
+    if nallocs > 0 then ctx.uses_base_off = true end
+    close_loop(ctx)
     popd(ctx)
+    local loopsave = loop_save_lines(frame)
     local tmpl
     if cstats == "" then
         tmpl = [[
+            $LOOPSAVE
             while($CEXP) {
                 $CBLK
                 $CHECKGC
-            }
+            }$AFTER
         ]]
     else
         tmpl = [[
+            $LOOPSAVE
             while(1) {
                 $CSTATS
                 if(!($CEXP)) {
@@ -867,33 +1520,37 @@ local function codewhile(ctx, node)
                 }
                 $CBLK
                 $CHECKGC
-            }
+            }$AFTER
         ]]
     end
     return render(tmpl, {
+        LOOPSAVE = loopsave,
         CSTATS = cstats,
         CEXP = toboolean(node.condition._type, cexp),
         CBLK = cblk,
-        CHECKGC = nallocs > 0 and "luaC_checkGC(L);" or ""
+        CHECKGC = nallocs > 0
+            and "luaC_checkGC(L); _base = restorestack(L, _base_off);" or "",
+        AFTER = after_loop_label(frame),
     })
 end
 
 local function coderepeat(ctx, node)
     pushd(ctx)
+    local frame = open_loop(ctx, node)
     local nallocs = ctx.allocations
     -- In Lua the `until` condition is in the scope of the body, so it may
     -- reference body-local variables. Code the body's statements INLINE (not
     -- wrapped in a nested C block) and then the condition, so both share one
     -- C scope and the body locals' C names are bound and still visible.
-    local stats = {}
-    for _, stat in ipairs(node.block.stats) do
-        table.insert(stats, codestat(ctx, stat))
-    end
-    local cblk = table.concat(stats, "\n")
+    local cblk = table.concat(codestats(ctx, node.block.stats), "\n")
     local cstats, cexp = codeexp(ctx, node.condition, true)
     nallocs = ctx.allocations - nallocs
+    if nallocs > 0 then ctx.uses_base_off = true end
+    close_loop(ctx)
     popd(ctx)
+    local loopsave = loop_save_lines(frame)
     return render([[
+        $LOOPSAVE
         while(1) {
             $CBLK
             $CSTATS
@@ -901,12 +1558,15 @@ local function coderepeat(ctx, node)
                 break;
             }
             $CHECKGC
-        }
+        }$AFTER
     ]], {
+        LOOPSAVE = loopsave,
         CBLK = cblk,
         CSTATS = cstats,
         CEXP = toboolean(node.condition._type, cexp),
-        CHECKGC = nallocs > 0 and "luaC_checkGC(L);" or ""
+        CHECKGC = nallocs > 0
+            and "luaC_checkGC(L); _base = restorestack(L, _base_off);" or "",
+        AFTER = after_loop_label(frame),
     })
 end
 
@@ -916,11 +1576,15 @@ local function codeif(ctx, node, idx)
     if idx == #node.thens then -- last condition
         cstats, cexp = codeexp(ctx, node.thens[idx].condition, true)
         cthn = codestat(ctx, node.thens[idx].block)
-        cels = node.elsestat and "else " .. codestat(ctx, node.elsestat):match("^[ \t]*(.*)") or ""
+        -- Put the else body on its own line(s): a statement's code now begins
+        -- with a `#line` directive, which must start
+        -- a line — gluing it after `else ` on one line would put the `#` off
+        -- column 1 and break compilation. `else\n<body>` is equally valid C.
+        cels = node.elsestat and "else\n" .. codestat(ctx, node.elsestat) or ""
     else
         cstats, cexp = codeexp(ctx, node.thens[idx].condition, true)
         cthn = codestat(ctx, node.thens[idx].block)
-        cels = "else " .. codeif(ctx, node, idx + 1):match("^[ \t]*(.*)")
+        cels = "else\n" .. codeif(ctx, node, idx + 1)
     end
     return render([[
         {
@@ -939,6 +1603,7 @@ end
 
 local function codefor(ctx, node)
     pushd(ctx)
+    local frame = open_loop(ctx, node)
     node.decl._cvar = "_local_" .. node.decl.name
     local csstats, csexp = codeexp(ctx, node.start)
     local cfstats, cfexp = codeexp(ctx, node.finish)
@@ -946,33 +1611,39 @@ local function codefor(ctx, node)
     local nallocs = ctx.allocations
     local cblock = codestat(ctx, node.block)
     nallocs = ctx.allocations - nallocs
+    if nallocs > 0 then ctx.uses_base_off = true end
+    close_loop(ctx)
     popd(ctx)
+    local loopsave = loop_save_lines(frame)
     -- Lua-faithful numeric for (see lvm.c forprep/forloop/floatforloop):
     -- a zero step raises a run-time error; the integer loop is driven by an
     -- unsigned iteration count so it cannot overflow past the integer limits
     -- into a non-terminating loop; and the visible control variable is a
     -- fresh copy each iteration (a separate internal index advances), so it
     -- is independent of the iteration and read-only.
-    local cvtyp = node.decl._type._tag == "Type.Integer" and "lua_Integer" or "lua_Number"
     local subs = {
+        LOOPSAVE = loopsave,
         CVAR = node.decl._cvar,
-        -- declare the visible control variable only if the body uses it
+        -- declare the visible control variable only if the body uses it.
         CVARDECL = node.decl._used
-            and (cvtyp .. " " .. node.decl._cvar .. " = _foridx;") or "",
+            and (cvardecl(ctx, node.decl._type, node.decl._cvar) .. " = _foridx;") or "",
         CSSTATS = csstats, CSEXP = csexp,
         CFSTATS = cfstats, CFEXP = cfexp,
         CISTATS = cistats, CIEXP = ciexp,
         CBLOCK = cblock,
-        CHECKGC = nallocs > 0 and "luaC_checkGC(L);" or "",
+        CHECKGC = nallocs > 0
+            and "luaC_checkGC(L); _base = restorestack(L, _base_off);" or "",
         FILE = c_string_literal(node.loc.filename),
         LINE = node.loc.line,
         COL = node.loc.col,
-        STEP0 = codethrow(ctx, "%s:%d:%d: 'for' step is zero",
+        STEP0 = codethrow(node.loc, "%s:%d:%d: 'for' step is zero",
                           { "$FILE", "$LINE", "$COL" }),
+        AFTER = after_loop_label(frame),
     }
     if node.decl._type._tag == "Type.Integer" then
         return render([[
             {
+                $LOOPSAVE
                 $CSSTATS
                 lua_Integer _forstart = $CSEXP;
                 $CFSTATS
@@ -998,11 +1669,12 @@ local function codefor(ctx, node)
                         _foridx = l_castU2S(l_castS2U(_foridx) + l_castS2U(_forstep));
                     }
                 }
-            }
+            }$AFTER
         ]], subs)
     else
         return render([[
             {
+                $LOOPSAVE
                 $CSSTATS
                 lua_Number _forstart = $CSEXP;
                 $CFSTATS
@@ -1024,7 +1696,7 @@ local function codefor(ctx, node)
                         }
                     }
                 }
-            }
+            }$AFTER
         ]], subs)
     end
 end
@@ -1194,10 +1866,12 @@ local function codeassignment(ctx, var, cexp, etype)
             return render([[
                 $CVAR = $CEXP;
                 $CSET
+                $SPILL
             ]], {
                 CVAR = var._decl._cvar,
                 CEXP = cexp,
                 CSET = cset,
+                SPILL = spill_update(var._decl),
             })
         else
             return render([[
@@ -1443,44 +2117,43 @@ end
 
 -- Build and append the backing-struct argument (`_varargs` + `_start`) for a
 -- native call to a variadic callee. Appends the two C expressions to `caexps`
--- and any setup statements to `castats`; returns `(varg_collectable,
--- dots_tail_close)` (see their declarations in the caller). `vargexps` holds the
--- already-coerced surplus static args (those beyond the callee's fixed params);
--- `dots_tail` is true when the call forwards the current function's own `...`
--- (a trailing `Ast.ExpDots` marker); `nstatic` is the static-prefix arg count.
+-- and any setup statements to `castats`. `vargexps` holds the already-coerced
+-- surplus static args (those beyond the callee's fixed params); `dots_tail` is
+-- true when the call forwards the current function's own `...` (a trailing
+-- `Ast.ExpDots` marker); `nstatic` is the static-prefix arg count.
 -- Shared by codecall (static call site) and codevaluecall (first-class value
 -- fast path) -- both build the struct identically (§5.7).
 local function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
                                   dots_tail, nstatic, caexps, castats)
     local callee_vararg = callee_ftype.varargtype
-    local varg_collectable = false
-    local dots_tail_close = false
     if not dots_tail then
-        -- STATIC arg list into a variadic callee: build the concrete-array struct
-        -- local from the surplus static args and pass its address + _start=0 at
-        -- the pinned ABI slot (after fixed params, before out-params).
+        -- Static arg list into a variadic callee. Keep the elements on the C
+        -- stack and point an exact, named TitanVarg descriptor at them. This
+        -- avoids both heap allocation and the old incompatible-struct cast.
         assert(#vargexps <= 200, "static variadic arg count exceeds TITAN_VARARG_MAX")
-        varg_collectable = types.is_gc(callee_vararg)
         local n = #vargexps
         local struct = varg_struct_name(callee_vararg)
         local elem_ct = ctype(callee_vararg)
-        local vname = "_varg_" .. ctx.tmp
+        local suffix = tostring(ctx.tmp)
         ctx.tmp = ctx.tmp + 1
-        -- ISO C forbids `args[0]`; for an empty vararg emit a 1-element array with
-        -- n_args == 0 (the callee's bounds checks never read args[]).
+        local argsname = "_vargargs_" .. suffix
+        local vname = "_varg_" .. suffix
         local arrlen = math.max(n, 1)
         local inits = n > 0 and ("{ " .. table.concat(vargexps, ", ") .. " }")
                               or "{ 0 }"
         table.insert(castats, render([[
-            struct { lu_byte n_args; $ELEM_CT args[$ARRLEN]; } $VNAME = { $N, $INITS };
+            $ELEM_CT $ARGS[$ARRLEN] = $INITS;
+            $STRUCT $VARG = { $N, $ARGS };
         ]], {
+            STRUCT = struct,
             ELEM_CT = elem_ct,
+            ARGS = argsname,
             ARRLEN = c_integer_literal(arrlen),
-            VNAME = vname,
             N = c_integer_literal(n),
+            VARG = vname,
             INITS = inits,
         }))
-        table.insert(caexps, render("($STRUCT *)&$VNAME", { STRUCT = struct, VNAME = vname }))
+        table.insert(caexps, "&" .. vname)
         table.insert(caexps, "0")
     else
         -- FORWARDING the current `...` into a variadic callee. `vargexps` holds the
@@ -1496,7 +2169,6 @@ local function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
             -- CASE 1 (pass-through): static prefix exactly fills the callee fixed
             -- params and the element representation matches; pass the current
             -- backing struct and start unchanged. No allocation, no copy.
-            varg_collectable = false      -- nothing new anchored here
             table.insert(caexps, render("($STRUCT *)$NAME",
                 { STRUCT = varg_struct_name(eg), NAME = va.cname }))
             table.insert(caexps, va.start)
@@ -1506,7 +2178,6 @@ local function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
             -- pass the SAME backing struct with `_start + (m - k)`. No struct
             -- mutation, no save/restore -- `start` is a parameter (§2.G). `...[i]`
             -- reads are bounds-checked, so an under-supplied tail raises cleanly.
-            varg_collectable = false
             local delta = m - k
             for j = 1, delta do
                 -- synthesize a `...[j]` read (non-nilfill: raise if too few) using
@@ -1563,12 +2234,11 @@ local function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
             -- against TITAN_VARARG_MAX, anchored per §2.D, and passed with
             -- _start = 0.
             -- The Udata0 holding the fresh struct is anchored on a RESERVED stack
-            -- slot (newslot -> s2v(_base + depth)), which persists for the whole
-            -- function -- not a lexical C block. The struct-pointer C local is
+            -- slot (newslot -> s2v(restorestack(...) + depth)), which persists
+            -- for the whole function -- not a lexical C block. The struct-pointer C local is
             -- declared at statement scope (unique _varg_N name) so it stays visible
-            -- at the call. Force-materializing the call before any tail `L->top.p =
-            -- _base` reset keeps the anchor live across the call (dots_tail_close).
-            dots_tail_close = true
+            -- at the call. Calls are materialized before any tail `L->top.p =
+            -- _base` reset, keeping the anchor live across the call.
             -- The fresh Udata0 allocation can trigger a GC that shrinks/relocates
             -- the Lua stack (luaD_shrinkstack), dangling the raw `_base` pointer;
             -- and the forwarded call itself may grow the stack. Save `_base` as an
@@ -1581,7 +2251,9 @@ local function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
             local suffix = tostring(ctx.tmp)
             ctx.tmp = ctx.tmp + 1
             local udname = "_vargud_" .. suffix
-            local slotname = "_vargslot_" .. suffix
+            local slotdepth = reserveslot(ctx)
+            local argsname = "_vargargs_" .. suffix
+            local descname = "_vargdesc_" .. suffix
             local vname = "_varg_" .. suffix
             local cntname = "_vcount_" .. suffix
             local nname = "_nvarargs_" .. suffix
@@ -1648,13 +2320,14 @@ local function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
                     luaL_error(L, "%s:%d:%d: too many variadic arguments forwarded (%d, max %d)", $FILE, $LINE, $COL, (int)$CNT, (int)TITAN_VARARG_MAX);
                 }
                 lu_byte $NN = (lu_byte)$CNT;
-                $NEWSLOT
-                Udata *$UDNAME = gco2u(luaC_newobj(L, LUA_VUSERDATA, sizeudata(0, sizeof($STRUCT) + (size_t)$NN * sizeof($ELEM_CT))));
-                $UDNAME->len = sizeof($STRUCT) + (size_t)$NN * sizeof($ELEM_CT);
+                Udata *$UDNAME = gco2u(luaC_newobj(L, LUA_VUSERDATA,
+                    sizeudata(0, (size_t)$NN * sizeof($ELEM_CT))));
+                $UDNAME->len = (size_t)$NN * sizeof($ELEM_CT);
                 $UDNAME->nuvalue = 0; $UDNAME->metatable = NULL;
-                setuvalue(L, $SLOTNAME, $UDNAME);
-                $STRUCT *$VNAME = ($STRUCT *)getudatamem($UDNAME);
-                $VNAME->n_args = $NN;
+                setuvalue(L, $SLOT, $UDNAME);
+                $ELEM_CT *$ARGSNAME = ($ELEM_CT *)getudatamem($UDNAME);
+                $STRUCT $DESCNAME = { $NN, $ARGSNAME };
+                $STRUCT *$VNAME = &$DESCNAME;
                 $PREFIX_INITS
                 for (int _vj = 0; _vj < (int)$SRC->n_args - $START; _vj++) {
                     $CONVBODY
@@ -1669,20 +2342,20 @@ local function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
                 FILE = c_string_literal(node.loc.filename),
                 LINE = c_integer_literal(node.loc.line),
                 COL = c_integer_literal(node.loc.col),
-                NEWSLOT = newslot(ctx, slotname),
                 UDNAME = udname,
-                SLOTNAME = slotname,
+                SLOT = slotat(slotdepth),
                 STRUCT = struct,
                 ELEM_CT = elem_ct,
+                ARGSNAME = argsname,
+                DESCNAME = descname,
                 VNAME = vname,
                 PREFIX_INITS = table.concat(prefix_inits, "\n"),
                 CONVBODY = convbody,
             }))
-            table.insert(caexps, render("($STRUCT *)$VNAME", { STRUCT = struct, VNAME = vname }))
+            table.insert(caexps, vname)
             table.insert(caexps, "0")
         end
     end
-    return varg_collectable, dots_tail_close
 end
 
 -- Generate a call through a first-class function *value* (a boxed TValue of
@@ -1754,7 +2427,12 @@ local function codevaluecall(ctx, node)
     local resultnames, rslots, rtypes = {}, {}, {}
     for i = 1, nresults do
         local rtype = node._types[i]
-        local rdecl, rname, rslot = newtmp(ctx, rtype, types.is_gc(rtype))
+        local rdecl, rname = newtmp(ctx, rtype)
+        local rslot
+        if types.is_gc(rtype) then
+            local depth = reserveslot(ctx)
+            rslot = slotat(depth)
+        end
         table.insert(stats, rdecl)
         resultnames[i] = rname
         rslots[i] = rslot
@@ -1775,11 +2453,9 @@ local function codevaluecall(ctx, node)
     -- Because the build and the native call both live in the fast branch's
     -- `if`-true block, they materialize together before any caller resets
     -- L->top.p: collectable vararg elements anchored on source slots (and a
-    -- case-3 fresh Udata0 on its reserved slot) stay live across `$FASTCALL`
-    -- without a separate materialize guard, so the helper's
-    -- `varg_collectable`/`dots_tail_close` results need no further action here.
-    -- The common `_base = restorestack(L, _base_off);` after the if/else still
-    -- runs on both paths (a case-3 allocation may have relocated the stack).
+    -- case-3 fresh Udata0 on its reserved slot) stay live across `$FASTCALL`.
+    -- The common `_base = restorestack(L, _base_off);` after the if/else runs on
+    -- both paths (a case-3 allocation may have relocated the stack).
     local vargca = {}   -- the two struct C exprs (_varargs ptr, _start)
     local vargstats = {}   -- the struct-build setup statements (fast path only)
     if callee_vararg then
@@ -1865,6 +2541,7 @@ local function codevaluecall(ctx, node)
             $FPTYPE _vc_fp = titan_cast_func($FPTYPE,
                 pvalue(&_vc_callee->upvalue[2]));
             $VARGSTATS
+            $LINEDIR
             $FASTCALL
         } else {
             /* generic path: call any callable value through the Lua stack;
@@ -1872,6 +2549,7 @@ local function codevaluecall(ctx, node)
             lua_checkstack(L, $NPUSH);
             ptrdiff_t _vc_func = savestack(L, L->top.p);
             $PUSHES
+            $LINEDIR
             luaD_callnoyield(L, restorestack(L, _vc_func), $NRESULTS);
             $SLOWREADS
             L->top.p = restorestack(L, _vc_func);
@@ -1884,6 +2562,7 @@ local function codevaluecall(ctx, node)
         FPTYPEDEF = "typedef " .. function_sig(fptype, ftype, true),
         FPTYPE = fptype,
         VARGSTATS = table.concat(vargstats, "\n"),
+        LINEDIR = emitline(node),
         FASTCALL = fastcall,
         NPUSH = c_integer_literal(1 + nstatic) .. npush_dynamic,
         PUSHES = table.concat(pushes, "\n"),
@@ -1977,7 +2656,7 @@ local function codecall(ctx, node)
                 INDEX = c_integer_literal(ctx.modules[mod])
             })
         end
-        local cstat, cexp = codeexp(ctx, node.exp)
+        local cstat, cexp = materialize(ctx, node.exp)
         table.insert(castats, cstat)
         table.insert(caexps, modarg)
         table.insert(caexps, "NULL")  -- _fn: a static method call has no closure
@@ -1996,6 +2675,10 @@ local function codecall(ctx, node)
         callee_ftype = fnode._type
     end
     local callee_vararg = callee_ftype and callee_ftype.varargtype
+    -- Any native Titan call can reallocate the Lua stack (directly or while
+    -- servicing a collection). Keep `_base` as an offset and materialize the
+    -- call so `_base` can be restored before result anchoring or later slot use.
+    ctx.uses_base_off = true
     local args = node.args.args
     local nargs = #args
     -- A trailing `Ast.ExpDots` marker means this call FORWARDS the current
@@ -2006,22 +2689,10 @@ local function codecall(ctx, node)
     local nstatic = dots_tail and (nargs - 1) or nargs
     local nfixed = callee_vararg and #callee_ftype.params or nargs
     local vargexps = {} -- surplus static args destined for the backing struct
+    local argstats, argexps = ordered_call_args(ctx, args, nstatic)
     for i = 1, nstatic do
-        local arg = args[i]
-        local cstat, cexp = codeexp(ctx, arg)
-        table.insert(castats, cstat)
-        if arg._tag == "Ast.ExpCall" and arg._extras then
-            -- A multi-return call expanded in this argument list: force it to
-            -- run now (into a temp), filling its out-param temps, before the
-            -- ExpExtra arguments that read those temps are evaluated -- C does
-            -- not specify the evaluation order of a call's arguments.
-            local ctmp, tmpname = newtmp(ctx, arg._type)
-            table.insert(castats, render([[
-                $CTMP
-                $TMPNAME = $CEXP;
-            ]], { CTMP = ctmp, TMPNAME = tmpname, CEXP = cexp }))
-            cexp = tmpname
-        end
+        local cexp = argexps[i]
+        table.insert(castats, argstats[i])
         if callee_vararg and i > nfixed then
             -- a surplus static arg -> a backing-struct element (already coerced
             -- to the element type by the checker)
@@ -2031,21 +2702,21 @@ local function codecall(ctx, node)
         end
     end
     -- Build + append the backing struct (`_varargs`, `_start`) for a variadic
-    -- callee. `varg_collectable` is true when the call carries collectable vararg
-    -- elements anchored only on source slots below L->top.p (NOT the backing
-    -- struct, whose raw-pointer payload is untraced, §2.D), so the call must run
-    -- while those anchors are live; `dots_tail_close` is true for forwarding case
-    -- 3 (a fresh stack-anchored Udata0). Both force the call to materialize before
-    -- a tail `L->top.p = _base` reset (codereturn) would drop the anchors.
-    local varg_collectable, dots_tail_close = false, false
+    -- callee. The call is materialized below, so collectable source-slot anchors
+    -- and any case-3 stack-anchored Udata0 remain live until the callee returns.
     if callee_vararg then
-        varg_collectable, dots_tail_close = emit_vararg_struct(
-            ctx, node, callee_ftype, vargexps, dots_tail, nstatic, caexps, castats)
+        emit_vararg_struct(ctx, node, callee_ftype, vargexps, dots_tail,
+                           nstatic, caexps, castats)
     end
     for i = 2, #node._types do
         node._extras = node._extras or {}
         local typ = node._types[i]
-        local ctmp, tmpname, tmpslot = newtmp(ctx, typ, types.is_gc(typ))
+        local ctmp, tmpname = newtmp(ctx, typ)
+        local tmpslot
+        if types.is_gc(typ) then
+            local depth = reserveslot(ctx)
+            tmpslot = slotat(depth)
+        end
         node._extras[i] = tmpname
         tmpnames[i] = tmpname
         table.insert(castats, ctmp)
@@ -2057,41 +2728,18 @@ local function codecall(ctx, node)
         NAME = fname,
         CAEXPS = table.concat(caexps, ", "),
     })
-    -- A case-3 forward allocated a Udata0 and may have relocated the Lua stack
-    -- during the call; recompute `_base` from its saved offset so any subsequent
-    -- raw-slot store (gc-result anchoring) and the tail `L->top.p = _base` reset
-    -- use the live stack. The preamble declares `_base_off` (uses_base_off set).
-    local rebase = dots_tail_close and "\n_base = restorestack(L, _base_off);" or ""
-    if dots_tail_close and util.any(types.is_gc, node._types) then
-        -- case-3 forward with a GC result: the result-anchor slot pointer must be
-        -- computed AFTER `_base` is recomputed (a stack relocation during the call
-        -- would dangle a slot pointer taken before it). Declare the value temp,
-        -- run the call, rebase, THEN take the anchor slot and store.
-        assert(#node._types == 1,
-            "case-3 forward into a multi-return callee is unsupported")
-        local typ = node._type
-        local slotname = "_tmp_" .. ctx.tmp .. "_slot"
-        local valname = "_tmp_" .. ctx.tmp
-        ctx.tmp = ctx.tmp + 1
-        tmpnames[1] = valname
-        return render([[
-            $CSTATS
-            $CTYPE $VAL = $INIT;
-            $VAL = $CCALL;$REBASE
-            $NEWSLOT
-            $SETSLOT;
-        ]], {
-            CSTATS = cstats,
-            CTYPE = ctype(typ),
-            VAL = valname,
-            INIT = initval(typ),
-            CCALL = ccall,
-            REBASE = rebase,
-            NEWSLOT = newslot(ctx, slotname),
-            SETSLOT = setslot(typ, slotname, valname),
-        }), valname
-    elseif util.any(types.is_gc, node._types) then
-        local ctmp, tmpname, tmpslot = newtmp(ctx, node._type, types.is_gc(node._type))
+    -- Recompute `_base` after every native call: the callee can collect and
+    -- relocate the Lua stack even when this particular call has no variadic
+    -- forwarding. Result anchor expressions are depth-based, so they are
+    -- evaluated only after this rebase.
+    local rebase = "\n_base = restorestack(L, _base_off);"
+    if util.any(types.is_gc, node._types) then
+        local ctmp, tmpname = newtmp(ctx, node._type)
+        local tmpslot
+        if types.is_gc(node._type) then
+            local depth = reserveslot(ctx)
+            tmpslot = slotat(depth)
+        end
         tmpnames[1] = tmpname
         retslots[1] = tmpslot
         local cslots = {}
@@ -2103,65 +2751,250 @@ local function codecall(ctx, node)
         return render([[
             $CSTATS
             $CTMP
+            $LINEDIR
             $TMPNAME = $CCALL;$REBASE
             $SLOTS
         ]], {
             CSTATS = cstats,
             CTMP = ctmp,
+            LINEDIR = emitline(node),
             TMPNAME = tmpname,
             CCALL = ccall,
             REBASE = rebase,
             SLOTS = table.concat(cslots, "\n"),
         }), tmpname
-    elseif (varg_collectable or dots_tail_close) and node._type._tag == "Type.Void" then
-        -- void-returning call with stack-anchored arguments: either a case-3
-        -- forward (Udata0 anchor slot) or a static call carrying collectable
-        -- vararg elements anchored on source slots. Run the call for effect now
-        -- (while the anchors are live), then the call expression is `((void)0)`.
+    elseif node._type._tag == "Type.Void" then
+        -- Run every void call for effect now so `_base` is restored before any
+        -- following generated code uses it.
         return render([[
             $CSTATS
+            $LINEDIR
             $CCALL;$REBASE
         ]], {
             CSTATS = cstats,
+            LINEDIR = emitline(node),
             CCALL = ccall,
             REBASE = rebase,
         }), "((void)0)"
-    elseif varg_collectable or dots_tail_close then
-        -- The result is non-GC, but the call either carries collectable vararg
-        -- elements anchored only on source slots below L->top.p, or (case 3) holds
-        -- a stack-anchored Udata0 backing struct. If we left the bare call in
-        -- `cexp`, a tail `return $CEXP` (codereturn) would emit `L->top.p = _base;`
-        -- BEFORE the call, dropping those anchors while the untraced struct still
-        -- holds raw pointers into them -- a GC at the callee's entry could then
-        -- collect a live element. Force the call to run now, inside `cstats`, while
-        -- the anchors are live; the non-GC result needs no anchoring afterward.
+    else
+        -- Materialize non-GC results too. Besides keeping any variadic anchors
+        -- live across the call, this gives us a statement boundary at which to
+        -- restore `_base` after a callee-triggered stack relocation.
         local ctmp, tmpname = newtmp(ctx, node._type)
         return render([[
             $CSTATS
             $CTMP
+            $LINEDIR
             $TMPNAME = $CCALL;$REBASE
         ]], {
             CSTATS = cstats,
             CTMP = ctmp,
+            LINEDIR = emitline(node),
             TMPNAME = tmpname,
             CCALL = ccall,
             REBASE = rebase,
         }), tmpname
-    else
-        return cstats, ccall
     end
 end
 
+-- A `StatTry` body/catch is emitted as straight-line C inside an inline setjmp
+-- boundary, so the `lua_longjmp _lj` is an automatic of an inner C scope. A
+-- `return` that jumps out of the whole native function, or a `break` that jumps
+-- out of an enclosing loop, must first restore `L->errorJmp` (and `nCcalls`) to
+-- the values they held BEFORE the protected region was entered, or `L->errorJmp`
+-- would dangle to an out-of-scope `_lj`. We snapshot those once at function entry
+-- (`_entry_errorjmp`/`_entry_nC`) and at each loop entry whose body contains a
+-- try (`_loop_errorjmp_N`/`_loop_nC_N`), then restore at the crossing transfer.
+-- Only emitted when a try is actually in scope, to keep try-free code untouched.
+local function restore_entry_errorjmp()
+    return [[
+        L->errorJmp = _entry_errorjmp;
+        L->nCcalls = _entry_nC;]]
+end
+
+-- Pending-action discriminator values (B.3). A `StatTry` with a finally records,
+-- on every exit of its protected region, a pending action; the finally runs
+-- straight-line; then an if-chain dispatch (NEVER a C `switch`, which would
+-- capture the PA_BREAK arm's `break`) performs it. PA_NONE falls through.
+local PA_NONE   = "0"
+local PA_RETURN = "1"
+local PA_BREAK  = "2"
+local PA_RAISE  = "3"
+
+-- Compute the per-return saved-value storage for a try-with-finally (B.4 "GC
+-- anchoring"). Each declared return value gets either a stack-anchored slot (GC
+-- types — written with no barrier since the stack is a root) or a `volatile` C
+-- temp (non-GC scalars, because a pending return can be written before a
+-- finally and read after a longjmp from that finally). Returns a list of
+-- descriptors {typ, cvar, slot?, decl} and the C
+-- declarations to splice at the try's top, plus a `write(cstats_list, exprs)`
+-- closure the body/catch `return` lowering uses to fill them.
+local function make_return_saves(ctx, id)
+    local rettypes = ctx.rettypes or {}
+    local saves = {}
+    local decls = {}
+    for i = 1, #rettypes do
+        local typ = rettypes[i]
+        local cvar = "_pa_ret_" .. id .. "_" .. i
+        local isgc = types.is_gc(typ)
+        local slot
+        if isgc then
+            -- GC saved return: anchor in a reserved stack slot so it survives the
+            -- finally (which may allocate / run the GC). The C temp just caches a
+            -- copy; the slot is the live root.
+            slot = reserveslot(ctx)
+            table.insert(decls, render("$VQ$CT $CVAR = $INIT;", {
+                VQ = "", CT = ctype(typ), CVAR = cvar, INIT = initval(typ),
+            }))
+        else
+            -- Non-GC saved return: a plain C temp. The whole native function is a
+            -- setjmp scope, so mark it volatile (the value is set before the
+            -- finally — which may longjmp out on a raise — and read in dispatch).
+            table.insert(decls, render("volatile $CT $CVAR = $INIT;", {
+                CT = ctype(typ), CVAR = cvar, INIT = initval(typ),
+            }))
+        end
+        -- A try-with-finally that contains no `return` leaves these temps written
+        -- nowhere (or, for GC types, written but only ever read via the slot), so
+        -- silence -Wunused-variable / -Wunused-but-set unconditionally.
+        table.insert(decls, "(void)" .. cvar .. ";")
+        saves[i] = { typ = typ, cvar = cvar, slot = slot }
+    end
+    return saves, table.concat(decls, "\n")
+end
+
+-- Emit the C that copies the saved return values into a fresh return — either the
+-- real function epilogue (no enclosing finally) or, when chaining to an outer
+-- try-with-finally, the outer try's saved slots. `from` is this try's saves list.
+-- For the real epilogue: first value via `return`, the rest via `*_outparam_i`.
+local function dispatch_return_epilogue(ctx, from)
+    local lines = {}
+    -- restore the errorjmp chain to the function-entry values (this return is
+    -- crossing the finally's torn-down boundary back to the caller)
+    ctx.used_entry_restore = true
+    table.insert(lines, restore_entry_errorjmp())
+    if #from == 0 then
+        table.insert(lines, "L->top.p = _base;")
+        table.insert(lines, "return;")
+        return table.concat(lines, "\n")
+    end
+    -- Read each saved value into a fresh C temp BEFORE resetting the stack top:
+    -- a GC saved return lives in a slot at `_base + d` (>= _base), so reading it
+    -- after `L->top.p = _base` would touch a slot above top. No allocation runs
+    -- here, so the temps hold valid (register-held) values across the reset.
+    local function read(save)
+        if save.slot then
+            return getslot(save.typ, nil, slotat(save.slot))
+        end
+        return save.cvar
+    end
+    for i = 1, #from do
+        table.insert(lines, render("$CT _pa_dret_$I = $READ;", {
+            CT = ctype(from[i].typ), I = c_integer_literal(i), READ = read(from[i]),
+        }))
+    end
+    table.insert(lines, "L->top.p = _base;")
+    for i = 2, #from do
+        table.insert(lines, "*_outparam_" .. i .. " = _pa_dret_" .. i .. ";")
+    end
+    table.insert(lines, "return _pa_dret_1;")
+    return table.concat(lines, "\n")
+end
+
+-- A `return`/`break` inside the body or catch of an enclosing try-with-finally
+-- is NOT realized as the real control transfer: it sets that try's pending
+-- action (+ saves the return values), then `goto`s the try's `_finally` label so
+-- the finally still runs before the action is performed (B.3 rule d/h). The
+-- innermost enclosing try-with-finally is `ctx.finally_stack[#ctx.finally_stack]`.
+local function innermost_finally(ctx)
+    local fs = ctx.finally_stack
+    return fs and fs[#fs] or nil
+end
+
+local function push_boundary(ctx, tag)
+    ctx.protected_boundary_stack = ctx.protected_boundary_stack or {}
+    table.insert(ctx.protected_boundary_stack, tag)
+end
+
+local function pop_boundary(ctx)
+    assert(ctx.protected_boundary_stack and #ctx.protected_boundary_stack > 0)
+    table.remove(ctx.protected_boundary_stack)
+end
+
+-- A pending return/break that jumps to a finally label leaves the C scope of
+-- every inline boundary opened between the target try and the current point.
+-- Restore those `lua_longjmp` links before the `goto`; otherwise a raise from
+-- the finally would longjmp to an out-of-scope `_lj_*` object. Stop at `floor`
+-- so outer still-active boundaries remain installed and can catch/cascade a
+-- raise from the finally (the plan's inside-out finally semantics).
+local function restore_boundaries_to(ctx, floor)
+    local bs = ctx.protected_boundary_stack or {}
+    local lines = {}
+    for i = #bs, floor + 1, -1 do
+        table.insert(lines, render([[
+            L->errorJmp = _lj_$T.previous;
+            L->nCcalls = _oldnC_$T;
+        ]], { T = bs[i] }))
+    end
+    return table.concat(lines, "\n")
+end
+
 local function codereturn(ctx, node)
+    -- Route through an enclosing finally: save the return values into the
+    -- innermost finally frame's saved slots, mark its pending action RETURN, and
+    -- jump to its finally. The finally's dispatch then performs (or chains) it.
+    local fin = innermost_finally(ctx)
+    if fin then
+        fin.label_used = true
+        local cstats = {}
+        for i = 1, #node.exps do
+            local cs, cexp = codeexp(ctx, node.exps[i])
+            table.insert(cstats, cs)
+            local save = fin.ret_saves[i]
+            if save.slot then
+                -- materialize into the C temp (which the dispatch may also read),
+                -- then anchor a copy in the slot (no barrier: the stack is a root)
+                table.insert(cstats, save.cvar .. " = " .. cexp .. ";")
+                table.insert(cstats, setslot(save.typ, slotat(save.slot), save.cvar))
+            else
+                table.insert(cstats, save.cvar .. " = " .. cexp .. ";")
+            end
+        end
+        return render([[
+            $CSTATS
+            $PA = $PARETURN;
+            $RESTORE
+            goto $LABEL;
+        ]], {
+            CSTATS = table.concat(cstats, "\n"),
+            PA = fin.pa_var,
+            PARETURN = PA_RETURN,
+            RESTORE = restore_boundaries_to(ctx, fin.boundary_floor),
+            LABEL = fin.label,
+        })
+    end
+    -- Clean-exit restore (#3): a `return` crossing one or more protected regions
+    -- must put L->errorJmp/nCcalls back to their function-entry values before the
+    -- epilogue, so the dangling inner `_lj` is never reachable.
+    local crossing = ctx.try_depth and ctx.try_depth > 0
+    if crossing then ctx.used_entry_restore = true end
+    local restore = crossing and restore_entry_errorjmp() .. "\n" or ""
     if #node.exps == 0 then
         -- bare `return` in a zero-return `() -> ()` function: no value to
         -- produce, just reset the stack and return from the void native entry
-        return [[
+        return restore .. [[
         L->top.p = _base;
         return;]]
     end
     local cs, cexp = codeexp(ctx, node.exps[1])
     local cstats = { cs }
+    -- Materialize the first return value into a temp BEFORE the clean-exit restore
+    -- when this return crosses a protected region: a deferred call left in `cexp`
+    -- (the common `return f()` case) would otherwise run AFTER the restore has
+    -- removed the try's boundary from L->errorJmp, so an error inside the call
+    -- would longjmp past the enclosing try instead of being caught by it. Forcing
+    -- the call here runs it while the boundary is still live. (The multi-return
+    -- case below already materializes for its own reason — see comment.)
     if #node.exps > 1 then
         -- The first return expression may itself be a bare multi-return
         -- call whose 2..n values are produced through out-param temps that
@@ -2170,6 +3003,17 @@ local function codereturn(ctx, node)
         -- before we copy them into our own *_outparam_i. Otherwise the call
         -- would be deferred into the trailing 'return $CEXP' and the extra
         -- values would be read uninitialized.
+        local ctmp, tmpname = newtmp(ctx, node.exps[1]._type)
+        table.insert(cstats, render([[
+            $CTMP
+            $TMPNAME = $CEXP;
+        ]], {
+            CTMP = ctmp,
+            TMPNAME = tmpname,
+            CEXP = cexp,
+        }))
+        cexp = tmpname
+    elseif restore ~= "" then
         local ctmp, tmpname = newtmp(ctx, node.exps[1]._type)
         table.insert(cstats, render([[
             $CTMP
@@ -2194,11 +3038,513 @@ local function codereturn(ctx, node)
     -- L->top.p one or more slots too high).
     return render([[
         $CSTATS
+        $RESTORE
         L->top.p = _base;
         return $CEXP;
     ]], {
         CSTATS = table.concat(cstats, "\n"),
+        RESTORE = restore,
         CEXP = cexp,
+    })
+end
+
+-- `raise <exp>`: evaluate the (already `value`-coerced) operand into an anchored
+-- temp, push it onto the Lua stack as the error object, then `lua_error(L)`. The
+-- entry wrapper ensured `errorhandler` is active on `L->errfunc`, so the longjmp
+-- through `lua_error` runs that handler, which builds the unified Lua+Titan trace before
+-- unwinding. The temp is a `value`-typed (GC) TValue, so `newtmp` anchors it in a
+-- reserved stack slot; that anchor keeps it alive across the `lua_checkstack`
+-- (which may run the GC and reallocate the stack) before we copy it to the new top.
+-- An `emitline` stamps the throw to the raise's exact `.titan` line so the native
+-- frame symbolizes there (mirrors `codethrow`).
+local function coderaise(ctx, node)
+    if not node.exp then
+        -- Bare `raise` (re-raise) — legal only inside a catch (checker-enforced).
+        -- Reinstall the catch's saved `traceback` into registry[TITAN_BACKTRACE_KEY]
+        -- and SET the pin (TITAN_TRACE_PINNED), so errorhandler KEEPS the ORIGINAL
+        -- trace rather than capturing a fresh one at this (shallower) re-raise
+        -- site; then push the saved `error` value and lua_error(L). The enclosing
+        -- catch's implicit locals are threaded through ctx (`ctx.catch_*_decl`).
+        local errcvar = ctx.catch_error_decl._cvar      -- TValue (the error value)
+        local tbcvar = ctx.catch_traceback_decl._cvar   -- TString* (the trace)
+        return render([[
+            lua_checkstack(L, 2);
+            lua_pushliteral(L, TITAN_BACKTRACE_KEY);
+            setsvalue2s(L, L->top.p, $TB);
+            L->top.p++;
+            lua_rawset(L, LUA_REGISTRYINDEX);
+            lua_pushliteral(L, TITAN_TRACE_PINNED);
+            lua_pushboolean(L, 1);
+            lua_rawset(L, LUA_REGISTRYINDEX);
+            setobj2s(L, L->top.p, &$ERR);
+            L->top.p++;
+            $LINEDIR
+            lua_error(L);
+        ]], {
+            LINEDIR = emitline(node),
+            TB = tbcvar,
+            ERR = errcvar,
+        })
+    end
+    local cstats, cexp = codeexp(ctx, node.exp)
+    local ctmp, tmpname, tmpslot = newtmp(ctx, types.Value(), true)
+    return render([[
+        $CSTATS
+        $CTMP
+        $TMPNAME = $CEXP;
+        $ANCHOR
+        lua_checkstack(L, 1);
+        setobj2t(L, s2v(L->top.p), &$TMPNAME);
+        L->top.p++;
+        $LINEDIR
+        lua_error(L);
+    ]], {
+        CSTATS = cstats,
+        CTMP = ctmp,
+        TMPNAME = tmpname,
+        CEXP = cexp,
+        ANCHOR = setslot(types.Value(), tmpslot, tmpname),
+        LINEDIR = emitline(node),
+    })
+end
+
+-- Find the innermost enclosing finally frame that is in the SAME target loop as a
+-- `break` issued at the current point (i.e. opened at or below the innermost
+-- loop). A break inside a finally-protected region must run that finally before it
+-- can reach the loop; if there is none in the loop, the break is realized directly
+-- (restore loop errorjmp + goto past the loop). `ctx.loopstack`/`ctx.finally_stack`
+-- reflect the lexical context of the call site.
+local function enclosing_break_finally(ctx)
+    local fs = ctx.finally_stack
+    if not fs or #fs == 0 then return nil end
+    local loop_len = ctx.loopstack and #ctx.loopstack or 0
+    local fin = fs[#fs]
+    -- The frame is between the break and the innermost loop iff it was opened while
+    -- that loop (or a deeper one) was already on the stack.
+    if fin.loopstack_len >= loop_len and loop_len > 0 then
+        return fin
+    end
+    return nil
+end
+
+-- Realize a `break` at the current point: if an enclosing finally lies between the
+-- break and its target loop, route through it (set pending BREAK, goto its
+-- finally); otherwise restore the loop-entry errorjmp/nC (if a try boundary is
+-- open) and `goto` the label past the enclosing loop (NOT a bare `break`, which a
+-- dispatch if-chain could not safely sit inside). Used by both the StatBreak arm
+-- and the PA_BREAK dispatch arm (which chains finallys inside-out).
+local function realize_break(ctx)
+    local fin = enclosing_break_finally(ctx)
+    if fin then
+        fin.label_used = true
+        return render([[
+            $PA = $PABREAK;
+            $RESTORE
+            goto $LABEL;
+        ]], {
+            PA = fin.pa_var,
+            PABREAK = PA_BREAK,
+            RESTORE = restore_boundaries_to(ctx, fin.boundary_floor),
+            LABEL = fin.label,
+        })
+    end
+    -- direct break: target the innermost loop frame, restoring its entry errorjmp
+    -- if a try boundary is open between here and the loop entry.
+    local frame = ctx.loopstack and ctx.loopstack[#ctx.loopstack]
+    assert(frame, "internal error: break with no enclosing loop")
+    frame.uses_after_label = true
+    local restore = ""
+    if frame.save_id and (ctx.try_depth or 0) > frame.try_depth then
+        frame.used = true
+        restore = render([[
+            L->errorJmp = _loop_errorjmp_$ID;
+            L->nCcalls = _loop_nC_$ID;
+        ]], { ID = c_integer_literal(frame.save_id) })
+    end
+    return render([[
+        $RESTORE
+        goto $AFTER;
+    ]], { RESTORE = restore, AFTER = "_after_loop_" .. frame.after_id })
+end
+
+-- The pending-action dispatch if-chain emitted after a finally (B.3 rule i). Never
+-- a C `switch` (which would capture PA_BREAK's `break`). PA_RETURN/PA_BREAK chain
+-- through any enclosing finally; PA_RAISE reinstalls the saved trace + pin and
+-- re-raises; PA_NONE falls through.
+local function dispatch_after_finally(ctx, pa_var, ret_saves, d_pa_err, d_pa_tb)
+    -- RETURN arm: chain to an outer finally if one encloses this try, else emit
+    -- the real return epilogue with the saved values.
+    local outer_fin = innermost_finally(ctx)
+    local return_arm
+    if outer_fin then
+        outer_fin.label_used = true
+        -- copy this try's saved returns into the outer try's saved slots, mark the
+        -- outer pending RETURN, and jump to the outer finally.
+        local lines = {}
+        for i = 1, #ret_saves do
+            local from = ret_saves[i]
+            local to = outer_fin.ret_saves[i]
+            local rd
+            if from.slot then
+                rd = getslot(from.typ, nil, slotat(from.slot))
+            else
+                rd = from.cvar
+            end
+            table.insert(lines, to.cvar .. " = " .. rd .. ";")
+            if to.slot then
+                table.insert(lines, setslot(to.typ, slotat(to.slot), to.cvar))
+            end
+        end
+        table.insert(lines, outer_fin.pa_var .. " = " .. PA_RETURN .. ";")
+        table.insert(lines, "goto " .. outer_fin.label .. ";")
+        return_arm = table.concat(lines, "\n")
+    else
+        return_arm = dispatch_return_epilogue(ctx, ret_saves)
+    end
+
+    -- BREAK arm: chain through enclosing finallys or break past the loop. Only a
+    -- try that is itself inside a loop can ever observe a pending BREAK (a break in
+    -- the body/catch targets the innermost ENCLOSING loop; a break to a loop
+    -- written inside the body is handled by that inner loop's own frame). With no
+    -- enclosing loop, PA_BREAK is unreachable, so emit nothing.
+    local break_arm = (ctx.loopstack and #ctx.loopstack > 0)
+        and realize_break(ctx) or "/* unreachable: no enclosing loop */ ;"
+
+    -- RAISE arm: reinstall the saved trace + pin (preserve original trace), push
+    -- the saved error, lua_error.
+    local raise_arm = render([[
+        lua_checkstack(L, 2);
+        lua_pushliteral(L, TITAN_BACKTRACE_KEY);
+        setsvalue2s(L, L->top.p, tsvalue($PATB));
+        L->top.p++;
+        lua_rawset(L, LUA_REGISTRYINDEX);
+        lua_pushliteral(L, TITAN_TRACE_PINNED);
+        lua_pushboolean(L, 1);
+        lua_rawset(L, LUA_REGISTRYINDEX);
+        setobj2s(L, L->top.p, $PAERR);
+        L->top.p++;
+        lua_error(L);
+    ]], {
+        PATB = slotat(d_pa_tb),
+        PAERR = slotat(d_pa_err),
+    })
+
+    return render([[
+        if ($PA == $PARETURN) {
+            $RETARM
+        } else if ($PA == $PABREAK) {
+            $BREAKARM
+        } else if ($PA == $PARAISE) {
+            $RAISEARM
+        }
+        /* PA_NONE: fall through past the try */
+    ]], {
+        PA = pa_var,
+        PARETURN = PA_RETURN,
+        PABREAK = PA_BREAK,
+        PARAISE = PA_RAISE,
+        RETARM = return_arm,
+        BREAKARM = break_arm,
+        RAISEARM = raise_arm,
+    })
+end
+
+-- The "save" prologue of an inline setjmp boundary (rawrunprotected save), tagged
+-- with `tag` so a try with two boundaries (body + catch) keeps distinct locals.
+local function boundary_save(tag)
+    return render([[
+        /* inline protected boundary (rawrunprotected save) */
+        l_uint32 _oldnC_$T = L->nCcalls;
+        CallInfo *_oldci_$T = L->ci;
+        lu_byte _oldah_$T = L->allowhook;
+        ptrdiff_t _oldtop_$T = savestack(L, L->top.p);
+        ptrdiff_t _olderrfunc_$T = L->errfunc;
+        lua_longjmp _lj_$T;
+        _lj_$T.status = LUA_OK;
+        _lj_$T.previous = L->errorJmp;
+        L->errorJmp = &_lj_$T;
+        if (TITAN_SETJMP(_lj_$T.b) == 0) {
+    ]], { T = tag })
+end
+
+-- The "tail" that closes a boundary's protected block and restores the
+-- error-handler chain (rawrunprotected tail), opening the `if (status != OK)`
+-- recovery arm and saving the caught error into slot `d_err` and its snapshotted
+-- trace into slot `d_tb`. The caller supplies the recovery body and closes braces.
+local function boundary_recover_open(ctx, tag, d_err, d_tb)
+    return render([[
+        }
+        /* restore the error-handler chain (rawrunprotected tail) */
+        L->errorJmp = _lj_$T.previous;
+        L->nCcalls = _oldnC_$T;
+        if (_lj_$T.status != LUA_OK) {
+            /* raised; errorhandler already filled the trace slot. Mirror
+            ** luaD_pcall's recovery: restore ci/allowhook, close any to-be-
+            ** closed vars from called Lua, materialize the error object. */
+            L->ci = _oldci_$T;
+            L->allowhook = _oldah_$T;
+            /* A longjmp can skip an inner Titan Lua-entry wrapper before that
+            ** wrapper restores L->errfunc. Put the boundary-entry message
+            ** handler back before closing Lua frames, so any __close error is
+            ** handled by a valid Titan errorhandler instead of a stale stack
+            ** slot from the skipped inner entry. */
+            L->errfunc = _olderrfunc_$T;
+            _lj_$T.status = luaD_closeprotected(L, _oldtop_$T, _lj_$T.status);
+            luaD_seterrorobj(L, _lj_$T.status, restorestack(L, _oldtop_$T));
+            lua_checkstack(L, 4);
+            /* a value-call or another stack-growing operation inside the protected
+            ** region may have reallocated the stack; recompute _base before
+            ** touching any reserved slot */
+            _base = restorestack(L, _base_off);
+            /* save the error object into its anchored slot, then drop it from the
+            ** top; the registry snapshot/clear below pushes within the
+            ** lua_checkstack(4) margin established above. */
+            setobj2s(L, $ERRSTACK, s2v(L->top.p - 1));
+            L->top.p = restorestack(L, _oldtop_$T);
+            /* snapshot registry[TITAN_BACKTRACE_KEY] into the traceback slot */
+            lua_pushliteral(L, TITAN_BACKTRACE_KEY);
+            lua_rawget(L, LUA_REGISTRYINDEX);
+            if (!ttisstring(s2v(L->top.p - 1))) {
+                L->top.p--;
+                lua_pushliteral(L, "");
+            }
+            setobj2s(L, $TBSTACK, s2v(L->top.p - 1));
+            L->top.p--;
+            /* clear slot + pin so a fresh error raised later is captured anew
+            ** (a bare re-raise re-pins the saved trace) */
+            lua_pushliteral(L, TITAN_BACKTRACE_KEY);
+            lua_pushnil(L);
+            lua_rawset(L, LUA_REGISTRYINDEX);
+            lua_pushliteral(L, TITAN_TRACE_PINNED);
+            lua_pushnil(L);
+            lua_rawset(L, LUA_REGISTRYINDEX);
+            /* re-establish the function's steady-state reserved top
+            ** (`_base + nslots`) so any reserved slots used in the recovery sit
+            ** below L->top.p and are GC-scanned. The literal nslots is patched in
+            ** by codefuncdec/codelambdadec once the high-water mark is known. */
+            L->top.p = _base + TITAN_RESERVED_NSLOTS;
+            $SPILLRELOAD
+    ]], {
+        T = tag,
+        ERRSTACK = stackslotat(d_err),
+        TBSTACK = stackslotat(d_tb),
+        SPILLRELOAD = spill_reload(ctx),
+    })
+end
+
+-- `catch`/`finally` codegen.
+--
+-- A StatTry wraps its body in an inline setjmp boundary that replicates
+-- luaD_rawrunprotected + luaD_pcall's error recovery, emitted as straight-line C
+-- in the native function (no thunk, no capture conversion). The Lua entry wrapper
+-- already ensured errorhandler is active on L->errfunc, and luaG_errormsg invokes
+-- it regardless of which boundary is on L->errorJmp, so the unified trace is
+-- already in registry[TITAN_BACKTRACE_KEY] by the time the longjmp lands here.
+--
+-- Per-try anchored slots (reserveslot -> depths within the function's _base..nslots
+-- region) hold the caught error value and the snapshotted trace string; a write
+-- into a stack slot needs no GC barrier (the stack is a root).
+--
+-- Boundary accounting (B.4): the BODY always gets a boundary. A CATCH gets its
+-- OWN boundary only when a FINALLY follows (so a raise in the catch still runs the
+-- finally); without a finally a catch error propagates to the outer boundary.
+-- A FINALLY itself installs no boundary: it is straight-line,
+-- and a raise/runtime error in it longjmps out, skipping the dispatch (override).
+local function codetry(ctx, node)
+    -- A function containing a try always needs `_base` recomputed from an offset
+    -- after a caught longjmp (a value-call or GC inside the body may have
+    -- relocated the stack), so force the base-offset preamble.
+    ctx.uses_base_off = true
+    ctx.try_id = (ctx.try_id or 0) + 1
+    local id = ctx.try_id
+    local has_finally = node.finallyblock and true or false
+    local has_catch = node.catchblock and true or false
+
+    -- Reserve the per-try anchored slots up front (depths persist across the body,
+    -- catch, and finally). The recovery recomputes addresses inline from a freshly
+    -- restored `_base`, so only the depth index is needed.
+    local d_err = reserveslot(ctx)   -- the BODY-boundary caught error
+    local d_tb = reserveslot(ctx)    -- ... and its snapshotted trace
+    -- For a try-with-finally, the pending RAISE carries its own saved error +
+    -- trace slots (set on a body raise with no catch, or on a catch raise), since
+    -- the dispatch re-raises after the finally runs.
+    local d_pa_err, d_pa_tb
+    if has_finally then
+        d_pa_err = reserveslot(ctx)
+        d_pa_tb = reserveslot(ctx)
+    end
+
+    -- Per-try pending-action discriminator + saved-return storage (finally only).
+    local pa_var = "_pa_" .. id
+    local fin_label = "_finally_" .. id
+    local ret_saves, ret_decls, fin_frame
+    if has_finally then
+        ret_saves, ret_decls = make_return_saves(ctx, id)
+        -- Push the finally frame so body/catch `return`/`break` route here. Record
+        -- the current loop nesting so a break can decide whether an OUTER finally
+        -- in the same target loop must also run (chaining).
+        ctx.finally_stack = ctx.finally_stack or {}
+        table.insert(ctx.finally_stack, {
+            id = id,
+            pa_var = pa_var,
+            label = fin_label,
+            ret_saves = ret_saves,
+            loopstack_len = ctx.loopstack and #ctx.loopstack or 0,
+            boundary_floor = ctx.protected_boundary_stack
+                and #ctx.protected_boundary_stack or 0,
+            label_used = false,  -- set when a return/break actually gotos it
+        })
+        fin_frame = ctx.finally_stack[#ctx.finally_stack]
+    end
+
+    -- The body and catch run as protected straight-line C. Within them, a
+    -- `return`/`break` that escapes a NON-finally try must clean-exit-restore the
+    -- errorjmp chain (#3); for a finally try, return/break route to the finally
+    -- instead (codereturn / the StatBreak arm consult ctx.finally_stack first).
+    ctx.try_depth = (ctx.try_depth or 0) + 1
+    push_boundary(ctx, tostring(id))
+    local cbody = codestat(ctx, node.block)
+    pop_boundary(ctx)
+    ctx.try_depth = ctx.try_depth - 1
+
+    -- Bind the catch's implicit locals to C autos populated in the recovery.
+    local errcvar = "_catch_error_" .. id
+    local tbcvar = "_catch_tb_" .. id
+    local ccatch = ""
+    if has_catch then
+        local errdecl = node._error_decl
+        local tbdecl = node._traceback_decl
+        errdecl._cvar = errcvar
+        tbdecl._cvar = tbcvar
+        local saved_err, saved_tb = ctx.catch_error_decl, ctx.catch_traceback_decl
+        ctx.catch_error_decl = errdecl
+        ctx.catch_traceback_decl = tbdecl
+        ctx.try_depth = ctx.try_depth + 1
+        if has_finally then push_boundary(ctx, id .. "c") end
+        ccatch = codestat(ctx, node.catchblock)
+        if has_finally then pop_boundary(ctx) end
+        ctx.try_depth = ctx.try_depth - 1
+        ctx.catch_error_decl, ctx.catch_traceback_decl = saved_err, saved_tb
+    end
+
+    -- Pop the finally frame BEFORE coding the finally block: a `return`/`break`
+    -- inside the finally must NOT loop back to this finally (it would be illegal —
+    -- the checker bans escaping return/break in a finally — and a contained break
+    -- targets a loop opened inside the finally, handled by the normal loop frame).
+    if has_finally then
+        table.remove(ctx.finally_stack)
+    end
+    local cfinally = has_finally and codestat(ctx, node.finallyblock) or ""
+
+    if not has_finally then
+        -- Body boundary; on error, materialize+bind catch locals
+        -- and run the catch directly (no own boundary — its raise propagates out).
+        return render([[
+            {
+                $SAVE
+                    $CBODY
+                $RECOVER
+                    TValue $ERR = *$ERRSLOT;
+                    TString *$TB = tsvalue($TBSLOT);
+                    (void)$ERR;
+                    (void)$TB;
+                    $CCATCH
+                }
+            }
+        ]], {
+            SAVE = boundary_save(tostring(id)),
+            CBODY = cbody,
+            RECOVER = boundary_recover_open(ctx, tostring(id), d_err, d_tb),
+            CCATCH = ccatch,
+            ERR = errcvar,
+            TB = tbcvar,
+            ERRSLOT = slotat(d_err),
+            TBSLOT = slotat(d_tb),
+        })
+    end
+
+    -- ===== try WITH finally =====
+
+    -- On a caught error with NO catch: stash error+trace into the PA_RAISE slots
+    -- and set pending RAISE (reinstall the original trace when re-raising).
+    local no_catch_raise = render([[
+        setobj2t(L, $PAERR, $ERR);
+        setsvalue(L, $PATB, tsvalue($TB));
+        $PA = $PARAISE;
+    ]], {
+        PAERR = slotat(d_pa_err),
+        PATB = slotat(d_pa_tb),
+        ERR = slotat(d_err),
+        TB = slotat(d_tb),
+        PA = pa_var,
+        PARAISE = PA_RAISE,
+    })
+
+    -- The catch body, run under ITS OWN boundary so a raise in it still runs the
+    -- finally. The body boundary's recovery binds the catch locals, then opens a
+    -- second boundary around the catch; on a catch error -> stash to PA_RAISE
+    -- slots + pending RAISE; on catch normal completion the pending stays whatever
+    -- the body set it to (NONE unless a return/break in the body routed here, but
+    -- a body that raised reached here by error, so it is NONE -> finally swallows).
+    local catch_under_boundary = ""
+    if has_catch then
+        catch_under_boundary = render([[
+            TValue $ERR = *$ERRSLOT;
+            TString *$TB = tsvalue($TBSLOT);
+            (void)$ERR;
+            (void)$TB;
+            $CSAVE
+                $CCATCH
+            $CRECOVER
+                $NOCATCHRAISE
+            }
+        ]], {
+            ERR = errcvar,
+            TB = tbcvar,
+            ERRSLOT = slotat(d_err),
+            TBSLOT = slotat(d_tb),
+            CSAVE = boundary_save(id .. "c"),
+            CCATCH = ccatch,
+            CRECOVER = boundary_recover_open(ctx, id .. "c", d_err, d_tb),
+            NOCATCHRAISE = no_catch_raise,
+        })
+    else
+        -- finally-only: a body error becomes a pending RAISE re-propagated after
+        -- the finally (rule c).
+        catch_under_boundary = no_catch_raise
+    end
+
+    local dispatch = dispatch_after_finally(ctx, pa_var, ret_saves,
+        d_pa_err, d_pa_tb)
+
+    return render([[
+        {
+            int $PA = $PANONE;
+            $RETDECLS
+            {
+                $SAVE
+                    $CBODY
+                $RECOVER
+                    $CATCHARM
+                }
+            }
+            $FINLABEL
+            $CFINALLY
+            /* dispatch the pending action (if-chain — never a C switch, which
+            ** would capture the PA_BREAK arm's `break`) */
+            $DISPATCH
+        }
+    ]], {
+        PA = pa_var,
+        PANONE = PA_NONE,
+        RETDECLS = ret_decls,
+        SAVE = boundary_save(tostring(id)),
+        CBODY = cbody,
+        RECOVER = boundary_recover_open(ctx, tostring(id), d_err, d_tb),
+        CATCHARM = catch_under_boundary,
+        FINLABEL = fin_frame.label_used and (fin_label .. ": ;") or "",
+        CFINALLY = cfinally,
+        DISPATCH = dispatch,
     })
 end
 
@@ -2208,7 +3554,7 @@ local function localname(ctx, name)
     return name .. "_" .. tostring(idx)
 end
 
-function codestat(ctx, node)
+local function codestat_dispatch(ctx, node)
     local tag = node._tag
     if tag == "Ast.StatDecl" then
         local code = {}
@@ -2231,7 +3577,7 @@ function codestat(ctx, node)
                 -- init is not swept while only held in a C local.
                 local ctmp, tmpname, tmpslot = newtmp(ctx, typ, isgc)
                 decl._box = "_box_" .. n
-                local boxslot = "_boxslot_" .. n
+                local boxslot = newslot(ctx)
                 local anchortmp = tmpslot
                     and setslot(typ, tmpslot, tmpname) or ""
                 table.insert(code, render([[
@@ -2253,12 +3599,13 @@ function codestat(ctx, node)
             elseif decl._used then
                 local typ = decl._type
                 decl._cvar = "_local_" .. localname(ctx, decl.name)
-                local cdecl = ctype(typ) .. " " .. decl._cvar .. ";"
+                local cdecl = cvardecl(ctx, typ, decl._cvar) .. ";"
                 local cslot = ""
                 local cset = ""
+                local cspilldecl = spill_decl_zero(ctx, decl)
+                local cspillset = spill_update(decl)
                 if types.is_gc(typ) then
-                    decl._slot = "_localslot_" .. localname(ctx, decl.name)
-                    cslot = newslot(ctx, decl._slot);
+                    decl._slot = newslot(ctx)
                     cset = render([[
                         /* update slot */
                         $SETSLOT
@@ -2268,17 +3615,21 @@ function codestat(ctx, node)
                 end
                 table.insert(code, render([[
                     $CDECL
+                    $CSPILLDECL
                     $CSLOT
                     $CSTATS
                     $CVAR = $CEXP;
                     $CSET
+                    $CSPILLSET
                 ]], {
                     CDECL = cdecl,
+                    CSPILLDECL = cspilldecl,
                     CSLOT = cslot,
                     CSTATS = cstats,
                     CVAR = decl._cvar,
                     CEXP = cexp,
-                    CSET = cset
+                    CSET = cset,
+                    CSPILLSET = cspillset,
                 }))
             else
                 table.insert(code, render([[
@@ -2315,15 +3666,48 @@ function codestat(ctx, node)
             return fstats .. fexp .. ";"
         else
             local cstats, cexp = codecall(ctx, node.callexp)
-            return cstats .. "\n    " .. cexp .. ";"
+            return cstats .. "\n    ((void)(" .. cexp .. "));"
         end
     elseif tag == "Ast.StatReturn" then
         return codereturn(ctx, node)
     elseif tag == "Ast.StatBreak" then
+        -- A `break` inside the body/catch of an enclosing try-with-finally (in the
+        -- same target loop) must run that finally first: set its pending BREAK and
+        -- `goto` the finally (which then chains outward or breaks past the loop).
+        if enclosing_break_finally(ctx) then
+            return realize_break(ctx)
+        end
+        -- Clean-exit restore (#3): a `break` crossing one or more protected
+        -- regions inside its target loop must restore L->errorJmp/nCcalls to the
+        -- loop's entry values (saved when the loop body contains a try) before
+        -- the C `break`, else L->errorJmp dangles to an out-of-scope `_lj`. The
+        -- target loop is the innermost loop frame; a restore is needed only when
+        -- a try boundary is open between this break and that loop entry.
+        local frame = ctx.loopstack and ctx.loopstack[#ctx.loopstack]
+        if frame and frame.save_id and (ctx.try_depth or 0) > frame.try_depth then
+            frame.used = true   -- the loop must emit its entry errorjmp/nC save
+            return render([[
+                L->errorJmp = _loop_errorjmp_$ID;
+                L->nCcalls = _loop_nC_$ID;
+                break;]], { ID = c_integer_literal(frame.save_id) })
+        end
         return "break;"
+    elseif tag == "Ast.StatRaise" then
+        return coderaise(ctx, node)
+    elseif tag == "Ast.StatTry" then
+        return codetry(ctx, node)
     else
         error("invalid node tag " .. tag)
     end
+end
+
+-- Prepend a `#line` directive so each statement's generated C attributes back
+-- to its .titan source line, then dispatch.
+-- The directive is a standalone leading line; codestat_dispatch never splices
+-- between multiply-referenced operand slots, so this cannot misattribute or
+-- break an un-hoisted operand.
+function codestat(ctx, node)
+    return emitline(node) .. codestat_dispatch(ctx, node)
 end
 
 -- All the code generation functions for EXPRESSIONS return
@@ -2450,18 +3834,10 @@ local function codearray(ctx, node, target)
         and node.fields[nfields].exp._tag == "Ast.ExpDots"
     local nprefix = dots_tail and nfields - 1 or nfields
     local slots = {}
-    local slot_depths = {}
     for i = 1, nprefix do
         local exp = node.fields[i].exp
         local cstats, cexp = codeexp(ctx, exp)
         local ctmpe, tmpename, tmpeslot = newtmp(ctx, elemtype, true)
-        -- The reserved-slot index this temp occupies; `newslot` (inside `newtmp`)
-        -- placed it at the pre-increment depth, i.e. ctx.depth - 1. We need this to
-        -- RE-derive the slot pointer after a resize-GC relocates the stack (the
-        -- captured `tmpeslot` C-pointer local would then dangle); only the dots
-        -- path below uses it.
-        slot_depths[i] = ctx.depth - 1
-
         local code = render([[
             $CSTATS
             $CTMPE
@@ -2497,8 +3873,8 @@ local function codearray(ctx, node, target)
         local struct = varg_struct_name(va.elem)
         -- `luaH_resizearray` -> `luaM_reallocvector` can GC, which may shrink and
         -- relocate the Lua stack (`luaD_shrinkstack`), dangling the raw `_base`
-        -- pointer. Save it as an offset and recompute it after the resize (the
-        -- Phase-4 lesson) so the prefix-slot reads and `obj2arr` stores below use
+        -- pointer. Save it as an offset and recompute it after the resize so
+        -- the prefix-slot reads and `obj2arr` stores below use
         -- the live stack. The preamble declares `_base_off` when uses_base_off.
         ctx.uses_base_off = true
         -- A reusable TValue scratch to wrap each vararg element before `obj2arr`
@@ -2567,11 +3943,7 @@ local function codearray(ctx, node, target)
             PREFIX_STORES = (function()
                 local ps = {}
                 for i = 1, nprefix do
-                    -- Re-derive the prefix slot pointer from the rebased `_base`:
-                    -- the resize above may have relocated the stack, dangling the
-                    -- C-local slot pointer taken before it (§2.D / Phase-4 lesson).
-                    local slot = render("s2v(_base + $D)",
-                        { D = c_integer_literal(slot_depths[i]) })
+                    local slot = slots[i]
                     table.insert(ps, render([[
                         obj2arr($TMPNAME, $INDEX, $SLOT);
                     ]], { TMPNAME = tmpname, INDEX = c_integer_literal(i - 1), SLOT = slot }))
@@ -2788,6 +4160,8 @@ end
 -- algorithm in luaV_shiftl by reordering the branches to put the common case
 -- (shift amount is a small positive integer) under only one level of branching
 -- and with a TITAN_LIKELY annotation.
+local ordered_binary_operands
+
 local function generate_binop_shift(shift_pos, shift_neg, exp, ctx)
     local x_stats, x_code = codeexp(ctx, exp.lhs)
     local y_stats, y_code = codeexp(ctx, exp.rhs)
@@ -2869,26 +4243,23 @@ local function generate_binop_idiv_int(exp, ctx)
         Q = qname,
         Q_DECL = qdecl,
         LINE = c_integer_literal(exp.loc.line),
-        THROW_DIV0 = codethrow(ctx, "error at line %d, divide by zero", { "$LINE" })
+        THROW_DIV0 = codethrow(exp.loc, "error at line %d, divide by zero", { "$LINE" })
     })
     return cstats, qname
 end
 
 -- see luai_numidiv
 local function generate_binop_idiv_flt(exp, ctx)
-    local x_stats, x_var = codeexp(ctx, exp.lhs)
-    local y_stats, y_var = codeexp(ctx, exp.rhs)
+    local stats, x_var, y_var = ordered_binary_operands(ctx, exp)
     local rdecl, rname = newtmp(ctx, exp._type)
     local cstats = util.render([[
-        ${X_STATS}
-        ${Y_STATS}
+        ${STATS}
         ${R_DECL}
         ${R_NAME} = floor(${X} / ${Y});
     ]], {
         X = x_var,
-        X_STATS = x_stats,
         Y = y_var,
-        Y_STATS = y_stats,
+        STATS = stats,
         R_DECL = rdecl,
         R_NAME = rname,
     })
@@ -2935,7 +4306,7 @@ local function generate_binop_mod_int(exp, ctx)
         R = rname,
         R_DECL = rdecl,
         LINE = c_integer_literal(exp.loc.line),
-        THROW_MOD0 = codethrow(ctx, "error at line %d, %% by zero", { "$LINE" })
+        THROW_MOD0 = codethrow(exp.loc, "error at line %d, %% by zero", { "$LINE" })
     })
     return cstats, rname
 end
@@ -2945,13 +4316,11 @@ end
 -- This differs from C's fmod for operands of opposite sign, where Lua
 -- (like floored division) returns a result with the sign of the divisor.
 local function generate_binop_mod_flt(exp, ctx)
-    local m_stats, m_var = codeexp(ctx, exp.lhs)
-    local n_stats, n_var = codeexp(ctx, exp.rhs)
+    local stats, m_var, n_var = ordered_binary_operands(ctx, exp)
     local bdecl, bname = newtmp(ctx, types.Float())
     local rdecl, rname = newtmp(ctx, types.Float())
     local cstats = util.render([[
-        ${M_STATS}
-        ${N_STATS}
+        ${STATS}
         ${B_DECL};
         ${R_DECL};
         ${B} = ${N};
@@ -2961,9 +4330,8 @@ local function generate_binop_mod_flt(exp, ctx)
         }
     ]], {
         M = m_var,
-        M_STATS = m_stats,
         N = n_var,
-        N_STATS = n_stats,
+        STATS = stats,
         B = bname,
         B_DECL = bdecl,
         R = rname,
@@ -2972,33 +4340,73 @@ local function generate_binop_mod_flt(exp, ctx)
     return cstats, rname
 end
 
+-- Preserve Titan/Lua's left-to-right operand evaluation. If preparing the RHS
+-- emits statements, freeze the LHS first; otherwise those statements could
+-- mutate state that a deferred LHS expression still reads.
+ordered_binary_operands = function(ctx, node)
+    local lstats, lcode = codeexp(ctx, node.lhs)
+    local rstats, rcode = codeexp(ctx, node.rhs)
+    if rstats == "" then
+        return lstats, lcode, rcode
+    end
+    local ldecl, lname, lslot =
+        newtmp(ctx, node.lhs._type, types.is_gc(node.lhs._type))
+    local anchor = lslot and setslot(node.lhs._type, lslot, lname) or ""
+    return render([[
+        $LSTATS
+        $LDECL
+        $LNAME = $LCODE;
+        $ANCHOR
+        $RSTATS
+    ]], {
+        LSTATS = lstats,
+        LDECL = ldecl,
+        LNAME = lname,
+        LCODE = lcode,
+        ANCHOR = anchor,
+        RSTATS = rstats,
+    }), lname, rcode
+end
+
 local function codebinaryop(ctx, node, _)
     local op = node.op
     if op == "~=" then op = "!=" end
     if op == "and" then
         if node._type._tag == "Type.Boolean" then
-            local lstats, lcode = codeexp(ctx, node.lhs)
-            local rstats, rcode = codeexp(ctx, node.rhs)
-            return lstats .. rstats, "(" .. lcode .. " && " .. rcode .. ")"
+            local lstats, lcode = materialize(ctx, node.lhs)
+            local rstats, rcode = materialize(ctx, node.rhs)
+            local rdecl, rname = newtmp(ctx, types.Boolean())
+            return render([[
+                $LSTATS
+                $RDECL
+                if (!$LCODE) {
+                    $RNAME = 0;
+                } else {
+                    $RSTATS
+                    $RNAME = $RCODE;
+                }
+            ]], {
+                LSTATS = lstats,
+                LCODE = lcode,
+                RSTATS = rstats,
+                RCODE = rcode,
+                RDECL = rdecl,
+                RNAME = rname,
+            }), rname
         elseif types.is_truthy(node.lhs._type) then
+            local lstats, lcode = materialize(ctx, node.lhs)
             local rstats, rcode = codeexp(ctx, node.rhs)
-            return rstats, rcode
+            return lstats .. "\n((void)" .. lcode .. ");\n" .. rstats, rcode
         elseif types.is_falsy(node.lhs._type) then
             local lstats, lcode = codeexp(ctx, node.lhs)
             return lstats, lcode
         else
-            local lstats, lcode = codeexp(ctx, node.lhs)
-            local rstats, rcode = codeexp(ctx, node.rhs)
+            local lstats, lcode = materialize(ctx, node.lhs)
+            local rstats, rcode = materialize(ctx, node.rhs)
             local ctmp, tmpname, tmpslot = newtmp(ctx, node._type, types.is_gc(node._type))
             local tmpset = types.is_gc(node._type) and setslot(node._type, tmpslot, tmpname) or ""
-            -- Materialize the lhs into a temp of its own type so the
-            -- truthiness test works for any lhs (boolean C value, a
-            -- comparison rvalue, an option, a value) — never &<rawCode>.
-            local lctmp, lcname = newtmp(ctx, node.lhs._type)
             local code = render([[
                 $LSTATS
-                $LCTMP
-                $LCNAME = $LCODE;
                 $CTMP
                 if(!($COND)) {
                     setnilvalue(&$TMPNAME);
@@ -3010,11 +4418,8 @@ local function codebinaryop(ctx, node, _)
             ]], {
                 CTMP = ctmp,
                 TMPNAME = tmpname,
-                LCTMP = lctmp,
-                LCNAME = lcname,
-                COND = toboolean(node.lhs._type, lcname),
+                COND = toboolean(node.lhs._type, lcode),
                 LSTATS = lstats,
-                LCODE = lcode,
                 RSTATS = rstats,
                 RCODE = rcode,
                 TMPSET = tmpset,
@@ -3023,29 +4428,41 @@ local function codebinaryop(ctx, node, _)
         end
     elseif op == "or" then
         if node._type._tag == "Type.Boolean" then
-            local lstats, lcode = codeexp(ctx, node.lhs)
-            local rstats, rcode = codeexp(ctx, node.rhs)
-            return lstats .. rstats, "(" .. lcode .. " || " .. rcode .. ")"
+            local lstats, lcode = materialize(ctx, node.lhs)
+            local rstats, rcode = materialize(ctx, node.rhs)
+            local rdecl, rname = newtmp(ctx, types.Boolean())
+            return render([[
+                $LSTATS
+                $RDECL
+                if ($LCODE) {
+                    $RNAME = 1;
+                } else {
+                    $RSTATS
+                    $RNAME = $RCODE;
+                }
+            ]], {
+                LSTATS = lstats,
+                LCODE = lcode,
+                RSTATS = rstats,
+                RCODE = rcode,
+                RDECL = rdecl,
+                RNAME = rname,
+            }), rname
         elseif types.is_truthy(node.lhs._type) then
             local lstats, lcode = codeexp(ctx, node.lhs)
             return lstats, lcode
         elseif types.is_falsy(node.lhs._type) then
+            local lstats, lcode = materialize(ctx, node.lhs)
             local rstats, rcode = codeexp(ctx, node.rhs)
-            return rstats, rcode
+            return lstats .. "\n((void)" .. lcode .. ");\n" .. rstats, rcode
         elseif node.lhs._type._tag == "Type.Option" then
             assert(types.equals(node.lhs._type.base, node.rhs._type))
-            local lstats, lcode = codeexp(ctx, node.lhs)
-            local rstats, rcode = codeexp(ctx, node.rhs)
+            local lstats, lcode = materialize(ctx, node.lhs)
+            local rstats, rcode = materialize(ctx, node.rhs)
             local ctmp, tmpname, tmpslot = newtmp(ctx, node._type, types.is_gc(node._type))
             local tmpset = types.is_gc(node._type) and setslot(node._type, tmpslot, tmpname) or ""
-            -- Materialize the option lhs into a TValue temp ONCE: the lhs may
-            -- be a non-lvalue (e.g. a direct call returning t?), and it must
-            -- be evaluated exactly once, not in both the test and the extract.
-            local lctmp, lcname = newtmp(ctx, node.lhs._type)
             local code = render([[
                 $LSTATS
-                $LCTMP
-                $LCNAME = $LCODE;
                 $CTMP
                 if(!($COND)) {
                     $RSTATS;
@@ -3057,21 +4474,18 @@ local function codebinaryop(ctx, node, _)
             ]], {
                 CTMP = ctmp,
                 TMPNAME = tmpname,
-                LCTMP = lctmp,
-                LCNAME = lcname,
-                COND = toboolean(node.lhs._type, lcname),
+                COND = toboolean(node.lhs._type, lcode),
                 LSTATS = lstats,
-                LCODE = lcode,
                 RSTATS = rstats,
                 RCODE = rcode,
                 TMPSET = tmpset,
-                GETL = getslot(node._type, tmpname, "&" .. lcname),
+                GETL = getslot(node._type, tmpname, "&" .. lcode),
             })
             return code, tmpname
         else
             assert(node._type._tag == "Type.Value")
-            local lstats, lcode = codeexp(ctx, node.lhs)
-            local rstats, rcode = codeexp(ctx, node.rhs)
+            local lstats, lcode = materialize(ctx, node.lhs)
+            local rstats, rcode = materialize(ctx, node.rhs)
             local ctmp, tmpname, tmpslot = newtmp(ctx, types.Value(), true)
             local tmpset = setslot(types.Value(), tmpslot, tmpname)
             local code = render([[
@@ -3095,18 +4509,16 @@ local function codebinaryop(ctx, node, _)
             return code, tmpname
         end
     elseif op == "^" then
-        local lstats, lcode = codeexp(ctx, node.lhs)
-        local rstats, rcode = codeexp(ctx, node.rhs)
+        local stats, lcode, rcode = ordered_binary_operands(ctx, node)
         local bdecl, bname = newtmp(ctx, types.Float())
         local edecl, ename = newtmp(ctx, types.Float())
         local cstats = render([[
-            $LSTATS
-            $RSTATS
+            $STATS
             $BDECL
             $EDECL
             $B = $LCODE;
             $E = $RCODE;
-        ]], { LSTATS=lstats, RSTATS=rstats, BDECL=bdecl, EDECL=edecl,
+        ]], { STATS=stats, BDECL=bdecl, EDECL=edecl,
               B=bname, E=ename, LCODE=lcode, RCODE=rcode })
         -- luai_numpow: exponent 2 is a*a, not pow(a,2) (differs by 1 ULP).
         return cstats, "((" .. ename .. " == 2) ? (" .. bname .. " * " .. bname
@@ -3114,9 +4526,8 @@ local function codebinaryop(ctx, node, _)
     elseif op == "~" then
         -- Lua's binary '~' is bitwise exclusive-or; C's binary xor is '^'
         -- (Titan's '^' is exponentiation). Wrap like Lua's intop(^,...).
-        local lstats, lcode = codeexp(ctx, node.lhs)
-        local rstats, rcode = codeexp(ctx, node.rhs)
-        return lstats .. rstats, "intop(^, " .. lcode .. ", " .. rcode .. ")"
+        local stats, lcode, rcode = ordered_binary_operands(ctx, node)
+        return stats, "intop(^, " .. lcode .. ", " .. rcode .. ")"
     elseif op == "<<" then
         return generate_binop_shift("<<", ">>", node, ctx)
     elseif op == ">>" then
@@ -3149,9 +4560,7 @@ local function codebinaryop(ctx, node, _)
         -- equality via luaS_eqstr, ordering via the VM's lexicographic
         -- comparators (which call l_strcmp). Pointer comparison is wrong for
         -- long (non-interned) strings and never lexicographic.
-        local lstats, lcode = codeexp(ctx, node.lhs)
-        local rstats, rcode = codeexp(ctx, node.rhs)
-        local cstats = lstats .. rstats
+        local cstats, lcode, rcode = ordered_binary_operands(ctx, node)
         if op == "==" then
             return cstats, "luaS_eqstr(" .. lcode .. ", " .. rcode .. ")"
         elseif op == "!=" then
@@ -3181,30 +4590,27 @@ local function codebinaryop(ctx, node, _)
     elseif (op == "==" or op == "!=") and
             ctype(node.lhs._type) == "TValue" and
             ctype(node.rhs._type) == "TValue" then
-        local lstats, lcode = codeexp(ctx, node.lhs)
-        local rstats, rcode = codeexp(ctx, node.rhs)
+        local stats, lcode, rcode = ordered_binary_operands(ctx, node)
         if op == "!=" then
-            return lstats .. rstats, "!luaV_rawequalobj(&(" .. lcode .. "),&(" .. rcode .. "))"
+            return stats, "!luaV_rawequalobj(&(" .. lcode .. "),&(" .. rcode .. "))"
         else
-            return lstats .. rstats, "luaV_rawequalobj(&(" .. lcode .. "),&(" .. rcode .. "))"
+            return stats, "luaV_rawequalobj(&(" .. lcode .. "),&(" .. rcode .. "))"
         end
     elseif (op == "<" or op == "<=" or op == ">" or op == ">="
             or op == "==" or op == "!=")
            and ((node.lhs._type._tag == "Type.Integer" and node.rhs._type._tag == "Type.Float")
              or (node.lhs._type._tag == "Type.Float"   and node.rhs._type._tag == "Type.Integer")) then
-        local lstats, lcode = codeexp(ctx, node.lhs)
-        local rstats, rcode = codeexp(ctx, node.rhs)
+        local stats, lcode, rcode = ordered_binary_operands(ctx, node)
         local ldecl, lname = newtmp(ctx, node.lhs._type)
         local rdecl, rname = newtmp(ctx, node.rhs._type)
         local cstats = render([[
-            $LSTATS
+            $STATS
             $LDECL
             $LNAME = $LCODE;
-            $RSTATS
             $RDECL
             $RNAME = $RCODE;
-        ]], { LSTATS=lstats, LDECL=ldecl, LNAME=lname, LCODE=lcode,
-              RSTATS=rstats, RDECL=rdecl, RNAME=rname, RCODE=rcode })
+        ]], { STATS=stats, LDECL=ldecl, LNAME=lname, LCODE=lcode,
+              RDECL=rdecl, RNAME=rname, RCODE=rcode })
         local lint = node.lhs._type._tag == "Type.Integer"
         local cmp
         if op == "==" or op == "!=" then
@@ -3230,13 +4636,11 @@ local function codebinaryop(ctx, node, _)
            and node.rhs._type._tag == "Type.Integer" then
         -- Integer + - * wrap two's-complement like Lua (intop), instead of raw
         -- signed C arithmetic which is overflow UB under -O2 (no -fwrapv).
-        local lstats, lcode = codeexp(ctx, node.lhs)
-        local rstats, rcode = codeexp(ctx, node.rhs)
-        return lstats .. rstats, "intop(" .. op .. ", " .. lcode .. ", " .. rcode .. ")"
+        local stats, lcode, rcode = ordered_binary_operands(ctx, node)
+        return stats, "intop(" .. op .. ", " .. lcode .. ", " .. rcode .. ")"
     else
-        local lstats, lcode = codeexp(ctx, node.lhs)
-        local rstats, rcode = codeexp(ctx, node.rhs)
-        return lstats .. rstats, "(" .. lcode .. op .. rcode .. ")"
+        local stats, lcode, rcode = ordered_binary_operands(ctx, node)
+        return stats, "(" .. lcode .. op .. rcode .. ")"
     end
 end
 
@@ -3455,7 +4859,7 @@ end
 --    controlling conditinal execution
 -- 'target' is not nil if expression is rvalue for a 'Ast.VarName' lvalue,
 --    in this case it will be the '_decl' of the lvalue
-function codeexp(ctx, node, iscondition, target)
+local function codeexp_dispatch(ctx, node, iscondition, target)
     local tag = node._tag
     if tag == "Ast.VarDot" and node.exp._type._tag == "Type.ForeignModule" then
         local fstats, fexp = codeforeignvar(ctx, node)
@@ -3621,7 +5025,7 @@ function codeexp(ctx, node, iscondition, target)
             TMPNAME2 = tmpname2,
             TMPNAME3 = tmpname3,
             LINE = c_integer_literal(node.loc.line),
-            THROW_WRONG_INT = codethrow(ctx, "type error at line %d, number '%f' has no integer representation", { "$LINE", "$TMPNAME1" })
+            THROW_WRONG_INT = codethrow(node.loc, "type error at line %d, number '%f' has no integer representation", { "$LINE", "$TMPNAME1" })
         })
         return cfloor, tmpname3
     elseif tag == "Ast.ExpCast" and node._type._tag == "Type.String"
@@ -3748,7 +5152,7 @@ function codeexp(ctx, node, iscondition, target)
             COL = node.loc.col,
             TYPENAME = c_string_literal(types.tostring(node._type)),
             GETSLOT = getslot(node._type, tmpname, "&" .. srcname),
-            THROW_WRONG_CAST = codethrow(ctx, "%s:%d:%d: type error, expected %s but found nil", { "$FILE", "$LINE", "$COL", "$TYPENAME" })
+            THROW_WRONG_CAST = codethrow(node.loc, "%s:%d:%d: type error, expected %s but found nil", { "$FILE", "$LINE", "$COL", "$TYPENAME" })
         }), tmpname
     elseif tag == "Ast.ExpCast" and node._type._tag == "Type.Pointer" then
         local cstats, cexp = codeexp(ctx, node.exp)
@@ -3830,6 +5234,17 @@ function codeexp(ctx, node, iscondition, target)
     end
 end
 
+-- codeexp's `stats` half is frequently spliced *mid-line* into a larger
+-- template (e.g. an expression-position slot), so a blanket `#line` prepend
+-- here would land a `#` off column 1 and break compilation. Instead, error
+-- attribution within an expression's expanded C is pinned where it matters —
+-- directly above each luaL_error in codethrow — so we keep codeexp a plain
+-- dispatch passthrough (the function-entry/statement/throw stamps cover the
+-- rest).
+function codeexp(ctx, node, iscondition, target)
+    return codeexp_dispatch(ctx, node, iscondition, target)
+end
+
 function codeforeignexp(ctx, node)
     local tag = node._tag
     if tag == "Ast.ExpCall"
@@ -3883,12 +5298,12 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
         local nfixed = #params
         local elem_ct = ctype(varargtype)
         local struct = varg_struct_name(varargtype)
-        -- Allocate the backing struct as a 0-uservalue Udata sized to hold the
-        -- FAM inline (sizeudata(0, sizeof(struct) + n*sizeof(elem))), anchor it on
-        -- the Lua stack so the GC keeps its storage alive across the native call,
-        -- then read each surplus arg through the same checkandget coercion the
-        -- fixed params use, into `_varargs->args[j]`. `_start` is 0 (the generic
-        -- entry always builds a fresh, fully-backing struct). The entry guard
+        -- Allocate 0-uservalue Udata for the runtime-sized element storage,
+        -- anchor it on the Lua stack so the GC keeps that storage alive across
+        -- the native call, then make a small C-stack descriptor point at the
+        -- payload. Each surplus arg is read through the same checkandget coercion
+        -- the fixed params use, into `_varargs->args[j]`. `_start` is 0 (the
+        -- generic entry always builds a fresh, fully-backed run). The entry guard
         -- below has already ensured the arg count is >= nfixed.
         local readone = checkandget(tlcontext, varargtype,
             "_varargs->args[_vj]", "s2v(_vfunc + " .. nfixed .. " + 1 + _vj)", loc)
@@ -3899,16 +5314,18 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
             }
             lu_byte _nvarargs = (lu_byte)_vcount;
             lua_checkstack(L, 1);
-            Udata *_varargs_ud = gco2u(luaC_newobj(L, LUA_VUSERDATA, sizeudata(0, sizeof($STRUCT) + (size_t)_nvarargs * sizeof($ELEM_CT))));
-            _varargs_ud->len = sizeof($STRUCT) + (size_t)_nvarargs * sizeof($ELEM_CT);
+            Udata *_varargs_ud = gco2u(luaC_newobj(L, LUA_VUSERDATA,
+                sizeudata(0, (size_t)_nvarargs * sizeof($ELEM_CT))));
+            _varargs_ud->len = (size_t)_nvarargs * sizeof($ELEM_CT);
             _varargs_ud->nuvalue = 0; _varargs_ud->metatable = NULL;
             setuvalue(L, s2v(L->top.p), _varargs_ud);
             L->top.p++;
             /* recompute the arg base AFTER the lua_checkstack/push that may have
                relocated the Lua stack, so the surplus-arg slot reads are valid */
             StkId _vfunc = L->ci->func.p;
-            $STRUCT *_varargs = ($STRUCT *)getudatamem(_varargs_ud);
-            _varargs->n_args = _nvarargs;
+            $ELEM_CT *_varargs_args = ($ELEM_CT *)getudatamem(_varargs_ud);
+            $STRUCT _varargs_desc = { _nvarargs, _varargs_args };
+            $STRUCT *_varargs = &_varargs_desc;
             for (int _vj = 0; _vj < (int)_nvarargs; _vj++) {
                 $READONE
             }
@@ -3975,7 +5392,9 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
         end
     end
     table.insert(stats, render([[
-        L->errfunc = __save_errfunc;
+        if (TITAN_UNLIKELY(__installed_errfunc)) {
+            L->errfunc = __save_errfunc;
+        }
         return $NRET;
     ]], {
         NRET = #typ.rettypes
@@ -4011,28 +5430,37 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
         $NARGSDECL
         $ERRORSLOT
         ptrdiff_t __save_errfunc = L->errfunc;
-        lua_pushcclosure(L, errorhandler, 0);
-        L->errfunc = savestack(L, L->top.p - 1);
+        int __installed_errfunc = 0;
+        if (TITAN_UNLIKELY(!titan_errfunc_is_errorhandler(L))) {
+            lua_pushcfunction(L, errorhandler);
+            L->errfunc = savestack(L, L->top.p - 1);
+            __installed_errfunc = 1;
+        }
         CClosure *_fn = clCvalue(s2v(func));
         Udata *_mod = uvalue(&_fn->upvalue[0]);
-        $BODY
+        $ENTRYLINE$BODY
     }]], {
         LUANAME = lua_name,
         ARGCHECK = argcheck,
         NARGSDECL = nargsdecl,
         ERRORSLOT = #params == 0 and "lua_pushnil(L);" or "",
         NAME = c_string_literal(titan_name),
+        -- Stamp the Lua-entry wrapper to the function definition's .titan loc
+        -- so its native frame, and any arg-coercion throw within it, symbolizes
+        -- to the .titan source rather than drifting through the wrapper's
+        -- generated C.
+        ENTRYLINE = emitline({ loc = loc }),
         BODY = table.concat(stats, "\n"),
     })
 end
 
--- A captured-and-mutated parameter is boxed: its incoming value (already anchored
--- in `_paramslot` by the caller for gc types) is copied into a fresh box cell so a
--- nested lambda capturing it shares the same mutable storage. Sets `param._box`.
+-- A captured-and-mutated parameter is boxed: its incoming value is anchored in
+-- its reserved slot for gc types, then copied into a fresh box cell so a nested
+-- lambda capturing it shares the same mutable storage. Sets `param._box`.
 local function codeboxparam(ctx, param)
     local typ = param._type
     param._box = "_box_" .. param.name
-    local boxslot = "_boxslot_" .. param.name
+    local boxslot = newslot(ctx)
     return render([[
         $NEWBOX
         $SETSLOT
@@ -4061,14 +5489,29 @@ local function codefuncdec(tlcontext, node)
     if node._tag == "Ast.TopLevelFunc" then
         fname = func_name(tlcontext.module, node.name)
         luaname = func_luaname(tlcontext.module, node.name)
+        register_trace_name(tlcontext, fname,
+            tlcontext.module .. "." .. node.name)
     elseif node._tag == "Ast.TopLevelStatic" then
         fname = static_name(node._type)
         luaname = static_luaname(node._type)
+        -- fqtn is "<module>.<record>"; a static is "<module>.<record>.<static>".
+        register_trace_name(tlcontext, fname,
+            node._type.fqtn .. "." .. node._type.name)
     else
         assert(node._tag == "Ast.TopLevelMethod")
         fname = method_name(node._type)
         luaname = method_luaname(node._type)
+        -- fqtn is "<module>.<record>"; a method is "<module>.<record>:<method>".
+        register_trace_name(tlcontext, fname,
+            node._type.fqtn .. ":" .. node._type.name)
     end
+    -- Detect a `StatTry` in this function's body up front. Nested
+    -- function/lambda bodies have their own contexts and are not scanned.
+    ctx.has_try = stat_contains_try(node.block)
+    if ctx.has_try then analyze_try_spills(node.block) end
+    -- The declared return types, so a `return` routed through a finally
+    -- (codetry/codereturn) can size + fill the per-try saved-return temps.
+    ctx.rettypes = node._type.rettypes
     local cparams = { "lua_State *L", "Udata *_mod", "CClosure *_fn" }
     if node._tag == "Ast.TopLevelMethod" then
         -- `self` is a real Decl that capture analysis can mark captured/assigned,
@@ -4077,9 +5520,8 @@ local function codefuncdec(tlcontext, node)
         local self = node._self
         self._cvar = "__self__"
         self._boxed = self._captured and self._assigned
-        if types.is_gc(self._type) and self._assigned then
-            self._slot = "__selfslot__"
-            table.insert(stats, newslot(ctx, self._slot))
+        if types.is_gc(self._type) and (self._assigned or self._needs_spill) then
+            self._slot = newslot(ctx)
             -- anchor the incoming gc self before the box allocation (which can
             -- trigger GC), so a reassigned/captured self stays live
             table.insert(stats, setslot(self._type, self._slot, self._cvar))
@@ -4087,14 +5529,14 @@ local function codefuncdec(tlcontext, node)
         if self._boxed then
             table.insert(stats, codeboxparam(ctx, self))
         end
-        table.insert(cparams, ctype(self._type) .. " " .. self._cvar)
+        table.insert(stats, spill_decl_init(ctx, self))
+        table.insert(cparams, cvardecl(ctx, self._type, self._cvar))
     end
     for _, param in ipairs(fixed_params(node.params)) do
         param._cvar = "_param_" .. param.name
         param._boxed = param._captured and param._assigned
-        if types.is_gc(param._type) and param._assigned then
-            param._slot = "_paramslot_" .. param.name
-            table.insert(stats, newslot(ctx, param._slot))
+        if types.is_gc(param._type) and (param._assigned or param._needs_spill) then
+            param._slot = newslot(ctx)
             -- anchor the incoming gc param in its own slot before the box
             -- allocation (which can trigger GC) — see codeboxparam
             table.insert(stats, setslot(param._type, param._slot, param._cvar))
@@ -4102,7 +5544,8 @@ local function codefuncdec(tlcontext, node)
         if param._boxed then
             table.insert(stats, codeboxparam(ctx, param))
         end
-        table.insert(cparams, ctype(param._type) .. " " .. param._cvar)
+        table.insert(stats, spill_decl_init(ctx, param))
+        table.insert(cparams, cvardecl(ctx, param._type, param._cvar))
     end
     -- Variadic: the backing struct + start offset, pinned after the declared
     -- params and before the out-params, and threaded into ctx for `...` lowering.
@@ -4116,13 +5559,29 @@ local function codefuncdec(tlcontext, node)
         local outtype = node._type.rettypes[i]
         table.insert(cparams, ctype(outtype) .. " *" .. "_outparam_" .. i)
     end
-    local body = codestat(ctx, node.block)
+    -- Attribute the first native frame to the function definition: a `#line`
+    -- at function entry (after parameter setup, before the body) so a
+    -- backtrace through the entry shows the .titan definition line, not the
+    -- generated .c.
+    local body = emitline(node) .. codestat(ctx, node.block)
     local nslots = ctx.nslots
+    -- Patch the try-recovery's reserved-top restore (codetry emits the symbolic
+    -- TITAN_RESERVED_NSLOTS so a catch's own slots are GC-scanned) now that the
+    -- function-wide high-water mark is final.
+    body = body:gsub("TITAN_RESERVED_NSLOTS", c_integer_literal(nslots))
     -- A value-call (codevaluecall) can relocate the Lua stack, which would
     -- dangle `_base`; such a function saves `_base` as an offset so it can be
     -- recomputed after each value-call.
     local baseoff = ctx.uses_base_off
         and "\n        ptrdiff_t _base_off = savestack(L, _base);" or ""
+    -- Clean-exit restore foundation (#3): snapshot the errorjmp chain at function
+    -- entry so a `return` crossing a protected region can restore it before the
+    -- epilogue (the inner `_lj` would otherwise be out of scope). Emitted only
+    -- when a `return` actually crossed a try (codereturn set used_entry_restore),
+    -- so a try with no escaping return adds no dead locals.
+    local entrysave = ctx.used_entry_restore
+        and "\n        lua_longjmp *_entry_errorjmp = L->errorJmp;"
+            .. "\n        l_uint32 _entry_nC = L->nCcalls;" or ""
     if nslots > 0 then
         table.insert(stats, 1, render([[
         luaC_checkGC(L);
@@ -4136,15 +5595,16 @@ local function codefuncdec(tlcontext, node)
         L->top.p += $NSLOTS;
         for(StkId _s = L->top.p - 1; _base <= _s; _s--) {
             setnilvalue(s2v(_s));
-        }$BASEOFF
+        }$BASEOFF$ENTRYSAVE
         ]], {
             NSLOTS = c_integer_literal(nslots),
             BASEOFF = baseoff,
+            ENTRYSAVE = entrysave,
         }))
     else
         -- No reserved slots, but still anchor _base so every return path can
         -- reset L->top.p uniformly (the reset is then a no-op).
-        table.insert(stats, 1, "        StkId _base = L->top.p;" .. baseoff)
+        table.insert(stats, 1, "        StkId _base = L->top.p;" .. baseoff .. entrysave)
     end
     table.insert(stats, body)
     -- A zero-return `() -> ()` function has no `rettypes[1]`: its native entry
@@ -4159,6 +5619,9 @@ local function codefuncdec(tlcontext, node)
         table.insert(stats, [[
             L->top.p = _base;
             return 0;]])
+    else
+        local ur = unreachable_return(rettype, node.block)
+        if ur then table.insert(stats, ur) end
     end
     node._body = render([[
     $ISLOCAL $RETTYPE $NAME($PARAMS) {
@@ -4196,6 +5659,10 @@ local function codemethodtrampoline(tlcontext, node)
     local luaname = bound_method_luaname(mtype)
     local mnative = method_name(mtype)
     local mlua = method_luaname(mtype)
+    -- The bound trampoline forwards to the method; if its own native frame ever
+    -- appears in a trace, name it after the method (<module>.<record>:<method>).
+    register_trace_name(tlcontext, nativename,
+        mtype.fqtn .. ":" .. mtype.name)
     local rettype = mtype.rettypes[1]
     local crettype = rettype and ctype(rettype) or "void"
 
@@ -4292,7 +5759,10 @@ local function lambda_register(tlcontext, node)
         local n = tlcontext.lambda_count
         tlcontext.lambda_count = n + 1
         node._lambda_native = tlcontext.prefix .. "lambda_" .. n
-        node._lambda_lua = tlcontext.prefix .. "lambda_" .. n .. "_lua"
+        node._lambda_lua = tlcontext.prefix .. "lambda_" .. n .. "_" .. TITAN_ENTRY_TAG .. "_lua"
+        -- An anonymous function shows as "anonymous function at <file>:<defline>"
+        -- (the lambda's DEFINITION loc), formatted into the name table here.
+        register_trace_name(tlcontext, node._lambda_native, anon_qualname(node.loc))
         table.insert(tlcontext.lambdas, node)
     end
 end
@@ -4479,6 +5949,12 @@ function codelambdadec(tlcontext, node)
     local rettype = node._type.rettypes[1]
     local fname = node._lambda_native
     local luaname = node._lambda_lua
+    -- A try inside this lambda's own body gets its own spill analysis and entry
+    -- errorjmp-save (an enclosing function's try does not affect this context).
+    ctx.has_try = stat_contains_try(node.block)
+    if ctx.has_try then analyze_try_spills(node.block) end
+    -- The lambda's own return types (sizes finally saved-return temps).
+    ctx.rettypes = node._type.rettypes
 
     -- Build the capture map and bind each boxed capture's box pointer once at
     -- body entry. By-value captures are read directly from _fn (immutable).
@@ -4501,15 +5977,15 @@ function codelambdadec(tlcontext, node)
     for _, param in ipairs(fixed_params(node.params)) do
         param._cvar = "_param_" .. param.name
         param._boxed = param._captured and param._assigned
-        if types.is_gc(param._type) and param._assigned then
-            param._slot = "_paramslot_" .. param.name
-            table.insert(stats, newslot(ctx, param._slot))
+        if types.is_gc(param._type) and (param._assigned or param._needs_spill) then
+            param._slot = newslot(ctx)
             table.insert(stats, setslot(param._type, param._slot, param._cvar))
         end
         if param._boxed then
             table.insert(stats, codeboxparam(ctx, param))
         end
-        table.insert(cparams, ctype(param._type) .. " " .. param._cvar)
+        table.insert(stats, spill_decl_init(ctx, param))
+        table.insert(cparams, cvardecl(ctx, param._type, param._cvar))
     end
     -- A lambda's `ctx` is fresh (newcontext), so ctx.varargs starts nil; set it
     -- only for a variadic lambda. An inner lambda thus NEVER inherits an enclosing
@@ -4527,8 +6003,12 @@ function codelambdadec(tlcontext, node)
 
     local body = codestat(ctx, node.block)
     local nslots = ctx.nslots
+    body = body:gsub("TITAN_RESERVED_NSLOTS", c_integer_literal(nslots))
     local baseoff = ctx.uses_base_off
         and "\n        ptrdiff_t _base_off = savestack(L, _base);" or ""
+    local entrysave = ctx.used_entry_restore
+        and "\n        lua_longjmp *_entry_errorjmp = L->errorJmp;"
+            .. "\n        l_uint32 _entry_nC = L->nCcalls;" or ""
     if nslots > 0 then
         table.insert(stats, 1, render([[
         luaC_checkGC(L);
@@ -4542,13 +6022,14 @@ function codelambdadec(tlcontext, node)
         L->top.p += $NSLOTS;
         for(StkId _s = L->top.p - 1; _base <= _s; _s--) {
             setnilvalue(s2v(_s));
-        }$BASEOFF
+        }$BASEOFF$ENTRYSAVE
         ]], {
             NSLOTS = c_integer_literal(nslots),
             BASEOFF = baseoff,
+            ENTRYSAVE = entrysave,
         }))
     else
-        table.insert(stats, 1, "        StkId _base = L->top.p;" .. baseoff)
+        table.insert(stats, 1, "        StkId _base = L->top.p;" .. baseoff .. entrysave)
     end
     -- box-capture bindings come first, before any body code or preamble use
     for i = #capbinds, 1, -1 do
@@ -4564,6 +6045,9 @@ function codelambdadec(tlcontext, node)
         table.insert(stats, [[
             L->top.p = _base;
             return 0;]])
+    else
+        local ur = unreachable_return(rettype, node.block)
+        if ur then table.insert(stats, ur) end
     end
     node._body = render([[
     static $RETTYPE $NAME($PARAMS) {
@@ -4656,6 +6140,13 @@ local preamble = [[
 
 #include "titan.h"
 
+static inline int titan_errfunc_is_errorhandler(lua_State *L) {
+    if (L->errfunc == 0) return 0;
+    StkId errfunc = restorestack(L, L->errfunc);
+    TValue *v = s2v(errfunc);
+    return ttislcf(v) && fvalue(v) == errorhandler;
+}
+
 $FOREIGNIMPORTS
 
 #ifdef __clang__
@@ -4671,9 +6162,17 @@ $SIGS
 
 local postamble = [[
 int $LUAOPEN_NAME(lua_State *L) {
+    titan_invalidate_backtrace_state(L);
     Udata *mod = $INITNAME(L);
     setuvalue(L, s2v(L->top.p), mod);
     L->top.p++;
+    return 1;
+}
+]]
+
+local modabi = [[
+int $ABINAME(lua_State* L) {
+    lua_pushliteral(L, TITAN_VER);
     return 1;
 }
 ]]
@@ -4696,6 +6195,7 @@ Udata *$INITNAME(lua_State *L) {
         $INITVARS
         $INITFUNCTAGS
         $FUNCS
+        $INITNAMES
         $CREATEMETA
         return _mod;
     } else {
@@ -4730,7 +6230,12 @@ local function import_module(loadmods, initmods, sigs, mprefixes, dynamic, node)
         local file = modname:gsub("[.]", "/") .. ".so"
         table.insert(loadmods, render([[
             void *$HANDLE = loadlib(L, "$FILE");
-        ]], { HANDLE = mprefix .. "handle", FILE = file }))
+            titan_check_abi(L, $HANDLE, "$ABI", "$FILE");
+        ]], {
+            HANDLE = mprefix .. "handle",
+            FILE = file,
+            ABI = mprefix .. "abi",
+        }))
         table.insert(initmods, render([[
             {
                 Udata* (*$INIT)(lua_State *L) = titan_cast_func(Udata* (*)(lua_State*), loadsym(L, $HANDLE, "$INIT"));
@@ -4790,7 +6295,12 @@ local function init_data_from_other_modules(tlcontext, includes, loadmods, initm
                 local file = func.module:gsub("[.]", "/") .. ".so"
                 table.insert(loadmods, render([[
                     void *$HANDLE = loadlib(L, "$FILE");
-                ]], { HANDLE = mprefix .. "handle", FILE = file }))
+                    titan_check_abi(L, $HANDLE, "$ABI", "$FILE");
+                ]], {
+                    HANDLE = mprefix .. "handle",
+                    FILE = file,
+                    ABI = mprefix .. "abi",
+                }))
             end
             table.insert(loadmods, render([[
                 $NAME = titan_cast_func($TYPE, loadsym(L, $HANDLE, "$NAME"));
@@ -5073,6 +6583,7 @@ function coder.generate(modname, ast, static_deps)
         record_namespace_slots = {}, -- record fqtn -> module uv slot of its static-namespace table
         lambdas = {},        -- ExpFunction nodes pending file-scope emission
         lambda_count = 0,    -- counter for unique lambda native/Lua names
+        names = {},          -- { native C symbol, qualified Titan name } pairs for the trace name table
         upvalue = 0
     }
 
@@ -5387,6 +6898,10 @@ function coder.generate(modname, ast, static_deps)
         TYPES = string.format("%q", types.serialize(ast._type))
     }))
 
+    table.insert(code, render(modabi, {
+        ABINAME = tlcontext.prefix .. "abi",
+    }))
+
     init_data_from_other_modules(tlcontext, includes, loadmods, initrecs, mprefixes, static_deps)
 
     -- Function-type tags: a per-library `static const void*` each, declared up
@@ -5413,6 +6928,39 @@ function coder.generate(modname, ast, static_deps)
         }))
     end
 
+    -- Trace name table (deliverable 2): map each native C symbol this module
+    -- generates -> its qualified Titan source name, into the shared registry
+    -- sub-table registry[TITAN_NAMES_KEY] (lazily created — multiple modules
+    -- contribute). errorhandler looks each native frame's symbol up here to show
+    -- the qualified name instead of the mangled C symbol.
+    local initnames = ""
+    if #tlcontext.names > 0 then
+        local setnames = {}
+        for _, pair in ipairs(tlcontext.names) do
+            table.insert(setnames, render([[
+                lua_pushliteral(L, $QUAL);
+                lua_setfield(L, -2, $SYM);
+            ]], {
+                SYM = c_string_literal(pair[1]),
+                QUAL = c_string_literal(pair[2]),
+            }))
+        end
+        initnames = render([[
+            lua_getfield(L, LUA_REGISTRYINDEX, $NAMESKEY);
+            if(lua_isnil(L, -1)) {
+                lua_pop(L, 1);
+                lua_newtable(L);
+                lua_pushvalue(L, -1);
+                lua_setfield(L, LUA_REGISTRYINDEX, $NAMESKEY);
+            }
+            $SETNAMES
+            lua_pop(L, 1); /* pop the names table */
+        ]], {
+            NAMESKEY = "TITAN_NAMES_KEY",
+            SETNAMES = table.concat(setnames, "\n"),
+        })
+    end
+
     table.insert(code, render(init, {
         INITNAME = tlcontext.prefix .. 'init',
         INITMODULES = table.concat(initmods, "\n"),
@@ -5422,6 +6970,7 @@ function coder.generate(modname, ast, static_deps)
         INITVARS = table.concat(initvars, "\n"),
         INITRECORDS = table.concat(initrecs, "\n"),
         FUNCS = table.concat(funcs, "\n"),
+        INITNAMES = initnames,
         MODNAMESTR = c_string_literal("Titan module "..modname),
         CREATEMETA = create_meta,
         NUPVALS = tlcontext.upvalue

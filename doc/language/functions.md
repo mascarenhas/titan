@@ -61,8 +61,8 @@ a return annotation — the only legal `return` is a bare `return` with no
 expression. `return nil` is **not** the same thing: it tries to return one
 value and is the arity error `returned 1 value(s) but function expected 0`.
 A bare `return` and `return nil` are equivalent only inside a function
-whose declared return type is `nil` (or another value type that `nil`
-fits, such as `integer?`).
+whose declared return type is exactly `nil`. For option- or
+`value`-returning functions, write `return nil` explicitly.
 
 ## Exported and `local` functions
 
@@ -400,6 +400,8 @@ $ ./answer; echo $?
 
 If a run-time error escapes `main` (or the module fails to load), the
 program prints `<program name>: <error message>` to standard error and
-exits with a failure status, without returning from `main`. For what can
-raise run-time errors and how to handle them, see
+exits with a failure status, without returning from `main`. The report
+also includes `stack traceback:` followed by tab-indented traceback
+frames through the Titan `main` frame; the synthetic Lua bootstrap is not
+shown. For what can raise run-time errors and how to handle them, see
 [Error handling](error-handling.md).

@@ -1,0 +1,1279 @@
+-- End-to-end coverage for Titan error handling in generated C.
+--
+-- This file exercises `raise`, `catch`, `finally`, trace preservation,
+-- setjmp-boundary spill/reload behavior, Lua callback unwinding, Lua
+-- to-be-closed variables, and standalone top-level reporting. The tests
+-- generate C, compile it, and run the result under stock Lua or as a standalone
+-- executable, so they need the full lua-5.5.0 + libbacktrace setup.
+--
+-- `raise <exp>` evaluates its operand to a Lua value, pushes it as the error
+-- object, and calls lua_error(L). The entry wrapper has errorhandler installed
+-- on L->errfunc, so the longjmp through lua_error builds the unified Lua+Titan
+-- trace. A `raise` from a Titan function caught by Lua `pcall` therefore
+-- surfaces the raised value as the pcall error and records the Titan frames.
+local h = require 'spec.support.helpers'
+
+local compile_and_run = h.compile_and_run
+local compile_and_read_c = h.compile_and_read_c
+local compile_and_run_app = h.compile_and_run_app
+
+local function clean()
+    os.execute("rm -rf *.o *.so *.dSYM test test__entrypoint.c")
+    if not h.verbose then os.execute("rm -f *.c") end
+end
+
+describe("raise <exp>", function()
+    setup(function() os.remove("titan-runtime/titan.o") end)
+    after_each(clean)
+
+    it("raises a string error caught by a Lua pcall", function()
+        local out = compile_and_run([[
+            function boom(): integer
+                raise "kaboom"
+                return 0
+            end
+        ]], [==[
+            local ok, err = pcall(test.boom)
+            assert(not ok, "expected boom to fail")
+            assert(err == "kaboom", "wrong error value: " .. tostring(err))
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("surfaces the error value separately from the raw unified trace", function()
+        local out = compile_and_run([[
+            function inner(): integer
+                raise "deep failure"
+                return 0
+            end
+            function outer(): integer
+                return inner()
+            end
+        ]], [==[
+            local titan = require 'titan'
+            local ok, err = pcall(test.outer)
+            assert(not ok)
+            assert(err == "deep failure", "wrong error value: " .. tostring(err))
+            local bt = titan.backtrace()
+            assert(not bt:find("deep failure", 1, true),
+                   "raw trace should not include the error message\n" .. bt)
+            assert(not bt:find("stack traceback:", 1, true),
+                   "raw trace should not include a trace header\n" .. bt)
+            assert(not bt:find("\t", 1, true),
+                   "raw trace should not include presentation tabs\n" .. bt)
+            -- the raising Titan function symbolizes as a native frame, shown by
+            -- its qualified Titan name (not the mangled C symbol)
+            assert(bt:find("in test.inner", 1, true), "missing inner frame\n" .. bt)
+            assert(bt:find("in test.outer", 1, true), "missing outer frame\n" .. bt)
+            -- attributed to the raise's .titan line via #line, not the generated .c
+            assert(bt:find("test%.titan:%d+: in test%.inner"),
+                   "inner frame not attributed to test.titan:<line>\n" .. bt)
+            assert(not bt:find("test%.c:%d+: in test"),
+                   "native frame still attributed to generated .c\n" .. bt)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("raises a non-string value (raised value reaches the handler verbatim)", function()
+        local out = compile_and_run([[
+            function boom(): integer
+                local t: {integer} = {1, 2, 3}
+                raise t
+                return 0
+            end
+        ]], [==[
+            local ok, err = pcall(test.boom)
+            assert(not ok, "expected boom to fail")
+            assert(type(err) == "table", "expected table error, got " .. type(err))
+            assert(err[2] == 2, "wrong table contents")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("raises non-GC scalar values verbatim", function()
+        local out = compile_and_run([[
+            function raise_int()
+                raise 42
+            end
+            function raise_false()
+                raise false
+            end
+        ]], [==[
+            local ok, err = pcall(test.raise_int)
+            assert(not ok and err == 42, "integer error not preserved: " .. tostring(err))
+            ok, err = pcall(test.raise_false)
+            assert(not ok and err == false, "false error not preserved: " .. tostring(err))
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("raises a computed value expression", function()
+        local out = compile_and_run([[
+            function boom(n: integer): integer
+                raise "code " .. n
+                return 0
+            end
+        ]], [==[
+            local ok, err = pcall(test.boom, 42)
+            assert(not ok)
+            assert(err == "code 42", "wrong error value: " .. tostring(err))
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("rejects a bare raise at compile time", function()
+        h.reset()
+        local errs = h.check_errs([[
+            function boom(): integer
+                raise
+                return 0
+            end
+        ]])
+        assert.truthy(#errs > 0, "bare raise should be a checker error")
+        assert.match("bare 'raise'", table.concat(errs, "\n"))
+    end)
+end)
+
+describe("standalone uncaught errors", function()
+    setup(function() os.remove("titan-runtime/titan.o") end)
+    after_each(clean)
+
+    it("prints the raised error and a backtrace before exiting non-zero", function()
+        local status, out = compile_and_run_app([[
+            function deep(): integer
+                raise "standalone-boom"
+                return 0
+            end
+            function main(args: {string}): integer
+                return deep()
+            end
+        ]])
+
+        assert.truthy(status and status ~= 0,
+            "expected non-zero exit, got " .. tostring(status) .. "\n" .. out)
+        assert.truthy(out:find("standalone-boom", 1, true),
+            "missing raised error in standalone report\n" .. out)
+        assert.truthy(out:find("^test: standalone%-boom\nstack traceback:\n\t"),
+            "standalone report is not Lua-shaped\n" .. out)
+        assert.falsy(out:find("stack traceback:\t", 1, true),
+            "standalone report put the first frame on the header line\n" .. out)
+        assert.truthy(out:find("in test.deep", 1, true),
+            "missing Titan raising frame in standalone report\n" .. out)
+        assert.truthy(out:find("in test.main", 1, true),
+            "missing Titan main frame in standalone report\n" .. out)
+    end)
+
+    it("formats a standalone non-string error object like lua.c", function()
+        local status, out = compile_and_run_app([[
+            function main(args: {string}): integer
+                raise false
+                return 0
+            end
+        ]])
+
+        assert.truthy(status and status ~= 0,
+            "expected non-zero exit, got " .. tostring(status) .. "\n" .. out)
+        assert.truthy(out:find("^test: %(error object is a boolean value%)\nstack traceback:\n\t"),
+            "standalone report did not use lua.c-style error conversion\n" .. out)
+    end)
+end)
+
+describe("finally", function()
+    setup(function() os.remove("titan-runtime/titan.o") end)
+    after_each(clean)
+
+    it("runs the finally on normal completion", function()
+        local out = compile_and_run([[
+            function run(): integer
+                local n: integer = 1
+                do
+                    n = 2
+                finally
+                    n = n + 10
+                end
+                return n
+            end
+        ]], [==[
+            assert(test.run() == 12, "finally not run on normal completion")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("runs the finally then returns when the body returns", function()
+        local out = compile_and_run([[
+            function run(): string
+                do
+                    return "from-body"
+                finally
+                    -- side effect proves the finally ran before the return landed
+                    raise_if_seen()
+                end
+            end
+            seen: boolean = false
+            function raise_if_seen()
+                seen = true
+            end
+            function was_seen(): boolean
+                return seen
+            end
+        ]], [==[
+            assert(test.run() == "from-body", "return-in-try wrong value")
+            assert(test.was_seen() == true, "finally did not run before return")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("runs the finally on a break out of a try inside a for loop", function()
+        local out = compile_and_run([[
+            function run(): integer
+                local sum: integer = 0
+                for i = 1, 5 do
+                    do
+                        if i == 3 then
+                            break
+                        end
+                        sum = sum + i
+                    finally
+                        sum = sum + 100
+                    end
+                end
+                return sum
+            end
+        ]], [==[
+            -- i=1: body +1, finally +100 -> 101
+            -- i=2: body +2, finally +100 -> 203
+            -- i=3: break (finally +100 still runs) -> 303, then break
+            assert(test.run() == 303, "break-in-try-in-for wrong: " .. tostring(test.run()))
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("runs the finally on a raise propagating through it", function()
+        local out = compile_and_run([[
+            ran: boolean = false
+            function mark()
+                ran = true
+            end
+            function did_run(): boolean
+                return ran
+            end
+            function run(): integer
+                do
+                    raise "boom"
+                finally
+                    mark()
+                end
+                return 0
+            end
+        ]], [==[
+            local ok, err = pcall(test.run)
+            assert(not ok, "expected raise to propagate")
+            assert(err == "boom", "wrong propagated error: " .. tostring(err))
+            assert(test.did_run() == true, "finally did not run on a raise")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("re-propagates the original error with its original trace", function()
+        local out = compile_and_run([[
+            function deep(): integer
+                raise "deep-boom"
+                return 0
+            end
+            function run(): integer
+                do
+                    return deep()
+                finally
+                    local x: integer = 1
+                end
+            end
+        ]], [==[
+            local titan = require 'titan'
+            local ok, err = pcall(test.run)
+            assert(not ok, "expected re-propagation")
+            assert(err == "deep-boom", "wrong re-raised value: " .. tostring(err))
+            local bt = titan.backtrace()
+            -- the original deep frame must survive (the finally reinstalled+pinned
+            -- the original trace before re-raising)
+            assert(bt:find("in test.deep", 1, true),
+                   "finally-only re-raise lost the original deep frame\n" .. bt)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("runs the finally then returns the caught value", function()
+        local out = compile_and_run([[
+            log: integer = 0
+            function note()
+                log = log + 1
+            end
+            function lognum(): integer
+                return log
+            end
+            function run(): string
+                do
+                    raise "x"
+                catch
+                    return "handled"
+                finally
+                    note()
+                end
+            end
+        ]], [==[
+            assert(test.run() == "handled", "catch-return-with-finally wrong value")
+            assert(test.lognum() == 1, "finally did not run after catch return")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("a finally that raises overrides a pending return", function()
+        local out = compile_and_run([[
+            function run(): integer
+                do
+                    return 7
+                finally
+                    raise "overridden"
+                end
+            end
+        ]], [==[
+            local ok, err = pcall(test.run)
+            assert(not ok, "finally raise should override the return")
+            assert(err == "overridden", "wrong override value: " .. tostring(err))
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("a finally that raises overrides a pending catch return", function()
+        local out = compile_and_run([[
+            function run(): integer
+                do
+                    raise "body"
+                catch
+                    return 7
+                finally
+                    raise "from-finally"
+                end
+            end
+        ]], [==[
+            local ok, err = pcall(test.run)
+            assert(not ok, "finally raise should override the catch return")
+            assert(err == "from-finally", "wrong override value: " .. tostring(err))
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("a finally that raises overrides a pending break", function()
+        local out = compile_and_run([[
+            function run(): integer
+                local n: integer = 0
+                while true do
+                    do
+                        break
+                    finally
+                        raise "no-break"
+                    end
+                end
+                return n
+            end
+        ]], [==[
+            local ok, err = pcall(test.run)
+            assert(not ok, "finally raise should override the break")
+            assert(err == "no-break", "wrong override value: " .. tostring(err))
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("a finally that raises overrides a pending raise", function()
+        local out = compile_and_run([[
+            function run(): integer
+                do
+                    raise "original"
+                finally
+                    raise "replacement"
+                end
+                return 0
+            end
+        ]], [==[
+            local ok, err = pcall(test.run)
+            assert(not ok, "expected the finally's raise to propagate")
+            assert(err == "replacement", "finally raise did not override: " .. tostring(err))
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("a bare re-raise in a catch that has a finally preserves the original trace", function()
+        local out = compile_and_run([[
+            function deep(): integer
+                raise "deep-boom"
+                return 0
+            end
+            function mid(): integer
+                return deep()
+            end
+            ran: boolean = false
+            function mark()
+                ran = true
+            end
+            function ran_finally(): boolean
+                return ran
+            end
+            function run(): integer
+                do
+                    return mid()
+                catch
+                    raise
+                finally
+                    mark()
+                end
+            end
+        ]], [==[
+            local titan = require 'titan'
+            local ok, err = pcall(test.run)
+            assert(not ok, "expected the re-raise to propagate")
+            assert(err == "deep-boom", "wrong re-raised value: " .. tostring(err))
+            assert(test.ran_finally() == true, "finally did not run on a catch re-raise")
+            local bt = titan.backtrace()
+            assert(bt:find("in test.deep", 1, true),
+                   "catch re-raise (with finally) lost the original deep frame\n" .. bt)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("runs nested finallys inside-out", function()
+        local out = compile_and_run([[
+            function order(): string
+                local s: string = ""
+                do
+                    do
+                        s = s .. "body "
+                    finally
+                        s = s .. "inner "
+                    end
+                finally
+                    s = s .. "outer "
+                end
+                return s
+            end
+        ]], [==[
+            assert(test.order() == "body inner outer ",
+                   "nested finally order wrong: " .. test.order())
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("a return chains through nested finallys", function()
+        local out = compile_and_run([[
+            function nested(): string
+                local s: string = ""
+                do
+                    do
+                        return "RET"
+                    finally
+                        s = s .. "inner "
+                    end
+                finally
+                    s = s .. "outer "
+                end
+            end
+        ]], [==[
+            -- the function returns RET; both finallys must have run on the way out
+            assert(test.nested() == "RET", "chained return wrong value")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("catch gets its own boundary: a raise in catch still runs the finally", function()
+        local out = compile_and_run([[
+            log: integer = 0
+            function note()
+                log = log + 1
+            end
+            function lognum(): integer
+                return log
+            end
+            function run(): integer
+                do
+                    raise "body"
+                catch
+                    raise "from-catch"
+                finally
+                    note()
+                end
+                return 0
+            end
+        ]], [==[
+            local ok, err = pcall(test.run)
+            assert(not ok)
+            assert(err == "from-catch", "wrong error from catch raise: " .. tostring(err))
+            assert(test.lognum() == 1, "finally did not run after a catch raise")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("catch-boundary recovery closes Lua to-be-closed variables before finally", function()
+        local out = compile_and_run([[
+            log: integer = 0
+            function note()
+                log = log + 1
+            end
+            function lognum(): integer
+                return log
+            end
+            function call_lua3(f: () -> integer): integer
+                return f()
+            end
+            function run(f: () -> integer): integer
+                do
+                    raise "body"
+                catch
+                    return f()
+                finally
+                    note()
+                end
+                return 0
+            end
+        ]], [==[
+            local closed = 0
+            local close_error
+            local mt = {
+                __close = function(_, err)
+                    closed = closed + 1
+                    close_error = tostring(err)
+                end
+            }
+            local function lua3()
+                error("catch-lua3-boom", 0)
+            end
+            local function lua2()
+                local x <close> = setmetatable({}, mt)
+                return test.call_lua3(lua3)
+            end
+
+            local ok, err = pcall(test.run, lua2)
+            assert(not ok, "catch callback error should propagate after finally")
+            assert(tostring(err):find("catch-lua3-boom", 1, true),
+                   "wrong propagated error: " .. tostring(err))
+            assert(closed == 1, "Lua __close in catch callback did not run exactly once: " .. closed)
+            assert(close_error:find("catch-lua3-boom", 1, true),
+                   "__close did not receive catch callback error: " .. tostring(close_error))
+            assert(test.lognum() == 1, "finally did not run after catch callback error")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("preserves a non-GC enclosing local across the finally", function()
+        local out = compile_and_run([[
+            function boom(): integer
+                raise "boom"
+                return 0
+            end
+            function run(): integer
+                local n: integer = 1
+                do
+                    n = 5
+                    n = n + boom()
+                catch
+                    n = n + 100
+                finally
+                    n = n + 1000
+                end
+                return n
+            end
+        ]], [==[
+            -- body sets n=5, errors; catch adds 100 (105); finally adds 1000 (1105)
+            assert(test.run() == 1105, "spill-across-finally wrong: " .. tostring(test.run()))
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("reloads a non-GC local assigned in catch before a catch raise reaches finally", function()
+        local out = compile_and_run([[
+            seen: integer = 0
+            function seen_value(): integer
+                return seen
+            end
+            function run()
+                local n: integer = 1
+                do
+                    raise "body"
+                catch
+                    n = 7
+                    raise "catch"
+                finally
+                    seen = n
+                end
+            end
+        ]], [==[
+            local ok, err = pcall(test.run)
+            assert(not ok)
+            assert(err == "catch", "wrong error from catch raise: " .. tostring(err))
+            assert(test.seen_value() == 7, "finally read stale catch-assigned local")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("preserves a multi-return through a finally", function()
+        local out = compile_and_run([[
+            function run(): (integer, string)
+                do
+                    return 42, "hi"
+                finally
+                    local x: integer = 0
+                end
+            end
+        ]], [==[
+            local a, b = test.run()
+            assert(a == 42 and b == "hi", "multi-return through finally wrong: "
+                   .. tostring(a) .. "," .. tostring(b))
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("keeps GC-valued pending returns rooted while the finally allocates", function()
+        local out = compile_and_run([[
+            record R
+                s: string
+            end
+
+            function churn()
+                local junk: {string} = {}
+                local i = 1
+                while i <= 600 do
+                    junk = { "x", "y", "z" }
+                    i = i + 1
+                end
+            end
+
+            function ret(a: string, b: string): (string, {string}, R, value)
+                do
+                    local arr: {string} = { a, b }
+                    local r: R = { s = b }
+                    local v: value = r
+                    return a, arr, r, v
+                finally
+                    churn()
+                end
+            end
+        ]], [==[
+            collectgarbage("generational")
+            local a = ("a"):rep(5000) .. "!"
+            local b = ("b"):rep(6000) .. "?"
+            local s, arr, r, v = test.ret(a, b)
+            collectgarbage("step")
+            assert(s == a, "string return corrupted")
+            assert(arr[2] == b, "array return corrupted")
+            assert(r.s == b, "record return corrupted")
+            assert(v == r, "value return no longer points at the record")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("runs finally before a break issued from a catch", function()
+        local out = compile_and_run([[
+            function run(): integer
+                local n: integer = 0
+                while n < 10 do
+                    do
+                        raise "stop"
+                    catch
+                        break
+                    finally
+                        n = n + 100
+                    end
+                    n = n + 1
+                end
+                return n
+            end
+        ]], [==[
+            assert(test.run() == 100, "catch break did not run finally first")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("cascades nested finally blocks on a propagating raise", function()
+        local out = compile_and_run([[
+            log: string = ""
+            function resetlog()
+                log = ""
+            end
+            function note(s: string)
+                log = log .. s
+            end
+            function getlog(): string
+                return log
+            end
+
+            function cascade(): integer
+                do
+                    do
+                        raise "x"
+                    finally
+                        note("inner ")
+                    end
+                finally
+                    note("outer ")
+                end
+                return 0
+            end
+
+            function override_inside_finally(): integer
+                do
+                    raise "body"
+                catch
+                    note("catch ")
+                finally
+                    do
+                        raise "inner"
+                    finally
+                        note("cleanup ")
+                    end
+                end
+                return 0
+            end
+        ]], [==[
+            test.resetlog()
+            local ok, err = pcall(test.cascade)
+            assert(not ok and err == "x")
+            assert(test.getlog() == "inner outer ",
+                   "wrong nested-finally order: " .. test.getlog())
+
+            test.resetlog()
+            ok, err = pcall(test.override_inside_finally)
+            assert(not ok and err == "inner")
+            assert(test.getlog() == "catch cleanup ",
+                   "inner raise from finally did not override/cascade correctly: "
+                   .. test.getlog())
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+end)
+
+describe("catch", function()
+    setup(function() os.remove("titan-runtime/titan.o") end)
+    after_each(clean)
+
+    it("catches a body error and continues after the try", function()
+        local out = compile_and_run([[
+            function run(): integer
+                do
+                    raise "boom"
+                    return 1
+                catch
+                    return 42
+                end
+            end
+        ]], [==[
+            local r = test.run()
+            assert(r == 42, "expected 42, got " .. tostring(r))
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("falls through to code after the try when the catch handles", function()
+        local out = compile_and_run([[
+            function run(): integer
+                local n: integer = 0
+                do
+                    raise "boom"
+                catch
+                    n = 7
+                end
+                return n + 1
+            end
+        ]], [==[
+            assert(test.run() == 8, "expected 8")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("binds the caught `error` value to what was raised", function()
+        local out = compile_and_run([[
+            function run(): string
+                do
+                    raise "the-message"
+                    return "unreached"
+                catch
+                    return error
+                end
+            end
+        ]], [==[
+            assert(test.run() == "the-message", "wrong caught error")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("binds a non-string caught error verbatim", function()
+        local out = compile_and_run([[
+            function run(): integer
+                do
+                    local t: {integer} = {10, 20, 30}
+                    raise t
+                    return 0
+                catch
+                    local got: {integer} = error as {integer}
+                    return got[2]
+                end
+            end
+        ]], [==[
+            assert(test.run() == 20, "wrong caught table value")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("binds `traceback` to a string containing the unified trace", function()
+        local out = compile_and_run([[
+            function deep(): integer
+                raise "fail-here"
+                return 0
+            end
+            function run(): string
+                do
+                    local x: integer = deep()
+                    return "no-error"
+                catch
+                    return traceback
+                end
+            end
+        ]], [==[
+            local tb = test.run()
+            assert(type(tb) == "string", "traceback not a string: " .. type(tb))
+            assert(not tb:find("stack traceback:", 1, true),
+                   "catch traceback should not include a trace header\n" .. tb)
+            assert(not tb:find("\t", 1, true),
+                   "catch traceback should not include presentation tabs\n" .. tb)
+            assert(tb:find("in test.deep", 1, true), "trace lacks deep frame\n" .. tb)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("catches non-raise runtime errors from protected bodies", function()
+        local out = compile_and_run([[
+            function run(): string
+                do
+                    local x: value = {}
+                    local n: integer = x as integer
+                    return "unreached " .. n
+                catch
+                    return traceback
+                end
+            end
+        ]], [==[
+            local tb = test.run()
+            assert(tb:find("in test.run", 1, true),
+                   "runtime type error was not caught with traceback\n" .. tostring(tb))
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("closes Lua to-be-closed variables while unwinding through Lua callbacks into a Titan catch", function()
+        local out = compile_and_run([[
+            function call_lua3(f: () -> integer): integer
+                return f()
+            end
+            function catch_lua2(f: () -> integer): integer
+                do
+                    return f()
+                catch
+                    return 77
+                end
+            end
+        ]], [==[
+            local closed = 0
+            local close_error
+            local mt = {
+                __close = function(_, err)
+                    closed = closed + 1
+                    close_error = tostring(err)
+                end
+            }
+            local function lua3()
+                error("lua3-boom", 0)
+            end
+            local function lua2()
+                local x <close> = setmetatable({}, mt)
+                return test.call_lua3(lua3)
+            end
+
+            -- Lua -> Titan catch_lua2 [1] -> Lua lua2 [2] -> Titan call_lua3
+            -- -> Lua lua3 [3]. The error from [3] is caught by [1]; recovery
+            -- must close [2]'s to-be-closed local during unwinding.
+            assert(test.catch_lua2(lua2) == 77, "Titan catch did not handle Lua error")
+            assert(closed == 1, "Lua __close did not run exactly once: " .. closed)
+            assert(close_error:find("lua3-boom", 1, true),
+                   "__close did not receive the original error: " .. tostring(close_error))
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("catches a Lua __close error raised during protected-boundary recovery", function()
+        local out = compile_and_run([[
+            function call_lua3(f: () -> integer): integer
+                return f()
+            end
+            function catch_lua2_error(f: () -> integer): (string, string)
+                do
+                    local n: integer = f()
+                    return "unreached " .. n, ""
+                catch
+                    return error as string, traceback
+                end
+            end
+        ]], [==[
+            local close_seen_original = false
+            local mt = {
+                __close = function(_, err)
+                    close_seen_original = tostring(err):find("original-lua3-error", 1, true) ~= nil
+                    error("close-error", 0)
+                end
+            }
+            local function lua3()
+                error("original-lua3-error", 0)
+            end
+            local function lua2()
+                local x <close> = setmetatable({}, mt)
+                return test.call_lua3(lua3)
+            end
+
+            local caught, tb = test.catch_lua2_error(lua2)
+            assert(close_seen_original, "__close did not see the original Lua error")
+            assert(caught:find("close-error", 1, true),
+                   "Titan catch did not receive the __close replacement error: " .. caught)
+            assert(not tb:find("close-error", 1, true),
+                   "raw traceback should not include the replacement error message:\n" .. tb)
+            assert(tb:find("in test.catch_lua2_error", 1, true),
+                   "Titan errorhandler did not recapture the replacement-error boundary:\n" .. tb)
+            assert(not tb:find("in test.call_lua3", 1, true),
+                   "traceback still points at the original Lua3 call instead of the __close replacement:\n" .. tb)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("catches an error raised while evaluating a return expression", function()
+        local out = compile_and_run([[
+            function boom(): integer
+                raise "boom"
+                return 0
+            end
+            function run(): integer
+                do
+                    return boom()
+                catch
+                    return 42
+                end
+            end
+        ]], [==[
+            assert(test.run() == 42,
+                   "return expression error restored the boundary too early")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("bare re-raise preserves the ORIGINAL deep trace", function()
+        local out = compile_and_run([[
+            function deep(): integer
+                raise "deep-boom"
+                return 0
+            end
+            function mid(): integer
+                return deep()
+            end
+            function run(): integer
+                do
+                    return mid()
+                catch
+                    raise
+                end
+            end
+        ]], [==[
+            local titan = require 'titan'
+            local ok, err = pcall(test.run)
+            assert(not ok)
+            assert(err == "deep-boom", "wrong re-raised value: " .. tostring(err))
+            local bt = titan.backtrace()
+            -- the ORIGINAL trace names the deep raising frame, not just the catch site
+            assert(bt:find("in test.deep", 1, true),
+                   "re-raise lost the original deep frame\n" .. bt)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("raise <exp> in a catch builds a FRESH trace at the raise site", function()
+        local out = compile_and_run([[
+            function deep(): integer
+                raise "deep-boom"
+                return 0
+            end
+            function run(): integer
+                do
+                    return deep()
+                catch
+                    raise "fresh-error"
+                end
+            end
+        ]], [==[
+            local titan = require 'titan'
+            local ok, err = pcall(test.run)
+            assert(not ok)
+            assert(err == "fresh-error", "wrong fresh value: " .. tostring(err))
+            local bt = titan.backtrace()
+            -- a fresh trace is captured at the catch's raise: it must NOT mention
+            -- the original deep frame (which is no longer on the stack)
+            assert(not bt:find("in test.deep", 1, true),
+                   "fresh trace wrongly kept the original deep frame\n" .. bt)
+            assert(bt:find("in test.run", 1, true),
+                   "fresh trace lacks the raise-site frame\n" .. bt)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("a return out of a protected body works (errorjmp restored)", function()
+        local out = compile_and_run([[
+            function run(): integer
+                do
+                    return 99
+                catch
+                    return -1
+                end
+            end
+        ]], [==[
+            assert(test.run() == 99, "early return out of try failed")
+            -- a subsequent error must still be caught/handled correctly,
+            -- proving L->errorJmp was restored (not dangling)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("a break out of a protected body in a loop works", function()
+        local out = compile_and_run([[
+            function run(): integer
+                local sum: integer = 0
+                local i: integer = 0
+                while i < 10 do
+                    i = i + 1
+                    do
+                        if i == 5 then
+                            break
+                        end
+                        sum = sum + i
+                    catch
+                        sum = sum + 1000
+                    end
+                end
+                return sum
+            end
+        ]], [==[
+            -- breaks at i==5: sums 1+2+3+4 = 10
+            assert(test.run() == 10, "break out of try-in-loop failed: " .. tostring(test.run()))
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("a non-GC local mutated in the body reads correctly after the catch (spill)", function()
+        local out = compile_and_run([[
+            function boom(): integer
+                raise "boom"
+                return 0
+            end
+            function run(): integer
+                local n: integer = 1
+                do
+                    n = 5
+                    n = n + boom()
+                catch
+                    n = n + 100
+                end
+                return n
+            end
+        ]], [==[
+            -- n is set to 5 in the body, then the catch reads it (5) and adds 100
+            assert(test.run() == 105, "spilled local wrong: " .. tostring(test.run()))
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("spills only setjmp-sensitive non-GC locals and params, not their C vars", function()
+        local csrc = compile_and_read_c([[
+            function run(n: integer): integer
+                local m: integer = 10
+                do
+                    n = 5
+                    m = 6
+                    raise "x"
+                catch
+                    n = n + m
+                end
+                return n
+            end
+        ]])
+        assert.not_match("volatile%s+lua_Integer%s+_param_n", csrc)
+        assert.not_match("volatile%s+lua_Integer%s+_local_m_1", csrc)
+        assert.match("volatile%s+lua_Integer%s+_spill_param_n", csrc)
+        assert.match("volatile%s+lua_Integer%s+_spill_local_m_1", csrc)
+    end)
+
+    it("does not spill locals and params just because a function contains catch", function()
+        local csrc = compile_and_read_c([[
+            function run(n: integer): integer
+                local m: integer = 1
+                do
+                    raise "x"
+                catch
+                end
+                return n + m
+            end
+        ]])
+        assert.not_match("_spill_param_n", csrc)
+        assert.not_match("_spill_local_m_1", csrc)
+        assert.not_match("volatile%s+lua_Integer%s+_param_n", csrc)
+        assert.not_match("volatile%s+lua_Integer%s+_local_m_1", csrc)
+    end)
+
+    it("a GC local mutated in the body reads correctly after a handled error", function()
+        local out = compile_and_run([[
+            function run(): string
+                local s: string = "old"
+                do
+                    s = "new"
+                    raise "x"
+                catch
+                end
+                return s
+            end
+        ]], [==[
+            assert(test.run() == "new", "GC local changed across longjmp")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("a GC parameter mutated in the body reads correctly after a handled error", function()
+        local out = compile_and_run([[
+            function run(s: string): string
+                do
+                    s = "new"
+                    raise "x"
+                catch
+                end
+                return s
+            end
+        ]], [==[
+            assert(test.run("old") == "new", "GC parameter changed across longjmp")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("a fresh error after a handled one regenerates the trace", function()
+        local out = compile_and_run([[
+            function handled(): integer
+                do
+                    raise "first"
+                catch
+                    return 0
+                end
+            end
+            function boom(): integer
+                raise "second"
+                return 0
+            end
+        ]], [==[
+            local titan = require 'titan'
+            assert(test.handled() == 0)
+            -- after handling, a brand-new error must get its own fresh trace
+            local ok, err = pcall(test.boom)
+            assert(not ok and err == "second")
+            local bt = titan.backtrace()
+            assert(bt:find("in test.boom", 1, true), "fresh trace missing\n" .. bt)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("clears handled traces and consumes a real re-raise pin before the next fresh error", function()
+        local out = compile_and_run([[
+            function deep(): integer
+                raise "old"
+                return 0
+            end
+            function rer(): integer
+                do
+                    return deep()
+                catch
+                    raise
+                end
+            end
+            function handled(): integer
+                do
+                    raise "handled"
+                catch
+                    return 0
+                end
+            end
+            function fresh(): integer
+                raise "fresh"
+                return 0
+            end
+        ]], [==[
+            local titan = require 'titan'
+            assert(test.handled() == 0)
+            assert(titan.backtrace() == nil, "handled catch left a stale trace")
+
+            local ok, err = pcall(test.rer)
+            assert(not ok and err == "old")
+            local old = titan.backtrace()
+            assert(old:find("in test.deep", 1, true),
+                   "re-raise did not preserve original deep trace\n" .. tostring(old))
+
+            ok, err = pcall(test.fresh)
+            assert(not ok and err == "fresh")
+            local new = titan.backtrace()
+            assert(new:find("in test.fresh", 1, true),
+                   "fresh error after re-raise did not regenerate\n" .. tostring(new))
+            assert(not new:find("in test.deep", 1, true),
+                   "re-raise pin leaked into next fresh error\n" .. new)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+end)

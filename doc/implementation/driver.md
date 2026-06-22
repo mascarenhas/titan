@@ -33,8 +33,8 @@ Two distinct path strings are consulted:
 * **`driver.TITAN_SOURCE_PATH`** — where `.titan` sources live. Default
   `"."`; `titanc --tree <root>` overrides it.
 * **`driver.TITAN_BIN_PATH`** — where compiled `.so` modules live.
-  Default `os.getenv("TITAN_PATH_0_5") or os.getenv("TITAN_PATH") or
-  ".;/usr/local/lib/titan/0.5"`.
+  Default `os.getenv("TITAN_PATH_0_10") or os.getenv("TITAN_PATH") or
+  ".;/usr/local/lib/titan/0.10"`.
 
 So `import foo.bar` looks for `foo/bar.titan` under the source path and
 `foo/bar.so` under the bin path. Note that the compile-time path walk
@@ -58,12 +58,14 @@ So the `.so` branch is taken when a compiled module exists *and* either
 no source is present (`not mtime_src`) or the `.so` is at least as new
 as the source (`mtime_bin >= mtime_src`); otherwise the loader falls
 through to the source path below. The `.so`-only case works end to end:
-the branch `package.loadlib`s the `<mangled>_types` symbol, evaluates
-the serialized interface, caches it as `{ type = ..., compiled = true }`,
-and the dependency is then linked dynamically at run time. The
-dynamic-loading machinery this rides on (the `_types` symbol,
-`loadlib`/`loadsym`, the generated `_init`) is the same one exercised
-through every other entry point.
+the branch first `package.loadlib`s the `<mangled>_abi` symbol and
+requires it to return the current `driver.TITAN_VER`, then loads
+`<mangled>_types`, evaluates the serialized interface, caches it as
+`{ type = ..., compiled = true }`, and the dependency is then linked
+dynamically at run time. The dynamic-loading machinery this rides on
+(the `_abi`/`_types` symbols, `loadlib`/`titan_check_abi`/`loadsym`, the
+generated `_init`) is the same one exercised through every other entry
+point.
 
 ## The loader protocol
 
@@ -96,10 +98,11 @@ is a message. See [the type checker](checker.md) for the consumer side.
 The closure proceeds: cache hit → return the cached type (and mark the
 module in `static_deps` if it has a source AST); `.so` selected (see the
 [selection logic above](#source-vs-so-the-selection-logic)) →
-`package.loadlib` the `<mangled>_types` symbol, call it,
-and evaluate the returned string with `load("return " .. serialized,
-modname, "t", types)` — the serialized interface is a Lua expression
-over `types.lua` constructors (see
+`package.loadlib` the `<mangled>_abi` symbol and require the current
+`TITAN_VER`, then `package.loadlib` the `<mangled>_types` symbol, call
+it, and evaluate the returned string with `load("return " .. serialized,
+modname, "t", types)` — the serialized interface is a Lua expression over
+`types.lua` constructors (see
 [the module protocol](codegen-overview.md)); source found → parse, set
 `CIRCULAR_MARK`, run `checker.check` recursively with the same loader,
 cache the result, and set `static_deps[modname] = true`.
@@ -128,7 +131,9 @@ checked AST into an object file:
    whenever it is missing or older than `titan-runtime/titan.c`:
 
    ```sh
-   cc --std=c99 -O2 -Wall -fPIC -c titan-runtime/titan.c -I titan-runtime/ -I lua-5.5.0/src/ -o titan-runtime/titan.o
+   cc --std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls \
+      -c titan-runtime/titan.c -I titan-runtime/ -I lua-5.5.0/src/ \
+      -I libbacktrace -o titan-runtime/titan.o
    ```
 
    (`coder_spec.lua`'s `setup()` deletes `titan.o` precisely to force
@@ -142,10 +147,14 @@ checked AST into an object file:
 4. The object is compiled with `driver.CC` and `driver.CFLAGS`:
 
    ```sh
-   cc --std=c99 -O2 -Wall -fPIC -c foo/bar.c -I titan-runtime -I lua-5.5.0/src/ -o foo/bar.o
+   cc --std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls -c foo/bar.c \
+      -I titan-runtime -I lua-5.5.0/src/ -I libbacktrace -o foo/bar.o
    ```
 
-   Note the first include directory is the string literal
+   `-g` emits the DWARF that carries the `#line` file/line a unified
+   trace needs; `-fno-optimize-sibling-calls` keeps tail frames on the
+   stack so libbacktrace can unwind them; `-I libbacktrace` finds
+   `backtrace.h`. Note the first include directory is the string literal
    `"titan-runtime"`, not the configurable `driver.TITAN_RUNTIME_PATH`
    used everywhere else — overriding `TITAN_RUNTIME_PATH` does not move
    the header search for module compilation.
@@ -168,21 +177,28 @@ wrapper `titanc` uses: it skips modules whose cache entry says
 next to the source like the `.c`/`.o` — from a list of object files:
 
 ```sh
-cc --std=c99 -O2 -Wall -fPIC -shared -o foo/bar.so \
-   foo/bar.o dep.o ... titan-runtime/titan.o lua-5.5.0/src//liblua.a -ldl -lm [-lSDL2 ...]
+cc --std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls -shared -o foo/bar.so \
+   foo/bar.o dep.o ... titan-runtime/titan.o libbacktrace/.libs/libbacktrace.a \
+   lua-5.5.0/src//liblua.a -ldl -lm [-lSDL2 ...]
 ```
 
 The link set is: every object in `libnames` (the module itself plus its
 statically-linked Titan dependencies), then `titan-runtime/titan.o`
 (the dynamic loader and error handler every module needs), then
-`liblua.a` from `driver.LUA_SOURCE_PATH` (the doubled slash is a
-cosmetic artifact of `LUA_SOURCE_PATH` ending in `/`), then `-ldl -lm`,
-then one `-l<lib>` per entry of the comma-separated `link` string
-(`titanc -l`). On Darwin (`driver.UNAME`, captured by shelling out to
-`uname` when `driver.lua` is loaded) the shared flag becomes
-`-shared -undefined dynamic_lookup` — the standard macOS idiom for Lua
-C modules, letting symbols still undefined at link time resolve when
-the module is loaded into the host process.
+`libbacktrace/.libs/libbacktrace.a` (the native unwinder/symbolizer,
+**before** `liblua.a`), then `liblua.a` from `driver.LUA_SOURCE_PATH`
+(the doubled slash is a cosmetic artifact of `LUA_SOURCE_PATH` ending in
+`/`), then `-ldl -lm`, then one `-l<lib>` per entry of the
+comma-separated `link` string (`titanc -l`). On Darwin
+(`driver.IS_DARWIN`, cached from a `uname` shell-out when `driver.lua`
+is loaded) the shared flag becomes `-shared -undefined dynamic_lookup` —
+the standard macOS idiom for Lua C modules — and, **after the link**,
+`driver.compile_library` runs `dsymutil <output>` to produce the
+companion `.dSYM` bundle libbacktrace needs to symbolize Mach-O PCs to
+`.titan` file/line (the Mach-O linker does not embed DWARF in the
+binary). `compile_program` does the same for the executable. On Linux
+`dsymutil` is **not** invoked (DWARF is embedded; `dsymutil` may be
+absent).
 
 ## Linking a standalone program: `driver.compile_program`
 
@@ -194,8 +210,10 @@ srlua-derived C `main` — and then links it with the same object set as
 a library, plus the entrypoint:
 
 ```sh
-cc --std=c99 -O2 -Wall -fPIC -o foo/bar -I titan-runtime/ -I lua-5.5.0/src/ \
-   foo/bar__entrypoint.c foo/bar.o ... titan-runtime/titan.o lua-5.5.0/src//liblua.a -ldl -lm
+cc --std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls -o foo/bar \
+   -I titan-runtime/ -I lua-5.5.0/src/ foo/bar__entrypoint.c foo/bar.o ... \
+   titan-runtime/titan.o libbacktrace/.libs/libbacktrace.a \
+   lua-5.5.0/src//liblua.a -ldl -lm
 ```
 
 The generated entrypoint, walked through (template substitutions:
@@ -213,11 +231,11 @@ error alerts):
   lua_setfield(L, -2, "$MODNAME");
   ```
 
-  It then pushes `msghandler` and runs `pmain` under
+  It then pushes Titan's runtime `errorhandler` and runs `pmain` under
   `lua_pcall(L, 2, 1, -4)` with `argc` and `argv` as arguments; a
-  failed pcall prints the message via `fatal` and
-  exits with `EXIT_FAILURE`. On success the integer returned by the
-  Titan `main` becomes the **process exit status**:
+  failed pcall formats the still-available original error object and the
+  captured raw traceback before exiting with `EXIT_FAILURE`. On success
+  the integer returned by the Titan `main` becomes the **process exit status**:
   `ret = lua_tointeger(L, -1); lua_close(L); return ret;`.
 * **`pmain`** loads the fixed chunk
   `"local arg = ...;\nreturn\nrequire('$MODNAME').main(arg);"`, builds
@@ -226,15 +244,18 @@ error alerts):
   ... lua_rawseti(L, -2, i)`) — and calls the chunk. So a Titan
   `main(args: {string}): integer` sees `args[1]` as the first real
   argument and `#args == argc - 1`.
-* **`msghandler`** is luac's message handler: stringify the error
-  object (via `__tostring` if needed) and append `luaL_traceback`. It
-  fires only for errors raised while it is the active handler, though:
-  an error raised *inside* a Titan function is intercepted by the
-  per-function Titan error handler, which replaced `L->errfunc` for the
-  duration of the native call and returns the error unchanged — so a
-  Titan run-time error reaches `fatal` *without* a Lua traceback (the
-  enriched backtrace went to the registry instead; see
-  [the runtime library](#titanc-the-dynamic-loader)).
+* **Top-level reporting** uses Titan's own `errorhandler` as the
+  `lua_pcall` message handler. On error, that handler records the raw
+  unified trace in `registry[TITAN_BACKTRACE_KEY]` and returns the
+  original raised value unchanged. `main` then converts that value with
+  `lua.c`'s string/number, `__tostring`, or typed-placeholder policy and
+  prints a Lua-style report to stderr: `<progname>: <error message>`,
+  `stack traceback:`, then the raw trace with a tab prepended to each
+  frame line through the Titan `main` frame. The report strips the
+  synthetic bootstrap chunk prefix from the headline and omits bootstrap
+  Lua/C frames after `main`. If no Titan trace was captured, it reports
+  only the converted error message. Either way the process exits
+  non-zero; see [the runtime library](#titanc-the-dynamic-loader).
 
 Mechanically, then, a standalone Titan program is an embedded Lua
 interpreter whose only preloaded module is the compiled main module;
@@ -354,12 +375,15 @@ uses directly.
 * **`TITAN_LIKELY(x)` / `TITAN_UNLIKELY(x)`** — `__builtin_expect`
   wrappers (plain parentheses off GCC/Clang); used on the hot/cold
   sides of generated type checks.
-* **Constants** — `TITAN_VER "0.5"`, `TITAN_VER_SUFFIX "_0_5"`,
+* **Constants** — `TITAN_VER "0.10"`, `TITAN_VER_SUFFIX "_0_10"`,
   `TITAN_PATH_VAR "TITAN_PATH"`, `TITAN_PATH_SEP "/"`,
-  `TITAN_PATH_DEFAULT ".;/usr/local/lib/titan/0.5"`, and three UUID
+  `TITAN_PATH_DEFAULT ".;/usr/local/lib/titan/0.10"`, and UUID
   strings used as Lua-registry keys: `TITAN_PATH_KEY` (cached search
   path), `TITAN_LIBS_KEY` (dlopen handle table),
-  `TITAN_BACKTRACE_KEY` (last error backtrace).
+  `TITAN_BT_GENERATION_KEY` (shared libbacktrace invalidation generation),
+  `TITAN_BACKTRACE_KEY` (last raw error backtrace),
+  `TITAN_NAMES_KEY` (native-symbol display-name table), and
+  `TITAN_TRACE_PINNED` (re-raise traceback pin).
   `TITAN_LUAINTEGER_NBITS` is used by shift code generation.
 * **`titan_pushmodule(L, c)`** — pushes a `Udata*` (the module state
   object) onto the Lua stack by writing the slot and bumping
@@ -385,9 +409,9 @@ It also declares the three C functions exported by `titan.c`:
 
 * **`pushpath(L)`** resolves the run-time module search path once per
   Lua state and caches it in the registry under `TITAN_PATH_KEY`. The
-  order is: `getenv("TITAN_PATH_0_5")` (the versioned variable,
+  order is: `getenv("TITAN_PATH_0_10")` (the versioned variable,
   `TITAN_PATH_VAR TITAN_VER_SUFFIX`), then `getenv("TITAN_PATH")`,
-  then the built-in default `".;/usr/local/lib/titan/0.5"`. A `;;` in
+  then the built-in default `".;/usr/local/lib/titan/0.10"`. A `;;` in
   the environment value is replaced by the default path (two
   `luaL_gsub` passes through a `\1` placeholder), so
   `TITAN_PATH="/opt/titan;;"` means "look in `/opt/titan`, then the
@@ -411,16 +435,24 @@ It also declares the three C functions exported by `titan.c`:
   cross-module function pointers
   ([static vs dynamic wiring](codegen-overview.md)).
 * **`errorhandler(L)`** — the message handler that every generated Lua
-  entry wrapper installs in `L->errfunc` around the native call
-  ([Lua interop internals](lua-interop-internals.md)). It captures up
-  to 255 C frames with `backtrace`/`backtrace_symbols` (`execinfo.h`),
-  concatenates *stringified error* + `"\n"` + Lua traceback +
-  `"C traceback:\n"` + the symbolized C frames, and stores the result
-  in the registry under `TITAN_BACKTRACE_KEY`. It then restores the
-  stack top and returns 1 — so the **original error value** reaches
-  `pcall` unchanged, and the enriched backtrace is fetched separately.
-  (Its push-everything-first ordering exists because a Lua 5.5
-  `luaL_Buffer` must stay at the stack top while in use.)
+  entry wrapper ensures is active in `L->errfunc` around the native call
+  ([Lua interop internals](lua-interop-internals.md)). It builds **one
+  unified, intermingled trace** (innermost→outer): the CallInfo chain
+  supplies every Lua frame, and libbacktrace (`backtrace_full`,
+  DWARF/`#line`-symbolized to `.titan` file/line) supplies the Titan
+  native frames, spliced at the entry-wrapper boundaries (identified by
+  the `titanentry` symbol substring). Interpreter, standard-library,
+  `titan-runtime` and unsymbolized native frames are filtered out. The
+  result — raw merged frame lines only, with no error message, no `stack
+  traceback:` header, and no presentation tabs — is stored in the
+  registry under `TITAN_BACKTRACE_KEY` (subject to the
+  `TITAN_TRACE_PINNED` pin discipline). It then restores the stack top
+  and returns 1 — so the **original error value** reaches `pcall`
+  unchanged, and the enriched backtrace is fetched separately. (Its
+  push-everything-first ordering exists because a Lua 5.5 `luaL_Buffer`
+  must stay at the stack top while in use.) Without libbacktrace
+  (`TITAN_NO_LIBBACKTRACE`) it falls back to raw Lua traceback lines plus
+  raw `execinfo` C frames.
 
 ### `titanlib.c`: the `titan` Lua module
 
@@ -433,7 +465,7 @@ modules). It exposes exactly one function:
 local titan = require "titan"
 local ok, err = pcall(mod.f)        -- a Titan function that raises
 if not ok then
-    print(titan.backtrace())        -- error + Lua traceback + C traceback
+    print(titan.backtrace())        -- raw unified Lua+Titan frame lines
 end
 ```
 
@@ -448,23 +480,24 @@ user-facing story.
 
 | Name | Where read | Default / value | Meaning |
 | --- | --- | --- | --- |
-| `TITAN_PATH_0_5` | `driver.lua` (compile time), `titan.c` `pushpath` (run time) | unset | Versioned module search path; wins over `TITAN_PATH`. |
+| `TITAN_PATH_0_10` | `driver.lua` (compile time), `titan.c` `pushpath` (run time) | unset | Versioned module search path; wins over `TITAN_PATH`. |
 | `TITAN_PATH` | same | unset | Module search path; `;;` expands to the default at run time only. |
-| `driver.TITAN_BIN_PATH` | `driver.lua` | `TITAN_PATH_0_5` or `TITAN_PATH` or `".;/usr/local/lib/titan/0.5"` | Where compiled `.so` modules are searched at compile time. |
+| `driver.TITAN_BIN_PATH` | `driver.lua` | `TITAN_PATH_0_10` or `TITAN_PATH` or `".;/usr/local/lib/titan/0.10"` | Where compiled `.so` modules are searched at compile time. |
 | `driver.TITAN_SOURCE_PATH` | `driver.lua` | `"."` (overridden by `titanc --tree`) | Where `.titan` sources are searched. |
 | `driver.LUA_SOURCE_PATH` | `driver.lua` | `"lua-5.5.0/src/"` (overridden by `titanc --lua`) | Lua source tree: internal headers at compile, `liblua.a` at link. |
 | `driver.TITAN_RUNTIME_PATH` | `driver.lua` | `"titan-runtime/"` | Location of `titan.c`/`titan.h`/`titan.o` (but `driver.compile` hard-codes `-I titan-runtime`). |
 | `driver.CC` | `driver.lua` | `"cc"` | The C compiler command. |
-| `driver.CFLAGS` | `driver.lua` | `"--std=c99 -O2 -Wall -fPIC"` | Flags for every compile and link step. |
+| `driver.CFLAGS` | `driver.lua` | `"--std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls"` | Flags for every compile and link step. |
 | shared-library flags | `shared_flag()` | `-shared`; on Darwin `-shared -undefined dynamic_lookup` | Platform from `driver.UNAME` (output of `uname`). |
-| link set (library) | `compile_library` | module `.o`s + `titan.o` + `liblua.a` + `-ldl -lm` + `-l<lib>`… | `-l` list from `titanc -l a,b,c`. |
-| link set (program) | `compile_program` | `<mod>__entrypoint.c` + all `.o`s + `titan.o` + `liblua.a` + `-ldl -lm` + `-l<lib>`… | Standalone programs bundle every compiled module. |
-| `TITAN_PATH_DEFAULT` | `titan.h` | `".;/usr/local/lib/titan/0.5"` | Run-time default search path (mirrors `TITAN_BIN_PATH`'s default). |
-| registry keys | `titan.h` | `TITAN_PATH_KEY`, `TITAN_LIBS_KEY`, `TITAN_BACKTRACE_KEY` (UUID strings) | Per-state caches: search path, dlopen handles, last backtrace. |
+| link set (library) | `compile_library` | module `.o`s + `titan.o` + `libbacktrace.a` + `liblua.a` + `-ldl -lm` + `-l<lib>`… | `-l` list from `titanc -l a,b,c`; libbacktrace is linked before Lua. |
+| link set (program) | `compile_program` | `<mod>__entrypoint.c` + all `.o`s + `titan.o` + `libbacktrace.a` + `liblua.a` + `-ldl -lm` + `-l<lib>`… | Standalone programs bundle every compiled module; libbacktrace is linked before Lua. |
+| `TITAN_PATH_DEFAULT` | `titan.h` | `".;/usr/local/lib/titan/0.10"` | Run-time default search path (mirrors `TITAN_BIN_PATH`'s default). |
+| registry keys | `titan.h` | `TITAN_PATH_KEY`, `TITAN_LIBS_KEY`, `TITAN_BT_GENERATION_KEY`, `TITAN_BACKTRACE_KEY`, `TITAN_NAMES_KEY`, `TITAN_TRACE_PINNED` (UUID strings) | Per-state caches: search path, dlopen handles, shared libbacktrace invalidation generation, last raw backtrace, native-frame display names, and re-raise traceback pin. |
+| generated ABI symbol | `coder.lua` | `<mangled>_abi` returning `TITAN_VER` | Checked before `.so` type rehydration and before run-time dynamic-import `dlsym`; markerless modules are treated as incompatible. |
 
 The pieces upstream of the driver are described in
 [the type checker](checker.md) (which calls the loader) and the
 [code generator overview](codegen-overview.md) (which produces what the
 driver compiles); the contents of `titan.o`'s callers — the generated
-`_init`, the Lua entry wrappers that install `errorhandler` — are in
-[Lua interop internals](lua-interop-internals.md).
+`_init`, the Lua entry wrappers that ensure `errorhandler` is active —
+are in [Lua interop internals](lua-interop-internals.md).
