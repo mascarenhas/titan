@@ -14,13 +14,19 @@ Required outcomes from the prompt:
 1. No manual bridge C for ordinary C library use. Header import remains unless a
    replacement is clearly better.
 2. Calls from Titan to C should be as close to zero-cost as possible.
-3. Titan functions should be passable to C function-pointer callbacks, through
-   generated thunks where needed.
+3. C variadic functions should be callable, with casts through ordinary
+   `as <C type>` where the caller must select a precise C width.
 4. Titan-allocated C storage should be tracked by Lua/Titan GC, using `Udata`,
    and must stay anchored when unwrapped for C calls.
 5. C struct and union fields should use normal Titan field syntax.
 6. C interop is unsafe; Lua gradual-typing guarantees do not extend across it.
 7. FFI values that reach Lua may be opaque lightuserdata or userdata.
+8. Passing Titan functions to C callbacks is explicitly out of scope for this
+   iteration and belongs in the future roadmap.
+
+Related follow-up note: `.claude/plans/c-ffi-lua-api-followup.md` sketches why
+"strong enough to call Lua API functions" should be handled after this v1
+redesign instead of being bundled into it.
 
 ## Research workflow
 
@@ -28,13 +34,14 @@ Three explorer tracks were launched:
 
 - Current FFI pipeline, type model, and migration risks.
 - C structs/unions/pointers, owned allocation, and field access syntax.
-- Function pointers/callbacks and Titan first-class function representation.
+- Function pointer/callback risks and Titan first-class function
+  representation, to separate v1 work from future callback support.
 
 The tracks agreed on the main direction: keep `foreign import`, promote ad-hoc
 C types into official internal type tags, keep `p.x` field syntax, separate C
 field lvalues from Titan record fields, use full userdata for owned C
-allocation, and model C function pointers separately from Titan
-`Type.Function`.
+allocation, model C function pointers separately from Titan `Type.Function`,
+and leave Titan-to-C callback adaptation out of v1.
 
 ## Evidence map
 
@@ -62,9 +69,8 @@ allocation, and model C function pointers separately from Titan
   `[0]=_mod`, `[1]=type tag`, `[2]=native entry`, `[3...]=captures`.
 - Native Titan entries have Titan's ABI
   `RETTYPE f(lua_State *L, Udata *_mod, CClosure *_fn, ...)`, not the C
-  callback ABI. Any callback thunk that wants closures or bound methods to work
-  must retain and pass the actual callee `CClosure *` as `_fn`; a native pointer
-  alone is not enough.
+  callback ABI. This is why Titan-to-C callback adaptation is parked for a
+  later design rather than treated as a small cast.
 
 ## Local experiments
 
@@ -85,7 +91,6 @@ Run output:
 layout:size=32 x=0 y=8 u=16 union.double=8
 owned-inline:x0=7 y0=3.5 u0=11 x1=13 len_count=2 uv_count=2 tagged=yes anchored=yes
 owned-after-gc:no-finalizer-needed
-callback-sum=20
 ```
 
 What this validates:
@@ -96,9 +101,6 @@ What this validates:
 - A full Lua userdata can store the C object bytes inline, recover the element
   count from `Udata.len`, and use user values for metadata such as a C type tag
   and cached count. No finalizer is needed for Titan-owned inline storage.
-- A C callback of shape `int (*)(int, void *)` can adapt through a thunk and
-  context pointer into a Lua/Titan callable value. This is the low-risk callback
-  case and should be implemented first.
 
 ## Design summary
 
@@ -118,10 +120,12 @@ converted for C.
 The generated C should stay simple:
 
 - C calls remain direct calls to the C identifier.
+- C variadic calls remain direct C calls after the checker/codegen has converted
+  each fixed and variadic argument to the chosen C type.
 - C field reads/writes become `ptr->field` or `value.field`.
 - C allocation uses `sizeof(C_TYPE)` in generated C, not a Lua-computed layout.
-- Owned C storage is a Lua full userdata whose raw payload stores the pointer,
-  C object bytes. User values carry metadata such as a type tag and, when useful,
+- Owned C storage is a Lua full userdata whose raw payload stores the C object
+  bytes inline. User values carry metadata such as a type tag and, when useful,
   a cached element count.
 - Passing an owned object to C computes the raw payload pointer with
   `getudatamem` and keeps the userdata anchored for the call.
@@ -191,32 +195,67 @@ descriptor and passed to both the Lua preprocessor and the C compiler.
 
 ### C type namespaces
 
-Imported named C composites and typedefs should appear as module members in a
-type-namespace role:
+Imported named C types should appear as module members in a type-namespace
+role:
 
 ```lua
 local H = foreign import "/tmp/probe.h"
+local ffi = foreign import "titan/ffi.h"
 
 local p = H.ProbePoint.new()
 p.x = 10
 p.y = 4.5
 H.consume_point(p)
+
+local n = ffi.int32_t.new()
+local bytes = ffi.uint8_t.new_array(1024)
 ```
 
 `H.ProbePoint` is not a Titan record and not an ordinary first-class value. It
 is a foreign type namespace, similar in spirit to a record static namespace:
 
-- `H.ProbePoint.new()` returns a GC-owned `struct ProbePoint`, zeroed in the
+- `H.Type.new()` returns a GC-owned object of that C type, zeroed in the
   userdata payload.
-- `H.ProbePoint.new_array(n)` returns a GC-owned array of `n` inline elements.
-- `H.ProbePoint.sizeof` and `H.ProbePoint.alignof` can be constants once layout
-  probing exists.
+- `H.Type.new_array(n)` returns a GC-owned array of `n` inline elements.
+- These pseudo-functions apply to any complete C object type with a defined
+  `sizeof(T)`: primitive C scalars, enums, pointers, structs, unions, and
+  typedefs thereof. Reject `void`, function types, incomplete composites, and
+  other non-object types.
+- `H.Type.sizeof` and `H.Type.alignof` can be constants once layout probing
+  exists.
 - Later, `H.ProbePoint.wrap(ptr)` can create a borrowed view and
   `adopt(ptr, finalizer)` can explicitly take ownership of C pointers returned
   by libraries. Adoption is a separate mode from Titan-owned inline allocation.
 
 The exact method names can change, but the important point is that allocation is
-available from the imported header namespace without manual bridge C.
+available from the imported header namespace without manual bridge C, and it is
+not restricted to aggregates.
+
+### Compiler-provided primitive header
+
+To make primitive C allocation and C vararg casts usable without requiring every
+program to invent a local header, Titan should ship a small FFI header. The
+exact include spelling can be decided with the rest of the compiler include
+path, but the intended user surface is:
+
+```lua
+local ffi = foreign import "titan/ffi.h"
+
+local count_box = ffi.size_t.new()
+local buf = ffi.uint8_t.new_array(4096)
+local count = 4096
+C.printf("%zu\n", count as ffi.size_t)
+```
+
+In that example `count_box` and `buf` are owned C storage, while `count as
+ffi.size_t` casts an ordinary Titan value to the C width expected by `printf`.
+
+The header should expose C99 primitive and standard typedef names in a stable
+form: signed and unsigned character/integer widths from `<stdint.h>`,
+`size_t`, `ptrdiff_t`, `intptr_t`, `uintptr_t`, `_Bool`/`bool`, `float`,
+`double`, and spelling aliases for ordinary C `char`, `short`, `int`, `long`,
+and `long long` where useful. It is a convenience header, not a new runtime
+library: imported names still lower to ordinary C types in generated C.
 
 ### C types in Titan annotations
 
@@ -235,18 +274,16 @@ local function bump(p: H.ProbePoint): nil
     p.x = p.x + 1
 end
 
-local cmp: H.CompareCallback = H.CompareCallback.new(function (a: integer, b: integer): integer
-    return a - b
-end)
+local count: H.size_t = H.size_t.new()
 ```
 
 The exact names exposed by a foreign module are part of the C type namespace:
 `H.ProbePoint` might denote the default owned inline representation for
-`struct ProbePoint`, while a typedef'd callback or pointer type should preserve
-the imported C typedef name. If v1 needs annotations that cannot be expressed as
-today's single `NAME.DOT.NAME` grammar, it should either add explicit syntax or
-expose additional type-namespace members rather than falling back to inference
-only.
+`struct ProbePoint`, while primitive typedefs such as `size_t` should preserve
+the imported C typedef name. If v1 needs annotations that cannot be expressed
+as today's single `NAME.DOT.NAME` grammar, it should either add explicit syntax
+or expose additional type-namespace members rather than falling back to
+inference only.
 
 Checker work:
 
@@ -266,7 +303,7 @@ Use ordinary Titan field syntax:
 
 ```lua
 p.x
-p.u.as_int
+p.u.int_value
 p.x = 42
 ```
 
@@ -293,45 +330,59 @@ ordinary bracket syntax with C's zero-based indexing, or a visibly foreign
 operation. The design should not quietly make C arrays look like Titan arrays
 with different indexing rules.
 
-### Function pointers and callbacks
+### Function pointers
 
 Imported C function-pointer types should become C function pointer types, not
 ordinary Titan function types. `Type.Function` means a boxed Titan/Lua callable;
-`Type.CFunction` means a raw C ABI signature. A Titan function value can be
-adapted where a C function pointer is expected only when the C signature is
-representable.
+`Type.CFunction` means a raw C ABI signature.
 
-Recommended callback surface:
+V1 should support function-pointer types as C values: declarations can mention
+them, structs can contain them, `nil` can initialize or compare them, imported C
+functions can decay to matching C function-pointer values, and compatible C
+function pointers can be passed through to C calls. This does not imply that a
+Titan function value can be converted to a C callback.
+
+Passing Titan functions to C is parked for a later design. The hard parts are
+lifetime, error propagation across arbitrary C, stored callbacks, no-context
+bare function pointers, and the fact that Titan native entries need `_mod` and
+the exact callee `CClosure *`, not just a raw native code pointer.
+
+### C variadic functions
+
+C declarations with `...` should be callable in v1. This is important enough to
+be part of the first useful FFI, because libc-style APIs such as `printf`,
+`snprintf`, `fcntl`, and many system wrappers use C varargs.
+
+Rules:
+
+- Fixed parameters are checked and converted exactly like ordinary C calls.
+- Variadic tail arguments are emitted as direct C call arguments after codegen
+  has materialized each side-effecting operand once.
+- The compiler should apply C default argument promotions for C-typed variadic
+  arguments where the static type is known: `float` to `double`, and integer
+  types narrower than `int` to `int` or `unsigned int` according to C's rules.
+- Titan scalar arguments may be accepted through documented default lowerings
+  (`integer` and `float`), but portable code should use ordinary
+  `as <C type>` casts whenever the C format or ABI requires a specific width.
+- There should be no separate `as_int`-style construct. The regular Titan
+  `as <type>` cast covers C vararg width selection, pointer/integer casts that
+  v1 permits, and Titan-to-C numeric conversions.
+- Titan `string` can be passed to `const char *`-style vararg positions for the
+  duration of the call, with the same lifetime rule as fixed `char *`
+  arguments.
+- Reject Titan arrays, maps, records, and `value` in C vararg tails unless an
+  explicit C cast/unboxing path is defined.
+- Do not try to forward a Titan variadic `...` pack directly into a C vararg
+  call in v1. Each C vararg argument should be visible to the checker.
+
+The `ffi.h` primitive header gives users names for the common casts:
 
 ```lua
-local cb = C.CallbackType.new(function (x: integer): integer
-    return x * 2
-end)
+local C = foreign import "stdio.h"
+local ffi = foreign import "titan/ffi.h"
 
-C.register_callback(cb)
+C.printf("count=%zu value=%d\n", count as ffi.size_t, value as ffi.int)
 ```
-
-For APIs that take both a function pointer and a `void *userdata`, allow a more
-ergonomic direct call:
-
-```lua
-C.foreach(values, function (x: integer): integer
-    return x * 2
-end)
-```
-
-The checker recognizes a function-pointer parameter paired with a user-data
-context parameter and codegen materializes both the thunk pointer and context
-pointer. This is the first callback form to implement.
-
-For APIs that store callbacks after the registering call returns, users must
-keep the callback object alive. A call-site temporary is only valid for
-synchronous callbacks that happen during the C call.
-
-Phase 1 callback restrictions should be explicit: exact Titan `CClosure` values
-only, non-variadic callbacks, one C return value, supported scalar/pointer
-parameters, same `lua_State`, no yielding, and no implicit `string` return unless
-ownership has been specified.
 
 ## Internal type model
 
@@ -362,7 +413,7 @@ This requires updating:
 - `types.tostring`
 - `types.serialize` should not need C-type cases in v1, because public Titan
   module interfaces cannot mention C types.
-- `types.is_gc` for `Type.COwned` and callback objects
+- `types.is_gc` for `Type.COwned` and opaque FFI handle userdata
 - checker visitors and coder type dispatches
 
 ### Cross-module policy
@@ -426,8 +477,10 @@ C calls stay statically checked. For each C parameter:
   `ExpCast` or a dedicated C-boundary coercion node.
 - If it is an owned C object passed to a borrowed pointer parameter, unwrap it
   and mark the owned object as anchored across the call.
-- If it is a Titan function passed to a C function pointer parameter, require a
-  supported callback adaptation.
+- If it is a Titan function passed to a C function pointer parameter, reject it
+  in v1 with a diagnostic that Titan-to-C callbacks are future work.
+- If the C function is variadic, convert the fixed arguments first, then convert
+  each visible variadic tail argument using the C vararg rules above.
 
 The coder must materialize side-effecting operands once before using them in
 generated C expressions, following the existing codegen rule for binary ops.
@@ -437,12 +490,12 @@ generated C expressions, following the existing codegen rule for binary ops.
 Use three distinct notions:
 
 - **C assignment conversion:** implicit only in C contexts, such as an argument
-  to a foreign call, assignment to a C field, C callback return, or initializing
-  a C temporary.
+  to a foreign call, assignment to a C field, a C variadic tail argument after
+  default promotions, or initializing a C temporary.
 - **Titan `as` cast:** explicit in source and allowed for unsafe reinterpretation
   or lossy conversion.
 - **`value` boxing/unboxing:** explicit at the C boundary except for values that
-  already are Lua GC objects, such as owned C userdata and callback userdata.
+  already are Lua GC objects, such as owned C userdata.
 
 #### C-to-C conversions
 
@@ -468,7 +521,8 @@ Explicit with `as`:
 - Integer/pointer casts (`uintptr_t`-style) if the relevant C integer type is
   representable.
 - C function pointer casts between different signatures. These are unsafe and
-  should be rare; v1 may reject them until the thunk story is stable.
+  should be rare; v1 may reject them until the function-pointer cast policy is
+  stable.
 
 Rejected in v1:
 
@@ -489,8 +543,6 @@ Implicit in C contexts:
 - Titan `nil` to any C pointer or C function pointer.
 - Titan `string` to `const char *` for the duration of a call, zero-copy. The
   caller's ordinary GC anchoring keeps the `TString` alive during the call.
-- Titan function value to a supported `Type.CFunction` callback parameter only
-  through generated thunk materialization; it is not a raw function pointer.
 
 Explicit with `as`:
 
@@ -505,6 +557,8 @@ Rejected in v1:
   unless an explicit owned-copy helper is used.
 - Passing a Titan array/map/record directly to C except through an explicit
   pointer/owned wrapper operation.
+- Passing a Titan function value where C expects a function pointer. This is the
+  parked callback feature.
 
 #### C-to-Titan conversions
 
@@ -538,9 +592,8 @@ Rejected in v1:
 `value` is the Lua/Titan dynamic box (`TValue`), not a magic C dynamic type.
 Rules:
 
-- `Type.COwned` and callback objects are already full userdata, so converting
-  them to `value` can hand out the same userdata object. Lua sees an opaque
-  userdata.
+- `Type.COwned` values are already full userdata, so converting them to `value`
+  can hand out the same userdata object. Lua sees an opaque userdata.
 - Borrowed C pointers converted to `value` should be boxed in an opaque FFI
   handle userdata carrying the pointer, C type tag, and ownership mode. Avoid
   using bare lightuserdata for typed handles because it cannot reliably preserve
@@ -659,51 +712,41 @@ C allocations returned by libraries, where the raw payload stores a pointer plus
 the library-specific release function. Borrowed pointers remain bare C pointers
 and are not GC tracked.
 
-### Callback objects
+### C variadic call codegen
 
-Represent long-lived callbacks as userdata:
+For a C function declared with `...`, codegen should still emit a direct call:
 
 ```c
-typedef struct TitanCCallback {
-    lua_State *L;
-    int registry_ref;
-    CClosure *callee;
-    const void *signature_tag;
-    int slot;
-    unsigned char alive;
-} TitanCCallback;
+snprintf(buf, size, "%d %zu", (int)x, (size_t)n);
 ```
 
-The userdata roots the Titan function value, keeps the exact `CClosure *` needed
-by the native fast path and by closure captures, and releases any trampoline slot
-from `__gc`.
+The checker should annotate each variadic tail expression with the exact C type
+that codegen will emit. If the source expression already has a C type, apply
+the C default promotions required for varargs. If the source expression is a
+Titan scalar, either use the documented default lowering or require an explicit
+`as <C type>` cast when the target width cannot be inferred safely.
 
-Implementation tiers:
+This keeps `printf`-style calls honest: the format string is not a type
+checker, so the Titan source must make width-sensitive choices visible through
+ordinary casts such as `n as ffi.size_t` or `x as ffi.int`.
 
-1. Context-pointer callbacks. If the C API accepts `fn, void *ctx`, generate one
-   static thunk per C signature and pass the callback userdata as `ctx`. This is
-   robust and was validated by `ffi_probe.c`.
-2. Synchronous call-site callbacks. If the C API calls the callback only during
-   the current call, materialize a temporary callback object anchored across the
-   call.
-3. Bare callbacks with no context pointer. Reject these in v1 unless the value
-   is a compile-time-known singleton callback. Portable C cannot create an
-   arbitrary per-closure function pointer without either a finite trampoline pool
-   or libffi-like machinery.
-4. Bare stored callbacks. For `int (*cb)(int)` with no context pointer, use a
-   generated static trampoline pool per signature. Each thunk has a baked slot id
-   and dispatches through module/runtime callback state. This avoids libffi but
-   has a finite slot count and must reject exhaustion cleanly.
-5. Optional future: libffi closure support for unlimited bare callbacks, if the
-   dependency is acceptable.
+### Future roadmap: Titan functions as C callbacks
 
-Thunk bodies convert C arguments to Titan values, call the exact Titan native
-entry with the retained `_mod` and `CClosure *`, then convert the result back to
-the C return type. A later phase can allow generic Lua callables through the Lua
-stack. Errors crossing a C callback boundary should not longjmp through
-arbitrary C by default; v1 should catch and store the error on the callback
-object, return a zero/null value, and let the registering Titan code query or
-rethrow where the C API permits.
+Titan-to-C callbacks should be designed after the core C type model, ownership,
+fields, arrays, and C varargs are stable. The future design needs to address:
+
+- Context-pointer callbacks, where the C API accepts both `fn` and `void *ctx`.
+- Stored callbacks, where the Titan callable must be rooted beyond the current
+  call.
+- Bare no-context function pointers, which need either a finite generated
+  trampoline pool or a dependency such as libffi closures.
+- Error propagation across arbitrary C, where a Lua/Titan longjmp is usually not
+  safe.
+- Calling the exact Titan closure, including `_mod`, `_fn`, and captures, rather
+  than treating a Titan function as a raw C function pointer.
+
+V1 should reject Titan function values at C function-pointer boundaries with a
+clear "callbacks are future work" diagnostic.
 
 ## Implementation plan
 
@@ -758,25 +801,28 @@ rethrow where the C API permits.
 - Add runtime/codegen helpers for inline `luaS_newudata` C payload allocation,
   type tags, and optional cached counts.
 - Generate per-C-type metatables or type tags.
-- Implement `C.Type.new()` and `C.Type.new_array(n)` for complete composites.
+- Implement `C.Type.new()` and `C.Type.new_array(n)` for all complete C object
+  types, including primitive scalars from imported headers.
 - Make owned-to-borrowed pointer coercion explicit in checker/codegen.
 - Add GC stress tests proving owned allocations remain anchored during calls and
   are reclaimed by Lua without a finalizer.
 - Add a separate later path for explicit adoption of external allocations with
   finalizers.
 
-### Phase 5 - function pointers and callbacks
+### Phase 5 - function pointers and C varargs
 
 - Add `Type.CFunction` and `Type.CPointer(CFunction)`.
 - Allow imported C functions to decay to C function pointers in foreign
   contexts.
-- Implement context-pointer callback thunks first.
-- Add explicit callback objects for stored callbacks, rooted by userdata and
-  registry references.
-- Add bare static trampoline pool support only after the context-pointer path is
-  solid.
-- Add tests for synchronous callbacks, stored callbacks, callback lifetime, and
-  error propagation policy.
+- Support `nil` for C function-pointer values and pass-through of compatible C
+  function pointers.
+- Reject Titan function values where C expects function pointers, with a
+  callback-roadmap diagnostic.
+- Preserve and strengthen support for C functions declared with `...`.
+- Apply C default promotions to C-typed variadic arguments and require or
+  preserve explicit `as <C type>` casts for width-sensitive Titan arguments.
+- Add tests for `printf`/`snprintf`-style calls, fixed-plus-vararg checking, and
+  rejection of unsupported Titan values in C vararg tails.
 
 ### Phase 6 - arrays and pointer operations
 
@@ -797,6 +843,8 @@ rethrow where the C API permits.
 - Document that C FFI types are module-local in v1 and cannot appear in exported
   Titan module interfaces. Future cross-module support needs include provenance
   in generated C, not just `types.serialize` work.
+- Document that Titan-to-C callbacks and direct Lua API support are roadmap
+  follow-ups, not v1 deliverables.
 
 ## Testing plan
 
@@ -813,19 +861,19 @@ Checker specs:
 - C-to-C, Titan-to-C, C-to-Titan, and `value` boxing/unboxing casts follow the
   documented matrix, including rejected unsafe cases.
 - Unsafe `char *` field storage is rejected.
-- Titan function to C callback accepts only representable signatures.
+- Titan function to C function-pointer conversion is rejected in v1.
+- C vararg tail arguments typecheck with default promotions and explicit
+  `as <C type>` casts.
 
 Coder specs:
 
 - Direct C calls still emit and run as bare calls.
+- C variadic calls emit and run as bare calls, including width-sensitive casts
+  through the compiler-provided primitive header.
 - Struct and union fields compile and run against a fixture header.
 - Owned inline allocation is reclaimed by Lua under forced GC without a
   finalizer.
 - Owned object passed to C remains anchored across calls that allocate.
-- Context-pointer callbacks call back into Titan/Lua and return converted
-  values.
-- Callback object kept alive supports stored callbacks; collected callback is
-  rejected or reports a controlled error.
 
 Regression specs:
 
@@ -836,15 +884,15 @@ Regression specs:
 
 ## Main risks
 
-1. Callback lifetime and error propagation. C has no uniform exception path, and
-   bare callbacks lack a context pointer. Start with context-pointer callbacks.
+1. C vararg correctness. The C compiler cannot check `printf` formats against
+   generated arguments, so width-sensitive calls need visible casts and tests.
 2. Cross-module leakage. C-aware types crossing Titan module boundaries require
    generated C include provenance as well as serialization and an ABI bump. V1
    avoids this by rejecting all exported C types.
 3. Header parser coverage. Real headers contain extensions. Keep the system C
    compiler in the loop for layout and validation.
 4. String lifetime. Zero-copy `string -> char *` is fine for call arguments but
-   unsafe for stored fields or callbacks.
+   unsafe for stored fields or retained pointers.
 5. Silent unsafety. The FFI is allowed to be unsafe, but lifetime-changing
    operations should be visibly explicit rather than hidden in innocent-looking
    assignments.
@@ -855,15 +903,16 @@ Implement a narrow vertical slice:
 
 ```lua
 local H = foreign import "ffi_probe.h"
+local C = foreign import "stdio.h"
+local ffi = foreign import "titan/ffi.h"
 
 function main(args: {string}): integer
     local p = H.ProbePoint.new()
     p.x = 7
     p.y = 3.5
     H.consume_point(p)
-    return H.sum_with_context(function (x: integer): integer
-        return x * 2
-    end)
+    C.printf("x=%d y=%g\n", p.x as ffi.int, p.y as ffi.double)
+    return 0
 end
 ```
 
@@ -871,7 +920,7 @@ This slice proves the redesign's core value:
 
 - no hand-written bridge C,
 - direct generated C calls,
+- C vararg calls with ordinary `as <C type>` casts,
 - C struct field syntax,
 - GC-tracked caller allocation,
-- callback thunking,
 - and clear boundaries for unsafe behavior.
