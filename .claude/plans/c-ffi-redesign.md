@@ -23,6 +23,10 @@ Required outcomes from the prompt:
 7. FFI values that reach Lua may be opaque lightuserdata or userdata.
 8. Passing Titan functions to C callbacks is explicitly out of scope for this
    iteration and belongs in the future roadmap.
+9. C indexing uses `exp[index]` with 0-based semantics; `#exp` is supported for
+   static C arrays and counted owned C arrays.
+10. `CAdopted` and owned allocation for structs with flexible array members are
+    parked out of v1.
 
 Related follow-up note: `.claude/plans/c-ffi-lua-api-followup.md` sketches why
 "strong enough to call Lua API functions" should be handled after this v1
@@ -50,13 +54,14 @@ and leave Titan-to-C callback adaptation out of v1.
 - Current language behavior: `doc/language/ffi.md` documents direct header
   import, direct calls, opaque pointers, and current limitations.
 - Current implementation: `doc/implementation/ffi-internals.md` documents the
-  compile-time C toolchain, `Type.ForeignModule`, ad-hoc `Type.Pointer` and
-  `Type.Typedef`, direct `codeforeigncall`, and field stubs.
+  compile-time C toolchain, the current `Type.ForeignModule` name that v1
+  should rename to `Type.CModule`, ad-hoc `Type.Pointer` and `Type.Typedef`,
+  direct `codeforeigncall`, and field stubs.
 - Parser: `titan-compiler/parser.lua` already lowers `e.name` to `Ast.VarDot`,
   so C field access does not need new surface syntax.
 - Checker: `titan-compiler/checker.lua` resolves `VarDot` only for Titan
-  modules, foreign modules, record statics, and Titan record fields. Pointer to
-  C composite field access is absent.
+  modules, current foreign modules, record statics, and Titan record fields.
+  Pointer to C composite field access is absent.
 - C type conversion: `titan-compiler/foreigntypes.lua` returns stub `Struct` and
   `Union` tables and does not convert their fields.
 - Codegen: `titan-compiler/coder.lua` emits foreign calls as bare C calls and
@@ -212,7 +217,7 @@ local bytes = ffi.uint8_t.new_array(1024)
 ```
 
 `H.ProbePoint` is not a Titan record and not an ordinary first-class value. It
-is a foreign type namespace, similar in spirit to a record static namespace:
+is a C type namespace, similar in spirit to a record static namespace:
 
 - `H.Type.new()` returns a GC-owned object of that C type, zeroed in the
   userdata payload.
@@ -223,9 +228,9 @@ is a foreign type namespace, similar in spirit to a record static namespace:
   other non-object types.
 - `H.Type.sizeof` and `H.Type.alignof` can be constants once layout probing
   exists.
-- Later, `H.ProbePoint.wrap(ptr)` can create a borrowed view and
-  `adopt(ptr, finalizer)` can explicitly take ownership of C pointers returned
-  by libraries. Adoption is a separate mode from Titan-owned inline allocation.
+- Later, `H.ProbePoint.wrap(ptr)` can create a borrowed view. Explicit adoption
+  of C pointers returned by libraries, with a finalizer or release function, is
+  parked out of v1; it is a separate mode from Titan-owned inline allocation.
 
 The exact method names can change, but the important point is that allocation is
 available from the imported header namespace without manual bridge C, and it is
@@ -262,8 +267,8 @@ library: imported names still lower to ordinary C types in generated C.
 V1 should lift a prototype limitation: imported C FFI types must be usable in
 Titan type annotations, not only inferred from foreign calls. The existing
 parser already has `Ast.TypeQualName` for `module.Type`; the checker should
-extend that rule so a qualified type name may resolve through a foreign module
-as well as a Titan module.
+extend that rule so a qualified type name may resolve through a `CModule` as
+well as a Titan module.
 
 Examples:
 
@@ -277,7 +282,7 @@ end
 local count: H.size_t = H.size_t.new()
 ```
 
-The exact names exposed by a foreign module are part of the C type namespace:
+The exact names exposed by a `CModule` are part of the C type namespace:
 `H.ProbePoint` might denote the default owned inline representation for
 `struct ProbePoint`, while primitive typedefs such as `size_t` should preserve
 the imported C typedef name. If v1 needs annotations that cannot be expressed
@@ -287,9 +292,8 @@ inference only.
 
 Checker work:
 
-- `Ast.TypeQualName` should accept a receiver whose type is
-  `Type.ForeignModule`/`Type.CModule`.
-- The foreign module needs a type namespace distinct from callable/value
+- `Ast.TypeQualName` should accept a receiver whose type is `Type.CModule`.
+- The C module needs a type namespace distinct from callable/value
   members, so `H.printf` is not accidentally accepted as a type.
 - A missing or non-type member should produce a normal type-resolution error.
 - This is allowed for locals, local functions, lambdas, private helper
@@ -319,16 +323,45 @@ the receiver type:
 Union access is intentionally unsafe and C-like. Titan does not track the active
 union variant.
 
-### C arrays and indexing
+### C arrays, indexing, and length
 
-Do not block struct/union field access on full C array support. Phase 1 should
-parse array fields enough to reject or pass them opaquely. Phase 2 should add C
-array indexing and pointer arithmetic explicitly.
+C indexing uses the same syntax as Titan array indexing:
 
-Open language question for phase 2: whether C indexing should use Titan's
-ordinary bracket syntax with C's zero-based indexing, or a visibly foreign
-operation. The design should not quietly make C arrays look like Titan arrays
-with different indexing rules.
+```lua
+local item = xs[i]
+xs[i] = item
+local n = #xs
+```
+
+The receiver may be a `CPointer(T)`, a `CArray(T, N)` static C array type
+(`T[N]`, including through typedefs and struct fields), or a `COwned(T)` value
+with count metadata, after resolving typedefs.
+
+Rules:
+
+- Indexing is 0-based, matching C.
+- The index expression is checked as an integer value and materialized once.
+- `CArray(T, N)` indexes are bounds-checked against the static length `N`.
+- `COwned(T)` indexes are bounds-checked against the dynamic count stored on
+  the owned userdata. `T.new()` has count 1; `T.new_array(n)` has count `n`.
+- Bare `CPointer(T)` indexing is unsafe and does not get a bounds check,
+  because no length is available.
+- `#exp` is valid for `CArray(T, N)` and counted `COwned(T)`, returning a Titan
+  `integer`: the static length for `CArray`, the dynamic count for `COwned`.
+- `#exp` is rejected for bare `CPointer(T)` and any owned value whose count is
+  unavailable.
+
+This deliberately makes C indexing visually familiar but semantically foreign:
+the receiver type controls the 0-based indexing and bounds policy. Titan arrays
+remain 1-based.
+
+Flexible array members need special handling and are not supported for owned
+struct allocation in v1. If a struct has a C flexible array member, v1 should
+record that fact, allow fixed-prefix metadata where practical, but reject
+`Struct.new()`/`Struct.new_array(n)` for that struct and reject indexing or
+`#` on the flexible member. Supporting this later requires an allocation API
+that accepts the flexible-member element count and stores enough metadata to
+bounds-check the flexible member.
 
 ### Function pointers
 
@@ -395,14 +428,15 @@ tags:
 - `Type.CPointer { pointee, quals }`
 - `Type.CArray { elem, len }`
 - `Type.CFunction { params, ret, vararg, abi }`
-- `Type.CStruct { cname, tagname, typedef, fields, complete }`
+- `Type.CStruct { cname, tagname, typedef, fields, complete, has_fam? }`
 - `Type.CUnion { cname, tagname, typedef, fields, complete }`
-- `Type.CField { owner, name, type, bitfield? }`
+- `Type.CField { owner, name, type, bitfield?, flexible_array? }`
 - `Type.CTypedef { name, target }`
 - `Type.COwned { pointee, count? }`
-- `Type.CAdopted { pointee, finalizer, count? }` if explicit adoption of
-  externally allocated memory is added.
-- `Type.CModule` or keep `Type.ForeignModule` with richer members.
+- `Type.CModule`, replacing the prototype's `Type.ForeignModule` name.
+
+Do not add `Type.CAdopted` in v1. Explicit adoption of externally allocated C
+memory, with finalizers and library-specific release functions, is future work.
 
 This requires updating:
 
@@ -441,7 +475,8 @@ module.
 
 This export ban must be enforced after the checker has resolved annotations.
 Do not preserve the prototype's old behavior where `Ast.TypeQualName` simply
-failed for foreign modules. Instead, allow the annotation first, then reject it
+failed for foreign modules. Rename that internal type to `CModule`, allow the
+annotation first, then reject it
 only if it appears in an exported position. In today's language records are
 public, so record fields plus method/static parameter and return types are
 exported positions.
@@ -505,8 +540,8 @@ Implicit in C contexts:
 - Qualifier addition, such as `T *` to `const T *`.
 - Object pointer to `void *`, preserving qualifiers.
 - `nil` to any C pointer or C function pointer.
-- `Type.COwned(T)` or `Type.CAdopted(T)` to borrowed `T *` or `void *`, by
-  unwrapping while keeping the userdata anchored for the call.
+- `Type.COwned(T)` to borrowed `T *` or `void *`, by unwrapping while keeping
+  the userdata anchored for the call.
 - C array lvalue to pointer to first element, in C rvalue/call contexts.
 - C function designator to C function pointer.
 - C numeric assignment conversions among C integer/float types. This follows C's
@@ -707,10 +742,10 @@ record before any subsequent allocation. Passing it to C unwraps
 across the call.
 
 No `__gc` finalizer is needed for this default case: Lua frees the userdata
-payload. A finalizer-bearing wrapper is only for explicit adoption of external
-C allocations returned by libraries, where the raw payload stores a pointer plus
-the library-specific release function. Borrowed pointers remain bare C pointers
-and are not GC tracked.
+payload. A finalizer-bearing wrapper for explicit adoption of external C
+allocations returned by libraries is future work and should not be implemented
+as `CAdopted` in v1. Borrowed pointers remain bare C pointers and are not GC
+tracked.
 
 ### C variadic call codegen
 
@@ -761,6 +796,7 @@ clear "callbacks are future work" diagnostic.
 ### Phase 1 - official C type model
 
 - Add `Type.C*` constructors in `types.lua`.
+- Rename the current `Type.ForeignModule` representation to `Type.CModule`.
 - Update equality, compatibility, stringification, GC classification, and the
   public-interface rejection path that prevents C types from reaching
   serialization.
@@ -768,7 +804,7 @@ clear "callbacks are future work" diagnostic.
 - Preserve declaration provenance: header, C spelling, source name, skipped
   reason.
 - Extend `Ast.TypeQualName` checking so qualified names can resolve C type
-  members from foreign modules.
+  members from `CModule`s.
 - Keep C types local-only; reject every exported Titan interface position that
   contains a C type with a clear message.
 - Add a module-interface validation pass that walks exported function
@@ -784,6 +820,8 @@ clear "callbacks are future work" diagnostic.
   long long, float, double, size_t and other typedefs.
 - Convert pointer-to-function and typedef'd function pointer types.
 - Preserve C array types enough for rejection and allocation sizing.
+- Detect flexible array members and mark their owner structs as not eligible
+  for owned allocation in v1.
 - Add enum value capture through compiler-assisted probing or generated C
   constants.
 
@@ -803,11 +841,12 @@ clear "callbacks are future work" diagnostic.
 - Generate per-C-type metatables or type tags.
 - Implement `C.Type.new()` and `C.Type.new_array(n)` for all complete C object
   types, including primitive scalars from imported headers.
+- Reject owned allocation for structs with flexible array members.
 - Make owned-to-borrowed pointer coercion explicit in checker/codegen.
 - Add GC stress tests proving owned allocations remain anchored during calls and
   are reclaimed by Lua without a finalizer.
-- Add a separate later path for explicit adoption of external allocations with
-  finalizers.
+- Park explicit adoption of external allocations; do not implement `CAdopted`
+  in v1.
 
 ### Phase 5 - function pointers and C varargs
 
@@ -824,12 +863,15 @@ clear "callbacks are future work" diagnostic.
 - Add tests for `printf`/`snprintf`-style calls, fixed-plus-vararg checking, and
   rejection of unsupported Titan values in C vararg tails.
 
-### Phase 6 - arrays and pointer operations
+### Phase 6 - arrays, indexing, and length
 
-- Add C array indexing and pointer arithmetic deliberately, with documented
-  indexing semantics.
-- Add owned arrays with bounds metadata for Titan-side access. Passing to C is
-  still unsafe and zero-overhead after unwrap.
+- Add C indexing through ordinary `exp[index]` syntax for `CPointer`,
+  `CArray`, and counted `COwned`, with 0-based semantics.
+- Bounds-check `CArray` against its static length and counted `COwned` against
+  its dynamic count; leave bare `CPointer` indexing unsafe and unchecked.
+- Add the `#exp` unary length operator for `CArray` and counted `COwned`.
+- Reject indexing/length on flexible array members in v1.
+- Passing owned arrays to C is still unsafe and zero-overhead after unwrap.
 - Add the remaining explicit casts among C pointer/integer/function-pointer
   types after the core `void *`, owned-to-borrowed, and value-handle casts are
   implemented.
@@ -861,6 +903,13 @@ Checker specs:
 - C-to-C, Titan-to-C, C-to-Titan, and `value` boxing/unboxing casts follow the
   documented matrix, including rejected unsafe cases.
 - Unsafe `char *` field storage is rejected.
+- C indexing accepts `CPointer`, `CArray`, and counted `COwned`, resolves
+  typedefs first, and uses 0-based semantics.
+- `#exp` accepts `CArray` and counted `COwned`, rejects bare `CPointer`, and
+  returns a Titan `integer`.
+- Structs with flexible array members reject owned allocation and reject
+  indexing/length on the flexible member.
+- `CAdopted`/external adoption APIs are absent from v1.
 - Titan function to C function-pointer conversion is rejected in v1.
 - C vararg tail arguments typecheck with default promotions and explicit
   `as <C type>` casts.
@@ -871,6 +920,10 @@ Coder specs:
 - C variadic calls emit and run as bare calls, including width-sensitive casts
   through the compiler-provided primitive header.
 - Struct and union fields compile and run against a fixture header.
+- Static C array indexing is bounds-checked against the declared length.
+- Counted owned array indexing is bounds-checked against the userdata count and
+  `#owned` returns that count.
+- Bare pointer indexing compiles to direct C indexing without a bounds check.
 - Owned inline allocation is reclaimed by Lua under forced GC without a
   finalizer.
 - Owned object passed to C remains anchored across calls that allocate.
