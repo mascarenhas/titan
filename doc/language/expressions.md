@@ -339,7 +339,14 @@ checker accepts are deliberately few:
 | option `T?` | base `T` | yes — checked (raises on `nil`) |
 | any type (including options) | `value` | never |
 | `value` | any type (including options) | yes — checked |
-| void pointer (FFI) | `string` | no run-time check |
+| C integer | `integer` | no |
+| C float | `float` | no |
+| `integer` | C integer | no |
+| `integer` or `float` | C float | no |
+| C `char *` or `void *` (FFI) | `string` | yes — raises on `NULL` |
+| `string` | C `char *` or `void *` (FFI) | no |
+| C integer, C float, C pointer, C array-as-pointer, or owned C userdata | `value` | never |
+| `value` | C integer, C float, C pointer, C array-as-pointer, or owned C userdata | yes — checked |
 
 A `value` cast to a concrete type is checked at run time and raises an
 error of the shape `file:line:col: type error, expected T but found U`
@@ -349,8 +356,8 @@ exact integral values and raises
 `value`, and from `value` *to* `boolean`, never fail — any value
 converts. An option cast `o as T` unwraps the option, raising
 `expected T but found nil` when `o` is `nil` (the explicit form of the
-implicit option unwrap; see [option types](option-types.md)). The
-void-pointer row belongs to the FFI; see [the C FFI](ffi.md).
+implicit option unwrap; see [option types](option-types.md)). The C rows belong
+to the FFI; see [the C FFI](ffi.md).
 
 ```lua
 function unbox(v: value): integer
@@ -366,8 +373,8 @@ function unwrap(o: integer?): integer
 end
 ```
 
-Everything else is the compile-time error `cannot cast 'T1' to 'T2'` —
-in the current compiler all of these are rejected:
+For non-FFI types, other casts are the compile-time error
+`cannot cast 'T1' to 'T2'` — in the current compiler all of these are rejected:
 
 ```lua
 function rejected(i: integer, x: float)
@@ -381,7 +388,8 @@ end
 Use the implicit coercions instead: `local a: float = i` converts, and
 `local b: integer = x` converts with the run-time exactness check. If
 you genuinely need an explicit two-step conversion, going through
-`value` works: `(i as value) as float`.
+`value` works: `(i as value) as float`. For an expression whose imported C type
+is, say, `c.size_t`, use the ordinary FFI cast: `n as integer`.
 
 ## Constructor expressions
 

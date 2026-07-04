@@ -104,18 +104,20 @@ with a clean error; each links to the chapter that documents it in full.
 
 ### The C FFI
 
-* **The FFI handles functions, scalars, strings and opaque pointers**, and
+* **The FFI imports real C types, fields, arrays and owned objects**, and
   is the one place Titan's safety guarantees end — a C function can misuse
   memory and crash the process, and a Titan `string` handed to a C
-  function that frees or stores it corrupts the heap. Struct/union fields
-  are inaccessible (structs usable only behind opaque pointers), bare
-  (non-typedef) enum constants are not imported, and C arrays, function
-  pointers, by-value structs and bare `char`/`short`/C `float`/`unsigned`
-  have no Titan type — a foreign function using one is simply skipped, so
-  referencing it is a clean "not a member" error. Foreign variables are
-  read-only, the C namespace is flat with no conflict detection, pointers
-  never cross into Lua, and the FFI carries a compile-time POSIX dependency
-  ([the full list](ffi.md#summary-of-current-limitations)).
+  function that frees or stores it corrupts the heap. Imported C types are
+  distinct from Titan types, can be used in local annotations, and support
+  regular `as <type>` casts; they cannot be exported from Titan modules.
+  C arrays are 0-based (`T[N]` bounds-checked, pointers unchecked, counted
+  owned arrays dynamically checked), `#` works for static/count-owned
+  arrays, struct/union fields can be read and written, and `.new()` /
+  `.new_array(count)` allocate zeroed Lua-GC-owned userdata with no
+  finalizer. Explicit C variadic calls are supported; Titan functions cannot yet be
+  passed to C, adopted lifetimes are parked, and owned structs with
+  flexible array members are deliberately rejected for this version
+  ([the full list](ffi.md#current-limitations)).
 
 ### Other
 

@@ -485,7 +485,7 @@ user-facing story.
 | `driver.TITAN_BIN_PATH` | `driver.lua` | `TITAN_PATH_0_10` or `TITAN_PATH` or `".;/usr/local/lib/titan/0.10"` | Where compiled `.so` modules are searched at compile time. |
 | `driver.TITAN_SOURCE_PATH` | `driver.lua` | `"."` (overridden by `titanc --tree`) | Where `.titan` sources are searched. |
 | `driver.LUA_SOURCE_PATH` | `driver.lua` | `"lua-5.5.0/src/"` (overridden by `titanc --lua`) | Lua source tree: internal headers at compile, `liblua.a` at link. |
-| `driver.TITAN_RUNTIME_PATH` | `driver.lua` | `"titan-runtime/"` | Location of `titan.c`/`titan.h`/`titan.o` (but `driver.compile` hard-codes `-I titan-runtime`). |
+| `driver.TITAN_RUNTIME_PATH` | `driver.lua` | `"titan-runtime/"` | Location of `titan.c`/`titan.h`/`titan.o`; generated C compiles with this path on its include list. |
 | `driver.CC` | `driver.lua` | `"cc"` | The C compiler command. |
 | `driver.CFLAGS` | `driver.lua` | `"--std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls"` | Flags for every compile and link step. |
 | shared-library flags | `shared_flag()` | `-shared`; on Darwin `-shared -undefined dynamic_lookup` | Platform from `driver.UNAME` (output of `uname`). |

@@ -1,430 +1,325 @@
 # The C FFI
 
-Titan can call C functions and read C constants and variables directly,
-without writing any C glue code. You name a C *header file* — the file
-that describes a C library's functions and types — and the compiler
-parses it and turns its declarations into a module-like value whose
-members you call like any imported Titan module. The stated goal of
-this facility is to let Titan's own standard library eventually be
-written in Titan itself, binding system libraries by declaration rather
-than by hand-written adapters.
-
-Everything in this chapter happens at **compile time**: the header is
-parsed while your module is typechecked, and calls compile to plain C
-function calls with no run-time marshalling machinery. The flip side is
-that the FFI is the one place where Titan's safety guarantees end: C
-functions can misuse memory and crash the process, and Titan does not
-(and cannot) check what they do.
-
-*Implementation note:* the header-parsing pipeline (a pure-Lua C
-preprocessor and C99 parser) and the code generated for foreign calls are
-described in [the FFI internals](../implementation/ffi-internals.md).
-
-## Importing a header
+Titan can call C functions, read C constants and variables, and work with a
+small but useful set of C types directly from a header:
 
 ```lua
--- Titan
 local stdio = foreign import "stdio.h"
 
-function hello(): integer
-    return stdio.printf("Hello from C!\n")
+function hello(name: string): integer
+    return stdio.printf("hello, %s\n", name)
 end
 ```
 
-`foreign import` is a top-level declaration, like [`import`](modules.md):
-it binds a local name to a *foreign module* whose members are the
-declarations found in the header. `foreign` and `import` are reserved
-words.
+The header is parsed at **compile time**. A foreign call compiles to a plain C
+call in the generated translation unit; there is no run-time reflection layer
+and no hand-written glue. The cost is that the FFI is exactly as unsafe as the C
+it binds: Titan cannot stop a C function from writing past a buffer, storing a
+pointer into a Titan string, freeing memory it does not own, or crashing the
+process.
 
-### Header names and search
+Implementation details are in [FFI internals](../implementation/ffi-internals.md).
 
-How the header name is resolved depends on its form:
+## Importing a Header
 
-* **A relative name** (`"stdio.h"`, `"SDL2/SDL.h"`) is looked up in the
-  *system* include directories — the same directories a C file's
-  `#include <...>` would search. The compiler discovers this list by
-  asking the system's C preprocessor (`cpp -v`), falling back to
-  `/usr/include` if that fails. The generated C contains a matching
-  `#include <stdio.h>`.
-* **An absolute path** (one starting with `/`) is read directly, and the
-  generated C contains `#include "/that/path.h"`. Use an absolute path
-  to bind a header of your own that is not installed in a system
-  location.
-
-(A relative name not found there is also tried relative to the current
-directory, but the generated `#include <...>` will then generally not
-be found by the C compiler — relative names are for installed headers.)
-
-If the header cannot be found or fails to preprocess, the import is a
-compile-time error:
-
-```
-foo.titan:1:1: type error: failed preprocessing 'does_not_exist.h': does_not_exist.h: No such file or directory
-```
-
-## What gets imported
-
-Processing a header gives the foreign module these members:
-
-* **Functions** — every C function the header declares becomes a callable
-  member with a Titan function type derived from its C prototype
-  (`stdio.fopen`, `stdio.printf`, ...). Functions marked `static` in the
-  header (private to a C file) are deliberately invisible.
-* **Variables** — C global variables declared in the header become
-  readable members with the converted type. For example, `errno.errno`
-  (the C error-number variable) reads as an `integer`:
-
-  ```lua
-  -- Titan
-  local stdio = foreign import "stdio.h"
-  local errno = foreign import "errno.h"
-
-  function try_open(name: string): integer
-      local f = stdio.fopen(name, "r")
-      if f ~= nil then
-          stdio.fclose(f)
-      end
-      return errno.errno
-  end
-  ```
-
-* **`#define` constants** — C constants defined with the preprocessor
-  also appear as variables when their type can be inferred from the
-  definition: integer constants read as `integer`, floating constants as
-  `float`, string constants as `string`. This is how `errno.ENOENT` or
-  `SDL.SDL_INIT_VIDEO` work. Function-like macros (macros that take
-  arguments) are *not* imported — for instance, SDL's `SDL_LoadBMP` is a
-  macro, so the SDL example below calls the real function
-  `SDL_LoadBMP_RW` instead.
-* **Type names** (`typedef`s such as `FILE`, `size_t`) are recorded and
-  used to give types to the functions and variables; you do not use them
-  directly in Titan source.
-
-Two practical consequences of how headers work in C:
-
-* **Transitive declarations are visible.** A C header includes other
-  headers, and everything the whole expansion declares becomes a
-  member; importing one umbrella header (like `SDL2/SDL.h`) gives you
-  the whole library.
-* **Type names unify across imports in the same module.** Each header
-  must declare (or `#include`) the typedefs it uses itself — a later
-  header that mentions `FILE` without declaring it fails to parse —
-  but typedefs with the same name convert to the same Titan type, so
-  values flow between functions from different headers when their C
-  types agree: the `pointer to FILE` returned by `stdio.fopen` can be
-  passed to a `FILE *` parameter declared in another imported header.
-
-### One flat namespace
-
-The Titan-side names (`stdio.`, `errno.`) are namespacing for the
-typechecker only. In the compiled code a foreign call or variable is the
-bare C name, and all imported headers are included into the same
-generated C file. So two imports that declare the same C name refer to
-the same thing:
+`foreign import` is a top-level declaration. It binds a local module namespace
+whose members are the declarations found in the C header:
 
 ```lua
--- Titan
-local a = foreign import "stdio.h"
-local b = foreign import "stdio.h"
--- a.printf and b.printf compile to calls to the same C printf.
+local c = foreign import "myheader.h"
 ```
 
-The compiler does not currently detect genuine conflicts (two different
-headers declaring the same name incompatibly); the C compiler will
-complain instead.
+The namespace is a compile-time namespace, not a first-class value. You can
+call `c.func(...)`, read `c.variable`, and name imported C types such as
+`c.size_t`, but you cannot store or return `c` itself.
 
-## The type mapping
+### Header Resolution
 
-C declarations are translated into Titan types as follows:
+Header lookup mirrors C include intent:
 
-| C type | Titan type |
+* An absolute path is read directly and emitted as `#include "/path/header.h"`.
+* A relative path that exists beside the Titan source file is emitted as
+  `#include "header.h"`, so the C compiler applies the normal quoted-include
+  search from that source directory.
+* The compiler-provided header `titan/ffi.h` is found under `titan-runtime` and
+  emitted as `#include <titan/ffi.h>`.
+* Other relative names are treated as system headers and emitted as
+  `#include <...>`.
+
+`titan/ffi.h` exposes selected portable C99 primitive aliases for Titan FFI
+code: `titan_ffi_void`, `titan_ffi_bool`, `titan_ffi_char`,
+`titan_ffi_signed_char`, `titan_ffi_unsigned_char`, `titan_ffi_short`,
+`titan_ffi_unsigned_short`, `titan_ffi_int`, `titan_ffi_unsigned_int`,
+`titan_ffi_long`, `titan_ffi_unsigned_long`, `titan_ffi_long_long`,
+`titan_ffi_unsigned_long_long`, `titan_ffi_float`, and `titan_ffi_double`.
+
+## Imported Members
+
+Foreign modules contain three categories of members:
+
+* C functions become callable members. C variadic functions such as
+  `printf`/`snprintf` accept extra arguments after their fixed parameters.
+* C variables and object-like `#define` constants become C values. Assigning to
+  a foreign variable name itself is rejected; assigning through an indexed C
+  array or through a field is emitted as C. Titan does not model `const` or
+  other C writeability rules for subobjects in v1, so the C compiler may still
+  reject those assignments.
+* C typedef names become the source-nameable type namespace. They may be used
+  in local annotations, casts, and the `.new()` / `.new_array(count)` allocation
+  pseudo-functions. Tag-only `struct S` / `union U` declarations are understood
+  for imported values, pointers, and fields, but cannot be written as `c.S`
+  unless the header also provides a typedef name.
+
+The value namespace and the type namespace are separate: an `extern int x;`
+member is read as `c.x`, but `c.x` is not a type annotation.
+
+## C Types In Titan
+
+Imported C types stay C types. They are not aliases for Titan `integer` or
+`float`, though many casts and calls can convert between the two.
+
+Supported C type families:
+
+| C type | Titan FFI type |
 | --- | --- |
-| `int`, `long` (and `typedef`s that resolve to integer types, e.g. `size_t`) | `integer` |
-| `double` | `float` |
-| `char *` | `string` |
-| `void` (as a return type) | `nil` — the call produces `nil` |
-| `void *` | the *void pointer* type |
-| any other pointer `T *` | an opaque pointer type, shown as `pointer to T` |
+| `void` | `void` for C calls and allocation checks |
+| `_Bool`, `char`, signed/unsigned integer types | distinct C integer types |
+| `float`, `double`, `long double` | distinct C float types |
+| `T *` | nullable C pointer type |
+| `T[N]` | C array type with static length |
+| `struct S`, `union U` | C aggregate type with fields when the header exposes them; source annotations need a typedef name in v1 |
+| `typedef T name` | C typedef that resolves through its target |
 
-Titan's `integer` is 64-bit and `float` is double-precision, matching
-`long` and `double` on the platforms Titan targets.
-
-C types outside this table — bare `char`, `short`, C's single-precision
-`float`, `unsigned` variants spelled out in a prototype, structs and
-unions passed by value, C arrays, and function pointers — have **no
-Titan counterpart**. A member whose signature mentions one of these is
-*skipped* during import rather than partly converted: it simply does
-not appear in the foreign module, so referencing it is the ordinary
-compile-time error `member '...' not found inside module '...'`.
-
-*Limitation:* struct and union **contents** are parsed but not yet
-converted — you cannot access the fields of a C struct from Titan. The
-constants of a bare top-level `enum color { ... };` declaration are not
-imported at all: using one is the compile-time error `member '...' not
-found inside module '...'`. The constants of a *typedef'd* enum
-(`typedef enum { ... } color_t;`) do become members and behave as
-integers. Struct values are only usable behind pointers, as opaque
-values (see below).
-
-## Calling C functions
-
-A foreign call looks exactly like a Titan module call. Arguments are
-checked at compile time against the C prototype, with the usual
-[implicit coercions](types.md), and arity is strict — except for C
-*variadic* functions (those declared with `...`, like `printf`), which
-accept any number of extra arguments. Mismatched argument types are
-ordinary compile-time type errors.
-
-**Foreign functions are not first-class values.** Even though Titan
-functions in general are now [first-class](functions.md) — you can refer
-to a regular Titan function by name, store it, pass it, and call it
-through a variable — a `foreign import`ed C function is *not* a value: it
-can only be *called* by name (`stdio.printf(...)`). Referring to one
-without calling it (to store or pass it as a value) is a compile-time
-error. Bind a C function once in the header and call it directly; if you
-need to pass C functionality around, wrap the call in a Titan function
-and pass that instead.
-
-Each argument is converted per the table above: numbers and booleans
-pass through directly, `nil` becomes the C null pointer, strings become
-`char *` (see the next section), pointers pass through unchanged, and
-Titan *literals* — numbers as well as strings — are emitted directly as
-C literals. The result converts back the same way; a `void` function's
-result is the value `nil`, so in practice you call it as a statement.
+Imported C types can appear in **local** type annotations:
 
 ```lua
--- Titan
-local stdio = foreign import "stdio.h"
+local ffi = foreign import "titan/ffi.h"
 
-function write_greeting(): integer
-    local fd = stdio.fopen("hello.txt", "w")    -- fd: pointer to FILE
-    local msg = "Hello, Titan!\n"
-    local n: integer = stdio.fwrite(msg, #msg, 1, fd)
-    stdio.fclose(fd)
-    return n
+local function add1(x: ffi.titan_ffi_int): ffi.titan_ffi_int
+    local y: integer = (x as integer) + 1
+    return y as ffi.titan_ffi_int
 end
 ```
 
-The annotation on `n` is optional here: `fwrite` returns the typedef
-`size_t`, which converts to `integer` wherever an integer is expected,
-and letting type inference give a local the typedef type works too — a
-typedef of a supported scalar (such as `size_t`) is treated as the
-scalar it resolves to.
+They cannot be exported from a Titan module. A public function parameter or
+return type, a public variable, or a record field that mentions a C FFI type is
+rejected. This version deliberately does not serialize C types into compiled
+Titan module interfaces, because another Titan module would also need the right
+C header included in its generated C.
 
-One C-ism to keep in mind with variadic functions: Titan integers are
-passed as 64-bit values, so `printf`-style formats must use 64-bit
-conversions (e.g. `%lld`, not `%d`); Titan floats match `%f`/`%g`.
-(An integer *literal* argument is the exception: it is emitted as a
-plain C literal of type `int`, so the C compiler may warn about `%lld`
-there.)
+## Casts And Coercions
 
-## Strings versus `char *`
+Regular `as <type>` casts handle FFI conversions; there is no special
+`as_int` form.
 
-Titan strings and C strings are different things, and the FFI converts
-between them at the boundary:
+Allowed conversions include:
 
-* **Titan → C.** Passing a Titan `string` where C expects `char *`
-  passes a pointer to the string's internal byte buffer. No copy is
-  made. Titan strings are immutable and their buffers end with a zero
-  byte, which is what C string functions expect — but this also means:
-  the C function must treat the memory as read-only; the pointer is
-  only valid during the call (do not bind C functions that stash the
-  pointer for later); and a Titan string containing an embedded zero
-  byte looks truncated from C's side.
-* **C → Titan.** A `char *` returned by a C function is immediately
-  *copied* into a fresh Titan string. Titan does not take ownership of
-  the C pointer: if the C function allocated memory for it and expects
-  the caller to free it, that memory leaks, because the pointer itself
-  is discarded after the copy. A `char *` is converted as a string, not
-  a `string?`, so a C function that can return a null `char *` (like
-  `getenv` for an unset variable) raises a clean run-time error on the
-  null case rather than crashing the process.
+* C integer values to Titan `integer`, and Titan `integer` to C integer types;
+* C float values to Titan `float`, and Titan `integer` or `float` to C float
+  types;
+* C pointers to `boolean`, with `nil` as the null pointer;
+* C arrays and counted owned C arrays to compatible C pointers;
+* any C pointer to `void *`;
+* Titan `string` to `char *` or `void *` for calls;
+* C `char *` or `void *` to Titan `string` with an explicit `as string`;
+* C integers, C floats, C pointers, C arrays-as-pointers, and owned C userdata
+  to/from `value`, with the same run-time checks used at the Lua boundary.
 
-## Pointers
+By-value C structs and unions cannot cross through `value` in v1.
 
-C functions traffic in *pointers* — addresses of C objects. Titan gives
-each pointer type an opaque, statically-checked identity: `fopen`
-returns a `pointer to FILE`, `opendir` a `pointer to DIR`, and the two
-do not mix — passing one where the other is expected is a compile-time
-type error (`... expected pointer to FILE but found pointer to DIR`).
-
-There is no Titan syntax for writing a pointer type; pointers exist
-only as the inferred types of locals and expressions inside functions
-that use the FFI. They cannot appear in a Titan function's signature,
-in arrays or maps, or in record fields, and they never cross into Lua.
-What you can do with a pointer:
-
-* **Store it in a local** and pass it to other foreign calls expecting
-  the same pointer type.
-* **Compare it with `==`/`~=`** against another pointer of the same
-  type or against `nil`. Every pointer type is *nullable*: C functions
-  signal failure by returning the null pointer, which compares equal
-  to `nil`, and you may pass `nil` for any pointer parameter.
-  Relational operators (`<`, `<=`, ...) are not allowed on pointers
-  (compile-time error `trying to use relational expression ...`).
-* **Test it for null.** Compare it with `nil` (`== nil`/`~= nil`), or
-  use its *truthiness* directly (`if p then`, `not p`, `while p`): a
-  pointer is truthy exactly when it is non-null.
-
-  ```lua
-  -- Titan
-  local win = SDL.SDL_CreateWindow(title, 100, 100, 640, 480, flags)
-  if win == nil then
-      -- creation failed
-  end
-  ```
-
-* **Coerce it to `void *` implicitly.** C's `void *` is the
-  "any pointer" type; every pointer — and also any Titan string —
-  converts to it implicitly, so calls like `free(p)` or
-  `memcmp(s1, s2, n)` just work.
-* **Cast `void *` to `string` explicitly.** This is the one conversion
-  that requires an explicit [`as` cast](expressions.md), because it
-  reinterprets raw memory as a string buffer. The typical use is C
-  functions that *fill* memory you allocated:
-
-  ```lua
-  -- Titan
-  local stdlib   = foreign import "stdlib.h"
-  local string_h = foreign import "string.h"
-
-  function copy_into_memory(): string
-      local mem = stdlib.realloc(nil, 100)        -- mem: void pointer
-      local s = string_h.strcpy(mem as string, "Hello, cast")
-      stdlib.free(mem)
-      return s    -- strcpy's char* return was copied into a Titan string
-  end
-  ```
-
-  Without the cast, the call is the compile-time error
-  `expected string but found void pointer`.
-
-Pointers are not managed by the garbage collector. Memory you obtain
-from C (as with `realloc` above) must be released through C (`free`),
-and Titan does nothing to stop you from using a pointer after the C
-library has invalidated it — this is exactly as unsafe as it is in C.
-There is no memory safety at the boundary in either direction: a Titan
-`string` passed to C is a pointer into a GC-owned buffer, so binding a
-C function that frees or reallocates what it is handed (passing a Titan
-string to `free` or `realloc`) corrupts the heap.
-
-## Reading and writing C globals
-
-Foreign variables (including the `#define` constants) are read like
-module variables, as in the `errno.errno` example above. They are
-**read-only**: assigning to one is the clean compile-time error
-`cannot assign to foreign variable`.
-
-## Linking and platform requirements
-
-Importing a header gives the compiler the *declarations*; the compiled
-module must still be linked against the *library* that implements them.
-Functions in the C standard library need nothing extra, but other
-libraries are named with `titanc`'s `-l`/`--link` option (a
-comma-separated list, each becoming a `-l<name>` flag for the C
-compiler):
-
-```sh
-titanc examples.sdl_demo -lSDL2
-```
-
-Platform requirements, all at **compile time** (a compiled module has no
-extra run-time dependencies beyond the libraries it links):
-
-* A POSIX system. The FFI shells out to `gcc -dM -E` (for the
-  compiler's predefined macros) and `cpp -v` (for the include search
-  path), so both `gcc` and `cpp` must be on `PATH`, and the imported
-  headers must be installed where the C compiler will also find them.
-* The header is parsed by Titan's own built-in C preprocessor and C99
-  parser — not by the system compiler — so headers must be within what
-  that parser accepts. In practice it tolerates the common GNU/Clang
-  and macOS extensions found in real system headers (`__attribute__`,
-  `__asm__`, `_Bool`, `__int128`, anonymous unions, Apple availability
-  macros and blocks), and it ignores `#error` and `#pragma`; exotic
-  compiler-specific headers may still fail to parse, which surfaces as
-  the compile-time `failed parsing: ...` error.
-
-## A complete example: SDL
-
-The repository's two-module SDL program (`examples/sdl_demo.titan` and
-`examples/sdl_quit.titan`) exercises most of this chapter: a third-party
-library bound through one umbrella header, `#define` constants, opaque
-pointers tested for null, `nil` arguments, variadic `printf`, and
-linking with `-l`.
+When a C scalar participates in Titan arithmetic, cast it to the Titan type you
+want:
 
 ```lua
--- Titan: examples/sdl_quit.titan
-local stdio  = foreign import "stdio.h"
-local SDL    = foreign import "SDL2/SDL.h"
+local string_h = foreign import "string.h"
+
+function len_plus_one(s: string): integer
+    return (string_h.strlen(s) as integer) + 1
+end
+```
+
+## Calling C Functions
+
+A foreign call uses the imported C function name:
+
+```lua
+local stdio = foreign import "stdio.h"
+
+function write(buf: string): integer
+    return stdio.printf("%s", buf)
+end
+```
+
+Fixed parameters are checked against the C prototype. For C variadic functions,
+the fixed prefix is checked and explicit extra arguments are converted using
+their own static types. This is enough to call functions such as `printf` and
+`snprintf`, but Titan does not validate format strings. Titan variadic `...`
+cannot be forwarded into a C variadic call in v1.
+
+Foreign functions are not first-class values. `stdio.printf` can be called by
+name, but cannot be stored, passed, or returned. Wrap it in a Titan function if
+you need a function value.
+
+## Strings And Pointers
+
+Passing a Titan `string` to C as `char *` or `void *` passes a pointer to the
+string's internal immutable byte buffer. No copy is made. The pointer is valid
+only while the Titan string is alive and anchored for the call; a C function
+must not store it, mutate it, free it, or reallocate it.
+
+Casting a C `char *` or `void *` to `string` copies bytes up to the first
+`\0` into a fresh Titan string:
+
+```lua
 local stdlib = foreign import "stdlib.h"
 
-function quit(sdlquit: boolean, msg: string)
-    stdio.printf(msg .. ": %s\n", SDL.SDL_GetError())
-    if sdlquit then
-        SDL.SDL_Quit()
-    end
-    stdlib.exit(1)
+function path(): string
+    return stdlib.getenv("PATH") as string
 end
 ```
+
+The cast raises a run-time error if the C pointer is `NULL`. A `void *` cast to
+`string` must point at a valid NUL-terminated C string; this is not a
+binary-buffer conversion.
+
+Pointers are nullable and can be tested directly:
 
 ```lua
--- Titan: examples/sdl_demo.titan (trimmed)
-local SDL = foreign import "SDL2/SDL.h"
-local sdl_quit = import "examples.sdl_quit"
+local stdio = foreign import "stdio.h"
 
-function main(args: {string}): integer
-    if SDL.SDL_Init(SDL.SDL_INIT_VIDEO) ~= 0 then
-        sdl_quit.quit(false, "SDL_init error")
+function exists(name: string): boolean
+    local f = stdio.fopen(name, "r")
+    if f then
+        stdio.fclose(f)
+        return true
     end
-    local SDL_WINDOW_SHOWN = 0x04
-    local win = SDL.SDL_CreateWindow("Hello World!", 100, 100, 640, 480,
-                                     SDL_WINDOW_SHOWN)
-    if win == nil then
-        sdl_quit.quit(true, "SDL_CreateWindow error")
-    end
-    local bmp = SDL.SDL_LoadBMP_RW(SDL.SDL_RWFromFile("examples/hello.bmp", "rb"), 1)
-    local ren = SDL.SDL_CreateRenderer(win, -1, 0x02 | 0x04)
-    local tex = SDL.SDL_CreateTextureFromSurface(ren, bmp)
-    SDL.SDL_FreeSurface(bmp)
-    for i = 1, 3 do
-        SDL.SDL_RenderClear(ren)
-        SDL.SDL_RenderCopy(ren, tex, nil, nil)
-        SDL.SDL_RenderPresent(ren)
-        SDL.SDL_Delay(1000)
-    end
-    SDL.SDL_DestroyTexture(tex)
-    SDL.SDL_DestroyRenderer(ren)
-    SDL.SDL_DestroyWindow(win)
-    SDL.SDL_Quit()
-    return 42
+    return false
 end
 ```
 
-Because `sdl_demo` defines `main(args: {string}): integer`, compiling it
-produces a standalone executable (see [Modules](modules.md) and
-[Functions](functions.md)):
+Raw C pointers are not owned by Titan. Memory obtained from C must be released
+through the matching C API.
+
+## C Arrays And Length
+
+C array indexing uses the same syntax as Titan array indexing but is **0-based**:
+
+```lua
+local c = foreign import "data.h"  -- extern int values[4];
+
+function third(): integer
+    return c.values[2] as integer
+end
+```
+
+The base expression may be:
+
+* a C pointer, indexed with no bounds check;
+* a C static array, bounds-checked against its declared length;
+* a counted owned C array, bounds-checked against its allocation count.
+
+`#exp` is valid for C static arrays and counted owned C arrays. It returns the
+static length for a C array and the allocation count for an owned array:
+
+```lua
+local ffi = foreign import "titan/ffi.h"
+
+function count(): integer
+    local xs = ffi.titan_ffi_int.new_array(8)
+    return #xs
+end
+```
+
+Unsized C arrays, including flexible array members, cannot be indexed or
+measured in this version.
+
+## Structs, Unions, And Fields
+
+When the header exposes a complete struct or union definition, Titan imports
+its named fields:
+
+```lua
+local c = foreign import "point.h"
+
+function sum(): integer
+    local p = c.ffi_point.new()
+    p.x = 10
+    p.y = 20
+    return (p.x as integer) + (p.y as integer)
+end
+```
+
+Field access works on C struct/union values, pointers to structs/unions, and
+owned C objects. For pointer and owned bases, `p.x` uses C's `->` semantics.
+
+Bitfields are parsed and typed, but they remain C bitfields: assignment follows
+the C compiler's rules. Anonymous fields are not exposed as Titan members.
+
+## Owned C Objects
+
+Any supported C object type has two pseudo-functions on its type namespace:
+
+```lua
+local ffi = foreign import "titan/ffi.h"
+
+function make(): integer
+    local one = ffi.titan_ffi_int.new()
+    local many = ffi.titan_ffi_int.new_array(16)
+    return #many
+end
+```
+
+`T.new()` allocates one zeroed C object. `T.new_array(count)` allocates `count`
+zeroed adjacent objects and records the count through the userdata payload size.
+The returned value is an owned C userdata whose lifetime belongs to Titan's Lua
+GC. No finalizer is installed.
+
+Passing an owned C object or owned C array to a C function expecting `T *`
+passes a pointer to the userdata payload:
+
+```lua
+local ffi = foreign import "titan/ffi.h"
+local stdio = foreign import "stdio.h"
+
+function formatted_len(s: string): integer
+    local buf = ffi.titan_ffi_char.new_array(32)
+    return stdio.snprintf(buf, 32, "%s", s)
+end
+```
+
+Allocation is intentionally limited in v1. Titan rejects owned allocation of
+`void`, incomplete struct/union types, C array typedefs, and structs with a
+flexible array member. Flexible array members need a dedicated design for
+passing the member length, storing it, and bounds-checking the member.
+
+## Linking And Platform Requirements
+
+`foreign import` gives Titan the declarations. You still link against the C
+library that implements them with `titanc -l`:
 
 ```sh
 titanc examples.sdl_demo -lSDL2
-./examples/sdl_demo
 ```
 
-## Summary of current limitations
+The compile-time FFI depends on a POSIX-like C toolchain: Titan shells out to
+`gcc -dM -E` for predefined macros and `cpp -v` for include paths, and then
+parses the preprocessed header with its own C99 grammar. Headers using
+unsupported compiler extensions may fail with a compile-time parse error.
 
-* No access to struct/union fields (bare-enum constants are missing
-  members; structs only as opaque pointers).
-* No C arrays, no function pointers, no by-value structs, and no
-  mapping for bare `char`, `short`, C `float`, or explicit `unsigned`
-  types in prototypes. A member whose signature mentions one of these
-  is skipped during import, so referencing it is a clean "not a member"
-  error.
-* Function-like macros are not imported.
-* Foreign functions are not first-class values: they can be called by
-  name but not referenced, stored, or passed as values.
-* Foreign variables are effectively read-only.
-* One flat C namespace across all imports, without conflict detection.
-* Pointers cannot appear in Titan type annotations, containers, record
-  fields, or exported signatures, and never cross into Lua.
-* Compile-time POSIX dependency (`gcc`, `cpp`, `/dev/null`).
-* No lifetime or memory safety for pointers: the FFI is exactly as
-  unsafe as the C it binds.
+## Current Limitations
+
+* C function pointers are not modeled as callable Titan values.
+* Function-pointer typedefs are not exposed as C FFI types in v1.
+* Foreign functions are not first-class values.
+* C types are local to the importing Titan module and cannot appear in exported
+  Titan interfaces.
+* Top-level enum constants, bare or typedef'd, are imported as C integer
+  members, but their actual numeric values are not stored in Titan's C type
+  list.
+* Static C functions and function-like macros are not imported.
+* Owned allocation does not support `void`, incomplete aggregate types, C array
+  typedefs, or structs with flexible array members.
+* C adopted pointers/lifetimes are parked for a later design; v1 has borrowed C
+  pointers and Titan-owned userdata only.
+* The C namespace is flat across all foreign imports in one generated C file,
+  and conflicts are left for the C compiler to diagnose.

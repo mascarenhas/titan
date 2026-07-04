@@ -69,10 +69,12 @@ local function emitline(node)
         .. c_string_literal(loc.filename) .. "\n"
 end
 
+local foreignctype
 
 local function getslot(typ --[[:table]], dst --[[:string?]], src --[[:string]])
     dst = dst and dst .. " =" or ""
     local tmpl
+    local ct
     if typ._tag == "Type.Integer" then tmpl = "$DST ivalue($SRC)"
     elseif typ._tag == "Type.Float" then tmpl = "$DST fltvalue($SRC)"
     elseif typ._tag == "Type.Boolean" then tmpl = "$DST ttistrue($SRC)"
@@ -84,8 +86,24 @@ local function getslot(typ --[[:table]], dst --[[:string?]], src --[[:string]])
     elseif typ._tag == "Type.Nominal" then tmpl = "$DST uvalue($SRC)"
     elseif typ._tag == "Type.Option" then tmpl = "$DST *($SRC)"
     elseif typ._tag == "Type.Function" then tmpl = "$DST *($SRC)"
+    elseif typ._tag == "Type.CInteger" or
+           (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CInteger") then
+        tmpl = "$DST (($CT)ivalue($SRC))"
+        ct = foreignctype(typ)
+    elseif typ._tag == "Type.CFloat" or
+           (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CFloat") then
+        tmpl = "$DST (($CT)fltvalue($SRC))"
+        ct = foreignctype(typ)
+    elseif typ._tag == "Type.CPointer" or typ._tag == "Type.CArray" or
+           (typ._tag == "Type.CTypedef"
+            and (types.resolve_c_typedef(typ)._tag == "Type.CPointer"
+                 or types.resolve_c_typedef(typ)._tag == "Type.CArray")) then
+        tmpl = "$DST (($CT)pvalue($SRC))"
+        ct = foreignctype(typ)
+    elseif typ._tag == "Type.COwned" then
+        tmpl = "$DST uvalue($SRC)"
     else error("invalid type " .. types.tostring(typ)) end
-    return render(tmpl, { DST = dst, SRC = src })
+    return render(tmpl, { DST = dst, SRC = src, CT = ct })
 end
 
 local function toboolean(typ --[[:table]], src --[[:string]])
@@ -101,6 +119,8 @@ local function toboolean(typ --[[:table]], src --[[:string]])
         tmpl = "!ttisnil(&$SRC)"
     elseif typ._tag == "Type.Pointer" then
         -- a foreign C pointer is truthy iff it is non-NULL
+        tmpl = "($SRC != NULL)"
+    elseif typ._tag == "Type.CPointer" then
         tmpl = "($SRC != NULL)"
     else error("invalid type " .. types.tostring(typ)) end
     return render(tmpl, { SRC = src })
@@ -212,6 +232,25 @@ local function type2metatable(ctx, typ --[[:table]])
     return ctx.metatables[typ.fqtn]
 end
 
+local function owned_c_metatable_key(typ)
+    assert(typ._tag == "Type.COwned")
+    return types.tostring(typ.pointee) .. (typ.count and "[]" or "")
+end
+
+local function owned_c_metatable(ctx, typ)
+    local tlcontext = ctx.tlcontext or ctx
+    local key = owned_c_metatable_key(typ)
+    local entry = tlcontext.owned_c_metatables[key]
+    if not entry then
+        entry = {
+            slot = nextupvalue(tlcontext),
+            name = "Titan owned C " .. tlcontext.module .. " " .. key .. " metatable",
+        }
+        tlcontext.owned_c_metatables[key] = entry
+    end
+    return entry.slot
+end
+
 -- Get the C identifier of the `static const void *` holding the type tag for a
 -- function type, allocating one (numbered per module) on first use. Tags are
 -- keyed by the verbatim canonical type string and shared across all modules
@@ -306,6 +345,94 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
         ]], {
             EXP = exp,
             VAR = cvar
+        })
+    elseif typ._tag == "Type.CInteger" or
+           (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CInteger") then
+        return render([[
+            if (TITAN_LIKELY(ttisinteger($EXP))) {
+                $VAR = ($CT)ivalue($EXP);
+            } else if (ttisfloat($EXP)) {
+                lua_Number _v = fltvalue($EXP);
+                lua_Number _flt = l_floor(_v);
+                lua_Integer _i;
+                if (TITAN_UNLIKELY(_v != _flt)) {
+                    $THROWFLOAT
+                } else if (TITAN_UNLIKELY(!lua_numbertointeger(_flt, &_i))) {
+                    $THROWFLOAT
+                } else {
+                    $VAR = ($CT)_i;
+                }
+            } else {
+                $THROWINTEGER
+            }
+        ]], {
+            EXP = exp,
+            VAR = cvar,
+            CT = foreignctype(typ),
+            FILE = c_string_literal(loc.filename),
+            LINE = c_integer_literal(loc.line),
+            COL = c_integer_literal(loc.col),
+            THROWFLOAT = codethrow(loc, "%s:%d:%d: type error, number '%f' has no integer representation", { "$FILE", "$LINE", "$COL", "_v" }),
+            THROWINTEGER = codethrow(loc, "%s:%d:%d: type error, expected integer but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($EXP))" })
+        })
+    elseif typ._tag == "Type.CFloat" or
+           (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CFloat") then
+        return render([[
+            if (TITAN_LIKELY(ttisfloat($EXP))) {
+                $VAR = ($CT)fltvalue($EXP);
+            } else if (ttisinteger($EXP)) {
+                $VAR = ($CT)ivalue($EXP);
+            } else {
+                $THROW
+            }
+        ]], {
+            EXP = exp,
+            VAR = cvar,
+            CT = foreignctype(typ),
+            FILE = c_string_literal(loc.filename),
+            LINE = c_integer_literal(loc.line),
+            COL = c_integer_literal(loc.col),
+            THROW = codethrow(loc, "%s:%d:%d: type error, expected float but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($EXP))" })
+        })
+    elseif typ._tag == "Type.CPointer" or
+           (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CPointer") then
+        return render([[
+            if (TITAN_LIKELY(ttislightuserdata($EXP))) {
+                $VAR = ($CT)pvalue($EXP);
+            } else if (ttisnil($EXP)) {
+                $VAR = NULL;
+            } else {
+                $THROW
+            }
+        ]], {
+            EXP = exp,
+            VAR = cvar,
+            CT = foreignctype(typ),
+            FILE = c_string_literal(loc.filename),
+            LINE = c_integer_literal(loc.line),
+            COL = c_integer_literal(loc.col),
+            THROW = codethrow(loc, "%s:%d:%d: type error, expected C pointer but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($EXP))" })
+        })
+    elseif typ._tag == "Type.COwned" then
+        return render([[
+            if (TITAN_LIKELY(ttisfulluserdata($EXP)
+                    && uvalue($EXP)->metatable == hvalue(&_mod->uv[$META].uv))) {
+                $VAR = uvalue($EXP);
+            } else {
+                $THROW
+            }
+        ]], {
+            EXP = exp,
+            VAR = cvar,
+            META = c_integer_literal(owned_c_metatable(ctx, typ)),
+            FILE = c_string_literal(loc.filename),
+            LINE = c_integer_literal(loc.line),
+            COL = c_integer_literal(loc.col),
+            THROW = codethrow(loc, "%s:%d:%d: type error, expected %s but found %s", {
+                "$FILE", "$LINE", "$COL",
+                c_string_literal(types.tostring(typ)),
+                "lua_typename(L, ttype($EXP))"
+            })
         })
     elseif typ._tag == "Type.Nil" then tag = "nil"
     elseif typ._tag == "Type.String" then tag = "string"
@@ -521,6 +648,20 @@ local function setslot(typ --[[:table]], dst --[[:string]], src --[[:string]])
     elseif typ._tag == "Type.Nominal" then tmpl = "setuvalue(L, $DST, $SRC);"
     elseif typ._tag == "Type.Option" then tmpl = "do { TValue _titan_v = $SRC; setobj2t(L, $DST, &_titan_v); } while (0);"
     elseif typ._tag == "Type.Function" then tmpl = "do { TValue _titan_v = $SRC; setobj2t(L, $DST, &_titan_v); } while (0);"
+    elseif typ._tag == "Type.CInteger" or
+           (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CInteger") then
+        tmpl = "setivalue($DST, ((lua_Integer)$SRC));"
+    elseif typ._tag == "Type.CFloat" or
+           (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CFloat") then
+        tmpl = "setfltvalue($DST, ((lua_Number)$SRC));"
+    elseif typ._tag == "Type.CPointer" or
+           (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CPointer") then
+        tmpl = "setpvalue($DST, ((void*)$SRC));"
+    elseif typ._tag == "Type.CArray" or
+           (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CArray") then
+        tmpl = "setpvalue($DST, ((void*)$SRC));"
+    elseif typ._tag == "Type.COwned" then
+        tmpl = "setuvalue(L, $DST, $SRC);"
     else
         error("invalid type " .. types.tostring(typ))
     end
@@ -570,8 +711,26 @@ local function copyslotwrapped(dst, src)
     })
 end
 
-local function foreignctype(typ --[[:table]])
-    if typ._tag == "Type.Pointer" then
+foreignctype = function(typ --[[:table]])
+    if typ._tag == "Type.CTypedef" then
+        return typ.name
+    elseif typ._tag == "Type.COwned" then
+        return "Udata*"
+    elseif typ._tag == "Type.CVoid" then
+        return "void"
+    elseif typ._tag == "Type.CInteger" or typ._tag == "Type.CFloat" then
+        return typ.spelling
+    elseif typ._tag == "Type.CStruct" then
+        return "struct " .. (typ.tagname or typ.cname)
+    elseif typ._tag == "Type.CUnion" then
+        return "union " .. (typ.tagname or typ.cname)
+    elseif typ._tag == "Type.CArray" then
+        return foreignctype(typ.elem) .. "*"
+    elseif typ._tag == "Type.CPointer" then
+        local quals = typ.quals and #typ.quals > 0
+            and " " .. table.concat(typ.quals, " ") or ""
+        return foreignctype(typ.pointee) .. " *" .. quals
+    elseif typ._tag == "Type.Pointer" then
         if typ.type._tag == "Type.Nil" then
             return "void*"
         end
@@ -603,6 +762,8 @@ local function ctype(typ --[[:table]])
     elseif typ._tag == "Type.Value" then return "TValue"
     elseif typ._tag == "Type.Nominal" then return "Udata*"
     elseif typ._tag == "Type.Pointer" then return foreignctype(typ)
+    elseif typ._tag == "Type.COwned" then return "Udata*"
+    elseif types.is_c(typ) then return foreignctype(typ)
     elseif typ._tag == "Type.Option" then return "TValue"
     -- A first-class function value is boxed (it may be a Titan closure, a Lua
     -- closure, a C function, or a `__call` object), like `value`/`option`.
@@ -1255,7 +1416,7 @@ local function newforeigntmp(ctx --[[:table]], typ --[[:table]])
     local ftype
     if typ._tag == "Type.String" then
         ftype = "char*"
-    elseif typ._tag == "Type.Pointer" then
+    elseif typ._tag == "Type.Pointer" or types.is_c(typ) then
         ftype = foreignctype(typ)
     else
         error("don't know how to convert foreign type "..types.tostring(typ))
@@ -1799,6 +1960,9 @@ local function set_table_entry(keytype, t, k, v)
     })
 end
 
+local codecfield
+local codecindex_parts
+
 local function codeassignment(ctx, var, cexp, etype)
     local vtag = var._tag
     if vtag == "Ast.VarName" or (vtag == "Ast.VarDot" and var._decl) then
@@ -1820,6 +1984,16 @@ local function codeassignment(ctx, var, cexp, etype)
                 SETSLOT = setslot(var._type, "_fieldslot", cexp),
                 BARRIER = types.is_gc(var._type)
                           and "luaC_barrierback(L, obj2gco(_recobj), _fieldslot);" or ""
+            })
+        elseif vtag == "Ast.VarDot" and var._decl._tag == "Type.CField" then
+            local lstats, lexp = codecfield(ctx, var)
+            return render([[
+                $STATS
+                $FIELD = $CEXP;
+            ]], {
+                STATS = lstats,
+                FIELD = lexp,
+                CEXP = cexp,
             })
         elseif vtag == "Ast.VarDot" then -- module variable
             assert(var._decl._tag == "Type.ModuleVariable")
@@ -1950,6 +2124,27 @@ local function codeassignment(ctx, var, cexp, etype)
                 BARRIER = types.is_gc(map._type.values)
                           and "luaC_barrierback(L, obj2gco(_t), &_vv);" or ""
             })
+        elseif types.is_c(var.exp1._type) then
+            local parts = codecindex_parts(ctx, var)
+            return render([[
+                {
+                    $BSTATS
+                    $ISTATS
+                    $CIDX
+                    $IDX = $IEXP;
+                    $BOUNDS
+                    $BASE[$IDX] = $CEXP;
+                }
+            ]], {
+                BSTATS = parts.bstats,
+                ISTATS = parts.istats,
+                CIDX = parts.cidx,
+                IDX = parts.idxname,
+                IEXP = parts.iexp,
+                BOUNDS = parts.bounds,
+                BASE = parts.baseexp,
+                CEXP = cexp,
+            })
         end
     else
         error("invalid tag for lvalue of assignment: " .. vtag)
@@ -2012,7 +2207,19 @@ local function makestring(ctx, cexp, target)
     end
 end
 
-local function nativetoforeignexp(ctx, exp, cexp)
+local function nativetoforeignexp(ctx, exp, cexp, target)
+    local stype = types.resolve_c_typedef(exp._type)
+    local ttype = target and types.resolve_c_typedef(target) or nil
+
+    if stype._tag == "Type.COwned"
+       and (not ttype or ttype._tag == "Type.CPointer") then
+        return "", render("getudatamem($EXP)", { EXP = cexp })
+    end
+
+    if types.is_c(exp._type) then
+        return "", cexp
+    end
+
     if exp._type._tag == "Type.Integer"
     or exp._type._tag == "Type.Float"
     or exp._type._tag == "Type.Boolean"
@@ -2025,6 +2232,9 @@ local function nativetoforeignexp(ctx, exp, cexp)
     end
 
     if exp._type._tag == "Type.String" then
+        if target and not (ttype and ttype._tag == "Type.CPointer") then
+            return "", cexp
+        end
         local texp, tmp = newforeigntmp(ctx, exp._type)
         local cvtexp = render([[getstr($CEXP)]], { CEXP = cexp })
         return render([[
@@ -2037,10 +2247,35 @@ local function nativetoforeignexp(ctx, exp, cexp)
         }), tmp
     end
 
+    if exp._type._tag == "Type.Value" and target then
+        local texp, tmp = newforeigntmp(ctx, target)
+        return render([[
+            $TEXP
+            $CHECKANDGET
+        ]], {
+            TEXP = texp,
+            CHECKANDGET = checkandget(ctx, target, tmp, "&" .. cexp, exp.loc),
+        }), tmp
+    end
+
     error("don't know how to handle type "..types.tostring(exp._type))
 end
 
 local function foreigntonativeexp(ctx, exp, cexp, target)
+    local etype = types.resolve_c_typedef(exp._type)
+
+    if etype._tag == "Type.CInteger" then
+        return "", "((lua_Integer)" .. cexp .. ")"
+    elseif etype._tag == "Type.CFloat" then
+        return "", "((lua_Number)" .. cexp .. ")"
+    elseif etype._tag == "Type.CPointer" then
+        return "", cexp
+    elseif etype._tag == "Type.CArray" then
+        return "", cexp
+    elseif etype._tag == "Type.CStruct" or etype._tag == "Type.CUnion" then
+        return "", cexp
+    end
+
     if exp._type._tag == "Type.Integer"
     or exp._type._tag == "Type.Float"
     or exp._type._tag == "Type.Boolean"
@@ -2106,7 +2341,7 @@ local function is_static_callee(node)
     if node.exp._tag ~= "Ast.ExpVar" then return false end
     local var = node.exp.var
     if var._tag == "Ast.VarDot" and var.exp and var.exp._type
-       and var.exp._type._tag == "Type.ForeignModule" then
+       and var.exp._type._tag == "Type.CModule" then
         return true   -- foreign call, handled by codeforeigncall
     end
     local decl = var._decl
@@ -2599,7 +2834,7 @@ local function codecall(ctx, node)
         if fnode._tag == "Ast.VarName" then
             fname = func_name(ctx.module, fnode.name)
         elseif fnode._tag == "Ast.VarDot" then
-            if fnode.exp._type._tag == "Type.ForeignModule" then
+            if fnode.exp._type._tag == "Type.CModule" then
                 return codeforeigncall(ctx, node)
             elseif fnode._decl._tag == "Type.StaticMethod" then
                 fname = static_name(fnode._decl)
@@ -3661,7 +3896,7 @@ local function codestat_dispatch(ctx, node)
     elseif tag == "Ast.StatCall" then
         local callee = node.callexp.exp
         if callee.var and callee.var._tag == "Ast.VarDot"
-           and callee.var.exp._type._tag == "Type.ForeignModule" then
+           and callee.var.exp._type._tag == "Type.CModule" then
             local fstats, fexp = codeforeigncall(ctx, node.callexp)
             return fstats .. fexp .. ";"
         else
@@ -3716,6 +3951,117 @@ end
 -- as a string with a C expression. For trivial expressions
 -- the preliminary code is always the empty string
 
+local function code_owned_payload(owner, pointee)
+    return render("(($CT *)getudatamem($OWNER))", {
+        CT = foreignctype(pointee),
+        OWNER = owner,
+    })
+end
+
+codecindex_parts = function(ctx, node)
+    local basetype = types.resolve_c_typedef(node.exp1._type)
+    local bstats, bexp = codeexp(ctx, node.exp1)
+    local istats, iexp = codeexp(ctx, node.exp2)
+    local cidx, idxname = newtmp(ctx, types.Integer())
+    local baseexp, lenexp, bounds
+
+    if basetype._tag == "Type.CPointer" then
+        local cbase, basename = newtmp(ctx, node.exp1._type)
+        bstats = render([[
+            $BSTATS
+            $CBASE
+            $BASENAME = $BEXP;
+            if (TITAN_UNLIKELY($BASENAME == NULL)) {
+                luaL_error(L, "%s:%d:%d: cannot index a NULL C pointer", $FILE, $LINE, $COL);
+            }
+        ]], {
+            BSTATS = bstats,
+            CBASE = cbase,
+            BASENAME = basename,
+            BEXP = bexp,
+            FILE = c_string_literal(node.loc.filename),
+            LINE = c_integer_literal(node.loc.line),
+            COL = c_integer_literal(node.loc.col),
+        }, true)
+        baseexp = basename
+        bounds = ""
+    elseif basetype._tag == "Type.CArray" then
+        baseexp = bexp
+        lenexp = c_integer_literal(basetype.len)
+    elseif basetype._tag == "Type.COwned" then
+        baseexp = code_owned_payload(bexp, basetype.pointee)
+        lenexp = render("((lua_Integer)($OWNER->len / sizeof($CT)))", {
+            OWNER = bexp,
+            CT = foreignctype(basetype.pointee),
+        })
+    else
+        error("invalid C index base " .. types.tostring(node.exp1._type))
+    end
+
+    if lenexp then
+        bounds = render([[
+            if (TITAN_UNLIKELY($IDX < 0 || $IDX >= $LEN)) {
+                luaL_error(L, "%s:%d:%d: C index %I out of range [0, %d)", $FILE, $LINE, $COL, (l_uacInt)$IDX, (int)$LEN);
+            }
+        ]], {
+            IDX = idxname,
+            LEN = lenexp,
+            FILE = c_string_literal(node.loc.filename),
+            LINE = c_integer_literal(node.loc.line),
+            COL = c_integer_literal(node.loc.col),
+        }, true)
+    end
+
+    return {
+        bstats = bstats,
+        istats = istats,
+        cidx = cidx,
+        idxname = idxname,
+        iexp = iexp,
+        bounds = bounds,
+        baseexp = baseexp,
+    }
+end
+
+codecfield = function(ctx, node)
+    local basetype = types.resolve_c_typedef(node.exp._type)
+    local cstats, cexp = codeexp(ctx, node.exp)
+    local field = node._decl
+    if basetype._tag == "Type.CPointer" then
+        local cbase, basename = newtmp(ctx, node.exp._type)
+        return render([[
+            $CSTATS
+            $CBASE
+            $BASENAME = $CEXP;
+            if (TITAN_UNLIKELY($BASENAME == NULL)) {
+                luaL_error(L, "%s:%d:%d: cannot access field '%s' of a NULL C pointer", $FILE, $LINE, $COL, $FIELDSTR);
+            }
+        ]], {
+            CSTATS = cstats,
+            CBASE = cbase,
+            BASENAME = basename,
+            CEXP = cexp,
+            FILE = c_string_literal(node.loc.filename),
+            LINE = c_integer_literal(node.loc.line),
+            COL = c_integer_literal(node.loc.col),
+            FIELDSTR = c_string_literal(field.name),
+        }, true), render("$BASE->$FIELD", {
+            BASE = basename,
+            FIELD = field.name,
+        })
+    elseif basetype._tag == "Type.COwned" then
+        return cstats, render("$BASE->$FIELD", {
+            BASE = code_owned_payload(cexp, basetype.pointee),
+            FIELD = field.name,
+        })
+    else
+        return cstats, render("$BASE.$FIELD", {
+            BASE = cexp,
+            FIELD = field.name,
+        })
+    end
+end
+
 local function codevar(ctx, node)
     if node._tag == "Ast.VarDot" then
         if node._decl._tag == "Type.Field" then
@@ -3725,6 +4071,8 @@ local function codevar(ctx, node)
                     EXP = cexp,
                     INDEX = node._decl.index
                 }))
+        elseif node._decl._tag == "Type.CField" then
+            return codecfield(ctx, node)
         elseif node._decl._tag == "Type.ModuleMember"
                and node._type._tag == "Type.Function" then
             -- Reference to an imported module's function as a first-class value:
@@ -4131,8 +4479,16 @@ local function codeunaryop(ctx, node, iscondition)
         return estats, "!(" .. ecode .. ")"
     elseif op == "#" then
         local estats, ecode = codeexp(ctx, node.exp)
+        local etype = types.resolve_c_typedef(node.exp._type)
         if node.exp._type._tag == "Type.Array" then
             return estats, "luaH_getn(L, " .. ecode .. ")"
+        elseif etype._tag == "Type.CArray" then
+            return estats, c_integer_literal(etype.len)
+        elseif etype._tag == "Type.COwned" and etype.count then
+            return estats, render("((lua_Integer)($OWNER->len / sizeof($CT)))", {
+                OWNER = ecode,
+                CT = foreignctype(etype.pointee),
+            })
         else
             return estats, "tsslen(" .. ecode .. ")"
         end
@@ -4767,6 +5123,95 @@ local function codeindexmap(ctx, node)
     return stats, tmpname
 end
 
+local function codeindexc(ctx, node)
+    local elem = node._type
+    local parts = codecindex_parts(ctx, node)
+    local ctmp, tmpname, tmpslot = newtmp(ctx, elem, types.is_gc(elem))
+    local cset = types.is_gc(elem) and setslot(elem, tmpslot, tmpname) or ""
+
+    return render([[
+        $CTMP
+        {
+            $BSTATS
+            $ISTATS
+            $CIDX
+            $IDX = $IEXP;
+            $BOUNDS
+            $TMPNAME = $BASE[$IDX];
+            $CSET
+        }
+    ]], {
+        CTMP = ctmp,
+        BSTATS = parts.bstats,
+        ISTATS = parts.istats,
+        CIDX = parts.cidx,
+        IDX = parts.idxname,
+        IEXP = parts.iexp,
+        BOUNDS = parts.bounds,
+        TMPNAME = tmpname,
+        BASE = parts.baseexp,
+        CSET = cset,
+    }), tmpname
+end
+
+local function codecpseudonew(ctx, node)
+    local decl = node.exp.var._decl
+    local ctyp = decl.ctype
+    local ret = node._type
+    local ctmp, tmpname, tmpslot = newtmp(ctx, ret, true)
+    local countstats, countdecl, countassign, countname
+
+    if decl.array then
+        local arg = node.args.args[1]
+        countstats, countname = codeexp(ctx, arg)
+        countdecl = ""
+        countassign = render([[
+            $COUNTSTATS
+            lua_Integer _count = $COUNTEXP;
+            if (TITAN_UNLIKELY(_count < 0)) {
+                luaL_error(L, "%s:%d:%d: C array allocation count cannot be negative", $FILE, $LINE, $COL);
+            }
+        ]], {
+            COUNTSTATS = countstats,
+            COUNTEXP = countname,
+            FILE = c_string_literal(node.loc.filename),
+            LINE = c_integer_literal(node.loc.line),
+            COL = c_integer_literal(node.loc.col),
+        }, true)
+    else
+        countdecl = "lua_Integer _count = 1;"
+        countassign = ""
+    end
+
+    return render([[
+        $CTMP
+        {
+            $COUNTDECL
+            $COUNTASSIGN
+            size_t _elem_size = sizeof($CT);
+            if (TITAN_UNLIKELY((size_t)_count > ((size_t)-1) / _elem_size)) {
+                luaL_error(L, "%s:%d:%d: C allocation size overflow", $FILE, $LINE, $COL);
+            }
+            size_t _nbytes = (size_t)_count * _elem_size;
+            $TMPNAME = luaS_newudata(L, _nbytes, 0);
+            $TMPNAME->metatable = hvalue(&_mod->uv[$META].uv);
+            setuvalue(L, $TMPSLOT, $TMPNAME);
+            memset(getudatamem($TMPNAME), 0, _nbytes);
+        }
+    ]], {
+        CTMP = ctmp,
+        COUNTDECL = countdecl,
+        COUNTASSIGN = countassign,
+        CT = foreignctype(ctyp),
+        TMPNAME = tmpname,
+        TMPSLOT = tmpslot,
+        META = c_integer_literal(owned_c_metatable(ctx, ret)),
+        FILE = c_string_literal(node.loc.filename),
+        LINE = c_integer_literal(node.loc.line),
+        COL = c_integer_literal(node.loc.col),
+    }), tmpname
+end
+
 -- `...[i]` (Ast.ExpDotsIndex). The current frame's vararg view is
 -- `args[_start .. n_args-1]`, 1-based for the user, so `...[i]` reads
 -- `args[_start + i - 1]` after a `1 <= i <= n_args - _start` bounds check.
@@ -4861,7 +5306,7 @@ end
 --    in this case it will be the '_decl' of the lvalue
 local function codeexp_dispatch(ctx, node, iscondition, target)
     local tag = node._tag
-    if tag == "Ast.VarDot" and node.exp._type._tag == "Type.ForeignModule" then
+    if tag == "Ast.VarDot" and node.exp._type._tag == "Type.CModule" then
         local fstats, fexp = codeforeignvar(ctx, node)
         local cstats, cexp = foreigntonativeexp(ctx, node, fexp, target)
         return fstats .. cstats, cexp
@@ -4872,6 +5317,8 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
             return codeindexarray(ctx, node)
         elseif node.exp1._type._tag == "Type.Map" then
             return codeindexmap(ctx, node)
+        elseif types.is_c(node.exp1._type) then
+            return codeindexc(ctx, node)
         end
         error("impossible var bracket")
     elseif tag == "Ast.ExpNil" or
@@ -4897,8 +5344,13 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
         return codebinaryop(ctx, node, iscondition)
     elseif tag == "Ast.ExpCall"
            and node.exp.var
+           and node.exp.var._decl
+           and node.exp.var._decl._tag == "Type.CPseudoNew" then
+        return codecpseudonew(ctx, node)
+    elseif tag == "Ast.ExpCall"
+           and node.exp.var
            and node.exp.var._tag == "Ast.VarDot"
-           and node.exp.var.exp._type._tag == "Type.ForeignModule" then
+           and node.exp.var.exp._type._tag == "Type.CModule" then
         local fstats, fexp = codeforeigncall(ctx, node)
         local cstats, cexp = foreigntonativeexp(ctx, node, fexp, target)
         return fstats .. cstats, cexp
@@ -4948,6 +5400,41 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
         -- typedef but its C representation already is the underlying scalar, so
         -- just emit the operand unchanged under its resolved type.
         return codeexp(ctx, node.exp, iscondition, target)
+    elseif tag == "Ast.ExpCast" and types.is_c(node._type) then
+        local cstats, cexp = codeexp(ctx, node.exp)
+        local fstats, fexp = nativetoforeignexp(ctx, node.exp, cexp, node._type)
+        return cstats .. fstats, foreigncast(fexp, node._type)
+    elseif tag == "Ast.ExpCast" and types.is_c(node.exp._type)
+           and node._type._tag == "Type.Integer" then
+        local cstats, cexp = codeexp(ctx, node.exp)
+        return cstats, "((lua_Integer)" .. cexp .. ")"
+    elseif tag == "Ast.ExpCast" and types.is_c(node.exp._type)
+           and node._type._tag == "Type.Float" then
+        local cstats, cexp = codeexp(ctx, node.exp)
+        return cstats, "((lua_Number)" .. cexp .. ")"
+    elseif tag == "Ast.ExpCast" and types.is_c(node.exp._type)
+           and node._type._tag == "Type.Boolean" then
+        local cstats, cexp = codeexp(ctx, node.exp)
+        return cstats, toboolean(types.resolve_c_typedef(node.exp._type), cexp)
+    elseif tag == "Ast.ExpCast" and types.is_c(node.exp._type)
+           and node._type._tag == "Type.String" then
+        local cstats, cexp = codeexp(ctx, node.exp)
+        local ctmp, tmpname = newforeigntmp(ctx, node.exp._type)
+        local guard = render([[
+            $CSTATS
+            $CTMP
+            $TMPNAME = $CEXP;
+            if ($TMPNAME == NULL) {
+                luaL_error(L, "foreign pointer cast to string was NULL");
+            }
+        ]], {
+            CSTATS = cstats,
+            CTMP = ctmp,
+            TMPNAME = tmpname,
+            CEXP = cexp,
+        })
+        local mkstats, mkexp = makestring(ctx, tmpname, target)
+        return guard .. "\n" .. mkstats, mkexp
     elseif tag == "Ast.ExpCast" and node.exp._tag == "Ast.ExpVar" and node.exp.var._tag == "Ast.VarBracket"
            and node.exp._type._tag ~= "Type.Option" then
         -- Fold casts of array/map indexing into the code for the operation
@@ -5249,15 +5736,19 @@ function codeforeignexp(ctx, node)
     local tag = node._tag
     if tag == "Ast.ExpCall"
            and node.exp.var._tag == "Ast.VarDot"
-           and node.exp.var.exp._type._tag == "Type.ForeignModule" then
+           and node.exp.var.exp._type._tag == "Type.CModule" then
         return codeforeigncall(ctx, node)
-    elseif tag == "Ast.VarDot" and node.exp._type._tag == "Type.ForeignModule" then
+    elseif tag == "Ast.VarDot" and node.exp._type._tag == "Type.CModule" then
         return codeforeignvar(ctx, node)
     elseif tag == "Ast.ExpString" then
         return "", c_string_literal(node.value)
     elseif tag == "Ast.ExpCast" and node.target._tag == "Type.String" then
         local cstats, cexp = codeforeignexp(ctx, node.exp)
         return cstats, foreigncast(cexp, node._type)
+    elseif tag == "Ast.ExpCast" and types.is_c(node._type) then
+        local cstats, cexp = codeexp(ctx, node.exp)
+        local fstats, fexp = nativetoforeignexp(ctx, node.exp, cexp, node._type)
+        return cstats .. fstats, foreigncast(fexp, node._type)
     else
         local cstat, cexp = codeexp(ctx, node)
         local fstat, fexp = nativetoforeignexp(ctx, node, cexp)
@@ -6573,6 +7064,7 @@ function coder.generate(modname, ast, static_deps)
         prefix = mangle_qn(modname) .. "_",
         variables = {},
         metatables = {},
+        owned_c_metatables = {},
         functions = {},
         modules = {},
         functags = {},       -- canonical function-type string -> { id, key }
@@ -6643,13 +7135,21 @@ function coder.generate(modname, ast, static_deps)
                 import_module(loadmods, initmods, sigs, mprefixes, not static_deps[node.modname], node)
             elseif tag == "Ast.TopLevelForeignImport" then
                 local include
-                if node.headername:match("^/") then
+                local include_name = node.headername
+                if node._include then
+                    include_name = node._include.include_name
+                    if node._include.include_kind == "quote" then
+                        include = [[#include "$HEADERNAME"]]
+                    else
+                        include = [[#include <$HEADERNAME>]]
+                    end
+                elseif node.headername:match("^/") then
                     include = [[#include "$HEADERNAME"]]
                 else
                     include = [[#include <$HEADERNAME>]]
                 end
                 table.insert(foreignimports, render(include, {
-                    HEADERNAME = node.headername
+                    HEADERNAME = include_name
                 }))
             elseif tag == "Ast.TopLevelVar" then
                 codevardec(initctx, initvars, switch_get, switch_set, gvar_map, node)
@@ -6903,6 +7403,23 @@ function coder.generate(modname, ast, static_deps)
     }))
 
     init_data_from_other_modules(tlcontext, includes, loadmods, initrecs, mprefixes, static_deps)
+
+    for _, entry in pairs(tlcontext.owned_c_metatables) do
+        table.insert(initrecs, render([[
+            if (luaL_newmetatable(L, $NAME)) {
+                lua_pushliteral(L, "__metatable");
+                lua_pushliteral(L, $DISPLAY);
+                lua_settable(L, -3);
+            }
+            setobj2t(L, &_mod->uv[$INDEX].uv, s2v(L->top.p - 1));
+            luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$INDEX].uv);
+            lua_pop(L, 1);
+        ]], {
+            NAME = c_string_literal(entry.name),
+            DISPLAY = c_string_literal(entry.name),
+            INDEX = c_integer_literal(entry.slot),
+        }))
+    end
 
     -- Function-type tags: a per-library `static const void*` each, declared up
     -- front (in $SIGS, ahead of any function body that references it) and set up

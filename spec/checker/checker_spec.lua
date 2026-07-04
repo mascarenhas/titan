@@ -194,7 +194,7 @@ describe("Titan type checker", function()
         ]])
     end)
 
-    it("catches array expression in indexing is not an array or map", function()
+    it("catches expression in indexing is not an indexable value", function()
         local code = [[
             function fn(x: integer)
                 x[1] = 2
@@ -202,7 +202,7 @@ describe("Titan type checker", function()
         ]]
         local ok, err = run_checker(code)
         assert.falsy(ok)
-        assert.match("expression in indexing is not an array or map", err)
+        assert.match("expression in indexing is not an array, map, C pointer, C array, or owned C array", err)
     end)
 
     it("accepts correct use of length operator", function()
@@ -269,7 +269,7 @@ describe("Titan type checker", function()
         ]]
         local ok, err = run_checker(code)
         assert.falsy(ok)
-        assert.match("expected string but found integer", err)
+        assert.match("expected string but found int", err)
     end)
 
     it("function can call another function", function()
@@ -293,7 +293,7 @@ describe("Titan type checker", function()
         ]]
         local ok, err = run_checker(code)
         assert.falsy(ok)
-        assert.match("expected string but found integer", err)
+        assert.match("expected string but found int", err)
     end)
 
     it("allows setting element of array as nil", function ()
@@ -413,7 +413,7 @@ describe("Titan type checker", function()
         ]]
         local ok, err = run_checker(code)
         assert.falsy(ok)
-        assert.match("expected string but found integer", err)
+        assert.match("expected string but found int", err)
     end)
 
     it("reports a clean error for an adjusted call in a multi-declaration", function ()
@@ -1710,7 +1710,7 @@ describe("Titan type checker", function()
             _tag = "Ast.TopLevelForeignImport",
             localname = "stdio",
             _type = {
-                _tag = "Type.ForeignModule",
+                _tag = "Type.CModule",
                 members = {
                     printf = {
                         type = {_tag = "Type.Function"}
@@ -1731,7 +1731,7 @@ describe("Titan type checker", function()
         ]]
         local ok, err = run_checker(code)
         assert.falsy(ok)
-        assert.match("expected pointer to FILE but found pointer to DIR", err)
+        assert.match("expected FILE %* but found DIR %*", err)
     end)
 
     it("cannot convert void pointer to string without a cast", function()
@@ -1745,7 +1745,7 @@ describe("Titan type checker", function()
         ]]
         local ok, err = run_checker(code)
         assert.falsy(ok)
-        assert.match("expected string but found void pointer", err)
+        assert.match("expected char %* but found void %*", err)
     end)
 
     it("can convert void pointer to string with a cast", function()
@@ -1778,7 +1778,7 @@ describe("Titan type checker", function()
         ]]
          ok, err = run_checker(code)
         assert.falsy(ok)
-        assert.match("expected string but found integer", err)
+        assert.match("expected string but found int", err)
     end)
 
     it("can check typedef'd enum constants imported by the FFI", function()
@@ -1806,17 +1806,17 @@ describe("Titan type checker", function()
         ok, err = run_checker(code)
         os.remove(header)
         assert.falsy(ok)
-        assert.match("expected string but found integer", err)
+        assert.match("expected string but found int", err)
     end)
 
     it("skips foreign members with unsupported C types instead of crashing", function ()
-        -- 'frob' uses a bare C float, which Titan does not support, so the
+        -- 'frob' uses a C complex float, which Titan does not support, so the
         -- importer skips that member while the rest of the header still
         -- imports; referencing the skipped member is a clean "not found"
         -- error, never a checker/codegen crash.
         local header = os.tmpname() .. ".h"
         local fd = assert(io.open(header, "w"))
-        fd:write("float frob(float x);\nint dbl(int x);\n")
+        fd:write("float _Complex frob(float _Complex x);\nint dbl(int x);\n")
         fd:close()
         local ok, err = run_checker([[
             local c = foreign import "]] .. header .. [["

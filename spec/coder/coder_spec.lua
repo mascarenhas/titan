@@ -1487,6 +1487,35 @@ describe("Titan code generator", function()
         assert.truthy(ok, err)
     end)
 
+    it("uses quoted includes for local foreign headers", function()
+        local suffix = os.tmpname():match("[^/]+$"):gsub("%W", "_")
+        local header = "tmp_titan_ffi_local_header_" .. suffix .. ".h"
+        local modname = "ffi_local_header_" .. suffix
+        local f = assert(io.open(header, "w"))
+        f:write("extern int titan_ffi_local_header_probe;\n")
+        f:close()
+
+        local modules = {
+            [modname] = [[
+                local h = foreign import "]] .. header .. [["
+                function fun(): integer
+                    return 1
+                end
+            ]]
+        }
+        local ok, err = pcall(function()
+            local gok, gerr = generate_modules(modules, modname)
+            assert.truthy(gok, gerr)
+
+            local c = assert(io.open(modname .. ".c", "r"))
+            local csrc = c:read("*a")
+            c:close()
+            assert.match('#include "' .. header .. '"', csrc, 1, true)
+        end)
+        os.remove(header)
+        if not ok then error(err, 0) end
+    end)
+
     it("can cast a string to void pointer in foreign calls", function ()
         local modules = {
             foo = [[

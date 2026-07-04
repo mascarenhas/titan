@@ -144,10 +144,11 @@ bound method reference `obj:m`. See
 ### Foreign types
 
 `foreign import` introduces additional types derived from C headers —
-pointer types (rendered `pointer to FILE`, `void pointer` in error
-messages) and C typedefs. They appear in the relations below only in the
-nullable-pointer and void-pointer rules; the details live in
-[The C FFI](ffi.md).
+C integer and float types, pointers, arrays, struct/union types, and C
+typedefs. They can be written in local annotations through the foreign module
+namespace (`c.size_t`, `c.FILE`, `c.ffi_point`) and they participate in the
+relations below through explicit FFI conversion rules. They cannot appear in
+exported Titan interfaces; the details live in [The C FFI](ffi.md).
 
 ## Type equality
 
@@ -202,9 +203,12 @@ comparisons, and as the precondition of explicit `as` casts. The rules:
    rule 3 does **not** look inside records: `PointV` above, whose fields
    are `value`, is still incompatible with `PointF`. Nominal means
    nominal.
-5. A foreign pointer type is compatible with `nil` (pointers are
-   nullable), and a void pointer is compatible with `string` (though the
-   conversion itself requires an explicit cast — see [the FFI](ffi.md)).
+5. C FFI compatibility is exact except for the boundary conversions documented
+   in [the FFI](ffi.md): C integers with `integer`, C floats with `float`,
+   Titan `integer`/`float` with C floats, nullable C pointers with `nil`, C
+   arrays and counted owned C arrays with compatible pointers, any C pointer
+   with `void *`, Titan `string` with C `char *`/`void *`, and boxable C values
+   with `value`. C `char *`/`void *` to Titan `string` is explicit-cast-only.
 
 When two types are merely compatible — related through `value` inside a
 compound type rather than by a direct coercion — **no conversion happens
@@ -252,7 +256,17 @@ the value does not conform.
 | `s` | `t?` | as for `s` to `t` (convert, then wrap) |
 | `s?` | `t`, for inter-coercible bases | yes — nil check, then convert (in practice the numeric pairs: `integer? → float`, `float? → integer`; an option over a non-coercible base, like `boolean? → integer`, is a clean compile-time type error) |
 | `integer` or `float` | `string` | no — **only** as an operand of `..`; integral floats format with a `.0` suffix exactly like Lua's `tostring` |
-| `string` or pointer | void pointer | no (FFI only) |
+| C integer | `integer` | no |
+| `integer` | C integer | no |
+| C float | `float` | no |
+| `float` or `integer` | C float | no |
+| C pointer | `boolean` | no — null is false, non-null is true |
+| `nil` | C pointer | no — becomes `NULL` |
+| C array or counted owned C array | compatible C pointer | no |
+| C pointer | `void *` | no |
+| `string` | C `char *` or `void *` | no (FFI only) |
+| C integer, C float, C pointer, C array-as-pointer, or owned C userdata | `value` | no |
+| `value` | C integer, C float, C pointer, C array-as-pointer, or owned C userdata | yes — checked against the target C representation |
 
 Notes on the entries a Lua programmer might not expect:
 
@@ -441,18 +455,20 @@ records, which are nominal and admit no such substitution.
 
 ## Explicit casts
 
-The cast expression `e as t` is *narrower* than the implicit coercion
-relation, not wider: a cast must relate types that are both coercible
-**and** compatible. In practice that leaves the conversions involving the
-dynamic type — `e as value` (always succeeds) and `e as t` for a
-`value`-typed `e` (run-time checked, for any `t`) — plus the FFI-only
-`p as string` for a void pointer `p`, which is the one conversion that is
-*never* done implicitly. Everything else is the compile-time error
-`cannot cast '<t1>' to '<t2>'`. That includes identity casts
-(`x as integer` when `x` is already an `integer`) and, notably, pairs
-that *do* coerce implicitly: `integer as float`, `float as integer`,
-`t as t?` and `t? as t` are all rejected. Those conversions are available
-only implicitly, by placing the expression in a context that expects the
-target type — for example `local n: integer = f` rather than
-`f as integer`. Full details and examples are in
-[Expressions](expressions.md).
+The cast expression `e as t` is *narrower* than the implicit coercion relation,
+not wider: a cast must relate types that are both coercible **and** compatible,
+with a few FFI-only explicit conversions. For pure Titan types this mostly means
+the conversions involving the dynamic type — `e as value` (always succeeds) and
+`e as t` for a `value`-typed `e` (run-time checked, for any `t`). Identity casts
+are still rejected, and ordinary numeric/option conversions such as
+`integer -> float` or `t -> t?` are normally requested by placing the expression
+in a context that expects the target type.
+
+For C FFI types, regular `as <type>` is also the explicit cast mechanism:
+C integers can be cast to `integer`, C floats can be cast to `float`, Titan
+`integer` can be cast to C integers, Titan `integer`/`float` can be cast to C
+floats, boxable C values can cross through `value`, and C `char *` / `void *`
+can be cast to `string` (copying bytes up to the first `\0` and raising if the
+pointer is `NULL`). There is no separate FFI cast form.
+Full details and examples are in [Expressions](expressions.md) and
+[The C FFI](ffi.md).

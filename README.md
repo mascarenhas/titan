@@ -134,7 +134,8 @@ they are in the roadmap:
 * top-level functions
 * early-bound modules
 * multiple assignment/multiple returns
-* FFI with C (C pointers, call C functions)
+* FFI with C (C primitive types, pointers, arrays, structs/unions, owned
+  buffers, explicit C varargs, and C function calls)
 * records (structs) with `:` method calls
 * maps
 * first-class functions
@@ -146,8 +147,9 @@ they are in the roadmap:
 
 ## Next
 
-* FFI with C, continued (other C primitive types, C arrays, C structs/unions including pointers, function pointers), address FIXMEs
-* standard library that is a subset of Lua's standard library, built using the C FFI (the previous C FFI should be strong enough to call Lua API functions)
+* standard library that is a subset of Lua's standard library, built using the C FFI
+* FFI with C, continued (function pointers, callbacks from C into Titan, adopted
+  pointers, owned structs with flexible array members, and Lua C API support)
 * tagged variants (unions of records with some syntax for switch/case on the record tag)
 * parametric polymorphism (via type erasure and boxed values)
 * for-in for built-in collection types (arrays, maps, slices)
