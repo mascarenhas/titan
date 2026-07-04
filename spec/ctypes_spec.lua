@@ -94,11 +94,44 @@ describe("C FFI ctype registration", function()
         assert.same({ "int" }, ftypes.ffi_values.type)
     end)
 
-    it("does not mis-model function pointer typedefs as data pointers", function()
+    it("models function pointer typedefs as function pointer C types", function()
         local ftypes = parse_header([[
             typedef int (*ffi_callback)(int);
         ]])
 
-        assert.is_nil(ftypes.ffi_callback)
+        local callback = assert(ftypes.ffi_callback)
+        assert.equal("typedef", callback.type)
+        assert.equal("functionptr", callback.def.type)
+        assert.same({ "*" }, callback.def.pointer)
+        assert.same({ "int" }, callback.def.ret.type)
+        assert.same({ "int" }, callback.def.params[1].type)
+    end)
+
+    it("imports static function definitions from headers", function()
+        local ftypes = parse_header([[
+            static int ffi_static(int x) { return x + 1; }
+        ]])
+
+        local fn = assert(ftypes.ffi_static)
+        assert.equal("function", fn.type)
+        assert.same({ "int" }, fn.ret.type)
+        assert.same({ "int" }, fn.params[1].type)
+    end)
+
+    it("preserves simple enum constant values", function()
+        local ftypes = parse_header([[
+            enum ffi_choice {
+                FFI_A,
+                FFI_B = 4,
+                FFI_C,
+                FFI_D = FFI_B + 3
+            };
+        ]])
+
+        local choice = assert(ftypes["enum@ffi_choice"])
+        assert.equal(0, choice.values[1].value)
+        assert.equal(4, choice.values[2].value)
+        assert.equal(5, choice.values[3].value)
+        assert.equal(7, choice.values[4].value)
     end)
 end)

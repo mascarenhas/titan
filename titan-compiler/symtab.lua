@@ -6,6 +6,7 @@ function symtab.new(modname)
     local self = {
         blocks = { {} },
         foreign_types = {},
+        foreign_names = {},
         modname = modname
     }
     return setmetatable(self, symtab)
@@ -49,6 +50,14 @@ end
 
 function symtab:find_foreign_type(name)
     return self.foreign_types[name]
+end
+
+function symtab:add_foreign_name(name, decl)
+    self.foreign_names[name] = decl
+end
+
+function symtab:find_foreign_name(name)
+    return self.foreign_names[name]
 end
 
 function symtab:dump()

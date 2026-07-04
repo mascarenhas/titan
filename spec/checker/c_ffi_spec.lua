@@ -333,30 +333,72 @@ describe("C FFI type checking", function()
         end)
     end)
 
-    it("does not expose function pointer typedefs as C FFI types", function()
+    it("exposes function pointer typedefs as callable C pointer types", function()
         with_header([[
             typedef int (*ffi_callback)(int);
-            extern int call_callback(ffi_callback cb);
+            extern int ffi_add1(int x);
+            extern int call_callback(ffi_callback cb, int x);
         ]], function(header)
             local ok, err = run_checker([[
                 local c = foreign import "]] .. header .. [["
 
-                local function f(x: c.ffi_callback): integer
-                    return 1
+                local function call_local(cb: c.ffi_callback): integer
+                    return cb(3) as integer
+                end
+
+                function f(): integer
+                    local cb: c.ffi_callback = c.ffi_add1
+                    return (c.call_callback(c.ffi_add1, 2) as integer)
+                        + (c.call_callback(cb, 4) as integer)
+                        + call_local(cb)
+                end
+            ]])
+            assert.truthy(ok, err)
+        end)
+    end)
+
+    it("rejects incompatible foreign functions as C function pointers", function()
+        with_header([[
+            typedef double (*ffi_callback)(double);
+            extern int ffi_add1(int x);
+            extern double call_callback(ffi_callback cb, double x);
+        ]], function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                function f(): float
+                    return c.call_callback(c.ffi_add1, 2.0) as float
                 end
             ]])
             assert.falsy(ok)
-            assert.match("C type 'ffi_callback' not found", err)
+            assert.match("foreign %(C%) function", err)
+        end)
+    end)
+
+    it("does not treat C function pointers as C object pointers", function()
+        with_header([[
+            typedef int (*ffi_callback)(int);
+            typedef void *ffi_vptr;
+        ]], function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                local function f(cb: c.ffi_callback): value
+                    return cb as value
+                end
+            ]])
+            assert.falsy(ok)
+            assert.match("cannot cast 'ffi_callback' to 'value'", err)
 
             ok, err = run_checker([[
                 local c = foreign import "]] .. header .. [["
 
-                function f(): integer
-                    return c.call_callback(nil) as integer
+                local function f(cb: c.ffi_callback): c.ffi_vptr
+                    return cb as c.ffi_vptr
                 end
             ]])
             assert.falsy(ok)
-            assert.match("member 'call_callback' not found", err)
+            assert.match("cannot cast 'ffi_callback' to 'ffi_vptr'", err)
         end)
     end)
 
@@ -383,6 +425,23 @@ describe("C FFI type checking", function()
                 end
             ]])
             assert.truthy(ok, err)
+        end)
+    end)
+
+    it("reports conflicting ordinary C declarations across foreign imports", function()
+        with_header("extern int ffi_conflict;\n", function(header1)
+            with_header("extern double ffi_conflict;\n", function(header2)
+                local ok, err = run_checker([[
+                    local c1 = foreign import "]] .. header1 .. [["
+                    local c2 = foreign import "]] .. header2 .. [["
+
+                    function f(): integer
+                        return 0
+                    end
+                ]])
+                assert.falsy(ok)
+                assert.match("conflicting C declaration", err)
+            end)
         end)
     end)
 

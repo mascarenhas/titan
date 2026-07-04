@@ -256,6 +256,16 @@ local function is_c_pointer(t)
     return t and t._tag == "Type.CPointer"
 end
 
+local function is_c_function_pointer(t)
+    t = resolved_c(t)
+    return t and t._tag == "Type.CPointer"
+        and resolved_c(t.pointee)._tag == "Type.CFunction"
+end
+
+local function is_c_object_pointer(t)
+    return is_c_pointer(t) and not is_c_function_pointer(t)
+end
+
 local function c_assignable_equal(t1, t2)
     return types.equals(resolved_c(t1), resolved_c(t2))
 end
@@ -291,7 +301,8 @@ local function c_value_compatible(t)
     t = resolved_c(t)
     return t and (t._tag == "Type.CInteger"
         or t._tag == "Type.CFloat"
-        or t._tag == "Type.CPointer"
+        or (t._tag == "Type.CPointer"
+            and resolved_c(t.pointee)._tag ~= "Type.CFunction")
         or t._tag == "Type.CArray"
         or t._tag == "Type.COwned")
 end
@@ -313,7 +324,7 @@ function types.explicitly_coerceable(source, target)
     return (is_void_pointer(source) and target._tag == "Type.String")
         or (is_c_void_pointer(source) and target._tag == "Type.String")
         or (is_c_char_pointer(source) and target._tag == "Type.String")
-        or (is_c_pointer(source) and is_c_void_pointer(target))
+        or (is_c_object_pointer(source) and is_c_void_pointer(target))
 end
 
 function types.coerceable(source, target)
@@ -335,7 +346,7 @@ function types.coerceable(source, target)
         return true
     elseif c_pointer_compatible(source, target) then
         return true
-    elseif is_c_pointer(source) and is_c_void_pointer(target) then
+    elseif is_c_object_pointer(source) and is_c_void_pointer(target) then
         return true
     elseif source._tag == "Type.String" and
            (is_c_char_pointer(target) or is_c_void_pointer(target)) then
@@ -416,7 +427,7 @@ function types.compatible(t1, t2)
         return true
     elseif c_pointer_compatible(t1, t2) then
         return true
-    elseif is_c_void_pointer(t1) and is_c_pointer(t2) then
+    elseif is_c_void_pointer(t1) and is_c_object_pointer(t2) then
         return true
     elseif t1._tag == "Type.String" and
            (is_c_char_pointer(t2) or is_c_void_pointer(t2)) then

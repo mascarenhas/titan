@@ -75,13 +75,15 @@ Generated C already compiles with `-I titan-runtime`, so the emitted
 * typedef and extern array dimensions are kept in `idxs`;
 * field declarators keep names, pointer suffixes and array suffixes;
 * bitfields store `bitfield`, `width` and `anonymous`;
-* flexible array members are marked with `flexible_array = true`.
+* flexible array members are marked with `flexible_array = true`;
+* function-pointer typedefs are represented as `functionptr` CTypes;
+* header-defined `static` functions are imported like ordinary C functions;
+* simple enum values are stored on the enum type's `values` list.
 
-Array extents are constant-folded when possible. Unknown but syntactically
-present extents are preserved rather than thrown away; the checker treats only
-numeric extents as known and rejects operations that require a known bound.
-Function-pointer typedefs are skipped in v1 instead of being mis-modeled as
-data pointers.
+Array extents and enum values are constant-folded when possible. Unknown but
+syntactically present extents are preserved rather than thrown away; the checker
+treats only numeric extents as known and rejects operations that require a known
+bound.
 
 The C99 grammar remains non-reentrant because it uses a module-global typedef
 table, reset at the start of each parse. The preprocessor still has the older
@@ -117,12 +119,12 @@ compatibility/coercion relations add the Titan boundary conversions:
 
 * C integer -> Titan `integer`, and Titan `integer` -> C integer;
 * C float -> Titan `float`, and Titan `integer`/`float` -> C float;
-* C pointer -> `boolean`, `nil` -> C pointer;
+* C pointer, including C function pointer -> `boolean`, `nil` -> C pointer;
 * C array / counted `COwned` -> compatible pointer;
-* any C pointer -> `void *`;
+* any non-function C pointer -> `void *`;
 * Titan `string` -> C `char *` or `void *`;
-* C integers, C floats, C pointers, C arrays-as-pointers, and `COwned` <->
-  `value`.
+* C integers, C floats, non-function C pointers, C arrays-as-pointers, and
+  `COwned` <-> `value`.
 
 Serialization rejects any type tree containing a C FFI type. This is the
 enforcement point for "C types are local to the importing module": exported
@@ -150,6 +152,10 @@ params and returns are C types. The pre-existing `vararg` boolean on
 `Type.Function` is still the marker for a C variadic function. It is distinct
 from Titan variadic functions, which use `varargtype`.
 
+C function pointer typedefs are represented as `CTypedef` targets that resolve
+to `CPointer(CFunction(...))`. `CFunction` is only a C function signature inside
+a pointer type; it is not a Titan function value.
+
 ## Checker Rules
 
 The checker has FFI-specific handling in a few narrow places:
@@ -168,11 +174,24 @@ The checker has FFI-specific handling in a few narrow places:
 * `Ast.ExpCall` validates C allocation pseudo-functions, rejecting `void`,
   incomplete aggregates, C array typedefs, and structs with flexible array
   members.
+* `Ast.ExpCall` also recognizes callees whose resolved type is
+  `CPointer(CFunction(...))`. It checks arguments against the C function
+  signature and records `_c_pointer_call` for codegen.
+* `Ast.ExpVar` rejects foreign functions as Titan first-class values, but allows
+  a foreign function name in a context whose target is a compatible C function
+  pointer type. The node records `_foreign_function_pointer` so codegen can emit
+  a C cast of the bare function name.
 
 Export checks use `types.contains_c_ffi_type`: any public function signature,
 public variable, or record field that mentions a C type is rejected. `CModule`
 itself is rejected as a first-class value in the same `ExpVar` path as ordinary
 Titan modules.
+
+The checker keeps a per-module `symtab.foreign_names` table for ordinary C
+identifiers imported so far. If a later foreign import declares the same ordinary
+name with an incompatible type, Titan reports the conflict before generating C.
+Duplicate declarations from the same header are ignored here because system
+headers can expose implementation-specific aliases during preprocessing.
 
 ## Code Generation
 
@@ -180,8 +199,10 @@ Titan modules.
 
 `foreignctype` renders C FFI types back to C spellings. A `CTypedef` renders as
 its typedef name, preserving headers' preferred spelling for calls and
-allocation. `COwned` renders as `Udata*`; its payload is reached through
-`getudatamem`.
+allocation. C function pointer types use declarator-aware rendering helpers for
+locals and temporaries, because `int (*cb)(int)` cannot be produced by simply
+concatenating a type spelling and a name. `COwned` renders as `Udata*`; its
+payload is reached through `getudatamem`.
 
 The general `ctype` function routes C values through `foreignctype`, except
 `COwned`, which is always a Lua full userdata pointer.
@@ -197,6 +218,13 @@ arguments are checked with `checkandget` when the target C type is known.
 `codeforeignvar` emits a bare C variable or macro name. Reading a C scalar into
 Titan code keeps the C value type until a cast or context converts it. C arrays
 are kept as C array expressions and can be indexed or decayed to pointers.
+
+`codecfunctionptrcall` handles calls through C function pointer values. It
+evaluates the pointer expression once, materializes it into a C temporary,
+raises a Lua error if the temporary is `NULL`, converts arguments through
+`codeforeignexp`, and emits `tmp(args...)`. The expression dispatcher checks this
+path before the direct C-module call path so `c.callback_value(...)` is treated
+as an indirect call when `callback_value` has a function pointer type.
 
 Generated includes use `node._include`:
 
@@ -226,11 +254,12 @@ target needs them; C pointers/arrays/aggregates remain C values; C `char *` /
 `void *` to `string` is implemented by an explicit cast arm with a NULL guard
 and `luaS_new` copy.
 
-`getslot` and `setslot` know how to box C scalars, pointers, arrays-as-pointers
-and owned userdata into Lua `TValue`s for `value` conversions and for
-Lua-facing slots. C pointers and arrays are exposed as light userdata in
-`value`; `COwned` is full userdata. By-value C structs/unions are deliberately
-not boxable in v1.
+`getslot` and `setslot` know how to box C scalars, non-function pointers,
+arrays-as-pointers and owned userdata into Lua `TValue`s for `value` conversions
+and for Lua-facing slots. C object pointers and arrays are exposed as light
+userdata in `value`; `COwned` is full userdata. C function pointers are not
+object pointers in portable C and cannot cross through `value`. By-value C
+structs/unions are deliberately not boxable in v1.
 
 ### C Arrays And Fields
 
@@ -293,11 +322,10 @@ left for a later FFI iteration.
 * Some preprocessor paths still raise raw Lua errors instead of diagnostics
   (`#if` operators outside the implemented set, unterminated function-like
   macros).
-* Bare and typedef'd enum constants become C integer members, but their numeric
-  values are not stored in the TypeList.
-* Static functions and function-like macros are invisible to Titan.
+* Function-like macros are invisible to Titan.
 * The generated C translation unit has one flat C namespace. Titan does not
-  detect conflicts among imported headers before the C compiler sees them.
+  rename declarations; it detects incompatible ordinary declarations from
+  distinct foreign imports before the C compiler sees them.
 
 ## `typed.lua`
 

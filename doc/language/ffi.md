@@ -57,13 +57,15 @@ code: `titan_ffi_void`, `titan_ffi_bool`, `titan_ffi_char`,
 
 Foreign modules contain three categories of members:
 
-* C functions become callable members. C variadic functions such as
+* C functions become callable members. This includes ordinary prototypes and
+  header-defined `static` functions. C variadic functions such as
   `printf`/`snprintf` accept extra arguments after their fixed parameters.
 * C variables and object-like `#define` constants become C values. Assigning to
   a foreign variable name itself is rejected; assigning through an indexed C
   array or through a field is emitted as C. Titan does not model `const` or
   other C writeability rules for subobjects in v1, so the C compiler may still
-  reject those assignments.
+  reject those assignments. Top-level enum constants become C integer members;
+  simple numeric enum values are retained in Titan's C type list.
 * C typedef names become the source-nameable type namespace. They may be used
   in local annotations, casts, and the `.new()` / `.new_array(count)` allocation
   pseudo-functions. Tag-only `struct S` / `union U` declarations are understood
@@ -86,6 +88,7 @@ Supported C type families:
 | `_Bool`, `char`, signed/unsigned integer types | distinct C integer types |
 | `float`, `double`, `long double` | distinct C float types |
 | `T *` | nullable C pointer type |
+| `R (*)(P...)` | nullable C function pointer type, usually through a typedef |
 | `T[N]` | C array type with static length |
 | `struct S`, `union U` | C aggregate type with fields when the header exposes them; source annotations need a typedef name in v1 |
 | `typedef T name` | C typedef that resolves through its target |
@@ -117,13 +120,16 @@ Allowed conversions include:
 * C integer values to Titan `integer`, and Titan `integer` to C integer types;
 * C float values to Titan `float`, and Titan `integer` or `float` to C float
   types;
-* C pointers to `boolean`, with `nil` as the null pointer;
+* C pointers, including C function pointers, to `boolean`, with `nil` as the
+  null pointer;
 * C arrays and counted owned C arrays to compatible C pointers;
-* any C pointer to `void *`;
+* any non-function C pointer to `void *`;
 * Titan `string` to `char *` or `void *` for calls;
 * C `char *` or `void *` to Titan `string` with an explicit `as string`;
-* C integers, C floats, C pointers, C arrays-as-pointers, and owned C userdata
-  to/from `value`, with the same run-time checks used at the Lua boundary.
+* a foreign C function name to a compatible C function pointer type;
+* C integers, C floats, non-function C pointers, C arrays-as-pointers, and
+  owned C userdata to/from `value`, with the same run-time checks used at the
+  Lua boundary.
 
 By-value C structs and unions cannot cross through `value` in v1.
 
@@ -156,9 +162,34 @@ their own static types. This is enough to call functions such as `printf` and
 `snprintf`, but Titan does not validate format strings. Titan variadic `...`
 cannot be forwarded into a C variadic call in v1.
 
-Foreign functions are not first-class values. `stdio.printf` can be called by
-name, but cannot be stored, passed, or returned. Wrap it in a Titan function if
-you need a function value.
+Foreign functions are not Titan first-class function values. `stdio.printf` can
+be called by name, but it cannot be stored, passed, or returned as a Titan
+function. A foreign function name can, however, be converted to a compatible C
+function pointer type:
+
+```lua
+local c = foreign import "callbacks.h"
+-- typedef int (*callback)(int);
+-- extern int add1(int);
+-- extern int apply(callback cb, int x);
+
+function via_callback(): integer
+    local cb: c.callback = c.add1
+    return c.apply(cb, 41) as integer
+end
+```
+
+C function pointer values are callable with the same call syntax. The call is a
+C call through the pointer, not a Titan function-value call, and raises a
+run-time error if the pointer is `NULL`:
+
+```lua
+local c = foreign import "callbacks.h"
+
+function call_it(cb: c.callback): integer
+    return cb(41) as integer
+end
+```
 
 ## Strings And Pointers
 
@@ -308,18 +339,16 @@ unsupported compiler extensions may fail with a compile-time parse error.
 
 ## Current Limitations
 
-* C function pointers are not modeled as callable Titan values.
-* Function-pointer typedefs are not exposed as C FFI types in v1.
-* Foreign functions are not first-class values.
+* Foreign functions are not Titan first-class values. They can only be called by
+  name or converted to compatible C function pointer types.
 * C types are local to the importing Titan module and cannot appear in exported
   Titan interfaces.
-* Top-level enum constants, bare or typedef'd, are imported as C integer
-  members, but their actual numeric values are not stored in Titan's C type
-  list.
-* Static C functions and function-like macros are not imported.
+* Function-like macros are not imported.
 * Owned allocation does not support `void`, incomplete aggregate types, C array
   typedefs, or structs with flexible array members.
 * C adopted pointers/lifetimes are parked for a later design; v1 has borrowed C
   pointers and Titan-owned userdata only.
 * The C namespace is flat across all foreign imports in one generated C file,
-  and conflicts are left for the C compiler to diagnose.
+  so compatible duplicate names denote the same C symbol. Titan reports
+  conflicting ordinary declarations from distinct foreign imports before code
+  generation, but it does not attempt to namespace or rename C declarations.

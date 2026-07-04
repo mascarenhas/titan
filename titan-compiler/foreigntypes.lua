@@ -149,6 +149,19 @@ end
 
 local convert_type
 
+local function apply_pointer_suffixes(base, suffixes)
+    local quals = {}
+    for _, suffix in ipairs(suffixes or {}) do
+        if suffix == "*" then
+            base = types.CPointer(base, copy_list(quals))
+            quals = {}
+        elseif qualifiers[suffix] then
+            table.insert(quals, suffix)
+        end
+    end
+    return base
+end
+
 local function convert_struct_or_union(st, ftype)
     local key = c_type_key(ftype) or ""
     local existing = st:find_foreign_type(key)
@@ -188,6 +201,30 @@ end
 
 local function convert_enum()
     return types.CInteger("int", true, 3, false)
+end
+
+local function convert_function_type(st, ftype)
+    local ptypes = {}
+    for _, pdecl in ipairs(ftype.params) do
+        local pt, err = convert_type(st, pdecl)
+        if not pt then return nil, err end
+        local rpt = types.resolve_c_typedef(pt)
+        if rpt._tag == "Type.CArray" then
+            pt = types.CPointer(rpt.elem, {})
+        end
+        if pt._tag ~= "Type.CVoid" then
+            table.insert(ptypes, pt)
+        end
+    end
+    local rt, err = convert_type(st, ftype.ret)
+    if not rt then return nil, err end
+    return types.CFunction(ptypes, rt, ftype.vararg, false)
+end
+
+local function convert_function_pointer(st, ftype)
+    local cfunc, err = convert_function_type(st, ftype)
+    if not cfunc then return nil, err end
+    return with_array_dims(apply_pointer_suffixes(cfunc, ftype.pointer), ftype.idxs)
 end
 
 local function convert_parts(st, parts, idxs)
@@ -252,6 +289,8 @@ convert_type = function(st, ftype)
         return convert_struct_or_union(st, ftype)
     elseif ftype.type == "enum" then
         return convert_enum(ftype)
+    elseif ftype.type == "functionptr" then
+        return convert_function_pointer(st, ftype)
     elseif ftype.type == "typedef" then
         return foreigntypes.convert(st, ftype)
     elseif type(ftype.type) == "table" then
@@ -261,26 +300,19 @@ convert_type = function(st, ftype)
 end
 
 local function convert_function(st, ftype)
-    local ptypes = {}
-    for _, pdecl in ipairs(ftype.params) do
-        local pt, err = convert_type(st, pdecl)
-        if not pt then return nil, err end
-        local rpt = types.resolve_c_typedef(pt)
-        if rpt._tag == "Type.CArray" then
-            pt = types.CPointer(rpt.elem, {})
-        end
-        if pt._tag ~= "Type.CVoid" then
-            table.insert(ptypes, pt)
-        end
-    end
-    local rt, err = convert_type(st, ftype.ret)
-    if not rt then return nil, err end
-    local rettypes = rt._tag == "Type.CVoid" and {} or { rt }
-    return types.Function(ptypes, rettypes, ftype.vararg, false)
+    local cfunc, err = convert_function_type(st, ftype)
+    if not cfunc then return nil, err end
+    local rettypes = cfunc.ret._tag == "Type.CVoid" and {} or { cfunc.ret }
+    return types.Function(cfunc.params, rettypes, cfunc.vararg, false)
 end
 
 local function convert_typedef(st, ftype)
-    local target, err = convert_parts(st, ftype.def, ftype.idxs)
+    local target, err
+    if type(ftype.def) == "table" and ftype.def.type == "functionptr" then
+        target, err = convert_function_pointer(st, ftype.def)
+    else
+        target, err = convert_parts(st, ftype.def, ftype.idxs)
+    end
     if not target then return nil, err end
     return types.CTypedef(ftype.name, target)
 end
@@ -294,6 +326,8 @@ function foreigntypes.convert(st, ftype)
         return convert_struct_or_union(st, ftype)
     elseif ftype.type == "enum" then
         return convert_enum(ftype)
+    elseif ftype.type == "functionptr" then
+        return convert_function_pointer(st, ftype)
     elseif type(ftype.type) == "table" then
         return convert_type(st, ftype)
     else

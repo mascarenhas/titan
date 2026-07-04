@@ -51,6 +51,19 @@ equal_declarations = function(t1, t2)
         if t1.vararg ~= t2.vararg then
             return false
         end
+    elseif t1.type == "functionptr" then
+        if not equal_declarations(t1.ret.type, t2.ret.type) then
+            return false
+        end
+        if not equal_lists(t1.params, t2.params) then
+            return false
+        end
+        if t1.vararg ~= t2.vararg then
+            return false
+        end
+        if not equal_lists(t1.pointer, t2.pointer) then
+            return false
+        end
     end
     return true
 end
@@ -204,9 +217,22 @@ end
 
 local function get_enum_items(_, values)
     local items = {}
+    local by_name = {}
+    local next_value = 0
     for _, v in ipairs(values) do
-        -- TODO store enum actual values
-        table.insert(items, { name = v.id })
+        local value
+        if v.value then
+            value = calculate_or_original(v.value, by_name)
+        else
+            value = next_value
+        end
+        table.insert(items, { name = v.id, value = value })
+        if type(value) == "number" then
+            by_name[v.id] = value
+            next_value = value + 1
+        else
+            next_value = nil
+        end
     end
     return items
 end
@@ -290,8 +316,8 @@ end
 
 local calculate
 
-local function binop(val, fn)
-    local e1, e2 = calculate(val[1]), calculate(val[2])
+local function binop(val, env, fn)
+    local e1, e2 = calculate(val[1], env), calculate(val[2], env)
     if type(e1) == "number" and type(e2) == "number" then
         return fn(e1, e2)
     else
@@ -299,31 +325,37 @@ local function binop(val, fn)
     end
 end
 
-calculate = function(val)
+calculate = function(val, env)
     if type(val) == "string" then
-        return tonumber(val) or val
+        return tonumber(val) or (env and env[val]) or val
     end
     if type(val) == "table" and val[1] and not val.op and not val.unop then
         if #val == 1 then
-            return calculate(val[1])
+            return calculate(val[1], env)
         end
         return val
     end
+    if val.unop == "+" then
+        return calculate(val[1], env)
+    elseif val.unop == "-" then
+        local e = calculate(val[1], env)
+        return type(e) == "number" and -e or { e, unop = "-" }
+    end
     if val.op == "+" then
-        return binop(val, function(a, b) return a + b end)
+        return binop(val, env, function(a, b) return a + b end)
     elseif val.op == "-" then
-        return binop(val, function(a, b) return a - b end)
+        return binop(val, env, function(a, b) return a - b end)
     elseif val.op == "*" then
-        return binop(val, function(a, b) return a * b end)
+        return binop(val, env, function(a, b) return a * b end)
     elseif val.op == "/" then
-        return binop(val, function(a, b) return a / b end)
+        return binop(val, env, function(a, b) return a / b end)
     else
         return val
     end
 end
 
-calculate_or_original = function(val)
-    local calculated = calculate(val)
+calculate_or_original = function(val, env)
+    local calculated = calculate(val, env)
     if calculated == nil then
         return val
     end
@@ -429,6 +461,28 @@ local get_params = typed("TypeList, array -> array, boolean", function(lst, para
     return params, vararg
 end)
 
+local function make_function_pointer_type(lst, name, spec, decl, pointer, idxs)
+    local ret_type, err = get_type(lst, spec, {})
+    if not ret_type then
+        return nil, err
+    end
+    local params, vararg = get_params(lst, decl.params)
+    if not params then
+        return nil, vararg
+    end
+    return typed.table("CType", {
+        type = "functionptr",
+        name = name,
+        idxs = idxs,
+        ret = {
+            type = ret_type,
+        },
+        params = params,
+        vararg = vararg,
+        pointer = pointer,
+    })
+end
+
 local register_many = function(register_item_fn, lst, ids, spec)
     for _, id in ipairs(ids) do
         local ok, err = register_item_fn(lst, id, spec)
@@ -445,32 +499,40 @@ local register_decl_item = function(lst, id, spec)
         return false, name
     end
     assert(name)
-    local ret_type, err = get_type(lst, spec, ret_pointer)
-    if not ret_type then
-        return false, err
-    end
     local typ
-    if id.decl.params then
-        local params, vararg = get_params(lst, id.decl.params)
-        if not params then
-            return false, vararg
+    if id.decl.params and id.decl.declarator then
+        local err
+        typ, err = make_function_pointer_type(lst, name, spec, id.decl, ret_pointer, idxs)
+        if not typ then
+            return false, err
         end
-        typ = typed.table("CType", {
-            type = "function",
-            name = name,
-            idxs = idxs,
-            ret = {
-                type = ret_type,
-            },
-            params = params,
-            vararg = vararg,
-        })
     else
-        typ = typed.table("CType", {
-            type = ret_type,
-            name = name,
-            idxs = idxs,
-        })
+        local ret_type, err = get_type(lst, spec, ret_pointer)
+        if not ret_type then
+            return false, err
+        end
+        if id.decl.params then
+            local params, vararg = get_params(lst, id.decl.params)
+            if not params then
+                return false, vararg
+            end
+            typ = typed.table("CType", {
+                type = "function",
+                name = name,
+                idxs = idxs,
+                ret = {
+                    type = ret_type,
+                },
+                params = params,
+                vararg = vararg,
+            })
+        else
+            typ = typed.table("CType", {
+                type = ret_type,
+                name = name,
+                idxs = idxs,
+            })
+        end
     end
 
     if lst[name] then
@@ -499,16 +561,39 @@ local function register_function(lst, item)
     return register_decl_item(lst, id, item.spec)
 end
 
-local function register_static_function(_, _)
-    return true
+local function register_static_function(lst, item)
+    return register_function(lst, item)
 end
 
 local register_typedef_item = typed("TypeList, table, table -> boolean, string?", function(lst, id, spec)
     if id.decl.params then
-        -- Function-pointer typedefs are out of scope for the first C FFI
-        -- iteration. Do not mis-model `typedef int (*cb)(int)` as `int *cb`;
-        -- leave the typedef unavailable so users get a clean missing-member
-        -- error, and dependent declarations are skipped by the converter.
+        if not id.decl.declarator then
+            -- A typedef of a bare C function type (not a function pointer)
+            -- remains out of scope; do not mis-model it as a callable value.
+            return true, nil
+        end
+        local ok, name, pointer, idxs = get_name(id.decl)
+        if not ok then
+            return false, name or "failed"
+        end
+        local def, err = make_function_pointer_type(lst, name, spec, id.decl, pointer, idxs)
+        if not def then
+            return false, err or "failed"
+        end
+        local typ = typed.table("CType", {
+            type = "typedef",
+            name = name,
+            def = def,
+            idxs = idxs,
+        })
+
+        if lst[name] then
+            if not equal_declarations(lst[name], typ) then
+                return false, "inconsistent declaration for " .. name .. " - " .. inspect(lst[name]) .. " VERSUS " .. inspect(typ)
+            end
+        end
+        add_type(lst, name, typ)
+
         return true, nil
     end
 

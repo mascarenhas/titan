@@ -727,8 +727,26 @@ foreignctype = function(typ --[[:table]])
     elseif typ._tag == "Type.CArray" then
         return foreignctype(typ.elem) .. "*"
     elseif typ._tag == "Type.CPointer" then
+        local pointee = types.resolve_c_typedef(typ.pointee)
         local quals = typ.quals and #typ.quals > 0
             and " " .. table.concat(typ.quals, " ") or ""
+        if pointee._tag == "Type.CFunction" then
+            local params = {}
+            for _, param in ipairs(pointee.params) do
+                table.insert(params, foreignctype(param))
+            end
+            if pointee.vararg then
+                table.insert(params, "...")
+            end
+            if #params == 0 then
+                table.insert(params, "void")
+            end
+            return render("$RET (*$QUALS)($PARAMS)", {
+                RET = foreignctype(pointee.ret),
+                QUALS = quals,
+                PARAMS = table.concat(params, ", "),
+            })
+        end
         return foreignctype(typ.pointee) .. " *" .. quals
     elseif typ._tag == "Type.Pointer" then
         if typ.type._tag == "Type.Nil" then
@@ -742,6 +760,33 @@ foreignctype = function(typ --[[:table]])
         return "char*"
     end
     error("FIXME unknown foreign c type: "..types.tostring(typ))
+end
+
+local function foreigncdecl(typ, name)
+    if typ._tag == "Type.CPointer" then
+        local pointee = types.resolve_c_typedef(typ.pointee)
+        if pointee._tag == "Type.CFunction" then
+            local params = {}
+            for _, param in ipairs(pointee.params) do
+                table.insert(params, foreignctype(param))
+            end
+            if pointee.vararg then
+                table.insert(params, "...")
+            end
+            if #params == 0 then
+                table.insert(params, "void")
+            end
+            local quals = typ.quals and #typ.quals > 0
+                and " " .. table.concat(typ.quals, " ") .. " " or ""
+            return render("$RET (*$QUALS$NAME)($PARAMS)", {
+                RET = foreignctype(pointee.ret),
+                QUALS = quals,
+                NAME = name,
+                PARAMS = table.concat(params, ", "),
+            })
+        end
+    end
+    return foreignctype(typ) .. " " .. name
 end
 
 local function foreigncast(exp, typ --[[:table]])
@@ -785,6 +830,9 @@ end
 -- values are protected by explicit spill/reload slots below, keeping the source
 -- local/param C autos ordinary (and avoiding volatile in the function ABI).
 local function cvardecl(ctx, typ, name)
+    if types.is_c(typ) and typ._tag ~= "Type.CTypedef" then
+        return foreigncdecl(typ, name)
+    end
     return ctype(typ) .. " " .. name
 end
 
@@ -1311,18 +1359,16 @@ local function newtmp(ctx --[[:table]], typ --[[:table]], isgc --[[:boolean]])
     if isgc then
         local slot = newslot(ctx)
         return render([[
-            $TYPE $TMPNAME = $INIT;
+            $DECL = $INIT;
         ]], {
-            TYPE = ctype(typ),
-            TMPNAME = tmpname,
+            DECL = cvardecl(ctx, typ, tmpname),
             INIT = initval(typ)
         }), tmpname, slot
     else
         return render([[
-            $TYPE $TMPNAME = $INIT;
+            $DECL = $INIT;
         ]], {
-            TYPE = ctype(typ),
-            TMPNAME = tmpname,
+            DECL = cvardecl(ctx, typ, tmpname),
             INIT = initval(typ)
         }), tmpname
     end
@@ -1413,19 +1459,19 @@ local function newforeigntmp(ctx --[[:table]], typ --[[:table]])
     local tmp = ctx.tmp
     ctx.tmp = ctx.tmp + 1
     local tmpname = "_tmp_" .. tmp
-    local ftype
+    local fdecl
     if typ._tag == "Type.String" then
-        ftype = "char*"
+        fdecl = "char* " .. tmpname
     elseif typ._tag == "Type.Pointer" or types.is_c(typ) then
-        ftype = foreignctype(typ)
+        fdecl = types.is_c(typ) and foreigncdecl(typ, tmpname)
+            or foreignctype(typ) .. " " .. tmpname
     else
         error("don't know how to convert foreign type "..types.tostring(typ))
     end
     return render([[
-        $TYPE $TMPNAME;
+        $DECL;
     ]], {
-        TYPE = ftype,
-        TMPNAME = tmpname,
+        DECL = fdecl,
     }), tmpname
 end
 
@@ -2311,7 +2357,6 @@ local function foreigntonativeexp(ctx, exp, cexp, target)
 end
 
 local function codeforeigncall(ctx, node)
-    -- TODO catch name conflicts among imports
     local cfuncname = node.exp.var.name
     local caexps = {}
     local castats = {}
@@ -2326,6 +2371,37 @@ local function codeforeigncall(ctx, node)
         CAEXPS = table.concat(caexps, ", "),
     })
     return cstats, ccall
+end
+
+local function codecfunctionptrcall(ctx, node)
+    local fstats, fexp = codeexp(ctx, node.exp)
+    local fdecl, fname = newforeigntmp(ctx, node.exp._type)
+    local castats = {
+        fstats,
+        fdecl,
+        render([[
+            $FNAME = $FEXP;
+            if (TITAN_UNLIKELY($FNAME == NULL)) {
+                luaL_error(L, "%s:%d:%d: cannot call a NULL C function pointer", $FILE, $LINE, $COL);
+            }
+        ]], {
+            FNAME = fname,
+            FEXP = fexp,
+            FILE = c_string_literal(node.loc.filename),
+            LINE = c_integer_literal(node.loc.line),
+            COL = c_integer_literal(node.loc.col),
+        }, true),
+    }
+    local caexps = {}
+    for _, arg in ipairs(node.args.args) do
+        local cstat, cexp = codeforeignexp(ctx, arg)
+        table.insert(castats, cstat)
+        table.insert(caexps, cexp)
+    end
+    return table.concat(castats, "\n"), render("$FNAME($ARGS)", {
+        FNAME = fname,
+        ARGS = table.concat(caexps, ", "),
+    })
 end
 
 local function codeforeignvar(_, node)
@@ -3895,7 +3971,10 @@ local function codestat_dispatch(ctx, node)
         end
     elseif tag == "Ast.StatCall" then
         local callee = node.callexp.exp
-        if callee.var and callee.var._tag == "Ast.VarDot"
+        if node.callexp._c_pointer_call then
+            local fstats, fexp = codecfunctionptrcall(ctx, node.callexp)
+            return fstats .. "\n    ((void)(" .. fexp .. "));"
+        elseif callee.var and callee.var._tag == "Ast.VarDot"
            and callee.var.exp._type._tag == "Type.CModule" then
             local fstats, fexp = codeforeigncall(ctx, node.callexp)
             return fstats .. fexp .. ";"
@@ -5337,6 +5416,9 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
         end
         error("impossible init list")
     elseif tag == "Ast.ExpVar" then
+        if node._foreign_function_pointer then
+            return "", foreigncast(node._foreign_function_pointer, node._type)
+        end
         return codeexp(ctx, node.var, iscondition)
     elseif tag == "Ast.ExpUnop" then
         return codeunaryop(ctx, node, iscondition)
@@ -5347,6 +5429,10 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
            and node.exp.var._decl
            and node.exp.var._decl._tag == "Type.CPseudoNew" then
         return codecpseudonew(ctx, node)
+    elseif tag == "Ast.ExpCall" and node._c_pointer_call then
+        local fstats, fexp = codecfunctionptrcall(ctx, node)
+        local cstats, cexp = foreigntonativeexp(ctx, node, fexp, target)
+        return fstats .. cstats, cexp
     elseif tag == "Ast.ExpCall"
            and node.exp.var
            and node.exp.var._tag == "Ast.VarDot"
@@ -5734,7 +5820,10 @@ end
 
 function codeforeignexp(ctx, node)
     local tag = node._tag
-    if tag == "Ast.ExpCall"
+    if tag == "Ast.ExpCall" and node._c_pointer_call then
+        return codecfunctionptrcall(ctx, node)
+    elseif tag == "Ast.ExpCall"
+           and node.exp.var
            and node.exp.var._tag == "Ast.VarDot"
            and node.exp.var.exp._type._tag == "Type.CModule" then
         return codeforeigncall(ctx, node)

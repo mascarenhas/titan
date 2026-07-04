@@ -170,6 +170,16 @@ local function is_foreign_type_declaration(ftype)
            ftype.type == "union"
 end
 
+local function is_foreign_ordinary_identifier(name, ftype)
+    if ftype.type == "enum" then
+        return not name:match("^enum@")
+    end
+    return ftype.type == "typedef"
+        or not (ftype.type == "struct"
+                or ftype.type == "union"
+                or ftype.type == "enum")
+end
+
 local function c_resolve(t)
     return types.resolve_c_typedef(t)
 end
@@ -182,6 +192,27 @@ end
 
 local function c_owned_type(typ, has_count)
     return types.COwned(c_resolve(typ), has_count and true or false)
+end
+
+local function c_function_pointer_type(typ)
+    typ = c_resolve(typ)
+    if typ and typ._tag == "Type.CPointer" then
+        local pointee = c_resolve(typ.pointee)
+        if pointee._tag == "Type.CFunction" then
+            return pointee
+        end
+    end
+end
+
+local function c_function_as_function_type(cfunc)
+    local ret = c_resolve(cfunc.ret)
+    local rettypes = ret._tag == "Type.CVoid" and {} or { cfunc.ret }
+    return types.Function(cfunc.params, rettypes, cfunc.vararg, false)
+end
+
+local function c_function_pointer_accepts_function(target, ftype)
+    local cfunc = c_function_pointer_type(target)
+    return cfunc and types.equals(c_function_as_function_type(cfunc), ftype)
 end
 
 local function c_pseudo_member(typ, name)
@@ -1601,14 +1632,21 @@ checkexp = util.make_visitor({
                 node.var.name)
         elseif texp._tag == "Type.Function" then
             -- First-class function value. Foreign (C FFI) functions cannot be
-            -- taken as values; every other function (Titan top-level function,
-            -- record static, imported module function, or a function-typed
-            -- local/param/field that already holds a value) is allowed.
+            -- taken as Titan closure values, but they can be converted to a
+            -- compatible C function pointer when the surrounding context asks
+            -- for one. Every other function (Titan top-level function, record
+            -- static, imported module function, or a function-typed local/param/
+            -- field that already holds a value) is allowed as before.
             local var = node.var
             if var._tag == "Ast.VarDot" and var.exp._type
                and var.exp._type._tag == "Type.CModule" then
-                node._type = invalid(errors, node.loc,
-                    "a foreign (C) function cannot be used as a first-class value")
+                if c_function_pointer_accepts_function(context, texp) then
+                    node._type = context
+                    node._foreign_function_pointer = var.name
+                else
+                    node._type = invalid(errors, node.loc,
+                        "a foreign (C) function cannot be used as a first-class value")
+                end
             else
                 node._type = texp
                 -- Mark a referenced *local* function declaration so the coder
@@ -1910,6 +1948,20 @@ checkexp = util.make_visitor({
                 return
             end
             local fname = expname(node.exp)
+            local cfunc = c_function_pointer_type(ftype)
+            if cfunc then
+                local cftype = c_function_as_function_type(cfunc)
+                node._c_pointer_call = cfunc
+                checkargs(cftype, node.args.args, node.loc,
+                    "function pointer '" .. fname .. "'", st, errors)
+                node._types = cftype.rettypes
+                node._type = cftype.rettypes[1] or types.Void()
+                if node._type._tag == "Type.Void" and not node._voidok then
+                    node._type = invalid(errors, node.loc,
+                        "a function returning no values cannot be used as a value")
+                end
+                return
+            end
             -- Auto-unwrap an option-of-function callee (e.g. an array element
             -- `arr[i]`, which has type `T?`): cast to the underlying function
             -- type. The cast codegen inserts a runtime nil-check, so calling
@@ -2020,7 +2072,9 @@ checkexp = util.make_visitor({
         local source = node.exp._type
         local target = node.target
         local ok
-        if source._tag == "Type.Option" and types.equals(source.base, target) then
+        if types.equals(source, target) then
+            ok = true
+        elseif source._tag == "Type.Option" and types.equals(source.base, target) then
             -- explicit unwrap of an option to its base type; the cast codegen
             -- emits a runtime nil-check that raises if the value is nil
             ok = true
@@ -2491,6 +2545,22 @@ local toplevel_visitor = util.make_visitor({
                 local ftype = item.type
                 local decl = foreigntypes.convert(st, ftype)
                 if decl then
+                    if is_foreign_ordinary_identifier(fname, ftype) then
+                        local previous = st:find_foreign_name(fname)
+                        if previous and previous.header ~= name
+                           and not types.equals(previous.type, decl) then
+                            checker.typeerror(errors, node.loc,
+                                "conflicting C declaration for '%s' in foreign import '%s'; "
+                                .. "previous declaration from '%s' has type %s, new declaration has type %s",
+                                fname, name, previous.header,
+                                types.tostring(previous.type), types.tostring(decl))
+                        elseif not previous then
+                            st:add_foreign_name(fname, {
+                                header = name,
+                                type = decl,
+                            })
+                        end
+                    end
                     if is_foreign_type_declaration(ftype) then
                         type_members[fname] = decl
                         st:add_foreign_type(fname, decl)

@@ -109,6 +109,56 @@ describe("C FFI code generation", function()
         ]])
     end)
 
+    it("calls static header functions and C function pointer values", function()
+        with_header([[
+            typedef int (*ffi_callback)(int);
+
+            static int ffi_add1(int x) {
+                return x + 1;
+            }
+
+            static int ffi_apply(ffi_callback cb, int x) {
+                return cb(x) + 3;
+            }
+
+            static ffi_callback ffi_choose(void) {
+                return ffi_add1;
+            }
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                function sum(): integer
+                    local cb: c.ffi_callback = c.ffi_add1
+                    local chosen = c.ffi_choose()
+                    return (c.ffi_add1(1) as integer)
+                        + (cb(4) as integer)
+                        + (c.ffi_apply(c.ffi_add1, 5) as integer)
+                        + (chosen(6) as integer)
+                end
+            ]], [[
+                assert(test.sum() == 23)
+            ]])
+        end)
+    end)
+
+    it("raises on NULL C function pointer calls", function()
+        with_header([[
+            typedef int (*ffi_callback)(int);
+            static ffi_callback ffi_null_cb = 0;
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                function bad(): integer
+                    return c.ffi_null_cb(1) as integer
+                end
+            ]], [[
+                test.bad()
+            ]], "NULL C function pointer")
+        end)
+    end)
+
     it("raises on NULL C pointer field access and indexing", function()
         with_header([[
             typedef struct ffi_point { int x; } ffi_point;
