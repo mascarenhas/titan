@@ -191,7 +191,7 @@ local function is_c_type_namespace(exp)
 end
 
 local function c_owned_type(typ, has_count)
-    return types.COwned(c_resolve(typ), has_count and true or false)
+    return types.COwned(typ, has_count and true or false)
 end
 
 local function c_function_pointer_type(typ)

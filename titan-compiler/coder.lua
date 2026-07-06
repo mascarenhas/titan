@@ -120,7 +120,7 @@ local function toboolean(typ --[[:table]], src --[[:string]])
     elseif typ._tag == "Type.Pointer" then
         -- a foreign C pointer is truthy iff it is non-NULL
         tmpl = "($SRC != NULL)"
-    elseif typ._tag == "Type.CPointer" then
+    elseif types.resolve_c_typedef(typ)._tag == "Type.CPointer" then
         tmpl = "($SRC != NULL)"
     else error("invalid type " .. types.tostring(typ)) end
     return render(tmpl, { SRC = src })

@@ -445,6 +445,34 @@ describe("C FFI type checking", function()
         end)
     end)
 
+    it("rejects C arrays crossing through value", function()
+        with_header([[
+            typedef int ffi_arr[2];
+            extern ffi_arr ffi_values;
+        ]], function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                function f(): value
+                    return c.ffi_values as value
+                end
+            ]])
+            assert.falsy(ok)
+            assert.match("cannot cast 'ffi_arr' to 'value'", err)
+
+            ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                function f(v: value): integer
+                    local xs = v as c.ffi_arr
+                    return xs[0] as integer
+                end
+            ]])
+            assert.falsy(ok)
+            assert.match("cannot cast 'value' to 'ffi_arr'", err)
+        end)
+    end)
+
     it("rejects by-value C aggregates crossing through value", function()
         with_header([[
             typedef struct ffi_point { int x; } ffi_point;

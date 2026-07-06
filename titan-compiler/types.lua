@@ -303,12 +303,12 @@ local function c_value_compatible(t)
         or t._tag == "Type.CFloat"
         or (t._tag == "Type.CPointer"
             and resolved_c(t.pointee)._tag ~= "Type.CFunction")
-        or t._tag == "Type.CArray"
         or t._tag == "Type.COwned")
 end
 
 -- Returns true if type always holds truthy values
 function types.is_truthy(typ)
+    typ = resolved_c(typ)
     local tag = typ._tag
     return tag ~= "Type.Nil" and tag ~= "Type.Value" and tag ~= "Type.Option"
         and tag ~= "Type.Pointer" and tag ~= "Type.Boolean"

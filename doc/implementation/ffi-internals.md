@@ -123,8 +123,7 @@ compatibility/coercion relations add the Titan boundary conversions:
 * C array / counted `COwned` -> compatible pointer;
 * any non-function C pointer -> `void *`;
 * Titan `string` -> C `char *` or `void *`;
-* C integers, C floats, non-function C pointers, C arrays-as-pointers, and
-  `COwned` <-> `value`.
+* C integers, C floats, non-function C pointers, and `COwned` <-> `value`.
 
 Serialization rejects any type tree containing a C FFI type. This is the
 enforcement point for "C types are local to the importing module": exported
@@ -254,12 +253,13 @@ target needs them; C pointers/arrays/aggregates remain C values; C `char *` /
 `void *` to `string` is implemented by an explicit cast arm with a NULL guard
 and `luaS_new` copy.
 
-`getslot` and `setslot` know how to box C scalars, non-function pointers,
-arrays-as-pointers and owned userdata into Lua `TValue`s for `value` conversions
-and for Lua-facing slots. C object pointers and arrays are exposed as light
-userdata in `value`; `COwned` is full userdata. C function pointers are not
-object pointers in portable C and cannot cross through `value`. By-value C
-structs/unions are deliberately not boxable in v1.
+`getslot` and `setslot` know how to box C scalars, non-function pointers, and
+owned userdata into Lua `TValue`s for `value` conversions and for Lua-facing
+slots. C object pointers are exposed as light userdata in `value`; `COwned` is
+full userdata. C arrays are not accepted through `value` because there is no
+array unboxing path. C function pointers are not object pointers in portable C
+and cannot cross through `value`. By-value C structs/unions are deliberately not
+boxable in v1.
 
 ### C Arrays And Fields
 

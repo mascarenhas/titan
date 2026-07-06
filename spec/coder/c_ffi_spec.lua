@@ -84,6 +84,25 @@ describe("C FFI code generation", function()
         end)
     end)
 
+    it("preserves typedef spelling for owned anonymous C structs", function()
+        with_header([[
+            typedef struct { int x; int y; } ffi_point;
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                function sum(): integer
+                    local p = c.ffi_point.new()
+                    p.x = 17
+                    p.y = 25
+                    return (p.x as integer) + (p.y as integer)
+                end
+            ]], [[
+                assert(test.sum() == 42)
+            ]])
+        end)
+    end)
+
     it("passes owned C arrays and Titan strings to C vararg functions", function()
         h.run_coder([[
             local ffi = foreign import "titan/ffi.h"
@@ -107,6 +126,30 @@ describe("C FFI code generation", function()
             assert(test.formatted_len("titan") == 5)
             assert(test.formatted_owned_len() == 2)
         ]])
+    end)
+
+    it("uses runtime truthiness for C pointer typedefs", function()
+        with_header([[
+            typedef int *ffi_iptr;
+            static int ffi_value = 42;
+            static ffi_iptr ffi_null = 0;
+            static ffi_iptr ffi_ptr = &ffi_value;
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                function null_and(): integer
+                    return (c.ffi_null and 99) or 7
+                end
+
+                function nonnull_and(): integer
+                    return (c.ffi_ptr and 99) or 7
+                end
+            ]], [[
+                assert(test.null_and() == 7)
+                assert(test.nonnull_and() == 99)
+            ]])
+        end)
     end)
 
     it("calls static header functions and C function pointer values", function()

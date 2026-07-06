@@ -127,9 +127,8 @@ Allowed conversions include:
 * Titan `string` to `char *` or `void *` for calls;
 * C `char *` or `void *` to Titan `string` with an explicit `as string`;
 * a foreign C function name to a compatible C function pointer type;
-* C integers, C floats, non-function C pointers, C arrays-as-pointers, and
-  owned C userdata to/from `value`, with the same run-time checks used at the
-  Lua boundary.
+* C integers, C floats, non-function C pointers, and owned C userdata to/from
+  `value`, with the same run-time checks used at the Lua boundary.
 
 By-value C structs and unions cannot cross through `value` in v1.
 
