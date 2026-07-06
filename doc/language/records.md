@@ -29,9 +29,22 @@ An empty record (`record Empty end`) is legal: it can be constructed
 with `Empty.new()` and crosses to Lua like any other record, though with
 no fields or methods there is little you can do with one.
 
-Records are **always exported**. There is no `local record` form (it is
-a syntax error), and the record's name becomes a member of the module,
-both for importing Titan modules and for Lua (see below).
+By default a record is exported: its name becomes a member of the module,
+both for importing Titan modules and for Lua (see below). A record declared
+with `local record` is module-local instead:
+
+```lua
+local record Cell
+    value: integer
+    next: Cell?
+end
+```
+
+A local record type can be used freely inside the defining module, including in
+local functions and local variables, but it is not a module member and cannot be
+named by importers. It also cannot appear anywhere in the public type surface:
+exported functions, methods, module variables, or public record fields, because
+compiled module interfaces only serialize the public surface.
 
 A record's field types may mention the record being declared, so
 recursive records work:
@@ -124,7 +137,10 @@ Each argument gets the usual implicit coercions of a function argument,
 so `Point.new(2, 3)` fills the `float` fields with `2.0` and `3.0`.
 
 `new` is not magic: the compiler synthesizes it as a static function
-whose body is a record constructor expression over its parameters.
+whose body is a record constructor expression over its parameters. For a local
+record, `new` is local too. For an exported record with any local field, `new`
+is also local, because exposing it would let outside code supply private field
+values positionally.
 
 ### Constructor expressions
 
@@ -161,6 +177,11 @@ The field list is checked strictly, all at compile time:
   `missing field in initializer for record type 'test.Point'`;
 * each value must match (or coerce to) the field's type, with the usual
   `expected float but found string` style of message.
+
+Outside the defining module, constructor expressions are rejected for records
+that have local fields. The compiler cannot safely fill private slots from a
+partial public field list, so use an exported factory function from the defining
+module instead.
 
 ### Records in module variables
 
@@ -236,6 +257,22 @@ function bump(o: Outer)
 end
 ```
 
+### Local fields
+
+A field may be prefixed with `local`:
+
+```lua
+record Box
+    local hidden: integer
+    shown: integer
+end
+```
+
+Local fields are real fields with fixed slots, but only code in the defining
+module may read or write them. Importing Titan modules and Lua code see only the
+public fields; attempting to read or write a hidden field reports the same
+"field not found" error as an absent field.
+
 ## Methods
 
 Methods are declared at the top level with Lua's colon syntax, naming the
@@ -257,6 +294,19 @@ function demo()
     p:move(1.0, 1.0)
 end
 ```
+
+Prefixing a method declaration with `local` makes the method callable only in
+the defining module:
+
+```lua
+local function Box:secret(): integer
+    return self.hidden
+end
+```
+
+Local methods are not serialized into compiled module interfaces and are not
+installed in the Lua record metatable. Outside the module, they behave like
+missing methods.
 
 Inside a method, `self` is implicitly declared with the record's type
 and is not listed among the parameters. (The compiler does not reject a
@@ -326,13 +376,15 @@ itself is not a value — `return Point` gives
 `Rec.new` itself, however, **is** a first-class value, exactly like a
 top-level function: it can be passed as an argument, stored in a variable,
 array, map, or record field, returned, and called indirectly, not just
-written inline as `Rec.new(...)`.
+written inline as `Rec.new(...)`. If `new` is local because the record is local
+or has local fields, that first-class value is available only inside the
+defining module.
 
 ## Records across modules
 
-A record declared in one module is usable from any module that
-[imports](modules.md) it: the qualified name works in type position, and
-`new`, constructor expressions, fields, and methods all work normally:
+An exported record declared in one module is usable from any module that
+[imports](modules.md) it: the qualified name works in type position, and public
+fields, public methods, and public statics work normally:
 
 ```lua
 -- geometry.titan
@@ -356,6 +408,12 @@ function origin_distance2(): float
 end
 ```
 
+Local records and local record members are omitted from the imported interface.
+If an exported record has local fields, importers can still receive and pass
+values of that record type and access its public fields and methods, but they
+cannot construct it directly with `Rec.new` or `{ ... }`; the defining module
+should export a factory function when outside code needs instances.
+
 Record identity is global per type, not per loaded copy: records of the
 same type created by different modules — or by the same module loaded
 both statically and as a shared library — share one metatable and pass
@@ -364,8 +422,8 @@ remain different types (`geometry.Point` is not `test.Point`).
 
 ## Records from Lua
 
-To Lua, a Titan record is a **userdata** (not a table) with full access
-to its fields and methods:
+To Lua, a Titan record is a **userdata** (not a table) with access to its public
+fields and public methods:
 
 ```lua
 -- Titan (module test)
@@ -395,7 +453,7 @@ The details, all run-time behavior:
 
 * **Construction.** Each record name is a member of the module — a small
   namespace table holding its statics — so `test.Point.new(1, 2)` works
-  from Lua. Arity is checked at run time:
+  from Lua for exported records whose `new` is public. Arity is checked at run time:
   `calling Titan function new with 1 arguments, but expected 2`.
 * **Field reads and writes** go through the record's metatable and are
   fully checked. An unknown field, read or written, raises
@@ -406,6 +464,10 @@ The details, all run-time behavior:
   called with `p:move(...)`; `self` is type-checked like any record
   argument. Methods cannot be *assigned*: `p.move = 2` raises the same
   "field ... not found" error — method names are not fields.
+* **Local records and members** are hidden from Lua. A local record is not a
+  member of the module value. Local fields and methods on an exported record
+  raise "field ... not found" when Lua tries to read or write them. A local
+  `new` static is absent from the record namespace table.
 * **Identity.** A record instance is one stable userdata: sending the
   same record to Lua twice (or round-tripping it through Lua, an array,
   or a `value`) yields the same object, and mutations on either side are

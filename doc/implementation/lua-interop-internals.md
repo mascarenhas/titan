@@ -249,9 +249,9 @@ lua_pushliteral(L, "Titan record interop.Point");
 lua_rawset(L, -3);
 lua_newtable(L);                 /* the fieldmap */
 lua_pushliteral(L, "x");
-lua_pushinteger(L, 1);
+lua_pushinteger(L, 0);
 lua_rawset(L, -3);
-/* ... "y" -> 2 likewise ... */
+/* ... "y" -> 1 likewise ... */
 lua_pushliteral(L, "move");
 /* Module is upvalue of Lua entry point of method */
 titan_pushmodule(L, _mod);
@@ -271,8 +271,10 @@ lua_rawset(L, -4);
 identity spec compares metatables that way). The **fieldmap** table is
 the single upvalue shared by
 `__index_<rec>` and `__newindex_<rec>`: it maps each field name to its
-integer upvalue index (1..n in declaration order) and each method name
-to the method's Lua-entry C closure, itself closed over the module.
+integer user-value index (`uv[0..n-1]` in declaration order) and each public
+method name to the method's Lua-entry C closure, itself closed over the module.
+Local fields and local methods are not entered in this table, but public fields
+keep their original indices even when a local field came before them.
 
 ### `__index`: fields and methods
 
@@ -294,7 +296,7 @@ static int __index_interop_Point(lua_State *L) {
         } else {
             TValue *_slot = &_rec->uv[ivalue(_fieldidx)].uv;
             switch(ivalue(_fieldidx)) {
-                case 1: { setobj2s(L, L->top.p - 1, _slot); break; }
+                case 0: { setobj2s(L, L->top.p - 1, _slot); break; }
                 /* ... one case per field ... */
             }
         }
@@ -357,6 +359,9 @@ Statics need no record metatable: each record name becomes a plain Lua
 `mod.Point` through the module `Udata`'s `__index` to that table, then
 does an ordinary table lookup plus a wrapped call — `new` was desugared
 into a static method by the parser long before codegen.
+Local records are not entered in the module member map. Public records with a
+local `new` static still allocate their namespace table for Titan-internal use,
+but the local static is not inserted into the Lua-visible table.
 
 ### Identity and tag security
 
@@ -422,7 +427,8 @@ static int __index(lua_State *L) {
 
 Both metamethods are C closures closed over the module `Udata` and a
 *member map* table mapping each exported name to its slot (variables,
-functions and record namespaces; `local` variables are not entered). A
+functions and public record namespaces; `local` variables and local records are
+not entered). A
 name miss raises `member '%s' does not exist in Titan module '%s'` —
 generalized from the old "global variable ..." message now that
 functions and records route through the same metamethods. A hit switches
@@ -477,8 +483,8 @@ Udata* (*some_dep_init)(lua_State *L) =
 
 `loadlib(L, file)` first consults the handle cache under
 `TITAN_LIBS_KEY`; on a miss it walks the Titan path — environment
-variable `TITAN_PATH_0_10`, then `TITAN_PATH`, then the default
-`".;/usr/local/lib/titan/0.10"`, with `;;` in an env value splicing the
+variable `TITAN_PATH_0_11`, then `TITAN_PATH`, then the default
+`".;/usr/local/lib/titan/0.11"`, with `;;` in an env value splicing the
 default in — trying `dlopen(dir "/" file, RTLD_NOW | RTLD_LOCAL)` per
 `;`-separated directory. Successes are cached; the cache table's
 metatable has a `__gc` that `dlclose`s every handle in reverse insertion

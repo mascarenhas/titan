@@ -300,9 +300,10 @@ but not called, `obj:method`, is also a value: a *bound method reference*,
 the method's type with the implicit `self` bound to the receiver (see
 [bound method references](closures.md#bound-method-references)).
 
-What is **still not** a value: a foreign/FFI function — it can be called by
-name but not referenced (see [the FFI chapter](ffi.md)). Assigning *to* a
-function name (`double = bad`) also remains an error.
+What is **still not** a Titan function value: a foreign/FFI function — it can
+be called by name or converted to a compatible C function pointer, but not
+stored as a Titan function value (see [the FFI chapter](ffi.md)). Assigning
+*to* a function name (`double = bad`) also remains an error.
 
 ## Recursion and declaration order
 
@@ -329,7 +330,8 @@ functions at all — see [Modules](modules.md).
 
 ## Methods and static functions
 
-Records may declare methods (`function Point:move(dx: float, dy: float)`).
+Records may declare methods (`function Point:move(dx: float, dy: float)`), and
+methods may be `local` to the defining module.
 There is no syntax for declaring static functions of your own —
 `function Point.polar(r: float, t: float): Point` is a syntax error in
 the current grammar; the only static function is the automatically

@@ -114,6 +114,76 @@ describe("typechecker rehydration of .so-only imports", function()
         assert.truthy(#bad >= 1)
     end)
 
+    it("rehydrates only the public surface of records with local members", function ()
+        local dep = { name = "lrecfoo", src = [[
+            record Box
+              local hidden: integer
+              shown: integer
+            end
+            local function Box:secret(): integer
+                return self.hidden
+            end
+            function Box:shown_twice(): integer
+                return self.shown * 2
+            end
+            function make(hidden: integer, shown: integer): Box
+                return Box.new(hidden, shown)
+            end
+            function reveal(b: Box): integer
+                return b.hidden + b:secret()
+            end
+        ]] }
+        local good = so_check({ dep }, "lrecbar", [[
+            local f = import "lrecfoo"
+            function bar(): integer
+                local b = f.make(3, 11)
+                return b.shown + b:shown_twice() + f.reveal(b)
+            end
+        ]])
+        assert.equal(0, #good, table.concat(good, "\n"))
+
+        local rec = assert(types.registry["lrecfoo.Box"])
+        assert.equal(2, rec.nfields)
+        assert.equal(1, #rec.fields)
+        assert.equal("shown", rec.fields[1].name)
+        assert.equal(1, rec.fields[1].index)
+        assert.falsy(rec.functions.new)
+        assert.falsy(rec.methods.secret)
+        assert.truthy(rec.methods.shown_twice)
+
+        local hidden = so_check({ dep }, "lrecbar", [[
+            local f = import "lrecfoo"
+            function bar(): integer
+                local b = f.make(3, 11)
+                return b.hidden
+            end
+        ]])
+        assert.truthy(#hidden >= 1)
+        assert.match("field 'hidden' not found in record 'lrecfoo%.Box'",
+            table.concat(hidden, "\n"))
+
+        local method = so_check({ dep }, "lrecbar", [[
+            local f = import "lrecfoo"
+            function bar(): integer
+                local b = f.make(3, 11)
+                return b:secret()
+            end
+        ]])
+        assert.truthy(#method >= 1)
+        assert.match("method 'secret' not found in record 'lrecfoo%.Box'",
+            table.concat(method, "\n"))
+
+        local constructor = so_check({ dep }, "lrecbar", [[
+            local f = import "lrecfoo"
+            function bar(): f.Box
+                return { shown = 11 }
+            end
+        ]])
+        assert.truthy(#constructor >= 1)
+        assert.match("cannot construct record type 'lrecfoo%.Box' outside module 'lrecfoo' because it has local fields",
+            table.concat(constructor, "\n"))
+    end)
+
     it("rehydrates a module variable's type", function ()
         local dep = { name = "varfoo", src = [[ count: integer = 0 ]] }
         local good = so_check({ dep }, "varbar", [[

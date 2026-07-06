@@ -2479,6 +2479,46 @@ describe("Titan code generator", function()
         ]])
     end)
 
+    it("hides local record fields and methods from Lua", function ()
+        run_coder([[
+            record Box
+                local hidden: integer
+                shown: integer
+            end
+
+            local function Box:secret(): integer
+                return self.hidden
+            end
+
+            function box(): Box
+                return Box.new(11, 31)
+            end
+
+            function reveal(b: Box): integer
+                return b.hidden + b:secret()
+            end
+
+            function via_values(): integer
+                local make = Box.new
+                local b = make(13, 37)
+                local secret = b:secret
+                return b.shown + secret()
+            end
+        ]], [[
+            local b = test.box()
+            assert(b.shown == 31)
+            assert(test.reveal(b) == 22)
+            assert(test.via_values() == 37 + 13)
+            local ok, err = pcall(function () return b.hidden end)
+            assert(not ok)
+            assert(err:match('not found'))
+            ok, err = pcall(function () return b:secret() end)
+            assert(not ok)
+            assert(err:match("not found"))
+            assert(test.Box.new == nil)
+        ]])
+    end)
+
     it("initializes a record using new", function ()
         run_coder([[
             record Point
@@ -2576,6 +2616,41 @@ describe("Titan code generator", function()
         local ok, err = generate_modules(modules, "bar")
         assert.truthy(ok, err)
         local ok, err = call("bar", "x, y = bar.bar(); assert(x == 4.0); assert(y == 6.0)")
+        assert.truthy(ok, err)
+    end)
+
+    it("uses public record surface from source-linked module with local members", function ()
+        local modules = {
+            foo = [[
+                record Box
+                    local hidden: integer
+                    shown: integer
+                end
+
+                local function Box:secret(): integer
+                    return self.hidden
+                end
+
+                function make(hidden: integer, shown: integer): Box
+                    return Box.new(hidden, shown)
+                end
+
+                function reveal(b: Box): integer
+                    return b.hidden + b:secret()
+                end
+            ]],
+            bar = [[
+                local f = import "foo"
+
+                function bar(): integer
+                    local b = f.make(17, 41)
+                    return b.shown + f.reveal(b)
+                end
+            ]]
+        }
+        local ok, err = generate_modules(modules, "bar")
+        assert.truthy(ok, err)
+        ok, err = call("bar", "assert(bar.bar() == 41 + 34)")
         assert.truthy(ok, err)
     end)
 

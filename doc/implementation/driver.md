@@ -33,8 +33,8 @@ Two distinct path strings are consulted:
 * **`driver.TITAN_SOURCE_PATH`** — where `.titan` sources live. Default
   `"."`; `titanc --tree <root>` overrides it.
 * **`driver.TITAN_BIN_PATH`** — where compiled `.so` modules live.
-  Default `os.getenv("TITAN_PATH_0_10") or os.getenv("TITAN_PATH") or
-  ".;/usr/local/lib/titan/0.10"`.
+  Default `os.getenv("TITAN_PATH_0_11") or os.getenv("TITAN_PATH") or
+  ".;/usr/local/lib/titan/0.11"`.
 
 So `import foo.bar` looks for `foo/bar.titan` under the source path and
 `foo/bar.so` under the bin path. Note that the compile-time path walk
@@ -375,9 +375,9 @@ uses directly.
 * **`TITAN_LIKELY(x)` / `TITAN_UNLIKELY(x)`** — `__builtin_expect`
   wrappers (plain parentheses off GCC/Clang); used on the hot/cold
   sides of generated type checks.
-* **Constants** — `TITAN_VER "0.10"`, `TITAN_VER_SUFFIX "_0_10"`,
+* **Constants** — `TITAN_VER "0.11"`, `TITAN_VER_SUFFIX "_0_11"`,
   `TITAN_PATH_VAR "TITAN_PATH"`, `TITAN_PATH_SEP "/"`,
-  `TITAN_PATH_DEFAULT ".;/usr/local/lib/titan/0.10"`, and UUID
+  `TITAN_PATH_DEFAULT ".;/usr/local/lib/titan/0.11"`, and UUID
   strings used as Lua-registry keys: `TITAN_PATH_KEY` (cached search
   path), `TITAN_LIBS_KEY` (dlopen handle table),
   `TITAN_BT_GENERATION_KEY` (shared libbacktrace invalidation generation),
@@ -409,9 +409,9 @@ It also declares the three C functions exported by `titan.c`:
 
 * **`pushpath(L)`** resolves the run-time module search path once per
   Lua state and caches it in the registry under `TITAN_PATH_KEY`. The
-  order is: `getenv("TITAN_PATH_0_10")` (the versioned variable,
+  order is: `getenv("TITAN_PATH_0_11")` (the versioned variable,
   `TITAN_PATH_VAR TITAN_VER_SUFFIX`), then `getenv("TITAN_PATH")`,
-  then the built-in default `".;/usr/local/lib/titan/0.10"`. A `;;` in
+  then the built-in default `".;/usr/local/lib/titan/0.11"`. A `;;` in
   the environment value is replaced by the default path (two
   `luaL_gsub` passes through a `\1` placeholder), so
   `TITAN_PATH="/opt/titan;;"` means "look in `/opt/titan`, then the
@@ -480,9 +480,9 @@ user-facing story.
 
 | Name | Where read | Default / value | Meaning |
 | --- | --- | --- | --- |
-| `TITAN_PATH_0_10` | `driver.lua` (compile time), `titan.c` `pushpath` (run time) | unset | Versioned module search path; wins over `TITAN_PATH`. |
+| `TITAN_PATH_0_11` | `driver.lua` (compile time), `titan.c` `pushpath` (run time) | unset | Versioned module search path; wins over `TITAN_PATH`. |
 | `TITAN_PATH` | same | unset | Module search path; `;;` expands to the default at run time only. |
-| `driver.TITAN_BIN_PATH` | `driver.lua` | `TITAN_PATH_0_10` or `TITAN_PATH` or `".;/usr/local/lib/titan/0.10"` | Where compiled `.so` modules are searched at compile time. |
+| `driver.TITAN_BIN_PATH` | `driver.lua` | `TITAN_PATH_0_11` or `TITAN_PATH` or `".;/usr/local/lib/titan/0.11"` | Where compiled `.so` modules are searched at compile time. |
 | `driver.TITAN_SOURCE_PATH` | `driver.lua` | `"."` (overridden by `titanc --tree`) | Where `.titan` sources are searched. |
 | `driver.LUA_SOURCE_PATH` | `driver.lua` | `"lua-5.5.0/src/"` (overridden by `titanc --lua`) | Lua source tree: internal headers at compile, `liblua.a` at link. |
 | `driver.TITAN_RUNTIME_PATH` | `driver.lua` | `"titan-runtime/"` | Location of `titan.c`/`titan.h`/`titan.o`; generated C compiles with this path on its include list. |
@@ -491,7 +491,7 @@ user-facing story.
 | shared-library flags | `shared_flag()` | `-shared`; on Darwin `-shared -undefined dynamic_lookup` | Platform from `driver.UNAME` (output of `uname`). |
 | link set (library) | `compile_library` | module `.o`s + `titan.o` + `libbacktrace.a` + `liblua.a` + `-ldl -lm` + `-l<lib>`… | `-l` list from `titanc -l a,b,c`; libbacktrace is linked before Lua. |
 | link set (program) | `compile_program` | `<mod>__entrypoint.c` + all `.o`s + `titan.o` + `libbacktrace.a` + `liblua.a` + `-ldl -lm` + `-l<lib>`… | Standalone programs bundle every compiled module; libbacktrace is linked before Lua. |
-| `TITAN_PATH_DEFAULT` | `titan.h` | `".;/usr/local/lib/titan/0.10"` | Run-time default search path (mirrors `TITAN_BIN_PATH`'s default). |
+| `TITAN_PATH_DEFAULT` | `titan.h` | `".;/usr/local/lib/titan/0.11"` | Run-time default search path (mirrors `TITAN_BIN_PATH`'s default). |
 | registry keys | `titan.h` | `TITAN_PATH_KEY`, `TITAN_LIBS_KEY`, `TITAN_BT_GENERATION_KEY`, `TITAN_BACKTRACE_KEY`, `TITAN_NAMES_KEY`, `TITAN_TRACE_PINNED` (UUID strings) | Per-state caches: search path, dlopen handles, shared libbacktrace invalidation generation, last raw backtrace, native-frame display names, and re-raise traceback pin. |
 | generated ABI symbol | `coder.lua` | `<mangled>_abi` returning `TITAN_VER` | Checked before `.so` type rehydration and before run-time dynamic-import `dlsym`; markerless modules are treated as incompatible. |
 

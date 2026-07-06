@@ -315,8 +315,8 @@ the structure of the generated C is in
   described above.
 * **Compiled modules** are looked up along the *binary search path*: a
   semicolon-separated list of directories taken from the environment
-  variable `TITAN_PATH_0_10`, or `TITAN_PATH` if that is unset,
-  defaulting to `.;/usr/local/lib/titan/0.10` — a list of plain
+  variable `TITAN_PATH_0_11`, or `TITAN_PATH` if that is unset,
+  defaulting to `.;/usr/local/lib/titan/0.11` — a list of plain
   directories, not a Lua-style template path. The same path is used at
   run time by compiled modules that load dependencies dynamically.
 

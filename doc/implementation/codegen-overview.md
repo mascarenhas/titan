@@ -64,9 +64,10 @@ and records first; functions second). The pieces appear in this order:
    what makes Titan fast and ties each compiler release to one Lua
    version (currently 5.5.0).
 2. **Foreign `#include`s** (`$FOREIGNIMPORTS`): one per `foreign import`
-   — `#include "<header>"` for an absolute header path,
-   `#include <<header>>` otherwise ([FFI internals](ffi-internals.md)) —
-   followed by an `#ifdef __clang__` block silencing two warnings.
+   — quoted includes for absolute paths and local relative headers, angle
+   includes for compiler-provided and system headers ([FFI
+   internals](ffi-internals.md)) — followed by an `#ifdef __clang__` block
+   silencing two warnings.
 3. **Cross-module declarations** (`$INCLUDES`, filled by
    `init_data_from_other_modules`): `extern` or `static`-function-pointer
    declarations for every imported function actually called. (A record's
@@ -87,7 +88,7 @@ and records first; functions second). The pieces appear in this order:
    functions get no wrapper).
 7. **Module-global metamethods**: if the module exports anything, one
    `__index`/`__newindex` pair serving all members — variables, functions
-   and record namespaces — through the metatable installed on the module
+   and public record namespaces — through the metatable installed on the module
    `Udata`.
 8. **`<prefix>_abi`**, **`<prefix>_types`**, **`<prefix>_init`**, **`luaopen_<prefix>`**: the
    module-protocol functions, described below.
@@ -332,10 +333,12 @@ copies the immutable value down.
 A bound method reference `obj:m` is a one-capture closure whose captured
 "variable" is the receiver `self`, with a pair of **trampolines** that
 delegate to the method's real entries. Both are emitted by the method's
-**defining module for every method**, with exported/recoverable symbols
-mirroring the method's own entries plus a `function_type_tag` for the
-self-removed type, so a bind site in another module — which may have only
-the `.so` — can point at them. The **native trampoline** matches the
+**defining module for every method**. Public methods use exported/recoverable
+symbols mirroring the method's own entries plus a `function_type_tag` for the
+self-removed type, so a bind site in another module — which may have only the
+`.so` — can point at them. Local methods keep those trampoline symbols
+file-local and are not serialized into `.so` interfaces. The **native
+trampoline** matches the
 self-removed function type's ABI, extracts `self` from its closure's
 `upvalue[3]`, and tail-calls the method's native entry with that `self`;
 the **Lua trampoline** inserts `self` as the first stack argument and
@@ -371,6 +374,13 @@ reading a 0.8 record's `getudatamem` would read out of bounds, so 0.7 and
 0.8 `.so`s are ABI-incompatible and live under different `TITAN_PATH`
 directories.
 
+The current ABI is **0.11**. The 0.10 to 0.11 bump covers module-local
+records and record members: `<mangled>_types` omits local records and local
+fields/methods/statics from the serialized public interface, while retaining
+the full record field-slot count so an imported `.so` still reads public fields
+from their original `Udata` user-value slots. A 0.10 checker would not know how
+to interpret that layout metadata.
+
 ## The module protocol
 
 All per-Lua-state module state lives in one `Udata` (`_mod`) created by
@@ -394,7 +404,7 @@ Udata *counter_init(lua_State *L) {
         /* create and register _mod (luaS_newudata(L, 0, NUPVALS));
            $LOADMODULES1 (dlopen dynamic deps), $INITMODULES (dep inits),
            $INITRECORDS (record metatables), $INITVARS (variable
-           initializers); install functions and record namespaces into
+           initializers); install functions and public record namespaces into
            their uv slots; $CREATEMETA (member metatable on the udata) */
         return _mod;
     } else {

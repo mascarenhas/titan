@@ -51,7 +51,8 @@ code: `titan_ffi_void`, `titan_ffi_bool`, `titan_ffi_char`,
 `titan_ffi_signed_char`, `titan_ffi_unsigned_char`, `titan_ffi_short`,
 `titan_ffi_unsigned_short`, `titan_ffi_int`, `titan_ffi_unsigned_int`,
 `titan_ffi_long`, `titan_ffi_unsigned_long`, `titan_ffi_long_long`,
-`titan_ffi_unsigned_long_long`, `titan_ffi_float`, and `titan_ffi_double`.
+`titan_ffi_unsigned_long_long`, `titan_ffi_float`, `titan_ffi_double`, and the
+opaque Lua state type `lua_State`.
 
 ## Imported Members
 
@@ -105,10 +106,34 @@ end
 ```
 
 They cannot be exported from a Titan module. A public function parameter or
-return type, a public variable, or a record field that mentions a C FFI type is
-rejected. This version deliberately does not serialize C types into compiled
-Titan module interfaces, because another Titan module would also need the right
-C header included in its generated C.
+return type, a public variable, or a public record member that mentions a C FFI
+type is rejected. This version deliberately does not serialize C types into
+compiled Titan module interfaces, because another Titan module would also need
+the right C header included in its generated C. A local record field may mention
+a C type because it remains private to the defining module.
+
+## The Built-In Lua State
+
+Every Titan function, method, and anonymous function has an implicit read-only
+local named `L`. It is the native `lua_State *L` that the generated C function
+received, typed as a C pointer to `lua_State`:
+
+```lua
+local api = foreign import "lua_helpers.h"
+-- lua_helpers.h:
+-- #include <titan/ffi.h>
+-- int current_top(lua_State *L);
+
+function current_top(): integer
+    return api.current_top(L) as integer
+end
+```
+
+`L` is most useful when passing the current Lua state to a C function imported
+through the FFI. It cannot be assigned to, and parameters or locals named `L`
+are rejected so the built-in remains unambiguous. The pointer is not a Titan
+value you should store for later use; pass it only to C APIs that use it during
+the call.
 
 ## Casts And Coercions
 

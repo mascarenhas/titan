@@ -1,7 +1,7 @@
 # The Titan grammar
 
 This chapter is the reference grammar of Titan as implemented by the
-0.10 prototype compiler: lexical conventions, the complete syntactic
+0.11 prototype compiler: lexical conventions, the complete syntactic
 grammar, operator precedence, and the restrictions the EBNF alone does
 not show. It replaces the old manual's stale grammar.
 
@@ -136,11 +136,11 @@ in any order, with no executable statements outside functions.
 
 ```
 program  ::= {tlmethod | tlfunc | tlvar | tlrecord | tlimport | tlforeignimport}
-tlmethod ::= function Name ':' Name '(' [parlist] ')' [':' rettype] block end
+tlmethod ::= [local] function Name ':' Name '(' [parlist] ')' [':' rettype] block end
 tlfunc   ::= [local] function Name '(' [parlist] ')' [':' rettype] block end
 tlvar    ::= [local] decl '=' exp
-tlrecord ::= record Name {recordfield} end
-recordfield     ::= Name ':' type [';']
+tlrecord ::= [local] record Name {recordfield} end
+recordfield     ::= [local] Name ':' type [';']
 tlimport        ::= local Name '=' import importname
 tlforeignimport ::= local Name '=' foreign import importname
 importname      ::= LiteralString | '(' LiteralString ')'
@@ -170,12 +170,14 @@ Notes on the top level:
 * A missing `[':' rettype]` annotation means the function returns
   *nothing* — its type is `(...) -> ()`, the zero-return form, distinct
   from a `: nil` return of one `nil` value (see [Functions](functions.md)).
-* Methods cannot be declared `local`, and they are written outside the
-  `record ... end` body, which contains only fields; a record may be
-  empty (`record A end` parses).
+* Methods are written outside the `record ... end` body, which contains only
+  fields; a record may be empty (`record A end` parses). `local` on a record,
+  record field, or method makes that declaration visible only inside the
+  defining module.
 * A `record` also synthesizes a static constructor `Name.new`, taking
   the fields as positional parameters in declaration order; there is no
-  surface syntax for other static functions. See [Records](records.md).
+  surface syntax for other static functions. `Name.new` is local when the
+  record is local or any field is local. See [Records](records.md).
 * A module variable's initializer is a full expression; after `=`, the
   keywords `import` and `foreign import` mark an import instead.
 

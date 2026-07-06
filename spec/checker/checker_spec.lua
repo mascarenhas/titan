@@ -181,6 +181,42 @@ describe("Titan type checker", function()
         assert.match("variable '%w+' not declared", err)
     end)
 
+    it("provides built-in local L and rejects shadowing or assigning it", function()
+        assert_type_check([[
+            record R
+            end
+
+            function fn(): boolean
+                return L
+            end
+
+            function R:method(): boolean
+                return L
+            end
+
+            function lambda(): boolean
+                local f = function(): boolean
+                    return L
+                end
+                return f()
+            end
+        ]])
+        assert_type_error("cannot declare parameter 'L' because it shadows a built%-in local", [[
+            function fn(L: integer)
+            end
+        ]])
+        assert_type_error("cannot declare local 'L' because it shadows a built%-in local", [[
+            function fn()
+                local L = nil
+            end
+        ]])
+        assert_type_error("cannot assign to built%-in local 'L'", [[
+            function fn()
+                L = nil
+            end
+        ]])
+    end)
+
     it("reads from array", function()
         assert_type_check([[
             function fn(): integer
@@ -2465,6 +2501,168 @@ describe("Titan typecheck of records", function()
         assert.truthy(ok, err)
     end)
 
+    it("does not export module-local records", function()
+        local ok, err, _, modtype = run_checker([[
+            local record Secret
+                x: integer
+            end
+
+            local function make(): Secret
+                return Secret.new(7)
+            end
+
+            function answer(): integer
+                return make().x
+            end
+        ]])
+        assert.truthy(ok, err)
+        assert.falsy(modtype.members.Secret)
+        assert.truthy(modtype.members.answer)
+    end)
+
+    it("rejects exported functions that mention module-local records", function()
+        assert_type_error("cannot export local record type 'test.Secret'", [[
+            local record Secret
+                x: integer
+            end
+
+            function make(): Secret
+                return Secret.new(7)
+            end
+        ]])
+    end)
+
+    it("rejects other exported surfaces that mention module-local records", function()
+        assert_type_error("cannot export local record type 'test.Secret'", [[
+            local record Secret
+                x: integer
+            end
+
+            current: Secret = Secret.new(1)
+        ]])
+        assert_type_error("cannot export local record type 'test.Secret'", [[
+            local record Secret
+                x: integer
+            end
+
+            record Public
+                secret: Secret
+            end
+        ]])
+        assert_type_error("cannot export local record type 'test.Secret'", [[
+            local record Secret
+                x: integer
+            end
+            record Public
+            end
+
+            function Public:take(secret: Secret): nil
+            end
+        ]])
+    end)
+
+    it("hides local record types from importing modules", function()
+        local modules = {
+            foo = [[
+                local record Secret
+                    x: integer
+                end
+
+                function answer(): integer
+                    return Secret.new(7).x
+                end
+            ]],
+            bar = [[
+                local f = import "foo"
+
+                function bad(s: f.Secret): integer
+                    return f.answer()
+                end
+            ]]
+        }
+        local ok, err = run_checker_modules(modules, "bar")
+        assert.falsy(ok)
+        assert.match("type 'Secret' not found inside module 'foo'", err)
+    end)
+
+    it("allows local fields inside their module and hides them outside", function()
+        local modules = {
+            foo = [[
+                record Box
+                    local hidden: integer
+                    shown: integer
+                end
+
+                function reveal(b: Box): integer
+                    return b.hidden + b.shown
+                end
+            ]],
+            bar = [[
+                local f = import "foo"
+
+                function bad(b: f.Box): integer
+                    return b.hidden
+                end
+            ]]
+        }
+        local ok, err = run_checker_modules(modules, "bar")
+        assert.falsy(ok)
+        assert.match("field 'hidden' not found in record 'foo.Box'", err)
+    end)
+
+    it("rejects external record literals for records with local fields", function()
+        local modules = {
+            foo = [[
+                record Box
+                    shown: integer
+                    local hidden: integer
+                end
+
+                function make(): Box
+                    return Box.new(1, 2)
+                end
+            ]],
+            bar = [[
+                local f = import "foo"
+
+                function bad(): f.Box
+                    return { shown = 1 }
+                end
+            ]]
+        }
+        local ok, err = run_checker_modules(modules, "bar")
+        assert.falsy(ok)
+        assert.match("cannot construct record type 'foo.Box' outside module 'foo' because it has local fields", err)
+    end)
+
+    it("allows local methods inside their module and hides them outside", function()
+        local modules = {
+            foo = [[
+                record Box
+                    x: integer
+                end
+
+                local function Box:secret(): integer
+                    return self.x
+                end
+
+                function reveal(b: Box): integer
+                    return b:secret()
+                end
+            ]],
+            bar = [[
+                local f = import "foo"
+
+                function bad(b: f.Box): integer
+                    return b:secret()
+                end
+            ]]
+        }
+        local ok, err = run_checker_modules(modules, "bar")
+        assert.falsy(ok)
+        assert.match("method 'secret' not found in record 'foo%.Box'", err)
+    end)
+
     it("uses transitive external record type wrongly", function ()
         local modules = {
             baz = [[
@@ -2569,7 +2767,7 @@ describe("Titan typecheck of records", function()
         }
         local ok, err = run_checker_modules(modules, "bar")
         assert.falsy(ok)
-        assert.match("record type 'foo.P' in receiver of method call does not exist", err)
+        assert.match("type 'P' not found inside module 'foo'", err)
         assert.match("method 'm' not found in record 'foo.R'", err)
         assert.match("expected record in receiver of method call but found 'integer'", err)
     end)

@@ -248,7 +248,20 @@ function defs.exp_is_call(_, pos, exp)
     end
 end
 
-function defs.recorddecl(pos, name, fields)
+function defs.methoddecl(pos, islocal, class, name, params, rettypes, block)
+    local node = ast.TopLevelMethod(pos, class, name, params, rettypes, block)
+    node.islocal = islocal
+    return node
+end
+
+local function has_local_field(fields)
+    for _, field in ipairs(fields) do
+        if field.islocal then return true end
+    end
+    return false
+end
+
+function defs.recorddecl(pos, islocal, name, fields)
     local params, initlist = {}, {}
     for _, field in ipairs(fields) do
         table.insert(params, ast.Decl(field.loc, field.name, field.type, false))
@@ -260,8 +273,22 @@ function defs.recorddecl(pos, name, fields)
             ast.ExpInitList(pos, initlist)
         })
     })
-    return ast.TopLevelRecord(pos, name, fields),
-           ast.TopLevelStatic(pos, name, "new", params, { ast.TypeName(pos, name) }, body)
+    local record = ast.TopLevelRecord(pos, name, fields)
+    record.islocal = islocal
+    local new = ast.TopLevelStatic(pos, name, "new", params, { ast.TypeName(pos, name) }, body)
+    new.islocal = islocal or has_local_field(fields)
+    return record, new
+end
+
+function defs.recordfielddecl(pos, name, type)
+    local decl = ast.Decl(pos, name, type, false)
+    return decl
+end
+
+function defs.localrecordfielddecl(pos, name, type)
+    local decl = ast.Decl(pos, name, type, false)
+    decl.islocal = true
+    return decl
 end
 
 function defs.typeddecl(pos, name, type)
@@ -333,9 +360,9 @@ local grammar = re.compile([[
                            / import
                            / foreign )* |} !.
 
-    method          <- (P  FUNCTION NAME COLON NAME^NameMethod
+    method          <- (P  localopt FUNCTION NAME COLON NAME^NameMethod
                            LPAREN^LParPList paramlist RPAREN^RParPList
-                           rettypeopt block END^EndFunc)         -> TopLevelMethod
+                           rettypeopt block END^EndFunc)         -> methoddecl
 
     toplevelfunc    <- (P  localopt FUNCTION NAME^NameFunc
                            LPAREN^LParPList paramlist RPAREN^RParPList
@@ -345,7 +372,7 @@ local grammar = re.compile([[
                            !(IMPORT / FOREIGN)
                            exp^ExpVarDec)                        -> TopLevelVar
 
-    toplevelrecord  <- (P  RECORD NAME^NameRecord
+    toplevelrecord  <- (P  localopt RECORD NAME^NameRecord
                            recordfields^FieldRecord
                            END^EndRecord)                        -> recorddecl
 
@@ -457,8 +484,10 @@ local grammar = re.compile([[
 
     recordfields    <- {| recordfield* |}                        -- produces {Decl}
 
-    recordfield     <- (P  NAME COLON^ColonRecordField
-                           type^TypeRecordField SEMICOLON?)      -> typeddecl
+    recordfield     <- (P  LOCAL NAME COLON^ColonRecordField
+                           type^TypeRecordField SEMICOLON?)      -> localrecordfielddecl
+                     / (P  NAME COLON^ColonRecordField
+                           type^TypeRecordField SEMICOLON?)      -> recordfielddecl
 
     -- A `block` may optionally absorb `(catch <block>)? (finally <block>)?`
     -- trailers. When either is present `trywrap` builds a `StatTry` wrapper;

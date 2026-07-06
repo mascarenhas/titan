@@ -21,10 +21,10 @@ value — whose members you access exactly like table fields (`m.f`, `m.v`,
 
 * **one function per exported Titan function** (and nothing for functions
   declared `local` — they are invisible to Lua), returned read-only;
-* **one namespace per record type**, a small table holding the record's
-  static functions — in particular the automatically generated
-  constructor, so `mod.Point.new(2, 3)` works from Lua (see
-  [Records](records.md));
+* **one namespace per exported record type**, a small table holding the
+  record's public static functions — in particular the automatically generated
+  constructor when it is public, so `mod.Point.new(2, 3)` works from Lua for a
+  public `new` (see [Records](records.md));
 * **exported module variables**, read and written through the metatable
   so that reads always see the current value and writes are type-checked
   (see [Module variables from Lua](#module-variables-from-lua) below).
@@ -255,20 +255,22 @@ are nominal, fixed-shape values and do not have a table representation
 all instances of the record type in the Lua state, that makes it behave
 like an object:
 
-* **Field reads** (`p.x`) return the field's value; record-typed fields
+* **Field reads** (`p.x`) return a public field's value; record-typed fields
   arrive as their own userdata.
 * **Field writes** (`p.x = v`) are type-checked against the declared
   field type, with the standard
   `file:line:col: type error, expected X but found Y` message on
   mismatch.
-* **Methods** are called with the usual colon syntax (`p:move(2, 3)`).
+* **Methods** are called with the usual colon syntax (`p:move(2, 3)`) when
+  they are public.
   Method names are not assignable fields: `p.move = 2` raises the
   "field not found" error.
-* **Unknown fields** raise
+* **Unknown fields**, including local fields and local methods, raise
   `file:line:col: field 'name' not found in record 'mod.Rec'` on both
   read and write — there is no Lua-style `nil` for missing fields.
 * **Statics**, including the generated `new`, are reached as a member of
-  the module value: `mod.Point.new(2, 3)`.
+  the module value: `mod.Point.new(2, 3)`. Local records are not module members,
+  and a local `new` static is absent from the namespace table.
 
 ```lua
 -- test.titan             -- Titan
@@ -298,10 +300,11 @@ Record identity is userdata identity: the same record instance always
 appears as the same userdata, two distinct instances compare `~=`, and
 there is no structural equality. The metatable is protected —
 `getmetatable(p)` returns the string `"Titan record test.Point"` — so Lua
-code cannot swap it; and even if it could, the type check on re-entry to
-Titan does not rely on the metatable, so a record of one type can never be
-passed off as another. Passing the wrong record type (or a non-record)
-where a record is expected is a run-time error naming both types:
+code cannot swap it. Titan record type checks use the real metatable pointer as
+the type identity, so plain Lua cannot pass one record type off as another;
+debug-library or C code that mutates protected metatables is outside Titan's
+safety boundary. Passing the wrong record type (or a non-record) where a record
+is expected is a run-time error naming both types:
 `type error, expected test.Rec but found test.Point`, or
 `... but found number`.
 
@@ -323,9 +326,9 @@ count: integer = 0
 -- Lua
 local counter = require "counter"
 counter.count = 2          -- fine
-counter.count = 2.0
+counter.count = 2.0        -- fine: integral floats convert to integer
+counter.count = 2.5
 --> error: counter.titan:...: type error, expected integer but found number
---  (writes do not get the integral-float conversion that arguments do)
 counter.count = "lots"
 --> error: counter.titan:...: type error, expected integer but found string
 ```

@@ -292,6 +292,18 @@ describe("Titan parser", function()
                 },
                 block = { _tag = "Ast.StatBlock", stats = {} } },
         })
+
+        assert_program_ast([[
+            local function Record:fD(): nil
+            end
+        ]], {
+            { _tag = "Ast.TopLevelMethod",
+                islocal = true,
+                class = "Record",
+                name = "fD",
+                params = {},
+                block = { _tag = "Ast.StatBlock", stats = {} } },
+        })
     end)
 
     it("omitting the return annotation yields a zero-return () function", function ()
@@ -1060,6 +1072,22 @@ describe("Titan parser", function()
                 { name = "p",
                   type = { subtype = { name = "Point" } } },
                 { name = "next", type = { name = "List" } } } },
+        })
+
+        assert_program_ast([[
+            local record Box
+                local hidden: integer
+                visible: integer
+            end
+        ]], {
+            { _tag = "Ast.TopLevelRecord",
+              islocal = true,
+              name = "Box",
+              fields = {
+                { name = "hidden", islocal = true,
+                  type = { _tag = "Ast.TypeInteger" } },
+                { name = "visible",
+                  type = { _tag = "Ast.TypeInteger" } } } },
         })
     end)
 

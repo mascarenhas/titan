@@ -26,7 +26,7 @@ local m = require "sum"
 print(m.sum_list({1, 2, 3, 4})) --> 10
 ```
 
-This is the reference for the language as implemented by the Titan 0.10
+This is the reference for the language as implemented by the Titan 0.11
 prototype compiler in this repository. It replaces the old single-file
 manual. For how the compiler itself works — including how each construct
 is translated to C — see the
@@ -58,7 +58,7 @@ Start with the [design philosophy](philosophy.md) if you want to know
 
 ## Status and limitations
 
-Titan is a working prototype, version 0.10. The language documented here is
+Titan is a working prototype, version 0.11. The language documented here is
 implemented and covered by the compiler's test suite. Its boundaries are
 mostly missing features, plus a handful of constructs the compiler rejects
 with a clean error; each links to the chapter that documents it in full.
@@ -90,9 +90,10 @@ with a clean error; each links to the chapter that documents it in full.
   `self` removed, bound to the receiver — so a method *can* now be taken
   as a value ([closures](closures.md#bound-method-references),
   [records](records.md#methods)).
-* **What is still not first-class.** Only foreign/FFI functions remain
-  non-values: a C function can be called by name but cannot be referenced
-  as a value ([the FFI chapter](ffi.md)).
+* **What is still not first-class.** Foreign/FFI functions are not Titan
+  function values: a C function can be called by name or converted to a
+  compatible C function pointer, but cannot be stored as a Titan function value
+  ([the FFI chapter](ffi.md)).
 
 ### Smaller gaps and rough edges
 

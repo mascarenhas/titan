@@ -26,7 +26,7 @@ backing storage must respect. Background on the calling convention is in the
 collector invariants in [values and the GC](values-and-gc.md).
 
 Variadic support originally bumped the compiled-module **ABI to 0.9**; the
-current descriptor layout is ABI **0.10** (see
+descriptor layout described here then bumped it to **0.10** (see
 [the ABI bumps](#the-abi-bumps-09-and-010)).
 
 ## Parser: the `...: t` grammar
@@ -523,12 +523,15 @@ the trailing `TitanVargX *` + `int _start` pair, and `<mangled>_types` began
 encoding the `varargtype` element type for variadic functions and methods. A
 0.8 module has neither, so 0.8 and 0.9 `.so`s are ABI-incompatible.
 
-The current ABI is `0.10` (`TITAN_VER_SUFFIX "_0_10"`,
-`TITAN_PATH_0_10`). The `TitanVargX` family changed from an inline
+The `0.10` ABI (`TITAN_VER_SUFFIX "_0_10"`,
+`TITAN_PATH_0_10`) changed the `TitanVargX` family from an inline
 flexible-array object (`lu_byte n_args; T args[]`) to a descriptor
 (`lu_byte n_args; T *args`). The native parameter type name stayed the same, but
 the struct layout did not; mixing 0.9 and 0.10 modules would misread the bytes
 after `n_args`, so they must live under different `TITAN_PATH` directories.
+
+The current ABI is newer than this variadic change. It is bumped when other
+separate-compilation surfaces change, such as record interface serialization.
 
 The `.so`-only import path round-trips `varargtype` through serialize and is
 covered by `spec/coder/so_import_spec.lua` and
