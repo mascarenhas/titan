@@ -6,6 +6,7 @@ local inspect = require("inspect")
 local typed = require("typed")
 
 local equal_declarations
+local calculate_or_original
 
 local add_type = typed("TypeList, string, CType -> ()", function(lst, name, typ)
     lst[name] = typ
@@ -50,6 +51,19 @@ equal_declarations = function(t1, t2)
         if t1.vararg ~= t2.vararg then
             return false
         end
+    elseif t1.type == "functionptr" then
+        if not equal_declarations(t1.ret.type, t2.ret.type) then
+            return false
+        end
+        if not equal_lists(t1.params, t2.params) then
+            return false
+        end
+        if t1.vararg ~= t2.vararg then
+            return false
+        end
+        if not equal_lists(t1.pointer, t2.pointer) then
+            return false
+        end
     end
     return true
 end
@@ -86,7 +100,7 @@ local function get_name(name_src)
         end
         for _, part in ipairs(name_src) do
             if part.idx then
-                table.insert(indices, part.idx)
+                table.insert(indices, calculate_or_original(part.idx))
             end
         end
         name = name_src.name
@@ -125,6 +139,12 @@ local convert_value = typed("TypeList, table -> CType?, string?", function (lst,
     }), nil
 end)
 
+local function mark_flexible_array_member(field)
+    if field.idxs and #field.idxs == 1 and field.idxs[1] == "" then
+        field.flexible_array = true
+    end
+end
+
 -- Interpret field data from `field_src` and add it to `fields`.
 local function add_to_fields(lst, field_src, fields)
 
@@ -137,12 +157,50 @@ local function add_to_fields(lst, field_src, fields)
         return true
     end
 
-    local field, err = convert_value(lst, field_src)
-    if not field then
-        return nil, err
-    end
+    if type(field_src.ids) == "table" then
+        local i = 1
+        while i <= #field_src.ids do
+            local id = field_src.ids[i]
+            local width
+            if id.name or id.declarator then
+                if field_src.ids[i + 1]
+                and not (field_src.ids[i + 1].name or field_src.ids[i + 1].declarator) then
+                    width = field_src.ids[i + 1]
+                    i = i + 1
+                end
+            else
+                width = id
+                id = nil
+            end
 
-    table.insert(fields, field)
+            local field, err = convert_value(lst, {
+                type = field_src.type,
+                id = id,
+            })
+            if not field then
+                return nil, err
+            end
+            if width then
+                field.bitfield = true
+                field.width = calculate_or_original(width)
+                if not id then
+                    field.anonymous = true
+                end
+            end
+            mark_flexible_array_member(field)
+
+            table.insert(fields, field)
+            i = i + 1
+        end
+    else
+        local field, err = convert_value(lst, field_src)
+        if not field then
+            return nil, err
+        end
+
+        mark_flexible_array_member(field)
+        table.insert(fields, field)
+    end
     return true
 end
 
@@ -159,9 +217,22 @@ end
 
 local function get_enum_items(_, values)
     local items = {}
+    local by_name = {}
+    local next_value = 0
     for _, v in ipairs(values) do
-        -- TODO store enum actual values
-        table.insert(items, { name = v.id })
+        local value
+        if v.value then
+            value = calculate_or_original(v.value, by_name)
+        else
+            value = next_value
+        end
+        table.insert(items, { name = v.id, value = value })
+        if type(value) == "number" then
+            by_name[v.id] = value
+            next_value = value + 1
+        else
+            next_value = nil
+        end
     end
     return items
 end
@@ -245,8 +316,8 @@ end
 
 local calculate
 
-local function binop(val, fn)
-    local e1, e2 = calculate(val[1]), calculate(val[2])
+local function binop(val, env, fn)
+    local e1, e2 = calculate(val[1], env), calculate(val[2], env)
     if type(e1) == "number" and type(e2) == "number" then
         return fn(e1, e2)
     else
@@ -254,21 +325,41 @@ local function binop(val, fn)
     end
 end
 
-calculate = function(val)
+calculate = function(val, env)
     if type(val) == "string" then
-        return tonumber(val)
+        return tonumber(val) or (env and env[val]) or val
+    end
+    if type(val) == "table" and val[1] and not val.op and not val.unop then
+        if #val == 1 then
+            return calculate(val[1], env)
+        end
+        return val
+    end
+    if val.unop == "+" then
+        return calculate(val[1], env)
+    elseif val.unop == "-" then
+        local e = calculate(val[1], env)
+        return type(e) == "number" and -e or { e, unop = "-" }
     end
     if val.op == "+" then
-        return binop(val, function(a, b) return a + b end)
+        return binop(val, env, function(a, b) return a + b end)
     elseif val.op == "-" then
-        return binop(val, function(a, b) return a - b end)
+        return binop(val, env, function(a, b) return a - b end)
     elseif val.op == "*" then
-        return binop(val, function(a, b) return a * b end)
+        return binop(val, env, function(a, b) return a * b end)
     elseif val.op == "/" then
-        return binop(val, function(a, b) return a / b end)
+        return binop(val, env, function(a, b) return a / b end)
     else
         return val
     end
+end
+
+calculate_or_original = function(val, env)
+    local calculated = calculate(val, env)
+    if calculated == nil then
+        return val
+    end
+    return calculated
 end
 
 local base_types = {
@@ -315,7 +406,8 @@ get_type = function(lst, spec, ret_pointer)
             table.insert(tarr, part)
         elseif lst[part] and lst[part].type == "typedef" then
             table.insert(tarr, part)
-        elseif type(part) == "table" and part.type == "struct" or part.type == "union" then
+        elseif type(part) == "table" and
+               (part.type == "struct" or part.type == "union") then
             local su_typ, err = refer(lst, part, get_structunion)
             if not su_typ then
                 return nil, err or "failed to refer struct"
@@ -369,6 +461,28 @@ local get_params = typed("TypeList, array -> array, boolean", function(lst, para
     return params, vararg
 end)
 
+local function make_function_pointer_type(lst, name, spec, decl, pointer, idxs)
+    local ret_type, err = get_type(lst, spec, {})
+    if not ret_type then
+        return nil, err
+    end
+    local params, vararg = get_params(lst, decl.params)
+    if not params then
+        return nil, vararg
+    end
+    return typed.table("CType", {
+        type = "functionptr",
+        name = name,
+        idxs = idxs,
+        ret = {
+            type = ret_type,
+        },
+        params = params,
+        vararg = vararg,
+        pointer = pointer,
+    })
+end
+
 local register_many = function(register_item_fn, lst, ids, spec)
     for _, id in ipairs(ids) do
         local ok, err = register_item_fn(lst, id, spec)
@@ -385,32 +499,40 @@ local register_decl_item = function(lst, id, spec)
         return false, name
     end
     assert(name)
-    local ret_type, err = get_type(lst, spec, ret_pointer)
-    if not ret_type then
-        return false, err
-    end
     local typ
-    if id.decl.params then
-        local params, vararg = get_params(lst, id.decl.params)
-        if not params then
-            return false, vararg
+    if id.decl.params and id.decl.declarator then
+        local err
+        typ, err = make_function_pointer_type(lst, name, spec, id.decl, ret_pointer, idxs)
+        if not typ then
+            return false, err
         end
-        typ = typed.table("CType", {
-            type = "function",
-            name = name,
-            idxs = idxs,
-            ret = {
-                type = ret_type,
-            },
-            params = params,
-            vararg = vararg,
-        })
     else
-        typ = typed.table("CType", {
-            type = ret_type,
-            name = name,
-            idxs = idxs,
-        })
+        local ret_type, err = get_type(lst, spec, ret_pointer)
+        if not ret_type then
+            return false, err
+        end
+        if id.decl.params then
+            local params, vararg = get_params(lst, id.decl.params)
+            if not params then
+                return false, vararg
+            end
+            typ = typed.table("CType", {
+                type = "function",
+                name = name,
+                idxs = idxs,
+                ret = {
+                    type = ret_type,
+                },
+                params = params,
+                vararg = vararg,
+            })
+        else
+            typ = typed.table("CType", {
+                type = ret_type,
+                name = name,
+                idxs = idxs,
+            })
+        end
     end
 
     if lst[name] then
@@ -439,12 +561,43 @@ local function register_function(lst, item)
     return register_decl_item(lst, id, item.spec)
 end
 
-local function register_static_function(_, _)
-    return true
+local function register_static_function(lst, item)
+    return register_function(lst, item)
 end
 
 local register_typedef_item = typed("TypeList, table, table -> boolean, string?", function(lst, id, spec)
-    local ok, name, ret_pointer = get_name(id.decl)
+    if id.decl.params then
+        if not id.decl.declarator then
+            -- A typedef of a bare C function type (not a function pointer)
+            -- remains out of scope; do not mis-model it as a callable value.
+            return true, nil
+        end
+        local ok, name, pointer, idxs = get_name(id.decl)
+        if not ok then
+            return false, name or "failed"
+        end
+        local def, err = make_function_pointer_type(lst, name, spec, id.decl, pointer, idxs)
+        if not def then
+            return false, err or "failed"
+        end
+        local typ = typed.table("CType", {
+            type = "typedef",
+            name = name,
+            def = def,
+            idxs = idxs,
+        })
+
+        if lst[name] then
+            if not equal_declarations(lst[name], typ) then
+                return false, "inconsistent declaration for " .. name .. " - " .. inspect(lst[name]) .. " VERSUS " .. inspect(typ)
+            end
+        end
+        add_type(lst, name, typ)
+
+        return true, nil
+    end
+
+    local ok, name, ret_pointer, idxs = get_name(id.decl)
     if not ok then
         return false, name or "failed"
     end
@@ -456,6 +609,7 @@ local register_typedef_item = typed("TypeList, table, table -> boolean, string?"
         type = "typedef",
         name = name,
         def = def,
+        idxs = idxs,
     })
 
     if lst[name] then
@@ -473,15 +627,18 @@ local register_typedefs = function(lst, item)
 end
 
 local function register_structunion(lst, item)
-    return get_structunion(lst, item.spec)
+    local spec = item.spec.type and item.spec or item.spec[1]
+    return get_structunion(lst, spec)
 end
 
 local function register_enum(lst, item)
-    return get_enum(lst, item.spec)
+    local spec = item.spec.type and item.spec or item.spec[1]
+    return get_enum(lst, spec)
 end
 
 local function register_one(lst, item)
     local spec_set = util.to_set(item.spec)
+    local spec_type = item.spec.type or (item.spec[1] and item.spec[1].type)
     if spec_set.extern and item.ids then
         return register_decls(lst, item.ids, item.spec)
     elseif spec_set.extern and item.func then
@@ -490,9 +647,9 @@ local function register_one(lst, item)
         return register_static_function(lst, item)
     elseif spec_set.typedef then
         return register_typedefs(lst, item)
-    elseif item.spec.type == "struct" or item.spec.type == "union" then
+    elseif spec_type == "struct" or spec_type == "union" then
         return register_structunion(lst, item)
-    elseif item.spec.type == "enum" then
+    elseif spec_type == "enum" then
         return register_enum(lst, item)
     elseif not item.ids then
         return true -- forward declaration (e.g. "struct foo;")

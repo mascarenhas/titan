@@ -530,18 +530,19 @@ Two real loaders exist in `driver.lua`:
   module's `<mangled>_types` symbol — a string of nested constructor calls
   produced by `types.serialize` — and evaluating it with
   `load("return " .. s, modname, "t", types)`, the `types` module itself
-  serving as the environment. Pointer, Typedef and ForeignModule types are
-  *not* serializable (`types.serialize` raises on them), so FFI types cannot
-  cross a compiled-interface boundary.
+  serving as the environment. C FFI types are *not* serializable
+  (`types.serialize` raises on any type tree containing one), so imported C
+  types cannot cross a compiled-interface boundary.
 * `driver.tableloader` is the in-memory variant for tests; it deliberately
   serializes and re-loads every module type, so the round-trip is exercised
   by every import test in the suite.
 
 `foreign import` is checked separately (`Ast.TopLevelForeignImport`): it runs
 the C parser pipeline and converts each declaration with
-`foreigntypes.convert` into members of a `Type.ForeignModule`, adding typedef
-names to the symbol table's `foreign_types` namespace (see
-[FFI internals](ffi-internals.md)).
+`foreigntypes.convert`. C values become members of a `Type.CModule`; C type
+declarations become `type_members` plus entries in the symbol table's
+`foreign_types` namespace, which is what lets local annotations such as
+`c.size_t` resolve (see [FFI internals](ffi-internals.md)).
 
 ## Process-global state
 

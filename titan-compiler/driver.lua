@@ -134,6 +134,11 @@ function driver.tableloader(modtable, imported, deps)
         if not ast then return false, parser.error_to_string(err, modf) end
         imported[modname] = CIRCULAR_MARK
         local modt, errors = checker.check(modname, ast, input, modf, loader)
+        if #errors ~= 0 then
+            imported[modname] = { ast = ast, type = modt, filename = modf }
+            deps[modname] = true
+            return true, modt, errors
+        end
         local mods = types.serialize(modt)
         local modtf, err = load("return " .. mods, modname, "t", types)
         if not modtf then return false, err end
@@ -195,7 +200,7 @@ function driver.compile(modname, ast, sourcef, static_deps, verbose)
     if not ok then return nil, err end
     local libflag = static_flag()
     local args = {driver.CC, driver.CFLAGS, libflag, filename,
-                  "-I", "titan-runtime",
+                  "-I", driver.TITAN_RUNTIME_PATH,
                   "-I", driver.LUA_SOURCE_PATH,
                   "-I", driver.LIBBACKTRACE_PATH, "-o", libname}
     local cmd = table.concat(args, " ")

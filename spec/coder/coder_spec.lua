@@ -1487,35 +1487,72 @@ describe("Titan code generator", function()
         assert.truthy(ok, err)
     end)
 
-    it("can cast a string to void pointer in foreign calls", function ()
+    it("uses quoted includes for local foreign headers", function()
+        local suffix = os.tmpname():match("[^/]+$"):gsub("%W", "_")
+        local header = "tmp_titan_ffi_local_header_" .. suffix .. ".h"
+        local modname = "ffi_local_header_" .. suffix
+        local f = assert(io.open(header, "w"))
+        f:write("extern int titan_ffi_local_header_probe;\n")
+        f:close()
+
         local modules = {
-            foo = [[
-                local stdio = foreign import "stdio.h"
-                local stdlib = foreign import "stdlib.h"
-                local string_h = foreign import "string.h"
-                function fun()
-                    local mem = stdlib.realloc(nil, 100)
-                    local h = "Hello, cast"
-                    local s = string_h.strcpy(mem as string, h)
-                    stdlib.free(mem)
-                    local fd = stdio.fopen("tmp_test_hello.txt", "w")
-                    local n = stdio.fwrite(s, 11, 1, fd)
-                    local err = stdio.fclose(fd)
+            [modname] = [[
+                local h = foreign import "]] .. header .. [["
+                function fun(): integer
+                    return 1
                 end
             ]]
         }
-        local ok, err = generate_modules(modules, "foo")
-        assert.truthy(ok, err)
-        local ok, err = call("foo", [[
-            os.remove('tmp_test_hello.txt')
-            foo.fun()
-            local fd = io.open('tmp_test_hello.txt', 'r')
-            local data = fd:read('*a')
-            fd:close()
-            os.remove('tmp_test_hello.txt')
-            assert(data == 'Hello, cast')
-        ]])
-        assert.truthy(ok, err)
+        local ok, err = pcall(function()
+            local gok, gerr = generate_modules(modules, modname)
+            assert.truthy(gok, gerr)
+
+            local c = assert(io.open(modname .. ".c", "r"))
+            local csrc = c:read("*a")
+            c:close()
+            assert.match('#include "' .. header .. '"', csrc, 1, true)
+        end)
+        os.remove(header)
+        if not ok then error(err, 0) end
+    end)
+
+    it("can cast a string to void pointer in foreign calls", function ()
+        local suffix = os.tmpname():match("[^/]+$"):gsub("%W", "_")
+        local header = "tmp_titan_ffi_voidptr_" .. suffix .. ".h"
+        local f = assert(io.open(header, "w"))
+        f:write("typedef void *ffi_vptr;\n")
+        f:close()
+
+        local modules = {
+            foo = [[
+                local c = foreign import "]] .. header .. [["
+                local stdio = foreign import "stdio.h"
+                function fun(): integer
+                    local h = "Hello, cast"
+                    local p = h as c.ffi_vptr
+                    local fd = stdio.fopen("tmp_test_hello.txt", "w")
+                    local n = stdio.fwrite(p, #h, 1, fd)
+                    local err = stdio.fclose(fd)
+                    return n as integer
+                end
+            ]]
+        }
+        local ok, err = pcall(function()
+            local gok, gerr = generate_modules(modules, "foo")
+            assert.truthy(gok, gerr)
+            local cok, cerr = call("foo", [[
+                os.remove('tmp_test_hello.txt')
+                assert(foo.fun() == 1)
+                local fd = io.open('tmp_test_hello.txt', 'r')
+                local data = fd:read('*a')
+                fd:close()
+                os.remove('tmp_test_hello.txt')
+                assert(data == 'Hello, cast')
+            ]])
+            assert.truthy(cok, cerr)
+        end)
+        os.remove(header)
+        if not ok then error(err, 0) end
     end)
 
     it("casts a scalar foreign typedef to value", function ()

@@ -107,7 +107,8 @@ local function check_vararg_elem(t, loc, errors)
         checker.typeerror(errors, loc,
             "a variadic parameter cannot have type nil")
         return types.Invalid()
-    elseif t._tag == "Type.Pointer" then
+    elseif t._tag == "Type.Pointer"
+           or types.resolve_c_typedef(t)._tag == "Type.CPointer" then
         checker.typeerror(errors, loc,
             "a variadic parameter cannot have a foreign pointer type")
         return types.Invalid()
@@ -163,6 +164,133 @@ local function check_dots_marker(node, st, errors)
     node._type = node._vararg_elem
 end
 
+local function is_foreign_type_declaration(ftype)
+    return ftype.type == "typedef" or
+           ftype.type == "struct" or
+           ftype.type == "union"
+end
+
+local function is_foreign_ordinary_identifier(name, ftype)
+    if ftype.type == "enum" then
+        return not name:match("^enum@")
+    end
+    return ftype.type == "typedef"
+        or not (ftype.type == "struct"
+                or ftype.type == "union"
+                or ftype.type == "enum")
+end
+
+local function c_resolve(t)
+    return types.resolve_c_typedef(t)
+end
+
+local function is_c_type_namespace(exp)
+    return exp._tag == "Ast.ExpVar"
+        and exp.var
+        and exp.var._ctype_namespace
+end
+
+local function c_owned_type(typ, has_count)
+    return types.COwned(typ, has_count and true or false)
+end
+
+local function c_function_pointer_type(typ)
+    typ = c_resolve(typ)
+    if typ and typ._tag == "Type.CPointer" then
+        local pointee = c_resolve(typ.pointee)
+        if pointee._tag == "Type.CFunction" then
+            return pointee
+        end
+    end
+end
+
+local function c_function_as_function_type(cfunc)
+    local ret = c_resolve(cfunc.ret)
+    local rettypes = ret._tag == "Type.CVoid" and {} or { cfunc.ret }
+    return types.Function(cfunc.params, rettypes, cfunc.vararg, false)
+end
+
+local function c_function_pointer_accepts_function(target, ftype)
+    local cfunc = c_function_pointer_type(target)
+    return cfunc and types.equals(c_function_as_function_type(cfunc), ftype)
+end
+
+local function c_pseudo_member(typ, name)
+    if name == "new" then
+        return {
+            _tag = "Type.CPseudoNew",
+            ctype = typ,
+            name = name,
+            type = types.Function({}, { c_owned_type(typ, false) }, false, false),
+        }
+    elseif name == "new_array" then
+        return {
+            _tag = "Type.CPseudoNew",
+            ctype = typ,
+            name = name,
+            array = true,
+            type = types.Function({ types.Integer() },
+                { c_owned_type(typ, true) }, false, false),
+        }
+    end
+end
+
+local function c_field_decl(typ, name)
+    typ = c_resolve(typ)
+    if typ._tag == "Type.CPointer" then
+        typ = c_resolve(typ.pointee)
+    elseif typ._tag == "Type.COwned" then
+        typ = c_resolve(typ.pointee)
+    end
+    if (typ._tag == "Type.CStruct" or typ._tag == "Type.CUnion")
+       and typ.fields and typ.fields[name] then
+        return typ.fields[name]
+    end
+end
+
+local function c_index_elem_type(typ)
+    typ = c_resolve(typ)
+    if typ._tag == "Type.CPointer" then
+        return c_resolve(typ.pointee), "C pointer indexing"
+    elseif typ._tag == "Type.CArray" then
+        if type(typ.len) ~= "number" then
+            return nil, nil,
+                "cannot index C array with unknown length in this FFI version"
+        end
+        return c_resolve(typ.elem), "C array indexing"
+    elseif typ._tag == "Type.COwned" and typ.count then
+        return c_resolve(typ.pointee), "owned C array indexing"
+    end
+end
+
+local function has_c_length(typ)
+    typ = c_resolve(typ)
+    return typ._tag == "Type.CArray"
+        and type(typ.len) == "number"
+        or (typ._tag == "Type.COwned" and typ.count)
+end
+
+local function c_allocation_error(typ)
+    local rtyp = c_resolve(typ)
+    if rtyp._tag == "Type.CVoid" then
+        return "cannot allocate C void type in this FFI version"
+    elseif rtyp._tag == "Type.CStruct" and not rtyp.complete then
+        return string.format(
+            "cannot allocate incomplete C struct type '%s' in this FFI version",
+            types.tostring(rtyp))
+    elseif rtyp._tag == "Type.CUnion" and not rtyp.complete then
+        return string.format(
+            "cannot allocate incomplete C union type '%s' in this FFI version",
+            types.tostring(rtyp))
+    elseif rtyp._tag == "Type.CStruct" and rtyp.has_fam then
+        return string.format(
+            "cannot allocate C struct type '%s' with a flexible array member in this FFI version",
+            types.tostring(rtyp))
+    elseif rtyp._tag == "Type.CArray" then
+        return "cannot allocate C array typedefs in this FFI version"
+    end
+end
+
 -- Converts an AST type declaration into a typechecker type
 --   node: AST node
 --   errors: list of compile-time errors
@@ -201,6 +329,14 @@ typefromnode = util.make_visitor({
         if mod and mod._type._tag == "Type.Module" then
             local fqtn = mod._type.name .. "." .. node.name
             return types.Nominal(fqtn)
+        elseif mod and mod._type._tag == "Type.CModule" then
+            local typ = mod._type.type_members and mod._type.type_members[node.name]
+            if typ then
+                return typ
+            end
+            return invalid(errors, node.loc,
+                "C type '%s' not found inside foreign module '%s'",
+                node.name, mod._type.name)
         end
         return invalid(errors, node.loc, "module '%s' referenced by type not found", node.module)
     end,
@@ -968,9 +1104,18 @@ checkvar = util.make_visitor({
         end
         node.exp = tryforce(node.exp)
         local ltype = node.exp._type
-        if ltype._tag == "Type.Module" or ltype._tag == "Type.ForeignModule" then
+        if ltype._tag == "Type.Module" or ltype._tag == "Type.CModule" then
             local mod = ltype
-            if not mod.members[node.name] then
+            if ltype._tag == "Type.CModule" and mod.type_members
+               and mod.type_members[node.name] then
+                node._decl = {
+                    _tag = "Type.CTypeNamespace",
+                    name = node.name,
+                    type = mod.type_members[node.name],
+                }
+                node._type = node._decl.type
+                node._ctype_namespace = true
+            elseif not mod.members[node.name] then
                 node._type = invalid(errors, node.loc,
                     "member '%s' not found inside module '%s'",
                     node.name, mod.name)
@@ -1006,9 +1151,29 @@ checkvar = util.make_visitor({
                     end
                 end
                 if not node._type then
+                node._type = invalid(errors, node.loc,
+                    "field '%s' not found in record '%s'",
+                    node.name, ltype.fqtn)
+                end
+            end
+        elseif types.is_c(ltype) then
+            if is_c_type_namespace(node.exp) then
+                node._decl = c_pseudo_member(ltype, node.name)
+                if node._decl then
+                    node._type = node._decl.type
+                else
                     node._type = invalid(errors, node.loc,
-                        "field '%s' not found in record '%s'",
-                        node.name, ltype.fqtn)
+                        "C type '%s' has no pseudo-member '%s'",
+                        types.tostring(ltype), node.name)
+                end
+            else
+                node._decl = c_field_decl(ltype, node.name)
+                if node._decl then
+                    node._type = node._decl.type
+                else
+                    node._type = invalid(errors, node.loc,
+                        "field '%s' not found in C type '%s'",
+                        node.name, types.tostring(ltype))
                 end
             end
         else
@@ -1022,6 +1187,7 @@ checkvar = util.make_visitor({
         checkexp(node.exp1, st, errors)
         node.exp1 = tryforce(node.exp1)
         local keystype, term
+        local celem, cterm, cerr = c_index_elem_type(node.exp1._type)
         if node.exp1._type._tag == "Type.Array" then
             node._type = optionize(node.exp1._type.elem)
             keystype = types.Integer()
@@ -1030,9 +1196,15 @@ checkvar = util.make_visitor({
             node._type = optionize(node.exp1._type.values)
             keystype = node.exp1._type.keys
             term = "map indexing"
+        elseif celem then
+            node._type, term = celem, cterm
+            keystype = types.Integer()
+        elseif cerr then
+            node._type = invalid(errors, node.exp1.loc, cerr)
+            return
         else
             node._type = invalid(errors, node.exp1.loc,
-                "expression in indexing is not an array or map but %s",
+                "expression in indexing is not an array, map, C pointer, C array, or owned C array but %s",
                 types.tostring(node.exp1._type))
             return
         end
@@ -1454,20 +1626,27 @@ checkexp = util.make_visitor({
         checkvar(node.var, st, errors, context)
         if node.var._decl then node.var._decl._used = true end
         local texp = node.var._type
-        if texp._tag == "Type.Module" then
+        if texp._tag == "Type.Module" or texp._tag == "Type.CModule" then
             node._type = invalid(errors, node.loc,
                 "trying to access module '%s' as a first-class value",
                 node.var.name)
         elseif texp._tag == "Type.Function" then
             -- First-class function value. Foreign (C FFI) functions cannot be
-            -- taken as values; every other function (Titan top-level function,
-            -- record static, imported module function, or a function-typed
-            -- local/param/field that already holds a value) is allowed.
+            -- taken as Titan closure values, but they can be converted to a
+            -- compatible C function pointer when the surrounding context asks
+            -- for one. Every other function (Titan top-level function, record
+            -- static, imported module function, or a function-typed local/param/
+            -- field that already holds a value) is allowed as before.
             local var = node.var
             if var._tag == "Ast.VarDot" and var.exp._type
-               and var.exp._type._tag == "Type.ForeignModule" then
-                node._type = invalid(errors, node.loc,
-                    "a foreign (C) function cannot be used as a first-class value")
+               and var.exp._type._tag == "Type.CModule" then
+                if c_function_pointer_accepts_function(context, texp) then
+                    node._type = context
+                    node._foreign_function_pointer = var.name
+                else
+                    node._type = invalid(errors, node.loc,
+                        "a foreign (C) function cannot be used as a first-class value")
+                end
             else
                 node._type = texp
                 -- Mark a referenced *local* function declaration so the coder
@@ -1506,9 +1685,10 @@ checkexp = util.make_visitor({
         if op == "#" then
             node.exp = tryforce(node.exp)
             texp = node.exp._type
-            if texp._tag ~= "Type.Array" and texp._tag ~= "Type.String" then
+            if texp._tag ~= "Type.Array" and texp._tag ~= "Type.String"
+               and not has_c_length(texp) then
                 checker.typeerror(errors, loc,
-                    "trying to take the length of a %s instead of an array or string",
+                    "trying to take the length of a %s instead of an array, string, C array, or counted owned C array",
                     types.tostring(texp))
             end
             node._type = types.Integer()
@@ -1768,6 +1948,20 @@ checkexp = util.make_visitor({
                 return
             end
             local fname = expname(node.exp)
+            local cfunc = c_function_pointer_type(ftype)
+            if cfunc then
+                local cftype = c_function_as_function_type(cfunc)
+                node._c_pointer_call = cfunc
+                checkargs(cftype, node.args.args, node.loc,
+                    "function pointer '" .. fname .. "'", st, errors)
+                node._types = cftype.rettypes
+                node._type = cftype.rettypes[1] or types.Void()
+                if node._type._tag == "Type.Void" and not node._voidok then
+                    node._type = invalid(errors, node.loc,
+                        "a function returning no values cannot be used as a value")
+                end
+                return
+            end
             -- Auto-unwrap an option-of-function callee (e.g. an array element
             -- `arr[i]`, which has type `T?`): cast to the underlying function
             -- type. The cast codegen inserts a runtime nil-check, so calling
@@ -1791,6 +1985,18 @@ checkexp = util.make_visitor({
                     checkexp(arg, st, errors)
                 end
                 return
+            end
+            if node.exp._tag == "Ast.ExpVar"
+               and node.exp.var._decl
+               and node.exp.var._decl._tag == "Type.CPseudoNew" then
+                local alloc_err = c_allocation_error(node.exp.var._decl.ctype)
+                if alloc_err then
+                    node._type = invalid(errors, node.loc, alloc_err)
+                    for _, arg in ipairs(node.args.args) do
+                        checkexp(arg, st, errors)
+                    end
+                    return
+                end
             end
             checkargs(ftype, node.args.args, node.loc,
                 "function '" .. fname .. "'", st, errors)
@@ -1866,14 +2072,16 @@ checkexp = util.make_visitor({
         local source = node.exp._type
         local target = node.target
         local ok
-        if source._tag == "Type.Option" and types.equals(source.base, target) then
+        if types.equals(source, target) then
+            ok = true
+        elseif source._tag == "Type.Option" and types.equals(source.base, target) then
             -- explicit unwrap of an option to its base type; the cast codegen
             -- emits a runtime nil-check that raises if the value is nil
             ok = true
         else
-            ok = (types.explicitly_coerceable(source, target) or
-                  types.coerceable(source, target))
-                 and types.compatible(source, target)
+            ok = types.explicitly_coerceable(source, target) or
+                 (types.coerceable(source, target) and
+                  types.compatible(source, target))
         end
         if not ok then
             checker.typeerror(errors, node.loc, "cannot cast '%s' to '%s'",
@@ -2007,7 +2215,7 @@ checkexp = util.make_visitor({
             node.exp = cast
             otype = otype.base
         end
-        if otype._tag == "Type.ForeignModule" then
+        if otype._tag == "Type.CModule" then
             node._type = invalid(errors, node.loc,
                 "a foreign (C) method cannot be used as a first-class value")
         elseif otype._tag == "Type.Nominal" and
@@ -2325,26 +2533,51 @@ local toplevel_visitor = util.make_visitor({
 
     ["Ast.TopLevelForeignImport"] = function(node, st, errors)
         local name = node.headername
-        local ftypes, defines = cdriver.process_file(name)
+        local ftypes, err, include = cdriver.process_file(name, {
+            source_dir = st.source_dir
+        })
         if ftypes then
+            node._include = include
             local members = {}
+            local type_members = {}
             for _, item in ipairs(ftypes) do
                 local fname = item.name
                 local ftype = item.type
                 local decl = foreigntypes.convert(st, ftype)
                 if decl then
-                    members[fname] = types.ModuleMember(name, fname, decl)
-                    st:add_foreign_type(fname, decl)
+                    if is_foreign_ordinary_identifier(fname, ftype) then
+                        local previous = st:find_foreign_name(fname)
+                        if previous and previous.header ~= name
+                           and not types.equals(previous.type, decl) then
+                            checker.typeerror(errors, node.loc,
+                                "conflicting C declaration for '%s' in foreign import '%s'; "
+                                .. "previous declaration from '%s' has type %s, new declaration has type %s",
+                                fname, name, previous.header,
+                                types.tostring(previous.type), types.tostring(decl))
+                        elseif not previous then
+                            st:add_foreign_name(fname, {
+                                header = name,
+                                type = decl,
+                            })
+                        end
+                    end
+                    if is_foreign_type_declaration(ftype) then
+                        type_members[fname] = decl
+                        st:add_foreign_type(fname, decl)
+                    else
+                        members[fname] = types.ModuleMember(name, fname, decl)
+                    end
                 end
                 -- else: the member uses an unsupported C type; skip it so the
                 -- rest of the header still imports. Referencing a skipped
                 -- member is then a clean "not a member" error, never a crash.
             end
-            local modtype = types.ForeignModule(name, members)
+            local modtype = types.CModule(name, members)
+            modtype.type_members = type_members
             node._type = modtype
         else
             node._type = types.Nil()
-            checker.typeerror(errors, node.loc, defines)
+            checker.typeerror(errors, node.loc, err)
         end
         st:add_symbol(node.localname, node)
     end,
@@ -2630,6 +2863,36 @@ local function makemoduletype(modname, modast)
     return types.Module(modname, members)
 end
 
+local function reject_exported_c_ffi_type(modname, errors, loc, typ)
+    local ctyp = types.first_c_ffi_type(typ)
+    if ctyp then
+        checker.typeerror(errors, loc,
+            "cannot export C FFI type '%s' from Titan module '%s'; "
+            .. "C FFI types are local to modules that import their headers",
+            types.tostring(ctyp), modname)
+    end
+end
+
+local function reject_exported_c_ffi_types(modname, modast, errors)
+    for _, node in ipairs(modast) do
+        if not node._ignore then
+            local tag = node._tag
+            if tag == "Ast.TopLevelVar" and not node.islocal then
+                reject_exported_c_ffi_type(modname, errors, node.loc, node._type)
+            elseif tag == "Ast.TopLevelFunc" and not node.islocal then
+                reject_exported_c_ffi_type(modname, errors, node.loc, node._type)
+            elseif tag == "Ast.TopLevelRecord" then
+                for i, field in ipairs(node._type.fields) do
+                    local loc = node.fields[i] and node.fields[i].loc or node.loc
+                    reject_exported_c_ffi_type(modname, errors, loc, field.type)
+                end
+            elseif tag == "Ast.TopLevelMethod" or tag == "Ast.TopLevelStatic" then
+                reject_exported_c_ffi_type(modname, errors, node.loc, node._type)
+            end
+        end
+    end
+end
+
 
 -- Entry point for the typechecker
 --   ast: AST for the whole module
@@ -2652,9 +2915,16 @@ function checker.check(modname, ast, subject, filename, loader)
     finally_loop_floor = 0
     loop_depth = 0
     local st = symtab.new(modname)
+    if filename then
+        st.source_dir = filename:match("^(.*)/[^/]*$")
+        if not st.source_dir or st.source_dir == "" then
+            st.source_dir = "."
+        end
+    end
     local errors = {subject = subject, filename = filename}
     checktoplevel(ast, st, errors, loader)
     checkbodies(ast, st, errors)
+    reject_exported_c_ffi_types(modname, ast, errors)
     ast._type = makemoduletype(modname, ast)
     return ast._type, errors
 end

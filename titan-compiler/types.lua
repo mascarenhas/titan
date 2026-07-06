@@ -17,11 +17,22 @@ local types = typedecl("Type", {
         Nominal     = {"fqtn"},
         Field       = {"fqtn", "name", "type", "index"},
         Method      = {"fqtn", "name", "params", "rettypes", "varargtype"},
-        ForeignModule = {"name", "members"},
         ModuleMember = {"modname", "name", "type"},
         ModuleVariable = {"modname", "name", "type"},
         StaticMethod = {"fqtn", "name", "params", "rettypes", "varargtype"},
-        Option       = {"base"}
+        Option       = {"base"},
+        CVoid        = {},
+        CInteger     = {"spelling", "signed", "rank", "bits"},
+        CFloat       = {"spelling"},
+        CPointer     = {"pointee", "quals"},
+        CArray       = {"elem", "len"},
+        CFunction    = {"params", "ret", "vararg", "abi"},
+        CStruct      = {"cname", "tagname", "typedef", "fields", "complete", "has_fam"},
+        CUnion       = {"cname", "tagname", "typedef", "fields", "complete"},
+        CField       = {"owner", "name", "type", "bitfield", "flexible_array"},
+        CTypedef     = {"name", "target"},
+        COwned       = {"pointee", "count"},
+        CModule      = {"name", "members"}
     }
 })
 
@@ -29,6 +40,136 @@ local types = typedecl("Type", {
 -- Keys are canonical FQTNs (fully qualified type names)
 -- Values are types
 types.registry = {}
+
+local function is_c_tag(tag)
+    return type(tag) == "string" and tag:match("^Type%.C") ~= nil
+        and tag ~= "Type.CModule"
+end
+
+local legacy_c_tags = {
+    ["Type.Pointer"] = true,
+    ["Type.Typedef"] = true,
+    Struct = true,
+    Union = true,
+}
+
+function types.resolve_c_typedef(t)
+    local seen = {}
+    while t and t._tag == "Type.CTypedef" do
+        if seen[t] then
+            return t
+        end
+        seen[t] = true
+        t = t.target
+    end
+    return t
+end
+
+local function find_c_type(t, include_legacy)
+    local function visit_type(typ, seen)
+        if type(typ) ~= "table" then
+            return nil
+        end
+        if seen[typ] then
+            return nil
+        end
+        seen[typ] = true
+
+        local tag = typ._tag
+        if is_c_tag(tag) or (include_legacy and legacy_c_tags[tag]) then
+            return typ
+        elseif tag == "Type.Array" then
+            return visit_type(typ.elem, seen)
+        elseif tag == "Type.Map" then
+            return visit_type(typ.keys, seen) or
+                   visit_type(typ.values, seen)
+        elseif tag == "Type.Function" then
+            for _, param in ipairs(typ.params) do
+                local ctyp = visit_type(param, seen)
+                if ctyp then return ctyp end
+            end
+            for _, ret in ipairs(typ.rettypes) do
+                local ctyp = visit_type(ret, seen)
+                if ctyp then return ctyp end
+            end
+            return visit_type(typ.varargtype, seen)
+        elseif tag == "Type.Option" then
+            return visit_type(typ.base, seen)
+        elseif tag == "Type.Field" then
+            return visit_type(typ.type, seen)
+        elseif tag == "Type.Method" or tag == "Type.StaticMethod" then
+            for _, param in ipairs(typ.params) do
+                local ctyp = visit_type(param, seen)
+                if ctyp then return ctyp end
+            end
+            for _, ret in ipairs(typ.rettypes) do
+                local ctyp = visit_type(ret, seen)
+                if ctyp then return ctyp end
+            end
+            return visit_type(typ.varargtype, seen)
+        elseif tag == "Type.Record" then
+            for _, field in ipairs(typ.fields) do
+                local ctyp = visit_type(field, seen)
+                if ctyp then return ctyp end
+            end
+            for _, func in pairs(typ.functions) do
+                local ctyp = visit_type(func, seen)
+                if ctyp then return ctyp end
+            end
+            for _, method in pairs(typ.methods) do
+                local ctyp = visit_type(method, seen)
+                if ctyp then return ctyp end
+            end
+        elseif tag == "Type.ModuleMember" or tag == "Type.ModuleVariable" then
+            return visit_type(typ.type, seen)
+        elseif tag == "Type.Module" then
+            for _, member in ipairs(typ.members) do
+                local ctyp = visit_type(member, seen)
+                if ctyp then return ctyp end
+            end
+        elseif tag == "Type.CPointer" then
+            return visit_type(typ.pointee, seen)
+        elseif tag == "Type.CArray" then
+            return visit_type(typ.elem, seen)
+        elseif tag == "Type.CFunction" then
+            for _, param in ipairs(typ.params) do
+                local ctyp = visit_type(param, seen)
+                if ctyp then return ctyp end
+            end
+            return visit_type(typ.ret, seen)
+        elseif tag == "Type.CStruct" or tag == "Type.CUnion" then
+            for _, field in ipairs(typ.fields or {}) do
+                local ctyp = visit_type(field, seen)
+                if ctyp then return ctyp end
+            end
+        elseif tag == "Type.CField" then
+            return visit_type(typ.type, seen)
+        elseif tag == "Type.CTypedef" then
+            return visit_type(typ.target, seen)
+        elseif tag == "Type.COwned" then
+            return visit_type(typ.pointee, seen)
+        end
+        return nil
+    end
+
+    return visit_type(t, {})
+end
+
+function types.first_c_type(t)
+    return find_c_type(t, false)
+end
+
+function types.first_c_ffi_type(t)
+    return find_c_type(t, true)
+end
+
+function types.is_c(t)
+    return types.first_c_type(t) ~= nil
+end
+
+function types.contains_c_ffi_type(t)
+    return types.first_c_ffi_type(t) ~= nil
+end
 
 function types.is_basic(t)
     local tag = t._tag
@@ -50,6 +191,7 @@ function types.is_gc(t)
            tag == "Type.Record" or
            tag == "Type.Interface" or
            tag == "Type.Nominal" or
+           tag == "Type.COwned" or
            (tag == "Type.Option" and types.is_gc(t.base))
 end
 
@@ -89,11 +231,88 @@ local function is_void_pointer(typ)
     return typ._tag == "Type.Pointer" and typ.type._tag == "Type.Nil"
 end
 
+local function resolved_c(t)
+    return types.resolve_c_typedef(t)
+end
+
+local function is_c_integer(t)
+    t = resolved_c(t)
+    return t and t._tag == "Type.CInteger"
+end
+
+local function is_c_float(t)
+    t = resolved_c(t)
+    return t and t._tag == "Type.CFloat"
+end
+
+local function is_c_void_pointer(t)
+    t = resolved_c(t)
+    return t and t._tag == "Type.CPointer"
+        and resolved_c(t.pointee)._tag == "Type.CVoid"
+end
+
+local function is_c_pointer(t)
+    t = resolved_c(t)
+    return t and t._tag == "Type.CPointer"
+end
+
+local function is_c_function_pointer(t)
+    t = resolved_c(t)
+    return t and t._tag == "Type.CPointer"
+        and resolved_c(t.pointee)._tag == "Type.CFunction"
+end
+
+local function is_c_object_pointer(t)
+    return is_c_pointer(t) and not is_c_function_pointer(t)
+end
+
+local function c_assignable_equal(t1, t2)
+    return types.equals(resolved_c(t1), resolved_c(t2))
+end
+
+local function c_pointer_compatible(source, target)
+    source = resolved_c(source)
+    target = resolved_c(target)
+    if not (target and target._tag == "Type.CPointer") then
+        return false
+    elseif source._tag == "Type.CArray" then
+        return c_assignable_equal(source.elem, target.pointee)
+            or resolved_c(target.pointee)._tag == "Type.CVoid"
+    elseif source._tag == "Type.COwned" then
+        return c_assignable_equal(source.pointee, target.pointee)
+            or resolved_c(target.pointee)._tag == "Type.CVoid"
+    end
+    return false
+end
+
+local function is_c_char_pointer(t)
+    t = resolved_c(t)
+    if not (t and t._tag == "Type.CPointer") then
+        return false
+    end
+    local pointee = resolved_c(t.pointee)
+    return pointee._tag == "Type.CInteger"
+        and (pointee.spelling == "char"
+             or pointee.spelling == "signed char"
+             or pointee.spelling == "unsigned char")
+end
+
+local function c_value_compatible(t)
+    t = resolved_c(t)
+    return t and (t._tag == "Type.CInteger"
+        or t._tag == "Type.CFloat"
+        or (t._tag == "Type.CPointer"
+            and resolved_c(t.pointee)._tag ~= "Type.CFunction")
+        or t._tag == "Type.COwned")
+end
+
 -- Returns true if type always holds truthy values
 function types.is_truthy(typ)
+    typ = resolved_c(typ)
     local tag = typ._tag
     return tag ~= "Type.Nil" and tag ~= "Type.Value" and tag ~= "Type.Option"
         and tag ~= "Type.Pointer" and tag ~= "Type.Boolean"
+        and tag ~= "Type.CPointer"
 end
 
 -- Returns true if type always holds falsy values
@@ -102,10 +321,44 @@ function types.is_falsy(typ)
 end
 
 function types.explicitly_coerceable(source, target)
-    return is_void_pointer(source) and target._tag == "Type.String"
+    return (is_void_pointer(source) and target._tag == "Type.String")
+        or (is_c_void_pointer(source) and target._tag == "Type.String")
+        or (is_c_char_pointer(source) and target._tag == "Type.String")
+        or (is_c_object_pointer(source) and is_c_void_pointer(target))
 end
 
 function types.coerceable(source, target)
+    if types.equals(source, target) then
+        return false
+    elseif is_c_integer(source) and target._tag == "Type.Integer" then
+        return true
+    elseif source._tag == "Type.Integer" and is_c_integer(target) then
+        return true
+    elseif is_c_float(source) and target._tag == "Type.Float" then
+        return true
+    elseif source._tag == "Type.Float" and is_c_float(target) then
+        return true
+    elseif source._tag == "Type.Integer" and is_c_float(target) then
+        return true
+    elseif is_c_pointer(source) and target._tag == "Type.Boolean" then
+        return true
+    elseif source._tag == "Type.Nil" and is_c_pointer(target) then
+        return true
+    elseif c_pointer_compatible(source, target) then
+        return true
+    elseif is_c_object_pointer(source) and is_c_void_pointer(target) then
+        return true
+    elseif source._tag == "Type.String" and
+           (is_c_char_pointer(target) or is_c_void_pointer(target)) then
+        return true
+    elseif c_value_compatible(source) and target._tag == "Type.Value" then
+        return true
+    elseif source._tag == "Type.Value" and c_value_compatible(target) then
+        return true
+    elseif types.is_c(source) or types.is_c(target) then
+        return false
+    end
+
     return (target._tag == "Type.Pointer" and
             can_coerce_pointer(source, target)) or
 
@@ -154,10 +407,45 @@ end
 function types.compatible(t1, t2)
     if types.equals(t1, t2) then
         return true
+    elseif t1._tag == "Type.CTypedef" then
+        return types.compatible(types.resolve_c_typedef(t1), t2)
+    elseif t2._tag == "Type.CTypedef" then
+        return types.compatible(t1, types.resolve_c_typedef(t2))
+    elseif is_c_integer(t1) and t2._tag == "Type.Integer" then
+        return true
+    elseif t1._tag == "Type.Integer" and is_c_integer(t2) then
+        return true
+    elseif is_c_float(t1) and t2._tag == "Type.Float" then
+        return true
+    elseif t1._tag == "Type.Float" and is_c_float(t2) then
+        return true
+    elseif t1._tag == "Type.Integer" and is_c_float(t2) then
+        return true
+    elseif is_c_pointer(t1) and t2._tag == "Type.Boolean" then
+        return true
+    elseif t1._tag == "Type.Nil" and is_c_pointer(t2) then
+        return true
+    elseif c_pointer_compatible(t1, t2) then
+        return true
+    elseif is_c_void_pointer(t1) and is_c_object_pointer(t2) then
+        return true
+    elseif t1._tag == "Type.String" and
+           (is_c_char_pointer(t2) or is_c_void_pointer(t2)) then
+        return true
+    elseif c_value_compatible(t1) and t2._tag == "Type.Value" then
+        return true
+    elseif t1._tag == "Type.Value" and c_value_compatible(t2) then
+        return true
     elseif t1._tag == "Type.Typedef" then
         return types.compatible(t1._type, t2)
     elseif t2._tag == "Type.Typedef" then
         return types.compatible(t1, t2._type)
+    elseif t1._tag == "Type.CPointer" and t2._tag == "Type.Nil" then
+        return true
+    elseif t1._tag == "Type.Nil" and t2._tag == "Type.CPointer" then
+        return true
+    elseif types.is_c(t1) or types.is_c(t2) then
+        return false
     elseif t1._tag == "Type.Pointer" and t2._tag == "Type.Nil" then
         return true -- nullable pointer
     elseif t1._tag == "Type.Nil" and t2._tag == "Type.Pointer" then
@@ -214,24 +502,121 @@ function types.compatible(t1, t2)
     end
 end
 
-function types.equals(t1, t2)
+local type_equals
+
+local function same_value(v1, v2, seen)
+    if v1 == v2 then
+        return true
+    elseif type(v1) ~= type(v2) then
+        return false
+    elseif type(v1) ~= "table" then
+        return false
+    elseif v1._tag or v2._tag then
+        return type_equals(v1, v2, seen)
+    else
+        for k, v in pairs(v1) do
+            if not same_value(v, v2[k], seen) then
+                return false
+            end
+        end
+        for k in pairs(v2) do
+            if v1[k] == nil then
+                return false
+            end
+        end
+        return true
+    end
+end
+
+local function same_list(l1, l2, seen)
+    if #l1 ~= #l2 then
+        return false
+    end
+    for i = 1, #l1 do
+        if not type_equals(l1[i], l2[i], seen) then
+            return false
+        end
+    end
+    return true
+end
+
+type_equals = function(t1, t2, seen)
+    if t1 == t2 then
+        return true
+    elseif type(t1) ~= "table" or type(t2) ~= "table" then
+        return false
+    end
+
     local tag1, tag2 = t1._tag, t2._tag
-    if tag1 == "Type.Array" and tag2 == "Type.Array" then
-        return types.equals(t1.elem, t2.elem)
-    elseif tag1 == "Type.Map" and tag2 == "Type.Map" then
-        return types.equals(t1.keys, t2.keys) and
-               types.equals(t1.values, t2.values)
-    elseif tag1 == "Type.Pointer" and tag2 == "Type.Pointer" then
-        return types.equals(t1.type, t2.type)
-    elseif tag1 == "Type.Typedef" and tag2 == "Type.Typedef" then
+    if tag1 ~= tag2 then
+        return false
+    end
+
+    seen = seen or {}
+    local pairkey = tostring(t1) .. "\0" .. tostring(t2)
+    if seen[pairkey] then
+        return true
+    end
+    seen[pairkey] = true
+
+    if tag1 == "Type.Array" then
+        return type_equals(t1.elem, t2.elem, seen)
+    elseif tag1 == "Type.Map" then
+        return type_equals(t1.keys, t2.keys, seen) and
+               type_equals(t1.values, t2.values, seen)
+    elseif tag1 == "Type.Pointer" then
+        return type_equals(t1.type, t2.type, seen)
+    elseif tag1 == "Type.Typedef" then
         return t1.name == t2.name
-    elseif tag1 == "Type.Function" and tag2 == "Type.Function" then
+    elseif tag1 == "Type.CInteger" then
+        return t1.spelling == t2.spelling and
+               t1.signed == t2.signed and
+               t1.rank == t2.rank and
+               t1.bits == t2.bits
+    elseif tag1 == "Type.CFloat" then
+        return t1.spelling == t2.spelling
+    elseif tag1 == "Type.CPointer" then
+        return type_equals(t1.pointee, t2.pointee, seen) and
+               same_value(t1.quals, t2.quals, seen)
+    elseif tag1 == "Type.CArray" then
+        return t1.len == t2.len and type_equals(t1.elem, t2.elem, seen)
+    elseif tag1 == "Type.CFunction" then
+        return t1.vararg == t2.vararg and
+               t1.abi == t2.abi and
+               same_list(t1.params, t2.params, seen) and
+               type_equals(t1.ret, t2.ret, seen)
+    elseif tag1 == "Type.CStruct" then
+        return t1.cname == t2.cname and
+               t1.tagname == t2.tagname and
+               t1.typedef == t2.typedef and
+               t1.complete == t2.complete and
+               t1.has_fam == t2.has_fam and
+               same_value(t1.fields, t2.fields, seen)
+    elseif tag1 == "Type.CUnion" then
+        return t1.cname == t2.cname and
+               t1.tagname == t2.tagname and
+               t1.typedef == t2.typedef and
+               t1.complete == t2.complete and
+               same_value(t1.fields, t2.fields, seen)
+    elseif tag1 == "Type.CField" then
+        return t1.name == t2.name and
+               t1.bitfield == t2.bitfield and
+               t1.flexible_array == t2.flexible_array and
+               type_equals(t1.owner, t2.owner, seen) and
+               type_equals(t1.type, t2.type, seen)
+    elseif tag1 == "Type.CTypedef" then
+        return t1.name == t2.name and type_equals(t1.target, t2.target, seen)
+    elseif tag1 == "Type.COwned" then
+        return t1.count == t2.count and type_equals(t1.pointee, t2.pointee, seen)
+    elseif tag1 == "Type.CModule" then
+        return t1.name == t2.name and same_value(t1.members, t2.members, seen)
+    elseif tag1 == "Type.Function" then
         if #t1.params ~= #t2.params then
             return false
         end
 
         for i = 1, #t1.params do
-            if not types.equals(t1.params[i], t2.params[i]) then
+            if not type_equals(t1.params[i], t2.params[i], seen) then
                 return false
             end
         end
@@ -241,7 +626,7 @@ function types.equals(t1, t2)
         end
 
         for i = 1, #t1.rettypes do
-            if not types.equals(t1.rettypes[i], t2.rettypes[i]) then
+            if not type_equals(t1.rettypes[i], t2.rettypes[i], seen) then
                 return false
             end
         end
@@ -254,20 +639,39 @@ function types.equals(t1, t2)
         if (v1 and true) ~= (v2 and true) then
             return false
         end
-        if v1 and v2 and not types.equals(v1, v2) then
+        if v1 and v2 and not type_equals(v1, v2, seen) then
             return false
         end
 
         return true
-    elseif tag1 == "Type.Nominal" and tag2 == "Type.Nominal" then
+    elseif tag1 == "Type.Nominal" then
         return t1.fqtn == t2.fqtn
-    elseif tag1 == "Type.Option" and tag2 == "Type.Option" then
-        return types.equals(t1.base, t2.base)
+    elseif tag1 == "Type.Option" then
+        return type_equals(t1.base, t2.base, seen)
     elseif tag1 == tag2 then
         return true
     else
         return false
     end
+end
+
+function types.equals(t1, t2)
+    return type_equals(t1, t2)
+end
+
+local function tostring_list(items)
+    local out = {}
+    for _, item in ipairs(items) do
+        table.insert(out, types.tostring(item))
+    end
+    return table.concat(out, ", ")
+end
+
+local function c_display_name(name)
+    if type(name) == "table" then
+        return table.concat(name, ".")
+    end
+    return name
 end
 
 function types.tostring(t)
@@ -352,6 +756,44 @@ function types.tostring(t)
         return t.fqtn
     elseif tag == "Type.Option" then
         return types.tostring(t.base) .. "?"
+    elseif tag == "Type.CVoid" then
+        return "void"
+    elseif tag == "Type.CInteger" then
+        return t.spelling
+    elseif tag == "Type.CFloat" then
+        return t.spelling
+    elseif tag == "Type.CPointer" then
+        local quals = t.quals and #t.quals > 0 and " " .. table.concat(t.quals, " ") or ""
+        return types.tostring(t.pointee) .. " *" .. quals
+    elseif tag == "Type.CArray" then
+        local len = t.len and tostring(t.len) or ""
+        return types.tostring(t.elem) .. "[" .. len .. "]"
+    elseif tag == "Type.CFunction" then
+        local params = {}
+        local rendered_params = tostring_list(t.params)
+        if rendered_params ~= "" then
+            table.insert(params, rendered_params)
+        end
+        if t.vararg then
+            table.insert(params, "...")
+        end
+        return types.tostring(t.ret) .. " (" .. table.concat(params, ", ") .. ")"
+    elseif tag == "Type.CStruct" then
+        return "struct " .. (c_display_name(t.tagname or t.cname or t.typedef) or "<anonymous>")
+    elseif tag == "Type.CUnion" then
+        return "union " .. (c_display_name(t.tagname or t.cname or t.typedef) or "<anonymous>")
+    elseif tag == "Type.CField" then
+        return t.name .. ": " .. types.tostring(t.type)
+    elseif tag == "Type.CTypedef" then
+        return t.name
+    elseif tag == "Type.COwned" then
+        return "owned " .. types.tostring(t.pointee)
+    elseif tag == "Type.CModule" then
+        return "C module " .. t.name
+    elseif tag == "Struct" then
+        return "struct " .. (t.name or "<anonymous>")
+    elseif tag == "Union" then
+        return "union " .. (t.name or "<anonymous>")
     else
         error("impossible: " .. tostring(tag))
     end
@@ -359,6 +801,11 @@ end
 
 function types.serialize(t)
     local tag = t._tag
+    local ctyp = types.first_c_ffi_type(t)
+    if ctyp then
+        error("cannot serialize C FFI type " .. types.tostring(ctyp))
+    end
+
     if tag == "Type.Array" then
         return "Array(" ..types.serialize(t.elem) .. ")"
     elseif tag == "Type.Map" then

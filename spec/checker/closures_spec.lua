@@ -425,7 +425,7 @@ describe("bound method references (obj:m)", function()
     end)
 
     it("rejects a foreign (C) method reference", function()
-        assert_type_error("a foreign %(C%) method cannot be used as a first", [[
+        assert_type_error("trying to access module 'm' as a first%-class value", [[
             local m = foreign import "math.h"
             function use()
                 local f = m:fabs
