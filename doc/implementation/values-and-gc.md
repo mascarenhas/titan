@@ -114,7 +114,7 @@ end
 ```
 
 the synthesized `Point.new` (the parser desugars every record into a
-declaration plus a `new` static method) generates, in `coderecord`
+declaration plus a `new` record function) generates, in `coderecord`
 (`coder.lua`), a single allocation:
 
 ```c
@@ -138,6 +138,10 @@ The layout:
   `setslot` into `&(_recobj->uv[i].uv)` plus a **back** barrier when the
   field type is GC-able (a userdata owner uses `luaC_barrierback`, see
   [write barriers](#5-write-barriers-back-for-userdata-and-tables-forward-for-closures)).
+  Local fields use the same slots as public fields. A serialized `.so`
+  interface may omit those local `Type.Field` entries, so `Type.Record.nfields`
+  carries the full allocation count and each public `Type.Field.index` keeps
+  the original slot number.
 * The udata has **no** raw payload (`luaS_newudata(L, 0, N)`): a record's
   *type identity* is its `metatable` field (next section), set directly
   from the module user value caching this record's metatable.

@@ -11,8 +11,8 @@ local driver = {}
 
 driver.imported = {}
 
-driver.TITAN_VER = "0.10"
-driver.TITAN_VER_SUFFIX = "_0_10"
+driver.TITAN_VER = "0.11"
+driver.TITAN_VER_SUFFIX = "_0_11"
 driver.TITAN_BIN_PATH = os.getenv("TITAN_PATH" .. driver.TITAN_VER_SUFFIX)
     or os.getenv("TITAN_PATH")
     or ".;/usr/local/lib/titan/" .. driver.TITAN_VER

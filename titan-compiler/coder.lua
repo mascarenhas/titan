@@ -201,7 +201,7 @@ end
 -- shows the qualified name instead of the mangled symbol. Forms:
 --   top-level func  -> "<module>.<func>"
 --   method          -> "<module>.<record>:<method>"
---   record static   -> "<module>.<record>.<static>"
+--   record function -> "<module>.<record>.<function>"
 --   anonymous/lambda-> "anonymous function at <file>.titan:<linedefined>"
 local function register_trace_name(tlcontext, symbol, qualname)
     table.insert(tlcontext.names, { symbol, qualname })
@@ -2409,7 +2409,7 @@ local function codeforeignvar(_, node)
 end
 
 -- Is the callee of this ExpCall a statically-known function symbol (a top-level
--- function, a record static, an imported module function, or a foreign call)?
+-- function, a record function, an imported module function, or a foreign call)?
 -- If so, codecall emits a direct native call. Otherwise the callee is a
 -- first-class function *value* and codevaluecall handles it.
 local function is_static_callee(node)
@@ -2970,7 +2970,7 @@ local function codecall(ctx, node)
         local cstat, cexp = materialize(ctx, node.exp)
         table.insert(castats, cstat)
         table.insert(caexps, modarg)
-        table.insert(caexps, "NULL")  -- _fn: a static method call has no closure
+        table.insert(caexps, "NULL")  -- _fn: a record method call has no closure
         table.insert(caexps, cexp)
     end
     -- The callee's static type, to detect a variadic callee and its fixed arity.
@@ -4165,7 +4165,7 @@ local function codevar(ctx, node)
             }))
         elseif node._decl._tag == "Type.StaticMethod"
                and ctx.tlcontext.static_slots[node._decl.fqtn .. "." .. node._decl.name] then
-            -- Reference to a record static (e.g. `Rec.new`) as a value: read its
+            -- Reference to a record function (e.g. `Rec.new`) as a value: read its
             -- canonical closure from the shadow slot allocated for it.
             return "", getslot(node._type, nil, render("&_mod->uv[$SLOT].uv", {
                 SLOT = c_integer_literal(
@@ -4514,7 +4514,7 @@ local function coderecord(ctx, node, target)
         CTMP = ctmp,
         TMPNAME = tmpname,
         TMPSLOT = tmpslot,
-        NUSERVALUES = #record.fields,
+        NUSERVALUES = record.nfields or #record.fields,
         META = c_integer_literal(type2metatable(ctx, node._type))
     })
     table.insert(stats, cinit)
@@ -6227,8 +6227,9 @@ end
 -- Emit the two bound-method trampolines for a TopLevelMethod, delegating to the
 -- method's own native/Lua entries. They turn `obj:m` into a first-class function
 -- value of the self-removed type `(params) -> rettypes`, with `self` captured in
--- the closure's `upvalue[3]`. Emitted for EVERY method (and exported) so a bind
--- site in a module that only has this module's `.so` can still reach them.
+-- the closure's `upvalue[3]`. Public methods export these trampolines so a bind
+-- site in a module that only has this module's `.so` can still reach them; local
+-- methods keep them file-local.
 -- Produces node._boundsig / node._boundbody.
 local function codemethodtrampoline(tlcontext, node)
     local mtype = node._type
@@ -6284,19 +6285,21 @@ local function codemethodtrampoline(tlcontext, node)
 
     -- native trampoline signature == function_sig of the self-removed type, but
     -- with named parameters so the body can forward them.
-    local nativesig = render("$RETTYPE $NAME($PARAMS)", {
+    local storage = node.islocal and "static " or ""
+    local nativesig = render("$STORAGE$RETTYPE $NAME($PARAMS)", {
+        STORAGE = storage,
         RETTYPE = crettype,
         NAME = nativename,
         PARAMS = table.concat(cparams, ", "),
     })
-    -- Both trampolines are exported (non-static): a bind site in a module that
-    -- only has this module's `.so` reaches the native one for the fast path AND
-    -- the Lua one (the closure's lua_CFunction) by dlsym.
+    -- Public bound trampolines are exported (non-static): a bind site in a
+    -- module that only has this module's `.so` reaches the native one for the
+    -- fast path AND the Lua one (the closure's lua_CFunction) by dlsym.
     node._boundbody = render([[
     $SIG {
         $BODYCALL
     }
-    int $LUANAME(lua_State *L) {
+    $STORAGE int $LUANAME(lua_State *L) {
         /* insert the captured receiver (self) as the first stack argument, then
            delegate to the method's Lua entry (which reuses all the boundary
            checks/coercions). upvalue[3] holds the record udata directly (the
@@ -6312,14 +6315,16 @@ local function codemethodtrampoline(tlcontext, node)
         return $MLUA(L);
     }]], {
         SIG = nativesig,
+        STORAGE = storage,
         BODYCALL = bodycall,
         LUANAME = luaname,
         MLUA = mlua,
     })
     node._boundsig = render([[
-        $SIG;
-        int $LUANAME(lua_State *L);
+        $STORAGE$SIG;
+        $STORAGE int $LUANAME(lua_State *L);
     ]], {
+        STORAGE = storage,
         SIG = function_sig(nativename, ftype, false),
         LUANAME = luaname,
     })
@@ -6937,14 +6942,16 @@ local function coderecorddec(ctx, code, initrecs, node)
     -- forward/mutually-recursive record field types resolve)
     local fieldmap, getswitch, setswitch = {}, {}, {}
     for _, field in ipairs(node._type.fields) do
-        table.insert(fieldmap, render([[
-            lua_pushliteral(L, $NAME);
-            lua_pushinteger(L, $INDEX);
-            lua_rawset(L, -3);
-        ]], {
-            NAME = c_string_literal(field.name),
-            INDEX = c_integer_literal(field.index)
-        }))
+        if not field.islocal then
+            table.insert(fieldmap, render([[
+                lua_pushliteral(L, $NAME);
+                lua_pushinteger(L, $INDEX);
+                lua_rawset(L, -3);
+            ]], {
+                NAME = c_string_literal(field.name),
+                INDEX = c_integer_literal(field.index)
+            }))
+        end
         table.insert(getswitch, render([[
             case $INDEX: {
                 $SETWRAPPED
@@ -6967,16 +6974,18 @@ local function coderecorddec(ctx, code, initrecs, node)
         }))
     end
     for name, method in pairs(node._type.methods) do
-        table.insert(fieldmap, render([[
-            lua_pushliteral(L, $NAME);
-            /* Module is upvalue of Lua entry point of method */
-            titan_pushmodule(L, _mod);
-            lua_pushcclosure(L, $METHOD, 1);
-            lua_rawset(L, -3);
-        ]], {
-            NAME = c_string_literal(name),
-            METHOD = method_luaname(method)
-        }))
+        if not method.islocal then
+            table.insert(fieldmap, render([[
+                lua_pushliteral(L, $NAME);
+                /* Module is upvalue of Lua entry point of method */
+                titan_pushmodule(L, _mod);
+                lua_pushcclosure(L, $METHOD, 1);
+                lua_rawset(L, -3);
+            ]], {
+                NAME = c_string_literal(name),
+                METHOD = method_luaname(method)
+            }))
+        end
     end
     if #node._type.fields > 0 then
         table.insert(code, render([[
@@ -7126,7 +7135,7 @@ local function allocate_upvalues(tlcontext, ast)
         end
     end
     -- Referenced local functions (private, so only when used as a value) and
-    -- every record static (e.g. `Rec.new`) each get a canonical-closure slot.
+    -- every record function (e.g. `Rec.new`) each get a canonical-closure slot.
     for _, node in pairs(ast) do
         if not node._ignore then
             if node._tag == "Ast.TopLevelFunc" and node.islocal and node._valref then
@@ -7263,7 +7272,9 @@ function coder.generate(modname, ast, static_deps)
             ]], {
                 SLOT = c_integer_literal(slot),
             }))
-            register_readonly_member(node.name, slot)
+            if not node.islocal then
+                register_readonly_member(node.name, slot)
+            end
         end
     end
 
@@ -7333,22 +7344,35 @@ function coder.generate(modname, ast, static_deps)
                 elseif tag == "Ast.TopLevelStatic" then
                     table.insert(code, node._luabody)
                     -- Build the static's canonical 3-upvalue closure once into
-                    -- its shadow slot, then install that object into the record's
-                    -- static-namespace table (pushed from its uv slot) so
-                    -- `Rec.new` (Lua) and a Titan value reference denote the same
-                    -- closure.
-                    table.insert(funcs, render([[
-                        setobj2s(L, L->top.p, &_mod->uv[$RECNSSLOT].uv);
-                        L->top.p++;
-                        titan_pushmodule(L, _mod);
-                        lua_pushlightuserdata(L, (void*)$FUNCTAG);
-                        lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
-                        lua_pushcclosure(L, $LUANAME, 3);
-                        setobj2t(L, &_mod->uv[$SLOT].uv, s2v(L->top.p - 1));
-                        luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$SLOT].uv);
-                        lua_setfield(L, -2, $NAMESTR);
-                        lua_pop(L, 1);
-                    ]], {
+                    -- its shadow slot. Public statics are also installed into
+                    -- the record's static-namespace table; local record functions remain
+                    -- reachable to Titan code through direct/static-slot paths.
+                    local closure_init
+                    if node.islocal then
+                        closure_init = [[
+                            titan_pushmodule(L, _mod);
+                            lua_pushlightuserdata(L, (void*)$FUNCTAG);
+                            lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
+                            lua_pushcclosure(L, $LUANAME, 3);
+                            setobj2t(L, &_mod->uv[$SLOT].uv, s2v(L->top.p - 1));
+                            luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$SLOT].uv);
+                            lua_pop(L, 1);
+                        ]]
+                    else
+                        closure_init = [[
+                            setobj2s(L, L->top.p, &_mod->uv[$RECNSSLOT].uv);
+                            L->top.p++;
+                            titan_pushmodule(L, _mod);
+                            lua_pushlightuserdata(L, (void*)$FUNCTAG);
+                            lua_pushlightuserdata(L, titan_cast_func(void*, $NATIVE));
+                            lua_pushcclosure(L, $LUANAME, 3);
+                            setobj2t(L, &_mod->uv[$SLOT].uv, s2v(L->top.p - 1));
+                            luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$SLOT].uv);
+                            lua_setfield(L, -2, $NAMESTR);
+                            lua_pop(L, 1);
+                        ]]
+                    end
+                    table.insert(funcs, render(closure_init, {
                         RECNSSLOT = c_integer_literal(
                             tlcontext.record_namespace_slots[node._type.fqtn]),
                         LUANAME = static_luaname(node._type),

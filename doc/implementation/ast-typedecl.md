@@ -151,19 +151,20 @@ omitted from the field lists for brevity.
 | Constructor | Fields | Notes |
 | --- | --- | --- |
 | `TopLevelFunc` | `islocal`, `name`, `params`, `rettypes`, `block` | `params` is a list of `Decl` |
-| `TopLevelMethod` | `class`, `name`, `params`, `rettypes`, `block` | `function Class:name(...)`; cannot be `local` |
-| `TopLevelStatic` | `class`, `name`, `params`, `rettypes`, `block` | **synthesized only** — see below |
+| `TopLevelMethod` | `class`, `name`, `params`, `rettypes`, `block` | `function Class:name(...)`; parser decorates `islocal` |
+| `TopLevelStatic` | `class`, `name`, `params`, `rettypes`, `block` | `function Class.name(...)`, plus synthesized `Class.new`; parser decorates `islocal` |
 | `TopLevelVar` | `islocal`, `decl`, `value` | module variable |
-| `TopLevelRecord` | `name`, `fields` | `fields` is a list of `Decl` |
+| `TopLevelRecord` | `name`, `fields` | `fields` is a list of `Decl`; parser decorates `islocal` |
 | `TopLevelImport` | `localname`, `modname` | `local m = import "x.y"` |
 | `TopLevelForeignImport` | `localname`, `headername` | `local c = foreign import "x.h"` |
 
-`TopLevelStatic` has **no surface syntax**: the grammar has no
-production for static functions. The only place one is created is the
-parser's `record` desugaring (`defs.recorddecl` in `parser.lua`), which
-turns each record into *two* top-level nodes — the `TopLevelRecord`
-plus a synthesized `new` static with one parameter per field, in field
-order:
+`TopLevelStatic` covers record functions. The parser creates one directly for
+`function Class.name(...)`, and also creates one from the `record` desugaring
+(`defs.recorddecl` in `parser.lua`), which turns each record into *two*
+top-level nodes — the `TopLevelRecord` plus a synthesized `new` record function
+with one parameter per field, in field order. The parser copies `local record`
+to both the record and `new`, and also makes `new` local when any field is
+local:
 
 ```lua
 record Point
@@ -194,7 +195,8 @@ That is, `x?: T` is eagerly desugared into an option *annotation*,
 while a bare `x?` defers to the checker, which infers the initializer's
 type and optionizes it (`local y? = arr[1]` gives `y : integer?` where
 `local y = arr[1]` gives `y : integer`). Parameters and record fields
-require an annotation and admit no `?` mark on the name.
+require an annotation and admit no `?` mark on the name. A record field `Decl`
+may carry `islocal = true`, set by the parser for `local field: T`.
 
 ### Statements
 
@@ -281,12 +283,13 @@ of these are declared anywhere; this table is the inventory.
 | `_decl` | `VarName`, `VarDot` | checker | checker, coder | what the name resolved to: an `Ast.Decl` (local/param/`self`), a top-level AST node, a `Type.ModuleMember`/`Type.ModuleVariable`, a `Type.Field`, or a `Type.StaticMethod` |
 | `_used` | `Decl`, top-level nodes (via `_decl`) | checker, on every read: `ExpVar`, `VarDot` receivers, call callees | coder | "this variable is read somewhere"; unused locals get no C variable — their initializer is evaluated and cast to `(void)` |
 | `_assigned` | `Decl` (via `_decl`) | checker, in `StatAssign` on `VarName` targets | coder | "this variable is reassigned"; GC-able parameters and `self` get their own Lua stack slot only when set (otherwise the caller's anchoring suffices — see [values and the GC](values-and-gc.md)) |
-| `_ignore` | top-level nodes | checker pass 1: duplicate declarations, and statics/methods whose declaration fails (missing record, name clash, redeclaration) | checker pass 2, `makemoduletype`, coder (`generate`, `allocate_upvalues`) | "pretend this node does not exist"; every later traversal must skip it |
+| `_ignore` | top-level nodes | checker pass 1: duplicate declarations, and record functions/methods whose declaration fails (missing record, name clash, redeclaration) | checker pass 2, `makemoduletype`, coder (`generate`, `allocate_upvalues`) | "pretend this node does not exist"; every later traversal must skip it |
 | `_self` | `TopLevelMethod` | checker (`checkmethod`) | checker, coder | a synthesized `Ast.Decl` for `self`, typed as the record's nominal type; becomes the C parameter `__self__` |
 | `_record` | `TopLevelStatic`, `TopLevelMethod` | checker pass 1 | checker (`checkmethod`, for `self`'s type) | the `Ast.TopLevelRecord` node the member belongs to |
 | `_method` | `ExpCall` (method calls) | checker | coder | the resolved `Type.Method` |
 | `_field` | `Field` (record constructors) | checker | coder | the resolved `Type.Field` descriptor; its `index` is the record `Udata` user-value slot (`uv[index].uv`) the field occupies |
 | `_cvar` | `Decl` | coder | coder | name of the C local holding the value: `_local_x_1`, `_param_x`, `__self__` |
+| `_readonly` | synthesized `Decl` | checker | checker | marks compiler-built locals such as `L`; `declare` rejects shadowing them and assignment reports a read-only built-in local error |
 | `_slot` | `Decl`, `TopLevelVar` | coder | coder | the `TValue` slot anchoring a GC-able value for the collector: a Lua stack slot (`_localslot_x_2` — the per-name counter is shared with `_cvar`, so the suffix is one past the `_cvar`'s — `_paramslot_x`, `__selfslot__`) or `&_mod->uv[N].uv` for module variables |
 | `_upvalue` | `TopLevelVar`, `TopLevelImport`, imported `Type.ModuleVariable` members | coder (`allocate_upvalues`, `import_module`) | coder | index of the node's slot in the module `Udata`'s user-value array (see [the code generator overview](codegen-overview.md)) |
 | `_body`, `_sig`, `_luabody` | `TopLevelFunc`/`Static`/`Method` | coder (`codefuncdec`) | coder (`generate`) | rendered C strings: the native function definition, its prototype, and the Lua-stack entry wrapper; `generate` concatenates them into the translation unit |

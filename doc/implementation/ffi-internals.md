@@ -61,7 +61,8 @@ on the process cwd. The file exposes selected primitive aliases:
 `titan_ffi_signed_char`, `titan_ffi_unsigned_char`, `titan_ffi_short`,
 `titan_ffi_unsigned_short`, `titan_ffi_int`, `titan_ffi_unsigned_int`,
 `titan_ffi_long`, `titan_ffi_unsigned_long`, `titan_ffi_long_long`,
-`titan_ffi_unsigned_long_long`, `titan_ffi_float`, and `titan_ffi_double`.
+`titan_ffi_unsigned_long_long`, `titan_ffi_float`, `titan_ffi_double`, and
+an opaque `lua_State` typedef.
 
 Generated C already compiles with `-I titan-runtime`, so the emitted
 `#include <titan/ffi.h>` resolves through the normal C compiler path too.
@@ -180,11 +181,17 @@ The checker has FFI-specific handling in a few narrow places:
   a foreign function name in a context whose target is a compatible C function
   pointer type. The node records `_foreign_function_pointer` so codegen can emit
   a C cast of the bare function name.
+* `checkfuncbody` synthesizes the read-only local `L` for every function-like
+  body. `lua_state_pointer_type` gives it type `CPointer(CTypedef("lua_State",
+  ...))`, reusing an imported `lua_State` type when one is already present in
+  the module's C type namespace.
 
 Export checks use `types.contains_c_ffi_type`: any public function signature,
-public variable, or record field that mentions a C type is rejected. `CModule`
-itself is rejected as a first-class value in the same `ExpVar` path as ordinary
-Titan modules.
+public variable, or public record member that mentions a C type is rejected.
+Local record fields, methods and record functions are skipped before this check, so a
+private C-typed record slot can remain module-internal. `CModule` itself is
+rejected as a first-class value in the same `ExpVar` path as ordinary Titan
+modules.
 
 The checker keeps a per-module `symtab.foreign_names` table for ordinary C
 identifiers imported so far. If a later foreign import declares the same ordinary

@@ -48,9 +48,13 @@
    The native parameter type name is unchanged, but its layout and the meaning
    of the bytes following n_args are not: mixing the two forms across a .so
    boundary misreads argument storage. 0.9 and 0.10 modules are therefore
-   ABI-incompatible and must live under different TITAN_PATH directories. */
-#define TITAN_VER          "0.10"
-#define TITAN_VER_SUFFIX   "_0_10"
+   ABI-incompatible and must live under different TITAN_PATH directories.
+   0.10 -> 0.11: records can have module-local declarations and members. The
+   serialized <mangled>_types interface omits local records and local record
+   members while preserving record field-slot counts, so 0.10 and 0.11 .so
+   modules disagree about what a compiled record interface means. */
+#define TITAN_VER          "0.11"
+#define TITAN_VER_SUFFIX   "_0_11"
 #define TITAN_PATH_VAR     "TITAN_PATH"
 #define TITAN_PATH_SEP     "/"
 #define TITAN_PATH_DEFAULT ".;/usr/local/lib/titan/" TITAN_VER

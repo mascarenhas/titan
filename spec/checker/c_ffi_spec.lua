@@ -30,6 +30,50 @@ describe("C FFI type checking", function()
         assert.truthy(ok, err)
     end)
 
+    it("imports lua_State from the compiler-provided FFI header", function()
+        local ok, err = run_checker([[
+            local ffi = foreign import "titan/ffi.h"
+
+            local function state_is_truthy(): boolean
+                return L
+            end
+        ]])
+        assert.truthy(ok, err)
+    end)
+
+    it("types the built-in L as lua_State pointer for C calls", function()
+        with_header([[
+            typedef struct lua_State lua_State;
+            typedef lua_State *ffi_lua_state;
+            extern int ffi_has_state(ffi_lua_state state);
+        ]], function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                function f(): integer
+                    return c.ffi_has_state(L)
+                end
+            ]])
+            assert.truthy(ok, err)
+        end)
+    end)
+
+    it("matches built-in L against tag-only struct lua_State pointers", function()
+        with_header([[
+            struct lua_State;
+            extern int ffi_has_state(struct lua_State *state);
+        ]], function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                function f(): integer
+                    return c.ffi_has_state(L)
+                end
+            ]])
+            assert.truthy(ok, err)
+        end)
+    end)
+
     it("allows imported C typedefs in local type annotations", function()
         with_header("typedef int ffi_count;\n", function(header)
             local ok, err = run_checker([[

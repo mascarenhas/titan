@@ -16,8 +16,8 @@ boundary.
 
 The main open questions are:
 
-* how to model `lua_State *` in Titan source without exporting it through module
-  interfaces;
+* how much API-specific metadata should attach to the built-in `lua_State *L`
+  beyond its raw C pointer type;
 * whether public API calls should be ordinary foreign calls or a separate
   trusted binding layer with stack-effect metadata;
 * how to express stack preconditions and postconditions, especially for APIs

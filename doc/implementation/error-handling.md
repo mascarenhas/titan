@@ -308,19 +308,21 @@ therefore not itself a stack-relocation hazard.
 
 ## ABI and search path
 
-The current compiled-module ABI is `0.10`. The error-handling control-flow
+The current compiled-module ABI is `0.11`. The error-handling control-flow
 machinery did not by itself require an ABI bump, but this branch also
 changed the `TitanVargX` structs from inline flexible-array backing
 objects to descriptor structs with an `args` pointer. That layout change
 is visible across `.so` boundaries even though the native parameter type
 names stayed the same, so `0.9` and `0.10` modules must not be mixed.
+The later `0.11` ABI keeps those descriptors and additionally changes
+record-interface serialization for module-local records and record members.
 
 The compiler and runtime therefore agree on:
 
-* `TITAN_VER "0.10"`
-* `TITAN_VER_SUFFIX "_0_10"`
-* versioned binary path variable `TITAN_PATH_0_10`
-* default binary path `.;/usr/local/lib/titan/0.10`
+* `TITAN_VER "0.11"`
+* `TITAN_VER_SUFFIX "_0_11"`
+* versioned binary path variable `TITAN_PATH_0_11`
+* default binary path `.;/usr/local/lib/titan/0.11`
 
 Every generated module also exports `<mangled>_abi`, a Lua C function
 returning `TITAN_VER`. The compiler's `.so`-only rehydration path checks
@@ -328,7 +330,7 @@ that marker before trusting `<mangled>_types`, and generated dynamic
 imports call `titan_check_abi` after `loadlib` and before `dlsym`ing
 native entries. Missing marker means "old module" and is rejected; this
 protects the unversioned `.` component of the default path from silently
-loading stale ABI-0.9 build artifacts.
+loading stale build artifacts.
 
 `spec/abi_spec.lua` pins the compiler/runtime agreement and rejection of
 markerless legacy `.so` files.

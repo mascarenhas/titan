@@ -13,7 +13,7 @@ local types = typedecl("Type", {
         Function    = {"params", "rettypes", "vararg", "varargtype"},
         Array       = {"elem"},
         Map         = {"keys", "values"},
-        Record      = {"name", "fields", "functions", "methods"},
+        Record      = {"name", "fields", "functions", "methods", "nfields"},
         Nominal     = {"fqtn"},
         Field       = {"fqtn", "name", "type", "index"},
         Method      = {"fqtn", "name", "params", "rettypes", "varargtype"},
@@ -96,8 +96,10 @@ local function find_c_type(t, include_legacy)
         elseif tag == "Type.Option" then
             return visit_type(typ.base, seen)
         elseif tag == "Type.Field" then
+            if typ.islocal then return nil end
             return visit_type(typ.type, seen)
         elseif tag == "Type.Method" or tag == "Type.StaticMethod" then
+            if typ.islocal then return nil end
             for _, param in ipairs(typ.params) do
                 local ctyp = visit_type(param, seen)
                 if ctyp then return ctyp end
@@ -109,15 +111,15 @@ local function find_c_type(t, include_legacy)
             return visit_type(typ.varargtype, seen)
         elseif tag == "Type.Record" then
             for _, field in ipairs(typ.fields) do
-                local ctyp = visit_type(field, seen)
+                local ctyp = not field.islocal and visit_type(field, seen)
                 if ctyp then return ctyp end
             end
             for _, func in pairs(typ.functions) do
-                local ctyp = visit_type(func, seen)
+                local ctyp = not func.islocal and visit_type(func, seen)
                 if ctyp then return ctyp end
             end
             for _, method in pairs(typ.methods) do
-                local ctyp = visit_type(method, seen)
+                local ctyp = not method.islocal and visit_type(method, seen)
                 if ctyp then return ctyp end
             end
         elseif tag == "Type.ModuleMember" or tag == "Type.ModuleVariable" then
@@ -862,18 +864,25 @@ function types.serialize(t)
     elseif tag == "Type.Record" then
         local functions, fields, methods = {}, {}, {}
         for _, field in ipairs(t.fields) do
-            table.insert(fields, types.serialize(field))
+            if not field.islocal then
+                table.insert(fields, types.serialize(field))
+            end
         end
         for name, method in pairs(t.methods) do
-            table.insert(methods, name .. " = " .. types.serialize(method))
+            if not method.islocal then
+                table.insert(methods, name .. " = " .. types.serialize(method))
+            end
         end
         for name, func in pairs(t.functions) do
-            table.insert(functions, name .. " = " .. types.serialize(func))
+            if not func.islocal then
+                table.insert(functions, name .. " = " .. types.serialize(func))
+            end
         end
         return "Record('" .. t.name ..
             "',{" .. table.concat(fields, ",") ..
             "},{" ..table.concat(functions, ",") .. "}" .. "," ..
-            "{" .. table.concat(methods, ",") .. "}" ..
+            "{" .. table.concat(methods, ",") .. "}" .. "," ..
+            tostring(t.nfields or #t.fields) ..
             ")"
     elseif tag == "Type.Option" then
         return "Option(" .. types.serialize(t.base) .. ")"

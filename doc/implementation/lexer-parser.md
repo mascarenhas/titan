@@ -260,9 +260,16 @@ The parser performs several rewrites that later passes rely on:
 
   parses as if the programmer had also written
   `function Point.new(x: float, y: float): Point return {x = x, y = y} end` —
-  the only way an `Ast.TopLevelStatic` is ever created (there is no surface
-  syntax for statics), and why `Point.new(2, 3)` is positional in field
-  order.
+  the same `Ast.TopLevelStatic` node that user-declared record functions use,
+  and why `Point.new(2, 3)` is positional in field order. `local record` marks
+  both the `TopLevelRecord` and synthesized `new`
+  local, and any local field also makes `new` local so outside code cannot
+  construct private slots positionally.
+
+* **Record functions share the static node.** A declaration
+  `function Point.origin(): Point ... end` parses to `Ast.TopLevelStatic`.
+  The parser sets `islocal` when the declaration is written
+  `local function Point.origin(...)`.
 
 * **`if`/`elseif` chains flatten to a list.** `defs.ifstat` prepends the
   initial condition/block pair to the captured `elseif` clauses, yielding one

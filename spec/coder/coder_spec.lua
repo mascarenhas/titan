@@ -2479,6 +2479,84 @@ describe("Titan code generator", function()
         ]])
     end)
 
+    it("hides local record fields and methods from Lua", function ()
+        run_coder([[
+            record Box
+                local hidden: integer
+                shown: integer
+            end
+
+            local function Box:secret(): integer
+                return self.hidden
+            end
+
+            function box(): Box
+                return Box.new(11, 31)
+            end
+
+            function reveal(b: Box): integer
+                return b.hidden + b:secret()
+            end
+
+            function via_values(): integer
+                local make = Box.new
+                local b = make(13, 37)
+                local secret = b:secret
+                return b.shown + secret()
+            end
+        ]], [[
+            local b = test.box()
+            assert(b.shown == 31)
+            assert(test.reveal(b) == 22)
+            assert(test.via_values() == 37 + 13)
+            local ok, err = pcall(function () return b.hidden end)
+            assert(not ok)
+            assert(err:match('not found'))
+            ok, err = pcall(function () return b:secret() end)
+            assert(not ok)
+            assert(err:match("not found"))
+            assert(test.Box.new == nil)
+        ]])
+    end)
+
+    it("calls public and local record functions", function ()
+        run_coder([[
+            record Box
+                local hidden: integer
+                shown: integer
+            end
+
+            function Box.make(shown: integer): Box
+                return Box.new(shown * 10, shown)
+            end
+
+            local function Box.secret(seed: integer): Box
+                return Box.new(seed, seed + 1)
+            end
+
+            function reveal(b: Box): integer
+                return b.hidden + b.shown
+            end
+
+            function via_local(): integer
+                local make = Box.secret
+                local b = make(41)
+                return b.hidden + b.shown
+            end
+        ]], [[
+            local b = test.Box.make(7)
+            assert(test.reveal(b) == 77)
+            assert(b.shown == 7)
+            assert(test.via_local() == 41 + 42)
+            assert(test.Box.make == test.Box.make)
+            assert(test.Box.secret == nil)
+            assert(test.Box.new == nil)
+            local ok, err = pcall(function () return b.hidden end)
+            assert(not ok)
+            assert(err:match('not found'))
+        ]])
+    end)
+
     it("initializes a record using new", function ()
         run_coder([[
             record Point
@@ -2576,6 +2654,41 @@ describe("Titan code generator", function()
         local ok, err = generate_modules(modules, "bar")
         assert.truthy(ok, err)
         local ok, err = call("bar", "x, y = bar.bar(); assert(x == 4.0); assert(y == 6.0)")
+        assert.truthy(ok, err)
+    end)
+
+    it("uses public record surface from source-linked module with local members", function ()
+        local modules = {
+            foo = [[
+                record Box
+                    local hidden: integer
+                    shown: integer
+                end
+
+                local function Box:secret(): integer
+                    return self.hidden
+                end
+
+                function make(hidden: integer, shown: integer): Box
+                    return Box.new(hidden, shown)
+                end
+
+                function reveal(b: Box): integer
+                    return b.hidden + b:secret()
+                end
+            ]],
+            bar = [[
+                local f = import "foo"
+
+                function bar(): integer
+                    local b = f.make(17, 41)
+                    return b.shown + f.reveal(b)
+                end
+            ]]
+        }
+        local ok, err = generate_modules(modules, "bar")
+        assert.truthy(ok, err)
+        ok, err = call("bar", "assert(bar.bar() == 41 + 34)")
         assert.truthy(ok, err)
     end)
 
@@ -3272,7 +3385,7 @@ describe("single-Udata representation (GC stress)", function()
 
     -- 6. Module Udata Lua-facing surface sanity: the module table is gone and
     -- `require` returns the Udata. Functions call, exported vars read/write, and
-    -- record statics construct with stable identity.
+    -- record functions construct with stable identity.
     it("module Udata surface: call, var get/set, static identity", function ()
         run_coder([[
             record Rec
@@ -3293,7 +3406,7 @@ describe("single-Udata representation (GC stress)", function()
             assert(test.v == 10)
             test.v = 99
             assert(test.v == 99)
-            -- record static constructs and has stable identity
+            -- record function constructs and has stable identity
             local r = test.Rec.new(5)
             assert(type(r) == 'userdata')
             assert(test.getx(r) == 5)

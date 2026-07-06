@@ -207,7 +207,7 @@ Exported variables of the imported module can be both read and
 assigned (`geom.origin.x = 0.0` above); writes from Titan are
 statically checked and compile to direct stores, with no run-time type
 check. Record types are referenced as `alias.Name` in type annotations,
-and their constructors and static functions as `alias.Name.new(...)`.
+and their record functions as `alias.Name.new(...)` or `alias.Name.make(...)`.
 
 An exported function is itself a **first-class value**: besides calling it
 as `geom.norm(p)`, the importer can reference `geom.norm` as a value — pass
@@ -315,8 +315,8 @@ the structure of the generated C is in
   described above.
 * **Compiled modules** are looked up along the *binary search path*: a
   semicolon-separated list of directories taken from the environment
-  variable `TITAN_PATH_0_10`, or `TITAN_PATH` if that is unset,
-  defaulting to `.;/usr/local/lib/titan/0.10` — a list of plain
+  variable `TITAN_PATH_0_11`, or `TITAN_PATH` if that is unset,
+  defaulting to `.;/usr/local/lib/titan/0.11` — a list of plain
   directories, not a Lua-style template path. The same path is used at
   run time by compiled modules that load dependencies dynamically.
 

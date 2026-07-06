@@ -241,7 +241,8 @@ calling `divmod` receives two values, as from any Lua function (see
 Titan functions are first-class values. A **function name** used where a
 value is expected yields a function value you can store, pass, return, and
 call indirectly. The name can be a top-level function, a `local` function,
-an imported module's function (`mod.f`), or a record static (`Rec.new`):
+an imported module's function (`mod.f`), or a record function (`Rec.new` or
+`Rec.make`):
 
 ```lua
 function double(x: integer): integer
@@ -300,9 +301,10 @@ but not called, `obj:method`, is also a value: a *bound method reference*,
 the method's type with the implicit `self` bound to the receiver (see
 [bound method references](closures.md#bound-method-references)).
 
-What is **still not** a value: a foreign/FFI function — it can be called by
-name but not referenced (see [the FFI chapter](ffi.md)). Assigning *to* a
-function name (`double = bad`) also remains an error.
+What is **still not** a Titan function value: a foreign/FFI function — it can
+be called by name or converted to a compatible C function pointer, but not
+stored as a Titan function value (see [the FFI chapter](ffi.md)). Assigning
+*to* a function name (`double = bad`) also remains an error.
 
 ## Recursion and declaration order
 
@@ -327,18 +329,21 @@ The one order-sensitive part of a module is top-level *variable*
 initializers, which must be compile-time constants and so cannot call
 functions at all — see [Modules](modules.md).
 
-## Methods and static functions
+## Methods and record functions
 
-Records may declare methods (`function Point:move(dx: float, dy: float)`).
-There is no syntax for declaring static functions of your own —
-`function Point.polar(r: float, t: float): Point` is a syntax error in
-the current grammar; the only static function is the automatically
-provided `Point.new`. Methods are top-level declarations like the
-functions in this chapter and follow the same rules for parameters,
-return values, arity (the compile-time message reads `method
-'test.Point:move' called with ...`) and multiple returns; what differs —
-the implicit `self`, name resolution against the record, visibility — is
-described in [Records](records.md).
+Records may declare methods (`function Point:move(dx: float, dy: float)`), and
+methods may be `local` to the defining module. Records may also declare record
+functions (`function Point.polar(r: float, t: float): Point`), likewise with
+optional `local` visibility. Record functions are called as `Point.polar(...)`
+and have no implicit `self`; the automatically provided `Point.new` is a
+record function synthesized by the parser.
+
+Methods and record functions are top-level declarations like the functions in
+this chapter and follow the same rules for parameters, return values, arity
+(method diagnostics read `method 'test.Point:move' called with ...`) and
+multiple returns. What differs — implicit `self` for methods, name resolution
+against the record, and record-member visibility — is described in
+[Records](records.md).
 
 ## Standalone programs: `main`
 

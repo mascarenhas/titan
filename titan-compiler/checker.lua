@@ -291,6 +291,39 @@ local function c_allocation_error(typ)
     end
 end
 
+local function lua_state_pointer_type(st)
+    local lua_state = st:find_foreign_type("lua_State")
+        or st:find_foreign_type("struct@lua_State")
+        or types.CTypedef("lua_State",
+            types.CStruct(nil, "lua_State", nil, {}, false, false))
+    return types.CPointer(
+        lua_state,
+        {})
+end
+
+local function record_module(fqtn)
+    return fqtn:match("^(.*)%.[^.]+$")
+end
+
+local function is_record_visible_from(st, fqtn)
+    local record = types.registry[fqtn]
+    return record and (not record.islocal or record_module(fqtn) == st.modname)
+end
+
+local function is_record_member_visible_from(st, member)
+    return not member.islocal or record_module(member.fqtn) == st.modname
+end
+
+local function visible_record_fields(record, st)
+    local out = {}
+    for _, field in ipairs(record.fields) do
+        if is_record_member_visible_from(st, field) then
+            table.insert(out, field)
+        end
+    end
+    return out
+end
+
 -- Converts an AST type declaration into a typechecker type
 --   node: AST node
 --   errors: list of compile-time errors
@@ -328,6 +361,20 @@ typefromnode = util.make_visitor({
         local mod = st:find_symbol(node.module)
         if mod and mod._type._tag == "Type.Module" then
             local fqtn = mod._type.name .. "." .. node.name
+            local member = mod._type.members[node.name]
+            if not member then
+                return invalid(errors, node.loc,
+                    "type '%s' not found inside module '%s'",
+                    node.name, mod._type.name)
+            elseif member.type._tag ~= "Type.Record" then
+                return invalid(errors, node.loc,
+                    "member '%s' inside module '%s' is not a record type",
+                    node.name, mod._type.name)
+            elseif not is_record_visible_from(st, fqtn) then
+                return invalid(errors, node.loc,
+                    "record type '%s' is local to module '%s'",
+                    node.name, mod._type.name)
+            end
             return types.Nominal(fqtn)
         elseif mod and mod._type._tag == "Type.CModule" then
             local typ = mod._type.type_members and mod._type.type_members[node.name]
@@ -526,7 +573,13 @@ checkdecl = function(node, st, errors)
     checktype(node._type, node.loc, errors)
 end
 
-local function declare(node, st)
+local function declare(node, st, errors)
+    local builtin = st:find_symbol(node.name)
+    if builtin and builtin._readonly then
+        checker.typeerror(errors, node.loc,
+            "cannot declare local '%s' because it shadows a built-in local",
+            node.name)
+    end
     -- Stamp the function-nesting depth at which this local was declared, so the
     -- VarName visitor can tell a capture (use from a deeper function) apart from
     -- a same-function reference.
@@ -571,7 +624,7 @@ local function checkfor(node, st, errors)
         node.decl._type = node.start._type
     end
     checkdecl(node.decl, st, errors)
-    declare(node.decl, st)
+    declare(node.decl, st, errors)
     -- The numeric-for control variable is read-only (as in Lua 5.4+):
     -- assigning to it is a clean compile-time error, not a silent miscompile.
     node.decl._forcontrol = true
@@ -717,7 +770,7 @@ checkstat = util.make_visitor({
                         decl._type = types.Invalid()
                     end
                 end
-                declare(decl, st)
+                declare(decl, st, errors)
             end
             return
         end
@@ -780,7 +833,7 @@ checkstat = util.make_visitor({
                     decl._type = types.Invalid()
                 end
             end
-            declare(decl, st)
+            declare(decl, st, errors)
         end
     end,
 
@@ -862,12 +915,12 @@ checkstat = util.make_visitor({
             errdecl._type = types.Value()
             errdecl._used = true
             errdecl._catch_implicit = true
-            declare(errdecl, st)
+            declare(errdecl, st, errors)
             local tbdecl = ast.Decl(node.loc, "traceback", false, false)
             tbdecl._type = types.String()
             tbdecl._used = true
             tbdecl._catch_implicit = true
-            declare(tbdecl, st)
+            declare(tbdecl, st, errors)
             node._error_decl = errdecl
             node._traceback_decl = tbdecl
             catch_depth = catch_depth + 1
@@ -942,7 +995,7 @@ checkstat = util.make_visitor({
                             or var._decl._tag == "Type.ModuleMember"
                             or var._decl._tag == "Type.StaticMethod") then
                     -- Cannot rebind a function *declaration* (top-level
-                    -- function, imported module function, or record static).
+                    -- function, imported module function, or record function).
                     -- Assigning a value *into* a function-typed local, param
                     -- or field is fine and falls through to the normal path.
                     checker.typeerror(errors, var.loc, "trying to assign to a function")
@@ -952,6 +1005,11 @@ checkstat = util.make_visitor({
                 else
                     -- mark this declared variable as assigned to
                     if var._tag == "Ast.VarName" and var._decl then
+                        if var._decl._readonly then
+                            checker.typeerror(errors, var.loc,
+                                "cannot assign to built-in local '%s'",
+                                var._decl.name)
+                        end
                         if var._decl._forcontrol then
                             checker.typeerror(errors, var.loc,
                                 "cannot assign to 'for' control variable '%s'",
@@ -1126,9 +1184,15 @@ checkvar = util.make_visitor({
         elseif ltype._tag == "Type.Record" then
             local decl = ltype.functions[node.name]
             if decl then
-                node._decl = decl
-                node._type = types.Function(decl.params, decl.rettypes, false,
-                    decl.varargtype)
+                if not is_record_member_visible_from(st, decl) then
+                    node._type = invalid(errors, node.loc,
+                        "record function '%s.%s' is local to module '%s'",
+                        ltype.name, node.name, record_module(ltype.name))
+                else
+                    node._decl = decl
+                    node._type = types.Function(decl.params, decl.rettypes, false,
+                        decl.varargtype)
+                end
             else
                 node._type = invalid(errors, node.loc,
                     "trying to access invalid record function '%s'", node.name)
@@ -1138,13 +1202,17 @@ checkvar = util.make_visitor({
             if not type then
                 node._type = invalid(errors, node.loc,
                     "type '%s' not found", ltype.fqtn)
+            elseif not is_record_visible_from(st, ltype.fqtn) then
+                node._type = invalid(errors, node.loc,
+                    "record type '%s' is local to module '%s'",
+                    ltype.fqtn, record_module(ltype.fqtn))
             elseif type._tag ~= "Type.Record" then
                 node._type = invalid(errors, node.loc,
                     "trying to access field '%s' of type '%s' that is not a record but '%s'",
                     node.name, ltype.fqtn, type._tag)
             else
                 for _, field in ipairs(type.fields) do
-                    if field.name == node.name then
+                    if field.name == node.name and is_record_member_visible_from(st, field) then
                         node._decl = field
                         node._type = field.type
                         break
@@ -1549,9 +1617,28 @@ checkexp = util.make_visitor({
                 end
             else
                 local record = types.registry[context.fqtn]
+                if record.islocal and record_module(context.fqtn) ~= st.modname then
+                    node._type = invalid(errors, node.loc,
+                        "record type '%s' is local to module '%s'",
+                        context.fqtn, record_module(context.fqtn))
+                    for _, field in ipairs(node.fields) do
+                        checkexp(field.exp, st, errors)
+                    end
+                    return
+                end
+                local visible_fields = visible_record_fields(record, st)
+                if (record.nfields or #record.fields) > #visible_fields then
+                    node._type = invalid(errors, node.loc,
+                        "cannot construct record type '%s' outside module '%s' because it has local fields",
+                        context.fqtn, record_module(context.fqtn))
+                    for _, field in ipairs(node.fields) do
+                        checkexp(field.exp, st, errors)
+                    end
+                    return
+                end
                 for _, cfield in ipairs(node.fields) do
                     local found
-                    for _, rfield in ipairs(record.fields) do
+                    for _, rfield in ipairs(visible_fields) do
                         if rfield.name == cfield.name then
                             found = rfield
                         end
@@ -1575,7 +1662,7 @@ checkexp = util.make_visitor({
                         cfield._field = found
                     end
                 end
-                for _, rfield in ipairs(record.fields) do
+                for _, rfield in ipairs(visible_fields) do
                     local found
                     for _, cfield in ipairs(node.fields) do
                         if rfield.name == cfield.name then
@@ -1974,7 +2061,7 @@ checkexp = util.make_visitor({
                 ftype = ftype.base
             end
             -- A callee may be a statically-known function (top-level function,
-            -- record static, imported module function) or any function-typed
+            -- record function, imported module function) or any function-typed
             -- value (a local/param, a returned function, ...). The coder tells
             -- the two apart; here we only require the callee to be a function.
             if ftype._tag ~= "Type.Function" then
@@ -2025,7 +2112,15 @@ checkexp = util.make_visitor({
                types.registry[otype.fqtn] and
                types.registry[otype.fqtn]._tag == "Type.Record" then
                 local class = types.registry[otype.fqtn]
-                if not class.methods[node.args.method] then
+                if not is_record_visible_from(st, otype.fqtn) then
+                    node._type = invalid(errors, node.loc,
+                        "record type '%s' is local to module '%s'",
+                        otype.fqtn, record_module(otype.fqtn))
+                    for _, arg in ipairs(node.args.args) do
+                        checkexp(arg, st, errors)
+                    end
+                    return
+                elseif not class.methods[node.args.method] then
                     node._type = invalid(errors, node.loc,
                         "method '%s' not found in record '%s'",
                         node.args.method, types.tostring(otype))
@@ -2035,6 +2130,15 @@ checkexp = util.make_visitor({
                     return
                 end
                 local ftype = class.methods[node.args.method]
+                if not is_record_member_visible_from(st, ftype) then
+                    node._type = invalid(errors, node.loc,
+                        "method '%s:%s' is local to module '%s'",
+                        class.name, node.args.method, record_module(class.name))
+                    for _, arg in ipairs(node.args.args) do
+                        checkexp(arg, st, errors)
+                    end
+                    return
+                end
                 checkargs(ftype, node.args.args, node.loc,
                     "method '" .. class.name .. ":" .. node.args.method .. "'", st, errors)
                 node._method = ftype
@@ -2223,10 +2327,18 @@ checkexp = util.make_visitor({
            types.registry[otype.fqtn]._tag == "Type.Record" then
             local class = types.registry[otype.fqtn]
             local mtype = class.methods[node.name]
-            if not mtype then
+            if not is_record_visible_from(st, otype.fqtn) then
+                node._type = invalid(errors, node.loc,
+                    "record type '%s' is local to module '%s'",
+                    otype.fqtn, record_module(otype.fqtn))
+            elseif not mtype then
                 node._type = invalid(errors, node.loc,
                     "method '%s' not found in record '%s'",
                     node.name, types.tostring(otype))
+            elseif not is_record_member_visible_from(st, mtype) then
+                node._type = invalid(errors, node.loc,
+                    "method '%s:%s' is local to module '%s'",
+                    class.name, node.name, record_module(class.name))
             else
                 node._method = mtype
                 node._type = types.Function(mtype.params, mtype.rettypes, false,
@@ -2304,6 +2416,12 @@ function checkfuncbody(node, st, errors, opts)
     st:add_symbol("$function", node) -- for return type
     local frame = { depth = #func_stack + 1, captures = {}, capture_set = {} }
     table.insert(func_stack, frame)
+    local ldecl = ast.Decl(node.loc, "L", false, false)
+    ldecl._type = lua_state_pointer_type(st)
+    ldecl._funcdepth = #func_stack
+    ldecl._cvar = "L"
+    ldecl._readonly = true
+    st:add_symbol("L", ldecl)
     if opts.self_decl then
         -- `self` belongs to this function's own depth, so a lambda nested in a
         -- method captures it just like any other parameter.
@@ -2339,6 +2457,12 @@ function checkfuncbody(node, st, errors, opts)
         if param.name ~= false then
             param._type = ptypes[i]
             param._funcdepth = #func_stack
+            local builtin = st:find_symbol(param.name)
+            if builtin and builtin._readonly then
+                checker.typeerror(errors, param.loc,
+                    "cannot declare parameter '%s' because it shadows a built-in local",
+                    param.name)
+            end
             st:add_symbol(param.name, param)
             checktype(param._type, param.loc, errors)
             if pnames[param.name] then
@@ -2630,11 +2754,13 @@ local toplevel_visitor = util.make_visitor({
                 -- 0-based field index: a record instance is a Udata whose
                 -- user values hold the fields directly (uv[0..N-1]); Lua never
                 -- sees these indices, so there is no reserved uv[0].
-                table.insert(fields,
-                    types.Field(fqtn, field.name, ftype, i - 1))
+                local tfield = types.Field(fqtn, field.name, ftype, i - 1)
+                tfield.islocal = field.islocal and true or false
+                table.insert(fields, tfield)
             end
         end
-        node._type = types.Record(fqtn, fields, {}, {})
+        node._type = types.Record(fqtn, fields, {}, {}, #fields)
+        node._type.islocal = node.islocal and true or false
         types.registry[fqtn] = node._type
     end,
 
@@ -2643,14 +2769,14 @@ local toplevel_visitor = util.make_visitor({
         if not record then
             node._ignore = true
             checker.typeerror(errors, node.loc,
-                "record referenced by static method declaration '%s.%s' does not exist",
+                "record referenced by record function declaration '%s.%s' does not exist",
                 node.class, node.name)
             return
         end
         if record._tag ~= "Ast.TopLevelRecord" then
             node._ignore = true
             checker.typeerror(errors, node.loc,
-                "member referenced by static method declaration '%s.%s' is not a record",
+                "member referenced by record function declaration '%s.%s' is not a record",
                 node.class, node.name)
             return
         end
@@ -2659,7 +2785,7 @@ local toplevel_visitor = util.make_visitor({
             if field.name == node.name then
                 node._ignore = true
                 checker.typeerror(errors, node.loc,
-                "cannot declare static method '%s.%s' as field '%s' exists in record '%s'",
+                "cannot declare record function '%s.%s' as field '%s' exists in record '%s'",
                     node.class, node.name, field.name, node.class)
                 return
             end
@@ -2667,14 +2793,14 @@ local toplevel_visitor = util.make_visitor({
         if rectype.methods[node.name] then
             node._ignore = true
             checker.typeerror(errors, node.loc,
-                "cannot declare static method '%s.%s' as method '%s:%s' exists in record '%s'",
+                "cannot declare record function '%s.%s' as method '%s:%s' exists in record '%s'",
                     node.class, node.name, node.class, node.name, node.class)
             return
         end
         if rectype.functions[node.name] then
             node._ignore = true
             checker.typeerror(errors, node.loc,
-                "redeclaration of static method '%s.%s'", node.class, node.name)
+                "redeclaration of record function '%s.%s'", node.class, node.name)
             return
         end
         node._record = record
@@ -2685,6 +2811,7 @@ local toplevel_visitor = util.make_visitor({
         end
         node._type = types.StaticMethod(rectype.name, node.name, ptypes, rettypes,
             varargtype)
+        node._type.islocal = node.islocal and true or false
         rectype.functions[node.name] = node._type
     end,
 
@@ -2717,7 +2844,7 @@ local toplevel_visitor = util.make_visitor({
         if rectype.functions[node.name] then
             node._ignore = true
             checker.typeerror(errors, node.loc,
-                "cannot declare method '%s:%s' as static method '%s.%s' exists in record '%s'",
+                "cannot declare method '%s:%s' as record function '%s.%s' exists in record '%s'",
                     node.class, node.name, node.class, node.name, node.class)
             return
         end
@@ -2735,6 +2862,7 @@ local toplevel_visitor = util.make_visitor({
         end
         node._type = types.Method(rectype.name, node.name, ptypes, rettypes,
             varargtype)
+        node._type.islocal = node.islocal and true or false
         rectype.methods[node.name] = node._type
     end,
 })
@@ -2826,6 +2954,64 @@ local function register_referenced_records(t, loader, seen)
     end
 end
 
+local function first_local_record_type(typ, seen)
+    if type(typ) ~= "table" or not typ._tag then return nil end
+    seen = seen or {}
+    if seen[typ] then return nil end
+    seen[typ] = true
+
+    local tag = typ._tag
+    if tag == "Type.Nominal" then
+        local record = types.registry[typ.fqtn]
+        if record and record.islocal then
+            return typ
+        end
+    elseif tag == "Type.Record" then
+        if typ.islocal then return typ end
+        for _, field in ipairs(typ.fields or {}) do
+            if not field.islocal then
+                local found = first_local_record_type(field.type, seen)
+                if found then return found end
+            end
+        end
+        for _, func in pairs(typ.functions or {}) do
+            if not func.islocal then
+                local found = first_local_record_type(func, seen)
+                if found then return found end
+            end
+        end
+        for _, method in pairs(typ.methods or {}) do
+            if not method.islocal then
+                local found = first_local_record_type(method, seen)
+                if found then return found end
+            end
+        end
+    elseif tag == "Type.Array" then
+        return first_local_record_type(typ.elem, seen)
+    elseif tag == "Type.Map" then
+        return first_local_record_type(typ.keys, seen)
+            or first_local_record_type(typ.values, seen)
+    elseif tag == "Type.Option" then
+        return first_local_record_type(typ.base, seen)
+    elseif tag == "Type.ModuleMember" or tag == "Type.ModuleVariable"
+           or tag == "Type.Field" then
+        return first_local_record_type(typ.type, seen)
+    elseif tag == "Type.Function" or tag == "Type.Method"
+           or tag == "Type.StaticMethod" then
+        for _, p in ipairs(typ.params or {}) do
+            local found = first_local_record_type(p, seen)
+            if found then return found end
+        end
+        for _, r in ipairs(typ.rettypes or {}) do
+            local found = first_local_record_type(r, seen)
+            if found then return found end
+        end
+        if typ.varargtype then
+            return first_local_record_type(typ.varargtype, seen)
+        end
+    end
+end
+
 function checker.checkimport(modname, loader)
     local ok, type_or_error, errors = loader(modname)
     if not ok then return nil, type_or_error end
@@ -2881,13 +3067,49 @@ local function reject_exported_c_ffi_types(modname, modast, errors)
                 reject_exported_c_ffi_type(modname, errors, node.loc, node._type)
             elseif tag == "Ast.TopLevelFunc" and not node.islocal then
                 reject_exported_c_ffi_type(modname, errors, node.loc, node._type)
-            elseif tag == "Ast.TopLevelRecord" then
+            elseif tag == "Ast.TopLevelRecord" and not node.islocal then
                 for i, field in ipairs(node._type.fields) do
-                    local loc = node.fields[i] and node.fields[i].loc or node.loc
-                    reject_exported_c_ffi_type(modname, errors, loc, field.type)
+                    if not field.islocal then
+                        local loc = node.fields[i] and node.fields[i].loc or node.loc
+                        reject_exported_c_ffi_type(modname, errors, loc, field.type)
+                    end
                 end
-            elseif tag == "Ast.TopLevelMethod" or tag == "Ast.TopLevelStatic" then
+            elseif (tag == "Ast.TopLevelMethod" or tag == "Ast.TopLevelStatic")
+                   and not node.islocal then
                 reject_exported_c_ffi_type(modname, errors, node.loc, node._type)
+            end
+        end
+    end
+end
+
+local function reject_exported_local_record_type(modname, errors, loc, typ)
+    local local_record = first_local_record_type(typ)
+    if local_record then
+        local name = local_record.fqtn or local_record.name
+        checker.typeerror(errors, loc,
+            "cannot export local record type '%s' from Titan module '%s'",
+            name, modname)
+    end
+end
+
+local function reject_exported_local_record_types(modname, modast, errors)
+    for _, node in ipairs(modast) do
+        if not node._ignore then
+            local tag = node._tag
+            if tag == "Ast.TopLevelVar" and not node.islocal then
+                reject_exported_local_record_type(modname, errors, node.loc, node._type)
+            elseif tag == "Ast.TopLevelFunc" and not node.islocal then
+                reject_exported_local_record_type(modname, errors, node.loc, node._type)
+            elseif tag == "Ast.TopLevelRecord" and not node.islocal then
+                for i, field in ipairs(node._type.fields) do
+                    if not field.islocal then
+                        local loc = node.fields[i] and node.fields[i].loc or node.loc
+                        reject_exported_local_record_type(modname, errors, loc, field.type)
+                    end
+                end
+            elseif (tag == "Ast.TopLevelMethod" or tag == "Ast.TopLevelStatic")
+                   and not node.islocal then
+                reject_exported_local_record_type(modname, errors, node.loc, node._type)
             end
         end
     end
@@ -2925,6 +3147,7 @@ function checker.check(modname, ast, subject, filename, loader)
     checktoplevel(ast, st, errors, loader)
     checkbodies(ast, st, errors)
     reject_exported_c_ffi_types(modname, ast, errors)
+    reject_exported_local_record_types(modname, ast, errors)
     ast._type = makemoduletype(modname, ast)
     return ast._type, errors
 end

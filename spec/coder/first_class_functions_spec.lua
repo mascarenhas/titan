@@ -2,7 +2,7 @@
 -- run it. Covers referencing/storing/passing/returning function values, the
 -- exact-type fast call path and the generic (Lua-stack) slow path, stable
 -- identity, Lua interop in both directions, source-linked cross-module
--- references, record statics as values, containers, value<->function coercion,
+-- references, record functions as values, containers, value<->function coercion,
 -- and GC safety.
 --
 -- The checker-only assertions live in spec/checker/first_class_functions_spec.lua,
@@ -156,7 +156,7 @@ describe("first-class function values (end-to-end)", function()
         ]])
     end)
 
-    it("uses a record static (Rec.new) as a value", function()
+    it("uses a record function (Rec.new) as a value", function()
         run_coder([[
             record Pair
                 a: integer

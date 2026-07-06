@@ -16,6 +16,23 @@ local function with_header(contents, fn)
 end
 
 describe("C FFI code generation", function()
+    it("passes the built-in lua_State pointer L to C functions", function()
+        with_header([[
+            typedef struct lua_State lua_State;
+            static int ffi_has_state(lua_State *state) { return state != 0; }
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                function has_state(): integer
+                    return c.ffi_has_state(L)
+                end
+            ]], [[
+                assert(test.has_state() == 1)
+            ]])
+        end)
+    end)
+
     it("indexes C arrays, C pointers, and counted owned C arrays with 0-based indices", function()
         with_header([[
             typedef int ffi_int;

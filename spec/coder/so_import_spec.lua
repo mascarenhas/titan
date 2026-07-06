@@ -88,6 +88,55 @@ describe(".so-only cross-module imports", function()
         assert.truthy(rok, out)
     end)
 
+    it("preserves public field slots for .so-only records with local members", function ()
+        local ok, err = build_so_chain({
+            { name = "lrfoo", src = [[
+                record Box
+                  local hidden: integer
+                  shown: integer
+                end
+                local function Box:secret(): integer
+                    return self.hidden
+                end
+                function make(hidden: integer, shown: integer): Box
+                    return Box.new(hidden, shown)
+                end
+                function Box.make(shown: integer): Box
+                    return Box.new(shown * 10, shown)
+                end
+                local function Box.secret_box(hidden: integer): Box
+                    return Box.new(hidden, 0)
+                end
+                function reveal(b: Box): integer
+                    return b.hidden + b:secret()
+                end
+            ]] },
+            { name = "lrbar", src = [[
+                local f = import "lrfoo"
+                function viaimport(): integer
+                    local b = f.make(11, 31)
+                    local c = f.Box.make(7)
+                    return b.shown + f.reveal(b) + c.shown + f.reveal(c)
+                end
+            ]] },
+        })
+        assert.truthy(ok, err)
+        local rok, out = call("lrbar", [[
+            assert(lrbar.viaimport() == 31 + 22 + 7 + 140)
+            local foo = require 'lrfoo'
+            local b = foo.Box.make(19)
+            assert(b.shown == 19)
+            local ok_hidden = pcall(function() return b.hidden end)
+            assert(not ok_hidden)
+            local ok_secret = pcall(function() return b:secret() end)
+            assert(not ok_secret)
+            assert(foo.Box.new == nil)
+            assert(foo.Box.secret_box == nil)
+            assert(foo.reveal(b) == 380)
+        ]])
+        assert.truthy(rok, out)
+    end)
+
     it("calls a method on a record returned from a .so-only module", function ()
         local ok, err = build_so_chain({
             { name = "qfoo", src = [[
@@ -362,7 +411,7 @@ describe(".so-only cross-module imports", function()
             { name = "vrecbar", src = [[
                 local foo = import "vrecfoo"
                 function viastatic(a: foo.Acc, x: foo.R, y: foo.R): integer
-                    return a:sumv(x, y)             -- static method call across .so
+                    return a:sumv(x, y)             -- method call across .so
                 end
             ]] },
         })

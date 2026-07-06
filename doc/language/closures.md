@@ -198,7 +198,7 @@ A few details worth knowing:
 * **Shadowing works as expected.** A local declared *inside* the lambda
   with the same name as an outer one shadows it and is not a capture.
 * **Module-level names are not captures.** Module variables, imported
-  modules' members, top-level functions and record statics are reached
+  modules' members, top-level functions and record functions are reached
   directly, exactly as they are from any function body; they are not part
   of the lambda's capture.
 * **Capture is transitive.** A lambda nested two or three levels deep can

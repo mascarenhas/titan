@@ -438,7 +438,7 @@ story on each constructor, including what `nil` elements mean.
 Functions are first-class values in Titan. **Referencing a function name
 is an expression** that yields a function value of the corresponding
 [function type](types.md#function-types): a top-level or `local`
-function name, an imported `mod.f`, and a record static like `Rec.new`
+function name, an imported `mod.f`, and a record function like `Rec.new`
 all denote values you can store in a variable, pass as an argument,
 return, and call. The conversion between a function value and `value` is
 implicit: a function flows into a `value` for free, and a `value` flows
@@ -465,10 +465,10 @@ called directly — `arr[i](x)` works, raising cleanly if the slot is nil
 
 ## Calls in expressions
 
-Function calls, method calls and record-static calls are expressions, and
+Function calls, method calls and record-function calls are expressions, and
 so is calling a function value. The callable things are module-level
 functions (local or imported), record methods (`r:move(...)`), record
-static functions (`Point.new(...)`), and any function value held in a
+functions (`Point.new(...)`, `Point.origin(...)`), and any function value held in a
 variable, parameter, field, or container slot.
 Arity is strict at compile time: the wrong number of arguments is the
 compile-time error `function 'f' called with N arguments but expects M`

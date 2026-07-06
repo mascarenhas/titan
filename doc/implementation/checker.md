@@ -44,8 +44,9 @@ of blocks plus one flat side table:
 * `find_dup(name)` checks **only the innermost block**
   (`return self.blocks[#self.blocks][name]`) and is used only for top-level
   duplicate detection. Local declarations just call `add_symbol`, so
-  re-declaring a name in the same inner block silently overwrites it —
-  shadowing is unchecked for locals.
+  re-declaring a name in the same inner block silently overwrites it, except
+  for read-only compiler-synthesized locals such as `L`, which `declare`
+  rejects before adding the new symbol.
 * `foreign_types` is a **separate namespace** for C typedef names
   (`add_foreign_type`/`find_foreign_type`), populated when a `foreign import`
   is checked, so C type names never collide with Titan symbols.
@@ -66,26 +67,31 @@ return types.
 order, computing its type without looking at function bodies: `TopLevelFunc`
 gets a `types.Function` built from its written parameter/return types;
 `TopLevelRecord` builds its `Type.Field` list and registers
-`types.Record(fqtn, fields, {}, {})` in `types.registry` under
-`modname .. "." .. name`; statics and methods attach themselves to the
+`types.Record(fqtn, fields, {}, {}, nfields)` in `types.registry` under
+`modname .. "." .. name`; record functions and methods attach themselves to the
 registered record type; imports run the loader; variables check their
 initializers. Duplicate handling happens here: `toplevel_name(node)` yields
 the declared name (the local name for imports; `nil` for methods and
-statics, which have their own clash logic against the record's existing
-fields, methods and statics); a `st:find_dup` hit produces `duplicate
+record functions, which have their own clash logic against the record's existing
+fields, methods and record functions); a `st:find_dup` hit produces `duplicate
 declaration for %s, previous one at line %d` and sets `node._ignore = true`.
 Everything downstream — pass 2, `makemoduletype`, the coder — must skip
 `_ignore`d nodes; forgetting that is a classic source of crashes.
 
-**Pass 2 — bodies** (`checkbodies`). Checks function, method and static
+**Pass 2 — bodies** (`checkbodies`). Checks function, method and record-function
 bodies (`checkfunc`, each in a fresh scope; `checkmethod` first synthesizes a
 `self` declaration typed as the record's `Type.Nominal`), and validates
 record **field types** — deferring those to pass 2 is what makes recursive
 and mutually recursive records typecheck, since by then every record of the
-module is in the registry. After both passes, `makemoduletype` builds the
-module's interface from the non-`islocal`, non-`_ignore`, non-import top
-levels (`TopLevelVar` → `Type.ModuleVariable`; `TopLevelFunc`/
-`TopLevelRecord` → `Type.ModuleMember`).
+module is in the registry. `checkfuncbody` also synthesizes a read-only local
+`L` in every function-like body. Its type is `lua_State *` in the C FFI type
+family; if a `foreign import` has already introduced `lua_State`, the checker
+reuses that type identity, otherwise it creates the same opaque declaration.
+After both passes, `makemoduletype` builds the module's interface from the
+non-`islocal`, non-`_ignore`, non-import top levels (`TopLevelVar` →
+`Type.ModuleVariable`; `TopLevelFunc`/`TopLevelRecord` →
+`Type.ModuleMember`). Local record fields, methods and functions are likewise
+left out of serialized public record interfaces.
 
 `checker.has_main(ast)` is a post-check used by `titanc` to decide between
 building a shared library and a standalone executable: it looks for a
@@ -532,7 +538,11 @@ Two real loaders exist in `driver.lua`:
   `load("return " .. s, modname, "t", types)`, the `types` module itself
   serving as the environment. C FFI types are *not* serializable
   (`types.serialize` raises on any type tree containing one), so imported C
-  types cannot cross a compiled-interface boundary.
+  types cannot cross a compiled-interface boundary. Local record declarations
+  and local record members are omitted from the serialized interface; exported
+  records still serialize their total `nfields` count and each public
+  `Field.index`, so public fields keep their real `Udata` slot even when local
+  fields were skipped.
 * `driver.tableloader` is the in-memory variant for tests; it deliberately
   serializes and re-loads every module type, so the round-trip is exercised
   by every import test in the suite.
@@ -543,6 +553,12 @@ the C parser pipeline and converts each declaration with
 declarations become `type_members` plus entries in the symbol table's
 `foreign_types` namespace, which is what lets local annotations such as
 `c.size_t` resolve (see [FFI internals](ffi-internals.md)).
+
+After the module interface is built, export validation rejects any public type
+tree that mentions a local record type, and any public type tree that mentions a
+C FFI type. For records, the walkers skip local fields, local methods and local
+record functions before applying the C-type check, which is why an exported record may
+have a private C-typed field as long as that field is local.
 
 ## Process-global state
 
