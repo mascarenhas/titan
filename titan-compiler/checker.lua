@@ -995,7 +995,7 @@ checkstat = util.make_visitor({
                             or var._decl._tag == "Type.ModuleMember"
                             or var._decl._tag == "Type.StaticMethod") then
                     -- Cannot rebind a function *declaration* (top-level
-                    -- function, imported module function, or record static).
+                    -- function, imported module function, or record function).
                     -- Assigning a value *into* a function-typed local, param
                     -- or field is fine and falls through to the normal path.
                     checker.typeerror(errors, var.loc, "trying to assign to a function")
@@ -1186,7 +1186,7 @@ checkvar = util.make_visitor({
             if decl then
                 if not is_record_member_visible_from(st, decl) then
                     node._type = invalid(errors, node.loc,
-                        "record static '%s.%s' is local to module '%s'",
+                        "record function '%s.%s' is local to module '%s'",
                         ltype.name, node.name, record_module(ltype.name))
                 else
                     node._decl = decl
@@ -2061,7 +2061,7 @@ checkexp = util.make_visitor({
                 ftype = ftype.base
             end
             -- A callee may be a statically-known function (top-level function,
-            -- record static, imported module function) or any function-typed
+            -- record function, imported module function) or any function-typed
             -- value (a local/param, a returned function, ...). The coder tells
             -- the two apart; here we only require the callee to be a function.
             if ftype._tag ~= "Type.Function" then
@@ -2769,14 +2769,14 @@ local toplevel_visitor = util.make_visitor({
         if not record then
             node._ignore = true
             checker.typeerror(errors, node.loc,
-                "record referenced by static method declaration '%s.%s' does not exist",
+                "record referenced by record function declaration '%s.%s' does not exist",
                 node.class, node.name)
             return
         end
         if record._tag ~= "Ast.TopLevelRecord" then
             node._ignore = true
             checker.typeerror(errors, node.loc,
-                "member referenced by static method declaration '%s.%s' is not a record",
+                "member referenced by record function declaration '%s.%s' is not a record",
                 node.class, node.name)
             return
         end
@@ -2785,7 +2785,7 @@ local toplevel_visitor = util.make_visitor({
             if field.name == node.name then
                 node._ignore = true
                 checker.typeerror(errors, node.loc,
-                "cannot declare static method '%s.%s' as field '%s' exists in record '%s'",
+                "cannot declare record function '%s.%s' as field '%s' exists in record '%s'",
                     node.class, node.name, field.name, node.class)
                 return
             end
@@ -2793,14 +2793,14 @@ local toplevel_visitor = util.make_visitor({
         if rectype.methods[node.name] then
             node._ignore = true
             checker.typeerror(errors, node.loc,
-                "cannot declare static method '%s.%s' as method '%s:%s' exists in record '%s'",
+                "cannot declare record function '%s.%s' as method '%s:%s' exists in record '%s'",
                     node.class, node.name, node.class, node.name, node.class)
             return
         end
         if rectype.functions[node.name] then
             node._ignore = true
             checker.typeerror(errors, node.loc,
-                "redeclaration of static method '%s.%s'", node.class, node.name)
+                "redeclaration of record function '%s.%s'", node.class, node.name)
             return
         end
         node._record = record
@@ -2844,7 +2844,7 @@ local toplevel_visitor = util.make_visitor({
         if rectype.functions[node.name] then
             node._ignore = true
             checker.typeerror(errors, node.loc,
-                "cannot declare method '%s:%s' as static method '%s.%s' exists in record '%s'",
+                "cannot declare method '%s:%s' as record function '%s.%s' exists in record '%s'",
                     node.class, node.name, node.class, node.name, node.class)
             return
         end

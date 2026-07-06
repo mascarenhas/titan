@@ -306,6 +306,44 @@ describe("Titan parser", function()
         })
     end)
 
+    it("can parse toplevel record function declarations", function()
+        assert_program_ast([[
+            function Record.fA(): nil
+            end
+        ]], {
+            { _tag = "Ast.TopLevelStatic",
+                class = "Record",
+                name = "fA",
+                params = {},
+                block = { _tag = "Ast.StatBlock", stats = {} } },
+        })
+
+        assert_program_ast([[
+            function Record.fB(x:int): nil
+            end
+        ]], {
+            { _tag = "Ast.TopLevelStatic",
+                class = "Record",
+                name = "fB",
+                params = {
+                    { _tag = "Ast.Decl", name = "x" },
+                },
+                block = { _tag = "Ast.StatBlock", stats = {} } },
+        })
+
+        assert_program_ast([[
+            local function Record.fC(): nil
+            end
+        ]], {
+            { _tag = "Ast.TopLevelStatic",
+                islocal = true,
+                class = "Record",
+                name = "fC",
+                params = {},
+                block = { _tag = "Ast.StatBlock", stats = {} } },
+        })
+    end)
+
     it("omitting the return annotation yields a zero-return () function", function ()
         assert_program_ast([[
             function foo()
@@ -1508,11 +1546,10 @@ describe("Titan parser", function()
             })
         end)
 
-        it("as the last parameter of a record static (synthesized `new`)", function()
-            -- Records desugar each field into a `new` static; the shared
-            -- `paramlist` rule used by statics is exercised here. There is no
-            -- surface syntax for a user-written vararg static, so we confirm the
-            -- record's `new` parses through the same param machinery.
+        it("as the last parameter of a synthesized record function (`new`)", function()
+            -- Records desugar each field into a `new` record function; this
+            -- confirms the synthesized function still parses through the same
+            -- parameter machinery as user-written record functions.
             assert_program_ast([[
                 record Point
                     x: integer

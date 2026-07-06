@@ -352,16 +352,16 @@ test writes a wrongly-typed value to a field from Lua. Records with zero
 fields get stub `__index`/`__newindex` that always error, with an
 unquoted message variant (`field %s not found in record %s`).
 
-Statics need no record metatable: each record name becomes a plain Lua
-**static-namespace table** with its statics inserted, held in a dedicated
+Record functions need no record metatable: each record name becomes a plain Lua
+**static-namespace table** with its public record functions inserted, held in a dedicated
 `_mod` user-value slot and served by the module metatable's `__index`
 (read-only) under the record's name. So `mod.Point.new(2, 3)` resolves
 `mod.Point` through the module `Udata`'s `__index` to that table, then
 does an ordinary table lookup plus a wrapped call — `new` was desugared
-into a static method by the parser long before codegen.
+into a record function by the parser long before codegen.
 Local records are not entered in the module member map. Public records with a
-local `new` static still allocate their namespace table for Titan-internal use,
-but the local static is not inserted into the Lua-visible table.
+local `new` still allocate their namespace table for Titan-internal use, but
+local record functions are not inserted into the Lua-visible table.
 
 ### Identity and tag security
 

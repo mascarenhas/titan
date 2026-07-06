@@ -188,7 +188,7 @@ The checker has FFI-specific handling in a few narrow places:
 
 Export checks use `types.contains_c_ffi_type`: any public function signature,
 public variable, or public record member that mentions a C type is rejected.
-Local record fields, methods and statics are skipped before this check, so a
+Local record fields, methods and record functions are skipped before this check, so a
 private C-typed record slot can remain module-internal. `CModule` itself is
 rejected as a first-class value in the same `ExpVar` path as ordinary Titan
 modules.

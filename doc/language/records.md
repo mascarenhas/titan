@@ -136,7 +136,7 @@ followed by the expected signature).
 Each argument gets the usual implicit coercions of a function argument,
 so `Point.new(2, 3)` fills the `float` fields with `2.0` and `3.0`.
 
-`new` is not magic: the compiler synthesizes it as a static function
+`new` is not magic: the compiler synthesizes it as a record function
 whose body is a record constructor expression over its parameters. For a local
 record, `new` is local too. For an exported record with any local field, `new`
 is also local, because exposing it would let outside code supply private field
@@ -355,36 +355,58 @@ including a dependency available only as a compiled `.so`. The full rules,
 errors and examples are in
 [anonymous functions and closures](closures.md#bound-method-references).
 
-## Static functions
+## Record functions
 
-`new` is currently the *only* static function a record has. There is no
-syntax for declaring your own — `function Point.origin() ... end` is a
-syntax error in the current grammar. If you need a custom constructor,
-write a module function:
+A record function is declared at top level with a dot-qualified record name:
 
 ```lua
-function origin(): Point
+function Point.origin(): Point
     return Point.new(0.0, 0.0)
 end
 ```
 
-Accessing a static the record does not have is a compile-time error
+Record functions are called as `RecName.func(...)`. They have no implicit
+`self` parameter; use a method (`function RecName:m(...)`) when the function
+operates on a receiver. A record function may be declared `local`, in which
+case it is visible only inside the defining module:
+
+```lua
+local function Point.checked(x: float, y: float): Point
+    return Point.new(x, y)
+end
+```
+
+The synthesized `new` constructor is just a record function. When `new` is local
+because the record is local or has local fields, a public record function is the
+usual way to expose a controlled factory:
+
+```lua
+record Cell
+    local generation: integer
+    value: integer
+end
+
+function Cell.fresh(value: integer): Cell
+    return Cell.new(0, value)
+end
+```
+
+Accessing a function the record does not have is a compile-time error
 (`trying to access invalid record function 'nope'`), and the record type
 itself is not a value — `return Point` gives
 `trying to access record type 'test.Point' as a first-class value`.
 
-`Rec.new` itself, however, **is** a first-class value, exactly like a
+`Rec.func` itself is a first-class value, exactly like a
 top-level function: it can be passed as an argument, stored in a variable,
 array, map, or record field, returned, and called indirectly, not just
-written inline as `Rec.new(...)`. If `new` is local because the record is local
-or has local fields, that first-class value is available only inside the
-defining module.
+written inline as `Rec.func(...)`. If the record function is local, that
+first-class value is available only inside the defining module.
 
 ## Records across modules
 
 An exported record declared in one module is usable from any module that
 [imports](modules.md) it: the qualified name works in type position, and public
-fields, public methods, and public statics work normally:
+fields, public methods, and public record functions work normally:
 
 ```lua
 -- geometry.titan
@@ -410,9 +432,10 @@ end
 
 Local records and local record members are omitted from the imported interface.
 If an exported record has local fields, importers can still receive and pass
-values of that record type and access its public fields and methods, but they
-cannot construct it directly with `Rec.new` or `{ ... }`; the defining module
-should export a factory function when outside code needs instances.
+values of that record type and access its public fields, methods, and record
+functions, but they cannot construct it directly with `Rec.new` or `{ ... }`;
+the defining module should export a factory record function or module function
+when outside code needs instances.
 
 Record identity is global per type, not per loaded copy: records of the
 same type created by different modules — or by the same module loaded
@@ -451,9 +474,10 @@ p.x = 10.0                       -- field writes are type-checked
 
 The details, all run-time behavior:
 
-* **Construction.** Each record name is a member of the module — a small
-  namespace table holding its statics — so `test.Point.new(1, 2)` works
-  from Lua for exported records whose `new` is public. Arity is checked at run time:
+* **Construction and record functions.** Each record name is a member of the
+  module — a small namespace table holding its public record functions — so
+  `test.Point.new(1, 2)` and `test.Point.origin()` work from Lua when those
+  functions are public. Arity is checked at run time:
   `calling Titan function new with 1 arguments, but expected 2`.
 * **Field reads and writes** go through the record's metatable and are
   fully checked. An unknown field, read or written, raises
@@ -466,8 +490,9 @@ The details, all run-time behavior:
   "field ... not found" error — method names are not fields.
 * **Local records and members** are hidden from Lua. A local record is not a
   member of the module value. Local fields and methods on an exported record
-  raise "field ... not found" when Lua tries to read or write them. A local
-  `new` static is absent from the record namespace table.
+  raise "field ... not found" when Lua tries to read or write them. Local
+  record functions, including a local `new`, are absent from the record
+  namespace table.
 * **Identity.** A record instance is one stable userdata: sending the
   same record to Lua twice (or round-tripping it through Lua, an array,
   or a `value`) yields the same object, and mutations on either side are

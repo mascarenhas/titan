@@ -201,7 +201,7 @@ end
 -- shows the qualified name instead of the mangled symbol. Forms:
 --   top-level func  -> "<module>.<func>"
 --   method          -> "<module>.<record>:<method>"
---   record static   -> "<module>.<record>.<static>"
+--   record function -> "<module>.<record>.<function>"
 --   anonymous/lambda-> "anonymous function at <file>.titan:<linedefined>"
 local function register_trace_name(tlcontext, symbol, qualname)
     table.insert(tlcontext.names, { symbol, qualname })
@@ -2409,7 +2409,7 @@ local function codeforeignvar(_, node)
 end
 
 -- Is the callee of this ExpCall a statically-known function symbol (a top-level
--- function, a record static, an imported module function, or a foreign call)?
+-- function, a record function, an imported module function, or a foreign call)?
 -- If so, codecall emits a direct native call. Otherwise the callee is a
 -- first-class function *value* and codevaluecall handles it.
 local function is_static_callee(node)
@@ -2970,7 +2970,7 @@ local function codecall(ctx, node)
         local cstat, cexp = materialize(ctx, node.exp)
         table.insert(castats, cstat)
         table.insert(caexps, modarg)
-        table.insert(caexps, "NULL")  -- _fn: a static method call has no closure
+        table.insert(caexps, "NULL")  -- _fn: a record method call has no closure
         table.insert(caexps, cexp)
     end
     -- The callee's static type, to detect a variadic callee and its fixed arity.
@@ -4165,7 +4165,7 @@ local function codevar(ctx, node)
             }))
         elseif node._decl._tag == "Type.StaticMethod"
                and ctx.tlcontext.static_slots[node._decl.fqtn .. "." .. node._decl.name] then
-            -- Reference to a record static (e.g. `Rec.new`) as a value: read its
+            -- Reference to a record function (e.g. `Rec.new`) as a value: read its
             -- canonical closure from the shadow slot allocated for it.
             return "", getslot(node._type, nil, render("&_mod->uv[$SLOT].uv", {
                 SLOT = c_integer_literal(
@@ -7135,7 +7135,7 @@ local function allocate_upvalues(tlcontext, ast)
         end
     end
     -- Referenced local functions (private, so only when used as a value) and
-    -- every record static (e.g. `Rec.new`) each get a canonical-closure slot.
+    -- every record function (e.g. `Rec.new`) each get a canonical-closure slot.
     for _, node in pairs(ast) do
         if not node._ignore then
             if node._tag == "Ast.TopLevelFunc" and node.islocal and node._valref then
@@ -7345,7 +7345,7 @@ function coder.generate(modname, ast, static_deps)
                     table.insert(code, node._luabody)
                     -- Build the static's canonical 3-upvalue closure once into
                     -- its shadow slot. Public statics are also installed into
-                    -- the record's static-namespace table; local statics remain
+                    -- the record's static-namespace table; local record functions remain
                     -- reachable to Titan code through direct/static-slot paths.
                     local closure_init
                     if node.islocal then

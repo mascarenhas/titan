@@ -114,7 +114,7 @@ end
 ```
 
 the synthesized `Point.new` (the parser desugars every record into a
-declaration plus a `new` static method) generates, in `coderecord`
+declaration plus a `new` record function) generates, in `coderecord`
 (`coder.lua`), a single allocation:
 
 ```c

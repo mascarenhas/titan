@@ -2663,6 +2663,78 @@ describe("Titan typecheck of records", function()
         assert.match("method 'secret' not found in record 'foo%.Box'", err)
     end)
 
+    it("allows record functions to construct records with local fields", function()
+        local modules = {
+            foo = [[
+                record Box
+                    local hidden: integer
+                    shown: integer
+                end
+
+                function Box.make(shown: integer): Box
+                    return Box.new(100, shown)
+                end
+
+                function reveal(b: Box): integer
+                    return b.hidden + b.shown
+                end
+            ]],
+            bar = [[
+                local f = import "foo"
+
+                function ok(): integer
+                    local b = f.Box.make(23)
+                    return b.shown + f.reveal(b)
+                end
+            ]]
+        }
+        local ok, err = run_checker_modules(modules, "bar")
+        assert.truthy(ok, err)
+    end)
+
+    it("allows local record functions inside their module and hides them outside", function()
+        local modules = {
+            foo = [[
+                record Box
+                    x: integer
+                end
+
+                local function Box.secret(x: integer): Box
+                    return Box.new(x)
+                end
+
+                function reveal(): integer
+                    local make = Box.secret
+                    return make(17).x
+                end
+            ]],
+            bar = [[
+                local f = import "foo"
+
+                function bad(): integer
+                    return f.Box.secret(1).x
+                end
+            ]]
+        }
+        local ok, err = run_checker_modules(modules, "bar")
+        assert.falsy(ok)
+        assert.match("trying to access invalid record function 'secret'", err)
+    end)
+
+    it("rejects exported record functions that mention module-local records", function()
+        assert_type_error("cannot export local record type 'test.Secret'", [[
+            local record Secret
+                x: integer
+            end
+            record Public
+            end
+
+            function Public.wrap(secret: Secret): Public
+                return Public.new()
+            end
+        ]])
+    end)
+
     it("uses transitive external record type wrongly", function ()
         local modules = {
             baz = [[

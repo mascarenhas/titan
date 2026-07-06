@@ -135,8 +135,9 @@ A Titan source file is a module: a sequence of top-level declarations,
 in any order, with no executable statements outside functions.
 
 ```
-program  ::= {tlmethod | tlfunc | tlvar | tlrecord | tlimport | tlforeignimport}
+program  ::= {tlmethod | tlrecfunc | tlfunc | tlvar | tlrecord | tlimport | tlforeignimport}
 tlmethod ::= [local] function Name ':' Name '(' [parlist] ')' [':' rettype] block end
+tlrecfunc ::= [local] function Name '.' Name '(' [parlist] ')' [':' rettype] block end
 tlfunc   ::= [local] function Name '(' [parlist] ')' [':' rettype] block end
 tlvar    ::= [local] decl '=' exp
 tlrecord ::= [local] record Name {recordfield} end
@@ -163,6 +164,9 @@ function Point:move(dx: float, dy: float)
     self.x = self.x + dx
     self.y = self.y + dy
 end
+function Point.origin(): Point
+    return Point.new(0.0, 0.0)
+end
 ```
 
 Notes on the top level:
@@ -170,14 +174,14 @@ Notes on the top level:
 * A missing `[':' rettype]` annotation means the function returns
   *nothing* — its type is `(...) -> ()`, the zero-return form, distinct
   from a `: nil` return of one `nil` value (see [Functions](functions.md)).
-* Methods are written outside the `record ... end` body, which contains only
-  fields; a record may be empty (`record A end` parses). `local` on a record,
-  record field, or method makes that declaration visible only inside the
-  defining module.
+* Methods and record functions are written outside the `record ... end` body,
+  which contains only fields; a record may be empty (`record A end` parses).
+  `local` on a record, record field, method, or record function makes that
+  declaration visible only inside the defining module.
 * A `record` also synthesizes a static constructor `Name.new`, taking
-  the fields as positional parameters in declaration order; there is no
-  surface syntax for other static functions. `Name.new` is local when the
-  record is local or any field is local. See [Records](records.md).
+  the fields as positional parameters in declaration order. `Name.new` is
+  local when the record is local or any field is local. See
+  [Records](records.md).
 * A module variable's initializer is a full expression; after `=`, the
   keywords `import` and `foreign import` mark an import instead.
 

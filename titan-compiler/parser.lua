@@ -254,6 +254,12 @@ function defs.methoddecl(pos, islocal, class, name, params, rettypes, block)
     return node
 end
 
+function defs.staticdecl(pos, islocal, class, name, params, rettypes, block)
+    local node = ast.TopLevelStatic(pos, class, name, params, rettypes, block)
+    node.islocal = islocal
+    return node
+end
+
 local function has_local_field(fields)
     for _, field in ipairs(fields) do
         if field.islocal then return true end
@@ -354,6 +360,7 @@ local grammar = re.compile([[
 
     program         <-  SKIP*
                         {| ( method
+                           / static
                            / toplevelfunc
                            / toplevelvar
                            / toplevelrecord
@@ -363,6 +370,10 @@ local grammar = re.compile([[
     method          <- (P  localopt FUNCTION NAME COLON NAME^NameMethod
                            LPAREN^LParPList paramlist RPAREN^RParPList
                            rettypeopt block END^EndFunc)         -> methoddecl
+
+    static          <- (P  localopt FUNCTION NAME DOT NAME^NameStatic
+                           LPAREN^LParPList paramlist RPAREN^RParPList
+                           rettypeopt block END^EndFunc)         -> staticdecl
 
     toplevelfunc    <- (P  localopt FUNCTION NAME^NameFunc
                            LPAREN^LParPList paramlist RPAREN^RParPList

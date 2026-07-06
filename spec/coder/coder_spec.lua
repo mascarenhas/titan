@@ -2519,6 +2519,44 @@ describe("Titan code generator", function()
         ]])
     end)
 
+    it("calls public and local record functions", function ()
+        run_coder([[
+            record Box
+                local hidden: integer
+                shown: integer
+            end
+
+            function Box.make(shown: integer): Box
+                return Box.new(shown * 10, shown)
+            end
+
+            local function Box.secret(seed: integer): Box
+                return Box.new(seed, seed + 1)
+            end
+
+            function reveal(b: Box): integer
+                return b.hidden + b.shown
+            end
+
+            function via_local(): integer
+                local make = Box.secret
+                local b = make(41)
+                return b.hidden + b.shown
+            end
+        ]], [[
+            local b = test.Box.make(7)
+            assert(test.reveal(b) == 77)
+            assert(b.shown == 7)
+            assert(test.via_local() == 41 + 42)
+            assert(test.Box.make == test.Box.make)
+            assert(test.Box.secret == nil)
+            assert(test.Box.new == nil)
+            local ok, err = pcall(function () return b.hidden end)
+            assert(not ok)
+            assert(err:match('not found'))
+        ]])
+    end)
+
     it("initializes a record using new", function ()
         run_coder([[
             record Point
@@ -3347,7 +3385,7 @@ describe("single-Udata representation (GC stress)", function()
 
     -- 6. Module Udata Lua-facing surface sanity: the module table is gone and
     -- `require` returns the Udata. Functions call, exported vars read/write, and
-    -- record statics construct with stable identity.
+    -- record functions construct with stable identity.
     it("module Udata surface: call, var get/set, static identity", function ()
         run_coder([[
             record Rec
@@ -3368,7 +3406,7 @@ describe("single-Udata representation (GC stress)", function()
             assert(test.v == 10)
             test.v = 99
             assert(test.v == 99)
-            -- record static constructs and has stable identity
+            -- record function constructs and has stable identity
             local r = test.Rec.new(5)
             assert(type(r) == 'userdata')
             assert(test.getx(r) == 5)

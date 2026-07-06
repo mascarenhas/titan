@@ -22,7 +22,7 @@ value — whose members you access exactly like table fields (`m.f`, `m.v`,
 * **one function per exported Titan function** (and nothing for functions
   declared `local` — they are invisible to Lua), returned read-only;
 * **one namespace per exported record type**, a small table holding the
-  record's public static functions — in particular the automatically generated
+  record's public record functions — in particular the automatically generated
   constructor when it is public, so `mod.Point.new(2, 3)` works from Lua for a
   public `new` (see [Records](records.md));
 * **exported module variables**, read and written through the metatable
@@ -268,7 +268,7 @@ like an object:
 * **Unknown fields**, including local fields and local methods, raise
   `file:line:col: field 'name' not found in record 'mod.Rec'` on both
   read and write — there is no Lua-style `nil` for missing fields.
-* **Statics**, including the generated `new`, are reached as a member of
+* **Record functions**, including the generated `new`, are reached as a member of
   the module value: `mod.Point.new(2, 3)`. Local records are not module members,
   and a local `new` static is absent from the namespace table.
 

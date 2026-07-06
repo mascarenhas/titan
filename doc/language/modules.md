@@ -207,7 +207,7 @@ Exported variables of the imported module can be both read and
 assigned (`geom.origin.x = 0.0` above); writes from Titan are
 statically checked and compile to direct stores, with no run-time type
 check. Record types are referenced as `alias.Name` in type annotations,
-and their constructors and static functions as `alias.Name.new(...)`.
+and their record functions as `alias.Name.new(...)` or `alias.Name.make(...)`.
 
 An exported function is itself a **first-class value**: besides calling it
 as `geom.norm(p)`, the importer can reference `geom.norm` as a value — pass

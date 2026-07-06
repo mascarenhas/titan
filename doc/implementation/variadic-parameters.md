@@ -1,6 +1,6 @@
 # Variadic parameters
 
-A Titan function, lambda, method or record static may end its parameter list
+A Titan function, lambda, method or record function may end its parameter list
 with a single **variadic parameter** `...: t` — the `name: type` declaration
 style with no name, always the last parameter. Its element type is mandatory on
 top-level functions, methods and function-type annotations; an anonymous

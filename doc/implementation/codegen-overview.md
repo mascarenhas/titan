@@ -145,7 +145,7 @@ Symbol names come from `mangle_qn` (`coder.lua`), which replaces `.` and
 `-` with `_`: module `foo.bar` yields `foo_bar_init`, `foo_bar_abi`,
 `foo_bar_types` and
 `luaopen_foo_bar`; a function `f` in it becomes `foo_bar_f_titan` /
-`foo_bar_f_titanentry_lua`; methods and statics use
+`foo_bar_f_titanentry_lua`; methods and record functions use
 `<mangled-fqtn>_<name>_titanmethod` / `_titanentry_luamethod` and
 `_titanstatic` / `_titanentry_luastatic`.
 
@@ -376,7 +376,7 @@ directories.
 
 The current ABI is **0.11**. The 0.10 to 0.11 bump covers module-local
 records and record members: `<mangled>_types` omits local records and local
-fields/methods/statics from the serialized public interface, while retaining
+fields/methods/record functions from the serialized public interface, while retaining
 the full record field-slot count so an imported `.so` still reads public fields
 from their original `Udata` user-value slots. A 0.10 checker would not know how
 to interpret that layout metadata.
@@ -453,7 +453,7 @@ would still re-emit their handles.)
 pushes the module `Udata` itself — so **`require` returns a userdata**,
 not a table, with **no separate module table at all**. Its members —
 exported functions, exported variables, and one static-namespace table
-per record (carrying its statics) — are all served by a metatable on the
+per record (carrying its public record functions) — are all served by a metatable on the
 `Udata` ([Lua interop internals](lua-interop-internals.md)).
 `<prefix>_abi` is a tiny marker function that returns the current
 `TITAN_VER`; both the compile-time `.so` loader and generated dynamic

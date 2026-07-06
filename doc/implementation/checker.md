@@ -68,17 +68,17 @@ order, computing its type without looking at function bodies: `TopLevelFunc`
 gets a `types.Function` built from its written parameter/return types;
 `TopLevelRecord` builds its `Type.Field` list and registers
 `types.Record(fqtn, fields, {}, {}, nfields)` in `types.registry` under
-`modname .. "." .. name`; statics and methods attach themselves to the
+`modname .. "." .. name`; record functions and methods attach themselves to the
 registered record type; imports run the loader; variables check their
 initializers. Duplicate handling happens here: `toplevel_name(node)` yields
 the declared name (the local name for imports; `nil` for methods and
-statics, which have their own clash logic against the record's existing
-fields, methods and statics); a `st:find_dup` hit produces `duplicate
+record functions, which have their own clash logic against the record's existing
+fields, methods and record functions); a `st:find_dup` hit produces `duplicate
 declaration for %s, previous one at line %d` and sets `node._ignore = true`.
 Everything downstream — pass 2, `makemoduletype`, the coder — must skip
 `_ignore`d nodes; forgetting that is a classic source of crashes.
 
-**Pass 2 — bodies** (`checkbodies`). Checks function, method and static
+**Pass 2 — bodies** (`checkbodies`). Checks function, method and record-function
 bodies (`checkfunc`, each in a fresh scope; `checkmethod` first synthesizes a
 `self` declaration typed as the record's `Type.Nominal`), and validates
 record **field types** — deferring those to pass 2 is what makes recursive
@@ -90,7 +90,7 @@ reuses that type identity, otherwise it creates the same opaque declaration.
 After both passes, `makemoduletype` builds the module's interface from the
 non-`islocal`, non-`_ignore`, non-import top levels (`TopLevelVar` →
 `Type.ModuleVariable`; `TopLevelFunc`/`TopLevelRecord` →
-`Type.ModuleMember`). Local record fields, methods and statics are likewise
+`Type.ModuleMember`). Local record fields, methods and functions are likewise
 left out of serialized public record interfaces.
 
 `checker.has_main(ast)` is a post-check used by `titanc` to decide between
@@ -557,7 +557,7 @@ declarations become `type_members` plus entries in the symbol table's
 After the module interface is built, export validation rejects any public type
 tree that mentions a local record type, and any public type tree that mentions a
 C FFI type. For records, the walkers skip local fields, local methods and local
-statics before applying the C-type check, which is why an exported record may
+record functions before applying the C-type check, which is why an exported record may
 have a private C-typed field as long as that field is local.
 
 ## Process-global state

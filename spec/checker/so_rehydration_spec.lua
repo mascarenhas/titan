@@ -129,6 +129,12 @@ describe("typechecker rehydration of .so-only imports", function()
             function make(hidden: integer, shown: integer): Box
                 return Box.new(hidden, shown)
             end
+            function Box.make(shown: integer): Box
+                return Box.new(5, shown)
+            end
+            local function Box.secret_box(hidden: integer): Box
+                return Box.new(hidden, 0)
+            end
             function reveal(b: Box): integer
                 return b.hidden + b:secret()
             end
@@ -137,7 +143,8 @@ describe("typechecker rehydration of .so-only imports", function()
             local f = import "lrecfoo"
             function bar(): integer
                 local b = f.make(3, 11)
-                return b.shown + b:shown_twice() + f.reveal(b)
+                local c = f.Box.make(13)
+                return b.shown + b:shown_twice() + f.reveal(b) + c.shown
             end
         ]])
         assert.equal(0, #good, table.concat(good, "\n"))
@@ -148,6 +155,8 @@ describe("typechecker rehydration of .so-only imports", function()
         assert.equal("shown", rec.fields[1].name)
         assert.equal(1, rec.fields[1].index)
         assert.falsy(rec.functions.new)
+        assert.truthy(rec.functions.make)
+        assert.falsy(rec.functions.secret_box)
         assert.falsy(rec.methods.secret)
         assert.truthy(rec.methods.shown_twice)
 
@@ -172,6 +181,16 @@ describe("typechecker rehydration of .so-only imports", function()
         assert.truthy(#method >= 1)
         assert.match("method 'secret' not found in record 'lrecfoo%.Box'",
             table.concat(method, "\n"))
+
+        local func = so_check({ dep }, "lrecbar", [[
+            local f = import "lrecfoo"
+            function bar(): integer
+                return f.Box.secret_box(3).shown
+            end
+        ]])
+        assert.truthy(#func >= 1)
+        assert.match("trying to access invalid record function 'secret_box'",
+            table.concat(func, "\n"))
 
         local constructor = so_check({ dep }, "lrecbar", [[
             local f = import "lrecfoo"

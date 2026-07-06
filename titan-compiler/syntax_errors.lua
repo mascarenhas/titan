@@ -30,6 +30,8 @@ local errors = {
 
    NameFunc = "Expected a function name after 'function'.",
 
+   NameStatic = "Expected a record function name after the dot.",
+
    LParPList = "Expected '(' for the parameter list.",
 
    RParPList = "Expected ')' to close the parameter list.",
