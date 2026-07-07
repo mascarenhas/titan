@@ -118,7 +118,7 @@ lua_Integer counter_inc_titan(lua_State *L, Udata *_mod, CClosure *_fn, lua_Inte
 }
 
 static int counter_inc_titanentry_lua(lua_State *L) {
-    ...    /* arity check, error handler, checkandget arguments */
+    ...    /* argument count adjustment, error handler, checkandget arguments */
     lua_Integer res = counter_inc_titan(L, _mod, _fn, _param_1);
     setivalue(s2v(_firstret), res);
     ...
@@ -298,12 +298,13 @@ stored into reserved caller slots immediately after the branch joins.
 
 For every exported function, method and static, `genluaentry` emits a
 companion `static int <name>_lua(lua_State *L)` with the standard
-`lua_CFunction` signature. It checks arity strictly (raising
-`calling Titan function %s with %d arguments, but expected %d`), installs
-the runtime's `errorhandler` as `L->errfunc` for the duration of the
-call, recovers the called closure as `_fn = clCvalue(s2v(func))` and
-`_mod = uvalue(&_fn->upvalue[0])` from it (the module value is a `Udata`;
-so a closure entered from Lua still reaches its own captures), checks and
+`lua_CFunction` signature. It rejects surplus fixed arguments (raising
+`calling Titan function %s with %d arguments, but expected at most %d`),
+pads missing fixed arguments with nil on the Lua stack, installs the
+runtime's `errorhandler` as `L->errfunc` for the duration of the call,
+recovers the called closure as `_fn = clCvalue(s2v(func))` and `_mod =
+uvalue(&_fn->upvalue[0])` from it (the module value is a `Udata`; so a
+closure entered from Lua still reaches its own captures), checks and
 converts each argument with
 `checkandget`, reserves one stack slot per return value, calls the native
 function (passing `_fn` so a closure body can read its captures), and

@@ -293,10 +293,16 @@ the error `cannot use '...' to return from a function that returns no values`.
 ### Forwarding `...` to another variadic function
 
 When the trailing `...` instead reaches a **variadic** callee — `f(...)` or
-`f(a, ...)` where `f` is itself variadic — the *whole* run is forwarded as
-that callee's variadic arguments (a true run-time-sized spread, not
-adjust-up). This is the one spread that carries the count through. The two
-runs' element types must be **compatible**:
+`f(a, ...)` where `f` is itself variadic — the run-time count is carried
+through. If the static prefix has already filled the callee's fixed
+parameters, the remaining run becomes that callee's variadic arguments. If
+the static prefix is short, the first elements of the run are borrowed for
+the missing fixed parameters, with the same nil-fill rule used for short
+call arguments: fixed parameters whose types accept `nil` receive `nil`
+when the run is too short; fixed parameters that cannot accept `nil` raise
+on an under-supplied run. Whatever remains after the fixed parameters
+becomes the callee's variadic run. The two variadic element types must be
+**compatible**:
 
 ```lua
 function forward(...: integer): integer
@@ -349,10 +355,10 @@ variadic is a type error.
 ## Using a variadic function from Lua
 
 A variadic exported function is called from Lua like any other: pass the
-fixed arguments, then as many trailing values as you like. Unlike a
-fixed-arity Titan function — which is [strict about argument count](functions.md#strict-arity)
-— a variadic one accepts **at least** its fixed parameters, with everything
-beyond them becoming the variadic run. The trailing values are checked and
+fixed arguments, then as many trailing values as you like. Missing fixed
+arguments are [padded with `nil`](functions.md#argument-adjustment), just
+as they are for non-variadic Titan functions; everything beyond the fixed
+parameters becomes the variadic run. The trailing values are checked and
 converted to the element type `t` at the boundary, exactly as a fixed
 parameter of type `t` would be, and a wrong-typed one raises the usual
 boundary error.
@@ -370,7 +376,7 @@ end
 local m = require "greet"
 print(m.greet(">"))                  --> >
 print(m.greet(">", "a", "b", "c"))   --> > a b c
-print(pcall(m.greet))                --> false   calling Titan function greet with 0 arguments, but expected at least 1
+print(pcall(m.greet))                --> false   greet.titan:1:1: type error, expected string but found nil
 ```
 
 Spreading `...` works across the boundary in both directions: a variadic

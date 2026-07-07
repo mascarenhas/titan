@@ -279,10 +279,12 @@ resolves.
   static args (beyond the callee's fixed params) are each `trycoerce`d to the
   callee's element type. `checkargs` additionally handles the **start-adjust**
   shape, where the static prefix is *shorter* than the callee's fixed params:
-  the missing fixed params are borrowed from the caller's own `...`, and each
-  borrowed fixed-param type must accept the caller's element type
-  (`cannot borrow a '...' element of type %s for fixed parameter %d`). Passing
-  `...` into a C-FFI variadic (`ftype.vararg`) is rejected
+  the missing fixed params are borrowed from the caller's own `...`; each
+  borrowed fixed-param type must accept or coerce the caller's element type
+  (`cannot borrow a '...' element of type %s for fixed parameter %d`). Codegen
+  lowers those borrowed reads with `ExpDotsIndex` plus an ordinary `ExpCast`
+  when needed, and uses nil-fill mode only for fixed parameter types that can
+  accept nil. Passing `...` into a C-FFI variadic (`ftype.vararg`) is rejected
   (`cannot pass '...' to a foreign (C) variadic function`).
 
 `...` is always the sole, last trailer; a list ending in both a multi-return

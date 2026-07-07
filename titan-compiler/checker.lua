@@ -215,6 +215,12 @@ local function c_function_pointer_accepts_function(target, ftype)
     return cfunc and types.equals(c_function_as_function_type(cfunc), ftype)
 end
 
+local function is_foreign_function_var(var)
+    return var and var._tag == "Ast.VarDot"
+        and var.exp and var.exp._type
+        and var.exp._type._tag == "Type.CModule"
+end
+
 local function c_pseudo_member(typ, name)
     if name == "new" then
         return {
@@ -511,7 +517,7 @@ end
 -- other expression. `deficit < 0` is a compile error (too many values for the
 -- slots); `deficit == 0` is a legal no-op (the `...` is simply dropped). `term`
 -- names the context for the over-supply diagnostic.
-local function expand_dots_adjustup(exps, nslots, slottype, term, errors)
+local function expand_dots_adjustup(exps, nslots, slottype, term, errors, nilfill_slot)
     local dotsnode = table.remove(exps) -- pop the trailing ExpDots
     local elem = dotsnode._vararg_elem
     local nstatic = #exps
@@ -528,14 +534,16 @@ local function expand_dots_adjustup(exps, nslots, slottype, term, errors)
         local idxexp = ast.ExpInteger(dotsnode.loc, k)
         idxexp._type = types.Integer()
         local node = ast.ExpDotsIndex(dotsnode.loc, idxexp)
-        if stype and stype._tag == "Type.Option" then
-            -- Optional slot: nil-fill out-of-range. Type the read as the REAL
-            -- element wrapped (`optionize(elem)`), NOT the slot type, so the
-            -- caller's trycoerce/checkmatch inserts the genuine element->base
-            -- conversion (e.g. integer? -> float?) and rejects an incompatible
-            -- element (e.g. integer into a string? slot). Force-setting the slot
-            -- type here would make trycoerce a no-op and bit-reinterpret the
-            -- element in codegen.
+        local nilfill = nilfill_slot and nilfill_slot(stype)
+            or (stype and stype._tag == "Type.Option")
+        if nilfill then
+            -- Nil-fill out-of-range. Type the read as the REAL element wrapped
+            -- (`optionize(elem)`), NOT the slot type, so the caller's
+            -- trycoerce/checkmatch inserts the genuine element->base conversion
+            -- (e.g. integer? -> float?) and rejects an incompatible element
+            -- (e.g. integer into a string? slot). Force-setting the slot type
+            -- here would make trycoerce a no-op and bit-reinterpret the element
+            -- in codegen.
             node._nilfill = true
             node._type = optionize(elem)
         else
@@ -543,6 +551,23 @@ local function expand_dots_adjustup(exps, nslots, slottype, term, errors)
             node._type = elem
         end
         table.insert(exps, node)
+    end
+end
+
+local function nil_can_adjust_to(typ)
+    return typ and (types.coerceable(types.Nil(), typ)
+        or types.compatible(typ, types.Nil()))
+end
+
+local function append_missing_nil_args(args, nparams, loc, fname, errors, ftype)
+    for i = #args + 1, nparams do
+        local ptype = ftype.params[i]
+        local exp = ast.ExpNil(loc)
+        exp._type = types.Nil()
+        exp = trycoerce(exp, ptype, errors)
+        table.insert(args, exp)
+        checkmatch("argument " .. i .. " of call to " .. fname,
+            ptype, exp._type, errors, loc)
     end
 end
 
@@ -1303,8 +1328,12 @@ local function expname(node)
     end
 end
 
--- Typechecks and argument list for a function or method call
-local function checkargs(ftype, args, loc, fname, st, errors)
+-- Typechecks and argument list for a function or method call. When
+-- `allow_missing` is true, a fixed-parameter deficit is adjusted upward by
+-- synthesizing explicit nil arguments; surplus arguments are still rejected
+-- below for non-variadic callees.
+local function checkargs(ftype, args, loc, fname, st, errors, allow_missing)
+    if allow_missing == nil then allow_missing = true end
     local nparams = #ftype.params
     local nargs = #args
     local lastarg = args[nargs]
@@ -1337,13 +1366,15 @@ local function checkargs(ftype, args, loc, fname, st, errors)
             if nstatic < nparams then
                 -- START-ADJUST (§5.7 case 2): the static prefix fills only the
                 -- first `nstatic` fixed params; the remaining `nparams - nstatic`
-                -- fixed params are BORROWED from the caller's own `...` (bounds-
-                -- checked at runtime, raising if too few). Each borrowed fixed
-                -- param type must accept the caller's `...` element type.
+                -- fixed params are BORROWED from the caller's own `...`. Each
+                -- borrowed fixed param type must accept or coerce the caller's
+                -- `...` element type; if the runtime tail is too short, codegen
+                -- nil-fills only the fixed params whose types can accept nil.
                 if caller_elem and caller_elem._tag ~= "Type.Invalid" then
                     for i = nstatic + 1, nparams do
                         local ptype = ftype.params[i]
-                        if not types.compatible(ptype, caller_elem) then
+                        if not (types.compatible(ptype, caller_elem)
+                                or types.coerceable(caller_elem, ptype)) then
                             checker.typeerror(errors, lastarg.loc,
                                 "cannot borrow a '...' element of type %s for "
                                 .. "fixed parameter %d (type %s) of %s",
@@ -1378,7 +1409,7 @@ local function checkargs(ftype, args, loc, fname, st, errors)
             -- ADJUST-UP into the fixed params.
             expand_dots_adjustup(args, nparams,
                 function(i) return ftype.params[i] end,
-                "call to " .. fname, errors)
+                "call to " .. fname, errors, nil_can_adjust_to)
             for i = nargs, #args do
                 local ptype = ftype.params[i]
                 if ptype then
@@ -1423,6 +1454,9 @@ local function checkargs(ftype, args, loc, fname, st, errors)
             table.insert(args, exp)
             checkmatch("argument " .. pidx .. " of call to " .. fname, ptype, exp._type, errors, exp.loc)
         end
+    end
+    if allow_missing and #args < nparams then
+        append_missing_nil_args(args, nparams, loc, fname, errors, ftype)
     end
     -- A Titan-variadic callee (`varargtype`) or a C-FFI variadic (`vararg`)
     -- accepts at least `nparams` arguments; a fixed callee needs exactly that.
@@ -2040,7 +2074,7 @@ checkexp = util.make_visitor({
                 local cftype = c_function_as_function_type(cfunc)
                 node._c_pointer_call = cfunc
                 checkargs(cftype, node.args.args, node.loc,
-                    "function pointer '" .. fname .. "'", st, errors)
+                    "function pointer '" .. fname .. "'", st, errors, false)
                 node._types = cftype.rettypes
                 node._type = cftype.rettypes[1] or types.Void()
                 if node._type._tag == "Type.Void" and not node._voidok then
@@ -2086,7 +2120,11 @@ checkexp = util.make_visitor({
                 end
             end
             checkargs(ftype, node.args.args, node.loc,
-                "function '" .. fname .. "'", st, errors)
+                "function '" .. fname .. "'", st, errors,
+                not (node.exp._tag == "Ast.ExpVar"
+                     and (is_foreign_function_var(node.exp.var)
+                          or (node.exp.var._decl
+                              and node.exp.var._decl._tag == "Type.CPseudoNew"))))
             node._types = ftype.rettypes
             -- A zero-return `() -> ()` callee produces no value; its result is
             -- `Type.Void`, which is only legal in statement position or inside

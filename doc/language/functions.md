@@ -90,16 +90,20 @@ generate the Lua-side entry code for it. See [Modules](modules.md) for module
 interfaces and [Lua interoperability](lua-interop.md) for what exported
 functions look like from Lua.
 
-## Strict arity
+## Argument adjustment
 
-Titan has none of Lua's argument adjustment: a function declared with
-*n* parameters must be called with exactly *n* arguments. Missing
-arguments are not padded with `nil` and extra arguments are not dropped.
-The rule is enforced in two different places, with the same strictness:
+Titan function calls adjust upward, but never downward. A function
+declared with *n* parameters may be called with fewer than *n* arguments;
+the missing positions are filled with `nil` and then type-checked as if
+the caller had written those `nil` arguments explicitly. Calling with
+more than *n* arguments is still a compile-time error. Titan never drops
+extra arguments.
 
-**Titan callers are checked at compile time.** Calling with the wrong
-number of arguments is a compile-time error that quotes the function's
-type:
+This is why omitted parameters are "optional" only when their declared
+type can accept the synthesized `nil` (for example `T?`, `value`,
+`boolean`, or a nullable pointer type). Omitting a non-optional
+`integer`, `float`, `string`, array, map, record, or function parameter
+is a type error at the call site:
 
 ```lua
 function fma(a: float, b: float, c: float): float
@@ -107,36 +111,52 @@ function fma(a: float, b: float, c: float): float
 end
 
 function wrong(): float
-    return fma(2.0, 3.0)   -- compile-time error
+    return fma(2.0, 3.0)   -- compile-time error: c receives nil
 end
 ```
 
 ```
-test.titan:6:15: type error: function 'fma' called with 2 arguments but expects 3.
+test.titan:6:15: type error: types in argument 3 of call to function 'fma' do not match, expected float but found nil
+```
+
+The same adjustment applies to methods, record static functions
+(including the compiler-synthesized `Rec.new` constructor), imported
+Titan functions, anonymous functions, and calls through function-typed
+values. Foreign C functions keep C-style arity: Titan does not invent
+missing C arguments.
+
+**Titan callers are checked at compile time.** Once missing positions
+have been filled with `nil`, each argument is coerced and checked against
+the corresponding parameter type. Too many arguments are rejected before
+code generation, with a message that quotes the function's type:
+
+```lua
+function too_many(): float
+    return fma(2.0, 3.0, 1.0, 0.0)   -- compile-time error
+end
+```
+
+```
+test.titan:6:15: type error: function 'fma' called with 4 arguments but expects 3.
 (float, float, float) -> float
 ```
 
-**Lua callers are checked at run time.** Lua code is not compiled by the
-Titan compiler, so the check moves into the generated entry code of each
-exported function, which counts the incoming arguments before anything
-else. The run-time error message has the shape:
-
-```
-calling Titan function fma with 2 arguments, but expected 3
-```
+**Lua callers are adjusted and checked at run time.** Lua code is not
+compiled by the Titan compiler, so the generated entry code of each
+exported function pads missing arguments with `nil`, then runs the usual
+boundary type checks. Extra Lua arguments are rejected:
 
 ```lua
 -- Lua
 local m = require "test"
 print(m.fma(2.0, 3.0, 1.0))            --> 7.0
-print(pcall(m.fma, 2.0, 3.0))          --> false   calling Titan function fma with 2 arguments, but expected 3
+print(pcall(m.fma, 2.0, 3.0))          --> false   test.titan:1:1: type error, expected float but found nil
+print(pcall(m.fma, 2.0, 3.0, 1.0, 0.0)) --> false   calling Titan function fma with 4 arguments, but expected at most 3
 ```
 
-The same strictness applies to `return` (returning the wrong number of
-values is a compile-time error) and to multiple assignment and
-declaration — see the next section. A wrong-arity call is reported the
-same way whether the callee returns one value or several: the message
-names the function and the expected and actual argument counts.
+The adjustment rule is only for function arguments. `return`, multiple
+assignment and multiple declaration still require the exact number of
+values in fixed-arity contexts — see the next section.
 
 ## Multiple return values
 

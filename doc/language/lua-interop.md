@@ -174,17 +174,17 @@ that prefix.) The Lua-side traceback identifies the call site as usual.
 are described in
 [the interop internals](../implementation/lua-interop-internals.md).
 
-## Calling Titan functions: arity and multiple returns
+## Calling Titan functions: argument counts and multiple returns
 
-Titan functions are strict about argument count. When Titan code calls a
-Titan function with the wrong number of arguments, that is a compile-time
-error (see [Functions](functions.md)); when *Lua* calls a Titan function,
-the same strictness is enforced at run time. There is no Lua-style
-adjustment — missing arguments are not padded with `nil`, and extra
-arguments are not dropped. The error message has the shape:
+Titan function calls adjust missing arguments upward with `nil` and still
+reject extra arguments (see [Functions](functions.md)). When *Lua* calls
+a Titan function, the generated Lua entry wrapper performs the same
+adjustment before it checks parameter types. If the synthesized `nil`
+does not fit the parameter type, the call raises the usual boundary type
+error. Extra Lua arguments are not dropped; they raise an arity error:
 
 ```
-calling Titan function f with 2 arguments, but expected 1
+calling Titan function f with 2 arguments, but expected at most 1
 ```
 
 Multiple return values work exactly as in Lua — a Titan function declared
@@ -202,7 +202,7 @@ end
 local test = require "test"
 local x, y = test.f(2)
 assert(x == 4 and y == "foo")
-assert(pcall(test.f, 2, "extra") == false)  -- wrong arity: run-time error
+assert(pcall(test.f, 2, "extra") == false)  -- extra argument: run-time error
 ```
 
 ## Sharing arrays and maps with Lua

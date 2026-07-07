@@ -478,7 +478,8 @@ describe("Titan type checker", function()
         ]])
         assert.falsy(ok)
         assert.match("called with 3 arguments but expects 2", err)
-        -- a non-trailing multi-return call is adjusted to a single value
+        -- a non-trailing multi-return call is adjusted to a single value; the
+        -- remaining parameter is then filled with nil and typechecked normally.
         ok, err = run_checker([[
             function dm(a: integer, b: integer): (integer, integer)
                 return a // b, a % b
@@ -487,7 +488,7 @@ describe("Titan type checker", function()
             function f(): integer return add3(dm(7, 2), 10) end
         ]])
         assert.falsy(ok)
-        assert.match("called with 2 arguments but expects 3", err)
+        assert.match("types in argument 3 of call to function 'add3' do not match, expected integer but found nil", err)
     end)
 
     it("accepts a written function-type annotation", function ()
@@ -2238,7 +2239,7 @@ describe("Titan type checker", function()
         end
     end)
 
-    it("catches functions called with wrong arity", function()
+    it("catches functions called with wrong argument counts", function()
         local cases = {{ code = [[
             function g(): (integer, integer)
                 return 20, 30
@@ -2248,7 +2249,7 @@ describe("Titan type checker", function()
             function h()
                 f(g())
             end
-        ]], args = 2, params = 3 }, { code = [[
+        ]], err = "types in argument 3 of call to function 'f' do not match, expected integer but found nil" }, { code = [[
             function g(): (integer, integer)
                 return 20, 30
             end
@@ -2257,7 +2258,7 @@ describe("Titan type checker", function()
             function h()
                 f(20, 30, g())
             end
-        ]], args = 4, params = 3 }, { code = [[
+        ]], err = "function 'f' called with 4 arguments but expects 3" }, { code = [[
             function g(): (integer, integer)
                 return 20, 30
             end
@@ -2266,11 +2267,11 @@ describe("Titan type checker", function()
             function h()
                 f(20, (g()))
             end
-        ]], args = 2, params = 3 }}
+        ]], err = "types in argument 3 of call to function 'f' do not match, expected integer but found nil" }}
         for _, c in ipairs(cases) do
             local ok, err = run_checker(c.code)
             assert.falsy(ok)
-            assert.match("function 'f' called with " .. c.args .. " arguments but expects " .. c.params, err)
+            assert.match(c.err, err)
         end
     end)
 end)
@@ -2354,7 +2355,7 @@ describe("Titan typecheck of records", function()
     it("doesn't typecheck constructor calls with wrong arguments", function()
         assert_type_error("expected float but found string",
                           wrap_record[[ p = Point.new("a", "b") ]])
-        assert_type_error("'Point.new' called with 1 arguments but expects 2",
+        assert_type_error("types in argument 2 of call to function 'Point.new' do not match, expected float but found nil",
                           wrap_record[[ p = Point.new(1) ]])
         assert_type_error("'Point.new' called with 3 arguments but expects 2",
                           wrap_record[[ p = Point.new(1, 2, 3) ]])
@@ -2911,7 +2912,7 @@ describe("Titan typecheck of records", function()
         ]])
     end)
 
-    it("catches methods called with wrong arity", function()
+    it("catches methods called with wrong argument counts", function()
         local cases = {{ code = [[
             record R end
             function R:g(): (integer, integer)
@@ -2922,7 +2923,7 @@ describe("Titan typecheck of records", function()
             function R:h()
                 self:f(self:g())
             end
-        ]], args = 2, params = 3 }, { code = [[
+        ]], err = "types in argument 3 of call to method 'test.R:f' do not match, expected integer but found nil" }, { code = [[
             record R end
             function R:g(): (integer, integer)
                 return 20, 30
@@ -2932,7 +2933,7 @@ describe("Titan typecheck of records", function()
             function R:h()
                 self:f(20, 30, self:g())
             end
-        ]], args = 4, params = 3 }, { code = [[
+        ]], err = "method 'test.R:f' called with 4 arguments but expects 3" }, { code = [[
             record R end
             function R:g(): (integer, integer)
                 return 20, 30
@@ -2942,11 +2943,11 @@ describe("Titan typecheck of records", function()
             function R:h()
                 self:f(20, (self:g()))
             end
-        ]], args = 2, params = 3 }}
+        ]], err = "types in argument 3 of call to method 'test.R:f' do not match, expected integer but found nil" }}
         for _, c in ipairs(cases) do
             local ok, err = run_checker(c.code)
             assert.falsy(ok)
-            assert.match("method 'test.R:f' called with " .. c.args .. " arguments but expects " .. c.params, err)
+            assert.match(c.err, err)
         end
     end)
 

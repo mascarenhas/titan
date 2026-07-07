@@ -2426,6 +2426,19 @@ local function is_static_callee(node)
         or decl._tag == "Type.StaticMethod")
 end
 
+local function optionize_type(t)
+    if t._tag == "Type.Option" or t._tag == "Type.Value" then
+        return t
+    else
+        return types.Option(t)
+    end
+end
+
+local function nil_can_adjust_to(typ)
+    return typ and (types.coerceable(types.Nil(), typ)
+        or types.compatible(typ, types.Nil()))
+end
+
 -- Build and append the backing-struct argument (`_varargs` + `_start`) for a
 -- native call to a variadic callee. Appends the two C expressions to `caexps`
 -- and any setup statements to `castats`. `vargexps` holds the already-coerced
@@ -2487,50 +2500,40 @@ local function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
             -- CASE 2 (start-adjust): the static prefix fills the first k fixed
             -- params; borrow `...[1 .. (m-k)]` for the remaining fixed params, then
             -- pass the SAME backing struct with `_start + (m - k)`. No struct
-            -- mutation, no save/restore -- `start` is a parameter (§2.G). `...[i]`
-            -- reads are bounds-checked, so an under-supplied tail raises cleanly.
+            -- mutation, no save/restore -- `start` is a parameter (§2.G).
+            -- Borrowed reads nil-fill only when the fixed parameter type accepts
+            -- nil; otherwise an under-supplied tail raises cleanly.
             local delta = m - k
             for j = 1, delta do
-                -- synthesize a `...[j]` read (non-nilfill: raise if too few) using
-                -- the same lowering as a user-written `...[i]`. It fills callee
-                -- fixed param `k + j` (the checker proved its type accepts ef).
+                -- Synthesize a `...[j]` read using the same lowering as a
+                -- user-written `...[i]`, then use an ordinary cast node when the
+                -- callee fixed parameter needs the borrowed element coerced.
+                -- The checker proved that the present element can be coerced.
+                local ptype = callee_ftype.params[k + j]
+                local nilfill = nil_can_adjust_to(ptype)
+                local btype = nilfill and optionize_type(ef) or ef
                 local idxnode = {
                     _tag = "Ast.ExpDotsIndex",
                     loc = node.loc,
                     exp = { _tag = "Ast.ExpInteger", value = j, loc = node.loc,
                             _type = types.Integer() },
-                    _type = ef,
-                    _nilfill = false,
+                    _type = btype,
+                    _nilfill = nilfill,
                 }
-                local bstat, bexp = codedotsindex(ctx, idxnode)
-                table.insert(castats, bstat)
-                local ptype = callee_ftype.params[k + j]
-                if ctype(ptype) == ctype(ef) then
-                    table.insert(caexps, bexp)
-                elseif ptype._tag == "Type.Value" or ptype._tag == "Type.Option"
-                       or ptype._tag == "Type.Function" then
-                    -- borrowed element widened into a tagged TValue fixed param.
-                    local ctmp, tmpname = newtmp(ctx, ptype)
-                    table.insert(castats, render([[
-                        $CTMP
-                        $SETWRAPPED
-                    ]], {
-                        CTMP = ctmp,
-                        SETWRAPPED = setwrapped(ef, "&" .. tmpname, bexp),
-                    }))
-                    table.insert(caexps, tmpname)
-                else
-                    -- borrowed element narrowed out of a TValue fixed param.
-                    local ctmp, tmpname = newtmp(ctx, ptype)
-                    table.insert(castats, render([[
-                        $CTMP
-                        $CHECKGET
-                    ]], {
-                        CTMP = ctmp,
-                        CHECKGET = checkandget(ctx, ptype, tmpname, "&(" .. bexp .. ")", node.loc),
-                    }))
-                    table.insert(caexps, tmpname)
+                local borrow = idxnode
+                if not types.equals(btype, ptype) and
+                   types.coerceable(btype, ptype) then
+                    borrow = {
+                        _tag = "Ast.ExpCast",
+                        loc = node.loc,
+                        exp = idxnode,
+                        target = ptype,
+                        _type = ptype,
+                    }
                 end
+                local bstat, bexp = codeexp(ctx, borrow)
+                table.insert(castats, bstat)
+                table.insert(caexps, bexp)
             end
             table.insert(caexps, render("($STRUCT *)$NAME",
                 { STRUCT = varg_struct_name(eg), NAME = va.cname }))
@@ -5979,35 +5982,51 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
     ]], {
         NRET = #typ.rettypes
     }))
-    -- A variadic function accepts AT LEAST nfixed args (the surplus become `...`);
-    -- a fixed-arity function requires EXACTLY nfixed.
+    -- Missing Lua arguments are adjusted upward with nil before parameter
+    -- coercion, matching Titan call-site adjustment. A variadic function accepts
+    -- any surplus arguments as `...`; a fixed-parameter function still rejects
+    -- surplus arguments.
     local argcheck
     if varargtype then
         argcheck = render([[
-        if((L->top.p - func - 1) < $EXPECTED) {
-            luaL_error(L, "calling Titan function %s with %d arguments, but expected at least %d", $NAME, (int)(L->top.p - func - 1), $EXPECTED);
+        ptrdiff_t _nargs = L->top.p - func - 1;
+        if (_nargs < $EXPECTED) {
+            ptrdiff_t _missing = $EXPECTED - _nargs;
+            lua_checkstack(L, (int)_missing);
+            func = L->ci->func.p;
+            while (_missing-- > 0) {
+                setnilvalue(s2v(L->top.p));
+                L->top.p++;
+                _nargs++;
+            }
         }]], {
             EXPECTED = c_integer_literal(#params),
             NAME = c_string_literal(titan_name),
         })
     else
         argcheck = render([[
-        if((L->top.p - func - 1) != $EXPECTED) {
-            luaL_error(L, "calling Titan function %s with %d arguments, but expected %d", $NAME, (int)(L->top.p - func - 1), $EXPECTED);
+        ptrdiff_t _nargs = L->top.p - func - 1;
+        if(_nargs > $EXPECTED) {
+            luaL_error(L, "calling Titan function %s with %d arguments, but expected at most %d", $NAME, (int)_nargs, $EXPECTED);
+        }
+        if (_nargs < $EXPECTED) {
+            ptrdiff_t _missing = $EXPECTED - _nargs;
+            lua_checkstack(L, (int)_missing);
+            func = L->ci->func.p;
+            while (_missing-- > 0) {
+                setnilvalue(s2v(L->top.p));
+                L->top.p++;
+                _nargs++;
+            }
         }]], {
             EXPECTED = c_integer_literal(#params),
             NAME = c_string_literal(titan_name),
         })
     end
-    -- A variadic entry must know the incoming arg count BEFORE the error-slot /
-    -- errorhandler pushes inflate L->top.p, so capture it up front.
-    local nargsdecl = varargtype
-        and "ptrdiff_t _nargs = L->top.p - func - 1;" or ""
     return render([[
     static int $LUANAME(lua_State *L) {
         StkId func = L->ci->func.p;
         $ARGCHECK
-        $NARGSDECL
         $ERRORSLOT
         ptrdiff_t __save_errfunc = L->errfunc;
         int __installed_errfunc = 0;
@@ -6022,7 +6041,6 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
     }]], {
         LUANAME = lua_name,
         ARGCHECK = argcheck,
-        NARGSDECL = nargsdecl,
         ERRORSLOT = #params == 0 and "lua_pushnil(L);" or "",
         NAME = c_string_literal(titan_name),
         -- Stamp the Lua-entry wrapper to the function definition's .titan loc

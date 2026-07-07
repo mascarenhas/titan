@@ -129,12 +129,14 @@ parameter per field, in declaration order:
 local p = Point.new(2.0, 3.0)   -- p: Point, with x = 2.0 and y = 3.0
 ```
 
-Arity is strict, as for all Titan calls — `Point.new(1)` is a
-compile-time error
-(`function 'Point.new' called with 1 arguments but expects 2.`,
-followed by the expected signature).
-Each argument gets the usual implicit coercions of a function argument,
-so `Point.new(2, 3)` fills the `float` fields with `2.0` and `3.0`.
+Like any Titan function call, `Point.new` pads omitted arguments with
+`nil` and then type-checks them against the corresponding field type.
+That means `Point.new(1)` is accepted only when the second field can
+accept `nil`; for a required `float` field it is a compile-time type
+error (`expected float but found nil`). Extra arguments are still
+rejected. Each argument gets the usual implicit coercions of a function
+argument, so `Point.new(2, 3)` fills the `float` fields with `2.0` and
+`3.0`.
 
 `new` is not magic: the compiler synthesizes it as a record function
 whose body is a record constructor expression over its parameters. For a local
@@ -477,8 +479,10 @@ The details, all run-time behavior:
 * **Construction and record functions.** Each record name is a member of the
   module — a small namespace table holding its public record functions — so
   `test.Point.new(1, 2)` and `test.Point.origin()` work from Lua when those
-  functions are public. Arity is checked at run time:
-  `calling Titan function new with 1 arguments, but expected 2`.
+  functions are public. Missing Lua arguments are padded with `nil` and
+  then checked against the field types; extra arguments raise a run-time
+  arity error such as
+  `calling Titan function new with 3 arguments, but expected at most 2`.
 * **Field reads and writes** go through the record's metatable and are
   fully checked. An unknown field, read or written, raises
   `field 'z' not found in record 'test.Point'`; a wrongly-typed write

@@ -577,9 +577,12 @@ complete inventory of conversions:
 ([overview](codegen-overview.md)). Argument marshaling is minimal: each
 argument's preliminary statements run, then the bare C expressions are
 passed — already native, already anchored at their sources; there is no
-per-call pushing. For multiple returns the caller allocates one temp per
-extra return (with a shadow slot iff GC-able) and passes its address;
-the temp names are recorded in `node._extras` so the
+per-call pushing. If the source call supplied too few fixed arguments,
+the checker has already appended `Ast.ExpNil` expressions and inserted
+the ordinary coercions, so code generation treats them exactly like
+written `nil` arguments. For multiple returns the caller allocates one
+temp per extra return (with a shadow slot iff GC-able) and passes its
+address; the temp names are recorded in `node._extras` so the
 checker-synthesized `Ast.ExpExtra` nodes read them directly. If *any*
 return type is GC-able, the first result also goes through a temp and
 every GC-able result is stored to its reserved slot right after the call
@@ -606,8 +609,9 @@ return 1;
 A call used as a statement just gets `";"` appended — results are
 simply discarded (the `((void)...)` wrapping belongs to assignments to
 unused locals, not to statement calls). Calls *from Lua* go through
-the generated entry wrappers, which check arity and argument types and
-install the error handler — see
+the generated entry wrappers, which reject surplus arguments, pad missing
+fixed arguments with nil, check argument types and install the error
+handler — see
 [Lua interop internals](lua-interop-internals.md).
 
 ## Run-time errors: `codethrow` and message conventions
@@ -628,9 +632,9 @@ by `codethrow` or its callers. Two prefix conventions coexist:
   `type error at line %d, number '%f' has no integer representation`.
 
 Boolean and `value` targets never throw — every Lua value converts.
-Wrapper arity errors use
-`calling Titan function %s with %d arguments, but expected %d`, and the
-module metatable raises
+Wrapper errors for surplus arguments use
+`calling Titan function %s with %d arguments, but expected at most %d`,
+and the module metatable raises
 `member '%s' does not exist in Titan module '%s'`. Whenever an
 error crosses a Lua entry wrapper, the runtime's `errorhandler` records
 a C-level backtrace retrievable via `titan.backtrace()`
