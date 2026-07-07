@@ -383,13 +383,16 @@ local function write_entrypoint(modname)
     return entrypoint_c
 end
 
-function driver.compile_library(modname, libnames, link, verbose)
+function driver.compile_library(modname, libnames, link, verbose, extra_objects)
     local soname = modname:gsub("[.]", "/") .. ".so"
     os.remove(soname)
 
     local args = {driver.CC, driver.CFLAGS, shared_flag(), "-o", soname}
     for _, libname in ipairs(libnames) do
         table.insert(args, libname)
+    end
+    for _, object in ipairs(extra_objects or {}) do
+        table.insert(args, object)
     end
 
     table.insert(args, driver.TITAN_RUNTIME_PATH .. "titan.o")
@@ -415,7 +418,7 @@ function driver.compile_library(modname, libnames, link, verbose)
     return ok, term, code
 end
 
-function driver.compile_program(modname, libnames, link, verbose)
+function driver.compile_program(modname, libnames, link, verbose, extra_objects)
     local execname = modname:gsub("[.]", "/")
     os.remove(execname)
 
@@ -427,6 +430,9 @@ function driver.compile_program(modname, libnames, link, verbose)
                 entrypoint_c}
     for _, libname in ipairs(libnames) do
         table.insert(args, libname)
+    end
+    for _, object in ipairs(extra_objects or {}) do
+        table.insert(args, object)
     end
 
     table.insert(args, driver.TITAN_RUNTIME_PATH .. "titan.o")
