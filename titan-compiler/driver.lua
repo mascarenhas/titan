@@ -13,9 +13,29 @@ driver.imported = {}
 
 driver.TITAN_VER = "0.11"
 driver.TITAN_VER_SUFFIX = "_0_11"
+local function package_cpath_dirs()
+    local dirs = {}
+    for template in package.cpath:gmatch("[^;]+") do
+        local q = template:find("?", 1, true)
+        if q then
+            local dir = template:sub(1, q - 1):gsub("[/\\]*$", "")
+            if dir ~= "" then
+                table.insert(dirs, dir)
+            end
+        end
+    end
+    return table.concat(dirs, ";")
+end
+
+local DEFAULT_TITAN_BIN_PATH = ".;/usr/local/lib/titan/" .. driver.TITAN_VER
+local cpath_dirs = package_cpath_dirs()
+if cpath_dirs ~= "" then
+    DEFAULT_TITAN_BIN_PATH = DEFAULT_TITAN_BIN_PATH .. ";" .. cpath_dirs
+end
+
 driver.TITAN_BIN_PATH = os.getenv("TITAN_PATH" .. driver.TITAN_VER_SUFFIX)
     or os.getenv("TITAN_PATH")
-    or ".;/usr/local/lib/titan/" .. driver.TITAN_VER
+    or DEFAULT_TITAN_BIN_PATH
 driver.TITAN_SOURCE_PATH = "."
 driver.LUA_SOURCE_PATH = "lua-5.5.0/src/"
 driver.TITAN_RUNTIME_PATH = "titan-runtime/"

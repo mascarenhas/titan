@@ -111,11 +111,13 @@ also stacked intermediate coroutines.
 When `co`'s entry function returns normally, the `resume` call returns
 that value and `co` becomes `dead`.
 
-Calling `resume` on a `running`, `normal`, `stacked`, or `dead`
-coroutine is an error raised in the caller. Calling `resume` on a
-coroutine from a different independent Lua state is an error. Resuming a
-coroutine created from another thread of the same Lua state is valid only
-through the runtime's normal same-state checks.
+Calling `resume` on a `running`, `normal`, or `dead` coroutine is an
+error raised in the caller. Resuming a stacked child while its parent is
+still stacked is also an error. Resuming the outer stacked handler that
+received the nested yield is the normal restore path. Calling `resume`
+on a coroutine from a different independent Lua state is an error.
+Resuming a coroutine created from another thread of the same Lua state is
+valid only through the runtime's normal same-state checks.
 
 ### Injecting an error
 
@@ -166,13 +168,13 @@ does not contain the tag.
 | `"suspended"` | The coroutine is resumable. This includes a newly created coroutine and one stopped at `yield`. |
 | `"running"` | The coroutine is the currently executing coroutine. |
 | `"normal"` | The coroutine is active in the dynamic chain but has resumed another coroutine. |
-| `"stacked"` | The coroutine was skipped by a tagged nested yield and cannot be resumed directly. |
+| `"stacked"` | The coroutine was skipped by a tagged nested yield; resuming the outer handler with the matching tag restores the skipped stack. |
 | `"dead"` | The entry function returned, or an uncaught error escaped. |
 
-`stacked` is observable so schedulers can diagnose incorrect direct
-resumes, but it is not a state user code should try to repair directly.
-The stack is restored by resuming the coroutine whose tagged handler
-received the yield.
+`stacked` is observable so schedulers can diagnose nested tagged yields.
+Resuming the outer stacked handler that received the yield restores the
+skipped stack; resuming a skipped child while its parent is still stacked
+is the incorrect direct-resume case.
 
 ## Module shape
 
@@ -503,7 +505,8 @@ Stock minicoro has `MCO_NORMAL`, `MCO_RUNNING`, `MCO_SUSPENDED`, and
   matching tag is found;
 * mark skipped coroutines as `MCO_STACKED` and remember enough of the
   skipped chain to restore it later;
-* reject direct resume of `MCO_STACKED`;
+* allow resume of the outer `MCO_STACKED` handler to restore the skipped
+  stack, but reject resuming a child whose parent is still stacked;
 * when the handler coroutine is resumed again, restore the skipped
   coroutines to running order and switch back to the original yielder;
 * never dereference, copy, compare, or free tags inside minicoro itself.
@@ -565,8 +568,9 @@ Add Titan runtime/coder coverage for:
   and non-nil tag enforcement;
 * raw tag equality for strings, numeric equality, table/userdata
   identity, and no `__eq` metamethod calls;
-* nested tagged yield, observable `stacked` status, direct resume of a
-  stacked coroutine, and restoration of the skipped stack;
+* nested tagged yield, observable `stacked` status, restoration through
+  the outer stacked handler, and rejected direct resume of a stacked
+  child;
 * `is_yieldable` outside a coroutine, inside a coroutine with no matching
   handler, and inside a coroutine with a matching outer handler;
 * normal callback return, dead status, and resume/error after dead;

@@ -131,11 +131,12 @@ Calling `co:error(err, tag)` before the first normal `resume` raises
 | `"suspended"` | The coroutine is resumable, either new or stopped at `yield`. |
 | `"running"` | The coroutine is currently executing. |
 | `"normal"` | The coroutine is active and has resumed another coroutine. |
-| `"stacked"` | The coroutine was skipped by a tagged nested yield and cannot be resumed directly. |
+| `"stacked"` | The coroutine was skipped by a tagged nested yield; resuming the outer handler with the matching tag restores the skipped stack. |
 | `"dead"` | The entry function returned or an uncaught error escaped. |
 
-Resuming a `running`, `normal`, `stacked`, or `dead` coroutine raises in
-the caller.
+Resuming a `running`, `normal`, or `dead` coroutine raises in the caller.
+Resuming a stacked child while its parent is still stacked also raises;
+resume the outer stacked handler that received the nested yield instead.
 
 Titan coroutines are not Lua coroutines. `coro.yield` does not call
 `lua_yield`, and Lua's `coroutine.status` does not describe these

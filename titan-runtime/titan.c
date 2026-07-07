@@ -421,6 +421,41 @@ void titan_invalidate_backtrace_state(lua_State *L) {
 }
 #endif
 
+static void add_package_cpath_dirs(lua_State *L, luaL_Buffer *buf) {
+    int top = lua_gettop(L);
+    lua_getglobal(L, "package");
+    if(lua_istable(L, -1) && lua_getfield(L, -1, "cpath") == LUA_TSTRING) {
+        const char *path = lua_tostring(L, -1);
+        while(path && *path != '\0') {
+            const char *end = strchr(path, ';');
+            const char *q;
+            if(end == NULL) end = path + strlen(path);
+            q = memchr(path, '?', end - path);
+            if(q != NULL) {
+                const char *dir_end = q;
+                while(dir_end > path && (dir_end[-1] == '/' || dir_end[-1] == '\\')) {
+                    dir_end--;
+                }
+                if(dir_end > path) {
+                    luaL_addchar(buf, ';');
+                    luaL_addlstring(buf, path, dir_end - path);
+                }
+            }
+            path = end;
+            if(*path == ';') path++;
+        }
+    }
+    lua_settop(L, top);
+}
+
+static void push_default_titan_path(lua_State *L) {
+    luaL_Buffer buf;
+    luaL_buffinit(L, &buf);
+    luaL_addstring(&buf, TITAN_PATH_DEFAULT);
+    add_package_cpath_dirs(L, &buf);
+    luaL_pushresult(&buf);
+}
+
 static void pushpath (lua_State *L) {
     lua_pushliteral(L, TITAN_PATH_KEY);
     lua_rawget(L, LUA_REGISTRYINDEX);
@@ -435,12 +470,15 @@ static void pushpath (lua_State *L) {
         }
         if (path == NULL) {
             /* No Titan Path environment variable */
-            path = TITAN_PATH_DEFAULT;
-            lua_pushstring(L, path);
+            push_default_titan_path(L);
         } else {
+            const char *default_path;
+            push_default_titan_path(L);
+            default_path = lua_tostring(L, -1);
             path = luaL_gsub(L, path, ";;", ";\1;");
-            path = luaL_gsub(L, path, "\1", TITAN_PATH_DEFAULT);
+            path = luaL_gsub(L, path, "\1", default_path);
             lua_remove(L, -2); /* remove result from 1st 'gsub' */
+            lua_remove(L, -2); /* remove default Titan path */
         }
         lua_pushliteral(L, TITAN_PATH_KEY);
         lua_pushvalue(L, -2);

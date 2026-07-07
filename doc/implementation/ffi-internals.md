@@ -227,8 +227,11 @@ The general `ctype` function routes C values through `foreignctype`, except
 `codeforeigncall` emits a direct C call of the bare C name. The Titan foreign
 module name is gone by codegen time. Fixed and C-vararg arguments both flow
 through `codeforeignexp`, so Titan strings become `getstr(TString*)`, owned C
-objects decay to payload pointers when the target is a C pointer, and `value`
-arguments are checked with `checkandget` when the target C type is known.
+objects decay to payload pointers when the target is a C pointer, and most
+`value` arguments are checked with `checkandget` when the target C type is
+known. A target C type of `TValue` is special: Titan passes the raw `TValue`
+struct by value, for private runtime helpers that already know how to preserve
+the owning Lua state and root any collectable payloads.
 
 `codeforeignvar` emits a bare C variable or macro name. Reading a C scalar into
 Titan code keeps the C value type until a cast or context converts it. C arrays
@@ -261,13 +264,15 @@ decides quote-vs-angle based on actual resolution.
 * Titan strings become `getstr(tstring)` for C pointer targets and for C
   vararg arguments;
 * `nil` becomes `NULL`;
-* `value` to C uses the runtime `checkandget` path.
+* `value` to C `TValue` passes the raw `TValue` by value;
+* other `value` to C conversions use the runtime `checkandget` path.
 
 `foreigntonativeexp` handles C-to-Titan conversion for call results and foreign
-variables. C integers/floats cast to Lua numeric C types when a Titan numeric
-target needs them; C pointers/arrays/aggregates remain C values; C `char *` /
-`void *` to `string` is implemented by an explicit cast arm with a NULL guard
-and `luaS_new` copy.
+variables. C `TValue` results become Titan `value`s directly. C
+integers/floats cast to Lua numeric C types when a Titan numeric target needs
+them; C pointers/arrays/aggregates remain C values; C `char *` / `void *` to
+`string` is implemented by an explicit cast arm with a NULL guard and
+`luaS_new` copy.
 
 `getslot` and `setslot` know how to box C scalars, non-function pointers, and
 owned userdata into Lua `TValue`s for `value` conversions and for Lua-facing

@@ -116,8 +116,9 @@ state dependency in the minicoro extension.
 When a coroutine yields to a non-immediate outer tag, each skipped
 coroutine is put in `MCO_STACKED`. The extension records
 `stacked_child`/`stacked_parent` links so Titan can route transfer
-payloads to the deepest suspended child and reject direct resumes of a
-child whose parent is still stacked.
+payloads to the deepest suspended child. Resuming the outer stacked
+handler restores the skipped stack; resuming a child whose parent is
+still stacked is rejected.
 
 The dummy return address at the base of each assembly coroutine stack is
 `NULL`, not a poison address. Titan's errorhandler uses libbacktrace; a

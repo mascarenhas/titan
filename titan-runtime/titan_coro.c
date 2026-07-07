@@ -10,6 +10,7 @@
 #include "titan.h"
 #include "titan/coro.h"
 
+#define MCO_NO_DEBUG
 #define MINICORO_IMPL
 #include "minicoro.h"
 
@@ -65,6 +66,14 @@ static void titan_coro_set_uv(lua_State *L, titan_coro *tc, int slot,
   int top = lua_gettop(L);
   titan_coro_push_tvalue(L, &tc->self);
   titan_coro_push_tvalue(L, value);
+  lua_setiuservalue(L, -2, slot);
+  lua_settop(L, top);
+}
+
+static void titan_coro_clear_uv(lua_State *L, titan_coro *tc, int slot) {
+  int top = lua_gettop(L);
+  titan_coro_push_tvalue(L, &tc->self);
+  lua_pushnil(L);
   lua_setiuservalue(L, -2, slot);
   lua_settop(L, top);
 }
@@ -133,6 +142,7 @@ static void titan_coro_restore_trace(lua_State *L, titan_coro *tc) {
     lua_setfield(L, LUA_REGISTRYINDEX, TITAN_BACKTRACE_KEY);
     lua_pushboolean(L, 1);
     lua_setfield(L, LUA_REGISTRYINDEX, TITAN_TRACE_PINNED);
+    titan_coro_clear_uv(L, tc, TITAN_CORO_UV_TRACE);
   }
 }
 
@@ -276,7 +286,12 @@ TValue titan_coro_pop_payload(lua_State *L, TValue handle) {
   titan_coro *tc = titan_coro_transfer_source(titan_coro_from_value(handle));
   TValue nilv;
   setnilvalue(&nilv);
-  return tc ? titan_coro_get_uv(L, tc, TITAN_CORO_UV_PAYLOAD) : nilv;
+  if(tc) {
+    TValue payload = titan_coro_get_uv(L, tc, TITAN_CORO_UV_PAYLOAD);
+    titan_coro_clear_uv(L, tc, TITAN_CORO_UV_PAYLOAD);
+    return payload;
+  }
+  return nilv;
 }
 
 int titan_coro_pop_current_ok(lua_State *L) {
@@ -289,7 +304,12 @@ TValue titan_coro_pop_current_payload(lua_State *L) {
   titan_coro *tc = titan_coro_current();
   TValue nilv;
   setnilvalue(&nilv);
-  return tc ? titan_coro_get_uv(L, tc, TITAN_CORO_UV_PAYLOAD) : nilv;
+  if(tc) {
+    TValue payload = titan_coro_get_uv(L, tc, TITAN_CORO_UV_PAYLOAD);
+    titan_coro_clear_uv(L, tc, TITAN_CORO_UV_PAYLOAD);
+    return payload;
+  }
+  return nilv;
 }
 
 int titan_coro_is_yieldable(lua_State *L, TValue tag) {

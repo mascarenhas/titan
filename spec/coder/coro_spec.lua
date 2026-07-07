@@ -1,7 +1,7 @@
 local assert = require 'luassert'
 
 local function clean_test_artifacts()
-    os.execute("rm -rf test.o test.so test.c test.titan test__entrypoint.c test test.dSYM")
+    os.execute("rm -rf test.o test.so test.c test.titan test__entrypoint.c test test.dSYM coro_standalone app app__entrypoint.c app.dSYM")
 end
 
 local function exec_ok(cmd)
@@ -44,6 +44,59 @@ local function compile_and_run(titan_code, lua_code)
     return out
 end
 
+local function compile_and_run_app(titan_code)
+    clean_test_artifacts()
+    write_file("test.titan", titan_code)
+    assert.truthy(exec_ok("env CCACHE_DISABLE=1 ./titanc test"))
+
+    local f = assert(io.popen("./test 2>&1"))
+    local out = f:read("*a")
+    local ok, why, status = f:close()
+    assert.truthy(ok, "program failed (" .. tostring(why) .. ", " ..
+        tostring(status) .. ")\n" .. out)
+    return out
+end
+
+local function run_lua(lua_code)
+    local script = os.tmpname()
+    write_file(script, lua_code)
+    local f = assert(io.popen("./lua " .. script .. " 2>&1"))
+    local out = f:read("*a")
+    local ok, why, status = f:close()
+    os.remove(script)
+    assert.truthy(ok, "lua failed (" .. tostring(why) .. ", " ..
+        tostring(status) .. ")\n" .. out)
+    return out
+end
+
+local function compile_and_run_standalone_import()
+    clean_test_artifacts()
+    assert.truthy(exec_ok("mkdir -p coro_standalone"))
+    write_file("coro_standalone/app.titan", [[
+        local coro = import "coro"
+
+        function body(arg: value): value
+            return arg
+        end
+
+        function main(args: {string}): integer
+            local co = coro.create(body, "tag")
+            if co:resume("ok") == "ok" then
+                return 0
+            end
+            return 1
+        end
+    ]])
+    assert.truthy(exec_ok("env CCACHE_DISABLE=1 ./titanc -t coro_standalone app"))
+
+    local f = assert(io.popen("./app 2>&1"))
+    local out = f:read("*a")
+    local ok, why, status = f:close()
+    assert.truthy(ok, "program failed (" .. tostring(why) .. ", " ..
+        tostring(status) .. ")\n" .. out)
+    return out
+end
+
 describe("coro standard module", function()
     setup(function()
         os.remove("titan-runtime/titan.o")
@@ -51,6 +104,9 @@ describe("coro standard module", function()
     end)
 
     after_each(clean_test_artifacts)
+    teardown(function()
+        os.remove("coro.c")
+    end)
 
     it("creates a coroutine and returns a callback result", function()
         local out = compile_and_run([[
@@ -180,6 +236,41 @@ describe("coro standard module", function()
         assert.match("OK", out)
     end)
 
+    it("rejects resume and error after a coroutine is dead", function()
+        local out = compile_and_run([[
+            local coro = import "coro"
+
+            function body(arg: value): value
+                return arg
+            end
+
+            function after_dead(): string
+                local co = coro.create(body, "tag")
+                local got = co:resume("done")
+                local status = co:status()
+                do
+                    co:resume("again")
+                catch
+                    local resume_error = error as string
+                    do
+                        co:error("oops")
+                    catch
+                        return (got as string) .. ":" .. status .. ":" ..
+                            resume_error .. ":" .. (error as string)
+                    end
+                end
+                return "missed"
+            end
+        ]], [==[
+            local text = test.after_dead()
+            assert(text:find("done:dead:", 1, true), text)
+            assert(text:find("Coroutine not suspended", 1, true), text)
+            print("OK")
+        ]==])
+        assert.falsy(out:find("attempt to resume", 1, true), out)
+        assert.match("OK", out)
+    end)
+
     it("rejects missing effective tags in the Titan wrapper", function()
         local out = compile_and_run([[
             local coro = import "coro"
@@ -227,5 +318,47 @@ describe("coro standard module", function()
             print("OK")
         ]==])
         assert.match("OK", out)
+    end)
+
+    it("loads from Lua and roots value payloads and identity tags across GC", function()
+        local out = run_lua([==[
+            local coro = require "coro"
+            collectgarbage("generational")
+
+            local tag = {}
+            local payload = { answer = 41 }
+            local marker = function(x) return x.answer + 1 end
+            local co = coro.create(function(arg)
+                assert(arg == payload)
+                collectgarbage("step")
+                local got = coro.yield(marker, tag)
+                assert(got == payload)
+                return marker(got)
+            end, tag)
+
+            collectgarbage("collect")
+            assert(co:status() == "suspended")
+            assert(co:resume(payload, tag) == marker)
+            payload.extra = {}
+            for _ = 1, 50 do collectgarbage("step") end
+            assert(co:resume(payload, tag) == 42)
+            assert(co:status() == "dead")
+
+            local nco = coro.create(function(arg)
+                local back = coro.yield("numeric", 1.0)
+                return back
+            end, 1)
+            assert(nco:resume(nil, 1) == "numeric")
+            assert(nco:resume("done", 1.0) == "done")
+
+            collectgarbage("incremental")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("imports coro from a compiled module in a standalone executable", function()
+        local out = compile_and_run_standalone_import()
+        assert.same("", out)
     end)
 end)

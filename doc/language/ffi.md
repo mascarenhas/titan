@@ -155,6 +155,8 @@ Allowed conversions include:
 * a foreign C function name to a compatible C function pointer type;
 * C integers, C floats, non-function C pointers, and owned C userdata to/from
   `value`, with the same run-time checks used at the Lua boundary.
+* Titan `value` to C `TValue` by value, and C `TValue` back to Titan `value`,
+  for private runtime helper APIs that include `<titan/ffi.h>`.
 
 By-value C structs and unions cannot cross through `value` in v1.
 
