@@ -1,0 +1,100 @@
+local rt = foreign import "titan/coro.h"
+
+record Coro
+  local handle: value
+  local default_tag: value
+end
+
+local function missing_tag()
+  raise "must provide tag argument if no default_tag was provided"
+end
+
+local function missing_yield_tag()
+  raise "must provide non-nil tag argument to coro.yield"
+end
+
+local function effective_tag(default_tag: value, explicit_tag: value): value
+  local tag = explicit_tag
+  if tag == nil then
+    tag = default_tag
+  end
+  if tag == nil then
+    missing_tag()
+  end
+  return tag
+end
+
+local function check_result(result: rt.titan_ffi_int)
+  if (result as integer) ~= (rt.TITAN_CORO_SUCCESS as integer) then
+    raise (rt.titan_coro_result_name(result) as string)
+  end
+end
+
+local function pop_or_raise(handle: value): value
+  local ok = rt.titan_coro_pop_ok(L, handle)
+  local payload = rt.titan_coro_pop_payload(L, handle)
+  if (ok as integer) == 0 then
+    raise payload
+  end
+  return payload
+end
+
+local function pop_current_or_raise(): value
+  local ok = rt.titan_coro_pop_current_ok(L)
+  local payload = rt.titan_coro_pop_current_payload(L)
+  if (ok as integer) == 0 then
+    raise payload
+  end
+  return payload
+end
+
+function create(func: (value) -> value, default_tag: value): Coro
+  return Coro.new(rt.titan_coro_create(L, func), default_tag)
+end
+
+function Coro:resume(arg: value, tag: value): value
+  local effective = effective_tag(self.default_tag, tag)
+  check_result(rt.titan_coro_push(L, self.handle, 1, arg))
+  check_result(rt.titan_coro_resume(L, self.handle, effective))
+  return pop_or_raise(self.handle)
+end
+
+function Coro:error(err: value, tag: value): value
+  local effective = effective_tag(self.default_tag, tag)
+  check_result(rt.titan_coro_push(L, self.handle, 0, err))
+  check_result(rt.titan_coro_resume(L, self.handle, effective))
+  return pop_or_raise(self.handle)
+end
+
+function Coro:status(): string
+  local status = rt.titan_coro_status(L, self.handle)
+  if (status as integer) == (rt.TITAN_CORO_STATUS_SUSPENDED as integer) then
+    return "suspended"
+  end
+  if (status as integer) == (rt.TITAN_CORO_STATUS_RUNNING as integer) then
+    return "running"
+  end
+  if (status as integer) == (rt.TITAN_CORO_STATUS_NORMAL as integer) then
+    return "normal"
+  end
+  if (status as integer) == (rt.TITAN_CORO_STATUS_STACKED as integer) then
+    return "stacked"
+  end
+  return "dead"
+end
+
+function yield(arg: value, tag: value): value
+  if tag == nil then
+    missing_yield_tag()
+  end
+  check_result(rt.titan_coro_push_current(L, 1, arg))
+  check_result(rt.titan_coro_yield(L, tag))
+  return pop_current_or_raise()
+end
+
+function is_yieldable(tag: value): boolean
+  if tag == nil then
+    missing_yield_tag()
+  end
+  return (rt.titan_coro_is_yieldable(L, tag) as integer) ~= 0
+end

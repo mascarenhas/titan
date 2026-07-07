@@ -124,6 +124,8 @@ compatibility/coercion relations add the Titan boundary conversions:
 * C array / counted `COwned` -> compatible pointer;
 * any non-function C pointer -> `void *`;
 * Titan `string` -> C `char *` or `void *`;
+* exact by-value C `TValue` -> Titan `value`, and Titan `value` ->
+  by-value C `TValue`;
 * C integers, C floats, non-function C pointers, and `COwned` <-> `value`.
 
 Serialization rejects any type tree containing a C FFI type. This is the
@@ -139,7 +141,10 @@ Primitive tokens are canonicalized before conversion, so spellings such as
 `long unsigned int` and `unsigned long` map to the same `CInteger` identity.
 Integer ranks preserve signedness and relative width; known 128-bit compiler
 types carry `bits = 128`. `float`, `double` and `long double` become `CFloat`.
-`void` becomes `CVoid`.
+`void` becomes `CVoid`. Exact `TValue` is special-cased to Titan's dynamic
+`value` type for private runtime helpers that need to move arbitrary Lua
+values through the FFI; `TValue *` and `TValue[]` are rejected rather than
+exposing raw Lua stack/value storage through Titan.
 
 Pointer and array suffixes are applied in declaration order. Typedefs become
 `CTypedef(name, target)`. Structs and unions become `CStruct`/`CUnion` objects

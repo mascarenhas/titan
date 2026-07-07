@@ -93,6 +93,7 @@ Supported C type families:
 | `T[N]` | C array type with static length |
 | `struct S`, `union U` | C aggregate type with fields when the header exposes them; source annotations need a typedef name in v1 |
 | `typedef T name` | C typedef that resolves through its target |
+| exact by-value `TValue` | Titan `value`, for compiler/runtime helper headers |
 
 Imported C types can appear in **local** type annotations:
 

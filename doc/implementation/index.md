@@ -59,6 +59,7 @@ Two facts shape everything downstream of the checker:
 | [Code generator: constructs](codegen-constructs.md) | Construct-by-construct translation with generated-C excerpts, including the array/map fast paths and the inlined Lua-semantics arithmetic. |
 | [Variadic parameters](variadic-parameters.md) | The `...: t` feature end to end: the `: type`/last-only grammar (with untyped-lambda-vararg context inference) and the `ExpDots`/`ExpDotsIndex`/`ExpDotsLen` nodes; the checker's `varargtype` slot, depth-stamped `$vararg` scope rule, and adjust-up vs. whole-tail explist handling; the seven `TitanVarg*` structs, the `_varargs` + `_start` native ABI, the `genluaentry` build and first-class tag dispatch; and the untraced-payload GC discipline. |
 | [Error handling](error-handling.md) | Unified Titan/Lua tracebacks via libbacktrace, `#line` source attribution, trace pinning, `raise`/`catch`/`finally` frontend rules, inline Lua longjmp boundaries, pending finally actions, stack relocation, and ABI/search-path notes. |
+| [Coroutines](coroutines.md) | The `coro` standard module split between Titan policy and private C helpers; the `TValue` FFI boundary; tagged minicoro, stacked parents, traceback handoff, and coroutine stack sizing. |
 | [Lua interop internals](lua-interop-internals.md) | The boundary machinery: Lua entry wrappers and per-type checks, record metatables and metatable-based type identity, the module `Udata`'s member metatable, dynamic module loading, the error handler, the standalone entrypoint, and the safety argument. |
 | [FFI internals](ffi-internals.md) | The pure-Lua C toolchain under `foreign import` (preprocessor, C99 grammar, type extraction) and how foreign declarations become Titan types and direct C calls. |
 | [Lua C API FFI follow-up](ffi-lua-api-followup.md) | Preliminary notes for a later design pass on calling the Lua C API through the C FFI. This is not part of FFI v1. |
@@ -107,7 +108,7 @@ cause.
 | `titanc` | The compiler CLI. |
 | `titan-compiler/` | The compiler proper: `lexer`, `parser`, `syntax_errors`, `ast`, `typedecl`, `checker`, `types`, `symtab`, `coder`, `pretty`, `driver`, `foreigntypes`, `location`, `util`. |
 | `c-parser/` | The pure-Lua C preprocessor and C99 parser behind `foreign import`. |
-| `titan-runtime/` | `titan.h`/`titan.c`, compiled into every module (dynamic loader, error handler); `titanlib.c`, the optional `titan` Lua module (`titan.backtrace()`). |
+| `titan-runtime/` | `titan.h`/`titan.c`, compiled into every module (dynamic loader, error handler); `titanlib.c`, the optional `titan` Lua module (`titan.backtrace()`); `titan_coro.c` and vendored `minicoro.h` for the `coro` standard module. |
 | `spec/` | The busted test suite; `coder_spec.lua` is end-to-end (generates, compiles and runs C). |
 | `examples/`, `testfiles/` | Manual benchmark/demo material (not used by the suite). |
 | `doc/` | This documentation, the [language reference](../language/index.md), and the migration reports. |

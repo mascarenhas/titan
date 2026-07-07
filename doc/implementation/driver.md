@@ -172,24 +172,24 @@ wrapper `titanc` uses: it skips modules whose cache entry says
 
 ## Linking a shared library: `driver.compile_library`
 
-`driver.compile_library(modname, libnames, link, verbose)` produces
+`driver.compile_library(modname, libnames, link, verbose, extra_objects)` produces
 `<modname-with-slashes>.so` — relative to the working directory, not
 next to the source like the `.c`/`.o` — from a list of object files:
 
 ```sh
 cc --std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls -shared -o foo/bar.so \
-   foo/bar.o dep.o ... titan-runtime/titan.o libbacktrace/.libs/libbacktrace.a \
+   foo/bar.o dep.o ... extra.o ... titan-runtime/titan.o libbacktrace/.libs/libbacktrace.a \
    lua-5.5.0/src//liblua.a -ldl -lm [-lSDL2 ...]
 ```
 
 The link set is: every object in `libnames` (the module itself plus its
-statically-linked Titan dependencies), then `titan-runtime/titan.o`
-(the dynamic loader and error handler every module needs), then
-`libbacktrace/.libs/libbacktrace.a` (the native unwinder/symbolizer,
-**before** `liblua.a`), then `liblua.a` from `driver.LUA_SOURCE_PATH`
-(the doubled slash is a cosmetic artifact of `LUA_SOURCE_PATH` ending in
-`/`), then `-ldl -lm`, then one `-l<lib>` per entry of the
-comma-separated `link` string (`titanc -l`). On Darwin
+statically-linked Titan dependencies), then any `extra_objects` supplied
+by the caller, then `titan-runtime/titan.o` (the dynamic loader and
+error handler every module needs), then `libbacktrace/.libs/libbacktrace.a`
+(the native unwinder/symbolizer, **before** `liblua.a`), then `liblua.a`
+from `driver.LUA_SOURCE_PATH` (the doubled slash is a cosmetic artifact
+of `LUA_SOURCE_PATH` ending in `/`), then `-ldl -lm`, then one `-l<lib>`
+per entry of the comma-separated `link` string (`titanc -l`). On Darwin
 (`driver.IS_DARWIN`, cached from a `uname` shell-out when `driver.lua`
 is loaded) the shared flag becomes `-shared -undefined dynamic_lookup` —
 the standard macOS idiom for Lua C modules — and, **after the link**,
@@ -202,7 +202,7 @@ absent).
 
 ## Linking a standalone program: `driver.compile_program`
 
-`driver.compile_program(modname, libnames, link, verbose)` produces an
+`driver.compile_program(modname, libnames, link, verbose, extra_objects)` produces an
 executable named `modname:gsub("[.]", "/")` (no extension, again
 relative to the working directory). It first
 writes `<mod>__entrypoint.c` from `entrypoint_template` — a small
@@ -211,7 +211,7 @@ a library, plus the entrypoint:
 
 ```sh
 cc --std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls -o foo/bar \
-   -I titan-runtime/ -I lua-5.5.0/src/ foo/bar__entrypoint.c foo/bar.o ... \
+   -I titan-runtime/ -I lua-5.5.0/src/ foo/bar__entrypoint.c foo/bar.o ... extra.o ... \
    titan-runtime/titan.o libbacktrace/.libs/libbacktrace.a \
    lua-5.5.0/src//liblua.a -ldl -lm
 ```
@@ -265,15 +265,18 @@ normal module-init protocol.
 ## The `titanc` command line
 
 ```sh
-./titanc [--print-ast] [-v|--verbose] [-u|--lua <luasrc>] [-t|--tree <srcroot>] [-l|--link lib1,lib2] <module>...
+./titanc [--print-ast] [-v|--verbose] [-u|--lua <luasrc>] [-t|--tree <srcroot>] [-l|--link lib1,lib2] [-X|--extra-object obj.o...] <module>...
 ```
 
 `titanc` (a short `argparse` script at the repository root) takes one
 or more dot-separated module names. `--tree` overrides
 `driver.TITAN_SOURCE_PATH`, `--lua` overrides `driver.LUA_SOURCE_PATH`,
 `-v` prints every `cc` command line, `--print-ast` dumps each module's
-AST after checking, and `-l` passes extra system libraries to the
-linker. Its flow:
+AST after checking, `-l` passes extra system libraries to the linker, and
+`-X`/`--extra-object` appends one or more already-built object files to
+the final link. The `coro` standard module uses this to link its private
+runtime helper object without putting minicoro into every Titan module.
+Its flow:
 
 1. **Typecheck everything first.** Each requested module gets a *fresh*
    `static_deps` table and goes through
@@ -301,7 +304,7 @@ linker. Its flow:
    each requested module is linked into its own `.so` with
    `driver.compile_library`, passing exactly the objects in its
    `static_deps` set (which includes the module itself and its
-   transitive source dependencies).
+   transitive source dependencies), plus any `--extra-object` files.
 
 *Limitation:* the return values of the link steps are dropped. In the
 library branch `local ok, err = driver.compile_library(...)` is
