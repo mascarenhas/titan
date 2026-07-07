@@ -126,6 +126,56 @@ describe("raise <exp>", function()
         assert.match("OK", out)
     end)
 
+    it("explicitly re-raising an error payload needs a pinned restored trace", function()
+        -- This models the coroutine wrapper path: a C boundary catches a
+        -- callback error, leaves/restores that callback trace in the registry,
+        -- then a Titan wrapper executes `raise payload`.
+        local out = compile_and_run([[
+            function fail(): integer
+                raise "body failed"
+                return 0
+            end
+            function reraiser(payload: value): integer
+                raise payload
+                return 0
+            end
+        ]], [==[
+            local titan = require 'titan'
+
+            titan.clear()
+            local ok, payload = pcall(test.fail)
+            assert(not ok and payload == "body failed")
+            local original = titan.backtrace()
+            assert(original:find("in test.fail", 1, true),
+                   "original error did not capture the body trace\n" .. tostring(original))
+
+            ok, payload = pcall(test.reraiser, payload)
+            assert(not ok and payload == "body failed")
+            local unpinned = titan.backtrace()
+            assert(unpinned:find("in test.reraiser", 1, true),
+                   "fresh raise did not regenerate at the wrapper\n" .. tostring(unpinned))
+            assert(not unpinned:find("in test.fail", 1, true),
+                   "unpinned explicit raise kept the old body trace\n" .. unpinned)
+
+            titan.clear()
+            ok, payload = pcall(test.fail)
+            assert(not ok and payload == "body failed")
+            local restored = titan.backtrace()
+            assert(restored:find("in test.fail", 1, true),
+                   "restored trace did not capture the body\n" .. tostring(restored))
+
+            titan.pin()
+            ok, payload = pcall(test.reraiser, payload)
+            assert(not ok and payload == "body failed")
+            local pinned = titan.backtrace()
+            assert(pinned == restored, "pin did not preserve restored trace")
+            assert(not pinned:find("in test.reraiser", 1, true),
+                   "pinned raise regenerated at the wrapper\n" .. pinned)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
     it("rejects a bare raise at compile time", function()
         h.reset()
         local errs = h.check_errs([[
