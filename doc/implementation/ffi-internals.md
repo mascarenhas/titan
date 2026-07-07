@@ -147,10 +147,14 @@ with a named field table and array part; the converter registers a composite
 owner in `symtab.foreign_types` before walking fields so recursive pointer
 fields reuse the same owner.
 
-C functions are represented as ordinary Titan `Type.Function` values whose
-params and returns are C types. The pre-existing `vararg` boolean on
-`Type.Function` is still the marker for a C variadic function. It is distinct
-from Titan variadic functions, which use `varargtype`.
+Foreign function declarations are stored in the C module's value namespace with
+a `Type.Function`-shaped signature whose params and returns are C types. That
+shape is an implementation convenience for checking a direct foreign call; it
+does **not** make a foreign function a Titan first-class function value.
+`Ast.ExpVar` rejects taking a foreign function as a value, except when the
+surrounding context asks for a compatible C function pointer. The pre-existing
+`vararg` boolean on `Type.Function` remains the marker for a C variadic
+function. It is distinct from Titan variadic functions, which use `varargtype`.
 
 C function pointer typedefs are represented as `CTypedef` targets that resolve
 to `CPointer(CFunction(...))`. `CFunction` is only a C function signature inside

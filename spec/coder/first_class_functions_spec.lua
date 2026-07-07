@@ -69,6 +69,23 @@ describe("first-class function values (end-to-end)", function()
         ]])
     end)
 
+    it("calls other Lua callables passed into Titan", function()
+        run_coder([[
+            function callint(f: (integer) -> integer, x: integer): integer
+                return f(x)
+            end
+            function callfloat(f: (float) -> float, x: float): float
+                return f(x)
+            end
+        ]], [[
+            local callable = setmetatable({}, {
+                __call = function(_, n) return n + 7 end
+            })
+            assert(test.callint(callable, 35) == 42)
+            assert(test.callfloat(math.abs, -2.5) == 2.5)
+        ]])
+    end)
+
     it("calls a multi-return function through a value", function()
         run_coder([[
             function dm(a: integer, b: integer): (integer, integer)
