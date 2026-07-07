@@ -291,6 +291,10 @@ local function convert_parts(st, parts, idxs)
         end
     end
 
+    if base._tag == "Type.Value" and idxs and #idxs > 0 then
+        return nil, "unsupported C type: TValue[]"
+    end
+
     return with_array_dims(base, idxs)
 end
 

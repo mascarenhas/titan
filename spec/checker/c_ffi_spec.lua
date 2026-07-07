@@ -66,7 +66,7 @@ describe("C FFI type checking", function()
         end)
     end)
 
-    it("does not expose raw TValue pointers through the FFI", function()
+    it("does not expose raw TValue pointers or arrays through the FFI", function()
         with_header([[
             typedef struct TValue TValue;
             extern int ffi_value_pointer(TValue *value);
@@ -80,6 +80,21 @@ describe("C FFI type checking", function()
             ]])
             assert.falsy(ok)
             assert.match("member 'ffi_value_pointer' not found", err)
+        end)
+
+        with_header([[
+            typedef struct TValue TValue;
+            extern TValue ffi_value_array[2];
+        ]], function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                function bad(): value
+                    return c.ffi_value_array[0]
+                end
+            ]])
+            assert.falsy(ok)
+            assert.match("member 'ffi_value_array' not found", err)
         end)
     end)
 
