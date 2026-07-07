@@ -72,7 +72,10 @@ describe("minicoro tagged extension", function()
               assert(step == 2);
               assert(mco_status(a) == MCO_STACKED);
               assert(mco_status(b) == MCO_SUSPENDED);
+              assert(a->stacked_child == b);
+              assert(b->stacked_parent == a);
               assert(mco_resume(a) == MCO_NOT_SUSPENDED);
+              assert(mco_resume_tagged(b, (void *)a_tag, tagcmp) == MCO_INVALID_OPERATION);
 
               step = 3;
               assert(mco_resume_tagged(a, (void *)main_tag, tagcmp) == MCO_SUCCESS);

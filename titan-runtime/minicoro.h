@@ -298,6 +298,8 @@ struct mco_coro {
   void* yield_tag;
   mco_tag_comparator yield_tag_comparator;
   int has_yield_tag;
+  mco_coro* stacked_child;
+  mco_coro* stacked_parent;
   void* user_data;
   size_t coro_size;
   void* allocator_data;
@@ -765,7 +767,7 @@ void (*_mco_switch)(_mco_ctxbuf* from, _mco_ctxbuf* to) = (void(*)(_mco_ctxbuf* 
 static mco_result _mco_makectx(mco_coro* co, _mco_ctxbuf* ctx, void* stack_base, size_t stack_size) {
   stack_size = stack_size - 32; /* Reserve 32 bytes for the shadow space. */
   void** stack_high_ptr = (void**)((size_t)stack_base + stack_size - sizeof(size_t));
-  stack_high_ptr[0] = (void*)(0xdeaddeaddeaddead);  /* Dummy return address. */
+  stack_high_ptr[0] = (void*)0;  /* Dummy return address. */
   ctx->rip = (void*)(_mco_wrap_main);
   ctx->rsp = (void*)(stack_high_ptr);
   ctx->r12 = (void*)(_mco_main);
@@ -841,7 +843,7 @@ __asm__(
 static mco_result _mco_makectx(mco_coro* co, _mco_ctxbuf* ctx, void* stack_base, size_t stack_size) {
   stack_size = stack_size - 128; /* Reserve 128 bytes for the Red Zone space (System V AMD64 ABI). */
   void** stack_high_ptr = (void**)((size_t)stack_base + stack_size - sizeof(size_t));
-  stack_high_ptr[0] = (void*)(0xdeaddeaddeaddead);  /* Dummy return address. */
+  stack_high_ptr[0] = (void*)0;  /* Dummy return address. */
   ctx->rip = (void*)(_mco_wrap_main);
   ctx->rsp = (void*)(stack_high_ptr);
   ctx->r12 = (void*)(_mco_main);
@@ -1047,9 +1049,9 @@ static mco_result _mco_makectx(mco_coro* co, _mco_ctxbuf* ctx, void* stack_base,
   ctx->s[1] = (void*)(_mco_main);
   ctx->pc = (void*)(_mco_wrap_main);
 #if __riscv_xlen == 64
-  ctx->ra = (void*)(0xdeaddeaddeaddead);
+  ctx->ra = (void*)0;
 #elif __riscv_xlen == 32
-  ctx->ra = (void*)(0xdeaddead);
+  ctx->ra = (void*)0;
 #endif
   ctx->sp = (void*)((size_t)stack_base + stack_size);
   return MCO_SUCCESS;
@@ -1100,7 +1102,7 @@ __asm__(
 
 static mco_result _mco_makectx(mco_coro* co, _mco_ctxbuf* ctx, void* stack_base, size_t stack_size) {
   void** stack_high_ptr = (void**)((size_t)stack_base + stack_size - 16 - 1*sizeof(size_t));
-  stack_high_ptr[0] = (void*)(0xdeaddead);  /* Dummy return address. */
+  stack_high_ptr[0] = (void*)0;  /* Dummy return address. */
   stack_high_ptr[1] = (void*)(co);
   ctx->eip = (void*)(_mco_main);
   ctx->esp = (void*)(stack_high_ptr);
@@ -1171,7 +1173,7 @@ __asm__(
 static mco_result _mco_makectx(mco_coro* co, _mco_ctxbuf* ctx, void* stack_base, size_t stack_size) {
   ctx->d[0] = (void*)(co);
   ctx->d[1] = (void*)(_mco_main);
-  ctx->d[2] = (void*)(0xdeaddead); /* Dummy return address. */
+  ctx->d[2] = (void*)0; /* Dummy return address. */
   ctx->lr = (void*)(_mco_wrap_main);
   ctx->sp = (void*)((size_t)stack_base + stack_size);
   return MCO_SUCCESS;
@@ -1254,7 +1256,7 @@ __asm__(
 static mco_result _mco_makectx(mco_coro* co, _mco_ctxbuf* ctx, void* stack_base, size_t stack_size) {
   ctx->x[0] = (void*)(co);
   ctx->x[1] = (void*)(_mco_main);
-  ctx->x[2] = (void*)(0xdeaddeaddeaddead); /* Dummy return address. */
+  ctx->x[2] = (void*)0; /* Dummy return address. */
   ctx->sp = (void*)((size_t)stack_base + stack_size);
   ctx->lr = (void*)(_mco_wrap_main);
   return MCO_SUCCESS;
@@ -1815,6 +1817,10 @@ mco_result mco_resume(mco_coro* co) {
     MCO_LOG("attempt to resume a coroutine that is not suspended");
     return MCO_NOT_SUSPENDED;
   }
+  if(co->stacked_parent) {
+    MCO_LOG("attempt to resume a coroutine whose parent is stacked");
+    return MCO_INVALID_OPERATION;
+  }
   co->state = MCO_RUNNING; /* The coroutine is now running. */
   _mco_jumpin(co);
   return MCO_SUCCESS;
@@ -1896,6 +1902,10 @@ mco_result mco_resume_tagged(mco_coro* co, void* tag, mco_tag_comparator compara
     MCO_LOG("attempt to resume a coroutine that is not suspended or stacked");
     return MCO_NOT_SUSPENDED;
   }
+  if(co->stacked_parent) {
+    MCO_LOG("attempt to resume a coroutine whose parent is stacked");
+    return MCO_INVALID_OPERATION;
+  }
   co->active_tag = tag;
   co->active_tag_comparator = comparator;
   for(;;) {
@@ -1910,6 +1920,8 @@ mco_result mco_resume_tagged(mco_coro* co, void* tag, mco_tag_comparator compara
         MCO_LOG("attempt to propagate a tagged yield without an active coroutine");
         return MCO_INVALID_OPERATION;
       }
+      current->stacked_child = co;
+      co->stacked_parent = current;
       current->yield_tag = co->yield_tag;
       current->yield_tag_comparator = co->yield_tag_comparator;
       current->has_yield_tag = 1;
@@ -1917,6 +1929,8 @@ mco_result mco_resume_tagged(mco_coro* co, void* tag, mco_tag_comparator compara
       current->has_yield_tag = 0;
       current->yield_tag = NULL;
       current->yield_tag_comparator = NULL;
+      current->stacked_child = NULL;
+      co->stacked_parent = NULL;
       if(res != MCO_SUCCESS) {
         return res;
       }
