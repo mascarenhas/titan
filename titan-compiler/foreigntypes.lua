@@ -127,6 +127,10 @@ local function canonical_spelling(tokens)
 end
 
 local function primitive_from_tokens(tokens)
+    if #tokens == 1 and tokens[1] == "TValue" then
+        return types.Value()
+    end
+
     local spelling = canonical_spelling(tokens)
     if spelling == "" then
         return nil
@@ -275,8 +279,14 @@ local function convert_parts(st, parts, idxs)
 
     for _, suffix in ipairs(suffixes) do
         if suffix.tag == "pointer" then
+            if base._tag == "Type.Value" then
+                return nil, "unsupported C type: TValue *"
+            end
             base = types.CPointer(base, suffix.quals)
         elseif suffix.tag == "array" then
+            if base._tag == "Type.Value" then
+                return nil, "unsupported C type: TValue[]"
+            end
             base = types.CArray(base, suffix.len)
         end
     end
@@ -307,6 +317,10 @@ local function convert_function(st, ftype)
 end
 
 local function convert_typedef(st, ftype)
+    if ftype.name == "TValue" then
+        return types.Value()
+    end
+
     local target, err
     if type(ftype.def) == "table" and ftype.def.type == "functionptr" then
         target, err = convert_function_pointer(st, ftype.def)

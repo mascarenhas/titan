@@ -41,6 +41,48 @@ describe("C FFI type checking", function()
         assert.truthy(ok, err)
     end)
 
+    it("maps by-value TValue parameters and returns to value", function()
+        with_header([[
+            typedef struct TValue TValue;
+            extern TValue ffi_value_echo(TValue value);
+            extern int ffi_value_seen(TValue value);
+        ]], function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                local function echo(x: value): value
+                    return c.ffi_value_echo(x)
+                end
+
+                local function implicit_value(): value
+                    return c.ffi_value_echo(42)
+                end
+
+                local function seen(f: (value) -> value): integer
+                    return c.ffi_value_seen(f)
+                end
+            ]])
+            assert.truthy(ok, err)
+        end)
+    end)
+
+    it("does not expose raw TValue pointers through the FFI", function()
+        with_header([[
+            typedef struct TValue TValue;
+            extern int ffi_value_pointer(TValue *value);
+        ]], function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                function bad(): integer
+                    return c.ffi_value_pointer(nil)
+                end
+            ]])
+            assert.falsy(ok)
+            assert.match("member 'ffi_value_pointer' not found", err)
+        end)
+    end)
+
     it("types the built-in L as lua_State pointer for C calls", function()
         with_header([[
             typedef struct lua_State lua_State;

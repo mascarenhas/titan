@@ -18,5 +18,6 @@ typedef float titan_ffi_float;
 typedef double titan_ffi_double;
 
 typedef struct lua_State lua_State;
+typedef struct TValue TValue;
 
 #endif
