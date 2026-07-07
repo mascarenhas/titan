@@ -147,7 +147,8 @@ they are in the roadmap:
 
 ## Next
 
-* standard library that is a subset of Lua's standard library, built using the C FFI
+* asymmetric, tagged (nested) coroutines as building block for async IO
+* minimal standard library (expose Lua tostring/tonumber, file/socket IO using libuv, string library, math library, load/run Lua code)
 * FFI with C, continued (function pointers, callbacks from C into Titan, adopted
   pointers, owned structs with flexible array members, and Lua C API support)
 * tagged variants (unions of records with some syntax for switch/case on the record tag)
