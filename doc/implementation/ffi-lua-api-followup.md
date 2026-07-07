@@ -29,6 +29,16 @@ The main open questions are:
 * whether API calls that can longjmp must always be wrapped by the same error
   machinery used by generated Lua entry points.
 
+This is only about calling the **C API surface** as C. Titan already has a
+separate route for Lua-callable operations: a value passed into Titan with a
+function type can be called by `codevaluecall`'s generic Lua-stack path. That
+path uses `luaD_callnoyield`, so it can invoke ordinary Lua closures, Lua C
+functions, and `__call` objects without going through the C FFI at all. It is
+therefore a viable way to call APIs that have already been packaged as Lua
+callables. It does not solve raw stack-oriented API calls such as `lua_push*`,
+`lua_get*`, registry operations, or macros that require generated code to reason
+about `lua_State *L`, stack effects, allocation, and longjmp behavior.
+
 ## Likely Direction
 
 A plain header import of `lua.h` is not enough. A safer next iteration would

@@ -19,6 +19,23 @@ macros, ownership, errors, and callbacks.
 This note should guide a follow-up design after the v1 C type model, ownership,
 field access, arrays, and C variadic calls have landed.
 
+## Existing non-FFI route: Lua callables
+
+Not every way of "calling Lua from Titan" requires importing the Lua C API.
+Titan function values already have a generic call path for non-exact runtime
+values: `codevaluecall` pushes the boxed callee and arguments onto the Lua stack
+and calls `luaD_callnoyield`. That means a function-typed parameter, local, or
+`value` cast can invoke any Lua-callable value passed into Titan: a Lua closure,
+a Lua C function, a table/userdata with `__call`, or a Titan function whose
+runtime function-type tag does not exactly match the call site's static type.
+
+This existing path is a valid way to expose Lua APIs that are already packaged
+as Lua callables, and it does not depend on the C FFI. The remaining follow-up
+described here is narrower: direct use of the public Lua C API as C, especially
+operations that need `lua_State *L`, stack-effect metadata, allocation and
+longjmp policy, macro wrappers, borrowed-pointer lifetimes, or callback
+registration.
+
 ## Capabilities needed
 
 - C type coverage for Lua's public API typedefs: `lua_State *`, `lua_Integer`,
@@ -142,6 +159,12 @@ This is not part of the first C FFI implementation.
 - `doc/language/ffi.md` documents the current direct-call, compile-time FFI and
   its limits around function-like macros, function pointers, and pointer
   leakage.
+- `doc/language/lua-interop.md` documents the existing Lua-callable route:
+  Titan can receive and call Lua functions, Lua C functions, and `__call`
+  objects through function-typed values.
+- `doc/implementation/codegen-overview.md` documents `codevaluecall`'s exact
+  Titan-closure fast path and generic `luaD_callnoyield` path for all other
+  Lua callables.
 - `doc/implementation/ffi-internals.md` documents the current foreign-import
   pipeline and direct C call codegen.
 - `doc/implementation/lua-interop-internals.md` documents Lua entry wrappers,

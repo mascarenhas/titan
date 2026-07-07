@@ -234,6 +234,66 @@ stack is used only as a **GC anchor**, under two rules:
   reserved *before* doing anything else that could allocate. The Lua
   entry wrapper plays the caller's role for Lua callers.
 
+### Calling function values (`codevaluecall`)
+
+Calling a first-class function value is the one Titan-to-Titan call form
+that may deliberately fall back to Lua's ordinary call machinery. The
+callee expression has static type `Type.Function`, but its runtime value
+is a boxed `TValue`: it may be a Titan `CClosure`, a Lua closure, a Lua C
+function, or an object with a `__call` metamethod. `codevaluecall`
+therefore emits two branches.
+
+The **fast path** is taken only when the boxed value is a Titan
+`CClosure` whose runtime function-type tag is the exact tag for the
+callee expression's static type:
+
+```c
+if (ttisCclosure(&fn) && clCvalue(&fn)->nupvalues >= 3
+    && ttislightuserdata(&clCvalue(&fn)->upvalue[1])
+    && pvalue(&clCvalue(&fn)->upvalue[1]) == <function-type tag>) {
+    ...
+}
+```
+
+Those tags are the `static const void *` identities allocated by
+`function_type_tag`, keyed by `types.tostring(ftype)` and
+publish-or-recovered through the Lua registry so source-linked and
+`.so`-loaded modules agree on the pointer for the same canonical type.
+Matching the tag is stricter than ordinary compatibility: a Titan
+`(value) -> integer` viewed as `(integer) -> integer` through a gradual
+`value` round trip is callable, but its tag does not match the call
+site's exact type and it cannot use this branch.
+
+Once the fast predicate holds, the call is again an unboxed native call:
+`_vc_callee = clCvalue(&fn)`, `_vc_mod =
+uvalue(&_vc_callee->upvalue[0])`, and the native entry pointer in
+`upvalue[2]` is cast to the exact `function_sig` typedef and called with
+`L`, `_vc_mod`, `_vc_callee`, the already-evaluated native arguments and
+the usual out-parameters. Passing `_vc_callee` as `_fn` is what lets
+anonymous closures and bound-method trampolines read their captured
+upvalues while still using the same fast branch as top-level function
+values.
+
+The **generic path** is used for everything else: non-exact Titan
+function values, Lua closures, Lua C functions, and `__call` objects.
+It pushes the boxed callee followed by the already-evaluated arguments
+onto the Lua stack with `setslot`, calls
+`luaD_callnoyield(L, restorestack(L, _vc_func), nresults)`, reads the
+results back with `checkandget`, and then resets `L->top.p` to discard
+the call frame and result slots. Since this is Lua's normal call
+machinery, it is also where non-callable values fail cleanly at runtime.
+The parameter and result checks still use the Titan function type at the
+call site; if the callee is a Titan function with a different compatible
+type, its Lua entry wrapper performs the callee-side coercions before
+entering the native body.
+
+Because the generic branch can grow and relocate the Lua stack,
+`codevaluecall` marks the enclosing function as `uses_base_off`, saves
+the callee stack slot as an offset with `savestack`, and recomputes
+`_base = restorestack(L, _base_off)` after both branches. GC-able
+arguments were already anchored when evaluated, and GC-able results are
+stored into reserved caller slots immediately after the branch joins.
+
 ### The Lua entry wrapper
 
 For every exported function, method and static, `genluaentry` emits a

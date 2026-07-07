@@ -52,6 +52,7 @@ for locals, parameters, return values and temporaries alike:
 | `{T}` (array) | `Table*` | raw pointer; Titan arrays *are* Lua tables |
 | `{K:V}` (map) | `Table*` | likewise |
 | `value` | `TValue` | a full boxed Lua value, held **by value** |
+| function type (`(P...) -> R`) | `TValue` | boxed callable value: exact Titan closures can fast-path, other Lua callables go through `luaD_callnoyield` |
 | record type (`Type.Nominal`) | `Udata*` | the record value *is* this userdata (below) |
 | `T?` (option) | `TValue` | boxed: nil or the payload |
 | foreign pointer | per `foreignctype` | e.g. `void*`, `char*` ([FFI internals](ffi-internals.md)) |
@@ -60,14 +61,15 @@ This is the central performance fact of the backend: Titan locals,
 parameters and return values are ordinary C variables in their native,
 unboxed form. The Lua stack is never the transport for values between
 Titan functions — it is used only as a GC anchor, as described under
-[GC discipline](#gc-discipline-the-invariants). The two dynamic types,
-`value` and `T?`, are carried as `TValue` *by value* (struct copy),
-still without touching the Lua stack. `initval` gives each type its
-zero value — `{ {0}, 0 }` (a nil `TValue`) for `value` and options, `0`
-for everything else — so a declared-but-unset temporary is never
-garbage (it initializes `newtmp` temporaries and the Lua entry
-wrappers' argument holders; plain locals are declared bare and
-assigned immediately).
+[GC discipline](#gc-discipline-the-invariants). The dynamic types
+`value`, function types and `T?` are carried as `TValue` *by value*
+(struct copy), still without touching the Lua stack except when the
+function-value generic call path intentionally invokes Lua's call
+machinery. `initval` gives each type its zero value — `{ {0}, 0 }` (a nil
+`TValue`) for `value`, function values and options, `0` for everything
+else — so a declared-but-unset temporary is never garbage (it
+initializes `newtmp` temporaries and the Lua entry wrappers' argument
+holders; plain locals are declared bare and assigned immediately).
 
 ### Conversion helpers
 
