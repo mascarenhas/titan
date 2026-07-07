@@ -1,5 +1,7 @@
 local assert = require 'luassert'
 
+local TITANC = "./lua ./titanc"
+
 local function clean_test_artifacts()
     os.execute("rm -rf test.o test.so test.c test.titan test__entrypoint.c test test.dSYM coro_standalone app app__entrypoint.c app.dSYM")
 end
@@ -22,14 +24,15 @@ local function build_coro()
         "-I titan-runtime -I lua-5.5.0/src -I libbacktrace " ..
         "-o titan-runtime/titan_coro.o"))
     assert.truthy(exec_ok(
-        "env CCACHE_DISABLE=1 TITAN_PATH_0_11=/tmp TITAN_PATH=/tmp ./titanc coro " ..
+        "env CCACHE_DISABLE=1 TITAN_PATH_0_11=/tmp TITAN_PATH=/tmp " ..
+        TITANC .. " coro " ..
         "-X titan-runtime/titan_coro.o"))
 end
 
 local function compile_and_run(titan_code, lua_code)
     clean_test_artifacts()
     write_file("test.titan", titan_code)
-    assert.truthy(exec_ok("env CCACHE_DISABLE=1 ./titanc test"))
+    assert.truthy(exec_ok("env CCACHE_DISABLE=1 " .. TITANC .. " test"))
     local so = assert(io.open("test.so", "r"))
     so:close()
 
@@ -47,7 +50,7 @@ end
 local function compile_and_run_app(titan_code)
     clean_test_artifacts()
     write_file("test.titan", titan_code)
-    assert.truthy(exec_ok("env CCACHE_DISABLE=1 ./titanc test"))
+    assert.truthy(exec_ok("env CCACHE_DISABLE=1 " .. TITANC .. " test"))
 
     local f = assert(io.popen("./test 2>&1"))
     local out = f:read("*a")
@@ -87,7 +90,8 @@ local function compile_and_run_standalone_import()
             return 1
         end
     ]])
-    assert.truthy(exec_ok("env CCACHE_DISABLE=1 ./titanc -t coro_standalone app"))
+    assert.truthy(exec_ok("env CCACHE_DISABLE=1 " .. TITANC ..
+        " -t coro_standalone app"))
 
     local f = assert(io.popen("./app 2>&1"))
     local out = f:read("*a")
