@@ -173,8 +173,8 @@ by these lights, roughly in order:
    obvious direct code, then letting the C compiler optimize. Where Lua
    semantics demand branches (shift amounts, division signs), they are
    written so constant operands let the C compiler delete them.
-5. **Restrictions are features when they buy the above.** Strict arity,
-   nominal records, no metatables on Titan data — each is a smaller
+5. **Restrictions are features when they buy the above.** Nominal
+   records, no metatables on Titan data — each is a smaller
    language in exchange for a faster and more predictable one, and each can
    be revisited as the design matures (see the roadmap in the
    [README](../../README.md)). First-class functions began as one of these

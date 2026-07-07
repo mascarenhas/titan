@@ -34,10 +34,10 @@ describe("typechecker rehydration of .so-only imports", function()
 
         local bad = so_check({ dep }, "rhbar", [[
             local f = import "rhfoo"
-            function bar(): integer return f.add(2) end   -- wrong arity
+            function bar(): integer return f.add(2) end   -- missing nil cannot fill integer
         ]])
         assert.truthy(#bad >= 1)
-        assert.match("1 arguments but expects 2", table.concat(bad, "\n"))
+        assert.match("expected integer but found nil", table.concat(bad, "\n"))
 
         local badty = so_check({ dep }, "rhbar", [[
             local f = import "rhfoo"

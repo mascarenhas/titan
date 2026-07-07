@@ -60,8 +60,19 @@ argument checks (shown in the next section):
 ```c
 static int interop_fmod_titanentry_lua(lua_State *L) {
     StkId func = L->ci->func.p;
-    if((L->top.p - func - 1) != 2) {
-        luaL_error(L, "calling Titan function %s with %d arguments, but expected %d", "fmod", (int)(L->top.p - func - 1), 2);
+    ptrdiff_t _nargs = L->top.p - func - 1;
+    if(_nargs > 2) {
+        luaL_error(L, "calling Titan function %s with %d arguments, but expected at most %d", "fmod", (int)_nargs, 2);
+    }
+    if (_nargs < 2) {
+        ptrdiff_t _missing = 2 - _nargs;
+        lua_checkstack(L, (int)_missing);
+        func = L->ci->func.p;
+        while (_missing-- > 0) {
+            setnilvalue(s2v(L->top.p));
+            L->top.p++;
+            _nargs++;
+        }
     }
     ptrdiff_t __save_errfunc = L->errfunc;
     int __installed_errfunc = 0;
@@ -98,12 +109,14 @@ static int interop_fmod_titanentry_lua(lua_State *L) {
 
 Walking through it:
 
-* **Strict arity.** The argument count must equal the parameter count
-  exactly; too few *and* too many raise the run-time error
-  `calling Titan function %s with %d arguments, but expected %d` with
-  the unqualified Titan name. There is no Lua-style adjustment. The spec
-  suite asserts the failure (`pcall(titan_test.f, 2, 'foo') == false`)
-  but not the message text.
+* **Argument count adjustment.** The wrapper rejects too many arguments
+  with the error `calling Titan function %s with %d arguments, but
+  expected at most %d` and the unqualified Titan name. Too few arguments
+  are padded by writing nils to fresh Lua stack slots before any
+  parameter is read; the later `checkandget` calls then accept or reject
+  those nils according to the declared parameter types. `lua_checkstack`
+  can relocate the stack, so the wrapper reloads
+  `func = L->ci->func.p` before filling the new slots.
 * **Error handler.** The wrapper saves `L->errfunc` and checks whether it
   already points at Titan's runtime `errorhandler`
   ([below](#the-error-handler-and-titanbacktrace)). If not, it pushes the

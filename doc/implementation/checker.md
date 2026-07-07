@@ -270,6 +270,29 @@ a multi-return declaration, just as on the head: `local a, b? = f()` makes
 `b` an option (`optionize(exp._type)`), while a marker-less tail variable is
 forced like any inferred local.
 
+### Call argument adjustment
+
+`checkargs` owns the upward adjustment of Titan function calls. After the
+ordinary argument expressions and any trailing multi-return expansion have
+been checked, a fixed-parameter deficit is filled by appending synthesized
+`Ast.ExpNil` nodes. Each synthesized nil is passed through `trycoerce` and
+`checkmatch` against the corresponding parameter type, exactly like a
+written `nil` argument; this is why omitting an `integer` parameter remains
+a compile-time type error, while omitting an `integer?`, `value` or
+`boolean` parameter is accepted under the existing coercion rules. If the
+call has too many arguments, `checkargs` still reports the arity error and
+does not drop anything.
+
+The missing-argument rule is deliberately limited to Titan function calls.
+Foreign C function calls and C pseudo-constructors pass `allow_missing=false`
+to `checkargs`, preserving C-style arity. A trailing `...` into a
+non-variadic Titan call is still expanded with `ExpDotsIndex` nodes; for
+call argument slots that can accept nil, the synthesized indexed read uses
+the nil-fill mode so an under-supplied runtime variadic tail behaves like
+the same short call written without `...`. The variadic-callee start-adjust
+path applies the same present-element coercion and nil-fill decision when
+it borrows fixed parameters from a forwarded `...`.
+
 ### Default `for` step
 
 `checkfor` synthesizes a literal `ExpInteger(loc, 1)` or `ExpFloat(loc, 1.0)`

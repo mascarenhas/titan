@@ -446,3 +446,30 @@ Documented the anonymous-functions / closures feature (branch
   functions contributor note. Added a pointer from
   `first-class-functions-spec-v1.md`'s scope note (it had excluded
   nested/anonymous functions).
+
+## 2026-07-07 — optional function parameters by nil adjustment
+
+Documented the relaxation of Titan function call arity: under-supplied
+Titan calls now adjust upward by synthesizing `nil` arguments, while
+over-supplied calls remain errors. The same nil-padding happens in each
+exported function's Lua entry wrapper before boundary type checks, so Lua
+callers can pass fewer arguments too.
+
+* **Language docs.** Updated `functions.md` with the new argument
+  adjustment rule, including the distinction between omitted parameters
+  whose types accept `nil` and omitted required parameters that still fail
+  type checking. Reconciled constructor and Lua-boundary wording in
+  `records.md`, `lua-interop.md`, `variadic-parameters.md`,
+  `error-handling.md`, `index.md`, and `philosophy.md`.
+* **Implementation docs.** Updated `checker.md` for `checkargs`
+  synthesis of `Ast.ExpNil` and the C/FFI strict-arity escape hatch;
+  updated `codegen-overview.md`, `codegen-constructs.md`, and
+  `lua-interop-internals.md` for Lua-entry stack padding, surplus-argument
+  errors, and the revised wrapper excerpt.
+* **Tests added.** `spec/checker/optional_parameters_spec.lua` covers
+  direct calls, methods, function values, missing non-nil parameters,
+  surplus arguments, and foreign C calls staying strict.
+  `spec/coder/optional_parameters_spec.lua` covers direct and method
+  native calls, first-class exact and generic calls, short trailing `...`
+  spreads into fixed and variadic callees, Lua entry padding, surplus Lua
+  arguments, and missing required parameters at the boundary.
