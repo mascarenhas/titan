@@ -69,7 +69,14 @@ end
 --   errors: list of compile-time errors
 --   loc: location of the term that is being compared
 local function checkmatch(term, expected, found, errors, loc)
-    if types.coerceable(found, expected) or not types.compatible(expected, found) then
+    local ok
+    if types.is_c(expected) or types.is_c(found) then
+        ok = types.equals(types.resolve_c_typedef(expected),
+            types.resolve_c_typedef(found))
+    else
+        ok = types.compatible(expected, found)
+    end
+    if types.coerceable(found, expected) or not ok then
         local msg = "types in %s do not match, expected %s but found %s"
         msg = string.format(msg, term, types.tostring(expected), types.tostring(found))
         checker.typeerror(errors, loc, msg)
@@ -238,6 +245,13 @@ local function c_pseudo_member(typ, name)
             type = types.Function({ types.Integer() },
                 { c_owned_type(typ, true) }, false, false),
         }
+    elseif name == "sizeof" or name == "alignof" then
+        return {
+            _tag = "Type.CPseudoSize",
+            ctype = typ,
+            name = name,
+            type = types.Integer(),
+        }
     end
 end
 
@@ -394,6 +408,16 @@ typefromnode = util.make_visitor({
         return invalid(errors, node.loc, "module '%s' referenced by type not found", node.module)
     end,
 
+    ["Ast.TypeCPointer"] = function(node, st, errors)
+        local pointee = typefromnode(node.subtype, st, errors)
+        if not types.is_c(pointee) then
+            return invalid(errors, node.loc,
+                "C pointer type can only point to a C FFI type, not '%s'",
+                types.tostring(pointee))
+        end
+        return types.CPointer(pointee, node.const and { "const" } or {})
+    end,
+
     ["Ast.TypeArray"] = function(node, st, errors)
         return types.Array(deoptionize(typefromnode(node.subtype, st, errors)))
     end,
@@ -442,8 +466,33 @@ typefromnode = util.make_visitor({
 --    node: expression node
 --    target: target type
 --    returns node wrapped in a coercion, or original node
+local function is_mutable_c_address_source(source)
+    if source._tag ~= "Ast.ExpVar" or source.var._tag ~= "Ast.VarName" then
+        return false
+    end
+    local decl = source.var._decl
+    return decl and decl._tag == "Ast.Decl"
+        and not decl._captured
+        and types.is_c(source._type)
+end
+
+local function mark_mutable_c_address_source(source)
+    if source._tag == "Ast.ExpVar" and source.var._tag == "Ast.VarName"
+       and source.var._decl then
+        source.var._decl._assigned = true
+        source.var._decl._c_address_taken = source.loc
+    end
+end
+
 local function trycoerce(source, target, errors)
-    if types.coerceable(source._type, target) then
+    if is_mutable_c_address_source(source)
+       and types.c_mutable_address_coerceable(source._type, target)
+       and not types.c_address_coerceable(source._type, target) then
+        mark_mutable_c_address_source(source)
+        local n = ast.ExpCast(source.loc, source, target)
+        n._type = target
+        return n
+    elseif types.coerceable(source._type, target) then
         local n
         if source._type._tag == "Type.Option" and target._tag == "Type.Option" then
             -- t1? -> t2?: a single cast that propagates nil and converts a
@@ -1161,6 +1210,11 @@ checkvar = util.make_visitor({
             -- (innermost) one.
             if decl._tag == "Ast.Decl" and decl._funcdepth
                and decl._funcdepth < #func_stack then
+                if decl._c_address_taken then
+                    checker.typeerror(errors, node.loc,
+                        "cannot capture variable '%s' after taking its mutable C address",
+                        node.name)
+                end
                 decl._captured = true
                 -- A variable only *written* (never read) by a nested function
                 -- would otherwise miss StatDecl's `_used` gate and never get a
@@ -1249,7 +1303,7 @@ checkvar = util.make_visitor({
                     node.name, ltype.fqtn)
                 end
             end
-        elseif types.is_c(ltype) then
+        elseif types.is_c(ltype) or is_c_type_namespace(node.exp) then
             if is_c_type_namespace(node.exp) then
                 node._decl = c_pseudo_member(ltype, node.name)
                 if node._decl then
@@ -2219,6 +2273,11 @@ checkexp = util.make_visitor({
         elseif source._tag == "Type.Option" and types.equals(source.base, target) then
             -- explicit unwrap of an option to its base type; the cast codegen
             -- emits a runtime nil-check that raises if the value is nil
+            ok = true
+        elseif is_mutable_c_address_source(node.exp)
+           and types.c_mutable_address_coerceable(source, target)
+           and not types.c_address_coerceable(source, target) then
+            mark_mutable_c_address_source(node.exp)
             ok = true
         else
             ok = types.explicitly_coerceable(source, target) or

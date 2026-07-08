@@ -41,7 +41,7 @@ describe("C FFI type checking", function()
         assert.truthy(ok, err)
     end)
 
-    it("maps by-value TValue parameters and returns to value", function()
+    it("coerces between by-value C TValue and Titan value", function()
         with_header([[
             typedef struct TValue TValue;
             extern TValue ffi_value_echo(TValue value);
@@ -51,7 +51,16 @@ describe("C FFI type checking", function()
                 local c = foreign import "]] .. header .. [["
 
                 local function echo(x: value): value
-                    return c.ffi_value_echo(x)
+                    local raw: c.TValue = x
+                    return c.ffi_value_echo(raw)
+                end
+
+                local function raw(x: value): c.TValue
+                    return x
+                end
+
+                local function back(x: c.TValue): value
+                    return x
                 end
 
                 local function implicit_value(): value
@@ -66,65 +75,47 @@ describe("C FFI type checking", function()
         end)
     end)
 
-    it("does not expose raw TValue pointers or arrays through the FFI", function()
+    it("exposes TValue pointer and array forms as C types", function()
         with_header([[
             typedef struct TValue TValue;
-            extern int ffi_value_pointer(TValue *value);
-        ]], function(header)
-            local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
-
-                function bad(): integer
-                    return c.ffi_value_pointer(nil)
-                end
-            ]])
-            assert.falsy(ok)
-            assert.match("member 'ffi_value_pointer' not found", err)
-        end)
-
-        with_header([[
-            typedef struct TValue TValue;
+            extern int ffi_value_pointer(const TValue *value);
             extern TValue ffi_value_array[2];
         ]], function(header)
             local ok, err = run_checker([[
                 local c = foreign import "]] .. header .. [["
 
-                function bad(): value
+                local function has_pointer(v: value): integer
+                    local raw: c.TValue = v
+                    local p: const *c.TValue = raw
+                    return (c.ffi_value_pointer(v) as integer)
+                        + (c.ffi_value_pointer(raw) as integer)
+                        + (c.ffi_value_pointer(p) as integer)
+                end
+
+                function array_entry(): value
                     return c.ffi_value_array[0]
                 end
             ]])
-            assert.falsy(ok)
-            assert.match("member 'ffi_value_array' not found", err)
+            assert.truthy(ok, err)
         end)
 
         with_header([[
             struct TValue;
-            extern int ffi_struct_value_pointer(struct TValue *value);
-        ]], function(header)
-            local ok, err = run_checker([[
-                local c = foreign import "]] .. header .. [["
-
-                function bad(): integer
-                    return c.ffi_struct_value_pointer(nil)
-                end
-            ]])
-            assert.falsy(ok)
-            assert.match("member 'ffi_struct_value_pointer' not found", err)
-        end)
-
-        with_header([[
-            struct TValue;
+            extern int ffi_struct_value_pointer(const struct TValue *value);
             extern struct TValue ffi_struct_value_array[2];
         ]], function(header)
             local ok, err = run_checker([[
                 local c = foreign import "]] .. header .. [["
 
-                function bad(): value
+                local function has_pointer(v: value): integer
+                    return c.ffi_struct_value_pointer(v)
+                end
+
+                function array_entry(): value
                     return c.ffi_struct_value_array[0]
                 end
             ]])
-            assert.falsy(ok)
-            assert.match("member 'ffi_struct_value_array' not found", err)
+            assert.truthy(ok, err)
         end)
     end)
 
@@ -392,6 +383,129 @@ describe("C FFI type checking", function()
         assert.truthy(ok, err)
     end)
 
+    it("offers sizeof and alignof pseudo-members on C types", function()
+        local ok, err = run_checker([[
+            local ffi = foreign import "titan/ffi.h"
+
+            function f(): integer
+                return ffi.titan_ffi_int.sizeof + ffi.titan_ffi_int.alignof
+                    + ffi.TValue.sizeof + ffi.TValue.alignof
+            end
+        ]])
+        assert.truthy(ok, err)
+    end)
+
+    it("allows source-level pointer types over imported C types", function()
+        local ok, err = run_checker([[
+            local ffi = foreign import "titan/ffi.h"
+
+            local function f(p: const *ffi.titan_ffi_int): const *ffi.titan_ffi_void
+                return p
+            end
+        ]])
+        assert.truthy(ok, err)
+
+        ok, err = run_checker([[
+            local ffi = foreign import "titan/ffi.h"
+
+            local function bad(p: *integer)
+            end
+        ]])
+        assert.falsy(ok)
+        assert.match("C pointer type can only point to a C FFI type", err)
+    end)
+
+    it("coerces by-value C expressions and values to const C pointers", function()
+        with_header([[
+            typedef int ffi_int;
+            extern int ffi_read_const_int(const int *p);
+            extern int ffi_has_const_ptr(const void *p);
+        ]], function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                function f(v: value): integer
+                    local x: c.ffi_int = 41 as c.ffi_int
+                    local p: const *c.ffi_int = x
+                    return (c.ffi_read_const_int(x) as integer)
+                        + (c.ffi_read_const_int(p) as integer)
+                        + (c.ffi_has_const_ptr(v) as integer)
+                end
+            ]])
+            assert.truthy(ok, err)
+        end)
+    end)
+
+    it("coerces mutable C locals to mutable C pointer arguments", function()
+        with_header([[
+            typedef int ffi_int;
+            typedef struct TValue TValue;
+            extern int ffi_write_int(ffi_int *p);
+            extern int ffi_write_void(void *p);
+            extern int ffi_read_const_int(const ffi_int *p);
+            extern int ffi_read_const_void(const void *p);
+        ]], function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                function f(v: value): integer
+                    local x: c.ffi_int = 0 as c.ffi_int
+                    local raw: c.TValue = v
+                    return (c.ffi_write_int(x) as integer)
+                        + (c.ffi_write_void(x) as integer)
+                        + (c.ffi_write_void(raw) as integer)
+                end
+            ]])
+            assert.truthy(ok, err)
+
+            ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                function bad(): integer
+                    return c.ffi_write_int(0 as c.ffi_int) as integer
+                end
+            ]])
+            assert.falsy(ok)
+            assert.match("argument 1 of call", err)
+
+            ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                function bad(): integer
+                    local x: c.ffi_int = 1 as c.ffi_int
+                    local cp: const *c.ffi_int = x
+                    return c.ffi_write_int(cp) as integer
+                end
+            ]])
+            assert.falsy(ok)
+            assert.match("argument 1 of call", err)
+
+            ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                function bad(): integer
+                    local x: c.ffi_int = 1 as c.ffi_int
+                    local cp: const *c.ffi_int = x
+                    return c.ffi_write_void(cp) as integer
+                end
+            ]])
+            assert.falsy(ok)
+            assert.match("argument 1 of call", err)
+
+            ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                function good(): integer
+                    local x: c.ffi_int = 1 as c.ffi_int
+                    local p: *c.ffi_int = x
+                    return (c.ffi_read_const_int(p) as integer)
+                        + (c.ffi_read_const_void(p) as integer)
+                end
+            ]])
+            assert.truthy(ok, err)
+        end)
+    end)
+
     it("rejects allocation for C types that are not v1 object allocations", function()
         local ok, err = run_checker([[
             local ffi = foreign import "titan/ffi.h"
@@ -591,12 +705,16 @@ describe("C FFI type checking", function()
     end)
 
     it("imports bare enum constants as C integer members", function()
-        with_header("enum ffi_choice { FFI_A = 3, FFI_B = 4 };\n", function(header)
+        with_header([[
+            enum ffi_choice { FFI_A = 3, FFI_B = 4 };
+            typedef enum ffi_result { FFI_OK = 0, FFI_FAIL = 7 } ffi_result;
+        ]], function(header)
             local ok, err = run_checker([[
                 local c = foreign import "]] .. header .. [["
 
                 function f(): integer
-                    return c.FFI_A as integer
+                    local result: c.ffi_result = c.FFI_FAIL as c.ffi_result
+                    return (c.FFI_A as integer) + (result as integer)
                 end
             ]])
             assert.truthy(ok, err)

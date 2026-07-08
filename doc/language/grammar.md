@@ -26,11 +26,11 @@ is not a reserved word. Tokenization is longest-match, so `andy`,
 `return17`, and `_end` are names. The reserved words are:
 
 ```
-and     as      boolean  break     catch   do      else    elseif
-end     false   finally  float     for     foreign function goto
-if      import  in       integer   local   nil     not      or
-raise   record  repeat   return    string  then    true     until
-value   while
+and     as      boolean  break     catch   const   do      else
+elseif  end     false    finally   float   for     foreign function
+goto    if      import   in        integer local   nil     not
+or      raise   record   repeat    return  string  then    true
+until   value   while
 ```
 
 Note that `goto` and `in` are **reserved but unused**: no Titan construct
@@ -196,6 +196,8 @@ type       ::= simpletype
 simpletype ::= basictype ['?']
 basictype  ::= nil | boolean | integer | float | string | value
             |  Name '.' Name
+            |  '*' simpletype
+            |  const '*' simpletype
             |  Name
             |  '{' type ':' type '}'
             |  '{' type '}'

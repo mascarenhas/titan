@@ -148,4 +148,19 @@ describe("C FFI ctype registration", function()
         assert.equal(5, choice.values[3].value)
         assert.equal(7, choice.values[4].value)
     end)
+
+    it("preserves typedef enum constant values", function()
+        local ftypes = parse_header([[
+            typedef enum ffi_choice {
+                FFI_A,
+                FFI_B = 4,
+                FFI_C
+            } ffi_choice;
+        ]])
+
+        local choice = assert(ftypes["enum@ffi_choice"])
+        assert.equal(0, choice.values[1].value)
+        assert.equal(4, choice.values[2].value)
+        assert.equal(5, choice.values[3].value)
+    end)
 end)

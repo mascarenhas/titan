@@ -7,8 +7,8 @@ The `coro` standard module is split deliberately:
   success/error payload convention, and the transfer choreography around
   minicoro.
 * `titan-runtime/titan_coro.c` owns unsafe runtime primitives: Lua thread
-  creation, userdata rooting, `TValue` address-taking shims, stack
-  switching, the minicoro entry callback, and traceback handoff.
+  creation, userdata rooting, the minicoro entry callback, tag comparison,
+  generic value calls, and traceback handoff.
 * `titan-runtime/minicoro.h` is a vendored copy of minicoro extended with
   tagged nested yield and a `MCO_STACKED` state.
 
@@ -43,18 +43,19 @@ that imports it directly from storing a stale pointer or violating the
 transfer order. Helper functions that need the calling Lua state take
 `lua_State *L`; Titan's built-in `L` local supplies that argument.
 
-The helper returns minicoro-compatible integer result codes. The Titan
-wrapper checks them and raises `titan_coro_result_name(result)` on
-control-transfer failures. User payloads are transported separately:
+`coro.titan` calls minicoro directly for storage and control transfer:
+`mco_push`, `mco_pop`, `mco_resume`, `mco_yield`, `mco_status`,
+`mco_running`, `mco_is_yieldable`, and `mco_result_description`. User
+payloads are transported separately:
 
 1. `Coro:resume` converts the private handle to `titan_coro_ref`,
    selects the current transfer source (`co->stacked_co` when present,
    otherwise `co`), pushes `payload=arg` and `ok=true`, and calls
-   `titan_coro_resume`.
+   `mco_resume` with the resolved tag.
 2. `Coro:error` follows the same path but pushes `ok=false` and
    `payload=err`.
 3. `coro.yield` obtains the current running coroutine, pushes
-   `payload=arg` and `ok=true`, and calls `titan_coro_yield`.
+   `payload=arg` and `ok=true`, and calls `mco_yield`.
 4. After control returns from a resume, the wrapper selects the transfer
    source again. Tagged nested yield can change it from the resumed
    coroutine to the deepest stacked coroutine.
@@ -65,17 +66,30 @@ control-transfer failures. User payloads are transported separately:
 
 ## TValue FFI Boundary
 
-The C FFI recognizes exact by-value `TValue` as Titan `value`. Pointers
-and arrays of `TValue` remain unsupported. This lets `coro.titan` pass
-arbitrary values, function values, tags, and error payloads directly to
-the private helper without inventing a second boxing layer.
+The C FFI imports Lua's by-value `TValue` as a distinct C type and has
+coercions between Titan `value` and C `TValue`. It also lets Titan form
+source-level C pointer types (`*T`, `const *T`), read `T.sizeof`, and
+coerce C locals/formals to mutable pointer parameters. This is enough for
+`coro.titan` to call minicoro's storage and tag APIs directly:
 
-The remaining transfer helpers exist because minicoro's storage and tag
-APIs take pointers to bytes. Titan can pass `value` as a by-value
-`TValue`, but it cannot yet form `&payload` or `&tag` in source. The C
-shims therefore copy a single by-value `TValue` or `int` into or out of
-minicoro storage, and take the address of a by-value tag before calling
-`mco_resume`, `mco_yield`, or `mco_is_yieldable`.
+```lua
+local payload: rt.TValue = nil
+local ok: rt.titan_ffi_int = 0 as rt.titan_ffi_int
+mco.mco_pop(source, ok, rt.titan_ffi_int.sizeof)
+mco.mco_pop(source, payload, rt.TValue.sizeof)
+```
+
+For resume/yield tags, `coro.titan` materializes the effective Titan
+`value` as a local C `TValue` and passes that local to minicoro's `void *`
+tag parameter:
+
+```lua
+local ctag: rt.TValue = tag
+mco.mco_resume(co, ctag)
+```
+
+Minicoro treats that pointer opaquely and compares it before returning
+from the control-transfer call.
 
 The helper stores live values in ordinary Lua roots:
 
@@ -98,11 +112,11 @@ the handle, the handle roots the child Lua thread, and nested
 unwinding them.
 
 Transfer itself uses minicoro storage. `coro.titan` pushes the payload
-`TValue` and then the `ok` flag through small C shims; the receiver pops
-`ok` first and the payload second. Minicoro copies the struct bytes. It
-never owns a Lua root for the collectable object referenced by the copied
-`TValue`; the owning Lua thread stack frame or the final-result slot on
-the child thread does.
+`TValue` and then the `ok` flag with `mco_push`; the receiver pops `ok`
+first and the payload second with `mco_pop`. Minicoro copies the struct
+bytes. It never owns a Lua root for the collectable object referenced by
+the copied `TValue`; the owning Lua thread stack frame or the
+final-result slot on the child thread does.
 
 ## Entry Function
 
@@ -138,18 +152,15 @@ suspended `err` parameter until the transfer is consumed.
 ## FFI Experiment Notes
 
 This implementation intentionally pushes the C FFI boundary: the Titan
-module manipulates an opaque C pointer, calls helpers over by-value
-`TValue`, and owns the order of `mco_push`/`mco_pop`-style operations.
-That raw pointer surface is deliberately private to `coro.titan`; it is
-not a safe general-purpose coroutine FFI. The pieces that remain in C are
-the ones that still require capabilities outside the current FFI:
+module manipulates borrowed `mco_coro *` values, calls minicoro directly,
+moves arbitrary Lua values as by-value `TValue`s, and owns the order of
+`mco_push`/`mco_pop` operations. That raw pointer surface is deliberately
+private to `coro.titan`; it is not a safe general-purpose coroutine FFI.
+The pieces that remain in C are the ones that still require capabilities
+outside the current FFI:
 
 * exporting a Titan closure as a C callback with `void (*)(mco_coro *)`
   ABI, for the minicoro entry point or tag comparator;
-* taking the address of a Titan local or formal, especially a by-value
-  `TValue`;
-* declaring out-parameters or scoped raw `TValue *` parameters without
-  exposing unrooted Lua stack storage generally;
 * installing userdata finalizers, uservalues, metatables, and write
   barriers from Titan code;
 * using Lua protected-call internals, `luaD_callnoyield`, `CallInfo`, and
@@ -173,8 +184,8 @@ int mco_is_yieldable(mco_coro *co, void *tag);
 
 All resumes and yields are tagged. The comparator is a static setting of
 the minicoro implementation, not a per-call argument. Minicoro stores
-tags as opaque `void *`; it knows nothing about Lua. `titan_coro.c`
-passes pointers to rooted `TValue`s and compares them with:
+tags as opaque `void *`; it knows nothing about Lua. Titan passes
+pointers to in-flight `TValue`s, and the C comparator compares them with:
 
 ```c
 luaV_equalobj(NULL, (const TValue *)t1, (const TValue *)t2)

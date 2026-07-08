@@ -35,6 +35,8 @@ describe("C FFI code generation", function()
 
     it("round-trips by-value TValue through C helpers", function()
         with_header([[
+            typedef struct lua_State lua_State;
+            typedef struct TString TString;
             typedef struct TValue TValue;
 
             static TValue ffi_value_echo(TValue value) {
@@ -51,6 +53,22 @@ describe("C FFI code generation", function()
                 if (ttisfunction(&value)) return 7;
                 if (ttisfulluserdata(&value)) return 8;
                 return 0;
+            }
+
+            static int ffi_const_value_kind(const TValue *value) {
+                return value ? ffi_value_kind(*value) : 0;
+            }
+
+            static void ffi_collect(lua_State *L) {
+                lua_gc(L, 2, 0);
+            }
+
+            static TValue ffi_make_gc_payload(lua_State *L) {
+                TValue value;
+                const char *payload = "anchored raw TValue payload";
+                TString *str = luaS_newlstr(L, payload, sizeof("anchored raw TValue payload") - 1);
+                setsvalue(L, &value, str);
+                return value;
             }
         ]], function(header)
             h.run_coder([[
@@ -93,6 +111,30 @@ describe("C FFI code generation", function()
                 function function_rounds(): value
                     return c.ffi_value_echo(echo)
                 end
+
+                function raw_local_kind(): integer
+                    local raw: c.TValue = 42
+                    return c.ffi_value_kind(raw)
+                end
+
+                function raw_pointer_kind(): integer
+                    local raw: c.TValue = "through pointer"
+                    local p: const *c.TValue = raw
+                    return (c.ffi_const_value_kind(p) as integer)
+                        + (c.ffi_const_value_kind(raw) as integer)
+                        + (c.ffi_const_value_kind("direct" as c.TValue) as integer)
+                end
+
+                function raw_back(): value
+                    local raw: c.TValue = "back"
+                    return raw
+                end
+
+                function raw_gc_survives(): value
+                    local raw: c.TValue = c.ffi_make_gc_payload(L)
+                    c.ffi_collect(L)
+                    return raw
+                end
             ]], [[
                 assert(test.nil_rounds() == nil)
                 assert(test.integer_rounds() == 42)
@@ -101,6 +143,10 @@ describe("C FFI code generation", function()
                 assert(test.map_kind() == 6)
                 assert(test.record_kind() == 8)
                 assert(test.function_rounds()("ok") == "ok")
+                assert(test.raw_local_kind() == 3)
+                assert(test.raw_pointer_kind() == 15)
+                assert(test.raw_back() == "back")
+                assert(test.raw_gc_survives() == "anchored raw TValue payload")
             ]])
         end)
     end)
@@ -195,6 +241,87 @@ describe("C FFI code generation", function()
                 end
             ]], [[
                 assert(test.sum() == 12)
+            ]])
+        end)
+    end)
+
+    it("generates sizeof, alignof, source pointer types, and address coercions", function()
+        with_header([[
+            typedef int ffi_int;
+            typedef struct TValue TValue;
+            static int ffi_read_const_int(const int *p) { return *p + 1; }
+            static ffi_int ffi_make_int(void) { return 18; }
+            static int ffi_has_const_ptr(const void *p) { return p != 0; }
+            static int ffi_has_const_tvalue(const TValue *p) { return p != 0; }
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                local function read_pointer(p: const *c.ffi_int): integer
+                    return c.ffi_read_const_int(p) as integer
+                end
+
+                function sum(v: value): integer
+                    local x: c.ffi_int = 41 as c.ffi_int
+                    return (c.ffi_int.sizeof as integer)
+                        + (c.ffi_int.alignof as integer)
+                        + (c.ffi_read_const_int(x) as integer)
+                        + read_pointer(x)
+                        + (c.ffi_has_const_ptr(v) as integer)
+                        + (c.ffi_has_const_tvalue(v as c.TValue) as integer)
+                end
+
+                function rvalue_const_pointer(): integer
+                    return c.ffi_read_const_int(41 as c.ffi_int) as integer
+                end
+
+                function call_result_const_pointer(): integer
+                    return c.ffi_read_const_int(c.ffi_make_int()) as integer
+                end
+            ]], [[
+                local expected = 4 + 4 + 42 + 42 + 1 + 1
+                assert(test.sum("rooted") == expected)
+                assert(test.rvalue_const_pointer() == 42)
+                assert(test.call_result_const_pointer() == 19)
+            ]])
+        end)
+    end)
+
+    it("generates address coercions for mutable C out-parameters", function()
+        with_header([[
+            typedef int ffi_int;
+            typedef struct TValue TValue;
+            static int ffi_write_int(ffi_int *p) { *p = 17; return 1; }
+            static int ffi_write_void(void *p) { *(ffi_int *)p = 23; return 1; }
+            static int ffi_write_value(void *p) {
+                setivalue((TValue *)p, 77);
+                return 1;
+            }
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                function write_int(): integer
+                    local x: c.ffi_int = 0 as c.ffi_int
+                    c.ffi_write_int(x)
+                    return x as integer
+                end
+
+                function write_void(): integer
+                    local x: c.ffi_int = 0 as c.ffi_int
+                    c.ffi_write_void(x)
+                    return x as integer
+                end
+
+                function write_value(): value
+                    local raw: c.TValue = nil
+                    c.ffi_write_value(raw)
+                    return raw
+                end
+            ]], [[
+                assert(test.write_int() == 17)
+                assert(test.write_void() == 23)
+                assert(test.write_value() == 77)
             ]])
         end)
     end)

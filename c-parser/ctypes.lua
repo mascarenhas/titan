@@ -295,7 +295,7 @@ local function get_enum(lst, spec)
 end
 
 local function refer(lst, item, get_fn)
-    if item.id and not item.fields then
+    if item.id and not item.fields and not item.values then
         local key = item.type .. "@" .. item.id
         local su_typ = lst[key]
         if not su_typ then

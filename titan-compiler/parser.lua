@@ -132,6 +132,14 @@ function defs.trywrap(pos, block, catchblock, finallyblock)
     return ast.StatTry(pos, block, catchblock, finallyblock)
 end
 
+function defs.cptrtype(pos, subtype)
+    return ast.TypeCPointer(pos, subtype, false)
+end
+
+function defs.constcptrtype(pos, subtype)
+    return ast.TypeCPointer(pos, subtype, true)
+end
+
 function defs.ifstat(pos, exp, block, thens, elseopt)
     table.insert(thens, 1, ast.Then(pos, exp, block))
     return ast.StatIf(pos, thens, elseopt)
@@ -450,6 +458,8 @@ local grammar = re.compile([[
                      / (P  FLOAT)                                -> TypeFloat
                      / (P  STRING)                               -> TypeString
                      / (P  VALUE)                                -> TypeValue
+                     / (P  CONST MUL simpletype^TypeType)        -> constcptrtype
+                     / (P  MUL simpletype^TypeType)              -> cptrtype
                      / (P  NAME DOT NAME^QualName)               -> TypeQualName
                      / (P  NAME)                                 -> TypeName
                      / (P  LCURLY type^TypeType
@@ -689,6 +699,7 @@ local grammar = re.compile([[
     CATCH           <- %CATCH SKIP*
     FINALLY         <- %FINALLY SKIP*
     RAISE           <- %RAISE SKIP*
+    CONST           <- %CONST SKIP*
 
     BOOLEAN         <- %BOOLEAN SKIP*
     INTEGER         <- %INTEGER SKIP*

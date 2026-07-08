@@ -53,9 +53,10 @@ code: `titan_ffi_void`, `titan_ffi_bool`, `titan_ffi_char`,
 `titan_ffi_long`, `titan_ffi_unsigned_long`, `titan_ffi_long_long`,
 `titan_ffi_unsigned_long_long`, `titan_ffi_float`, `titan_ffi_double`, and the
 opaque Lua state type `lua_State`. It also exposes Lua's internal `TValue`
-type for private runtime helpers; exact by-value `TValue` parameters and
-returns map to Titan `value`, while raw `TValue *` and `TValue[]` surfaces are
-unsupported.
+type as a real C type for private runtime helpers; Titan `value` and C
+`TValue` are distinct types with explicit FFI coercions between them. A local,
+temporary, or parameter whose C type is `TValue` is treated as GC-bearing, like
+Titan `value`.
 
 ## Imported Members
 
@@ -96,7 +97,7 @@ Supported C type families:
 | `T[N]` | C array type with static length |
 | `struct S`, `union U` | C aggregate type with fields when the header exposes them; source annotations need a typedef name in v1 |
 | `typedef T name` | C typedef that resolves through its target |
-| exact by-value `TValue` | Titan `value`, for compiler/runtime helper headers |
+| exact by-value `TValue` | distinct C `TValue`, with FFI coercions to/from Titan `value` |
 
 Imported C types can appear in **local** type annotations:
 
@@ -115,6 +116,35 @@ type is rejected. This version deliberately does not serialize C types into
 compiled Titan module interfaces, because another Titan module would also need
 the right C header included in its generated C. A local record field may mention
 a C type because it remains private to the defining module.
+
+Pointer types can also be written directly from an imported C type:
+
+```lua
+local ffi = foreign import "titan/ffi.h"
+
+local function fill(out: *ffi.titan_ffi_int)
+    out[0] = 42
+end
+
+local function read(p: const *ffi.titan_ffi_int): integer
+    return p[0] as integer
+end
+```
+
+`*T` means `T *`; `const *T` means `const T *`. The pointee must be an imported
+C type, so `*integer` and pointers to non-FFI Titan types are compile-time
+errors.
+
+Every imported C type namespace exposes `sizeof` and `alignof` pseudo-members.
+They compile to C `sizeof(T)` and `_Alignof(T)` and return a Titan `integer`:
+
+```lua
+local ffi = foreign import "titan/ffi.h"
+
+function int_layout(): integer
+    return ffi.titan_ffi_int.sizeof + ffi.titan_ffi_int.alignof
+end
+```
 
 ## The Built-In Lua State
 
@@ -153,6 +183,11 @@ Allowed conversions include:
   null pointer;
 * C arrays and counted owned C arrays to compatible C pointers;
 * any non-function C pointer to `void *`;
+* non-pointer by-value C object expressions to compatible `const *T` pointers,
+  materialized as the address of the C expression for the duration of the
+  foreign call;
+* mutable local or formal C values to compatible mutable `*T` or `void *`
+  pointer parameters, for C out-parameters;
 * Titan `string` to `char *` or `void *` for calls;
 * C `char *` or `void *` to Titan `string` with an explicit `as string`;
 * a foreign C function name to a compatible C function pointer type;
@@ -161,7 +196,23 @@ Allowed conversions include:
 * Titan `value` to C `TValue` by value, and C `TValue` back to Titan `value`,
   for private runtime helper APIs that include `<titan/ffi.h>`.
 
-By-value C structs and unions cannot cross through `value` in v1.
+By-value C structs and unions cannot cross through `value` in v1. C function
+pointers are callable and nullable, but they are not C object pointers: they
+cannot cross through `value` or through `void *`.
+
+Mutable address coercions are intentionally limited to local variables and
+formal parameters that have C types, because C may write through the pointer:
+
+```lua
+local ffi = foreign import "titan/ffi.h"
+local c = foreign import "outparam.h" -- void write_int(int *p);
+
+function read_written(): integer
+    local x: ffi.titan_ffi_int = 0 as ffi.titan_ffi_int
+    c.write_int(x)
+    return x as integer
+end
+```
 
 When a C scalar participates in Titan arithmetic, cast it to the Titan type you
 want:

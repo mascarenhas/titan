@@ -60,11 +60,11 @@ static int titan_coro_tag_equal(void *t1, void *t2) {
 
 static inline int titan_coro_push_transfer(mco_coro *co, int ok,
                                            TValue payload) {
-  mco_result res = titan_coro_push_value(co, payload);
+  mco_result res = mco_push(co, &payload, sizeof(payload));
   if(res != MCO_SUCCESS) {
     return res;
   }
-  res = titan_coro_push_int(co, ok);
+  res = mco_push(co, &ok, sizeof(ok));
   if(res != MCO_SUCCESS) {
     TValue ignored;
     (void)mco_pop(co, &ignored, sizeof(ignored));
@@ -79,12 +79,6 @@ static inline int titan_coro_pop_transfer(mco_coro *co, int *ok,
     return res;
   }
   return mco_pop(co, payload, sizeof(*payload));
-}
-
-void titan_coro_discard_transfer(mco_coro *co) {
-  int ok;
-  TValue payload;
-  (void)titan_coro_pop_transfer(co, &ok, &payload);
 }
 
 typedef struct titan_coro_call {
@@ -271,56 +265,8 @@ TValue titan_coro_create(lua_State *L, TValue func) {
   return result;
 }
 
-static TValue titan_coro_nil_value(void) {
-  TValue nilv;
-  setnilvalue(&nilv);
-  return nilv;
-}
-
 titan_coro_ref titan_coro_handle(TValue handle) {
   return titan_coro_co_from_value(handle);
-}
-
-titan_coro_ref titan_coro_running(void) {
-  return mco_running();
-}
-
-int titan_coro_push_value(mco_coro *co, TValue payload) {
-  return mco_push(co, &payload, sizeof(payload));
-}
-
-int titan_coro_push_int(mco_coro *co, int value) {
-  return mco_push(co, &value, sizeof(value));
-}
-
-TValue titan_coro_pop_value(lua_State *L, mco_coro *co) {
-  TValue payload = titan_coro_nil_value();
-  mco_result res = mco_pop(co, &payload, sizeof(payload));
-  if(res != MCO_SUCCESS) {
-    luaL_error(L, "could not pop coroutine result: %s",
-               mco_result_description(res));
-  }
-  return payload;
-}
-
-int titan_coro_pop_int(lua_State *L, mco_coro *co) {
-  int value = 0;
-  mco_result res = mco_pop(co, &value, sizeof(value));
-  if(res != MCO_SUCCESS) {
-    luaL_error(L, "could not pop coroutine result: %s",
-               mco_result_description(res));
-  }
-  return value;
-}
-
-int titan_coro_resume(mco_coro *co, TValue tag) {
-  if(!co) return MCO_INVALID_COROUTINE;
-  return mco_resume(co, &tag);
-}
-
-int titan_coro_yield(mco_coro *co, TValue tag) {
-  if(!co) return MCO_INVALID_COROUTINE;
-  return mco_yield(co, &tag);
 }
 
 void titan_coro_raise(lua_State *L, mco_coro *source, TValue payload) {
@@ -337,16 +283,4 @@ void titan_coro_raise(lua_State *L, mco_coro *source, TValue payload) {
   }
   titan_coro_clear_dead(L, source);
   lua_error(L);
-}
-
-int titan_coro_is_yieldable(mco_coro *co, TValue tag) {
-  return co && mco_is_yieldable(co, &tag);
-}
-
-int titan_coro_status(mco_coro *co) {
-  return mco_status(co);
-}
-
-char *titan_coro_result_name(int result) {
-  return (char *)mco_result_description((mco_result)result);
 }

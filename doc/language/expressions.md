@@ -343,10 +343,13 @@ checker accepts are deliberately few:
 | C float | `float` | no |
 | `integer` | C integer | no |
 | `integer` or `float` | C float | no |
+| C numeric type | another C numeric type | no |
 | C `char *` or `void *` (FFI) | `string` | yes — raises on `NULL` |
 | `string` | C `char *` or `void *` (FFI) | no |
 | C integer, C float, C pointer, C array-as-pointer, or owned C userdata | `value` | never |
 | `value` | C integer, C float, C pointer, C array-as-pointer, or owned C userdata | yes — checked |
+| C `TValue` | `value` | no |
+| `value` | C `TValue` | no |
 
 A `value` cast to a concrete type is checked at run time and raises an
 error of the shape `file:line:col: type error, expected T but found U`

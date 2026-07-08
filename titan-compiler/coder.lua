@@ -83,6 +83,7 @@ local function getslot(typ --[[:table]], dst --[[:string?]], src --[[:string]])
     elseif typ._tag == "Type.Array" then tmpl = "$DST hvalue($SRC)"
     elseif typ._tag == "Type.Map" then tmpl = "$DST hvalue($SRC)"
     elseif typ._tag == "Type.Value" then tmpl = "$DST *($SRC)"
+    elseif types.is_c_tvalue(typ) then tmpl = "$DST *($SRC)"
     elseif typ._tag == "Type.Nominal" then tmpl = "$DST uvalue($SRC)"
     elseif typ._tag == "Type.Option" then tmpl = "$DST *($SRC)"
     elseif typ._tag == "Type.Function" then tmpl = "$DST *($SRC)"
@@ -342,6 +343,13 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
             } else {
                 $VAR = 1;
             }
+        ]], {
+            EXP = exp,
+            VAR = cvar
+        })
+    elseif types.is_c_tvalue(typ) then
+        return render([[
+            setobj2t(L, &$VAR, $EXP);
         ]], {
             EXP = exp,
             VAR = cvar
@@ -645,6 +653,7 @@ local function setslot(typ --[[:table]], dst --[[:string]], src --[[:string]])
     elseif typ._tag == "Type.Array" then tmpl = "sethvalue(L, $DST, $SRC);"
     elseif typ._tag == "Type.Map" then tmpl = "sethvalue(L, $DST, $SRC);"
     elseif typ._tag == "Type.Value" then tmpl = "do { TValue _titan_v = $SRC; setobj2t(L, $DST, &_titan_v); } while (0);"
+    elseif types.is_c_tvalue(typ) then tmpl = "do { TValue _titan_v = $SRC; setobj2t(L, $DST, &_titan_v); } while (0);"
     elseif typ._tag == "Type.Nominal" then tmpl = "setuvalue(L, $DST, $SRC);"
     elseif typ._tag == "Type.Option" then tmpl = "do { TValue _titan_v = $SRC; setobj2t(L, $DST, &_titan_v); } while (0);"
     elseif typ._tag == "Type.Function" then tmpl = "do { TValue _titan_v = $SRC; setobj2t(L, $DST, &_titan_v); } while (0);"
@@ -729,7 +738,7 @@ foreignctype = function(typ --[[:table]])
     elseif typ._tag == "Type.CPointer" then
         local pointee = types.resolve_c_typedef(typ.pointee)
         local quals = typ.quals and #typ.quals > 0
-            and " " .. table.concat(typ.quals, " ") or ""
+            and table.concat(typ.quals, " ") .. " " or ""
         if pointee._tag == "Type.CFunction" then
             local params = {}
             for _, param in ipairs(pointee.params) do
@@ -747,7 +756,7 @@ foreignctype = function(typ --[[:table]])
                 PARAMS = table.concat(params, ", "),
             })
         end
-        return foreignctype(typ.pointee) .. " *" .. quals
+        return quals .. foreignctype(typ.pointee) .. " *"
     elseif typ._tag == "Type.Pointer" then
         if typ.type._tag == "Type.Nil" then
             return "void*"
@@ -822,7 +831,8 @@ end
 
 local function initval(typ --[[:table]])
     if typ._tag == "Type.Value" or typ._tag == "Type.Option"
-       or typ._tag == "Type.Function" then return "{ {0}, 0 }"
+       or typ._tag == "Type.Function" or types.is_c_tvalue(typ) then
+        return "{ {0}, 0 }"
     else return "0" end
 end
 
@@ -2253,9 +2263,66 @@ local function makestring(ctx, cexp, target)
     end
 end
 
+local function is_addressable_local(exp)
+    if exp._tag ~= "Ast.ExpVar" or exp.var._tag ~= "Ast.VarName" then
+        return false
+    end
+    local decl = exp.var._decl
+    return decl and decl._tag == "Ast.Decl" and not decl._boxed
+end
+
+local function materialize_address_tmp(ctx, exp, cexp)
+    local tmp = ctx.tmp
+    ctx.tmp = ctx.tmp + 1
+    local tmpname = "_tmp_" .. tmp
+    local slot = types.is_gc(exp._type) and newslot(ctx) or nil
+    return render([[
+        $CDECL;
+        $TMPNAME = $CEXP;
+        $ANCHOR
+    ]], {
+        CDECL = cvardecl(ctx, exp._type, tmpname),
+        TMPNAME = tmpname,
+        CEXP = cexp,
+        ANCHOR = slot and setslot(exp._type, slot, tmpname) or "",
+    }), render("(&$TMPNAME)", { TMPNAME = tmpname })
+end
+
 local function nativetoforeignexp(ctx, exp, cexp, target)
     local stype = types.resolve_c_typedef(exp._type)
     local ttype = target and types.resolve_c_typedef(target) or nil
+
+    if target and types.c_mutable_address_coerceable(exp._type, target)
+       and exp._tag == "Ast.ExpVar"
+       and exp.var._tag == "Ast.VarName"
+       and exp.var._decl
+       and exp.var._decl._tag == "Ast.Decl"
+       and not exp.var._decl._boxed then
+        return "", render("(&($CEXP))", { CEXP = cexp })
+    end
+
+    if target and types.c_address_coerceable(exp._type, target)
+       and is_addressable_local(exp) then
+        return "", render("(&($CEXP))", { CEXP = cexp })
+    elseif target and types.c_address_coerceable(exp._type, target) then
+        return materialize_address_tmp(ctx, exp, cexp)
+    end
+
+    if target and types.is_c_tvalue(target) then
+        if stype._tag == "Type.Value" or types.is_c_tvalue(exp._type) then
+            return "", cexp
+        end
+        local ctmp, tmpname, tmpslot = newtmp(ctx, types.Value(), true)
+        return render([[
+            $CTMP
+            $SETTMP
+            $ANCHOR
+        ]], {
+            CTMP = ctmp,
+            SETTMP = setwrapped(exp._type, "&" .. tmpname, cexp),
+            ANCHOR = setslot(types.Value(), tmpslot, tmpname),
+        }), tmpname
+    end
 
     if stype._tag == "Type.Value"
        and (not ttype or ttype._tag == "Type.Value") then
@@ -4164,6 +4231,12 @@ local function codevar(ctx, node)
                 }))
         elseif node._decl._tag == "Type.CField" then
             return codecfield(ctx, node)
+        elseif node._decl._tag == "Type.CPseudoSize" then
+            local op = node._decl.name == "sizeof" and "sizeof" or "_Alignof"
+            return "", render("((lua_Integer)$OP($CT))", {
+                OP = op,
+                CT = ctype(node._decl.ctype),
+            })
         elseif node._decl._tag == "Type.ModuleMember"
                and node._type._tag == "Type.Function" then
             -- Reference to an imported module's function as a first-class value:
@@ -5456,6 +5529,8 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
         return codecall(ctx, node, target)
     elseif tag == "Ast.ExpExtra" then
         return "", node.exp._extras[node.index]
+    elseif tag == "Ast.ExpCast" and types.equals(node.exp._type, node._type) then
+        return codeexp(ctx, node.exp, iscondition, target)
     elseif tag == "Ast.ExpCast"
            and (node.exp._type._tag == "Type.Typedef"
                 or node._type._tag == "Type.Typedef") then
@@ -5501,6 +5576,9 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
     elseif tag == "Ast.ExpCast" and types.is_c(node._type) then
         local cstats, cexp = codeexp(ctx, node.exp)
         local fstats, fexp = nativetoforeignexp(ctx, node.exp, cexp, node._type)
+        if types.is_c_tvalue(node._type) then
+            return cstats .. fstats, fexp
+        end
         return cstats .. fstats, foreigncast(fexp, node._type)
     elseif tag == "Ast.ExpCast" and types.is_c(node.exp._type)
            and node._type._tag == "Type.Integer" then
@@ -5849,6 +5927,9 @@ function codeforeignexp(ctx, node, target)
     elseif tag == "Ast.ExpCast" and types.is_c(node._type) then
         local cstats, cexp = codeexp(ctx, node.exp)
         local fstats, fexp = nativetoforeignexp(ctx, node.exp, cexp, node._type)
+        if types.is_c_tvalue(node._type) then
+            return cstats .. fstats, fexp
+        end
         return cstats .. fstats, foreigncast(fexp, node._type)
     else
         local cstat, cexp = codeexp(ctx, node)
