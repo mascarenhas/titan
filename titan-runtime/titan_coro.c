@@ -54,7 +54,7 @@ static inline StkId titan_coro_func_slot(lua_State *L) {
   return L->stack.p + 1;
 }
 
-static inline mco_coro *titan_coro_transfer_source(mco_coro *co) {
+mco_coro *titan_coro_transfer_source(mco_coro *co) {
   return (co && co->stacked_co) ? co->stacked_co : co;
 }
 
@@ -64,11 +64,11 @@ static int titan_coro_tag_equal(void *t1, void *t2) {
 
 static inline int titan_coro_push_transfer(mco_coro *co, int ok,
                                            TValue payload) {
-  mco_result res = mco_push(co, &payload, sizeof(payload));
+  mco_result res = titan_coro_push_value(co, payload);
   if(res != MCO_SUCCESS) {
     return res;
   }
-  res = mco_push(co, &ok, sizeof(ok));
+  res = titan_coro_push_int(co, ok);
   if(res != MCO_SUCCESS) {
     TValue ignored;
     (void)mco_pop(co, &ignored, sizeof(ignored));
@@ -85,7 +85,7 @@ static inline int titan_coro_pop_transfer(mco_coro *co, int *ok,
   return mco_pop(co, payload, sizeof(*payload));
 }
 
-static inline void titan_coro_discard_transfer(mco_coro *co) {
+void titan_coro_discard_transfer(mco_coro *co) {
   int ok;
   TValue payload;
   (void)titan_coro_pop_transfer(co, &ok, &payload);
@@ -168,8 +168,7 @@ static inline void titan_coro_clear_dead_thread(lua_State *T) {
   T->top.p = titan_coro_func_slot(T);
 }
 
-static inline void titan_coro_clear_dead_source(lua_State *L,
-                                                mco_coro *source) {
+void titan_coro_clear_dead(lua_State *L, mco_coro *source) {
   lua_State *T = titan_coro_thread_from_mco(source);
   if(T && T != L && mco_status(source) == MCO_DEAD) {
     titan_coro_clear_dead_thread(T);
@@ -276,101 +275,80 @@ TValue titan_coro_create(lua_State *L, TValue func) {
   return result;
 }
 
-int titan_coro_push(lua_State *L, TValue handle, int ok, TValue payload) {
-  mco_coro *target =
-    titan_coro_transfer_source(titan_coro_co_from_value(handle));
-  if(!target) return MCO_INVALID_COROUTINE;
-  return titan_coro_push_transfer(target, ok, payload);
-}
-
-int titan_coro_push_current(lua_State *L, int ok, TValue payload) {
-  mco_coro *co = mco_running();
-  if(!co) return MCO_INVALID_COROUTINE;
-  return titan_coro_push_transfer(co, ok, payload);
-}
-
-int titan_coro_resume(lua_State *L, TValue handle, TValue tag) {
-  mco_coro *co = titan_coro_co_from_value(handle);
-  mco_coro *target = titan_coro_transfer_source(co);
-  mco_result res;
-  if(!co) return MCO_INVALID_COROUTINE;
-  res = mco_resume(co, &tag);
-  if(res != MCO_SUCCESS) {
-    if(target) {
-      titan_coro_discard_transfer(target);
-    }
-  }
-  return res;
-}
-
-int titan_coro_yield(lua_State *L, TValue tag) {
-  mco_coro *co = mco_running();
-  mco_result res;
-  if(!co) return MCO_INVALID_COROUTINE;
-  res = mco_yield(co, &tag);
-  if(res != MCO_SUCCESS) {
-    titan_coro_discard_transfer(co);
-  }
-  return res;
-}
-
-static TValue titan_coro_pop_transfer_or_raise(lua_State *L, mco_coro *source) {
+static TValue titan_coro_nil_value(void) {
   TValue nilv;
-  TValue payload;
-  mco_result res;
-  int ok;
   setnilvalue(&nilv);
-  if(!source) {
-    luaL_error(L, "invalid coroutine handle");
-    return nilv;
-  }
-  res = titan_coro_pop_transfer(source, &ok, &payload);
+  return nilv;
+}
+
+titan_coro_ref titan_coro_handle(TValue handle) {
+  return titan_coro_co_from_value(handle);
+}
+
+titan_coro_ref titan_coro_running(void) {
+  return mco_running();
+}
+
+int titan_coro_push_value(mco_coro *co, TValue payload) {
+  return mco_push(co, &payload, sizeof(payload));
+}
+
+int titan_coro_push_int(mco_coro *co, int value) {
+  return mco_push(co, &value, sizeof(value));
+}
+
+TValue titan_coro_pop_value(lua_State *L, mco_coro *co) {
+  TValue payload = titan_coro_nil_value();
+  mco_result res = mco_pop(co, &payload, sizeof(payload));
   if(res != MCO_SUCCESS) {
     luaL_error(L, "could not pop coroutine result: %s",
                mco_result_description(res));
-    return nilv;
   }
-  if(!ok) {
-    lua_State *T = titan_coro_thread_from_mco(source);
-    lua_checkstack(L, 1);
-    setobj2s(L, L->top.p, &payload);
-    L->top.p++;
-    if(T && mco_status(source) == MCO_DEAD) {
-      titan_coro_restore_trace(L, T);
-    }
-    titan_coro_clear_dead_source(L, source);
-    lua_error(L);
-    return nilv;
-  }
-  titan_coro_clear_dead_source(L, source);
   return payload;
 }
 
-TValue titan_coro_pop(lua_State *L, TValue handle) {
-  mco_coro *source = titan_coro_transfer_source(titan_coro_co_from_value(handle));
-  return titan_coro_pop_transfer_or_raise(L, source);
+int titan_coro_pop_int(lua_State *L, mco_coro *co) {
+  int value = 0;
+  mco_result res = mco_pop(co, &value, sizeof(value));
+  if(res != MCO_SUCCESS) {
+    luaL_error(L, "could not pop coroutine result: %s",
+               mco_result_description(res));
+  }
+  return value;
 }
 
-TValue titan_coro_pop_current(lua_State *L) {
-  return titan_coro_pop_transfer_or_raise(L, mco_running());
+int titan_coro_resume(mco_coro *co, TValue tag) {
+  if(!co) return MCO_INVALID_COROUTINE;
+  return mco_resume(co, &tag);
 }
 
-int titan_coro_is_yieldable(lua_State *L, TValue tag) {
-  mco_coro *co = mco_running();
+int titan_coro_yield(mco_coro *co, TValue tag) {
+  if(!co) return MCO_INVALID_COROUTINE;
+  return mco_yield(co, &tag);
+}
+
+void titan_coro_raise(lua_State *L, mco_coro *source, TValue payload) {
+  if(!source) {
+    luaL_error(L, "invalid coroutine handle");
+    return;
+  }
+  lua_State *T = titan_coro_thread_from_mco(source);
+  lua_checkstack(L, 1);
+  setobj2s(L, L->top.p, &payload);
+  L->top.p++;
+  if(T && mco_status(source) == MCO_DEAD) {
+    titan_coro_restore_trace(L, T);
+  }
+  titan_coro_clear_dead(L, source);
+  lua_error(L);
+}
+
+int titan_coro_is_yieldable(mco_coro *co, TValue tag) {
   return co && mco_is_yieldable(co, &tag);
 }
 
-int titan_coro_status(lua_State *L, TValue handle) {
-  mco_coro *co = titan_coro_co_from_value(handle);
-  if(!co) return TITAN_CORO_STATUS_DEAD;
-  switch(mco_status(co)) {
-    case MCO_SUSPENDED: return TITAN_CORO_STATUS_SUSPENDED;
-    case MCO_RUNNING: return TITAN_CORO_STATUS_RUNNING;
-    case MCO_NORMAL: return TITAN_CORO_STATUS_NORMAL;
-    case MCO_STACKED: return TITAN_CORO_STATUS_STACKED;
-    case MCO_DEAD: return TITAN_CORO_STATUS_DEAD;
-  }
-  return TITAN_CORO_STATUS_DEAD;
+int titan_coro_status(mco_coro *co) {
+  return mco_status(co);
 }
 
 char *titan_coro_result_name(int result) {

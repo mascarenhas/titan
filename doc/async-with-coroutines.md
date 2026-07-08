@@ -196,37 +196,52 @@ new language surface is needed to pass the calling state to C.
 
 The private helper interface should be thin. `coro.titan` owns policy:
 effective-tag resolution, the difference between `resume` and `error`,
-the success/error payload convention, `mco_result` checks, and conversion
-from runtime status codes to public strings. The C helpers own only the
-unsafe pieces: handle validation, value transport to/from minicoro
-storage, stack switching, and Lua-internal bookkeeping.
+the success/error payload convention, `mco_result` checks, conversion
+from runtime status codes to public strings, and the order of transfer
+operations around minicoro. The C helpers own only the unsafe pieces:
+handle validation, address-taking for `TValue` storage and tags, stack
+switching, callback entry, and Lua-internal bookkeeping.
 
-The FFI-facing helper shape should look like mco primitives adapted to
-Titan `value`s:
+The FFI-facing helper shape exposes an opaque `mco_coro *` handle and
+small shims where Titan cannot yet spell `&value` or `sizeof(TValue)`:
 
 ```c
+typedef struct mco_coro mco_coro;
+typedef mco_coro *titan_coro_ref;
+
 enum {
-  TITAN_CORO_SUCCESS = 0
+  TITAN_CORO_SUCCESS = 0,
+  TITAN_CORO_STATUS_DEAD = 0,
+  TITAN_CORO_STATUS_NORMAL = 1,
+  TITAN_CORO_STATUS_RUNNING = 2,
+  TITAN_CORO_STATUS_SUSPENDED = 3,
+  TITAN_CORO_STATUS_STACKED = 4
 };
 
 TValue titan_coro_create(lua_State *L, TValue func);
-int titan_coro_push(lua_State *L, TValue handle, int ok, TValue payload);
-int titan_coro_push_current(lua_State *L, int ok, TValue payload);
-int titan_coro_resume(lua_State *L, TValue handle, TValue tag);
-int titan_coro_yield(lua_State *L, TValue tag);
-TValue titan_coro_pop(lua_State *L, TValue handle);
-TValue titan_coro_pop_current(lua_State *L);
-int titan_coro_is_yieldable(lua_State *L, TValue tag);
-int titan_coro_status(lua_State *L, TValue handle);
+titan_coro_ref titan_coro_handle(TValue handle);
+titan_coro_ref titan_coro_running(void);
+titan_coro_ref titan_coro_transfer_source(titan_coro_ref co);
+int titan_coro_push_value(titan_coro_ref co, TValue payload);
+int titan_coro_push_int(titan_coro_ref co, int value);
+TValue titan_coro_pop_value(lua_State *L, titan_coro_ref co);
+int titan_coro_pop_int(lua_State *L, titan_coro_ref co);
+void titan_coro_discard_transfer(titan_coro_ref co);
+int titan_coro_resume(titan_coro_ref co, TValue tag);
+int titan_coro_yield(titan_coro_ref co, TValue tag);
+int titan_coro_is_yieldable(titan_coro_ref co, TValue tag);
+int titan_coro_status(titan_coro_ref co);
+void titan_coro_clear_dead(lua_State *L, titan_coro_ref source);
+void titan_coro_raise(lua_State *L, titan_coro_ref source, TValue payload);
 char *titan_coro_result_name(int result);
 ```
 
 The exact names are not important; the split is. `resume` and `yield`
 return an `mco_result`-compatible integer, not the user's payload. The
 Titan layer checks it and raises a Titan error with
-`titan_coro_result_name` when the control transfer itself failed. A
-single pop helper consumes the `(ok, payload)` transfer pair; on
-`ok=false` it restores any saved traceback and raises the payload.
+`titan_coro_result_name` when the control transfer itself failed. Titan
+pushes `payload` then `ok`, and pops `ok` then `payload`. On `ok=false`
+it delegates only the traceback restoration and actual `lua_error` to C.
 
 `coro.titan` then has the public shape:
 
@@ -254,25 +269,30 @@ end
 
 function Coro:resume(arg: value, tag: value): value
   local t = effective_tag(self.default_tag, tag)
-  check_result(rt.titan_coro_push(L, self.handle, 1, arg))
-  check_result(rt.titan_coro_resume(L, self.handle, t))
-  return rt.titan_coro_pop(L, self.handle)
+  local co = rt.titan_coro_handle(self.handle)
+  local source = rt.titan_coro_transfer_source(co)
+  push_transfer(source, 1, arg)
+  resume_checked(co, source, t)
+  return pop_transfer_or_raise(rt.titan_coro_transfer_source(co))
 end
 
 function Coro:error(err: value, tag: value): value
   local t = effective_tag(self.default_tag, tag)
-  check_result(rt.titan_coro_push(L, self.handle, 0, err))
-  check_result(rt.titan_coro_resume(L, self.handle, t))
-  return rt.titan_coro_pop(L, self.handle)
+  local co = rt.titan_coro_handle(self.handle)
+  local source = rt.titan_coro_transfer_source(co)
+  push_transfer(source, 0, err)
+  resume_checked(co, source, t)
+  return pop_transfer_or_raise(rt.titan_coro_transfer_source(co))
 end
 
 function yield(arg: value, tag: value): value
   if tag == nil then
     raise "must provide non-nil tag argument to coro.yield"
   end
-  check_result(rt.titan_coro_push_current(L, 1, arg))
-  check_result(rt.titan_coro_yield(L, tag))
-  return rt.titan_coro_pop_current(L)
+  local co = rt.titan_coro_running()
+  push_transfer(co, 1, arg)
+  yield_checked(co, tag)
+  return pop_transfer_or_raise(co)
 end
 ```
 

@@ -30,12 +30,48 @@ local function check_result(result: rt.titan_ffi_int)
   end
 end
 
-local function pop_or_raise(handle: value): value
-  return rt.titan_coro_pop(L, handle)
+local function push_transfer(source: rt.titan_coro_ref,
+                             ok: rt.titan_ffi_int, payload: value)
+  local result = rt.titan_coro_push_value(source, payload)
+  check_result(result)
+  result = rt.titan_coro_push_int(source, ok)
+  if (result as integer) ~= (rt.TITAN_CORO_SUCCESS as integer) then
+    rt.titan_coro_pop_value(L, source)
+    check_result(result)
+  end
 end
 
-local function pop_current_or_raise(): value
-  return rt.titan_coro_pop_current(L)
+local function discard_transfer(source: rt.titan_coro_ref)
+  if source then
+    rt.titan_coro_discard_transfer(source)
+  end
+end
+
+local function resume_checked(co: rt.titan_coro_ref,
+                              source: rt.titan_coro_ref, tag: value)
+  local result = rt.titan_coro_resume(co, tag)
+  if (result as integer) ~= (rt.TITAN_CORO_SUCCESS as integer) then
+    discard_transfer(source)
+    check_result(result)
+  end
+end
+
+local function yield_checked(co: rt.titan_coro_ref, tag: value)
+  local result = rt.titan_coro_yield(co, tag)
+  if (result as integer) ~= (rt.TITAN_CORO_SUCCESS as integer) then
+    discard_transfer(co)
+    check_result(result)
+  end
+end
+
+local function pop_transfer_or_raise(source: rt.titan_coro_ref): value
+  local ok = rt.titan_coro_pop_int(L, source)
+  local payload = rt.titan_coro_pop_value(L, source)
+  if (ok as integer) == 0 then
+    rt.titan_coro_raise(L, source, payload)
+  end
+  rt.titan_coro_clear_dead(L, source)
+  return payload
 end
 
 function create(func: (value) -> value, default_tag: value): Coro
@@ -44,20 +80,24 @@ end
 
 function Coro:resume(arg: value, tag: value): value
   local effective = effective_tag(self.default_tag, tag)
-  check_result(rt.titan_coro_push(L, self.handle, 1, arg))
-  check_result(rt.titan_coro_resume(L, self.handle, effective))
-  return pop_or_raise(self.handle)
+  local co = rt.titan_coro_handle(self.handle)
+  local source = rt.titan_coro_transfer_source(co)
+  push_transfer(source, 1, arg)
+  resume_checked(co, source, effective)
+  return pop_transfer_or_raise(rt.titan_coro_transfer_source(co))
 end
 
 function Coro:error(err: value, tag: value): value
   local effective = effective_tag(self.default_tag, tag)
-  check_result(rt.titan_coro_push(L, self.handle, 0, err))
-  check_result(rt.titan_coro_resume(L, self.handle, effective))
-  return pop_or_raise(self.handle)
+  local co = rt.titan_coro_handle(self.handle)
+  local source = rt.titan_coro_transfer_source(co)
+  push_transfer(source, 0, err)
+  resume_checked(co, source, effective)
+  return pop_transfer_or_raise(rt.titan_coro_transfer_source(co))
 end
 
 function Coro:status(): string
-  local status = rt.titan_coro_status(L, self.handle)
+  local status = rt.titan_coro_status(rt.titan_coro_handle(self.handle))
   if (status as integer) == (rt.TITAN_CORO_STATUS_SUSPENDED as integer) then
     return "suspended"
   end
@@ -77,14 +117,15 @@ function yield(arg: value, tag: value): value
   if tag == nil then
     missing_yield_tag()
   end
-  check_result(rt.titan_coro_push_current(L, 1, arg))
-  check_result(rt.titan_coro_yield(L, tag))
-  return pop_current_or_raise()
+  local co = rt.titan_coro_running()
+  push_transfer(co, 1, arg)
+  yield_checked(co, tag)
+  return pop_transfer_or_raise(co)
 end
 
 function is_yieldable(tag: value): boolean
   if tag == nil then
     missing_yield_tag()
   end
-  return (rt.titan_coro_is_yieldable(L, tag) as integer) ~= 0
+  return (rt.titan_coro_is_yieldable(rt.titan_coro_running(), tag) as integer) ~= 0
 end
