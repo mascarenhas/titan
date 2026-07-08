@@ -503,8 +503,13 @@ extern "C" {
     }
   #elif defined(MCO_USE_VMEM_ALLOCATOR) /* POSIX virtual memory allocator */
     #include <sys/mman.h>
-    #if !defined(MAP_ANONYMOUS) && defined(MAP_ANON)
-      #define MAP_ANONYMOUS MAP_ANON
+    #if !defined(MAP_ANONYMOUS)
+      #if defined(MAP_ANON)
+        #define MAP_ANONYMOUS MAP_ANON
+      #elif defined(__APPLE__)
+        /* Darwin hides MAP_ANON under strict X/Open feature sets. */
+        #define MAP_ANONYMOUS 0x1000
+      #endif
     #endif
     static void* mco_alloc(size_t size, void* allocator_data) {
       _MCO_UNUSED(allocator_data);

@@ -1,6 +1,15 @@
 local assert = require 'luassert'
 
-local LUA = ".lua/bin/lua"
+local function file_exists(path)
+    local f = io.open(path, "r")
+    if f then
+        f:close()
+        return true
+    end
+    return false
+end
+
+local LUA = file_exists("./lua") and "./lua" or ".lua/bin/lua"
 local TITANC = LUA .. " ./titanc"
 
 local function clean_test_artifacts()
