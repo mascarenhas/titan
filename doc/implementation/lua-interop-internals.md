@@ -475,6 +475,7 @@ lives in the Lua registry. The complete key inventory:
 | `TITAN_LIBS_KEY` (`"ecfc9174-d8fd-11e7-8be2-abbaa3ded45f"`) | the dlopen-handle cache table (below) |
 | `TITAN_BT_GENERATION_KEY` (`"a222927d-0e7b-4f7a-93d9-1a6ce7111a5c"`) | a shared generation counter that tells every loaded module's local libbacktrace state to resnapshot after any Titan `.so` is dlopened |
 | `TITAN_BACKTRACE_KEY` (`"57d80578-2534-4856-ad3b-bde8cba4c445"`) | the last error's raw merged backtrace string |
+| `TITAN_TRACE_APPEND_KEY` (`"4f895b66-bae0-4e97-afb3-83a31f2f9e96"`) | temporary coroutine trace handoff slot used before appending resume/error propagation frames |
 | `TITAN_NAMES_KEY` (`"a7c4e2f0-1d6b-4e3a-9c5f-8b2d7e0a4f16"`) | the native-symbol display-name table used by unified trace formatting |
 | `TITAN_TRACE_PINNED` (`"5b3f0f7e-4b1a-4d2e-9a8c-2f6d4c1e7a90"`) | the one-shot flag that preserves an existing traceback for bare re-raise |
 | `"Titan function type <serialized type> tag"` | a shared light-userdata identity tag for each first-class function type |
@@ -574,8 +575,12 @@ The retrieval side is the separate, optional `titan` Lua module
 (`titan-runtime/titanlib.c`, built by the rockspec): `titan.backtrace()`
 rawgets that registry key. Regeneration follows the **pin discipline**
 (`TITAN_TRACE_PINNED`): a pinned slot (a pending re-raise) is preserved
-verbatim and the pin cleared; an unpinned (fresh) error regenerates. See
-also the [language error-handling
+verbatim and the pin cleared; an unpinned (fresh) error regenerates.
+Coroutines use `TITAN_TRACE_APPEND_KEY` before setting the pin: an
+uncaught dead-coroutine trace is staged there, then the resume/error side
+captures a propagation trace, appends it, stores the combined trace under
+`TITAN_BACKTRACE_KEY`, and pins that combined trace for the final
+re-raise. See also the [language error-handling
 chapter](../language/error-handling.md).
 
 ## The standalone entrypoint

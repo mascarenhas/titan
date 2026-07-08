@@ -384,7 +384,8 @@ uses directly.
   `TITAN_BT_GENERATION_KEY` (shared libbacktrace invalidation generation),
   `TITAN_BACKTRACE_KEY` (last raw error backtrace),
   `TITAN_NAMES_KEY` (native-symbol display-name table), and
-  `TITAN_TRACE_PINNED` (re-raise traceback pin).
+  `TITAN_TRACE_PINNED` (re-raise traceback pin), and
+  `TITAN_TRACE_APPEND_KEY` (temporary coroutine traceback append slot).
   `TITAN_LUAINTEGER_NBITS` is used by shift code generation.
 * **`titan_pushmodule(L, c)`** — pushes a `Udata*` (the module state
   object) onto the Lua stack by writing the slot and bumping
@@ -494,7 +495,7 @@ user-facing story.
 | link set (library) | `compile_library` | module `.o`s + `titan.o` + `libbacktrace.a` + `liblua.a` + `-ldl -lm` + `-l<lib>`… | `-l` list from `titanc -l a,b,c`; libbacktrace is linked before Lua. |
 | link set (program) | `compile_program` | `<mod>__entrypoint.c` + all `.o`s + `titan.o` + `libbacktrace.a` + `liblua.a` + `-ldl -lm` + `-l<lib>`… | Standalone programs bundle every compiled module; libbacktrace is linked before Lua. |
 | `TITAN_PATH_DEFAULT` | `titan.h`/`titan.c` | `".;/usr/local/lib/titan/0.11"` plus `package.cpath` dirs at run time | Run-time default search path (mirrors `TITAN_BIN_PATH`'s default fallback). |
-| registry keys | `titan.h` | `TITAN_PATH_KEY`, `TITAN_LIBS_KEY`, `TITAN_BT_GENERATION_KEY`, `TITAN_BACKTRACE_KEY`, `TITAN_NAMES_KEY`, `TITAN_TRACE_PINNED` (UUID strings) | Per-state caches: search path, dlopen handles, shared libbacktrace invalidation generation, last raw backtrace, native-frame display names, and re-raise traceback pin. |
+| registry keys | `titan.h` | `TITAN_PATH_KEY`, `TITAN_LIBS_KEY`, `TITAN_BT_GENERATION_KEY`, `TITAN_BACKTRACE_KEY`, `TITAN_NAMES_KEY`, `TITAN_TRACE_PINNED`, `TITAN_TRACE_APPEND_KEY` (UUID strings) | Per-state caches: search path, dlopen handles, shared libbacktrace invalidation generation, last raw backtrace, native-frame display names, re-raise traceback pin, and coroutine traceback append handoff. |
 | generated ABI symbol | `coder.lua` | `<mangled>_abi` returning `TITAN_VER` | Checked before `.so` type rehydration and before run-time dynamic-import `dlsym`; markerless modules are treated as incompatible. |
 
 The pieces upstream of the driver are described in

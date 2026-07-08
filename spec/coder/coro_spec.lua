@@ -384,6 +384,8 @@ describe("coro standard module", function()
             local bt = titan.backtrace()
             assert(bt:find("in test.nested_fail_body", 1, true),
                    "missing nested coroutine frame\n" .. tostring(bt))
+            assert(bt:find("in test.nested_uncaught", 1, true),
+                   "missing propagation frame\n" .. tostring(bt))
             print("OK")
         ]==])
         assert.match("OK", out)
@@ -461,6 +463,11 @@ describe("coro standard module", function()
                 return nil
             end
 
+            function fresh_fail(): value
+                raise "fresh"
+                return nil
+            end
+
             function body(arg: value): value
                 return fail()
             end
@@ -470,10 +477,13 @@ describe("coro standard module", function()
                 return co:resume(nil)
             end
 
+            injected_trace: value = nil
+
             function catcher(arg: value): value
                 do
                     coro.yield("ready", "tag")
                 catch
+                    injected_trace = traceback
                     return "caught:" .. (error as string)
                 end
                 return "missed"
@@ -486,6 +496,10 @@ describe("coro standard module", function()
                 return (first as string) .. "," .. (second as string) ..
                     "," .. co:status()
             end
+
+            function injected_backtrace(): value
+                return injected_trace
+            end
         ]], [==[
             local titan = require 'titan'
             local ok, err = pcall(test.uncaught)
@@ -493,7 +507,22 @@ describe("coro standard module", function()
             local bt = titan.backtrace()
             assert(bt:find("in test.fail", 1, true),
                    "missing coroutine callback frame\n" .. tostring(bt))
+            assert(bt:find("in test.uncaught", 1, true),
+                   "missing propagation frame\n" .. tostring(bt))
             assert(test.inject() == "ready,caught:oops,dead")
+            local injected = test.injected_backtrace()
+            assert(injected:find("in test.catcher", 1, true),
+                   "missing injected yield frame\n" .. tostring(injected))
+            assert(not injected:find("in test.inject", 1, true),
+                   "yield-side injected error should not append caller propagation\n" ..
+                   tostring(injected))
+            ok, err = pcall(test.fresh_fail)
+            assert(not ok and err == "fresh")
+            local fresh = titan.backtrace()
+            assert(fresh:find("in test.fresh_fail", 1, true),
+                   "fresh trace missing fresh raise\n" .. tostring(fresh))
+            assert(not fresh:find("in test.fail", 1, true),
+                   "fresh trace retained dead coroutine frame\n" .. tostring(fresh))
             print("OK")
         ]==])
         assert.match("OK", out)
@@ -657,6 +686,45 @@ describe("coro standard module", function()
             assert(a:resume(response, weak.tag_main) == response)
             assert(a:status() == "dead")
             assert(b:status() == "dead")
+
+            collectgarbage("incremental")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("abandons stacked coroutines when their suspended handler is collected", function()
+        local out = run_lua([==[
+            local coro = require "coro"
+            collectgarbage("generational")
+
+            local tag_main = {}
+            local tag_b = {}
+            local stacked
+
+            do
+                local a = coro.create(function()
+                    local b = coro.create(function()
+                        return coro.yield("from-b", tag_main)
+                    end, tag_b)
+                    stacked = b
+                    return b:resume(nil, tag_b)
+                end, tag_main)
+
+                assert(a:resume(nil, tag_main) == "from-b")
+                assert(a:status() == "suspended")
+                assert(stacked:status() == "stacked")
+                a = nil
+            end
+
+            for _ = 1, 4 do collectgarbage("collect") end
+            assert(stacked:status() == "dead", stacked:status())
+            local ok, err = pcall(function()
+                stacked:resume(nil, tag_b)
+            end)
+            assert(not ok, "abandoned stacked coroutine should not resume")
+            assert(tostring(err):find("Coroutine not suspended", 1, true),
+                   tostring(err))
 
             collectgarbage("incremental")
             print("OK")

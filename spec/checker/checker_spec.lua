@@ -59,6 +59,47 @@ describe("zero-return () functions (typechecker)", function()
 end)
 
 describe("Titan type checker", function()
+    it("checks a module initializer as a zero-return function", function()
+        assert_type_check([[
+            local function seed(): integer
+                return 41
+            end
+            answer: integer = 0
+            do
+                answer = seed() + 1
+                return
+            end
+        ]])
+    end)
+
+    it("rejects values returned by a module initializer", function()
+        assert_type_error("returned 1 value%(s%) but function expected 0", [[
+            answer: integer = 0
+            do
+                return answer
+            end
+        ]])
+    end)
+
+    it("lets a module initializer use imports", function()
+        local modules = {
+            foo = [[
+                function seed(): integer
+                    return 42
+                end
+            ]],
+            bar = [[
+                local foo = import "foo"
+                answer: integer = 0
+                do
+                    answer = foo.seed()
+                end
+            ]],
+        }
+        local ok, err = run_checker_modules(modules, "bar")
+        assert.truthy(ok, err)
+    end)
+
     it("for loop iteration variables don't shadow var limit and step", function()
         local code = [[
             function fn(x: integer): integer

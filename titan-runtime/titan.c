@@ -5,6 +5,8 @@
 #include <dlfcn.h>
 #include "lua.h"
 #include "lauxlib.h"
+#include "lapi.h"
+#include "lfunc.h"
 #include "lobject.h"
 #include "llimits.h"
 #include "titan.h"
@@ -676,8 +678,10 @@ int errorhandler(lua_State *L) {
 }
 
 /*
- * Copied from lapi.c
+ * Adapted from lapi.c.
 */
+#define titan_ispseudo(i) ((i) <= LUA_REGISTRYINDEX)
+
 static TValue *index2value (lua_State *L, int idx) {
   CallInfo *ci = L->ci;
   if (idx > 0) {
@@ -686,7 +690,7 @@ static TValue *index2value (lua_State *L, int idx) {
     if (o >= L->top.p) return &G(L)->nilvalue;
     else return s2v(o);
   }
-  else if (!ispseudo(idx)) {  /* negative index */
+  else if (!titan_ispseudo(idx)) {  /* negative index */
     api_check(L, idx != 0 && -idx <= L->top.p - (ci->func.p + 1),
                  "invalid index");
     return s2v(L->top.p + idx);
@@ -713,5 +717,6 @@ TValue lua_totvalue(lua_State *L, int idx) {
 }
 
 void lua_pushtvalue(lua_State *L, TValue v) {
-  *(L->top.p++) = v;
+  setobj2s(L, L->top.p, &v);
+  L->top.p++;
 }

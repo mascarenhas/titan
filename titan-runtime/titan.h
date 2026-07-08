@@ -19,9 +19,11 @@
 #ifdef __GNUC__
 #define TITAN_LIKELY(x) __builtin_expect((x), 1)
 #define TITAN_UNLIKELY(x) __builtin_expect((x), 0)
+#define TITAN_UNUSED __attribute__((unused))
 #else
 #define TITAN_LIKELY(x) (x)
 #define TITAN_UNLIKELY(x) (x)
+#define TITAN_UNUSED
 #endif
 
 /* 0.5 -> 0.6: the native ABI changed (every entry gained the _fn closure
@@ -82,6 +84,12 @@
 ** pending re-raise sets the pin so the original error's trace is preserved; a
 ** fresh error leaves it clear so it gets a freshly-captured trace. */
 #define TITAN_TRACE_PINNED "5b3f0f7e-4b1a-4d2e-9a8c-2f6d4c1e7a90"
+
+/* Temporary handoff slot used by Titan coroutines. A dead coroutine entry
+** stages its own trace here; the resume/error side captures a new propagation
+** trace, appends it, stores the combined trace in TITAN_BACKTRACE_KEY, and
+** sets TITAN_TRACE_PINNED for the final re-raise. */
+#define TITAN_TRACE_APPEND_KEY "4f895b66-bae0-4e97-afb3-83a31f2f9e96"
 
 #define TITAN_LUAINTEGER_NBITS cast_int(sizeof(lua_Integer) * CHAR_BIT)
 

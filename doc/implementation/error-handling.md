@@ -39,6 +39,15 @@ pushes the saved `error`, and calls `lua_error`. The handler sees the pin
 and preserves the original deep trace. A fresh `raise <exp>` leaves the
 pin clear, so the handler captures a new trace at the new raise site.
 
+Coroutines use one extra registry slot, `TITAN_TRACE_APPEND_KEY`, for
+uncaught errors in a dead coroutine. The coroutine entry stages its own
+trace there, then the `resume`/`error` side raises and catches the same
+payload to capture the propagation trace in the caller. It appends the new
+trace to the staged coroutine trace, writes the combined string to
+`TITAN_BACKTRACE_KEY`, sets `TITAN_TRACE_PINNED`, and re-raises the
+original payload. The final handler therefore preserves the combined trace
+instead of replacing it with only the shallow propagation site.
+
 When a boundary catches an error for a Titan `catch`, it snapshots the
 trace into a reserved stack slot and then clears both the trace slot and
 the pin. A fully handled catch therefore leaves `titan.backtrace()` as

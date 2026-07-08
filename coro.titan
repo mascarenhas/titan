@@ -54,6 +54,40 @@ local function discard_transfer(source: *mco.mco_coro)
   end
 end
 
+local function reinstall_trace(trace: string)
+  ffi.lua_pushtvalue(L, trace)
+  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_BACKTRACE_KEY)
+  lua.lua_pushboolean(L, 1)
+  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_PINNED)
+end
+
+local function stash_trace_for_append(trace: string)
+  ffi.lua_pushtvalue(L, trace)
+  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_APPEND_KEY)
+end
+
+local function pop_trace_for_append(): value
+  local top = lua.lua_gettop(L)
+  lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_APPEND_KEY)
+  local trace = ffi.lua_totvalue(L, -1)
+  lua.lua_pushnil(L)
+  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_APPEND_KEY)
+  lua.lua_settop(L, top)
+  return trace
+end
+
+local function raise_with_appended_trace(err: value)
+  do
+    raise err
+  catch
+    local inner = pop_trace_for_append()
+    if inner ~= nil then
+      reinstall_trace((inner as string) .. "\n" .. traceback)
+    end
+    raise error
+  end
+end
+
 local function transfer_source(co: *mco.mco_coro): *mco.mco_coro
   if co and co.stacked_co then
     return co.stacked_co
@@ -61,7 +95,8 @@ local function transfer_source(co: *mco.mco_coro): *mco.mco_coro
   return co
 end
 
-local function pop_transfer_or_raise(co: *mco.mco_coro)
+local function pop_transfer_or_raise(co: *mco.mco_coro,
+                                     append_trace: boolean): value
   local ok: ffi.titan_ffi_int = 0 as ffi.titan_ffi_int
   local payload: ffi.TValue = nil
   local ok_result = mco.mco_pop(co, ok, ffi.titan_ffi_int.sizeof)
@@ -69,7 +104,11 @@ local function pop_transfer_or_raise(co: *mco.mco_coro)
   check_mco_result(ok_result)
   check_mco_result(payload_result)
   if (ok as integer) == 0 then
-    raise payload
+    if append_trace then
+      raise_with_appended_trace(payload)
+    else
+      raise payload
+    end
   end
   return payload
 end
@@ -87,7 +126,7 @@ local function resume_result_or_raise(co: *mco.mco_coro,
   if co and co.stacked_co then
     result_source = co.stacked_co
   end
-  return pop_transfer_or_raise(result_source)
+  return pop_transfer_or_raise(result_source, true)
 end
 
 local function yield_result_or_raise(co: *mco.mco_coro, tag: value): value
@@ -97,12 +136,15 @@ local function yield_result_or_raise(co: *mco.mco_coro, tag: value): value
     discard_transfer(co)
     check_mco_result(result)
   end
-  return pop_transfer_or_raise(co)
+  return pop_transfer_or_raise(co, false)
 end
 
 local function handle_to_coro(handle: value): *mco.mco_coro
+  local top = lua.lua_gettop(L)
   ffi.lua_pushtvalue(L, handle)
-  return (lua.lua_touserdata(L, -1) as **mco.mco_coro)[0]
+  local co = (lua.lua_touserdata(L, -1) as **mco.mco_coro)[0]
+  lua.lua_settop(L, top)
+  return co
 end
 
 function Coro:resume(arg: value, tag: value): value
@@ -155,21 +197,22 @@ function is_yieldable(tag: value): boolean
   return (mco.mco_is_yieldable(mco.mco_running(), ctag) as integer) ~= 0
 end
 
-local function coro_gc(handle)
+local function coro_gc(handle: value)
   mco.mco_destroy(handle_to_coro(handle))
 end
 
-local function coro_create(func: value)
-  local slot: **mco.mco_coro = lua.lua_newuserdatauv(L, ffi.titan_sizeof_pointer, 1)
+local function coro_create(func: value): value
+  local slot: **mco.mco_coro = lua.lua_newuserdatauv(L, ffi.titan_ffi_void_ptr.sizeof, 1)
   local T = lua.lua_newthread(L)
   lua.lua_setiuservalue(L, -2, 1)
   lual.luaL_setmetatable(L, "titan.coro")
   ffi.lua_pushtvalue(T, func)
-  local desc = mco.mco_desc_init(coro.titan_coro_entry, coro.STACK_SIZE)
+  local desc = mco.mco_desc_init(nil, STACK_SIZE)
+  desc.func = coro.titan_coro_entry
   desc.user_data = T
   local res = mco.mco_create(slot, desc)
-  if res as integer != mco.MCO_SUCCESS as integer then
-    raise "could not create coroutine: " .. mco.mco_result_description(res)
+  if res as integer ~= mco.MCO_SUCCESS as integer then
+    raise "could not create coroutine: " .. (mco.mco_result_description(res) as string)
   end
   return ffi.lua_totvalue(L, -1)
 end
@@ -178,18 +221,18 @@ function create(func: (value) -> value, default_tag: value): Coro
   return Coro.new(coro_create(func), default_tag)
 end
 
-local function coro_entry(co: *mco.mco_coro)
+local function coro_entry(func_value: value, raw_co: value)
+  local co: *mco.mco_coro = raw_co as *mco.mco_coro
   -- L here is going to be the T from the mco_coro*
   -- since this is called through the Lua entry point
   -- errfunc in the new thread will be set by Titan
-  local func = ffi.lua_totvalue(L, 1)
-  local arg = pop_transfer_or_raise(co)
+  local func: (value) -> value = func_value as value
+  local arg = pop_transfer_or_raise(co, false)
   local res = func(arg)
   push_transfer(co, 1, res)
 catch
-  lua.lua_pushboolean(L, 1)
-  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_PINNED)
-  push_transfer(co, 0, err)
+  stash_trace_for_append(traceback)
+  push_transfer(raw_co as *mco.mco_coro, 0, error)
 finally
   lua.lua_settop(L, 0)
 end
@@ -197,10 +240,10 @@ end
 do
   local res = lual.luaL_newmetatable(L, "titan.coro")
   if res as integer == 1 then
-    ffi.lua_pushtvalue(L, coro_gc as value)
+    ffi.lua_pushtvalue(L, coro_gc)
     lua.lua_setfield(L, -2, "__gc")
   end
   mco.mco_set_tag_comparator(coro.titan_coro_tag_equal)
-  ffi.lua_pushtvalue(L, coro_entry as value)
+  ffi.lua_pushtvalue(L, coro_entry)
   lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, coro.TITAN_CORO_ENTRY_FUNCTION)
 end

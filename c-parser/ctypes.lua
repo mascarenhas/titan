@@ -78,6 +78,69 @@ local function extract_modifiers(ret_pointer, items)
     end
 end
 
+local function leading_modifiers(items)
+    local ret_pointer = {}
+    if type(items) ~= "table" then
+        return ret_pointer
+    end
+    local first = items[1]
+    if type(first) == "table" then
+        for _, item in ipairs(first) do
+            if is_modifier(item) then
+                table.insert(ret_pointer, item)
+            end
+        end
+    else
+        for _, item in ipairs(items) do
+            if is_modifier(item) then
+                table.insert(ret_pointer, item)
+            else
+                break
+            end
+        end
+    end
+    return ret_pointer
+end
+
+local function prepend_modifiers(prefix, rest)
+    if not prefix or #prefix == 0 then
+        return rest
+    end
+    local out = {}
+    for _, item in ipairs(prefix) do
+        table.insert(out, item)
+    end
+    for _, item in ipairs(rest) do
+        table.insert(out, item)
+    end
+    return out
+end
+
+local function declarator_has_pointer(declarator)
+    if type(declarator) ~= "table" then
+        return false
+    end
+    if declarator.declarator and declarator_has_pointer(declarator.declarator) then
+        return true
+    end
+    for _, part in ipairs(declarator) do
+        if type(part) == "table" then
+            for _, modifier in ipairs(part) do
+                if modifier == "*" or modifier == "^" then
+                    return true
+                end
+            end
+        elseif part == "*" or part == "^" then
+            return true
+        end
+    end
+    return false
+end
+
+local function is_function_pointer_declarator(decl)
+    return decl.declarator and declarator_has_pointer(decl.declarator)
+end
+
 local function get_name(name_src)
     local ret_pointer = {}
     if name_src == nil then
@@ -110,6 +173,7 @@ end
 
 local get_type
 local get_fields
+local make_function_pointer_type
 
 local convert_value = typed("TypeList, table -> CType?, string?", function (lst, src)
     local name = nil
@@ -119,11 +183,24 @@ local convert_value = typed("TypeList, table -> CType?, string?", function (lst,
     if type(src.id) == "table" or type(src.ids) == "table" then
         -- FIXME multiple ids, e.g.: int *x, y, *z;
         local ok
+        local is_funcptr = src.id and src.id.params
+            and is_function_pointer_declarator(src.id)
+        local outer_pointer = src.id and leading_modifiers(src.id) or {}
         -- get_name fills these only when ok is true (checked below); LuaLS can't correlate.
         ---@diagnostic disable-next-line: cast-local-type
         ok, name, ret_pointer, idxs = get_name(src.id or src.ids)
         if not ok then
             return nil, name
+        end
+        if is_funcptr then
+            local typ, err = make_function_pointer_type(lst, name, src.type,
+                src.id, ret_pointer, idxs, outer_pointer)
+            if not typ then
+                return nil, err
+            end
+            return typ, nil
+        elseif src.id and src.id.declarator then
+            ret_pointer = prepend_modifiers(outer_pointer, ret_pointer)
         end
     end
 
@@ -461,8 +538,8 @@ local get_params = typed("TypeList, array -> array, boolean", function(lst, para
     return params, vararg
 end)
 
-local function make_function_pointer_type(lst, name, spec, decl, pointer, idxs)
-    local ret_type, err = get_type(lst, spec, {})
+make_function_pointer_type = function(lst, name, spec, decl, pointer, idxs, ret_pointer)
+    local ret_type, err = get_type(lst, spec, ret_pointer or {})
     if not ret_type then
         return nil, err
     end
@@ -494,19 +571,25 @@ local register_many = function(register_item_fn, lst, ids, spec)
 end
 
 local register_decl_item = function(lst, id, spec)
+    local outer_pointer = leading_modifiers(id.decl)
+    local is_funcptr = id.decl.params and is_function_pointer_declarator(id.decl)
     local ok, name, ret_pointer, idxs = get_name(id.decl)
     if not ok then
         return false, name
     end
     assert(name)
     local typ
-    if id.decl.params and id.decl.declarator then
+    if is_funcptr then
         local err
-        typ, err = make_function_pointer_type(lst, name, spec, id.decl, ret_pointer, idxs)
+        typ, err = make_function_pointer_type(lst, name, spec, id.decl,
+            ret_pointer, idxs, outer_pointer)
         if not typ then
             return false, err
         end
     else
+        if id.decl.declarator then
+            ret_pointer = prepend_modifiers(outer_pointer, ret_pointer)
+        end
         local ret_type, err = get_type(lst, spec, ret_pointer)
         if not ret_type then
             return false, err
@@ -567,7 +650,8 @@ end
 
 local register_typedef_item = typed("TypeList, table, table -> boolean, string?", function(lst, id, spec)
     if id.decl.params then
-        if not id.decl.declarator then
+        local outer_pointer = leading_modifiers(id.decl)
+        if not is_function_pointer_declarator(id.decl) then
             -- A typedef of a bare C function type (not a function pointer)
             -- remains out of scope; do not mis-model it as a callable value.
             return true, nil
@@ -576,7 +660,8 @@ local register_typedef_item = typed("TypeList, table, table -> boolean, string?"
         if not ok then
             return false, name or "failed"
         end
-        local def, err = make_function_pointer_type(lst, name, spec, id.decl, pointer, idxs)
+        local def, err = make_function_pointer_type(lst, name, spec, id.decl,
+            pointer, idxs, outer_pointer)
         if not def then
             return false, err or "failed"
         end

@@ -81,6 +81,7 @@ describe("Titan lexer", function()
         assert_lex("nil",   {"NIL"},   {})
         assert_lex("true",  {"TRUE"},  {})
         assert_lex("false", {"FALSE"}, {})
+        assert_lex("return", {"RETURN"}, {})
     end)
 
     it("can lex some identifiers", function()

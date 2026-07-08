@@ -128,6 +128,28 @@ describe("optional function parameter code generation", function()
         ]])
     end)
 
+    it("coerces borrowed fixed parameters before fresh-copying a forwarded variadic tail", function()
+        run_coder([[
+            function target(a: value, ...: value): integer
+                if a ~= 3 then
+                    return -1
+                end
+                local boxed: value = #... as value
+                if boxed ~= #... then
+                    return -2
+                end
+                return #...
+            end
+
+            function spread(...: integer): integer
+                return target(...)
+            end
+        ]], [[
+            assert(test.spread(3) == 0)
+            assert(test.spread(3, 4, 5) == 2)
+        ]])
+    end)
+
     it("pads the Lua entry point and still rejects surplus Lua arguments", function()
         run_coder([[
             function entry(a: integer?, b: boolean): integer

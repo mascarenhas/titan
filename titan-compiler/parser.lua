@@ -352,6 +352,13 @@ function defs.typefunc(pos, argtypes, varargtype, rettypes)
     return ast.TypeFunction(pos, argtypes, rettypes, varargtype)
 end
 
+function defs.makeprogram(_, nodes, init)
+    if init then
+        table.insert(nodes, init)
+    end
+    return nodes
+end
+
 -- Match-time guard against absurdly long parameter/expression lists. Used as a
 -- `=>` predicate over a captured list: succeeds (re-yielding the list capture)
 -- when within LIST_LIMIT, fails when over so the grammar can throw
@@ -367,13 +374,14 @@ end
 local grammar = re.compile([[
 
     program         <-  SKIP*
-                        {| ( method
-                           / static
-                           / toplevelfunc
-                           / toplevelvar
-                           / toplevelrecord
-                           / import
-                           / foreign )* |} !.
+                        (P {| ( method
+                              / static
+                              / toplevelfunc
+                              / toplevelvar
+                              / toplevelrecord
+                              / import
+                              / foreign )* |}
+                           ((moduleinit)? -> opt) !.) -> makeprogram
 
     method          <- (P  localopt FUNCTION NAME COLON NAME^NameMethod
                            LPAREN^LParPList paramlist RPAREN^RParPList
@@ -406,6 +414,8 @@ local grammar = re.compile([[
                            FOREIGN IMPORT^ImportImport
                           (LPAREN STRINGLIT^StringLParImport RPAREN^RParImport /
                            STRINGLIT^StringImport))              -> TopLevelForeignImport
+
+    moduleinit      <- doblock                                   -- produces StatBlock
 
     rettypeopt      <- (P  (COLON rettype^TypeFunc)?)            -> rettypeopt
 
@@ -526,7 +536,7 @@ local grammar = re.compile([[
     statement       <- (SEMICOLON)                               -- ignore
                      / (P  BREAK)                                -> StatBreak
                      / (P  RAISE (exp? -> opt))                  -> StatRaise
-                     / (DO block END^EndBlock)                   -- produces StatBlock
+                     / doblock                                   -- produces StatBlock
                      / (P  WHILE exp^ExpWhile DO^DoWhile
                                  block END^EndWhile)             -> StatWhile
                      / (P  REPEAT block UNTIL^UntilRepeat
@@ -555,6 +565,8 @@ local grammar = re.compile([[
 
     returnstat      <- (P  RETURN (explist? -> listopt) SEMICOLON?)      -> StatReturn
 
+    doblock         <- (DO block END^EndBlock)                   -- produces StatBlock
+
     op1             <- ( OR -> 'or' )
     op2             <- ( AND -> 'and' )
     op3             <- ( EQ -> '==' / NE -> '~=' / LT -> '<' /
@@ -580,8 +592,9 @@ local grammar = re.compile([[
     e8              <- (P     e9  (op8  e8^OpExp)?)              -> binop_concat
     e9              <- (P  {| e10 (op9  e10^OpExp)* |})          -> fold_binop_left
     e10             <- (P  {| e11 (op10 e11^OpExp)* |})          -> fold_binop_left
-    e11             <- (P  {| unop* |}  e12)                     -> fold_unops
-    e12             <- (P  castexp (op12 e11^OpExp)?)            -> binop_right
+    e11             <- castexp
+    unopexp         <- (P  {| unop* |}  e12)                     -> fold_unops
+    e12             <- (P  simpleexp (op12 e11^OpExp)?)          -> binop_right
 
     suffixedexp     <- (prefixexp {| expsuffix+ |})              -> fold_suffixes
 
@@ -598,8 +611,8 @@ local grammar = re.compile([[
                                RPAREN^RParSimpleExp)             -> adjust_exp
 
 
-    castexp         <- (P  simpleexp AS type^CastMissingType)    -> ExpCast
-                     / simpleexp                                 -- produces Exp
+    castexp         <- (P  unopexp AS type^CastMissingType)      -> ExpCast
+                     / unopexp                                   -- produces Exp
 
     simpleexp       <- (P  NIL)                                  -> nil_exp
                      / (P  FALSE -> tofalse)                     -> ExpBool

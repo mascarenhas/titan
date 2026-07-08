@@ -119,8 +119,6 @@ get_type_of_exp = typed("Exp, TypeList -> {string}?", function(exp, lst)
         return base_c_types.INT
     elseif bitop_set[exp.op] then
         return get_type_of_exp(exp[1], lst) -- ...or should it be int?
-    elseif exp.op then
-        print("FIXME unsupported op", exp.op)
     end
     return nil
 end)

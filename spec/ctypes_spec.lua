@@ -108,6 +108,42 @@ describe("C FFI ctype registration", function()
         assert.same({ 2 }, ftypes.ffi_value_array.idxs)
     end)
 
+    it("models parenthesized function names as functions, not function pointers", function()
+        local ftypes = parse_header([[
+            extern int (ffi_parenthesized)(int);
+            extern void *(ffi_parenthesized_ptr)(int);
+            extern int (*ffi_pointer)(int);
+            extern void *(*ffi_pointer_retptr)(int);
+            typedef struct ffi_holder {
+                void (*cb)(int);
+                void *(*retptr)(int);
+            } ffi_holder;
+            typedef int (ffi_function_type)(int);
+        ]])
+
+        assert.equal("function", ftypes.ffi_parenthesized.type)
+        assert.same({ "int" }, ftypes.ffi_parenthesized.ret.type)
+        assert.same({ "int" }, ftypes.ffi_parenthesized.params[1].type)
+
+        assert.equal("function", ftypes.ffi_parenthesized_ptr.type)
+        assert.same({ "void", "*" }, ftypes.ffi_parenthesized_ptr.ret.type)
+
+        assert.equal("functionptr", ftypes.ffi_pointer.type)
+        assert.same({ "*" }, ftypes.ffi_pointer.pointer)
+        assert.same({ "int" }, ftypes.ffi_pointer.ret.type)
+
+        assert.equal("functionptr", ftypes.ffi_pointer_retptr.type)
+        assert.same({ "*" }, ftypes.ffi_pointer_retptr.pointer)
+        assert.same({ "void", "*" }, ftypes.ffi_pointer_retptr.ret.type)
+
+        local holder = ftypes.ffi_holder.def[1]
+        assert.equal("functionptr", holder.fields[1].type)
+        assert.same({ "*" }, holder.fields[1].pointer)
+        assert.equal("functionptr", holder.fields[2].type)
+        assert.same({ "void", "*" }, holder.fields[2].ret.type)
+        assert.is_nil(ftypes.ffi_function_type)
+    end)
+
     it("models function pointer typedefs as function pointer C types", function()
         local ftypes = parse_header([[
             typedef int (*ffi_callback)(int);

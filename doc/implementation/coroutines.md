@@ -4,22 +4,26 @@ The `coro` standard module is split deliberately:
 
 * `coro.titan` owns the public API and policy: tag defaults, status
   strings, result-code checks, `resume` versus `error`, the
-  success/error payload convention, and the transfer choreography around
-  minicoro.
-* `titan-runtime/titan_coro.c` owns unsafe runtime primitives: Lua thread
-  creation, userdata rooting, the minicoro entry callback, tag comparison,
-  generic value calls, and traceback handoff.
+  success/error payload convention, Lua-thread/userdata setup, traceback
+  handoff, and the transfer choreography around minicoro.
+* `titan-runtime/titan_coro.c` owns only the pieces that still need C:
+  compiling the single-file minicoro implementation, the Lua raw-equality
+  tag comparator, and a tiny minicoro entry trampoline that calls the
+  Titan entry function stored in the Lua registry.
 * `titan-runtime/minicoro.h` is a vendored copy of minicoro extended with
   tagged nested yield and a `MCO_STACKED` state.
 
 ## Public Wrapper
 
-`coro.titan` imports minicoro's private struct layout first, then the
-private helper header:
+`coro.titan` imports minicoro's private struct layout plus the Lua and
+private helper headers:
 
 ```lua
 local mco = foreign import "minicoro.h"
-local rt = foreign import "titan/coro.h"
+local lua = foreign import "lua.h"
+local lual = foreign import "lauxlib.h"
+local ffi = foreign import "titan/ffi.h"
+local coro = foreign import "titan/coro.h"
 ```
 
 The exported `Coro` record has local fields:
@@ -32,23 +36,23 @@ end
 ```
 
 That keeps the Lua-visible record opaque while allowing public methods to
-pass the raw handle to the helper through the FFI. The helper exposes the
-minicoro handle as a borrowed C pointer typedef, `titan_coro_ref`.
-Because `minicoro.h` is imported directly, `coro.titan` can read the
-private `mco_coro` fields it needs, such as `stacked_co`, without a C
-helper for simple source selection. A `titan_coro_ref` is borrowed from
-its owning handle or from `mco_running()`. The C header is a private
-standard-library boundary: the Titan type system cannot prevent a module
-that imports it directly from storing a stale pointer or violating the
-transfer order. Helper functions that need the calling Lua state take
-`lua_State *L`; Titan's built-in `L` local supplies that argument.
+keep the raw handle local to the module. The handle is a full userdata
+whose payload is an `mco_coro *`; `coro.titan` pushes the handle value,
+reads the payload through `lua_touserdata`, and immediately restores the
+Lua stack top. Because `minicoro.h` is imported directly, Titan can read
+the private `mco_coro` fields it needs, such as `stacked_co`, without a C
+helper for simple source selection. This is a private standard-library
+boundary: the Titan type system cannot prevent a module that imports
+`minicoro.h` directly from storing a stale pointer or violating the
+transfer order. FFI calls that need the calling Lua state use Titan's
+built-in `L` local.
 
 `coro.titan` calls minicoro directly for storage and control transfer:
 `mco_push`, `mco_pop`, `mco_resume`, `mco_yield`, `mco_status`,
 `mco_running`, `mco_is_yieldable`, and `mco_result_description`. User
 payloads are transported separately:
 
-1. `Coro:resume` converts the private handle to `titan_coro_ref`,
+1. `Coro:resume` converts the private handle to a borrowed `mco_coro *`,
    selects the current transfer source (`co->stacked_co` when present,
    otherwise `co`), pushes `payload=arg` and `ok=true`, and calls
    `mco_resume` with the resolved tag.
@@ -61,10 +65,12 @@ payloads are transported separately:
    it from the resumed coroutine to the deepest stacked coroutine.
 5. The helper pops `ok` and `payload` separately before returning to its
    caller. For `resume`/`error`, `ok=false` means the source coroutine has
-   already died; its entry point pinned any coroutine traceback and cleared
-   its dead child-thread stack before returning control. The helper raises
-   `payload` directly. For `yield`, `ok=false` is an injected error at a
-   live yield site, so the helper also just raises `payload`.
+   already died; its entry point staged any coroutine-thread traceback and
+   cleared its dead child-thread stack before returning control. The helper
+   captures a resume/error-side propagation traceback, appends it to the
+   staged trace, pins the combined trace, and re-raises `payload`. For
+   `yield`, `ok=false` is an injected error at a live yield site, so the
+   helper raises `payload` directly.
 
 ## TValue FFI Boundary
 
@@ -75,10 +81,10 @@ coerce C locals/formals to mutable pointer parameters. This is enough for
 `coro.titan` to call minicoro's storage and tag APIs directly:
 
 ```lua
-local payload: rt.TValue = nil
-local ok: rt.titan_ffi_int = 0 as rt.titan_ffi_int
-mco.mco_pop(source, ok, rt.titan_ffi_int.sizeof)
-mco.mco_pop(source, payload, rt.TValue.sizeof)
+local payload: ffi.TValue = nil
+local ok: ffi.titan_ffi_int = 0 as ffi.titan_ffi_int
+mco.mco_pop(source, ok, ffi.titan_ffi_int.sizeof)
+mco.mco_pop(source, payload, ffi.TValue.sizeof)
 ```
 
 When a C call mutates a stack-anchored `TValue` local through a mutable
@@ -93,7 +99,7 @@ For resume/yield tags, `coro.titan` materializes the effective Titan
 tag parameter:
 
 ```lua
-local ctag: rt.TValue = tag
+local ctag: ffi.TValue = tag
 mco.mco_resume(co, ctag)
 ```
 
@@ -105,10 +111,11 @@ The helper stores live values in ordinary Lua roots:
 * the coroutine handle is full userdata whose raw payload is the
   `mco_coro *`;
 * the handle's uservalue roots the child Lua thread;
-* the child thread stack roots the callback function value while the
-  coroutine is alive; when the entry point finishes, it copies the final
-  return/error payload into minicoro storage, pins any captured traceback in
-  the registry, and clears the dead child stack before returning control;
+* the child thread stack slot 1 roots the callback function value while
+  the coroutine is alive; when the entry point finishes, it copies the
+  final return/error payload into minicoro storage, stages any captured
+  traceback for the caller-side append step, and clears the dead child
+  stack before returning control;
 * `mco_coro->user_data` stores only the child `lua_State *` needed by
   `void (*func)(mco_coro *co)`;
 * in-flight arguments, yielded values, errors, tags, and handles remain
@@ -120,6 +127,14 @@ kept alive by ordinary Lua reachability: the user's `Coro` record owns
 the handle, the handle roots the child Lua thread, and nested
 `resume`/`yield` chains keep their outer frames suspended instead of
 unwinding them.
+
+If the suspended handler of a stacked tagged-yield chain becomes
+unreachable, its finalizer calls `mco_destroy`. Minicoro then abandons the
+skipped chain without running user code: it clears the handler's
+`stacked_co`, marks the stacked inner coroutines dead, and unlinks their
+raw `prev_co` pointers so their later finalizers can destroy them safely.
+This is cleanup for unreachable coroutines, not cancellation for reachable
+ones.
 
 Transfer itself uses minicoro storage. `coro.titan` pushes the payload
 `TValue` and then the `ok` flag with `mco_push`; the receiver pops `ok`
@@ -134,27 +149,38 @@ intervening allocation.
 ## Entry Function
 
 Each coroutine handle owns a `lua_newthread` thread. Creation copies the
-callback value onto that child thread's first real Lua stack slot. Lua's
-base `CallInfo` function slot is reserved and stays nil. The minicoro
-entry function uses the child thread from `mco_coro->user_data`, pushes
-the rooted callback and first argument, and calls it through the same
-generic value-call path generated Titan code uses:
-`luaD_callnoyield` under a protected boundary with Titan's
+callback value onto that child thread's first real Lua stack slot, stores
+the child `lua_State *` in `mco_coro->user_data`, and installs a
+minicoro descriptor whose C entry is `titan_coro_entry`.
+
+The C entry trampoline uses the child thread from `mco_coro->user_data`,
+pushes the registered Titan entry function, duplicates the rooted
+callback, pushes the `mco_coro *` as light userdata, and calls the Titan
+entry with those two values. The Titan entry casts the light userdata
+back to `mco_coro *`, casts the callback `value` to `(value) -> value`,
+and calls it through the same generic value-call path generated Titan code
+uses: `luaD_callnoyield` under a protected boundary with Titan's
 `errorhandler` installed as `L->errfunc`.
 
 Calling a Titan function value this way goes through its normal Lua entry
 wrapper, so `_mod`, `_fn`, captures, argument checks, and result checks
-are the same as for any generic function-value call.
+are the same as for any other generic function-value call.
 
 On success, the entry records `ok=true`, copies the result `TValue` into
 minicoro storage, clears the dead child stack, and returns control. On
-error, Titan's `errorhandler` has already stored the coroutine-thread
-traceback in `registry[TITAN_BACKTRACE_KEY]`; the entry sets the one-shot
-trace pin, copies `(false, error)` into minicoro storage, clears the dead
-child stack, and returns control. When the Titan wrapper observes
-`ok=false` after `resume` or `error`, it raises the payload directly. The
-pin tells the caller's error handler to keep the coroutine traceback rather
-than replacing it with a shallow wrapper traceback.
+error, the generated catch gives the Titan source both `error` and the
+saved catch-local `traceback`. The entry stores that traceback under
+`registry[TITAN_TRACE_APPEND_KEY]`, copies `(false, error)` into minicoro
+storage, clears the dead child stack, and returns control.
+
+When the Titan wrapper observes `ok=false` after `resume` or `error`, it
+raises and catches the payload locally to capture a new traceback on the
+propagation side. If a staged coroutine traceback is present, the wrapper
+stores `coroutine_trace .. "\n" .. propagation_trace` under
+`registry[TITAN_BACKTRACE_KEY]`, sets the one-shot trace pin, and re-raises
+the same error payload. The pin tells the caller's error handler to keep
+the combined trace. This preserves frames from the now-dead coroutine and
+also records where the error crossed the `resume`/`error` boundary.
 
 `Coro:error` before the first normal `resume` is handled without calling
 the callback: the entry sees the preloaded `ok=false` transfer, returns
@@ -173,10 +199,10 @@ outside the current FFI:
 
 * exporting a Titan closure as a C callback with `void (*)(mco_coro *)`
   ABI, for the minicoro entry point or tag comparator;
-* installing userdata finalizers, uservalues, metatables, and write
-  barriers from Titan code;
-* using Lua protected-call internals, `luaD_callnoyield`, `CallInfo`, and
-  traceback registry handoff from Titan source.
+* defining `MINICORO_IMPL` exactly once while forcing Titan's minicoro
+  compile-time options;
+* comparing arbitrary Lua values from minicoro's C-only comparator hook
+  with `luaV_equalobj(NULL, ...)`.
 
 Those are plausible future FFI extensions, but they should be designed as
 general facilities rather than coroutine-specific escape hatches.
@@ -214,6 +240,11 @@ records the deepest stacked coroutine in `stacked_co`; the existing
 handler reconstructs that chain and performs one context switch to the
 deepest stacked coroutine. Directly resuming any stacked coroutine is
 rejected with `MCO_NOT_SUSPENDED`.
+
+Destroying the suspended handler while such a chain is still stacked
+abandons the skipped chain instead of restoring it. The inner coroutines
+are marked `MCO_DEAD` and their `prev_co` links are cleared, which avoids
+leaving raw links into a finalized handler.
 
 The dummy return address at the base of each assembly coroutine stack is
 `NULL`, not a poison address. Titan's errorhandler uses libbacktrace; a

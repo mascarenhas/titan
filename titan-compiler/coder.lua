@@ -196,6 +196,10 @@ local function func_luaname(modname, name)
     return modprefix(modname) .. name .. "_" .. TITAN_ENTRY_TAG .. "_lua"
 end
 
+local function module_initializer_name(tlcontext)
+    return tlcontext.prefix .. TITAN_ENTRY_TAG .. "_module_initializer"
+end
+
 -- Record the mapping from a native function's mangled C symbol to its qualified
 -- Titan source name, for the trace name table emitted in _init (deliverable 2).
 -- The runtime (errorhandler) looks each native frame's DWARF symbol up here and
@@ -1067,7 +1071,7 @@ local function mark_spills(assigned, reads)
 end
 
 local function analyze_try_spills_block(block, after_reads)
-    if not block then return end
+    if not block or not block.stats then return end
     local stats = {}
     for _, stat in ipairs(block.stats) do
         table.insert(stats, stat)
@@ -1470,18 +1474,30 @@ local function newforeigntmp(ctx --[[:table]], typ --[[:table]])
     ctx.tmp = ctx.tmp + 1
     local tmpname = "_tmp_" .. tmp
     local fdecl
+    local finit = ""
+    local rtyp = types.resolve_c_typedef(typ)
     if typ._tag == "Type.String" then
         fdecl = "char* " .. tmpname
+        finit = " = NULL"
     elseif typ._tag == "Type.Pointer" or types.is_c(typ) then
         fdecl = types.is_c(typ) and foreigncdecl(typ, tmpname)
             or foreignctype(typ) .. " " .. tmpname
+        if typ._tag == "Type.Pointer" or typ._tag == "Type.COwned"
+           or rtyp._tag == "Type.CPointer" then
+            finit = " = NULL"
+        elseif rtyp._tag == "Type.CInteger" or rtyp._tag == "Type.CFloat" then
+            finit = " = 0"
+        elseif types.is_c_tvalue(typ) then
+            finit = " = { {0}, 0 }"
+        end
     else
         error("don't know how to convert foreign type "..types.tostring(typ))
     end
     return render([[
-        $DECL;
+        $DECL$INIT;
     ]], {
         DECL = fdecl,
+        INIT = finit,
     }), tmpname
 end
 
@@ -2632,20 +2648,11 @@ local function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
         local same_ct = ctype(ef) == ctype(eg)
         local k = nstatic                 -- static-prefix arg count
         local m = #callee_ftype.params    -- callee fixed-param count
-        if same_ct and k == m then
-            -- CASE 1 (pass-through): static prefix exactly fills the callee fixed
-            -- params and the element representation matches; pass the current
-            -- backing struct and start unchanged. No allocation, no copy.
-            table.insert(caexps, render("($STRUCT *)$NAME",
-                { STRUCT = varg_struct_name(eg), NAME = va.cname }))
-            table.insert(caexps, va.start)
-        elseif same_ct and k < m then
-            -- CASE 2 (start-adjust): the static prefix fills the first k fixed
-            -- params; borrow `...[1 .. (m-k)]` for the remaining fixed params, then
-            -- pass the SAME backing struct with `_start + (m - k)`. No struct
-            -- mutation, no save/restore -- `start` is a parameter (§2.G).
-            -- Borrowed reads nil-fill only when the fixed parameter type accepts
-            -- nil; otherwise an under-supplied tail raises cleanly.
+        local tail_start = va.start
+        if k < m then
+            -- Borrow `...[1 .. (m-k)]` for the remaining fixed params before
+            -- forwarding the rest as the variadic tail. This is needed even
+            -- when the tail representation changes and we must fresh-copy it.
             local delta = m - k
             for j = 1, delta do
                 -- Synthesize a `...[j]` read using the same lowering as a
@@ -2678,10 +2685,17 @@ local function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
                 table.insert(castats, bstat)
                 table.insert(caexps, bexp)
             end
+            tail_start = render("($START + $DELTA)",
+                { START = va.start, DELTA = c_integer_literal(delta) })
+        end
+        if same_ct and k <= m then
+            -- CASE 1 (pass-through): static prefix exactly fills the callee fixed
+            -- params, or the missing fixed params were borrowed above, and the
+            -- element representation matches; pass the current backing struct and
+            -- adjusted start unchanged. No allocation, no copy.
             table.insert(caexps, render("($STRUCT *)$NAME",
                 { STRUCT = varg_struct_name(eg), NAME = va.cname }))
-            table.insert(caexps, render("($START + $DELTA)",
-                { START = va.start, DELTA = c_integer_literal(delta) }))
+            table.insert(caexps, tail_start)
         else
             -- CASE 3 (fresh copy): k > m (the static prefix grows the tail) OR the
             -- element representation differs (ctype(ef) != ctype(eg), each element
@@ -2714,6 +2728,7 @@ local function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
             local vname = "_varg_" .. suffix
             local cntname = "_vcount_" .. suffix
             local nname = "_nvarargs_" .. suffix
+            local tailcount = "_vtail_" .. suffix
             -- Prefix-element stores (already coerced to eg by the checker). When eg
             -- is collectable, a fresh prefix value held only in a C temp would be
             -- swept by the Udata0 allocation below (which may GC). Anchor each gc
@@ -2753,11 +2768,11 @@ local function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
                     VNAME = vname,
                     NPREFIX = c_integer_literal(nprefix),
                     SRC = render("$SRC->args[$START + _vj]",
-                        { SRC = va.cname, START = va.start }),
+                        { SRC = va.cname, START = tail_start }),
                 })
             else
                 local src = render("$SRC->args[$START + _vj]",
-                    { SRC = va.cname, START = va.start })
+                    { SRC = va.cname, START = tail_start })
                 local dst = render("$VNAME->args[$NPREFIX + _vj]",
                     { VNAME = vname, NPREFIX = c_integer_literal(nprefix) })
                 if eg._tag == "Type.Value" or eg._tag == "Type.Option"
@@ -2772,7 +2787,9 @@ local function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
             end
             table.insert(castats, render([[
                 $PREFIX_ANCHOR
-                ptrdiff_t $CNT = (ptrdiff_t)$NPREFIX + ((ptrdiff_t)$SRC->n_args - $START);
+                ptrdiff_t $TAIL = (ptrdiff_t)$SRC->n_args - $START;
+                if ($TAIL < 0) $TAIL = 0;
+                ptrdiff_t $CNT = (ptrdiff_t)$NPREFIX + $TAIL;
                 if (TITAN_UNLIKELY($CNT > TITAN_VARARG_MAX)) {
                     luaL_error(L, "%s:%d:%d: too many variadic arguments forwarded (%d, max %d)", $FILE, $LINE, $COL, (int)$CNT, (int)TITAN_VARARG_MAX);
                 }
@@ -2786,16 +2803,17 @@ local function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
                 $STRUCT $DESCNAME = { $NN, $ARGSNAME };
                 $STRUCT *$VNAME = &$DESCNAME;
                 $PREFIX_INITS
-                for (int _vj = 0; _vj < (int)$SRC->n_args - $START; _vj++) {
+                for (int _vj = 0; _vj < (int)$TAIL; _vj++) {
                     $CONVBODY
                 }
             ]], {
                 PREFIX_ANCHOR = table.concat(prefix_anchor, "\n"),
                 CNT = cntname,
+                TAIL = tailcount,
                 NN = nname,
                 NPREFIX = c_integer_literal(nprefix),
                 SRC = va.cname,
-                START = va.start,
+                START = tail_start,
                 FILE = c_string_literal(node.loc.filename),
                 LINE = c_integer_literal(node.loc.line),
                 COL = c_integer_literal(node.loc.col),
@@ -4123,7 +4141,7 @@ local function codestat_dispatch(ctx, node)
         elseif callee.var and callee.var._tag == "Ast.VarDot"
            and callee.var.exp._type._tag == "Type.CModule" then
             local fstats, fexp = codeforeigncall(ctx, node.callexp)
-            return fstats .. fexp .. ";"
+            return fstats .. "\n    ((void)(" .. fexp .. "));"
         else
             local cstats, cexp = codecall(ctx, node.callexp)
             return cstats .. "\n    ((void)(" .. cexp .. "));"
@@ -6399,6 +6417,64 @@ local function codefuncdec(tlcontext, node)
     node._luabody = genluaentry(tlcontext, node.name, fname, node._type, node.loc, luaname)
 end
 
+local function codeinitializerdec(tlcontext, node)
+    local ctx = newcontext(tlcontext)
+    local stats = {}
+    local fname = module_initializer_name(tlcontext)
+    ctx.has_try = stat_contains_try(node)
+    if ctx.has_try then analyze_try_spills(node) end
+    ctx.rettypes = {}
+
+    local body = codestat(ctx, node)
+    local nslots = ctx.nslots
+    body = body:gsub("TITAN_RESERVED_NSLOTS", c_integer_literal(nslots))
+    local baseoff = ctx.uses_base_off
+        and "\n        ptrdiff_t _base_off = savestack(L, _base);" or ""
+    local entrysave = ctx.used_entry_restore
+        and "\n        lua_longjmp *_entry_errorjmp = L->errorJmp;"
+            .. "\n        l_uint32 _entry_nC = L->nCcalls;" or ""
+    if nslots > 0 then
+        table.insert(stats, 1, render([[
+        luaC_checkGC(L);
+        /* function preamble: reserve needed stack space */
+        if (L->stack_last.p - L->top.p > $NSLOTS) {
+            if (L->ci->top.p < L->top.p + $NSLOTS) L->ci->top.p = L->top.p + $NSLOTS;
+        } else {
+            lua_checkstack(L, $NSLOTS);
+        }
+        StkId _base = L->top.p;
+        L->top.p += $NSLOTS;
+        for(StkId _s = L->top.p - 1; _base <= _s; _s--) {
+            setnilvalue(s2v(_s));
+        }$BASEOFF$ENTRYSAVE
+        ]], {
+            NSLOTS = c_integer_literal(nslots),
+            BASEOFF = baseoff,
+            ENTRYSAVE = entrysave,
+        }))
+    else
+        table.insert(stats, 1, "        StkId _base = L->top.p;" .. baseoff .. entrysave)
+    end
+    table.insert(stats, "        (void)_mod;")
+    table.insert(stats, "        (void)_fn;")
+    table.insert(stats, body)
+    table.insert(stats, [[
+            L->top.p = _base;
+            return;]])
+    node._body = render([[
+    static void $NAME(lua_State *L, Udata *_mod, CClosure *_fn) {
+        $BODY
+    }]], {
+        NAME = fname,
+        BODY = table.concat(stats, "\n")
+    })
+    node._sig = render([[
+        static void $NAME(lua_State *L, Udata *_mod, CClosure *_fn);
+    ]], {
+        NAME = fname,
+    })
+end
+
 -- Emit the two bound-method trampolines for a TopLevelMethod, delegating to the
 -- method's own native/Lua entries. They turn `obj:m` into a first-class function
 -- value of the self-removed type `(params) -> rettypes`, with `self` captured in
@@ -6460,7 +6536,7 @@ local function codemethodtrampoline(tlcontext, node)
 
     -- native trampoline signature == function_sig of the self-removed type, but
     -- with named parameters so the body can forward them.
-    local storage = node.islocal and "static " or ""
+    local storage = node.islocal and "static TITAN_UNUSED " or ""
     local nativesig = render("$STORAGE$RETTYPE $NAME($PARAMS)", {
         STORAGE = storage,
         RETTYPE = crettype,
@@ -6957,6 +7033,7 @@ Udata *$INITNAME(lua_State *L) {
         $FUNCS
         $INITNAMES
         $CREATEMETA
+        $MODULEINIT
         return _mod;
     } else {
         Udata *_mod = uvalue(s2v(L->top.p - 1));
@@ -7366,6 +7443,7 @@ function coder.generate(modname, ast, static_deps)
     local switch_set = {}
     local gvar_map = {}
     local create_meta = ""
+    local moduleinit = ""
 
     -- Register a read-only member (an exported function or a record namespace)
     -- in the unified member map served by the module metatable. The member's
@@ -7559,6 +7637,15 @@ function coder.generate(modname, ast, static_deps)
                         NATIVE = static_name(node._type),
                     }))
                 end
+            elseif tag == "Ast.StatBlock" then
+                codeinitializerdec(tlcontext, node)
+                table.insert(sigs, node._sig)
+                table.insert(code, node._body)
+                moduleinit = render([[
+                    $NAME(L, _mod, NULL);
+                ]], {
+                    NAME = module_initializer_name(tlcontext),
+                })
             else
                 -- ignore other nodes in second pass
             end
@@ -7778,6 +7865,7 @@ function coder.generate(modname, ast, static_deps)
         INITNAMES = initnames,
         MODNAMESTR = c_string_literal("Titan module "..modname),
         CREATEMETA = create_meta,
+        MODULEINIT = moduleinit,
         NUPVALS = tlcontext.upvalue
     }))
 

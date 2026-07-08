@@ -1278,6 +1278,25 @@ describe("Titan code generator", function()
         assert.truthy(ok, err)
     end)
 
+    it("runs a module initializer during first-time module initialization", function()
+        run_coder([[
+            answer: integer = 0
+            local function seed(): integer
+                return 41
+            end
+            function get(): integer
+                return answer
+            end
+            do
+                answer = seed() + 1
+                return
+            end
+        ]], [[
+            assert(test.answer == 42)
+            assert(test.get() == 42)
+        ]])
+    end)
+
     local tovalue = {
         integer = 1,
         float = 1.5 ,
@@ -1511,6 +1530,85 @@ describe("Titan code generator", function()
             local csrc = c:read("*a")
             c:close()
             assert.match('#include "' .. header .. '"', csrc, 1, true)
+        end)
+        os.remove(header)
+        if not ok then error(err, 0) end
+    end)
+
+    it("runs TValue and void pointer FFI lowering paths", function()
+        local suffix = os.tmpname():match("[^/]+$"):gsub("%W", "_")
+        local header = "tmp_titan_ffi_tvalue_runtime_" .. suffix .. ".h"
+        local f = assert(io.open(header, "w"))
+        f:write([[
+            #include "lua-5.5.0/src/lobject.h"
+
+            typedef void *ffi_vptr;
+            typedef int *ffi_iptr;
+
+            static int ffi_box = 0;
+
+            static inline TValue ffi_value_echo(TValue value) {
+                return value;
+            }
+
+            static inline int ffi_value_seen(TValue value) {
+                return !ttisnil(&value);
+            }
+
+            static inline void ffi_value_store(TValue *out, TValue value) {
+                *out = value;
+            }
+
+            static inline ffi_vptr ffi_box_void(void) {
+                return &ffi_box;
+            }
+
+            static inline void ffi_write_int(ffi_iptr p, int value) {
+                *p = value;
+            }
+
+            static inline int ffi_read_int(ffi_iptr p) {
+                return *p;
+            }
+        ]])
+        f:close()
+
+        local modules = {
+            foo = [[
+                local c = foreign import "]] .. header .. [["
+
+                function echo(): value
+                    return c.ffi_value_echo("ok")
+                end
+
+                function store(v: value): value
+                    local raw: c.TValue = nil
+                    c.ffi_value_store(raw, v)
+                    return raw
+                end
+
+                function seen(v: value): integer
+                    return c.ffi_value_seen(v)
+                end
+
+                function write_box(): integer
+                    local p: c.ffi_iptr = c.ffi_box_void()
+                    c.ffi_write_int(p, 77)
+                    return c.ffi_read_int(c.ffi_box_void() as c.ffi_iptr)
+                end
+            ]]
+        }
+        local ok, err = pcall(function()
+            local gok, gerr = generate_modules(modules, "foo")
+            assert.truthy(gok, gerr)
+            local cok, cerr = call("foo", [[
+                assert(foo.echo() == "ok")
+                local marker = {}
+                assert(foo.store(marker) == marker)
+                assert(foo.seen(function() end) == 1)
+                assert(foo.write_box() == 77)
+            ]])
+            assert.truthy(cok, cerr)
         end)
         os.remove(header)
         if not ok then error(err, 0) end

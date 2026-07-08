@@ -2602,6 +2602,20 @@ local function checkfunc(node, st, errors)
     checkfuncbody(node, st, errors)
 end
 
+local function checkinitializer(node, st, errors)
+    local init = {
+        loc = node.loc,
+        name = "$module_initializer",
+        params = {},
+        rettypes = {},
+        block = node,
+        _type = node._type,
+    }
+    st:open_block()
+    checkfuncbody(init, st, errors)
+    st:close_block()
+end
+
 -- Typechecks a method body, binding self to the first parameter
 --   node: TopLevelMethod AST node
 --   st: symbol table
@@ -2628,6 +2642,8 @@ local function checkbodies(ast, st, errors)
                 st:with_block(checkmethod, node, st, errors)
             elseif node._tag == "Ast.TopLevelStatic" then
                 st:with_block(checkfunc, node, st, errors)
+            elseif node._tag == "Ast.StatBlock" then
+                checkinitializer(node, st, errors)
             elseif node._tag == "Ast.TopLevelRecord" then
                 local fields = node._type.fields
                 for i, field in ipairs(fields) do
@@ -2731,6 +2747,8 @@ local function toplevel_name(node)
         return node.name
     elseif tag == "Ast.TopLevelMethod" or tag == "Ast.TopLevelStatic" then
         return nil
+    elseif tag == "Ast.StatBlock" then
+        return nil
     else
         error("tag not found " .. tag)
     end
@@ -2832,6 +2850,10 @@ local toplevel_visitor = util.make_visitor({
             table.insert(rettypes, typefromnode(rt, st, errors))
         end
         node._type = types.Function(ptypes, rettypes, false, varargtype)
+    end,
+
+    ["Ast.StatBlock"] = function(node)
+        node._type = types.Function({}, {}, false, false)
     end,
 
     ["Ast.TopLevelRecord"] = function(node, st, errors)

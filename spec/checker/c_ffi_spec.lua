@@ -41,6 +41,22 @@ describe("C FFI type checking", function()
         assert.truthy(ok, err)
     end)
 
+    it("imports bundled Lua headers through the compiler include path", function()
+        local ok, err = run_checker([[
+            local lua = foreign import "lua.h"
+            local lual = foreign import "lauxlib.h"
+
+            local function top(): integer
+                return lua.lua_gettop(L)
+            end
+
+            local function metatable_created(): integer
+                return lual.luaL_newmetatable(L, "titan_ffi_header_test")
+            end
+        ]])
+        assert.truthy(ok, err)
+    end)
+
     it("coerces between by-value C TValue and Titan value", function()
         with_header([[
             typedef struct TValue TValue;
@@ -72,6 +88,21 @@ describe("C FFI type checking", function()
                 end
             ]])
             assert.truthy(ok, err)
+        end)
+    end)
+
+    it("does not treat an unrelated typedef named TValue as Lua TValue", function()
+        with_header([[
+            typedef struct ffi_not_lua_value { int x; } TValue;
+        ]], function(header)
+            local ok = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                local function bad(v: value): c.TValue
+                    return v
+                end
+            ]])
+            assert.falsy(ok)
         end)
     end)
 
@@ -124,6 +155,22 @@ describe("C FFI type checking", function()
             typedef struct lua_State lua_State;
             typedef lua_State *ffi_lua_state;
             extern int ffi_has_state(ffi_lua_state state);
+        ]], function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                function f(): integer
+                    return c.ffi_has_state(L)
+                end
+            ]])
+            assert.truthy(ok, err)
+        end)
+    end)
+
+    it("matches built-in L when lua_State typedef and struct spelling mix", function()
+        with_header([[
+            typedef struct lua_State lua_State;
+            extern int ffi_has_state(struct lua_State *state);
         ]], function(header)
             local ok, err = run_checker([[
                 local c = foreign import "]] .. header .. [["
@@ -616,6 +663,27 @@ describe("C FFI type checking", function()
 
                 local function f(p: c.ffi_iptr): c.ffi_vptr
                     return p as c.ffi_vptr
+                end
+            ]])
+            assert.truthy(ok, err)
+        end)
+    end)
+
+    it("allows casts and assignments from void pointers to C object pointers", function()
+        with_header([[
+            typedef int *ffi_iptr;
+            typedef void *ffi_vptr;
+        ]], function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                local function explicit(p: c.ffi_vptr): c.ffi_iptr
+                    return p as c.ffi_iptr
+                end
+
+                local function implicit(p: c.ffi_vptr): c.ffi_iptr
+                    local q: c.ffi_iptr = p
+                    return q
                 end
             ]])
             assert.truthy(ok, err)

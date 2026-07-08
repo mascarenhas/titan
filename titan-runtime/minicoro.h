@@ -702,6 +702,22 @@ static MCO_FORCE_INLINE void _mco_prepare_stacked_resume(mco_coro* co, mco_coro*
 #endif
 }
 
+static MCO_FORCE_INLINE void _mco_abandon_stacked(mco_coro* co) {
+  mco_coro* p = co->stacked_co;
+  co->stacked_co = NULL;
+  co->active_tag = NULL;
+  while(p && p != co) {
+    mco_coro* prev_co = p->prev_co;
+    p->prev_co = NULL;
+    p->active_tag = NULL;
+    p->state = MCO_DEAD;
+    if(prev_co == co) {
+      break;
+    }
+    p = prev_co;
+  }
+}
+
 static MCO_NO_INLINE void _mco_main(mco_coro* co) {
   co->func(co); /* Run the coroutine function. */
   co->state = MCO_DEAD; /* Coroutine finished successfully, set state to dead. */
@@ -1761,6 +1777,9 @@ mco_result mco_uninit(mco_coro* co) {
   if(!(co->state == MCO_SUSPENDED || co->state == MCO_DEAD)) {
     MCO_LOG("attempt to uninitialize a coroutine that is not dead or suspended");
     return MCO_INVALID_OPERATION;
+  }
+  if(co->stacked_co) {
+    _mco_abandon_stacked(co);
   }
   /* The coroutine is now dead and cannot be used anymore. */
   co->state = MCO_DEAD;

@@ -194,6 +194,30 @@ static void test_long_tagged_chain(void) {
   assert(mco_destroy(chain_c) == MCO_SUCCESS);
 }
 
+static void test_destroy_suspended_handler_abandons_stacked_chain(void) {
+  mco_desc da = test_desc(chain_a_entry);
+  mco_desc db = test_desc(chain_b_entry);
+  mco_desc dc = test_desc(chain_c_entry);
+  chain_step = 0;
+  assert(mco_create(&chain_a, &da) == MCO_SUCCESS);
+  assert(mco_create(&chain_b, &db) == MCO_SUCCESS);
+  assert(mco_create(&chain_c, &dc) == MCO_SUCCESS);
+
+  assert(mco_resume(chain_a, (void *)main_tag) == MCO_SUCCESS);
+  assert(chain_step == 3);
+  assert(mco_status(chain_a) == MCO_SUSPENDED);
+  assert(mco_status(chain_b) == MCO_STACKED);
+  assert(mco_status(chain_c) == MCO_STACKED);
+
+  assert(mco_destroy(chain_a) == MCO_SUCCESS);
+  assert(mco_status(chain_b) == MCO_DEAD);
+  assert(mco_status(chain_c) == MCO_DEAD);
+  assert(chain_b->prev_co == NULL);
+  assert(chain_c->prev_co == NULL);
+  assert(mco_destroy(chain_b) == MCO_SUCCESS);
+  assert(mco_destroy(chain_c) == MCO_SUCCESS);
+}
+
 static mco_coro *handoff_driver;
 static mco_coro *handoff_a;
 static mco_coro *handoff_b;
@@ -327,6 +351,7 @@ int main(void) {
   mco_set_tag_comparator(tagcmp);
   test_immediate_tagged_yield();
   test_long_tagged_chain();
+  test_destroy_suspended_handler_abandons_stacked_chain();
   test_stacked_handler_can_be_resumed_by_a_different_resumer();
   test_storage_across_tagged_transfers();
   test_error_cases();

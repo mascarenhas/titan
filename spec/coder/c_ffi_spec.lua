@@ -510,7 +510,6 @@ describe("C FFI code generation", function()
         with_header([[
             typedef struct ffi_point { int x; } ffi_point;
             static ffi_point *ffi_null_point = 0;
-            static int *ffi_null_int = 0;
         ]], function(header)
             h.run_coder([[
                 local c = foreign import "]] .. header .. [["
@@ -521,7 +520,11 @@ describe("C FFI code generation", function()
             ]], [[
                 test.bad_field()
             ]], "NULL C pointer")
+        end)
 
+        with_header([[
+            static int *ffi_null_int = 0;
+        ]], function(header)
             h.run_coder([[
                 local c = foreign import "]] .. header .. [["
 

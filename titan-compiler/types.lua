@@ -172,8 +172,6 @@ end
 function types.is_c_tvalue(t)
     if not t then
         return false
-    elseif t._tag == "Type.CTypedef" and t.name == "TValue" then
-        return true
     end
     local rt = types.resolve_c_typedef(t)
     return rt and rt._tag == "Type.CStruct" and rt.tagname == "TValue"
@@ -306,6 +304,28 @@ local function c_object_to_void_pointer_compatible(source, target)
     local target_pointee = resolved_c(target.pointee)
     return source_pointee._tag ~= "Type.CFunction"
         and target_pointee._tag == "Type.CVoid"
+        and qualifiers_include(target, source)
+end
+
+local function c_void_to_object_pointer_compatible(source, target, allow_char_pointer)
+    source = resolved_c(source)
+    target = resolved_c(target)
+    if not (source and target
+            and source._tag == "Type.CPointer"
+            and target._tag == "Type.CPointer") then
+        return false
+    end
+    local source_pointee = resolved_c(source.pointee)
+    local target_pointee = resolved_c(target.pointee)
+    if not allow_char_pointer
+       and target_pointee._tag == "Type.CInteger"
+       and (target_pointee.spelling == "char"
+            or target_pointee.spelling == "signed char"
+            or target_pointee.spelling == "unsigned char") then
+        return false
+    end
+    return source_pointee._tag == "Type.CVoid"
+        and target_pointee._tag ~= "Type.CFunction"
         and qualifiers_include(target, source)
 end
 
@@ -447,6 +467,7 @@ function types.explicitly_coerceable(source, target)
         or ((is_c_integer(source) or is_c_float(source))
             and (is_c_integer(target) or is_c_float(target)))
         or c_object_to_void_pointer_compatible(source, target)
+        or c_void_to_object_pointer_compatible(source, target, true)
 end
 
 function types.coerceable(source, target)
@@ -471,6 +492,8 @@ function types.coerceable(source, target)
     elseif c_pointer_compatible(source, target) then
         return true
     elseif c_object_to_void_pointer_compatible(source, target) then
+        return true
+    elseif c_void_to_object_pointer_compatible(source, target, false) then
         return true
     elseif source._tag == "Type.String" and
            (is_c_char_pointer(target) or is_c_void_pointer(target)) then
@@ -560,6 +583,10 @@ function types.compatible(t1, t2)
     elseif c_object_to_void_pointer_compatible(t1, t2) then
         return true
     elseif c_object_to_void_pointer_compatible(t2, t1) then
+        return true
+    elseif c_void_to_object_pointer_compatible(t1, t2, true) then
+        return true
+    elseif c_void_to_object_pointer_compatible(t2, t1, true) then
         return true
     elseif t1._tag == "Type.String" and
            (is_c_char_pointer(t2) or is_c_void_pointer(t2)) then
