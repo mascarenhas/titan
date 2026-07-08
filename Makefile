@@ -33,7 +33,7 @@ CFLAGS    ?= --std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls
 RUNTIME_O := titan-runtime/titan.o
 CORO_O    := titan-runtime/titan_coro.o
 CORO_SO   := coro.so
-TITAN_LUA ?= .lua/bin/lua
+TITAN_LUA ?= $(if $(wildcard ./lua),./lua,.lua/bin/lua)
 TITANC    ?= $(TITAN_LUA) ./titanc
 
 # libbacktrace is cloned + built into ./libbacktrace (gitignored), mirroring the
