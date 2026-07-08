@@ -221,18 +221,16 @@ function create(func: (value) -> value, default_tag: value): Coro
   return Coro.new(coro_create(func), default_tag)
 end
 
-local function coro_entry(func_value: value, raw_co: value)
-  local co: *mco.mco_coro = raw_co as *mco.mco_coro
+local function coro_entry(func: (value) -> value, co: *mco.mco_coro)
   -- L here is going to be the T from the mco_coro*
   -- since this is called through the Lua entry point
   -- errfunc in the new thread will be set by Titan
-  local func: (value) -> value = func_value as value
   local arg = pop_transfer_or_raise(co, false)
   local res = func(arg)
   push_transfer(co, 1, res)
 catch
   stash_trace_for_append(traceback)
-  push_transfer(raw_co as *mco.mco_coro, 0, error)
+  push_transfer(co, 0, error)
 finally
   lua.lua_settop(L, 0)
 end
