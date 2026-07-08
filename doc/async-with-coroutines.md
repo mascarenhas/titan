@@ -204,7 +204,7 @@ handle validation, address-taking for `TValue` storage and tags, stack
 switching, callback entry, and Lua-internal bookkeeping.
 
 The FFI-facing helper shape exposes a borrowed `mco_coro *` handle and
-small shims where Titan cannot yet spell `&value` or `sizeof(TValue)`.
+small shims where Titan cannot yet spell `&value`.
 `coro.titan` imports `minicoro.h` directly so it can read simple private
 fields such as `stacked_co` without adding C helpers for that policy:
 

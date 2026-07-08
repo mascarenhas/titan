@@ -285,7 +285,6 @@ local function c_pointer_compatible(source, target)
             return false
         end
         return c_assignable_equal(source.pointee, target.pointee)
-            or target_pointee._tag == "Type.CVoid"
     elseif source._tag == "Type.CArray" then
         return c_assignable_equal(source.elem, target.pointee)
             or resolved_c(target.pointee)._tag == "Type.CVoid"

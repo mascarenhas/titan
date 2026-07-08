@@ -72,10 +72,10 @@ the private helper without inventing a second boxing layer.
 
 The remaining transfer helpers exist because minicoro's storage and tag
 APIs take pointers to bytes. Titan can pass `value` as a by-value
-`TValue`, but it cannot yet form `&payload`, `&tag`, or `sizeof(TValue)`
-in source. The C shims therefore copy a single by-value `TValue` or
-`int` into or out of minicoro storage, and take the address of a by-value
-tag before calling `mco_resume`, `mco_yield`, or `mco_is_yieldable`.
+`TValue`, but it cannot yet form `&payload` or `&tag` in source. The C
+shims therefore copy a single by-value `TValue` or `int` into or out of
+minicoro storage, and take the address of a by-value tag before calling
+`mco_resume`, `mco_yield`, or `mco_is_yieldable`.
 
 The helper stores live values in ordinary Lua roots:
 
@@ -147,7 +147,7 @@ the ones that still require capabilities outside the current FFI:
 * exporting a Titan closure as a C callback with `void (*)(mco_coro *)`
   ABI, for the minicoro entry point or tag comparator;
 * taking the address of a Titan local or formal, especially a by-value
-  `TValue`, and spelling `sizeof(TValue)` safely in Titan source;
+  `TValue`;
 * declaring out-parameters or scoped raw `TValue *` parameters without
   exposing unrooted Lua stack storage generally;
 * installing userdata finalizers, uservalues, metatables, and write
