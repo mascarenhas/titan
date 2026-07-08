@@ -171,7 +171,7 @@ does not contain the tag.
 | `"running"` | The coroutine is the currently executing coroutine. |
 | `"normal"` | The coroutine is active in the dynamic chain but has resumed another coroutine. |
 | `"stacked"` | The coroutine is inside a skipped chain created by a tagged nested yield; resuming the suspended matching handler restores the skipped stack. |
-| `"dead"` | The entry function returned, or an uncaught error escaped. |
+| `"dead"` | The entry function returned, an uncaught error escaped, or an error was injected before the entry function started. |
 
 `stacked` is observable so schedulers can diagnose nested tagged yields.
 Resuming the suspended handler that received the yield restores the

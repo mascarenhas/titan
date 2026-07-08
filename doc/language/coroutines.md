@@ -56,7 +56,7 @@ metamethods.
 ## Resume And Yield
 
 `create(func, default_tag)` creates a suspended coroutine. The first
-successful `resume` calls `func(arg)` on the coroutine's Lua thread.
+successful `resume` calls `func(arg)` in that coroutine.
 
 ```lua
 local coro = import "coro"
@@ -81,11 +81,36 @@ returns `arg`.
 Calling `coro.yield` outside a Titan coroutine raises in the caller.
 
 If the immediate resumer's tag does not match, Titan walks outward
-through the dynamic resume chain. The matching handler is the coroutine
-whose `resume` or `error` call returns to its own caller; it becomes
-`"suspended"` and is resumable. The inner coroutines between that
-handler and the yielder become `"stacked"` until the handler is resumed
+through the active chain of resumes. The matching resumer is the
+coroutine whose `resume` or `error` call returns to its own caller; it
+becomes `"suspended"` and is resumable. The inner coroutines between that
+resumer and the yielder become `"stacked"` until the resumer is resumed
 and restores the skipped stack.
+
+```lua
+local coro = import "coro"
+
+function nested(): string
+    local tag_main: value = "main"
+    local tag_a: value = "a"
+
+    local b = coro.create(function (arg: value): value
+        coro.yield("from-b", tag_main)
+        return "b-done"
+    end, tag_a)
+
+    local a = coro.create(function (arg: value): value
+        local got = b:resume("to-b")
+        return "a:" .. (got as string)
+    end, tag_main)
+
+    local first = a:resume("start", tag_main)
+    local statuses = a:status() .. "/" .. b:status()
+    local second = a:resume("again", tag_main)
+    return (first as string) .. ":" .. statuses .. ":" .. (second as string)
+    -- "from-b:suspended/stacked:a:b-done"
+end
+```
 
 ```text
 main resumes A with tag "main"
@@ -97,8 +122,22 @@ main resumes A again; A and B are restored and B's yield returns.
 ```
 
 `coro.is_yieldable(tag)` returns whether a yield with `tag` would find a
-matching active handler in the current dynamic chain. Outside a Titan
+matching active resumer in the current chain. Outside a Titan
 coroutine it returns `false`.
+
+Lua code uses the same module dynamically:
+
+```lua
+local coro = require "coro"
+
+local co = coro.create(function(arg)
+    local next_value = coro.yield(arg, "io")
+    return next_value
+end, "io")
+
+assert(co:resume("ready") == "ready")
+assert(co:resume("done") == "done")
+```
 
 ## Errors
 
