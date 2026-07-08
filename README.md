@@ -144,18 +144,15 @@ they are in the roadmap:
 * variadic parameters in functions (Lua `...`)
 * error handling with `raise`, `catch`, `finally`, Lua `pcall`, and
   unified Lua/Titan backtraces via `titan.backtrace()`
+* asymmetric, tagged (nested) coroutines as building block for async IO
 
 ## Next
 
-* asymmetric, tagged (nested) coroutines as building block for async IO
+* for-in construct for iterators (`next`, `next,state`, `next,state,start`)
 * minimal standard library (expose Lua tostring/tonumber, file/socket IO using libuv, string library, math library, load/run Lua code)
-* FFI with C, continued (function pointers, callbacks from C into Titan, adopted
-  pointers, owned structs with flexible array members, and Lua C API support)
+* FFI with C, continued (function pointers, callbacks from C into Titan, owned structs with flexible array members)
 * tagged variants (unions of records with some syntax for switch/case on the record tag)
 * parametric polymorphism (via type erasure and boxed values)
-* for-in for built-in collection types (arrays, maps, slices)
 * some mechanism for ad-hoc polymorphism, either Go/Java/C#/Swift-like interfaces/protocols or Haskell/Rust-like typeclasses/traits
-* for-in for user-defined types
-* operator overloading
-* self-hosted compiler
+* Language server
 * ...Titan 1.0!
