@@ -768,7 +768,12 @@ type_equals = function(t1, t2, seen)
                type_equals(t1.owner, t2.owner, seen) and
                type_equals(t1.type, t2.type, seen)
     elseif tag1 == "Type.CTypedef" then
-        return t1.name == t2.name and type_equals(t1.target, t2.target, seen)
+        -- C typedef names are nominal in Titan's foreign-type namespace. Their
+        -- targets still drive representation through resolve_c_typedef(), but
+        -- duplicate declarations imported from different headers can build
+        -- distinct target graphs for the same typedef name (for example through
+        -- system-header typedef chains). Those are the same C name for equality.
+        return t1.name == t2.name
     elseif tag1 == "Type.COwned" then
         return t1.count == t2.count and type_equals(t1.pointee, t2.pointee, seen)
     elseif tag1 == "Type.CModule" then

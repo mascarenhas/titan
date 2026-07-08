@@ -173,6 +173,9 @@ describe("Titan types", function()
             local alias = types.CTypedef("alias_size_t", size_t)
             assert.same(int, types.resolve_c_typedef(alias))
             assert.truthy(types.compatible(alias, int))
+            assert.truthy(types.equals(
+                types.CTypedef("size_t", int),
+                types.CTypedef("size_t", alias)))
         end)
 
         it("treats borrowed C pointers as nullable but owned C values as userdata", function()

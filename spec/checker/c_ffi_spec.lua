@@ -57,6 +57,29 @@ describe("C FFI type checking", function()
         assert.truthy(ok, err)
     end)
 
+    it("accepts matching C redeclarations reached through typedef chains", function()
+        with_header([[
+            typedef long ffi_base;
+            typedef ffi_base ffi_alias;
+            extern ffi_alias ffi_redeclared(ffi_alias value);
+        ]], function(header1)
+            with_header([[
+                typedef long ffi_alias;
+                extern ffi_alias ffi_redeclared(ffi_alias value);
+            ]], function(header2)
+                local ok, err = run_checker([[
+                    local c1 = foreign import "]] .. header1 .. [["
+                    local c2 = foreign import "]] .. header2 .. [["
+
+                    local function f(x: c2.ffi_alias): c1.ffi_alias
+                        return c1.ffi_redeclared(x)
+                    end
+                ]])
+                assert.truthy(ok, err)
+            end)
+        end)
+    end)
+
     it("coerces between by-value C TValue and Titan value", function()
         with_header([[
             typedef struct TValue TValue;
