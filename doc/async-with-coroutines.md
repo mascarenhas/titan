@@ -192,16 +192,15 @@ local rt = foreign import "titan/coro.h"
 
 The runtime helper functions that need the current Lua state take it
 through Titan's existing built-in `L` local. The functions in
-`coro.titan` that need to create handles, restore traces, or clear dead
-threads already have that `L`; no new language surface is needed to pass
-the calling state to C.
+`coro.titan` that need to create handles already have that `L`; no new
+language surface is needed to pass the calling state to C.
 
 The private helper interface should be thin. `coro.titan` owns policy:
 effective-tag resolution, the difference between `resume` and `error`,
 the success/error payload convention, `mco_result` checks, conversion
 from runtime status codes to public strings, and the order of transfer
 operations around minicoro. The C helpers own only the unsafe pieces:
-handle construction/validation, callback entry, tag comparison, and
+handle construction/projection, callback entry, tag comparison, and
 Lua-internal bookkeeping.
 
 The FFI-facing helper shape exposes a borrowed `mco_coro *` handle.
@@ -214,8 +213,6 @@ typedef struct mco_coro *titan_coro_ref;
 
 TValue titan_coro_create(lua_State *L, TValue func);
 titan_coro_ref titan_coro_handle(TValue handle);
-void titan_coro_clear_dead(lua_State *L, titan_coro_ref source);
-void titan_coro_raise(lua_State *L, titan_coro_ref source, TValue payload);
 ```
 
 The split is the important point. `mco_resume`, `mco_yield`,
@@ -223,7 +220,9 @@ The split is the important point. `mco_resume`, `mco_yield`,
 The Titan layer checks those results and raises a Titan error with
 `mco_result_description` when the control transfer itself failed. Titan
 pushes `payload` then `ok`, and pops `ok` then `payload`. On `ok=false`
-it delegates only the traceback restoration and actual `lua_error` to C.
+it raises the payload directly: for `resume`/`error`, the dead source
+entry point has already pinned any traceback, and for `yield`, the source
+is still live and the payload is simply the injected error.
 
 `coro.titan` then has the public shape:
 
@@ -261,8 +260,7 @@ function Coro:resume(arg: value, tag: value): value
   local co = rt.titan_coro_handle(self.handle)
   local source = transfer_source(co)
   push_transfer(source, 1, arg)
-  resume_checked(co, source, t)
-  return pop_transfer_or_raise(transfer_source(co))
+  return resume_result_or_raise(co, source, t)
 end
 
 function Coro:error(err: value, tag: value): value
@@ -270,8 +268,7 @@ function Coro:error(err: value, tag: value): value
   local co = rt.titan_coro_handle(self.handle)
   local source = transfer_source(co)
   push_transfer(source, 0, err)
-  resume_checked(co, source, t)
-  return pop_transfer_or_raise(transfer_source(co))
+  return resume_result_or_raise(co, source, t)
 end
 
 function yield(arg: value, tag: value): value
@@ -280,21 +277,26 @@ function yield(arg: value, tag: value): value
   end
   local co = mco.mco_running()
   push_transfer(co, 1, arg)
-  yield_checked(co, tag)
-  return pop_transfer_or_raise(co)
+  return yield_result_or_raise(co, tag)
 end
 ```
 
 The exact source can be adjusted to local style, but the important point
 is that the public API remains Titan code while the unsafe stack switch
 and Lua-internal operations stay behind private C helpers.
+`resume_result_or_raise` and `yield_result_or_raise` intentionally perform
+the `mco_resume`/`mco_yield` and the matching `mco_pop` operations in the
+same Titan function: once a dead coroutine entry point has cleared its
+child stack, no generated Titan helper prologue may run before the result
+payload has been popped into a stack-anchored `TValue` local.
 
-For uncaught coroutine-body errors, the C pop helper depends on a
-runtime-side invariant: before it raises the returned error payload, it
-restores the captured coroutine traceback under `TITAN_BACKTRACE_KEY` and
-sets Titan's one-shot trace pin. Restoring the registry traceback without
-the pin is not enough, because raising the payload is a fresh raise and
-would otherwise capture a new shallow traceback at the wrapper site.
+For uncaught coroutine-body errors, the entry point depends on a
+runtime-side invariant: before it returns `(false, error)` to the
+resumer, it leaves the captured coroutine traceback under
+`TITAN_BACKTRACE_KEY` and sets Titan's one-shot trace pin. The wrapper can
+then raise the returned payload directly. The pin is still required,
+because raising the payload is a fresh raise and would otherwise capture
+a new shallow traceback at the wrapper site.
 
 The raise in `yield` is different. When `Coro:error` injects an error
 into a suspended yield, that error is intentionally raised at the yield
@@ -332,7 +334,8 @@ address coercions for calls:
   to compatible `const *T` or `const void *` parameters;
 * mutable non-pointer local/formal C variables can be passed to
   compatible mutable `*T` or `void *` parameters, which covers ordinary C
-  out-parameters;
+  out-parameters; if the local/formal is a GC-bearing C `TValue`, the
+  generated code refreshes its stack anchor immediately after the C call;
 * C function pointers are excluded from object-pointer/value paths.
 
 These conversions do not make arbitrary C helper storage into GC roots. A
@@ -363,11 +366,12 @@ The handle userdata must have a uservalue that roots:
 1. the Lua thread created by `lua_newthread`.
 
 The child thread stack roots the callback function value passed to
-`create`. It also temporarily roots a final callback return/error payload
-and saved traceback after the entry function has unwound, until the
-resumer consumes the final transfer. Ordinary yielded/resumed payloads do
-not need a persistent uservalue slot. They remain rooted by the suspended
-Titan frames that own the formal parameters.
+`create`. It also roots a final callback return/error payload while the
+entry point copies it into minicoro storage, pins any captured traceback,
+and clears the dead child stack before returning control. Ordinary
+yielded/resumed payloads do not need a persistent uservalue slot. They
+remain rooted by the suspended Titan frames that own the formal
+parameters.
 
 The raw `mco_coro` user data stores only the child `lua_State *` needed
 by `void (*func)(mco_coro *co)`. That cached pointer is not a GC root.
@@ -413,10 +417,14 @@ a `TValue` does not allocate, and generated callers immediately anchor
 GC-able returns in their own stack slots before any later allocation.
 
 The runtime may copy a `TValue` through minicoro storage with
-`mco_push`/`mco_pop`, because minicoro copies the struct bytes and the
-owning Titan frame remains suspended and rooted. The runtime must not
-make minicoro storage, raw C heap memory, or untraced fields the only
-root for a collectable payload beyond that stackful suspension.
+`mco_push`/`mco_pop`, because minicoro copies the struct bytes and
+ordinary suspended transfers keep the owning Titan frame rooted. For
+final callback return/error payloads, the entry copies the payload
+immediately before returning control and the receiver pops it immediately
+after the context switch returns, before any intervening allocation. The
+runtime must not make minicoro storage, raw C heap memory, or untraced
+fields the only root for a collectable payload beyond those bounded
+transfer windows.
 
 Each transfer pushes two values into minicoro storage: the payload
 `TValue`, followed by the `ok` flag. The receiver pops `ok` first and
@@ -475,18 +483,17 @@ error:
 1. the coroutine becomes `dead`;
 2. the original error value is preserved;
 3. the coroutine-thread traceback captured under `TITAN_BACKTRACE_KEY` is
-   preserved immediately on the child thread stack;
-4. the control transfer returns `(false, error)` to the resumer;
-5. the resumer's pop helper roots the error payload, restores the saved
-   traceback under `TITAN_BACKTRACE_KEY`, sets the existing
-   `TITAN_TRACE_PINNED` one-shot trace pin, and raises the same error
-   value in the caller.
+   left in the shared registry and `TITAN_TRACE_PINNED` is set;
+4. the entry copies `(false, error)` into minicoro storage, clears the
+   dead child stack, and returns control to the resumer;
+5. the resumer pops the error payload immediately and raises the same
+   value directly.
 
-The pin is required. A helper that only restores the registry traceback
-before raising a false payload still loses the traceback: raising the
-payload is a fresh raise, so Titan's error handler captures a new shallow
-traceback unless the one-shot pin tells it to keep the restored one. This
-is the same protocol Titan generated code uses for bare re-raise.
+The pin is required. Raising the returned payload is a fresh raise, so
+Titan's error handler captures a new shallow traceback unless the
+one-shot pin tells it to keep the coroutine traceback already in the
+registry. This is the same protocol Titan generated code uses for bare
+re-raise.
 
 An error injected by `Coro:error` is different from an uncaught callback
 error: it is raised at the target `yield` site. If target code catches
@@ -603,10 +610,9 @@ Add Titan runtime/coder coverage for:
   uncaught injected error, and injected error before first resume;
 * uncaught callback errors, preserved coroutine traceback, and
   interaction with `raise`, `catch`, `finally`, and bare re-raise;
-* traceback handoff through the C raise helper: restoring
-  `TITAN_BACKTRACE_KEY` alone is overwritten by a fresh payload raise,
-  while restoring it and setting `TITAN_TRACE_PINNED` preserves the
-  coroutine traceback;
+* traceback handoff from the coroutine entry point: returning a false
+  payload without setting `TITAN_TRACE_PINNED` is overwritten by a fresh
+  payload raise, while setting the pin preserves the coroutine traceback;
 * yield before a `finally` block, then later resume, proving the
   suspended stack preserves pending cleanup state;
 * Lua interop through `require "coro"`: method calls, bad argument
@@ -630,10 +636,10 @@ Lua 5.5 runtime and upstream minicoro:
   callable through `luaD_callnoyield` on that child thread.
 * Titan's existing `errorhandler` works when installed on a child Lua
   thread and captures a traceback in the shared registry.
-* A focused Titan/FFI probe confirmed that raising a payload after only
-  restoring `TITAN_BACKTRACE_KEY` captures a fresh wrapper traceback;
-  restoring the traceback and setting `TITAN_TRACE_PINNED` preserves the
-  restored traceback across the fresh raise.
+* A focused Titan/FFI probe confirmed that raising a returned payload
+  without setting `TITAN_TRACE_PINNED` captures a fresh wrapper traceback;
+  setting the pin preserves the coroutine traceback already stored under
+  `TITAN_BACKTRACE_KEY` across the fresh raise.
 * Plain Lua `coroutine.yield` is not yieldable under a protected-call
   entry path, confirming that Titan coroutine yield must be minicoro
   backed.

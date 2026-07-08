@@ -326,6 +326,68 @@ describe("C FFI code generation", function()
         end)
     end)
 
+    it("anchors GC TValue out-parameters before later calls can collect", function()
+        with_header([[
+            typedef struct lua_State lua_State;
+            typedef struct TValue TValue;
+
+            static int ffi_outparam_finalized = 0;
+
+            static int ffi_outparam_gc(lua_State *L) {
+                (void)L;
+                ffi_outparam_finalized = 1;
+                return 0;
+            }
+
+            static void ffi_reset_outparam_finalized(void) {
+                ffi_outparam_finalized = 0;
+            }
+
+            static int ffi_was_outparam_finalized(void) {
+                return ffi_outparam_finalized;
+            }
+
+            static void ffi_write_gc_value(lua_State *L, void *out) {
+                lua_newuserdatauv(L, 0, 0);
+                if(luaL_newmetatable(L, "titan_ffi_outparam_anchor")) {
+                    lua_pushcfunction(L, ffi_outparam_gc);
+                    lua_setfield(L, -2, "__gc");
+                }
+                lua_setmetatable(L, -2);
+                setuvalue(L, (TValue *)out, uvalue(s2v(L->top.p - 1)));
+                lua_pop(L, 1);
+            }
+
+            static void ffi_collect(lua_State *L) {
+                lua_gc(L, 2, 0);
+            }
+
+            static int ffi_is_userdata(TValue value) {
+                return ttisfulluserdata(&value);
+            }
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                function survives_gc_check_after_write(): integer
+                    local raw: c.TValue = nil
+                    c.ffi_reset_outparam_finalized()
+                    c.ffi_write_gc_value(L, raw)
+                    c.ffi_collect(L)
+                    if (c.ffi_was_outparam_finalized() as integer) ~= 0 then
+                        return -1
+                    end
+                    if (c.ffi_is_userdata(raw) as integer) == 0 then
+                        return -2
+                    end
+                    return 1
+                end
+            ]], [[
+                assert(test.survives_gc_check_after_write() == 1)
+            ]])
+        end)
+    end)
+
     it("preserves typedef spelling for owned anonymous C structs", function()
         with_header([[
             typedef struct { int x; int y; } ffi_point;

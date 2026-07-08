@@ -56,13 +56,15 @@ payloads are transported separately:
    `payload=err`.
 3. `coro.yield` obtains the current running coroutine, pushes
    `payload=arg` and `ok=true`, and calls `mco_yield`.
-4. After control returns from a resume, the wrapper selects the transfer
-   source again. Tagged nested yield can change it from the resumed
-   coroutine to the deepest stacked coroutine.
-5. The wrapper pops `ok` and `payload` separately. `ok=true` clears any
-   dead child-thread roots and returns `payload`; `ok=false` calls the C
-   raise helper so it can restore any saved traceback, set
-   `TITAN_TRACE_PINNED`, clear dead roots, and raise `payload`.
+4. The same helper that calls `mco_resume` selects the transfer source
+   again immediately after control returns. Tagged nested yield can change
+   it from the resumed coroutine to the deepest stacked coroutine.
+5. The helper pops `ok` and `payload` separately before returning to its
+   caller. For `resume`/`error`, `ok=false` means the source coroutine has
+   already died; its entry point pinned any coroutine traceback and cleared
+   its dead child-thread stack before returning control. The helper raises
+   `payload` directly. For `yield`, `ok=false` is an injected error at a
+   live yield site, so the helper also just raises `payload`.
 
 ## TValue FFI Boundary
 
@@ -78,6 +80,13 @@ local ok: rt.titan_ffi_int = 0 as rt.titan_ffi_int
 mco.mco_pop(source, ok, rt.titan_ffi_int.sizeof)
 mco.mco_pop(source, payload, rt.TValue.sizeof)
 ```
+
+When a C call mutates a stack-anchored `TValue` local through a mutable
+pointer argument, the FFI lowering refreshes that local's Lua stack anchor
+immediately after the call. Coroutine result helpers still keep the
+control switch and the result pops in the same Titan function, so no
+generated helper prologue can run a GC check while a final dead-coroutine
+payload exists only in minicoro storage.
 
 For resume/yield tags, `coro.titan` materializes the effective Titan
 `value` as a local C `TValue` and passes that local to minicoro's `void *`
@@ -97,8 +106,9 @@ The helper stores live values in ordinary Lua roots:
   `mco_coro *`;
 * the handle's uservalue roots the child Lua thread;
 * the child thread stack roots the callback function value while the
-  coroutine is alive, and roots a final return/error payload plus saved
-  traceback until the resumer consumes the transfer;
+  coroutine is alive; when the entry point finishes, it copies the final
+  return/error payload into minicoro storage, pins any captured traceback in
+  the registry, and clears the dead child stack before returning control;
 * `mco_coro->user_data` stores only the child `lua_State *` needed by
   `void (*func)(mco_coro *co)`;
 * in-flight arguments, yielded values, errors, tags, and handles remain
@@ -115,8 +125,11 @@ Transfer itself uses minicoro storage. `coro.titan` pushes the payload
 `TValue` and then the `ok` flag with `mco_push`; the receiver pops `ok`
 first and the payload second with `mco_pop`. Minicoro copies the struct
 bytes. It never owns a Lua root for the collectable object referenced by
-the copied `TValue`; the owning Lua thread stack frame or the
-final-result slot on the child thread does.
+the copied `TValue`; ordinary suspended transfers are rooted by the
+owning Lua/Titan frame. Final callback return/error payloads are rooted
+on the child stack while the entry copies them, then are popped by the
+receiver immediately after the context switch returns, before any
+intervening allocation.
 
 ## Entry Function
 
@@ -133,16 +146,15 @@ Calling a Titan function value this way goes through its normal Lua entry
 wrapper, so `_mod`, `_fn`, captures, argument checks, and result checks
 are the same as for any generic function-value call.
 
-On success, the entry records `ok=true`, leaves the result rooted on the
-child thread stack, pushes the result `TValue` into minicoro storage, and
-marks the coroutine dead. On error, it records `ok=false`, leaves the
-error rooted on the child thread stack, snapshots
-`registry[TITAN_BACKTRACE_KEY]` onto that stack, and marks the coroutine
-dead. When the Titan wrapper observes `ok=false`, it calls the C raise
-helper; that helper restores the saved traceback, sets the one-shot trace
-pin, and raises the payload. After the Titan wrapper consumes a dead
-coroutine's final transfer, it asks the C helper to clear the child stack
-roots.
+On success, the entry records `ok=true`, copies the result `TValue` into
+minicoro storage, clears the dead child stack, and returns control. On
+error, Titan's `errorhandler` has already stored the coroutine-thread
+traceback in `registry[TITAN_BACKTRACE_KEY]`; the entry sets the one-shot
+trace pin, copies `(false, error)` into minicoro storage, clears the dead
+child stack, and returns control. When the Titan wrapper observes
+`ok=false` after `resume` or `error`, it raises the payload directly. The
+pin tells the caller's error handler to keep the coroutine traceback rather
+than replacing it with a shallow wrapper traceback.
 
 `Coro:error` before the first normal `resume` is handled without calling
 the callback: the entry sees the preloaded `ok=false` transfer, returns

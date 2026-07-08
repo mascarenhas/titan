@@ -214,6 +214,10 @@ function read_written(): integer
 end
 ```
 
+If the mutable C value is a GC-bearing `TValue`, Titan refreshes its stack
+anchor immediately after the foreign call, before any later call can run
+the collector.
+
 When a C scalar participates in Titan arithmetic, cast it to the Titan type you
 want:
 

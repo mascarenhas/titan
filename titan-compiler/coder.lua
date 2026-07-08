@@ -2288,6 +2288,26 @@ local function materialize_address_tmp(ctx, exp, cexp)
     }), render("(&$TMPNAME)", { TMPNAME = tmpname })
 end
 
+local function mutable_out_anchor(ctx, exp, target)
+    local source = exp
+    if exp._tag == "Ast.ExpCast"
+       and exp.exp
+       and target
+       and types.c_mutable_address_coerceable(exp.exp._type, target) then
+        source = exp.exp
+    end
+    if not (target and types.c_mutable_address_coerceable(source._type, target))
+       or not is_addressable_local(source)
+       or not types.is_gc(source._type) then
+        return nil
+    end
+    local decl = source.var._decl
+    if not decl._slot then
+        decl._slot = newslot(ctx)
+    end
+    return setslot(source._type, decl._slot, decl._cvar)
+end
+
 local function nativetoforeignexp(ctx, exp, cexp, target)
     local stype = types.resolve_c_typedef(exp._type)
     local ttype = target and types.resolve_c_typedef(target) or nil
@@ -2430,22 +2450,62 @@ local function foreigntonativeexp(ctx, exp, cexp, target)
     error("don't know how to handle type "..types.tostring(exp._type))
 end
 
+local function finish_foreign_call(ctx, ret, prestats, ccall, poststats)
+    if #poststats == 0 then
+        return prestats, ccall
+    end
+
+    local ret_res = types.resolve_c_typedef(ret)
+    local post = table.concat(poststats, "\n")
+    if ret_res._tag == "Type.CVoid" then
+        return render([[
+            $PRESTATS
+            $CCALL;
+            $POST
+        ]], {
+            PRESTATS = prestats,
+            CCALL = ccall,
+            POST = post,
+        }), "((void)0)"
+    end
+
+    local fdecl, fname = newforeigntmp(ctx, ret)
+    return render([[
+        $PRESTATS
+        $FDECL
+        $FNAME = $CCALL;
+        $POST
+    ]], {
+        PRESTATS = prestats,
+        FDECL = fdecl,
+        FNAME = fname,
+        CCALL = ccall,
+        POST = post,
+    }), fname
+end
+
 local function codeforeigncall(ctx, node)
     local cfuncname = node.exp.var.name
     local ftype = node.exp._type
+    local ret = ftype.ret or ftype.rettypes[1] or types.CVoid()
     local caexps = {}
     local castats = {}
+    local poststats = {}
     for i, arg in ipairs(node.args.args) do
         local cstat, cexp = codeforeignexp(ctx, arg, ftype.params[i])
         table.insert(castats, cstat)
         table.insert(caexps, cexp)
+        local anchor = mutable_out_anchor(ctx, arg, ftype.params[i])
+        if anchor then
+            table.insert(poststats, anchor)
+        end
     end
     local cstats = table.concat(castats, "\n")
     local ccall = render("$NAME($CAEXPS)", {
         NAME = cfuncname,
         CAEXPS = table.concat(caexps, ", "),
     })
-    return cstats, ccall
+    return finish_foreign_call(ctx, ret, cstats, ccall, poststats)
 end
 
 local function codecfunctionptrcall(ctx, node)
@@ -2469,15 +2529,22 @@ local function codecfunctionptrcall(ctx, node)
         }, true),
     }
     local caexps = {}
+    local poststats = {}
     for i, arg in ipairs(node.args.args) do
         local cstat, cexp = codeforeignexp(ctx, arg, cfunc.params[i])
         table.insert(castats, cstat)
         table.insert(caexps, cexp)
+        local anchor = mutable_out_anchor(ctx, arg, cfunc.params[i])
+        if anchor then
+            table.insert(poststats, anchor)
+        end
     end
-    return table.concat(castats, "\n"), render("$FNAME($ARGS)", {
+    local cstats = table.concat(castats, "\n")
+    local ccall = render("$FNAME($ARGS)", {
         FNAME = fname,
         ARGS = table.concat(caexps, ", "),
     })
+    return finish_foreign_call(ctx, cfunc.ret, cstats, ccall, poststats)
 end
 
 local function codeforeignvar(_, node)

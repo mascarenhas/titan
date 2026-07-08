@@ -9,12 +9,12 @@
 ** coroutine handle or the currently running coroutine; Titan code must not
 ** store them or call these transfer primitives outside the wrapper protocol
 ** in coro.titan.
+** titan_coro_handle assumes its argument is Coro.handle's userdata; passing
+** any other value is undefined behavior.
 */
 typedef struct mco_coro *titan_coro_ref;
 
 TValue titan_coro_create(lua_State *L, TValue func);
 titan_coro_ref titan_coro_handle(TValue handle);
-void titan_coro_clear_dead(lua_State *L, titan_coro_ref source);
-void titan_coro_raise(lua_State *L, titan_coro_ref source, TValue payload);
 
 #endif
