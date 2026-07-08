@@ -1,5 +1,3 @@
-#include <stdlib.h>
-
 #include "lua.h"
 #include "lauxlib.h"
 #include "lstate.h"
@@ -16,15 +14,10 @@
 #include "minicoro.h"
 
 #define TITAN_CORO_UV_THREAD  1
-#define TITAN_CORO_UV_FUNC    2
-#define TITAN_CORO_UV_TRACE   3
-#define TITAN_CORO_NUV        3
+#define TITAN_CORO_NUV        1
 #define TITAN_CORO_STACK_SIZE (2 * 1024 * 1024)
 
-typedef struct titan_coro_data {
-  Udata *handle;
-  lua_State *thread;
-} titan_coro_data;
+static Table *titan_coro_metatable = NULL;
 
 static void titan_coro_push_tvalue(lua_State *L, const TValue *v) {
   lua_checkstack(L, 1);
@@ -43,45 +36,28 @@ static void titan_coro_set_ud_uv(lua_State *L, Udata *ud, int slot,
   luaC_barrierback(L, obj2gco(ud), uv);
 }
 
-static void titan_coro_clear_ud_uv(Udata *ud, int slot) {
-  setnilvalue(titan_coro_uv(ud, slot));
-}
-
-static void titan_coro_set_uv(lua_State *L, titan_coro_data *data, int slot,
-                              const TValue *value) {
-  titan_coro_set_ud_uv(L, data->handle, slot, value);
-}
-
-static void titan_coro_clear_uv(lua_State *L, titan_coro_data *data,
-                                int slot) {
-  (void)L;
-  titan_coro_clear_ud_uv(data->handle, slot);
-}
-
-static TValue titan_coro_get_uv(titan_coro_data *data, int slot) {
-  return *titan_coro_uv(data->handle, slot);
-}
-
-static Table *titan_coro_ensure_metatable(lua_State *L);
-
-static mco_coro *titan_coro_co_from_udata(lua_State *L, Udata *ud) {
-  Table *metatable = titan_coro_ensure_metatable(L);
-  if(!ud || ud->metatable != metatable ||
-     ud->nuvalue != TITAN_CORO_NUV || ud->len != sizeof(mco_coro *)) {
+static mco_coro *titan_coro_co_from_udata(Udata *ud) {
+  if(!ud || !titan_coro_metatable || ud->metatable != titan_coro_metatable ||
+     ud->nuvalue != TITAN_CORO_NUV ||
+     ud->len != sizeof(mco_coro *)) {
     return NULL;
   }
   return *(mco_coro **)getudatamem(ud);
 }
 
-static mco_coro *titan_coro_co_from_value(lua_State *L, TValue handle) {
+static mco_coro *titan_coro_co_from_value(TValue handle) {
   if(!ttisfulluserdata(&handle)) {
     return NULL;
   }
-  return titan_coro_co_from_udata(L, uvalue(&handle));
+  return titan_coro_co_from_udata(uvalue(&handle));
 }
 
-static titan_coro_data *titan_coro_data_from_mco(mco_coro *co) {
-  return co ? (titan_coro_data *)mco_get_user_data(co) : NULL;
+static lua_State *titan_coro_thread_from_mco(mco_coro *co) {
+  return co ? (lua_State *)mco_get_user_data(co) : NULL;
+}
+
+static StkId titan_coro_func_slot(lua_State *L) {
+  return L->stack.p + 1;
 }
 
 static mco_coro *titan_coro_transfer_source(mco_coro *co) {
@@ -96,10 +72,6 @@ static int titan_coro_tag_equal(void *t1, void *t2) {
   return luaV_equalobj(NULL, (const TValue *)t1, (const TValue *)t2);
 }
 
-static int titan_coro_pop_payload_value(mco_coro *co, TValue *payload) {
-  return mco_pop(co, payload, sizeof(*payload));
-}
-
 static int titan_coro_push_transfer(mco_coro *co, int ok, TValue payload) {
   mco_result res = mco_push(co, &payload, sizeof(payload));
   if(res != MCO_SUCCESS) {
@@ -107,20 +79,24 @@ static int titan_coro_push_transfer(mco_coro *co, int ok, TValue payload) {
   }
   res = mco_push(co, &ok, sizeof(ok));
   if(res != MCO_SUCCESS) {
-    (void)titan_coro_pop_payload_value(co, &payload);
+    TValue ignored;
+    (void)mco_pop(co, &ignored, sizeof(ignored));
   }
   return res;
 }
 
-static int titan_coro_pop_ok_value(mco_coro *co, int *ok) {
-  return mco_pop(co, ok, sizeof(*ok));
+static int titan_coro_pop_transfer(mco_coro *co, int *ok, TValue *payload) {
+  mco_result res = mco_pop(co, ok, sizeof(*ok));
+  if(res != MCO_SUCCESS) {
+    return res;
+  }
+  return mco_pop(co, payload, sizeof(*payload));
 }
 
 static void titan_coro_discard_transfer(mco_coro *co) {
   int ok;
   TValue payload;
-  (void)titan_coro_pop_ok_value(co, &ok);
-  (void)titan_coro_pop_payload_value(co, &payload);
+  (void)titan_coro_pop_transfer(co, &ok, &payload);
 }
 
 typedef struct titan_coro_call {
@@ -132,9 +108,8 @@ static void titan_coro_call_noyield(lua_State *L, void *ud) {
   luaD_callnoyield(L, restorestack(L, call->func), 1);
 }
 
-static int titan_coro_call_value(lua_State *L, titan_coro_data *data,
-                                 TValue arg, TValue *result) {
-  TValue func = titan_coro_get_uv(data, TITAN_CORO_UV_FUNC);
+static int titan_coro_call_value(lua_State *L, TValue arg, TValue *result) {
+  TValue func = *s2v(titan_coro_func_slot(L));
   ptrdiff_t old_errfunc = L->errfunc;
   CallInfo *old_ci = L->ci;
   lu_byte old_allowhook = L->allowhook;
@@ -173,24 +148,31 @@ static int titan_coro_call_value(lua_State *L, titan_coro_data *data,
   return status;
 }
 
-static void titan_coro_save_trace(lua_State *L, titan_coro_data *data) {
-  int top = lua_gettop(L);
+static void titan_coro_save_trace(lua_State *L) {
   lua_getfield(L, LUA_REGISTRYINDEX, TITAN_BACKTRACE_KEY);
-  if(!lua_isnil(L, -1)) {
-    TValue trace = *s2v(L->top.p - 1);
-    titan_coro_set_uv(L, data, TITAN_CORO_UV_TRACE, &trace);
+  if(lua_isnil(L, -1)) {
+    lua_pop(L, 1);
   }
-  lua_settop(L, top);
 }
 
-static void titan_coro_restore_trace(lua_State *L, titan_coro_data *data) {
-  TValue trace = titan_coro_get_uv(data, TITAN_CORO_UV_TRACE);
-  if(!ttisnil(&trace)) {
-    titan_coro_push_tvalue(L, &trace);
+static void titan_coro_restore_trace(lua_State *L, lua_State *source) {
+  StkId trace = titan_coro_func_slot(source) + 2;
+  if(source->top.p > trace && !ttisnil(s2v(trace))) {
+    titan_coro_push_tvalue(L, s2v(trace));
     lua_setfield(L, LUA_REGISTRYINDEX, TITAN_BACKTRACE_KEY);
     lua_pushboolean(L, 1);
     lua_setfield(L, LUA_REGISTRYINDEX, TITAN_TRACE_PINNED);
-    titan_coro_clear_uv(L, data, TITAN_CORO_UV_TRACE);
+  }
+}
+
+static void titan_coro_clear_dead_thread(lua_State *T) {
+  T->top.p = titan_coro_func_slot(T);
+}
+
+static void titan_coro_clear_dead_source(lua_State *L, mco_coro *source) {
+  lua_State *T = titan_coro_thread_from_mco(source);
+  if(T && T != L && mco_status(source) == MCO_DEAD) {
+    titan_coro_clear_dead_thread(T);
   }
 }
 
@@ -198,10 +180,9 @@ static int titan_coro_gc(lua_State *L) {
   mco_coro **slot = (mco_coro **)lua_touserdata(L, 1);
   if(slot && *slot) {
     mco_coro *co = *slot;
-    titan_coro_data *data = titan_coro_data_from_mco(co);
-    *slot = NULL;
-    mco_destroy(co);
-    free(data);
+    if(mco_destroy(co) == MCO_SUCCESS) {
+      *slot = NULL;
+    }
   }
   return 0;
 }
@@ -213,27 +194,24 @@ static Table *titan_coro_ensure_metatable(lua_State *L) {
     lua_setfield(L, -2, "__gc");
   }
   metatable = hvalue(s2v(L->top.p - 1));
+  titan_coro_metatable = metatable;
   lua_pop(L, 1);
   return metatable;
 }
 
 static void titan_coro_entry(mco_coro *co) {
-  titan_coro_data *data = titan_coro_data_from_mco(co);
-  lua_State *T;
+  lua_State *T = titan_coro_thread_from_mco(co);
   int top;
   int status;
   int ok;
   TValue payload;
 
-  if(!data || !data->thread) {
+  if(!T) {
     return;
   }
-
-  T = data->thread;
   top = lua_gettop(T);
 
-  if(titan_coro_pop_ok_value(co, &ok) != MCO_SUCCESS ||
-     titan_coro_pop_payload_value(co, &payload) != MCO_SUCCESS) {
+  if(titan_coro_pop_transfer(co, &ok, &payload) != MCO_SUCCESS) {
     setnilvalue(&payload);
     titan_coro_push_transfer(co, 0, payload);
     lua_settop(T, top);
@@ -246,12 +224,12 @@ static void titan_coro_entry(mco_coro *co) {
     return;
   }
 
-  status = titan_coro_call_value(T, data, payload, &payload);
+  status = titan_coro_call_value(T, payload, &payload);
   if(status == LUA_OK) {
     ok = 1;
   } else {
     ok = 0;
-    titan_coro_save_trace(T, data);
+    titan_coro_save_trace(T);
   }
   titan_coro_push_transfer(co, ok, payload);
 }
@@ -260,20 +238,20 @@ TValue titan_coro_create(lua_State *L, TValue func) {
   int top = lua_gettop(L);
   Udata *ud;
   mco_coro **slot;
-  titan_coro_data *data;
   lua_State *thread;
   TValue threadv;
   TValue result;
   mco_desc desc;
   mco_result res;
+  Table *metatable;
 
-  (void)titan_coro_ensure_metatable(L);
+  metatable = titan_coro_ensure_metatable(L);
   lua_newuserdatauv(L, sizeof(mco_coro *), TITAN_CORO_NUV);
   ud = uvalue(s2v(L->top.p - 1));
   slot = (mco_coro **)getudatamem(ud);
   *slot = NULL;
-  luaL_getmetatable(L, "titan.coro");
-  lua_setmetatable(L, -2);
+  ud->metatable = metatable;
+  luaC_objbarrier(L, ud, metatable);
 
   lua_newthread(L);
   thread = lua_tothread(L, -1);
@@ -281,21 +259,13 @@ TValue titan_coro_create(lua_State *L, TValue func) {
   titan_coro_set_ud_uv(L, ud, TITAN_CORO_UV_THREAD, &threadv);
   lua_pop(L, 1);
 
-  data = (titan_coro_data *)calloc(1, sizeof(*data));
-  if(!data) {
-    luaL_error(L, "could not create coroutine: out of memory");
-  }
-  data->handle = ud;
-  data->thread = thread;
-  titan_coro_set_uv(L, data, TITAN_CORO_UV_FUNC, &func);
-  titan_coro_clear_uv(L, data, TITAN_CORO_UV_TRACE);
+  titan_coro_push_tvalue(thread, &func);
 
   mco_set_tag_comparator(titan_coro_tag_equal);
   desc = mco_desc_init(titan_coro_entry, TITAN_CORO_STACK_SIZE);
-  desc.user_data = data;
+  desc.user_data = thread;
   res = mco_create(slot, &desc);
   if(res != MCO_SUCCESS) {
-    free(data);
     *slot = NULL;
     luaL_error(L, "could not create coroutine: %s", mco_result_description(res));
   }
@@ -305,7 +275,7 @@ TValue titan_coro_create(lua_State *L, TValue func) {
 }
 
 int titan_coro_push(lua_State *L, TValue handle, int ok, TValue payload) {
-  mco_coro *target = titan_coro_transfer_target(titan_coro_co_from_value(L, handle));
+  mco_coro *target = titan_coro_transfer_target(titan_coro_co_from_value(handle));
   (void)L;
   if(!target) return MCO_INVALID_COROUTINE;
   return titan_coro_push_transfer(target, ok, payload);
@@ -319,11 +289,11 @@ int titan_coro_push_current(lua_State *L, int ok, TValue payload) {
 }
 
 int titan_coro_resume(lua_State *L, TValue handle, TValue tag) {
-  mco_coro *co = titan_coro_co_from_value(L, handle);
+  mco_coro *co = titan_coro_co_from_value(handle);
   mco_coro *target = titan_coro_transfer_target(co);
   mco_result res;
+  (void)L;
   if(!co) return MCO_INVALID_COROUTINE;
-  mco_set_tag_comparator(titan_coro_tag_equal);
   res = mco_resume(co, &tag);
   if(res != MCO_SUCCESS) {
     if(target) {
@@ -338,7 +308,6 @@ int titan_coro_yield(lua_State *L, TValue tag) {
   mco_result res;
   (void)L;
   if(!co) return MCO_INVALID_COROUTINE;
-  mco_set_tag_comparator(titan_coro_tag_equal);
   res = mco_yield(co, &tag);
   if(res != MCO_SUCCESS) {
     titan_coro_discard_transfer(co);
@@ -346,62 +315,53 @@ int titan_coro_yield(lua_State *L, TValue tag) {
   return res;
 }
 
-int titan_coro_pop_ok(lua_State *L, TValue handle) {
-  mco_coro *source = titan_coro_transfer_source(titan_coro_co_from_value(L, handle));
-  titan_coro_data *data = titan_coro_data_from_mco(source);
-  int ok;
-  if(!source || titan_coro_pop_ok_value(source, &ok) != MCO_SUCCESS) {
-    return 0;
-  }
-  if(data && !ok) {
-    titan_coro_restore_trace(L, data);
-  }
-  return ok;
-}
-
-TValue titan_coro_pop_payload(lua_State *L, TValue handle) {
-  mco_coro *source = titan_coro_transfer_source(titan_coro_co_from_value(L, handle));
+static TValue titan_coro_pop_transfer_or_raise(lua_State *L, mco_coro *source) {
   TValue nilv;
   TValue payload;
-  setnilvalue(&nilv);
-  (void)L;
-  if(source && titan_coro_pop_payload_value(source, &payload) == MCO_SUCCESS) {
-    return payload;
-  }
-  return nilv;
-}
-
-int titan_coro_pop_current_ok(lua_State *L) {
-  mco_coro *co = mco_running();
+  mco_result res;
   int ok;
-  (void)L;
-  if(!co || titan_coro_pop_ok_value(co, &ok) != MCO_SUCCESS) {
-    return 0;
+  setnilvalue(&nilv);
+  if(!source) {
+    luaL_error(L, "invalid coroutine handle");
+    return nilv;
   }
-  return ok;
+  res = titan_coro_pop_transfer(source, &ok, &payload);
+  if(res != MCO_SUCCESS) {
+    luaL_error(L, "could not pop coroutine result: %s",
+               mco_result_description(res));
+    return nilv;
+  }
+  if(!ok) {
+    lua_State *T = titan_coro_thread_from_mco(source);
+    titan_coro_push_tvalue(L, &payload);
+    if(T && mco_status(source) == MCO_DEAD) {
+      titan_coro_restore_trace(L, T);
+    }
+    titan_coro_clear_dead_source(L, source);
+    lua_error(L);
+    return nilv;
+  }
+  titan_coro_clear_dead_source(L, source);
+  return payload;
 }
 
-TValue titan_coro_pop_current_payload(lua_State *L) {
-  mco_coro *co = mco_running();
-  TValue nilv;
-  TValue payload;
-  setnilvalue(&nilv);
-  (void)L;
-  if(co && titan_coro_pop_payload_value(co, &payload) == MCO_SUCCESS) {
-    return payload;
-  }
-  return nilv;
+TValue titan_coro_pop(lua_State *L, TValue handle) {
+  mco_coro *source = titan_coro_transfer_source(titan_coro_co_from_value(handle));
+  return titan_coro_pop_transfer_or_raise(L, source);
+}
+
+TValue titan_coro_pop_current(lua_State *L) {
+  return titan_coro_pop_transfer_or_raise(L, mco_running());
 }
 
 int titan_coro_is_yieldable(lua_State *L, TValue tag) {
   mco_coro *co = mco_running();
   (void)L;
-  mco_set_tag_comparator(titan_coro_tag_equal);
   return co && mco_is_yieldable(co, &tag);
 }
 
 int titan_coro_status(lua_State *L, TValue handle) {
-  mco_coro *co = titan_coro_co_from_value(L, handle);
+  mco_coro *co = titan_coro_co_from_value(handle);
   (void)L;
   if(!co) return TITAN_CORO_STATUS_DEAD;
   switch(mco_status(co)) {

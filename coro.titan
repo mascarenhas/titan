@@ -31,21 +31,11 @@ local function check_result(result: rt.titan_ffi_int)
 end
 
 local function pop_or_raise(handle: value): value
-  local ok = rt.titan_coro_pop_ok(L, handle)
-  local payload = rt.titan_coro_pop_payload(L, handle)
-  if (ok as integer) == 0 then
-    raise payload
-  end
-  return payload
+  return rt.titan_coro_pop(L, handle)
 end
 
 local function pop_current_or_raise(): value
-  local ok = rt.titan_coro_pop_current_ok(L)
-  local payload = rt.titan_coro_pop_current_payload(L)
-  if (ok as integer) == 0 then
-    raise payload
-  end
-  return payload
+  return rt.titan_coro_pop_current(L)
 end
 
 function create(func: (value) -> value, default_tag: value): Coro
