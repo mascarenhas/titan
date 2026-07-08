@@ -94,6 +94,20 @@ describe("C FFI ctype registration", function()
         assert.same({ "int" }, ftypes.ffi_values.type)
     end)
 
+    it("parses TValue typedefs, functions, and arrays for the Titan FFI layer", function()
+        local ftypes = parse_header([[
+            typedef struct TValue TValue;
+            extern TValue ffi_value_echo(TValue value);
+            extern TValue ffi_value_array[2];
+        ]])
+
+        assert.equal("typedef", ftypes.TValue.type)
+        assert.same({ "TValue" }, ftypes.ffi_value_echo.ret.type)
+        assert.same({ "TValue" }, ftypes.ffi_value_echo.params[1].type)
+        assert.same({ "TValue" }, ftypes.ffi_value_array.type)
+        assert.same({ 2 }, ftypes.ffi_value_array.idxs)
+    end)
+
     it("models function pointer typedefs as function pointer C types", function()
         local ftypes = parse_header([[
             typedef int (*ffi_callback)(int);

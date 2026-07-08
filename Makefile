@@ -31,6 +31,10 @@ endif
 CC        ?= cc
 CFLAGS    ?= --std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls
 RUNTIME_O := titan-runtime/titan.o
+CORO_O    := titan-runtime/titan_coro.o
+CORO_SO   := coro.so
+TITAN_LUA ?= $(if $(wildcard ./lua),./lua,.lua/bin/lua)
+TITANC    ?= $(TITAN_LUA) ./titanc
 
 # libbacktrace is cloned + built into ./libbacktrace (gitignored), mirroring the
 # ./lua-5.5.0 tree. The generated C and the runtime include its backtrace.h and
@@ -39,9 +43,9 @@ LIBBT_DIR := libbacktrace
 LIBBT_URL := https://github.com/ianlancetaylor/libbacktrace.git
 LIBBT_LIB := $(LIBBT_DIR)/.libs/libbacktrace.a
 
-.PHONY: all help lua libbacktrace runtime test examples clean clean-lua clean-libbacktrace distclean
+.PHONY: all help lua libbacktrace runtime stdlib test examples clean clean-lua clean-libbacktrace distclean
 
-all: lua libbacktrace ## Build everything needed to run the test suite (default)
+all: lua libbacktrace stdlib ## Build everything needed to run the test suite (default)
 
 help: ## Show this help
 	@echo "Titan developer tasks:"
@@ -80,12 +84,20 @@ $(LIBBT_LIB):
 	@echo "==> Building libbacktrace (configure + make, -fPIC)"
 	cd "$(LIBBT_DIR)" && ./configure CFLAGS="-fPIC -g -O2" && $(MAKE)
 
-runtime: $(RUNTIME_O) ## Build the Titan C runtime object (also built lazily by the compiler)
+runtime: $(RUNTIME_O) $(CORO_O) ## Build the Titan C runtime objects (also built lazily by the compiler)
 
 $(RUNTIME_O): titan-runtime/titan.c titan-runtime/titan.h | $(LUA_LIB) $(LIBBT_LIB)
 	$(CC) $(CFLAGS) -c titan-runtime/titan.c -I titan-runtime -I $(LUA_DIR)/src -I $(LIBBT_DIR) -o $@
 
-test: lua libbacktrace ## Build/install the rock and run the suite via `luarocks test`
+$(CORO_O): titan-runtime/titan_coro.c titan-runtime/titan/coro.h titan-runtime/minicoro.h titan-runtime/titan/ffi.h | $(LUA_LIB) $(LIBBT_LIB)
+	$(CC) $(CFLAGS) -c titan-runtime/titan_coro.c -I titan-runtime -I $(LUA_DIR)/src -I $(LIBBT_DIR) -o $@
+
+stdlib: $(CORO_SO) ## Build the Titan standard library modules
+
+$(CORO_SO): coro.titan $(CORO_O) $(RUNTIME_O) titanc | .lua/bin/lua $(LIBBT_LIB)
+	TITAN_PATH_0_11=/tmp TITAN_PATH=/tmp $(TITANC) coro -X $(CORO_O)
+
+test: lua libbacktrace stdlib ## Build/install the rock and run the suite via `luarocks test`
 	luarocks make
 	luarocks test
 

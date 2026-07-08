@@ -2257,6 +2257,11 @@ local function nativetoforeignexp(ctx, exp, cexp, target)
     local stype = types.resolve_c_typedef(exp._type)
     local ttype = target and types.resolve_c_typedef(target) or nil
 
+    if stype._tag == "Type.Value"
+       and (not ttype or ttype._tag == "Type.Value") then
+        return "", cexp
+    end
+
     if stype._tag == "Type.COwned"
        and (not ttype or ttype._tag == "Type.CPointer") then
         return "", render("getudatamem($EXP)", { EXP = cexp })
@@ -2310,7 +2315,9 @@ end
 local function foreigntonativeexp(ctx, exp, cexp, target)
     local etype = types.resolve_c_typedef(exp._type)
 
-    if etype._tag == "Type.CInteger" then
+    if etype._tag == "Type.Value" then
+        return "", cexp
+    elseif etype._tag == "Type.CInteger" then
         return "", "((lua_Integer)" .. cexp .. ")"
     elseif etype._tag == "Type.CFloat" then
         return "", "((lua_Number)" .. cexp .. ")"
@@ -2358,10 +2365,11 @@ end
 
 local function codeforeigncall(ctx, node)
     local cfuncname = node.exp.var.name
+    local ftype = node.exp._type
     local caexps = {}
     local castats = {}
-    for _, arg in ipairs(node.args.args) do
-        local cstat, cexp = codeforeignexp(ctx, arg)
+    for i, arg in ipairs(node.args.args) do
+        local cstat, cexp = codeforeignexp(ctx, arg, ftype.params[i])
         table.insert(castats, cstat)
         table.insert(caexps, cexp)
     end
@@ -2374,6 +2382,7 @@ local function codeforeigncall(ctx, node)
 end
 
 local function codecfunctionptrcall(ctx, node)
+    local cfunc = node._c_pointer_call
     local fstats, fexp = codeexp(ctx, node.exp)
     local fdecl, fname = newforeigntmp(ctx, node.exp._type)
     local castats = {
@@ -2393,8 +2402,8 @@ local function codecfunctionptrcall(ctx, node)
         }, true),
     }
     local caexps = {}
-    for _, arg in ipairs(node.args.args) do
-        local cstat, cexp = codeforeignexp(ctx, arg)
+    for i, arg in ipairs(node.args.args) do
+        local cstat, cexp = codeforeignexp(ctx, arg, cfunc.params[i])
         table.insert(castats, cstat)
         table.insert(caexps, cexp)
     end
@@ -5821,7 +5830,7 @@ function codeexp(ctx, node, iscondition, target)
     return codeexp_dispatch(ctx, node, iscondition, target)
 end
 
-function codeforeignexp(ctx, node)
+function codeforeignexp(ctx, node, target)
     local tag = node._tag
     if tag == "Ast.ExpCall" and node._c_pointer_call then
         return codecfunctionptrcall(ctx, node)
@@ -5843,7 +5852,7 @@ function codeforeignexp(ctx, node)
         return cstats .. fstats, foreigncast(fexp, node._type)
     else
         local cstat, cexp = codeexp(ctx, node)
-        local fstat, fexp = nativetoforeignexp(ctx, node, cexp)
+        local fstat, fexp = nativetoforeignexp(ctx, node, cexp, target)
         return cstat .. fstat, fexp
     end
 end

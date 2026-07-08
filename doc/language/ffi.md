@@ -52,7 +52,10 @@ code: `titan_ffi_void`, `titan_ffi_bool`, `titan_ffi_char`,
 `titan_ffi_unsigned_short`, `titan_ffi_int`, `titan_ffi_unsigned_int`,
 `titan_ffi_long`, `titan_ffi_unsigned_long`, `titan_ffi_long_long`,
 `titan_ffi_unsigned_long_long`, `titan_ffi_float`, `titan_ffi_double`, and the
-opaque Lua state type `lua_State`.
+opaque Lua state type `lua_State`. It also exposes Lua's internal `TValue`
+type for private runtime helpers; exact by-value `TValue` parameters and
+returns map to Titan `value`, while raw `TValue *` and `TValue[]` surfaces are
+unsupported.
 
 ## Imported Members
 
@@ -93,6 +96,7 @@ Supported C type families:
 | `T[N]` | C array type with static length |
 | `struct S`, `union U` | C aggregate type with fields when the header exposes them; source annotations need a typedef name in v1 |
 | `typedef T name` | C typedef that resolves through its target |
+| exact by-value `TValue` | Titan `value`, for compiler/runtime helper headers |
 
 Imported C types can appear in **local** type annotations:
 
@@ -154,6 +158,8 @@ Allowed conversions include:
 * a foreign C function name to a compatible C function pointer type;
 * C integers, C floats, non-function C pointers, and owned C userdata to/from
   `value`, with the same run-time checks used at the Lua boundary.
+* Titan `value` to C `TValue` by value, and C `TValue` back to Titan `value`,
+  for private runtime helper APIs that include `<titan/ffi.h>`.
 
 By-value C structs and unions cannot cross through `value` in v1.
 

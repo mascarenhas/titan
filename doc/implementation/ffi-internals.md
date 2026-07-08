@@ -61,8 +61,11 @@ on the process cwd. The file exposes selected primitive aliases:
 `titan_ffi_signed_char`, `titan_ffi_unsigned_char`, `titan_ffi_short`,
 `titan_ffi_unsigned_short`, `titan_ffi_int`, `titan_ffi_unsigned_int`,
 `titan_ffi_long`, `titan_ffi_unsigned_long`, `titan_ffi_long_long`,
-`titan_ffi_unsigned_long_long`, `titan_ffi_float`, `titan_ffi_double`, and
-an opaque `lua_State` typedef.
+`titan_ffi_unsigned_long_long`, `titan_ffi_float`, `titan_ffi_double`, an
+opaque `lua_State` typedef, and Lua's internal `TValue` type. Exact by-value
+`TValue` is special-cased to Titan `value` for private runtime helper
+boundaries; pointer and array forms such as `TValue *` and `TValue[]` are not
+part of the supported FFI surface.
 
 Generated C already compiles with `-I titan-runtime`, so the emitted
 `#include <titan/ffi.h>` resolves through the normal C compiler path too.
@@ -124,6 +127,8 @@ compatibility/coercion relations add the Titan boundary conversions:
 * C array / counted `COwned` -> compatible pointer;
 * any non-function C pointer -> `void *`;
 * Titan `string` -> C `char *` or `void *`;
+* exact by-value C `TValue` -> Titan `value`, and Titan `value` ->
+  by-value C `TValue`;
 * C integers, C floats, non-function C pointers, and `COwned` <-> `value`.
 
 Serialization rejects any type tree containing a C FFI type. This is the
@@ -139,7 +144,10 @@ Primitive tokens are canonicalized before conversion, so spellings such as
 `long unsigned int` and `unsigned long` map to the same `CInteger` identity.
 Integer ranks preserve signedness and relative width; known 128-bit compiler
 types carry `bits = 128`. `float`, `double` and `long double` become `CFloat`.
-`void` becomes `CVoid`.
+`void` becomes `CVoid`. Exact `TValue` is special-cased to Titan's dynamic
+`value` type for private runtime helpers that need to move arbitrary Lua
+values through the FFI; `TValue *` and `TValue[]` are rejected rather than
+exposing raw Lua stack/value storage through Titan.
 
 Pointer and array suffixes are applied in declaration order. Typedefs become
 `CTypedef(name, target)`. Structs and unions become `CStruct`/`CUnion` objects
@@ -222,8 +230,11 @@ The general `ctype` function routes C values through `foreignctype`, except
 `codeforeigncall` emits a direct C call of the bare C name. The Titan foreign
 module name is gone by codegen time. Fixed and C-vararg arguments both flow
 through `codeforeignexp`, so Titan strings become `getstr(TString*)`, owned C
-objects decay to payload pointers when the target is a C pointer, and `value`
-arguments are checked with `checkandget` when the target C type is known.
+objects decay to payload pointers when the target is a C pointer, and most
+`value` arguments are checked with `checkandget` when the target C type is
+known. A target C type of `TValue` is special: Titan passes the raw `TValue`
+struct by value, for private runtime helpers that already know how to preserve
+the owning Lua state and root any collectable payloads.
 
 `codeforeignvar` emits a bare C variable or macro name. Reading a C scalar into
 Titan code keeps the C value type until a cast or context converts it. C arrays
@@ -256,13 +267,15 @@ decides quote-vs-angle based on actual resolution.
 * Titan strings become `getstr(tstring)` for C pointer targets and for C
   vararg arguments;
 * `nil` becomes `NULL`;
-* `value` to C uses the runtime `checkandget` path.
+* `value` to C `TValue` passes the raw `TValue` by value;
+* other `value` to C conversions use the runtime `checkandget` path.
 
 `foreigntonativeexp` handles C-to-Titan conversion for call results and foreign
-variables. C integers/floats cast to Lua numeric C types when a Titan numeric
-target needs them; C pointers/arrays/aggregates remain C values; C `char *` /
-`void *` to `string` is implemented by an explicit cast arm with a NULL guard
-and `luaS_new` copy.
+variables. C `TValue` results become Titan `value`s directly. C
+integers/floats cast to Lua numeric C types when a Titan numeric target needs
+them; C pointers/arrays/aggregates remain C values; C `char *` / `void *` to
+`string` is implemented by an explicit cast arm with a NULL guard and
+`luaS_new` copy.
 
 `getslot` and `setslot` know how to box C scalars, non-function pointers, and
 owned userdata into Lua `TValue`s for `value` conversions and for Lua-facing

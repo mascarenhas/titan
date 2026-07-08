@@ -33,6 +33,78 @@ describe("C FFI code generation", function()
         end)
     end)
 
+    it("round-trips by-value TValue through C helpers", function()
+        with_header([[
+            typedef struct TValue TValue;
+
+            static TValue ffi_value_echo(TValue value) {
+                return value;
+            }
+
+            static int ffi_value_kind(TValue value) {
+                if (ttisnil(&value)) return 1;
+                if (ttisboolean(&value)) return 2;
+                if (ttisinteger(&value)) return 3;
+                if (ttisfloat(&value)) return 4;
+                if (ttisstring(&value)) return 5;
+                if (ttistable(&value)) return 6;
+                if (ttisfunction(&value)) return 7;
+                if (ttisfulluserdata(&value)) return 8;
+                return 0;
+            }
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                record Box
+                    x: integer
+                end
+
+                local function echo(x: value): value
+                    return x
+                end
+
+                function nil_rounds(): value
+                    return c.ffi_value_echo(nil)
+                end
+
+                function integer_rounds(): value
+                    return c.ffi_value_echo(42)
+                end
+
+                function string_rounds(): value
+                    return c.ffi_value_echo("titan")
+                end
+
+                function array_kind(): integer
+                    local xs = { 1, 2, 3 }
+                    return c.ffi_value_kind(xs)
+                end
+
+                function map_kind(): integer
+                    local xs = { ["a"] = 1 }
+                    return c.ffi_value_kind(xs)
+                end
+
+                function record_kind(): integer
+                    return c.ffi_value_kind(Box.new(17))
+                end
+
+                function function_rounds(): value
+                    return c.ffi_value_echo(echo)
+                end
+            ]], [[
+                assert(test.nil_rounds() == nil)
+                assert(test.integer_rounds() == 42)
+                assert(test.string_rounds() == "titan")
+                assert(test.array_kind() == 6)
+                assert(test.map_kind() == 6)
+                assert(test.record_kind() == 8)
+                assert(test.function_rounds()("ok") == "ok")
+            ]])
+        end)
+    end)
+
     it("indexes C arrays, C pointers, and counted owned C arrays with 0-based indices", function()
         with_header([[
             typedef int ffi_int;

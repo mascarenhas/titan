@@ -53,6 +53,7 @@ Start with the [design philosophy](philosophy.md) if you want to know
 | [Modules](modules.md) | Module files, `import`, visibility, module variables, and the compilation model (shared libraries, executables, search paths). |
 | [Lua interoperability](lua-interop.md) | Using Titan from Lua and Lua values in Titan: what crosses the boundary, what each type looks like on the other side, and where the run-time checks happen. |
 | [Error handling](error-handling.md) | The run-time error model: what raises errors, error messages, `pcall`, `titan.backtrace()`, and the option-type idiom for recoverable failures. |
+| [Coroutines](coroutines.md) | The `coro` standard module: stackful asymmetric coroutines, tagged nested yield, error injection, status, and Lua interop. |
 | [The C FFI](ffi.md) | `foreign import`: binding C headers, supported types, calling C functions, limitations. |
 | [Grammar](grammar.md) | The complete lexical and syntactic grammar. |
 
@@ -127,8 +128,9 @@ with a clean error; each links to the chapter that documents it in full.
   out-of-band traceback: there is no exception class hierarchy and no
   chaining/cause mechanism. A new error in a catch or finally replaces the
   previous one ([error handling](error-handling.md)).
-* **No standard library yet.** Titan code uses the FFI, imported Titan
-  modules, or its Lua host for library functionality.
+* **Only a small standard library so far.** Titan includes the low-level
+  `coro` module for stackful coroutines, but most library functionality
+  still comes from the FFI, imported Titan modules, or the Lua host.
 
 The [README roadmap](../../README.md) lists where the language is headed;
 the [philosophy chapter](philosophy.md) explains the principles that order

@@ -13,9 +13,29 @@ driver.imported = {}
 
 driver.TITAN_VER = "0.11"
 driver.TITAN_VER_SUFFIX = "_0_11"
+local function package_cpath_dirs()
+    local dirs = {}
+    for template in package.cpath:gmatch("[^;]+") do
+        local q = template:find("?", 1, true)
+        if q then
+            local dir = template:sub(1, q - 1):gsub("[/\\]*$", "")
+            if dir ~= "" then
+                table.insert(dirs, dir)
+            end
+        end
+    end
+    return table.concat(dirs, ";")
+end
+
+local DEFAULT_TITAN_BIN_PATH = ".;/usr/local/lib/titan/" .. driver.TITAN_VER
+local cpath_dirs = package_cpath_dirs()
+if cpath_dirs ~= "" then
+    DEFAULT_TITAN_BIN_PATH = DEFAULT_TITAN_BIN_PATH .. ";" .. cpath_dirs
+end
+
 driver.TITAN_BIN_PATH = os.getenv("TITAN_PATH" .. driver.TITAN_VER_SUFFIX)
     or os.getenv("TITAN_PATH")
-    or ".;/usr/local/lib/titan/" .. driver.TITAN_VER
+    or DEFAULT_TITAN_BIN_PATH
 driver.TITAN_SOURCE_PATH = "."
 driver.LUA_SOURCE_PATH = "lua-5.5.0/src/"
 driver.TITAN_RUNTIME_PATH = "titan-runtime/"
@@ -383,13 +403,16 @@ local function write_entrypoint(modname)
     return entrypoint_c
 end
 
-function driver.compile_library(modname, libnames, link, verbose)
+function driver.compile_library(modname, libnames, link, verbose, extra_objects)
     local soname = modname:gsub("[.]", "/") .. ".so"
     os.remove(soname)
 
     local args = {driver.CC, driver.CFLAGS, shared_flag(), "-o", soname}
     for _, libname in ipairs(libnames) do
         table.insert(args, libname)
+    end
+    for _, object in ipairs(extra_objects or {}) do
+        table.insert(args, object)
     end
 
     table.insert(args, driver.TITAN_RUNTIME_PATH .. "titan.o")
@@ -415,7 +438,7 @@ function driver.compile_library(modname, libnames, link, verbose)
     return ok, term, code
 end
 
-function driver.compile_program(modname, libnames, link, verbose)
+function driver.compile_program(modname, libnames, link, verbose, extra_objects)
     local execname = modname:gsub("[.]", "/")
     os.remove(execname)
 
@@ -427,6 +450,9 @@ function driver.compile_program(modname, libnames, link, verbose)
                 entrypoint_c}
     for _, libname in ipairs(libnames) do
         table.insert(args, libname)
+    end
+    for _, object in ipairs(extra_objects or {}) do
+        table.insert(args, object)
     end
 
     table.insert(args, driver.TITAN_RUNTIME_PATH .. "titan.o")

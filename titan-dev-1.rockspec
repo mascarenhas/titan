@@ -30,6 +30,9 @@ test_dependencies = {
 test = {
    type = "busted"
 }
+hooks = {
+   post_install = "make stdlib CC=\"$(CC)\" && mkdir -p $(LIBDIR) $(PREFIX)/../../../../lua/$(LUA_VERSION) && cp coro.so $(LIBDIR)/coro.so && cp coro.so $(PREFIX)/../../../../lua/$(LUA_VERSION)/coro.so"
+}
 build = {
    type = "builtin",
    modules = {

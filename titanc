@@ -13,12 +13,18 @@ p:flag('-v --verbose', 'Be verbose about compiler invocations.')
 p:option('-u --lua', 'Path to Lua source tree (to find Lua headers, defaults to "lua-5.5.0/src").')
 p:option('-t --tree', 'Root of the source tree, used for looking for source modules (defaults to ".").')
 p:option('-l --link', 'Comma-separated list of additional libraries to link into module.')
+p:option('-X --extra-object', 'Additional object file to link into the output.'):args("*")
 local args = p:parse()
 
 -- Work like assert, but don't print the stack trace
 local function exit(msg)
     io.stderr:write(msg, "\n")
     os.exit(1)
+end
+
+local function link_failed(kind, modname, term, code)
+    return string.format("failed to link %s '%s' (%s%s)",
+        kind, modname, tostring(term), code and (", " .. tostring(code)) or "")
 end
 
 driver.TITAN_SOURCE_PATH = args.tree or driver.TITAN_SOURCE_PATH
@@ -69,14 +75,22 @@ if main_module then
     for _, ofile in pairs(libnames) do
         table.insert(ofiles, ofile)
     end
-    driver.compile_program(main_module, ofiles, args.link, args.verbose)
+    local ok, term, code = driver.compile_program(main_module, ofiles,
+        args.link, args.verbose, args.extra_object)
+    if not ok then
+        table.insert(errors, link_failed("program", main_module, term, code))
+    end
 else
     for modname, depset in pairs(modules) do
         local ofiles = {}
         for modname, _ in pairs(depset) do
             table.insert(ofiles, libnames[modname])
         end
-        local ok, err = driver.compile_library(modname, ofiles, args.link, args.verbose)
+        local ok, term, code = driver.compile_library(modname, ofiles, args.link,
+            args.verbose, args.extra_object)
+        if not ok then
+            table.insert(errors, link_failed("library", modname, term, code))
+        end
     end
 end
 

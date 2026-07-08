@@ -34,13 +34,17 @@ Two distinct path strings are consulted:
   `"."`; `titanc --tree <root>` overrides it.
 * **`driver.TITAN_BIN_PATH`** — where compiled `.so` modules live.
   Default `os.getenv("TITAN_PATH_0_11") or os.getenv("TITAN_PATH") or
-  ".;/usr/local/lib/titan/0.11"`.
+  ".;/usr/local/lib/titan/0.11"` plus directories derived from Lua's
+  `package.cpath`.
 
 So `import foo.bar` looks for `foo/bar.titan` under the source path and
 `foo/bar.so` under the bin path. Note that the compile-time path walk
 skips empty entries (`[^;]+`) and does **not** implement the `;;`
 "insert the default path here" convention; the run-time loader in
 `titan.c` does (see [pushpath](#titanc-the-dynamic-loader) below).
+The `package.cpath` fallback strips each `?.so`-style template down to
+its directory, so LuaRocks-installed compiled Titan modules can be found
+without a separate `TITAN_PATH` setting.
 
 ### Source vs `.so`: the selection logic
 
@@ -172,24 +176,24 @@ wrapper `titanc` uses: it skips modules whose cache entry says
 
 ## Linking a shared library: `driver.compile_library`
 
-`driver.compile_library(modname, libnames, link, verbose)` produces
+`driver.compile_library(modname, libnames, link, verbose, extra_objects)` produces
 `<modname-with-slashes>.so` — relative to the working directory, not
 next to the source like the `.c`/`.o` — from a list of object files:
 
 ```sh
 cc --std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls -shared -o foo/bar.so \
-   foo/bar.o dep.o ... titan-runtime/titan.o libbacktrace/.libs/libbacktrace.a \
+   foo/bar.o dep.o ... extra.o ... titan-runtime/titan.o libbacktrace/.libs/libbacktrace.a \
    lua-5.5.0/src//liblua.a -ldl -lm [-lSDL2 ...]
 ```
 
 The link set is: every object in `libnames` (the module itself plus its
-statically-linked Titan dependencies), then `titan-runtime/titan.o`
-(the dynamic loader and error handler every module needs), then
-`libbacktrace/.libs/libbacktrace.a` (the native unwinder/symbolizer,
-**before** `liblua.a`), then `liblua.a` from `driver.LUA_SOURCE_PATH`
-(the doubled slash is a cosmetic artifact of `LUA_SOURCE_PATH` ending in
-`/`), then `-ldl -lm`, then one `-l<lib>` per entry of the
-comma-separated `link` string (`titanc -l`). On Darwin
+statically-linked Titan dependencies), then any `extra_objects` supplied
+by the caller, then `titan-runtime/titan.o` (the dynamic loader and
+error handler every module needs), then `libbacktrace/.libs/libbacktrace.a`
+(the native unwinder/symbolizer, **before** `liblua.a`), then `liblua.a`
+from `driver.LUA_SOURCE_PATH` (the doubled slash is a cosmetic artifact
+of `LUA_SOURCE_PATH` ending in `/`), then `-ldl -lm`, then one `-l<lib>`
+per entry of the comma-separated `link` string (`titanc -l`). On Darwin
 (`driver.IS_DARWIN`, cached from a `uname` shell-out when `driver.lua`
 is loaded) the shared flag becomes `-shared -undefined dynamic_lookup` —
 the standard macOS idiom for Lua C modules — and, **after the link**,
@@ -202,7 +206,7 @@ absent).
 
 ## Linking a standalone program: `driver.compile_program`
 
-`driver.compile_program(modname, libnames, link, verbose)` produces an
+`driver.compile_program(modname, libnames, link, verbose, extra_objects)` produces an
 executable named `modname:gsub("[.]", "/")` (no extension, again
 relative to the working directory). It first
 writes `<mod>__entrypoint.c` from `entrypoint_template` — a small
@@ -211,7 +215,7 @@ a library, plus the entrypoint:
 
 ```sh
 cc --std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls -o foo/bar \
-   -I titan-runtime/ -I lua-5.5.0/src/ foo/bar__entrypoint.c foo/bar.o ... \
+   -I titan-runtime/ -I lua-5.5.0/src/ foo/bar__entrypoint.c foo/bar.o ... extra.o ... \
    titan-runtime/titan.o libbacktrace/.libs/libbacktrace.a \
    lua-5.5.0/src//liblua.a -ldl -lm
 ```
@@ -265,15 +269,18 @@ normal module-init protocol.
 ## The `titanc` command line
 
 ```sh
-./titanc [--print-ast] [-v|--verbose] [-u|--lua <luasrc>] [-t|--tree <srcroot>] [-l|--link lib1,lib2] <module>...
+./titanc [--print-ast] [-v|--verbose] [-u|--lua <luasrc>] [-t|--tree <srcroot>] [-l|--link lib1,lib2] [-X|--extra-object obj.o...] <module>...
 ```
 
 `titanc` (a short `argparse` script at the repository root) takes one
 or more dot-separated module names. `--tree` overrides
 `driver.TITAN_SOURCE_PATH`, `--lua` overrides `driver.LUA_SOURCE_PATH`,
 `-v` prints every `cc` command line, `--print-ast` dumps each module's
-AST after checking, and `-l` passes extra system libraries to the
-linker. Its flow:
+AST after checking, `-l` passes extra system libraries to the linker, and
+`-X`/`--extra-object` appends one or more already-built object files to
+the final link. The `coro` standard module uses this to link its private
+runtime helper object without putting minicoro into every Titan module.
+Its flow:
 
 1. **Typecheck everything first.** Each requested module gets a *fresh*
    `static_deps` table and goes through
@@ -301,15 +308,9 @@ linker. Its flow:
    each requested module is linked into its own `.so` with
    `driver.compile_library`, passing exactly the objects in its
    `static_deps` set (which includes the module itself and its
-   transitive source dependencies).
-
-*Limitation:* the return values of the link steps are dropped. In the
-library branch `local ok, err = driver.compile_library(...)` is
-captured but never tested or reported, and in the program branch the
-return of `driver.compile_program` is not captured at all — a failed
-`cc` link prints whatever the C compiler wrote to stderr, but `titanc`
-still exits 0. Check that the artifact exists when scripting around
-`titanc`.
+   transitive source dependencies), plus any `--extra-object` files.
+   Link failures are collected and make `titanc` exit with status 1, after
+   the C compiler has printed its own diagnostic.
 
 ## `pretty.lua`: the C style contract and the reindenter
 
@@ -411,8 +412,9 @@ It also declares the three C functions exported by `titan.c`:
   Lua state and caches it in the registry under `TITAN_PATH_KEY`. The
   order is: `getenv("TITAN_PATH_0_11")` (the versioned variable,
   `TITAN_PATH_VAR TITAN_VER_SUFFIX`), then `getenv("TITAN_PATH")`,
-  then the built-in default `".;/usr/local/lib/titan/0.11"`. A `;;` in
-  the environment value is replaced by the default path (two
+  then the built-in default `".;/usr/local/lib/titan/0.11"` plus
+  directories derived from Lua's `package.cpath`. A `;;` in
+  the environment value is replaced by that default path (two
   `luaL_gsub` passes through a `\1` placeholder), so
   `TITAN_PATH="/opt/titan;;"` means "look in `/opt/titan`, then the
   defaults". As noted earlier, the *compile-time* search in
@@ -482,7 +484,7 @@ user-facing story.
 | --- | --- | --- | --- |
 | `TITAN_PATH_0_11` | `driver.lua` (compile time), `titan.c` `pushpath` (run time) | unset | Versioned module search path; wins over `TITAN_PATH`. |
 | `TITAN_PATH` | same | unset | Module search path; `;;` expands to the default at run time only. |
-| `driver.TITAN_BIN_PATH` | `driver.lua` | `TITAN_PATH_0_11` or `TITAN_PATH` or `".;/usr/local/lib/titan/0.11"` | Where compiled `.so` modules are searched at compile time. |
+| `driver.TITAN_BIN_PATH` | `driver.lua` | `TITAN_PATH_0_11` or `TITAN_PATH` or `".;/usr/local/lib/titan/0.11"` plus `package.cpath` dirs | Where compiled `.so` modules are searched at compile time. |
 | `driver.TITAN_SOURCE_PATH` | `driver.lua` | `"."` (overridden by `titanc --tree`) | Where `.titan` sources are searched. |
 | `driver.LUA_SOURCE_PATH` | `driver.lua` | `"lua-5.5.0/src/"` (overridden by `titanc --lua`) | Lua source tree: internal headers at compile, `liblua.a` at link. |
 | `driver.TITAN_RUNTIME_PATH` | `driver.lua` | `"titan-runtime/"` | Location of `titan.c`/`titan.h`/`titan.o`; generated C compiles with this path on its include list. |
@@ -491,7 +493,7 @@ user-facing story.
 | shared-library flags | `shared_flag()` | `-shared`; on Darwin `-shared -undefined dynamic_lookup` | Platform from `driver.UNAME` (output of `uname`). |
 | link set (library) | `compile_library` | module `.o`s + `titan.o` + `libbacktrace.a` + `liblua.a` + `-ldl -lm` + `-l<lib>`… | `-l` list from `titanc -l a,b,c`; libbacktrace is linked before Lua. |
 | link set (program) | `compile_program` | `<mod>__entrypoint.c` + all `.o`s + `titan.o` + `libbacktrace.a` + `liblua.a` + `-ldl -lm` + `-l<lib>`… | Standalone programs bundle every compiled module; libbacktrace is linked before Lua. |
-| `TITAN_PATH_DEFAULT` | `titan.h` | `".;/usr/local/lib/titan/0.11"` | Run-time default search path (mirrors `TITAN_BIN_PATH`'s default). |
+| `TITAN_PATH_DEFAULT` | `titan.h`/`titan.c` | `".;/usr/local/lib/titan/0.11"` plus `package.cpath` dirs at run time | Run-time default search path (mirrors `TITAN_BIN_PATH`'s default fallback). |
 | registry keys | `titan.h` | `TITAN_PATH_KEY`, `TITAN_LIBS_KEY`, `TITAN_BT_GENERATION_KEY`, `TITAN_BACKTRACE_KEY`, `TITAN_NAMES_KEY`, `TITAN_TRACE_PINNED` (UUID strings) | Per-state caches: search path, dlopen handles, shared libbacktrace invalidation generation, last raw backtrace, native-frame display names, and re-raise traceback pin. |
 | generated ABI symbol | `coder.lua` | `<mangled>_abi` returning `TITAN_VER` | Checked before `.so` type rehydration and before run-time dynamic-import `dlsym`; markerless modules are treated as incompatible. |
 
