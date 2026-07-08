@@ -61,8 +61,11 @@ on the process cwd. The file exposes selected primitive aliases:
 `titan_ffi_signed_char`, `titan_ffi_unsigned_char`, `titan_ffi_short`,
 `titan_ffi_unsigned_short`, `titan_ffi_int`, `titan_ffi_unsigned_int`,
 `titan_ffi_long`, `titan_ffi_unsigned_long`, `titan_ffi_long_long`,
-`titan_ffi_unsigned_long_long`, `titan_ffi_float`, `titan_ffi_double`, and
-an opaque `lua_State` typedef.
+`titan_ffi_unsigned_long_long`, `titan_ffi_float`, `titan_ffi_double`, an
+opaque `lua_State` typedef, and Lua's internal `TValue` type. Exact by-value
+`TValue` is special-cased to Titan `value` for private runtime helper
+boundaries; pointer and array forms such as `TValue *` and `TValue[]` are not
+part of the supported FFI surface.
 
 Generated C already compiles with `-I titan-runtime`, so the emitted
 `#include <titan/ffi.h>` resolves through the normal C compiler path too.

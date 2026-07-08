@@ -167,6 +167,10 @@ local function apply_pointer_suffixes(base, suffixes)
 end
 
 local function convert_struct_or_union(st, ftype)
+    if ftype.type == "struct" and c_name(ftype.name) == "TValue" then
+        return types.Value()
+    end
+
     local key = c_type_key(ftype) or ""
     local existing = st:find_foreign_type(key)
     if existing then
@@ -201,6 +205,21 @@ local function convert_struct_or_union(st, ftype)
         owner.has_fam = has_fam
     end
     return owner
+end
+
+local function convert_struct_or_union_declarator(st, ftype)
+    local base, err = convert_struct_or_union(st, ftype)
+    if not base then return nil, err end
+    if base._tag == "Type.Value" then
+        if ftype.pointer and #ftype.pointer > 0 then
+            return nil, "unsupported C type: TValue *"
+        end
+        if ftype.idxs and #ftype.idxs > 0 then
+            return nil, "unsupported C type: TValue[]"
+        end
+    end
+    return with_array_dims(apply_pointer_suffixes(base, ftype.pointer),
+                           ftype.idxs)
 end
 
 local function convert_enum()
@@ -300,7 +319,7 @@ end
 
 convert_type = function(st, ftype)
     if ftype.type == "struct" or ftype.type == "union" then
-        return convert_struct_or_union(st, ftype)
+        return convert_struct_or_union_declarator(st, ftype)
     elseif ftype.type == "enum" then
         return convert_enum(ftype)
     elseif ftype.type == "functionptr" then
@@ -341,7 +360,7 @@ function foreigntypes.convert(st, ftype)
     elseif ftype.type == "typedef" then
         return convert_typedef(st, ftype)
     elseif ftype.type == "struct" or ftype.type == "union" then
-        return convert_struct_or_union(st, ftype)
+        return convert_struct_or_union_declarator(st, ftype)
     elseif ftype.type == "enum" then
         return convert_enum(ftype)
     elseif ftype.type == "functionptr" then

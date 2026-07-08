@@ -33,7 +33,8 @@ CFLAGS    ?= --std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls
 RUNTIME_O := titan-runtime/titan.o
 CORO_O    := titan-runtime/titan_coro.o
 CORO_SO   := coro.so
-TITANC    ?= ./lua ./titanc
+TITAN_LUA ?= .lua/bin/lua
+TITANC    ?= $(TITAN_LUA) ./titanc
 
 # libbacktrace is cloned + built into ./libbacktrace (gitignored), mirroring the
 # ./lua-5.5.0 tree. The generated C and the runtime include its backtrace.h and
@@ -93,7 +94,7 @@ $(CORO_O): titan-runtime/titan_coro.c titan-runtime/titan/coro.h titan-runtime/m
 
 stdlib: $(CORO_SO) ## Build the Titan standard library modules
 
-$(CORO_SO): coro.titan $(CORO_O) $(RUNTIME_O) titanc | $(LUA_LIB) $(LIBBT_LIB)
+$(CORO_SO): coro.titan $(CORO_O) $(RUNTIME_O) titanc | .lua/bin/lua $(LIBBT_LIB)
 	TITAN_PATH_0_11=/tmp TITAN_PATH=/tmp $(TITANC) coro -X $(CORO_O)
 
 test: lua libbacktrace stdlib ## Build/install the rock and run the suite via `luarocks test`

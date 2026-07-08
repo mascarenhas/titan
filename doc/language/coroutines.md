@@ -78,17 +78,21 @@ end
 whose tag is raw-equal to `tag`. That resumer's `resume` or `error` call
 returns `arg`.
 
+Calling `coro.yield` outside a Titan coroutine raises in the caller.
+
 If the immediate resumer's tag does not match, Titan walks outward
-through the dynamic resume chain. Every skipped coroutine becomes
-`"stacked"` until the matching handler resumes and restores the skipped
-stack.
+through the dynamic resume chain. The matching handler is the coroutine
+whose `resume` or `error` call returns to its own caller; it becomes
+`"suspended"` and is resumable. The inner coroutines between that
+handler and the yielder become `"stacked"` until the handler is resumed
+and restores the skipped stack.
 
 ```text
 main resumes A with tag "main"
   A resumes B with tag "a"
     B yields "payload" to tag "main"
 
-main receives "payload"; A is stacked and B is suspended.
+main receives "payload"; A is suspended and B is stacked.
 main resumes A again; A and B are restored and B's yield returns.
 ```
 
@@ -131,12 +135,12 @@ Calling `co:error(err, tag)` before the first normal `resume` raises
 | `"suspended"` | The coroutine is resumable, either new or stopped at `yield`. |
 | `"running"` | The coroutine is currently executing. |
 | `"normal"` | The coroutine is active and has resumed another coroutine. |
-| `"stacked"` | The coroutine was skipped by a tagged nested yield; resuming the outer handler with the matching tag restores the skipped stack. |
-| `"dead"` | The entry function returned or an uncaught error escaped. |
+| `"stacked"` | The coroutine is inside a skipped chain created by a tagged nested yield; resuming the suspended matching handler restores the skipped stack. |
+| `"dead"` | The entry function returned, an uncaught error escaped, or an error was injected before the entry function started. |
 
-Resuming a `running`, `normal`, or `dead` coroutine raises in the caller.
-Resuming a stacked child while its parent is still stacked also raises;
-resume the outer stacked handler that received the nested yield instead.
+Calling `resume` or `error` on a `running`, `normal`, `stacked`, or
+`dead` coroutine raises in the caller. For a tagged nested yield, resume
+the suspended handler that received the yield instead.
 
 Titan coroutines are not Lua coroutines. `coro.yield` does not call
 `lua_yield`, and Lua's `coroutine.status` does not describe these

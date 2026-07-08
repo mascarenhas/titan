@@ -1,6 +1,7 @@
 local assert = require 'luassert'
 
-local TITANC = "./lua ./titanc"
+local LUA = ".lua/bin/lua"
+local TITANC = LUA .. " ./titanc"
 
 local function clean_test_artifacts()
     os.execute("rm -rf test.o test.so test.c test.titan test__entrypoint.c test test.dSYM coro_standalone app app__entrypoint.c app.dSYM")
@@ -38,7 +39,7 @@ local function compile_and_run(titan_code, lua_code)
 
     local script = os.tmpname()
     write_file(script, lua_code)
-    local f = assert(io.popen("./lua -l test " .. script .. " 2>&1"))
+    local f = assert(io.popen(LUA .. " -l test " .. script .. " 2>&1"))
     local out = f:read("*a")
     local ok, why, status = f:close()
     os.remove(script)
@@ -63,7 +64,7 @@ end
 local function run_lua(lua_code)
     local script = os.tmpname()
     write_file(script, lua_code)
-    local f = assert(io.popen("./lua " .. script .. " 2>&1"))
+    local f = assert(io.popen(LUA .. " " .. script .. " 2>&1"))
     local out = f:read("*a")
     local ok, why, status = f:close()
     os.remove(script)
@@ -139,6 +140,9 @@ describe("coro standard module", function()
                 if not coro.is_yieldable("tag") then
                     raise "not yieldable"
                 end
+                if coro.is_yieldable("other") then
+                    raise "wrong tag yieldable"
+                end
                 local back = coro.yield(arg, "tag")
                 return back
             end
@@ -165,7 +169,37 @@ describe("coro standard module", function()
         assert.match("OK", out)
     end)
 
-    it("routes a nested tagged yield through a stacked parent", function()
+    it("rejects unmatched raw tags without calling __eq", function()
+        local out = run_lua([==[
+            local coro = require "coro"
+
+            local calls = 0
+            local mt = {
+                __eq = function()
+                    calls = calls + 1
+                    return true
+                end
+            }
+            local resume_tag = setmetatable({}, mt)
+            local yield_tag = setmetatable({}, mt)
+            local co = coro.create(function()
+                return coro.yield("unmatched", yield_tag)
+            end, resume_tag)
+
+            local ok, err = pcall(function()
+                co:resume(nil, resume_tag)
+            end)
+            assert(not ok, "raw-unequal tags should not match")
+            assert(tostring(err):find("Invalid operation", 1, true),
+                   tostring(err))
+            assert(calls == 0, "__eq comparator was called")
+            assert(co:status() == "dead")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("routes a nested tagged yield through a suspended outer handler", function()
         local out = compile_and_run([[
             local coro = import "coro"
 
@@ -187,7 +221,44 @@ describe("coro standard module", function()
                     (second as string) .. "," .. a:status() .. "/" .. b:status()
             end
         ]], [==[
-            assert(test.run() == "from-b,stacked/suspended,a:b-done,dead/dead")
+            assert(test.run() == "from-b,suspended/stacked,a:b-done,dead/dead")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("rejects direct resume of a stacked coroutine at the Titan wrapper", function()
+        local out = compile_and_run([[
+            local coro = import "coro"
+
+            function run(): string
+                local tag_main: value = "main"
+                local tag_a: value = "a"
+                local b = coro.create(function (arg: value): value
+                    coro.yield("from-b", tag_main)
+                    return "b-done"
+                end, tag_a)
+                local a = coro.create(function (arg: value): value
+                    local got = b:resume("to-b")
+                    return "a:" .. (got as string)
+                end, tag_main)
+                local first = a:resume("start", tag_main)
+                local stacked = a:status() .. "/" .. b:status()
+                local rejected: string = "missed"
+                do
+                    b:resume("direct", tag_a)
+                catch
+                    rejected = error as string
+                end
+                local restored = a:resume("again", tag_main)
+                return (first as string) .. "," .. stacked .. "," ..
+                    rejected .. "," .. (restored as string)
+            end
+        ]], [==[
+            local text = test.run()
+            assert(text:find("^from%-b,suspended/stacked,", 1), text)
+            assert(text:find("Coroutine not suspended", 1, true), text)
+            assert(text:find(",a:b%-done$", 1), text)
             print("OK")
         ]==])
         assert.match("OK", out)
@@ -235,6 +306,38 @@ describe("coro standard module", function()
             assert(bt:find("in test.fail", 1, true),
                    "missing coroutine callback frame\n" .. tostring(bt))
             assert(test.inject() == "ready,caught:oops,dead")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("preserves finally state across yield and later resume", function()
+        local out = compile_and_run([[
+            local coro = import "coro"
+
+            log: string = ""
+
+            function body(arg: value): value
+                do
+                    log = log .. "body;"
+                    coro.yield("pause", "tag")
+                    log = log .. "after;"
+                finally
+                    log = log .. "finally;"
+                end
+                return log
+            end
+
+            function run(): string
+                local co = coro.create(body, "tag")
+                local first = co:resume(nil)
+                local mid = log
+                local second = co:resume(nil)
+                return (first as string) .. ":" .. mid .. ":" ..
+                    (second as string)
+            end
+        ]], [==[
+            assert(test.run() == "pause:body;:body;after;finally;")
             print("OK")
         ]==])
         assert.match("OK", out)
@@ -330,8 +433,8 @@ describe("coro standard module", function()
             collectgarbage("generational")
 
             local tag = {}
-            local payload = { answer = 41 }
-            local marker = function(x) return x.answer + 1 end
+            local payload
+            local marker
             local co = coro.create(function(arg)
                 assert(arg == payload)
                 collectgarbage("step")
@@ -341,6 +444,8 @@ describe("coro standard module", function()
             end, tag)
 
             collectgarbage("collect")
+            payload = { answer = 41 }
+            marker = function(x) return x.answer + 1 end
             assert(co:status() == "suspended")
             assert(co:resume(payload, tag) == marker)
             payload.extra = {}
@@ -356,6 +461,48 @@ describe("coro standard module", function()
             assert(nco:resume("done", 1.0) == "done")
 
             collectgarbage("incremental")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("reports Lua call errors for bad coroutine API use", function()
+        local out = run_lua([==[
+            local coro = require "coro"
+
+            local function fails(fn, needle)
+                local ok, err = pcall(fn)
+                assert(not ok, "expected API call to fail")
+                if needle then
+                    assert(tostring(err):find(needle, 1, true),
+                           tostring(err))
+                end
+            end
+
+            local bad_callback = coro.create("not callable", "tag")
+            fails(function()
+                bad_callback:resume(nil)
+            end)
+
+            fails(function()
+                coro.yield("payload")
+            end, "must provide non-nil tag")
+
+            local co = coro.create(function()
+                return "done"
+            end, "tag")
+            assert(co:resume(nil) == "done")
+            fails(function()
+                co:resume(nil)
+            end, "Coroutine not suspended")
+
+            local missing = coro.create(function(arg)
+                return arg
+            end)
+            fails(function()
+                missing:resume(nil)
+            end, "must provide tag argument")
+
             print("OK")
         ]==])
         assert.match("OK", out)

@@ -52,7 +52,10 @@ code: `titan_ffi_void`, `titan_ffi_bool`, `titan_ffi_char`,
 `titan_ffi_unsigned_short`, `titan_ffi_int`, `titan_ffi_unsigned_int`,
 `titan_ffi_long`, `titan_ffi_unsigned_long`, `titan_ffi_long_long`,
 `titan_ffi_unsigned_long_long`, `titan_ffi_float`, `titan_ffi_double`, and the
-opaque Lua state type `lua_State`.
+opaque Lua state type `lua_State`. It also exposes Lua's internal `TValue`
+type for private runtime helpers; exact by-value `TValue` parameters and
+returns map to Titan `value`, while raw `TValue *` and `TValue[]` surfaces are
+unsupported.
 
 ## Imported Members
 

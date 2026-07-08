@@ -96,6 +96,36 @@ describe("C FFI type checking", function()
             assert.falsy(ok)
             assert.match("member 'ffi_value_array' not found", err)
         end)
+
+        with_header([[
+            struct TValue;
+            extern int ffi_struct_value_pointer(struct TValue *value);
+        ]], function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                function bad(): integer
+                    return c.ffi_struct_value_pointer(nil)
+                end
+            ]])
+            assert.falsy(ok)
+            assert.match("member 'ffi_struct_value_pointer' not found", err)
+        end)
+
+        with_header([[
+            struct TValue;
+            extern struct TValue ffi_struct_value_array[2];
+        ]], function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                function bad(): value
+                    return c.ffi_struct_value_array[0]
+                end
+            ]])
+            assert.falsy(ok)
+            assert.match("member 'ffi_struct_value_array' not found", err)
+        end)
     end)
 
     it("types the built-in L as lua_State pointer for C calls", function()

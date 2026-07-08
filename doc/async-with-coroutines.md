@@ -72,10 +72,11 @@ nearest active handler in the dynamic resume chain whose tag is raw-equal
 to `tag`.
 
 If the immediate resumer's tag does not match, the implementation walks
-outward through the chain. Every coroutine skipped by this tagged yield
-becomes `stacked`. The handler that matched receives the yielded value.
-Later, resuming the coroutine whose handler received that value restores
-the skipped stack and eventually resumes the original `yield` call.
+outward through the chain. The handler that matched receives the yielded
+value, becomes `suspended`, and is the coroutine that must be resumed
+later. The inner coroutines between that handler and the yielder become
+`stacked`. Later, resuming the suspended handler restores the skipped
+stack and eventually resumes the original `yield` call.
 
 This is the core nested behavior:
 
@@ -84,7 +85,7 @@ main resumes A with tag "main"
   A resumes B with tag "a"
     B yields "payload" to tag "main"
 
-main's resume(A) returns "payload"; A is stacked, B is suspended.
+main's resume(A) returns "payload"; A is suspended, B is stacked.
 main resumes A again; A and B are restored; B's yield returns.
 ```
 
@@ -105,17 +106,18 @@ resumed, installs that tag as the current active handler, and transfers
 control into `co`.
 
 When `co` reaches `coro.yield(value, matching_tag)`, the `resume` call
-returns `value` and `co` becomes `suspended` unless a tagged nested yield
-also stacked intermediate coroutines.
+returns `value` and `co` becomes `suspended`. For a nested tagged yield,
+the matching handler becomes `suspended` and inner coroutines up to the
+yielder become `stacked`.
 
 When `co`'s entry function returns normally, the `resume` call returns
 that value and `co` becomes `dead`.
 
 Calling `resume` on a `running`, `normal`, or `dead` coroutine is an
-error raised in the caller. Resuming a stacked child while its parent is
-still stacked is also an error. Resuming the outer stacked handler that
-received the nested yield is the normal restore path. Calling `resume`
-on a coroutine from a different independent Lua state is an error.
+error raised in the caller. Resuming a stacked coroutine is also an
+error. Resuming the suspended handler that received the nested yield is
+the normal restore path. Calling `resume` on a coroutine from a different
+independent Lua state is an error.
 Resuming a coroutine created from another thread of the same Lua state is
 valid only through the runtime's normal same-state checks.
 
@@ -168,13 +170,13 @@ does not contain the tag.
 | `"suspended"` | The coroutine is resumable. This includes a newly created coroutine and one stopped at `yield`. |
 | `"running"` | The coroutine is the currently executing coroutine. |
 | `"normal"` | The coroutine is active in the dynamic chain but has resumed another coroutine. |
-| `"stacked"` | The coroutine was skipped by a tagged nested yield; resuming the outer handler with the matching tag restores the skipped stack. |
+| `"stacked"` | The coroutine is inside a skipped chain created by a tagged nested yield; resuming the suspended matching handler restores the skipped stack. |
 | `"dead"` | The entry function returned, or an uncaught error escaped. |
 
 `stacked` is observable so schedulers can diagnose nested tagged yields.
-Resuming the outer stacked handler that received the yield restores the
-skipped stack; resuming a skipped child while its parent is still stacked
-is the incorrect direct-resume case.
+Resuming the suspended handler that received the yield restores the
+skipped stack; resuming a stacked coroutine is the incorrect
+direct-resume case.
 
 ## Module shape
 
@@ -203,6 +205,10 @@ The FFI-facing helper shape should look like mco primitives adapted to
 Titan `value`s:
 
 ```c
+enum {
+  TITAN_CORO_SUCCESS = 0
+};
+
 TValue titan_coro_create(lua_State *L, TValue func);
 int titan_coro_push(lua_State *L, TValue handle, int ok, TValue payload);
 int titan_coro_push_current(lua_State *L, int ok, TValue payload);
@@ -214,7 +220,7 @@ int titan_coro_pop_current_ok(lua_State *L);
 TValue titan_coro_pop_current_payload(lua_State *L);
 int titan_coro_is_yieldable(lua_State *L, TValue tag);
 int titan_coro_status(lua_State *L, TValue handle);
-const char *titan_coro_result_name(int result);
+char *titan_coro_result_name(int result);
 ```
 
 The exact names are not important; the split is. `resume` and `yield`
@@ -240,19 +246,19 @@ local function effective_tag(default_tag: value, explicit_tag: value): value
   return tag
 end
 
-local function check_result(result: integer)
-  if result ~= rt.MCO_SUCCESS then
+local function check_result(result: rt.titan_ffi_int)
+  if (result as integer) ~= (rt.TITAN_CORO_SUCCESS as integer) then
     raise (rt.titan_coro_result_name(result) as string)
   end
 end
 
 function Coro:resume(arg: value, tag: value): value
   local t = effective_tag(self.default_tag, tag)
-  check_result(rt.titan_coro_push(L, self.handle, true, arg))
+  check_result(rt.titan_coro_push(L, self.handle, 1, arg))
   check_result(rt.titan_coro_resume(L, self.handle, t))
-  local ok: boolean = rt.titan_coro_pop_ok(L, self.handle)
+  local ok = rt.titan_coro_pop_ok(L, self.handle)
   local payload = rt.titan_coro_pop_payload(L, self.handle)
-  if not ok then
+  if (ok as integer) == 0 then
     raise payload
   end
   return payload
@@ -260,11 +266,11 @@ end
 
 function Coro:error(err: value, tag: value): value
   local t = effective_tag(self.default_tag, tag)
-  check_result(rt.titan_coro_push(L, self.handle, false, err))
+  check_result(rt.titan_coro_push(L, self.handle, 0, err))
   check_result(rt.titan_coro_resume(L, self.handle, t))
-  local ok: boolean = rt.titan_coro_pop_ok(L, self.handle)
+  local ok = rt.titan_coro_pop_ok(L, self.handle)
   local payload = rt.titan_coro_pop_payload(L, self.handle)
-  if not ok then
+  if (ok as integer) == 0 then
     raise payload
   end
   return payload
@@ -274,11 +280,11 @@ function yield(arg: value, tag: value): value
   if tag == nil then
     raise "must provide non-nil tag argument to coro.yield"
   end
-  check_result(rt.titan_coro_push_current(L, true, arg))
+  check_result(rt.titan_coro_push_current(L, 1, arg))
   check_result(rt.titan_coro_yield(L, tag))
-  local ok: boolean = rt.titan_coro_pop_current_ok(L)
+  local ok = rt.titan_coro_pop_current_ok(L)
   local payload = rt.titan_coro_pop_current_payload(L)
-  if not ok then
+  if (ok as integer) == 0 then
     raise payload
   end
   return payload
@@ -330,8 +336,10 @@ The typechecker/code generator rules are:
   `value`;
 * passing a non-`value` Titan expression to a `TValue` parameter uses the
   normal implicit coercion to `value` first;
-* `TValue` is not a general exported C type in Titan interfaces; it is a
-  local FFI boundary representation for `value`;
+* `TValue` is not a general-purpose C data representation in Titan
+  interfaces; an imported alias such as `ffi.TValue` behaves as Titan
+  `value`, and this spelling is intended for private runtime helper
+  boundaries;
 * mutable `TValue *`, arrays of `TValue`, and storing raw `TValue *`
   pointers in Titan-visible values are out of scope for this feature.
 
@@ -354,8 +362,8 @@ remain rooted by the corresponding Titan formal parameter or field.
 
 The exported `Coro` record is opaque. Its fields are local to `coro`:
 
-* `handle: value` stores a full userdata whose payload owns the
-  `mco_coro *` and Titan coroutine bookkeeping.
+* `handle: value` stores a full userdata whose raw payload is the
+  `mco_coro *`.
 * `default_tag: value` stores nil or a non-nil default tag.
 
 The handle userdata must have uservalues that root at least:
@@ -363,16 +371,22 @@ The handle userdata must have uservalues that root at least:
 1. the Lua thread created by `lua_newthread`;
 2. the callback function value passed to `create`.
 
-It may use additional uservalues for implementation-private roots, but
-ordinary yielded/resumed payloads do not need a persistent uservalue slot.
-They remain rooted by the suspended Titan frames that own the formal
-parameters.
+It may use an additional uservalue for the saved traceback while
+returning an uncaught coroutine error. Ordinary yielded/resumed payloads
+do not need a persistent uservalue slot. They remain rooted by the
+suspended Titan frames that own the formal parameters.
 
-The raw `mco_coro` user data may cache C pointers to the handle, Lua
-thread, or current transfer record for speed, but those cached pointers
-are not GC roots. Every collectable Lua object must also be reachable
-from a Lua stack slot, userdata uservalue, table, registry entry, or
-another traced object.
+The raw `mco_coro` user data stores only the entry/transfer state needed
+by `void (*func)(mco_coro *co)`, such as the handle userdata pointer,
+and child Lua thread pointer. That cached state is not a GC root. Every
+collectable Lua object must also be reachable from a Lua stack slot,
+userdata uservalue, table, registry entry, or another traced object.
+
+There is no private registry root for live coroutine handles. A
+reachable coroutine stays alive through ordinary Lua ownership: the
+user's `Coro` record owns the handle, the handle roots the child Lua
+thread, and nested coroutine chains keep their outer Titan frames
+suspended rather than unwound.
 
 Create the Lua thread with `lua_newthread(L)`, never with `luaL_newstate`.
 The coroutine thread must share the same `global_State` as the creating
@@ -405,11 +419,16 @@ locations and native return slots. That is safe because copying/returning
 a `TValue` does not allocate, and generated callers immediately anchor
 GC-able returns in their own stack slots before any later allocation.
 
-The runtime must not store collectable `TValue` payloads only in
-minicoro storage, raw C heap memory, or untraced fields. If an
-implementation uses a transfer record, it should hold pointers or stack
-offsets to currently rooted `TValue` slots, and those pointers must not
-outlive the stackful suspension that keeps the slots alive.
+The runtime may copy a `TValue` through minicoro storage with
+`mco_push`/`mco_pop`, because minicoro copies the struct bytes and the
+owning Titan frame remains suspended and rooted. The runtime must not
+make minicoro storage, raw C heap memory, or untraced fields the only
+root for a collectable payload beyond that stackful suspension.
+
+Each transfer pushes two values into minicoro storage: the payload
+`TValue`, followed by the `ok` flag. The receiver pops `ok` first and the
+payload second. No payload or success flag needs to be cached in
+`mco_coro->user_data`.
 
 When storing a collectable value into an old userdata uservalue or record
 field, use the existing Lua 5.5 barrier discipline. Public API helpers
@@ -477,14 +496,11 @@ error: it is raised at the target `yield` site. If target code catches
 it, the coroutine continues. If it escapes, the same uncaught-error rule
 above applies.
 
-Destroying or abandoning a live coroutine must not silently skip Titan
-`finally` blocks or Lua close operations. V1 does not include general
-cancellation. The runtime must not call `mco_destroy` on a coroutine
-whose stack may still contain suspended Titan frames. Keep live
-coroutines reachable from per-state runtime bookkeeping until they
-become `dead` or the whole Lua state is closing. A later cancellation
-feature can resume a coroutine with an injected error and let normal
-unwinding run cleanup.
+V1 does not include general cancellation. `mco_destroy` is only reached
+from the handle userdata finalizer, so it runs after the coroutine has
+become unreachable through ordinary Lua references. A later cancellation
+feature can resume a reachable coroutine with an injected error and let
+normal unwinding run cleanup.
 
 ## Minicoro changes
 
@@ -497,18 +513,21 @@ Stock minicoro has `MCO_NORMAL`, `MCO_RUNNING`, `MCO_SUSPENDED`, and
 `normal` coroutine fails. Titan needs a real extension:
 
 * add `MCO_STACKED`;
-* add tagged resume/yield entry points that receive an opaque
-  `void *tag` plus an `int (*comparator)(void *t1, void *t2)`;
+* make `mco_resume`, `mco_yield`, and `mco_is_yieldable` tag-only
+  operations that receive an opaque `void *tag`;
+* add an implementation-level `mco_set_tag_comparator` static setting,
+  not a per-call comparator argument;
 * record the active resume tag for each dynamic resume activation;
 * when a yield tag does not match the immediate active handler according
   to the comparator, walk the nested resume chain outward until a
   matching tag is found;
-* mark skipped coroutines as `MCO_STACKED` and remember enough of the
-  skipped chain to restore it later;
-* allow resume of the outer `MCO_STACKED` handler to restore the skipped
-  stack, but reject resuming a child whose parent is still stacked;
-* when the handler coroutine is resumed again, restore the skipped
-  coroutines to running order and switch back to the original yielder;
+* mark the matching handler `MCO_SUSPENDED`, mark the inner coroutines up
+  to the yielder `MCO_STACKED`, and remember the deepest stacked
+  coroutine so the existing chain can be restored later;
+* allow resume of the suspended matching handler to restore the skipped
+  stack, but reject direct resume of stacked coroutines;
+* in both yield and resume, traverse the chain once and then perform a
+  single context switch;
 * never dereference, copy, compare, or free tags inside minicoro itself.
 
 The minicoro extension should remain unaware of Lua and Titan values. The
@@ -539,8 +558,16 @@ unless a future design moves coroutine primitives into `titan.o`.
 
 Avoid mutable process-global scheduler state in `titan.o` or generated
 modules. Multiple generated `.so`s can each link their own copy of
-`titan.o`; coroutine runtime state should live in the `coro` module and
-in per-Lua-state registry tables.
+`titan.o`; coroutine runtime state should live in the `coro` module, the
+handle userdata, and each `mco_coro`'s user data.
+
+Titan's vendored minicoro should not include the Binaryen
+`MCO_USE_ASYNCIFY` backend: its unwind/rewind model does not implement
+the tagged single-switch skip/restore semantics. Local Linux tests should
+cover the ASM and UCONTEXT backends, including VMEM and Valgrind hook
+builds. `MCO_USE_FIBERS` remains a supported backend for Windows and
+Emscripten, but native Linux cannot execute that backend without a
+cross/toolchain-specific test environment.
 
 ## Required tests
 
@@ -554,23 +581,23 @@ Add FFI coverage for the new `TValue` boundary:
 * a C helper returning `TValue` produces a Titan `value`;
 * the conversion works for nil, booleans, numbers, strings, records,
   arrays/maps, and function values;
-* `TValue *` and exported interfaces containing the C `TValue` type are
-  rejected or left unsupported as specified.
+* raw `TValue *` and `TValue[]` interfaces are rejected or left
+  unsupported as specified.
 
 Add Titan runtime/coder coverage for:
 
 * create/resume/yield round trips with nil, booleans, integers, floats,
   strings, records, arrays, maps, function values, and Lua closures;
-* `coro.titan` resolving default tags, framing resume as `(true, arg)`,
-  framing error injection as `(false, err)`, checking `mco_result`, and
-  raising a returned `(false, payload)`;
+* `coro.titan` resolving default tags, recording resume as success,
+  recording error injection as failure, checking `mco_result`, and
+  raising a returned failure payload;
 * default tag use, explicit tag override, missing effective tag errors,
   and non-nil tag enforcement;
 * raw tag equality for strings, numeric equality, table/userdata
   identity, and no `__eq` metamethod calls;
 * nested tagged yield, observable `stacked` status, restoration through
-  the outer stacked handler, and rejected direct resume of a stacked
-  child;
+  the suspended matching handler, and rejected direct resume of a stacked
+  coroutine;
 * `is_yieldable` outside a coroutine, inside a coroutine with no matching
   handler, and inside a coroutine with a matching outer handler;
 * normal callback return, dead status, and resume/error after dead;
@@ -582,8 +609,8 @@ Add Titan runtime/coder coverage for:
   `TITAN_BACKTRACE_KEY` alone is overwritten by `raise payload`, while
   restoring it and setting `TITAN_TRACE_PINNED` preserves the coroutine
   traceback;
-* yield inside `try`/`finally`, then later resume, proving the suspended
-  stack preserves pending cleanup state;
+* yield before a `finally` block, then later resume, proving the
+  suspended stack preserves pending cleanup state;
 * Lua interop through `require "coro"`: method calls, bad argument
   counts, bad callback values, bad tags, and non-callable callbacks;
 * GC stress in incremental and generational modes, including old

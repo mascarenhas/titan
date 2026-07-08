@@ -38,7 +38,7 @@ Most platforms are supported through different methods:
 | Windows      | x86_64           | Windows fibers    |
 | Linux        | x86_64/i686      | ucontext          |
 | Mac OS X     | x86_64/ARM/ARM64 | ucontext          |
-| WebAssembly  | N/A              | Emscripten fibers / Binaryen asyncify |
+| WebAssembly  | N/A              | Emscripten fibers |
 | Raspberry Pi | ARM              | ucontext          |
 | RISC-V       | rv64/rv32        | ucontext          |
 
@@ -58,12 +58,6 @@ to create, resume, yield or destroy a coroutine.
 - Avoid using `thread_local` inside coroutine code, the compiler may cache thread local variables pointers which can be invalid when a coroutine switch threads.
 - Stack space is limited. By default it has 56KB of space, this can be changed on coroutine creation, or by enabling the virtual memory backed allocator to make it 2040KB.
 - Take care to not cause stack overflows (run out of stack space), otherwise your program may crash or not, the behavior is undefined.
-- On WebAssembly you must compile with Emscripten flag `-s ASYNCIFY=1`.
-- The WebAssembly Binaryen asyncify method can be used when explicitly enabled,
-you may want to do this only to use minicoro with WebAssembly native interpreters
-(no Web browser). This method is confirmed to work well with Emscripten toolchain,
-however it fails on other WebAssembly toolchains like WASI SDK.
-
 # Introduction
 
 A coroutine represents an independent "green" thread of execution.
@@ -112,11 +106,17 @@ The following simple example demonstrates on how to use the library:
 #include <stdio.h>
 #include <assert.h>
 
+static int tag;
+
 // Coroutine entry function.
 void coro_entry(mco_coro* co) {
   printf("coroutine 1\n");
-  mco_yield(co);
+  mco_yield(co, &tag);
   printf("coroutine 2\n");
+}
+
+int tag_eq(void* t1, void* t2) {
+  return t1 == t2;
 }
 
 int main() {
@@ -130,13 +130,15 @@ int main() {
   assert(res == MCO_SUCCESS);
   // The coroutine should be now in suspended state.
   assert(mco_status(co) == MCO_SUSPENDED);
+  // Configure tag comparison before resuming/yielding tagged coroutines.
+  mco_set_tag_comparator(tag_eq);
   // Call `mco_resume` to start for the first time, switching to its context.
-  res = mco_resume(co); // Should print "coroutine 1".
+  res = mco_resume(co, &tag); // Should print "coroutine 1".
   assert(res == MCO_SUCCESS);
   // We get back from coroutine context in suspended state (because it's unfinished).
   assert(mco_status(co) == MCO_SUSPENDED);
   // Call `mco_resume` to resume for a second time.
-  res = mco_resume(co); // Should print "coroutine 2".
+  res = mco_resume(co, &tag); // Should print "coroutine 2".
   assert(res == MCO_SUCCESS);
   // The coroutine finished and should be now dead.
   assert(mco_status(co) == MCO_DEAD);
@@ -155,7 +157,7 @@ then later to destroy call `mco_uninit` and deallocate it.
 
 You can yield the current running coroutine from anywhere
 without having to pass `mco_coro` pointers around,
-to this just use `mco_yield(mco_running())`.
+to this just use `mco_yield(mco_running(), tag)`.
 
 ## Passing data between yield and resume
 
@@ -229,7 +231,6 @@ The following can be defined to change the library behavior:
 - `MCO_USE_ASM`               - Force use of assembly context switch implementation.
 - `MCO_USE_UCONTEXT`          - Force use of ucontext context switch implementation.
 - `MCO_USE_FIBERS`            - Force use of fibers context switch implementation.
-- `MCO_USE_ASYNCIFY`          - Force use of Binaryen asyncify context switch implementation.
 - `MCO_USE_VALGRIND`          - Define if you want run with valgrind to fix accessing memory errors.
 
 # License
@@ -294,12 +295,7 @@ struct mco_coro {
   void (*func)(mco_coro* co);
   mco_coro* prev_co;
   void* active_tag;
-  mco_tag_comparator active_tag_comparator;
-  void* yield_tag;
-  mco_tag_comparator yield_tag_comparator;
-  int has_yield_tag;
-  mco_coro* stacked_child;
-  mco_coro* stacked_parent;
+  mco_coro* stacked_co;
   void* user_data;
   size_t coro_size;
   void* allocator_data;
@@ -335,11 +331,10 @@ MCO_API mco_result mco_init(mco_coro* co, mco_desc* desc);                      
 MCO_API mco_result mco_uninit(mco_coro* co);                                    /* Uninitialize the coroutine, may fail if it's not dead or suspended. */
 MCO_API mco_result mco_create(mco_coro** out_co, mco_desc* desc);               /* Allocates and initializes a new coroutine. */
 MCO_API mco_result mco_destroy(mco_coro* co);                                   /* Uninitialize and deallocate the coroutine, may fail if it's not dead or suspended. */
-MCO_API mco_result mco_resume(mco_coro* co);                                    /* Starts or continues the execution of the coroutine. */
-MCO_API mco_result mco_yield(mco_coro* co);                                     /* Suspends the execution of a coroutine. */
-MCO_API mco_result mco_resume_tagged(mco_coro* co, void* tag, mco_tag_comparator comparator);
-MCO_API mco_result mco_yield_tagged(mco_coro* co, void* tag, mco_tag_comparator comparator);
-MCO_API int mco_is_yieldable_tagged(mco_coro* co, void* tag, mco_tag_comparator comparator);
+MCO_API void mco_set_tag_comparator(mco_tag_comparator comparator);             /* Set the implementation-level tag comparator. */
+MCO_API mco_result mco_resume(mco_coro* co, void* tag);                         /* Starts or continues the execution of the coroutine. */
+MCO_API mco_result mco_yield(mco_coro* co, void* tag);                          /* Suspends the execution of a coroutine. */
+MCO_API int mco_is_yieldable(mco_coro* co, void* tag);
 MCO_API mco_state mco_status(mco_coro* co);                                     /* Returns the status of the coroutine. */
 MCO_API void* mco_get_user_data(mco_coro* co);                                  /* Get coroutine user data supplied on coroutine creation. */
 
@@ -387,7 +382,7 @@ extern "C" {
 #define MCO_MAGIC_NUMBER 0x7E3CB1A9
 
 /* Detect implementation based on OS, arch and compiler. */
-#if !defined(MCO_USE_UCONTEXT) && !defined(MCO_USE_FIBERS) && !defined(MCO_USE_ASM) && !defined(MCO_USE_ASYNCIFY)
+#if !defined(MCO_USE_UCONTEXT) && !defined(MCO_USE_FIBERS) && !defined(MCO_USE_ASM)
   #if defined(_WIN32)
     #if (defined(__GNUC__) && defined(__x86_64__)) || (defined(_MSC_VER) && defined(_M_X64))
       #define MCO_USE_ASM
@@ -398,8 +393,6 @@ extern "C" {
     #define MCO_USE_UCONTEXT
   #elif defined(__EMSCRIPTEN__)
     #define MCO_USE_FIBERS
-  #elif defined(__wasm__)
-    #define MCO_USE_ASYNCIFY
   #else
     #if __GNUC__ >= 3 /* Assembly extension supported. */
       #if defined(__x86_64__) || \
@@ -510,6 +503,9 @@ extern "C" {
     }
   #elif defined(MCO_USE_VMEM_ALLOCATOR) /* POSIX virtual memory allocator */
     #include <sys/mman.h>
+    #if !defined(MAP_ANONYMOUS) && defined(MAP_ANON)
+      #define MAP_ANONYMOUS MAP_ANON
+    #endif
     static void* mco_alloc(size_t size, void* allocator_data) {
       _MCO_UNUSED(allocator_data);
       void *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -575,6 +571,12 @@ static MCO_FORCE_INLINE size_t _mco_align_forward(size_t addr, size_t align) {
 
 /* Variable holding the current running coroutine per thread. */
 static MCO_THREAD_LOCAL mco_coro* mco_current_co = NULL;
+static mco_tag_comparator mco_current_tag_comparator = NULL;
+
+typedef enum _mco_context_slot {
+  _MCO_CONTEXT_SELF,
+  _MCO_CONTEXT_BACK
+} _mco_context_slot;
 
 static MCO_FORCE_INLINE void _mco_prepare_jumpin(mco_coro* co) {
   /* Set the old coroutine to normal state and update it. */
@@ -629,6 +631,71 @@ static MCO_FORCE_INLINE void _mco_prepare_jumpout(mco_coro* co) {
 
 static void _mco_jumpin(mco_coro* co);
 static void _mco_jumpout(mco_coro* co);
+static void _mco_transfer(mco_coro* from, _mco_context_slot from_slot,
+                          mco_coro* to, _mco_context_slot to_slot);
+
+static MCO_FORCE_INLINE void _mco_prepare_tagged_yield(mco_coro* co, mco_coro* target) {
+  mco_coro* prev_co = target->prev_co;
+  mco_coro* p = co;
+  while(p && p != target) {
+    p->state = MCO_STACKED;
+    p = p->prev_co;
+  }
+  target->state = MCO_SUSPENDED;
+  target->stacked_co = co;
+  target->prev_co = NULL;
+  if(prev_co) {
+    prev_co->state = MCO_RUNNING;
+  }
+  mco_current_co = prev_co;
+#ifdef _MCO_USE_ASAN
+  void* bottom_old = NULL;
+  size_t size_old = 0;
+  __sanitizer_finish_switch_fiber(co->asan_prev_stack, (const void**)&bottom_old, &size_old);
+  co->asan_prev_stack = NULL;
+  if(prev_co) {
+    __sanitizer_start_switch_fiber(&prev_co->asan_prev_stack, bottom_old, size_old);
+  }
+#endif
+#ifdef _MCO_USE_TSAN
+  void* tsan_prev_fiber = co->tsan_prev_fiber;
+  co->tsan_prev_fiber = NULL;
+  if(prev_co) {
+    __tsan_switch_to_fiber(tsan_prev_fiber, 0);
+  }
+#endif
+}
+
+static MCO_FORCE_INLINE void _mco_prepare_stacked_resume(mco_coro* co, mco_coro* stacked_co) {
+  mco_coro* prev_co = mco_running();
+  mco_coro* p = stacked_co;
+  MCO_ASSERT(co->prev_co == NULL);
+  if(prev_co) {
+    MCO_ASSERT(prev_co->state == MCO_RUNNING);
+    prev_co->state = MCO_NORMAL;
+  }
+  co->prev_co = prev_co;
+  co->stacked_co = NULL;
+  co->state = MCO_NORMAL;
+  while(p && p != co) {
+    p->state = (p == stacked_co) ? MCO_RUNNING : MCO_NORMAL;
+    p = p->prev_co;
+  }
+  mco_current_co = stacked_co;
+#ifdef _MCO_USE_ASAN
+  if(prev_co) {
+    void* bottom_old = NULL;
+    size_t size_old = 0;
+    __sanitizer_finish_switch_fiber(prev_co->asan_prev_stack, (const void**)&bottom_old, &size_old);
+    prev_co->asan_prev_stack = NULL;
+  }
+  __sanitizer_start_switch_fiber(&stacked_co->asan_prev_stack, stacked_co->stack_base, stacked_co->stack_size);
+#endif
+#ifdef _MCO_USE_TSAN
+  stacked_co->tsan_prev_fiber = __tsan_get_current_fiber();
+  __tsan_switch_to_fiber(stacked_co->tsan_fiber, 0);
+#endif
+}
 
 static MCO_NO_INLINE void _mco_main(mco_coro* co) {
   co->func(co); /* Run the coroutine function. */
@@ -1326,15 +1393,24 @@ typedef struct _mco_context {
 } _mco_context;
 
 static void _mco_jumpin(mco_coro* co) {
-  _mco_context* context = (_mco_context*)co->context;
   _mco_prepare_jumpin(co);
-  _mco_switch(&context->back_ctx, &context->ctx); /* Do the context switch. */
+  _mco_transfer(co, _MCO_CONTEXT_BACK, co, _MCO_CONTEXT_SELF);
 }
 
 static void _mco_jumpout(mco_coro* co) {
-  _mco_context* context = (_mco_context*)co->context;
   _mco_prepare_jumpout(co);
-  _mco_switch(&context->ctx, &context->back_ctx); /* Do the context switch. */
+  _mco_transfer(co, _MCO_CONTEXT_SELF, co, _MCO_CONTEXT_BACK);
+}
+
+static void _mco_transfer(mco_coro* from, _mco_context_slot from_slot,
+                          mco_coro* to, _mco_context_slot to_slot) {
+  _mco_context* from_context = (_mco_context*)from->context;
+  _mco_context* to_context = (_mco_context*)to->context;
+  _mco_ctxbuf* from_ctx = from_slot == _MCO_CONTEXT_BACK
+    ? &from_context->back_ctx : &from_context->ctx;
+  _mco_ctxbuf* to_ctx = to_slot == _MCO_CONTEXT_BACK
+    ? &to_context->back_ctx : &to_context->ctx;
+  _mco_switch(from_ctx, to_ctx);
 }
 
 static mco_result _mco_create_context(mco_coro* co, mco_desc* desc) {
@@ -1401,15 +1477,8 @@ typedef struct _mco_context {
 } _mco_context;
 
 static void _mco_jumpin(mco_coro* co) {
-  void *cur_fib = GetCurrentFiber();
-  if(!cur_fib || cur_fib == (void*)0x1e00) { /* See http://blogs.msdn.com/oldnewthing/archive/2004/12/31/344799.aspx */
-    cur_fib = ConvertThreadToFiber(NULL);
-  }
-  MCO_ASSERT(cur_fib != NULL);
-  _mco_context* context = (_mco_context*)co->context;
-  context->back_fib = cur_fib;
   _mco_prepare_jumpin(co);
-  SwitchToFiber(context->fib);
+  _mco_transfer(co, _MCO_CONTEXT_BACK, co, _MCO_CONTEXT_SELF);
 }
 
 static void CALLBACK _mco_wrap_main(void* co) {
@@ -1417,12 +1486,29 @@ static void CALLBACK _mco_wrap_main(void* co) {
 }
 
 static void _mco_jumpout(mco_coro* co) {
-  _mco_context* context = (_mco_context*)co->context;
-  void* back_fib = context->back_fib;
-  MCO_ASSERT(back_fib != NULL);
-  context->back_fib = NULL;
   _mco_prepare_jumpout(co);
-  SwitchToFiber(back_fib);
+  _mco_transfer(co, _MCO_CONTEXT_SELF, co, _MCO_CONTEXT_BACK);
+}
+
+static void _mco_transfer(mco_coro* from, _mco_context_slot from_slot,
+                          mco_coro* to, _mco_context_slot to_slot) {
+  _mco_context* from_context = (_mco_context*)from->context;
+  _mco_context* to_context = (_mco_context*)to->context;
+  void* target_fib;
+  if(from_slot == _MCO_CONTEXT_BACK) {
+    void *cur_fib = GetCurrentFiber();
+    if(!cur_fib || cur_fib == (void*)0x1e00) {
+      cur_fib = ConvertThreadToFiber(NULL);
+    }
+    MCO_ASSERT(cur_fib != NULL);
+    from_context->back_fib = cur_fib;
+  }
+  target_fib = to_slot == _MCO_CONTEXT_BACK ? to_context->back_fib : to_context->fib;
+  MCO_ASSERT(target_fib != NULL);
+  if(to_slot == _MCO_CONTEXT_BACK) {
+    to_context->back_fib = NULL;
+  }
+  SwitchToFiber(target_fib);
 }
 
 /* Reverse engineered Fiber struct, used to get stack base. */
@@ -1501,23 +1587,38 @@ static void _mco_wrap_main(void* co) {
 }
 
 static void _mco_jumpin(mco_coro* co) {
-  _mco_context* context = (_mco_context*)co->context;
-  emscripten_fiber_t* back_fib = running_fib;
-  if(!back_fib) {
-    back_fib = &main_fib;
-    emscripten_fiber_init_from_current_context(back_fib, main_asyncify_stack, MCO_ASYNCFY_STACK_SIZE);
-  }
-  running_fib = &context->fib;
-  context->back_fib = back_fib;
   _mco_prepare_jumpin(co);
-  emscripten_fiber_swap(back_fib, &context->fib); /* Do the context switch. */
+  _mco_transfer(co, _MCO_CONTEXT_BACK, co, _MCO_CONTEXT_SELF);
 }
 
 static void _mco_jumpout(mco_coro* co) {
-  _mco_context* context = (_mco_context*)co->context;
-  running_fib = context->back_fib;
   _mco_prepare_jumpout(co);
-  emscripten_fiber_swap(&context->fib, context->back_fib); /* Do the context switch. */
+  _mco_transfer(co, _MCO_CONTEXT_SELF, co, _MCO_CONTEXT_BACK);
+}
+
+static void _mco_transfer(mco_coro* from, _mco_context_slot from_slot,
+                          mco_coro* to, _mco_context_slot to_slot) {
+  _mco_context* from_context = (_mco_context*)from->context;
+  _mco_context* to_context = (_mco_context*)to->context;
+  emscripten_fiber_t* from_fib;
+  emscripten_fiber_t* to_fib;
+  if(from_slot == _MCO_CONTEXT_BACK) {
+    from_fib = running_fib;
+    if(!from_fib) {
+      from_fib = &main_fib;
+      emscripten_fiber_init_from_current_context(from_fib, main_asyncify_stack, MCO_ASYNCFY_STACK_SIZE);
+    }
+    from_context->back_fib = from_fib;
+  } else {
+    from_fib = &from_context->fib;
+  }
+  to_fib = to_slot == _MCO_CONTEXT_BACK ? to_context->back_fib : &to_context->fib;
+  MCO_ASSERT(to_fib != NULL);
+  if(to_slot == _MCO_CONTEXT_BACK) {
+    to_context->back_fib = NULL;
+  }
+  running_fib = to_fib;
+  emscripten_fiber_swap(from_fib, to_fib);
 }
 
 static mco_result _mco_create_context(mco_coro* co, mco_desc* desc) {
@@ -1573,99 +1674,6 @@ static MCO_FORCE_INLINE void _mco_init_desc_sizes(mco_desc* desc, size_t stack_s
 #endif
 
 #endif /* MCO_USE_FIBERS */
-
-/* ---------------------------------------------------------------------------------------------- */
-
-#ifdef MCO_USE_ASYNCIFY
-
-typedef struct _asyncify_stack_region {
-  void* start;
-  void* limit;
-} _asyncify_stack_region;
-
-typedef struct _mco_context {
-  int rewind_id;
-  _asyncify_stack_region stack_region;
-} _mco_context;
-
-__attribute__((import_module("asyncify"), import_name("start_unwind"))) void _asyncify_start_unwind(void*);
-__attribute__((import_module("asyncify"), import_name("stop_unwind")))  void _asyncify_stop_unwind();
-__attribute__((import_module("asyncify"), import_name("start_rewind"))) void _asyncify_start_rewind(void*);
-__attribute__((import_module("asyncify"), import_name("stop_rewind")))  void _asyncify_stop_rewind();
-
-MCO_NO_INLINE void _mco_jumpin(mco_coro* co) {
-  _mco_context* context = (_mco_context*)co->context;
-  _mco_prepare_jumpin(co);
-  if(context->rewind_id > 0) { /* Begin rewinding until last yield point. */
-    _asyncify_start_rewind(&context->stack_region);
-  }
-  _mco_main(co); /* Run the coroutine function. */
-  _asyncify_stop_unwind(); /* Stop saving coroutine stack. */
-}
-
-static MCO_NO_INLINE void _mco_finish_jumpout(mco_coro* co, volatile int rewind_id) {
-  _mco_context* context = (_mco_context*)co->context;
-  int next_rewind_id = context->rewind_id + 1;
-  if(rewind_id == next_rewind_id) { /* Begins unwinding the stack (save locals and call stack to rewind later) */
-    _mco_prepare_jumpout(co);
-    context->rewind_id = next_rewind_id;
-    _asyncify_start_unwind(&context->stack_region);
-  } else if(rewind_id == context->rewind_id) { /* Continue from yield point. */
-    _asyncify_stop_rewind();
-  }
-  /* Otherwise, we should be rewinding, let it continue... */
-}
-
-MCO_NO_INLINE void _mco_jumpout(mco_coro* co) {
-  _mco_context* context = (_mco_context*)co->context;
-  /*
-  Save rewind point into a local, that should be restored when rewinding.
-  That is "rewind_id != co->rewind_id + 1" may be true when rewinding.
-  Use volatile here just to be safe from compiler optimizing this out.
-  */
-  volatile int rewind_id = context->rewind_id + 1;
-  _mco_finish_jumpout(co, rewind_id);
-}
-
-static mco_result _mco_create_context(mco_coro* co, mco_desc* desc) {
-  /* Determine the context address. */
-  size_t co_addr = (size_t)co;
-  size_t context_addr = _mco_align_forward(co_addr + sizeof(mco_coro), 16);
-  size_t storage_addr = _mco_align_forward(context_addr + sizeof(_mco_context), 16);
-  size_t stack_addr = _mco_align_forward(storage_addr + desc->storage_size, 16);
-  /* Initialize context. */
-  _mco_context* context = (_mco_context*)context_addr;
-  memset(context, 0, sizeof(_mco_context));
-  /* Initialize storage. */
-  unsigned char* storage = (unsigned char*)storage_addr;
-  /* Initialize stack. */
-  void *stack_base = (void*)stack_addr;
-  size_t stack_size = desc->stack_size;
-  context->stack_region.start = stack_base;
-  context->stack_region.limit = (void*)((size_t)stack_base + stack_size);
-  co->context = context;
-  co->stack_base = stack_base;
-  co->stack_size = stack_size;
-  co->storage = storage;
-  co->storage_size = desc->storage_size;
-  return MCO_SUCCESS;
-}
-
-static void _mco_destroy_context(mco_coro* co) {
-  /* Nothing to do. */
-  _MCO_UNUSED(co);
-}
-
-static MCO_FORCE_INLINE void _mco_init_desc_sizes(mco_desc* desc, size_t stack_size) {
-  desc->coro_size = _mco_align_forward(sizeof(mco_coro), 16) +
-                    _mco_align_forward(sizeof(_mco_context), 16) +
-                    _mco_align_forward(desc->storage_size, 16) +
-                    _mco_align_forward(stack_size, 16) +
-                    16;
-  desc->stack_size = stack_size; /* This is just a hint, it won't be the real one. */
-}
-
-#endif /* MCO_USE_ASYNCIFY */
 
 /* ---------------------------------------------------------------------------------------------- */
 
@@ -1808,52 +1816,72 @@ mco_result mco_destroy(mco_coro* co) {
   return MCO_SUCCESS;
 }
 
-mco_result mco_resume(mco_coro* co) {
+void mco_set_tag_comparator(mco_tag_comparator comparator) {
+  mco_current_tag_comparator = comparator;
+}
+
+static int _mco_tag_matches(mco_coro* co, void* tag) {
+  if(!co || !co->active_tag || !mco_current_tag_comparator) {
+    return 0;
+  }
+  return mco_current_tag_comparator(co->active_tag, tag);
+}
+
+static mco_coro* _mco_find_tag_handler(mco_coro* co, void* tag) {
+  if(!co || !tag || !mco_current_tag_comparator) {
+    return NULL;
+  }
+  while(co) {
+    if(_mco_tag_matches(co, tag)) {
+      return co;
+    }
+    co = co->prev_co;
+  }
+  return NULL;
+}
+
+int mco_is_yieldable(mco_coro* co, void* tag) {
+  return _mco_find_tag_handler(co, tag) != NULL;
+}
+
+mco_result mco_resume(mco_coro* co, void* tag) {
   if(!co) {
     MCO_LOG("attempt to resume an invalid coroutine");
     return MCO_INVALID_COROUTINE;
   }
-  if(co->state != MCO_SUSPENDED) { /* Can only resume coroutines that are suspended. */
+  if(co->state != MCO_SUSPENDED) {
     MCO_LOG("attempt to resume a coroutine that is not suspended");
     return MCO_NOT_SUSPENDED;
   }
-  if(co->stacked_parent) {
-    MCO_LOG("attempt to resume a coroutine whose parent is stacked");
-    return MCO_INVALID_OPERATION;
+  co->active_tag = tag;
+  if(co->stacked_co) {
+    mco_coro* stacked_co = co->stacked_co;
+    _mco_prepare_stacked_resume(co, stacked_co);
+    _mco_transfer(co, _MCO_CONTEXT_BACK, stacked_co, _MCO_CONTEXT_SELF);
+  } else {
+    co->state = MCO_RUNNING;
+    _mco_jumpin(co);
   }
-  co->state = MCO_RUNNING; /* The coroutine is now running. */
-  _mco_jumpin(co);
   return MCO_SUCCESS;
 }
 
-static int _mco_tag_matches(mco_coro* co, void* tag, mco_tag_comparator comparator) {
-  if(!co || !co->active_tag || !comparator) {
-    return 0;
+static mco_result _mco_yield_to(mco_coro* co, mco_coro* target) {
+  if(co == target) {
+    co->state = MCO_SUSPENDED;
+    _mco_jumpout(co);
+  } else {
+    _mco_prepare_tagged_yield(co, target);
+    _mco_transfer(co, _MCO_CONTEXT_SELF, target, _MCO_CONTEXT_BACK);
   }
-  return comparator(co->active_tag, tag);
+  return MCO_SUCCESS;
 }
 
-int mco_is_yieldable_tagged(mco_coro* co, void* tag, mco_tag_comparator comparator) {
-  if(!co || !tag || !comparator) {
-    return 0;
-  }
-  while(co) {
-    if(_mco_tag_matches(co, tag, comparator)) {
-      return 1;
-    }
-    co = co->prev_co;
-  }
-  return 0;
-}
-
-static mco_result _mco_yield_with_state(mco_coro* co, mco_state yield_state) {
+mco_result mco_yield(mco_coro* co, void* tag) {
+  mco_coro* target;
   if(!co) {
     MCO_LOG("attempt to yield an invalid coroutine");
     return MCO_INVALID_COROUTINE;
   }
-#ifdef MCO_USE_ASYNCIFY
-  /* Asyncify already checks for stack overflow. */
-#else
   /* This check happens when the stack overflow already happened, but better later than never. */
   volatile size_t dummy;
   size_t stack_addr = (size_t)&dummy;
@@ -1863,79 +1891,16 @@ static mco_result _mco_yield_with_state(mco_coro* co, mco_state yield_state) {
     MCO_LOG("coroutine stack overflow, try increasing the stack size");
     return MCO_STACK_OVERFLOW;
   }
-#endif
-  if(co->state != MCO_RUNNING) {  /* Can only yield coroutines that are running. */
+  if(co->state != MCO_RUNNING) {
     MCO_LOG("attempt to yield a coroutine that is not running");
     return MCO_NOT_RUNNING;
   }
-  co->state = yield_state; /* The coroutine is now suspended. */
-  _mco_jumpout(co);
-  return MCO_SUCCESS;
-}
-
-mco_result mco_yield(mco_coro* co) {
-  return _mco_yield_with_state(co, MCO_SUSPENDED);
-}
-
-mco_result mco_yield_tagged(mco_coro* co, void* tag, mco_tag_comparator comparator) {
-  mco_result res;
-  if(!mco_is_yieldable_tagged(co, tag, comparator)) {
+  target = _mco_find_tag_handler(co, tag);
+  if(!target) {
     MCO_LOG("attempt to yield to a tag with no active handler");
     return MCO_INVALID_OPERATION;
   }
-  co->yield_tag = tag;
-  co->yield_tag_comparator = comparator;
-  co->has_yield_tag = 1;
-  res = _mco_yield_with_state(co, MCO_SUSPENDED);
-  co->has_yield_tag = 0;
-  co->yield_tag = NULL;
-  co->yield_tag_comparator = NULL;
-  return res;
-}
-
-mco_result mco_resume_tagged(mco_coro* co, void* tag, mco_tag_comparator comparator) {
-  if(!co) {
-    MCO_LOG("attempt to resume an invalid coroutine");
-    return MCO_INVALID_COROUTINE;
-  }
-  if(co->state != MCO_SUSPENDED && co->state != MCO_STACKED) {
-    MCO_LOG("attempt to resume a coroutine that is not suspended or stacked");
-    return MCO_NOT_SUSPENDED;
-  }
-  if(co->stacked_parent) {
-    MCO_LOG("attempt to resume a coroutine whose parent is stacked");
-    return MCO_INVALID_OPERATION;
-  }
-  co->active_tag = tag;
-  co->active_tag_comparator = comparator;
-  for(;;) {
-    co->state = MCO_RUNNING;
-    _mco_jumpin(co);
-    if(!co->has_yield_tag || _mco_tag_matches(co, co->yield_tag, comparator)) {
-      return MCO_SUCCESS;
-    } else {
-      mco_coro* current = mco_running();
-      mco_result res;
-      if(!current) {
-        MCO_LOG("attempt to propagate a tagged yield without an active coroutine");
-        return MCO_INVALID_OPERATION;
-      }
-      current->stacked_child = co;
-      co->stacked_parent = current;
-      current->yield_tag = co->yield_tag;
-      current->yield_tag_comparator = co->yield_tag_comparator;
-      current->has_yield_tag = 1;
-      res = _mco_yield_with_state(current, MCO_STACKED);
-      current->has_yield_tag = 0;
-      current->yield_tag = NULL;
-      current->yield_tag_comparator = NULL;
-      current->stacked_child = NULL;
-      co->stacked_parent = NULL;
-      if(res != MCO_SUCCESS) {
-        return res;
-      }
-    }
-  }
+  return _mco_yield_to(co, target);
 }
 
 mco_state mco_status(mco_coro* co) {
