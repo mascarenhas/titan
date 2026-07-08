@@ -186,6 +186,7 @@ and Titan/Lua-facing entry wrappers. Its implementation imports a
 compiler-provided private header:
 
 ```lua
+local mco = foreign import "minicoro.h"
 local rt = foreign import "titan/coro.h"
 ```
 
@@ -202,12 +203,13 @@ operations around minicoro. The C helpers own only the unsafe pieces:
 handle validation, address-taking for `TValue` storage and tags, stack
 switching, callback entry, and Lua-internal bookkeeping.
 
-The FFI-facing helper shape exposes an opaque `mco_coro *` handle and
-small shims where Titan cannot yet spell `&value` or `sizeof(TValue)`:
+The FFI-facing helper shape exposes a borrowed `mco_coro *` handle and
+small shims where Titan cannot yet spell `&value` or `sizeof(TValue)`.
+`coro.titan` imports `minicoro.h` directly so it can read simple private
+fields such as `stacked_co` without adding C helpers for that policy:
 
 ```c
-typedef struct mco_coro mco_coro;
-typedef mco_coro *titan_coro_ref;
+typedef struct mco_coro *titan_coro_ref;
 
 enum {
   TITAN_CORO_SUCCESS = 0,
@@ -221,7 +223,6 @@ enum {
 TValue titan_coro_create(lua_State *L, TValue func);
 titan_coro_ref titan_coro_handle(TValue handle);
 titan_coro_ref titan_coro_running(void);
-titan_coro_ref titan_coro_transfer_source(titan_coro_ref co);
 int titan_coro_push_value(titan_coro_ref co, TValue payload);
 int titan_coro_push_int(titan_coro_ref co, int value);
 TValue titan_coro_pop_value(lua_State *L, titan_coro_ref co);
@@ -267,22 +268,29 @@ local function check_result(result: rt.titan_ffi_int)
   end
 end
 
+local function transfer_source(co: rt.titan_coro_ref): rt.titan_coro_ref
+  if co and co.stacked_co then
+    return co.stacked_co
+  end
+  return co
+end
+
 function Coro:resume(arg: value, tag: value): value
   local t = effective_tag(self.default_tag, tag)
   local co = rt.titan_coro_handle(self.handle)
-  local source = rt.titan_coro_transfer_source(co)
+  local source = transfer_source(co)
   push_transfer(source, 1, arg)
   resume_checked(co, source, t)
-  return pop_transfer_or_raise(rt.titan_coro_transfer_source(co))
+  return pop_transfer_or_raise(transfer_source(co))
 end
 
 function Coro:error(err: value, tag: value): value
   local t = effective_tag(self.default_tag, tag)
   local co = rt.titan_coro_handle(self.handle)
-  local source = rt.titan_coro_transfer_source(co)
+  local source = transfer_source(co)
   push_transfer(source, 0, err)
   resume_checked(co, source, t)
-  return pop_transfer_or_raise(rt.titan_coro_transfer_source(co))
+  return pop_transfer_or_raise(transfer_source(co))
 end
 
 function yield(arg: value, tag: value): value

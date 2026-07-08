@@ -300,6 +300,50 @@ describe("C FFI type checking", function()
         end)
     end)
 
+    it("completes named C structs after forward typedef declarations", function()
+        with_header([[
+            typedef struct ffi_node ffi_node;
+            typedef ffi_node *ffi_node_ref;
+            struct ffi_node { int x; ffi_node *next; };
+            extern ffi_node *ffi_node_ptr;
+        ]], function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                local function next_node(): c.ffi_node_ref
+                    return c.ffi_node_ptr.next
+                end
+
+                function f(): integer
+                    return (c.ffi_node_ptr.x as integer)
+                        + (next_node().x as integer)
+                end
+            ]])
+            assert.truthy(ok, err)
+        end)
+    end)
+
+    it("completes forward-declared C structs across foreign imports", function()
+        with_header([[
+            typedef struct ffi_split ffi_split;
+            extern ffi_split *ffi_split_ptr;
+        ]], function(forward_header)
+            with_header([[
+                struct ffi_split { int x; };
+            ]], function(definition_header)
+                local ok, err = run_checker([[
+                    local forward = foreign import "]] .. forward_header .. [["
+                    local definition = foreign import "]] .. definition_header .. [["
+
+                    function f(): integer
+                        return forward.ffi_split_ptr.x as integer
+                    end
+                ]])
+                assert.truthy(ok, err)
+            end)
+        end)
+    end)
+
     it("decays C array parameters to pointers", function()
         with_header([[
             typedef int ffi_int;

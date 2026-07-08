@@ -6,12 +6,12 @@
 #include "ldo.h"
 #include "lvm.h"
 #include "titan.h"
-#include "titan/coro.h"
 
 #define MCO_NO_DEBUG
 #define MCO_USE_VMEM_ALLOCATOR
 #define MINICORO_IMPL
 #include "minicoro.h"
+#include "titan/coro.h"
 
 #define TITAN_CORO_UV_THREAD  1
 #define TITAN_CORO_NUV        1
@@ -52,10 +52,6 @@ static inline lua_State *titan_coro_thread_from_mco(mco_coro *co) {
 
 static inline StkId titan_coro_func_slot(lua_State *L) {
   return L->stack.p + 1;
-}
-
-mco_coro *titan_coro_transfer_source(mco_coro *co) {
-  return (co && co->stacked_co) ? co->stacked_co : co;
 }
 
 static int titan_coro_tag_equal(void *t1, void *t2) {

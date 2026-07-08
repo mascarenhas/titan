@@ -173,6 +173,32 @@ describe("C FFI code generation", function()
         end)
     end)
 
+    it("generates field access for named C structs completed after forward typedefs", function()
+        with_header([[
+            typedef struct ffi_node ffi_node;
+            typedef ffi_node *ffi_node_ref;
+            struct ffi_node { int x; ffi_node *next; };
+            static ffi_node ffi_tail = { 5, 0 };
+            static ffi_node ffi_head = { 7, &ffi_tail };
+            static ffi_node *ffi_head_ptr = &ffi_head;
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                local function next_node(): c.ffi_node_ref
+                    return c.ffi_head_ptr.next
+                end
+
+                function sum(): integer
+                    return (c.ffi_head_ptr.x as integer)
+                        + (next_node().x as integer)
+                end
+            ]], [[
+                assert(test.sum() == 12)
+            ]])
+        end)
+    end)
+
     it("preserves typedef spelling for owned anonymous C structs", function()
         with_header([[
             typedef struct { int x; int y; } ffi_point;

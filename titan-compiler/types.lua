@@ -277,6 +277,15 @@ local function c_pointer_compatible(source, target)
     target = resolved_c(target)
     if not (target and target._tag == "Type.CPointer") then
         return false
+    elseif source._tag == "Type.CPointer" then
+        local source_pointee = resolved_c(source.pointee)
+        local target_pointee = resolved_c(target.pointee)
+        if source_pointee._tag == "Type.CFunction"
+           or target_pointee._tag == "Type.CFunction" then
+            return false
+        end
+        return c_assignable_equal(source.pointee, target.pointee)
+            or target_pointee._tag == "Type.CVoid"
     elseif source._tag == "Type.CArray" then
         return c_assignable_equal(source.elem, target.pointee)
             or resolved_c(target.pointee)._tag == "Type.CVoid"

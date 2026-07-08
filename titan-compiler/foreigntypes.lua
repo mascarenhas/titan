@@ -166,29 +166,16 @@ local function apply_pointer_suffixes(base, suffixes)
     return base
 end
 
-local function convert_struct_or_union(st, ftype)
-    if ftype.type == "struct" and c_name(ftype.name) == "TValue" then
-        return types.Value()
+local function populate_struct_or_union(st, owner, ftype)
+    if not ftype.fields then
+        return owner
     end
 
-    local key = c_type_key(ftype) or ""
-    local existing = st:find_foreign_type(key)
-    if existing then
-        return existing
-    end
-
-    local owner
     local fields = {}
     local has_fam = false
-    local tagname = c_name(ftype.name)
-    owner = (ftype.type == "struct")
-        and types.CStruct(nil, tagname, nil, fields, ftype.fields ~= nil, false)
-        or types.CUnion(nil, tagname, nil, fields, ftype.fields ~= nil)
-    if key ~= "" then
-        st:add_foreign_type(key, owner)
-    end
-
-    for _, field in ipairs(ftype.fields or {}) do
+    owner.fields = fields
+    owner.complete = true
+    for _, field in ipairs(ftype.fields) do
         if not field.anonymous and field.name then
             local ftyp, err = convert_type(st, field)
             if not ftyp then return nil, err end
@@ -200,11 +187,37 @@ local function convert_struct_or_union(st, ftype)
             has_fam = has_fam or (field.flexible_array and true or false)
         end
     end
-
     if owner._tag == "Type.CStruct" then
         owner.has_fam = has_fam
     end
     return owner
+end
+
+local function convert_struct_or_union(st, ftype)
+    if ftype.type == "struct" and c_name(ftype.name) == "TValue" then
+        return types.Value()
+    end
+
+    local key = c_type_key(ftype) or ""
+    local existing = st:find_foreign_type(key)
+    if existing then
+        if ftype.fields and not existing.complete then
+            return populate_struct_or_union(st, existing, ftype)
+        end
+        return existing
+    end
+
+    local owner
+    local fields = {}
+    local tagname = c_name(ftype.name)
+    owner = (ftype.type == "struct")
+        and types.CStruct(nil, tagname, nil, fields, ftype.fields ~= nil, false)
+        or types.CUnion(nil, tagname, nil, fields, ftype.fields ~= nil)
+    if key ~= "" then
+        st:add_foreign_type(key, owner)
+    end
+
+    return populate_struct_or_union(st, owner, ftype)
 end
 
 local function convert_struct_or_union_declarator(st, ftype)

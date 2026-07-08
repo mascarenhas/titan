@@ -14,9 +14,11 @@ The `coro` standard module is split deliberately:
 
 ## Public Wrapper
 
-`coro.titan` imports the private helper header:
+`coro.titan` imports minicoro's private struct layout first, then the
+private helper header:
 
 ```lua
+local mco = foreign import "minicoro.h"
 local rt = foreign import "titan/coro.h"
 ```
 
@@ -31,27 +33,29 @@ end
 
 That keeps the Lua-visible record opaque while allowing public methods to
 pass the raw handle to the helper through the FFI. The helper exposes the
-minicoro handle as an opaque C pointer typedef, `titan_coro_ref`; Titan
-code can pass it back to C helpers and test it for nullness, but it never
-inspects the pointed-to object directly. A `titan_coro_ref` is a borrowed
-pointer from its owning handle or from `mco_running()`. The C header is a
-private standard-library boundary: the Titan type system cannot prevent a
-module that imports it directly from storing a stale pointer or violating
-the transfer order. Helper functions that need the calling Lua state take
+minicoro handle as a borrowed C pointer typedef, `titan_coro_ref`.
+Because `minicoro.h` is imported directly, `coro.titan` can read the
+private `mco_coro` fields it needs, such as `stacked_co`, without a C
+helper for simple source selection. A `titan_coro_ref` is borrowed from
+its owning handle or from `mco_running()`. The C header is a private
+standard-library boundary: the Titan type system cannot prevent a module
+that imports it directly from storing a stale pointer or violating the
+transfer order. Helper functions that need the calling Lua state take
 `lua_State *L`; Titan's built-in `L` local supplies that argument.
 
 The helper returns minicoro-compatible integer result codes. The Titan
 wrapper checks them and raises `titan_coro_result_name(result)` on
 control-transfer failures. User payloads are transported separately:
 
-1. `Coro:resume` converts the private handle to `titan_coro_ref`, asks
-   for the current transfer source, pushes `payload=arg` and `ok=true`,
-   and calls `titan_coro_resume`.
+1. `Coro:resume` converts the private handle to `titan_coro_ref`,
+   selects the current transfer source (`co->stacked_co` when present,
+   otherwise `co`), pushes `payload=arg` and `ok=true`, and calls
+   `titan_coro_resume`.
 2. `Coro:error` follows the same path but pushes `ok=false` and
    `payload=err`.
 3. `coro.yield` obtains the current running coroutine, pushes
    `payload=arg` and `ok=true`, and calls `titan_coro_yield`.
-4. After control returns from a resume, the wrapper asks for the transfer
+4. After control returns from a resume, the wrapper selects the transfer
    source again. Tagged nested yield can change it from the resumed
    coroutine to the deepest stacked coroutine.
 5. The wrapper pops `ok` and `payload` separately. `ok=true` clears any

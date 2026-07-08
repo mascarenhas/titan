@@ -1,3 +1,4 @@
+local mco = foreign import "minicoro.h"
 local rt = foreign import "titan/coro.h"
 
 record Coro
@@ -47,6 +48,13 @@ local function discard_transfer(source: rt.titan_coro_ref)
   end
 end
 
+local function transfer_source(co: rt.titan_coro_ref): rt.titan_coro_ref
+  if co and co.stacked_co then
+    return co.stacked_co
+  end
+  return co
+end
+
 local function resume_checked(co: rt.titan_coro_ref,
                               source: rt.titan_coro_ref, tag: value)
   local result = rt.titan_coro_resume(co, tag)
@@ -81,19 +89,19 @@ end
 function Coro:resume(arg: value, tag: value): value
   local effective = effective_tag(self.default_tag, tag)
   local co = rt.titan_coro_handle(self.handle)
-  local source = rt.titan_coro_transfer_source(co)
+  local source = transfer_source(co)
   push_transfer(source, 1, arg)
   resume_checked(co, source, effective)
-  return pop_transfer_or_raise(rt.titan_coro_transfer_source(co))
+  return pop_transfer_or_raise(transfer_source(co))
 end
 
 function Coro:error(err: value, tag: value): value
   local effective = effective_tag(self.default_tag, tag)
   local co = rt.titan_coro_handle(self.handle)
-  local source = rt.titan_coro_transfer_source(co)
+  local source = transfer_source(co)
   push_transfer(source, 0, err)
   resume_checked(co, source, effective)
-  return pop_transfer_or_raise(rt.titan_coro_transfer_source(co))
+  return pop_transfer_or_raise(transfer_source(co))
 end
 
 function Coro:status(): string
