@@ -38,6 +38,7 @@ describe("C FFI code generation", function()
             typedef struct lua_State lua_State;
             typedef struct TString TString;
             typedef struct TValue TValue;
+            typedef struct ffi_coro ffi_coro;
 
             static TValue ffi_value_echo(TValue value) {
                 return value;
@@ -82,6 +83,9 @@ describe("C FFI code generation", function()
                     return x
                 end
 
+                local function coro_entry(func: (value) -> value, co: *c.ffi_coro)
+                end
+
                 function nil_rounds(): value
                     return c.ffi_value_echo(nil)
                 end
@@ -110,6 +114,10 @@ describe("C FFI code generation", function()
 
                 function function_rounds(): value
                     return c.ffi_value_echo(echo)
+                end
+
+                function c_pointer_function_kind(): integer
+                    return c.ffi_value_kind(coro_entry)
                 end
 
                 function raw_local_kind(): integer
@@ -143,6 +151,7 @@ describe("C FFI code generation", function()
                 assert(test.map_kind() == 6)
                 assert(test.record_kind() == 8)
                 assert(test.function_rounds()("ok") == "ok")
+                assert(test.c_pointer_function_kind() == 7)
                 assert(test.raw_local_kind() == 3)
                 assert(test.raw_pointer_kind() == 15)
                 assert(test.raw_back() == "back")

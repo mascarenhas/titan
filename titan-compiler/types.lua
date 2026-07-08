@@ -65,7 +65,7 @@ function types.resolve_c_typedef(t)
     return t
 end
 
-local function find_c_type(t, include_legacy)
+local function find_c_type(t, include_legacy, descend_function_values)
     local function visit_type(typ, seen)
         if type(typ) ~= "table" then
             return nil
@@ -84,6 +84,9 @@ local function find_c_type(t, include_legacy)
             return visit_type(typ.keys, seen) or
                    visit_type(typ.values, seen)
         elseif tag == "Type.Function" then
+            if not descend_function_values then
+                return nil
+            end
             for _, param in ipairs(typ.params) do
                 local ctyp = visit_type(param, seen)
                 if ctyp then return ctyp end
@@ -158,11 +161,11 @@ local function find_c_type(t, include_legacy)
 end
 
 function types.first_c_type(t)
-    return find_c_type(t, false)
+    return find_c_type(t, false, false)
 end
 
 function types.first_c_ffi_type(t)
-    return find_c_type(t, true)
+    return find_c_type(t, true, true)
 end
 
 function types.is_c(t)

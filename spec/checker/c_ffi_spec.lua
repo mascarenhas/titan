@@ -114,6 +114,25 @@ describe("C FFI type checking", function()
         end)
     end)
 
+    it("coerces Titan functions with C pointer parameters to TValue", function()
+        with_header([[
+            typedef struct ffi_coro ffi_coro;
+        ]], function(header)
+            local ok, err = run_checker([[
+                local ffi = foreign import "titan/ffi.h"
+                local c = foreign import "]] .. header .. [["
+
+                local function entry(func: (value) -> value, co: *c.ffi_coro)
+                end
+
+                local function store_entry()
+                    ffi.lua_pushtvalue(L, entry)
+                end
+            ]])
+            assert.truthy(ok, err)
+        end)
+    end)
+
     it("does not treat an unrelated typedef named TValue as Lua TValue", function()
         with_header([[
             typedef struct ffi_not_lua_value { int x; } TValue;

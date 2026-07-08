@@ -232,6 +232,9 @@ describe("Titan types", function()
             assert.truthy(types.is_c(types.Option(types.CPointer(cint(), {}))))
             assert.truthy(types.is_c(types.ModuleMember("m", "x", types.CFloat("float"))))
             assert.falsy(types.is_c(types.Function({types.Integer()}, {types.String()}, false, false)))
+            assert.falsy(types.is_c(types.Function({types.CPointer(cint(), {})}, {}, false, false)))
+            assert.truthy(types.first_c_ffi_type(
+                types.Function({types.CPointer(cint(), {})}, {}, false, false)))
         end)
 
         it("rejects serializing C FFI types", function()
