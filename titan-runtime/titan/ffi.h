@@ -1,6 +1,8 @@
 #ifndef TITAN_FFI_H
 #define TITAN_FFI_H
 
+#define TITAN_TRACE_PINNED "5b3f0f7e-4b1a-4d2e-9a8c-2f6d4c1e7a90"
+
 typedef void titan_ffi_void;
 typedef _Bool titan_ffi_bool;
 typedef char titan_ffi_char;
@@ -19,5 +21,8 @@ typedef double titan_ffi_double;
 
 typedef struct lua_State lua_State;
 typedef struct TValue TValue;
+
+TValue lua_totvalue(lua_State *L, int idx);
+void lua_pushtvalue(lua_State *L, TValue v);
 
 #endif
