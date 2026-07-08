@@ -222,22 +222,26 @@ describe("Titan type checker", function()
         assert.match("variable '%w+' not declared", err)
     end)
 
-    it("provides built-in local L and rejects shadowing or assigning it", function()
+    it("provides built-in locals L and M and rejects shadowing or assigning them", function()
         assert_type_check([[
             record R
             end
 
-            function fn(): boolean
+            function fn_l(): boolean
                 return L
             end
 
+            function fn_m(): boolean
+                return M
+            end
+
             function R:method(): boolean
-                return L
+                return M
             end
 
             function lambda(): boolean
                 local f = function(): boolean
-                    return L
+                    return M
                 end
                 return f()
             end
@@ -246,14 +250,28 @@ describe("Titan type checker", function()
             function fn(L: integer)
             end
         ]])
+        assert_type_error("cannot declare parameter 'M' because it shadows a built%-in local", [[
+            function fn(M: integer)
+            end
+        ]])
         assert_type_error("cannot declare local 'L' because it shadows a built%-in local", [[
             function fn()
                 local L = nil
             end
         ]])
+        assert_type_error("cannot declare local 'M' because it shadows a built%-in local", [[
+            function fn()
+                local M = nil
+            end
+        ]])
         assert_type_error("cannot assign to built%-in local 'L'", [[
             function fn()
                 L = nil
+            end
+        ]])
+        assert_type_error("cannot assign to built%-in local 'M'", [[
+            function fn()
+                M = nil
             end
         ]])
     end)

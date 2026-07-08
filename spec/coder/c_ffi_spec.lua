@@ -16,10 +16,12 @@ local function with_header(contents, fn)
 end
 
 describe("C FFI code generation", function()
-    it("passes the built-in lua_State pointer L to C functions", function()
+    it("passes the built-in Lua state and module pointers to C functions", function()
         with_header([[
             typedef struct lua_State lua_State;
+            typedef struct Udata Udata;
             static int ffi_has_state(lua_State *state) { return state != 0; }
+            static int ffi_has_module(Udata *module) { return module != 0; }
         ]], function(header)
             h.run_coder([[
                 local c = foreign import "]] .. header .. [["
@@ -27,8 +29,13 @@ describe("C FFI code generation", function()
                 function has_state(): integer
                     return c.ffi_has_state(L)
                 end
+
+                function has_module(): integer
+                    return c.ffi_has_module(M)
+                end
             ]], [[
                 assert(test.has_state() == 1)
+                assert(test.has_module() == 1)
             ]])
         end)
     end)

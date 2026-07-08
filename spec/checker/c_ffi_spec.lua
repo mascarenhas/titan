@@ -241,6 +241,39 @@ describe("C FFI type checking", function()
         end)
     end)
 
+    it("types the built-in M as Udata pointer for C calls", function()
+        with_header([[
+            typedef struct Udata Udata;
+            typedef Udata *ffi_module_state;
+            extern int ffi_has_module(ffi_module_state module);
+        ]], function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                function f(): integer
+                    return c.ffi_has_module(M)
+                end
+            ]])
+            assert.truthy(ok, err)
+        end)
+    end)
+
+    it("matches built-in M against tag-only struct Udata pointers", function()
+        with_header([[
+            struct Udata;
+            extern int ffi_has_module(struct Udata *module);
+        ]], function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                function f(): integer
+                    return c.ffi_has_module(M)
+                end
+            ]])
+            assert.truthy(ok, err)
+        end)
+    end)
+
     it("allows imported C typedefs in local type annotations", function()
         with_header("typedef int ffi_count;\n", function(header)
             local ok, err = run_checker([[

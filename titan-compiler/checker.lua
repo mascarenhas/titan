@@ -321,6 +321,16 @@ local function lua_state_pointer_type(st)
         {})
 end
 
+local function module_udata_pointer_type(st)
+    local udata = st:find_foreign_type("Udata")
+        or st:find_foreign_type("struct@Udata")
+        or types.CTypedef("Udata",
+            types.CStruct(nil, "Udata", nil, {}, false, false))
+    return types.CPointer(
+        udata,
+        {})
+end
+
 local function record_module(fqtn)
     return fqtn:match("^(.*)%.[^.]+$")
 end
@@ -2519,6 +2529,12 @@ function checkfuncbody(node, st, errors, opts)
     ldecl._cvar = "L"
     ldecl._readonly = true
     st:add_symbol("L", ldecl)
+    local mdecl = ast.Decl(node.loc, "M", false, false)
+    mdecl._type = module_udata_pointer_type(st)
+    mdecl._funcdepth = #func_stack
+    mdecl._cvar = "_mod"
+    mdecl._readonly = true
+    st:add_symbol("M", mdecl)
     if opts.self_decl then
         -- `self` belongs to this function's own depth, so a lambda nested in a
         -- method captures it just like any other parameter.
