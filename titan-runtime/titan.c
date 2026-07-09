@@ -6,6 +6,7 @@
 #include "lua.h"
 #include "lauxlib.h"
 #include "lapi.h"
+#include "ldo.h"
 #include "lfunc.h"
 #include "lobject.h"
 #include "llimits.h"
@@ -624,6 +625,26 @@ static int titan_trace_pinned(lua_State *L) {
     lua_rawset(L, LUA_REGISTRYINDEX);
   }
   return pinned;
+}
+
+static int titan_errfunc_is_errorhandler(lua_State *L) {
+  if (L->errfunc == 0) return 0;
+  StkId errfunc = restorestack(L, L->errfunc);
+  TValue *v = s2v(errfunc);
+  return ttislcf(v) && fvalue(v) == errorhandler;
+}
+
+static void titan_install_errorhandler(lua_State *L) {
+  if (!titan_errfunc_is_errorhandler(L)) {
+    lua_pushcfunction(L, errorhandler);
+    L->errfunc = savestack(L, L->top.p - 1);
+  }
+}
+
+lua_State *titan_newthread(lua_State *L) {
+  lua_State *T = lua_newthread(L);
+  titan_install_errorhandler(T);
+  return T;
 }
 
 int errorhandler(lua_State *L) {

@@ -202,22 +202,17 @@ local function coro_gc(handle: value)
 end
 
 local function coro_entry(func: (value) -> value, co: *mco.mco_coro)
-  -- L here is going to be the T from the mco_coro*
-  -- since this is called through the Lua entry point
-  -- errfunc in the new thread will be set by Titan
   local arg = pop_transfer_or_raise(co, false)
   local res = func(arg)
   push_transfer(co, 1, res)
 catch
   stash_trace_for_append(traceback)
   push_transfer(co, 0, error)
-finally
-  lua.lua_settop(L, 0)
 end
 
 function create(func: (value) -> value, default_tag: value): Coro
   local slot: **mco.mco_coro = lua.lua_newuserdatauv(L, ffi.titan_ffi_void_ptr.sizeof, 4)
-  local T = lua.lua_newthread(L)
+  local T = ffi.titan_newthread(L)
   lua.lua_setiuservalue(L, -2, 1)
   ffi.lua_pushtvalue(L, M)
   lua.lua_setiuservalue(L, -2, 2)
