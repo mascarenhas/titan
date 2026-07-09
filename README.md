@@ -142,13 +142,14 @@ they are in the roadmap:
 * anonymous functions and closures, with proper lexical scoping
 * bound methods (`obj:method`) as first-class values
 * variadic parameters in functions (Lua `...`)
+* generic `for ... in` iterators with optional state, start value, and close
+  callable
 * error handling with `raise`, `catch`, `finally`, Lua `pcall`, and
   unified Lua/Titan backtraces via `titan.backtrace()`
 * asymmetric, tagged (nested) coroutines as building block for async IO
 
 ## Next
 
-* for-in construct for iterators (`next`, `next,state`, `next,state,start`)
 * minimal standard library (string library including tostring, math library including tonumber, file/socket IO using libuv, lua library to load/run Lua code)
 * FFI with C, continued (function pointers, callbacks from C into Titan, owned structs with flexible array members)
 * tagged variants (unions of records with some syntax for switch/case on the record tag)
