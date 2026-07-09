@@ -205,7 +205,8 @@ access sites (see [Code generator: constructs](codegen-constructs.md)).
 This is the load-bearing design. **Invariant:** after `checker.check`
 succeeds, every implicit conversion is an explicit `Ast.ExpCast` node, every
 consumed multiple-return value beyond the first is an explicit `Ast.ExpExtra`
-node, and every `for` loop has an explicit step expression. The coder
+node, every numeric `for` loop has an explicit step expression, and every
+generic `for` loop has hidden iterator tuple/call declarations. The coder
 generates conversions *only* from `ExpCast` nodes and never consults
 `coerceable`; if the checker fails to materialize a cast, the coder silently
 emits code for the wrong type.
@@ -244,10 +245,11 @@ Float-typed nodes in a cast to String; only `..` concatenation uses it.
 
 The contexts that call `trycoerce` are: declaration initializers, assignment
 RHS, returns, call arguments, index expressions, initializer-list entries,
-record fields, top-level variable initializers, plus the operator-specific
-promotions (catalogued in the [type system chapter](../language/types.md)).
-A contributor adding a context must call `trycoerce` *before* `checkmatch`,
-or legal programs will be rejected by the still-coerceable arm.
+record fields, top-level variable initializers, generic-`for` tuple slots
+and visible variables, plus the operator-specific promotions (catalogued in
+the [type system chapter](../language/types.md)). A contributor adding a
+context must call `trycoerce` *before* `checkmatch`, or legal programs will
+be rejected by the still-coerceable arm.
 
 ### `ExpExtra` — materializing multiple returns
 
@@ -302,6 +304,66 @@ themselves are `tryforce`d but **never `trycoerce`d** — they are
 `checkmatch`ed directly against the control type, so `for i = 1, 10.0` is a
 compile-time error rather than a promotion (the old manual claimed
 otherwise; this describes the implementation).
+
+### Generic `for` tuple elaboration
+
+`checkforin` turns `for decllist in explist do block end` into an
+elaborated `Ast.StatForIn` that codegen can lower without type decisions.
+It first checks the written expressions, expands a trailing multi-return
+call if present, adjusts a trailing `...` through the same fixed-slot
+`ExpDotsIndex` machinery used by locals/returns/calls, errors on more than
+four tuple values, and pads missing slots with typed `Ast.ExpNil` nodes.
+The four slots are iterator, state, initial control, and close.
+
+For `iter, ...`, the vararg spread is adjusted only through the tuple slots
+the iterator needs (state and initial control), then the remaining tuple
+slots are padded with static nil. Writing `iter, state, init, ...` reaches
+the fourth slot and can supply the close function from the spread.
+
+The iterator slot must resolve to a callable shape: a non-variadic
+`Type.Function`, a `value` coerced to a synthesized function type, or a C
+function pointer/foreign function viewed through its C signature. The
+synthesized type for a `value` iterator uses the non-`nil` state/init slots
+as zero, one, or two parameter types, and uses the visible declaration list
+as return types, filling unannotated positions with `value` and optionizing
+the first return. The iterator returns at least one value. Its first return
+is the control result and must be nil-capable: an option type, `value`, a
+nullable C pointer, or a raw C `TValue`; `nil` alone and non-nil-capable
+concrete types are rejected. State and initial control are coerced and
+matched against the iterator's first and second parameters when those
+parameters exist.
+
+The close slot must be `nil` or another callable shape. A `value` close slot
+is coerced to a synthesized close type using the state slot as its single
+parameter when the state is not statically `nil`, otherwise to a zero-arg
+close type; the synthesized close has no returns. Statically typed close
+functions and C function pointers may accept zero or one parameter. If they
+accept one, the state value must coerce to it. Any close returns are
+accepted but discarded.
+
+The checker then synthesizes:
+
+* `_tuple_decls`: hidden declarations holding the four adjusted tuple
+  values, so `<explist>` is evaluated once.
+* `_result_decls`: hidden declarations holding every iterator return value.
+* `_init_call` and `_next_call`: synthesized calls through the hidden
+  iterator. Function values go through the ordinary function-value path; C
+  function pointers carry `_c_pointer_call` so codegen uses the FFI pointer
+  path. The update call forces the previous control result before coercing it
+  to the iterator's second parameter, because loop entry has already proved
+  it is not nil.
+* `_close_call`: an optional synthesized call through the hidden close
+  function, marked `_voidok` because close returns are ignored.
+* `_visible_stat`: a synthesized `StatDecl` that initializes the
+  user-written variables from `_result_decls` on each iteration.
+
+The visible variables are declared in the loop body's scope and marked
+`_forcontrol`, making assignment to them the same compile-time error as for
+numeric `for` variables. The first visible variable is initialized from a
+forced control result. Later variables are initialized from matching return
+positions; if a position is missing, only an explicitly annotated variable
+can receive the synthesized `nil`, because an unannotated declaration would
+have no type to infer.
 
 ### `ExpAdjust` — truncation to one value
 

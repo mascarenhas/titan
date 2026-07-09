@@ -846,6 +846,45 @@ describe("Titan parser", function()
         })
     end)
 
+    it("can parse generic for loops", function()
+        assert_statements_ast([[
+            for x in iter do
+                y = x
+            end
+        ]], {
+            { _tag = "Ast.StatForIn",
+              decls = {{ _tag = "Ast.Decl", name = "x", type = false }},
+              exps = {{ var = { _tag = "Ast.VarName", name = "iter" }}},
+              block = {
+                stats = {
+                  { _tag = "Ast.StatAssign",
+                    exps = {{ var = { _tag = "Ast.VarName", name = "x" }} },
+                    vars = {{ _tag = "Ast.VarName", name = "y" }} } } } },
+        })
+    end)
+
+    it("can parse typed multi-variable generic for loops", function()
+        assert_statements_ast([[
+            for k: integer, v: string in next, ctx, init do
+                use(k, v)
+            end
+        ]], {
+            { _tag = "Ast.StatForIn",
+              decls = {
+                { _tag = "Ast.Decl", name = "k",
+                  type = { _tag = "Ast.TypeInteger" } },
+                { _tag = "Ast.Decl", name = "v",
+                  type = { _tag = "Ast.TypeString" } },
+              },
+              exps = {
+                { var = { _tag = "Ast.VarName", name = "next" }},
+                { var = { _tag = "Ast.VarName", name = "ctx" }},
+                { var = { _tag = "Ast.VarName", name = "init" }},
+              },
+              block = { stats = {{ _tag = "Ast.StatCall" }} } },
+        })
+    end)
+
     it("can parse return statements", function()
         assert_statements_ast("return", {
             { _tag = "Ast.StatReturn", exps = {} }})
@@ -1474,6 +1513,32 @@ describe("Titan parser", function()
                 return 42
             return 41
         ]], "EndFor")
+
+        assert_statements_syntax_error([[
+            for x, y = 1, 2 do
+            end
+        ]], "InFor")
+
+        assert_statements_syntax_error([[
+            for x in do
+            end
+        ]], "ExpForIn")
+
+        assert_statements_syntax_error([[
+            for x, in iter do
+            end
+        ]], "DeclParList")
+
+        assert_statements_syntax_error([[
+            for x in iter
+            end
+        ]], "DoForIn")
+
+        assert_statements_syntax_error([[
+            for x in iter do
+                return 42
+            return 41
+        ]], "EndForIn")
 
         assert_statements_syntax_error([[
             local = 3

@@ -3,11 +3,12 @@
 Titan's statements are a subset of Lua's, with the same surface syntax,
 plus static checking. This chapter covers blocks and scoping, local
 declarations, assignment (including multiple assignment), the control-flow
-statements (`if`, `while`, `repeat`, the numeric `for`), function calls in
-statement position, `raise`, and `return`. For the expressions that appear inside
-statements see [Expressions](expressions.md); for the typing rules they
-trigger see [The type system](types.md); for the full statement grammar
-see [Grammar](grammar.md).
+statements (`if`, `while`, `repeat`, numeric `for`, and generic
+`for ... in`), function calls in statement position, `raise`, and
+`return`. For the expressions that appear inside statements see
+[Expressions](expressions.md); for the typing rules they trigger see
+[The type system](types.md); for the full statement grammar see
+[Grammar](grammar.md).
 
 ## Blocks, scope, and semicolons
 
@@ -251,8 +252,7 @@ the loop above could end with `local done = n <= 0` followed by
 
 ## The numeric `for`
 
-Titan has Lua's numeric `for` (there is no `for ... in`; `in` is a
-reserved word with no construct behind it):
+Titan has Lua's numeric `for`:
 
 ```lua
 function sum_list(xs: {integer}): integer
@@ -297,6 +297,130 @@ A step of zero is a run-time error (`'for' step is zero`), as in Lua.
 Integer loops are Lua-faithful at the integer limits: the number of
 iterations is bounded so that `for i = 1, math.maxinteger` terminates
 rather than wrapping the counter past the maximum integer.
+
+## The generic `for ... in`
+
+Titan's generic `for` iterates with an explicit iterator tuple:
+
+```lua
+function step(limit: integer, n: integer): integer?
+    if n >= limit then
+        return nil
+    else
+        return n + 1
+    end
+end
+
+function sum_to(limit: integer): integer
+    local sum = 0
+    for n: integer in step, limit, 0 do
+        sum = sum + n
+    end
+    return sum
+end
+```
+
+The syntax is `for decllist in explist do ... end`. The expression list is
+evaluated once before the loop and adjusted to a four-slot iterator tuple:
+
+| Slot | Meaning |
+| --- | --- |
+| 1 | iterator function, required |
+| 2 | state/context value |
+| 3 | initial control value |
+| 4 | close function |
+
+Missing slots are filled with `nil`; producing more than four values is a
+compile-time error. A trailing multi-return expression or trailing `...` in
+a variadic function can fill the tuple, so a helper may return
+`(next, state, init, close)` directly.
+
+The iterator slot may be a function, a `value` that is coerced to a
+synthesized function type, or a compatible C function pointer/foreign
+function. The iterator cannot be variadic and may take zero, one, or two
+fixed parameters. A two-parameter iterator is called as
+`next(state, control)`: first with the initial control value, then after
+each body execution with the previous first result. A one-parameter
+iterator is called as `next(state)`, and a zero-parameter iterator as
+`next()`.
+
+When the iterator slot has type `value`, Titan synthesizes the function type
+from the tuple and declaration list. The parameter types come from the
+non-`nil` state and initial-control slots. Return types come from the
+visible declarations: an annotated declaration contributes its annotation,
+and an unannotated one contributes `value`. The first synthesized return is
+made nil-capable so it can stop the loop.
+
+The iterator must return at least one value. Its first return value is the
+loop control value and must be an option type, `value`, or a nullable C
+pointer. A plain `nil` return type and non-nil-capable return types such as
+`integer` are rejected. The loop stops only when that first returned value is
+`nil` (or `NULL` for C pointers). False values do **not** stop the loop:
+
+```lua
+function flags(_: nil): boolean?
+    -- returning false here still runs the loop body
+end
+```
+
+On each iteration, Titan initializes the visible declaration list from the
+iterator returns. The first declaration is initialized from the forced
+control value; later declarations use later iterator returns. If the
+iterator returns fewer values than the declaration list needs, the missing
+values are `nil`, but only annotated declarations can receive them:
+`for x: integer, y: string? in step do` is legal when `step` returns only
+the first value, while `for x, y in step do` cannot infer `y`'s type.
+Generic `for` variables are scoped to the body, fresh per iteration, and
+read-only, like numeric `for` variables.
+
+The close slot is `nil`, a function, a `value` that is coerced to a
+synthesized close function type, or a compatible C function pointer/foreign
+function. A close function may accept zero or one fixed parameter; when it
+accepts one, the state value must be coercible to that parameter type. Close
+return values are discarded. When present, the close function runs after
+normal exhaustion, `break`, `return`, and errors from the initial iterator
+call, body, or update iterator call. If close itself raises, that new error
+replaces the pending action.
+
+This helper returns the whole tuple, including a close function that receives
+the file state:
+
+```lua
+function numbered_lines(filename: string):
+        ((File, integer) -> (integer?, string?), File, integer, (File) -> ())
+    local file: File = File.open(filename)
+    local next = function (f: File, line_no: integer): (integer?, string?)
+        local line? = f:read_line()
+        if line == nil then
+            return nil, nil
+        else
+            return line_no + 1, line
+        end
+    end
+    local close = function (f: File): ()
+        f:close()
+    end
+    return next, file, 0, close
+end
+
+for line_no: integer, line: string in numbered_lines("input.txt") do
+    process(line_no, line)
+end
+```
+
+If the iterator and closer are method closures that already capture the file,
+no state value is needed:
+
+```lua
+function lines(filename: string): (() -> string?, nil, nil, () -> ())
+    local file: File = File.open(filename)
+    return file:read_lines, nil, nil, file:close
+end
+
+for line: string in lines("input.txt") do
+    process_line(line)
+end
+```
 
 ## Function calls as statements
 
@@ -397,8 +521,8 @@ does not count as "always returns".
 
 ## `break` (no `goto`)
 
-`break` exits the innermost enclosing loop — a `while`, `repeat`, or
-numeric `for` — exactly as in Lua:
+`break` exits the innermost enclosing loop — a `while`, `repeat`,
+numeric `for`, or generic `for` — exactly as in Lua:
 
 ```lua
 function first_positive(xs: {integer}): integer
@@ -416,8 +540,5 @@ end
 A `break` that is not inside any loop is the compile-time error
 `'break' outside a loop`.
 
-`goto` and the generic `for ... in` loop are **not** implemented:
-`goto`, `in`, and `::label::` syntax are recognized by the lexer but have
-no statement form, so using them is a syntax error (and there is no
-iterator-based `for`). Where Lua would write `for k, v in pairs(t)`,
-iterate with a numeric `for` over the keys or indices instead.
+`goto` and `::label::` syntax are recognized by the lexer but have no
+statement form, so using them is a syntax error.

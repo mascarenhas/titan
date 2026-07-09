@@ -205,6 +205,9 @@ The checker has FFI-specific handling in a few narrow places:
   a foreign function name in a context whose target is a compatible C function
   pointer type. The node records `_foreign_function_pointer` so codegen can emit
   a C cast of the bare function name.
+* `checkforin` treats generic-for iterator and close slots as C function-pointer
+  contexts when a foreign function name appears there, then records
+  `_c_pointer_call` on the synthesized calls.
 * `trycoerce` and explicit casts recognize mutable address coercion only for
   local/formal C variables. The checker marks those declarations as assigned and
   rejects later capture, so generated C cannot take the address of a boxed

@@ -70,6 +70,14 @@ Lexing and parsing are fused in one LPegLabel/relabel grammar; `lexer.lua` expor
 
 - Every legal implicit coercion is materialized as a synthesized `Ast.ExpCast` node (`trycoerce`) **before** `checkmatch` — the coder generates conversions only from ExpCast, and `checkmatch` reports an error if a still-coerceable mismatch reaches it.
 - Extra multiple-return values become synthesized `Ast.ExpExtra` nodes appended to `exps`/`args` lists; for-loops get a default step synthesized into `node.inc`.
+- Generic `for ... in` elaborates its iterator tuple into synthesized
+  `_init_call`, `_next_call`, and optional `_close_call` nodes. `next` and
+  `close` may be Titan functions, `value` callables, or C function
+  pointers/direct FFI functions; `value` callables are coerced to a synthesized
+  function type from the state/start/declaration list for `next`, and from the
+  state for `close`. The first iterator return may be an option, `value`, raw
+  `TValue`, or nullable C pointer sentinel; close callables accept zero or one
+  state argument.
 
 `checkstat` handlers return a boolean "always returns", used to enforce that non-nil-returning functions return on all paths. Imports go through a `loader` callback (`driver.defaultloader` for real lookup, `driver.tableloader` for in-memory sources in tests); source deps are recursively typechecked, `.so`-only deps first check the compiled `<mangled>_abi` marker, then recover their interface from the compiled `<mangled>_types` symbol.
 

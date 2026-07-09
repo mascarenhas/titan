@@ -127,6 +127,14 @@ local errors = {
 
     EndFor = "Expected 'end' to close the for statement.",
 
+    InFor = "Expected 'in' in generic for statement.",
+
+    ExpForIn = "Expected an expression after 'in'.",
+
+    DoForIn = "Expected 'do' in generic for statement.",
+
+    EndForIn = "Expected 'end' to close the generic for statement.",
+
     DeclLocal = "Expected variable declaration after 'local'.",
 
     AssignLocal = "Expected '=' after variable declaration.",

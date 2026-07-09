@@ -145,6 +145,29 @@ function defs.ifstat(pos, exp, block, thens, elseopt)
     return ast.StatIf(pos, thens, elseopt)
 end
 
+function defs.fornum_rest(_, start, finish, inc, block)
+    return function(pos, decl)
+        return ast.StatFor(pos, decl, start, finish, inc, block)
+    end
+end
+
+function defs.forin_rest(_, decls, exps, block)
+    return function(pos, decl)
+        table.insert(decls, 1, decl)
+        return ast.StatForIn(pos, decls, exps, block)
+    end
+end
+
+function defs.forin_rest0(_, exps, block)
+    return function(pos, decl)
+        return ast.StatForIn(pos, { decl }, exps, block)
+    end
+end
+
+function defs.forstat(pos, decl, rest)
+    return rest(pos, decl)
+end
+
 function defs.fold_binop_left(pos, matches)
     local lhs = matches[1]
     for i = 2, #matches, 2 do
@@ -543,20 +566,32 @@ local grammar = re.compile([[
                                       exp^ExpRepeat)             -> StatRepeat
                      / (P  IF exp^ExpIf THEN^ThenIf block
                            elseifstats elseopt END^EndIf)        -> ifstat
-                     / (P  FOR decl^DeclFor
-                           ASSIGN^AssignFor exp^Exp1For
-                           COMMA^CommaFor exp^Exp2For
-                           (COMMA exp^Exp3For)?                  -> opt
-                           DO^DoFor block END^EndFor)            -> StatFor
+                     / forstat
                      / (P  LOCAL decllist^DeclLocal ASSIGN^AssignLocal
                                  explist^ExpLocal)                   -> StatDecl
                      / (P  varlist ASSIGN^AssignAssign
                                explist^ExpAssign)                    -> StatAssign
                      / &(exp ASSIGN) %{AssignNotLValue}
-                     / (P  (suffixedexp => exp_is_call))         -> StatCall
-                     / &exp %{ExpStat}
+	                     / (P  (suffixedexp => exp_is_call))         -> StatCall
+	                     / &exp %{ExpStat}
 
-    elseifstats     <- {| elseifstat* |}                         -- produces {Then}
+	    forstat         <- (P  FOR decl^DeclFor forrest)          -> forstat
+
+	    forrest         <- (P  IN explist^ExpForIn
+	                            DO^DoForIn block END^EndForIn)   -> forin_rest0
+	                     / (P  forindecls IN^InFor
+	                             explist^ExpForIn
+	                             DO^DoForIn block END^EndForIn)   -> forin_rest
+	                     / (P  ASSIGN^AssignFor exp^Exp1For
+	                             COMMA^CommaFor exp^Exp2For
+	                             (COMMA exp^Exp3For)?             -> opt
+	                             DO^DoFor block END^EndFor)       -> fornum_rest
+	                     / %{AssignFor}
+
+	    forindecls      <- {| COMMA decl^DeclParList
+	                           (COMMA decl^DeclParList)* |}       -- produces {Decl}
+
+	    elseifstats     <- {| elseifstat* |}                         -- produces {Then}
 
     elseifstat      <- (P  ELSEIF exp^ExpElseIf
                            THEN^ThenElseIf block)                -> Then

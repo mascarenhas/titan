@@ -33,9 +33,9 @@ synonym rules, `NEG <- SUB` and `BNEG <- BXOR`, let unary minus and unary
 `~` reuse the `-` and `~` tokens.
 
 A few tokens get the whitespace wrapper even when they are rarely used.
-`break` and `DOTS` (`...`) are real syntax; `goto`, `in`, and `DBLCOLON`
-(`::`) remain reserved but unused, so there is no `goto` statement,
-generic `for ... in` loop, or label syntax.
+`break`, `in`, and `DOTS` (`...`) are real syntax; `goto` and `DBLCOLON`
+(`::`) remain reserved/recognized but unused, so there is no `goto`
+statement or label syntax.
 
 ## Longest match by construction
 
@@ -275,6 +275,13 @@ The parser performs several rewrites that later passes rely on:
   initial condition/block pair to the captured `elseif` clauses, yielding one
   `Ast.StatIf` whose `thens` is a flat list of `Ast.Then` nodes (plus
   `elsestat`, a block or `false`) — not nested ifs.
+
+* **Numeric and generic `for` share their prefix.** The grammar parses
+  `FOR decl` once and then dispatches to `forrest`: `= exp, exp ...` builds
+  `Ast.StatFor`, while `in explist do ... end` or `, decl ... in explist`
+  builds `Ast.StatForIn`. Keeping the labeled numeric-`=` failure inside
+  `forrest` lets malformed numeric loops still report `AssignFor` without
+  swallowing valid generic loops.
 
 * **Missing return types default to `nil`.** `defs.rettypeopt` turns an
   absent `: rettype` annotation into `{ ast.TypeNil(pos) }`, so
