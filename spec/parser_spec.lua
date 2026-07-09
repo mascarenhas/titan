@@ -154,6 +154,26 @@ describe("Titan parser", function()
         assert.are.same({}, ast)
     end)
 
+    it("can parse a module initializer block", function()
+        assert_program_ast([[
+            local x = 1
+            do
+                local y = x
+                return
+            end
+        ]], {
+            { _tag = "Ast.TopLevelVar",
+                islocal = true,
+                decl = { name = "x", type = false, option = false } },
+            { _tag = "Ast.StatBlock",
+                stats = {
+                    { _tag = "Ast.StatDecl",
+                        decls = { { name = "y", type = false, option = false } } },
+                    { _tag = "Ast.StatReturn", exps = {} },
+                } },
+        })
+    end)
+
     it("can parse toplevel var declarations", function()
         assert_program_ast([[ local x=17 ]], {
             { _tag = "Ast.TopLevelVar",
@@ -845,6 +865,15 @@ describe("Titan parser", function()
         assert_statements_ast("return x, y;", {
             { _tag = "Ast.StatReturn", exps = {{ _tag = "Ast.ExpVar" },{ _tag = "Ast.ExpVar" }} },
         })
+
+        assert_statements_ast([[
+            local x = 1
+            return
+        ]], {
+            { _tag = "Ast.StatDecl",
+                exps = { { _tag = "Ast.ExpInteger", value = 1 } } },
+            { _tag = "Ast.StatReturn", exps = {} },
+        })
     end)
 
     it("requires that return statements be the last in the block", function()
@@ -1213,6 +1242,11 @@ describe("Titan parser", function()
             { _tag = "Ast.ExpCast", exp = { _tag = "Ast.ExpVar" }, target = { _tag = "Ast.TypeArray" } })
         assert_expression_ast([[ 2 + foo as integer ]],
             { rhs = { _tag = "Ast.ExpCast", exp = { _tag = "Ast.ExpVar" }, target = { _tag = "Ast.TypeInteger" } }})
+        assert_expression_ast([[ #... as value ]],
+            { _tag = "Ast.ExpCast",
+                exp = { _tag = "Ast.ExpUnop", op = "#",
+                    exp = { _tag = "Ast.ExpDots" } },
+                target = { _tag = "Ast.TypeValue" } })
     end)
 
     it("does not allow parentheses in the LHS of an assignment", function()

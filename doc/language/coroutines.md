@@ -184,3 +184,8 @@ the suspended handler that received the yield instead.
 Titan coroutines are not Lua coroutines. `coro.yield` does not call
 `lua_yield`, and Lua's `coroutine.status` does not describe these
 coroutines.
+
+Coroutine stacks are finite. The current implementation uses large
+virtual-memory-backed stacks, but deeply recursive coroutine bodies can
+still overflow them. The `coro` module is a low-level control-transfer
+primitive, not a scheduler or an async I/O policy by itself.

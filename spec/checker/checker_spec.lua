@@ -59,6 +59,47 @@ describe("zero-return () functions (typechecker)", function()
 end)
 
 describe("Titan type checker", function()
+    it("checks a module initializer as a zero-return function", function()
+        assert_type_check([[
+            local function seed(): integer
+                return 41
+            end
+            answer: integer = 0
+            do
+                answer = seed() + 1
+                return
+            end
+        ]])
+    end)
+
+    it("rejects values returned by a module initializer", function()
+        assert_type_error("returned 1 value%(s%) but function expected 0", [[
+            answer: integer = 0
+            do
+                return answer
+            end
+        ]])
+    end)
+
+    it("lets a module initializer use imports", function()
+        local modules = {
+            foo = [[
+                function seed(): integer
+                    return 42
+                end
+            ]],
+            bar = [[
+                local foo = import "foo"
+                answer: integer = 0
+                do
+                    answer = foo.seed()
+                end
+            ]],
+        }
+        local ok, err = run_checker_modules(modules, "bar")
+        assert.truthy(ok, err)
+    end)
+
     it("for loop iteration variables don't shadow var limit and step", function()
         local code = [[
             function fn(x: integer): integer
@@ -181,22 +222,26 @@ describe("Titan type checker", function()
         assert.match("variable '%w+' not declared", err)
     end)
 
-    it("provides built-in local L and rejects shadowing or assigning it", function()
+    it("provides built-in locals L and M and rejects shadowing or assigning them", function()
         assert_type_check([[
             record R
             end
 
-            function fn(): boolean
+            function fn_l(): boolean
                 return L
             end
 
+            function fn_m(): boolean
+                return M
+            end
+
             function R:method(): boolean
-                return L
+                return M
             end
 
             function lambda(): boolean
                 local f = function(): boolean
-                    return L
+                    return M
                 end
                 return f()
             end
@@ -205,14 +250,28 @@ describe("Titan type checker", function()
             function fn(L: integer)
             end
         ]])
+        assert_type_error("cannot declare parameter 'M' because it shadows a built%-in local", [[
+            function fn(M: integer)
+            end
+        ]])
         assert_type_error("cannot declare local 'L' because it shadows a built%-in local", [[
             function fn()
                 local L = nil
             end
         ]])
+        assert_type_error("cannot declare local 'M' because it shadows a built%-in local", [[
+            function fn()
+                local M = nil
+            end
+        ]])
         assert_type_error("cannot assign to built%-in local 'L'", [[
             function fn()
                 L = nil
+            end
+        ]])
+        assert_type_error("cannot assign to built%-in local 'M'", [[
+            function fn()
+                M = nil
             end
         ]])
     end)

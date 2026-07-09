@@ -127,10 +127,6 @@ local function canonical_spelling(tokens)
 end
 
 local function primitive_from_tokens(tokens)
-    if #tokens == 1 and tokens[1] == "TValue" then
-        return types.Value()
-    end
-
     local spelling = canonical_spelling(tokens)
     if spelling == "" then
         return nil
@@ -166,29 +162,16 @@ local function apply_pointer_suffixes(base, suffixes)
     return base
 end
 
-local function convert_struct_or_union(st, ftype)
-    if ftype.type == "struct" and c_name(ftype.name) == "TValue" then
-        return types.Value()
+local function populate_struct_or_union(st, owner, ftype)
+    if not ftype.fields then
+        return owner
     end
 
-    local key = c_type_key(ftype) or ""
-    local existing = st:find_foreign_type(key)
-    if existing then
-        return existing
-    end
-
-    local owner
     local fields = {}
     local has_fam = false
-    local tagname = c_name(ftype.name)
-    owner = (ftype.type == "struct")
-        and types.CStruct(nil, tagname, nil, fields, ftype.fields ~= nil, false)
-        or types.CUnion(nil, tagname, nil, fields, ftype.fields ~= nil)
-    if key ~= "" then
-        st:add_foreign_type(key, owner)
-    end
-
-    for _, field in ipairs(ftype.fields or {}) do
+    owner.fields = fields
+    owner.complete = true
+    for _, field in ipairs(ftype.fields) do
         if not field.anonymous and field.name then
             local ftyp, err = convert_type(st, field)
             if not ftyp then return nil, err end
@@ -200,24 +183,38 @@ local function convert_struct_or_union(st, ftype)
             has_fam = has_fam or (field.flexible_array and true or false)
         end
     end
-
     if owner._tag == "Type.CStruct" then
         owner.has_fam = has_fam
     end
     return owner
 end
 
+local function convert_struct_or_union(st, ftype)
+    local key = c_type_key(ftype) or ""
+    local existing = st:find_foreign_type(key)
+    if existing then
+        if ftype.fields and not existing.complete then
+            return populate_struct_or_union(st, existing, ftype)
+        end
+        return existing
+    end
+
+    local owner
+    local fields = {}
+    local tagname = c_name(ftype.name)
+    owner = (ftype.type == "struct")
+        and types.CStruct(nil, tagname, nil, fields, ftype.fields ~= nil, false)
+        or types.CUnion(nil, tagname, nil, fields, ftype.fields ~= nil)
+    if key ~= "" then
+        st:add_foreign_type(key, owner)
+    end
+
+    return populate_struct_or_union(st, owner, ftype)
+end
+
 local function convert_struct_or_union_declarator(st, ftype)
     local base, err = convert_struct_or_union(st, ftype)
     if not base then return nil, err end
-    if base._tag == "Type.Value" then
-        if ftype.pointer and #ftype.pointer > 0 then
-            return nil, "unsupported C type: TValue *"
-        end
-        if ftype.idxs and #ftype.idxs > 0 then
-            return nil, "unsupported C type: TValue[]"
-        end
-    end
     return with_array_dims(apply_pointer_suffixes(base, ftype.pointer),
                            ftype.idxs)
 end
@@ -298,20 +295,10 @@ local function convert_parts(st, parts, idxs)
 
     for _, suffix in ipairs(suffixes) do
         if suffix.tag == "pointer" then
-            if base._tag == "Type.Value" then
-                return nil, "unsupported C type: TValue *"
-            end
             base = types.CPointer(base, suffix.quals)
         elseif suffix.tag == "array" then
-            if base._tag == "Type.Value" then
-                return nil, "unsupported C type: TValue[]"
-            end
             base = types.CArray(base, suffix.len)
         end
-    end
-
-    if base._tag == "Type.Value" and idxs and #idxs > 0 then
-        return nil, "unsupported C type: TValue[]"
     end
 
     return with_array_dims(base, idxs)
@@ -340,10 +327,6 @@ local function convert_function(st, ftype)
 end
 
 local function convert_typedef(st, ftype)
-    if ftype.name == "TValue" then
-        return types.Value()
-    end
-
     local target, err
     if type(ftype.def) == "table" and ftype.def.type == "functionptr" then
         target, err = convert_function_pointer(st, ftype.def)

@@ -163,15 +163,13 @@ lexer.COMMENT = long_comment + short_comment
 -- Keywords and names
 --
 
-local idstart = P("_") + R("AZ", "az")
 local idrest  = P("_") + R("AZ", "az", "09")
-local possiblename = idstart * idrest^0
 
 local keywords = {
     "and", "break", "do", "else", "elseif", "end", "for", "false",
     "function", "goto", "if", "in", "local", "nil", "not", "or",
     "repeat", "return", "then", "true", "until", "while", "import",
-    "record", "as", "foreign", "catch", "finally", "raise",
+    "record", "as", "foreign", "catch", "finally", "raise", "const",
 
     "boolean", "integer", "float", "string", "value"
 }
@@ -185,12 +183,16 @@ for _, keyword in ipairs(keywords) do
     is_keyword[keyword] = true
 end
 
-lexer.NAME = Cmt(C(possiblename), function(_, pos, s)
-    if not is_keyword[s] then
-        return pos, s
-    else
+lexer.NAME = Cmt(P(true), function(s, pos)
+    local startpos, endpos = s:find("^[_A-Za-z][_A-Za-z0-9]*", pos)
+    if not startpos then
         return false
     end
+    local name = s:sub(startpos, endpos)
+    if is_keyword[name] then
+        return false
+    end
+    return endpos + 1, name
 end)
 
 --

@@ -16,10 +16,12 @@ local function with_header(contents, fn)
 end
 
 describe("C FFI code generation", function()
-    it("passes the built-in lua_State pointer L to C functions", function()
+    it("passes the built-in Lua state and module pointers to C functions", function()
         with_header([[
             typedef struct lua_State lua_State;
+            typedef struct Udata Udata;
             static int ffi_has_state(lua_State *state) { return state != 0; }
+            static int ffi_has_module(Udata *module) { return module != 0; }
         ]], function(header)
             h.run_coder([[
                 local c = foreign import "]] .. header .. [["
@@ -27,15 +29,23 @@ describe("C FFI code generation", function()
                 function has_state(): integer
                     return c.ffi_has_state(L)
                 end
+
+                function has_module(): integer
+                    return c.ffi_has_module(M)
+                end
             ]], [[
                 assert(test.has_state() == 1)
+                assert(test.has_module() == 1)
             ]])
         end)
     end)
 
     it("round-trips by-value TValue through C helpers", function()
         with_header([[
+            typedef struct lua_State lua_State;
+            typedef struct TString TString;
             typedef struct TValue TValue;
+            typedef struct ffi_coro ffi_coro;
 
             static TValue ffi_value_echo(TValue value) {
                 return value;
@@ -52,6 +62,22 @@ describe("C FFI code generation", function()
                 if (ttisfulluserdata(&value)) return 8;
                 return 0;
             }
+
+            static int ffi_const_value_kind(const TValue *value) {
+                return value ? ffi_value_kind(*value) : 0;
+            }
+
+            static void ffi_collect(lua_State *L) {
+                lua_gc(L, 2, 0);
+            }
+
+            static TValue ffi_make_gc_payload(lua_State *L) {
+                TValue value;
+                const char *payload = "anchored raw TValue payload";
+                TString *str = luaS_newlstr(L, payload, sizeof("anchored raw TValue payload") - 1);
+                setsvalue(L, &value, str);
+                return value;
+            }
         ]], function(header)
             h.run_coder([[
                 local c = foreign import "]] .. header .. [["
@@ -62,6 +88,9 @@ describe("C FFI code generation", function()
 
                 local function echo(x: value): value
                     return x
+                end
+
+                local function coro_entry(func: (value) -> value, co: *c.ffi_coro)
                 end
 
                 function nil_rounds(): value
@@ -93,6 +122,34 @@ describe("C FFI code generation", function()
                 function function_rounds(): value
                     return c.ffi_value_echo(echo)
                 end
+
+                function c_pointer_function_kind(): integer
+                    return c.ffi_value_kind(coro_entry)
+                end
+
+                function raw_local_kind(): integer
+                    local raw: c.TValue = 42
+                    return c.ffi_value_kind(raw)
+                end
+
+                function raw_pointer_kind(): integer
+                    local raw: c.TValue = "through pointer"
+                    local p: const *c.TValue = raw
+                    return (c.ffi_const_value_kind(p) as integer)
+                        + (c.ffi_const_value_kind(raw) as integer)
+                        + (c.ffi_const_value_kind("direct" as c.TValue) as integer)
+                end
+
+                function raw_back(): value
+                    local raw: c.TValue = "back"
+                    return raw
+                end
+
+                function raw_gc_survives(): value
+                    local raw: c.TValue = c.ffi_make_gc_payload(L)
+                    c.ffi_collect(L)
+                    return raw
+                end
             ]], [[
                 assert(test.nil_rounds() == nil)
                 assert(test.integer_rounds() == 42)
@@ -101,6 +158,11 @@ describe("C FFI code generation", function()
                 assert(test.map_kind() == 6)
                 assert(test.record_kind() == 8)
                 assert(test.function_rounds()("ok") == "ok")
+                assert(test.c_pointer_function_kind() == 7)
+                assert(test.raw_local_kind() == 3)
+                assert(test.raw_pointer_kind() == 15)
+                assert(test.raw_back() == "back")
+                assert(test.raw_gc_survives() == "anchored raw TValue payload")
             ]])
         end)
     end)
@@ -169,6 +231,175 @@ describe("C FFI code generation", function()
             ]], [[
                 assert(test.sum() == 18)
                 assert(test.zero() == 42)
+            ]])
+        end)
+    end)
+
+    it("generates field access for named C structs completed after forward typedefs", function()
+        with_header([[
+            typedef struct ffi_node ffi_node;
+            typedef ffi_node *ffi_node_ref;
+            struct ffi_node { int x; ffi_node *next; };
+            static ffi_node ffi_tail = { 5, 0 };
+            static ffi_node ffi_head = { 7, &ffi_tail };
+            static ffi_node *ffi_head_ptr = &ffi_head;
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                local function next_node(): c.ffi_node_ref
+                    return c.ffi_head_ptr.next
+                end
+
+                function sum(): integer
+                    return (c.ffi_head_ptr.x as integer)
+                        + (next_node().x as integer)
+                end
+            ]], [[
+                assert(test.sum() == 12)
+            ]])
+        end)
+    end)
+
+    it("generates sizeof, alignof, source pointer types, and address coercions", function()
+        with_header([[
+            typedef int ffi_int;
+            typedef struct TValue TValue;
+            static int ffi_read_const_int(const int *p) { return *p + 1; }
+            static ffi_int ffi_make_int(void) { return 18; }
+            static int ffi_has_const_ptr(const void *p) { return p != 0; }
+            static int ffi_has_const_tvalue(const TValue *p) { return p != 0; }
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                local function read_pointer(p: const *c.ffi_int): integer
+                    return c.ffi_read_const_int(p) as integer
+                end
+
+                function sum(v: value): integer
+                    local x: c.ffi_int = 41 as c.ffi_int
+                    return (c.ffi_int.sizeof as integer)
+                        + (c.ffi_int.alignof as integer)
+                        + (c.ffi_read_const_int(x) as integer)
+                        + read_pointer(x)
+                        + (c.ffi_has_const_ptr(v) as integer)
+                        + (c.ffi_has_const_tvalue(v as c.TValue) as integer)
+                end
+
+                function rvalue_const_pointer(): integer
+                    return c.ffi_read_const_int(41 as c.ffi_int) as integer
+                end
+
+                function call_result_const_pointer(): integer
+                    return c.ffi_read_const_int(c.ffi_make_int()) as integer
+                end
+            ]], [[
+                local expected = 4 + 4 + 42 + 42 + 1 + 1
+                assert(test.sum("rooted") == expected)
+                assert(test.rvalue_const_pointer() == 42)
+                assert(test.call_result_const_pointer() == 19)
+            ]])
+        end)
+    end)
+
+    it("generates address coercions for mutable C out-parameters", function()
+        with_header([[
+            typedef int ffi_int;
+            typedef struct TValue TValue;
+            static int ffi_write_int(ffi_int *p) { *p = 17; return 1; }
+            static int ffi_write_void(void *p) { *(ffi_int *)p = 23; return 1; }
+            static int ffi_write_value(void *p) {
+                setivalue((TValue *)p, 77);
+                return 1;
+            }
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                function write_int(): integer
+                    local x: c.ffi_int = 0 as c.ffi_int
+                    c.ffi_write_int(x)
+                    return x as integer
+                end
+
+                function write_void(): integer
+                    local x: c.ffi_int = 0 as c.ffi_int
+                    c.ffi_write_void(x)
+                    return x as integer
+                end
+
+                function write_value(): value
+                    local raw: c.TValue = nil
+                    c.ffi_write_value(raw)
+                    return raw
+                end
+            ]], [[
+                assert(test.write_int() == 17)
+                assert(test.write_void() == 23)
+                assert(test.write_value() == 77)
+            ]])
+        end)
+    end)
+
+    it("anchors GC TValue out-parameters before later calls can collect", function()
+        with_header([[
+            typedef struct lua_State lua_State;
+            typedef struct TValue TValue;
+
+            static int ffi_outparam_finalized = 0;
+
+            static int ffi_outparam_gc(lua_State *L) {
+                (void)L;
+                ffi_outparam_finalized = 1;
+                return 0;
+            }
+
+            static void ffi_reset_outparam_finalized(void) {
+                ffi_outparam_finalized = 0;
+            }
+
+            static int ffi_was_outparam_finalized(void) {
+                return ffi_outparam_finalized;
+            }
+
+            static void ffi_write_gc_value(lua_State *L, void *out) {
+                lua_newuserdatauv(L, 0, 0);
+                if(luaL_newmetatable(L, "titan_ffi_outparam_anchor")) {
+                    lua_pushcfunction(L, ffi_outparam_gc);
+                    lua_setfield(L, -2, "__gc");
+                }
+                lua_setmetatable(L, -2);
+                setuvalue(L, (TValue *)out, uvalue(s2v(L->top.p - 1)));
+                lua_pop(L, 1);
+            }
+
+            static void ffi_collect(lua_State *L) {
+                lua_gc(L, 2, 0);
+            }
+
+            static int ffi_is_userdata(TValue value) {
+                return ttisfulluserdata(&value);
+            }
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                function survives_gc_check_after_write(): integer
+                    local raw: c.TValue = nil
+                    c.ffi_reset_outparam_finalized()
+                    c.ffi_write_gc_value(L, raw)
+                    c.ffi_collect(L)
+                    if (c.ffi_was_outparam_finalized() as integer) ~= 0 then
+                        return -1
+                    end
+                    if (c.ffi_is_userdata(raw) as integer) == 0 then
+                        return -2
+                    end
+                    return 1
+                end
+            ]], [[
+                assert(test.survives_gc_check_after_write() == 1)
             ]])
         end)
     end)
@@ -295,7 +526,6 @@ describe("C FFI code generation", function()
         with_header([[
             typedef struct ffi_point { int x; } ffi_point;
             static ffi_point *ffi_null_point = 0;
-            static int *ffi_null_int = 0;
         ]], function(header)
             h.run_coder([[
                 local c = foreign import "]] .. header .. [["
@@ -306,7 +536,11 @@ describe("C FFI code generation", function()
             ]], [[
                 test.bad_field()
             ]], "NULL C pointer")
+        end)
 
+        with_header([[
+            static int *ffi_null_int = 0;
+        ]], function(header)
             h.run_coder([[
                 local c = foreign import "]] .. header .. [["
 

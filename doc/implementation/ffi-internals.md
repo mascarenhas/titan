@@ -62,10 +62,9 @@ on the process cwd. The file exposes selected primitive aliases:
 `titan_ffi_unsigned_short`, `titan_ffi_int`, `titan_ffi_unsigned_int`,
 `titan_ffi_long`, `titan_ffi_unsigned_long`, `titan_ffi_long_long`,
 `titan_ffi_unsigned_long_long`, `titan_ffi_float`, `titan_ffi_double`, an
-opaque `lua_State` typedef, and Lua's internal `TValue` type. Exact by-value
-`TValue` is special-cased to Titan `value` for private runtime helper
-boundaries; pointer and array forms such as `TValue *` and `TValue[]` are not
-part of the supported FFI surface.
+opaque `lua_State` typedef, and Lua's internal `TValue` type. `TValue` remains a
+distinct C type in Titan's FFI type graph. Private runtime helpers can move
+values across that boundary through explicit `value` <-> C `TValue` coercions.
 
 Generated C already compiles with `-I titan-runtime`, so the emitted
 `#include <titan/ffi.h>` resolves through the normal C compiler path too.
@@ -82,7 +81,8 @@ Generated C already compiles with `-I titan-runtime`, so the emitted
 * flexible array members are marked with `flexible_array = true`;
 * function-pointer typedefs are represented as `functionptr` CTypes;
 * header-defined `static` functions are imported like ordinary C functions;
-* simple enum values are stored on the enum type's `values` list.
+* simple enum values, including typedef-enum values, are stored on the enum
+  type's `values` list.
 
 Array extents and enum values are constant-folded when possible. Unknown but
 syntactically present extents are preserved rather than thrown away; the checker
@@ -126,10 +126,18 @@ compatibility/coercion relations add the Titan boundary conversions:
 * C pointer, including C function pointer -> `boolean`, `nil` -> C pointer;
 * C array / counted `COwned` -> compatible pointer;
 * any non-function C pointer -> `void *`;
+* non-pointer by-value C object expressions -> compatible `const *T` pointers
+  by address;
+* mutable non-pointer local/formal C variables -> compatible mutable `*T` or
+  `void *` out-parameters by address;
 * Titan `string` -> C `char *` or `void *`;
-* exact by-value C `TValue` -> Titan `value`, and Titan `value` ->
-  by-value C `TValue`;
+* C `TValue` -> Titan `value`, and Titan `value` -> C `TValue`;
 * C integers, C floats, non-function C pointers, and `COwned` <-> `value`.
+
+C `TValue` is treated as a GC-bearing C type by the code generator. A local,
+temporary, or parameter with that C type gets the same Lua-stack anchoring used
+for Titan `value`, because the by-value C object may itself contain a pointer to
+a collectable Lua object.
 
 Serialization rejects any type tree containing a C FFI type. This is the
 enforcement point for "C types are local to the importing module": exported
@@ -144,10 +152,10 @@ Primitive tokens are canonicalized before conversion, so spellings such as
 `long unsigned int` and `unsigned long` map to the same `CInteger` identity.
 Integer ranks preserve signedness and relative width; known 128-bit compiler
 types carry `bits = 128`. `float`, `double` and `long double` become `CFloat`.
-`void` becomes `CVoid`. Exact `TValue` is special-cased to Titan's dynamic
-`value` type for private runtime helpers that need to move arbitrary Lua
-values through the FFI; `TValue *` and `TValue[]` are rejected rather than
-exposing raw Lua stack/value storage through Titan.
+`void` becomes `CVoid`. `TValue` follows the normal C conversion path and stays
+a C typedef/struct type; `TValue *` and `TValue[]` are therefore ordinary C
+pointer/array types. The special handling lives in the checker and coder
+coercion rules, not in foreign type import.
 
 Pointer and array suffixes are applied in declaration order. Typedefs become
 `CTypedef(name, target)`. Structs and unions become `CStruct`/`CUnion` objects
@@ -175,9 +183,13 @@ The checker has FFI-specific handling in a few narrow places:
 * `Ast.TypeQualName` accepts `c.T` when `c` is a `CModule` and source-nameable
   `T` is in its `type_members`. This lifts the prototype restriction that C
   types could only be inferred.
+* `Ast.TypeCPointer` accepts `*c.T` and `const *c.T`, producing `CPointer`
+  values over imported C pointees and rejecting non-C pointees.
 * `Ast.VarDot` on a `CModule` first consults `type_members`; a type member
   yields a `Type.CTypeNamespace` pseudo-declaration so `.new` and `.new_array`
-  can be resolved on it. Value members still come from `mod.members`.
+  can be resolved on it. `sizeof` and `alignof` on a C type namespace produce
+  pseudo-declarations that codegen emits as `sizeof(T)` and `_Alignof(T)`.
+  Value members still come from `mod.members`.
 * `Ast.VarDot` on a C struct/union, pointer-to-aggregate, or owned aggregate
   resolves a `Type.CField`.
 * `Ast.VarBracket` accepts C pointers, C arrays with known static length, and
@@ -193,6 +205,10 @@ The checker has FFI-specific handling in a few narrow places:
   a foreign function name in a context whose target is a compatible C function
   pointer type. The node records `_foreign_function_pointer` so codegen can emit
   a C cast of the bare function name.
+* `trycoerce` and explicit casts recognize mutable address coercion only for
+  local/formal C variables. The checker marks those declarations as assigned and
+  rejects later capture, so generated C cannot take the address of a boxed
+  captured local.
 * `checkfuncbody` synthesizes the read-only local `L` for every function-like
   body. `lua_state_pointer_type` gives it type `CPointer(CTypedef("lua_State",
   ...))`, reusing an imported `lua_State` type when one is already present in
@@ -268,6 +284,10 @@ decides quote-vs-angle based on actual resolution.
   vararg arguments;
 * `nil` becomes `NULL`;
 * `value` to C `TValue` passes the raw `TValue` by value;
+* non-pointer by-value C or `value` expressions passed to compatible `const *T`
+  parameters are materialized as `&(expr)`;
+* local/formal non-pointer C variables passed to compatible mutable pointer
+  parameters are materialized as `&(local)`, enabling C out-parameters;
 * other `value` to C conversions use the runtime `checkandget` path.
 
 `foreigntonativeexp` handles C-to-Titan conversion for call results and foreign
@@ -277,13 +297,13 @@ them; C pointers/arrays/aggregates remain C values; C `char *` / `void *` to
 `string` is implemented by an explicit cast arm with a NULL guard and
 `luaS_new` copy.
 
-`getslot` and `setslot` know how to box C scalars, non-function pointers, and
-owned userdata into Lua `TValue`s for `value` conversions and for Lua-facing
+`getslot` and `setslot` know how to box C scalars, non-function pointers, owned
+userdata, and by-value C `TValue`s for `value` conversions and for Lua-facing
 slots. C object pointers are exposed as light userdata in `value`; `COwned` is
 full userdata. C arrays are not accepted through `value` because there is no
 array unboxing path. C function pointers are not object pointers in portable C
-and cannot cross through `value`. By-value C structs/unions are deliberately not
-boxable in v1.
+and cannot cross through `value` or the object-pointer address coercions.
+By-value C structs/unions are deliberately not boxable in v1.
 
 ### C Arrays And Fields
 

@@ -65,7 +65,7 @@ function types.resolve_c_typedef(t)
     return t
 end
 
-local function find_c_type(t, include_legacy)
+local function find_c_type(t, include_legacy, descend_function_values)
     local function visit_type(typ, seen)
         if type(typ) ~= "table" then
             return nil
@@ -84,6 +84,9 @@ local function find_c_type(t, include_legacy)
             return visit_type(typ.keys, seen) or
                    visit_type(typ.values, seen)
         elseif tag == "Type.Function" then
+            if not descend_function_values then
+                return nil
+            end
             for _, param in ipairs(typ.params) do
                 local ctyp = visit_type(param, seen)
                 if ctyp then return ctyp end
@@ -158,15 +161,23 @@ local function find_c_type(t, include_legacy)
 end
 
 function types.first_c_type(t)
-    return find_c_type(t, false)
+    return find_c_type(t, false, false)
 end
 
 function types.first_c_ffi_type(t)
-    return find_c_type(t, true)
+    return find_c_type(t, true, true)
 end
 
 function types.is_c(t)
     return types.first_c_type(t) ~= nil
+end
+
+function types.is_c_tvalue(t)
+    if not t then
+        return false
+    end
+    local rt = types.resolve_c_typedef(t)
+    return rt and rt._tag == "Type.CStruct" and rt.tagname == "TValue"
 end
 
 function types.contains_c_ffi_type(t)
@@ -185,7 +196,8 @@ end
 
 function types.is_gc(t)
     local tag = t._tag
-    return tag == "Type.String" or
+    return types.is_c_tvalue(t) or
+           tag == "Type.String" or
            tag == "Type.Value" or
            tag == "Type.Function" or
            tag == "Type.Array" or
@@ -268,8 +280,56 @@ local function is_c_object_pointer(t)
     return is_c_pointer(t) and not is_c_function_pointer(t)
 end
 
+local function has_const_qual(typ)
+    for _, qual in ipairs(typ.quals or {}) do
+        if qual == "const" then return true end
+    end
+    return false
+end
+
+local function qualifiers_include(target, source)
+    return not has_const_qual(source) or has_const_qual(target)
+end
+
 local function c_assignable_equal(t1, t2)
     return types.equals(resolved_c(t1), resolved_c(t2))
+end
+
+local function c_object_to_void_pointer_compatible(source, target)
+    source = resolved_c(source)
+    target = resolved_c(target)
+    if not (source and target
+            and source._tag == "Type.CPointer"
+            and target._tag == "Type.CPointer") then
+        return false
+    end
+    local source_pointee = resolved_c(source.pointee)
+    local target_pointee = resolved_c(target.pointee)
+    return source_pointee._tag ~= "Type.CFunction"
+        and target_pointee._tag == "Type.CVoid"
+        and qualifiers_include(target, source)
+end
+
+local function c_void_to_object_pointer_compatible(source, target, allow_char_pointer)
+    source = resolved_c(source)
+    target = resolved_c(target)
+    if not (source and target
+            and source._tag == "Type.CPointer"
+            and target._tag == "Type.CPointer") then
+        return false
+    end
+    local source_pointee = resolved_c(source.pointee)
+    local target_pointee = resolved_c(target.pointee)
+    if not allow_char_pointer
+       and target_pointee._tag == "Type.CInteger"
+       and (target_pointee.spelling == "char"
+            or target_pointee.spelling == "signed char"
+            or target_pointee.spelling == "unsigned char") then
+        return false
+    end
+    return source_pointee._tag == "Type.CVoid"
+        and target_pointee._tag ~= "Type.CFunction"
+        and qualifiers_include(target, source)
 end
 
 local function c_pointer_compatible(source, target)
@@ -277,6 +337,15 @@ local function c_pointer_compatible(source, target)
     target = resolved_c(target)
     if not (target and target._tag == "Type.CPointer") then
         return false
+    elseif source._tag == "Type.CPointer" then
+        local source_pointee = resolved_c(source.pointee)
+        local target_pointee = resolved_c(target.pointee)
+        if source_pointee._tag == "Type.CFunction"
+           or target_pointee._tag == "Type.CFunction" then
+            return false
+        end
+        return c_assignable_equal(source.pointee, target.pointee)
+            and qualifiers_include(target, source)
     elseif source._tag == "Type.CArray" then
         return c_assignable_equal(source.elem, target.pointee)
             or resolved_c(target.pointee)._tag == "Type.CVoid"
@@ -285,6 +354,77 @@ local function c_pointer_compatible(source, target)
             or resolved_c(target.pointee)._tag == "Type.CVoid"
     end
     return false
+end
+
+local function is_c_function_pointer(t)
+    t = resolved_c(t)
+    return t and t._tag == "Type.CPointer"
+        and resolved_c(t.pointee)._tag == "Type.CFunction"
+end
+
+function types.c_address_coerceable(source, target)
+    local target_res = resolved_c(target)
+    if not (target_res and target_res._tag == "Type.CPointer"
+            and has_const_qual(target_res)) then
+        return false
+    end
+
+    local target_pointee = resolved_c(target_res.pointee)
+    if target_pointee._tag == "Type.CFunction" then
+        return false
+    end
+
+    if source._tag == "Type.Value" then
+        return target_pointee._tag == "Type.CVoid"
+            or types.is_c_tvalue(target_res.pointee)
+    end
+
+    local source_res = resolved_c(source)
+    if not (source_res and types.is_c(source)) then
+        return false
+    elseif is_c_function_pointer(source_res) then
+        return false
+    elseif source_res._tag == "Type.CVoid"
+        or source_res._tag == "Type.CPointer"
+        or source_res._tag == "Type.CArray"
+        or source_res._tag == "Type.CFunction"
+        or source_res._tag == "Type.COwned"
+        or source_res._tag == "Type.CModule" then
+        return false
+    end
+
+    return c_assignable_equal(source, target_res.pointee)
+        or target_pointee._tag == "Type.CVoid"
+end
+
+function types.c_mutable_address_coerceable(source, target)
+    local target_res = resolved_c(target)
+    if not (target_res and target_res._tag == "Type.CPointer")
+       or has_const_qual(target_res) then
+        return false
+    end
+
+    local target_pointee = resolved_c(target_res.pointee)
+    if target_pointee._tag == "Type.CFunction" then
+        return false
+    end
+
+    local source_res = resolved_c(source)
+    if not (source_res and types.is_c(source)) then
+        return false
+    elseif is_c_function_pointer(source_res) then
+        return false
+    elseif source_res._tag == "Type.CVoid"
+        or source_res._tag == "Type.CPointer"
+        or source_res._tag == "Type.CArray"
+        or source_res._tag == "Type.CFunction"
+        or source_res._tag == "Type.COwned"
+        or source_res._tag == "Type.CModule" then
+        return false
+    end
+
+    return c_assignable_equal(source, target_res.pointee)
+        or target_pointee._tag == "Type.CVoid"
 end
 
 local function is_c_char_pointer(t)
@@ -305,7 +445,8 @@ local function c_value_compatible(t)
         or t._tag == "Type.CFloat"
         or (t._tag == "Type.CPointer"
             and resolved_c(t.pointee)._tag ~= "Type.CFunction")
-        or t._tag == "Type.COwned")
+        or t._tag == "Type.COwned"
+        or types.is_c_tvalue(t))
 end
 
 -- Returns true if type always holds truthy values
@@ -326,7 +467,10 @@ function types.explicitly_coerceable(source, target)
     return (is_void_pointer(source) and target._tag == "Type.String")
         or (is_c_void_pointer(source) and target._tag == "Type.String")
         or (is_c_char_pointer(source) and target._tag == "Type.String")
-        or (is_c_object_pointer(source) and is_c_void_pointer(target))
+        or ((is_c_integer(source) or is_c_float(source))
+            and (is_c_integer(target) or is_c_float(target)))
+        or c_object_to_void_pointer_compatible(source, target)
+        or c_void_to_object_pointer_compatible(source, target, true)
 end
 
 function types.coerceable(source, target)
@@ -346,9 +490,13 @@ function types.coerceable(source, target)
         return true
     elseif source._tag == "Type.Nil" and is_c_pointer(target) then
         return true
+    elseif types.c_address_coerceable(source, target) then
+        return true
     elseif c_pointer_compatible(source, target) then
         return true
-    elseif is_c_object_pointer(source) and is_c_void_pointer(target) then
+    elseif c_object_to_void_pointer_compatible(source, target) then
+        return true
+    elseif c_void_to_object_pointer_compatible(source, target, false) then
         return true
     elseif source._tag == "Type.String" and
            (is_c_char_pointer(target) or is_c_void_pointer(target)) then
@@ -356,6 +504,10 @@ function types.coerceable(source, target)
     elseif c_value_compatible(source) and target._tag == "Type.Value" then
         return true
     elseif source._tag == "Type.Value" and c_value_compatible(target) then
+        return true
+    elseif c_value_compatible(source) and types.is_c_tvalue(target) then
+        return true
+    elseif types.is_c_tvalue(target) and not types.is_c(source) then
         return true
     elseif types.is_c(source) or types.is_c(target) then
         return false
@@ -427,9 +579,17 @@ function types.compatible(t1, t2)
         return true
     elseif t1._tag == "Type.Nil" and is_c_pointer(t2) then
         return true
+    elseif types.c_address_coerceable(t1, t2) then
+        return true
     elseif c_pointer_compatible(t1, t2) then
         return true
-    elseif is_c_void_pointer(t1) and is_c_object_pointer(t2) then
+    elseif c_object_to_void_pointer_compatible(t1, t2) then
+        return true
+    elseif c_object_to_void_pointer_compatible(t2, t1) then
+        return true
+    elseif c_void_to_object_pointer_compatible(t1, t2, true) then
+        return true
+    elseif c_void_to_object_pointer_compatible(t2, t1, true) then
         return true
     elseif t1._tag == "Type.String" and
            (is_c_char_pointer(t2) or is_c_void_pointer(t2)) then
@@ -437,6 +597,10 @@ function types.compatible(t1, t2)
     elseif c_value_compatible(t1) and t2._tag == "Type.Value" then
         return true
     elseif t1._tag == "Type.Value" and c_value_compatible(t2) then
+        return true
+    elseif c_value_compatible(t1) and types.is_c_tvalue(t2) then
+        return true
+    elseif types.is_c_tvalue(t2) and not types.is_c(t1) then
         return true
     elseif t1._tag == "Type.Typedef" then
         return types.compatible(t1._type, t2)
@@ -607,7 +771,12 @@ type_equals = function(t1, t2, seen)
                type_equals(t1.owner, t2.owner, seen) and
                type_equals(t1.type, t2.type, seen)
     elseif tag1 == "Type.CTypedef" then
-        return t1.name == t2.name and type_equals(t1.target, t2.target, seen)
+        -- C typedef names are nominal in Titan's foreign-type namespace. Their
+        -- targets still drive representation through resolve_c_typedef(), but
+        -- duplicate declarations imported from different headers can build
+        -- distinct target graphs for the same typedef name (for example through
+        -- system-header typedef chains). Those are the same C name for equality.
+        return t1.name == t2.name
     elseif tag1 == "Type.COwned" then
         return t1.count == t2.count and type_equals(t1.pointee, t2.pointee, seen)
     elseif tag1 == "Type.CModule" then
@@ -765,8 +934,9 @@ function types.tostring(t)
     elseif tag == "Type.CFloat" then
         return t.spelling
     elseif tag == "Type.CPointer" then
-        local quals = t.quals and #t.quals > 0 and " " .. table.concat(t.quals, " ") or ""
-        return types.tostring(t.pointee) .. " *" .. quals
+        local quals = t.quals and #t.quals > 0
+            and table.concat(t.quals, " ") .. " " or ""
+        return quals .. types.tostring(t.pointee) .. " *"
     elseif tag == "Type.CArray" then
         local len = t.len and tostring(t.len) or ""
         return types.tostring(t.elem) .. "[" .. len .. "]"

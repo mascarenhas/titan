@@ -178,6 +178,90 @@ describe("coro standard module", function()
         assert.match("OK", out)
     end)
 
+    it("uses default tags, explicit overrides, and explicit nil fallback", function()
+        local out = compile_and_run([[
+            local coro = import "coro"
+
+            function default_resume(): string
+                local co = coro.create(function (arg: value): value
+                    local got = coro.yield(arg, "default")
+                    return got
+                end, "default")
+                local first = co:resume("out", nil)
+                local second = co:resume("in", nil)
+                return (first as string) .. ":" .. (second as string)
+            end
+
+            function override_resume(): string
+                local co = coro.create(function (arg: value): value
+                    local got = coro.yield(arg, "override")
+                    return got
+                end, "default")
+                local first = co:resume("out", "override")
+                local second = co:resume("in", "override")
+                return (first as string) .. ":" .. (second as string)
+            end
+
+            function default_error(): string
+                local co = coro.create(function (arg: value): value
+                    do
+                        coro.yield("ready", "default")
+                    catch
+                        return "caught:" .. (error as string)
+                    end
+                    return "missed"
+                end, "default")
+                local first = co:resume(nil, nil)
+                local second = co:error("oops", nil)
+                return (first as string) .. ":" .. (second as string)
+            end
+
+            function override_error(): string
+                local co = coro.create(function (arg: value): value
+                    do
+                        coro.yield("ready", "override")
+                    catch
+                        return "caught:" .. (error as string)
+                    end
+                    return "missed"
+                end, "default")
+                local first = co:resume(nil, "override")
+                local second = co:error("oops", "override")
+                return (first as string) .. ":" .. (second as string)
+            end
+        ]], [==[
+            assert(test.default_resume() == "out:in")
+            assert(test.override_resume() == "out:in")
+            assert(test.default_error() == "ready:caught:oops")
+            assert(test.override_error() == "ready:caught:oops")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("reports running and normal statuses through the Titan wrapper", function()
+        local out = run_lua([==[
+            local coro = require "coro"
+
+            local a
+            local b
+            b = coro.create(function()
+                assert(a:status() == "normal")
+                assert(b:status() == "running")
+                return "ok"
+            end, "b")
+            a = coro.create(function()
+                return b:resume(nil, "b")
+            end, "a")
+
+            assert(a:resume(nil, "a") == "ok")
+            assert(a:status() == "dead")
+            assert(b:status() == "dead")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
     it("rejects unmatched raw tags without calling __eq", function()
         local out = run_lua([==[
             local coro = require "coro"
@@ -236,6 +320,77 @@ describe("coro standard module", function()
         assert.match("OK", out)
     end)
 
+    it("injects errors through a nested stacked yield", function()
+        local out = compile_and_run([[
+            local coro = import "coro"
+
+            function run(): string
+                local tag_main: value = "main"
+                local tag_a: value = "a"
+                local b = coro.create(function (arg: value): value
+                    do
+                        coro.yield("from-b", tag_main)
+                    catch
+                        return "b-caught:" .. (error as string)
+                    end
+                    return "b-missed"
+                end, tag_a)
+                local a = coro.create(function (arg: value): value
+                    local got = b:resume("to-b")
+                    return "a:" .. (got as string)
+                end, tag_main)
+                local first = a:resume("start", tag_main)
+                local second = a:error("oops", tag_main)
+                return (first as string) .. "," .. (second as string) ..
+                    "," .. a:status() .. "/" .. b:status()
+            end
+        ]], [==[
+            assert(test.run() == "from-b,a:b-caught:oops,dead/dead")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("preserves traces for uncaught errors through a nested stacked yield", function()
+        local out = compile_and_run([[
+            local coro = import "coro"
+
+            nested_main_tag: value = nil
+            nested_a_tag: value = nil
+
+            function nested_fail_body(arg: value): value
+                coro.yield("from-b", nested_main_tag)
+                return "missed"
+            end
+
+            function nested_uncaught(): value
+                nested_main_tag = "main"
+                nested_a_tag = "a"
+                local b = coro.create(nested_fail_body, nested_a_tag)
+                local a = coro.create(function (arg: value): value
+                    local got = b:resume("to-b")
+                    return "a:" .. (got as string)
+                end, nested_main_tag)
+                local first = a:resume("start", nested_main_tag)
+                if (first as string) ~= "from-b" then
+                    raise "bad first"
+                end
+                return a:error("oops", nested_main_tag)
+            end
+        ]], [==[
+            local titan = require 'titan'
+            local ok, err = pcall(test.nested_uncaught)
+            assert(not ok and err == "oops")
+            local bt = titan.backtrace()
+            assert(bt:find("in test.nested_fail_body", 1, true),
+                   "missing nested coroutine frame\n" .. tostring(bt))
+            assert(bt:find("in test.nested_uncaught", 1, true),
+                   "missing propagation frame\n" .. tostring(bt))
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
     it("rejects direct resume of a stacked coroutine at the Titan wrapper", function()
         local out = compile_and_run([[
             local coro = import "coro"
@@ -273,12 +428,43 @@ describe("coro standard module", function()
         assert.match("OK", out)
     end)
 
+    it("round-trips nil yield, resume, and return payloads", function()
+        local out = compile_and_run([[
+            local coro = import "coro"
+
+            function run(): boolean
+                local co = coro.create(function (arg: value): value
+                    if arg ~= nil then
+                        raise "initial arg was not nil"
+                    end
+                    local got = coro.yield(nil, "tag")
+                    if got ~= nil then
+                        raise "resume arg was not nil"
+                    end
+                    return nil
+                end, "tag")
+                local first = co:resume(nil)
+                local second = co:resume(nil)
+                return first == nil and second == nil and co:status() == "dead"
+            end
+        ]], [==[
+            assert(test.run() == true)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
     it("preserves callback traces and injects errors into a suspended yield", function()
         local out = compile_and_run([[
             local coro = import "coro"
 
             function fail(): value
                 raise "boom"
+                return nil
+            end
+
+            function fresh_fail(): value
+                raise "fresh"
                 return nil
             end
 
@@ -291,10 +477,13 @@ describe("coro standard module", function()
                 return co:resume(nil)
             end
 
+            injected_trace: value = nil
+
             function catcher(arg: value): value
                 do
                     coro.yield("ready", "tag")
                 catch
+                    injected_trace = traceback
                     return "caught:" .. (error as string)
                 end
                 return "missed"
@@ -307,6 +496,10 @@ describe("coro standard module", function()
                 return (first as string) .. "," .. (second as string) ..
                     "," .. co:status()
             end
+
+            function injected_backtrace(): value
+                return injected_trace
+            end
         ]], [==[
             local titan = require 'titan'
             local ok, err = pcall(test.uncaught)
@@ -314,7 +507,22 @@ describe("coro standard module", function()
             local bt = titan.backtrace()
             assert(bt:find("in test.fail", 1, true),
                    "missing coroutine callback frame\n" .. tostring(bt))
+            assert(bt:find("in test.uncaught", 1, true),
+                   "missing propagation frame\n" .. tostring(bt))
             assert(test.inject() == "ready,caught:oops,dead")
+            local injected = test.injected_backtrace()
+            assert(injected:find("in test.catcher", 1, true),
+                   "missing injected yield frame\n" .. tostring(injected))
+            assert(not injected:find("in test.inject", 1, true),
+                   "yield-side injected error should not append caller propagation\n" ..
+                   tostring(injected))
+            ok, err = pcall(test.fresh_fail)
+            assert(not ok and err == "fresh")
+            local fresh = titan.backtrace()
+            assert(fresh:find("in test.fresh_fail", 1, true),
+                   "fresh trace missing fresh raise\n" .. tostring(fresh))
+            assert(not fresh:find("in test.fail", 1, true),
+                   "fresh trace retained dead coroutine frame\n" .. tostring(fresh))
             print("OK")
         ]==])
         assert.match("OK", out)
@@ -436,6 +644,94 @@ describe("coro standard module", function()
         assert.match("OK", out)
     end)
 
+    it("roots nested stacked payloads and tags across generational GC", function()
+        local out = run_lua([==[
+            local coro = require "coro"
+            collectgarbage("generational")
+
+            local weak = setmetatable({}, { __mode = "v" })
+            local tag_main = {}
+            local tag_a = {}
+            local payload = { name = "payload" }
+            local marker = function(x) return x.name end
+            weak.tag_main = tag_main
+            weak.tag_a = tag_a
+            weak.payload = payload
+            weak.marker = marker
+
+            local b = coro.create(function(arg)
+                assert(arg == weak.payload)
+                local got = coro.yield(weak.marker, weak.tag_main)
+                return got
+            end, tag_a)
+            local a = coro.create(function(arg)
+                return b:resume(arg, weak.tag_a)
+            end, tag_main)
+
+            assert(a:resume(payload, tag_main) == marker)
+            tag_main = nil
+            tag_a = nil
+            payload = nil
+            marker = nil
+
+            for _ = 1, 80 do collectgarbage("step") end
+            assert(weak.tag_main ~= nil)
+            assert(weak.tag_a ~= nil)
+            assert(weak.payload ~= nil)
+            assert(weak.marker ~= nil)
+            assert(a:status() == "suspended")
+            assert(b:status() == "stacked")
+
+            local response = { name = "response" }
+            assert(a:resume(response, weak.tag_main) == response)
+            assert(a:status() == "dead")
+            assert(b:status() == "dead")
+
+            collectgarbage("incremental")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("abandons stacked coroutines when their suspended handler is collected", function()
+        local out = run_lua([==[
+            local coro = require "coro"
+            collectgarbage("generational")
+
+            local tag_main = {}
+            local tag_b = {}
+            local stacked
+
+            do
+                local a = coro.create(function()
+                    local b = coro.create(function()
+                        return coro.yield("from-b", tag_main)
+                    end, tag_b)
+                    stacked = b
+                    return b:resume(nil, tag_b)
+                end, tag_main)
+
+                assert(a:resume(nil, tag_main) == "from-b")
+                assert(a:status() == "suspended")
+                assert(stacked:status() == "stacked")
+                a = nil
+            end
+
+            for _ = 1, 4 do collectgarbage("collect") end
+            assert(stacked:status() == "dead", stacked:status())
+            local ok, err = pcall(function()
+                stacked:resume(nil, tag_b)
+            end)
+            assert(not ok, "abandoned stacked coroutine should not resume")
+            assert(tostring(err):find("Coroutine not suspended", 1, true),
+                   tostring(err))
+
+            collectgarbage("incremental")
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
     it("loads from Lua and roots value payloads and identity tags across GC", function()
         local out = run_lua([==[
             local coro = require "coro"
@@ -496,6 +792,10 @@ describe("coro standard module", function()
             fails(function()
                 coro.yield("payload")
             end, "must provide non-nil tag")
+
+            fails(function()
+                coro.yield("payload", "tag")
+            end, "Invalid coroutine")
 
             local co = coro.create(function()
                 return "done"

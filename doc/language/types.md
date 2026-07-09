@@ -206,9 +206,12 @@ comparisons, and as the precondition of explicit `as` casts. The rules:
 5. C FFI compatibility is exact except for the boundary conversions documented
    in [the FFI](ffi.md): C integers with `integer`, C floats with `float`,
    Titan `integer`/`float` with C floats, nullable C pointers with `nil`, C
-   arrays and counted owned C arrays with compatible pointers, any C pointer
-   with `void *`, Titan `string` with C `char *`/`void *`, and boxable C values
-   with `value`. C `char *`/`void *` to Titan `string` is explicit-cast-only.
+   arrays and counted owned C arrays with compatible pointers, non-function C
+   object pointers with `void *`, non-pointer by-value C object expressions with
+   compatible `const *T` parameters, mutable non-pointer C locals/formals with
+   compatible mutable pointer parameters, Titan `string` with C `char *`/`void
+   *`, C `TValue` with Titan `value`, and boxable C values with `value`. C
+   `char *`/`void *` to Titan `string` is explicit-cast-only.
 
 When two types are merely compatible — related through `value` inside a
 compound type rather than by a direct coercion — **no conversion happens
@@ -264,9 +267,13 @@ the value does not conform.
 | `nil` | C pointer | no — becomes `NULL` |
 | C array or counted owned C array | compatible C pointer | no |
 | C pointer | `void *` | no |
+| non-pointer C object expression | compatible `const *T` or `const void *` | no (FFI calls; materializes the address for the call) |
+| mutable non-pointer C local or formal | compatible `*T` or `void *` | no (FFI calls; C may write through the pointer) |
 | `string` | C `char *` or `void *` | no (FFI only) |
 | C integer, C float, C pointer, C array-as-pointer, or owned C userdata | `value` | no |
 | `value` | C integer, C float, C pointer, C array-as-pointer, or owned C userdata | yes — checked against the target C representation |
+| C `TValue` | `value` | no |
+| `value` | C `TValue` | no |
 
 Notes on the entries a Lua programmer might not expect:
 
@@ -460,15 +467,16 @@ not wider: a cast must relate types that are both coercible **and** compatible,
 with a few FFI-only explicit conversions. For pure Titan types this mostly means
 the conversions involving the dynamic type — `e as value` (always succeeds) and
 `e as t` for a `value`-typed `e` (run-time checked, for any `t`). Identity casts
-are still rejected, and ordinary numeric/option conversions such as
+are accepted as no-ops. Ordinary numeric/option conversions such as
 `integer -> float` or `t -> t?` are normally requested by placing the expression
 in a context that expects the target type.
 
 For C FFI types, regular `as <type>` is also the explicit cast mechanism:
 C integers can be cast to `integer`, C floats can be cast to `float`, Titan
 `integer` can be cast to C integers, Titan `integer`/`float` can be cast to C
-floats, boxable C values can cross through `value`, and C `char *` / `void *`
-can be cast to `string` (copying bytes up to the first `\0` and raising if the
-pointer is `NULL`). There is no separate FFI cast form.
+floats, C numeric types can be explicitly cast among themselves, boxable C values
+can cross through `value`, C `TValue` can cross to/from Titan `value`, and C
+`char *` / `void *` can be cast to `string` (copying bytes up to the first `\0`
+and raising if the pointer is `NULL`). There is no separate FFI cast form.
 Full details and examples are in [Expressions](expressions.md) and
 [The C FFI](ffi.md).
