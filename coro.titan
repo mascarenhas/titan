@@ -229,7 +229,7 @@ function create(func: (value) -> value, default_tag: value): Coro
 
   local desc = mco.mco_desc_init(nil, STACK_SIZE)
   desc.func = coro.titan_coro_entry
-  desc.user_data = lua.lua_topointer(L, -1) as ffi.titan_ffi_void_ptr
+  desc.user_data = lua.lua_topointer(L, -1)
 
   local res = mco.mco_create(slot, desc)
   if res as integer ~= mco.MCO_SUCCESS as integer then

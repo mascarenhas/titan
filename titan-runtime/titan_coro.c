@@ -14,7 +14,7 @@ int titan_coro_tag_equal(void *t1, void *t2) {
 }
 
 void titan_coro_entry(mco_coro *co) {
-  Udata *ud = mco_get_user_data(co);
+  const Udata *ud = mco_get_user_data(co);
   lua_State *T = gco2th(ud->uv[0].uv.value_.gc);
   TValue coro_entry = ud->uv[2].uv;
   TValue f = ud->uv[3].uv;
