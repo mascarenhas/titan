@@ -149,7 +149,7 @@ they are in the roadmap:
 ## Next
 
 * for-in construct for iterators (`next`, `next,state`, `next,state,start`)
-* minimal standard library (expose Lua tostring/tonumber, file/socket IO using libuv, string library, math library, load/run Lua code)
+* minimal standard library (string library including tostring, math library including tonumber, file/socket IO using libuv, lua library to load/run Lua code)
 * FFI with C, continued (function pointers, callbacks from C into Titan, owned structs with flexible array members)
 * tagged variants (unions of records with some syntax for switch/case on the record tag)
 * parametric polymorphism (via type erasure and boxed values)
