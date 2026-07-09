@@ -223,13 +223,13 @@ function create(func: (value) -> value, default_tag: value): Coro
   lua.lua_setiuservalue(L, -2, 2)
   ffi.lua_pushtvalue(L, coro_entry)
   lua.lua_setiuservalue(L, -2, 3)
-  ffi.lua_pushtvalue(T, func)
+  ffi.lua_pushtvalue(L, func)
   lua.lua_setiuservalue(L, -2, 4)
   lual.luaL_setmetatable(L, "titan.coro")
 
   local desc = mco.mco_desc_init(nil, STACK_SIZE)
   desc.func = coro.titan_coro_entry
-  desc.user_data = lua.lua_topointer(L, -1)
+  desc.user_data = ffi.lua_togco(L, -1)
 
   local res = mco.mco_create(slot, desc)
   if res as integer ~= mco.MCO_SUCCESS as integer then

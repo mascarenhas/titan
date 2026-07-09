@@ -296,7 +296,7 @@ struct mco_coro {
   mco_coro* prev_co;
   void* active_tag;
   mco_coro* stacked_co;
-  const void* user_data;
+  void* user_data;
   size_t coro_size;
   void* allocator_data;
   void (*dealloc_cb)(void* ptr, size_t size, void* allocator_data);
@@ -314,7 +314,7 @@ struct mco_coro {
 /* Structure used to initialize a coroutine. */
 typedef struct mco_desc {
   void (*func)(mco_coro* co); /* Entry point function for the coroutine. */
-  const void* user_data;            /* Coroutine user data, can be get with `mco_get_user_data`. */
+  void* user_data;            /* Coroutine user data, can be get with `mco_get_user_data`. */
   /* Custom allocation interface. */
   void* (*alloc_cb)(size_t size, void* allocator_data); /* Custom allocation function. */
   void  (*dealloc_cb)(void* ptr, size_t size, void* allocator_data);     /* Custom deallocation function. */
@@ -336,7 +336,7 @@ MCO_API mco_result mco_resume(mco_coro* co, void* tag);                         
 MCO_API mco_result mco_yield(mco_coro* co, void* tag);                          /* Suspends the execution of a coroutine. */
 MCO_API int mco_is_yieldable(mco_coro* co, void* tag);
 MCO_API mco_state mco_status(mco_coro* co);                                     /* Returns the status of the coroutine. */
-MCO_API const void* mco_get_user_data(mco_coro* co);                                  /* Get coroutine user data supplied on coroutine creation. */
+MCO_API void* mco_get_user_data(mco_coro* co);                                  /* Get coroutine user data supplied on coroutine creation. */
 
 /* Storage interface functions, used to pass values between yield and resume. */
 MCO_API mco_result mco_push(mco_coro* co, const void* src, size_t len); /* Push bytes to the coroutine storage. Use to send values between yield and resume. */
@@ -1934,7 +1934,7 @@ mco_state mco_status(mco_coro* co) {
   return MCO_DEAD;
 }
 
-const void* mco_get_user_data(mco_coro* co) {
+void* mco_get_user_data(mco_coro* co) {
   if(co != NULL) {
     return co->user_data;
   }

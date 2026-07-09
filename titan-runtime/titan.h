@@ -275,6 +275,7 @@ LUAI_FUNC void titan_invalidate_backtrace_state(lua_State *L);
 
 TValue lua_totvalue(lua_State *L, int idx);
 void lua_pushtvalue(lua_State *L, TValue v);
+void *lua_togco(lua_State *L, int idx);
 
 int errorhandler(lua_State *L);
 

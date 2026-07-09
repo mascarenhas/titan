@@ -720,3 +720,8 @@ void lua_pushtvalue(lua_State *L, TValue v) {
   setobj2s(L, L->top.p, &v);
   L->top.p++;
 }
+
+void *lua_togco(lua_State *L, int idx) {
+  TValue *o = index2value(L, idx);
+  return gcvalue(o);
+}

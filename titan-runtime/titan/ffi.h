@@ -28,5 +28,6 @@ typedef struct Udata Udata;
 
 TValue lua_totvalue(lua_State *L, int idx);
 void lua_pushtvalue(lua_State *L, TValue v);
+void *lua_togco(lua_State *L, int idx);
 
 #endif
