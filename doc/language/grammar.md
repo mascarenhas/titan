@@ -26,7 +26,7 @@ is not a reserved word. Tokenization is longest-match, so `andy`,
 `return17`, and `_end` are names. The reserved words are:
 
 ```
-and     as      boolean  break     catch   const   do      else
+and     as      boolean  break     catch   const   defer  do      else
 elseif  end     false    finally   float   for     foreign function
 goto    if      import   in        integer local   nil     not
 or      raise   record   repeat    return  string  then    true
@@ -274,6 +274,7 @@ statement  ::= ';'
             |  functioncall
             |  break
             |  raise [exp]
+            |  defer statement
 returnstat ::= return [explist] [';']
 varlist    ::= var {',' var}
 explist    ::= exp {',' exp} [',' '...']
@@ -437,21 +438,26 @@ confused rule is not syntax at all:
    A block may have a `catch`, a `finally`, or both in that order; the
    clause bodies are `simpleblock`s so an inner catch cannot consume an
    outer finally.
-4. **`as` does not chain.** `x as integer as float` is a syntax error;
+4. **`defer` cannot directly defer another `defer`.** The grammar
+   production is guarded like `defer !defer statement`, so
+   `defer defer cleanup()` is a syntax error. Use two separate defers for
+   last-in-first-out cleanup, or `defer do ... end` for multiple cleanup
+   statements.
+5. **`as` does not chain.** `x as integer as float` is a syntax error;
    the cast operand is a `simpleexp`, so chaining grammatically
    requires parentheses (`(x as integer) as value`). Which casts are
    then *accepted* is a typing matter ([Expressions](expressions.md)) —
    the checker rejects `(x as integer) as float`, for instance, with
    `cannot cast 'integer' to 'float'`.
-5. **Lvalues cannot be parenthesized.** `(x) = 1` is a syntax error
+6. **Lvalues cannot be parenthesized.** `(x) = 1` is a syntax error
    (`Expected a valid lvalue in the left side of assignment but found
    a regular expression.`).
-6. **Declarations need initializers.** Both module variables and
+7. **Declarations need initializers.** Both module variables and
    `local` statements require `= explist`.
-7. **Parenthesizing a call truncates it.** `(f())` adjusts a
+8. **Parenthesizing a call truncates it.** `(f())` adjusts a
    multiple-value call to exactly its first value, as in Lua. See
    [Functions](functions.md).
-8. **Record constructors needing a type from context is a typing rule,
+9. **Record constructors needing a type from context is a typing rule,
    not a syntax rule.** The grammar places `constructor` wherever any
    expression can go; the *type checker* then requires a named-field
    constructor to appear where the expected record type is known,

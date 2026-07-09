@@ -95,6 +95,10 @@ local errors = {
 
     FinallyBlock = "Expected a block after 'finally'.",
 
+    DeferStatement = "Expected a statement after 'defer'.",
+
+    DeferDefer = "Expected a non-defer statement after 'defer'.",
+
     ExpWhile = "Expected an expression after 'while'.",
 
     DoWhile = "Expected 'do' in while statement.",

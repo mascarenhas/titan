@@ -4,7 +4,7 @@ Titan's statements are a subset of Lua's, with the same surface syntax,
 plus static checking. This chapter covers blocks and scoping, local
 declarations, assignment (including multiple assignment), the control-flow
 statements (`if`, `while`, `repeat`, numeric `for`, and generic
-`for ... in`), function calls in statement position, `raise`, and
+`for ... in`), function calls in statement position, `defer`, `raise`, and
 `return`. For the expressions that appear inside statements see
 [Expressions](expressions.md); for the typing rules they trigger see
 [The type system](types.md); for the full statement grammar see
@@ -453,6 +453,66 @@ bare `raise` is a compile-time error. `raise` always terminates the
 current control-flow path, like `return` for the purpose of checking that
 a function with return values always returns. Full propagation and
 `finally` semantics are in [Error handling](error-handling.md).
+
+## `defer`
+
+`defer <statement>` schedules a statement to run when the rest of the
+current statement-list finishes. It is equivalent to wrapping the rest of
+that `simpleblock` in a `do ... finally ... end` block:
+
+```lua
+defer cleanup()
+body()
+return result()
+```
+
+behaves like:
+
+```lua
+do
+    body()
+    return result()
+finally
+    cleanup()
+end
+```
+
+The deferred statement runs on normal fallthrough, `return`, `break`, or
+a propagating error. If the deferred statement raises, that new error
+overrides the pending action exactly like a `finally` raise. Return values
+are evaluated before the deferred statement runs, so cleanup side effects
+do not change already-saved return values.
+
+Multiple defers in the same block run in last-in-first-out order:
+
+```lua
+defer first()
+defer second()
+work()
+-- execution order on exit: work, second, first
+```
+
+The deferred statement is checked in the scope where the `defer` appears.
+It can read and assign locals that are already in scope, but it cannot see
+locals declared later in the rest of the block. A `defer` inside a loop
+body is installed for that iteration's body and runs before the iteration
+leaves the body.
+
+The statement after `defer` may not itself be another `defer` statement.
+Write two separate defers for LIFO cleanup, or use `defer do ... end` to
+defer multiple statements:
+
+```lua
+defer do
+    flush()
+    close()
+end
+```
+
+Because `defer` lowers to `finally`, the same control-transfer limits
+apply to the deferred statement: it may not `return`, and a `break` inside
+it may only target a loop written inside that deferred statement. See the
+full [Defer](defer.md) chapter for details.
 
 ## `return`
 

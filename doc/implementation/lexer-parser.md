@@ -33,7 +33,7 @@ synonym rules, `NEG <- SUB` and `BNEG <- BXOR`, let unary minus and unary
 `~` reuse the `-` and `~` tokens.
 
 A few tokens get the whitespace wrapper even when they are rarely used.
-`break`, `in`, and `DOTS` (`...`) are real syntax; `goto` and `DBLCOLON`
+`break`, `defer`, `in`, and `DOTS` (`...`) are real syntax; `goto` and `DBLCOLON`
 (`::`) remain reserved/recognized but unused, so there is no `goto`
 statement or label syntax.
 
