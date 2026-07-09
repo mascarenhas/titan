@@ -132,6 +132,42 @@ function defs.trywrap(pos, block, catchblock, finallyblock)
     return ast.StatTry(pos, block, catchblock, finallyblock)
 end
 
+function defs.deferstat(pos, stat)
+    return {
+        _tag = "Parser.Defer",
+        loc = pos,
+        stat = stat
+    }
+end
+
+local function lower_defers(stats)
+    local lowered = {}
+    for i, stat in ipairs(stats) do
+        if stat._tag == "Parser.Defer" then
+            local rest = {}
+            for j = i + 1, #stats do
+                table.insert(rest, stats[j])
+            end
+            local tail = ast.StatBlock(stat.loc, lower_defers(rest))
+            tail._defer_tail = true
+            local trynode = ast.StatTry(stat.loc,
+                tail,
+                false,
+                ast.StatBlock(stat.stat.loc, { stat.stat }))
+            trynode._defer_tail = true
+            table.insert(lowered, trynode)
+            break
+        else
+            table.insert(lowered, stat)
+        end
+    end
+    return lowered
+end
+
+function defs.simpleblock(pos, stats)
+    return ast.StatBlock(pos, lower_defers(stats))
+end
+
 function defs.cptrtype(pos, subtype)
     return ast.TypeCPointer(pos, subtype, false)
 end
@@ -554,11 +590,12 @@ local grammar = re.compile([[
                             ((CATCH simpleblock^CatchBlock)? -> opt)
                             ((FINALLY simpleblock^FinallyBlock)? -> opt)) -> trywrap
 
-    simpleblock     <- (P  {| statement* returnstat? |})         -> StatBlock
+    simpleblock     <- (P  {| statement* returnstat? |})         -> simpleblock
 
     statement       <- (SEMICOLON)                               -- ignore
                      / (P  BREAK)                                -> StatBreak
                      / (P  RAISE (exp? -> opt))                  -> StatRaise
+                     / deferstat
                      / doblock                                   -- produces StatBlock
                      / (P  WHILE exp^ExpWhile DO^DoWhile
                                  block END^EndWhile)             -> StatWhile
@@ -574,6 +611,10 @@ local grammar = re.compile([[
                      / &(exp ASSIGN) %{AssignNotLValue}
 	                     / (P  (suffixedexp => exp_is_call))         -> StatCall
 	                     / &exp %{ExpStat}
+
+    deferstat       <- (P  DEFER (!DEFER / %{DeferDefer})
+                              (!SEMICOLON / %{DeferStatement})
+                              statement^DeferStatement)          -> deferstat
 
 	    forstat         <- (P  FOR decl^DeclFor forrest)          -> forstat
 
@@ -720,6 +761,7 @@ local grammar = re.compile([[
 
     AND             <- %AND SKIP*
     BREAK           <- %BREAK SKIP*
+    DEFER           <- %DEFER SKIP*
     DO              <- %DO SKIP*
     ELSE            <- %ELSE SKIP*
     ELSEIF          <- %ELSEIF SKIP*

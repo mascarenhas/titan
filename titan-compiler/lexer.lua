@@ -166,7 +166,7 @@ lexer.COMMENT = long_comment + short_comment
 local idrest  = P("_") + R("AZ", "az", "09")
 
 local keywords = {
-    "and", "break", "do", "else", "elseif", "end", "for", "false",
+    "and", "break", "defer", "do", "else", "elseif", "end", "for", "false",
     "function", "goto", "if", "in", "local", "nil", "not", "or",
     "repeat", "return", "then", "true", "until", "while", "import",
     "record", "as", "foreign", "catch", "finally", "raise", "const",

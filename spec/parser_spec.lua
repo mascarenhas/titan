@@ -2198,5 +2198,131 @@ describe("Titan parser", function()
                   finallyblock = { _tag = "Ast.StatBlock" } }
             })
         end)
+
+        it("lowers `defer <statement>` over the rest of its simpleblock", function()
+            assert_statements_ast([[
+                local x = 1
+                defer cleanup()
+                x = 2
+                return
+            ]], {
+                { _tag = "Ast.StatDecl" },
+                { _tag = "Ast.StatTry",
+                  block = {
+                      _tag = "Ast.StatBlock",
+                      stats = {
+                          { _tag = "Ast.StatAssign" },
+                          { _tag = "Ast.StatReturn" }
+                      }
+                  },
+                  catchblock = false,
+                  finallyblock = {
+                      _tag = "Ast.StatBlock",
+                      stats = {
+                          { _tag = "Ast.StatCall",
+                            callexp = {
+                                _tag = "Ast.ExpCall",
+                                exp = {
+                                    _tag = "Ast.ExpVar",
+                                    var = { _tag = "Ast.VarName", name = "cleanup" }
+                                }
+                            } }
+                      }
+                  } }
+            })
+        end)
+
+        it("lowers multiple defers into nested finally blocks", function()
+            assert_statements_ast([[
+                defer first()
+                defer second()
+                work()
+            ]], {
+                { _tag = "Ast.StatTry",
+                  block = {
+                      _tag = "Ast.StatBlock",
+                      stats = {
+                          { _tag = "Ast.StatTry",
+                            block = {
+                                _tag = "Ast.StatBlock",
+                                stats = {
+                                    { _tag = "Ast.StatCall",
+                                      callexp = {
+                                          _tag = "Ast.ExpCall",
+                                          exp = {
+                                              _tag = "Ast.ExpVar",
+                                              var = { _tag = "Ast.VarName", name = "work" }
+                                          }
+                                      } }
+                                }
+                            },
+                            finallyblock = {
+                                _tag = "Ast.StatBlock",
+                                stats = {
+                                    { _tag = "Ast.StatCall",
+                                      callexp = {
+                                          _tag = "Ast.ExpCall",
+                                          exp = {
+                                              _tag = "Ast.ExpVar",
+                                              var = { _tag = "Ast.VarName", name = "second" }
+                                          }
+                                      } }
+                                }
+                            } }
+                      }
+                  },
+                  finallyblock = {
+                      _tag = "Ast.StatBlock",
+                      stats = {
+                          { _tag = "Ast.StatCall",
+                            callexp = {
+                                _tag = "Ast.ExpCall",
+                                exp = {
+                                    _tag = "Ast.ExpVar",
+                                    var = { _tag = "Ast.VarName", name = "first" }
+                                }
+                            } }
+                      }
+                  } }
+            })
+        end)
+
+        it("allows `defer do ... end` as a multi-statement cleanup", function()
+            assert_statements_ast([[
+                defer do
+                    first()
+                    second()
+                end
+                work()
+            ]], {
+                { _tag = "Ast.StatTry",
+                  finallyblock = {
+                      _tag = "Ast.StatBlock",
+                      stats = {
+                          { _tag = "Ast.StatBlock",
+                            stats = {
+                                { _tag = "Ast.StatCall" },
+                                { _tag = "Ast.StatCall" }
+                            } }
+                      }
+                  } }
+            })
+        end)
+
+        it("rejects directly deferring another defer statement", function()
+            assert_program_syntax_error([[
+                function f(): nil
+                    defer defer cleanup()
+                end
+            ]], "DeferDefer")
+        end)
+
+        it("rejects deferring an empty semicolon statement", function()
+            assert_program_syntax_error([[
+                function f(): nil
+                    defer ;
+                end
+            ]], "DeferStatement")
+        end)
     end)
 end)
