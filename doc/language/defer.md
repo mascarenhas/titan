@@ -89,6 +89,10 @@ defer use(later)   -- compile-time error
 local later = 2
 ```
 
+In a `repeat ... until` loop, the `until` condition still has Titan's
+normal repeat-loop scope: it can see locals declared in the body after the
+`defer`.
+
 ## Multiple Cleanup Statements
 
 The grammar accepts exactly one statement after `defer`. Use a `do` block

@@ -65,4 +65,30 @@ describe("defer statement (typechecker)", function()
             end
         ]])
     end)
+
+    it("keeps repeat until conditions in scope of locals declared after defer", function()
+        ok([[
+            function f(): nil
+                repeat
+                    defer nop(1)
+                    local done = true
+                until done
+            end
+        ]])
+    end)
+
+    it("does not let repeat cleanup see locals declared after defer", function()
+        bad("variable 'done' not declared", [[
+            function f(): nil
+                repeat
+                    defer do
+                        if done then
+                            nop(1)
+                        end
+                    end
+                    local done = true
+                until done
+            end
+        ]])
+    end)
 end)

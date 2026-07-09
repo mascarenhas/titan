@@ -1694,6 +1694,13 @@ local function codeblock(ctx, node)
     return " {\n " .. table.concat(stats, "\n ") .. "\n }"
 end
 
+local function codetransparentblock(ctx, node)
+    push_spillscope(ctx)
+    local stats = codestats(ctx, node.stats)
+    pop_spillscope(ctx)
+    return table.concat(stats, "\n")
+end
+
 -- Open a loop frame (#3): if the loop body contains a try, allocate a save id so
 -- a `break` crossing that try boundary can restore the loop-entry errorjmp/nC.
 -- Returns the frame; the caller must `close_loop` after coding the body, then
@@ -3887,7 +3894,9 @@ local function codetry(ctx, node)
     -- instead (codereturn / the StatBreak arm consult ctx.finally_stack first).
     ctx.try_depth = (ctx.try_depth or 0) + 1
     push_boundary(ctx, tostring(id))
-    local cbody = codestat(ctx, node.block)
+    local cbody = node.block._defer_tail
+        and codetransparentblock(ctx, node.block)
+        or codestat(ctx, node.block)
     pop_boundary(ctx)
     ctx.try_depth = ctx.try_depth - 1
 
@@ -4001,24 +4010,44 @@ local function codetry(ctx, node)
     local dispatch = dispatch_after_finally(ctx, pa_var, ret_saves,
         d_pa_err, d_pa_tb)
 
-    return render([[
-        {
+    local tmpl
+    if node._defer_tail then
+        tmpl = [[
             int $PA = $PANONE;
             $RETDECLS
-            {
-                $SAVE
-                    $CBODY
-                $RECOVER
-                    $CATCHARM
-                }
+            $SAVE
+                $CBODY
+            $RECOVER
+                $CATCHARM
             }
             $FINLABEL
             $CFINALLY
             /* dispatch the pending action (if-chain — never a C switch, which
             ** would capture the PA_BREAK arm's `break`) */
             $DISPATCH
-        }
-    ]], {
+        ]]
+    else
+        tmpl = [[
+            {
+                int $PA = $PANONE;
+                $RETDECLS
+                {
+                    $SAVE
+                        $CBODY
+                    $RECOVER
+                        $CATCHARM
+                    }
+                }
+                $FINLABEL
+                $CFINALLY
+                /* dispatch the pending action (if-chain — never a C switch, which
+                ** would capture the PA_BREAK arm's `break`) */
+                $DISPATCH
+            }
+        ]]
+    end
+
+    return render(tmpl, {
         PA = pa_var,
         PANONE = PA_NONE,
         RETDECLS = ret_decls,
@@ -4087,6 +4116,33 @@ local function code_hidden_result_decls(ctx, decls)
         table.insert(out, cvardecl(ctx, typ, decl._cvar)
             .. " = " .. initval(typ) .. ";")
     end
+    return table.concat(out, "\n")
+end
+
+local function predeclare_defer_tail(ctx, block)
+    local out = {}
+    local function visit_block(b)
+        for _, stat in ipairs(b.stats) do
+            if stat._tag == "Ast.StatDecl" then
+                for _, decl in ipairs(stat.decls) do
+                    if decl._used and not (decl._captured and decl._assigned)
+                       and not decl._defer_tail_predeclared then
+                        decl._cvar = "_local_" .. localname(ctx, decl.name)
+                        decl._defer_tail_predeclared = true
+                        table.insert(out, cvardecl(ctx, decl._type, decl._cvar) .. ";")
+                        local spill = spill_decl_zero(ctx, decl)
+                        if spill ~= "" then
+                            decl._defer_tail_spill_predeclared = true
+                            table.insert(out, spill)
+                        end
+                    end
+                end
+            elseif stat._tag == "Ast.StatTry" and stat._defer_tail then
+                visit_block(stat.block)
+            end
+        end
+    end
+    visit_block(block)
     return table.concat(out, "\n")
 end
 
@@ -4241,11 +4297,15 @@ local function codestat_dispatch(ctx, node)
                 }))
             elseif decl._used then
                 local typ = decl._type
-                decl._cvar = "_local_" .. localname(ctx, decl.name)
-                local cdecl = cvardecl(ctx, typ, decl._cvar) .. ";"
+                if not decl._cvar then
+                    decl._cvar = "_local_" .. localname(ctx, decl.name)
+                end
+                local cdecl = decl._defer_tail_predeclared
+                    and "" or cvardecl(ctx, typ, decl._cvar) .. ";"
                 local cslot = ""
                 local cset = ""
-                local cspilldecl = spill_decl_zero(ctx, decl)
+                local cspilldecl = decl._defer_tail_spill_predeclared
+                    and "" or spill_decl_zero(ctx, decl)
                 local cspillset = spill_update(decl)
                 if types.is_gc(typ) then
                     decl._slot = newslot(ctx)
@@ -4345,7 +4405,10 @@ local function codestat_dispatch(ctx, node)
     elseif tag == "Ast.StatRaise" then
         return coderaise(ctx, node)
     elseif tag == "Ast.StatTry" then
-        return codetry(ctx, node)
+        local predecls = node._defer_tail and predeclare_defer_tail(ctx, node.block) or ""
+        local trycode = codetry(ctx, node)
+        if predecls == "" then return trycode end
+        return predecls .. "\n" .. trycode
     else
         error("invalid node tag " .. tag)
     end

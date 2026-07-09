@@ -1140,6 +1140,14 @@ local function checkblock(node, st, errors)
     return ret
 end
 
+local function copy_block(block)
+    local copy = {}
+    for name, decl in pairs(block) do
+        copy[name] = decl
+    end
+    return copy
+end
+
 -- Typechecks a statement or declaration
 --   node: A DeclDecl or Stat_* AST node
 --   st: symbol table
@@ -1372,7 +1380,22 @@ checkstat = util.make_visitor({
         -- SIBLING scopes, not nested: a body local may be undeclared when the
         -- error fires, so it must not be visible in catch/finally. Check each in
         -- its own block, closing the previous one first.
-        local bret = st:with_block(checkstat, node.block, st, errors)
+        local saved_block_index, saved_body_block
+        local bret
+        if node._defer_tail then
+            -- Parser-lowered `defer` protects the rest of the same simpleblock.
+            -- A `repeat ... until` condition is scoped with its body, so locals
+            -- declared in that tail must remain visible after the synthetic try.
+            -- They must still be hidden from the cleanup itself, which is checked
+            -- as the sibling `finally` below.
+            saved_block_index = #st.blocks
+            local before_body = copy_block(st.blocks[saved_block_index])
+            bret = checkblock(node.block, st, errors)
+            saved_body_block = st.blocks[saved_block_index]
+            st.blocks[saved_block_index] = before_body
+        else
+            bret = st:with_block(checkstat, node.block, st, errors)
+        end
 
         local cret = false
         if node.catchblock then
@@ -1414,6 +1437,10 @@ checkstat = util.make_visitor({
             finally_loop_floor = saved_floor
             in_finally = in_finally - 1
             st:close_block()
+        end
+
+        if saved_body_block then
+            st.blocks[saved_block_index] = saved_body_block
         end
 
         -- Always-returns (B.2): the construct returns on every path iff the

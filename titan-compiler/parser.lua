@@ -148,10 +148,14 @@ local function lower_defers(stats)
             for j = i + 1, #stats do
                 table.insert(rest, stats[j])
             end
-            table.insert(lowered, ast.StatTry(stat.loc,
-                ast.StatBlock(stat.loc, lower_defers(rest)),
+            local tail = ast.StatBlock(stat.loc, lower_defers(rest))
+            tail._defer_tail = true
+            local trynode = ast.StatTry(stat.loc,
+                tail,
                 false,
-                ast.StatBlock(stat.stat.loc, { stat.stat })))
+                ast.StatBlock(stat.stat.loc, { stat.stat }))
+            trynode._defer_tail = true
+            table.insert(lowered, trynode)
             break
         else
             table.insert(lowered, stat)

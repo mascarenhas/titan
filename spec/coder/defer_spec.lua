@@ -119,4 +119,22 @@ describe("defer statement (code generator)", function()
         ]==])
         assert.match("OK", out)
     end)
+
+    it("keeps repeat until conditions in C scope of locals declared after defer", function()
+        local out = compile_and_run([[
+            function run(): integer
+                local n = 0
+                repeat
+                    defer n = n + 10
+                    local done = true
+                    n = n + 1
+                until done
+                return n
+            end
+        ]], [==[
+            assert(test.run() == 11)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
 end)

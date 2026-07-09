@@ -85,22 +85,33 @@ Because the optional final `returnstat` is captured in the same list,
 `defer cleanup(); return x` naturally becomes a pending return through a
 `finally`, not a special return case.
 
+The parser marks the synthetic `StatTry` and its body block as
+`_defer_tail`. That marker is intentionally private to the compiler. It
+lets the checker and coder preserve the surrounding statement-list scope
+for the protected tail, which matters for `repeat ... until`: Titan keeps
+the repeat condition in the body scope, so the condition can reference
+locals declared in the tail after the `defer`.
+
 ## Checker And Code Generator
 
 The checker sees only `StatTry`, so existing `finally` rules define the
 semantics:
 
-* the deferred statement is checked in a sibling `finally` scope, which
-  can see bindings that existed at the defer point but not locals declared
-  in the transformed rest block;
+* the deferred statement is checked in a sibling `finally` scope, with
+  the current block temporarily restored to its defer-point bindings, so
+  cleanup can see bindings that existed at the defer point but not locals
+  declared in the transformed rest block;
 * `return` and finally-escaping `break` are rejected inside deferred
   cleanup;
 * a `raise` in cleanup is allowed and overrides the pending action.
 
-The code generator likewise uses the existing `codetry` path. Normal
-fallthrough, returns, breaks, and raises are recorded as pending actions,
-the synthetic finally block is emitted, and pending action dispatch
-continues exactly as for user-written `finally`.
+The code generator likewise uses the existing `codetry` path. For
+`_defer_tail`, it emits the protected tail and synthetic try boundary
+without the extra C lexical blocks that a user-written `do ... finally`
+would get, preserving any tail locals for a following `repeat` condition.
+Normal fallthrough, returns, breaks, and raises are still recorded as
+pending actions, the synthetic finally block is emitted, and pending
+action dispatch continues exactly as for user-written `finally`.
 
 ## Tests
 
@@ -110,6 +121,7 @@ Keep these tests close when changing the feature:
   parse-time lowering shape, `defer do ... end`, LIFO nesting, and direct
   `defer defer` rejection.
 * `spec/checker/defer_spec.lua` pins defer-point scope and inherited
-  finally control-flow bans.
+  finally control-flow bans, including repeat-condition scope.
 * `spec/coder/defer_spec.lua` pins fallthrough, LIFO execution, return,
-  multi-statement cleanup, and propagated-error cleanup.
+  multi-statement cleanup, propagated-error cleanup, and generated-C
+  scope for repeat conditions.
