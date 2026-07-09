@@ -250,7 +250,8 @@ cannot be forwarded into a C variadic call in v1.
 Foreign functions are not Titan first-class function values. `stdio.printf` can
 be called by name, but it cannot be stored, passed, or returned as a Titan
 function. A foreign function name can, however, be converted to a compatible C
-function pointer type:
+function pointer type. Generic `for ... in` iterator and close slots are also
+such a context when the C signature satisfies the generic-for rules:
 
 ```lua
 local c = foreign import "callbacks.h"

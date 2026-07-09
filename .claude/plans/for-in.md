@@ -17,8 +17,10 @@ next, ctx, init, close
 ```
 
 The loop then repeatedly calls `next`, stops when the first returned value is
-`nil`, binds the visible declarations from the returned values, runs the body,
-and calls `close(ctx)` exactly once when a non-nil close function was supplied.
+`nil` (or `NULL` for a nullable C pointer control), binds the visible
+declarations from the returned values, runs the body, and calls `close` exactly
+once when a non-nil close function was supplied. A close function may take zero
+arguments or the state/context argument.
 
 ## Language semantics
 
@@ -36,22 +38,24 @@ in local declarations and assignments. If fewer than four values are produced,
 the missing slots are filled with `nil`. Extra tuple values are a compile-time
 arity error.
 
-The iterator expression must have a function type. Its return list must contain
-at least one value; the first return is the control value used for termination.
-The first return must be nil-capable and still have a usable present value:
-an option type or `value`. A nil-only first return is rejected because it has no
-base value from which to type the first visible loop declaration.
+The iterator expression must resolve to a callable shape: a function type, a
+`value` coerced to a synthesized function type, or a compatible C
+function-pointer/foreign-function signature. Its return list must contain at
+least one value; the first return is the control value used for termination. The
+first return must be nil-capable and still have a usable present value: an
+option type, `value`, a nullable C pointer, or a raw C `TValue`. A nil-only
+first return is rejected because it has no base value from which to type the
+first visible loop declaration.
 
-The close slot may be statically `nil`, a function value, or a value compatible
-with a function type only when the checker can still prove the call shape. This
-first implementation accepts `nil` and statically typed function values. A
+The close slot may be statically `nil` or one of the same callable shapes. A
 statically `nil` close slot emits no cleanup code. A non-nil close function is
-called once with the state/context argument after the iterator tuple has been
-created and the protected loop region is entered. That protected region includes
-the initial iterator call, all body executions, and update iterator calls, so
-close runs on initial-call failure, update-call failure, normal exhaustion,
-`break`, `return`, and `raise`. If close itself raises, that raise replaces the
-pending action just like an explicit `finally` raise.
+called once after the iterator tuple has been created and the protected loop
+region is entered. The call uses zero arguments when the close type has no
+parameters, otherwise it passes the state/context argument. That protected
+region includes the initial iterator call, all body executions, and update
+iterator calls, so close runs on initial-call failure, update-call failure,
+normal exhaustion, `break`, `return`, and `raise`. If close itself raises, that
+raise replaces the pending action just like an explicit `finally` raise.
 
 ### Iterator calls
 
@@ -155,7 +159,7 @@ as the sentinel.
   - reject extra tuple values;
   - coerce/check missing nils only where the target slot type is known.
 - Validate the iterator function:
-  - must be `Type.Function`;
+  - must be `Type.Function`, `value`, or a C function pointer/foreign function;
   - fixed parameter count must be 0, 1, or 2;
   - first return must exist and be nil-capable.
 - Infer/check state, initial control, and close from the tuple and iterator
@@ -164,12 +168,13 @@ as the sentinel.
   - initial control must match parameter 2 when present;
   - subsequent control uses the non-nil/base control value and must match
     parameter 2 when present;
-  - close must be `nil` or a function accepting the state value. Any close
-    return values are discarded, matching Titan's statement-position calls.
+  - close must be `nil` or a callable accepting zero parameters or the state
+    value. Any close return values are discarded, matching Titan's
+    statement-position calls.
 - Synthesize checked hidden call ASTs for the initial and update iterator calls.
   Reuse the normal `ExpCall`/`ExpExtra` machinery so exact Titan function values,
-  generic Lua-callable values, coercions, and multi-return storage stay on the
-  existing path.
+  generic Lua-callable values, coercions, C function-pointer calls, and
+  multi-return storage stay on the existing path.
 - Elaborate visible declaration initializers from the iterator return tuple.
   The first declaration forces option controls to their base type, while `value`
   controls stay `value`; other declarations follow local declaration rules.
@@ -227,7 +232,9 @@ Checker:
 
 - accepts a one-value tuple and nil-fills state/init/close;
 - accepts a four-value tuple with close;
-- rejects non-function iterators;
+- accepts value and C function-pointer iterators/closers where the synthesized
+  or C signature works;
+- rejects non-callable iterators;
 - rejects iterators with no return value;
 - rejects non-nil-capable first returns and nil-only first returns;
 - rejects too many iterator fixed parameters;
@@ -249,8 +256,11 @@ Coder/runtime:
 - close runs on `raise` before the error propagates;
 - close raise overrides pending `break`, `return`, and body/iterator raises;
 - statically nil close emits no runtime close call;
+- zero-parameter close functions work;
 - exact Titan function-value iterators and generic Lua-callable iterators both
   work where existing call machinery supports them;
+- C function-pointer/foreign-function iterators and closers work where the C
+  signature and nullable control result satisfy the checker;
 - GC-sensitive tests exercise option/string/record iterator values and close
   under incremental and generational collectors where practical.
 - closure tests prove per-iteration captures keep distinct loop values.

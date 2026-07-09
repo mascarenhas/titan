@@ -4041,6 +4041,10 @@ end
 local function forin_is_nil(typ, cexp)
     if typ._tag == "Type.Option" or typ._tag == "Type.Value" then
         return "ttisnil(&" .. cexp .. ")"
+    elseif types.is_c_tvalue(typ) then
+        return "ttisnil(&" .. cexp .. ")"
+    elseif types.resolve_c_typedef(typ)._tag == "Type.CPointer" then
+        return "(" .. cexp .. " == NULL)"
     elseif typ._tag == "Type.Nil" then
         return "1"
     else

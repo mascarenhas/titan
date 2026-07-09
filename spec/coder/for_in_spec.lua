@@ -1,5 +1,20 @@
 local h = require 'spec.support.helpers'
 
+local function with_header(contents, fn)
+    local header = os.tmpname() .. ".h"
+    local f = assert(io.open(header, "w"))
+    f:write(contents)
+    f:close()
+
+    local results = { pcall(fn, header) }
+    os.remove(header)
+    if not results[1] then
+        error(results[2], 0)
+    end
+    table.remove(results, 1)
+    return table.unpack(results)
+end
+
 describe("generic for loops", function()
     setup(function()
         h.reset()
@@ -129,6 +144,31 @@ describe("generic for loops", function()
             end
             return sum + closed
         ]], 14)
+    end)
+
+    it("runs zero-parameter close functions", function()
+        h.run_coder_app([[
+            closed: integer = 0
+
+            function step(_: nil, n: integer): integer?
+                if n >= 2 then
+                    return nil
+                else
+                    return n + 1
+                end
+            end
+
+            function close(): nil
+                closed = closed + 20
+                return nil
+            end
+        ]], [[
+            local sum = 0
+            for x: integer in step, nil, 0, close do
+                sum = sum + x
+            end
+            return sum + closed
+        ]], 23)
     end)
 
     it("runs close when the initial iterator call raises", function()
@@ -293,6 +333,80 @@ describe("generic for loops", function()
                 return nil
             end) == 10)
         ]])
+    end)
+
+    it("coerces value iterator and close slots to zero-parameter callables", function()
+        h.run_coder([[
+            function sum(step: value, closev: value): integer
+                local total = 0
+                for x: integer in step, nil, nil, closev do
+                    total = total + x
+                end
+                return total
+            end
+        ]], [[
+            local i = 0
+            local closed = 0
+            local total = test.sum(function()
+                i = i + 1
+                if i <= 4 then return i end
+                return nil
+            end, function()
+                closed = closed + 1
+            end)
+            assert(total == 10)
+            assert(closed == 1)
+        ]])
+    end)
+
+    it("coerces value iterators using state and initial control values", function()
+        h.run_coder([[
+            function sum(step: value): integer
+                local total = 0
+                for x: integer in step, 4, 0 do
+                    total = total + x
+                end
+                return total
+            end
+        ]], [[
+            assert(test.sum(function(limit, n)
+                if n >= limit then return nil end
+                return n + 1
+            end) == 10)
+        ]])
+    end)
+
+    it("calls foreign functions as iterator and close callables", function()
+        with_header([[
+            typedef int ffi_int;
+            typedef ffi_int *ffi_int_ptr;
+            static int ffi_values[3] = { 2, 4, 8 };
+            static int ffi_index = 0;
+            static int ffi_closed = 0;
+
+            static ffi_int_ptr ffi_next(void) {
+                if (ffi_index >= 3) return 0;
+                return &ffi_values[ffi_index++];
+            }
+
+            static void ffi_close(void) {
+                ffi_closed += 10;
+            }
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                function sum(): integer
+                    local total = 0
+                    for p: c.ffi_int_ptr in c.ffi_next, nil, nil, c.ffi_close do
+                        total = total + (p[0] as integer)
+                    end
+                    return total + (c.ffi_closed as integer)
+                end
+            ]], [[
+                assert(test.sum() == 24)
+            ]])
+        end)
     end)
 
     it("fills state and initial control from a trailing variadic spread", function()

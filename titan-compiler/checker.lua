@@ -782,6 +782,10 @@ local function forin_dots_target(exps)
     local prefix = #exps - 1
     local target = 4
     local ftype = exps[1] and exps[1]._type
+    local cfunc = ftype and c_function_pointer_type(ftype)
+    if cfunc then
+        ftype = c_function_as_function_type(cfunc)
+    end
     if ftype and ftype._tag == "Type.Function" then
         target = math.max(prefix + 1, 1 + math.min(#ftype.params, 2))
         if target > 4 then target = 4 end
@@ -791,6 +795,10 @@ end
 
 local function forin_tuple_slottype(exps, i)
     local ftype = exps[1] and exps[1]._type
+    local cfunc = ftype and c_function_pointer_type(ftype)
+    if cfunc then
+        ftype = c_function_as_function_type(cfunc)
+    end
     if not (ftype and ftype._tag == "Type.Function") then
         return nil
     elseif i == 2 then
@@ -820,11 +828,100 @@ local function check_forin_decl_init(decl, exp, st, errors)
     return exp
 end
 
-local function make_forin_call(loc, iter_decl, args, rettypes)
+local function forin_ftype_from_slot_type(typ)
+    local cfunc = c_function_pointer_type(typ)
+    if cfunc then
+        return c_function_as_function_type(cfunc), cfunc
+    elseif typ._tag == "Type.Function" then
+        return typ, nil
+    end
+end
+
+local function function_type_as_c_pointer(ftype)
+    if #ftype.rettypes > 1 or ftype.varargtype then
+        return nil
+    end
+    local ret = ftype.rettypes[1] or types.CVoid()
+    return types.CPointer(types.CFunction(ftype.params, ret, ftype.vararg, false), {})
+end
+
+local function check_forin_callable_exp(exp, st, errors)
+    if exp._tag == "Ast.ExpVar" and exp.var._tag == "Ast.VarDot" then
+        checkvar(exp.var, st, errors)
+        if exp.var._decl then exp.var._decl._used = true end
+        local ftype = exp.var._type
+        if exp.var.exp and exp.var.exp._type
+           and exp.var.exp._type._tag == "Type.CModule"
+           and ftype._tag == "Type.Function" then
+            local target = function_type_as_c_pointer(ftype)
+            if target then
+                exp._type = target
+                exp._foreign_function_pointer = exp.var.name
+            else
+                exp._type = invalid(errors, exp.loc,
+                    "a foreign (C) function with this signature cannot be used as a generic for callable")
+            end
+            return
+        end
+    end
+    checkexp(exp, st, errors)
+end
+
+local function forin_decl_return_type(decl, index, st, errors)
+    local typ
+    if decl.type then
+        decl._type = decl._type or typefromnode(decl.type, st, errors)
+        typ = decl._type
+    else
+        typ = types.Value()
+    end
+    if index == 1 then
+        return optionize(typ)
+    else
+        return typ
+    end
+end
+
+local function synthesize_forin_iterator_type(node, st, errors)
+    local exps = node.exps
+    local params = {}
+    if exps[3]._type._tag ~= "Type.Nil" then
+        table.insert(params, exps[2]._type)
+        table.insert(params, exps[3]._type)
+    elseif exps[2]._type._tag ~= "Type.Nil" then
+        table.insert(params, exps[2]._type)
+    end
+
+    local rettypes = {}
+    for i, decl in ipairs(node.decls) do
+        table.insert(rettypes, forin_decl_return_type(decl, i, st, errors))
+    end
+    return types.Function(params, rettypes, false, false)
+end
+
+local function synthesize_forin_close_type(exps)
+    local params = {}
+    if exps[2]._type._tag ~= "Type.Nil" then
+        table.insert(params, exps[2]._type)
+    end
+    return types.Function(params, {}, false, false)
+end
+
+local function forin_nil_capable_control(typ)
+    local rtyp = c_resolve(typ)
+    return typ._tag == "Type.Option"
+        or typ._tag == "Type.Value"
+        or typ._tag == "Type.Invalid"
+        or types.is_c_tvalue(typ)
+        or (rtyp and rtyp._tag == "Type.CPointer")
+end
+
+local function make_forin_call(loc, iter_decl, args, rettypes, cfunc)
     local call = ast.ExpCall(loc, hidden_exp(loc, iter_decl),
         ast.ArgsFunc(loc, args))
     call._types = rettypes
     call._type = rettypes[1] or types.Void()
+    call._c_pointer_call = cfunc
     return call
 end
 
@@ -834,7 +931,11 @@ local function checkforin(node, st, errors)
     local dots = lastexp and lastexp._tag == "Ast.ExpDots"
     for i, exp in ipairs(exps) do
         if not (dots and i == #exps) then
-            checkexp(exp, st, errors)
+            if i == 1 or i == 4 then
+                check_forin_callable_exp(exp, st, errors)
+            else
+                checkexp(exp, st, errors)
+            end
         end
     end
     if dots then
@@ -855,14 +956,22 @@ local function checkforin(node, st, errors)
     end
 
     local ftype = exps[1]._type
-    if ftype._tag ~= "Type.Function" then
+    local iter_cfunc
+    if ftype._tag == "Type.Value" then
+        ftype = synthesize_forin_iterator_type(node, st, errors)
+        exps[1] = trycoerce(exps[1], ftype, errors)
+        ftype = exps[1]._type
+    else
+        ftype, iter_cfunc = forin_ftype_from_slot_type(ftype)
+    end
+    if not ftype then
         checker.typeerror(errors, exps[1].loc,
-            "generic for iterator must be a function but found %s",
-            types.tostring(ftype))
+            "generic for iterator must be a function, value, or C function pointer but found %s",
+            types.tostring(exps[1]._type))
         ftype = types.Function({}, { types.Invalid() }, false, false)
     end
 
-    if ftype.varargtype then
+    if ftype.vararg or ftype.varargtype then
         checker.typeerror(errors, exps[1].loc,
             "generic for iterator cannot be variadic")
     end
@@ -880,10 +989,9 @@ local function checkforin(node, st, errors)
         if ctrltype._tag == "Type.Nil" then
             checker.typeerror(errors, exps[1].loc,
                 "generic for iterator control result cannot be nil-only")
-        elseif ctrltype._tag ~= "Type.Option" and ctrltype._tag ~= "Type.Value"
-               and ctrltype._tag ~= "Type.Invalid" then
+        elseif not forin_nil_capable_control(ctrltype) then
             checker.typeerror(errors, exps[1].loc,
-                "generic for iterator control result must be optional or value but found %s",
+                "generic for iterator control result must be optional, value, or a nullable C pointer but found %s",
                 types.tostring(ctrltype))
         end
     end
@@ -900,24 +1008,35 @@ local function checkforin(node, st, errors)
     end
 
     local close_type = exps[4]._type
+    local close_ftype
+    local close_cfunc
     if close_type._tag == "Type.Nil" then
         node._has_close = false
-    elseif close_type._tag == "Type.Function" then
-        local close_ok = true
-        if close_type.varargtype or #close_type.params ~= 1 then
-            checker.typeerror(errors, exps[4].loc,
-                "generic for close function must accept exactly one state argument")
-            close_ok = false
+    else
+        if close_type._tag == "Type.Value" then
+            close_ftype = synthesize_forin_close_type(exps)
+            exps[4] = trycoerce(exps[4], close_ftype, errors)
+            close_type = exps[4]._type
         else
+            close_ftype, close_cfunc = forin_ftype_from_slot_type(close_type)
+        end
+    end
+    if close_ftype then
+        local close_ok = true
+        if close_ftype.vararg or close_ftype.varargtype or #close_ftype.params > 1 then
+            checker.typeerror(errors, exps[4].loc,
+                "generic for close function must accept zero or one state argument")
+            close_ok = false
+        elseif close_ftype.params[1] then
             local state_for_close = exps[2]
-            state_for_close = trycoerce(state_for_close, close_type.params[1], errors)
+            state_for_close = trycoerce(state_for_close, close_ftype.params[1], errors)
             checkmatch("generic for close argument",
-                close_type.params[1], state_for_close._type, errors, exps[2].loc)
+                close_ftype.params[1], state_for_close._type, errors, exps[2].loc)
         end
         node._has_close = close_ok
-    elseif close_type._tag ~= "Type.Invalid" then
+    elseif close_type._tag ~= "Type.Nil" and close_type._tag ~= "Type.Invalid" then
         checker.typeerror(errors, exps[4].loc,
-            "generic for close value must be nil or a function but found %s",
+            "generic for close value must be nil, a function, value, or C function pointer but found %s",
             types.tostring(close_type))
         node._has_close = false
     end
@@ -944,7 +1063,7 @@ local function checkforin(node, st, errors)
     if ftype.params[1] then table.insert(init_args, arg_state()) end
     if ftype.params[2] then table.insert(init_args, arg_init()) end
     node._init_call = make_forin_call(node.loc, node._tuple_decls[1],
-        init_args, ftype.rettypes)
+        init_args, ftype.rettypes, iter_cfunc)
 
     local next_args = {}
     if ftype.params[1] then table.insert(next_args, arg_state()) end
@@ -957,14 +1076,19 @@ local function checkforin(node, st, errors)
         table.insert(next_args, ctrlarg)
     end
     node._next_call = make_forin_call(node.loc, node._tuple_decls[1],
-        next_args, ftype.rettypes)
+        next_args, ftype.rettypes, iter_cfunc)
 
     if node._has_close then
-        local close_arg = hidden_exp(node.loc, node._tuple_decls[2])
-        close_arg = trycoerce(close_arg, close_type.params[1], errors)
+        local close_args = {}
+        if close_ftype.params[1] then
+            local close_arg = hidden_exp(node.loc, node._tuple_decls[2])
+            close_arg = trycoerce(close_arg, close_ftype.params[1], errors)
+            table.insert(close_args, close_arg)
+        end
         node._close_call = make_forin_call(node.loc, node._tuple_decls[4],
-            { close_arg },
-            close_type.rettypes)
+            close_args,
+            close_ftype.rettypes,
+            close_cfunc)
         node._close_call._voidok = true
     end
 

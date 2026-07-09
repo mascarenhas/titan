@@ -320,25 +320,39 @@ the iterator needs (state and initial control), then the remaining tuple
 slots are padded with static nil. Writing `iter, state, init, ...` reaches
 the fourth slot and can supply the close function from the spread.
 
-The iterator slot must be a non-variadic `Type.Function` taking at most two
-fixed parameters and returning at least one value. Its first return is the
-control result and must be nil-capable: either an option type or `value`;
-`nil` alone and non-option concrete types are rejected. State and initial
-control are coerced and matched against the iterator's first and second
-parameters when those parameters exist. The close slot must be `nil` or a
-function of exactly one parameter that can accept the state value after
-implicit coercion; its returns are accepted but discarded.
+The iterator slot must resolve to a callable shape: a non-variadic
+`Type.Function`, a `value` coerced to a synthesized function type, or a C
+function pointer/foreign function viewed through its C signature. The
+synthesized type for a `value` iterator uses the non-`nil` state/init slots
+as zero, one, or two parameter types, and uses the visible declaration list
+as return types, filling unannotated positions with `value` and optionizing
+the first return. The iterator returns at least one value. Its first return
+is the control result and must be nil-capable: an option type, `value`, a
+nullable C pointer, or a raw C `TValue`; `nil` alone and non-nil-capable
+concrete types are rejected. State and initial control are coerced and
+matched against the iterator's first and second parameters when those
+parameters exist.
+
+The close slot must be `nil` or another callable shape. A `value` close slot
+is coerced to a synthesized close type using the state slot as its single
+parameter when the state is not statically `nil`, otherwise to a zero-arg
+close type; the synthesized close has no returns. Statically typed close
+functions and C function pointers may accept zero or one parameter. If they
+accept one, the state value must coerce to it. Any close returns are
+accepted but discarded.
 
 The checker then synthesizes:
 
 * `_tuple_decls`: hidden declarations holding the four adjusted tuple
   values, so `<explist>` is evaluated once.
 * `_result_decls`: hidden declarations holding every iterator return value.
-* `_init_call` and `_next_call`: function-value calls through the hidden
-  iterator. The update call forces the previous control result before
-  coercing it to the iterator's second parameter, because loop entry has
-  already proved it is not nil.
-* `_close_call`: an optional function-value call through the hidden close
+* `_init_call` and `_next_call`: synthesized calls through the hidden
+  iterator. Function values go through the ordinary function-value path; C
+  function pointers carry `_c_pointer_call` so codegen uses the FFI pointer
+  path. The update call forces the previous control result before coercing it
+  to the iterator's second parameter, because loop entry has already proved
+  it is not nil.
+* `_close_call`: an optional synthesized call through the hidden close
   function, marked `_voidok` because close returns are ignored.
 * `_visible_stat`: a synthesized `StatDecl` that initializes the
   user-written variables from `_result_decls` on each iteration.

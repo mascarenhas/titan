@@ -300,8 +300,7 @@ rather than wrapping the counter past the maximum integer.
 
 ## The generic `for ... in`
 
-Titan's generic `for` iterates with an explicit function-typed iterator
-tuple:
+Titan's generic `for` iterates with an explicit iterator tuple:
 
 ```lua
 function step(limit: integer, n: integer): integer?
@@ -336,18 +335,27 @@ compile-time error. A trailing multi-return expression or trailing `...` in
 a variadic function can fill the tuple, so a helper may return
 `(next, state, init, close)` directly.
 
-The iterator must have a function type, cannot be variadic, and may take
-zero, one, or two fixed parameters. A two-parameter iterator is called as
+The iterator slot may be a function, a `value` that is coerced to a
+synthesized function type, or a compatible C function pointer/foreign
+function. The iterator cannot be variadic and may take zero, one, or two
+fixed parameters. A two-parameter iterator is called as
 `next(state, control)`: first with the initial control value, then after
 each body execution with the previous first result. A one-parameter
 iterator is called as `next(state)`, and a zero-parameter iterator as
 `next()`.
 
+When the iterator slot has type `value`, Titan synthesizes the function type
+from the tuple and declaration list. The parameter types come from the
+non-`nil` state and initial-control slots. Return types come from the
+visible declarations: an annotated declaration contributes its annotation,
+and an unannotated one contributes `value`. The first synthesized return is
+made nil-capable so it can stop the loop.
+
 The iterator must return at least one value. Its first return value is the
-loop control value and must be either an option type or `value`; a plain
-`nil` return type and non-nil-capable return types such as `integer` are
-rejected. The loop stops only when that first returned value is `nil`.
-False values do **not** stop the loop:
+loop control value and must be an option type, `value`, or a nullable C
+pointer. A plain `nil` return type and non-nil-capable return types such as
+`integer` are rejected. The loop stops only when that first returned value is
+`nil` (or `NULL` for C pointers). False values do **not** stop the loop:
 
 ```lua
 function flags(_: nil): boolean?
@@ -365,12 +373,54 @@ the first value, while `for x, y in step do` cannot infer `y`'s type.
 Generic `for` variables are scoped to the body, fresh per iteration, and
 read-only, like numeric `for` variables.
 
-The close slot is either `nil` or a function with exactly one parameter.
-The state value must be coercible to that parameter type, and any close
+The close slot is `nil`, a function, a `value` that is coerced to a
+synthesized close function type, or a compatible C function pointer/foreign
+function. A close function may accept zero or one fixed parameter; when it
+accepts one, the state value must be coercible to that parameter type. Close
 return values are discarded. When present, the close function runs after
 normal exhaustion, `break`, `return`, and errors from the initial iterator
 call, body, or update iterator call. If close itself raises, that new error
 replaces the pending action.
+
+This helper returns the whole tuple, including a close function that receives
+the file state:
+
+```lua
+function numbered_lines(filename: string):
+        ((File, integer) -> (integer?, string?), File, integer, (File) -> ())
+    local file: File = File.open(filename)
+    local next = function (f: File, line_no: integer): (integer?, string?)
+        local line? = f:read_line()
+        if line == nil then
+            return nil, nil
+        else
+            return line_no + 1, line
+        end
+    end
+    local close = function (f: File): ()
+        f:close()
+    end
+    return next, file, 0, close
+end
+
+for line_no: integer, line: string in numbered_lines("input.txt") do
+    process(line_no, line)
+end
+```
+
+If the iterator and closer are method closures that already capture the file,
+no state value is needed:
+
+```lua
+function lines(filename: string): (() -> string?, nil, nil, () -> ())
+    local file: File = File.open(filename)
+    return file:read_lines, nil, nil, file:close
+end
+
+for line: string in lines("input.txt") do
+    process_line(line)
+end
+```
 
 ## Function calls as statements
 

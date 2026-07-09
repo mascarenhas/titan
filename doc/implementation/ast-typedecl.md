@@ -293,9 +293,9 @@ of these are declared anywhere; this table is the inventory.
 | `_forcontrol` | `Decl` | checker | checker | marks numeric and generic `for` control variables as read-only assignment targets |
 | `_tuple_decls` | `StatForIn` | checker | coder | four hidden `Decl`s for iterator, state, initial control and close slots |
 | `_result_decls` | `StatForIn` | checker | coder | hidden `Decl`s for the iterator return tuple, reused by the initial and update calls |
-| `_init_call`, `_next_call`, `_close_call` | `StatForIn` | checker | coder | synthesized function-value calls for the initial iterator call, update iterator call and optional close call |
+| `_init_call`, `_next_call`, `_close_call` | `StatForIn` | checker | coder | synthesized calls for the initial iterator call, update iterator call and optional close call; C function-pointer calls carry `_c_pointer_call` |
 | `_visible_stat` | `StatForIn` | checker | coder | synthesized `StatDecl` that initializes the user-written loop variables from `_result_decls` each iteration |
-| `_has_close` | `StatForIn` | checker | coder | whether the close slot statically typechecked as a close function; drives the generated `finally` wrapper |
+| `_has_close` | `StatForIn` | checker | coder | whether the close slot statically typechecked as a close callable; drives the generated `finally` wrapper |
 | `_cvar` | `Decl` | coder | coder | name of the C local holding the value: `_local_x_1`, `_param_x`, `__self__` |
 | `_readonly` | synthesized `Decl` | checker | checker | marks compiler-built locals such as `L`; `declare` rejects shadowing them and assignment reports a read-only built-in local error |
 | `_slot` | `Decl`, `TopLevelVar` | coder | coder | the `TValue` slot anchoring a GC-able value for the collector: a Lua stack slot (`_localslot_x_2` — the per-name counter is shared with `_cvar`, so the suffix is one past the `_cvar`'s — `_paramslot_x`, `__selfslot__`) or `&_mod->uv[N].uv` for module variables |

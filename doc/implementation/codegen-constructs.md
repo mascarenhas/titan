@@ -179,21 +179,25 @@ while (1) {
 }
 ```
 
-`$INITCALL` and `$NEXTCALL` are ordinary function-value calls emitted by
-`codevaluecall`, so an exact Titan iterator can take the native fast path
-and a Lua callable can take the generic Lua-stack path. The nil test is not
-truthiness: for option and `value` control results it is `ttisnil(&ctrl)`,
+`$INITCALL` and `$NEXTCALL` are synthesized by the checker. Function-typed
+iterators are ordinary function-value calls emitted by `codevaluecall`, so
+an exact Titan iterator can take the native fast path and a Lua callable can
+take the generic Lua-stack path. C function-pointer iterators carry
+`_c_pointer_call` and use `codecfunctionptrcall` instead. The nil test is
+not truthiness: for option, `value`, and raw C `TValue` controls it is
+`ttisnil(&ctrl)`, and for nullable C pointer controls it is `ctrl == NULL`,
 so `false` keeps iterating.
 
 When the close slot is present, `codeforin` wraps the run node in a
 synthetic `Ast.StatTry` whose `finally` block calls the hidden close
-function with the hidden state value. That puts the initial iterator call,
-all body executions and all update calls inside the protected region, so
-close runs on normal exhaustion, `break`, `return`, and raised errors. The
-generic loop frame is opened outside that synthetic try, which lets `break`
-route through the same pending-action machinery as a user-written
-`finally`. A close raise therefore overrides the pending action in the same
-way any `finally` raise does.
+function with zero arguments or with the hidden state value, depending on
+the checked close type. That puts the initial iterator call, all body
+executions and all update calls inside the protected region, so close runs
+on normal exhaustion, `break`, `return`, and raised errors. The generic loop
+frame is opened outside that synthetic try, which lets `break` route through
+the same pending-action machinery as a user-written `finally`. A close raise
+therefore overrides the pending action in the same way any `finally` raise
+does.
 
 ## Arrays
 
