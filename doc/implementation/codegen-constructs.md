@@ -153,6 +153,48 @@ The body tail gets the same allocation-gated `luaC_checkGC(L);` as
 then emits `L->top.p = _base;` when the frame reserved slots, and
 returns the first value in C (see [Calls](#calls)).
 
+## The generic `for ... in`
+
+`codeforin` consumes the checker's elaborated `Ast.StatForIn`; it does no
+iterator type reasoning of its own. The four tuple expressions are evaluated
+once into hidden C locals named `_forin_*`, and any GC-able tuple value gets
+a Lua stack slot immediately. Iterator return values live in a second set of
+hidden locals, also slotted when GC-able, so a string/record returned by the
+iterator survives body allocations before it is copied into the visible loop
+variable.
+
+The loop body is generated as:
+
+```c
+$INITCALL
+while (1) {
+    if ($ISNIL) {
+        break;
+    }
+    $VISIBLE_DECLS
+    $BODY
+    $NEXTCALL
+    luaC_checkGC(L);
+    _base = restorestack(L, _base_off);
+}
+```
+
+`$INITCALL` and `$NEXTCALL` are ordinary function-value calls emitted by
+`codevaluecall`, so an exact Titan iterator can take the native fast path
+and a Lua callable can take the generic Lua-stack path. The nil test is not
+truthiness: for option and `value` control results it is `ttisnil(&ctrl)`,
+so `false` keeps iterating.
+
+When the close slot is present, `codeforin` wraps the run node in a
+synthetic `Ast.StatTry` whose `finally` block calls the hidden close
+function with the hidden state value. That puts the initial iterator call,
+all body executions and all update calls inside the protected region, so
+close runs on normal exhaustion, `break`, `return`, and raised errors. The
+generic loop frame is opened outside that synthetic try, which lets `break`
+route through the same pending-action machinery as a user-written
+`finally`. A close raise therefore overrides the pending action in the same
+way any `finally` raise does.
+
 ## Arrays
 
 These paths are written against Lua 5.5's table internals, where the

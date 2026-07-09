@@ -179,8 +179,9 @@ end
 
 ### Declarations and the `option` flag
 
-`Decl = {loc, name, type, option}` is used for locals, `for` control
-variables, function parameters, record fields, and `TopLevelVar`. The
+`Decl = {loc, name, type, option}` is used for locals, numeric and
+generic `for` control variables, function parameters, record fields, and
+`TopLevelVar`. The
 `type` field is an `Ast.Type*` node *or `false`* (type to be inferred),
 and `option` is a boolean marking the bare-`?` inference form:
 
@@ -207,6 +208,7 @@ may carry `islocal = true`, set by the parser for `local field: T`.
 | `StatRepeat` | `block`, `condition` | note the field order: block first |
 | `StatIf` | `thens`, `elsestat` | `thens` is a flat list of `Then {condition, block}` (one per `if`/`elseif`); `elsestat` is a `StatBlock` or `false` |
 | `StatFor` | `decl`, `start`, `finish`, `inc`, `block` | `inc` is `false` when the step is omitted; the checker fills in a literal `1`/`1.0` |
+| `StatForIn` | `decls`, `exps`, `block` | generic `for decllist in explist`; the checker pads/elaborates `exps` as the iterator tuple |
 | `StatAssign` | `vars`, `exps` | multiple assignment lists |
 | `StatDecl` | `decls`, `exps` | `local` with lists; initializers are mandatory |
 | `StatCall` | `callexp` | a call in statement position |
@@ -288,6 +290,12 @@ of these are declared anywhere; this table is the inventory.
 | `_record` | `TopLevelStatic`, `TopLevelMethod` | checker pass 1 | checker (`checkmethod`, for `self`'s type) | the `Ast.TopLevelRecord` node the member belongs to |
 | `_method` | `ExpCall` (method calls) | checker | coder | the resolved `Type.Method` |
 | `_field` | `Field` (record constructors) | checker | coder | the resolved `Type.Field` descriptor; its `index` is the record `Udata` user-value slot (`uv[index].uv`) the field occupies |
+| `_forcontrol` | `Decl` | checker | checker | marks numeric and generic `for` control variables as read-only assignment targets |
+| `_tuple_decls` | `StatForIn` | checker | coder | four hidden `Decl`s for iterator, state, initial control and close slots |
+| `_result_decls` | `StatForIn` | checker | coder | hidden `Decl`s for the iterator return tuple, reused by the initial and update calls |
+| `_init_call`, `_next_call`, `_close_call` | `StatForIn` | checker | coder | synthesized function-value calls for the initial iterator call, update iterator call and optional close call |
+| `_visible_stat` | `StatForIn` | checker | coder | synthesized `StatDecl` that initializes the user-written loop variables from `_result_decls` each iteration |
+| `_has_close` | `StatForIn` | checker | coder | whether the close slot statically typechecked as a close function; drives the generated `finally` wrapper |
 | `_cvar` | `Decl` | coder | coder | name of the C local holding the value: `_local_x_1`, `_param_x`, `__self__` |
 | `_readonly` | synthesized `Decl` | checker | checker | marks compiler-built locals such as `L`; `declare` rejects shadowing them and assignment reports a read-only built-in local error |
 | `_slot` | `Decl`, `TopLevelVar` | coder | coder | the `TValue` slot anchoring a GC-able value for the collector: a Lua stack slot (`_localslot_x_2` — the per-name counter is shared with `_cvar`, so the suffix is one past the `_cvar`'s — `_paramslot_x`, `__selfslot__`) or `&_mod->uv[N].uv` for module variables |

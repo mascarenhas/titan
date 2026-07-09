@@ -98,10 +98,13 @@ with a clean error; each links to the chapter that documents it in full.
 
 ### Smaller gaps and rough edges
 
-* **No `goto`, no `for ... in`** — these two words are reserved but unused:
-  there is no generic `for ... in` loop and no `goto`/labels, so using
-  them is a syntax error. `break` *is* supported (and a loop can also be
-  exited with `return`)
+* **Generic `for ... in` is available.** It iterates with a typed iterator
+  tuple `(next, state, init, close)`, stops only on a nil first result, and
+  runs the close function on exhaustion, `break`, `return`, or errors
+  ([statements](statements.md#the-generic-for--in)).
+* **No `goto`.** The word `goto` and label syntax are reserved/recognized
+  but still have no statement form, so using them is a syntax error.
+  `break` *is* supported (and a loop can also be exited with `return`)
   ([statements](statements.md#break-no-goto)).
 
 ### The C FFI

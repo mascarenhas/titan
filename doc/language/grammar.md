@@ -33,13 +33,13 @@ or      raise   record   repeat    return  string  then    true
 until   value   while
 ```
 
-Note that `goto` and `in` are **reserved but unused**: no Titan construct
-uses them, so a `goto` statement or a generic `for ... in` loop is a
-compile-time syntax error. (`break` *is* a statement — see
-[statements](statements.md#break-no-goto).) The type
-keywords `boolean`, `float`, `integer`, `nil`, `string`, and `value`
-are reserved too, so they cannot name variables, functions, or fields
-(`local integer: integer = 10` is a syntax error).
+`in` is used by the generic `for ... in` statement. `goto` is still
+reserved but unused, and `::` is recognized by the lexer but used by no
+grammar rule — there are no labels. (`break` *is* a statement — see
+[statements](statements.md#break-no-goto).) The type keywords `boolean`,
+`float`, `integer`, `nil`, `string`, and `value` are reserved too, so
+they cannot name variables, functions, or fields (`local integer:
+integer = 10` is a syntax error).
 
 ### Other tokens
 
@@ -220,9 +220,12 @@ The four forms of `decl` mean:
 | `x` | type is inferred from the initializer |
 
 These forms are accepted wherever a `decl` appears: module variables,
-`local` statements, and the control variable of a numeric `for`
-(`for i: integer = 1, 10 do ... end` is valid). Function *parameters*
-(`param`) must be annotated and admit no `?` shorthand — write `p: T?`.
+`local` statements, the control variable of a numeric `for`, and each
+visible variable of a generic `for`
+(`for i: integer = 1, 10 do ... end` and
+`for k: integer, v: string in step do ... end` are valid). Function
+*parameters* (`param`) must be annotated and admit no `?` shorthand —
+write `p: T?`.
 
 In types: `Name` is a record type and `mod.Name` one from an imported
 module; `{T}` is an array, `{K: V}` a map, `T?` an option type, and
@@ -265,6 +268,7 @@ statement  ::= ';'
             |  repeat block until exp
             |  if exp then block {elseif exp then block} [else block] end
             |  for decl '=' exp ',' exp [',' exp] do block end
+            |  for decllist in explist do block end
             |  local decllist '=' explist
             |  varlist '=' explist
             |  functioncall

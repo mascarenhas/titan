@@ -230,7 +230,10 @@ compile-time errors a written-out argument would. Expansion applies to:
 
 * array constructors — `{ 10, divmod(13, 2) }` is `{ 10, 6, 1 }`, while
   a non-final call inside the constructor contributes only its first
-  value.
+  value;
+* generic `for ... in` iterator tuples — a helper returning
+  `(next, state, init, close)` can be used directly after `in`, and a
+  trailing `...` in a variadic function can fill the remaining tuple slots.
 
 Map constructors are the exception: a multi-return call as a value
 (`[k] = divmod(13, 2)`) keeps only the first value; the extras are

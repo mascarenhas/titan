@@ -1024,6 +1024,9 @@ collect_reads_stat = function(node, out)
         collect_reads_exp(node.finish, out)
         collect_reads_exp(node.inc, out)
         collect_reads_block(node.block, out)
+    elseif tag == "Ast.StatForIn" then
+        for _, exp in ipairs(node.exps) do collect_reads_exp(exp, out) end
+        collect_reads_block(node.block, out)
     elseif tag == "Ast.StatIf" then
         for _, t in ipairs(node.thens) do
             collect_reads_exp(t.condition, out)
@@ -1051,7 +1054,10 @@ collect_writes_stat = function(node, out)
     elseif tag == "Ast.StatAssign" then
         for _, var in ipairs(node.vars) do collect_lvalue_write(var, out) end
     elseif tag == "Ast.StatWhile" or tag == "Ast.StatRepeat"
-            or tag == "Ast.StatFor" then
+            or tag == "Ast.StatFor" or tag == "Ast.StatForIn" then
+        if tag == "Ast.StatForIn" then
+            for _, decl in ipairs(node.decls) do set_add(out, decl) end
+        end
         collect_writes_block(node.block, out)
     elseif tag == "Ast.StatIf" then
         for _, t in ipairs(node.thens) do collect_writes_block(t.block, out) end
@@ -1084,7 +1090,7 @@ local function analyze_try_spills_block(block, after_reads)
         if tag == "Ast.StatBlock" then
             analyze_try_spills_block(stat, after)
         elseif tag == "Ast.StatWhile" or tag == "Ast.StatRepeat"
-                or tag == "Ast.StatFor" then
+                or tag == "Ast.StatFor" or tag == "Ast.StatForIn" then
             local loop_after = set_copy(after)
             collect_reads_stat(stat, loop_after)
             analyze_try_spills_block(stat.block, loop_after)
@@ -1646,7 +1652,10 @@ local function stat_contains_try(node)
         end
         return false
     elseif tag == "Ast.StatWhile" or tag == "Ast.StatFor"
-           or tag == "Ast.StatRepeat" then
+           or tag == "Ast.StatRepeat" or tag == "Ast.StatForIn" then
+        if tag == "Ast.StatForIn" and node._has_close then
+            return true
+        end
         return stat_contains_try(node.block)
     elseif tag == "Ast.StatIf" then
         for _, t in ipairs(node.thens) do
@@ -4029,6 +4038,161 @@ local function localname(ctx, name)
     return name .. "_" .. tostring(idx)
 end
 
+local function forin_is_nil(typ, cexp)
+    if typ._tag == "Type.Option" or typ._tag == "Type.Value" then
+        return "ttisnil(&" .. cexp .. ")"
+    elseif typ._tag == "Type.Nil" then
+        return "1"
+    else
+        return "0"
+    end
+end
+
+local function code_hidden_decl(ctx, decl, exp)
+    local typ = decl._type
+    local cstats, cexp = codeexp(ctx, exp)
+    decl._cvar = "_forin_" .. localname(ctx, decl.name)
+    local cset = ""
+    if types.is_gc(typ) then
+        decl._slot = newslot(ctx)
+        cset = setslot(typ, decl._slot, decl._cvar)
+    end
+    return render([[
+        $CSTATS
+        $CDECL
+        $CVAR = $CEXP;
+        (void)$CVAR;
+        $CSET
+    ]], {
+        CSTATS = cstats,
+        CDECL = cvardecl(ctx, typ, decl._cvar) .. " = " .. initval(typ) .. ";",
+        CVAR = decl._cvar,
+        CEXP = cexp,
+        CSET = cset,
+    })
+end
+
+local function code_hidden_result_decls(ctx, decls)
+    local out = {}
+    for _, decl in ipairs(decls) do
+        local typ = decl._type
+        decl._cvar = "_forin_" .. localname(ctx, decl.name)
+        if types.is_gc(typ) then
+            decl._slot = newslot(ctx)
+        end
+        table.insert(out, cvardecl(ctx, typ, decl._cvar)
+            .. " = " .. initval(typ) .. ";")
+    end
+    return table.concat(out, "\n")
+end
+
+local function code_hidden_assign(decl, cexp)
+    local cset = ""
+    if types.is_gc(decl._type) then
+        cset = setslot(decl._type, decl._slot, decl._cvar)
+    end
+    return render([[
+        $CVAR = $CEXP;
+        $CSET
+    ]], {
+        CVAR = decl._cvar,
+        CEXP = cexp,
+        CSET = cset,
+    })
+end
+
+local function code_forin_call(ctx, call, result_decls)
+    local cstats, cexp = codeexp(ctx, call)
+    local out = { cstats }
+    if result_decls[1] then
+        table.insert(out, code_hidden_assign(result_decls[1], cexp))
+    end
+    for i = 2, #result_decls do
+        table.insert(out, code_hidden_assign(result_decls[i], call._extras[i]))
+    end
+    return table.concat(out, "\n")
+end
+
+local function codeforinrun(ctx, node)
+    local forin = node.forin
+    local initcall = code_forin_call(ctx, forin._init_call, forin._result_decls)
+    local visible = codestat(ctx, forin._visible_stat)
+    local body = codestat(ctx, forin.block)
+    local nextcall = code_forin_call(ctx, forin._next_call, forin._result_decls)
+    local ctrl = forin._result_decls[1]
+    return render([[
+        $INITCALL
+        while (1) {
+            if ($ISNIL) {
+                break;
+            }
+            $VISIBLE
+            $BODY
+            $NEXTCALL
+            luaC_checkGC(L);
+            _base = restorestack(L, _base_off);
+        }
+    ]], {
+        INITCALL = initcall,
+        ISNIL = forin_is_nil(ctrl._type, ctrl._cvar),
+        VISIBLE = visible,
+        BODY = body,
+        NEXTCALL = nextcall,
+    })
+end
+
+local function codeforin(ctx, node)
+    pushd(ctx)
+    ctx.uses_base_off = true
+    local tuple = {}
+    for i, decl in ipairs(node._tuple_decls) do
+        table.insert(tuple, code_hidden_decl(ctx, decl, node.exps[i]))
+    end
+    table.insert(tuple, code_hidden_result_decls(ctx, node._result_decls))
+
+    local frame = open_loop(ctx, node)
+    local runnode = { _tag = "Ast.StatForInRun", loc = node.loc, forin = node }
+    local loopcode
+    if node._has_close then
+        local trynode = {
+            _tag = "Ast.StatTry",
+            loc = node.loc,
+            block = {
+                _tag = "Ast.StatBlock",
+                loc = node.loc,
+                stats = { runnode },
+            },
+            catchblock = false,
+            finallyblock = {
+                _tag = "Ast.StatBlock",
+                loc = node.loc,
+                stats = {
+                    { _tag = "Ast.StatCall", loc = node.loc,
+                      callexp = node._close_call },
+                },
+            },
+        }
+        loopcode = codestat(ctx, trynode)
+    else
+        loopcode = codestat(ctx, runnode)
+    end
+    close_loop(ctx)
+    popd(ctx)
+
+    return render([[
+        {
+            $TUPLE
+            $LOOPSAVE
+            $LOOPCODE
+        }$AFTER
+    ]], {
+        TUPLE = table.concat(tuple, "\n"),
+        LOOPSAVE = loop_save_lines(frame),
+        LOOPCODE = loopcode,
+        AFTER = after_loop_label(frame),
+    })
+end
+
 local function codestat_dispatch(ctx, node)
     local tag = node._tag
     if tag == "Ast.StatDecl" then
@@ -4127,6 +4291,10 @@ local function codestat_dispatch(ctx, node)
         return codeif(ctx, node)
     elseif tag == "Ast.StatFor" then
         return codefor(ctx, node)
+    elseif tag == "Ast.StatForIn" then
+        return codeforin(ctx, node)
+    elseif tag == "Ast.StatForInRun" then
+        return codeforinrun(ctx, node)
     elseif tag == "Ast.StatAssign" then
         if #node.vars == 1 then
             return codesingleassignment(ctx, node)

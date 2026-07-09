@@ -747,6 +747,262 @@ local function checkfor(node, st, errors)
     return false
 end
 
+local function hidden_decl(loc, name, typ)
+    local decl = ast.Decl(loc, name, false, false)
+    decl._type = typ
+    decl._used = true
+    return decl
+end
+
+local function hidden_exp(loc, decl)
+    local var = ast.VarName(loc, decl.name)
+    var._decl = decl
+    var._type = decl._type
+    local exp = ast.ExpVar(loc, var)
+    exp._type = decl._type
+    return exp
+end
+
+local function nil_exp(loc)
+    local exp = ast.ExpNil(loc)
+    exp._type = types.Nil()
+    return exp
+end
+
+local function expand_trailing_multireturn(exps)
+    local lastexp = exps[#exps]
+    if lastexp and lastexp._types and #lastexp._types > 1 then
+        for i = 2, #lastexp._types do
+            table.insert(exps, ast.ExpExtra(lastexp.loc, lastexp, i, lastexp._types[i]))
+        end
+    end
+end
+
+local function forin_dots_target(exps)
+    local prefix = #exps - 1
+    local target = 4
+    local ftype = exps[1] and exps[1]._type
+    if ftype and ftype._tag == "Type.Function" then
+        target = math.max(prefix + 1, 1 + math.min(#ftype.params, 2))
+        if target > 4 then target = 4 end
+    end
+    return target
+end
+
+local function forin_tuple_slottype(exps, i)
+    local ftype = exps[1] and exps[1]._type
+    if not (ftype and ftype._tag == "Type.Function") then
+        return nil
+    elseif i == 2 then
+        return ftype.params[1] or types.Nil()
+    elseif i == 3 then
+        return ftype.params[2] or types.Nil()
+    else
+        return nil
+    end
+end
+
+local function check_forin_decl_init(decl, exp, st, errors)
+    if decl.type then
+        checkdecl(decl, st, errors)
+        exp = trycoerce(exp, decl._type, errors)
+    elseif decl.option then
+        decl._type = optionize(exp._type)
+        checkdecl(decl, st, errors)
+        exp = trycoerce(exp, decl._type, errors)
+    else
+        exp = tryforce(exp)
+        decl._type = exp._type
+        checkdecl(decl, st, errors)
+    end
+    checkmatch("generic for variable " .. decl.name,
+        decl._type, exp._type, errors, decl.loc)
+    return exp
+end
+
+local function make_forin_call(loc, iter_decl, args, rettypes)
+    local call = ast.ExpCall(loc, hidden_exp(loc, iter_decl),
+        ast.ArgsFunc(loc, args))
+    call._types = rettypes
+    call._type = rettypes[1] or types.Void()
+    return call
+end
+
+local function checkforin(node, st, errors)
+    local exps = node.exps
+    local lastexp = exps[#exps]
+    local dots = lastexp and lastexp._tag == "Ast.ExpDots"
+    for i, exp in ipairs(exps) do
+        if not (dots and i == #exps) then
+            checkexp(exp, st, errors)
+        end
+    end
+    if dots then
+        check_dots_marker(lastexp, st, errors)
+        expand_dots_adjustup(exps, forin_dots_target(exps),
+            function(i) return forin_tuple_slottype(exps, i) end,
+            "generic for iterator tuple", errors, nil_can_adjust_to)
+    else
+        expand_trailing_multireturn(exps)
+    end
+    if #exps > 4 then
+        checker.typeerror(errors, node.loc,
+            "generic for iterator tuple produces %d value(s) but expects at most 4",
+            #exps)
+    end
+    while #exps < 4 do
+        table.insert(exps, nil_exp(node.loc))
+    end
+
+    local ftype = exps[1]._type
+    if ftype._tag ~= "Type.Function" then
+        checker.typeerror(errors, exps[1].loc,
+            "generic for iterator must be a function but found %s",
+            types.tostring(ftype))
+        ftype = types.Function({}, { types.Invalid() }, false, false)
+    end
+
+    if ftype.varargtype then
+        checker.typeerror(errors, exps[1].loc,
+            "generic for iterator cannot be variadic")
+    end
+    if #ftype.params > 2 then
+        checker.typeerror(errors, exps[1].loc,
+            "generic for iterator expects at most 2 parameter(s) but found %d",
+            #ftype.params)
+    end
+    if #ftype.rettypes == 0 then
+        checker.typeerror(errors, exps[1].loc,
+            "generic for iterator must return at least one value")
+        ftype = types.Function(ftype.params, { types.Invalid() }, false, false)
+    else
+        local ctrltype = ftype.rettypes[1]
+        if ctrltype._tag == "Type.Nil" then
+            checker.typeerror(errors, exps[1].loc,
+                "generic for iterator control result cannot be nil-only")
+        elseif ctrltype._tag ~= "Type.Option" and ctrltype._tag ~= "Type.Value"
+               and ctrltype._tag ~= "Type.Invalid" then
+            checker.typeerror(errors, exps[1].loc,
+                "generic for iterator control result must be optional or value but found %s",
+                types.tostring(ctrltype))
+        end
+    end
+
+    if ftype.params[1] then
+        exps[2] = trycoerce(exps[2], ftype.params[1], errors)
+        checkmatch("generic for iterator state",
+            ftype.params[1], exps[2]._type, errors, exps[2].loc)
+    end
+    if ftype.params[2] then
+        exps[3] = trycoerce(exps[3], ftype.params[2], errors)
+        checkmatch("generic for iterator initial control",
+            ftype.params[2], exps[3]._type, errors, exps[3].loc)
+    end
+
+    local close_type = exps[4]._type
+    if close_type._tag == "Type.Nil" then
+        node._has_close = false
+    elseif close_type._tag == "Type.Function" then
+        local close_ok = true
+        if close_type.varargtype or #close_type.params ~= 1 then
+            checker.typeerror(errors, exps[4].loc,
+                "generic for close function must accept exactly one state argument")
+            close_ok = false
+        else
+            local state_for_close = exps[2]
+            state_for_close = trycoerce(state_for_close, close_type.params[1], errors)
+            checkmatch("generic for close argument",
+                close_type.params[1], state_for_close._type, errors, exps[2].loc)
+        end
+        node._has_close = close_ok
+    elseif close_type._tag ~= "Type.Invalid" then
+        checker.typeerror(errors, exps[4].loc,
+            "generic for close value must be nil or a function but found %s",
+            types.tostring(close_type))
+        node._has_close = false
+    end
+
+    node._tuple_decls = {
+        hidden_decl(node.loc, "__forin_iter", exps[1]._type),
+        hidden_decl(node.loc, "__forin_state", exps[2]._type),
+        hidden_decl(node.loc, "__forin_init", exps[3]._type),
+        hidden_decl(node.loc, "__forin_close", exps[4]._type),
+    }
+    node._result_decls = {}
+    for i, rtype in ipairs(ftype.rettypes) do
+        node._result_decls[i] = hidden_decl(node.loc,
+            "__forin_result_" .. i, rtype)
+    end
+
+    local function arg_state()
+        return hidden_exp(node.loc, node._tuple_decls[2])
+    end
+    local function arg_init()
+        return hidden_exp(node.loc, node._tuple_decls[3])
+    end
+    local init_args = {}
+    if ftype.params[1] then table.insert(init_args, arg_state()) end
+    if ftype.params[2] then table.insert(init_args, arg_init()) end
+    node._init_call = make_forin_call(node.loc, node._tuple_decls[1],
+        init_args, ftype.rettypes)
+
+    local next_args = {}
+    if ftype.params[1] then table.insert(next_args, arg_state()) end
+    if ftype.params[2] then
+        local ctrlarg = hidden_exp(node.loc, node._result_decls[1])
+        ctrlarg = tryforce(ctrlarg)
+        ctrlarg = trycoerce(ctrlarg, ftype.params[2], errors)
+        checkmatch("generic for iterator control argument",
+            ftype.params[2], ctrlarg._type, errors, node.loc)
+        table.insert(next_args, ctrlarg)
+    end
+    node._next_call = make_forin_call(node.loc, node._tuple_decls[1],
+        next_args, ftype.rettypes)
+
+    if node._has_close then
+        local close_arg = hidden_exp(node.loc, node._tuple_decls[2])
+        close_arg = trycoerce(close_arg, close_type.params[1], errors)
+        node._close_call = make_forin_call(node.loc, node._tuple_decls[4],
+            { close_arg },
+            close_type.rettypes)
+        node._close_call._voidok = true
+    end
+
+    local visible_exps = {}
+    for i, decl in ipairs(node.decls) do
+        local exp
+        if ftype.rettypes[i] then
+            exp = hidden_exp(node.loc, node._result_decls[i])
+            if i == 1 then
+                exp = tryforce(exp)
+            end
+            exp = check_forin_decl_init(decl, exp, st, errors)
+        else
+            if decl.type then
+                checkdecl(decl, st, errors)
+                exp = trycoerce(nil_exp(node.loc), decl._type, errors)
+                checkmatch("generic for variable " .. decl.name,
+                    decl._type, exp._type, errors, decl.loc)
+            else
+                checker.typeerror(errors, decl.loc,
+                    "cannot infer type of generic for variable '%s' from a missing iterator result",
+                    decl.name)
+                decl._type = types.Invalid()
+                exp = nil_exp(node.loc)
+            end
+        end
+        decl._forcontrol = true
+        table.insert(visible_exps, exp)
+    end
+    node._visible_stat = ast.StatDecl(node.loc, node.decls, visible_exps)
+
+    for _, decl in ipairs(node.decls) do
+        declare(decl, st, errors)
+    end
+    checkstat(node.block, st, errors)
+    return false
+end
+
 -- Typechecks a block statement
 --   node: StatBlock AST node
 --   st: symbol table
@@ -941,6 +1197,12 @@ checkstat = util.make_visitor({
     ["Ast.StatFor"] = function(node, st, errors)
         loop_depth = loop_depth + 1
         st:with_block(checkfor, node, st, errors)
+        loop_depth = loop_depth - 1
+    end,
+
+    ["Ast.StatForIn"] = function(node, st, errors)
+        loop_depth = loop_depth + 1
+        st:with_block(checkforin, node, st, errors)
         loop_depth = loop_depth - 1
     end,
 
@@ -2480,7 +2742,8 @@ checkexp = util.make_visitor({
         if node._vararg_elem._tag ~= "Type.Invalid" then
             checker.typeerror(errors, node.loc,
                 "'...' can only be used as the last item of an argument list, "
-                .. "a return, an assignment, or an array constructor")
+                .. "a return, an assignment, a generic for iterator tuple, "
+                .. "or an array constructor")
         end
     end,
 
