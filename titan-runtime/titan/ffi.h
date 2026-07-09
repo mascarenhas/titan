@@ -24,6 +24,7 @@ typedef double titan_ffi_double;
 
 typedef struct lua_State lua_State;
 typedef struct TValue TValue;
+typedef struct Udata Udata;
 
 TValue lua_totvalue(lua_State *L, int idx);
 void lua_pushtvalue(lua_State *L, TValue v);

@@ -201,26 +201,6 @@ local function coro_gc(handle: value)
   mco.mco_destroy(handle_to_coro(handle))
 end
 
-local function coro_create(func: value): value
-  local slot: **mco.mco_coro = lua.lua_newuserdatauv(L, ffi.titan_ffi_void_ptr.sizeof, 1)
-  local T = lua.lua_newthread(L)
-  lua.lua_setiuservalue(L, -2, 1)
-  lual.luaL_setmetatable(L, "titan.coro")
-  ffi.lua_pushtvalue(T, func)
-  local desc = mco.mco_desc_init(nil, STACK_SIZE)
-  desc.func = coro.titan_coro_entry
-  desc.user_data = T
-  local res = mco.mco_create(slot, desc)
-  if res as integer ~= mco.MCO_SUCCESS as integer then
-    raise "could not create coroutine: " .. (mco.mco_result_description(res) as string)
-  end
-  return ffi.lua_totvalue(L, -1)
-end
-
-function create(func: (value) -> value, default_tag: value): Coro
-  return Coro.new(coro_create(func), default_tag)
-end
-
 local function coro_entry(func: (value) -> value, co: *mco.mco_coro)
   -- L here is going to be the T from the mco_coro*
   -- since this is called through the Lua entry point
@@ -235,6 +215,30 @@ finally
   lua.lua_settop(L, 0)
 end
 
+function create(func: (value) -> value, default_tag: value): Coro
+  local slot: **mco.mco_coro = lua.lua_newuserdatauv(L, ffi.titan_ffi_void_ptr.sizeof, 4)
+  local T = lua.lua_newthread(L)
+  lua.lua_setiuservalue(L, -2, 1)
+  ffi.lua_pushtvalue(L, M)
+  lua.lua_setiuservalue(L, -2, 2)
+  ffi.lua_pushtvalue(L, coro_entry)
+  lua.lua_setiuservalue(L, -2, 3)
+  ffi.lua_pushtvalue(T, func)
+  lua.lua_setiuservalue(L, -2, 4)
+  lual.luaL_setmetatable(L, "titan.coro")
+
+  local desc = mco.mco_desc_init(nil, STACK_SIZE)
+  desc.func = coro.titan_coro_entry
+  desc.user_data = lua.lua_topointer(L, -1)
+
+  local res = mco.mco_create(slot, desc)
+  if res as integer ~= mco.MCO_SUCCESS as integer then
+    raise "could not create coroutine: " .. (mco.mco_result_description(res) as string)
+  end
+
+  return Coro.new(ffi.lua_totvalue(L, -1), default_tag)
+end
+
 do
   local res = lual.luaL_newmetatable(L, "titan.coro")
   if res as integer == 1 then
@@ -242,6 +246,4 @@ do
     lua.lua_setfield(L, -2, "__gc")
   end
   mco.mco_set_tag_comparator(coro.titan_coro_tag_equal)
-  ffi.lua_pushtvalue(L, coro_entry)
-  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, coro.TITAN_CORO_ENTRY_FUNCTION)
 end
