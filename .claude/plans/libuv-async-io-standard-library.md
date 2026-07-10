@@ -1,45 +1,55 @@
 # Titan libuv async I/O standard library
 
 Status: reviewed design and implementation plan. No production library code has
-been implemented. The design below is based on the current `master` checkout,
+been implemented. The design below is based on the current repository checkout,
 the sketch in `/tmp/uv-io.md`, the implemented `coro` module, focused Titan and
 libuv prototypes, and the public libuv 1.x contracts.
 
 ## Executive decision
 
-The sketch is feasible, but its callback, rooting, scheduler, and shutdown
-contracts need to be made explicit before implementation.
+The sketch is feasible. Its central callback-to-coroutine continuation model is
+the selected design; the remaining work is to make rooting, error containment,
+multi-shot handles, loop bootstrap, and shutdown contracts explicit.
 
 Keep the proposed four layers:
 
 1. Public libuv calls through Titan's C FFI.
 2. A small C shim for the fixed libuv callback ABIs and operations that cannot
    be expressed safely in Titan alone.
-3. A coroutine scheduler that turns callbacks into resumptions.
+3. A coroutine continuation pump in which each callback resumes its task and
+   arms the next yielded request before returning.
 4. Synchronous-looking `fs`, `net`, `os`, and `timer` modules.
 
 Use these concrete decisions for v1:
 
-- Standard-library module names are namespaced as `titan.uv`, `titan.timer`,
-  `titan.fs`, `titan.net`, and `titan.os`. Root names such as `os`, `math`, and
-  `string` collide with Lua libraries already installed by `luaL_openlibs`.
-- `titan.uv` owns one private `uv_loop_t` per active `run`, not
-  `uv_default_loop()`.
-- `run` must be invoked on the main Lua thread and nested `run` calls are
-  rejected.
-- Each scheduled task owns a fresh, private identity-valued coroutine tag.
-  There is no guessable shared string tag.
-- A task yields an internal request to the scheduler. The scheduler, running on
-  the main Lua state, allocates and roots the libuv operation, submits it, and
-  checks immediate submission failure.
+- Titan source uses the canonical module names `coro`, `uv`, `timer`, `fs`,
+  `net`, and `os`. Lua loads the new I/O module Udata values as
+  `require "titan.uv"`,
+  `require "titan.os"`, and so on. Titan's standard-library search root and
+  Lua-facing entry aliases provide the two lookup names without replacing
+  Lua's own `os`, `math`, or `string` modules.
+- `uv` owns one private `uv_loop_t` per active bootstrap/loop session, not per
+  task and not `uv_default_loop()`.
+- Public `uv.run` is nonblocking: it creates and roots a task coroutine, arms a
+  zero-timeout start callback, and returns a Task without resuming it. Calls
+  from another UV task are valid and schedule an independent task.
+- The `uv` module instance creates one fresh, private identity-valued `UV_TAG`
+  per Lua state. Every UV Task and sequential loop session in that state shares
+  it. The tag names the async scheduling abstraction; operation owners/task
+  pointers identify the particular continuation to resume.
+- A task yields an internal Request with `UV_TAG`. The callback whose
+  `root:resume` receives that Request allocates/roots/submits the next libuv
+  operation and then returns.
 - Libuv callbacks enter one fixed module-local Titan dispatcher through the
   native Titan function pointer, following `titan_coro_entry`; they do not use
   the generated Lua entry wrapper.
-- The native dispatcher only records completion and enqueues a wakeup. The
-  scheduler resumes or errors coroutines after `uv_run` returns, so user code
-  does not run inside an arbitrary libuv callback.
-- Every native dispatcher arm has a catch-all. No Lua/Titan longjmp may cross a
-  libuv frame.
+- The native dispatcher extracts and cleans the completed result, directly
+  resumes/errors the captured task, runs user code until its next UV yield or
+  completion, and arms the returned Request. Running the continuation inside
+  the callback is intentional and mirrors an ordinary callback chain.
+- Every dispatcher has a Titan catch-all and the C trampoline adds a protected
+  boundary around the native entry call. No Lua/Titan longjmp, including one
+  from native-entry setup before the Titan catch, may cross a libuv frame.
 - Lua userdata allocated from Titan owns loop, request, handle, and fixed-buffer
   storage wherever possible. Size it with `uv.<type>.sizeof`, cast the aligned
   payload pointer to the imported C pointer type, and keep the userdata rooted
@@ -53,9 +63,11 @@ Use these concrete decisions for v1:
   libuv still represents with host constants, such as signal numbers.
 - The default developer/CI build uses a pinned static libuv 1.52.1 built by the
   Makefile. A system `pkg-config` mode is optional.
-- V1 uses an explicit `uv.run`/`uv.run_main` boundary. Automatic compiler
-  wrapping of every `main` is a separately gated follow-up, not hidden import
-  magic.
+- The standalone bootstrap wraps an async program's `main` in nonblocking
+  `uv.run`, then enters the primary C `uv_run(loop, UV_RUN_DEFAULT)` from
+  outside callbacks. Any later shutdown-drain invocation happens only after
+  that call has returned. Lua embedding gets a distinctly named loop-driving
+  API; it is never confused with task-starting `uv.run`.
 
 This design does not require general Titan-function-to-C callback support,
 `CAdopted`, tagged variants, new syntax, or a Titan module ABI bump.
@@ -65,9 +77,10 @@ This design does not require general Titan-function-to-C callback support,
 ### In scope
 
 - Reproducible libuv availability and build integration on Linux and macOS.
-- A private loop and cooperative task scheduler built on `coro`.
+- A private loop and direct callback/coroutine continuation pump built on
+  `coro`.
 - Fixed native C-to-Titan callback trampolines.
-- Timers and scheduler yielding.
+- Timers, recurring ticks, and next-turn yielding.
 - Asynchronous filesystem I/O.
 - TCP sockets and asynchronous DNS.
 - Portable OS helpers, signals, child processes, and `popen`-style convenience.
@@ -81,13 +94,14 @@ This design does not require general Titan-function-to-C callback support,
 - UDP, TTYs, filesystem watching, named-pipe IPC, arbitrary `uv_poll_t`, and
   `uv_queue_work` as public APIs.
 - General Titan closures as arbitrary C function pointers.
-- Detached tasks or daemon tasks.
+- Cross-thread use of one loop or task; v1 runs callbacks and task
+  continuations serially on the loop thread.
 - Automatic source-level resource finalizers that start asynchronous work from
   Lua GC.
 - Replacing Lua's own `io`, `os`, `math`, or `string` tables.
-- Detailed plans for the separate `titan.math`, `titan.string`, and `titan.lua`
-  modules. The namespace and packaging decisions here should be reused by
-  those straightforward parts of the roadmap.
+- Detailed plans for the separate Titan `math`, `string`, and `lua` modules.
+  Their Lua-facing names should reuse the `titan.*` alias packaging described
+  here.
 
 ## Evidence from the current repository
 
@@ -102,7 +116,10 @@ The current architecture already supplies the necessary substrate:
   matching root becomes `suspended`, inner coroutines become `stacked`, and
   resuming the root restores the chain (`doc/language/coroutines.md:77-88`).
 - `coro.titan` already selects `stacked_co` when transferring values, so the
-  scheduler only needs to own and resume the task root (`coro.titan:91-139`).
+  callback only needs to own and resume the task root (`coro.titan:91-139`).
+- Minicoro searches the active dynamic `prev_co` chain for a matching tag; it
+  does not search unrelated suspended roots (`titan-runtime/minicoro.h:1854-1864`).
+  One hidden tag can therefore be shared safely by all independent UV tasks.
 - C FFI types may be used locally but may not appear in exported Titan
   interfaces (`doc/language/ffi.md:102-118`). The public libraries therefore
   expose only Titan records, scalars, strings, arrays/maps, functions, and
@@ -120,15 +137,17 @@ The current architecture already supplies the necessary substrate:
   need an explicit length and an operation-owned root/copy.
 - The standalone launcher currently evaluates
   `require('<module>').main(arg)` directly (`titan-compiler/driver.lua:326-343`).
-  Automatic async wrapping is a compiler/bootstrap feature, not only a library
-  edit.
+  Async wrapping is therefore a concrete compiler/entrypoint bootstrap change,
+  not an overload of the public `uv.run` implementation.
 - Source dependencies are statically linked while binary-only modules are
   dynamically loaded (`doc/language/modules.md:327-347`). The build must produce
-  `titan/uv.so` first and make higher-level standard modules import that binary,
-  so the shim and libuv archive are linked exactly once.
+  canonical `uv.so` first and make higher-level standard modules import that
+  binary, so the shim and libuv archive are linked exactly once. Packaging also
+  exposes a single-image Lua alias at `titan/uv.so` with
+  `luaopen_titan_uv`.
 - Module state is per Lua state (`doc/implementation/codegen-overview.md:483-490`).
-  Libuv state must also be per Lua state/run; no process-global default loop or
-  task table is acceptable.
+  Libuv state must also be per Lua state/bootstrap session; no process-global
+  default loop or task table is acceptable.
 
 ## Feasibility experiments and what they proved
 
@@ -178,7 +197,7 @@ This pins the two different libuv lifetime families:
   `uv_fs_req_cleanup`;
 - handles finish only after `uv_close` invokes the close callback.
 
-### Native Titan callback and coroutine probes
+### Direct native callback and continuation probes
 
 - A zero timer stored a Lua userdata owner in `handle->data`. Its uservalues
   rooted the main Lua thread, module Udata, and a module-local Titan dispatcher
@@ -186,72 +205,92 @@ This pins the two different libuv lifetime families:
   the native Titan function directly. The success path returned `true`.
 - A forced dispatcher error was caught inside that native Titan dispatcher. The
   libuv callback returned normally and the captured trace named both the
-  dispatcher and `run`; no error crossed libuv.
-- Timer and async filesystem callbacks resumed Titan coroutines under
+  dispatcher and task driver; no error crossed libuv.
+- Timer and async filesystem callbacks directly resumed Titan coroutines under
   generational GC with a forced full collection between submission and
   completion. The operation owner, coroutine, buffers, module, and dispatcher
   survived.
-- A nested end-to-end probe ran a native timer callback on the main Lua state,
-  entered a child Titan coroutine, submitted asynchronous filesystem work,
-  yielded, forced GC, and later resumed with the read bytes from a native FS
-  callback. It exited successfully.
-- A queued scheduler probe completed two zero-duration waits and propagated a
-  coroutine error only after `uv_run` returned. This validates the selected
-  non-reentrant rule: native callbacks enqueue; the scheduler resumes.
-- Existing coroutine tests already cover nested tagged routing, injected
-  errors, stacked-resume rejection, traceback preservation, and generational
-  rooting (`spec/coder/coro_spec.lua:295-428,647-733`).
+- The end-to-end `/tmp/uv-probes/uv_nested_titan_probe` exercised the selected
+  continuation path: a native timer callback resumed a task; that task submitted
+  asynchronous filesystem work and yielded its Request; the current callback
+  armed the FS operation and returned; the native FS callback later resumed the
+  same task with the bytes. It exited `0`.
+- A queued post-`uv_run` prototype also worked, but it proves only that a more
+  elaborate alternative is possible. It is not needed by libuv's contracts and
+  is not the selected design.
+- Existing coroutine tests cover nested tagged routing, injected errors,
+  stacked-resume rejection, traceback preservation, and generational rooting
+  (`spec/coder/coro_spec.lua:295-428,647-733`).
 
-### Consolidated selected-architecture probe
+### Shared-tag probe and prior art
 
-A final `/tmp/uv-consolidated` spike exercised the exact selected chain, rather
-than the earlier callback and queue pieces separately:
-
-```text
-uv.<type>.sizeof + lua_newuserdatauv
-  -> native Titan dispatcher enqueues only
-  -> C callback returns
-  -> uv_run returns
-  -> scheduler extracts and closes/drains
-  -> scheduler resumes/errors the coroutine
-```
-
-It forced collections after making an old owner point to a young coroutine and
-ran both GC modes. Exact summaries were:
+A focused current-runtime probe used two independent roots with one identity
+tag, interleaved them, and routed a yield through a differently tagged nested
+coroutine. It observed:
 
 ```text
-CASE normal-incremental result=ok:done run=0 loop_close=0 timer_cb=1 close_cb=1 dispatch_returns=2 dispatch_in_uv_run=2 bad_resume=0 fatal=none trace=0
-CASE normal-generational result=ok:done run=0 loop_close=0 timer_cb=1 close_cb=1 dispatch_returns=2 dispatch_in_uv_run=2 bad_resume=0 fatal=none trace=0
-CASE dispatcher-failure result=caught:forced dispatcher failure run=0 loop_close=0 timer_cb=1 close_cb=1 dispatch_returns=2 dispatch_in_uv_run=2 bad_resume=0 fatal=forced dispatcher failure trace=1
-CASE cancel-stop-close result=caught:cancelled run=0 loop_close=0 timer_cb=0 close_cb=1 dispatch_returns=1 dispatch_in_uv_run=1 bad_resume=0 fatal=none trace=0
-ALL CASES PASS
+shared-independent-ok nested-skip-ok nearest-same-tag-confirmed
 ```
 
-`dispatch_returns` increments in C after native dispatch returns, and
-`bad_resume=0` proves no coroutine was resumed inside either callback. The
-cancellation case deliberately had no timer event but retained the owner until
-the close callback. The probe also exposed three implementation constraints now
-captured below: concrete typed wrappers are needed for libuv base-handle casts,
-Linux needs compiler-level `_GNU_SOURCE`, and the production completion queue
-must be multi-entry.
+The first two results prove the intended design. The third deliberately resumes
+an inline child with the same tag and demonstrates the dynamically nearest
+handler rule; `UV_TAG` therefore stays private, and `uv.run` schedules a new
+independent root instead of resuming it inline.
 
-A separate checker-only probe accepted the proposed higher-order `run` APIs,
-tuple-returning `communicate`, and extended `ExitStatus` declarations:
-`public API syntax/checker: OK`.
+This is the model used by taggedcoro's `fortag`/`make` and lua-coronest's
+`coroutine.make`: one tag-specialized coroutine API per abstraction (scheduler,
+iterator, exception layer), not one tag per coroutine instance.
+
+### Nonblocking run, nested scheduling, and recurring-tick probe
+
+`/tmp/direct-model-probe/direct_model` exercised the corrected control flow.
+`run(A)` returned with `A-started=false`; A's first callback directly ran A; A
+called nested `run(B)`, which scheduled but did not execute B; A then completed
+three callback -> resume -> `tick()` yield -> arm-next-tick -> callback-return
+cycles. Selected trace points were:
+
+```text
+schedule:A run-depth=0
+after-run:A-started=false
+uv-run-enter depth=1
+cb-enter:A:1 run-depth=1
+schedule:B run-depth=1
+A:yield-tick:1
+arm-tick:A in-callback=1
+cb-return:A:1
+cb-enter:B:1 run-depth=1
+...
+loop-close=0 max-run-depth=1 tick-callbacks=3
+RESULT ok direct=true nested=true ticks=3 max-run-depth=1
+```
+
+This directly proves that nested public `run` does not re-enter C `uv_run`,
+that user code intentionally runs inside callbacks, and that a repeating timer
+can use the coroutine itself as its continuation across ticks. It is a control-
+flow proof, not the production main-state proof: the implementation test must
+additionally call nested `uv.run` from child state `T` and assert that its start
+callback dispatches on `Runtime.main_thread` `L`, as specified below.
 
 ### Experiment-driven constraints
 
-1. The callback state is the scheduler's main Lua state, never the child Lua
+1. The callback state is the loop's main Lua state, never the child Lua
    state whose native stack is suspended inside minicoro.
 2. A raw `Udata *`, `CClosure *`, `lua_State *`, or buffer pointer in libuv data
    is navigation only; it is not a GC root.
-3. The operation owner stays rooted for the entire C callback. Do not remove it
-   from the pending table before native dispatch and C cleanup return.
-4. The fixed native dispatcher must catch everything, record the failure, ask
-   the scheduler to stop, and return normally.
-5. `uv_stop` only makes `uv_run` return. It does not close handles, finish
+3. The completed operation owner stays rooted through result extraction,
+   request cleanup, direct task execution, and the handoff. Root the next owner
+   before removing the old pending root.
+4. Copy/extract callback-owned result data and perform mandatory request cleanup
+   before resumed user code can observe the result.
+5. The Titan dispatcher catches task/continuation errors, and a C-level
+   protected boundary also covers failures in native-entry setup before that
+   catch. Both return normally to libuv.
+6. Only C `uv_run` is non-reentrant. Directly resuming a coroutine and starting
+   a new libuv operation from a callback are part of the selected model and do
+   not call `uv_run` recursively.
+7. `uv_stop` only makes the outer `uv_run` return. It does not close handles, finish
    requests, or make `uv_loop_close` succeed.
-6. Libuv worker threads never call Titan. Filesystem completion callbacks return
+8. Libuv worker threads never call Titan. Filesystem completion callbacks return
    on the loop thread. If `uv_queue_work` is added later, only its
    `after_work_cb` may dispatch to Titan.
 
@@ -266,27 +305,27 @@ tuple-returning `communicate`, and extended `ExitStatus` declarations:
 - Pausing stream reads and retaining excess bytes in the connection.
 - Fixed C trampolines that recover a Titan module dispatcher.
 
-### Required corrections
+### Clarifications and required corrections
 
 | Sketch point | Final design |
 | --- | --- |
-| One hidden module string tag | One fresh private identity object per task. `_await` reads the currently running task's tag. |
-| Start each task with a zero timer | Put a new task directly on the ready queue. A zero timer is used only for `timer.yield()`/`timer.sleep(0)`. |
-| Callback resumes and then interprets the next request inline | Callback invokes the native completion dispatcher, which enqueues. The scheduler resumes after `uv_run` returns and interprets the newly yielded request. |
+| One hidden module string tag | Keep one module-wide tag, but make it a fresh private identity object rather than a guessable string. Tags distinguish coroutine abstractions, not tasks. |
+| Start each task with a zero timer | Keep this. `uv.run` arms the zero timer and returns without executing the task; its callback performs the first resume on the next loop iteration. |
+| Callback resumes and interprets the next request inline | Keep this. The coroutine is the continuation an ordinary callback API would pass explicitly. The Titan dispatcher arms the next yielded Request before the callback returns. |
 | Raw L/module/closure/coroutine tuple in `data` | `data` points to a Lua userdata owner rooted in `Runtime.pending` or `Runtime.resources`; uservalues root all Titan values. |
-| Print traceback from a callback | Save `{error, traceback}`, close/cancel/drain, reinstall and pin the trace, then re-raise at `uv.run`. |
-| Default/global event loop implied | Private loop allocated for one `run`, closed before `run` returns. |
-| Callback owns all scheduling policy | Titan scheduler owns policy; C only normalizes callback ABI and exposes binary-length/lifetime details that the FFI cannot express cleanly. |
-| Main is automatically wrapped | V1 uses explicit `run_main`; automatic bootstrap is an opt-in later phase if still desired. |
-| `fs`, `net`, `os`, `timer` root names | Namespaced modules avoid Lua standard-library collisions and remain usable from both Titan `import` and Lua `require`. |
+| Print traceback from a callback | Save `{error, traceback}`, initiate close/cancel, return through libuv, drain from the outer bootstrap, then reinstall/pin and report the failure. |
+| Default/global event loop implied | Use one private loop per bootstrap session so state remains per Lua state, while all `uv.run` tasks in that session share it. |
+| Callback owns scheduling policy | Keep policy in the native Titan dispatcher; the C trampoline only normalizes callback ABI, establishes protection, and transfers trusted fields. |
+| Main is automatically wrapped | Keep automatic standalone bootstrap: schedule `main` with public `uv.run`, then drive C `uv_run` outside all callbacks. |
+| Titan imports `fs`, `net`, `os`, `timer` | Keep these canonical Titan names. Install Lua-facing aliases as `titan.fs`, `titan.net`, `titan.os`, and `titan.timer` so Lua's existing modules remain untouched. |
 
 ## Module and file layout
 
 Add these production files:
 
 ```text
-titan/
-  uv.titan                 public scheduler + private low-level operations
+stdlib/
+  uv.titan                 public task API + private continuation pump
   timer.titan              timers and cooperative yield
   fs.titan                 files and path operations
   net.titan                DNS and TCP
@@ -296,7 +335,7 @@ titan-runtime/
   titan/uv.h               parser-friendly callback/helper declarations
 ```
 
-`titan.uv` is the only Titan module that imports C types. Its exported surface
+`uv` is the only Titan module that imports C types. Its exported surface
 contains no C FFI type. Higher-level modules dynamically import its compiled
 interface and use reserved underscore-prefixed middle-layer functions such as
 `_fs_open`, `_tcp_read`, and `_spawn`. Titan has no package-private visibility,
@@ -304,99 +343,226 @@ so those names are technically public; document them as unstable and reject
 untrusted opaque handles at runtime.
 
 Use the symbol prefix `titan_uvshim_` for C helpers. The generated module name
-`titan_uv_*` already occupies the shorter prefix.
+`uv_*` occupies the logical-module prefix.
 
-## Scheduler design
+### Canonical Titan names and Lua aliases
+
+Add the `stdlib` origin to Titan's default import resolution, including when
+`--tree` selects an application root. Reserve the canonical names `coro`, `uv`, `timer`,
+`fs`, `net`, and `os` for this standard library and resolve them from a pinned
+standard-library source/binary origin before ordinary application lookup.
+Diagnose an application module that attempts to claim one of those names.
+This stronger rule is necessary because Titan's source dependency graph,
+binary rehydration cache, and generated `loadlib("uv.so")` calls all key the
+module by its short canonical identity: merely appending a source path would
+allow an application `uv.titan` or `uv.so` to become the private dependency of
+standard `fs`; the same rule prevents a local `coro` from capturing `uv`'s
+coroutine dependency. It also makes `import "os"` reliably resolve the standard
+module while leaving Lua's loader and Lua's own `os` table out of Titan import
+resolution entirely.
+
+Pinning must survive code generation. Mark a resolved dependency as
+standard-origin metadata and make `titan-compiler/coder.lua` emit a distinct
+runtime `loadstdlib` path for it. `titan-runtime/titan.c` implements that path
+from a dedicated standard-library directory configured by the Makefile/install
+(`TITAN_STDLIB_PATH`, with an installed ABI-directory default); it never searches
+`.` or ordinary application `TITAN_PATH` entries. Generated ordinary imports
+continue to use `loadlib`. An application source chain importing `fs` and a
+binary-only `fs` must therefore reach the same canonical `uv.so`, and `uv` must
+reach canonical `coro.so`, even
+when the application supplies fake local `uv`/`coro` sources and binaries.
+Custom-prefix installation instructions and
+`make help` must show how the standard path is selected rather than relying on
+the developer's environment.
+
+Ordinary application compilation always consumes a reserved standard module as
+that pinned canonical binary, even when the repository's `stdlib/*.titan`
+sources are visible; it never recursively source-links a second `coro`/`uv` or
+emits an accidental `luaopen_os`. Standard sources are roots only in an explicit
+Makefile/driver `--stdlib-build` mode. That mode builds one canonical root at a
+time, attaches its Lua alias metadata to that root, and still resolves all
+reserved standard dependencies through already built canonical binaries. The
+build order is therefore `coro` first, then `uv`, then the higher modules. This
+is the same single-implementation rule for static executables and DSOs, not
+only an install-layout rule.
+
+Compile each module under its canonical Titan name (`os`, `uv`, and so on), and
+install the canonical binary as `<Titan ABI path>/os.so`. Lua also gets an alias
+at `<Lua C path>/titan/os.so`. Because Lua's C loader asks that path for
+`luaopen_titan_os`, add a general driver/build option that separates the
+Lua-facing require name from the canonical Titan module name, for example:
+
+```text
+titanc --stdlib-build --tree stdlib --lua-name titan.os os
+```
+
+This emits `os_init`/`os_abi`/`os_types` for Titan import and
+`luaopen_titan_os` for Lua require. It deliberately does not emit
+`luaopen_os`, avoiding a C-symbol collision with Lua's standard `os` library.
+The option changes only the requested non-main root module's generated
+`luaopen_*` postamble: it must not change the canonical module name, registry
+key, native symbol prefix, serialized interface, or recursively compiled
+dependencies. Applying one alias to several roots is rejected as ambiguous.
+`require "titan.os"` and `import "os"` therefore initialize the same canonical
+module Udata, while `require "os"` still returns Lua's table. Apply the same
+mapping to `math`, `string`, and `lua` when those modules are added.
+
+The canonical path and Lua alias must resolve to one mapped DSO image, not two
+byte-for-byte copies. This matters especially for `uv.so`: two independently
+loaded images would contain two statically linked libuv instances even if both
+entry functions recover the same registry Udata. Prefer a relative symbolic
+link to the canonical binary and verify loader coalescing on Linux and macOS;
+if the package layout cannot preserve that link, install a tiny forwarding
+alias DSO that contains no Titan module or libuv objects and opens/calls the
+canonical entry. Require-first and import-first tests inspect constructor/load
+counters and native symbol addresses to prove exactly one canonical image and
+one Runtime implementation are active.
+
+A scratch binary proof must be promoted into tests: an aliased `os.so` exports
+`luaopen_titan_os` plus `os_init`/`os_abi`/`os_types`, does not export
+`luaopen_os`, preserves `package.loaded.os`, and returns the same registry Udata
+and mutable module state through Lua `require "titan.os"` and a separately
+compiled Titan consumer's `import "os"`. This requires no module ABI bump.
+Also link a standalone against Lua's built-in `luaopen_os` and the distinct
+`luaopen_titan_os` to prove both symbols coexist.
+
+## Callback continuation runtime design
 
 ### Runtime ownership
 
-Each active `run` owns this Lua-traced graph:
+The `uv` module Udata owns one `UV_TAG` for its Lua state and an
+`active_runtime` slot. Each active loop/bootstrap session references that tag
+and owns this Lua-traced graph:
 
 ```text
+uv module Udata ------------> one private UV_TAG identity
+  |
+  +-- active_runtime -------> Runtime
+
 Runtime (module-local record + loop-owner userdata)
   |
   +-- main thread value
   +-- private uv_loop_t payload
+  +-- shared UV_TAG reference
   +-- tasks map ----------> Task ----------> root coro.Coro
   |                           |                  +-- coroutine handle userdata
-  |                           +-- private tag    +-- child Lua thread
-  |                           +-- state/result   +-- entry closure/function
+  |                           +-- state/result   +-- child Lua thread
+  |                           +-- operation epoch+-- entry closure/function
   |                           +-- current op
   +-- pending map --------> Operation owner userdata
   |                           +-- uv request/handle payload
   |                           +-- main thread / module / dispatcher uservalues
   |                           +-- Task / Request / input/output roots
   +-- resources map ------> open File/Connection/Server/Process/Ticker owners
-  +-- ready queue --------> Completion(Task, generation, ok, payload)
+  +-- main Task/result ----> standalone exit result
   +-- first failure ------> exact error value + copied traceback string
 ```
 
 Every arrow that reaches a Lua/Titan value is visible to the Lua collector.
 Libuv `data` pointers point back into this graph but do not create it.
+An async API may be called while Titan is running on the Task's child
+`lua_State *T`; it may allocate there, but every callback owner stores
+`Runtime.main_thread` in its main-thread uservalue, never the call's current
+`L`. Native callbacks always recover and dispatch on that main `lua_State *`.
+This is especially important for nested `uv.run`, whose caller state and later
+start-callback state are deliberately different.
 
-`active_runtime` is a module Udata slot, so it is per Lua state. Reject a second
-`run` while it is non-nil. After complete shutdown and `uv_loop_close == 0`,
-clear it so a later sequential `run` can create a fresh loop.
+`active_runtime` is a module Udata slot, so it is per Lua state. Any number of
+public `uv.run` tasks share it. Only a second loop driver/bootstrap is rejected
+while C `uv_run` is active. After complete shutdown and `uv_loop_close == 0`,
+clear it so a later sequential session can create a fresh loop. `uv.run`
+lazily creates an idle session when Lua embedding schedules before `uv.loop`;
+it still does not drive or resume anything.
 
 ### Task state
 
 An opaque `Task` contains:
 
 - root `coro.Coro`;
-- private identity tag;
-- generation number;
+- operation epoch/generation number;
 - state: `new`, `ready`, `running`, `waiting`, `succeeded`, `failed`, or
   `cancelled`;
 - current operation owner;
 - final error/trace when failed;
 - joiners;
-- sticky cancellation reason.
+- sticky cancellation reason and a synchronously set cancellation epoch;
+- cleanup-shield depth/state used only by library-owned terminal cleanup.
 
-Only the scheduler calls `root:resume` or `root:error`. A callback, cancellation
-request, join, or spawn only queues scheduler work.
+Only the fixed start/operation/resource callback dispatchers call
+`root:resume` or `root:error`. `uv.run` itself never does. Because current
+`coro.create` accepts `(value) -> value` while public `run` accepts
+`() -> value`, `run` creates a private adapter
+`function(_ignored: value): value return func() end`, roots the adapter and its
+captured `func` in the Task, passes the adapter to `coro.create`, and arms a zero
+timer. The start callback resumes it with `nil`; the public function still has
+no synthetic argument.
 
-Set `Runtime.running_task` immediately before entering a root and clear it as
-soon as control returns. Any `_await` function obtains the tag from that slot.
-This also handles a user-created nested coroutine: its hidden async yield walks
-outward until it reaches the task root, which becomes `suspended` while the
-intermediate coroutines become `stacked`.
+Every `_await` calls `coro.yield(request, UV_TAG)` explicitly; `yield` does not
+consult a coroutine's default tag. In a user-created nested coroutine belonging
+to another abstraction, the UV yield walks outward until the UV task root's
+active resume. That root becomes `suspended`, intermediate coroutines become
+`stacked`, and the next callback resumes the exact root captured in its owner.
+`Runtime.running_task` may still support join/ownership diagnostics, but it is
+not used to choose the coroutine tag.
+
+`Task:join()` returns immediately for an already terminal Task. Otherwise it
+yields a Join Request with `UV_TAG`; target completion arms a zero-timer wakeup
+for each joiner rather than inline-resuming an independent root from the
+target's callback. This keeps nested `uv.run` Tasks dynamically independent and
+bounds fan-out per callback.
 
 ### Request flow
 
-Use one private `Request` record in `titan.uv`. It has an integer operation kind,
+Use one private `Request` record in `uv`. It has an integer operation kind,
 ordinary Titan/value arguments, and a generation. No tagged-variant language
 feature is required.
 
 The selected flow is:
 
-1. A high-level middle-layer function, executing on the task's child Lua state,
-   validates arguments and creates a pure Titan `Request`.
-2. `_await(request)` calls `coro.yield(request, task.tag)`.
-3. The task root's `resume` returns on the main scheduler state.
-4. The scheduler checks `root:status()`:
-   - `suspended`: the returned value must cast to the private `Request` type;
-   - `dead`: the returned value is task completion;
-   - any other status is an internal scheduler error.
-5. On the main state, the scheduler allocates operation owner userdata and
-   buffers, sets uservalues, inserts the owner in `pending`, sets libuv data to
-   the owner, and submits the public libuv operation.
-6. A negative immediate return means that operation's completion callback will
-   not arrive. Apply the lifecycle-matrix arm and queue an error wakeup without
-   entering `uv_run`; if a handle was already initialized, its owner remains
-   rooted through an explicit `uv_close` callback.
-7. A successful submission leaves the task `waiting` and the operation rooted.
-8. The libuv callback records status/result in the still-rooted owner, calls the
-   native Titan dispatcher, and returns. It must not clean or release anything
-   whose result storage the scheduler still needs.
-9. The dispatcher enqueues the rooted owner plus its generation. It does not
-   resume user code or expose a borrowed result pointer as the payload.
-10. After `uv_run` returns, the scheduler applies that operation kind's
-    extraction contract: copy/convert all result data into Lua-owned values,
-    perform the one required cleanup, transition terminal state, and only then
-    remove the logical wait/final operation root.
-11. The scheduler calls `root:resume(result, tag)` or
-    `root:error(error, tag)`. Result extraction/cleanup failure is contained as
-    a Runtime failure and enters the same drain path.
+1. `uv.run(func)` creates and roots the private `(value) -> value` adapter,
+   creates `coro.create(adapter, UV_TAG)`, roots the Task, allocates a GC-owned
+   zero timer, and arms its one-shot start callback. `func` has not run when
+   `uv.run` returns. Failure to create the Runtime/loop before a Task exists
+   raises synchronously. A timer init/start failure after Task creation marks
+   and returns that Task failed without running `func`; init failure has no live
+   handle, while start failure initiates `uv_close` and keeps its owner rooted
+   for the later close callback. The next `uv.loop`/standalone bootstrap drains
+   that cleanup and applies normal observed/unobserved Task policy.
+   Whether called from Lua's main thread or a running child Task, the start
+   owner records the Runtime's main thread for its native callback.
+2. The start or operation callback retrieves its exact Task owner and enters the
+   protected native Titan dispatcher on the main Lua state.
+3. For a completed operation, the dispatcher first copies/converts all borrowed
+   result data and performs mandatory request cleanup. Arbitrary user code never
+   sees request-owned pointers.
+4. The dispatcher calls `root:resume(result, UV_TAG)` or
+   `root:error(error, UV_TAG)`. User code now runs synchronously on the loop
+   thread until it finishes or an async API calls
+   `coro.yield(request, UV_TAG)`.
+5. When the call returns, inspect `root:status()`:
+   - `suspended`: the returned value must be the private Request and its epoch
+     must match the Task;
+   - `dead`: store the task result, wake joiners through their own callbacks,
+     and retire the Task after physical owner cleanup;
+   - anything else: record an internal invariant failure.
+6. For a yielded Request, allocate buffers/operation userdata, set uservalues,
+   insert it in `pending`, associate it through public libuv data APIs, and
+   submit the operation. Root this new owner before releasing the completed
+   owner's logical root.
+7. A successful asynchronous submission leaves the Task waiting; the current
+   callback restores the main Lua stack and returns to libuv.
+8. A negative immediate return means no completion callback will arrive. Apply
+   the lifecycle-matrix cleanup arm and iteratively call `root:error` with that
+   error in the same dispatcher. Do not recurse and do not wait for a nonexistent
+   callback. Cap consecutive immediate iterations and defer through a zero timer
+   if needed to preserve loop responsiveness.
+9. An error or the library-injected `Cancelled` escaping the root drive is a
+   normal Task terminal outcome: store its exact value/trace, wake registered
+   joiners, and
+   apply the observed/unobserved Task policy below. It is not itself a broken
+   dispatcher. A separate outer boundary treats malformed private Requests,
+   native-entry/protected-call failures, and pump invariant failures as fatal
+   Runtime errors. Both boundaries return normally through the C callback.
 
 For `uv_fs_t`, use public `uv_fs_get_result`, `uv_fs_get_ptr`,
 `uv_fs_get_statbuf`, `uv_fs_get_path`, and `uv_fs_scandir_next` as appropriate.
@@ -404,38 +570,53 @@ Copy all request-owned data before calling `uv_fs_req_cleanup` exactly once.
 The immediate-submission-error arm also runs its operation-specific cleanup;
 it is not a shortcut around this state machine.
 
-A submit-before-yield fast path was also proven feasible, provided the context
-stores `Runtime.main_L` and never dispatches on suspended child state `T`. Keep
-it out of v1 until profiling shows the request handoff matters; the yield-first
-path has simpler state ownership and matches the original sketch.
+### Loop bootstrap and callback scheduling
 
-### Fair event-loop driver
-
-Use a bounded ready-task budget so CPU-ready tasks cannot starve I/O:
+Public `uv.run` is not the libuv loop runner. Use these distinct layers:
 
 ```text
-enqueue root start
-
-while root not terminal or shutdown not drained:
-    run up to READY_BUDGET queued task actions
-    uv_run(loop, UV_RUN_NOWAIT)
-    drain callback-produced completions into the ready queue
-
-    if ready is empty and loop still owns active work:
-        uv_run(loop, UV_RUN_ONCE)
-        drain callback-produced completions
-
-    if ready is empty, tasks are waiting, and uv_loop_alive(loop) is false:
-        fail with a scheduler-deadlock diagnostic
+public uv.run(f)             create/root task + arm zero timer + return Task
+private uv._bootstrap(main)  uv.run(main) + drive the session + report result
+C uv_run(loop, mode)         poll and invoke callbacks; never called in callback
+public uv.loop()             explicit loop driver for Lua embedding/non-main use
 ```
 
-No callback calls `uv_run`. `timer.yield()` uses a zero-duration timer when the
-contract specifically requires the next loop turn; ordinary spawning simply
-queues at the tail. The callback-to-scheduler completion queue is a multi-entry
-FIFO with one entry per terminal event, not a single mailbox slot: one `uv_run`
-iteration may invoke many callbacks before returning. Its growth is bounded by
-rooted pending operations/resources, and shutdown drains it before releasing
-those roots.
+The standalone hook and public `uv.loop()` may drive only from the Lua main
+thread, where the outer protected entry/`errfunc` and callback stack contract
+are installed; `uv.loop()` called from a Lua/Titan child coroutine is rejected
+before C `uv_run`. This restriction does not apply to task-starting `uv.run`,
+which remains valid inside a running UV Task or another nested coroutine.
+
+The generated standalone entrypoint first loads the main module, which
+initializes its transitive imports, and retrieves the main callable. Only then
+does it read a private main-bootstrap hook from the Lua registry. If that hook
+is present, the entrypoint passes the main callable and arguments to it under
+the existing outer `lua_pcall`; otherwise it preserves today's direct
+synchronous call. Put the shared registry-key definition in both `titan.h` and
+`titan/ffi.h`. The hook creates the private session, schedules main through
+ordinary `uv.run`, and then invokes C `uv_run(loop, UV_RUN_DEFAULT)` from
+outside all callbacks. This registry hook makes source-linked and binary-only
+application source chains and binary-only async dependencies behave the same
+and does not link libuv into programs that never import `uv`.
+Registration is idempotent for the same canonical `uv` module and rejects a
+different bootstrap provider instead of silently changing main semantics.
+
+C `uv_run` depth is always one. A callback may resume arbitrary Titan code and
+start requests/handles, but it never calls `uv_run`, `uv_loop_close`, or a
+second bootstrap. `timer.yield()` explicitly cedes to a zero timer on the next
+turn. CPU-heavy code that does not yield blocks the loop just as CPU-heavy code
+inside a conventional libuv callback would; this is documented cooperative
+scheduling, not a hidden fairness queue.
+
+When the final live Task becomes terminal, begin normal session cleanup of all
+remaining session-owned resources. This closes both active leftovers (for
+example, a Ticker whose last waiter was cancelled) and passive leftovers (for
+example, an idle File or connected TCP handle) that cannot be used once no Task
+remains. It also means normal exit does not depend on passive handles keeping
+`uv_run(UV_RUN_DEFAULT)` alive. If that C call returns while Tasks remain
+logically waiting but the loop is not alive, report a deadlock with their
+Task/Request kinds. Normal or failure cleanup may call `uv_run` again to drain
+request/close callbacks only after the active invocation has returned.
 
 ## Low-level FFI and C shim contract
 
@@ -444,7 +625,7 @@ those roots.
 For a loop, request, or handle:
 
 1. Read the exact C size and alignment from `uv.<type>.sizeof` and `.alignof`.
-2. Call `lua_newuserdatauv` from `titan.uv`, using enough uservalues for its
+2. Call `lua_newuserdatauv` from `uv`, using enough uservalues for its
    ownership contract.
 3. Cast the returned `void *` payload to the source-level pointer type such as
    `*uv.uv_loop_t`, `*uv.uv_fs_t`, or `*uv.uv_timer_t`.
@@ -488,8 +669,8 @@ layout is:
 
 | Slot | Root |
 | --- | --- |
-| 1 | scheduler main Lua thread |
-| 2 | `titan.uv` module Udata |
+| 1 | loop/bootstrap main Lua thread |
+| 2 | `uv` module Udata |
 | 3 | fixed module-local native dispatcher CClosure |
 | 4 | Task/root coroutine |
 | 5 | private Request/operation metadata |
@@ -506,32 +687,67 @@ sets of named constants together and assert the mapping in that layout test.
 `titan-runtime/titan_uv.c` follows the current coroutine pattern:
 
 ```c
+/* Public libuv accessors and raw TValue reads do not allocate or throw. */
 Udata *owner = uv_req_get_data((uv_req_t *)req);
-lua_State *L = thvalue(&owner->uv[MAIN_THREAD_SLOT].uv);
-Udata *M = uvalue(&owner->uv[MODULE_SLOT].uv);
-CClosure *dispatcher = clCvalue(&owner->uv[DISPATCH_SLOT].uv);
-titan_uv_dispatch f = pvalue(&dispatcher->upvalue[2]);
+lua_State *L = titan_uv_owner_main_thread(owner);
+uv_loop_t *loop = titan_uv_owner_loop_noalloc(owner);
+struct titan_uv_callback call = { owner, loop, event_kind, result, size };
 
-/* Keep owner rooted until this C callback has completely finished. */
-TValue owner_value = push_owner_temporarily(L, owner);
-f(L, M, NULL, owner_value, event_kind, result, size);
-restore_stack(L);
+/* The thunk contains every Lua-touching action, including temporary rooting,
+ * native-pointer recovery, native entry, and ordinary stack restoration. */
+int status = titan_uv_callprotected(L, titan_uv_callback_thunk, &call);
+if (status != LUA_OK) {
+    /* No allocation, formatting, Lua API call, or second throw is permitted. */
+    titan_uv_capture_emergency_failure_noalloc(L, owner, status);
+    uv_stop(loop);
+}
 ```
+
+Both `Runtime.main_thread` and the loop pointer are recovered through validated
+raw owner fields before entering protection; neither lookup allocates or calls
+Lua. The loop value is therefore initialized even if the protected thunk fails
+on its first instruction.
 
 The dispatcher is a fixed module-local top-level function with no captures, so
 `_fn == NULL` matches `titan_coro_entry`. Do not route through its Lua wrapper;
 these callbacks are frequent and their arguments are already trusted by the
 private shim.
 
-The dispatcher body is one outer `do ... catch`:
+`titan_uv_callprotected` uses a C-level Lua protected boundary whose thunk roots
+the owner, recovers the module and dispatcher closure, and calls the native
+Titan function pointer directly; it does not route through the Lua entry
+wrapper. This extra boundary matters because a generated native entry has
+GC/stack setup before its first Titan `do ... catch`. Mirror Lua/Titan's
+protected-call recovery: save and restore the main stack top,
+`CallInfo`/error-function state needed by the internal API, and leave the
+callback stack exactly as it was on entry.
 
-- normal path: validate generation/state and append a `Completion`;
-- catch path: save exact `error` and `traceback`, mark the runtime failing,
-  request `uv_stop`, and return;
+Each Runtime pre-roots emergency error/trace slots and a static fallback
+message before entering C `uv_run`. If the protected thunk fails, the recovery
+helper performs only raw `TValue` assignment plus the required GC barriers into
+those already rooted slots; it preserves the current error/backtrace value when
+available and never allocates, formats, calls a raising Lua API, or invokes
+Titan. Human-readable conversion and trace copying are deferred until the
+outer bootstrap has regained control, under its existing protected boundary.
+Add synthetic allocation/prologue failures before the dispatcher's Titan catch
+to prove both the outer protection and the no-throw emergency recorder.
+
+The Titan dispatcher has an inner Task-drive boundary and an outer invariant
+boundary:
+
+- normal path: validate owner epoch/state, copy/extract the completed result,
+  perform mandatory request cleanup, directly resume/error the exact Task, and
+  arm the next yielded Request before returning;
+- Task boundary: an error or `Cancelled` escaping `root:resume`/`root:error` is
+  stored as that Task's terminal outcome, joiners are scheduled, and only an
+  unobserved failure applies the session-failure policy;
+- invariant boundary: a dispatcher bug saves the exact `error` and `traceback`,
+  marks the Runtime fatal, begins phased shutdown, requests `uv_stop`, and
+  returns;
 - it never re-raises while the C callback is active.
 
-The scheduler later performs orderly shutdown and only then reinstalls/pins the
-saved trace and raises.
+The outer bootstrap regains control from C `uv_run`, drains orderly shutdown,
+and only then reinstalls/pins the saved trace and reports the error.
 
 ### Initial fixed callbacks
 
@@ -549,7 +765,8 @@ Declare only the callback shapes actually needed:
 - signal.
 
 Imported shim function names decay to libuv's callback pointer typedefs. The C
-functions should contain no scheduler policy.
+functions contain ABI conversion, protection, and stack restoration but no
+continuation policy; the native Titan dispatcher owns the direct request pump.
 
 ### Binary buffers
 
@@ -562,19 +779,22 @@ V1 uses explicit-length buffers throughout.
   proven optimization may pin the immutable `TString` and write directly.
 - Stream reads: when a waiter starts reading, associate a preallocated
   GC-owned buffer with the stream owner. The C alloc callback returns that
-  buffer without entering Titan. On data, EOF, or error (`nread != 0`), the C
-  read callback must synchronously call public `uv_read_stop` before enqueueing
-  the owner. That quiesces the single buffer so another callback cannot
-  overwrite it before post-`uv_run` extraction. The scheduler converts exactly
-  `nread` bytes into a Titan string and explicitly restarts reading for the next
-  waiter. A negative stop result is an invariant failure: record it and close
-  the stream (or observe that it is already closing) before returning from the
-  callback, so the buffer is still never reused.
-- `nread == 0` is not EOF; enqueue nothing and keep reading.
-- `UV_EOF` becomes `nil` at the high-level read API. Other negative results
-  become `titan.uv.Error`.
-- Stop reading as soon as the current waiter has data/EOF/error. Higher-level
-  methods retain excess bytes and explicitly restart when another read waits.
+  buffer without entering Titan. For `nread > 0`, copy exactly those bytes into
+  a Titan string before resuming the waiter. Libuv serializes callbacks on this
+  loop, so the buffer cannot be overwritten while the callback and resumed
+  continuation are executing. If the continuation yields another read Request
+  for the same Connection, keep/restart reading; if it yields a different
+  operation, completes, or closes, call public `uv_read_stop` before returning.
+- `nread == 0` is not EOF; resume nothing and keep reading.
+- Before resuming arbitrary code for any `nread < 0`, stop the read side and
+  persist its terminal state on the Connection. `UV_EOF` makes this and all
+  later reads return `nil` without another `uv_read_start`; another negative
+  result stores a `uv.Error` which later reads re-raise without restarting.
+  Libuv documents another read after a negative read callback as undefined.
+- Higher-level methods retain excess bytes in the Connection before they yield
+  again. `uv_read_stop` is idempotent and documented to always succeed. Its
+  platform-specific nonzero Windows TTY result means resource release is still
+  pending, not failure; do not turn it into an invariant error.
 
 No NUL-terminated cast is used for file/socket payloads.
 
@@ -583,6 +803,36 @@ text rather than payloads. Reject embedded NUL bytes before crossing the FFI,
 and keep an operation-owned NUL-terminated copy whenever libuv may retain the
 pointer beyond the submission call. Tests must distinguish accepted binary
 file/socket data from rejected NUL-containing text arguments.
+
+### Multi-shot callback continuations
+
+Long-lived handle owners carry at most one current waiter plus an epoch; this is
+resource state, not a global completion queue.
+
+- `Ticker:tick()` always yields a wait Request. The repeating timer callback
+  clears the waiter and directly resumes it. If the continuation reaches
+  `tick()` again on the same Ticker, the yielded Request reinstalls the waiter
+  and the current callback returns; the next timer callback makes `tick()`
+  return. With no waiter, ticks are dropped rather than accumulated. A Ticker
+  is an independently shareable resource with one waiter: cancelling that
+  waiter clears only the waiter/epoch and does not implicitly close the Ticker;
+  `Ticker:close()` or final session cleanup owns stop-and-close.
+- A stream owner follows the read behavior above. Only one reader may wait;
+  surplus bytes live in the Connection buffer, not in extra callbacks.
+- A Server directly satisfies one waiting `accept`; without a waiter it stores
+  accepted clients in its bounded resource-local queue.
+- Signal/timer/listener callbacks compare the waiter epoch before resuming.
+  A one-shot timer or signal callback first clears its waiter, records
+  `fired/stopped`, and initiates its exactly-once `uv_close`; only then may it
+  resume arbitrary Titan code. Repeating Ticker state is reinstalled after the
+  direct drive only when the resource is still open and the new waiter epoch
+  matches. Cancellation or a stale event performs physical cleanup only and
+  never resumes the Task twice.
+
+Because loop callbacks are serial, no second callback fires while the current
+callback's Titan continuation is executing. User code must nevertheless yield
+cooperatively; a long computation delays all other callbacks exactly as it
+would in a hand-written callback API.
 
 ## Errors and traceback preservation
 
@@ -608,51 +858,99 @@ normal optional read result, and cancellation is a distinct semantic value.
 
 There are three error boundaries:
 
-1. Immediate submission failure: queue `Error` without entering the loop.
-2. Async operation failure: callback queues the negative result; scheduler
-   injects `Error` with `Coro:error` at the suspended `_await` site.
-3. Task/user failure: scheduler catches the error escaping `root:resume`, copies
-   the catch-local `traceback`, marks the task failed, and applies fail-fast
-   structured-concurrency policy.
+1. Immediate submission failure: clean the failed arm and iteratively inject
+   `Error` with `root:error` from the current dispatcher; no callback is awaited.
+2. Async operation failure: its callback copies/cleans the result and directly
+   injects `Error` with `root:error` at the suspended `_await` site.
+3. Task/user failure: the Task-drive boundary catches the error or
+   library-injected `Cancelled` escaping `root:resume`/`root:error`, copies the
+   catch-local `traceback`, and marks only that Task terminal before applying the
+   observed/unobserved policy. Dispatcher invariants and native-entry failures
+   use the distinct Runtime-fatal boundary and always initiate phased shutdown.
 
 Do not depend on `registry[TITAN_BACKTRACE_KEY]` retaining a task failure while
 other callbacks run. Store the traceback string in the Task/Runtime immediately.
 
-Before `run` or `Task:join` re-raises a stored error, reinstall the saved trace
-and set `TITAN_TRACE_PINNED`, following `coro.titan:57-89` and
+Before `Task:join` or the outer bootstrap re-raises a stored error, reinstall
+the saved trace and set `TITAN_TRACE_PINNED`, following `coro.titan:57-89` and
 `doc/implementation/error-handling.md:27-49`. Joining a failed child appends a
 join-site propagation trace so both the child failure and observer are visible.
 
 The library never prints errors. Standalone/Lua callers retain control over
 presentation.
 
-## Cancellation and structured concurrency
+## Task completion and cancellation
 
 ### Public task policy
 
-V1 has structured tasks and no detach:
+V1 tracks every Task created by nonblocking `uv.run`:
 
-- a child with an already waiting joiner delivers its stored failure to the
+- a Task with an already waiting joiner delivers its stored failure to the
   joiner; `Task:join` re-raises it with its saved trace and the joiner may catch
   it;
-- a child that fails with no waiting joiner is unobserved and fails the run,
-  cancelling the root and siblings immediately;
+- a Task that fails with no waiting joiner is unobserved and fails the loop
+  session; the dispatcher records it, initiates cancellation/close, and returns
+  through libuv before the bootstrap reports it;
+- decide “unobserved” with a per-Task next-turn zero-timer check after control
+  has returned to the Task's creator. This lets `uv.run` return an immediately
+  failed start Task and lets an already running/scheduled observer register
+  `join` before promotion; the timer is only an observation deadline, not a
+  global ready/completion queue;
+- a pending observation check prevents the Runtime from declaring the final
+  Task set settled and entering normal cleanup. The check either finds an
+  observer or promotes the failure; main-Task failures bypass this grace;
+- every non-success terminal outcome of the standalone main Task, including
+  `Cancelled`, is reported by the bootstrap instead of inventing an integer
+  exit result. For non-main Tasks, an explicitly requested `Cancelled` outcome
+  is not promoted merely because no one joins it; a joiner still receives and
+  may catch that `Cancelled` value;
 - joining self is rejected; a cycle among joiners is reported by the
-  scheduler-deadlock diagnostic rather than hanging;
-- when the root finishes, remaining children are cancelled and drained before
-  `run` returns;
+  loop-deadlock diagnostic rather than hanging;
+- completion of the standalone main Task stores its integer result but does not
+  cancel independently scheduled `uv.run` Tasks. Once the final Task is
+  terminal, normal session cleanup closes any leftover active or passive
+  resources and drains their callbacks before returning;
 - cancellation is cooperative and cannot preempt CPU-bound Titan code;
 - cancellation is sticky: catching it permits cleanup, but a later `_await`
   observes it again, and returning without another await still leaves the Task
   terminally `cancelled`, so `join` raises its `Cancelled` value.
 
+Classify a Task as `cancelled` only when its sticky cancellation state is set
+and the escaping value is the library's corresponding injected cancellation;
+a user-created/lookalike `Cancelled` raised without that state is an ordinary
+Task failure.
+
+Library combinators that need helper Tasks use a private observed-task
+constructor which installs their parent/observer before the zero-timer start is
+armed. They never create an unobserved helper and hope to join it later.
+
 ### Logical versus physical cancellation
 
-`Task:cancel(reason)` marks the task and schedules injection of
-`Cancelled(reason)` through `root:error` at the next safe point. For ordinary
-waits that can be immediate; for cleanup-critical waits, the safe point is only
-after physical cleanup. It also requests operation-specific physical
-cancellation:
+`Task:cancel(reason)` synchronously sets the sticky cancellation flag/reason and
+increments the Task epoch before it returns. That mark is the linearization
+point: cancellation wins over any operation result not already delivered to
+the coroutine. The method then schedules injection of `Cancelled(reason)`
+through `root:error` at the next safe point and requests operation-specific
+physical cancellation:
+
+- cancellation requested by another Task never inline-resumes the target from
+  the caller's callback. Arm a zero-timer cancellation callback for the exact
+  target, preserving independent dynamic chains and bounding callback work;
+- every ordinary `_await` checks the sticky flag before allocating, rooting, or
+  submitting new work. If cancellation was marked while the Task was running,
+  the yielded Request is rejected by the current dispatcher and cancellation
+  is injected iteratively instead;
+- every completion callback checks the sticky flag and epoch after mandatory
+  result extraction/cleanup but before delivering a result or submitting a
+  continuation Request. If cancellation won, normal result delivery is
+  suppressed; the scheduled cancellation timer becomes a stale cleanup-only
+  callback;
+- library-owned cleanup awaits are shielded from the ordinary reject-new-work
+  rule. `File:close`, handle close/drain, and process cleanup must reach their
+  terminal callbacks. A cleanup completion may resume the shielded cleanup
+  code, but the sticky cancellation remains pending and is reinjected at the
+  next ordinary await (or determines the Task's terminal state on return), so a
+  `finally` block is not interrupted at its first asynchronous close;
 
 - non-cleanup request families supported by `uv_cancel`: call it, but keep the
   owner rooted until the completion callback, including when cancellation
@@ -663,8 +961,15 @@ cancellation:
   nevertheless completes with a valid file descriptor, immediately schedule
   an uncancellable close and retain ownership until that close completes;
 - timers: `uv_timer_stop`, then `uv_close`, free only after close callback;
-- reads: `uv_read_stop`; keep stream storage and late event handling valid;
-- connect/write: mark logically cancelled and consume the eventual callback;
+- a cancelled Ticker wait clears that waiter/epoch but leaves the independently
+  shareable Ticker open; explicit close or final session cleanup stops it;
+- reads: `uv_read_stop`; clear only the waiter and keep the independently
+  shareable Connection storage and late event handling valid;
+- an in-flight connect owns an unpublished `uv_tcp_t`; close that handle on
+  cancellation so libuv completes the connect request asynchronously, and keep
+  both request and handle owners rooted through their terminal callbacks;
+- a write uses an already published, potentially shared Connection, so do not
+  close it merely to cancel one waiter; consume the eventual write callback;
 - process wait: cancel the waiter without implicitly killing the child;
 - explicit `Process:kill` controls process termination.
 
@@ -676,6 +981,15 @@ late open schedules the uncancellable file close above.
 Generation and terminal-state checks make completion/cancellation exactly once.
 A late callback after logical cancellation performs physical cleanup and is not
 allowed to resume the task again.
+
+Files, Connections, Servers, Processes, and Tickers are Runtime-owned resources
+which may be shared among Tasks; they are not implicitly owned by their creator.
+Cancelling a waiter therefore does not close a published resource. A newly
+acquired resource becomes publishable only when its creating await returns;
+until then, cancellation/abandonment owns and closes it. When no live Task
+remains, the Runtime closes every still-registered resource because no future
+continuation can use it. This rule prevents both shared-resource surprises and
+active/passive leftovers rooted forever.
 
 Dropping a coroutine is not cancellation. Current minicoro collection abandons
 stacked frames without running user code, so it would skip `finally` blocks.
@@ -693,49 +1007,86 @@ promise.
 | Family | Immediate/start failure | Logical/physical cancellation | Terminal event and extraction | Final unroot point |
 | --- | --- | --- | --- | --- |
 | Private loop | Failed `uv_loop_init` leaves no live loop and releases its owner | Runtime shutdown drains all other families; `uv_stop` is only a wakeup | `uv_loop_close == 0` | After successful loop close |
-| One-shot timer or signal wait | Init failure releases immediately; start failure after successful init queues the error and calls `uv_close` | `uv_timer_stop`/`uv_signal_stop`, then `uv_close`; cancellation may be injected immediately | Event callback stops the watcher, enqueues once, and initiates close | Only after close callback, and after any queued completion no longer needs the owner |
-| Repeating Ticker | Same init/start split | Stop and close; pending `next` waiter receives closed/cancelled outcome | Tick coalesces in owner; scheduler consumes it | Close callback after no pending completion references it |
-| `uv_fs_t` including open/read/write/stat/path/scandir/close | A negative submit return queues its result and follows the wrapper's cleanup arm; no callback is assumed | Call `uv_cancel` only for non-cleanup operations where supported. Never physically cancel `uv_fs_close`; logical cancellation waits for close callback + cleanup. A cancelled open that returns a valid fd is converted immediately into an uncancellable close | Scheduler copies buffer/stat/path/scandir entries through public accessors, then calls `uv_fs_req_cleanup` exactly once; cleanup-close status is consumed before delivering cancellation | After extraction and cleanup; any acquired `uv_file` remains owned until its close request completes |
-| DNS (`uv_getaddrinfo`/`uv_getnameinfo`) | Negative submit return has no callback and releases request inputs | `uv_cancel` success still ends in completion callback; too-late/failure leaves normal callback path | Copy normalized addresses/names; for `getaddrinfo`, call `uv_freeaddrinfo` on every non-null result after copying | After callback result is copied and any address list freed |
-| Connect, write, and `uv_shutdown_t` requests | Negative submit return has no callback; release request/buffer roots, while any initialized stream handle follows handle-close policy | No assumed physical cancellation; mark logical cancellation and consume the eventual callback. A late successful connect closes the undelivered stream | Scheduler copies status; write buffer remains rooted through callback; shutdown closes only the write side | After callback extraction; a delivered stream remains until explicit close, an undelivered one until close callback |
-| Stream read waiter | Negative `uv_read_start` has no callback and retires the waiter synchronously | Successful `uv_read_stop` produces no terminal read callback: retire the waiter and inject cancellation synchronously while retaining the stream owner | For `nread != 0`, callback calls `uv_read_stop` before enqueue; scheduler copies the quiesced buffer. `nread == 0` is ignored | Per-wait owner/buffer after scheduler extraction; stream handle only at close callback |
-| Listener and accepted TCP handles | Listen failure after successful handle init initiates close | Closing the server uses `uv_close`; no nonexistent listen-stop API is assumed | Each connection notification performs `uv_accept` into a new GC-owned handle; a full queue closes that new client immediately | Each handle's own close callback |
-| Spawned process and stdio pipes | On `uv_spawn` failure, the process handle is treated as uninitialized; already initialized pipe handles are closed and drained | Cancelling a waiter does not kill; Runtime shutdown uses `uv_process_kill`, consumes exit, then closes process/pipes | Exit callback records status; pipe read/write requests follow stream/request rows | Process close callback plus all pipe close callbacks |
+| One-shot timer or signal wait | Init failure releases immediately; start failure after successful init injects the error iteratively and calls `uv_close` | `uv_timer_stop`/`uv_signal_stop`, clear waiter/epoch, then exactly-once `uv_close`; a cancellation callback injects at its safe point | Before arbitrary user code: mark fired/stopped, clear waiter, initiate close, then directly resume once | Only after close callback and after direct drive no longer needs the owner |
+| Repeating Ticker | Same init/start split | Cancelling `tick` clears only its waiter/epoch. Explicit/resource-shutdown close stops and closes the Ticker and wakes a waiter with the applicable outcome | Callback clears and resumes the current waiter; reinstall a newly yielded `tick` only if still open and its epoch matches; with no waiter drop the tick | Close callback after no active drive/waiter references it |
+| `uv_fs_t` including open/read/write/stat/path/scandir/close | A negative submit return follows the wrapper's cleanup arm and is injected iteratively; no callback is assumed | Call `uv_cancel` only for non-cleanup operations where supported. Never physically cancel `uv_fs_close`; logical cancellation waits for close callback + cleanup. A cancelled open that returns a valid fd is converted immediately into an uncancellable close | Callback/dispatcher copies buffer/stat/path/scandir entries through public accessors, calls `uv_fs_req_cleanup` exactly once, then directly resumes/errors the Task; cleanup-close status is consumed before delivering cancellation | After extraction, cleanup, and direct drive; any acquired `uv_file` remains owned until its close request completes |
+| DNS (`uv_getaddrinfo`/`uv_getnameinfo`) | Negative submit return has no callback and releases request inputs | `uv_cancel` success still ends in completion callback; too-late/failure leaves normal callback path | Copy normalized addresses/names, free each non-null `getaddrinfo` result, then directly drive the Task | After callback drive and any address list free |
+| Connect, write, and `uv_shutdown_t` requests | Negative submit return has no callback; release request/buffer roots and inject iteratively, while any initialized stream handle follows handle-close policy | Cancel an unpublished connect by closing its private TCP handle and consume both connect/close callbacks. Do not close a published shared Connection merely to cancel a write; consume that callback. A late successful connect is never delivered and stays on the close path | Callback copies status and directly drives only if cancellation did not win; write buffer remains rooted through callback; shutdown closes only the write side | After callback drive; a published stream remains registered until explicit/session close, an unpublished one until close callback |
+| Stream read waiter | Negative `uv_read_start` has no callback and retires/errors the waiter in the current drive | `uv_read_stop` promises no terminal read callback: clear/retire the waiter and inject cancellation separately while retaining the stream owner; its documented nonzero Windows TTY return is not failure | `nread > 0`: copy bytes and directly resume; another same-stream read Request keeps reading, otherwise stop before return. `nread == 0` is ignored. Before any `nread < 0` drive, persist EOF or stored-error read-terminal state; never start reading again | Per-wait roots after direct drive/handoff; stream handle only at close callback |
+| Published passive File/Connection | Acquisition failure follows its request row; a partially acquired object is never published | Cancelling a Task/waiter does not close a shared object. Explicit close serializes after its in-flight operations; final session cleanup does the same | Idle files and connected handles need not keep `uv_run` alive, so Runtime registration—not loop liveness—controls cleanup | File after close request cleanup; Connection after close callback |
+| Listener and accepted TCP handles | Listen failure after successful handle init initiates close | Closing the server uses `uv_close`; no nonexistent listen-stop API is assumed | Each connection notification performs `uv_accept` into a new GC-owned handle and directly resumes an accept waiter, or queues locally; a full queue closes that new client | Each handle's own close callback |
+| Spawned process and stdio pipes | `uv_spawn` initializes the process handle on both success and failure. On a negative return, `uv_close` that handle and close/drain every initialized pipe; no exit callback is expected | Cancelling a waiter does not kill. Session cleanup uses `uv_process_kill` for a live child, observes its exit callback, and only then closes the process handle; pipe requests follow their own rows | Exit callback records status and directly resumes a waiter. A successfully spawned live process handle is never closed before exit is observed, avoiding an unreapable child on Unix | Process close callback after spawn failure or observed exit, plus all pipe request/close callbacks |
 
 Wrapper tests fault each transition, including init failure, start/submit failure,
 cancel-before-complete, complete-before-cancel, too-late cancellation, and close
-with a completion still queued.
+while a callback is directly driving its continuation.
 
 ## Deterministic shutdown
 
-On root completion, task failure, or internal dispatcher failure:
+Normal main completion only records the exit result and lets independently
+scheduled Tasks continue. The transition to session cleanup occurs when the
+last Task becomes terminal, even if active or passive resources remain. An
+unobserved Task failure, explicit session cancellation, or internal
+dispatcher/protected-call failure enters the same cleanup machine in fatal mode
+while Tasks are still live.
 
-1. Mark Runtime `closing`; reject new tasks and operations.
-2. Preserve the first failure and its trace.
-3. Inject cancellation into all live child tasks so their `finally` paths run.
-4. Cancel supported requests but keep every context rooted for its callback.
-5. Stop watchers/readers and initiate `uv_close` for every initialized handle.
-6. Close open files asynchronously.
-7. For live child processes owned by the run, send the documented graceful
+Shutdown is phased; it is not a blanket `uv_walk` + `uv_close` pass:
+
+1. Enter `quiescing`. Reject `uv.run` and ordinary new operations, preserve the
+   first fatal error/trace if any, but explicitly permit library-owned
+   cleanup-shield operations. Mark internal cancellation wakeups and process
+   grace timers as shutdown infrastructure so later handle closing cannot
+   remove them prematurely.
+2. In fatal mode, synchronously mark every live Task cancelled and arm its own
+   cancellation callback; never resume an independent Task inline from the
+   failing callback. Request operation-specific cancellation at the same time,
+   but retain every owner until the callback promised by its lifecycle row.
+   Completion callbacks that lose to cancellation perform cleanup and inject
+   cancellation rather than deliver their result.
+3. Continue dispatching until all Task `finally` paths have run and Tasks are
+   terminal. Cleanup-shielded close/drain operations may be submitted in this
+   phase. Do not close a handle or file descriptor while a request still uses
+   it; serialize each File's close after its in-flight request and wait for
+   every submitted request's terminal callback/cleanup.
+4. Close remaining published Files asynchronously and drain their `uv_fs_t`
+   callbacks. Stop resource waiters/watchers, but retain handle storage and any
+   shutdown infrastructure still needed by later phases.
+5. For each non-detached live child owned by the session, close/drain its stdio
+   streams as their request states permit, send the documented graceful
    termination signal (`SIGTERM` on Linux/macOS), wait up to a five-second
-   grace timer, then force termination with `SIGKILL`;
-   consume the exit callback before closing the process handle. Task
-   cancellation alone does not kill a process.
-8. Continue `uv_run` calls until all request and close callbacks drain.
-9. Call `uv_loop_close`. Treat `UV_EBUSY` as an implementation bug; in a debug
+   grace timer, then send `SIGKILL` if needed. Observe the exit callback before
+   calling `uv_close` on a successfully spawned process handle. A spawn-failed
+   initialized handle may be closed immediately because no exit callback will
+   arrive. Task cancellation alone never kills a process while the session
+   remains active.
+6. Now stop and close every remaining Server, Connection, Ticker, signal,
+   timer, process, pipe, and internal shutdown handle exactly once. Drain every
+   close callback; an unpublished cancelled connect remains rooted until both
+   its connect and handle-close terminal events have occurred.
+7. A callback may request `uv_stop` so the outer bootstrap regains control, but
+   no callback calls C `uv_run` recursively. After the current
+   `uv_run(UV_RUN_DEFAULT)` returns, the bootstrap invokes nonblocking/default
+   drain iterations as required until the phase machine and loop liveness both
+   report empty.
+8. Call `uv_loop_close`. Treat `UV_EBUSY` as an implementation bug; in a debug
    build, enumerate remaining handles with `uv_walk` for the diagnostic.
-10. Clear `active_runtime` and release the loop-owner root.
-11. Return normally or reinstall/pin and re-raise the preserved error.
+9. Clear `active_runtime`, release the loop-owner root, and either return the
+   main result or reinstall/pin and re-raise the preserved failure.
 
-No userdata finalizer starts async close after the loop may already be gone.
-Explicit resource `close` plus Runtime ownership is the correctness path.
+No control-owner finalizer starts async close after the loop may already be
+gone. A live libuv handle requires a strong Runtime root, so that same owner
+cannot detect user abandonment through `__gc`. If earlier automatic
+abandonment is added, use a separate user-facing finalizable proxy that marks
+the rooted control owner for closure on the loop thread. V1 correctness rests
+on explicit resource `close` plus automatic final-session cleanup; Lua GC
+reclaims Titan-owned storage only after legal terminal cleanup.
 
 ## Public APIs
 
 The declaration forms below passed a checker-only probe; committed checker and
 binary-interface tests will lock the exact surface during implementation.
 
-### `titan.uv`
+### `uv` (Lua: `titan.uv`)
 
 ```titan
 record Task
@@ -753,37 +1104,49 @@ record Cancelled
   reason: value
 end
 
-function run(func: () -> value): value
-function run_main(func: ({string}) -> integer,
-                  args: {string}): integer
-function spawn(func: () -> value): Task
+function run(func: () -> value): Task
+function loop()
 function Task:join(): value
 function Task:cancel(reason: value)
 function Task:status(): string
 ```
 
-`run_main` is the explicit v1 standalone convenience:
+`run` schedules; it never executes `func` before returning. `loop` is the
+explicit loop driver for Lua embedding or a Titan host without standalone
+bootstrap and raises if called from a Lua child thread, callback, or active loop
+invocation. Embedding `loop` returns normally after successful/cancelled
+non-main Tasks and final cleanup, but re-raises an unobserved Task failure or
+Runtime-fatal error with its preserved trace.
+
+Ordinary standalone Titan code needs no wrapper:
 
 ```titan
-local uv = import "titan.uv"
-
-function async_main(args: {string}): integer
-  -- synchronous-looking async code
-  return 0
-end
+local fs = import "fs"
 
 function main(args: {string}): integer
-  return uv.run_main(async_main, args)
+  local data = fs.read_file(args[1])
+  return #data
 end
 ```
 
-Every async operation outside an active main-thread `run` raises a clear usage
-error. A Task or resource from an older Runtime generation is rejected. The
-dynamic `value` result keeps task functions useful without adding generics;
-callers cast the joined result back to the application type, while `run_main`
-provides the typed integer-returning standalone path.
+Import initialization installs the UV bootstrap hook, so generated entry code
+schedules `main` through `run` and drives the loop. For Lua:
 
-### `titan.timer`
+```lua
+local uv = require "titan.uv"
+local task = uv.run(function() return "done" end)
+uv.loop()
+assert(task:join() == "done")
+```
+
+Every async operation outside a running UV Task raises a clear usage error
+using `coro.is_yieldable(UV_TAG)`. A live Task or resource from an older session
+is rejected; a completed Task retains immutable status/result/error so
+`status` and an already-resolved `join` remain usable after `loop` returns. The
+dynamic `value` result keeps task functions useful without adding generics;
+callers cast a joined result back to the application type.
+
+### `timer` (Lua: `titan.timer`)
 
 Initial API:
 
@@ -795,19 +1158,21 @@ record Ticker
 end
 
 function ticker(milliseconds: integer): Ticker
-function Ticker:next(): boolean
+function Ticker:tick(): boolean
 function Ticker:close()
 ```
 
-- Negative durations are rejected.
+- `sleep` rejects negative durations and permits zero for a next-turn yield;
+  `ticker` requires a strictly positive interval so its repeating libuv timer
+  cannot silently become a one-shot timer.
 - `sleep(0)`/`yield()` cede through a zero timer and therefore reach another
   event-loop turn.
-- `Ticker:next` returns false after close.
-- Ticks coalesce to one pending tick if the consumer is slow; they do not grow an
-  unbounded queue.
+- `Ticker:tick` yields for the next callback and returns false after close.
+- Ticks with no active waiter are dropped; they do not create a backlog. A later
+  `tick()` waits for a later firing.
 - Close is idempotent and callbacks after close are cleanup-only.
 
-### `titan.fs`
+### `fs` (Lua: `titan.fs`)
 
 Initial API:
 
@@ -875,7 +1240,7 @@ Contracts:
 - Whole-file helpers cap growth against integer/size overflow and stream rather
   than trusting `stat.size` alone.
 
-### `titan.net`
+### `net` (Lua: `titan.net`)
 
 Initial API:
 
@@ -911,7 +1276,7 @@ Contracts:
   only when needed and stops it as soon as data/EOF/error satisfies the waiter.
 - `read_exactly` and `read_until` loop over `read_some` and retain excess bytes
   in the Connection. Premature EOF in `read_exactly` raises
-  `titan.uv.Error` with libuv's `UV_EOF` and includes the requested and partial
+  `uv.Error` with libuv's `UV_EOF` and includes the requested and partial
   byte counts in `message`/`subject`; it never returns a short string.
   `read_until` enforces `max_bytes` and raises without discarding already
   buffered bytes.
@@ -920,7 +1285,7 @@ Contracts:
   closes only the write side, and leaves reads active until EOF/error or
   `close`. Later writes are rejected as soon as shutdown is requested. `close`
   closes both directions and remains idempotent.
-- EOF is `nil`; reset and other errors raise `titan.uv.Error`.
+- EOF is `nil`; reset and other errors raise `uv.Error`.
 - `listen` requires `backlog > 0` and uses it both for `uv_listen` and as the
   accepted-connection queue capacity. Libuv exposes no public listen-stop
   operation, so every connection notification calls `uv_accept` into a fresh
@@ -932,7 +1297,7 @@ Contracts:
 
 UDP and Unix-domain/named pipes are follow-ups.
 
-### `titan.os`
+### `os` (Lua: `titan.os`)
 
 Portable synchronous helpers use public `uv_os_*`/utility functions:
 
@@ -985,9 +1350,17 @@ function wait_signal(name: string): string
   The shim builds a GC-owned, NUL-terminated vector `[file, args..., NULL]` and
   roots every copied string/vector through the return of `uv_spawn`; the child
   inherits the current environment and working directory in v1.
-- The process owner remains rooted until the exit callback and all pipe closes.
+- The process owner remains rooted through the exit callback, the process
+  handle's later close callback, and every pipe request/close callback. On
+  spawn failure it remains rooted through the required process close callback
+  even though no exit callback will arrive.
 - `communicate` drains stdout and stderr concurrently while optionally writing
   stdin, so it cannot deadlock on a full child pipe.
+- `communicate` creates its reader/writer helpers through a private observed-task
+  path: register the parent/join relationship before arming each helper start
+  callback. A helper failure therefore propagates to the parent, cancels/drains
+  its siblings and process resources, and never trips the unobserved-task policy
+  first.
 - `Process:wait` may be cancelled without killing the child. `Process:kill` is
   explicit.
 - Signal names map to the common Linux/macOS subset inside the shim. Numeric
@@ -1069,11 +1442,12 @@ Linux links the static archive with `pthread`, `dl`, and `rt` (the driver alread
 adds `dl`); macOS links `pthread` and must not add Linux-only `rt`. Keep this
 conditional in the Makefile, not in Titan runtime code.
 
-Build the generated `titan.uv` translation unit and shim with
+Build the generated canonical `uv` translation unit and shim with
 `-fno-strict-aliasing`, as upstream recommends for libuv's public base-handle
 casts. On Linux also put `_GNU_SOURCE` in compiler flags before all headers.
 
-After linking, assert that bundled `titan/uv.so` has no dynamic libuv dependency:
+After linking, assert that canonical `uv.so` and its Lua-facing installed alias
+have no dynamic libuv dependency:
 
 - Linux: inspect `readelf -d` or `ldd`;
 - macOS: inspect `otool -L`.
@@ -1122,15 +1496,29 @@ plumbing before the standard module:
 - preserve existing defaults rather than replacing them;
 - honor `CC`, `CPATH`, and `LIBRARY_PATH`, but do not rely on ambient variables
   for the reproducible bundled mode;
-- print all effective flags under `-v`.
+- print all effective flags under `-v`;
+- add pinned source/binary resolution for the reserved standard-library names
+  and diagnose a conflicting application source or local binary;
+- add standard-origin dependency metadata plus a runtime `loadstdlib` which
+  uses only the ABI-qualified `TITAN_STDLIB_PATH`/installed default, never `.` or
+  ordinary `TITAN_PATH` precedence;
+- add `--lua-name <qualified-name>` so a canonical Titan module may export a
+  distinct Lua entry name without changing its Titan ABI symbols;
+- add `--stdlib-build` for one explicit standard source root at a time; ordinary
+  application imports of reserved names must remain pinned binary imports and
+  standard-build dependencies must never recurse into source;
+- add the generic registry-based standalone main-bootstrap hook described
+  above, preserving the current direct path when no hook is installed.
 
 This requires a real FFI-preprocessor change, not only driver link plumbing:
 
 1. `c-parser/cdriver.lua` obtains the configured compiler and parsed
    `TITAN_EXTRA_CPPFLAGS` from its options.
-2. Both include-search discovery (`CC -E -v`) and predefined-macro discovery
-   (`CC -std=gnu11 -dM -E`) run with those same flags. Cache their results by
-   compiler plus flag string, not process-globally.
+2. Both include-search discovery and predefined-macro discovery run with the
+   exact effective compiler, preprocessing-relevant language standard, and CPP
+   flags used for generated C (currently `CC -std=c99 ...`), not a hard-coded
+   `gnu11` probe. Cache their results by compiler, language mode, and complete
+   relevant flag string, not process-globally.
 3. `cdriver` passes the resulting include directories and macro table into
    `cpp.parse_file`; recursive includes share that context.
 4. `titan-compiler/checker.lua` supplies the configuration for every `foreign
@@ -1156,18 +1544,24 @@ Extend the build graph:
 lua + libbacktrace + libuv
   -> titan.o + titan_coro.o + titan_uv.o
   -> coro.so
-  -> titan/uv.so
-  -> titan/timer.so, titan/fs.so, titan/net.so, titan/os.so
+  -> uv.so
+  -> timer.so, fs.so, net.so, os.so
+  -> single-image Lua aliases: coro.so and titan/{uv,timer,fs,net,os}.so
 ```
 
-Build `coro.so` and `titan/uv.so` before higher-level modules and force those
+Build `coro.so` and canonical `uv.so` before higher-level modules and force those
 dependencies down the compiled-module path, so `titan_uv.o`/`libuv.a` are not
 duplicated into every library.
 
 Replace the rockspec's single `coro.so` copy hook with an `install-stdlib`
-target that preserves `titan/*.so` subdirectories in both Lua's `LIBDIR` and
-Titan's ABI-versioned binary path. Installed high-level modules depend on the
-binary `titan.uv` interface and need no libuv headers at user compile time.
+target. Install canonical `{coro,uv,timer,fs,net,os}.so` in Titan's ABI-versioned
+binary root, expose the I/O modules under `titan/*.so` in Lua's `LIBDIR`, and
+expose `coro` under its existing Lua `coro.so` path, all through the single-image
+alias mechanism above; never install an independent copy. Preserve
+`luaopen_coro` rather than placing that compatibility module under `titan.*`;
+the new I/O aliases use `luaopen_titan_*`. Installed `uv` imports canonical
+binary `coro` through `loadstdlib`, and installed high-level modules do the same
+for canonical `uv`, so they need no libuv headers at user compile time.
 
 Do not add LuaRocks `external_dependencies.UV` in bundled mode: that would
 incorrectly require a system developer package. In system mode, its
@@ -1190,7 +1584,11 @@ Files:
 - `c-parser/cpp.lua`
 - `c-parser/cdriver.lua`
 - `titan-compiler/checker.lua`
+- `titan-compiler/coder.lua`
 - `titan-compiler/driver.lua`
+- `titan-runtime/titan.c`
+- `titan-runtime/titan.h`
+- `titan-runtime/titan/ffi.h`
 - `spec/cdriver_spec.lua`
 - `spec/cpp_spec.lua`
 - `spec/coder/coder_spec.lua`
@@ -1205,9 +1603,20 @@ Work:
 - Add `TITAN_EXTRA_CPPFLAGS`/`TITAN_EXTRA_CFLAGS`/`TITAN_EXTRA_LDFLAGS`
   plumbing across `c-parser/cpp.lua`, `c-parser/cdriver.lua`, the checker, and
   `titan-compiler/driver.lua`, plus `doc/implementation/driver.md`.
+- Add pinned resolution for reserved standard modules, `--stdlib-build`,
+  `--lua-name`, the
+  single-image canonical/Lua alias install layout, and the registry-based
+  main-bootstrap hook with driver and `.so`-rehydration tests.
+- Carry standard-origin dependency metadata into code generation and emit the
+  dedicated runtime `loadstdlib` path; configure its ABI-qualified installed
+  root and prove local source/binary names plus ordinary `TITAN_PATH` cannot
+  capture a standard module's internal dependency.
+- Define the bootstrap registry key in both public runtime headers; require and
+  retrieve `main` before hook lookup, and invoke either path under the existing
+  outer protected call.
 - Turn the native timer, FS, GC, loop-lifetime, and consolidated
-  enqueue-return-extract-resume spikes into small repeatable fixtures/spec
-  helpers.
+  callback-resume-yield-arm-return plus nested-run/recurring-tick spikes into
+  small repeatable fixtures/spec helpers.
 - Assert `.sizeof`/`.alignof` + `lua_newuserdatauv` + pointer cast for every
   allocated libuv type on both supported platforms.
 
@@ -1218,12 +1627,27 @@ Exit criteria:
 - System mode fails early with useful package/prefix instructions when absent.
 - A foreign header found only through `TITAN_EXTRA_CPPFLAGS` takes the same
   feature-macro branch in Titan's parser and in generated C compilation.
+- `import "os"` resolves the pinned standard module and diagnoses a conflicting
+  application/local `os`; `require "titan.os"` loads the same canonical image
+  and module Udata without changing Lua's `package.loaded.os`.
+- Require-first/import-first and static-link tests prove one DSO/libuv instance,
+  shared module state, and coexistence of `luaopen_os`/`luaopen_titan_os`.
+- An ordinary application build with `stdlib` sources visible still imports the
+  pinned binary and emits no standard-module `luaopen_*` or duplicate libuv
+  implementation; `--stdlib-build` compiles exactly one requested root with its
+  intended Lua entry and binary-only reserved dependencies.
+- A synchronous standalone retains today's direct entry path, while importing
+  `uv` installs and selects the generic async bootstrap.
+- Binary-only standard `uv`/`fs` import canonical `coro`/`uv` through
+  `loadstdlib` even with fake local sources, `./coro.so`/`./uv.so`, and
+  application `TITAN_PATH` entries; a custom installed prefix works through the
+  documented standard-path setting.
 
 ### Phase 1 - GC-owned low-level objects and native callbacks
 
 Files:
 
-- `titan/uv.titan`
+- `stdlib/uv.titan`
 - `titan-runtime/titan_uv.c`
 - `titan-runtime/titan/uv.h`
 - `spec/checker/uv_spec.lua`
@@ -1242,55 +1666,81 @@ Work:
   concrete-to-base handle cast; assert that each wrapper delegates to a public
   libuv API and contains no field access.
 - Implement native trampoline pointer recovery and the catch-all dispatcher.
+- Wrap each direct native dispatch in a C-level protected call so failures in
+  the generated native-entry prologue also return through libuv safely.
+- Pre-root emergency fatal slots and keep post-protection capture strictly
+  allocation-free/no-throw; test a failure before ordinary temporary rooting
+  and a failure inside native-entry setup.
 - Implement timer, close, FS, read/alloc, connect/write, DNS, process, and signal
   callback shapes incrementally; begin with timer + FS only.
 - Add exact-length buffer helpers.
 - Lock the public declarations in checker tests, reject any exported C type,
-  and verify the same interface rehydrates from a binary-only `titan.uv`.
+  and verify the same canonical interface rehydrates from binary-only `uv.so`
+  and loads through Lua's `titan.uv` alias.
 
 Exit criteria:
 
 - Native path counters prove no callback uses a Lua entry wrapper.
-- The consolidated path proves callbacks only enqueue, `uv_run` returns before
-  extraction/resume, and cancellation without an operation callback still
-  drains the close callback.
+- The direct path proves callback A extracts/cleans, resumes user code, receives
+  Request B, roots/arms B, and only then returns; later callback B resumes the
+  same Task.
 - Owner survives incremental and generational GC, including old owner -> young
   Task/buffer stores.
 - Dispatcher failure never unwinds through libuv.
+- Emergency protected-failure capture itself cannot allocate or raise, restores
+  the main stack/CallInfo state, and defers formatting until bootstrap control.
 - Request/handle roots are released after, and only after, terminal cleanup.
 
-### Phase 2 - scheduler, errors, shutdown, and timers
+### Phase 2 - continuation pump, bootstrap, tasks, errors, and timers
 
 Files:
 
-- `titan/uv.titan`
-- `titan/timer.titan`
+- `stdlib/uv.titan`
+- `stdlib/timer.titan`
 - `spec/coder/uv_spec.lua`
 - `spec/coder/timer_spec.lua`
 
 Work:
 
-- Implement Runtime, Task, Request, Completion, per-task tag, ready queue,
-  pending/resources maps, and fair loop driver.
-- Implement `run`, `run_main`, `spawn`, `join`, cancel/status.
+- Implement the module-instance private `UV_TAG`, Runtime reference, Task,
+  Request, operation epochs, pending/resources maps, and the iterative direct
+  `drive` pump. There is no Completion/ready queue.
+- Implement nonblocking `run`, `join`, cancel/status, public embedding `loop`,
+  and automatic standalone bootstrap. Remove the redundant `spawn`/`run_main`
+  split.
+- Adapt public `() -> value` functions to current `coro.create`'s
+  `(value) -> value` entry and lock timer init/start failure semantics.
 - Implement immediate failure, async failure, trace copying/reinstallation, and
   first-error policy.
 - Implement close/cancel/drain and `UV_EBUSY` diagnostics.
-- Implement sleep, zero-turn yield, and Ticker.
+- Implement sleep, zero-turn yield, and repeating `Ticker:tick` continuation
+  handoff.
 
 Exit criteria:
 
 - Out-of-order timers wake the correct task exactly once.
-- Nested tagged coroutine await and cancellation work.
-- CPU-ready tasks do not starve timers.
-- Root/child errors preserve both task and propagation traces.
-- Repeated `run` cycles end with `uv_loop_close == 0` and no retained owners.
+- Many roots share exact `UV_TAG`; an async yield crosses differently tagged
+  nested coroutines and restores their stacked chain.
+- `run` never executes synchronously; nested `run` schedules an independent
+  zero-timer task and maximum C `uv_run` depth remains one.
+- A nested `run` called on child state `T` stores the Runtime main state `L` in
+  its owner and its start callback dispatches on `L`; `loop` rejects child-state
+  callers while nested `run` remains legal.
+- Three or more `tick()` cycles prove callback -> resume -> tick yield -> arm ->
+  callback return.
+- `ticker(0)` is rejected while `sleep(0)` and `yield()` still cede one turn.
+- Task/join errors preserve both task and propagation traces.
+- Next-turn observation lets a scheduled joiner catch a child start/task
+  failure; the same failure without an observer is promoted. A cancelled main
+  is reported, while an unjoined cancelled non-main Task is not session-fatal.
+- Repeated bootstrap/loop sessions end with `uv_loop_close == 0` and no retained
+  owners.
 
 ### Phase 3 - filesystem core
 
 Files:
 
-- `titan/fs.titan`
+- `stdlib/fs.titan`
 - `spec/coder/fs_spec.lua`
 
 Work:
@@ -1313,12 +1763,20 @@ Before sockets/processes multiply handle types, complete the race matrix:
 
 - completion before cancellation;
 - cancellation before completion;
+- synchronous cancellation-mark versus completion-callback linearization, with
+  normal result suppression even when the cancellation timer has not run;
+- sticky cancellation before an ordinary await (no allocation/submission) and
+  cleanup shielding across multiple asynchronous close/drain operations;
 - `uv_cancel` success and failure/too-late cases;
 - late callback after logical task death;
 - callback after resource close request;
-- root completion with live children;
-- child error while another callback is queued;
-- generational GC with old Runtime/owner and young task, buffer, error, and tag.
+- main completion with independently scheduled live Tasks;
+- final-Task completion with leaked active and passive resources, proving
+  automatic session cleanup rather than reliance on loop liveness;
+- cancelled Ticker/read wait preserves a resource shared with another Task;
+- one Task error while another callback is directly driving a different Task;
+- generational GC with old Runtime/owner and young Task, buffer, error, and the
+  shared tag.
 
 Add an ASan/UBSan CI job for the shim and focused library specs. Local sanitizer
 availability is not assumed; CI is the release gate.
@@ -1327,7 +1785,7 @@ availability is not assumed; CI is the release gate.
 
 Files:
 
-- `titan/net.titan`
+- `stdlib/net.titan`
 - `spec/coder/net_spec.lua`
 
 Work:
@@ -1336,6 +1794,8 @@ Work:
 - Implement TCP connect, binary stream read/write, shutdown, close.
 - Implement server listen/accept and bounded accept queue.
 - Implement excess buffering and one-reader policy.
+- Persist EOF/error read-terminal state before continuation drive and reject any
+  later `uv_read_start`; close unpublished connect handles on cancellation.
 
 Exit criteria:
 
@@ -1348,7 +1808,7 @@ Exit criteria:
 
 Files:
 
-- `titan/os.titan`
+- `stdlib/os.titan`
 - `spec/coder/os_spec.lua`
 
 Work:
@@ -1356,17 +1816,24 @@ Work:
 - Implement portable `uv_os_*` helpers and checked resizing.
 - Implement common signal-name mapping and one-shot wait.
 - Implement Process + pipe ownership, wait/kill, and communicate/popen.
-- Implement runtime shutdown policy for live processes.
+- Implement phased runtime shutdown for live processes, including spawn-failure
+  handle close and exit-before-close ordering for successfully spawned children.
 
 Exit criteria:
 
 - Tests use only owned child fixtures and temporary directories.
 - stdout/stderr are drained concurrently; large dual-stream output cannot
   deadlock.
+- Reader/writer helpers are observed before start; a forced helper failure is
+  reported through `communicate` after sibling/process cleanup, never as an
+  unrelated unobserved Task.
 - exit code/signal, spawn failure, stdin close, cancellation, and forced runtime
   shutdown pass on Linux and macOS.
+- Fault tests prove a failed `uv_spawn` handle is closed, a successful live
+  process handle is never closed before its exit callback, and all pipe/process
+  close callbacks drain without zombies.
 
-### Phase 7 - packaging, docs, and optional bootstrap follow-up
+### Phase 7 - packaging and documentation
 
 Files:
 
@@ -1378,27 +1845,27 @@ Files:
 - new `doc/language/async-io.md`
 - new `doc/language/standard-library-{timer,fs,net,os}.md`
 - `doc/language/coroutines.md`
+- `doc/language/modules.md`
+- `doc/language/lua-interop.md`
 - `doc/implementation/index.md`
 - new `doc/implementation/libuv-runtime.md`
 - `doc/implementation/coroutines.md`
 - `doc/implementation/ffi-internals.md`
 - `doc/implementation/driver.md`
+- `doc/implementation/lua-interop-internals.md`
+- `doc/implementation/codegen-overview.md`
 
 Work:
 
-- Install all namespaced modules and document both bundled/system libuv modes.
+- Install canonical Titan modules plus Lua `titan.*` aliases and document both
+  bundled/system libuv modes.
 - Document synchronous appearance, cooperative scheduling, cancellation points,
-  explicit close, errors, task policy, and unsupported operations.
+  direct callback execution, nonblocking `uv.run`, shared-tag semantics,
+  automatic standalone bootstrap, explicit close, errors, task policy, and
+  unsupported operations.
 - Correct coroutine implementation prose that still describes older callback
   rooting rather than the current handle-uservalue shape.
 - Update the roadmap only when shipped behavior and tests justify it.
-
-Optional auto-main gate, after the explicit API is stable:
-
-- prefer an explicit compiler option or declared main convention;
-- do not silently make every executable depend on libuv;
-- preserve exact integer exit status and standalone trace reporting;
-- add standalone tests before enabling it.
 
 ## Verification plan
 
@@ -1419,22 +1886,46 @@ module build order, environment flags, and standalone execution.
 
 ### Required behavioral coverage
 
-- private loop and sequential runs;
-- nested-run/main-thread rejection;
+- private loop and sequential bootstrap sessions;
+- `uv.run` returns before its function starts; nested `uv.run` schedules a new
+  start callback without re-entering C `uv_run`;
+- public run-entry adapter and zero-timer init/start failure arms;
+- nested `uv.run` allocates from a child state but every callback dispatches on
+  Runtime main `L`; `uv.loop` rejects child-thread callers;
 - two independent Lua states in one process;
-- unique task tags and nested `stacked` routes;
-- native callback path, callback catch-all, and trace preservation;
+- one exact module-instance `UV_TAG` across many roots and sequential Runtime
+  sessions, plus differently tagged nested `stacked` routes and restoration;
+- native callback directly resumes user code, receives/arms its next Request,
+  and returns with C `uv_run` depth still one;
+- three or more repeating `Ticker:tick` callback/continuation cycles;
+- native callback C protection, no-throw emergency capture, Titan Task versus
+  Runtime-fatal boundaries, and trace preservation;
 - immediate versus asynchronous error;
 - incremental and generational GC;
 - pending/resource root release verified with weak references;
 - request cleanup and handle close order;
-- cancellation and late callback matrix;
+- cancellation linearization, sticky ordinary-await rejection,
+  cleanup-shielding, and late callback matrix;
+- observed versus unobserved Task failure deadline, internal helper pre-observe,
+  and standalone-main cancellation;
+- final-Task cleanup of leaked active/passive resources and shared-resource
+  waiter cancellation;
 - binary strings, NUL, empty buffers, overflow/negative lengths;
 - filesystem temp-directory cases;
 - loopback networking only;
+- permanent EOF/read-error terminal state and cancelled unpublished connect;
 - owned subprocess fixtures and common signals;
-- source import during development, binary-only installed import, Lua
-  `require`, and standalone executable paths;
+- failed-spawn close, observed-exit-before-process-close, and zombie-free
+  forced shutdown;
+- explicit one-root standard source builds, ordinary pinned-binary imports from
+  application source chains, binary-only installed imports, Lua `require`, and
+  standalone executable paths;
+- Titan `import "os"` versus Lua `require "titan.os"`, preserving Lua's
+  existing `require "os"`; reserved-name diagnostics and pinned standard
+  source/binary resolution that local `coro`/`uv` sources or binaries cannot
+  capture;
+- both alias load orders map one canonical DSO and one statically linked libuv
+  instance while sharing the registry Udata;
 - checker rejection of C types in exported APIs; runtime rejection of forged
   opaque handles and handles/resources from another Runtime generation;
 - bundled static and optional system libuv modes;
@@ -1454,7 +1945,8 @@ Manual macOS pre-merge CI:
 
 1. Build the same pinned libuv, not an undeclared Homebrew runtime.
 2. Run focused stdlib tests and full suite.
-3. Verify `otool -L titan/uv.so` has no dynamic libuv dependency.
+3. Verify `otool -L uv.so` and the Lua alias have no dynamic libuv dependency,
+   and the alias/load-order test maps one canonical DSO image.
 
 Final local gate:
 
@@ -1486,13 +1978,25 @@ snapshot can otherwise shadow source edits.
 - [ ] All libuv data pointers refer to independently rooted owner userdata.
 - [ ] Native callbacks use Titan native entry pointers, not Lua wrappers.
 - [ ] No error can unwind through libuv.
-- [ ] Scheduler resumes outside `uv_run` callbacks.
-- [ ] Per-task hidden tags support nested coroutines.
-- [ ] Cancellation runs Titan cleanup and tolerates late libuv callbacks.
+- [ ] Each callback copies/cleans its result, directly drives the captured Task,
+      arms the next yielded Request, and returns without nesting C `uv_run`.
+- [ ] One private shared `UV_TAG` routes through differently tagged nested
+      coroutines; task/operation identity is kept separately.
+- [ ] Public `uv.run` is nonblocking and nested calls schedule independent
+      zero-timer starts; standalone bootstrap drives the loop automatically.
+- [ ] Nested starts recover Runtime main `L`; only the loop driver is restricted
+      to the Lua main thread.
+- [ ] Cancellation has a synchronous winning mark, runs shielded Titan cleanup,
+      and tolerates late libuv callbacks without delivering stale results.
 - [ ] Every request/handle/loop reaches its documented terminal cleanup.
+- [ ] Final-Task session cleanup closes leftover active and passive resources;
+      process handles close only after failure or observed child exit.
 - [ ] Binary buffers preserve length and embedded NUL.
 - [ ] Timer, file, TCP/DNS, OS/process/signal APIs match documented contracts.
-- [ ] Namespaced modules work through Titan import and Lua require.
+- [ ] Canonical modules work as Titan `import "os"`/etc.; Lua aliases work as
+      `require "titan.os"`/etc. without replacing Lua standard modules.
+- [ ] Reserved standard identities cannot be captured by local source/binaries,
+      and canonical/Lua paths map one DSO/libuv instance in either load order.
 - [ ] Source, `.so`-only, and standalone paths are covered.
 - [ ] Incremental, generational, sanitizer, Linux, and macOS gates pass.
 - [ ] Both language and implementation manuals, README, CLAUDE, Makefile,
@@ -1501,12 +2005,14 @@ snapshot can otherwise shadow source edits.
 ## Authoritative external contracts
 
 - Libuv design overview: <https://docs.libuv.org/en/v1.x/design.html>
-- Event loop and non-reentrancy: <https://docs.libuv.org/en/v1.x/loop.html>
+- Event loop and C `uv_run` non-reentrancy: <https://docs.libuv.org/en/v1.x/loop.html>
 - Handle close lifetime: <https://docs.libuv.org/en/v1.x/handle.html>
 - Request and cancellation lifetime: <https://docs.libuv.org/en/v1.x/request.html>
 - Filesystem requests and cleanup: <https://docs.libuv.org/en/v1.x/fs.html>
 - Streams and buffer lifetime: <https://docs.libuv.org/en/v1.x/stream.html>
 - Processes: <https://docs.libuv.org/en/v1.x/process.html>
 - Official source/build/version policy: <https://github.com/libuv/libuv>
+- Tagged-coroutine prior art: <https://github.com/mascarenhas/taggedcoro>
+- Nested-coroutine prior art: <https://github.com/saucisson/lua-coronest>
 - Current Homebrew formula/setup alternative:
   <https://formulae.brew.sh/formula/libuv.html>
