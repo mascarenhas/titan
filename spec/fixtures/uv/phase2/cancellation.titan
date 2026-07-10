@@ -1,0 +1,79 @@
+local uv = import "uv"
+local timer = import "timer"
+
+local sticky_catches = 0
+
+function catches(): integer
+  return sticky_catches
+end
+
+function schedule_sticky(): uv.Task
+  sticky_catches = 0
+  local target = uv.run(function (): value
+    do
+      timer.sleep(1000)
+    catch
+      local cancelled = error as uv.Cancelled
+      if cancelled.reason ~= "first-reason" then
+        raise "first cancellation reason changed"
+      end
+      sticky_catches = sticky_catches + 1
+    end
+    do
+      timer.yield()
+    catch
+      local cancelled = error as uv.Cancelled
+      if cancelled.reason ~= "first-reason" then
+        raise "sticky cancellation reason changed"
+      end
+      sticky_catches = sticky_catches + 1
+    end
+    return "must-not-win-over-cancellation"
+  end)
+
+  uv.run(function (): value
+    timer.yield()
+    target:cancel("first-reason")
+    target:cancel("second-reason")
+    return nil
+  end)
+
+  return uv.run(function (): value
+    do
+      target:join()
+    catch
+      local cancelled = error as uv.Cancelled
+      if cancelled.reason ~= "first-reason" then
+        raise "terminal cancellation reason changed"
+      end
+      if target:status() ~= "cancelled" then
+        raise "cancelled Task has the wrong terminal status"
+      end
+      return cancelled
+    end
+    raise "cancelled Task joined successfully"
+    return nil
+  end)
+end
+
+function schedule_cancel_before_start(): uv.Task
+  local entered = false
+  local target = uv.run(function (): value
+    entered = true
+    return nil
+  end)
+  target:cancel("before-start")
+  return uv.run(function (): value
+    do
+      target:join()
+    catch
+      local cancelled = error as uv.Cancelled
+      if entered then
+        raise "cancel-before-start entered the Task body"
+      end
+      return cancelled
+    end
+    raise "cancel-before-start joined successfully"
+    return nil
+  end)
+end

@@ -1,0 +1,22 @@
+local stdio = foreign import "stdio.h"
+local uv = import "uv"
+local timer = import "timer"
+
+function main(args: {string}): integer
+  uv.run(function (): value
+    uv.__test_cancel_main("phase2-bootstrap-main-cancelled")
+    return nil
+  end)
+
+  do
+    timer.sleep(1000)
+  catch
+    local cancelled = error as uv.Cancelled
+    -- The standalone reporter deliberately preserves a non-string error object.
+    -- Emit the exact reason separately, then re-raise the same Cancelled value so
+    -- the Runtime still terminalizes this bootstrap Task as cancelled.
+    stdio.puts(cancelled.reason as string)
+    raise error
+  end
+  return #args
+end

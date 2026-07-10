@@ -2,7 +2,7 @@ local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
 local lfs = require "lfs"
 
-local STDLIB_MODULES = { "coroutine", "uv" }
+local STDLIB_MODULES = { "coroutine", "uv", "timer" }
 
 local function quote(word)
     local quoted = assert(cdriver.shell_quote(word))
@@ -72,6 +72,29 @@ local function assert_uv_load_order(raw_lua, environment, canonical,
         tostring(code) .. ")")
 end
 
+local function assert_timer_load_order(raw_lua, environment, canonical,
+                                       canonical_first)
+    local program = string.format([[
+        local canonical = %q
+        local open = assert(package.loadlib(canonical,
+            "luaopen_titan_timer"))
+        local first, second
+        if %s then
+            first = open()
+            second = require "titan.timer"
+        else
+            first = require "titan.timer"
+            second = open()
+        end
+        assert(type(first) == "userdata")
+        assert(rawequal(first, second))
+        assert(rawequal(second, package.loaded["titan.timer"]))
+    ]], canonical, tostring(canonical_first))
+    local ok, output, why, code = run({ raw_lua, "-e", program }, environment)
+    assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+        tostring(code) .. ")")
+end
+
 describe("LuaRocks standard-library packaging", function()
     local tree
     local rock
@@ -129,17 +152,40 @@ describe("LuaRocks standard-library packaging", function()
             local builtin = require "coroutine"
             local standard_coroutine = require "titan.coroutine"
             local standard_uv = require "titan.uv"
+            local standard_timer = require "titan.timer"
             assert(type(builtin) == "table")
             assert(type(standard_coroutine) == "userdata")
             assert(type(standard_uv) == "userdata")
+            assert(type(standard_timer) == "userdata")
             assert(type(standard_uv.version()) == "string")
+            local task = standard_uv.run(function()
+                standard_timer.yield()
+                return true
+            end)
+            standard_uv.loop()
+            assert(task:join())
         ]] }, environment)
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
 
         local uv_canonical = stdlib_dir .. "/uv.so"
+        local timer_canonical = stdlib_dir .. "/timer.so"
         assert_uv_load_order(raw_lua, environment, uv_canonical, false)
         assert_uv_load_order(raw_lua, environment, uv_canonical, true)
+        assert_timer_load_order(raw_lua, environment, timer_canonical, false)
+        assert_timer_load_order(raw_lua, environment, timer_canonical, true)
+
+        ok, output, why, code = run({ raw_lua, "-e", string.format([[
+            local timer = require "titan.timer"
+            local uv = require "titan.uv"
+            local open = assert(package.loadlib(%q, "luaopen_titan_uv"))
+            assert(rawequal(uv, open()))
+            local task = uv.run(function() timer.sleep(0); return 17 end)
+            uv.loop()
+            assert(task:join() == 17)
+        ]], uv_canonical) }, environment)
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
 
         local host_ok, host_output = run({ "uname", "-s" })
         assert.truthy(host_ok, host_output)
@@ -148,6 +194,11 @@ describe("LuaRocks standard-library packaging", function()
             or { "readelf", "-d", uv_canonical }
         local deps_ok, deps_output, deps_why, deps_code =
             run(dependency_argv)
+        assert.truthy(deps_ok, deps_output .. "\n(" ..
+            tostring(deps_why) .. ", " .. tostring(deps_code) .. ")")
+        assert.falsy(deps_output:lower():find("libuv", 1, true), deps_output)
+        dependency_argv[#dependency_argv] = timer_canonical
+        deps_ok, deps_output, deps_why, deps_code = run(dependency_argv)
         assert.truthy(deps_ok, deps_output .. "\n(" ..
             tostring(deps_why) .. ", " .. tostring(deps_code) .. ")")
         assert.falsy(deps_output:lower():find("libuv", 1, true), deps_output)
@@ -192,8 +243,13 @@ describe("LuaRocks standard-library packaging", function()
                 tree .. "/lib/titan/0.11")
         ok, output, why, code = run({ ".lua/bin/lua", "-e", [[
             local uv = require "titan.uv"
+            local timer = require "titan.timer"
             assert(type(uv) == "userdata")
+            assert(type(timer) == "userdata")
             assert(type(uv.version()) == "string")
+            local task = uv.run(function() timer.yield(); return "ok" end)
+            uv.loop()
+            assert(task:join() == "ok")
         ]] }, environment)
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")

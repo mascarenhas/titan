@@ -1,0 +1,25 @@
+local uv = import "uv"
+
+record Ticker
+  local handle: uv.uv_timer_t
+end
+
+function sleep(milliseconds: integer)
+  uv._sleep(milliseconds)
+end
+
+function yield()
+  uv._yield()
+end
+
+function ticker(milliseconds: integer): Ticker
+  return Ticker.new(uv._ticker(milliseconds))
+end
+
+function Ticker:tick(): boolean
+  return uv._ticker_tick(self.handle)
+end
+
+function Ticker:close()
+  uv._ticker_close(self.handle)
+end

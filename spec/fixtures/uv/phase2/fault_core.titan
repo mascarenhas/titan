@@ -1,0 +1,75 @@
+-- Runs only against the generated __test_* uv variant.
+local uv = import "uv"
+local timer = import "timer"
+
+local function check(condition: boolean, message: string)
+  if not condition then raise message end
+end
+
+function main(args: {string}): integer
+  local cleanup_started = false
+  local cleanup_completed = false
+  local cleanup_task = uv.run(function (): value
+    local ticker = timer.ticker(1000)
+    cleanup_started = true
+    do
+      timer.sleep(1000)
+    catch
+      check((error as uv.Cancelled).reason == "cleanup-stop",
+            "cleanup reason changed")
+      uv.__test_cleanup_begin()
+      ticker:close()
+      uv.__test_cleanup_sleep(0)
+      cleanup_completed = true
+      uv.__test_cleanup_end()
+    end
+    return nil
+  end)
+  while not cleanup_started do timer.yield() end
+  cleanup_task:cancel("cleanup-stop")
+  do cleanup_task:join() catch end
+  check(cleanup_completed and cleanup_task:status() == "cancelled",
+        "shielded cleanup did not complete")
+
+  uv.__test_fail_sleep_submissions(12)
+  local caught = 0
+  local immediate = uv.run(function (): value
+    for i = 1, 12 do
+      do timer.sleep(0)
+      catch
+        check((error as uv.Error).operation == "timer.start.injected",
+              "wrong injected operation")
+        caught = caught + 1
+      end
+    end
+    return caught
+  end)
+  check((immediate:join() as integer) == 12,
+        "iterative delivery lost a continuation")
+  check(uv.__test_deferred_error_callbacks() > 0,
+        "immediate budget never deferred")
+
+  local callbacks = uv.__test_deferred_error_callbacks()
+  uv.__test_fail_sleep_submissions(20)
+  uv.__test_delay_next_deferred_error(20)
+  local stale_catches = 0
+  local stale = uv.run(function (): value
+    for i = 1, 7 do
+      do timer.sleep(0)
+      catch stale_catches = stale_catches + 1 end
+    end
+    timer.sleep(0)
+    return nil
+  end)
+  uv.run(function (): value
+    stale:cancel("deferred-cancel")
+    return nil
+  end):join()
+  do stale:join() catch end
+  uv.__test_fail_sleep_submissions(0)
+  check(stale:status() == "cancelled" and stale_catches == 7,
+        "cancellation lost to deferred error")
+  check(uv.__test_deferred_error_callbacks() == callbacks,
+        "stale deferred callback resumed cancelled Task")
+  return 0
+end

@@ -10,144 +10,162 @@ local function read_file(path)
     return contents
 end
 
-local function configure_libuv()
+local function configure_foreign_headers()
     local cppflags = { "-Ilibuv-v1.52.1/include" }
     local uname = assert(io.popen("uname -s"))
     local host = assert(uname:read("*l"))
     uname:close()
-    if host == "Linux" then
-        table.insert(cppflags, "-D_GNU_SOURCE")
-    end
+    if host == "Linux" then table.insert(cppflags, "-D_GNU_SOURCE") end
     checker.configure_foreign_c({
         compiler = os.getenv("CC") or "cc",
         language_mode = "c99",
         cppflags = cppflags,
-        compiler_include_dirs = {
-            "titan-runtime",
-            "lua-5.5.0/src",
-        },
+        compiler_include_dirs = { "titan-runtime", "lua-5.5.0/src" },
     })
 end
 
-local COROUTINE_STUB = [[
-    function marker(): boolean
-        return true
-    end
-]]
-
-local function check_module(modname, source, modules)
+local function check_uv()
     types.registry = {}
     driver.imported = {}
-    local ast, parse_errors = parser.parse(modname .. ".titan", source)
-    assert.truthy(ast, parse_errors and
-        parser.error_to_string(parse_errors, modname .. ".titan"))
-    modules = modules or {}
-    modules.coroutine = modules.coroutine or COROUTINE_STUB
-    local loader = driver.tableloader(modules, {}, {})
-    local modtype, errors = checker.check(modname, ast, source,
-        modname .. ".titan", loader)
-    return modtype, errors, ast
-end
-
-local function check_consumer(source)
-    return check_module("consumer", source, {
+    local modules = {
         uv = read_file("stdlib/uv.titan"),
-        coroutine = COROUTINE_STUB,
-    })
+        coroutine = read_file("stdlib/coroutine.titan"),
+    }
+    local source = modules.uv
+    local ast, parse_errors = parser.parse("stdlib/uv.titan", source)
+    assert.truthy(ast, parse_errors and
+        parser.error_to_string(parse_errors, "stdlib/uv.titan"))
+    local modtype, errors = checker.check("uv", ast, source,
+        "stdlib/uv.titan", driver.tableloader(modules, {}, {}))
+    assert.truthy(modtype)
+    assert.equals(0, #errors, table.concat(errors, "\n"))
+    return modtype
 end
 
-describe("uv native owner interface", function()
-    setup(configure_libuv)
+local function signature(modtype, name)
+    local member = assert(modtype.members[name], "missing member " .. name)
+    return types.tostring(member.type)
+end
+
+local function sorted_keys(table_value)
+    local keys = {}
+    for key in pairs(table_value) do
+        if type(key) == "string" then keys[#keys + 1] = key end
+    end
+    table.sort(keys)
+    return keys
+end
+
+describe("uv Phase 2 public interface", function()
+    setup(configure_foreign_headers)
 
     teardown(function()
-        driver.configure_foreign_c()
+        checker.configure_foreign_c()
         types.registry = {}
         driver.imported = {}
     end)
 
-    it("exports only the opaque timer type and Titan-safe functions", function()
-        local source = read_file("stdlib/uv.titan")
-        local modtype, errors = check_module("uv", source)
-        assert.equals(0, #errors, table.concat(errors, "\n"))
+    it("locks the Task, error, loop, and timer middle-layer surface", function()
+        local modtype = check_uv()
+        assert.same({
+            "Cancelled", "Error", "Task", "_sleep", "_ticker",
+            "_ticker_close", "_ticker_tick", "_yield", "loop", "run",
+            "uv_timer_t", "version",
+        }, sorted_keys(modtype.members))
 
-        assert.truthy(modtype.members.uv_timer_t)
-        assert.truthy(modtype.members._timer_is_closed)
-        assert.truthy(modtype.members._timer_is_closing)
-        assert.truthy(modtype.members._phase1_probe)
-        assert.truthy(modtype.members.version)
-        assert.falsy(modtype.members.Runtime)
-        assert.falsy(modtype.members.CallbackState)
-        assert.falsy(modtype.members.uv_fs_t)
-        assert.falsy(modtype.members.Buffer)
+        assert.equals("(() -> value) -> uv.Task", signature(modtype, "run"))
+        assert.equals("() -> ()", signature(modtype, "loop"))
+        assert.equals("() -> string", signature(modtype, "version"))
+        assert.equals("(integer) -> ()", signature(modtype, "_sleep"))
+        assert.equals("() -> ()", signature(modtype, "_yield"))
+        assert.equals("(integer) -> uv.uv_timer_t",
+            signature(modtype, "_ticker"))
+        assert.equals("(uv.uv_timer_t) -> boolean",
+            signature(modtype, "_ticker_tick"))
+        assert.equals("(uv.uv_timer_t) -> ()",
+            signature(modtype, "_ticker_close"))
+    end)
 
-        local timer = assert(types.registry["uv.uv_timer_t"])
-        assert.equals("Type.Record", timer._tag)
-        assert.equals(8, #timer.fields)
-        for _, field in ipairs(timer.fields) do
-            assert.is_true(field.islocal,
-                "callback-owner field must stay local: " .. field.name)
+    it("keeps all native and scheduler controls out of the interface", function()
+        local modtype = check_uv()
+        for _, name in ipairs({
+            "Loop", "Runtime", "TimerControl", "Request", "TickerState",
+            "timer_dispatch", "UV_TAG", "active_runtime",
+        }) do
+            assert.falsy(modtype.members[name], name .. " leaked")
         end
 
+        local task = assert(types.registry["uv.Task"])
+        assert.equals(25, task.nfields)
+        assert.equals(25, #task.fields)
+        for _, field in ipairs(task.fields) do assert.is_true(field.islocal) end
+        assert.same({ "cancel", "join", "status" }, sorted_keys(task.methods))
+
+        local owner = assert(types.registry["uv.uv_timer_t"])
+        assert.equals(8, owner.nfields)
+        assert.equals(8, #owner.fields)
+        for _, field in ipairs(owner.fields) do assert.is_true(field.islocal) end
+
+        local err = assert(types.registry["uv.Error"])
+        assert.equals(5, err.nfields)
+        assert.equals(5, #err.fields)
+        for _, field in ipairs(err.fields) do assert.falsy(field.islocal) end
+
+        local cancelled = assert(types.registry["uv.Cancelled"])
+        assert.equals(1, cancelled.nfields)
+        assert.equals("reason", cancelled.fields[1].name)
+        assert.falsy(cancelled.fields[1].islocal)
+
         local serialized = types.serialize(modtype)
-        assert.truthy(serialized:find(
-            "Record('uv.uv_timer_t',{},{},{},8)", 1, true))
         assert.not_match("uv_loop_t", serialized, 1, true)
         assert.not_match("uv_timer_t %*", serialized)
         assert.not_match("uv_fs_t", serialized, 1, true)
-        assert.not_match("CallbackState", serialized, 1, true)
+        assert.not_match("TimerControl", serialized, 1, true)
+        assert.not_match("Request", serialized, 1, true)
         assert.not_match("dispatcher", serialized, 1, true)
+        assert.truthy(serialized:find(
+            "Record('uv.Task',{},{", 1, true), serialized)
     end)
 
-    it("rejects a public native pointer if an owner field loses local", function()
+    it("permits public error construction but not opaque native/Task forging",
+    function()
         local source = read_file("stdlib/uv.titan")
-        local changed, count = source:gsub(
-            "local handle: %*libuv%.uv_timer_t",
-            "handle: *libuv.uv_timer_t", 1)
-        assert.equals(1, count)
-        local _, errors = check_module("uv", changed)
-        assert.is_true(#errors > 0)
-        assert.match("cannot export C FFI type 'uv_timer_t %*'",
-            table.concat(errors, "\n"))
-    end)
+        local coroutine_source = read_file("stdlib/coroutine.titan")
+        local function check_consumer(consumer)
+            types.registry = {}
+            driver.imported = {}
+            local _, errors = checker.checkimport("consumer",
+                driver.tableloader({
+                    consumer = consumer,
+                    uv = source,
+                    coroutine = coroutine_source,
+                }, {}, {}))
+            return table.concat(errors, "\n")
+        end
 
-    it("does not expose or permit construction of the opaque timer", function()
-        local _, new_errors = check_consumer([[
+        local opaque = check_consumer([[
             local uv = import "uv"
+            function bad_task(): uv.Task return uv.Task.new() end
+            function bad_owner(): uv.uv_timer_t return uv.uv_timer_t.new() end
+        ]])
+        assert.match("invalid record function 'new'", opaque)
 
-            function bad(): uv.uv_timer_t
-                return uv.uv_timer_t.new()
+        local literal = check_consumer([[
+            local uv = import "uv"
+            function bad(): uv.Task return {} end
+        ]])
+        assert.match("cannot construct record type 'uv%.Task' outside module 'uv' because it has local fields",
+            literal)
+
+        local errors = check_consumer([[
+            local uv = import "uv"
+            function good(): uv.Error
+              return uv.Error.new(-1, "E", "message", "operation", nil)
+            end
+            function cancelled(): uv.Cancelled
+              return uv.Cancelled.new("reason")
             end
         ]])
-        assert.is_true(#new_errors > 0)
-        assert.match("invalid record function 'new'",
-            table.concat(new_errors, "\n"))
-
-        local _, literal_errors = check_consumer([[
-            local uv = import "uv"
-
-            function bad(): uv.uv_timer_t
-                return {}
-            end
-        ]])
-        assert.is_true(#literal_errors > 0)
-        assert.match("cannot construct record type 'uv%.uv_timer_t' outside module 'uv' because it has local fields",
-            table.concat(literal_errors, "\n"))
-    end)
-
-    it("requires the exact nominal wrapper in middle-layer calls", function()
-        local _, errors = check_consumer([[
-            local uv = import "uv"
-
-            record Other
-            end
-
-            function bad(other: Other): boolean
-                return uv._timer_is_closed(other)
-            end
-        ]])
-        assert.is_true(#errors > 0)
-        local message = table.concat(errors, "\n")
-        assert.match("expected uv%.uv_timer_t", message)
-        assert.match("consumer%.Other", message)
+        assert.equals("", errors)
     end)
 end)

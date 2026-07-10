@@ -414,15 +414,24 @@ TITAN_STDLIB_PATH="$PWD" ./titanc --stdlib-build --tree stdlib \
   -X titan-runtime/titan_uv.o libuv-build/libuv.a
 ```
 
+Higher modules then resolve `uv` from that canonical binary. They receive no
+shim object or libuv archive themselves:
+
+```sh
+TITAN_STDLIB_PATH="$PWD" ./titanc --stdlib-build --tree stdlib \
+  --lua-name titan.timer timer
+```
+
 `--lua-name` accepts one valid dot-qualified Lua module name and exactly
 one non-`main` root. It changes only that root's exported Lua loader
-symbol (`titan.coroutine` becomes `luaopen_titan_coroutine` and `titan.uv`
-becomes `luaopen_titan_uv`); canonical Titan symbols keep their short module
+symbol (`titan.coroutine` becomes `luaopen_titan_coroutine`, `titan.uv`
+becomes `luaopen_titan_uv`, and `titan.timer` becomes
+`luaopen_titan_timer`); canonical Titan symbols keep their short module
 prefixes. It is not propagated to dependencies. The Makefile installs one
 canonical image per module and exposes the same DSOs under Lua's `titan/`
-paths, so Titan `import "coroutine"`/`import "uv"` and Lua
-`require "titan.coroutine"`/`require "titan.uv"` initialize the same module
-Udata values without replacing Lua's bare `coroutine` library.
+paths, so Titan short-name imports and Lua's qualified `titan.*` requires
+initialize the same module Udata values without replacing Lua's bare
+`coroutine` library.
 
 For a manual prefix, `make install-stdlib` places the canonical image under
 `<prefix>/lib/titan/0.11` and a relative alias under
@@ -431,8 +440,9 @@ own manifest so binary rocks, upgrades, and uninstall remain correct; its
 managed canonical directory is therefore
 `lib/lua/5.5/titan/stdlib_0_11`, with each managed `titan/<module>.so`
 replaced after deployment by a relative link such as
-`stdlib_0_11/coroutine.so` or `stdlib_0_11/uv.so`. A LuaRocks-prefix Titan
-host selects that canonical directory through `TITAN_STDLIB_PATH`.
+`stdlib_0_11/coroutine.so`, `stdlib_0_11/uv.so`, or
+`stdlib_0_11/timer.so`. A LuaRocks-prefix Titan host selects that canonical
+directory through `TITAN_STDLIB_PATH`.
 
 Its flow:
 

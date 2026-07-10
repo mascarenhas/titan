@@ -1,0 +1,20 @@
+local uv = import "uv"
+local timer = import "timer"
+
+function main(args: {string}): integer
+  local target = uv.run(function (): value
+    timer.sleep(8)
+    raise "failure-after-observer-cancel"
+    return nil
+  end)
+  local observer = uv.run(function (): value
+    do target:join() catch return nil end
+    return nil
+  end)
+  uv.run(function (): value
+    timer.sleep(1)
+    observer:cancel("observer-left")
+    return nil
+  end)
+  return 0
+end

@@ -242,6 +242,10 @@ int main(void) {
 
   assert(L != NULL);
   assert(uv_loop_init(&loop) == 0);
+  assert(titan_uvshim_loop_handle_count(&loop) == 0);
+  assert(strcmp(titan_uvshim_loop_first_handle_type(&loop), "unknown") == 0);
+  assert(titan_uvshim_status_is_ebusy(UV_EBUSY));
+  assert(!titan_uvshim_status_is_ebusy(UV_EINVAL));
   expected_L = L;
   test_slot_numbering();
   test_buffers();
@@ -256,6 +260,8 @@ int main(void) {
   pending_ref = luaL_ref(L, LUA_REGISTRYINDEX);
 
   assert(uv_timer_init(&loop, &timer) == 0);
+  assert(titan_uvshim_loop_handle_count(&loop) == 1);
+  assert(strcmp(titan_uvshim_loop_first_handle_type(&loop), "timer") == 0);
   expected_timer = &timer;
   timer_owner = push_owner(L, &timer, module_ref, dispatcher_ref);
   titan_uvshim_timer_set_data(&timer, timer_owner);

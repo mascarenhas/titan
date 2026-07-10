@@ -112,8 +112,48 @@ The reserved standard modules (`coroutine`, `uv`, `timer`, `fs`, `net`, and
 `os`) use the separate `TITAN_STDLIB_PATH` (installed default
 `/usr/local/lib/titan/0.11`) and cannot be shadowed through `--tree` or
 `TITAN_PATH`. Titan code imports them by their short names, while Lua uses the
-qualified aliases such as `require "titan.coroutine"` and eventually
-`require "titan.uv"`; Lua's own `coroutine` and `os` modules remain unchanged.
+qualified aliases such as `require "titan.coroutine"`, `require "titan.uv"`,
+and `require "titan.timer"`; Lua's own `coroutine` and `os` modules remain
+unchanged.
+
+The currently implemented async chain is `coroutine.so -> uv.so -> timer.so`.
+Only the canonical `uv.so` contains libuv; `timer.so` dynamically imports that
+standard image instead of linking a second copy. `make stdlib` builds all three
+canonical modules and their `titan.*` Lua aliases in dependency order.
+
+From Titan, importing `timer` is enough to enable the standalone async
+bootstrap:
+
+```titan
+local timer = import "timer"
+
+function main(args: {string}): integer
+  timer.sleep(10)
+  return 0
+end
+```
+
+From Lua, schedule Tasks with `uv.run` and drive them explicitly:
+
+```lua
+local uv = require "titan.uv"
+local timer = require "titan.timer"
+
+local task = uv.run(function()
+    timer.yield()
+    return "done"
+end)
+assert(task:status() == "ready") -- `run` has not executed it
+uv.loop()
+assert(task:join() == "done")
+```
+
+A libuv callback directly resumes its Titan Task and application code runs in
+that callback until it finishes or starts another async operation and yields.
+There is no extra protected callback wrapper or implicit ready queue;
+`timer.yield()` explicitly cedes an event-loop turn. See
+[Asynchronous I/O and tasks](doc/language/async-io.md) and the
+[timer module](doc/language/standard-library-timer.md).
 
 If everything is all right with your modules, you will get the result of
 your compilation as a native binary:

@@ -6,9 +6,9 @@ tagged (nested) coroutines as building block for async IO".
 This feature adds a small standard-library module, `coroutine`, that gives
 Titan stackful, asymmetric coroutines with tagged nested yield. The
 public API is written in Titan and delegates to private C runtime helpers
-through the FFI. It is the control-transfer substrate for later async IO
-and green-thread schedulers. It does not add scheduling, timers, libuv
-integration, or new syntax.
+through the FFI. It is the control-transfer substrate now used by the `uv`
+Task runtime and can support other schedulers. The `coroutine` module itself
+does not add scheduling, timers, libuv integration, or new syntax.
 
 The implementation is based on a vendored copy of
 https://github.com/edubart/minicoro, extended with the tagged nested

@@ -1,0 +1,141 @@
+local uv = import "uv"
+local timer = import "timer"
+local coroutine = import "coroutine"
+
+local OTHER_TAG: value = {}
+local nonblocking_started = false
+local nested_child_started = false
+
+local function fail_origin(): value
+  raise "phase2-observed-boom"
+  return nil
+end
+
+local function join_propagation(child: uv.Task): value
+  do
+    child:join()
+  catch
+    return traceback
+  end
+  return "missing failure"
+end
+
+local function other_tag_body(_arg: value): value
+  timer.yield()
+  return "crossed-and-restored"
+end
+
+function reset()
+  nonblocking_started = false
+  nested_child_started = false
+end
+
+function did_start(): boolean
+  return nonblocking_started
+end
+
+function nested_did_start(): boolean
+  return nested_child_started
+end
+
+function schedule_nonblocking(): uv.Task
+  return uv.run(function (): value
+    nonblocking_started = true
+    return "nonblocking-ok"
+  end)
+end
+
+function schedule_nested_run(): uv.Task
+  return uv.run(function (): value
+    local child = uv.run(function (): value
+      nested_child_started = true
+      timer.yield()
+      return "nested-child-ok"
+    end)
+    if nested_child_started then
+      raise "nested uv.run resumed its child inline"
+    end
+    return child:join()
+  end)
+end
+
+function schedule_shared_tag(): uv.Task
+  return uv.run(function (): value
+    local nested = coroutine.create(other_tag_body, OTHER_TAG)
+    local result = nested:resume(nil, OTHER_TAG)
+    if nested:status() ~= "dead" then
+      raise "differently tagged coroutine chain was not restored"
+    end
+    return result
+  end)
+end
+
+function schedule_callback_chain(): uv.Task
+  return uv.run(function (): value
+    local trace = "A"
+    timer.yield()
+    trace = trace .. "B"
+    return trace
+  end)
+end
+
+function schedule_out_of_order(): uv.Task
+  return uv.run(function (): value
+    local order: {integer} = {}
+    local slow = uv.run(function (): value
+      timer.sleep(20)
+      order[#order + 1] = 1
+      return 1
+    end)
+    local fast = uv.run(function (): value
+      timer.sleep(0)
+      order[#order + 1] = 2
+      return 2
+    end)
+    local fast_result = fast:join() as integer
+    local slow_result = slow:join() as integer
+    if fast_result ~= 2 or slow_result ~= 1 or #order ~= 2 or
+        order[1] ~= 2 or order[2] ~= 1 then
+      raise "out-of-order timers resumed the wrong Task"
+    end
+    return "out-of-order-ok"
+  end)
+end
+
+function schedule_observed_trace(): uv.Task
+  local child = uv.run(fail_origin)
+  return uv.run(function (): value
+    return join_propagation(child)
+  end)
+end
+
+function schedule_next_turn_observer(): uv.Task
+  local child = uv.run(fail_origin)
+  return uv.run(function (): value
+    do
+      child:join()
+    catch
+      if error ~= "phase2-observed-boom" then
+        raise "observer received the wrong error value"
+      end
+      timer.yield()
+      return "observed-before-promotion"
+    end
+    return "observer missed failure"
+  end)
+end
+
+function schedule_loop_rejection(): uv.Task
+  return uv.run(function (): value
+    do
+      uv.loop()
+    catch
+      local child = uv.run(function (): value
+        return "nested-run-on-child-state"
+      end)
+      return child:join()
+    end
+    raise "uv.loop accepted a UV child-state caller"
+    return nil
+  end)
+end

@@ -118,3 +118,37 @@ int titan_uvshim_buf_init(void *buf, char *base, int64_t len) {
   *uvbuf = uv_buf_init(base, (unsigned int)len);
   return 0;
 }
+
+struct titan_uv_walk_summary {
+  int count;
+  uv_handle_type first_type;
+};
+
+static void titan_uvshim_walk_summary_cb(uv_handle_t *handle, void *arg) {
+  struct titan_uv_walk_summary *summary =
+      (struct titan_uv_walk_summary *)arg;
+  if (summary->count == 0)
+    summary->first_type = uv_handle_get_type(handle);
+  summary->count++;
+}
+
+static struct titan_uv_walk_summary titan_uvshim_walk_summary(
+    uv_loop_t *loop) {
+  struct titan_uv_walk_summary summary = {0, UV_UNKNOWN_HANDLE};
+  uv_walk(loop, titan_uvshim_walk_summary_cb, &summary);
+  return summary;
+}
+
+int titan_uvshim_loop_handle_count(uv_loop_t *loop) {
+  return titan_uvshim_walk_summary(loop).count;
+}
+
+const char *titan_uvshim_loop_first_handle_type(uv_loop_t *loop) {
+  struct titan_uv_walk_summary summary = titan_uvshim_walk_summary(loop);
+  const char *name = uv_handle_type_name(summary.first_type);
+  return name != NULL ? name : "unknown";
+}
+
+int titan_uvshim_status_is_ebusy(int status) {
+  return status == UV_EBUSY;
+}

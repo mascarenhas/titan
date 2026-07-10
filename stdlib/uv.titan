@@ -4,117 +4,197 @@ local ffi = foreign import "titan/ffi.h"
 local shim = foreign import "titan/uv.h"
 local coroutine = import "coroutine"
 
--- Private native-owner lifecycle values.  Public Task/cancellation state is a
--- separate Phase-2 concern and must not become coupled to storage lifetime.
+-- Private continuation runtime. Native pointers stay in exact local fields;
+-- every callback is a direct call to timer_dispatch's native Titan entry.
+
 local OWNER_ALLOCATED = 0
 local OWNER_ACTIVE = 1
 local OWNER_CLOSING = 2
 local OWNER_CLOSED = 3
-local OWNER_CLEANED = 4
 
--- Kept in lockstep with enum titan_uvshim_event_kind in titan/uv.h.  Imported
--- enum values are not Titan constant expressions, so these remain literals.
 local EVENT_TIMER = 1
 local EVENT_HANDLE_CLOSE = 2
-local EVENT_FS = 3
 
--- A private loop owns the userdata that contains its native bytes.  The
--- pointer is never transported through value and is read directly thereafter.
+local TASK_NEW = 0
+local TASK_READY = 1
+local TASK_RUNNING = 2
+local TASK_WAITING = 3
+local TASK_SUCCEEDED = 4
+local TASK_FAILED = 5
+local TASK_CANCELLED = 6
+
+local OWNER_START = 1
+local OWNER_SLEEP = 2
+local OWNER_CANCEL = 3
+local OWNER_JOIN_WAKE = 4
+local OWNER_OBSERVE = 5
+local OWNER_TICKER = 6
+local OWNER_TICKER_CLOSE_WAKE = 7
+local OWNER_CLEANUP_SLEEP = 8
+local OWNER_DEFER_ERROR = 9
+
+local REQUEST_SLEEP = 1
+local REQUEST_JOIN = 2
+local REQUEST_TICK = 3
+local REQUEST_CLEANUP_SLEEP = 4
+
+local DRIVE_RESUME = 1
+local DRIVE_ERROR = 2
+local IMMEDIATE_BUDGET = 8
+
+record Error
+  code: integer
+  name: string
+  message: string
+  operation: string
+  subject: string?
+end
+
+record Cancelled
+  reason: value
+end
+
 local record Loop
   local handle: *libuv.uv_loop_t
   local storage: value
   local generation: integer
-  local state: integer
 end
 
--- Runtime roots callback-owner records by their existing Lua identity.  The
--- map key is dynamic because timer and filesystem owners are distinct nominal
--- types; native handles themselves always stay in exact typed local fields.
+-- Values are used only for heterogeneous/recursive Lua GC links.  No native
+-- pointer is ever converted through value.
 local record Runtime
   local loop: Loop
   local generation: integer
-  local pending: {value: boolean}
-  local resources: {value: boolean}
+  local main_thread: value
+  local module: value
+  local owner_head: value
+  local task_head: value
+  local running_task: value
+  local main_task: value
+  local in_loop: boolean
+  local closing: boolean
   local fatal: boolean
   local fatal_error: value
   local fatal_traceback: string
-  local callback_count: integer
-  local timer_count: integer
-  local close_count: integer
-  local fs_count: integer
-  local task_failure_sequence: integer
-  local followup_timer_sequence: integer
+  local pending_observations: integer
 end
 
-local record CallbackState
+local record TimerControl
   local runtime: Runtime
   local generation: integer
   local lifecycle: integer
-  local cleaned: boolean
-  local inject_dispatch_failure: boolean
-  local fail_task: boolean
-  local fail_task_handler: boolean
-  local task_failed: boolean
-  local task_error: value
-  local task_traceback: string
-  local result: integer
-  local size: integer
-  local probe_role: integer
+  local kind: integer
+  local task: value
+  local peer: value
+  local epoch: integer
+  local next_owner: value
+  local previous_owner: value
 end
 
--- Persistent timers cross into the higher-level timer module.  All eight
--- fields are local: only uv can construct one, read its native pointer, or
--- mutate callback state.  The wrapper itself is the native callback owner.
+-- Fixed eight-slot owner layout consumed by titan_uv.c.
 record uv_timer_t
-  local handle: *libuv.uv_timer_t -- slot 1 / C index 0
-  local storage: value           -- slot 2 / C index 1
-  local main_thread: value       -- slot 3 / C index 2
-  local module: value            -- slot 4 / C index 3
-  local dispatcher: (uv_timer_t, integer, integer, libuv.size_t) -> () -- 5/4
-  local root: value              -- slot 6 / C index 5
-  local metadata: CallbackState  -- slot 7 / C index 6
-  local buffer: value            -- slot 8 / C index 7
-end
-
--- Filesystem requests stay wholly inside uv, but use the same fixed layout.
--- Its family-specific dispatcher erases to the same native Udata* ABI while
--- preserving the exact nominal type inside Titan.
-local record uv_fs_t
-  local handle: *libuv.uv_fs_t
+  local handle: *libuv.uv_timer_t
   local storage: value
   local main_thread: value
   local module: value
-  local dispatcher: (uv_fs_t, integer, integer, libuv.size_t) -> ()
+  local dispatcher: (uv_timer_t, integer, integer, libuv.size_t) -> ()
   local root: value
-  local metadata: CallbackState
+  local metadata: TimerControl
   local buffer: value
 end
 
-local record Bytes
-  local data: *ffi.titan_ffi_char
-  local storage: value
-  local length: integer
+local record Request
+  local kind: integer
+  local generation: integer
+  local task: value
+  local subject: value
+  local milliseconds: integer
 end
 
-local record Buffer
-  local handle: *libuv.uv_buf_t
-  local storage: value
-  local bytes: Bytes
+record Task
+  local root: coroutine.Coro
+  local runtime: Runtime
+  local generation: integer
+  local state: integer
+  local epoch: integer
+  local result: value
+  local error_value: value
+  local error_traceback: string
+  local cancel_requested: boolean
+  local cancel_reason: value
+  local cancel_value: value
+  local operation: value
+  local current_request: value
+  local joiner_head: value
+  local join_next: value
+  local join_previous: value
+  local joining_target: value
+  local next_task: value
+  local previous_task: value
+  local permanently_observed: boolean
+  local observer_count: integer
+  local cleanup_shield_depth: integer
+  local cancel_deferred: boolean
+  local cancel_fallback: boolean
+  local main: boolean
 end
 
+local record TickerState
+  local runtime: Runtime
+  local generation: integer
+  local open: boolean
+  local interval: integer
+  local owner: value
+  local waiter: value
+  local waiter_epoch: integer
+end
+
+-- A single tag identity belongs to this module instance and is shared by all
+-- tasks and by every sequential Runtime session in the Lua state.
+local UV_TAG: value = {}
 local generation = 0
 local active_runtime: Runtime? = nil
 
--- Lua userdata payloads have LUAI_MAXALIGN.  TValue is a member of that
--- aligned union, so this comparison rejects a target requiring a fallback
--- allocator instead of silently assuming the payload is sufficiently aligned.
-local function check_storage_alignment()
-  if libuv.uv_loop_t.alignof > ffi.TValue.alignof or
-      libuv.uv_timer_t.alignof > ffi.TValue.alignof or
-      libuv.uv_fs_t.alignof > ffi.TValue.alignof or
-      libuv.uv_buf_t.alignof > ffi.TValue.alignof then
-    raise "libuv requires over-aligned storage on this target"
+local function reinstall_trace(trace: string)
+  ffi.lua_pushtvalue(L, trace)
+  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_BACKTRACE_KEY)
+  lua.lua_pushboolean(L, 1)
+  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_PINNED)
+end
+
+local function stash_trace_for_append(trace: string)
+  ffi.lua_pushtvalue(L, trace)
+  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_APPEND_KEY)
+end
+
+local function pop_trace_for_append(): value
+  local top = lua.lua_gettop(L)
+  lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_APPEND_KEY)
+  local trace: value = ffi.lua_totvalue(L, -1)
+  lua.lua_pushnil(L)
+  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_APPEND_KEY)
+  lua.lua_settop(L, top)
+  return trace
+end
+
+local function raise_joined(err: value, target_trace: string)
+  stash_trace_for_append(target_trace)
+  do
+    raise err
+  catch
+    local inner = pop_trace_for_append()
+    if inner ~= nil then
+      reinstall_trace((inner as string) .. "\n" .. traceback)
+    end
+    raise error
   end
+end
+
+local function raise_saved(err: value, trace: string)
+  if #trace > 0 then
+    reinstall_trace(trace)
+  end
+  raise err
 end
 
 local function main_thread_value(): value
@@ -126,10 +206,6 @@ local function main_thread_value(): value
   return thread
 end
 
--- M is a native Udata* inside Titan code; coercing that C pointer directly to
--- value would produce lightuserdata, not a tracing root.  A canonical Titan
--- function closure keeps the module Udata in Lua upvalue 1, so capture that
--- already existing full-userdata TValue once through the public Lua API.
 local function dispatcher_module_value(dispatcher: value): value
   local top = lua.lua_gettop(L)
   ffi.lua_pushtvalue(L, dispatcher)
@@ -139,27 +215,14 @@ local function dispatcher_module_value(dispatcher: value): value
   return module
 end
 
-local function owner_slot_type(owner: value, slot: integer): integer
+local function on_main_thread(): boolean
   local top = lua.lua_gettop(L)
-  ffi.lua_pushtvalue(L, owner)
-  lua.lua_getiuservalue(L, -1, slot as ffi.titan_ffi_int)
-  local kind = lua.lua_type(L, -1)
+  local is_main = lua.lua_pushthread(L)
   lua.lua_settop(L, top)
-  return kind as integer
+  return (is_main as integer) ~= 0
 end
 
-local function owner_layout_is_valid(owner: value): boolean
-  return owner_slot_type(owner, 1) == (lua.LUA_TLIGHTUSERDATA as integer) and
-         owner_slot_type(owner, 2) == (lua.LUA_TUSERDATA as integer) and
-         owner_slot_type(owner, 3) == (lua.LUA_TTHREAD as integer) and
-         owner_slot_type(owner, 4) == (lua.LUA_TUSERDATA as integer) and
-         owner_slot_type(owner, 5) == (lua.LUA_TFUNCTION as integer) and
-         owner_slot_type(owner, 6) == (lua.LUA_TUSERDATA as integer) and
-         owner_slot_type(owner, 7) == (lua.LUA_TUSERDATA as integer) and
-         owner_slot_type(owner, 8) == (lua.LUA_TUSERDATA as integer)
-end
-
-local function timer_owner_pointer(owner: uv_timer_t): ffi.titan_ffi_void_ptr
+local function owner_pointer(owner: uv_timer_t): ffi.titan_ffi_void_ptr
   local top = lua.lua_gettop(L)
   ffi.lua_pushtvalue(L, owner)
   local pointer = ffi.lua_togco(L, -1)
@@ -167,409 +230,1116 @@ local function timer_owner_pointer(owner: uv_timer_t): ffi.titan_ffi_void_ptr
   return pointer
 end
 
-local function fs_owner_pointer(owner: uv_fs_t): ffi.titan_ffi_void_ptr
-  local top = lua.lua_gettop(L)
-  ffi.lua_pushtvalue(L, owner)
-  local pointer = ffi.lua_togco(L, -1)
-  lua.lua_settop(L, top)
-  return pointer
+local function make_error(status: integer, operation: string,
+                          subject: string?): Error
+  local code = status as ffi.titan_ffi_int
+  return Error.new(status, libuv.uv_err_name(code) as string,
+                   libuv.uv_strerror(code) as string, operation, subject)
+end
+
+local function internal_error(operation: string): Error
+  return Error.new(-1, "EINTERNAL", "libuv Runtime invariant failed",
+                   operation, nil)
+end
+
+local function task_state_name(state: integer): string
+  if state == TASK_NEW then return "new" end
+  if state == TASK_READY then return "ready" end
+  if state == TASK_RUNNING then return "running" end
+  if state == TASK_WAITING then return "waiting" end
+  if state == TASK_SUCCEEDED then return "succeeded" end
+  if state == TASK_FAILED then return "failed" end
+  return "cancelled"
+end
+
+local function request_kind_name(kind: integer): string
+  if kind == REQUEST_SLEEP then return "sleep" end
+  if kind == REQUEST_JOIN then return "join" end
+  if kind == REQUEST_TICK then return "ticker.tick" end
+  if kind == REQUEST_CLEANUP_SLEEP then return "cleanup.sleep" end
+  return "unknown"
+end
+
+local function waiting_task_diagnostic(runtime: Runtime): string
+  local diagnostic = ""
+  local raw = runtime.task_head
+  while raw ~= nil do
+    local task = raw as Task
+    if #diagnostic > 0 then diagnostic = diagnostic .. ", " end
+    diagnostic = diagnostic .. "Task(state=" .. task_state_name(task.state)
+    if task.current_request ~= nil then
+      local request = task.current_request as Request
+      diagnostic = diagnostic .. ", request=" ..
+                   request_kind_name(request.kind)
+    else
+      diagnostic = diagnostic .. ", request=none"
+    end
+    diagnostic = diagnostic .. ")"
+    raw = task.next_task
+  end
+  if #diagnostic == 0 then return "no live Tasks" end
+  return diagnostic
+end
+
+local function check_alignment()
+  if libuv.uv_loop_t.alignof > ffi.TValue.alignof or
+      libuv.uv_timer_t.alignof > ffi.TValue.alignof then
+    raise "libuv requires over-aligned storage on this target"
+  end
 end
 
 local function allocate_loop(next_generation: integer): Loop
   local top = lua.lua_gettop(L)
   local memory = lua.lua_newuserdatauv(L, libuv.uv_loop_t.sizeof, 0)
   local storage = ffi.lua_totvalue(L, -1)
-  local handle = memory as *libuv.uv_loop_t
-  local loop = Loop.new(handle, storage, next_generation, OWNER_ALLOCATED)
+  local loop = Loop.new(memory as *libuv.uv_loop_t, storage, next_generation)
   lua.lua_settop(L, top)
   return loop
 end
 
-local function allocate_bytes(length: integer): Bytes
-  if length < 0 then
-    raise "buffer length must not be negative"
-  end
-  local top = lua.lua_gettop(L)
-  local memory = lua.lua_newuserdatauv(L, length, 0)
-  local storage = ffi.lua_totvalue(L, -1)
-  local bytes = Bytes.new(memory as *ffi.titan_ffi_char, storage, length)
-  lua.lua_settop(L, top)
-  return bytes
-end
-
-local function allocate_buffer(length: integer): Buffer
-  local bytes = allocate_bytes(length)
-  local top = lua.lua_gettop(L)
-  local memory = lua.lua_newuserdatauv(L, libuv.uv_buf_t.sizeof, 0)
-  local storage = ffi.lua_totvalue(L, -1)
-  local handle = memory as *libuv.uv_buf_t
-  local status = shim.titan_uvshim_buf_init(
-      handle as ffi.titan_ffi_void_ptr, bytes.data, length)
-  if (status as integer) < 0 then
-    lua.lua_settop(L, top)
-    raise "buffer length is not representable by libuv"
-  end
-  local buffer = Buffer.new(handle, storage, bytes)
-  lua.lua_settop(L, top)
-  return buffer
-end
-
-local function install_young_buffer(timer: uv_timer_t,
-                                    request: uv_fs_t): integer
-  local buffer = allocate_buffer(32)
-  -- Slot 6 models the later Task/root coroutine, while slot 8 is the distinct
-  -- I/O buffer role.  Both writes are old-owner -> young-record barriers.
-  timer.root = buffer
-  request.root = buffer
-  timer.buffer = buffer
-  request.buffer = buffer
-  return buffer.bytes.length
-end
-
 local function new_runtime(): Runtime
-  check_storage_alignment()
+  check_alignment()
   generation = generation + 1
   local loop = allocate_loop(generation)
   local status = libuv.uv_loop_init(loop.handle)
   if (status as integer) < 0 then
-    loop.storage = nil
     loop.handle = nil
-    raise "could not initialize private libuv loop"
+    loop.storage = nil
+    raise make_error(status as integer, "loop.init", nil)
   end
-  loop.state = OWNER_ACTIVE
-  local runtime = Runtime.new(loop, generation, {}, {}, false, nil, "",
-                              0, 0, 0, 0, 0, 0)
+  local runtime = Runtime.new(loop, generation, main_thread_value(),
+      dispatcher_module_value(timer_dispatch), nil, nil, nil, nil,
+      false, false, false, nil, "", 0)
   active_runtime = runtime
   return runtime
 end
 
-local function new_state(runtime: Runtime): CallbackState
-  return CallbackState.new(runtime, runtime.generation, OWNER_ALLOCATED, false,
-                           false, false, false, false, nil, "", 0, 0, 0)
+local function current_runtime(): Runtime
+  if not active_runtime then
+    raise "no active libuv Runtime"
+  end
+  return active_runtime as Runtime
 end
 
-local function task_body(state: CallbackState, event_kind: integer,
-                         result: integer, size: integer)
-  if state.fail_task and event_kind == EVENT_TIMER then
-    raise "phase-1 observed task failure"
-  end
-  if event_kind == EVENT_FS then
-    -- Model an allocating/arbitrary continuation after request cleanup.  The
-    -- pending-table root must still keep the raw callback owner and metadata
-    -- alive until this drive returns.
-    lua.lua_gc(L, lua.LUA_GCCOLLECT)
-  end
-  state.result = result
-  state.size = size
-end
-
-local function task_error_handler(state: CallbackState, err: value,
-                                  trace: string)
-  if state.fail_task_handler then
-    raise "phase-1 task error handler failure"
-  end
-  state.task_failed = true
-  state.task_error = err
-  state.task_traceback = trace
-  state.runtime.task_failure_sequence = state.runtime.callback_count
-end
-
-local function drive_task_boundary(state: CallbackState, event_kind: integer,
-                                   result: integer, size: integer)
-  do
-    task_body(state, event_kind, result, size)
-  catch
-    task_error_handler(state, error, traceback)
-  end
-end
-
--- Family-specific, capture-free top-level dispatchers erase to the one native
--- callback ABI in titan_uv.c.  They are invoked directly with _fn == NULL.
--- Every potentially raising operation is inside the function-level catch.
-local function timer_dispatch(owner: uv_timer_t, event_kind: integer,
-                              result: integer, size: libuv.size_t)
-  if owner.metadata.inject_dispatch_failure then
-    owner.metadata.inject_dispatch_failure = false
-    raise "phase-1 injected dispatcher failure"
-  end
-
-  owner.metadata.runtime.callback_count =
-      owner.metadata.runtime.callback_count + 1
-  if event_kind == EVENT_TIMER then
-    owner.metadata.runtime.timer_count =
-        owner.metadata.runtime.timer_count + 1
-    if owner.metadata.probe_role == 2 then
-      owner.metadata.runtime.followup_timer_sequence =
-          owner.metadata.runtime.callback_count
+local function ensure_runtime(): Runtime
+  if active_runtime then
+    local runtime = active_runtime as Runtime
+    if runtime.closing then
+      raise "the libuv Runtime is shutting down"
     end
-    owner.metadata.lifecycle = OWNER_CLOSING
-    libuv.uv_timer_stop(owner.handle)
-    shim.titan_uvshim_timer_close(owner.handle)
-    drive_task_boundary(owner.metadata, event_kind, result, size as integer)
-  elseif event_kind == EVENT_HANDLE_CLOSE then
-    owner.metadata.runtime.close_count =
-        owner.metadata.runtime.close_count + 1
-    owner.metadata.lifecycle = OWNER_CLOSED
-    owner.handle = nil
-    owner.storage = nil
-    owner.metadata.runtime.resources[owner] = nil
+    return runtime
+  end
+  return new_runtime()
+end
+
+local function link_owner(runtime: Runtime, owner: uv_timer_t)
+  local previous = runtime.owner_head
+  owner.metadata.next_owner = previous
+  owner.metadata.previous_owner = nil
+  if previous ~= nil then
+    local old = previous as uv_timer_t
+    old.metadata.previous_owner = owner
+  end
+  runtime.owner_head = owner
+end
+
+local function unlink_owner(owner: uv_timer_t)
+  local runtime = owner.metadata.runtime
+  local previous = owner.metadata.previous_owner
+  local next = owner.metadata.next_owner
+  if previous ~= nil then
+    local before = previous as uv_timer_t
+    before.metadata.next_owner = next
   else
-    raise "timer owner received an invalid callback event"
+    runtime.owner_head = next
   end
-catch
-  owner.metadata.runtime.fatal_error = error
-  owner.metadata.runtime.fatal_traceback = traceback
-  owner.metadata.runtime.fatal = true
-  libuv.uv_stop(owner.metadata.runtime.loop.handle)
-  return
+  if next ~= nil then
+    local after = next as uv_timer_t
+    after.metadata.previous_owner = previous
+  end
+  owner.metadata.previous_owner = nil
+  owner.metadata.next_owner = nil
 end
 
-local function fs_dispatch(owner: uv_fs_t, event_kind: integer,
-                           result: integer, size: libuv.size_t)
-  if owner.metadata.inject_dispatch_failure then
-    owner.metadata.inject_dispatch_failure = false
-    raise "phase-1 injected filesystem dispatcher failure"
+local function link_task(runtime: Runtime, task: Task)
+  local previous = runtime.task_head
+  task.next_task = previous
+  task.previous_task = nil
+  if previous ~= nil then
+    local old = previous as Task
+    old.previous_task = task
   end
-  if event_kind ~= EVENT_FS then
-    raise "filesystem owner received an invalid callback event"
-  end
-
-  owner.metadata.runtime.callback_count =
-      owner.metadata.runtime.callback_count + 1
-  owner.metadata.runtime.fs_count = owner.metadata.runtime.fs_count + 1
-  if not owner.metadata.cleaned then
-    libuv.uv_fs_req_cleanup(owner.handle)
-    owner.metadata.cleaned = true
-  end
-  owner.metadata.lifecycle = OWNER_CLEANED
-  owner.metadata.result = result
-  owner.handle = nil
-  owner.storage = nil
-  drive_task_boundary(owner.metadata, event_kind, result, size as integer)
-  -- The native callback holds only a raw Udata pointer.  Keep the Runtime map
-  -- root through every continuation allocation, then release it immediately
-  -- before returning to libuv.
-  owner.metadata.runtime.pending[owner] = nil
-catch
-  owner.metadata.runtime.fatal_error = error
-  owner.metadata.runtime.fatal_traceback = traceback
-  owner.metadata.runtime.fatal = true
-  -- The callback proves this request is terminal even when the first
-  -- dispatcher operation fails.  Cleanup is a public void libuv operation;
-  -- keep this arm inline and non-raising, then release the existing map key.
-  if not owner.metadata.cleaned then
-    libuv.uv_fs_req_cleanup(owner.handle)
-    owner.metadata.cleaned = true
-  end
-  owner.metadata.lifecycle = OWNER_CLEANED
-  owner.handle = nil
-  owner.storage = nil
-  libuv.uv_stop(owner.metadata.runtime.loop.handle)
-  owner.metadata.runtime.pending[owner] = nil
-  return
+  runtime.task_head = task
 end
 
-local function allocate_timer(runtime: Runtime): uv_timer_t
+local function unlink_task(task: Task)
+  local runtime = task.runtime
+  local previous = task.previous_task
+  local next = task.next_task
+  if previous ~= nil then
+    local before = previous as Task
+    before.next_task = next
+  else
+    runtime.task_head = next
+  end
+  if next ~= nil then
+    local after = next as Task
+    after.previous_task = previous
+  end
+  task.previous_task = nil
+  task.next_task = nil
+end
+
+local function close_owner(owner: uv_timer_t)
+  if owner.metadata.lifecycle == OWNER_ACTIVE then
+    if owner.metadata.kind == OWNER_TICKER then
+      local state = owner.metadata.peer as TickerState
+      state.open = false
+    end
+    libuv.uv_timer_stop(owner.handle)
+    owner.metadata.lifecycle = OWNER_CLOSING
+    shim.titan_uvshim_timer_close(owner.handle)
+  end
+end
+
+local function close_all_owners(runtime: Runtime)
+  local raw = runtime.owner_head
+  while raw ~= nil do
+    local owner = raw as uv_timer_t
+    raw = owner.metadata.next_owner
+    close_owner(owner)
+  end
+end
+
+local function maybe_finish_session(runtime: Runtime)
+  if runtime.task_head == nil and runtime.pending_observations == 0 then
+    runtime.closing = true
+    close_all_owners(runtime)
+  end
+end
+
+local function allocate_owner(runtime: Runtime, kind: integer, task: value,
+                              peer: value, epoch: integer): uv_timer_t
   local top = lua.lua_gettop(L)
   local memory = lua.lua_newuserdatauv(L, libuv.uv_timer_t.sizeof, 0)
   local storage = ffi.lua_totvalue(L, -1)
-  local handle = memory as *libuv.uv_timer_t
+  local metadata = TimerControl.new(runtime, runtime.generation,
+      OWNER_ALLOCATED, kind, task, peer, epoch, nil, nil)
   local owner: uv_timer_t = {
-    handle = handle,
+    handle = memory as *libuv.uv_timer_t,
     storage = storage,
-    main_thread = main_thread_value(),
-    module = dispatcher_module_value(timer_dispatch),
+    main_thread = runtime.main_thread,
+    module = runtime.module,
     dispatcher = timer_dispatch,
-    root = nil,
-    metadata = new_state(runtime),
-    buffer = nil,
+    root = task,
+    metadata = metadata,
+    buffer = peer,
   }
-  owner.root = owner
+  link_owner(runtime, owner)
   lua.lua_settop(L, top)
   return owner
 end
 
-local function allocate_fs(runtime: Runtime): uv_fs_t
-  local top = lua.lua_gettop(L)
-  local memory = lua.lua_newuserdatauv(L, libuv.uv_fs_t.sizeof, 0)
-  local storage = ffi.lua_totvalue(L, -1)
-  local handle = memory as *libuv.uv_fs_t
-  local owner: uv_fs_t = {
-    handle = handle,
-    storage = storage,
-    main_thread = main_thread_value(),
-    module = dispatcher_module_value(fs_dispatch),
-    dispatcher = fs_dispatch,
-    root = nil,
-    metadata = new_state(runtime),
-    buffer = nil,
-  }
-  owner.root = owner
-  lua.lua_settop(L, top)
-  return owner
-end
-
-local function start_timer(runtime: Runtime, fail_task: boolean,
-                           fail_task_handler: boolean,
-                           inject_dispatch_failure: boolean,
-                           probe_role: integer,
-                           delay: integer): uv_timer_t
-  local owner = allocate_timer(runtime)
-  owner.metadata.fail_task = fail_task
-  owner.metadata.fail_task_handler = fail_task_handler
-  owner.metadata.inject_dispatch_failure = inject_dispatch_failure
-  owner.metadata.probe_role = probe_role
+local function start_owner(runtime: Runtime, kind: integer, task: value,
+                           peer: value, epoch: integer,
+                           timeout: integer, repeat_time: integer):
+                           (uv_timer_t, integer)
+  local owner = allocate_owner(runtime, kind, task, peer, epoch)
   local status = libuv.uv_timer_init(runtime.loop.handle, owner.handle)
   if (status as integer) < 0 then
-    owner.storage = nil
+    unlink_owner(owner)
     owner.handle = nil
-    owner.metadata.lifecycle = OWNER_CLEANED
-    return owner
+    owner.storage = nil
+    owner.metadata.lifecycle = OWNER_CLOSED
+    return owner, status as integer
   end
   owner.metadata.lifecycle = OWNER_ACTIVE
-  runtime.resources[owner] = true
-  shim.titan_uvshim_timer_set_data(owner.handle, timer_owner_pointer(owner))
+  shim.titan_uvshim_timer_set_data(owner.handle, owner_pointer(owner))
   status = libuv.uv_timer_start(owner.handle, shim.titan_uvshim_timer_cb,
-                               delay, 0)
+                               timeout, repeat_time)
   if (status as integer) < 0 then
-    owner.metadata.lifecycle = OWNER_CLOSING
-    shim.titan_uvshim_timer_close(owner.handle)
+    close_owner(owner)
+  end
+  return owner, status as integer
+end
+
+local function terminal(state: integer): boolean
+  return state == TASK_SUCCEEDED or state == TASK_FAILED or
+         state == TASK_CANCELLED
+end
+
+local function promote_fatal(runtime: Runtime, err: value, trace: string)
+  if not runtime.fatal then
+    runtime.fatal = true
+    -- Prevent the remainder of this callback from admitting ordinary work.
+    -- Cleanup requests remain legal while the outer driver drains the session.
+    runtime.closing = true
+    runtime.fatal_error = err
+    runtime.fatal_traceback = trace
+    libuv.uv_stop(runtime.loop.handle)
+  end
+end
+
+local function remove_joiner(task: Task)
+  local raw_target = task.joining_target
+  if raw_target == nil then
+    return
+  end
+  local target = raw_target as Task
+  local previous = task.join_previous
+  local next = task.join_next
+  if previous ~= nil then
+    local before = previous as Task
+    before.join_next = next
+  else
+    target.joiner_head = next
+  end
+  if next ~= nil then
+    local after = next as Task
+    after.join_previous = previous
+  end
+  task.join_previous = nil
+  task.join_next = nil
+  task.joining_target = nil
+  target.observer_count = target.observer_count - 1
+  if target.observer_count < 0 then
+    raise "Task observer count became negative"
+  end
+end
+
+local function add_joiner(target: Task, task: Task)
+  local previous = target.joiner_head
+  task.joining_target = target
+  task.join_previous = nil
+  task.join_next = previous
+  if previous ~= nil then
+    local old = previous as Task
+    old.join_previous = task
+  end
+  target.joiner_head = task
+  target.observer_count = target.observer_count + 1
+end
+
+local function schedule_observation(task: Task)
+  local runtime = task.runtime
+  runtime.pending_observations = runtime.pending_observations + 1
+  local owner, status = start_owner(runtime, OWNER_OBSERVE, task, nil,
+                                    task.epoch, 0, 0)
+  if status < 0 then
+    if owner.metadata.lifecycle == OWNER_CLOSED then
+      runtime.pending_observations = runtime.pending_observations - 1
+    end
+    promote_fatal(runtime, make_error(status, "task.observe", nil), "")
+  else
+    owner.root = task
+  end
+end
+
+local function wake_joiners(task: Task)
+  local raw = task.joiner_head
+  while raw ~= nil do
+    local joiner = raw as Task
+    raw = joiner.join_next
+    local owner, status = start_owner(task.runtime, OWNER_JOIN_WAKE,
+                                      joiner, task, joiner.epoch, 0, 0)
+    if status < 0 then
+      promote_fatal(task.runtime,
+                    make_error(status, "task.join.wake", nil), "")
+    else
+      joiner.operation = owner
+    end
+  end
+end
+
+local function finish_task(task: Task, state: integer, result: value,
+                           err: value, trace: string)
+  if terminal(task.state) then
+    return
+  end
+  local runtime = task.runtime
+  task.operation = nil
+  task.current_request = nil
+  task.result = result
+  task.error_value = err
+  task.error_traceback = trace
+  task.state = state
+  task.cancel_deferred = false
+  task.cancel_fallback = false
+  task.cleanup_shield_depth = 0
+  unlink_task(task)
+  if state == TASK_FAILED and task.main then
+    promote_fatal(runtime, err, trace)
+  elseif state == TASK_CANCELLED and task.main then
+    promote_fatal(runtime, err, trace)
+  end
+  wake_joiners(task)
+  if state == TASK_FAILED then
+    if not task.main and not task.permanently_observed and
+        task.observer_count == 0 and
+        not runtime.fatal then
+      schedule_observation(task)
+    end
+  end
+  maybe_finish_session(runtime)
+end
+
+local function ticker_state(owner: uv_timer_t): TickerState
+  if owner.metadata.kind ~= OWNER_TICKER then
+    raise "timer wrapper is not a Ticker"
+  end
+  return owner.metadata.peer as TickerState
+end
+
+local function detach_wait(task: Task)
+  local raw_request = task.current_request
+  local raw_owner = task.operation
+  if raw_request ~= nil then
+    local request = raw_request as Request
+    if request.kind == REQUEST_JOIN then
+      local raw_target = task.joining_target
+      remove_joiner(task)
+      if raw_owner ~= nil then
+        close_owner(raw_owner as uv_timer_t)
+      end
+      if raw_target ~= nil then
+        local target = raw_target as Task
+        if target.state == TASK_FAILED and
+            not target.permanently_observed and
+            target.observer_count == 0 and
+            not target.runtime.fatal then
+          schedule_observation(target)
+        end
+      end
+    elseif request.kind == REQUEST_TICK then
+      local owner = request.subject as uv_timer_t
+      local state = ticker_state(owner)
+      if state.waiter == task and state.waiter_epoch == request.generation then
+        state.waiter = nil
+        state.waiter_epoch = 0
+      end
+    elseif (request.kind == REQUEST_SLEEP or
+            request.kind == REQUEST_CLEANUP_SLEEP) and raw_owner ~= nil then
+      close_owner(raw_owner as uv_timer_t)
+    end
+  elseif raw_owner ~= nil then
+    close_owner(raw_owner as uv_timer_t)
+  end
+  task.operation = nil
+  task.current_request = nil
+end
+
+local function request_cancel(task: Task, reason: value)
+  if terminal(task.state) or task.cancel_requested then
+    return
+  end
+  local runtime = task.runtime
+  if runtime.generation ~= task.generation then
+    raise "Task belongs to a stale libuv Runtime"
+  end
+  task.cancel_requested = true
+  task.cancel_reason = reason
+  task.cancel_value = Cancelled.new(reason)
+  task.epoch = task.epoch + 1
+  if task.cleanup_shield_depth > 0 then
+    task.cancel_deferred = true
+    return
+  end
+  if task.state ~= TASK_RUNNING then
+    detach_wait(task)
+  end
+  local owner, status = start_owner(runtime, OWNER_CANCEL, task, nil,
+                                    task.epoch, 0, 0)
+  if status < 0 then
+    task.cancel_fallback = true
+    promote_fatal(runtime, make_error(status, "task.cancel", nil), "")
+  else
+    task.cancel_deferred = false
+    task.operation = owner
+  end
+end
+
+local function running_task(): Task
+  if not coroutine.is_yieldable(UV_TAG) then
+    raise "async operation used outside a UV Task"
+  end
+  local runtime = current_runtime()
+  if runtime.running_task == nil then
+    raise "UV Task continuation is not active"
+  end
+  local task = runtime.running_task as Task
+  if task.generation ~= runtime.generation then
+    raise "Task belongs to a stale libuv Runtime"
+  end
+  return task
+end
+
+local function new_request(kind: integer, subject: value,
+                           milliseconds: integer): Request
+  local task = running_task()
+  if task.cancel_requested then
+    raise task.cancel_value
+  end
+  if task.runtime.closing then
+    raise "the libuv Runtime is shutting down"
+  end
+  task.epoch = task.epoch + 1
+  return Request.new(kind, task.epoch, task, subject, milliseconds)
+end
+
+local function new_cleanup_request(milliseconds: integer): Request
+  local task = running_task()
+  if task.cleanup_shield_depth <= 0 then
+    raise "cleanup await used outside a cleanup shield"
+  end
+  task.epoch = task.epoch + 1
+  return Request.new(REQUEST_CLEANUP_SLEEP, task.epoch, task, nil,
+                     milliseconds)
+end
+
+local function arm_request(task: Task, request: Request): value
+  local runtime = task.runtime
+  if request.task ~= task or request.generation ~= task.epoch or
+      task.generation ~= runtime.generation then
+    raise "stale private UV Request"
+  end
+  task.current_request = request
+  if request.kind == REQUEST_SLEEP then
+    local owner, status = start_owner(runtime, OWNER_SLEEP, task, request,
+                                      request.generation,
+                                      request.milliseconds, 0)
+    if status < 0 then
+      task.current_request = nil
+      return make_error(status, "timer.start", nil)
+    end
+    task.operation = owner
+    task.state = TASK_WAITING
+    return nil
+  elseif request.kind == REQUEST_CLEANUP_SLEEP then
+    if task.cleanup_shield_depth <= 0 then
+      raise "cleanup Request escaped its cleanup shield"
+    end
+    local owner, status = start_owner(runtime, OWNER_CLEANUP_SLEEP,
+                                      task, request, request.generation,
+                                      request.milliseconds, 0)
+    if status < 0 then
+      task.current_request = nil
+      return make_error(status, "cleanup.timer.start", nil)
+    end
+    task.operation = owner
+    task.state = TASK_WAITING
+    return nil
+  elseif request.kind == REQUEST_JOIN then
+    local target = request.subject as Task
+    if target.runtime ~= runtime or target.generation ~= runtime.generation then
+      raise "cannot join a Task from another libuv Runtime"
+    end
+    if target == task then
+      raise "a Task cannot join itself"
+    end
+    if terminal(target.state) then
+      raise "terminal Task unexpectedly yielded a Join Request"
+    end
+    add_joiner(target, task)
+    task.operation = nil
+    task.state = TASK_WAITING
+    return nil
+  elseif request.kind == REQUEST_TICK then
+    local owner = request.subject as uv_timer_t
+    local state = ticker_state(owner)
+    if state.runtime ~= runtime or state.generation ~= runtime.generation then
+      raise "Ticker belongs to a stale libuv Runtime"
+    end
+    if not state.open then
+      raise "closed Ticker unexpectedly yielded a wait Request"
+    end
+    if state.waiter ~= nil then
+      raise "Ticker already has a waiting Task"
+    end
+    state.waiter = task
+    state.waiter_epoch = request.generation
+    task.operation = owner
+    task.state = TASK_WAITING
+    return nil
+  end
+  raise "malformed private UV Request"
+end
+
+local function drive_task(task: Task, initial_mode: integer,
+                          initial_payload: value,
+                          initial_trace: string)
+  local runtime = task.runtime
+  local mode = initial_mode
+  local payload = initial_payload
+  local source_trace = initial_trace
+  local immediate_iterations = 0
+  while true do
+    runtime.running_task = task
+    task.state = TASK_RUNNING
+    task.operation = nil
+    task.current_request = nil
+    local yielded: value = nil
+    do
+      if mode == DRIVE_ERROR then
+        if #source_trace > 0 then
+          -- Task:join's suspended catch combines this target trace with the
+          -- join-site trace before the error reaches user code.  If it then
+          -- escapes the child, coroutine.Coro appends the callback propagation
+          -- trace once more using the same staged-trace protocol.
+          stash_trace_for_append(source_trace)
+        end
+        yielded = task.root:error(payload, UV_TAG)
+      else
+        yielded = task.root:resume(payload, UV_TAG)
+      end
+    catch
+      runtime.running_task = nil
+      if task.cancel_requested and error == task.cancel_value then
+        finish_task(task, TASK_CANCELLED, nil, error, traceback)
+      else
+        finish_task(task, TASK_FAILED, nil, error, traceback)
+      end
+      return
+    end
+    runtime.running_task = nil
+
+    local status = task.root:status()
+    if status == "dead" then
+      if task.cancel_requested then
+        finish_task(task, TASK_CANCELLED, nil, task.cancel_value, source_trace)
+      else
+        finish_task(task, TASK_SUCCEEDED, yielded, nil, "")
+      end
+      return
+    elseif status ~= "suspended" then
+      raise "invalid UV Task coroutine state"
+    end
+
+    local request = yielded as Request
+    if request.task ~= task or request.generation ~= task.epoch then
+      raise "malformed or stale private UV Request"
+    end
+    local cleanup_request = request.kind == REQUEST_CLEANUP_SLEEP and
+                            task.cleanup_shield_depth > 0
+    if task.cancel_requested and not cleanup_request then
+      mode = DRIVE_ERROR
+      payload = task.cancel_value
+      source_trace = ""
+    else
+      local immediate_error = arm_request(task, request)
+      if immediate_error == nil then
+        return
+      end
+      immediate_iterations = immediate_iterations + 1
+      if immediate_iterations >= IMMEDIATE_BUDGET then
+        local deferred, deferred_status = start_owner(runtime,
+            OWNER_DEFER_ERROR, task, immediate_error, task.epoch,
+            0, 0)
+        if deferred_status < 0 then
+          local infrastructure_error = make_error(deferred_status,
+                                                  "task.defer", nil)
+          promote_fatal(runtime, infrastructure_error, "")
+          finish_task(task, TASK_FAILED, nil, infrastructure_error, "")
+        else
+          task.operation = deferred
+          task.state = TASK_WAITING
+        end
+        return
+      end
+      mode = DRIVE_ERROR
+      payload = immediate_error
+      source_trace = ""
+    end
+  end
+end
+
+-- Trusted direct native dispatcher.  drive_task owns the inner Task catch;
+-- this function's trailing catch is the non-raising Runtime invariant fence.
+local function timer_dispatch(owner: uv_timer_t, event_kind: integer,
+                              result: integer, size: libuv.size_t)
+  local runtime = owner.metadata.runtime
+  if owner.metadata.generation ~= runtime.generation then
+    raise "callback owner belongs to a stale libuv Runtime"
+  end
+
+  if event_kind == EVENT_HANDLE_CLOSE then
+    local kind = owner.metadata.kind
+    owner.metadata.lifecycle = OWNER_CLOSED
+    if kind == OWNER_OBSERVE then
+      runtime.pending_observations = runtime.pending_observations - 1
+    end
+    -- Keep this callback's owner strongly reachable while a helper can run or
+    -- raise.  Only non-raising field clears remain after session bookkeeping;
+    -- unlinking is the final owner operation before returning to the shim.
+    maybe_finish_session(runtime)
+    owner.handle = nil
+    owner.storage = nil
+    owner.root = nil
+    owner.buffer = nil
+    unlink_owner(owner)
+    return
+  end
+  if event_kind ~= EVENT_TIMER then
+    raise "timer owner received an invalid callback event"
+  end
+
+  local kind = owner.metadata.kind
+  if kind ~= OWNER_TICKER then
+    close_owner(owner)
+  end
+
+  if kind == OWNER_START then
+    local task = owner.metadata.task as Task
+    if task.state == TASK_READY and not task.cancel_requested then
+      drive_task(task, DRIVE_RESUME, nil, "")
+    end
+  elseif kind == OWNER_SLEEP then
+    local task = owner.metadata.task as Task
+    if task.state == TASK_WAITING and not task.cancel_requested and
+        task.epoch == owner.metadata.epoch then
+      drive_task(task, DRIVE_RESUME, nil, "")
+    end
+  elseif kind == OWNER_CLEANUP_SLEEP then
+    local task = owner.metadata.task as Task
+    if task.state == TASK_WAITING and task.cleanup_shield_depth > 0 then
+      drive_task(task, DRIVE_RESUME, nil, "")
+    end
+  elseif kind == OWNER_CANCEL then
+    local task = owner.metadata.task as Task
+    if not terminal(task.state) and task.cancel_requested and
+        task.epoch == owner.metadata.epoch then
+      drive_task(task, DRIVE_ERROR, task.cancel_value, "")
+    end
+  elseif kind == OWNER_JOIN_WAKE then
+    local task = owner.metadata.task as Task
+    local target = owner.metadata.peer as Task
+    if task.state == TASK_WAITING and not task.cancel_requested and
+        task.epoch == owner.metadata.epoch then
+      -- A waiting join is only permanently observed when this delivery wins.
+      -- Until now cancellation may revoke the observer and promote an
+      -- otherwise-unobserved target failure on its own next turn.
+      target.permanently_observed = true
+      remove_joiner(task)
+      if target.state == TASK_SUCCEEDED then
+        drive_task(task, DRIVE_RESUME, target.result, "")
+      elseif target.state == TASK_FAILED or target.state == TASK_CANCELLED then
+        drive_task(task, DRIVE_ERROR, target.error_value,
+                   target.error_traceback)
+      else
+        raise "Join wakeup target is not terminal"
+      end
+    end
+  elseif kind == OWNER_OBSERVE then
+    local task = owner.metadata.task as Task
+    if task.state == TASK_FAILED and not task.permanently_observed and
+        task.observer_count == 0 then
+      promote_fatal(runtime, task.error_value, task.error_traceback)
+    end
+  elseif kind == OWNER_DEFER_ERROR then
+    local task = owner.metadata.task as Task
+    if task.state == TASK_WAITING and not task.cancel_requested and
+        task.epoch == owner.metadata.epoch then
+      drive_task(task, DRIVE_ERROR, owner.metadata.peer, "")
+    end
+  elseif kind == OWNER_TICKER then
+    local state = owner.metadata.peer as TickerState
+    if state.open and state.waiter ~= nil then
+      local task = state.waiter as Task
+      local epoch = state.waiter_epoch
+      state.waiter = nil
+      state.waiter_epoch = 0
+      if task.state == TASK_WAITING and not task.cancel_requested and
+          task.epoch == epoch then
+        drive_task(task, DRIVE_RESUME, true, "")
+      end
+    end
+  elseif kind == OWNER_TICKER_CLOSE_WAKE then
+    local task = owner.metadata.task as Task
+    if task.state == TASK_WAITING and not task.cancel_requested and
+        task.epoch == owner.metadata.epoch then
+      drive_task(task, DRIVE_RESUME, false, "")
+    end
+  else
+    raise "timer owner has an invalid operation kind"
+  end
+catch
+  if not owner.metadata.runtime.fatal then
+    owner.metadata.runtime.fatal = true
+    owner.metadata.runtime.closing = true
+    owner.metadata.runtime.fatal_error = error
+    owner.metadata.runtime.fatal_traceback = traceback
+  end
+  libuv.uv_stop(owner.metadata.runtime.loop.handle)
+  return
+end
+
+local function adapt(func: () -> value): (value) -> value
+  return function (_ignored: value): value
+    return func()
+  end
+end
+
+local function run_internal(func: () -> value, is_main: boolean): Task
+  local runtime = ensure_runtime()
+  local root = coroutine.create(adapt(func), UV_TAG)
+  local task = Task.new(root, runtime, runtime.generation, TASK_NEW, 0,
+      nil, nil, "", false, nil, nil, nil, nil, nil, nil, nil, nil,
+      nil, nil, false, 0, 0, false, false, is_main)
+  link_task(runtime, task)
+  if is_main then
+    runtime.main_task = task
+  end
+
+  local owner, status = start_owner(runtime, OWNER_START, task, nil, 0, 0, 0)
+  task.operation = owner
+  if status < 0 then
+    finish_task(task, TASK_FAILED, nil,
+                make_error(status, "task.start", nil), "")
+  else
+    task.state = TASK_READY
+  end
+  return task
+end
+
+function run(func: () -> value): Task
+  return run_internal(func, false)
+end
+
+function Task:status(): string
+  if self.state == TASK_NEW then return "new" end
+  if self.state == TASK_READY then return "ready" end
+  if self.state == TASK_RUNNING then return "running" end
+  if self.state == TASK_WAITING then return "waiting" end
+  if self.state == TASK_SUCCEEDED then return "succeeded" end
+  if self.state == TASK_FAILED then return "failed" end
+  return "cancelled"
+end
+
+function Task:cancel(reason: value)
+  request_cancel(self, reason)
+end
+
+function Task:join(): value
+  if self.state == TASK_SUCCEEDED then
+    self.permanently_observed = true
+    return self.result
+  elseif self.state == TASK_FAILED or self.state == TASK_CANCELLED then
+    self.permanently_observed = true
+    raise_joined(self.error_value, self.error_traceback)
+  end
+
+  local task = running_task()
+  if task == self then
+    raise "a Task cannot join itself"
+  end
+  if task.runtime ~= self.runtime or task.generation ~= self.generation then
+    raise "cannot join a Task from another libuv Runtime"
+  end
+  local request = new_request(REQUEST_JOIN, self, 0)
+  do
+    return coroutine.yield(request, UV_TAG)
+  catch
+    local target_trace = pop_trace_for_append()
+    if target_trace ~= nil then
+      reinstall_trace((target_trace as string) .. "\n" .. traceback)
+    end
+    raise error
+  end
+end
+
+function _sleep(milliseconds: integer)
+  if milliseconds < 0 then
+    raise "sleep duration must not be negative"
+  end
+  local request = new_request(REQUEST_SLEEP, nil, milliseconds)
+  coroutine.yield(request, UV_TAG)
+end
+
+function _yield()
+  _sleep(0)
+end
+
+local function cleanup_begin()
+  local task = running_task()
+  task.cleanup_shield_depth = task.cleanup_shield_depth + 1
+end
+
+local function cleanup_sleep(milliseconds: integer)
+  if milliseconds < 0 then
+    raise "cleanup sleep duration must not be negative"
+  end
+  local request = new_cleanup_request(milliseconds)
+  coroutine.yield(request, UV_TAG)
+end
+
+local function cleanup_end()
+  local task = running_task()
+  if task.cleanup_shield_depth <= 0 then
+    raise "cleanup shield is not active"
+  end
+  task.cleanup_shield_depth = task.cleanup_shield_depth - 1
+  if task.cleanup_shield_depth == 0 and task.cancel_requested then
+    task.cancel_deferred = false
+    raise task.cancel_value
+  end
+end
+
+-- Test-source variants insert fault controls here. Production keeps the
+-- corresponding branches private and unreachable from the module interface.
+-- TITAN_UV_TEST_HOOKS
+
+function _ticker(milliseconds: integer): uv_timer_t
+  if milliseconds <= 0 then
+    raise "Ticker interval must be positive"
+  end
+  local task = running_task()
+  if task.cancel_requested then
+    raise task.cancel_value
+  end
+  if task.runtime.closing then
+    raise "the libuv Runtime is shutting down"
+  end
+  local runtime = task.runtime
+  local state = TickerState.new(runtime, runtime.generation, true,
+                                milliseconds, nil, nil, 0)
+  local owner, status = start_owner(runtime, OWNER_TICKER, nil, state, 0,
+                                    milliseconds, milliseconds)
+  state.owner = owner
+  owner.root = state
+  if status < 0 then
+    state.open = false
+    raise make_error(status, "ticker.start", nil)
   end
   return owner
 end
 
-local function start_fs_stat(runtime: Runtime, path: string): uv_fs_t
-  local owner = allocate_fs(runtime)
-  owner.metadata.lifecycle = OWNER_ACTIVE
-  runtime.pending[owner] = true
-  shim.titan_uvshim_fs_set_data(owner.handle, fs_owner_pointer(owner))
-  local status = libuv.uv_fs_stat(runtime.loop.handle, owner.handle, path,
-                                 shim.titan_uvshim_fs_cb)
-  if (status as integer) < 0 then
-    libuv.uv_fs_req_cleanup(owner.handle)
-    owner.metadata.cleaned = true
-    owner.metadata.lifecycle = OWNER_CLEANED
-    owner.metadata.result = status as integer
-    owner.handle = nil
-    owner.storage = nil
-    runtime.pending[owner] = nil
+function _ticker_tick(owner: uv_timer_t): boolean
+  local state = ticker_state(owner)
+  if not state.open then
+    return false
   end
-  return owner
+  -- The loop is serial: checking before the yield makes a second waiter a
+  -- normal Task error instead of letting it reach arm_request as an internal
+  -- dispatcher invariant failure.
+  if state.waiter ~= nil then
+    raise "Ticker already has a waiting Task"
+  end
+  local request = new_request(REQUEST_TICK, owner, 0)
+  return coroutine.yield(request, UV_TAG) as boolean
+end
+
+function _ticker_close(owner: uv_timer_t)
+  local state = ticker_state(owner)
+  if not state.open then
+    return
+  end
+  if state.generation ~= state.runtime.generation then
+    raise "Ticker belongs to a stale libuv Runtime"
+  end
+  state.open = false
+  close_owner(owner)
+  if state.waiter ~= nil then
+    local task = state.waiter as Task
+    local epoch = state.waiter_epoch
+    state.waiter = nil
+    state.waiter_epoch = 0
+    local wake, status = start_owner(state.runtime,
+        OWNER_TICKER_CLOSE_WAKE, task, owner, epoch, 0, 0)
+    if status < 0 then
+      promote_fatal(state.runtime,
+                    make_error(status, "ticker.close.wake", nil), "")
+    else
+      task.operation = wake
+    end
+  end
+end
+
+local function drive_cancel_fallbacks(runtime: Runtime)
+  local raw = runtime.task_head
+  while raw ~= nil do
+    local task = raw as Task
+    raw = task.next_task
+    if task.cancel_fallback and not terminal(task.state) then
+      task.cancel_fallback = false
+      drive_task(task, DRIVE_ERROR, task.cancel_value, "")
+    end
+  end
+end
+
+local function begin_fatal_shutdown(runtime: Runtime)
+  runtime.closing = true
+  local raw_task = runtime.task_head
+  while raw_task ~= nil do
+    local task = raw_task as Task
+    raw_task = task.next_task
+    request_cancel(task, runtime.fatal_error)
+  end
+
+  local raw_owner = runtime.owner_head
+  while raw_owner ~= nil do
+    local owner = raw_owner as uv_timer_t
+    raw_owner = owner.metadata.next_owner
+    if owner.metadata.kind == OWNER_TICKER or
+        owner.metadata.kind == OWNER_OBSERVE then
+      close_owner(owner)
+    end
+  end
+end
+
+local function retire_closed_owners(runtime: Runtime)
+  local raw = runtime.owner_head
+  while raw ~= nil do
+    local owner = raw as uv_timer_t
+    raw = owner.metadata.next_owner
+    if owner.metadata.lifecycle == OWNER_CLOSED then
+      owner.handle = nil
+      owner.storage = nil
+      owner.root = nil
+      owner.buffer = nil
+      unlink_owner(owner)
+    end
+  end
 end
 
 local function close_runtime(runtime: Runtime)
+  retire_closed_owners(runtime)
+  close_all_owners(runtime)
+  retire_closed_owners(runtime)
+  -- Drain owners registered in the Runtime. An unknown active handle must not
+  -- make UV_RUN_DEFAULT hang here; once known owners are gone, loop_close
+  -- reports UV_EBUSY and the public uv_walk diagnostic below identifies it.
+  while runtime.owner_head ~= nil do
+    libuv.uv_run(runtime.loop.handle, libuv.UV_RUN_DEFAULT)
+    retire_closed_owners(runtime)
+    -- A callback may have called uv_stop or created a cleanup owner before it
+    -- returned.  Re-close/re-run only from this outer driver safe point.
+    close_all_owners(runtime)
+    retire_closed_owners(runtime)
+  end
   local status = libuv.uv_loop_close(runtime.loop.handle)
   if (status as integer) ~= 0 then
-    raise "private libuv loop remained busy after drain"
+    if not runtime.fatal then
+      runtime.fatal = true
+      local subject: string? = nil
+      if (shim.titan_uvshim_status_is_ebusy(
+              status as ffi.titan_ffi_int) as integer) ~= 0 then
+        local count = shim.titan_uvshim_loop_handle_count(
+            runtime.loop.handle) as integer
+        local first = shim.titan_uvshim_loop_first_handle_type(
+            runtime.loop.handle) as string
+        subject = "remaining handles=" .. count .. ", first=" .. first
+      end
+      runtime.fatal_error = make_error(status as integer, "loop.close",
+                                       subject)
+      runtime.fatal_traceback = ""
+    end
+    -- Keep active_runtime and its storage root intact: reclaiming a busy loop
+    -- would be a native use-after-free even on an error-reporting path.
+    return
   end
-  runtime.loop.state = OWNER_CLOSED
   runtime.loop.handle = nil
   runtime.loop.storage = nil
   active_runtime = nil
 end
 
--- A narrow executable Phase-1 probe covers the native foundation without
--- pretending that Task/run/cancellation already exist.  Phase 2 replaces this
--- diagnostic surface with the public continuation API.
-function _phase1_probe(path: string, fail_task: boolean,
-                       fail_task_handler: boolean,
-                       inject_dispatch_failure: boolean,
-                       inject_fs_dispatch_failure: boolean): {value}
-  if active_runtime then
-    raise "a libuv Runtime is already active"
+function loop()
+  if not on_main_thread() or coroutine.is_yieldable(UV_TAG) then
+    raise "uv.loop must be driven from the Lua main thread"
   end
-  local runtime = new_runtime()
-  local timer = start_timer(runtime, fail_task, fail_task_handler,
-                            inject_dispatch_failure, 1, 0)
-  -- This independent callback is deliberately later than the failing owner.
-  -- It proves an observed Task failure returned normally through libuv.
-  local followup = start_timer(runtime, false, false, false, 2, 5)
-  local request = start_fs_stat(runtime, path)
-  request.metadata.inject_dispatch_failure = inject_fs_dispatch_failure
+  if not active_runtime then
+    return
+  end
+  if (lua.lua_checkstack(L, lua.LUA_MINSTACK) as integer) == 0 then
+    raise "cannot reserve stack for libuv native callbacks"
+  end
+  local runtime = active_runtime as Runtime
+  if runtime.in_loop then
+    raise "uv.loop is already active"
+  end
+  runtime.in_loop = true
+  libuv.uv_run(runtime.loop.handle, libuv.UV_RUN_DEFAULT)
+  runtime.in_loop = false
+  retire_closed_owners(runtime)
 
-  -- First make the rooted owners old, then store a newly allocated buffer in
-  -- both of them and force a generational step.  The generated record-field
-  -- writes must use back barriers for the young buffer graph to survive.
-  lua.lua_gc(L, lua.LUA_GCCOLLECT)
-  local buffer_length = install_young_buffer(timer, request)
-  lua.lua_gc(L, lua.LUA_GCGEN)
-  lua.lua_gc(L, lua.LUA_GCSTEP, 0 as libuv.size_t)
-  local owner_layout_ok = owner_layout_is_valid(timer) and
-                          owner_layout_is_valid(request)
-  local repeated_timer_access_ok = 0
-  if not _timer_is_closing(timer) and not _timer_is_closing(timer) then
-    repeated_timer_access_ok = 1
-  end
-  local stack_top = lua.lua_gettop(L)
-  local run_status = libuv.uv_run(runtime.loop.handle, libuv.UV_RUN_DEFAULT)
-
-  -- uv_stop only wakes the active invocation.  Physical cleanup/draining is
-  -- deliberately performed after uv_run returns.
-  if runtime.fatal and timer.metadata.lifecycle < OWNER_CLOSING then
-    libuv.uv_timer_stop(timer.handle)
-    timer.metadata.lifecycle = OWNER_CLOSING
-    shim.titan_uvshim_timer_close(timer.handle)
-  end
-  if runtime.fatal and followup.metadata.lifecycle < OWNER_CLOSING then
-    libuv.uv_timer_stop(followup.handle)
-    followup.metadata.lifecycle = OWNER_CLOSING
-    shim.titan_uvshim_timer_close(followup.handle)
+  if not runtime.fatal and runtime.task_head ~= nil then
+    runtime.fatal = true
+    runtime.closing = true
+    runtime.fatal_error = "libuv loop became idle while Tasks were waiting: " ..
+                          waiting_task_diagnostic(runtime)
+    runtime.fatal_traceback = ""
   end
   if runtime.fatal then
-    run_status = libuv.uv_run(runtime.loop.handle, libuv.UV_RUN_DEFAULT)
-  end
-
-  local task_failed = 0
-  if timer.metadata.task_failed then task_failed = 1 end
-  local fatal = 0
-  if runtime.fatal then fatal = 1 end
-  local fs_cleaned = 0
-  if request.metadata.cleaned and request.storage == nil then fs_cleaned = 1 end
-  local timer_closed = 0
-  if timer.metadata.lifecycle == OWNER_CLOSED and timer.storage == nil then
-    timer_closed = 1
-  end
-  local followup_closed = 0
-  if followup.metadata.lifecycle == OWNER_CLOSED and followup.storage == nil then
-    followup_closed = 1
-  end
-  local stack_balanced = 0
-  if lua.lua_gettop(L) == stack_top then stack_balanced = 1 end
-  local layout_valid = 0
-  if owner_layout_ok then layout_valid = 1 end
-  local followup_after_task_failure = 0
-  if runtime.task_failure_sequence > 0 and
-      runtime.followup_timer_sequence > runtime.task_failure_sequence then
-    followup_after_task_failure = 1
+    begin_fatal_shutdown(runtime)
+    drive_cancel_fallbacks(runtime)
+    while runtime.task_head ~= nil do
+      if (libuv.uv_loop_alive(runtime.loop.handle) as integer) == 0 then
+        -- No callback can make progress.  The only legal callback-less
+        -- cancellation delivery is this outer-driver fallback.
+        local raw = runtime.task_head
+        while raw ~= nil do
+          local task = raw as Task
+          raw = task.next_task
+          if task.cancel_requested and task.cleanup_shield_depth == 0 then
+            task.cancel_fallback = true
+          end
+        end
+        drive_cancel_fallbacks(runtime)
+        if runtime.task_head ~= nil and
+            (libuv.uv_loop_alive(runtime.loop.handle) as integer) == 0 then
+          -- A shielded Task without any live cleanup owner is an internal
+          -- deadlock, not a reason to return with a suspended root retained.
+          -- The first Runtime fatal remains authoritative; terminalize these
+          -- impossible leftovers at the outer safe point so owner draining and
+          -- uv_loop_close remain total.
+          local invariant_error = internal_error("shutdown.deadlock")
+          local stranded = runtime.task_head
+          while stranded ~= nil do
+            local task = stranded as Task
+            stranded = task.next_task
+            finish_task(task, TASK_FAILED, nil, invariant_error, "")
+          end
+        end
+      else
+        libuv.uv_run(runtime.loop.handle, libuv.UV_RUN_DEFAULT)
+        retire_closed_owners(runtime)
+        drive_cancel_fallbacks(runtime)
+      end
+    end
   end
   close_runtime(runtime)
-  lua.lua_gc(L, lua.LUA_GCINC)
-  return { runtime.callback_count, runtime.timer_count, runtime.close_count,
-           runtime.fs_count, task_failed, fatal, fs_cleaned, timer_closed,
-           stack_balanced, request.metadata.result, buffer_length,
-           layout_valid, run_status as integer, followup_after_task_failure,
-           runtime.fatal_error, runtime.fatal_traceback,
-           timer.metadata.task_error, timer.metadata.task_traceback,
-           followup_closed, repeated_timer_access_ok }
+  if runtime.fatal then
+    raise_saved(runtime.fatal_error, runtime.fatal_traceback)
+  end
+end
+
+local function bootstrap(main_callable: ({string}) -> integer,
+                         args: {string}): integer
+  local task = run_internal(function (): value
+    return main_callable(args)
+  end, true)
+  loop()
+  if task.state ~= TASK_SUCCEEDED then
+    raise_saved(task.error_value, task.error_traceback)
+  end
+  return task.result as integer
 end
 
 function version(): string
   return libuv.uv_version_string() as string
 end
 
--- Foundational exact-wrapper entry used by the higher timer layer.  Its Lua
--- entry also provides the nominal record check; Phase 2 grows the operation
--- surface around the same opaque type.
-function _timer_is_closed(timer: uv_timer_t): boolean
-  return timer.metadata.lifecycle == OWNER_CLOSED
+local function install_bootstrap()
+  local top = lua.lua_gettop(L)
+  lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_BOOTSTRAP_KEY)
+  local installed: value = ffi.lua_totvalue(L, -1)
+  if installed ~= nil and installed ~= bootstrap then
+    lua.lua_settop(L, top)
+    raise "a different Titan main bootstrap is already installed"
+  end
+  ffi.lua_pushtvalue(L, bootstrap)
+  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_BOOTSTRAP_KEY)
+  lua.lua_settop(L, top)
 end
 
-function _timer_is_closing(timer: uv_timer_t): boolean
-  if timer.metadata.generation ~= timer.metadata.runtime.generation then
-    raise "timer belongs to a stale libuv Runtime"
-  end
-  if timer.metadata.lifecycle >= OWNER_CLOSED then
-    return true
-  end
-  return (shim.titan_uvshim_timer_is_closing(timer.handle) as integer) ~= 0
+do
+  install_bootstrap()
 end

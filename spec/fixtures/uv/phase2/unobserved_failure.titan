@@ -1,0 +1,11 @@
+local uv = import "uv"
+
+local function unobserved_origin(): value
+  raise "phase2-unobserved-boom"
+  return nil
+end
+
+function main(args: {string}): integer
+  uv.run(unobserved_origin)
+  return 0
+end

@@ -45,6 +45,27 @@ local function run_uv_dry_run(mode)
     return ok == true, output, why, code
 end
 
+local function run_timer_dry_run(mode)
+    local argv = {
+        "make", "--no-print-directory", "-n",
+        "-W", "stdlib/timer.titan",
+        "LIBUV_MODE=" .. mode,
+        "HOST_OS=Linux",
+        "LIBUV_PKG_CONFIG=" .. PKG_CONFIG,
+        "CC=ccache cc",
+        "TITAN_EXTRA_CPPFLAGS=-DUSER_CPP=1",
+        "TITAN_EXTRA_CFLAGS=-DUSER_C=1",
+        "TITAN_EXTRA_LDFLAGS=-Wl,user-link",
+        "timer.so",
+    }
+    local words = {}
+    for _, word in ipairs(argv) do table.insert(words, quote(word)) end
+    local pipe = assert(io.popen(table.concat(words, " ") .. " 2>&1"))
+    local output = pipe:read("*a")
+    local ok, why, code = pipe:close()
+    return ok == true, output, why, code
+end
+
 describe("libuv Makefile configuration", function()
     it("preserves complete pkg-config flags and Linux feature macros",
        function()
@@ -122,5 +143,36 @@ describe("libuv Makefile configuration", function()
         assert.truthy(normalized:find(
             [[TITAN_EXTRA_LDFLAGS='-Wl,user-link -L/opt/libuv/lib -luv -pthread -ldl -lrt']],
             1, true), normalized)
+    end)
+
+    it("builds timer from binary uv without another libuv input", function()
+        for _, mode in ipairs({ "bundled", "system" }) do
+            local ok, output, why, code = run_timer_dry_run(mode)
+            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+                tostring(code) .. ")")
+            local normalized = output:gsub("%s+", " ")
+            local marker = "--lua-name titan.timer timer"
+            local marker_start = assert(normalized:find(marker, 1, true),
+                normalized)
+            local prefix = normalized:sub(1, marker_start)
+            local command_start = assert(prefix:match(".*()CC="), normalized)
+            local command = normalized:sub(command_start,
+                marker_start + #marker - 1)
+
+            assert.truthy(command:find([[CC='ccache cc']], 1, true), command)
+            assert.truthy(command:find(
+                [[TITAN_EXTRA_CPPFLAGS='-DUSER_CPP=1']], 1, true), command)
+            assert.truthy(command:find(
+                [[TITAN_EXTRA_CFLAGS='-DUSER_C=1']], 1, true), command)
+            assert.truthy(command:find(
+                [[TITAN_EXTRA_LDFLAGS='-Wl,user-link']], 1, true), command)
+            assert.falsy(command:find("titan_uv.o", 1, true), command)
+            assert.falsy(command:find("libuv-build/libuv.a", 1, true),
+                command)
+            assert.falsy(command:find("-luv", 1, true), command)
+            assert.falsy(command:find("-D_GNU_SOURCE", 1, true), command)
+            assert.falsy(command:find("-fno-strict-aliasing", 1, true),
+                command)
+        end
     end)
 end)

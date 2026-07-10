@@ -653,6 +653,12 @@ static int titan_trace_pinned(lua_State *L) {
 
 lua_State *titan_newthread(lua_State *L) {
   lua_State *T = lua_newthread(L);
+  /* Native coroutine entry bypasses a Lua entry wrapper. Reserve enough stack
+  ** while the parent call still owns the ordinary protected boundary, so the
+  ** generated function-scope catch can install its jump target before its
+  ** first potentially allocating GC check. */
+  if (!lua_checkstack(T, LUA_MINSTACK))
+    luaL_error(L, "cannot reserve stack for Titan coroutine entry");
   lua_pushcfunction(T, errorhandler);
   T->errfunc = savestack(T, T->top.p - 1);
   return T;

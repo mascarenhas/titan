@@ -13,6 +13,7 @@
 #ifndef UV_H
 typedef struct uv_fs_s uv_fs_t;
 typedef struct uv_handle_s uv_handle_t;
+typedef struct uv_loop_s uv_loop_t;
 typedef struct uv_timer_s uv_timer_t;
 #endif
 
@@ -75,5 +76,10 @@ void titan_uvshim_fs_cb(uv_fs_t *req);
  * uv_buf_init API cannot represent are rejected instead of truncated.
  */
 int titan_uvshim_buf_init(void *buf, char *base, int64_t len);
+
+/* Outer-driver diagnostics for an unexpected UV_EBUSY loop close. */
+int titan_uvshim_loop_handle_count(uv_loop_t *loop);
+const char *titan_uvshim_loop_first_handle_type(uv_loop_t *loop);
+int titan_uvshim_status_is_ebusy(int status);
 
 #endif

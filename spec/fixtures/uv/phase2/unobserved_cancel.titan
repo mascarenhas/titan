@@ -1,0 +1,11 @@
+local uv = import "uv"
+local timer = import "timer"
+
+function main(args: {string}): integer
+  local task = uv.run(function (): value
+    timer.sleep(1000)
+    return nil
+  end)
+  task:cancel("not-session-fatal")
+  return 0
+end

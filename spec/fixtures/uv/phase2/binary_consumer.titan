@@ -1,0 +1,22 @@
+local uv = import "uv"
+local timer = import "timer"
+
+function task_identity(task: uv.Task): uv.Task
+  return task
+end
+
+function error_identity(err: uv.Error): uv.Error
+  return err
+end
+
+function cancelled_identity(cancelled: uv.Cancelled): uv.Cancelled
+  return cancelled
+end
+
+function timer_identity(handle: uv.uv_timer_t): uv.uv_timer_t
+  return handle
+end
+
+function ticker_identity(ticker: timer.Ticker): timer.Ticker
+  return ticker
+end

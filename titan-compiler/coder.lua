@@ -3782,7 +3782,8 @@ local function boundary_recover_open(ctx, tag, d_err, d_tb)
             L->errfunc = _olderrfunc_$T;
             _lj_$T.status = luaD_closeprotected(L, _oldtop_$T, _lj_$T.status);
             luaD_seterrorobj(L, _lj_$T.status, restorestack(L, _oldtop_$T));
-            lua_checkstack(L, 4);
+            if (TITAN_UNLIKELY(!lua_checkstack(L, 4)))
+                luaD_throw(L, LUA_ERRMEM);
             /* a value-call or another stack-growing operation inside the protected
             ** region may have reallocated the stack; recompute _base before
             ** touching any reserved slot */
@@ -3897,6 +3898,19 @@ local function codetry(ctx, node)
     local cbody = node.block._defer_tail
         and codetransparentblock(ctx, node.block)
         or codestat(ctx, node.block)
+    if ctx.entry_try == node then
+        -- A function-scope catch is also the safety boundary for a trusted
+        -- native entry (for example the coroutine and libuv dispatchers).
+        -- Install its jump target before the entry GC step: an emergency-GC
+        -- allocation failure must land in the Titan catch, never unwind across
+        -- the native caller's stack. Callback domains reserve LUA_MINSTACK
+        -- before entry, so the non-raising stack reservation preamble remains
+        -- safe outside this boundary.
+        cbody = [[
+            luaC_checkGC(L);
+            _base = restorestack(L, _base_off);
+        ]] .. cbody
+    end
     pop_boundary(ctx)
     ctx.try_depth = ctx.try_depth - 1
 
@@ -6516,6 +6530,8 @@ local function codefuncdec(tlcontext, node)
     -- Detect a `StatTry` in this function's body up front. Nested
     -- function/lambda bodies have their own contexts and are not scanned.
     ctx.has_try = stat_contains_try(node.block)
+    ctx.entry_try = node.block._tag == "Ast.StatTry" and
+        node.block.catchblock and node.block or nil
     if ctx.has_try then analyze_try_spills(node.block) end
     -- The declared return types, so a `return` routed through a finally
     -- (codetry/codereturn) can size + fill the per-try saved-return temps.
@@ -6592,12 +6608,13 @@ local function codefuncdec(tlcontext, node)
             .. "\n        l_uint32 _entry_nC = L->nCcalls;" or ""
     if nslots > 0 then
         table.insert(stats, 1, render([[
-        luaC_checkGC(L);
+        $ENTRYGC
         /* function preamble: reserve needed stack space */
         if (L->stack_last.p - L->top.p > $NSLOTS) {
             if (L->ci->top.p < L->top.p + $NSLOTS) L->ci->top.p = L->top.p + $NSLOTS;
         } else {
-            lua_checkstack(L, $NSLOTS);
+            if (TITAN_UNLIKELY(!lua_checkstack(L, $NSLOTS)))
+                luaD_throw(L, LUA_ERRMEM);
         }
         StkId _base = L->top.p;
         L->top.p += $NSLOTS;
@@ -6606,6 +6623,7 @@ local function codefuncdec(tlcontext, node)
         }$BASEOFF$ENTRYSAVE
         ]], {
             NSLOTS = c_integer_literal(nslots),
+            ENTRYGC = ctx.entry_try and "" or "luaC_checkGC(L);",
             BASEOFF = baseoff,
             ENTRYSAVE = entrysave,
         }))
@@ -6657,6 +6675,8 @@ local function codeinitializerdec(tlcontext, node)
     local stats = {}
     local fname = module_initializer_name(tlcontext)
     ctx.has_try = stat_contains_try(node)
+    ctx.entry_try = node._tag == "Ast.StatTry" and
+        node.catchblock and node or nil
     if ctx.has_try then analyze_try_spills(node) end
     ctx.rettypes = {}
 
@@ -6670,12 +6690,13 @@ local function codeinitializerdec(tlcontext, node)
             .. "\n        l_uint32 _entry_nC = L->nCcalls;" or ""
     if nslots > 0 then
         table.insert(stats, 1, render([[
-        luaC_checkGC(L);
+        $ENTRYGC
         /* function preamble: reserve needed stack space */
         if (L->stack_last.p - L->top.p > $NSLOTS) {
             if (L->ci->top.p < L->top.p + $NSLOTS) L->ci->top.p = L->top.p + $NSLOTS;
         } else {
-            lua_checkstack(L, $NSLOTS);
+            if (TITAN_UNLIKELY(!lua_checkstack(L, $NSLOTS)))
+                luaD_throw(L, LUA_ERRMEM);
         }
         StkId _base = L->top.p;
         L->top.p += $NSLOTS;
@@ -6684,6 +6705,7 @@ local function codeinitializerdec(tlcontext, node)
         }$BASEOFF$ENTRYSAVE
         ]], {
             NSLOTS = c_integer_literal(nslots),
+            ENTRYGC = ctx.entry_try and "" or "luaC_checkGC(L);",
             BASEOFF = baseoff,
             ENTRYSAVE = entrysave,
         }))
@@ -7023,6 +7045,8 @@ function codelambdadec(tlcontext, node)
     -- A try inside this lambda's own body gets its own spill analysis and entry
     -- errorjmp-save (an enclosing function's try does not affect this context).
     ctx.has_try = stat_contains_try(node.block)
+    ctx.entry_try = node.block._tag == "Ast.StatTry" and
+        node.block.catchblock and node.block or nil
     if ctx.has_try then analyze_try_spills(node.block) end
     -- The lambda's own return types (sizes finally saved-return temps).
     ctx.rettypes = node._type.rettypes
@@ -7082,12 +7106,13 @@ function codelambdadec(tlcontext, node)
             .. "\n        l_uint32 _entry_nC = L->nCcalls;" or ""
     if nslots > 0 then
         table.insert(stats, 1, render([[
-        luaC_checkGC(L);
+        $ENTRYGC
         /* function preamble: reserve needed stack space */
         if (L->stack_last.p - L->top.p > $NSLOTS) {
             if (L->ci->top.p < L->top.p + $NSLOTS) L->ci->top.p = L->top.p + $NSLOTS;
         } else {
-            lua_checkstack(L, $NSLOTS);
+            if (TITAN_UNLIKELY(!lua_checkstack(L, $NSLOTS)))
+                luaD_throw(L, LUA_ERRMEM);
         }
         StkId _base = L->top.p;
         L->top.p += $NSLOTS;
@@ -7096,6 +7121,7 @@ function codelambdadec(tlcontext, node)
         }$BASEOFF$ENTRYSAVE
         ]], {
             NSLOTS = c_integer_literal(nslots),
+            ENTRYGC = ctx.entry_try and "" or "luaC_checkGC(L);",
             BASEOFF = baseoff,
             ENTRYSAVE = entrysave,
         }))

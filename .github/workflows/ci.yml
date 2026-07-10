@@ -108,18 +108,29 @@ jobs:
         run: |
           export PATH="$PWD/lua_install/bin:$PATH"
           luarocks init --lua-dir="$PWD/.lua"
-          # Add the rocks bin dir (busted, titanc) to PATH for subsequent
-          # steps.  ./lua and ./luarocks are used directly with ./ prefix.
+          # Make the vendored Lua available to ordinary `#!/usr/bin/env lua`
+          # tools such as titanc, and add the rocks bin dir for busted and the
+          # installed command wrappers.  Explicit ./lua and ./luarocks calls
+          # remain useful when their project-local package paths are required.
+          echo "$PWD/.lua/bin" >> "$GITHUB_PATH"
           echo "$PWD/lua_modules/bin" >> "$GITHUB_PATH"
+          echo "LUA_PATH=$(./luarocks path --lr-path);;" >> "$GITHUB_ENV"
+          echo "LUA_CPATH=$(./luarocks path --lr-cpath);;" >> "$GITHUB_ENV"
 
-      - name: Print Lua version
-        run: ./lua -v
+      - name: Verify vendored Lua is on PATH
+        run: lua -v
 
       # Build and install the rock so the `titan` C runtime module (titanlib.c,
       # required by one coder spec via `require 'titan'`) is on the Lua path.
       # `luarocks test` does not build the rock-under-test, only its dependencies.
       - name: Build and install the rock
         run: ./luarocks make
+
+      # Exercise titanc through its real /usr/bin/env shebang. This deliberately
+      # does not select a Lua interpreter inside the script: CI must provide the
+      # vendored Lua and installed compiler dependencies through PATH/LUA_PATH.
+      - name: Verify titanc shebang environment
+        run: ./titanc --help
 
       # The normal build above proves the pinned, self-contained archive path.
       # Also compile and load against the platform development package, then
@@ -132,13 +143,26 @@ jobs:
           fi
           LIBUV_MODE=system make stdlib
           env TITAN_STDLIB_PATH="$PWD" LUA_CPATH="$PWD/?.so;;" \
-            .lua/bin/lua -e 'local uv = require "titan.uv"; assert(type(uv.version()) == "string")'
+            .lua/bin/lua -e 'local uv = require "titan.uv"; local timer = require "titan.timer"; local task = uv.run(function() timer.sleep(0); return true end); uv.loop(); assert(task:join()); assert(type(uv.version()) == "string")'
+          test -L titan/uv.so && test "$(readlink titan/uv.so)" = ../uv.so
+          test -L titan/timer.so && test "$(readlink titan/timer.so)" = ../timer.so
           if [ "${{ runner.os }}" = "macOS" ]; then
             otool -L uv.so | grep -i libuv
+            ! otool -L timer.so | grep -i libuv
           else
             readelf -d uv.so | grep -i libuv
+            ! readelf -d timer.so | grep -i libuv
           fi
           make stdlib
+          env TITAN_STDLIB_PATH="$PWD" LUA_CPATH="$PWD/?.so;;" \
+            .lua/bin/lua -e 'local uv = require "titan.uv"; local timer = require "titan.timer"; local task = uv.run(function() timer.yield(); return true end); uv.loop(); assert(task:join())'
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            ! otool -L uv.so | grep -i libuv
+            ! otool -L timer.so | grep -i libuv
+          else
+            ! readelf -d uv.so | grep -i libuv
+            ! readelf -d timer.so | grep -i libuv
+          fi
 
       # `luarocks test` installs the test_dependencies (busted, cluacov) declared
       # in the rockspec and runs the suite; flags after `--` are forwarded to busted.

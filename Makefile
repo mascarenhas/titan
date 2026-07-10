@@ -106,8 +106,9 @@ CORO_O    := titan-runtime/titan_coro.o
 UV_O      := titan-runtime/titan_uv.o
 COROUTINE_SO := coroutine.so
 UV_SO        := uv.so
+TIMER_SO     := timer.so
 UV_CONFIG_STAMP := $(LIBUV_BUILD_DIR)/.titan-uv-config
-STDLIB_MODULES := coroutine uv
+STDLIB_MODULES := coroutine uv timer
 STDLIB_SOS     := $(addsuffix .so,$(STDLIB_MODULES))
 STDLIB_ALIASES := $(addprefix titan/,$(STDLIB_SOS))
 ROCK_RUNTIME_SO := titan.so
@@ -396,6 +397,18 @@ $(UV_SO): stdlib/uv.titan $(COROUTINE_SO) $(UV_O) $(RUNTIME_O) titanc \
 		TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_LDFLAGS) $(LIBUV_LDFLAGS))) \
 		$(TITANC) --stdlib-build --tree stdlib --lua-name titan.uv uv \
 		-X $(UV_O) $(LIBUV_EXTRA_OBJECTS)
+
+# Higher-level standard modules import the already-built canonical uv image.
+# They neither compile the uv source again nor link a second copy of libuv.
+$(TIMER_SO): stdlib/timer.titan $(UV_SO) $(RUNTIME_O) titanc \
+		$(TITAN_COMPILER_LUA) Makefile | .lua/bin/lua $(LIBBT_LIB)
+	CC=$(call make_shell_quote,$(CC)) TITAN_PATH_0_11= TITAN_PATH= \
+		TITAN_STDLIB_PATH=$(call make_shell_quote,$(CURDIR)) \
+		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
+		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CFLAGS)) \
+		TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_LDFLAGS)) \
+		$(TITANC) --stdlib-build --tree stdlib \
+		--lua-name titan.timer timer
 
 titan/%.so: %.so
 	mkdir -p "$(@D)"
