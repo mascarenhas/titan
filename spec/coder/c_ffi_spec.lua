@@ -553,6 +553,32 @@ describe("C FFI code generation", function()
         end)
     end)
 
+    it("stores C pointers in local record fields", function()
+        with_header([[
+            typedef int ffi_counter;
+            static int ffi_counter_read(ffi_counter *counter) {
+                return *counter;
+            }
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                record Handle
+                    local pointer: *c.ffi_counter
+                end
+
+                function read(): integer
+                    local counter: c.ffi_counter = 42 as c.ffi_counter
+                    local pointer: *c.ffi_counter = counter
+                    local handle = Handle.new(pointer)
+                    return c.ffi_counter_read(handle.pointer) as integer
+                end
+            ]], [[
+                assert(test.read() == 42)
+            ]])
+        end)
+    end)
+
     it("checks owned C userdata identity when casting from value", function()
         with_header([[
             typedef struct ffi_point { int x; } ffi_point;

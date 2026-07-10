@@ -34,7 +34,11 @@ RUNTIME_O := titan-runtime/titan.o
 CORO_O    := titan-runtime/titan_coro.o
 CORO_SO   := coro.so
 TITAN_LUA ?= $(if $(wildcard ./lua),./lua,.lua/bin/lua)
-TITANC    ?= $(TITAN_LUA) ./titanc
+# Project Lua launchers put the installed rock before the checkout. Prepend the
+# checkout so stdlib rebuilds always use the compiler sources that triggered
+# them, while retaining the launcher's paths for third-party dependencies.
+TITANC    ?= $(TITAN_LUA) -e 'package.path="./?.lua;./?/init.lua;" .. package.path' ./titanc
+TITAN_COMPILER_LUA := $(wildcard titan-compiler/*.lua c-parser/*.lua) typed.lua
 
 # libbacktrace is cloned + built into ./libbacktrace (gitignored), mirroring the
 # ./lua-5.5.0 tree. The generated C and the runtime include its backtrace.h and
@@ -94,10 +98,12 @@ $(CORO_O): titan-runtime/titan_coro.c titan-runtime/titan/coro.h titan-runtime/m
 
 stdlib: $(CORO_SO) ## Build the Titan standard library modules
 
-$(CORO_SO): coro.titan $(CORO_O) $(RUNTIME_O) titanc | .lua/bin/lua $(LIBBT_LIB)
-	TITAN_PATH_0_11=/tmp TITAN_PATH=/tmp $(TITANC) coro -X $(CORO_O)
+# Force this root module down the source path even if an installed coro.so is newer.
+$(CORO_SO): coro.titan $(CORO_O) $(RUNTIME_O) titanc \
+		$(TITAN_COMPILER_LUA) Makefile | .lua/bin/lua $(LIBBT_LIB)
+	TITAN_PATH_0_11= TITAN_PATH= $(TITANC) coro -X $(CORO_O)
 
-test: lua libbacktrace stdlib ## Build/install the rock and run the suite via `luarocks test`
+test: lua libbacktrace ## Build/install the rock and run the suite via `luarocks test`
 	luarocks make
 	luarocks test
 

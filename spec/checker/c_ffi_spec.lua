@@ -998,6 +998,23 @@ describe("C FFI type checking", function()
         end)
     end)
 
+    it("allows C FFI types in local record fields", function()
+        with_header("typedef struct ffi_handle ffi_handle;\n", function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                record Handle
+                    local pointer: *c.ffi_handle
+                end
+
+                local function use(pointer: *c.ffi_handle): Handle
+                    return Handle.new(pointer)
+                end
+            ]])
+            assert.truthy(ok, err)
+        end)
+    end)
+
     it("rejects exported legacy C struct types without crashing", function()
         with_header("typedef struct ffi_point { int x; } ffi_point;\n", function(header)
             local ok, err = run_checker([[

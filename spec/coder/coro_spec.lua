@@ -10,7 +10,8 @@ local function file_exists(path)
 end
 
 local LUA = file_exists("./lua") and "./lua" or ".lua/bin/lua"
-local TITANC = LUA .. " ./titanc"
+local TITANC = LUA ..
+    [[ -e 'package.path="./?.lua;./?/init.lua;" .. package.path' ./titanc]]
 
 local function clean_test_artifacts()
     os.execute("rm -rf test.o test.so test.c test.titan test__entrypoint.c test test.dSYM coro_standalone app app__entrypoint.c app.dSYM")
@@ -34,7 +35,7 @@ local function build_coro()
         "-I titan-runtime -I lua-5.5.0/src -I libbacktrace " ..
         "-o titan-runtime/titan_coro.o"))
     assert.truthy(exec_ok(
-        "env CCACHE_DISABLE=1 TITAN_PATH_0_11=/tmp TITAN_PATH=/tmp " ..
+        "env CCACHE_DISABLE=1 TITAN_PATH_0_11= TITAN_PATH= " ..
         TITANC .. " coro " ..
         "-X titan-runtime/titan_coro.o"))
 end

@@ -7438,27 +7438,27 @@ local function coderecorddec(ctx, code, initrecs, node)
                 NAME = c_string_literal(field.name),
                 INDEX = c_integer_literal(field.index)
             }))
+            table.insert(getswitch, render([[
+                case $INDEX: {
+                    $SETWRAPPED
+                    break;
+                }
+            ]], {
+                INDEX = c_integer_literal(field.index),
+                -- The field value (for any type, including a nominal whose
+                -- value is itself a udata) is held directly at _slot.
+                SETWRAPPED = "setobj2s(L, L->top.p - 1, _slot);"
+            }))
+            table.insert(setswitch, render([[
+                case $INDEX: {
+                    $CHECKANDSET;
+                    break;
+                }
+            ]], {
+                INDEX = c_integer_literal(field.index),
+                CHECKANDSET = checkandset(ctx, field.type, "_dst", "_src", node.loc)
+            }))
         end
-        table.insert(getswitch, render([[
-            case $INDEX: {
-                $SETWRAPPED
-                break;
-            }
-        ]], {
-            INDEX = c_integer_literal(field.index),
-            -- The field value (for any type, including a nominal whose value is
-            -- itself a udata) is held directly at _slot.
-            SETWRAPPED = "setobj2s(L, L->top.p - 1, _slot);"
-        }))
-        table.insert(setswitch, render([[
-            case $INDEX: {
-                $CHECKANDSET;
-                break;
-            }
-        ]], {
-            INDEX = c_integer_literal(field.index),
-            CHECKANDSET = checkandset(ctx, field.type, "_dst", "_src", node.loc)
-        }))
     end
     for name, method in pairs(node._type.methods) do
         if not method.islocal then
@@ -7492,6 +7492,7 @@ local function coderecorddec(ctx, code, initrecs, node)
                         setobj2s(L, L->top.p - 1, _fieldidx);
                     } else {
                         TValue *_slot = &_rec->uv[ivalue(_fieldidx)].uv;
+                        (void)_slot; /* records with only local fields have no cases */
                         switch(ivalue(_fieldidx)) {
                             $GETCASES
                         }
@@ -7514,6 +7515,7 @@ local function coderecorddec(ctx, code, initrecs, node)
                 if(TITAN_LIKELY(!tagisempty(_fieldtag) && ttisinteger(&_fieldidxv))) {
                     TValue* _dst = &(_rec->uv[ivalue(&_fieldidxv)].uv);
                     TValue* _src = s2v(L->ci->func.p + 3);
+                    (void)_src; /* records with only local fields have no cases */
                     switch(ivalue(&_fieldidxv)) {
                         $SETCASES
                     }

@@ -9,7 +9,7 @@ The `coro` standard module is split deliberately:
 * `titan-runtime/titan_coro.c` owns only the pieces that still need C:
   compiling the single-file minicoro implementation, the Lua raw-equality
   tag comparator, and a tiny minicoro entry trampoline that calls the
-  Titan entry function stored in the Lua registry.
+  native Titan entry function stored in the owner userdata.
 * `titan-runtime/minicoro.h` is a vendored copy of minicoro extended with
   tagged nested yield and a `MCO_STACKED` state.
 
@@ -30,29 +30,33 @@ The exported `Coro` record has local fields:
 
 ```lua
 record Coro
-  local handle: value
+  local udata: value
+  local handle: *mco.mco_coro
   local default_tag: value
 end
 ```
 
 That keeps the Lua-visible record opaque while allowing public methods to
-keep the raw handle local to the module. The handle is a full userdata
-whose payload is an `mco_coro *`; `coro.titan` pushes the handle value,
-reads the payload through `lua_touserdata`, and immediately restores the
-Lua stack top. Because `minicoro.h` is imported directly, Titan can read
-the private `mco_coro` fields it needs, such as `stacked_co`, without a C
-helper for simple source selection. This is a private standard-library
-boundary: the Titan type system cannot prevent a module that imports
-`minicoro.h` directly from storing a stale pointer or violating the
-transfer order. FFI calls that need the calling Lua state use Titan's
-built-in `L` local.
+keep the raw handle local to the module. `udata` roots the full userdata
+that owns the minicoro allocation; the userdata payload is an
+`mco_coro *` slot. `handle` caches that pointer with its native C type, so
+normal operations use `self.handle` directly. Only the userdata's `__gc`
+finalizer pushes its owner-userdata argument, reads the payload through
+`lua_touserdata`, and passes the recovered pointer to `mco_destroy`.
+
+Because `minicoro.h` is imported directly, Titan can read the private
+`mco_coro` fields it needs, such as `stacked_co`, without a C helper for
+simple source selection. This is a private standard-library boundary:
+the Titan type system cannot prevent a module that imports `minicoro.h`
+directly from storing a stale pointer or violating the transfer order.
+FFI calls that need the calling Lua state use Titan's built-in `L` local.
 
 `coro.titan` calls minicoro directly for storage and control transfer:
 `mco_push`, `mco_pop`, `mco_resume`, `mco_yield`, `mco_status`,
 `mco_running`, `mco_is_yieldable`, and `mco_result_description`. User
 payloads are transported separately:
 
-1. `Coro:resume` converts the private handle to a borrowed `mco_coro *`,
+1. `Coro:resume` reads its private, typed `mco_coro *` handle directly,
    selects the current transfer source (`co->stacked_co` when present,
    otherwise `co`), pushes `payload=arg` and `ok=true`, and calls
    `mco_resume` with the resolved tag.
@@ -108,25 +112,26 @@ from the control-transfer call.
 
 The helper stores live values in ordinary Lua roots:
 
-* the coroutine handle is full userdata whose raw payload is the
-  `mco_coro *`;
-* the handle's uservalue roots the child Lua thread;
-* the child thread stack slot 1 roots the callback function value while
-  the coroutine is alive; when the entry point finishes, it copies the
-  final return/error payload into minicoro storage, stages any captured
-  traceback for the caller-side append step, and clears the dead child
-  stack before returning control;
-* `mco_coro->user_data` stores only the child `lua_State *` needed by
-  `void (*func)(mco_coro *co)`;
+* `Coro.udata` roots the owner userdata whose raw payload stores the
+  `mco_coro *`; `Coro.handle` is the same pointer cached as a native
+  field and is not itself a GC root;
+* the owner userdata's four uservalues root the child Lua thread, module
+  state, native Titan entry closure, and callback function;
+* when the entry point finishes, its child-thread frame roots the final
+  return/error payload while it copies that payload into minicoro
+  storage, stages any captured traceback for the caller-side append step,
+  and clears the dead child stack before returning control;
+* `mco_coro->user_data` points back to the owner userdata needed by
+  `void (*func)(mco_coro *co)`; minicoro does not trace that raw pointer;
 * in-flight arguments, yielded values, errors, tags, and handles remain
   rooted by the Titan formal parameters whose C stack frames are
   suspended by minicoro.
 
 There is no registry pin for coroutine handles. A reachable coroutine is
-kept alive by ordinary Lua reachability: the user's `Coro` record owns
-the handle, the handle roots the child Lua thread, and nested
-`resume`/`yield` chains keep their outer frames suspended instead of
-unwinding them.
+kept alive by ordinary Lua reachability: the user's `Coro` record roots
+the owner userdata through `udata`, the userdata roots the child thread
+and callback through its uservalues, and nested `resume`/`yield` chains
+keep their outer frames suspended instead of unwinding them.
 
 If the suspended handler of a stacked tagged-yield chain becomes
 unreachable, its finalizer calls `mco_destroy`. Minicoro then abandons the
@@ -148,23 +153,20 @@ intervening allocation.
 
 ## Entry Function
 
-Each coroutine handle owns a `lua_newthread` thread. Creation copies the
-callback value onto that child thread's first real Lua stack slot, stores
-the child `lua_State *` in `mco_coro->user_data`, and installs a
-minicoro descriptor whose C entry is `titan_coro_entry`.
+Each coroutine owner userdata holds four uservalues: the
+`lua_newthread` thread, the owning module state, the native Titan entry
+closure, and the callback value. Creation stores the userdata pointer in
+`mco_coro->user_data` and installs a minicoro descriptor whose C entry is
+`titan_coro_entry`.
 
-The C entry trampoline uses the child thread from `mco_coro->user_data`,
-pushes the registered Titan entry function, duplicates the rooted
-callback, pushes the `mco_coro *` as light userdata, and calls the Titan
-entry with those two values. The Titan entry casts the light userdata
-back to `mco_coro *`, casts the callback `value` to `(value) -> value`,
-and calls it through the same generic value-call path generated Titan code
-uses: `luaD_callnoyield` under a protected boundary with Titan's
-`errorhandler` installed as `L->errfunc`.
-
-Calling a Titan function value this way goes through its normal Lua entry
-wrapper, so `_mod`, `_fn`, captures, argument checks, and result checks
-are the same as for any other generic function-value call.
+The C trampoline recovers those four values from the owner userdata,
+reads the native function pointer from the Titan entry closure, and calls
+that native Titan entry directly with the child thread, module state,
+callback value, and `mco_coro *`. It does not enter through the Lua-stack
+wrapper on every resume. The Titan entry then calls the callback value
+using Titan's normal function-value call path under its protected error
+boundary: exact Titan closures can take the native fast path, while
+other Lua callables use the generic Lua-stack path.
 
 On success, the entry records `ok=true`, copies the result `TValue` into
 minicoro storage, clears the dead child stack, and returns control. On

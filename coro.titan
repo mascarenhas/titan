@@ -7,7 +7,8 @@ local coro = foreign import "titan/coro.h"
 local STACK_SIZE = 2 * 1024 * 1024
 
 record Coro
-  local handle: value
+  local udata: value -- just for GC rooting
+  local handle: *mco.mco_coro
   local default_tag: value
 end
 
@@ -139,17 +140,9 @@ local function yield_result_or_raise(co: *mco.mco_coro, tag: value): value
   return pop_transfer_or_raise(co, false)
 end
 
-local function handle_to_coro(handle: value): *mco.mco_coro
-  local top = lua.lua_gettop(L)
-  ffi.lua_pushtvalue(L, handle)
-  local co = (lua.lua_touserdata(L, -1) as **mco.mco_coro)[0]
-  lua.lua_settop(L, top)
-  return co
-end
-
 function Coro:resume(arg: value, tag: value): value
   local effective = effective_tag(self.default_tag, tag)
-  local co = handle_to_coro(self.handle)
+  local co = self.handle
   local source = transfer_source(co)
   push_transfer(source, 1, arg)
   return resume_result_or_raise(co, source, effective)
@@ -157,14 +150,14 @@ end
 
 function Coro:error(err: value, tag: value): value
   local effective = effective_tag(self.default_tag, tag)
-  local co = handle_to_coro(self.handle)
+  local co = self.handle
   local source = transfer_source(co)
   push_transfer(source, 0, err)
   return resume_result_or_raise(co, source, effective)
 end
 
 function Coro:status(): string
-  local status = mco.mco_status(handle_to_coro(self.handle))
+  local status = mco.mco_status(self.handle)
   if (status as integer) == (mco.MCO_SUSPENDED as integer) then
     return "suspended"
   end
@@ -198,7 +191,9 @@ function is_yieldable(tag: value): boolean
 end
 
 local function coro_gc(handle: value)
-  mco.mco_destroy(handle_to_coro(handle))
+  ffi.lua_pushtvalue(L, handle)
+  local co = (lua.lua_touserdata(L, -1) as **mco.mco_coro)[0]
+  mco.mco_destroy(co)
 end
 
 local function coro_entry(func: (value) -> value, co: *mco.mco_coro)
@@ -231,7 +226,7 @@ function create(func: (value) -> value, default_tag: value): Coro
     raise "could not create coroutine: " .. (mco.mco_result_description(res) as string)
   end
 
-  return Coro.new(ffi.lua_totvalue(L, -1), default_tag)
+  return Coro.new(ffi.lua_totvalue(L, -1), slot[0], default_tag)
 end
 
 do
