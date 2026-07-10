@@ -22,12 +22,12 @@ Keep the proposed four layers:
 
 Use these concrete decisions for v1:
 
-- Titan source uses the canonical module names `coro`, `uv`, `timer`, `fs`,
-  `net`, and `os`. Lua loads the new I/O module Udata values as
-  `require "titan.uv"`,
+- Titan source uses the canonical module names `coroutine`, `uv`, `timer`,
+  `fs`, `net`, and `os`. Lua loads every standard module through its `titan.*`
+  alias: `require "titan.coroutine"`, `require "titan.uv"`,
   `require "titan.os"`, and so on. Titan's standard-library search root and
   Lua-facing entry aliases provide the two lookup names without replacing
-  Lua's own `os`, `math`, or `string` modules.
+  Lua's own `coroutine`, `os`, `math`, or `string` modules.
 - `uv` owns one private `uv_loop_t` per active bootstrap/loop session, not per
   task and not `uv_default_loop()`.
 - Public `uv.run` is nonblocking: it creates and roots a task coroutine, arms a
@@ -83,8 +83,8 @@ This design does not require general Titan-function-to-C callback support,
 ### In scope
 
 - Reproducible libuv availability and build integration on Linux and macOS.
-- A private loop and direct callback/coroutine continuation pump built on
-  `coro`.
+- A private loop and direct callback/coroutine continuation pump built on the
+  `coroutine` standard module, renamed from the current `coro` module.
 - Fixed native C-to-Titan callback trampolines.
 - Timers, recurring ticks, and next-turn yielding.
 - Asynchronous filesystem I/O.
@@ -335,6 +335,7 @@ Add these production files:
 
 ```text
 stdlib/
+  coroutine.titan          existing coro.titan policy module, moved and renamed
   uv.titan                 public task API + private continuation pump
   timer.titan              timers and cooperative yield
   fs.titan                 files and path operations
@@ -362,18 +363,19 @@ Use the symbol prefix `titan_uvshim_` for C helpers. The generated module name
 ### Canonical Titan names and Lua aliases
 
 Add the `stdlib` origin to Titan's default import resolution, including when
-`--tree` selects an application root. Reserve the canonical names `coro`, `uv`, `timer`,
-`fs`, `net`, and `os` for this standard library and resolve them from a pinned
-standard-library source/binary origin before ordinary application lookup.
+`--tree` selects an application root. Reserve the canonical names `coroutine`,
+`uv`, `timer`, `fs`, `net`, and `os` for this standard library and resolve them
+from a pinned standard-library source/binary origin before ordinary application
+lookup.
 Diagnose an application module that attempts to claim one of those names.
 This stronger rule is necessary because Titan's source dependency graph,
 binary rehydration cache, and generated `loadlib("uv.so")` calls all key the
 module by its short canonical identity: merely appending a source path would
 allow an application `uv.titan` or `uv.so` to become the private dependency of
-standard `fs`; the same rule prevents a local `coro` from capturing `uv`'s
-coroutine dependency. It also makes `import "os"` reliably resolve the standard
-module while leaving Lua's loader and Lua's own `os` table out of Titan import
-resolution entirely.
+standard `fs`; the same rule prevents a local `coroutine` from capturing `uv`'s
+coroutine dependency. It also makes `import "coroutine"` and `import "os"`
+reliably resolve the standard modules while leaving Lua's loader and Lua's own
+`coroutine` and `os` tables out of Titan import resolution entirely.
 
 Pinning must survive code generation. Mark a resolved dependency as
 standard-origin metadata and make `titan-compiler/coder.lua` emit a distinct
@@ -383,22 +385,33 @@ from a dedicated standard-library directory configured by the Makefile/install
 `.` or ordinary application `TITAN_PATH` entries. Generated ordinary imports
 continue to use `loadlib`. An application source chain importing `fs` and a
 binary-only `fs` must therefore reach the same canonical `uv.so`, and `uv` must
-reach canonical `coro.so`, even
-when the application supplies fake local `uv`/`coro` sources and binaries.
+reach canonical `coroutine.so`, even when the application supplies fake local
+`uv`/`coroutine` sources and binaries.
 Custom-prefix installation instructions and
 `make help` must show how the standard path is selected rather than relying on
 the developer's environment.
 
 Ordinary application compilation always consumes a reserved standard module as
 that pinned canonical binary, even when the repository's `stdlib/*.titan`
-sources are visible; it never recursively source-links a second `coro`/`uv` or
+sources are visible; it never recursively source-links a second
+`coroutine`/`uv` or
 emits an accidental `luaopen_os`. Standard sources are roots only in an explicit
 Makefile/driver `--stdlib-build` mode. That mode builds one canonical root at a
 time, attaches its Lua alias metadata to that root, and still resolves all
 reserved standard dependencies through already built canonical binaries. The
-build order is therefore `coro` first, then `uv`, then the higher modules. This
-is the same single-implementation rule for static executables and DSOs, not
-only an install-layout rule.
+build order is therefore `coroutine` first, then `uv`, then the higher modules.
+This is the same single-implementation rule for static executables and DSOs,
+not only an install-layout rule.
+
+Move and rename the existing repository-root `coro.titan` to
+`stdlib/coroutine.titan` as part of introducing this layout; do not leave a
+duplicate or forwarding source at the root. Rename its focused spec to
+`spec/coder/coroutine_spec.lua`, and update the Makefile input, LuaRocks
+source/install packaging, test build helper, and every documentation path and
+module-name reference in the same change. The new canonical Titan import is
+`import "coroutine"`, and its only Lua-facing name is
+`require "titan.coroutine"`. Do not install a legacy `coro.so`, `require "coro"`
+alias, or bare `luaopen_coroutine` entry.
 
 Compile each module under its canonical Titan name (`os`, `uv`, and so on), and
 install the canonical binary as `<Titan ABI path>/os.so`. Lua also gets an alias
@@ -408,6 +421,7 @@ Lua-facing require name from the canonical Titan module name, for example:
 
 ```text
 titanc --stdlib-build --tree stdlib --lua-name titan.os os
+titanc --stdlib-build --tree stdlib --lua-name titan.coroutine coroutine
 ```
 
 This emits `os_init`/`os_abi`/`os_types` for Titan import and
@@ -418,8 +432,11 @@ The option changes only the requested non-main root module's generated
 key, native symbol prefix, serialized interface, or recursively compiled
 dependencies. Applying one alias to several roots is rejected as ambiguous.
 `require "titan.os"` and `import "os"` therefore initialize the same canonical
-module Udata, while `require "os"` still returns Lua's table. Apply the same
-mapping to `math`, `string`, and `lua` when those modules are added.
+module Udata, while `require "os"` still returns Lua's table. Likewise,
+`coroutine_init`/`coroutine_abi`/`coroutine_types` coexist with
+`luaopen_titan_coroutine`; no `luaopen_coroutine` is emitted, and
+`require "coroutine"` still returns Lua's standard table. Apply the same mapping
+to `math`, `string`, and `lua` when those modules are added.
 
 The canonical path and Lua alias must resolve to one mapped DSO image, not two
 byte-for-byte copies. This matters especially for `uv.so`: two independently
@@ -439,6 +456,11 @@ and mutable module state through Lua `require "titan.os"` and a separately
 compiled Titan consumer's `import "os"`. This requires no module ABI bump.
 Also link a standalone against Lua's built-in `luaopen_os` and the distinct
 `luaopen_titan_os` to prove both symbols coexist.
+Repeat the identity/symbol proof for canonical `coroutine.so` and its
+`titan/coroutine.so` alias: `import "coroutine"` and
+`require "titan.coroutine"` share one module Udata, `package.loaded.coroutine`
+is unchanged, and Lua's built-in `luaopen_coroutine` coexists with the distinct
+`luaopen_titan_coroutine`.
 
 ## Callback continuation runtime design
 
@@ -459,7 +481,7 @@ Runtime (module-local record + opaque loop-wrapper record)
   +-- loop wrapper ----------> local `*uv_loop_t` pointer
   |                              +-- rooted native-storage userdata
   +-- shared UV_TAG reference
-  +-- tasks map ----------> Task ----------> root coro.Coro
+  +-- tasks map ----------> Task ----------> root coroutine.Coro
   |                           |                  +-- coroutine handle userdata
   |                           +-- state/result   +-- child Lua thread
   |                           +-- operation epoch+-- entry closure/function
@@ -494,7 +516,7 @@ it still does not drive or resume anything.
 
 An opaque `Task` contains:
 
-- root `coro.Coro`;
+- root `coroutine.Coro`;
 - operation epoch/generation number;
 - state: `new`, `ready`, `running`, `waiting`, `succeeded`, `failed`, or
   `cancelled`;
@@ -506,20 +528,20 @@ An opaque `Task` contains:
 
 Only the fixed start/operation/resource callback dispatchers call
 `root:resume` or `root:error`. `uv.run` itself never does. Because current
-`coro.create` accepts `(value) -> value` while public `run` accepts
+`coroutine.create` accepts `(value) -> value` while public `run` accepts
 `() -> value`, `run` creates a private adapter
 `function(_ignored: value): value return func() end`, roots the adapter and its
-captured `func` in the Task, passes the adapter to `coro.create`, and arms a zero
-timer. The start callback resumes it with `nil`; the public function still has
-no synthetic argument.
+captured `func` in the Task, passes the adapter to `coroutine.create`, and arms
+a zero timer. The start callback resumes it with `nil`; the public function
+still has no synthetic argument.
 
-Every `_await` calls `coro.yield(request, UV_TAG)` explicitly; `yield` does not
-consult a coroutine's default tag. In a user-created nested coroutine belonging
-to another abstraction, the UV yield walks outward until the UV task root's
-active resume. That root becomes `suspended`, intermediate coroutines become
-`stacked`, and the next callback resumes the exact root captured in its owner.
-`Runtime.running_task` may still support join/ownership diagnostics, but it is
-not used to choose the coroutine tag.
+Every `_await` calls `coroutine.yield(request, UV_TAG)` explicitly; `yield` does
+not consult a coroutine's default tag. In a user-created nested coroutine
+belonging to another abstraction, the UV yield walks outward until the UV task
+root's active resume. That root becomes `suspended`, intermediate coroutines
+become `stacked`, and the next callback resumes the exact root captured in its
+owner. `Runtime.running_task` may still support join/ownership diagnostics, but
+it is not used to choose the coroutine tag.
 
 `Task:join()` returns immediately for an already terminal Task. Otherwise it
 yields a Join Request with `UV_TAG`; target completion arms a zero-timer wakeup
@@ -536,9 +558,9 @@ feature is required.
 The selected flow is:
 
 1. `uv.run(func)` creates and roots the private `(value) -> value` adapter,
-   creates `coro.create(adapter, UV_TAG)`, roots the Task, allocates a GC-owned
-   zero timer, and arms its one-shot start callback. `func` has not run when
-   `uv.run` returns. Failure to create the Runtime/loop before a Task exists
+   creates `coroutine.create(adapter, UV_TAG)`, roots the Task, allocates a
+   GC-owned zero timer, and arms its one-shot start callback. `func` has not run
+   when `uv.run` returns. Failure to create the Runtime/loop before a Task exists
    raises synchronously. A timer init/start failure after Task creation marks
    and returns that Task failed without running `func`; init failure has no live
    handle, while start failure initiates `uv_close` and keeps its owner rooted
@@ -554,7 +576,7 @@ The selected flow is:
 4. The dispatcher calls `root:resume(result, UV_TAG)` or
    `root:error(error, UV_TAG)`. User code now runs synchronously on the loop
    thread until it finishes or an async API calls
-   `coro.yield(request, UV_TAG)`.
+   `coroutine.yield(request, UV_TAG)`.
 5. When the call returns, inspect `root:status()`:
    - `suspended`: the returned value must be the private Request and its epoch
      must match the Task;
@@ -1206,7 +1228,7 @@ in the compiled public interface.
 
 ```titan
 record Task
-  local root: coro.Coro
+  local root: coroutine.Coro
 end
 
 record Error
@@ -1257,8 +1279,8 @@ assert(task:join() == "done")
 ```
 
 Every async operation outside a running UV Task raises a clear usage error
-using `coro.is_yieldable(UV_TAG)`. A live Task or resource from an older session
-is rejected; a completed Task retains immutable status/result/error so
+using `coroutine.is_yieldable(UV_TAG)`. A live Task or resource from an older
+session is rejected; a completed Task retains immutable status/result/error so
 `status` and an already-resolved `join` remain usable after `loop` returns. The
 dynamic `value` result keeps task functions useful without adding generics;
 callers cast a joined result back to the application type.
@@ -1665,25 +1687,27 @@ Extend the build graph:
 ```text
 lua + libbacktrace + libuv
   -> titan.o + titan_coro.o + titan_uv.o
-  -> coro.so
+  -> coroutine.so
   -> uv.so
   -> timer.so, fs.so, net.so, os.so
-  -> single-image Lua aliases: coro.so and titan/{uv,timer,fs,net,os}.so
+  -> single-image Lua aliases: titan/{coroutine,uv,timer,fs,net,os}.so
 ```
 
-Build `coro.so` and canonical `uv.so` before higher-level modules and force those
-dependencies down the compiled-module path, so `titan_uv.o`/`libuv.a` are not
-duplicated into every library.
+Build `coroutine.so` and canonical `uv.so` before higher-level modules and force
+those dependencies down the compiled-module path, so `titan_uv.o`/`libuv.a` are
+not duplicated into every library. The `coroutine.so` rule consumes
+`stdlib/coroutine.titan` through `--stdlib-build --tree stdlib`, not a
+root-level source or an ambient `TITAN_PATH` entry.
 
 Replace the rockspec's single `coro.so` copy hook with an `install-stdlib`
-target. Install canonical `{coro,uv,timer,fs,net,os}.so` in Titan's ABI-versioned
-binary root, expose the I/O modules under `titan/*.so` in Lua's `LIBDIR`, and
-expose `coro` under its existing Lua `coro.so` path, all through the single-image
-alias mechanism above; never install an independent copy. Preserve
-`luaopen_coro` rather than placing that compatibility module under `titan.*`;
-the new I/O aliases use `luaopen_titan_*`. Installed `uv` imports canonical
-binary `coro` through `loadstdlib`, and installed high-level modules do the same
-for canonical `uv`, so they need no libuv headers at user compile time.
+target. Install canonical `{coroutine,uv,timer,fs,net,os}.so` in Titan's
+ABI-versioned binary root and expose every module under `titan/*.so` in Lua's
+`LIBDIR`, all through the single-image alias mechanism above; never install an
+independent copy. The coroutine module exports `luaopen_titan_coroutine`, not
+the old `luaopen_coro` or Lua's reserved `luaopen_coroutine`. Installed `uv`
+imports canonical binary `coroutine` through `loadstdlib`, and installed
+high-level modules do the same for canonical `uv`, so they need no libuv headers
+at user compile time.
 
 Do not add LuaRocks `external_dependencies.UV` in bundled mode: that would
 incorrectly require a system developer package. In system mode, its
@@ -1701,6 +1725,8 @@ lifetime gate is green.
 Files:
 
 - `Makefile`
+- `coro.titan` -> `stdlib/coroutine.titan` (move and rename)
+- `titan-dev-1.rockspec`
 - `.gitignore`
 - `.github/workflows/ci.yml`
 - `c-parser/cpp.lua`
@@ -1714,6 +1740,13 @@ Files:
 - `spec/cdriver_spec.lua`
 - `spec/cpp_spec.lua`
 - `spec/coder/coder_spec.lua`
+- `spec/coder/coro_spec.lua` -> `spec/coder/coroutine_spec.lua` (rename)
+- `doc/async-with-coroutines.md`
+- `doc/language/coroutines.md`
+- `doc/language/index.md`
+- `doc/implementation/coroutines.md`
+- `doc/implementation/driver.md`
+- `doc/implementation/index.md`
 - optional `spec/fixtures/uv/`
 
 Work:
@@ -1729,6 +1762,17 @@ Work:
   `--lua-name`, the
   single-image canonical/Lua alias install layout, and the registry-based
   main-bootstrap hook with driver and `.so`-rehydration tests.
+- Move and rename `coro.titan` to `stdlib/coroutine.titan`, rename its focused
+  spec, and update the Makefile, rockspec packaging, test helper, and
+  language/implementation documentation and index references together. Build
+  it as canonical module `coroutine` with Lua alias `titan.coroutine` from the
+  pinned standard source root, with no duplicate source or legacy `coro` alias
+  left.
+- Replace every `import "coro"`/`require "coro"` in the renamed spec and every
+  public old-name string in the moved source, including the `coro.yield`
+  diagnostic and `titan.coro` owner-userdata metatable key. Private C helper
+  filenames and symbols such as `titan_coro.c`, `titan/coro.h`, and
+  `titan_coro_entry` may retain their established internal names.
 - Carry standard-origin dependency metadata into code generation and emit the
   dedicated runtime `loadstdlib` path; configure its ABI-qualified installed
   root and prove local source/binary names plus ordinary `TITAN_PATH` cannot
@@ -1758,12 +1802,22 @@ Exit criteria:
   pinned binary and emits no standard-module `luaopen_*` or duplicate libuv
   implementation; `--stdlib-build` compiles exactly one requested root with its
   intended Lua entry and binary-only reserved dependencies.
+- `stdlib/coroutine.titan` is the sole coroutine standard-module source;
+  clean-checkout Makefile, LuaRocks, renamed focused coroutine spec, all current
+  coroutine documents, indexes, and driver documentation use the new path and
+  names. `import "coroutine"` and
+  `require "titan.coroutine"` share the canonical module, while Lua's
+  `require "coroutine"` remains unchanged and no old `coro` alias is installed.
+- Clean-install tests exercise only the new Titan/Lua names and prove the
+  install tree contains no root `coro.so` and no installed DSO exports
+  `luaopen_coro`; source/runtime checks prove there is no old `titan.coro` owner
+  metatable key or `coro.yield` diagnostic.
 - A synchronous standalone retains today's direct entry path, while importing
   `uv` installs and selects the generic async bootstrap.
-- Binary-only standard `uv`/`fs` import canonical `coro`/`uv` through
-  `loadstdlib` even with fake local sources, `./coro.so`/`./uv.so`, and
-  application `TITAN_PATH` entries; a custom installed prefix works through the
-  documented standard-path setting.
+- Binary-only standard `uv`/`fs` import canonical `coroutine`/`uv` through
+  `loadstdlib` even with fake local sources,
+  `./coroutine.so`/`./uv.so`, and application `TITAN_PATH` entries; a custom
+  installed prefix works through the documented standard-path setting.
 
 ### Phase 1 - GC-owned low-level objects and native callbacks
 
@@ -1779,7 +1833,7 @@ Files:
 Work:
 
 - Import public `uv.h`, Lua headers, `titan/ffi.h`, private shim header, and
-  `coro`.
+  canonical `coroutine`.
 - Implement loop/operation native-storage userdata allocation in Titan with
   imported `.sizeof`, plus the separate wrapper record Udata used as callback
   owner and GC root.
@@ -1839,8 +1893,9 @@ Work:
 - Implement nonblocking `run`, `join`, cancel/status, public embedding `loop`,
   and automatic standalone bootstrap. Remove the redundant `spawn`/`run_main`
   split.
-- Adapt public `() -> value` functions to current `coro.create`'s
-  `(value) -> value` entry and lock timer init/start failure semantics.
+- Adapt public `() -> value` functions to the renamed `coroutine.create`
+  (current `coro.create`) `(value) -> value` entry and lock timer init/start
+  failure semantics.
 - Implement immediate failure, async failure, trace copying/reinstallation, and
   first-error policy.
 - Implement close/cancel/drain and `UV_EBUSY` diagnostics.
@@ -2002,8 +2057,8 @@ Work:
   automatic standalone bootstrap, local-field opaque native wrappers and their
   one-allocation cost model, explicit close, errors, task policy, and unsupported
   operations.
-- Correct coroutine implementation prose that still describes older callback
-  rooting rather than the current handle-uservalue shape.
+- Keep coroutine implementation prose aligned with the renamed module/path and
+  its typed native-handle plus owner-uservalue shape.
 - Update the roadmap only when shipped behavior and tests justify it.
 
 ## Verification plan
@@ -2060,9 +2115,11 @@ module build order, environment flags, and standalone execution.
   application source chains, binary-only installed imports, Lua `require`, and
   standalone executable paths;
 - Titan `import "os"` versus Lua `require "titan.os"`, preserving Lua's
-  existing `require "os"`; reserved-name diagnostics and pinned standard
-  source/binary resolution that local `coro`/`uv` sources or binaries cannot
-  capture;
+  existing `require "os"`; Titan `import "coroutine"` versus Lua
+  `require "titan.coroutine"`, preserving Lua's existing
+  `require "coroutine"`; reserved-name diagnostics and pinned standard
+  source/binary resolution that local `coroutine`/`uv` sources or binaries
+  cannot capture;
 - both alias load orders map one canonical DSO and one statically linked libuv
   instance while sharing the registry Udata;
 - checker acceptance of local C-pointer fields without interface leakage;
@@ -2145,8 +2202,13 @@ snapshot can otherwise shadow source edits.
       process handles close only after failure or observed child exit.
 - [ ] Binary buffers preserve length and embedded NUL.
 - [ ] Timer, file, TCP/DNS, OS/process/signal APIs match documented contracts.
-- [ ] Canonical modules work as Titan `import "os"`/etc.; Lua aliases work as
-      `require "titan.os"`/etc. without replacing Lua standard modules.
+- [ ] Canonical modules work as Titan `import "coroutine"`/`import "os"`/etc.;
+      Lua aliases work as `require "titan.coroutine"`/`require "titan.os"`/etc.
+      without replacing Lua standard modules.
+- [ ] The existing coroutine source is moved and renamed to
+      `stdlib/coroutine.titan`; no root duplicate or legacy `coro` alias remains,
+      and Makefile, rockspec, renamed tests, and documentation all consume or
+      name the new source/module path.
 - [ ] Reserved standard identities cannot be captured by local source/binaries,
       and canonical/Lua paths map one DSO/libuv instance in either load order.
 - [ ] Source, `.so`-only, and standalone paths are covered.
