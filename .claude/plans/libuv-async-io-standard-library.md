@@ -54,6 +54,12 @@ Use these concrete decisions for v1:
   storage wherever possible. Size it with `uv.<type>.sizeof`, cast the aligned
   payload pointer to the imported C pointer type, and keep the userdata rooted
   until libuv's terminal callback says it is safe to reclaim.
+- Carry a native object across Titan module/API boundaries in one nominal
+  wrapper record with a local typed native-handle field (a pointer for libuv
+  struct handles/requests). The declaring module alone can construct or unwrap
+  it; ordinary calls read the typed pointer field directly and never coerce the
+  pointer to `value` and back. Allocate the wrapper once per native object, not
+  once per handle use.
 - A pointer allocated by libuv or the shim is a fallback. Store it in a rooted
   userdata and release it with the matching library deallocator; a `__gc`
   fallback may reclaim passive memory, but it never replaces required
@@ -122,8 +128,12 @@ The current architecture already supplies the necessary substrate:
   One hidden tag can therefore be shared safely by all independent UV tasks.
 - C FFI types may be used locally but may not appear in exported Titan
   interfaces (`doc/language/ffi.md:102-118`). The public libraries therefore
-  expose only Titan records, scalars, strings, arrays/maps, functions, and
-  opaque `value` fields.
+  expose only Titan records, scalars, strings, arrays/maps, and functions. An
+  exported record's local field may hold a C pointer because that field is
+  omitted from the compiled public interface. A record with any local field has
+  no externally callable `new`, and outside constructor expressions are
+  rejected (`doc/language/records.md:141-145,183-186,262-275`). This is the
+  preferred opaque-native-handle boundary.
 - The FFI supports imported function names decaying to compatible C function
   pointers (`doc/language/ffi.md:250-270`). Fixed shim callbacks can therefore
   be passed directly to `uv_timer_start`, `uv_fs_*`, `uv_read_start`, and other
@@ -312,7 +322,7 @@ callback dispatches on `Runtime.main_thread` `L`, as specified below.
 | One hidden module string tag | Keep one module-wide tag, but make it a fresh private identity object rather than a guessable string. Tags distinguish coroutine abstractions, not tasks. |
 | Start each task with a zero timer | Keep this. `uv.run` arms the zero timer and returns without executing the task; its callback performs the first resume on the next loop iteration. |
 | Callback resumes and interprets the next request inline | Keep this. The coroutine is the continuation an ordinary callback API would pass explicitly. The Titan dispatcher arms the next yielded Request before the callback returns. |
-| Raw L/module/closure/coroutine tuple in `data` | `data` points to a Lua userdata owner rooted in `Runtime.pending` or `Runtime.resources`; uservalues root all Titan values. |
+| Raw L/module/closure/coroutine tuple in `data` | `data` points to the opaque Titan wrapper-record Udata rooted in `Runtime.pending` or `Runtime.resources`; its local fields root the distinct native-storage userdata plus every Titan value. |
 | Print traceback from a callback | Save `{error, traceback}`, initiate close/cancel, return through libuv, drain from the outer bootstrap, then reinstall/pin and report the failure. |
 | Default/global event loop implied | Use one private loop per bootstrap session so state remains per Lua state, while all `uv.run` tasks in that session share it. |
 | Callback owns scheduling policy | Keep policy in the native Titan dispatcher; the C trampoline only normalizes callback ABI, establishes protection, and transfers trusted fields. |
@@ -336,11 +346,15 @@ titan-runtime/
 ```
 
 `uv` is the only Titan module that imports C types. Its exported surface
-contains no C FFI type. Higher-level modules dynamically import its compiled
-interface and use reserved underscore-prefixed middle-layer functions such as
-`_fs_open`, `_tcp_read`, and `_spawn`. Titan has no package-private visibility,
-so those names are technically public; document them as unstable and reject
-untrusted opaque handles at runtime.
+contains no publicly visible C FFI type, but it exports nominal opaque wrapper
+records whose local fields hold the native pointers. Higher-level modules
+dynamically import those record types and use reserved underscore-prefixed
+middle-layer functions such as `_fs_open`, `_tcp_read`, and `_spawn`. Titan has
+no package-private visibility, so those names are technically public; document
+them as unstable. Exact record parameters make their handles unforgeable from
+Titan, and generated Lua entries enforce record/metatable identity. Runtime
+checks remain for legitimate-but-closed handles and handles from an older
+Runtime generation, not for arbitrary `value` forgery.
 
 Use the symbol prefix `titan_uvshim_` for C helpers. The generated module name
 `uv_*` occupies the logical-module prefix.
@@ -439,21 +453,23 @@ uv module Udata ------------> one private UV_TAG identity
   |
   +-- active_runtime -------> Runtime
 
-Runtime (module-local record + loop-owner userdata)
+Runtime (module-local record + opaque loop-wrapper record)
   |
   +-- main thread value
-  +-- private uv_loop_t payload
+  +-- loop wrapper ----------> local `*uv_loop_t` pointer
+  |                              +-- rooted native-storage userdata
   +-- shared UV_TAG reference
   +-- tasks map ----------> Task ----------> root coro.Coro
   |                           |                  +-- coroutine handle userdata
   |                           +-- state/result   +-- child Lua thread
   |                           +-- operation epoch+-- entry closure/function
   |                           +-- current op
-  +-- pending map --------> Operation owner userdata
-  |                           +-- uv request/handle payload
+  +-- pending map --------> opaque operation-owner record userdata
+  |                           +-- local typed native pointer
+  |                           +-- rooted native-storage userdata
   |                           +-- main thread / module / dispatcher uservalues
   |                           +-- Task / Request / input/output roots
-  +-- resources map ------> open File/Connection/Server/Process/Ticker owners
+  +-- resources map ------> opaque timer/file/TCP/process wrapper records
   +-- main Task/result ----> standalone exit result
   +-- first failure ------> exact error value + copied traceback string
 ```
@@ -545,9 +561,10 @@ The selected flow is:
    - `dead`: store the task result, wake joiners through their own callbacks,
      and retire the Task after physical owner cleanup;
    - anything else: record an internal invariant failure.
-6. For a yielded Request, allocate buffers/operation userdata, set uservalues,
-   insert it in `pending`, associate it through public libuv data APIs, and
-   submit the operation. Root this new owner before releasing the completed
+6. For a yielded Request, allocate its native-storage/buffer userdata, capture
+   those roots in a new opaque operation-wrapper record, insert that record in
+   `pending`, associate the record Udata through public libuv data APIs, and
+   submit the operation. Root this new wrapper before releasing the completed
    owner's logical root.
 7. A successful asynchronous submission leaves the Task waiting; the current
    callback restores the main Lua stack and returns to libuv.
@@ -625,16 +642,25 @@ request/close callbacks only after the active invocation has returned.
 For a loop, request, or handle:
 
 1. Read the exact C size and alignment from `uv.<type>.sizeof` and `.alignof`.
-2. Call `lua_newuserdatauv` from `uv`, using enough uservalues for its
-   ownership contract.
-3. Cast the returned `void *` payload to the source-level pointer type such as
+2. Save the Lua API stack top, then call `lua_newuserdatauv` from `uv` for the
+   native byte storage. The call returns the payload pointer and pushes its
+   owning full userdata.
+3. While that userdata is stack-anchored, capture the already created value
+   once with `ffi.lua_totvalue(L, -1)` into a GC-visible `storage` local. This
+   is not native-handle-to-`value` coercion and allocates no second userdata.
+4. Cast the returned `void *` payload to the source-level pointer type such as
    `*uv.uv_loop_t`, `*uv.uv_fs_t`, or `*uv.uv_timer_t`.
-4. Keep the full userdata value in `pending`/`resources` before a call that can
-   make it visible to libuv.
-5. Use public `uv_loop_set_data`, `uv_req_set_data`, or `uv_handle_set_data` to
-   associate the userdata owner; avoid depending on macro-expanded struct
-   fields in Titan's parsed type model.
-6. Remove the final root only after the operation's terminal callback or the
+5. Construct the object's nominal Titan wrapper once. Its local typed-pointer
+   field stores the pointer directly and its local `storage` field takes the
+   captured value. Only after both fields are installed may code restore the
+   saved Lua API stack top.
+6. Keep the wrapper/owner in `pending`/`resources` before a call that can make
+   it visible to libuv.
+7. Use public `uv_loop_set_data`, `uv_req_set_data`, or `uv_handle_set_data` to
+   associate the wrapper record Udata as the callback owner, not the separate
+   native-storage userdata; avoid depending on macro-expanded struct fields in
+   Titan's parsed type model.
+8. Remove the final root only after the operation's terminal callback or the
    handle close callback returns and all required cleanup is complete.
 
 This works even when Titan considers the imported libuv struct incomplete:
@@ -657,30 +683,117 @@ and add a parser regression before introducing one.
 
 Use library/shim allocation only when an API allocates and returns its own
 object or when callback-driven variable storage cannot practically be created
-in Titan. The fallback mirrors `coro.titan`: a full userdata roots the pointer,
-the matching library cleanup is explicit, and `__gc` is a last-resort passive
-memory release. Never free an initialized libuv handle from `__gc` before its
-close callback.
+in Titan. The fallback mirrors `coro.titan`: one pointer-owner full userdata is
+captured in the wrapper's local `storage` field, the matching library cleanup is
+explicit, and `__gc` is a last-resort passive memory release. Never free an
+initialized libuv handle from `__gc` before its close callback.
+
+### Opaque native wrapper records
+
+Do not transport a native pointer through `value`. Define a nominal record in
+`uv` with a local typed-pointer field instead, exporting that record when it
+must cross into a higher-level module. The minimal exported pattern is:
+
+```titan
+local uv = foreign import "uv.h"
+
+record uv_fs_t
+  local handle: *uv.uv_fs_t
+end
+```
+
+Only `uv` can call this record's synthesized local constructor or write/read
+`handle`. Titan code outside the module cannot forge a `uv_fs_t`, and a
+non-optional variable/parameter of that record type is guaranteed to contain an
+instance of that exact record. Generated Lua entries likewise check its record
+metatable identity. Middle-layer functions therefore accept the exact wrapper
+type and use `wrapper.handle` directly, with no native-pointer-to-`value`
+coercion, dynamic cast, or unwrap allocation.
+
+This is a material cost distinction, not only a type-safety preference: the
+FFI's native-pointer-to-`value` coercion allocates a userdata each time the
+coercion occurs. A local pointer field is stored once in the record and read as
+the native pointer type on every later call.
+
+The `uv_fs_t` snippet illustrates the exported form. If filesystem request
+objects remain entirely inside `uv`'s continuation pump, declare that wrapper
+as `local record uv_fs_t` instead; only persistent file/resource wrappers used
+by `fs` need an exported nominal type.
+
+The production owner record adds only private lifetime metadata required by the
+object family, for example:
+
+```titan
+record uv_fs_t
+  local handle: *uv.uv_fs_t
+  local storage: value
+  local runtime_generation: integer
+end
+```
+
+`storage` is the one-time GC root for the already allocated native payload
+userdata; it is not a boxed representation of `handle` and is never recreated
+on calls. Every long-lived wrapper also carries Runtime generation and explicit
+lifecycle state; watcher/stream wrappers carry their waiter/epoch as required.
+Before reading `handle`, every middle-layer entry validates the exact record,
+matching active Runtime generation, and a state in which that operation is
+legal. Request wrappers keep their operation roots and state bits until the
+terminal callback. Terminal cleanup marks a reachable wrapper closed/cleaned
+before releasing Runtime roots; if it clears `storage`, it also nulls a pointer
+handle so even an internal missed state check cannot use reclaimed bytes.
+Scalar `uv_file` wrappers use their state plus an invalid descriptor sentinel
+and need no separate native-storage userdata.
+
+Thus each native object pays for one Titan record wrapper and, for
+struct-backed families, one native-storage allocation, while repeated
+method/middle-layer calls pass the record and read the C pointer without
+allocating another userdata.
+
+Nominal unforgeability proves what kind of handle arrived; it does not prove
+that the handle is still live. The lifecycle/generation checks above remain
+mandatory.
+
+The Titan wrapper record instance is also the callback owner: libuv `data`
+stores its stable `Udata *`, while `Runtime.pending`/`resources` keeps that
+record alive. The wrapper's local `storage` field in turn keeps the native byte
+payload alive. The storage userdata is never used as the callback identity.
+
+Export wrapper record types for each family that crosses from a higher module
+into `uv` (file, timer/ticker, TCP stream/server, pipe, process, and any
+request/resource token that is actually exposed). Keep purely internal request
+types local. The higher-level `File`, `Ticker`, `Connection`, `Server`, and
+`Process` records each have a local field of the corresponding `uv` wrapper
+type, making their own constructors local as well. `value` remains appropriate
+for genuinely dynamic Task results/cancellation reasons and for one-time Lua GC
+roots such as `storage`; it is not the native-handle representation.
+
+Concretely, the first exported wrapper set is `uv_timer_t` with
+`*uv.uv_timer_t`, `uv_file` with scalar `uv.uv_file`, `uv_tcp_t` with
+`*uv.uv_tcp_t`, `uv_pipe_t` with `*uv.uv_pipe_t`, and `uv_process_t` with
+`*uv.uv_process_t`. Request records such as `uv_fs_t`, `uv_connect_t`, and
+`uv_write_t` stay local unless a later API genuinely needs to expose them.
 
 ### Uservalue layout
 
 Give every callback owner a documented fixed slot layout. A representative
 layout is:
 
-| Slot | Root |
+| Slot | Private field/role |
 | --- | --- |
-| 1 | loop/bootstrap main Lua thread |
-| 2 | `uv` module Udata |
-| 3 | fixed module-local native dispatcher CClosure |
-| 4 | Task/root coroutine |
-| 5 | private Request/operation metadata |
-| 6 | input buffer/string or output buffer userdata |
-| 7 | resource owner when request and handle differ |
+| 1 | local typed native-pointer field (navigation, not a GC root) |
+| 2 | local native-storage userdata root |
+| 3 | loop/bootstrap main Lua thread |
+| 4 | `uv` module Udata |
+| 5 | fixed module-local native dispatcher CClosure |
+| 6 | Task/root coroutine |
+| 7 | private Request/operation metadata |
+| 8 | input/output buffer or distinct resource owner |
 
-Not every family needs every slot, but a family must have one stable contract
-covered by a C layout test. Lua's uservalue API numbers these slots from one;
-the corresponding `Udata.uv` indices in the C shim are zero-based. Define both
-sets of named constants together and assert the mapping in that layout test.
+These are the opaque record's local fields/uservalues; not every family needs
+every slot, but a family must have one stable contract covered by a C layout
+test. Lua's uservalue API numbers these slots from one; the corresponding
+`Udata.uv` indices in the C shim are zero-based. Define both sets of named
+constants together and assert the mapping in that layout test.
 
 ### Native callback path
 
@@ -1083,13 +1196,17 @@ reclaims Titan-owned storage only after legal terminal cleanup.
 
 ## Public APIs
 
-The declaration forms below passed a checker-only probe; committed checker and
-binary-interface tests will lock the exact surface during implementation.
+The public callable forms below passed a checker-only probe; committed checker
+and binary-interface tests will lock the exact surface during implementation.
+The snippets now show one representative local ownership field on each opaque
+record; the implementation may add further local state, none of which appears
+in the compiled public interface.
 
 ### `uv` (Lua: `titan.uv`)
 
 ```titan
 record Task
+  local root: coro.Coro
 end
 
 record Error
@@ -1155,6 +1272,7 @@ function sleep(milliseconds: integer)
 function yield()
 
 record Ticker
+  local handle: uv.uv_timer_t
 end
 
 function ticker(milliseconds: integer): Ticker
@@ -1178,6 +1296,7 @@ Initial API:
 
 ```titan
 record File
+  local handle: uv.uv_file
 end
 
 function open(path: string, mode: string): File
@@ -1246,9 +1365,11 @@ Initial API:
 
 ```titan
 record Connection
+  local handle: uv.uv_tcp_t
 end
 
 record Server
+  local handle: uv.uv_tcp_t
 end
 
 function connect(host: string, port: integer): Connection
@@ -1329,6 +1450,7 @@ record ExitStatus
 end
 
 record Process
+  local handle: uv.uv_process_t
 end
 
 function spawn(file: string, args: {string}): Process
@@ -1658,8 +1780,12 @@ Work:
 
 - Import public `uv.h`, Lua headers, `titan/ffi.h`, private shim header, and
   `coro`.
-- Implement loop owner and operation owner userdata allocation in Titan with
-  imported `.sizeof`.
+- Implement loop/operation native-storage userdata allocation in Titan with
+  imported `.sizeof`, plus the separate wrapper record Udata used as callback
+  owner and GC root.
+- Define nominal opaque wrapper records with local typed native-handle,
+  storage-root, lifecycle, and Runtime-generation fields. Use exact wrapper
+  types—not `value`—on every middle-layer handle parameter/return.
 - Implement fixed uservalue layouts and data association through public libuv
   getters/setters.
 - Add concrete typed shim wrappers only where Titan rejects a libuv
@@ -1674,9 +1800,10 @@ Work:
 - Implement timer, close, FS, read/alloc, connect/write, DNS, process, and signal
   callback shapes incrementally; begin with timer + FS only.
 - Add exact-length buffer helpers.
-- Lock the public declarations in checker tests, reject any exported C type,
-  and verify the same canonical interface rehydrates from binary-only `uv.so`
-  and loads through Lua's `titan.uv` alias.
+- Lock the public declarations in checker tests, reject publicly visible C
+  types, verify local C-pointer fields are omitted from the serialized
+  interface, and verify the same canonical wrapper identities rehydrate from
+  binary-only `uv.so` and load through Lua's `titan.uv` alias.
 
 Exit criteria:
 
@@ -1686,6 +1813,10 @@ Exit criteria:
   same Task.
 - Owner survives incremental and generational GC, including old owner -> young
   Task/buffer stores.
+- External Titan code cannot call an opaque wrapper's `new`, use a constructor
+  expression, or substitute another record; Lua entry checks reject a table or
+  wrong-record userdata. Repeated calls through one wrapper allocate no
+  pointer-boxing userdata.
 - Dispatcher failure never unwinds through libuv.
 - Emergency protected-failure capture itself cannot allocate or raise, restores
   the main stack/CallInfo state, and defers formatting until bootstrap control.
@@ -1715,6 +1846,8 @@ Work:
 - Implement close/cancel/drain and `UV_EBUSY` diagnostics.
 - Implement sleep, zero-turn yield, and repeating `Ticker:tick` continuation
   handoff.
+- Give public `Task` and `Ticker` records local root/control and `uv_timer_t`
+  wrapper fields so neither can be constructed outside its declaring module.
 
 Exit criteria:
 
@@ -1747,6 +1880,8 @@ Work:
 
 - Implement mode translation using `UV_FS_O_*`.
 - Implement File state/serialization, open/read/write/flush/close.
+- Store the exact `uv.uv_file` wrapper in a local `File` field; no file method
+  converts a descriptor/pointer through `value`.
 - Implement whole-file helpers with checked chunk growth.
 - Then implement stat/path operations and list.
 
@@ -1793,6 +1928,7 @@ Work:
 - Implement getaddrinfo ownership/cleanup.
 - Implement TCP connect, binary stream read/write, shutdown, close.
 - Implement server listen/accept and bounded accept queue.
+- Store exact `uv.uv_tcp_t` wrappers in local `Connection`/`Server` fields.
 - Implement excess buffering and one-reader policy.
 - Persist EOF/error read-terminal state before continuation drive and reject any
   later `uv_read_start`; close unpublished connect handles on cancellation.
@@ -1816,6 +1952,8 @@ Work:
 - Implement portable `uv_os_*` helpers and checked resizing.
 - Implement common signal-name mapping and one-shot wait.
 - Implement Process + pipe ownership, wait/kill, and communicate/popen.
+- Store the exact `uv.uv_process_t` wrapper (which privately roots its pipe
+  wrappers) in a local `Process` field.
 - Implement phased runtime shutdown for live processes, including spawn-failure
   handle close and exit-before-close ordering for successfully spawned children.
 
@@ -1861,8 +1999,9 @@ Work:
   bundled/system libuv modes.
 - Document synchronous appearance, cooperative scheduling, cancellation points,
   direct callback execution, nonblocking `uv.run`, shared-tag semantics,
-  automatic standalone bootstrap, explicit close, errors, task policy, and
-  unsupported operations.
+  automatic standalone bootstrap, local-field opaque native wrappers and their
+  one-allocation cost model, explicit close, errors, task policy, and unsupported
+  operations.
 - Correct coroutine implementation prose that still describes older callback
   rooting rather than the current handle-uservalue shape.
 - Update the roadmap only when shipped behavior and tests justify it.
@@ -1926,8 +2065,13 @@ module build order, environment flags, and standalone execution.
   capture;
 - both alias load orders map one canonical DSO and one statically linked libuv
   instance while sharing the registry Udata;
-- checker rejection of C types in exported APIs; runtime rejection of forged
-  opaque handles and handles/resources from another Runtime generation;
+- checker acceptance of local C-pointer fields without interface leakage;
+  rejection of external opaque-record construction, wrong record identities,
+  and publicly visible C fields; source/`.so`/Lua identity checks for the same
+  wrappers;
+- allocation counters proving repeated wrapper method/middle-layer calls do not
+  allocate pointer-boxing userdata; runtime rejection of closed wrappers and
+  wrappers/resources from another Runtime generation;
 - bundled static and optional system libuv modes;
 - Linux and macOS.
 
@@ -1975,7 +2119,15 @@ snapshot can otherwise shadow source edits.
 - [ ] Runtime behavior uses public libuv APIs; no hidden POSIX I/O/process path.
 - [ ] Loop/request/handle storage is Lua-GC-owned by default using imported
       `.sizeof`.
-- [ ] All libuv data pointers refer to independently rooted owner userdata.
+- [ ] Every native object crossing a Titan module/API boundary uses one exact
+      wrapper record with a local typed native-handle field and, when needed,
+      one rooted storage owner; native pointers are never transported by
+      `value` coercion.
+- [ ] Opaque wrapper/high-level resource constructors are inaccessible outside
+      their declaring modules, and repeated handle use performs no wrapper or
+      pointer-boxing allocation.
+- [ ] All libuv data pointers refer to independently rooted opaque wrapper
+      record userdata, never the separate native-storage userdata.
 - [ ] Native callbacks use Titan native entry pointers, not Lua wrappers.
 - [ ] No error can unwind through libuv.
 - [ ] Each callback copies/cleans its result, directly drives the captured Task,
