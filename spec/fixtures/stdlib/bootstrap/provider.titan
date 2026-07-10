@@ -1,0 +1,12 @@
+local lua = foreign import "lua.h"
+local ffi = foreign import "titan/ffi.h"
+
+local function bootstrap(main: ({string}) -> integer,
+                         args: {string}): integer
+    return main(args) + 10
+end
+
+do
+    ffi.lua_pushtvalue(L, bootstrap)
+    lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_BOOTSTRAP_KEY)
+end

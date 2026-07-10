@@ -1,6 +1,6 @@
 # Coroutines
 
-Titan's `coro` standard module provides stackful asymmetric coroutines
+Titan's `coroutine` standard module provides stackful asymmetric coroutines
 with tagged nested yield. It is intended as the low-level control-transfer
 building block for schedulers and async I/O libraries; it does not provide
 a scheduler by itself.
@@ -8,10 +8,12 @@ a scheduler by itself.
 Titan code imports it normally:
 
 ```lua
-local coro = import "coro"
+local coroutine = import "coroutine"
 ```
 
-Lua code can load the same module with `require "coro"`.
+Lua code can load the same module with `require "titan.coroutine"`.
+This does not replace Lua's standard coroutine library:
+`require "coroutine"` continues to return Lua's own table.
 
 ## API
 
@@ -29,7 +31,7 @@ function is_yieldable(tag: value): boolean
 ```
 
 The `Coro` record is opaque. Its handle and default tag are private to
-the `coro` module.
+the `coroutine` module.
 
 Titan's ordinary argument adjustment makes the second argument to
 `create`, `resume`, and `error` optional in practice: omitting it passes
@@ -45,8 +47,8 @@ coroutine. `co:resume(arg, tag)` and `co:error(err, tag)` use the
 explicit tag when it is non-nil; otherwise they use the stored default
 tag. If the effective tag is nil, they raise in the caller.
 
-`coro.yield(arg, tag)` and `coro.is_yieldable(tag)` require an explicit
-non-nil tag. They do not use a coroutine's default tag.
+`coroutine.yield(arg, tag)` and `coroutine.is_yieldable(tag)` require an
+explicit non-nil tag. They do not use a coroutine's default tag.
 
 Tags compare by raw Lua/Titan equality. Numbers compare by Lua numeric
 equality, strings by contents, booleans by value, and tables, userdata,
@@ -59,26 +61,26 @@ metamethods.
 successful `resume` calls `func(arg)` in that coroutine.
 
 ```lua
-local coro = import "coro"
+local coroutine = import "coroutine"
 
 function body(arg: value): value
-    local next = coro.yield(arg, "io")
+    local next = coroutine.yield(arg, "io")
     return next
 end
 
 function run(): string
-    local co = coro.create(body, "io")
+    local co = coroutine.create(body, "io")
     local first = co:resume("ready")  -- "ready"; body is suspended at yield
     local done = co:resume("done")    -- "done"; body returns
     return (first as string) .. ":" .. (done as string)
 end
 ```
 
-`coro.yield(arg, tag)` transfers control to the nearest active resumer
-whose tag is raw-equal to `tag`. That resumer's `resume` or `error` call
-returns `arg`.
+`coroutine.yield(arg, tag)` transfers control to the nearest active
+resumer whose tag is raw-equal to `tag`. That resumer's `resume` or
+`error` call returns `arg`.
 
-Calling `coro.yield` outside a Titan coroutine raises in the caller.
+Calling `coroutine.yield` outside a Titan coroutine raises in the caller.
 
 If the immediate resumer's tag does not match, Titan walks outward
 through the active chain of resumes. The matching resumer is the
@@ -88,18 +90,18 @@ resumer and the yielder become `"stacked"` until the resumer is resumed
 and restores the skipped stack.
 
 ```lua
-local coro = import "coro"
+local coroutine = import "coroutine"
 
 function nested(): string
     local tag_main: value = "main"
     local tag_a: value = "a"
 
-    local b = coro.create(function (arg: value): value
-        coro.yield("from-b", tag_main)
+    local b = coroutine.create(function (arg: value): value
+        coroutine.yield("from-b", tag_main)
         return "b-done"
     end, tag_a)
 
-    local a = coro.create(function (arg: value): value
+    local a = coroutine.create(function (arg: value): value
         local got = b:resume("to-b")
         return "a:" .. (got as string)
     end, tag_main)
@@ -121,17 +123,17 @@ main receives "payload"; A is suspended and B is stacked.
 main resumes A again; A and B are restored and B's yield returns.
 ```
 
-`coro.is_yieldable(tag)` returns whether a yield with `tag` would find a
-matching active resumer in the current chain. Outside a Titan
+`coroutine.is_yieldable(tag)` returns whether a yield with `tag` would
+find a matching active resumer in the current chain. Outside a Titan
 coroutine it returns `false`.
 
 Lua code uses the same module dynamically:
 
 ```lua
-local coro = require "coro"
+local coroutine = require "titan.coroutine"
 
-local co = coro.create(function(arg)
-    local next_value = coro.yield(arg, "io")
+local co = coroutine.create(function(arg)
+    local next_value = coroutine.yield(arg, "io")
     return next_value
 end, "io")
 
@@ -144,13 +146,13 @@ assert(co:resume("done") == "done")
 `co:error(err, tag)` resumes a coroutine by sending an error instead of
 a successful value.
 
-If the coroutine is suspended at a `coro.yield`, that yield raises `err`
-at the yield site. The coroutine may catch it:
+If the coroutine is suspended at a `coroutine.yield`, that yield raises
+`err` at the yield site. The coroutine may catch it:
 
 ```lua
 function body(arg: value): value
     do
-        coro.yield("ready", "tag")
+        coroutine.yield("ready", "tag")
     catch
         return "caught:" .. (error as string)
     end
@@ -181,11 +183,12 @@ Calling `resume` or `error` on a `running`, `normal`, `stacked`, or
 `dead` coroutine raises in the caller. For a tagged nested yield, resume
 the suspended handler that received the yield instead.
 
-Titan coroutines are not Lua coroutines. `coro.yield` does not call
-`lua_yield`, and Lua's `coroutine.status` does not describe these
-coroutines.
+Titan coroutines are not Lua coroutines. The `yield` function on Titan's
+imported `coroutine` module does not call `lua_yield`, and Lua's
+`coroutine.status` does not describe these coroutines.
 
 Coroutine stacks are finite. The current implementation uses large
 virtual-memory-backed stacks, but deeply recursive coroutine bodies can
-still overflow them. The `coro` module is a low-level control-transfer
-primitive, not a scheduler or an async I/O policy by itself.
+still overflow them. The `coroutine` module is a low-level
+control-transfer primitive, not a scheduler or an async I/O policy by
+itself.

@@ -31,11 +31,30 @@ test = {
    type = "busted"
 }
 hooks = {
-   post_install = "make stdlib CC=\"$(CC)\" && mkdir -p $(LIBDIR) $(PREFIX)/../../../../lua/$(LUA_VERSION) && cp coro.so $(LIBDIR)/coro.so && cp coro.so $(PREFIX)/../../../../lua/$(LUA_VERSION)/coro.so"
+   post_install = [[set -e
+      titan_libdir="$(PREFIX)/../../../../lua/$(LUA_VERSION)/titan"
+      for module in coroutine uv; do
+         test -f "$titan_libdir/stdlib_0_11/$module.so"
+         rm -f "$titan_libdir/$module.so"
+         ln -s "stdlib_0_11/$module.so" "$titan_libdir/$module.so"
+      done]]
 }
 build = {
-   type = "builtin",
-   modules = {
+   type = "make",
+   build_target = "rock-build",
+   install_pass = false,
+   build_variables = {
+      ROCK_LUA_INCDIR = "$(LUA_INCDIR)",
+      ROCK_CFLAGS = "$(CFLAGS)",
+      ROCK_LD = "$(LD)",
+      ROCK_LIBFLAG = "$(LIBFLAG)"
+   },
+   copy_directories = {
+      "doc",
+      "LICENSES"
+   },
+   install = {
+      lua = {
       ["titan-compiler.ast"] = "titan-compiler/ast.lua",
       ["titan-compiler.checker"] = "titan-compiler/checker.lua",
       ["titan-compiler.coder"] = "titan-compiler/coder.lua",
@@ -55,12 +74,20 @@ build = {
       ["c-parser.cdriver"] = "c-parser/cdriver.lua",
       ["c-parser.cpp"] = "c-parser/cpp.lua",
       ["c-parser.ctypes"] = "c-parser/ctypes.lua",
-      ["c-parser.cdefines"] = "c-parser/cdefines.lua",
-      ["titan"] = "titan-runtime/titanlib.c"
-  },
-   install = {
+      ["c-parser.cdefines"] = "c-parser/cdefines.lua"
+      },
+      lib = {
+         ["titan"] = "titan.so",
+         ["titan.stdlib_0_11.coroutine"] = "coroutine.so",
+         ["titan.coroutine"] = "coroutine.so",
+         ["titan.stdlib_0_11.uv"] = "uv.so",
+         ["titan.uv"] = "uv.so"
+      },
       bin = {
          "titanc"
+      },
+      conf = {
+         "THIRD_PARTY_NOTICES.md"
       }
    }
 }

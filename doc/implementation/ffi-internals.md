@@ -11,7 +11,10 @@ For user-facing behavior see [the C FFI](../language/ffi.md).
 ## Import Pipeline
 
 The checker's `Ast.TopLevelForeignImport` handler calls
-`cdriver.process_file(header, { source_dir = st.source_dir })`. On success it
+`cdriver.process_file` with the importing source directory plus the configured
+compiler, C99 language mode, and already parsed `TITAN_EXTRA_CPPFLAGS`.
+The driver also supplies its current fixed runtime and Lua include directories;
+`titanc --lua` updates that configuration before checking begins. On success it
 gets:
 
 * a TypeList from the C parser;
@@ -26,8 +29,12 @@ or system header becomes `#include <name.h>`; an absolute path is quoted.
 
 The four C-pipeline stages are:
 
-1. `cpp.parse_file` preprocesses the header, using `gcc -dM -E` for predefined
-   macros and `cpp -v` for system include paths.
+1. `cpp.new_context` asks the configured compiler with user CPP flags first,
+   Titan's fixed C99 mode next, and the actual runtime/Lua include directories
+   last for predefined macros (`-dM -E`) and system include paths (`-E -v`),
+   then `cpp.parse_file` preprocesses the header. Contexts are cached by the
+   complete effective argument vector and copied for each import; recursive
+   includes share the per-import context.
 2. `c99.match_language_grammar` parses the preprocessed C translation unit.
 3. `ctypes.register_types` extracts declarations into a TypeList.
 4. `cdefines.register_defines` adds typed object-like `#define` constants.
@@ -362,8 +369,10 @@ left for a later FFI iteration.
 
 ## Platform Constraints And Failure Modes
 
-* Compile-time POSIX dependency: `gcc -dM -E`, `cpp -v`, `/dev/null`,
-  `LANG=C`.
+* Compile-time POSIX dependency: the configured C compiler's `-E`, `-dM`, and
+  `-v` modes, `/dev/null`, and `LANG=C`/`LC_ALL=C`. Ambient `CPATH` remains in
+  force; explicit include paths and feature macros belong in
+  `TITAN_EXTRA_CPPFLAGS` so checking and generated compilation agree.
 * The built-in C parser accepts common GNU/Clang/macOS extensions, but headers
   outside that subset can fail during preprocessing or parsing.
 * Some preprocessor paths still raise raw Lua errors instead of diagnostics

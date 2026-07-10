@@ -16,7 +16,11 @@ Titan is a statically-typed, ahead-of-time-compiled sister language to Lua. This
   cd lua-5.5.0 && make linux MYCFLAGS=-fPIC    # 'make macosx' on Darwin
   ```
 - **Lua deps**: `luarocks make titan-dev-1.rockspec` installs lpeglabel, inspect, argparse, luafilesystem, plus the `titan` runtime-support module (`titan.backtrace()`) that one coder spec requires. The rockspec is format 3.0 and declares `test_dependencies` (busted, cluacov) plus a `test = { type = "busted" }` block, so `luarocks test` installs those and runs the suite (no separate `luarocks install busted`). Note `luarocks test` does **not** build the rock-under-test — only its deps — so the `titan` C module won't exist on a fresh tree until you `luarocks make`; `make test` runs both for you.
-- **C toolchain**: `cc` for compilation; the C FFI also shells out to `gcc -dM -E` and `cpp -v` at compile time (POSIX only).
+- **C toolchain**: `CC` (default `cc`) for compilation and for the C FFI's
+  predefined-macro/include-search probes. The FFI uses the same C99 mode and
+  parsed `TITAN_EXTRA_CPPFLAGS` as generated C. The probe is POSIX-only today
+  (`/dev/null`, `LANG=C`). Bundled libuv additionally needs CMake, tar, a
+  downloader (`curl` or `wget`), and `sha256sum` or `shasum`.
 
 ## Commands
 
@@ -28,6 +32,7 @@ eval $(./luarocks path --bin)
 
 ```sh
 make lua                                            # download + build the ./lua-5.5.0 source tree (one-time setup)
+make libuv                                          # build pinned static PIC libuv (bundled default)
 make test                                           # `luarocks make` + `luarocks test`: (re)install the rock, then run the full suite
 luarocks make && luarocks test -- -c -o gtest -v    # what CI runs (luarocks test does NOT build the rock; flags after -- go to busted; -c = coverage)
 make clean                                           # remove generated artifacts; `make distclean` also removes the lua tree
@@ -37,7 +42,9 @@ busted spec/parser_spec.lua                         # single spec file
 busted spec/coder/coder_spec.lua --filter='for loop' # single test (Lua pattern on test name)
 LUA_CPATH="./?.so;./lua_modules/lib/lua/5.5/?.so;;" busted   # if busted can't find the 'titan' C module (the ./lua wrapper already includes these paths)
 
-./titanc [--print-ast] [-v] [--lua <luasrc>] [--tree <srcroot>] [-l lib1,lib2] <module>...
+./titanc [--print-ast] [-v] [--lua <luasrc>] [--tree <srcroot>] \
+  [-l lib1,lib2] [-X object...] [--stdlib-build] \
+  [--lua-name qualified.name] <module>...
 ```
 
 **Spec layout.** Pure, layer-level specs live at `spec/` root (`cpp_spec`, `lexer_spec`, `location_spec`, `parser_spec`, `symtab_spec`, `types_spec`, `util_spec`). Checker-only specs (run the checker, never generate or execute code) live under `spec/checker/` (`checker_spec`, `first_class_functions_spec`, `so_rehydration_spec`, `variadic_spec`); end-to-end specs (generate C, compile, run) under `spec/coder/` (`coder_spec`, `first_class_functions_spec`, `so_import_spec`, `variadic_spec`). Keep the two apart — a checker assertion belongs in `spec/checker/`, anything that compiles and runs in `spec/coder/`. A sizable per-feature suite gets its own topical `<feature>_spec.lua` in each layer (e.g. `variadic_spec`, `first_class_functions_spec`) rather than bloating the catch-all `checker_spec`/`coder_spec`. All driver/artifact paths inside specs are relative to the repo-root CWD (not the spec file), so subdir specs still run from repo root. The shared compile/run/import scaffolding (`parse`, `compile`, `call`, `run_coder`, `generate_modules`, `build_so_chain`, `check_against_so`, `run_checker`, `check_errs`, `DEPTH_PROBE`, ...) lives in **`spec/support/helpers.lua`**, `require`d as `spec.support.helpers`; it pulls in luassert explicitly (`require 'luassert'`) because a `require`d module does not inherit busted's `assert` global. Set `helpers.verbose = true` (was a per-file `local verbose`) to print `cc` command lines and keep generated `.c` files.
@@ -54,7 +61,7 @@ The coder targets Lua 5.5 internals; keep these idioms when touching templates: 
 
 ## Architecture
 
-Pipeline (all in `titan-compiler/`): source text → `parser.parse` → `checker.check` → `coder.generate` → `pretty.reindent_c` → `driver` writes the `.c` **next to the `.titan` source** and invokes `cc` (`driver.CC`/`driver.CFLAGS`, via `os.execute` with no escaping). `titanc` orchestrates: typecheck everything first, exit 1 with all errors before any codegen, then compile and link.
+Pipeline (all in `titan-compiler/`): source text → `parser.parse` → `checker.check` → `coder.generate` → `pretty.reindent_c` → `driver` writes the `.c` **next to the `.titan` source** and invokes the parsed `CC` command with each argument shell-quoted. `TITAN_EXTRA_CPPFLAGS` precedes the defaults and is shared with foreign-import probes, `TITAN_EXTRA_CFLAGS` is compile-only, and ordered `TITAN_EXTRA_LDFLAGS` is final-link-only. `titanc` orchestrates: typecheck everything first, exit 1 with all errors before any codegen, then compile and link.
 
 ### The `_tag` / typedecl convention (cross-cutting)
 
@@ -97,7 +104,7 @@ Lexing and parsing are fused in one LPegLabel/relabel grammar; `lexer.lua` expor
 
 ### C FFI (`c-parser/`, `foreigntypes.lua`)
 
-`foreign import "header.h"` invokes a pure-Lua C toolchain: `cpp.lua` (full hand-written preprocessor; gets system include paths and predefined macros by shelling out to `cpp`/`gcc`), `c99.lua` (relabel C99 grammar; module-global typedef table, not reentrant), `ctypes.lua`/`cdefines.lua` (build a TypeList), and `cdriver.lua` (include resolution plus C type extraction). The checker passes the importing Titan source directory to `cdriver`, which emits quoted `#include "..."` syntax only when the header is found by the quoted-include rules relative to that source; otherwise generated C uses angle brackets. `cdriver` also exposes `titan-runtime/titan/ffi.h`, which defines selected `titan_ffi_*` aliases for portable C primitive types.
+`foreign import "header.h"` invokes a pure-Lua C toolchain: `cpp.lua` (full hand-written preprocessor; asks the configured `CC -std=c99` plus parsed `TITAN_EXTRA_CPPFLAGS` for system include paths and predefined macros), `c99.lua` (relabel C99 grammar; module-global typedef table, not reentrant), `ctypes.lua`/`cdefines.lua` (build a TypeList), and `cdriver.lua` (include resolution plus C type extraction). The checker passes the importing Titan source directory and the shared toolchain configuration to `cdriver`, which emits quoted `#include "..."` syntax only when the header is found by the quoted-include rules relative to that source; otherwise generated C uses angle brackets. `cdriver` also exposes `titan-runtime/titan/ffi.h`, which defines selected `titan_ffi_*` aliases for portable C primitive types.
 
 `foreigntypes.convert` maps C declarations to the `Type.C*` family (`CVoid`, `CInteger`, `CFloat`, `CPointer`, `CArray`, `CStruct`, `CUnion`, `CFunction`, `CTypedef`, `CModule`, and owned storage wrappers). C imports are namespaces, not first-class values: the checker represents them as `Type.CModule` (renamed from the prototype's foreign-module type), typedef-qualified names such as `c.T` may be used in local annotations, and `types.serialize` rejects any exported function/method/variable type that mentions a C FFI type. C aggregate fields, C array indexing, `#` on static arrays and counted owned buffers, and explicit C vararg calls are implemented; C array indexing is 0-based, bounds-checked for `CArray` and counted `COwned`, and null-checked but otherwise unchecked for raw `CPointer`.
 

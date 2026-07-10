@@ -2655,6 +2655,31 @@ describe("Titan code generator", function()
         ]])
     end)
 
+    it("calls and binds functions on records with underscored names", function ()
+        run_coder([[
+            record native_handle
+                n: integer
+            end
+
+            function native_handle.make(n: integer): native_handle
+                return native_handle.new(n)
+            end
+
+            function native_handle:bump(delta: integer): integer
+                self.n = self.n + delta
+                return self.n
+            end
+
+            function exercise(): integer
+                local handle = native_handle.make(10)
+                local bound: (integer) -> integer = handle:bump
+                return handle:bump(2) + bound(3)
+            end
+        ]], [[
+            assert(test.exercise() == 12 + 15)
+        ]])
+    end)
+
     it("initializes a record using new", function ()
         run_coder([[
             record Point

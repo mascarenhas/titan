@@ -418,10 +418,13 @@ library that implements them with `titanc -l`:
 titanc examples.sdl_demo -lSDL2
 ```
 
-The compile-time FFI depends on a POSIX-like C toolchain: Titan shells out to
-`gcc -dM -E` for predefined macros and `cpp -v` for include paths, and then
-parses the preprocessed header with its own C99 grammar. Headers using
-unsupported compiler extensions may fail with a compile-time parse error.
+The compile-time FFI depends on a POSIX-like C toolchain. Titan asks the
+configured `CC` (default `cc`) for predefined macros and include paths in C99
+mode, using the same parsed `TITAN_EXTRA_CPPFLAGS` that precede the defaults
+when generated C is compiled. This is the supported way to provide `-I` and
+`-D` options, including quoted paths containing spaces. Titan then parses the
+preprocessed header with its own C99 grammar. Headers using unsupported
+compiler extensions may fail with a compile-time parse error.
 
 ## Current Limitations
 

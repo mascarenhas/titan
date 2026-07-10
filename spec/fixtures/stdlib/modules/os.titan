@@ -1,0 +1,8 @@
+local coroutine = import "coroutine"
+
+count: integer = 0
+
+function bump(): integer
+    count = count + 1
+    return coroutine.marker() + count
+end

@@ -21,6 +21,49 @@ the `linux`/`macosx` build target from `uname` (override with
 `make lua LUA_PLATFORM=...`). To do it by hand instead, download and extract the
 tarball into a `lua-5.5.0` folder and run `make linux MYCFLAGS=-fPIC` inside it.
 
+Titan's async standard library uses libuv. The supported default is a pinned
+libuv 1.52.1 static PIC build, so neither the compiler nor the resulting
+standard modules depend on an unversioned system libuv at runtime. Install a C
+compiler, CMake, tar, a downloader, and a SHA-256 tool, then let the Makefile
+fetch, verify, and build it:
+
+```sh
+# Ubuntu/Debian
+sudo apt-get install build-essential cmake curl
+
+# Fedora
+sudo dnf install gcc make cmake curl
+
+# macOS (Apple's curl, tar, and shasum are already present)
+xcode-select --install
+brew install cmake
+
+make libuv
+```
+
+`make all`, `make stdlib`, and the LuaRocks build also build this bundled
+copy automatically. To use a system development package instead, install it
+with pkg-config and select the optional mode explicitly:
+
+```sh
+# Ubuntu/Debian
+sudo apt-get install libuv1-dev pkg-config
+# Fedora
+sudo dnf install libuv-devel pkgconf-pkg-config
+# macOS (Homebrew's prefix is discovered through pkg-config)
+brew install libuv pkgconf
+
+LIBUV_MODE=system make libuv
+LIBUV_MODE=system ./luarocks make
+```
+
+System mode requires libuv 1.43.0 or newer and consumes the complete ordered
+`pkg-config --cflags/--libs` output. Run `make libuv-config` to inspect the
+effective mode, include flags, archive, and support libraries; `make help`
+lists the related targets and setup hints. The Makefile records the effective
+mode, compiler, and flags, so switching between bundled and system mode
+rebuilds `titan_uv.o` and `uv.so` without requiring a manual clean.
+
 You can install the Titan compiler and its dependencies using  [LuaRocks](http://luarocks.org)
 making sure that the dependencies will use the same exact Lua version Titan is using.
 After installing luarocks, run these commands in the root of this repository:
@@ -35,6 +78,25 @@ the correct project paths baked in.  To also put `titanc` and `busted` (from
 
         $ cd <titan folder> && eval $(./luarocks path --bin)
 
+LuaRocks records the canonical standard-module image under its managed,
+ABI-qualified `lib/lua/5.5/titan/stdlib_0_11/` directory and replaces the
+managed Lua-facing file with a relative symlink under `lib/lua/5.5/titan/`.
+Both paths therefore belong to the rock manifest, binary rocks, upgrades, and
+uninstall while still mapping one DSO image. A project-local `luarocks init` is
+a custom prefix, so point Titan's dedicated standard loader at it when
+compiling or running code that imports a standard module:
+
+```sh
+export TITAN_STDLIB_PATH="$PWD/lua_modules/lib/lua/5.5/titan/stdlib_0_11"
+```
+
+For a manual prefix, `make install-stdlib PREFIX=/opt/titan` installs canonical
+modules under `/opt/titan/lib/titan/0.11` and Lua aliases under
+`/opt/titan/lib/lua/5.5/titan`; set `TITAN_STDLIB_PATH` to the former and add
+`/opt/titan/lib/lua/5.5/?.so` to `LUA_CPATH` for Lua hosts. The standard path is
+separate from ordinary `TITAN_PATH` by design, so an application-local module
+cannot replace a standard dependency.
+
 # Usage
 
         $ titanc [--print-ast] [--lua <path>] [--tree <path>] <module> [<module>]
@@ -45,6 +107,13 @@ but you can override this with the `--tree` option), as well as in the Titan
 binary path, a semicolon-separated list of paths 
 (defaults to `.;/usr/local/lib/titan/0.11`, you can override with a `TITAN_PATH_0_11`
 or `TITAN_PATH` environment variable).
+
+The reserved standard modules (`coroutine`, `uv`, `timer`, `fs`, `net`, and
+`os`) use the separate `TITAN_STDLIB_PATH` (installed default
+`/usr/local/lib/titan/0.11`) and cannot be shadowed through `--tree` or
+`TITAN_PATH`. Titan code imports them by their short names, while Lua uses the
+qualified aliases such as `require "titan.coroutine"` and eventually
+`require "titan.uv"`; Lua's own `coroutine` and `os` modules remain unchanged.
 
 If everything is all right with your modules, you will get the result of
 your compilation as a native binary:
@@ -112,10 +181,21 @@ C, compiled modules, coverage data) while keeping the downloaded Lua tree.
 
 # Compiler options
 
-        --print-ast                     Print the AST.
-        --lua <path>                    Path to the Lua sources (default 'lua-5.5.0/src')
-        --tree <path>                   Path to the source tree for your Titan modules (default '.')
-        -h, --help                      Show this help message and exit.
+        --print-ast                       Print the AST.
+        -v, --verbose                     Print safely quoted effective compiler commands.
+        --lua <path>                      Path to the Lua sources (default 'lua-5.5.0/src').
+        --tree <path>                     Path to the source tree for Titan modules (default '.').
+        -l, --link <lib1,lib2>            Add libraries to the final link.
+        -X, --extra-object <object...>     Add object/archive inputs to the final link.
+        --stdlib-build                    Build one reserved standard source root (Makefile use).
+        --lua-name <qualified.name>        Export a distinct Lua require entry for one root.
+        -h, --help                        Show this help message and exit.
+
+`CC` selects the compiler. `TITAN_EXTRA_CPPFLAGS` carries append-only `-I`/`-D`
+arguments shared by C-FFI checking and generated compilation;
+`TITAN_EXTRA_CFLAGS` is compile-only; and ordered `TITAN_EXTRA_LDFLAGS` is
+final-link-only. Shell quoting in these environment strings is parsed once, so
+paths containing spaces stay one argument and malformed quoting is rejected.
         
 # Tentative roadmap
 

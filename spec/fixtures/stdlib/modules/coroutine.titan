@@ -1,0 +1,3 @@
+function marker(): integer
+    return 100
+end

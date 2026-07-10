@@ -1,0 +1,6 @@
+local standard_os = import "os"
+local ordinary = import "ordinary_dep"
+
+function sum(): integer
+    return standard_os.bump() + ordinary.answer()
+end

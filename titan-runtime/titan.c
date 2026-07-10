@@ -489,6 +489,21 @@ static void pushpath (lua_State *L) {
     }
 }
 
+static void pushstdlibpath (lua_State *L) {
+    lua_pushliteral(L, TITAN_STDLIB_PATH_KEY);
+    lua_rawget(L, LUA_REGISTRYINDEX);
+    if(lua_isnil(L, -1)) {
+        const char *path;
+        lua_pop(L, 1);
+        path = getenv(TITAN_STDLIB_PATH_VAR);
+        if(path == NULL) path = TITAN_STDLIB_PATH_DEFAULT;
+        lua_pushstring(L, path);
+        lua_pushliteral(L, TITAN_STDLIB_PATH_KEY);
+        lua_pushvalue(L, -2);
+        lua_rawset(L, LUA_REGISTRYINDEX);
+    }
+}
+
 static const char *pushnextdir (lua_State *L, const char *path) {
     const char *l;
     while (*path == ';') path++;  /* skip separators */
@@ -499,23 +514,13 @@ static const char *pushnextdir (lua_State *L, const char *path) {
     return l;
 }
 
-static int gctm (lua_State *L) {
-    lua_Integer n = luaL_len(L, 1);
-    /* for each handle, in reverse order */
-    for (; n >= 1; n--) {
-        lua_rawgeti(L, 1, n);  /* get handle LIBS[n] */
-        dlclose(lua_touserdata(L, -1));
-        lua_pop(L, 1);  /* pop handle */
-    }
-    return 0;
-}
-
 static void createlibstable (lua_State *L) {
     lua_newtable(L);
-    lua_createtable(L, 0, 1);  /* create metatable */
-    lua_pushcfunction(L, gctm);
-    lua_setfield(L, -2, "__gc");  /* set finalizer */
-    lua_setmetatable(L, -2);
+    /* Keep Titan DSOs mapped for the process lifetime.  A flat load-order
+    ** finalizer cannot safely unload a manually wired dependency graph: the
+    ** required order depends on which module was initialized first, and Lua
+    ** finalizers can still hold native entry pointers.  The old string-only
+    ** table's luaL_len was zero, so it also never actually called dlclose. */
     lua_pushliteral(L, TITAN_LIBS_KEY);
     lua_pushvalue(L, -2);
     lua_rawset(L, LUA_REGISTRYINDEX);
@@ -530,9 +535,17 @@ static void pushlibs(lua_State *L) {
     }
 }
 
-void *loadlib (lua_State *L, const char *file) {
+static void pushlibkey(lua_State *L, const char *file, int standard) {
+    if(standard) {
+        lua_pushfstring(L, "stdlib:%s", file);
+    } else {
+        lua_pushstring(L, file);
+    }
+}
+
+static void *loadlibfrompath(lua_State *L, const char *file, int standard) {
     pushlibs(L);
-    lua_pushstring(L, file);
+    pushlibkey(L, file, standard);
     lua_rawget(L, -2); // try to get lib
     if(!lua_isnil(L, -1)) {
         void *lib = lua_touserdata(L, -1);
@@ -540,7 +553,7 @@ void *loadlib (lua_State *L, const char *file) {
         return lib;
     } else {
         lua_pop(L, 1); // pop nil
-        pushpath(L);
+        if(standard) pushstdlibpath(L); else pushpath(L);
         const char *path = lua_tostring(L, -1);
         while((path = pushnextdir(L, path)) != NULL) {
             const char *dir = lua_tostring(L, -1);
@@ -554,7 +567,7 @@ void *loadlib (lua_State *L, const char *file) {
                 ** path above loads nothing, so it must NOT invalidate). */
                 titan_invalidate_backtrace_state(L);
                 lua_pop(L, 3); // pop path, filename, and dir
-                lua_pushstring(L, file);
+                pushlibkey(L, file, standard);
                 lua_pushlightuserdata(L, lib);
                 lua_rawset(L, -3); // add to libs table
                 lua_pop(L, 1); // pop libs table
@@ -563,9 +576,20 @@ void *loadlib (lua_State *L, const char *file) {
             lua_pop(L, 2); // pop filename and dir
         }
         lua_pop(L, 2); // pop path and libs table
-        luaL_error(L, dlerror());
+        const char *err = dlerror();
+        luaL_error(L, "cannot load %s '%s': %s",
+            standard ? "standard module" : "module", file,
+            err != NULL ? err : "search path is empty");
         return NULL;
     }
+}
+
+void *loadlib (lua_State *L, const char *file) {
+    return loadlibfrompath(L, file, 0);
+}
+
+void *loadstdlib (lua_State *L, const char *file) {
+    return loadlibfrompath(L, file, 1);
 }
 
 void *loadsym (lua_State *L, void *lib, const char *sym) {

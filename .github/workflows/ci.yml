@@ -33,6 +33,9 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       LUAROCKS_VERSION: "3.13.0"
+      LIBUV_VERSION: "1.52.1"
+      # Bump when any CMake option that affects the cached archive changes.
+      LIBUV_BUILD_PROFILE: "static-pic-release-tests-off-v1"
 
     steps:
       - uses: actions/checkout@v6
@@ -51,9 +54,22 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-lua_modules-
 
+      - name: Cache bundled libuv source and static build
+        uses: actions/cache@v5
+        with:
+          path: |
+            libuv-v${{ env.LIBUV_VERSION }}
+            libuv-v${{ env.LIBUV_VERSION }}.tar.gz
+            libuv-build
+          key: ${{ runner.os }}-${{ runner.arch }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-${{ hashFiles('Makefile') }}
+
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libreadline-dev
+        run: sudo apt-get update && sudo apt-get install -y cmake curl libreadline-dev libuv1-dev pkg-config
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake libuv pkgconf
 
       - name: Build the bundled Lua 5.5 source tree
         run: make lua LUA_PLATFORM=${{ matrix.lua_os }}
@@ -63,6 +79,9 @@ jobs:
       # luarocks directly rather than `make test`, so build the tree explicitly.
       - name: Build the bundled libbacktrace
         run: make libbacktrace
+
+      - name: Build the pinned bundled libuv
+        run: make libuv
 
       # Install LuaRocks from source, pointing it at the vendored Lua 5.5 in
       # .lua/.  This replaces hererocks and eliminates the Python dependency.
@@ -101,6 +120,25 @@ jobs:
       # `luarocks test` does not build the rock-under-test, only its dependencies.
       - name: Build and install the rock
         run: ./luarocks make
+
+      # The normal build above proves the pinned, self-contained archive path.
+      # Also compile and load against the platform development package, then
+      # switch back without cleaning. This locks the optional pkg-config mode
+      # and the Makefile configuration stamp on both supported hosts.
+      - name: Smoke-test system libuv mode and mode switching
+        run: |
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            export PKG_CONFIG_PATH="$(brew --prefix libuv)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          fi
+          LIBUV_MODE=system make stdlib
+          env TITAN_STDLIB_PATH="$PWD" LUA_CPATH="$PWD/?.so;;" \
+            .lua/bin/lua -e 'local uv = require "titan.uv"; assert(type(uv.version()) == "string")'
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            otool -L uv.so | grep -i libuv
+          else
+            readelf -d uv.so | grep -i libuv
+          fi
+          make stdlib
 
       # `luarocks test` installs the test_dependencies (busted, cluacov) declared
       # in the rockspec and runs the suite; flags after `--` are forwarded to busted.

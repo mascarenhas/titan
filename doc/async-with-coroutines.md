@@ -3,7 +3,7 @@
 Status: finalized implementation spec for the roadmap item "asymmetric,
 tagged (nested) coroutines as building block for async IO".
 
-This feature adds a small standard-library module, `coro`, that gives
+This feature adds a small standard-library module, `coroutine`, that gives
 Titan stackful, asymmetric coroutines with tagged nested yield. The
 public API is written in Titan and delegates to private C runtime helpers
 through the FFI. It is the control-transfer substrate for later async IO
@@ -19,10 +19,12 @@ semantics of https://github.com/mascarenhas/taggedcoro.
 Titan code imports the module statically:
 
 ```lua
-local coro = import "coro"
+local coroutine = import "coroutine"
 ```
 
-Lua code can load the same module dynamically with `require "coro"`.
+Lua code can load the same module dynamically with
+`require "titan.coroutine"`. Lua's `require "coroutine"` remains the
+standard Lua coroutine table; Titan's module does not replace it.
 
 The Titan interface is:
 
@@ -106,7 +108,7 @@ nil.
 resumed, installs that tag as the current active handler, and transfers
 control into `co`.
 
-When `co` reaches `coro.yield(value, matching_tag)`, the `resume` call
+When `co` reaches `coroutine.yield(value, matching_tag)`, the `resume` call
 returns `value` and `co` becomes `suspended`. For a nested tagged yield,
 the matching handler becomes `suspended` and inner coroutines up to the
 yielder become `stacked`.
@@ -140,7 +142,7 @@ caller.
 
 ### Yielding
 
-`coro.yield(arg, tag)` can be called only while running inside a Titan
+`coroutine.yield(arg, tag)` can be called only while running inside a Titan
 coroutine. It requires a non-nil tag. If no active handler in the dynamic
 resume chain has a raw-equal tag, `yield` raises in the current
 coroutine.
@@ -152,12 +154,14 @@ error back in, `yield` raises that error at the yield site.
 Titan coroutine yield is not Lua coroutine yield. It does not call
 `lua_yield`, does not set `lua_State.status` to `LUA_YIELD`, and is not
 observable through Lua's `coroutine.status`. Lua code running inside a
-Titan coroutine must use `coro.yield`; plain `coroutine.yield` remains
-subject to Lua's usual C-call-boundary restrictions.
+Titan coroutine must use the Titan module loaded as
+`require "titan.coroutine"`; the `yield` function on Lua's standard
+`coroutine` table remains subject to Lua's usual C-call-boundary
+restrictions.
 
 ### Testing yieldability
 
-`coro.is_yieldable(tag)` returns whether a `yield` with that non-nil tag
+`coroutine.is_yieldable(tag)` returns whether a `yield` with that non-nil tag
 would currently find a matching active handler. It returns `false`
 outside Titan coroutines and inside coroutines whose dynamic resume chain
 does not contain the tag.
@@ -181,30 +185,31 @@ direct-resume case.
 
 ## Module shape
 
-`coro` is an ordinary Titan source module installed with the compiler. It
-owns the public `Coro` record, default-tag policy, status-string mapping,
-result-code checks, success/error payload convention, Lua-thread/userdata
-setup, and Titan/Lua-facing entry wrappers. Its implementation imports
-minicoro and private runtime headers:
+`coroutine` is an ordinary Titan source module installed with the
+compiler. It owns the public `Coro` record, default-tag policy,
+status-string mapping, result-code checks, success/error payload
+convention, Lua-thread/userdata setup, and Titan/Lua-facing entry
+wrappers. Its implementation imports minicoro and private runtime
+headers:
 
 ```lua
 local mco = foreign import "minicoro.h"
 local lua = foreign import "lua.h"
 local lual = foreign import "lauxlib.h"
 local ffi = foreign import "titan/ffi.h"
-local coro = foreign import "titan/coro.h"
+local coro_native = foreign import "titan/coro.h"
 ```
 
 The FFI calls that need the current Lua state use Titan's existing
-built-in `L` local. The functions in `coro.titan` that create handles
-already have that `L`; no new language surface is needed to pass the
-calling state to C.
+built-in `L` local. The functions in `stdlib/coroutine.titan` that
+create handles already have that `L`; no new language surface is needed
+to pass the calling state to C.
 
-The C helper interface is deliberately tiny. `coro.titan` imports
+The C helper interface is deliberately tiny. `stdlib/coroutine.titan` imports
 `minicoro.h` directly, reads the `mco_coro` fields it needs, constructs
 the owner userdata and typed handle, and calls the minicoro
 storage/control APIs directly.
-The C helper surface used by `coro.titan` consists of the entry
+The C helper surface used by `stdlib/coroutine.titan` consists of the entry
 trampoline and static tag comparator:
 
 ```c
@@ -222,7 +227,7 @@ the caller appends its propagation traceback before re-raising. On
 `ok=false` after `yield`, the source is still live and the payload is
 simply the injected error.
 
-`coro.titan` then has the public shape:
+`stdlib/coroutine.titan` then has the public shape:
 
 ```lua
 function create(func: (value) -> value, default_tag: value): Coro
@@ -272,7 +277,7 @@ end
 
 function yield(arg: value, tag: value): value
   if tag == nil then
-    raise "must provide non-nil tag argument to coro.yield"
+    raise "must provide non-nil tag argument to coroutine.yield"
   end
   local co = mco.mco_running()
   push_transfer(co, 1, arg)
@@ -348,7 +353,7 @@ traced Lua object. The coroutine helpers are allowed to keep by-value copies
 across a minicoro stack switch because the Titan frames that supplied those
 parameters are not unwound by `yield`.
 
-With those rules, `coro.titan` does not need C shims for storage or
+With those rules, `stdlib/coroutine.titan` does not need C shims for storage or
 tag-only minicoro operations. It can call `mco_push`/`mco_pop` directly
 with `TValue` and `int` locals, and it can materialize a tag as a local
 C `TValue` before passing it to `mco_resume`, `mco_yield`, or
@@ -356,7 +361,7 @@ C `TValue` before passing it to `mco_resume`, `mco_yield`, or
 
 ## Coroutine object representation
 
-The exported `Coro` record is opaque. Its fields are local to `coro`:
+The exported `Coro` record is opaque. Its fields are local to `coroutine`:
 
 * `udata: value` roots the full owner userdata whose raw payload is an
   `mco_coro *` slot.
@@ -376,6 +381,11 @@ The owner userdata has four uservalues that root:
 2. the coroutine module state;
 3. the native Titan entry closure;
 4. the callback function value passed to `create`.
+
+The module slot is a real full-userdata root, not a boxed native pointer.
+`M` is a native `Udata *`, so `create` obtains the module value from Lua
+upvalue 1 of the canonical entry closure through `lua_getupvalue` and stores
+that already existing value in the owner userdata.
 
 The child-thread frame roots a final callback return/error payload while
 the entry point copies it into minicoro storage, stages any captured
@@ -411,7 +421,7 @@ unwinding the Lua/Titan call stack that called `yield`. Therefore:
   resumed coroutine runs;
 * the `err` formal parameter of `Coro:error` stays rooted while the
   target handles or propagates it;
-* the `arg` formal parameter of `coro.yield` stays rooted while the
+* the `arg` formal parameter of `coroutine.yield` stays rooted while the
   yielding coroutine is suspended;
 * active non-nil tags are rooted by the suspended `resume`/`error`
   parameter frame, by the `Coro` record's `default_tag` field, or by the
@@ -473,14 +483,15 @@ boxed callee and argument on the coroutine Lua stack, calls through Lua's
 ordinary machinery, and reads one boxed result; this covers other Titan
 function values, Lua closures, Lua C functions, and `__call` objects.
 
-The implementation wraps that generic call in a hand-coded protected
-boundary equivalent to Lua's `luaD_rawrunprotected`/`luaD_pcall`
-recovery, around `luaD_callnoyield`; it does not use `lua_pcall` or
-`lua_pcallk`. `coro.yield` is a minicoro stack switch, not a Lua
+The trusted Titan entry function has a trailing function-level `catch`.
+Its generated boundary provides the `luaD_rawrunprotected`/`luaD_pcall`
+style recovery around a generic `luaD_callnoyield`; the C trampoline
+does not add another protected call, and neither path uses `lua_pcall`
+or `lua_pcallk`. `coroutine.yield` is a minicoro stack switch, not a Lua
 `lua_yield`, so it is allowed even when the callback is running under
-Titan's existing non-yielding generic function value path. The important
-rule is that `coro.yield` must not ask Lua to yield across a C-call
-boundary.
+Titan's existing non-yielding generic function-value path. The important
+rule is that the Titan module's `yield` must not ask Lua to yield across
+a C-call boundary.
 
 ## Errors and tracebacks
 
@@ -569,9 +580,18 @@ coroutine transfer.
 
 ## Build and packaging
 
-Build `coro.titan` as a standard module installed with Titan. The build
-should produce a `.so` that Titan's existing source-vs-compiled-module
-lookup can import when user code writes `import "coro"`.
+Build `stdlib/coroutine.titan` under the canonical Titan module name
+`coroutine`. Its canonical binary exports `coroutine_init`,
+`coroutine_abi`, and `coroutine_types`; its Lua entry is the distinct
+`luaopen_titan_coroutine`. Install the binary as `coroutine.so` in
+Titan's ABI-qualified standard-library directory and expose that same
+DSO at the Lua C-module path `titan/coroutine.so`, normally with a
+relative symbolic link. Do not install `coro.so`, `luaopen_coro`, or
+`luaopen_coroutine` aliases.
+
+Titan code reaches this binary with `import "coroutine"`, while Lua code
+uses `require "titan.coroutine"`. The bare Lua name `coroutine` remains
+owned by Lua's standard library.
 
 Update the rockspec and Makefile so `luarocks make` and `make test`
 build the coroutine module, its private helper header
@@ -581,7 +601,7 @@ unless a future design moves coroutine primitives into `titan.o`.
 
 Avoid mutable process-global scheduler state in `titan.o` or generated
 modules. Multiple generated `.so`s can each link their own copy of
-`titan.o`; coroutine runtime state should live in the `coro` module, the
+`titan.o`; coroutine runtime state should live in the `coroutine` module, the
 owner userdata, and each `mco_coro`'s user data.
 
 Titan's vendored minicoro should not include the Binaryen
@@ -606,13 +626,13 @@ Add FFI coverage for the new `TValue` boundary:
   arrays/maps, and function values;
 * raw `TValue *`, `const TValue *`, and `TValue[]` interfaces import as C
   pointer/array types, and the new address coercions cover the scoped
-  pointer arguments used by `coro.titan`.
+  pointer arguments used by `stdlib/coroutine.titan`.
 
 Add Titan runtime/coder coverage for:
 
 * create/resume/yield round trips with nil, booleans, integers, floats,
   strings, records, arrays, maps, function values, and Lua closures;
-* `coro.titan` resolving default tags, recording resume as success,
+* `stdlib/coroutine.titan` resolving default tags, recording resume as success,
   recording error injection as failure, checking `mco_result`, and
   raising a returned failure payload;
 * default tag use, explicit tag override, missing effective tag errors,
@@ -635,12 +655,12 @@ Add Titan runtime/coder coverage for:
   and the final re-raise pins the combined trace;
 * yield before a `finally` block, then later resume, proving the
   suspended stack preserves pending cleanup state;
-* Lua interop through `require "coro"`: method calls, bad argument
+* Lua interop through `require "titan.coroutine"`: method calls, bad argument
   counts, bad callback values, bad tags, and non-callable callbacks;
 * GC stress in incremental and generational modes, including old
   coroutine owner userdata rooting young Lua threads, callback closures,
   default tags, record/table payloads, and function-valued payloads;
-* `.so`-only import of `coro` from another Titan module and use from a
+* `.so`-only import of `coroutine` from another Titan module and use from a
   standalone executable.
 
 ## Feasibility evidence

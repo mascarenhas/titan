@@ -12,9 +12,12 @@ end
 local LUA = file_exists("./lua") and "./lua" or ".lua/bin/lua"
 local TITANC = LUA ..
     [[ -e 'package.path="./?.lua;./?/init.lua;" .. package.path' ./titanc]]
+local TEST_ENV = "env CCACHE_DISABLE=1 TITAN_STDLIB_PATH=. "
 
 local function clean_test_artifacts()
-    os.execute("rm -rf test.o test.so test.c test.titan test__entrypoint.c test test.dSYM coro_standalone app app__entrypoint.c app.dSYM")
+    os.execute("rm -rf test.o test.so test.c test.titan " ..
+        "test__entrypoint.c test test.dSYM coroutine_standalone app " ..
+        "app__entrypoint.c app.dSYM")
 end
 
 local function exec_ok(cmd)
@@ -28,28 +31,59 @@ local function write_file(path, contents)
     f:close()
 end
 
-local function build_coro()
+local function build_coroutine()
     assert.truthy(exec_ok(
         "env CCACHE_DISABLE=1 cc --std=c99 -O2 -Wall -fPIC -g " ..
         "-fno-optimize-sibling-calls -c titan-runtime/titan_coro.c " ..
         "-I titan-runtime -I lua-5.5.0/src -I libbacktrace " ..
         "-o titan-runtime/titan_coro.o"))
     assert.truthy(exec_ok(
-        "env CCACHE_DISABLE=1 TITAN_PATH_0_11= TITAN_PATH= " ..
-        TITANC .. " coro " ..
+        TEST_ENV .. "TITAN_PATH_0_11= TITAN_PATH= " ..
+        TITANC .. " --stdlib-build --tree stdlib " ..
+        "--lua-name titan.coroutine coroutine " ..
         "-X titan-runtime/titan_coro.o"))
+    assert.truthy(exec_ok("mkdir -p titan"))
+    os.remove("titan/coroutine.so")
+    assert.truthy(exec_ok("ln -s ../coroutine.so titan/coroutine.so"))
+end
+
+local function clean_coroutine_artifacts()
+    os.remove("titan/coroutine.so")
+    os.execute("rmdir titan 2>/dev/null")
+    os.remove("coroutine.so")
+    os.remove("stdlib/coroutine.c")
+    os.remove("stdlib/coroutine.o")
 end
 
 local function compile_and_run(titan_code, lua_code)
     clean_test_artifacts()
     write_file("test.titan", titan_code)
-    assert.truthy(exec_ok("env CCACHE_DISABLE=1 " .. TITANC .. " test"))
+    assert.truthy(exec_ok(TEST_ENV .. TITANC .. " test"))
     local so = assert(io.open("test.so", "r"))
     so:close()
 
     local script = os.tmpname()
     write_file(script, lua_code)
-    local f = assert(io.popen(LUA .. " -l test " .. script .. " 2>&1"))
+    local f = assert(io.popen(TEST_ENV .. LUA .. " -l test " ..
+        script .. " 2>&1"))
+    local out = f:read("*a")
+    local ok, why, status = f:close()
+    os.remove(script)
+    assert.truthy(ok, "lua failed (" .. tostring(why) .. ", " ..
+        tostring(status) .. ")\n" .. out)
+    return out
+end
+
+local function compile_and_run_require_first(titan_code, lua_code)
+    clean_test_artifacts()
+    write_file("test.titan", titan_code)
+    assert.truthy(exec_ok(TEST_ENV .. TITANC .. " test"))
+    local so = assert(io.open("test.so", "r"))
+    so:close()
+
+    local script = os.tmpname()
+    write_file(script, lua_code)
+    local f = assert(io.popen(TEST_ENV .. LUA .. " " .. script .. " 2>&1"))
     local out = f:read("*a")
     local ok, why, status = f:close()
     os.remove(script)
@@ -61,9 +95,9 @@ end
 local function compile_and_run_app(titan_code)
     clean_test_artifacts()
     write_file("test.titan", titan_code)
-    assert.truthy(exec_ok("env CCACHE_DISABLE=1 " .. TITANC .. " test"))
+    assert.truthy(exec_ok(TEST_ENV .. TITANC .. " test"))
 
-    local f = assert(io.popen("./test 2>&1"))
+    local f = assert(io.popen(TEST_ENV .. "./test 2>&1"))
     local out = f:read("*a")
     local ok, why, status = f:close()
     assert.truthy(ok, "program failed (" .. tostring(why) .. ", " ..
@@ -74,7 +108,7 @@ end
 local function run_lua(lua_code)
     local script = os.tmpname()
     write_file(script, lua_code)
-    local f = assert(io.popen(LUA .. " " .. script .. " 2>&1"))
+    local f = assert(io.popen(TEST_ENV .. LUA .. " " .. script .. " 2>&1"))
     local out = f:read("*a")
     local ok, why, status = f:close()
     os.remove(script)
@@ -85,26 +119,26 @@ end
 
 local function compile_and_run_standalone_import()
     clean_test_artifacts()
-    assert.truthy(exec_ok("mkdir -p coro_standalone"))
-    write_file("coro_standalone/app.titan", [[
-        local coro = import "coro"
+    assert.truthy(exec_ok("mkdir -p coroutine_standalone"))
+    write_file("coroutine_standalone/app.titan", [[
+        local coroutine = import "coroutine"
 
         function body(arg: value): value
             return arg
         end
 
         function main(args: {string}): integer
-            local co = coro.create(body, "tag")
+            local co = coroutine.create(body, "tag")
             if co:resume("ok") == "ok" then
                 return 0
             end
             return 1
         end
     ]])
-    assert.truthy(exec_ok("env CCACHE_DISABLE=1 " .. TITANC ..
-        " -t coro_standalone app"))
+    assert.truthy(exec_ok(TEST_ENV .. TITANC ..
+        " --tree coroutine_standalone app"))
 
-    local f = assert(io.popen("./app 2>&1"))
+    local f = assert(io.popen(TEST_ENV .. "./app 2>&1"))
     local out = f:read("*a")
     local ok, why, status = f:close()
     assert.truthy(ok, "program failed (" .. tostring(why) .. ", " ..
@@ -112,27 +146,27 @@ local function compile_and_run_standalone_import()
     return out
 end
 
-describe("coro standard module", function()
+describe("coroutine standard module", function()
     setup(function()
         os.remove("titan-runtime/titan.o")
-        build_coro()
+        build_coroutine()
     end)
 
     after_each(clean_test_artifacts)
     teardown(function()
-        os.remove("coro.c")
+        clean_coroutine_artifacts()
     end)
 
     it("creates a coroutine and returns a callback result", function()
         local out = compile_and_run([[
-            local coro = import "coro"
+            local coroutine = import "coroutine"
 
             function body(arg: value): value
                 return arg
             end
 
             function run(): value
-                local co = coro.create(body, "tag")
+                local co = coroutine.create(body, "tag")
                 return co:resume("hello")
             end
         ]], [==[
@@ -142,27 +176,98 @@ describe("coro standard module", function()
         assert.match("OK", out)
     end)
 
-    it("yields, resumes, reports status, and checks yieldability", function()
+    it("shares the canonical module when Titan imports before Lua requires", function()
         local out = compile_and_run([[
-            local coro = import "coro"
+            local coroutine = import "coroutine"
 
             function body(arg: value): value
-                if not coro.is_yieldable("tag") then
+                return arg
+            end
+
+            function make(): coroutine.Coro
+                return coroutine.create(body, "tag")
+            end
+        ]], [==[
+            local lua_coroutine = require "coroutine"
+            local from_titan = test.make()
+            local titan_coroutine = require "titan.coroutine"
+            local from_lua = titan_coroutine.create(function(arg)
+                return arg
+            end, "tag")
+
+            assert(type(titan_coroutine) == "userdata")
+            assert(require "coroutine" == lua_coroutine)
+            assert(package.loaded.coroutine == lua_coroutine)
+            assert(debug.getmetatable(from_titan) ==
+                   debug.getmetatable(from_lua))
+            assert(debug.getregistry()["titan.coroutine"] ~= nil)
+            assert(debug.getregistry()["titan.coro"] == nil)
+            local open = assert(package.loadlib(
+                "./coroutine.so", "luaopen_titan_coroutine"))
+            assert(open() == titan_coroutine)
+            assert(package.loadlib(
+                "./coroutine.so", "luaopen_coroutine") == nil)
+            assert(package.loadlib(
+                "./coroutine.so", "luaopen_coro") == nil)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("shares the canonical module when Lua requires before Titan imports", function()
+        local out = compile_and_run_require_first([[
+            local coroutine = import "coroutine"
+
+            function body(arg: value): value
+                return arg
+            end
+
+            function make(): coroutine.Coro
+                return coroutine.create(body, "tag")
+            end
+        ]], [==[
+            local lua_coroutine = require "coroutine"
+            local titan_coroutine = require "titan.coroutine"
+            local from_lua = titan_coroutine.create(function(arg)
+                return arg
+            end, "tag")
+            local test = require "test"
+            local from_titan = test.make()
+
+            assert(type(titan_coroutine) == "userdata")
+            assert(require "coroutine" == lua_coroutine)
+            assert(package.loaded.coroutine == lua_coroutine)
+            assert(debug.getmetatable(from_titan) ==
+                   debug.getmetatable(from_lua))
+            local open = assert(package.loadlib(
+                "./coroutine.so", "luaopen_titan_coroutine"))
+            assert(open() == titan_coroutine)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("yields, resumes, reports status, and checks yieldability", function()
+        local out = compile_and_run([[
+            local coroutine = import "coroutine"
+
+            function body(arg: value): value
+                if not coroutine.is_yieldable("tag") then
                     raise "not yieldable"
                 end
-                if coro.is_yieldable("other") then
+                if coroutine.is_yieldable("other") then
                     raise "wrong tag yieldable"
                 end
-                local back = coro.yield(arg, "tag")
+                local back = coroutine.yield(arg, "tag")
                 return back
             end
 
             function outside(): boolean
-                return coro.is_yieldable("tag")
+                return coroutine.is_yieldable("tag")
             end
 
             function run(): string
-                local co = coro.create(body, "tag")
+                local co = coroutine.create(body, "tag")
                 local s0 = co:status()
                 local first = co:resume("out")
                 local s1 = co:status()
@@ -181,11 +286,11 @@ describe("coro standard module", function()
 
     it("uses default tags, explicit overrides, and explicit nil fallback", function()
         local out = compile_and_run([[
-            local coro = import "coro"
+            local coroutine = import "coroutine"
 
             function default_resume(): string
-                local co = coro.create(function (arg: value): value
-                    local got = coro.yield(arg, "default")
+                local co = coroutine.create(function (arg: value): value
+                    local got = coroutine.yield(arg, "default")
                     return got
                 end, "default")
                 local first = co:resume("out", nil)
@@ -194,8 +299,8 @@ describe("coro standard module", function()
             end
 
             function override_resume(): string
-                local co = coro.create(function (arg: value): value
-                    local got = coro.yield(arg, "override")
+                local co = coroutine.create(function (arg: value): value
+                    local got = coroutine.yield(arg, "override")
                     return got
                 end, "default")
                 local first = co:resume("out", "override")
@@ -204,9 +309,9 @@ describe("coro standard module", function()
             end
 
             function default_error(): string
-                local co = coro.create(function (arg: value): value
+                local co = coroutine.create(function (arg: value): value
                     do
-                        coro.yield("ready", "default")
+                        coroutine.yield("ready", "default")
                     catch
                         return "caught:" .. (error as string)
                     end
@@ -218,9 +323,9 @@ describe("coro standard module", function()
             end
 
             function override_error(): string
-                local co = coro.create(function (arg: value): value
+                local co = coroutine.create(function (arg: value): value
                     do
-                        coro.yield("ready", "override")
+                        coroutine.yield("ready", "override")
                     catch
                         return "caught:" .. (error as string)
                     end
@@ -242,16 +347,16 @@ describe("coro standard module", function()
 
     it("reports running and normal statuses through the Titan wrapper", function()
         local out = run_lua([==[
-            local coro = require "coro"
+            local coroutine = require "titan.coroutine"
 
             local a
             local b
-            b = coro.create(function()
+            b = coroutine.create(function()
                 assert(a:status() == "normal")
                 assert(b:status() == "running")
                 return "ok"
             end, "b")
-            a = coro.create(function()
+            a = coroutine.create(function()
                 return b:resume(nil, "b")
             end, "a")
 
@@ -265,7 +370,7 @@ describe("coro standard module", function()
 
     it("rejects unmatched raw tags without calling __eq", function()
         local out = run_lua([==[
-            local coro = require "coro"
+            local coroutine = require "titan.coroutine"
 
             local calls = 0
             local mt = {
@@ -276,8 +381,8 @@ describe("coro standard module", function()
             }
             local resume_tag = setmetatable({}, mt)
             local yield_tag = setmetatable({}, mt)
-            local co = coro.create(function()
-                return coro.yield("unmatched", yield_tag)
+            local co = coroutine.create(function()
+                return coroutine.yield("unmatched", yield_tag)
             end, resume_tag)
 
             local ok, err = pcall(function()
@@ -295,16 +400,16 @@ describe("coro standard module", function()
 
     it("routes a nested tagged yield through a suspended outer handler", function()
         local out = compile_and_run([[
-            local coro = import "coro"
+            local coroutine = import "coroutine"
 
             function run(): string
                 local tag_main: value = "main"
                 local tag_a: value = "a"
-                local b = coro.create(function (arg: value): value
-                    coro.yield("from-b", tag_main)
+                local b = coroutine.create(function (arg: value): value
+                    coroutine.yield("from-b", tag_main)
                     return "b-done"
                 end, tag_a)
-                local a = coro.create(function (arg: value): value
+                local a = coroutine.create(function (arg: value): value
                     local got = b:resume("to-b")
                     return "a:" .. (got as string)
                 end, tag_main)
@@ -323,20 +428,20 @@ describe("coro standard module", function()
 
     it("injects errors through a nested stacked yield", function()
         local out = compile_and_run([[
-            local coro = import "coro"
+            local coroutine = import "coroutine"
 
             function run(): string
                 local tag_main: value = "main"
                 local tag_a: value = "a"
-                local b = coro.create(function (arg: value): value
+                local b = coroutine.create(function (arg: value): value
                     do
-                        coro.yield("from-b", tag_main)
+                        coroutine.yield("from-b", tag_main)
                     catch
                         return "b-caught:" .. (error as string)
                     end
                     return "b-missed"
                 end, tag_a)
-                local a = coro.create(function (arg: value): value
+                local a = coroutine.create(function (arg: value): value
                     local got = b:resume("to-b")
                     return "a:" .. (got as string)
                 end, tag_main)
@@ -354,21 +459,21 @@ describe("coro standard module", function()
 
     it("preserves traces for uncaught errors through a nested stacked yield", function()
         local out = compile_and_run([[
-            local coro = import "coro"
+            local coroutine = import "coroutine"
 
             nested_main_tag: value = nil
             nested_a_tag: value = nil
 
             function nested_fail_body(arg: value): value
-                coro.yield("from-b", nested_main_tag)
+                coroutine.yield("from-b", nested_main_tag)
                 return "missed"
             end
 
             function nested_uncaught(): value
                 nested_main_tag = "main"
                 nested_a_tag = "a"
-                local b = coro.create(nested_fail_body, nested_a_tag)
-                local a = coro.create(function (arg: value): value
+                local b = coroutine.create(nested_fail_body, nested_a_tag)
+                local a = coroutine.create(function (arg: value): value
                     local got = b:resume("to-b")
                     return "a:" .. (got as string)
                 end, nested_main_tag)
@@ -394,16 +499,16 @@ describe("coro standard module", function()
 
     it("rejects direct resume of a stacked coroutine at the Titan wrapper", function()
         local out = compile_and_run([[
-            local coro = import "coro"
+            local coroutine = import "coroutine"
 
             function run(): string
                 local tag_main: value = "main"
                 local tag_a: value = "a"
-                local b = coro.create(function (arg: value): value
-                    coro.yield("from-b", tag_main)
+                local b = coroutine.create(function (arg: value): value
+                    coroutine.yield("from-b", tag_main)
                     return "b-done"
                 end, tag_a)
-                local a = coro.create(function (arg: value): value
+                local a = coroutine.create(function (arg: value): value
                     local got = b:resume("to-b")
                     return "a:" .. (got as string)
                 end, tag_main)
@@ -431,14 +536,14 @@ describe("coro standard module", function()
 
     it("round-trips nil yield, resume, and return payloads", function()
         local out = compile_and_run([[
-            local coro = import "coro"
+            local coroutine = import "coroutine"
 
             function run(): boolean
-                local co = coro.create(function (arg: value): value
+                local co = coroutine.create(function (arg: value): value
                     if arg ~= nil then
                         raise "initial arg was not nil"
                     end
-                    local got = coro.yield(nil, "tag")
+                    local got = coroutine.yield(nil, "tag")
                     if got ~= nil then
                         raise "resume arg was not nil"
                     end
@@ -457,7 +562,7 @@ describe("coro standard module", function()
 
     it("preserves callback traces and injects errors into a suspended yield", function()
         local out = compile_and_run([[
-            local coro = import "coro"
+            local coroutine = import "coroutine"
 
             function fail(): value
                 raise "boom"
@@ -474,7 +579,7 @@ describe("coro standard module", function()
             end
 
             function uncaught(): value
-                local co = coro.create(body, "tag")
+                local co = coroutine.create(body, "tag")
                 return co:resume(nil)
             end
 
@@ -482,7 +587,7 @@ describe("coro standard module", function()
 
             function catcher(arg: value): value
                 do
-                    coro.yield("ready", "tag")
+                    coroutine.yield("ready", "tag")
                 catch
                     injected_trace = traceback
                     return "caught:" .. (error as string)
@@ -491,7 +596,7 @@ describe("coro standard module", function()
             end
 
             function inject(): string
-                local co = coro.create(catcher, "tag")
+                local co = coroutine.create(catcher, "tag")
                 local first = co:resume(nil)
                 local second = co:error("oops")
                 return (first as string) .. "," .. (second as string) ..
@@ -531,14 +636,14 @@ describe("coro standard module", function()
 
     it("preserves finally state across yield and later resume", function()
         local out = compile_and_run([[
-            local coro = import "coro"
+            local coroutine = import "coroutine"
 
             log: string = ""
 
             function body(arg: value): value
                 do
                     log = log .. "body;"
-                    coro.yield("pause", "tag")
+                    coroutine.yield("pause", "tag")
                     log = log .. "after;"
                 finally
                     log = log .. "finally;"
@@ -547,7 +652,7 @@ describe("coro standard module", function()
             end
 
             function run(): string
-                local co = coro.create(body, "tag")
+                local co = coroutine.create(body, "tag")
                 local first = co:resume(nil)
                 local mid = log
                 local second = co:resume(nil)
@@ -563,14 +668,14 @@ describe("coro standard module", function()
 
     it("rejects resume and error after a coroutine is dead", function()
         local out = compile_and_run([[
-            local coro = import "coro"
+            local coroutine = import "coroutine"
 
             function body(arg: value): value
                 return arg
             end
 
             function after_dead(): string
-                local co = coro.create(body, "tag")
+                local co = coroutine.create(body, "tag")
                 local got = co:resume("done")
                 local status = co:status()
                 do
@@ -598,14 +703,14 @@ describe("coro standard module", function()
 
     it("rejects missing effective tags in the Titan wrapper", function()
         local out = compile_and_run([[
-            local coro = import "coro"
+            local coroutine = import "coroutine"
 
             function body(arg: value): value
                 return arg
             end
 
             function missing(): value
-                local co = coro.create(body)
+                local co = coroutine.create(body)
                 return co:resume(nil)
             end
         ]], [==[
@@ -619,7 +724,7 @@ describe("coro standard module", function()
 
     it("injects an error before first resume without calling the entry function", function()
         local out = compile_and_run([[
-            local coro = import "coro"
+            local coroutine = import "coroutine"
 
             seen: boolean = false
 
@@ -629,7 +734,7 @@ describe("coro standard module", function()
             end
 
             function before_start(): value
-                local co = coro.create(body, "tag")
+                local co = coroutine.create(body, "tag")
                 return co:error("pre-start")
             end
 
@@ -647,7 +752,7 @@ describe("coro standard module", function()
 
     it("roots nested stacked payloads and tags across generational GC", function()
         local out = run_lua([==[
-            local coro = require "coro"
+            local coroutine = require "titan.coroutine"
             collectgarbage("generational")
 
             local weak = setmetatable({}, { __mode = "v" })
@@ -660,12 +765,12 @@ describe("coro standard module", function()
             weak.payload = payload
             weak.marker = marker
 
-            local b = coro.create(function(arg)
+            local b = coroutine.create(function(arg)
                 assert(arg == weak.payload)
-                local got = coro.yield(weak.marker, weak.tag_main)
+                local got = coroutine.yield(weak.marker, weak.tag_main)
                 return got
             end, tag_a)
-            local a = coro.create(function(arg)
+            local a = coroutine.create(function(arg)
                 return b:resume(arg, weak.tag_a)
             end, tag_main)
 
@@ -696,7 +801,7 @@ describe("coro standard module", function()
 
     it("abandons stacked coroutines when their suspended handler is collected", function()
         local out = run_lua([==[
-            local coro = require "coro"
+            local coroutine = require "titan.coroutine"
             collectgarbage("generational")
 
             local tag_main = {}
@@ -704,9 +809,9 @@ describe("coro standard module", function()
             local stacked
 
             do
-                local a = coro.create(function()
-                    local b = coro.create(function()
-                        return coro.yield("from-b", tag_main)
+                local a = coroutine.create(function()
+                    local b = coroutine.create(function()
+                        return coroutine.yield("from-b", tag_main)
                     end, tag_b)
                     stacked = b
                     return b:resume(nil, tag_b)
@@ -735,16 +840,16 @@ describe("coro standard module", function()
 
     it("loads from Lua and roots value payloads and identity tags across GC", function()
         local out = run_lua([==[
-            local coro = require "coro"
+            local coroutine = require "titan.coroutine"
             collectgarbage("generational")
 
             local tag = {}
             local payload
             local marker
-            local co = coro.create(function(arg)
+            local co = coroutine.create(function(arg)
                 assert(arg == payload)
                 collectgarbage("step")
-                local got = coro.yield(marker, tag)
+                local got = coroutine.yield(marker, tag)
                 assert(got == payload)
                 return marker(got)
             end, tag)
@@ -759,8 +864,8 @@ describe("coro standard module", function()
             assert(co:resume(payload, tag) == 42)
             assert(co:status() == "dead")
 
-            local nco = coro.create(function(arg)
-                local back = coro.yield("numeric", 1.0)
+            local nco = coroutine.create(function(arg)
+                local back = coroutine.yield("numeric", 1.0)
                 return back
             end, 1)
             assert(nco:resume(nil, 1) == "numeric")
@@ -774,7 +879,7 @@ describe("coro standard module", function()
 
     it("reports Lua call errors for bad coroutine API use", function()
         local out = run_lua([==[
-            local coro = require "coro"
+            local coroutine = require "titan.coroutine"
 
             local function fails(fn, needle)
                 local ok, err = pcall(fn)
@@ -785,20 +890,20 @@ describe("coro standard module", function()
                 end
             end
 
-            local bad_callback = coro.create("not callable", "tag")
+            local bad_callback = coroutine.create("not callable", "tag")
             fails(function()
                 bad_callback:resume(nil)
             end)
 
             fails(function()
-                coro.yield("payload")
-            end, "must provide non-nil tag")
+                coroutine.yield("payload")
+            end, "must provide non-nil tag argument to coroutine.yield")
 
             fails(function()
-                coro.yield("payload", "tag")
+                coroutine.yield("payload", "tag")
             end, "Invalid coroutine")
 
-            local co = coro.create(function()
+            local co = coroutine.create(function()
                 return "done"
             end, "tag")
             assert(co:resume(nil) == "done")
@@ -806,7 +911,7 @@ describe("coro standard module", function()
                 co:resume(nil)
             end, "Coroutine not suspended")
 
-            local missing = coro.create(function(arg)
+            local missing = coroutine.create(function(arg)
                 return arg
             end)
             fails(function()
@@ -818,7 +923,7 @@ describe("coro standard module", function()
         assert.match("OK", out)
     end)
 
-    it("imports coro from a compiled module in a standalone executable", function()
+    it("imports coroutine from a compiled module in a standalone executable", function()
         local out = compile_and_run_standalone_import()
         assert.same("", out)
     end)

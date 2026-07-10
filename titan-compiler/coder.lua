@@ -3094,7 +3094,7 @@ local function codecall(ctx, node)
                 return codeforeigncall(ctx, node)
             elseif fnode._decl._tag == "Type.StaticMethod" then
                 fname = static_name(fnode._decl)
-                local mod, record = fnode._decl.fqtn:match("^(.*)%.(%a+)$")
+                local mod, record = fnode._decl.fqtn:match("^(.*)%.([^.]+)$")
                 if mod ~= ctx.module then
                     assert(fnode.exp.var._tag == "Ast.VarDot")
                     ctx.functions[fnode._decl.fqtn .. "." .. fnode._decl.name] = {
@@ -3131,7 +3131,7 @@ local function codecall(ctx, node)
         assert(node.args._tag == "Ast.ArgsMethod")
         local mtype = node._method
         fname = method_name(mtype)
-        local mod, record = mtype.fqtn:match("^(.*)%.(%a+)$")
+        local mod, record = mtype.fqtn:match("^(.*)%.([^.]+)$")
         if mod ~= ctx.module then
             ctx.functions[mtype.fqtn .. ":" .. mtype.name] = {
                 module = mod,
@@ -6938,7 +6938,7 @@ function codemethodref(ctx, node)
     local ftype = node._type      -- Type.Function (self removed)
     local nativename = bound_method_name(mtype)
     local luaname = bound_method_luaname(mtype)
-    local mod, record = mtype.fqtn:match("^(.*)%.(%a+)$")
+    local mod, record = mtype.fqtn:match("^(.*)%.([^.]+)$")
 
     -- The bound closure's upvalue[0] must be the defining module's closure: `_mod`
     -- for a same-module method, or the imported module's closure recovered from
@@ -7293,7 +7293,8 @@ int $TYPESNAME(lua_State* L) {
 
 -- Generates the code for importing the module, and storing it
 -- in the corresponding local state slot
-local function import_module(loadmods, initmods, sigs, mprefixes, dynamic, node)
+local function import_module(loadmods, initmods, sigs, mprefixes,
+                             dynamic, standard, node)
     local modname = node.modname
     local upvalue = node._upvalue
     local mprefix = mangle_qn(modname) .. "_"
@@ -7301,12 +7302,13 @@ local function import_module(loadmods, initmods, sigs, mprefixes, dynamic, node)
     if dynamic then
         local file = modname:gsub("[.]", "/") .. ".so"
         table.insert(loadmods, render([[
-            void *$HANDLE = loadlib(L, "$FILE");
+            void *$HANDLE = $LOAD(L, "$FILE");
             titan_check_abi(L, $HANDLE, "$ABI", "$FILE");
         ]], {
             HANDLE = mprefix .. "handle",
             FILE = file,
             ABI = mprefix .. "abi",
+            LOAD = standard and "loadstdlib" or "loadlib",
         }))
         table.insert(initmods, render([[
             {
@@ -7349,13 +7351,16 @@ local function import_module(loadmods, initmods, sigs, mprefixes, dynamic, node)
     end
 end
 
-local function init_data_from_other_modules(tlcontext, includes, loadmods, initmetas, mprefixes, static_deps)
+local function init_data_from_other_modules(tlcontext, includes, loadmods,
+                                            initmetas, mprefixes, static_deps)
     -- When linking dynamically, we need to make 'static' variables and load the values
     -- from the other module's dynamic library
     -- When linking statically, we only need to make 'extern' forward declarations.
 
     for _, func in pairs(tlcontext.functions) do
-        local is_dynamic = not static_deps[func.module]
+        local origin = static_deps[func.module]
+        local is_dynamic = origin ~= true
+        local is_standard = origin == "standard"
         local storage_class = is_dynamic and "static" or "extern"
         local fname = func.mangled
         table.insert(includes, storage_class .. " " .. function_sig(fname, func.type, is_dynamic) .. ";")
@@ -7366,12 +7371,13 @@ local function init_data_from_other_modules(tlcontext, includes, loadmods, initm
                 mprefixes[func.module] = mprefix
                 local file = func.module:gsub("[.]", "/") .. ".so"
                 table.insert(loadmods, render([[
-                    void *$HANDLE = loadlib(L, "$FILE");
+                    void *$HANDLE = $LOAD(L, "$FILE");
                     titan_check_abi(L, $HANDLE, "$ABI", "$FILE");
                 ]], {
                     HANDLE = mprefix .. "handle",
                     FILE = file,
                     ABI = mprefix .. "abi",
+                    LOAD = is_standard and "loadstdlib" or "loadlib",
                 }))
             end
             table.insert(loadmods, render([[
@@ -7386,7 +7392,7 @@ local function init_data_from_other_modules(tlcontext, includes, loadmods, initm
     -- module handle was already opened by the function loop above, since a bound
     -- ref always also registers the native trampoline in tlcontext.functions).
     for luaname, info in pairs(tlcontext.bound_luas) do
-        local is_dynamic = not static_deps[info.module]
+        local is_dynamic = static_deps[info.module] ~= true
         if is_dynamic then
             local mprefix = mprefixes[info.module]
             table.insert(includes,
@@ -7645,7 +7651,8 @@ local function allocate_upvalues(tlcontext, ast)
     end
 end
 
-function coder.generate(modname, ast, static_deps)
+function coder.generate(modname, ast, static_deps, options)
+    options = options or {}
     local tlcontext = {
         module = modname,
         prefix = mangle_qn(modname) .. "_",
@@ -7720,7 +7727,9 @@ function coder.generate(modname, ast, static_deps)
         if not node._ignore then
             local tag = node._tag
             if tag == "Ast.TopLevelImport" then
-                import_module(loadmods, initmods, sigs, mprefixes, not static_deps[node.modname], node)
+                local origin = static_deps[node.modname]
+                import_module(loadmods, initmods, sigs, mprefixes,
+                    origin ~= true, origin == "standard", node)
             elseif tag == "Ast.TopLevelForeignImport" then
                 local include
                 local include_name = node.headername
@@ -8107,7 +8116,7 @@ function coder.generate(modname, ast, static_deps)
     }))
 
     table.insert(code, render(postamble, {
-        LUAOPEN_NAME = 'luaopen_' .. mangle_qn(modname),
+        LUAOPEN_NAME = 'luaopen_' .. mangle_qn(options.lua_name or modname),
         INITNAME = tlcontext.prefix .. 'init',
     }))
 

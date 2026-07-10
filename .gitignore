@@ -10,6 +10,11 @@
 
 # libbacktrace source tree (cloned + built by `make libbacktrace`)
 /libbacktrace/
+
+# bundled libuv release source, CMake build tree, and downloaded archive
+/libuv-v*/
+/libuv-build/
+/libuv-v*.tar.gz
 /luarocks
 /lua
 /lua_modules

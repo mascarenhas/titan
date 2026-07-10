@@ -8,6 +8,18 @@ local util = require "titan-compiler.util"
 local foreigntypes = require "titan-compiler.foreigntypes"
 local cdriver = require("c-parser.cdriver")
 
+-- The compiler driver installs the exact C toolchain configuration used for
+-- generated code. Keeping this small hook in the checker makes every foreign
+-- import use the same compiler, language mode, and already parsed CPP flags,
+-- while checker-only embeddings retain cdriver's environment-based defaults.
+local foreign_c_options = {}
+local foreign_c_config_error
+
+function checker.configure_foreign_c(options, config_error)
+    foreign_c_options = options or {}
+    foreign_c_config_error = config_error
+end
+
 
 -- The typechecker works in two passes, the first one just
 -- collects type information for top-level functions and variables
@@ -3202,9 +3214,19 @@ local toplevel_visitor = util.make_visitor({
 
     ["Ast.TopLevelForeignImport"] = function(node, st, errors)
         local name = node.headername
-        local ftypes, err, include = cdriver.process_file(name, {
-            source_dir = st.source_dir
-        })
+        local options = {
+            source_dir = st.source_dir,
+            compiler = foreign_c_options.compiler,
+            language_mode = foreign_c_options.language_mode,
+            cppflags = foreign_c_options.cppflags,
+            compiler_include_dirs = foreign_c_options.compiler_include_dirs,
+        }
+        local ftypes, err, include
+        if foreign_c_config_error then
+            err = foreign_c_config_error
+        else
+            ftypes, err, include = cdriver.process_file(name, options)
+        end
         if ftypes then
             node._include = include
             local members = {}
