@@ -47,9 +47,12 @@ Use these concrete decisions for v1:
   resumes/errors the captured task, runs user code until its next UV yield or
   completion, and arms the returned Request. Running the continuation inside
   the callback is intentional and mirrors an ordinary callback chain.
-- Every dispatcher has a Titan catch-all and the C trampoline adds a protected
-  boundary around the native entry call. No Lua/Titan longjmp, including one
-  from native-entry setup before the Titan catch, may cross a libuv frame.
+- The fixed C trampoline calls the trusted Titan dispatcher directly, matching
+  `titan_coro_entry`; it does not add a second C protected-call layer. The
+  dispatcher uses a trailing function-level Titan `catch` around its controlled
+  body, records either a Task failure or fatal Runtime state, requests loop stop
+  when needed, and returns normally. No Lua/Titan longjmp may cross a libuv
+  frame.
 - Lua userdata allocated from Titan owns loop, request, handle, and fixed-buffer
   storage wherever possible. Size it with `uv.<type>.sizeof`, cast the aligned
   payload pointer to the imported C pointer type, and keep the userdata rooted
@@ -292,9 +295,11 @@ callback dispatches on `Runtime.main_thread` `L`, as specified below.
    before removing the old pending root.
 4. Copy/extract callback-owned result data and perform mandatory request cleanup
    before resumed user code can observe the result.
-5. The Titan dispatcher catches task/continuation errors, and a C-level
-   protected boundary also covers failures in native-entry setup before that
-   catch. Both return normally to libuv.
+5. The C trampoline calls the native Titan dispatcher directly. That dispatcher
+   is library code under Titan's control. Its inner Task catch records Task
+   terminal state; its trailing function-level catch contains all remaining
+   throwing work, records Runtime-fatal state, and returns normally to libuv
+   without a second C protected-call layer.
 6. Only C `uv_run` is non-reentrant. Directly resuming a coroutine and starting
    a new libuv operation from a callback are part of the selected model and do
    not call `uv_run` recursively.
@@ -323,9 +328,9 @@ callback dispatches on `Runtime.main_thread` `L`, as specified below.
 | Start each task with a zero timer | Keep this. `uv.run` arms the zero timer and returns without executing the task; its callback performs the first resume on the next loop iteration. |
 | Callback resumes and interprets the next request inline | Keep this. The coroutine is the continuation an ordinary callback API would pass explicitly. The Titan dispatcher arms the next yielded Request before the callback returns. |
 | Raw L/module/closure/coroutine tuple in `data` | `data` points to the opaque Titan wrapper-record Udata rooted in `Runtime.pending` or `Runtime.resources`; its local fields root the distinct native-storage userdata plus every Titan value. |
-| Print traceback from a callback | Save `{error, traceback}`, initiate close/cancel, return through libuv, drain from the outer bootstrap, then reinstall/pin and report the failure. |
+| Print traceback from a callback | Save `{error, traceback}`, mark the Runtime fatal, request `uv_stop`, and return through libuv. The outer bootstrap then initiates cancel/close, drains, reinstalls/pins the trace, and reports the failure. |
 | Default/global event loop implied | Use one private loop per bootstrap session so state remains per Lua state, while all `uv.run` tasks in that session share it. |
-| Callback owns scheduling policy | Keep policy in the native Titan dispatcher; the C trampoline only normalizes callback ABI, establishes protection, and transfers trusted fields. |
+| Callback owns scheduling policy | Keep policy and the trailing function-level error boundary in the native Titan dispatcher; the C trampoline only normalizes callback ABI, recovers trusted rooted fields, and calls the native entry directly. |
 | Main is automatically wrapped | Keep automatic standalone bootstrap: schedule `main` with public `uv.run`, then drive C `uv_run` outside all callbacks. |
 | Titan imports `fs`, `net`, `os`, `timer` | Keep these canonical Titan names. Install Lua-facing aliases as `titan.fs`, `titan.net`, `titan.os`, and `titan.timer` so Lua's existing modules remain untouched. |
 
@@ -568,8 +573,8 @@ The selected flow is:
    that cleanup and applies normal observed/unobserved Task policy.
    Whether called from Lua's main thread or a running child Task, the start
    owner records the Runtime's main thread for its native callback.
-2. The start or operation callback retrieves its exact Task owner and enters the
-   protected native Titan dispatcher on the main Lua state.
+2. The start or operation callback retrieves its exact Task owner and directly
+   calls the native Titan dispatcher on the main Lua state.
 3. For a completed operation, the dispatcher first copies/converts all borrowed
    result data and performs mandatory request cleanup. Arbitrary user code never
    sees request-owned pointers.
@@ -597,11 +602,11 @@ The selected flow is:
    if needed to preserve loop responsiveness.
 9. An error or the library-injected `Cancelled` escaping the root drive is a
    normal Task terminal outcome: store its exact value/trace, wake registered
-   joiners, and
-   apply the observed/unobserved Task policy below. It is not itself a broken
-   dispatcher. A separate outer boundary treats malformed private Requests,
-   native-entry/protected-call failures, and pump invariant failures as fatal
-   Runtime errors. Both boundaries return normally through the C callback.
+   joiners, and apply the observed/unobserved Task policy below. It is not itself
+   a broken dispatcher. A separate trailing function-level catch treats
+   malformed private Requests and pump/library invariant failures as fatal
+   Runtime errors. Both Titan boundaries return normally through the direct C
+   callback.
 
 For `uv_fs_t`, use public `uv_fs_get_result`, `uv_fs_get_ptr`,
 `uv_fs_get_statbuf`, `uv_fs_get_path`, and `uv_fs_scandir_next` as appropriate.
@@ -822,50 +827,54 @@ constants together and assert the mapping in that layout test.
 `titan-runtime/titan_uv.c` follows the current coroutine pattern:
 
 ```c
-/* Public libuv accessors and raw TValue reads do not allocate or throw. */
+typedef void (*titan_uv_dispatch_func)(lua_State *L, Udata *_mod,
+                                       CClosure *_fn, Udata *owner,
+                                       lua_Integer event_kind,
+                                       lua_Integer result,
+                                       size_t size);
+
+/* Public libuv accessors and trusted raw owner fields do not allocate. */
 Udata *owner = uv_req_get_data((uv_req_t *)req);
 lua_State *L = titan_uv_owner_main_thread(owner);
-uv_loop_t *loop = titan_uv_owner_loop_noalloc(owner);
-struct titan_uv_callback call = { owner, loop, event_kind, result, size };
+Udata *M = titan_uv_owner_module(owner);
+CClosure *dispatcher = titan_uv_owner_dispatcher(owner);
+titan_uv_dispatch_func dispatch =
+    titan_cast_func(titan_uv_dispatch_func,
+                    pvalue(&dispatcher->upvalue[2]));
 
-/* The thunk contains every Lua-touching action, including temporary rooting,
- * native-pointer recovery, native entry, and ordinary stack restoration. */
-int status = titan_uv_callprotected(L, titan_uv_callback_thunk, &call);
-if (status != LUA_OK) {
-    /* No allocation, formatting, Lua API call, or second throw is permitted. */
-    titan_uv_capture_emergency_failure_noalloc(L, owner, status);
-    uv_stop(loop);
-}
+/* Direct native Titan entry, exactly like titan_coro_entry. */
+dispatch(L, M, NULL, owner, event_kind, result, size);
 ```
 
-Both `Runtime.main_thread` and the loop pointer are recovered through validated
-raw owner fields before entering protection; neither lookup allocates or calls
-Lua. The loop value is therefore initialized even if the protected thunk fails
-on its first instruction.
+The owner remains strongly rooted by `Runtime.pending` or `Runtime.resources`
+for the entire callback. Its fixed uservalues supply `Runtime.main_thread`, the
+module Udata, and the dispatcher closure; the C trampoline only reads those
+trusted fields, normalizes the particular libuv callback ABI, and transfers
+primitive result values. Request/handle families use the corresponding public
+libuv data getter.
 
 The dispatcher is a fixed module-local top-level function with no captures, so
 `_fn == NULL` matches `titan_coro_entry`. Do not route through its Lua wrapper;
 these callbacks are frequent and their arguments are already trusted by the
 private shim.
 
-`titan_uv_callprotected` uses a C-level Lua protected boundary whose thunk roots
-the owner, recovers the module and dispatcher closure, and calls the native
-Titan function pointer directly; it does not route through the Lua entry
-wrapper. This extra boundary matters because a generated native entry has
-GC/stack setup before its first Titan `do ... catch`. Mirror Lua/Titan's
-protected-call recovery: save and restore the main stack top,
-`CallInfo`/error-function state needed by the internal API, and leave the
-callback stack exactly as it was on entry.
+There is deliberately no `titan_uv_callprotected` layer. The dispatcher is
+trusted library code, not an arbitrary user callback, and follows the same
+direct native-entry contract as `coro.titan`/`titan_coro_entry`. Its entire
+controlled body is followed by a trailing function-level Titan `catch`. The
+catch arm uses the still-rooted owner to store the exact `error` and `traceback`
+in the Runtime, marks it fatal, calls public `uv_stop`, and returns. Because a
+trailing catch arm is not itself protected, keep it inline and non-raising:
+existing-field assignments, scalar state changes, and `uv_stop` only—no
+allocation, formatting, potentially raising Titan helper call, or user code.
+The outer bootstrap performs phased cleanup and reporting only after C `uv_run`
+has returned.
 
-Each Runtime pre-roots emergency error/trace slots and a static fallback
-message before entering C `uv_run`. If the protected thunk fails, the recovery
-helper performs only raw `TValue` assignment plus the required GC barriers into
-those already rooted slots; it preserves the current error/backtrace value when
-available and never allocates, formats, calls a raising Lua API, or invokes
-Titan. Human-readable conversion and trace copying are deferred until the
-outer bootstrap has regained control, under its existing protected boundary.
-Add synthetic allocation/prologue failures before the dispatcher's Titan catch
-to prove both the outer protection and the no-throw emergency recorder.
+The loop driver, not each callback, owns the active Titan `errfunc`. The
+standalone outer `lua_pcall` or generated Lua entry for `uv.loop()` keeps the
+Titan error handler installed for the complete C `uv_run` invocation. Reject a
+loop-driving path that bypasses both entries; do not install or restore an
+error handler per callback.
 
 The Titan dispatcher has an inner Task-drive boundary and an outer invariant
 boundary:
@@ -877,8 +886,8 @@ boundary:
   stored as that Task's terminal outcome, joiners are scheduled, and only an
   unobserved failure applies the session-failure policy;
 - invariant boundary: a dispatcher bug saves the exact `error` and `traceback`,
-  marks the Runtime fatal, begins phased shutdown, requests `uv_stop`, and
-  returns;
+  marks the Runtime fatal, requests `uv_stop`, and returns; the outer bootstrap
+  begins phased shutdown after C `uv_run` returns;
 - it never re-raises while the C callback is active.
 
 The outer bootstrap regains control from C `uv_run`, drains orderly shutdown,
@@ -900,8 +909,9 @@ Declare only the callback shapes actually needed:
 - signal.
 
 Imported shim function names decay to libuv's callback pointer typedefs. The C
-functions contain ABI conversion, protection, and stack restoration but no
-continuation policy; the native Titan dispatcher owns the direct request pump.
+functions contain only ABI conversion and trusted raw owner/entry recovery; the
+native Titan dispatcher owns stack discipline, both Titan catch levels, and the
+direct request pump.
 
 ### Binary buffers
 
@@ -991,17 +1001,20 @@ Negative libuv statuses are converted with public `uv_err_name` and
 `uv_strerror`. Copy both strings before releasing the request/context. EOF is a
 normal optional read result, and cancellation is a distinct semantic value.
 
-There are three error boundaries:
+There are two error-injection paths and two nested Titan catch levels:
 
 1. Immediate submission failure: clean the failed arm and iteratively inject
    `Error` with `root:error` from the current dispatcher; no callback is awaited.
 2. Async operation failure: its callback copies/cleans the result and directly
    injects `Error` with `root:error` at the suspended `_await` site.
-3. Task/user failure: the Task-drive boundary catches the error or
+3. Task/user catch: the inner Task-drive boundary catches the error or
    library-injected `Cancelled` escaping `root:resume`/`root:error`, copies the
    catch-local `traceback`, and marks only that Task terminal before applying the
-   observed/unobserved policy. Dispatcher invariants and native-entry failures
-   use the distinct Runtime-fatal boundary and always initiate phased shutdown.
+   observed/unobserved policy.
+4. Runtime-fatal catch: the dispatcher's trailing function-level `catch` handles
+   a malformed private Request or pump/library invariant, stores its catch-local
+   `error` and `traceback`, marks/stops the Runtime, and returns normally to the
+   direct C callback. It never re-raises while libuv is on the stack.
 
 Do not depend on `registry[TITAN_BACKTRACE_KEY]` retaining a task failure while
 other callbacks run. Store the traceback string in the Task/Runtime immediately.
@@ -1024,8 +1037,9 @@ V1 tracks every Task created by nonblocking `uv.run`:
   joiner; `Task:join` re-raises it with its saved trace and the joiner may catch
   it;
 - a Task that fails with no waiting joiner is unobserved and fails the loop
-  session; the dispatcher records it, initiates cancellation/close, and returns
-  through libuv before the bootstrap reports it;
+  session; the dispatcher records/promotes it, requests `uv_stop`, and returns
+  through libuv. The outer bootstrap then initiates cancellation/close, drains,
+  and reports it;
 - decide “unobserved” with a per-Task next-turn zero-timer check after control
   has returned to the Task's creator. This lets `uv.run` return an immediately
   failed start Task and lets an already running/scheduled observer register
@@ -1161,9 +1175,9 @@ while a callback is directly driving its continuation.
 Normal main completion only records the exit result and lets independently
 scheduled Tasks continue. The transition to session cleanup occurs when the
 last Task becomes terminal, even if active or passive resources remain. An
-unobserved Task failure, explicit session cancellation, or internal
-dispatcher/protected-call failure enters the same cleanup machine in fatal mode
-while Tasks are still live.
+unobserved Task failure, explicit session cancellation, or internal dispatcher
+failure enters the same cleanup machine in fatal mode while Tasks are still
+live.
 
 Shutdown is phased; it is not a blanket `uv_walk` + `uv_close` pass:
 
@@ -1846,11 +1860,16 @@ Work:
   concrete-to-base handle cast; assert that each wrapper delegates to a public
   libuv API and contains no field access.
 - Implement native trampoline pointer recovery and the catch-all dispatcher.
-- Wrap each direct native dispatch in a C-level protected call so failures in
-  the generated native-entry prologue also return through libuv safely.
-- Pre-root emergency fatal slots and keep post-protection capture strictly
-  allocation-free/no-throw; test a failure before ordinary temporary rooting
-  and a failure inside native-entry setup.
+- Call the trusted dispatcher through its native Titan entry exactly as
+  `titan_coro_entry` does, with no C protected-call wrapper. Put all dispatcher
+  body work under its trailing function-level Titan `catch`; its non-raising
+  failure arm stores `error`/`traceback`, marks Runtime fatal, calls `uv_stop`,
+  and returns.
+- Test an observed Task failure followed by another live timer callback, an
+  injected library failure at the first dispatcher body operation, and a
+  failure in the Task-error handler itself. Prove the inner and trailing catches
+  classify them correctly and return through every native callback shape
+  without a longjmp or Lua entry-wrapper call.
 - Implement timer, close, FS, read/alloc, connect/write, DNS, process, and signal
   callback shapes incrementally; begin with timer + FS only.
 - Add exact-length buffer helpers.
@@ -1871,9 +1890,15 @@ Exit criteria:
   expression, or substitute another record; Lua entry checks reject a table or
   wrong-record userdata. Repeated calls through one wrapper allocate no
   pointer-boxing userdata.
-- Dispatcher failure never unwinds through libuv.
-- Emergency protected-failure capture itself cannot allocate or raise, restores
-  the main stack/CallInfo state, and defers formatting until bootstrap control.
+- An observed Task error is stored and a later callback still fires; a
+  Task-handler error reaches the Runtime-fatal catch. Neither unwinds through
+  libuv; separate coverage proves an unobserved failure stops the session.
+- Its trailing function-level catch saves the exact error/trace in already
+  rooted Runtime fields, marks fatal, requests `uv_stop`, and returns;
+  formatting, cleanup, and reporting wait until bootstrap control.
+- Main-stack top is unchanged after dispatch, and standalone plus Lua
+  `uv.loop()` failure tests retain a nonempty Titan traceback, proving the loop
+  entry keeps `errfunc` active throughout C `uv_run`.
 - Request/handle roots are released after, and only after, terminal cleanup.
 
 ### Phase 2 - continuation pump, bootstrap, tasks, errors, and timers
@@ -2092,8 +2117,14 @@ module build order, environment flags, and standalone execution.
 - native callback directly resumes user code, receives/arms its next Request,
   and returns with C `uv_run` depth still one;
 - three or more repeating `Ticker:tick` callback/continuation cycles;
-- native callback C protection, no-throw emergency capture, Titan Task versus
-  Runtime-fatal boundaries, and trace preservation;
+- direct native callback entry with no Lua wrapper or additional shim-level
+  protected call, a trailing function-level Titan catch, Task versus
+  Runtime-fatal classification, and trace preservation;
+- an observed Task raise returns normally and a later timer callback still runs;
+  failure in the Task-error arm reaches the trailing Runtime-fatal catch, while
+  an unobserved Task failure stops the session;
+- callback dispatch preserves the main stack top, and both standalone and Lua
+  `uv.loop()` paths retain a nonempty Titan traceback across `uv_run`;
 - immediate versus asynchronous error;
 - incremental and generational GC;
 - pending/resource root release verified with weak references;
@@ -2185,8 +2216,13 @@ snapshot can otherwise shadow source edits.
       pointer-boxing allocation.
 - [ ] All libuv data pointers refer to independently rooted opaque wrapper
       record userdata, never the separate native-storage userdata.
-- [ ] Native callbacks use Titan native entry pointers, not Lua wrappers.
-- [ ] No error can unwind through libuv.
+- [ ] Native callbacks use Titan native entry pointers directly, with neither a
+      Lua wrapper nor an additional shim-level protected-call wrapper.
+- [ ] The trusted dispatcher's controlled body is covered by a trailing
+      function-level Titan catch whose failure arm records state and returns
+      without re-raising; no error can unwind through libuv.
+- [ ] Standalone and Lua loop entries keep Titan `errfunc` active for the whole
+      `uv_run`; callbacks do not install or restore it individually.
 - [ ] Each callback copies/cleans its result, directly drives the captured Task,
       arms the next yielded Request, and returns without nesting C `uv_run`.
 - [ ] One private shared `UV_TAG` routes through differently tagged nested
