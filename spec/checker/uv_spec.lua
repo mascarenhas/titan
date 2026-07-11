@@ -75,11 +75,17 @@ describe("uv public interface", function()
             "_net_connect", "_net_eof_error", "_net_find",
             "_net_is_closed", "_net_listen", "_net_read",
             "_net_shutdown", "_net_slice", "_net_write", "_os_chdir",
-            "_os_cwd", "_os_exepath", "_os_getenv", "_os_homedir",
-            "_os_hostname", "_os_pid", "_os_ppid", "_os_setenv",
+            "_os_communicate", "_os_cwd", "_os_exepath", "_os_getenv",
+            "_os_homedir",
+            "_os_hostname", "_os_pid", "_os_ppid",
+            "_os_process_close_stdin", "_os_process_kill",
+            "_os_process_read_stderr", "_os_process_read_stdout",
+            "_os_process_spawn", "_os_process_wait",
+            "_os_process_write_stdin", "_os_setenv", "_os_signal_name",
             "_os_tmpdir", "_os_unsetenv", "_os_wait_signal", "_sleep",
             "_ticker", "_ticker_close", "_ticker_tick", "_yield", "loop",
-            "run", "uv_file", "uv_tcp_t", "uv_timer_t", "version",
+            "run", "uv_file", "uv_process_t", "uv_tcp_t", "uv_timer_t",
+            "version",
         }, sorted_keys(modtype.members))
 
         assert.equals("(() -> value) -> uv.Task", signature(modtype, "run"))
@@ -132,6 +138,9 @@ describe("uv public interface", function()
         assert.equals("(string) -> ()", signature(modtype, "_os_unsetenv"))
         assert.equals("() -> string", signature(modtype, "_os_cwd"))
         assert.equals("(string) -> ()", signature(modtype, "_os_chdir"))
+        assert.equals(
+            "(string, { string }, string?) -> (string, string, integer, integer)",
+            signature(modtype, "_os_communicate"))
         for _, name in ipairs({
             "_os_homedir", "_os_tmpdir", "_os_hostname", "_os_exepath",
         }) do
@@ -141,6 +150,22 @@ describe("uv public interface", function()
         assert.equals("() -> integer", signature(modtype, "_os_ppid"))
         assert.equals("(string) -> string",
             signature(modtype, "_os_wait_signal"))
+        assert.equals("(integer) -> string?",
+            signature(modtype, "_os_signal_name"))
+        assert.equals("(string, { string }) -> uv.uv_process_t",
+            signature(modtype, "_os_process_spawn"))
+        assert.equals("(uv.uv_process_t) -> (integer, integer)",
+            signature(modtype, "_os_process_wait"))
+        assert.equals("(uv.uv_process_t, string) -> ()",
+            signature(modtype, "_os_process_kill"))
+        assert.equals("(uv.uv_process_t, string) -> ()",
+            signature(modtype, "_os_process_write_stdin"))
+        assert.equals("(uv.uv_process_t) -> ()",
+            signature(modtype, "_os_process_close_stdin"))
+        assert.equals("(uv.uv_process_t, integer) -> string?",
+            signature(modtype, "_os_process_read_stdout"))
+        assert.equals("(uv.uv_process_t, integer) -> string?",
+            signature(modtype, "_os_process_read_stderr"))
         assert.equals("(integer) -> ()", signature(modtype, "_sleep"))
         assert.equals("() -> ()", signature(modtype, "_yield"))
         assert.equals("(integer) -> uv.uv_timer_t",
@@ -158,15 +183,21 @@ describe("uv public interface", function()
             "FsConstants", "Bytes", "Text", "Buffer", "Dirent",
             "FsStatResult", "FsOperation", "FsControl", "uv_fs_t",
             "TickerState", "SignalSpec", "SignalControl", "uv_signal_t",
+            "ProcessControl", "PipeControl", "ProcessOperation",
+            "ProcessRequestControl", "ProcessExitResult", "HelperGroup",
+            "uv_pipe_t",
+            "uv_pipe_write_t", "uv_process_grace_t",
             "timer_dispatch", "fs_dispatch", "signal_dispatch",
+            "process_dispatch", "pipe_dispatch", "pipe_write_dispatch",
+            "process_grace_dispatch",
             "UV_TAG", "active_runtime",
         }) do
             assert.falsy(modtype.members[name], name .. " leaked")
         end
 
         local task = assert(types.registry["uv.Task"])
-        assert.equals(25, task.nfields)
-        assert.equals(25, #task.fields)
+        assert.equals(27, task.nfields)
+        assert.equals(27, #task.fields)
         for _, field in ipairs(task.fields) do assert.is_true(field.islocal) end
         assert.same({ "cancel", "join", "status" }, sorted_keys(task.methods))
 
@@ -179,6 +210,13 @@ describe("uv public interface", function()
         assert.equals(8, signal.nfields)
         assert.equals(8, #signal.fields)
         for _, field in ipairs(signal.fields) do
+            assert.is_true(field.islocal)
+        end
+
+        local process = assert(types.registry["uv.uv_process_t"])
+        assert.equals(8, process.nfields)
+        assert.equals(8, #process.fields)
+        for _, field in ipairs(process.fields) do
             assert.is_true(field.islocal)
         end
 
@@ -202,8 +240,11 @@ describe("uv public interface", function()
         assert.not_match("uv_timer_t %*", serialized)
         assert.not_match("uv_fs_t", serialized, 1, true)
         assert.not_match("uv_signal_t", serialized, 1, true)
+        assert.not_match("uv_process_t %*", serialized)
         assert.not_match("TimerControl", serialized, 1, true)
         assert.not_match("SignalControl", serialized, 1, true)
+        assert.not_match("ProcessControl", serialized, 1, true)
+        assert.not_match("PipeControl", serialized, 1, true)
         assert.not_match("Request", serialized, 1, true)
         assert.not_match("dispatcher", serialized, 1, true)
         assert.truthy(serialized:find(
@@ -230,9 +271,28 @@ describe("uv public interface", function()
             local uv = import "uv"
             function bad_task(): uv.Task return uv.Task.new() end
             function bad_owner(): uv.uv_timer_t return uv.uv_timer_t.new() end
+            function bad_process(): uv.uv_process_t
+              return uv.uv_process_t.new()
+            end
             function bad_file(): uv.uv_file return uv.uv_file.new() end
         ]])
         assert.match("invalid record function 'new'", opaque)
+
+        local process_literal = check_consumer([[
+            local uv = import "uv"
+            function bad(): uv.uv_process_t return {} end
+        ]])
+        assert.match("cannot construct record type 'uv%.uv_process_t' outside module 'uv' because it has local fields",
+            process_literal)
+
+        local process_field = check_consumer([[
+            local uv = import "uv"
+            function bad(process: uv.uv_process_t): value
+              return process.handle
+            end
+        ]])
+        assert.match("field 'handle' not found in record 'uv%.uv_process_t'",
+            process_field)
 
         local literal = check_consumer([[
             local uv = import "uv"

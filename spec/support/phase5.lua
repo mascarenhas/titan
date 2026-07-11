@@ -69,17 +69,23 @@ end
 -- The ordinary Phase 5 suite intentionally uses an isolated instrumented uv
 -- image too: port-0 and bounded-accept checks need private counters without
 -- expanding the production net API.
-function M.workspace(label)
-    local workspace = phase2.variant_workspace(
-        "spec/support/make_phase5_test_variant.lua")
-    build_net(workspace)
-    return workspace
+local PHASE5_TRANSFORMER =
+    "spec/support/make_phase5_test_variant.lua"
+
+local function cached_workspace(transformer)
+    return phase2.cached_workspace("phase5-net:" .. transformer, function()
+        local workspace = phase2.variant_workspace(transformer)
+        build_net(workspace)
+        return workspace
+    end)
+end
+
+function M.workspace(_label)
+    return cached_workspace(PHASE5_TRANSFORMER)
 end
 
 function M.variant_workspace(transformer)
-    local workspace = phase2.variant_workspace(transformer)
-    build_net(workspace)
-    return workspace
+    return cached_workspace(transformer)
 end
 
 function M.copy_fixture(workspace, fixture, modname)

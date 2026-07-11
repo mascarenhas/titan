@@ -172,8 +172,9 @@ There is no extra protected callback wrapper or implicit ready queue;
 [timer](doc/language/standard-library-timer.md),
 [filesystem](doc/language/standard-library-fs.md), and
 [TCP networking](doc/language/standard-library-net.md) modules. Portable
-environment, directory, identity, executable-path, and one-shot signal helpers
-are documented in the [OS standard library](doc/language/standard-library-os.md).
+environment, directory, identity, executable-path, one-shot signal,
+argv-based child-process, binary stdio, and concurrent `communicate` helpers are
+documented in the [OS standard library](doc/language/standard-library-os.md).
 
 If everything is all right with your modules, you will get the result of
 your compilation as a native binary:
@@ -288,7 +289,8 @@ they are in the roadmap:
   unified Lua/Titan backtraces via `titan.backtrace()`
 * asymmetric, tagged (nested) coroutines as building block for async IO
 * libuv-backed Tasks, timers, asynchronous binary filesystem I/O, DNS, TCP,
-  portable OS helpers, and one-shot signal waits
+  portable OS helpers, one-shot signal waits, direct child processes with
+  binary stdio, and concurrent `communicate`
 
 ## Next
 

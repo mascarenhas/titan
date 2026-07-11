@@ -3,6 +3,18 @@ local uv = import "uv"
 -- Portable operating-system helpers. The low-level uv module owns every C
 -- type and libuv call; this facade exposes only ordinary Titan values.
 
+record ExitStatus
+  code: integer
+  signal: string?
+  signal_number: integer
+end
+
+-- The exact private uv wrapper makes Process unforgeable outside this module
+-- without converting its native handle through value on every method call.
+record Process
+  local handle: uv.uv_process_t
+end
+
 function getenv(name: string): string?
   return uv._os_getenv(name)
 end
@@ -45,6 +57,45 @@ end
 
 function ppid(): integer
   return uv._os_ppid()
+end
+
+function spawn(file: string, args: {string}): Process
+  return Process.new(uv._os_process_spawn(file, args))
+end
+
+function Process:wait(): ExitStatus
+  local code, signal_number = uv._os_process_wait(self.handle)
+  return ExitStatus.new(code, uv._os_signal_name(signal_number),
+                        signal_number)
+end
+
+function Process:kill(signal: string)
+  uv._os_process_kill(self.handle, signal)
+end
+
+function Process:write_stdin(data: string)
+  uv._os_process_write_stdin(self.handle, data)
+end
+
+function Process:close_stdin()
+  uv._os_process_close_stdin(self.handle)
+end
+
+function Process:read_stdout(max_bytes: integer): string?
+  return uv._os_process_read_stdout(self.handle, max_bytes)
+end
+
+function Process:read_stderr(max_bytes: integer): string?
+  return uv._os_process_read_stderr(self.handle, max_bytes)
+end
+
+function communicate(file: string, args: {string},
+                     input: string?): (string, string, ExitStatus)
+  local stdout, stderr, code, signal_number =
+    uv._os_communicate(file, args, input)
+  return stdout, stderr,
+         ExitStatus.new(code, uv._os_signal_name(signal_number),
+                        signal_number)
 end
 
 function wait_signal(name: string): string

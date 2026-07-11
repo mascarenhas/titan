@@ -130,8 +130,28 @@ cleanup-shielded through its `uv_shutdown` callback; repeated calls are
 idempotent. Explicit close rejects new work and stops reads, but serializes the
 native handle close behind already submitted and queued FIFO output.
 
+Child-process stdio follows the same callback-ownership rule without treating
+an anonymous pipe like a socket. Cancelling a queued stdin write removes it;
+a submitted write remains rooted through its callback. `Process:close_stdin()`
+is a cleanup-shielded FIFO close behind earlier writes and uses the pipe's
+`uv_close` callback, not `uv_shutdown`. Cancelling a process wait only frees
+that waiter: it does not signal the child, and another Task can wait for the
+retained exit status.
+
+`os.communicate` owns four pre-observed helper Tasks for stdin, stdout, stderr,
+and exit. They run concurrently, so large bidirectional traffic cannot
+deadlock because one pipe filled before another was drained. On a helper error
+or parent cancellation, the runtime keeps the original error, cancels the
+other helpers, terminates and reaps the child, drains every native callback,
+and only then reports the error.
+
+If a Runtime closes with a live child, it sends `term`, waits up to five
+seconds, then sends `kill`. The loop still waits for the real exit and close
+callbacks, so shutdown does not leave a zombie or let process/pipe storage be
+collected early.
+
 See the [filesystem standard library](standard-library-fs.md) and
 [TCP networking standard library](standard-library-net.md) for their public
 I/O APIs. The [operating-system standard library](standard-library-os.md)
-documents portable synchronous helpers and one-shot signal waits built on the
-same Runtime.
+documents portable synchronous helpers, one-shot signal waits, child-process
+stdio, exit status, and `communicate` built on the same Runtime.

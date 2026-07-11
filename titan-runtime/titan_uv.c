@@ -46,6 +46,14 @@ TITAN_UV_STATIC_ASSERT(slot_count,
                            (int)TITAN_UV_OWNER_C_INDEX_COUNT);
 TITAN_UV_STATIC_ASSERT(fs_result_fits_lua_integer,
                        sizeof(ssize_t) <= sizeof(lua_Integer));
+TITAN_UV_STATIC_ASSERT(process_exit_status_fits_lua_integer,
+                       sizeof(int64_t) <= sizeof(lua_Integer));
+TITAN_UV_STATIC_ASSERT(process_signal_fits_size,
+                       sizeof(int) <= sizeof(size_t));
+TITAN_UV_STATIC_ASSERT(process_pid_fits_int64,
+                       sizeof(uv_pid_t) <= sizeof(int64_t));
+TITAN_UV_STATIC_ASSERT(unix_uv_file_is_int,
+                       sizeof(uv_file) == sizeof(int));
 
 struct titan_uvshim_address_alignment_probe {
   char byte;
@@ -96,6 +104,15 @@ static void titan_uvshim_dispatch(Udata *owner, lua_Integer event_kind,
 static void titan_uvshim_signal_cb(uv_signal_t *signal, int signum) {
   Udata *owner = (Udata *)uv_handle_get_data((uv_handle_t *)signal);
   titan_uvshim_dispatch(owner, TITAN_UV_EVENT_SIGNAL, signum, 0, NULL);
+}
+
+static void titan_uvshim_process_exit_cb(uv_process_t *process,
+                                         int64_t exit_status,
+                                         int term_signal) {
+  Udata *owner = (Udata *)uv_handle_get_data((uv_handle_t *)process);
+  size_t signal_size = term_signal >= 0 ? (size_t)term_signal : 0;
+  titan_uvshim_dispatch(owner, TITAN_UV_EVENT_PROCESS_EXIT,
+                        (lua_Integer)exit_status, signal_size, NULL);
 }
 
 static void titan_uvshim_getaddrinfo_cb(uv_getaddrinfo_t *req,
@@ -367,6 +384,230 @@ int titan_uvshim_tcp_shutdown_start(uv_shutdown_t *req,
     return UV_EINVAL;
   uv_req_set_data((uv_req_t *)req, data);
   return uv_shutdown(req, (uv_stream_t *)tcp, titan_uvshim_shutdown_cb);
+}
+
+enum { TITAN_UV_LAST_STDIO_FD = 2 };
+
+static int titan_uvshim_pair_contains_stdio(const int pair[2]) {
+  return pair[0] <= TITAN_UV_LAST_STDIO_FD ||
+         pair[1] <= TITAN_UV_LAST_STDIO_FD;
+}
+
+static void titan_uvshim_store_pair(int *storage,
+                                    int *count,
+                                    const int pair[2]) {
+  storage[*count] = pair[0];
+  storage[*count + 1] = pair[1];
+  *count += 2;
+}
+
+int titan_uvshim_stdio_pipes(int *endpoints,
+                             int *endpoint_count,
+                             int *fillers,
+                             int *filler_count) {
+  int endpoint_capacity;
+  int filler_capacity;
+  int pair[2];
+  int status;
+
+  if (endpoint_count == NULL || filler_count == NULL)
+    return UV_EINVAL;
+  endpoint_capacity = *endpoint_count;
+  filler_capacity = *filler_count;
+  *endpoint_count = 0;
+  *filler_count = 0;
+  if (endpoints == NULL || fillers == NULL ||
+      endpoint_capacity < TITAN_UV_STDIO_ENDPOINT_COUNT ||
+      filler_capacity < TITAN_UV_STDIO_FILLER_CAPACITY)
+    return UV_EINVAL;
+
+  /*
+   * POSIX assigns the lowest available descriptors to each public uv_pipe()
+   * call.  Keeping both ends of a low candidate open fills fd 0..2 in at most
+   * two pairs when the process descriptor table is not racing.  A third low
+   * candidate is still returned to the caller for cleanup, then diagnosed.
+   */
+  for (;;) {
+    status = uv_pipe(pair, 0, UV_NONBLOCK_PIPE);
+    if (status < 0)
+      return status;
+    if (!titan_uvshim_pair_contains_stdio(pair)) {
+      titan_uvshim_store_pair(endpoints, endpoint_count, pair);
+      break;
+    }
+    titan_uvshim_store_pair(fillers, filler_count, pair);
+    if (*filler_count > TITAN_UV_STDIO_FILLER_CAPACITY - 2)
+      return UV_EBUSY;
+  }
+
+  status = uv_pipe(pair, UV_NONBLOCK_PIPE, 0);
+  if (status < 0)
+    return status;
+  if (titan_uvshim_pair_contains_stdio(pair)) {
+    titan_uvshim_store_pair(fillers, filler_count, pair);
+    return UV_EBUSY;
+  }
+  titan_uvshim_store_pair(endpoints, endpoint_count, pair);
+
+  status = uv_pipe(pair, UV_NONBLOCK_PIPE, 0);
+  if (status < 0)
+    return status;
+  if (titan_uvshim_pair_contains_stdio(pair)) {
+    titan_uvshim_store_pair(fillers, filler_count, pair);
+    return UV_EBUSY;
+  }
+  titan_uvshim_store_pair(endpoints, endpoint_count, pair);
+  return 0;
+}
+
+int titan_uvshim_pipe_init(uv_loop_t *loop,
+                           uv_pipe_t *pipe,
+                           void *data) {
+  int status;
+  if (loop == NULL || pipe == NULL || data == NULL)
+    return UV_EINVAL;
+  status = uv_pipe_init(loop, pipe, 0);
+  if (status == 0)
+    uv_handle_set_data((uv_handle_t *)pipe, data);
+  return status;
+}
+
+int titan_uvshim_pipe_open(uv_pipe_t *pipe,
+                           int *endpoints,
+                           int endpoint_count,
+                           int index) {
+  int *fd;
+  int status;
+  if (pipe == NULL || endpoints == NULL ||
+      endpoint_count != TITAN_UV_STDIO_ENDPOINT_COUNT ||
+      index < 0 || index >= endpoint_count)
+    return UV_EINVAL;
+  if (index != TITAN_UV_STDIO_STDIN_PARENT &&
+      index != TITAN_UV_STDIO_STDOUT_PARENT &&
+      index != TITAN_UV_STDIO_STDERR_PARENT)
+    return UV_EINVAL;
+  fd = &endpoints[index];
+  if (*fd <= TITAN_UV_LAST_STDIO_FD)
+    return UV_EINVAL;
+  status = uv_pipe_open(pipe, *fd);
+  if (status == 0)
+    *fd = -1;
+  return status;
+}
+
+int titan_uvshim_pipe_read_start(uv_pipe_t *pipe) {
+  if (pipe == NULL)
+    return UV_EINVAL;
+  return uv_read_start((uv_stream_t *)pipe, titan_uvshim_alloc_cb,
+                       titan_uvshim_read_cb);
+}
+
+int titan_uvshim_pipe_read_stop(uv_pipe_t *pipe) {
+  if (pipe == NULL)
+    return UV_EINVAL;
+  return uv_read_stop((uv_stream_t *)pipe);
+}
+
+int titan_uvshim_pipe_write_start(uv_write_t *req,
+                                  uv_pipe_t *pipe,
+                                  void *data,
+                                  const void *buffer) {
+  if (req == NULL || pipe == NULL || data == NULL || buffer == NULL)
+    return UV_EINVAL;
+  uv_req_set_data((uv_req_t *)req, data);
+  return uv_write(req, (uv_stream_t *)pipe, (const uv_buf_t *)buffer, 1,
+                  titan_uvshim_write_cb);
+}
+
+int titan_uvshim_pipe_is_closing(const uv_pipe_t *pipe) {
+  return uv_is_closing((const uv_handle_t *)pipe);
+}
+
+void titan_uvshim_pipe_close(uv_pipe_t *pipe) {
+  uv_close((uv_handle_t *)pipe, titan_uvshim_close_cb);
+}
+
+int titan_uvshim_process_spawn(uv_loop_t *loop,
+                               uv_process_t *process,
+                               void *data,
+                               const char *file,
+                               titan_uvshim_char_ptr *argv,
+                               int64_t argv_count,
+                               const int *endpoints,
+                               int endpoint_count,
+                               int *initialized) {
+  uv_process_options_t options;
+  uv_stdio_container_t stdio[3];
+  int64_t index;
+  int status;
+
+  if (initialized == NULL)
+    return UV_EINVAL;
+  *initialized = 0;
+  if (loop == NULL || process == NULL || data == NULL || file == NULL ||
+      argv == NULL || argv_count < 1 || argv_count > INT_MAX ||
+      endpoints == NULL || endpoint_count != TITAN_UV_STDIO_ENDPOINT_COUNT)
+    return UV_EINVAL;
+  for (index = 0; index < argv_count; index++)
+    if (argv[index] == NULL)
+      return UV_EINVAL;
+  if (argv[argv_count] != NULL ||
+      endpoints[TITAN_UV_STDIO_STDIN_CHILD] <= TITAN_UV_LAST_STDIO_FD ||
+      endpoints[TITAN_UV_STDIO_STDOUT_CHILD] <= TITAN_UV_LAST_STDIO_FD ||
+      endpoints[TITAN_UV_STDIO_STDERR_CHILD] <= TITAN_UV_LAST_STDIO_FD)
+    return UV_EINVAL;
+
+  memset(&options, 0, sizeof(options));
+  memset(stdio, 0, sizeof(stdio));
+  stdio[0].flags = UV_INHERIT_FD;
+  stdio[0].data.fd = endpoints[TITAN_UV_STDIO_STDIN_CHILD];
+  stdio[1].flags = UV_INHERIT_FD;
+  stdio[1].data.fd = endpoints[TITAN_UV_STDIO_STDOUT_CHILD];
+  stdio[2].flags = UV_INHERIT_FD;
+  stdio[2].data.fd = endpoints[TITAN_UV_STDIO_STDERR_CHILD];
+  options.exit_cb = titan_uvshim_process_exit_cb;
+  options.file = file;
+  options.args = argv;
+  options.env = NULL;
+  options.cwd = NULL;
+  options.stdio_count = 3;
+  options.stdio = stdio;
+
+  /*
+   * Exactly three valid UV_INHERIT_FD entries use libuv's stack stdio array;
+   * init_stdio cannot reject them and open_stream is a no-op.  On supported
+   * Linux/desktop-macOS every uv_spawn return therefore follows process.c's
+   * ordinary return path, where the initialized process handle is closeable.
+   * Inherit entries remain caller-owned on both success and failure.
+   */
+  status = uv_spawn(loop, process, &options);
+  uv_handle_set_data((uv_handle_t *)process, data);
+  *initialized = 1;
+  return status;
+}
+
+int titan_uvshim_process_kill(uv_process_t *process, int signum) {
+  if (process == NULL || signum <= 0)
+    return UV_EINVAL;
+  return uv_process_kill(process, signum);
+}
+
+int64_t titan_uvshim_process_get_pid(const uv_process_t *process) {
+  if (process == NULL)
+    return UV_EINVAL;
+  return (int64_t)uv_process_get_pid(process);
+}
+
+int titan_uvshim_process_is_closing(const uv_process_t *process) {
+  return uv_is_closing((const uv_handle_t *)process);
+}
+
+void titan_uvshim_process_close(uv_process_t *process) {
+  uv_close((uv_handle_t *)process, titan_uvshim_close_cb);
+}
+
+int titan_uvshim_status_is_esrch(int status) {
+  return status == UV_ESRCH;
 }
 
 void titan_uvshim_timer_set_data(uv_timer_t *timer, void *data) {

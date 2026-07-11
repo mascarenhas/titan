@@ -1,4 +1,5 @@
 local mode = assert(arg[1], "expected libuv mode label")
+local process_child = arg[2]
 local builtin = require "os"
 local system = require "titan.os"
 
@@ -35,5 +36,38 @@ assert(type(host) == "string" and #host > 0)
 assert(type(executable) == "string" and #executable > 0)
 assert(system.pid() > 0)
 assert(system.ppid() > 0)
+
+if process_child then
+    local uv = require "titan.uv"
+    local payload = mode .. "\0titan.os.process"
+    for _ = 1, 14 do payload = payload .. payload end
+
+    local main = uv.run(function()
+        local output, diagnostics, status =
+            system.communicate(process_child, { "echo" }, payload)
+        assert(output == payload)
+        assert(diagnostics == "")
+        assert(status.code == 0)
+        assert(status.signal == nil)
+        assert(status.signal_number == 0)
+
+        local exited = system.spawn(process_child, { "exit", "29" })
+        exited:close_stdin()
+        assert(exited:read_stdout(4096) == nil)
+        assert(exited:read_stderr(4096) == nil)
+        local exit_status = exited:wait()
+        assert(exit_status.code == 29)
+        assert(exit_status.signal == nil)
+        assert(exit_status.signal_number == 0)
+        return output
+    end)
+
+    uv.loop()
+    assert(main:join() == payload)
+    assert(require "os" == builtin)
+    assert(package.loaded.os == builtin)
+    assert(package.loaded["titan.os"] == system)
+    print("RESULT os production process smoke " .. mode .. " passed")
+end
 
 print("RESULT os production smoke " .. mode .. " passed")

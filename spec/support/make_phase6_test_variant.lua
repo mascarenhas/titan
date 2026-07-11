@@ -1,4 +1,4 @@
--- Generate an isolated Phase 6 signal-test uv.titan from the production
+-- Generate an isolated Phase 6 OS/signal/process-test uv.titan from production
 -- source.  Phase 6 deliberately composes the Phase 5 transformer first so
 -- the one shared runtime variant retains all earlier fault instrumentation.
 -- Usage: lua make_phase6_test_variant.lua INPUT OUTPUT
@@ -49,8 +49,8 @@ assert(not source:find("__test_phase6_", 1, true),
 
 source = replace_once(source, "-- TITAN_UV_PHASE6_TEST_STATE", [==[
 -- TITAN_UV_PHASE6_TEST_STATE
--- Variant-only signal counters and one-shot transition faults. This source is
--- generated into a private workspace and is never installed.
+-- Variant-only Phase 6 counters and one-shot transition faults. This source
+-- is generated into a private workspace and is never installed.
 local test_phase6_signal_init_attempts = 0
 local test_phase6_signal_native_inits = 0
 local test_phase6_signal_start_attempts = 0
@@ -71,6 +71,29 @@ local test_phase6_os_grows = 0
 local test_phase6_os_last_initial = 0
 local test_phase6_os_last_grow_from = 0
 local test_phase6_os_last_grow_to = 0
+local test_phase6_process_fault = 0
+local test_phase6_process_callback_fault = 0
+local test_phase6_process_stdio_attempts = 0
+local test_phase6_process_stdio_native_calls = 0
+local test_phase6_process_init_attempts = 0
+local test_phase6_process_init_native_calls = 0
+local test_phase6_process_open_attempts = 0
+local test_phase6_process_open_native_calls = 0
+local test_phase6_process_spawn_attempts = 0
+local test_phase6_process_spawn_native_calls = 0
+local test_phase6_process_native_initialized = 0
+local test_phase6_process_exit_callbacks = 0
+local test_phase6_process_close_callbacks = 0
+local test_phase6_process_pipe_close_callbacks = 0
+local test_phase6_process_pipe_read_callbacks = 0
+local test_phase6_process_write_attempts = 0
+local test_phase6_process_write_native_calls = 0
+local test_phase6_process_write_callbacks = 0
+local test_phase6_process_stdin_close_transitions = 0
+local test_phase6_process_grace_callbacks = 0
+local test_phase6_process_close_before_exit = 0
+local test_phase6_process_helper_starts = 0
+local test_phase6_process_helper_completions = 0
 ]==], "signal counters and controls")
 
 source = replace_once(source, [==[  -- TITAN_UV_PHASE6_OS_BUFFER_INIT
@@ -192,6 +215,252 @@ source = replace_once(source, "  -- TITAN_UV_PHASE6_SIGNAL_CALLBACK", [==[
     raise "phase6-forced-signal-callback-failure"
   end
 ]==], "signal callback fault")
+
+source = replace_once(source, [==[      -- TITAN_UV_PHASE6_PROCESS_WRITE_SUBMIT
+      status = shim.titan_uvshim_pipe_write_start(
+          owner.handle, pipe.handle, pointer, buffer.handle)]==], [==[      -- TITAN_UV_PHASE6_PROCESS_WRITE_SUBMIT
+      test_phase6_process_write_attempts =
+          test_phase6_process_write_attempts + 1
+      if test_phase6_process_fault == 10 then
+        test_phase6_process_fault = 0
+        status = shim.titan_uvshim_error_ecanceled()
+      else
+        test_phase6_process_write_native_calls =
+            test_phase6_process_write_native_calls + 1
+        status = shim.titan_uvshim_pipe_write_start(
+            owner.handle, pipe.handle, pointer, buffer.handle)
+      end]==], "process write submission")
+
+source = replace_once(source, [==[      -- TITAN_UV_PHASE6_PROCESS_STDIN_CLOSE
+      control.write_shutdown = true
+      start_pipe_close(pipe)]==], [==[      -- TITAN_UV_PHASE6_PROCESS_STDIN_CLOSE
+      test_phase6_process_stdin_close_transitions =
+          test_phase6_process_stdin_close_transitions + 1
+      if test_phase6_process_fault == 11 then
+        test_phase6_process_fault = 0
+        operation.last_error = make_error(
+            shim.titan_uvshim_error_ecanceled() as integer,
+            "process.stdin.close", nil)
+      end
+      control.write_shutdown = true
+      start_pipe_close(pipe)]==], "ordered stdin close transition")
+
+source = replace_once(source, [==[  -- TITAN_UV_PHASE6_PROCESS_STDIO_CREATE
+  local status = shim.titan_uvshim_stdio_pipes(
+      endpoints, endpoint_count, fillers, filler_count)]==], [==[  -- TITAN_UV_PHASE6_PROCESS_STDIO_CREATE
+  test_phase6_process_stdio_attempts =
+      test_phase6_process_stdio_attempts + 1
+  test_phase6_process_stdio_native_calls =
+      test_phase6_process_stdio_native_calls + 1
+  local status = shim.titan_uvshim_stdio_pipes(
+      endpoints, endpoint_count, fillers, filler_count)
+  if test_phase6_process_fault == 1 then
+    test_phase6_process_fault = 0
+    status = shim.titan_uvshim_error_ecanceled()
+  end]==], "process stdio acquisition")
+
+local function replace_process_transition(marker, call, fault,
+                                          label, counter)
+    source = replace_once(source, marker .. "\n" .. call,
+        marker .. "\n" .. [==[    test_phase6_process_]==] .. counter .. [==[_attempts =
+        test_phase6_process_]==] .. counter .. [==[_attempts + 1
+    if test_phase6_process_fault == ]==] .. fault .. [==[ then
+      test_phase6_process_fault = 0
+      status = shim.titan_uvshim_error_ecanceled()
+    else
+      test_phase6_process_]==] .. counter .. [==[_native_calls =
+          test_phase6_process_]==] .. counter .. [==[_native_calls + 1
+]==] .. call .. "\n    end", label)
+end
+
+replace_process_transition(
+    "    -- TITAN_UV_PHASE6_PROCESS_STDIN_INIT",
+    [==[    status = shim.titan_uvshim_pipe_init(runtime.loop.handle,
+        stdin_pipe.handle, stdin_pointer)]==], "2", "stdin pipe init", "init")
+replace_process_transition(
+    "      -- TITAN_UV_PHASE6_PROCESS_STDOUT_INIT",
+    [==[      status = shim.titan_uvshim_pipe_init(runtime.loop.handle,
+          stdout_pipe.handle, stdout_pointer)]==], "3", "stdout pipe init", "init")
+replace_process_transition(
+    "      -- TITAN_UV_PHASE6_PROCESS_STDERR_INIT",
+    [==[      status = shim.titan_uvshim_pipe_init(runtime.loop.handle,
+          stderr_pipe.handle, stderr_pointer)]==], "4", "stderr pipe init", "init")
+replace_process_transition(
+    "      -- TITAN_UV_PHASE6_PROCESS_STDIN_OPEN",
+    [==[      status = shim.titan_uvshim_pipe_open(stdin_pipe.handle, endpoints,
+          endpoint_count[0],
+          shim.TITAN_UV_STDIO_STDIN_PARENT as ffi.titan_ffi_int)]==],
+    "5", "stdin pipe open", "open")
+replace_process_transition(
+    "      -- TITAN_UV_PHASE6_PROCESS_STDOUT_OPEN",
+    [==[      status = shim.titan_uvshim_pipe_open(stdout_pipe.handle, endpoints,
+          endpoint_count[0],
+          shim.TITAN_UV_STDIO_STDOUT_PARENT as ffi.titan_ffi_int)]==],
+    "6", "stdout pipe open", "open")
+replace_process_transition(
+    "      -- TITAN_UV_PHASE6_PROCESS_STDERR_OPEN",
+    [==[      status = shim.titan_uvshim_pipe_open(stderr_pipe.handle, endpoints,
+          endpoint_count[0],
+          shim.TITAN_UV_STDIO_STDERR_PARENT as ffi.titan_ffi_int)]==],
+    "7", "stderr pipe open", "open")
+
+source = replace_once(source, [==[      -- TITAN_UV_PHASE6_PROCESS_SPAWN_SUBMIT
+      status = shim.titan_uvshim_process_spawn(runtime.loop.handle,
+          process.handle, process_pointer, file.bytes.data, argv,
+          argument_count, endpoints, endpoint_count[0], initialized)]==], [==[      -- TITAN_UV_PHASE6_PROCESS_SPAWN_SUBMIT
+      test_phase6_process_spawn_attempts =
+          test_phase6_process_spawn_attempts + 1
+      if test_phase6_process_fault == 8 then
+        test_phase6_process_fault = 0
+        initialized[0] = 0 as ffi.titan_ffi_int
+        status = shim.titan_uvshim_error_ecanceled()
+      else
+        test_phase6_process_spawn_native_calls =
+            test_phase6_process_spawn_native_calls + 1
+        status = shim.titan_uvshim_process_spawn(runtime.loop.handle,
+            process.handle, process_pointer, file.bytes.data, argv,
+            argument_count, endpoints, endpoint_count[0], initialized)
+        if (initialized[0] as integer) ~= 0 then
+          test_phase6_process_native_initialized =
+              test_phase6_process_native_initialized + 1
+        end
+      end]==], "process spawn submission")
+
+source = replace_once(source, [==[  -- TITAN_UV_PHASE6_PROCESS_RAW_CLOSE
+  local raw_close_status = 0]==], [==[  -- TITAN_UV_PHASE6_PROCESS_RAW_CLOSE
+  local raw_close_status = 0
+  if test_phase6_process_fault == 9 then
+    test_phase6_process_fault = 0
+    raw_close_status = shim.titan_uvshim_error_ecanceled() as integer
+  end]==], "post-spawn descriptor-close failure")
+
+source = replace_once(source, [==[    -- TITAN_UV_PHASE6_PROCESS_EXIT_CALLBACK
+    owner.metadata.exit_seen = true
+    owner.metadata.exit_status = result
+    owner.metadata.term_signal = size as integer
+    owner.metadata.lifecycle = PROCESS_EXITED]==], [==[
+    -- TITAN_UV_PHASE6_PROCESS_EXIT_CALLBACK
+    owner.metadata.exit_seen = true
+    owner.metadata.exit_status = result
+    owner.metadata.term_signal = size as integer
+    owner.metadata.lifecycle = PROCESS_EXITED
+    test_phase6_process_exit_callbacks =
+        test_phase6_process_exit_callbacks + 1
+    if test_phase6_process_callback_fault == 1 then
+      test_phase6_process_callback_fault = 0
+      raise "phase6-forced-process-exit-callback-failure"
+    end
+]==], "process exit callback")
+
+source = replace_once(source, [==[    -- TITAN_UV_PHASE6_PROCESS_CLOSE_CALLBACK
+    owner.metadata.close_callback_seen = true
+    owner.metadata.lifecycle = PROCESS_CLOSED]==], [==[
+    -- TITAN_UV_PHASE6_PROCESS_CLOSE_CALLBACK
+    owner.metadata.close_callback_seen = true
+    owner.metadata.lifecycle = PROCESS_CLOSED
+    test_phase6_process_close_callbacks =
+        test_phase6_process_close_callbacks + 1
+    if owner.metadata.published and not owner.metadata.exit_seen then
+      test_phase6_process_close_before_exit =
+          test_phase6_process_close_before_exit + 1
+    end
+    if test_phase6_process_callback_fault == 2 then
+      test_phase6_process_callback_fault = 0
+      raise "phase6-forced-process-close-callback-failure"
+    end
+]==], "process close callback")
+
+source = replace_once(source, [==[    -- TITAN_UV_PHASE6_PROCESS_PIPE_CLOSE_CALLBACK
+    owner.metadata.close_callback_seen = true
+    owner.metadata.lifecycle = PIPE_CLOSED]==], [==[
+    -- TITAN_UV_PHASE6_PROCESS_PIPE_CLOSE_CALLBACK
+    owner.metadata.close_callback_seen = true
+    owner.metadata.lifecycle = PIPE_CLOSED
+    test_phase6_process_pipe_close_callbacks =
+        test_phase6_process_pipe_close_callbacks + 1
+    if test_phase6_process_callback_fault == 3 then
+      test_phase6_process_callback_fault = 0
+      raise "phase6-forced-process-pipe-close-callback-failure"
+    end
+]==], "process pipe close callback")
+
+source = replace_once(source, [==[    -- TITAN_UV_PHASE6_PROCESS_PIPE_READ_CALLBACK
+    if owner.metadata.read_active then
+      shim.titan_uvshim_pipe_read_stop(owner.handle)
+      owner.metadata.read_active = false
+    end
+    if result < 0 then
+      if result == (shim.titan_uvshim_error_eof() as integer) then
+        owner.metadata.read_terminal = TCP_READ_EOF
+      else
+        owner.metadata.read_terminal = TCP_READ_ERROR
+      end
+    end]==], [==[
+    -- TITAN_UV_PHASE6_PROCESS_PIPE_READ_CALLBACK
+    if owner.metadata.read_active then
+      shim.titan_uvshim_pipe_read_stop(owner.handle)
+      owner.metadata.read_active = false
+    end
+    if result < 0 then
+      if result == (shim.titan_uvshim_error_eof() as integer) then
+        owner.metadata.read_terminal = TCP_READ_EOF
+      else
+        owner.metadata.read_terminal = TCP_READ_ERROR
+      end
+    end
+    test_phase6_process_pipe_read_callbacks =
+        test_phase6_process_pipe_read_callbacks + 1
+    if test_phase6_process_callback_fault == 4 then
+      test_phase6_process_callback_fault = 0
+      raise "phase6-forced-process-pipe-read-callback-failure"
+    end
+]==], "process pipe read callback")
+
+source = replace_once(source,
+    "  -- TITAN_UV_PHASE6_PROCESS_WRITE_CALLBACK", [==[
+  -- TITAN_UV_PHASE6_PROCESS_WRITE_CALLBACK
+  test_phase6_process_write_callbacks =
+      test_phase6_process_write_callbacks + 1
+  if test_phase6_process_callback_fault == 5 then
+    test_phase6_process_callback_fault = 0
+    raise "phase6-forced-process-write-callback-failure"
+  end
+]==], "process write callback")
+
+source = replace_once(source,
+    "    -- TITAN_UV_PHASE6_PROCESS_GRACE_CALLBACK", [==[
+    -- TITAN_UV_PHASE6_PROCESS_GRACE_CALLBACK
+    test_phase6_process_grace_callbacks =
+        test_phase6_process_grace_callbacks + 1
+    if test_phase6_process_callback_fault == 6 then
+      test_phase6_process_callback_fault = 0
+      raise "phase6-forced-process-grace-callback-failure"
+    end
+]==], "process grace callback")
+
+source = replace_once(source,
+    "  -- TITAN_UV_PHASE6_PROCESS_HELPER_COMPLETE", [==[
+  -- TITAN_UV_PHASE6_PROCESS_HELPER_COMPLETE
+  test_phase6_process_helper_completions =
+      test_phase6_process_helper_completions + 1
+]==], "process helper completion")
+
+source = replace_once(source, [==[  -- TITAN_UV_PHASE6_PROCESS_HELPER_START
+  local owner, status = start_owner(group.runtime, OWNER_START,
+                                    task, nil, 0, 0, 0)]==], [==[
+  -- TITAN_UV_PHASE6_PROCESS_HELPER_START
+  test_phase6_process_helper_starts =
+      test_phase6_process_helper_starts + 1
+  local owner, status = start_owner(group.runtime, OWNER_START,
+                                    task, nil, 0, 0, 0)
+  if test_phase6_process_fault == 12 then
+    -- The physical timer remains owned and drains normally.  Override the
+    -- immediate logical result after the helper is registered/observed to
+    -- prove that this infrastructure failure belongs to its HelperGroup.
+    test_phase6_process_fault = 0
+    status = shim.titan_uvshim_error_ecanceled() as integer
+  end
+]==], "process helper start")
 
 local hooks = [==[
 
@@ -362,6 +631,158 @@ function __test_phase6_has_active_runtime(): boolean
   if active_runtime then return true end
   return false
 end
+
+function __test_phase6_reset_process_state()
+  if active_runtime and
+      ((active_runtime as Runtime).process_head ~= nil or
+       (active_runtime as Runtime).process_request_head ~= nil) then
+    raise "cannot reset Phase 6 process state with live native owners"
+  end
+  test_phase6_process_fault = 0
+  test_phase6_process_callback_fault = 0
+  test_phase6_process_stdio_attempts = 0
+  test_phase6_process_stdio_native_calls = 0
+  test_phase6_process_init_attempts = 0
+  test_phase6_process_init_native_calls = 0
+  test_phase6_process_open_attempts = 0
+  test_phase6_process_open_native_calls = 0
+  test_phase6_process_spawn_attempts = 0
+  test_phase6_process_spawn_native_calls = 0
+  test_phase6_process_native_initialized = 0
+  test_phase6_process_exit_callbacks = 0
+  test_phase6_process_close_callbacks = 0
+  test_phase6_process_pipe_close_callbacks = 0
+  test_phase6_process_pipe_read_callbacks = 0
+  test_phase6_process_write_attempts = 0
+  test_phase6_process_write_native_calls = 0
+  test_phase6_process_write_callbacks = 0
+  test_phase6_process_stdin_close_transitions = 0
+  test_phase6_process_grace_callbacks = 0
+  test_phase6_process_close_before_exit = 0
+  test_phase6_process_helper_starts = 0
+  test_phase6_process_helper_completions = 0
+end
+
+function __test_phase6_force_process_failure(stage: string)
+  if test_phase6_process_fault ~= 0 then
+    raise "a process transition failure is already pending"
+  end
+  if stage == "stdio" then test_phase6_process_fault = 1
+  elseif stage == "stdin-init" then test_phase6_process_fault = 2
+  elseif stage == "stdout-init" then test_phase6_process_fault = 3
+  elseif stage == "stderr-init" then test_phase6_process_fault = 4
+  elseif stage == "stdin-open" then test_phase6_process_fault = 5
+  elseif stage == "stdout-open" then test_phase6_process_fault = 6
+  elseif stage == "stderr-open" then test_phase6_process_fault = 7
+  elseif stage == "spawn" then test_phase6_process_fault = 8
+  elseif stage == "raw-close" then test_phase6_process_fault = 9
+  elseif stage == "write" then test_phase6_process_fault = 10
+  elseif stage == "close" then test_phase6_process_fault = 11
+  elseif stage == "helper-start" then test_phase6_process_fault = 12
+  else raise "unknown process transition failure stage"
+  end
+end
+
+function __test_phase6_fail_next_process_callback(stage: string)
+  if test_phase6_process_callback_fault ~= 0 then
+    raise "a process callback failure is already pending"
+  end
+  if stage == "exit" then test_phase6_process_callback_fault = 1
+  elseif stage == "process-close" then
+    test_phase6_process_callback_fault = 2
+  elseif stage == "pipe-close" then test_phase6_process_callback_fault = 3
+  elseif stage == "pipe-read" then test_phase6_process_callback_fault = 4
+  elseif stage == "write" then test_phase6_process_callback_fault = 5
+  elseif stage == "grace" then test_phase6_process_callback_fault = 6
+  else raise "unknown process callback failure stage"
+  end
+end
+
+function __test_phase6_process_fault_pending(): boolean
+  return test_phase6_process_fault ~= 0 or
+         test_phase6_process_callback_fault ~= 0
+end
+
+function __test_phase6_process_counter(name: string): integer
+  if name == "stdio-attempts" then return test_phase6_process_stdio_attempts
+  elseif name == "stdio-native" then
+    return test_phase6_process_stdio_native_calls
+  elseif name == "init-attempts" then return test_phase6_process_init_attempts
+  elseif name == "init-native" then
+    return test_phase6_process_init_native_calls
+  elseif name == "open-attempts" then return test_phase6_process_open_attempts
+  elseif name == "open-native" then
+    return test_phase6_process_open_native_calls
+  elseif name == "spawn-attempts" then
+    return test_phase6_process_spawn_attempts
+  elseif name == "spawn-native" then
+    return test_phase6_process_spawn_native_calls
+  elseif name == "native-initialized" then
+    return test_phase6_process_native_initialized
+  elseif name == "exit-callbacks" then
+    return test_phase6_process_exit_callbacks
+  elseif name == "process-close-callbacks" then
+    return test_phase6_process_close_callbacks
+  elseif name == "pipe-close-callbacks" then
+    return test_phase6_process_pipe_close_callbacks
+  elseif name == "pipe-read-callbacks" then
+    return test_phase6_process_pipe_read_callbacks
+  elseif name == "write-attempts" then
+    return test_phase6_process_write_attempts
+  elseif name == "write-native" then
+    return test_phase6_process_write_native_calls
+  elseif name == "write-callbacks" then
+    return test_phase6_process_write_callbacks
+  elseif name == "stdin-close-transitions" then
+    return test_phase6_process_stdin_close_transitions
+  elseif name == "grace-callbacks" then
+    return test_phase6_process_grace_callbacks
+  elseif name == "close-before-exit" then
+    return test_phase6_process_close_before_exit
+  elseif name == "helper-starts" then
+    return test_phase6_process_helper_starts
+  elseif name == "helper-completions" then
+    return test_phase6_process_helper_completions
+  end
+  raise "unknown Phase 6 process counter"
+  return -1
+end
+
+function __test_phase6_process_resources(): integer
+  if not active_runtime then return 0 end
+  local count = 0
+  local raw = (active_runtime as Runtime).process_head
+  while raw ~= nil do
+    count = count + 1
+    raw = (raw as ProcessControl).next_control
+  end
+  return count
+end
+
+function __test_phase6_process_requests(): integer
+  if not active_runtime then return 0 end
+  local count = 0
+  local raw = (active_runtime as Runtime).process_request_head
+  while raw ~= nil do
+    count = count + 1
+    raw = (raw as ProcessRequestControl).next_control
+  end
+  return count
+end
+
+function __test_phase6_process_live_helpers(): integer
+  if not active_runtime then return 0 end
+  local count = 0
+  local raw = (active_runtime as Runtime).task_head
+  while raw ~= nil do
+    local task = raw as Task
+    if task.helper_group ~= nil and not terminal(task.state) then
+      count = count + 1
+    end
+    raw = task.next_task
+  end
+  return count
+end
 ]==]
 
 source = replace_once(source, "-- TITAN_UV_PHASE6_TEST_HOOKS",
@@ -392,6 +813,14 @@ for _, hook in ipairs({
     "__test_phase6_os_last_grow_from",
     "__test_phase6_os_last_grow_to",
     "__test_phase6_has_active_runtime",
+    "__test_phase6_reset_process_state",
+    "__test_phase6_force_process_failure",
+    "__test_phase6_fail_next_process_callback",
+    "__test_phase6_process_fault_pending",
+    "__test_phase6_process_counter",
+    "__test_phase6_process_resources",
+    "__test_phase6_process_requests",
+    "__test_phase6_process_live_helpers",
 }) do
     assert(source:find("function " .. hook, 1, true),
         "Phase 6 hook was not inserted: " .. hook)

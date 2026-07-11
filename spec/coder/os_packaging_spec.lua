@@ -1,5 +1,6 @@
 local lfs = require "lfs"
 local phase2 = require "spec.support.phase2"
+local phase6 = require "spec.support.phase6"
 
 local FIXTURE = "spec/fixtures/uv/phase6/packaging/"
 
@@ -81,6 +82,7 @@ describe("os standard-binary pinning", function()
     local workspace
     local source_root
     local shadow_bin
+    local process_child
 
     setup(function()
         workspace = phase2.workspace("os-packaging")
@@ -92,18 +94,49 @@ describe("os standard-binary pinning", function()
             source_root .. "/os_only.titan")
         copy_file(FIXTURE .. "os_consumer.titan",
             source_root .. "/os_consumer.titan")
+        copy_file(FIXTURE .. "process_only.titan",
+            source_root .. "/process_only.titan")
         copy_file(FIXTURE .. "fake_uv.titan", source_root .. "/uv.titan")
         write_file(shadow_bin .. "/uv.so", "not a shared library\n")
+        process_child = phase6.process_child(workspace)
         local ok, _, output = compile(workspace, source_root, "os_only",
             shadow_bin)
         assert.truthy(ok, output)
         ok, _, output = compile(workspace, source_root, "os_consumer",
             shadow_bin)
         assert.truthy(ok, output)
+        ok, _, output = compile(workspace, source_root, "process_only",
+            shadow_bin)
+        assert.truthy(ok, output)
     end)
 
     teardown(function()
         phase2.cleanup(workspace)
+    end)
+
+    it("runs process I/O through canonical binaries and async bootstrap",
+    function()
+        local generated = phase2.read(source_root .. "/process_only.c")
+        assert.match('loadstdlib%(L, "os%.so"%)', generated)
+        assert.not_match('loadlib%(L, "os%.so"%)', generated)
+        assert.not_match('loadstdlib%(L, "uv%.so"%)', generated)
+        assert.not_match("#include <uv.h>", generated, 1, true)
+        assert.not_match("titan_uvshim", generated, 1, true)
+
+        local entrypoint = phase2.read(
+            workspace .. "/process_only__entrypoint.c")
+        assert.match("TITAN_MAIN_BOOTSTRAP_KEY", entrypoint, 1, true)
+        assert_no_uv_implementation(workspace .. "/process_only")
+
+        local command = table.concat({
+            "env TITAN_STDLIB_PATH=" .. quote(phase2.standard_dir()),
+            "TITAN_PATH_0_11=" .. quote(shadow_bin),
+            "TITAN_PATH=" .. quote(shadow_bin),
+            quote(workspace .. "/process_only"), quote(process_child),
+        }, " ")
+        local ok, status, output = phase2.run(command, workspace)
+        assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
+        assert.equals(0, status, output)
     end)
 
     it("pins an os-only application and os.so to canonical binaries",
@@ -227,5 +260,17 @@ describe("os standard-binary pinning", function()
         }, " ")
         local ok, status, output = phase2.run(command, workspace)
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
+    end)
+
+    it("runs process APIs through the qualified Lua alias", function()
+        local script = phase2.repo ..
+            "/spec/fixtures/libuv/os_production_smoke.lua"
+        local command = phase2.lua_command(
+            workspace, script, "packaging", process_child)
+        local ok, status, output = phase2.run(command, workspace)
+        assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
+        assert.equals(0, status, output)
+        assert.match("RESULT os production process smoke packaging passed",
+            output, 1, true)
     end)
 end)

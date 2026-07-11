@@ -7,6 +7,7 @@ local phase2 = require "spec.support.phase2"
 
 describe("uv Phase 2 continuation pump", function()
     local workspace
+    local cache_workspaces = {}
 
     setup(function()
         workspace = phase2.workspace("uv")
@@ -19,6 +20,7 @@ describe("uv Phase 2 continuation pump", function()
 
     teardown(function()
         phase2.cleanup(workspace)
+        for _, path in ipairs(cache_workspaces) do phase2.cleanup(path) end
         types.registry = {}
         driver.imported = {}
     end)
@@ -50,6 +52,41 @@ describe("uv Phase 2 continuation pump", function()
             1, true)
     end)
 
+    it("clones cached test workspaces across insulated helper reloads",
+    function()
+        local key = "uv-phase2-cache-spec:" .. tostring({})
+        local builds = 0
+        local function build_template()
+            builds = builds + 1
+            local template = phase2.workspace("cache-template")
+            local marker = assert(io.open(template .. "/cache-marker", "wb"))
+            marker:write("template")
+            marker:close()
+            return template
+        end
+
+        local first = phase2.cached_workspace(key, build_template)
+        cache_workspaces[#cache_workspaces + 1] = first
+        local marker = assert(io.open(first .. "/cache-marker", "wb"))
+        marker:write("first-clone")
+        marker:close()
+
+        local module_name = "spec.support.phase2"
+        local original = package.loaded[module_name]
+        package.loaded[module_name] = nil
+        local reloaded = require(module_name)
+        package.loaded[module_name] = original
+        local second = reloaded.cached_workspace(key, function()
+            error("workspace cache rebuilt an existing template")
+        end)
+        cache_workspaces[#cache_workspaces + 1] = second
+
+        assert.equals(1, builds)
+        assert.not_equals(first, second)
+        assert.equals("first-clone", phase2.read(first .. "/cache-marker"))
+        assert.equals("template", phase2.read(second .. "/cache-marker"))
+    end)
+
     it("rehydrates all Phase 2 opaque records from binary-only stdlib DSOs",
     function()
         types.registry = {}
@@ -76,7 +113,7 @@ describe("uv Phase 2 continuation pump", function()
         assert.equals("standard", deps.uv)
         assert.equals("standard", deps.timer)
         assert.truthy(modtype.members.task_identity)
-        assert.equals(25, types.registry["uv.Task"].nfields)
+        assert.equals(27, types.registry["uv.Task"].nfields)
         assert.equals(0, #types.registry["uv.Task"].fields)
         assert.equals(8, types.registry["uv.uv_timer_t"].nfields)
         assert.equals(0, #types.registry["uv.uv_timer_t"].fields)

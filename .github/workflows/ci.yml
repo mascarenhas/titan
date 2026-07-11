@@ -132,6 +132,20 @@ jobs:
       - name: Verify titanc shebang environment
         run: ./titanc --help
 
+      # Build one native argv/stdio child with the pinned bundled archive and
+      # reuse it while smoke-testing both standard-library link modes. The OS
+      # smoke invokes this executable directly through os.spawn/communicate.
+      - name: Build child-process smoke fixture
+        run: |
+          # phase6's test support uses luassert; prepare the declared test
+          # dependencies here so a cold lua_modules cache is deterministic.
+          ./luarocks test --prepare
+          process_smoke_dir="$RUNNER_TEMP/titan-process-smoke"
+          mkdir -p "$process_smoke_dir"
+          TITAN_PROCESS_SMOKE_DIR="$process_smoke_dir" \
+            .lua/bin/lua -e 'require("spec.support.phase6").process_child(assert(os.getenv("TITAN_PROCESS_SMOKE_DIR")))'
+          echo "TITAN_PROCESS_SMOKE_CHILD=$process_smoke_dir/process_child" >> "$GITHUB_ENV"
+
       # The normal build above proves the pinned, self-contained archive path.
       # Also compile and load against the platform development package, then
       # switch back without cleaning. This locks the optional pkg-config mode
@@ -147,7 +161,8 @@ jobs:
           env TITAN_STDLIB_PATH="$PWD" LUA_CPATH="$PWD/?.so;;" \
             .lua/bin/lua spec/fixtures/libuv/net_production_smoke.lua system
           env TITAN_STDLIB_PATH="$PWD" LUA_CPATH="$PWD/?.so;;" \
-            .lua/bin/lua spec/fixtures/libuv/os_production_smoke.lua system
+            .lua/bin/lua spec/fixtures/libuv/os_production_smoke.lua system \
+              "$TITAN_PROCESS_SMOKE_CHILD"
           test -L titan/uv.so && test "$(readlink titan/uv.so)" = ../uv.so
           test -L titan/timer.so && test "$(readlink titan/timer.so)" = ../timer.so
           test -L titan/fs.so && test "$(readlink titan/fs.so)" = ../fs.so
@@ -172,7 +187,8 @@ jobs:
           env TITAN_STDLIB_PATH="$PWD" LUA_CPATH="$PWD/?.so;;" \
             .lua/bin/lua spec/fixtures/libuv/net_production_smoke.lua bundled
           env TITAN_STDLIB_PATH="$PWD" LUA_CPATH="$PWD/?.so;;" \
-            .lua/bin/lua spec/fixtures/libuv/os_production_smoke.lua bundled
+            .lua/bin/lua spec/fixtures/libuv/os_production_smoke.lua bundled \
+              "$TITAN_PROCESS_SMOKE_CHILD"
           if [ "${{ runner.os }}" = "macOS" ]; then
             ! otool -L uv.so | grep -i libuv
             ! otool -L timer.so | grep -i libuv
@@ -300,4 +316,6 @@ jobs:
             spec/coder/os_signal_spec.lua \
             spec/coder/os_signal_fault_spec.lua \
             spec/coder/os_helpers_spec.lua \
-            spec/coder/os_helpers_fault_spec.lua
+            spec/coder/os_helpers_fault_spec.lua \
+            spec/coder/os_process_spec.lua \
+            spec/coder/os_process_fault_spec.lua

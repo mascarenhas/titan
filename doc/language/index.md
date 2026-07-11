@@ -55,11 +55,11 @@ Start with the [design philosophy](philosophy.md) if you want to know
 | [Lua interoperability](lua-interop.md) | Using Titan from Lua and Lua values in Titan: what crosses the boundary, what each type looks like on the other side, and where the run-time checks happen. |
 | [Error handling](error-handling.md) | The run-time error model: what raises errors, error messages, `pcall`, `titan.backtrace()`, and the option-type idiom for recoverable failures. |
 | [Coroutines](coroutines.md) | The `coroutine` standard module (`import "coroutine"` from Titan, `require "titan.coroutine"` from Lua): stackful asymmetric coroutines, tagged nested yield, error injection, status, and Lua interop. |
-| [Asynchronous I/O and tasks](async-io.md) | The `uv` Task scheduler, nonblocking `run`, explicit/automatic loop driving, direct callback continuation model, errors, joins, and cancellation. |
+| [Asynchronous I/O and tasks](async-io.md) | The `uv` Task scheduler, nonblocking `run`, explicit/automatic loop driving, direct callback continuation model, errors, joins, cancellation, and resource/process shutdown. |
 | [Timer standard library](standard-library-timer.md) | Task delays, cooperative `yield`, recurring `Ticker` handles, dropped ticks, and explicit close. |
 | [Filesystem standard library](standard-library-fs.md) | Binary file reads and writes, per-File FIFO ordering and close, whole-file helpers, metadata, and path operations. |
 | [TCP networking standard library](standard-library-net.md) | Asynchronous DNS and TCP clients/servers, binary stream reads and FIFO writes, shutdown, close, and cancellation. |
-| [Operating-system standard library](standard-library-os.md) | Portable environment, directory, host/process identity, executable-path, and one-shot signal helpers. |
+| [Operating-system standard library](standard-library-os.md) | Portable environment, directory, identity, executable-path, one-shot signals, child processes with binary stdio, and deadlock-free `communicate`. |
 | [The C FFI](ffi.md) | `foreign import`: binding C headers, supported types, calling C functions, limitations. |
 | [Grammar](grammar.md) | The complete lexical and syntactic grammar. |
 
@@ -139,10 +139,10 @@ with a clean error; each links to the chapter that documents it in full.
   previous one ([error handling](error-handling.md)).
 * **Only a small standard library so far.** Titan includes stackful
   `coroutine`, the libuv-backed `uv` Task runtime, `timer`, asynchronous `fs`
-  and `net`, and portable `os` helpers plus one-shot signal waits. Child
-  process and pipe operations are still being built. Qualified Lua names such
-  as `titan.coroutine`, `titan.timer`, `titan.fs`, `titan.net`, and `titan.os`
-  leave Lua's standard modules unchanged.
+  and `net`, and portable `os` helpers with one-shot signal waits, direct child
+  processes, binary stdio pipes, and concurrent `communicate`. Qualified Lua
+  names such as `titan.coroutine`, `titan.timer`, `titan.fs`, `titan.net`, and
+  `titan.os` leave Lua's standard modules unchanged.
 
 The [README roadmap](../../README.md) lists where the language is headed;
 the [philosophy chapter](philosophy.md) explains the principles that order

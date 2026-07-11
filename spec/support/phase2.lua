@@ -17,8 +17,78 @@ local function run(command, cwd)
 end
 M.run = run
 
+-- Building the transformed uv standard module dominates the async coder
+-- suites (roughly twenty seconds per invocation). Busted loads every spec in
+-- one Lua process, so keep one pristine template for each identical standard
+-- library variant and clone it for each caller. Callers still receive private
+-- source, runtime, generated-object, and DSO trees; only the compilation work
+-- is shared.
+-- Busted auto-insulates each spec file by restoring _G and package.loaded.
+-- The Lua registry is deliberately outside that snapshot, so independently
+-- loaded copies of this helper still share the same process-local templates.
+local registry = debug.getregistry()
+local cache_registry_key =
+    "titan.spec.support.phase2.workspace-templates:" .. REPO
+local workspace_templates = registry[cache_registry_key]
+if not workspace_templates then
+    workspace_templates = setmetatable({}, {
+        __gc = function(templates)
+            for _, path in pairs(templates) do
+                if type(path) == "string" then
+                    pcall(run, "rm -rf " .. quote(path))
+                end
+            end
+            registry[cache_registry_key] = nil
+        end,
+    })
+    registry[cache_registry_key] = workspace_templates
+end
+
 local function exists(path)
     return lfs.attributes(path) ~= nil
+end
+
+local function fresh_workspace_path(label)
+    local path = os.tmpname() .. "-titan-phase2-" .. label
+    os.remove(path)
+    return path
+end
+
+local function clone_workspace(template)
+    local path = fresh_workspace_path("cached")
+    -- -p matters here: driver.compile's private-runtime staleness check must
+    -- see the same source/object ordering as the prepared template on both
+    -- GNU and BSD/macOS cp.
+    local ok, _, output = run("cp -Rp " .. quote(template) ..
+        " " .. quote(path))
+    assert.truthy(ok, output)
+    return path
+end
+
+local function cache_context()
+    return table.concat({
+        os.getenv("CC") or "",
+        os.getenv("TITAN_TEST_EXTRA_CFLAGS") or "",
+        os.getenv("TITAN_TEST_EXTRA_LDFLAGS") or "",
+    }, "\0")
+end
+
+-- Cache only within this Lua process: every fresh Busted/CI invocation still
+-- rebuilds variants from the current source, transformer, native objects, and
+-- libuv archive. The successfully built workspace becomes the immutable
+-- template until Lua closes; callers always receive disposable clones.
+function M.cached_workspace(key, builder)
+    local full_key = key .. "\0" .. cache_context()
+    local template = workspace_templates[full_key]
+    if template then
+        assert.truthy(exists(template),
+            "cached test workspace disappeared: " .. template)
+        return clone_workspace(template)
+    end
+
+    template = assert(builder())
+    workspace_templates[full_key] = template
+    return clone_workspace(template)
 end
 
 local function find_standard_dir()
@@ -75,6 +145,7 @@ local function host_libuv_config()
     end
     return cppflags, ldflags, archive
 end
+M.host_libuv_config = host_libuv_config
 
 local function copy_file(source, destination)
     local input = assert(io.open(source, "rb"))
@@ -86,8 +157,7 @@ local function copy_file(source, destination)
 end
 
 function M.workspace(label)
-    local path = os.tmpname() .. "-titan-phase2-" .. label
-    os.remove(path)
+    local path = fresh_workspace_path(label)
     assert.truthy(lfs.mkdir(path))
     assert.truthy(lfs.mkdir(path .. "/src"))
     -- A private runtime copy prevents driver mtime checks from rebuilding the
@@ -163,7 +233,7 @@ local function compiler_command()
         "/?/init.lua;\" .. package.path") .. " " .. quote(REPO .. "/titanc")
 end
 
-function M.variant_workspace(transformer)
+local function build_variant_workspace(transformer)
     local workspace = M.workspace("variant")
     assert.truthy(lfs.mkdir(workspace .. "/stdlib"))
     assert.truthy(lfs.mkdir(workspace .. "/titan"))
@@ -243,6 +313,12 @@ function M.variant_workspace(transformer)
     ok, _, output = run("ln -s ../timer.so titan/timer.so", workspace)
     assert.truthy(ok, output)
     return workspace
+end
+
+function M.variant_workspace(transformer)
+    local transform = transformer
+    if transform:sub(1, 1) ~= "/" then transform = REPO .. "/" .. transform end
+    return build_variant_workspace(transform)
 end
 
 function M.variant_lua_command(workspace, script, ...)

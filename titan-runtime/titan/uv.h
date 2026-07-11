@@ -16,6 +16,9 @@ typedef union titan_uvshim_address {
   unsigned char bytes[256];
 } titan_uvshim_address;
 
+/* Parser-visible pointer cell used for Titan/GC-owned argv vectors. */
+typedef char *titan_uvshim_char_ptr;
+
 /*
  * Minimal libuv forward declarations for Titan's FFI.  The standard uv module
  * imports <uv.h> separately and generated C includes it first; keeping this
@@ -29,6 +32,8 @@ typedef struct uv_fs_s uv_fs_t;
 typedef struct uv_getaddrinfo_s uv_getaddrinfo_t;
 typedef struct uv_handle_s uv_handle_t;
 typedef struct uv_loop_s uv_loop_t;
+typedef struct uv_pipe_s uv_pipe_t;
+typedef struct uv_process_s uv_process_t;
 typedef struct uv_signal_s uv_signal_t;
 typedef struct uv_shutdown_s uv_shutdown_t;
 typedef struct uv_tcp_s uv_tcp_t;
@@ -78,7 +83,24 @@ enum titan_uvshim_event_kind {
   TITAN_UV_EVENT_SHUTDOWN = 7,
   TITAN_UV_EVENT_STREAM_READ = 8,
   TITAN_UV_EVENT_CONNECTION = 9,
-  TITAN_UV_EVENT_SIGNAL = 10
+  TITAN_UV_EVENT_SIGNAL = 10,
+  TITAN_UV_EVENT_PROCESS_EXIT = 11
+};
+
+/*
+ * Raw stdio endpoints returned by titan_uvshim_stdio_pipes().  Directions are
+ * from the parent process: stdin's child end is readable and its parent end is
+ * writable; stdout/stderr have readable parent ends and writable child ends.
+ */
+enum titan_uvshim_stdio_endpoint_index {
+  TITAN_UV_STDIO_STDIN_CHILD = 0,
+  TITAN_UV_STDIO_STDIN_PARENT = 1,
+  TITAN_UV_STDIO_STDOUT_PARENT = 2,
+  TITAN_UV_STDIO_STDOUT_CHILD = 3,
+  TITAN_UV_STDIO_STDERR_PARENT = 4,
+  TITAN_UV_STDIO_STDERR_CHILD = 5,
+  TITAN_UV_STDIO_ENDPOINT_COUNT = 6,
+  TITAN_UV_STDIO_FILLER_CAPACITY = 6
 };
 
 /* Concrete wrappers for libuv's public base-handle/base-request API. */
@@ -173,6 +195,58 @@ int titan_uvshim_tcp_write_start(uv_write_t *req,
 int titan_uvshim_tcp_shutdown_start(uv_shutdown_t *req,
                                     uv_tcp_t *tcp,
                                     void *data);
+
+/*
+ * Create the three raw stdio pairs using only public libuv. endpoint_count and
+ * filler_count are in/out capacities: initialize them to the number of int
+ * cells supplied; on return they report every descriptor still owned by the
+ * caller, including on error.  The fixed endpoint layout is defined above.
+ * Filler descriptors reserve fd 0..2 so uv_pipe_t never owns a descriptor
+ * that libuv's Unix stream close deliberately treats as stdio.
+ */
+int titan_uvshim_stdio_pipes(int *endpoints,
+                             int *endpoint_count,
+                             int *fillers,
+                             int *filler_count);
+
+/* Typed pipe wrappers; Titan never casts a uv_pipe_t through uv_stream_t. */
+int titan_uvshim_pipe_init(uv_loop_t *loop, uv_pipe_t *pipe, void *data);
+/* Clears endpoints[index] only when uv_pipe_open takes ownership. */
+int titan_uvshim_pipe_open(uv_pipe_t *pipe,
+                           int *endpoints,
+                           int endpoint_count,
+                           int index);
+int titan_uvshim_pipe_read_start(uv_pipe_t *pipe);
+int titan_uvshim_pipe_read_stop(uv_pipe_t *pipe);
+int titan_uvshim_pipe_write_start(uv_write_t *req,
+                                  uv_pipe_t *pipe,
+                                  void *data,
+                                  const void *buffer);
+int titan_uvshim_pipe_is_closing(const uv_pipe_t *pipe);
+void titan_uvshim_pipe_close(uv_pipe_t *pipe);
+
+/*
+ * argv_count includes argv[0] and excludes the required trailing NULL.  A
+ * validation error leaves process uninitialized.  initialized is set to zero
+ * before validation and to one after a call reaches uv_spawn.  On supported
+ * Linux and desktop macOS, each such process is closeable, including after a
+ * negative spawn result: exactly three valid UV_INHERIT_FD entries avoid
+ * libuv's pre-initialization error cleanup path.
+ */
+int titan_uvshim_process_spawn(uv_loop_t *loop,
+                               uv_process_t *process,
+                               void *data,
+                               const char *file,
+                               titan_uvshim_char_ptr *argv,
+                               int64_t argv_count,
+                               const int *endpoints,
+                               int endpoint_count,
+                               int *initialized);
+int titan_uvshim_process_kill(uv_process_t *process, int signum);
+int64_t titan_uvshim_process_get_pid(const uv_process_t *process);
+int titan_uvshim_process_is_closing(const uv_process_t *process);
+void titan_uvshim_process_close(uv_process_t *process);
+int titan_uvshim_status_is_esrch(int status);
 
 /* Fixed callback shapes passed directly to public libuv start functions. */
 void titan_uvshim_timer_cb(uv_timer_t *timer);

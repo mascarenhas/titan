@@ -268,8 +268,9 @@ source = replace_once(source, [==[
     if test_fail_sleep_submissions > 0 then
       test_fail_sleep_submissions = test_fail_sleep_submissions - 1
       task.current_request = nil
-      return Error.new(-1, "EINJECTED", "injected Phase-2 fault",
-                       "timer.start.injected", nil)
+      return DriveControl.new(DRIVE_ERROR,
+          Error.new(-1, "EINJECTED", "injected Phase-2 fault",
+                    "timer.start.injected", nil), "", nil)
     end
     local owner, status = start_owner(runtime, OWNER_SLEEP, task, request,
 ]==], "sleep-submit injection")
@@ -286,21 +287,22 @@ source = replace_once(source, [==[
     if test_fail_sleep_submissions > 0 then
       test_fail_sleep_submissions = test_fail_sleep_submissions - 1
       task.current_request = nil
-      return Error.new(-1, "EINJECTED", "injected Phase-2 fault",
-                       "cleanup.timer.start.injected", nil)
+      return DriveControl.new(DRIVE_ERROR,
+          Error.new(-1, "EINJECTED", "injected Phase-2 fault",
+                    "cleanup.timer.start.injected", nil), "", request)
     end
     local owner, status = start_owner(runtime, OWNER_CLEANUP_SLEEP,
 ]==], "cleanup-submit injection")
 
 source = replace_once(source, [==[
         local deferred, deferred_status = start_owner(runtime,
-            OWNER_DEFER_ERROR, task, immediate_error, task.epoch,
+            OWNER_DEFER_ERROR, task, outcome, task.epoch,
             0, 0)
 ]==], [==[
         local defer_timeout = test_deferred_error_delay
         test_deferred_error_delay = 0
         local deferred, deferred_status = start_owner(runtime,
-            OWNER_DEFER_ERROR, task, immediate_error, task.epoch,
+            OWNER_DEFER_ERROR, task, outcome, task.epoch,
             defer_timeout, 0)
 ]==], "deferred-error delay")
 
@@ -321,10 +323,16 @@ source = replace_once(source, [==[
 ]==], "dispatcher-close injection")
 
 source = replace_once(source, [==[
-      drive_task(task, DRIVE_ERROR, owner.metadata.peer, "")
+    if deliver then
+      drive_task(task, control.mode, control.payload, control.trace)
+    end
+  -- TITAN_UV_PHASE5_TIMER_DISPATCH
 ]==], [==[
+    if deliver then
       test_deferred_error_callbacks = test_deferred_error_callbacks + 1
-      drive_task(task, DRIVE_ERROR, owner.metadata.peer, "")
+      drive_task(task, control.mode, control.payload, control.trace)
+    end
+  -- TITAN_UV_PHASE5_TIMER_DISPATCH
 ]==], "deferred callback counter")
 
 source = replace_once(source, [==[

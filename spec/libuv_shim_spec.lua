@@ -96,6 +96,8 @@ describe("native libuv shim", function()
         assert.not_match("timer%-%>", source)
         assert.not_match("handle%-%>", source)
         assert.not_match("req%-%>", source)
+        assert.not_match("pipe%-%>", source)
+        assert.not_match("process%-%>", source)
         assert.not_match("strlen", source, 1, true)
         assert.not_match("memmem", source, 1, true)
         assert.match("uv_handle_set_data", source, 1, true)
@@ -125,13 +127,30 @@ describe("native libuv shim", function()
         assert.match("uv_signal_start_oneshot", source, 1, true)
         assert.match("uv_signal_stop", source, 1, true)
         assert.match("TITAN_UV_EVENT_SIGNAL", source, 1, true)
+        assert.match("uv_pipe%s*%(", source)
+        assert.match("uv_pipe_init", source, 1, true)
+        assert.match("uv_pipe_open", source, 1, true)
+        assert.match("return UV_EBUSY", source, 1, true)
+        assert.match("uv_spawn", source, 1, true)
+        assert.match("UV_INHERIT_FD", source, 1, true)
+        assert.not_match("UV_CREATE_PIPE", source, 1, true)
+        assert.match("uv_process_kill", source, 1, true)
+        assert.match("uv_process_get_pid", source, 1, true)
+        assert.match("TITAN_UV_EVENT_PROCESS_EXIT", source, 1, true)
+        local native_probe = read_file("spec/fixtures/uv/shim_probe.c")
+        assert.match("uv_fs_close", native_probe, 1, true)
+        assert.match("uv_fs_req_cleanup", native_probe, 1, true)
         assert.match("titan_uvshim_size_as_int64", source, 1, true)
         assert.match("titan_uvshim_status_is_enobufs", source, 1, true)
         assert.match("titan_uvshim_status_is_enoent", source, 1, true)
         assert.not_match("fork%s*%(", source)
         assert.not_match("waitpid%s*%(", source)
+        assert.not_match("[^%w_]wait%s*%(", source)
         assert.not_match("[^%w_]pipe%s*%(", source)
         assert.not_match("[^%w_]kill%s*%(", source)
+        assert.not_match("[^%w_]close%s*%(", source)
+        assert.not_match("[^%w_]dup2?%s*%(", source)
+        assert.not_match("[^%w_]open%s*%(", source)
         for _, name in ipairs({
             "getenv", "setenv", "unsetenv", "getcwd", "chdir",
             "gethostname", "readlink", "realpath",
@@ -177,7 +196,10 @@ describe("native libuv shim", function()
                                       dns: *uv.uv_getaddrinfo_t,
                                       tcp: *uv.uv_tcp_t,
                                       signal: *uv.uv_signal_t,
+                                      pipe: *uv.uv_pipe_t,
+                                      process: *uv.uv_process_t,
                                       connect: *uv.uv_connect_t,
+                                      write: *uv.uv_write_t,
                                       owner: ffi.titan_ffi_void_ptr): integer
                     local loop_storage: *uv.uv_loop_t = lua.lua_newuserdatauv(
                         L, uv.uv_loop_t.sizeof, 0)
@@ -193,9 +215,22 @@ describe("native libuv shim", function()
                     local signal_storage: *uv.uv_signal_t =
                         lua.lua_newuserdatauv(
                             L, uv.uv_signal_t.sizeof, 0)
+                    local pipe_storage: *uv.uv_pipe_t =
+                        lua.lua_newuserdatauv(L, uv.uv_pipe_t.sizeof, 0)
+                    local process_storage: *uv.uv_process_t =
+                        lua.lua_newuserdatauv(L, uv.uv_process_t.sizeof, 0)
                     local address_storage: *shim.titan_uvshim_address =
                         lua.lua_newuserdatauv(
                             L, shim.titan_uvshim_address.sizeof, 0)
+                    local argv: *shim.titan_uvshim_char_ptr =
+                        lua.lua_newuserdatauv(
+                            L, shim.titan_uvshim_char_ptr.sizeof * 2, 0)
+                    local endpoints = ffi.titan_ffi_int.new_array(
+                        shim.TITAN_UV_STDIO_ENDPOINT_COUNT)
+                    local endpoint_count = ffi.titan_ffi_int.new_array(1)
+                    local fillers = ffi.titan_ffi_int.new_array(
+                        shim.TITAN_UV_STDIO_FILLER_CAPACITY)
+                    local filler_count = ffi.titan_ffi_int.new_array(1)
                     local size = uv.size_t.new_array(1)
                     size[0] = 256 as uv.size_t
                     shim.titan_uvshim_timer_set_data(timer, owner)
@@ -209,6 +244,32 @@ describe("native libuv shim", function()
                     shim.titan_uvshim_signal_start_oneshot(
                         signal, shim.titan_uvshim_signal_number("usr1"))
                     shim.titan_uvshim_signal_stop(signal)
+                    shim.titan_uvshim_stdio_pipes(
+                        endpoints, endpoint_count, fillers, filler_count)
+                    shim.titan_uvshim_pipe_init(nil, pipe, owner)
+                    shim.titan_uvshim_pipe_open(
+                        pipe, endpoints,
+                        shim.TITAN_UV_STDIO_ENDPOINT_COUNT
+                            as ffi.titan_ffi_int,
+                        shim.TITAN_UV_STDIO_STDIN_PARENT
+                            as ffi.titan_ffi_int)
+                    shim.titan_uvshim_pipe_read_start(pipe)
+                    shim.titan_uvshim_pipe_read_stop(pipe)
+                    shim.titan_uvshim_pipe_write_start(
+                        write, pipe, owner, nil)
+                    shim.titan_uvshim_pipe_is_closing(pipe)
+                    shim.titan_uvshim_pipe_close(pipe)
+                    shim.titan_uvshim_process_spawn(
+                        nil, process, owner, nil, argv, 1,
+                        endpoints,
+                        shim.TITAN_UV_STDIO_ENDPOINT_COUNT
+                            as ffi.titan_ffi_int,
+                        endpoint_count)
+                    shim.titan_uvshim_process_kill(process, 15)
+                    shim.titan_uvshim_process_get_pid(process)
+                    shim.titan_uvshim_process_is_closing(process)
+                    shim.titan_uvshim_process_close(process)
+                    shim.titan_uvshim_status_is_esrch(-1)
                     shim.titan_uvshim_size_as_int64(size[0])
                     shim.titan_uvshim_status_is_enobufs(-1)
                     shim.titan_uvshim_status_is_enoent(-1)
@@ -216,13 +277,17 @@ describe("native libuv shim", function()
                     uv.uv_fs_stat(nil, req, ".", shim.titan_uvshim_fs_cb)
                     if loop_storage and timer_storage and fs_storage and
                         dns_storage and tcp_storage and signal_storage and
-                        address_storage then
+                        pipe_storage and process_storage and address_storage and
+                        argv then
                         return uv.uv_loop_t.alignof
                             + uv.uv_timer_t.alignof + uv.uv_fs_t.alignof
                             + uv.uv_getaddrinfo_t.alignof
                             + uv.uv_tcp_t.alignof
                             + uv.uv_signal_t.alignof
+                            + uv.uv_pipe_t.alignof
+                            + uv.uv_process_t.alignof
                             + shim.titan_uvshim_address.alignof
+                            + shim.titan_uvshim_char_ptr.alignof
                     end
                     return 0
                 end
@@ -249,21 +314,31 @@ describe("native libuv shim", function()
         assert.match("sizeof%(uv_getaddrinfo_t%)", result)
         assert.match("sizeof%(uv_tcp_t%)", result)
         assert.match("sizeof%(uv_signal_t%)", result)
+        assert.match("sizeof%(uv_pipe_t%)", result)
+        assert.match("sizeof%(uv_process_t%)", result)
         assert.match("sizeof%(titan_uvshim_address%)", result)
+        assert.match("sizeof%(titan_uvshim_char_ptr%)", result)
         assert.match("_Alignof%(uv_loop_t%)", result)
         assert.match("_Alignof%(uv_timer_t%)", result)
         assert.match("_Alignof%(uv_fs_t%)", result)
         assert.match("_Alignof%(uv_getaddrinfo_t%)", result)
         assert.match("_Alignof%(uv_tcp_t%)", result)
         assert.match("_Alignof%(uv_signal_t%)", result)
+        assert.match("_Alignof%(uv_pipe_t%)", result)
+        assert.match("_Alignof%(uv_process_t%)", result)
         assert.match("_Alignof%(titan_uvshim_address%)", result)
+        assert.match("_Alignof%(titan_uvshim_char_ptr%)", result)
         assert.match("%(%(uv_loop_t %*%)%(lua_newuserdatauv", result)
         assert.match("%(%(uv_timer_t %*%)%(lua_newuserdatauv", result)
         assert.match("%(%(uv_fs_t %*%)%(lua_newuserdatauv", result)
         assert.match("%(%(uv_getaddrinfo_t %*%)%(lua_newuserdatauv", result)
         assert.match("%(%(uv_tcp_t %*%)%(lua_newuserdatauv", result)
         assert.match("%(%(uv_signal_t %*%)%(lua_newuserdatauv", result)
+        assert.match("%(%(uv_pipe_t %*%)%(lua_newuserdatauv", result)
+        assert.match("%(%(uv_process_t %*%)%(lua_newuserdatauv", result)
         assert.match("%(%(titan_uvshim_address %*%)%(lua_newuserdatauv",
+            result)
+        assert.match("%(%(titan_uvshim_char_ptr %*%)%(lua_newuserdatauv",
             result)
         assert.match("%(%(uv_timer_cb%)%(titan_uvshim_timer_cb%)%)", result)
         assert.match("%(%(uv_fs_cb%)%(titan_uvshim_fs_cb%)%)", result)
@@ -304,7 +379,7 @@ describe("native libuv shim", function()
         end
     end)
 
-    it("runs timer, filesystem, DNS, TCP, signal, OS, layout, and buffer probes", function()
+    it("runs timer, filesystem, DNS, TCP, signal, process, pipe, OS, layout, and buffer probes", function()
         local config = bundled_libuv_config()
         local cc = shell_command_words(os.getenv("CC") or "cc")
         local lua_system_libs = "-lm"

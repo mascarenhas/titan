@@ -64,12 +64,13 @@ describe("os Phase 6 public interface", function()
         driver.imported = {}
     end)
 
-    it("exports the portable helper and one-shot signal API", function()
+    it("exports the portable helper, signal, and process API", function()
         local modtype, errors = check_modules()
         assert.equals(0, #errors, table.concat(errors, "\n"))
         assert.same({
-            "chdir", "cwd", "exepath", "getenv", "homedir", "hostname",
-            "pid", "ppid", "setenv", "tmpdir", "unsetenv", "wait_signal",
+            "ExitStatus", "Process", "chdir", "communicate", "cwd",
+            "exepath", "getenv", "homedir", "hostname", "pid", "ppid",
+            "setenv", "spawn", "tmpdir", "unsetenv", "wait_signal",
         }, sorted_keys(modtype.members))
 
         assert.equals("(string) -> string?", signature(modtype, "getenv"))
@@ -85,6 +86,57 @@ describe("os Phase 6 public interface", function()
         assert.equals("() -> integer", signature(modtype, "ppid"))
         assert.equals("(string) -> string",
             signature(modtype, "wait_signal"))
+        assert.equals("(string, { string }) -> os.Process",
+            signature(modtype, "spawn"))
+        assert.equals(
+            "(string, { string }, string?) -> (string, string, os.ExitStatus)",
+            signature(modtype, "communicate"))
+
+        local status = assert(types.registry["os.ExitStatus"])
+        assert.equals(3, status.nfields)
+        assert.same({ "code", "signal", "signal_number" }, (function()
+            local names = {}
+            for _, field in ipairs(status.fields) do
+                assert.falsy(field.islocal)
+                names[#names + 1] = field.name
+            end
+            return names
+        end)())
+        assert.equals("integer", types.tostring(status.fields[1].type))
+        assert.equals("string?", types.tostring(status.fields[2].type))
+        assert.equals("integer", types.tostring(status.fields[3].type))
+
+        local process = assert(types.registry["os.Process"])
+        assert.equals(1, process.nfields)
+        assert.equals("handle", process.fields[1].name)
+        assert.is_true(process.fields[1].islocal)
+        assert.equals("uv.uv_process_t",
+            types.tostring(process.fields[1].type))
+        assert.same({
+            "close_stdin", "kill", "read_stderr", "read_stdout", "wait",
+            "write_stdin",
+        }, sorted_keys(process.methods))
+        assert.equals("os.Process:wait(): os.ExitStatus",
+            types.tostring(process.methods.wait))
+        assert.equals("os.Process:kill(string)",
+            types.tostring(process.methods.kill))
+        assert.equals("os.Process:write_stdin(string)",
+            types.tostring(process.methods.write_stdin))
+        assert.equals("os.Process:close_stdin()",
+            types.tostring(process.methods.close_stdin))
+        assert.equals("os.Process:read_stdout(integer): string?",
+            types.tostring(process.methods.read_stdout))
+        assert.equals("os.Process:read_stderr(integer): string?",
+            types.tostring(process.methods.read_stderr))
+
+        -- tableloader serializes and rehydrates imported source modules by
+        -- the same interface representation used for .so-only imports. The
+        -- native owner retains its fixed slot count, but none of its local
+        -- fields or constructor may cross that boundary.
+        local native = assert(types.registry["uv.uv_process_t"])
+        assert.equals(8, native.nfields)
+        assert.equals(0, #native.fields)
+        assert.falsy(native.functions.new)
     end)
 
     it("keeps the C boundary and uv bridge out of the serialized interface",
@@ -93,7 +145,7 @@ describe("os Phase 6 public interface", function()
         assert.equals(0, #errors, table.concat(errors, "\n"))
         local serialized = types.serialize(modtype)
         for _, hidden in ipairs({
-            "_os_", "uv_", "uv%.", "titan_uvshim", "ffi%.",
+            "_os_", "uv_", "uv%.", "handle", "titan_uvshim", "ffi%.",
         }) do
             assert.not_match(hidden, serialized)
         end
@@ -103,6 +155,55 @@ describe("os Phase 6 public interface", function()
         assert.match('local uv = import "uv"', source, 1, true)
     end)
 
+    it("keeps Process opaque and enforces exact record identities", function()
+        local function consumer_errors(source)
+            local _, errors = check_modules({ consumer = source })
+            return table.concat(errors, "\n")
+        end
+
+        local constructor = consumer_errors([[
+            local os = import "os"
+            function bad_new(): os.Process return os.Process.new() end
+        ]])
+        assert.match("invalid record function 'new'", constructor)
+
+        local literal = consumer_errors([[
+            local os = import "os"
+            function bad_literal(): os.Process return {} end
+        ]])
+        assert.match("cannot construct record type 'os%.Process' outside module 'os' because it has local fields",
+            literal)
+
+        local native_constructor = consumer_errors([[
+            local uv = import "uv"
+            function bad_native_new(): uv.uv_process_t
+              return uv.uv_process_t.new()
+            end
+        ]])
+        assert.match("invalid record function 'new'", native_constructor)
+
+        local field = consumer_errors([[
+            local os = import "os"
+            function bad_field(process: os.Process): value
+              return process.handle
+            end
+        ]])
+        assert.match("field 'handle' not found in record 'os%.Process'",
+            field)
+
+        local identity = consumer_errors([[
+            local os = import "os"
+            record Other end
+            local function takes_process(process: os.Process)
+              process:wait()
+            end
+            function bad_receiver(other: Other)
+              takes_process(other)
+            end
+        ]])
+        assert.match("expected os%.Process", identity)
+    end)
+
     it("enforces the public argument types", function()
         local _, errors = check_modules({ consumer = [[
             local os = import "os"
@@ -110,6 +211,11 @@ describe("os Phase 6 public interface", function()
             function bad_setenv() os.setenv("name", false) end
             function bad_chdir() os.chdir({}) end
             function bad_signal(): string return os.wait_signal(9) end
+            function bad_spawn(): os.Process return os.spawn(9, {}) end
+            function bad_args(): os.Process return os.spawn("x", { 1 }) end
+            function bad_communicate()
+              os.communicate("x", {}, 17)
+            end
         ]] })
         local message = table.concat(errors, "\n")
         assert.match("expected string but found integer", message)

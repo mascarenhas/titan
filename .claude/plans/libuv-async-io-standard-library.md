@@ -1,18 +1,19 @@
 # Titan libuv async I/O standard library
 
-Status: implementation in progress. Phases 0 through 5 are implemented and
-covered by normal, deterministic fault, packaging, and sanitizer suites.
-Phase 6's portable OS-helper/one-shot-signal slice is implemented and locally
-verified; its Linux sanitizer and manual macOS gates, Phase 6's process/pipe
-slice, and the final Phase 7 audit remain. The design below is based on the
-current repository checkout, the sketch in `/tmp/uv-io.md`, the implemented
-`coroutine`/`uv` standard modules, focused Titan and libuv prototypes, and the
-public libuv 1.x contracts.
+Status: implementation complete through Phase 6. Portable OS helpers,
+one-shot signals, child processes, binary stdio pipes, retained exit status,
+and concurrent `communicate` are covered by normal, deterministic fault, and
+packaging suites. Phase 7 documentation and CI integration are complete; the
+full local suite is green, and the external Linux/sanitizer/manual-macOS gates
+remain.
+The design below is based on the current repository checkout, the sketch in
+`/tmp/uv-io.md`, the implemented `coroutine`/`uv` standard modules, focused
+Titan and libuv prototypes, and the public libuv 1.x contracts.
 
 ## Executive decision
 
 The sketch is feasible. Its central callback-to-coroutine continuation model is
-the selected design; the remaining work is to make rooting, error containment,
+the implemented design; the runtime makes rooting, error containment,
 multi-shot handles, loop bootstrap, and shutdown contracts explicit.
 
 Keep the proposed four layers:
@@ -1514,6 +1515,11 @@ function wait_signal(name: string): string
 
 - Use `uv_spawn`, `uv_process_t`, and `uv_pipe_t`; no `fork`, `pipe`, or
   `waitpid` fallback.
+- Close child stdin with a FIFO close sentinel: after every previously accepted
+  `uv_write` callback, call public `uv_close` on the parent `uv_pipe_t` and
+  complete on its close callback. Do not use `uv_shutdown` for this anonymous
+  pipe; on Unix libuv ultimately applies socket `shutdown(2)` and reports
+  `UV_ENOTSOCK`.
 - `file` is the executable and `args` contains only arguments after `argv[0]`.
   The shim builds a GC-owned, NUL-terminated vector `[file, args..., NULL]` and
   roots every copied string/vector through the return of `uv_spawn`; the child
@@ -1847,8 +1853,8 @@ Exit criteria:
 
 ### Phase 1 - GC-owned low-level objects and native callbacks
 
-Status: complete for the callback/storage families required through Phase 5;
-Phase 6 adds its process, pipe, and signal shapes on the same fixed boundary.
+Status: complete, including the process, pipe, write-request, grace-timer, and
+signal shapes added in Phase 6 on the same fixed boundary.
 
 Files:
 
@@ -1993,8 +1999,8 @@ Exit criteria:
 
 ### Phase 4 - task races and cancellation hardening
 
-Status: complete for the timer, filesystem, and networking families currently
-implemented; the same matrix remains an exit gate for Phase 6 resources.
+Status: complete for timer, filesystem, networking, signal, and process
+resources.
 
 Before sockets/processes multiply handle types, complete the race matrix:
 
@@ -2046,13 +2052,24 @@ Exit criteria:
 
 ### Phase 6 - OS helpers, signals, and processes
 
-Status: portable OS helpers and one-shot signals are implemented; child
-process and stdio-pipe ownership remain.
+Status: complete.
 
 Files:
 
 - `stdlib/os.titan`
-- `spec/coder/os_spec.lua`
+- `stdlib/uv.titan`
+- `titan-runtime/titan_uv.c`
+- `titan-runtime/titan/uv.h`
+- `spec/checker/os_spec.lua`
+- `spec/checker/uv_spec.lua`
+- `spec/coder/os_signal_spec.lua`
+- `spec/coder/os_signal_fault_spec.lua`
+- `spec/coder/os_helpers_spec.lua`
+- `spec/coder/os_helpers_fault_spec.lua`
+- `spec/coder/os_process_spec.lua`
+- `spec/coder/os_process_fault_spec.lua`
+- `spec/coder/os_packaging_spec.lua`
+- `spec/libuv_shim_spec.lua`
 
 Work:
 
@@ -2079,6 +2096,9 @@ Exit criteria:
   close callbacks drain without zombies.
 
 ### Phase 7 - packaging and documentation
+
+Status: implementation and local release gates complete; external release
+gates remain.
 
 Files:
 
@@ -2121,11 +2141,31 @@ Add topical suites instead of growing catch-all files:
 
 - `spec/libuv_shim_spec.lua`
 - `spec/checker/uv_spec.lua`
+- `spec/checker/timer_spec.lua`
+- `spec/checker/fs_spec.lua`
+- `spec/checker/net_spec.lua`
+- `spec/checker/os_spec.lua`
 - `spec/coder/uv_spec.lua`
+- `spec/coder/uv_phase2_spec.lua`
+- `spec/coder/uv_states_spec.lua`
+- `spec/coder/uv_fault_spec.lua`
+- `spec/coder/uv_bootstrap_spec.lua`
+- `spec/coder/uv_phase4_spec.lua`
 - `spec/coder/timer_spec.lua`
+- `spec/coder/timer_packaging_spec.lua`
 - `spec/coder/fs_spec.lua`
+- `spec/coder/fs_fault_spec.lua`
+- `spec/coder/fs_packaging_spec.lua`
 - `spec/coder/net_spec.lua`
-- `spec/coder/os_spec.lua`
+- `spec/coder/net_fault_spec.lua`
+- `spec/coder/net_packaging_spec.lua`
+- `spec/coder/os_signal_spec.lua`
+- `spec/coder/os_signal_fault_spec.lua`
+- `spec/coder/os_helpers_spec.lua`
+- `spec/coder/os_helpers_fault_spec.lua`
+- `spec/coder/os_process_spec.lua`
+- `spec/coder/os_process_fault_spec.lua`
+- `spec/coder/os_packaging_spec.lua`
 
 Extend `spec/support/helpers.lua` once for native archives/objects, standard
 module build order, environment flags, and standalone execution.
@@ -2215,11 +2255,31 @@ CCACHE_DISABLE=1 ./luarocks make
 CCACHE_DISABLE=1 busted \
   spec/libuv_shim_spec.lua \
   spec/checker/uv_spec.lua \
+  spec/checker/timer_spec.lua \
+  spec/checker/fs_spec.lua \
+  spec/checker/net_spec.lua \
+  spec/checker/os_spec.lua \
   spec/coder/uv_spec.lua \
+  spec/coder/uv_phase2_spec.lua \
+  spec/coder/uv_states_spec.lua \
+  spec/coder/uv_fault_spec.lua \
+  spec/coder/uv_bootstrap_spec.lua \
+  spec/coder/uv_phase4_spec.lua \
   spec/coder/timer_spec.lua \
+  spec/coder/timer_packaging_spec.lua \
   spec/coder/fs_spec.lua \
+  spec/coder/fs_fault_spec.lua \
+  spec/coder/fs_packaging_spec.lua \
   spec/coder/net_spec.lua \
-  spec/coder/os_spec.lua
+  spec/coder/net_fault_spec.lua \
+  spec/coder/net_packaging_spec.lua \
+  spec/coder/os_signal_spec.lua \
+  spec/coder/os_signal_fault_spec.lua \
+  spec/coder/os_helpers_spec.lua \
+  spec/coder/os_helpers_fault_spec.lua \
+  spec/coder/os_process_spec.lua \
+  spec/coder/os_process_fault_spec.lua \
+  spec/coder/os_packaging_spec.lua
 CCACHE_DISABLE=1 make test
 git diff --check
 ```
@@ -2229,54 +2289,54 @@ snapshot can otherwise shadow source edits.
 
 ## Completion checklist for the implementation
 
-- [ ] Pinned libuv builds from a clean checkout on Linux and macOS.
-- [ ] Optional system mode has tested discovery and useful failure messages.
-- [ ] Runtime behavior uses public libuv APIs; no hidden POSIX I/O/process path.
-- [ ] Loop/request/handle storage is Lua-GC-owned by default using imported
+- [x] Pinned libuv builds from a clean checkout on Linux and macOS.
+- [x] Optional system mode has tested discovery and useful failure messages.
+- [x] Runtime behavior uses public libuv APIs; no hidden POSIX I/O/process path.
+- [x] Loop/request/handle storage is Lua-GC-owned by default using imported
       `.sizeof`.
-- [ ] Every native object crossing a Titan module/API boundary uses one exact
+- [x] Every native object crossing a Titan module/API boundary uses one exact
       wrapper record with a local typed native-handle field and, when needed,
       one rooted storage owner; native pointers are never transported by
       `value` coercion.
-- [ ] Opaque wrapper/high-level resource constructors are inaccessible outside
+- [x] Opaque wrapper/high-level resource constructors are inaccessible outside
       their declaring modules, and repeated handle use performs no wrapper or
       pointer-boxing allocation.
-- [ ] All libuv data pointers refer to independently rooted opaque wrapper
+- [x] All libuv data pointers refer to independently rooted opaque wrapper
       record userdata, never the separate native-storage userdata.
-- [ ] Native callbacks use Titan native entry pointers directly, with neither a
+- [x] Native callbacks use Titan native entry pointers directly, with neither a
       Lua wrapper nor an additional shim-level protected-call wrapper.
-- [ ] The trusted dispatcher's controlled body is covered by a trailing
+- [x] The trusted dispatcher's controlled body is covered by a trailing
       function-level Titan catch whose failure arm records state and returns
       without re-raising; no error can unwind through libuv.
-- [ ] Standalone and Lua loop entries keep Titan `errfunc` active for the whole
+- [x] Standalone and Lua loop entries keep Titan `errfunc` active for the whole
       `uv_run`; callbacks do not install or restore it individually.
-- [ ] Each callback copies/cleans its result, directly drives the captured Task,
+- [x] Each callback copies/cleans its result, directly drives the captured Task,
       arms the next yielded Request, and returns without nesting C `uv_run`.
-- [ ] One private shared `UV_TAG` routes through differently tagged nested
+- [x] One private shared `UV_TAG` routes through differently tagged nested
       coroutines; task/operation identity is kept separately.
-- [ ] Public `uv.run` is nonblocking and nested calls schedule independent
+- [x] Public `uv.run` is nonblocking and nested calls schedule independent
       zero-timer starts; standalone bootstrap drives the loop automatically.
-- [ ] Nested starts recover Runtime main `L`; only the loop driver is restricted
+- [x] Nested starts recover Runtime main `L`; only the loop driver is restricted
       to the Lua main thread.
-- [ ] Cancellation has a synchronous winning mark, runs shielded Titan cleanup,
+- [x] Cancellation has a synchronous winning mark, runs shielded Titan cleanup,
       and tolerates late libuv callbacks without delivering stale results.
-- [ ] Every request/handle/loop reaches its documented terminal cleanup.
-- [ ] Final-Task session cleanup closes leftover active and passive resources;
+- [x] Every request/handle/loop reaches its documented terminal cleanup.
+- [x] Final-Task session cleanup closes leftover active and passive resources;
       process handles close only after failure or observed child exit.
-- [ ] Binary buffers preserve length and embedded NUL.
-- [ ] Timer, file, TCP/DNS, OS/process/signal APIs match documented contracts.
-- [ ] Canonical modules work as Titan `import "coroutine"`/`import "os"`/etc.;
+- [x] Binary buffers preserve length and embedded NUL.
+- [x] Timer, file, TCP/DNS, OS/process/signal APIs match documented contracts.
+- [x] Canonical modules work as Titan `import "coroutine"`/`import "os"`/etc.;
       Lua aliases work as `require "titan.coroutine"`/`require "titan.os"`/etc.
       without replacing Lua standard modules.
-- [ ] The existing coroutine source is moved and renamed to
+- [x] The existing coroutine source is moved and renamed to
       `stdlib/coroutine.titan`; no root duplicate or legacy `coro` alias remains,
       and Makefile, rockspec, renamed tests, and documentation all consume or
       name the new source/module path.
-- [ ] Reserved standard identities cannot be captured by local source/binaries,
+- [x] Reserved standard identities cannot be captured by local source/binaries,
       and canonical/Lua paths map one DSO/libuv instance in either load order.
-- [ ] Source, `.so`-only, and standalone paths are covered.
+- [x] Source, `.so`-only, and standalone paths are covered.
 - [ ] Incremental, generational, sanitizer, Linux, and macOS gates pass.
-- [ ] Both language and implementation manuals, README, CLAUDE, Makefile,
+- [x] Both language and implementation manuals, README, CLAUDE, Makefile,
       rockspec, and CI are updated in the same change.
 
 ## Authoritative external contracts
