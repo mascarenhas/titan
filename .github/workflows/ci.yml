@@ -143,25 +143,30 @@ jobs:
           fi
           LIBUV_MODE=system make stdlib
           env TITAN_STDLIB_PATH="$PWD" LUA_CPATH="$PWD/?.so;;" \
-            .lua/bin/lua -e 'local uv = require "titan.uv"; local timer = require "titan.timer"; local task = uv.run(function() timer.sleep(0); return true end); uv.loop(); assert(task:join()); assert(type(uv.version()) == "string")'
+            .lua/bin/lua -e 'local uv = require "titan.uv"; local timer = require "titan.timer"; local fs = require "titan.fs"; local path = os.tmpname(); os.remove(path); local task = uv.run(function() timer.sleep(0); fs.write_file(path, "system\0uv"); assert(fs.read_file(path) == "system\0uv"); fs.unlink(path); return true end); uv.loop(); assert(task:join()); assert(type(uv.version()) == "string")'
           test -L titan/uv.so && test "$(readlink titan/uv.so)" = ../uv.so
           test -L titan/timer.so && test "$(readlink titan/timer.so)" = ../timer.so
+          test -L titan/fs.so && test "$(readlink titan/fs.so)" = ../fs.so
           if [ "${{ runner.os }}" = "macOS" ]; then
             otool -L uv.so | grep -i libuv
             ! otool -L timer.so | grep -i libuv
+            ! otool -L fs.so | grep -i libuv
           else
             readelf -d uv.so | grep -i libuv
             ! readelf -d timer.so | grep -i libuv
+            ! readelf -d fs.so | grep -i libuv
           fi
           make stdlib
           env TITAN_STDLIB_PATH="$PWD" LUA_CPATH="$PWD/?.so;;" \
-            .lua/bin/lua -e 'local uv = require "titan.uv"; local timer = require "titan.timer"; local task = uv.run(function() timer.yield(); return true end); uv.loop(); assert(task:join())'
+            .lua/bin/lua -e 'local uv = require "titan.uv"; local timer = require "titan.timer"; local fs = require "titan.fs"; local path = os.tmpname(); os.remove(path); local task = uv.run(function() timer.yield(); fs.write_file(path, "bundled"); local data = fs.read_file(path); fs.unlink(path); return data end); uv.loop(); assert(task:join() == "bundled")'
           if [ "${{ runner.os }}" = "macOS" ]; then
             ! otool -L uv.so | grep -i libuv
             ! otool -L timer.so | grep -i libuv
+            ! otool -L fs.so | grep -i libuv
           else
             ! readelf -d uv.so | grep -i libuv
             ! readelf -d timer.so | grep -i libuv
+            ! readelf -d fs.so | grep -i libuv
           fi
 
       # `luarocks test` installs the test_dependencies (busted, cluacov) declared
@@ -180,3 +185,92 @@ jobs:
         uses: codecov/codecov-action@v7
         with:
           fail_ci_if_error: false
+
+  # Linux owns the native-memory release gate. Build Lua, libbacktrace, the
+  # pinned static libuv, Titan's runtime shims, generated standard modules, and
+  # private fault variants with the same ASan/UBSan instrumentation.
+  sanitizer:
+    runs-on: ubuntu-latest
+
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      LUAROCKS_VERSION: "3.13.0"
+      SANITIZER_FLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      # Every Titan DSO intentionally embeds the vendored static Lua archive;
+      # disable only ASan's cross-image ODR diagnostic for those duplicate Lua
+      # globals. Address, bounds, lifetime, and leak checks remain enabled.
+      ASAN_OPTIONS: "detect_odr_violation=0:detect_leaks=1:detect_stack_use_after_return=1:halt_on_error=1:abort_on_error=1"
+      UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install sanitizer build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake curl libreadline-dev
+
+      - name: Build sanitizer-enabled native dependencies
+        run: |
+          make lua \
+            LUA_MYCFLAGS="-fPIC ${SANITIZER_FLAGS}" \
+            LUA_MYLDFLAGS="${SANITIZER_FLAGS}" \
+            LUA_MYLIBS="${SANITIZER_FLAGS}"
+          make libbacktrace \
+            LIBBT_CFLAGS="-fPIC ${SANITIZER_FLAGS}"
+          make libuv \
+            LIBUV_BUILD_TYPE=Debug \
+            LIBUV_BUILD_CFLAGS="${SANITIZER_FLAGS}"
+
+      - name: Install LuaRocks for the sanitizer Lua
+        run: |
+          curl -fL -o "luarocks-${LUAROCKS_VERSION}.tar.gz" \
+            "https://luarocks.github.io/luarocks/releases/luarocks-${LUAROCKS_VERSION}.tar.gz"
+          tar zxf "luarocks-${LUAROCKS_VERSION}.tar.gz"
+          cd "luarocks-${LUAROCKS_VERSION}"
+          ./configure --prefix="$GITHUB_WORKSPACE/lua_install" \
+                      --with-lua="$GITHUB_WORKSPACE/.lua"
+          make
+          make install
+          cd ..
+          rm -rf "luarocks-${LUAROCKS_VERSION}" "luarocks-${LUAROCKS_VERSION}.tar.gz"
+
+      - name: Set up sanitizer project tree
+        run: |
+          export PATH="$PWD/lua_install/bin:$PATH"
+          luarocks init --lua-dir="$PWD/.lua"
+          ./luarocks install busted
+          echo "$PWD/.lua/bin" >> "$GITHUB_PATH"
+          echo "$PWD/lua_modules/bin" >> "$GITHUB_PATH"
+          echo "LUA_PATH=$(./luarocks path --lr-path);;" >> "$GITHUB_ENV"
+          echo "LUA_CPATH=$(./luarocks path --lr-cpath);;" >> "$GITHUB_ENV"
+
+      - name: Build sanitizer-enabled Titan artifacts
+        run: |
+          TITAN_EXTRA_CFLAGS="${SANITIZER_FLAGS}" \
+          TITAN_EXTRA_LDFLAGS="${SANITIZER_FLAGS}" \
+          LIBUV_BUILD_TYPE=Debug \
+          LIBUV_BUILD_CFLAGS="${SANITIZER_FLAGS}" \
+            ./luarocks make
+          readelf -Ws .lua/bin/lua | grep __asan_
+          readelf -Ws .lua/bin/lua | grep __ubsan_
+          readelf -Ws uv.so | grep __asan_
+          readelf -Ws uv.so | grep __ubsan_
+          # titanlib is small enough that UBSan may emit no handler reference;
+          # an ASan registration symbol proves this separate C module used the
+          # threaded native instrumentation flags.
+          readelf -Ws titan.so | grep __asan_
+
+      - name: Run native async sanitizer gate
+        env:
+          TITAN_TEST_EXTRA_CFLAGS: ${{ env.SANITIZER_FLAGS }}
+          TITAN_TEST_EXTRA_LDFLAGS: ${{ env.SANITIZER_FLAGS }}
+        run: |
+          ./lua_modules/bin/busted -v \
+            spec/coder/uv_spec.lua \
+            spec/coder/uv_phase2_spec.lua \
+            spec/coder/uv_fault_spec.lua \
+            spec/coder/uv_bootstrap_spec.lua \
+            spec/coder/uv_states_spec.lua \
+            spec/coder/timer_spec.lua \
+            spec/coder/fs_spec.lua \
+            spec/coder/fs_fault_spec.lua \
+            spec/coder/uv_phase4_spec.lua

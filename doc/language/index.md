@@ -57,6 +57,7 @@ Start with the [design philosophy](philosophy.md) if you want to know
 | [Coroutines](coroutines.md) | The `coroutine` standard module (`import "coroutine"` from Titan, `require "titan.coroutine"` from Lua): stackful asymmetric coroutines, tagged nested yield, error injection, status, and Lua interop. |
 | [Asynchronous I/O and tasks](async-io.md) | The `uv` Task scheduler, nonblocking `run`, explicit/automatic loop driving, direct callback continuation model, errors, joins, and cancellation. |
 | [Timer standard library](standard-library-timer.md) | Task delays, cooperative `yield`, recurring `Ticker` handles, dropped ticks, and explicit close. |
+| [Filesystem standard library](standard-library-fs.md) | Binary file reads and writes, per-File FIFO ordering and close, whole-file helpers, metadata, and path operations. |
 | [The C FFI](ffi.md) | `foreign import`: binding C headers, supported types, calling C functions, limitations. |
 | [Grammar](grammar.md) | The complete lexical and syntactic grammar. |
 
@@ -135,10 +136,10 @@ with a clean error; each links to the chapter that documents it in full.
   chaining/cause mechanism. A new error in a catch or finally replaces the
   previous one ([error handling](error-handling.md)).
 * **Only a small standard library so far.** Titan includes stackful
-  `coroutine`, the libuv-backed `uv` Task runtime, and `timer`; filesystem,
-  networking, and process modules are still being built. Qualified Lua names
-  such as `titan.coroutine` and `titan.timer` leave Lua's standard modules
-  unchanged.
+  `coroutine`, the libuv-backed `uv` Task runtime, `timer`, and asynchronous
+  `fs`; networking and process modules are still being built. Qualified Lua
+  names such as `titan.coroutine`, `titan.timer`, and `titan.fs` leave Lua's
+  standard modules unchanged.
 
 The [README roadmap](../../README.md) lists where the language is headed;
 the [philosophy chapter](philosophy.md) explains the principles that order

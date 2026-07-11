@@ -1143,9 +1143,17 @@ describe("Titan code generator", function()
     it("generates code for string literals", function()
         local code = [[
             function fn(): string
-                --return "foo\tbar\nbaz"
-                local x: string = "foo"
+                local x: string = "foo\0bar\255"
                 return x
+            end
+            function trigraphs(): string
+                return "??=??/??'??(??)??!??<??>??-"
+            end
+            function binary_direct(): string
+                return "\0\0017\255"
+            end
+            function empty(): string
+                return ""
             end
         ]]
         local ast, err = parse(code)
@@ -1154,8 +1162,47 @@ describe("Titan code generator", function()
         assert.equal(0, #err, table.concat(err, "\n"))
         local ok, err = compile("titan_test", ast)
         assert.truthy(ok, err)
-        --local ok, err = call("titan_test", "assert(titan_test.lit() == 'foo\\tbar\\nbaz')")
-        local ok, err = call("titan_test", "local x = titan_test.fn(); assert(x == 'foo')")
+        local ok, err = call("titan_test", [[
+            local x = titan_test.fn()
+            assert(#x == 8)
+            assert(x == "foo\0bar\255")
+            local t = titan_test.trigraphs()
+            assert(#t == 27)
+            assert(t == "??=??/??'??(??)??!??<??>??-")
+            local b = titan_test.binary_direct()
+            assert(#b == 4)
+            assert(string.byte(b, 1) == 0)
+            assert(string.byte(b, 2) == 1)
+            assert(string.byte(b, 3) == string.byte("7"))
+            assert(string.byte(b, 4) == 255)
+            assert(titan_test.empty() == "")
+        ]])
+        assert.truthy(ok, err)
+    end)
+
+    it("preserves every byte in a direct string literal", function()
+        local escapes = {}
+        for byte = 0, 255 do
+            escapes[#escapes + 1] = string.format("\\%03d", byte)
+        end
+        local code = string.format([[
+            function bytes(): string
+                return "%s"
+            end
+        ]], table.concat(escapes))
+        local ast, err = parse(code)
+        assert.truthy(ast, err)
+        local _, err = checker.check("test", ast, code, "test.titan")
+        assert.equal(0, #err, table.concat(err, "\n"))
+        local ok, err = compile("titan_test", ast)
+        assert.truthy(ok, err)
+        local ok, err = call("titan_test", [[
+            local expected = {}
+            for byte = 0, 255 do
+                expected[#expected + 1] = string.char(byte)
+            end
+            assert(titan_test.bytes() == table.concat(expected))
+        ]])
         assert.truthy(ok, err)
     end)
 

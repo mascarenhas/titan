@@ -1,0 +1,132 @@
+local uv = import "uv"
+
+-- Fixed-size reads keep whole-file helpers independent of stat metadata. The
+-- uv middle layer may return a shorter chunk and returns nil only at EOF.
+local READ_CHUNK_BYTES = 64 * 1024
+local MAX_STRING_BYTES = 9223372036854775807
+
+record File
+  local handle: uv.uv_file
+end
+
+record Stat
+  size: integer
+  kind: string
+  mode: integer
+  modified_seconds: integer
+  modified_nanoseconds: integer
+end
+
+-- Validate at the public boundary so a bad mode has a stable fs diagnostic.
+-- uv repeats this validation, then maps the mode only through UV_FS_O_*.
+local function validated_mode(mode: string): string
+  if mode == "r" or mode == "rb" or
+      mode == "w" or mode == "wb" or
+      mode == "a" or mode == "ab" or
+      mode == "r+" or mode == "r+b" or mode == "rb+" or
+      mode == "w+" or mode == "w+b" or mode == "wb+" or
+      mode == "a+" or mode == "a+b" or mode == "ab+" then
+    return mode
+  end
+  raise "invalid file mode '" .. mode .. "'"
+end
+
+-- Titan intentionally has no dependency on Lua's string library here. Joining
+-- a chunk tree avoids the quadratic copying of repeatedly appending to one
+-- ever-growing string.
+local function join_chunks(chunks: {string}, first: integer,
+                           last: integer): string
+  if first > last then return "" end
+  if first == last then return chunks[first] as string end
+  local middle = first + (last - first) // 2
+  return join_chunks(chunks, first, middle) ..
+         join_chunks(chunks, middle + 1, last)
+end
+
+function open(path: string, mode: string): File
+  return File.new(uv._fs_open(path, validated_mode(mode)))
+end
+
+function File:read(max_bytes: integer): string?
+  if max_bytes <= 0 then
+    raise "file read size must be positive"
+  end
+  return uv._fs_read(self.handle, max_bytes)
+end
+
+function File:write(data: string): integer
+  local written = uv._fs_write(self.handle, data)
+  -- One uv logical write owns all of its partial native submissions, so it
+  -- cannot interleave with the next FIFO operation.
+  if written ~= #data then
+    raise "filesystem write completed without consuming the full input"
+  end
+  return written
+end
+
+function File:flush()
+  uv._fs_flush(self.handle)
+end
+
+function File:close()
+  -- The uv layer coalesces close waiters and cleanup-shields physical close.
+  uv._fs_close(self.handle)
+end
+
+function File:is_closed(): boolean
+  return uv._fs_is_closed(self.handle)
+end
+
+function read_file(path: string): string
+  local file = open(path, "r")
+  defer file:close()
+
+  local chunks: {string} = {}
+  local nchunks = 0
+  local total = 0
+  while true do
+    local chunk: string? = file:read(READ_CHUNK_BYTES)
+    if not chunk then break end
+    local bytes = chunk as string
+    local length = #bytes
+    if total > MAX_STRING_BYTES - length then
+      raise "file is too large to read into a string"
+    end
+    total = total + length
+    nchunks = nchunks + 1
+    chunks[nchunks] = bytes
+  end
+  return join_chunks(chunks, 1, nchunks)
+end
+
+function write_file(path: string, data: string)
+  local file = open(path, "w")
+  defer file:close()
+  file:write(data)
+end
+
+function stat(path: string): Stat
+  local size, kind, mode, modified_seconds, modified_nanoseconds =
+    uv._fs_stat(path)
+  return Stat.new(size, kind, mode, modified_seconds, modified_nanoseconds)
+end
+
+function mkdir(path: string)
+  uv._fs_mkdir(path)
+end
+
+function unlink(path: string)
+  uv._fs_unlink(path)
+end
+
+function rmdir(path: string)
+  uv._fs_rmdir(path)
+end
+
+function rename(from: string, to: string)
+  uv._fs_rename(from, to)
+end
+
+function list(path: string): {string}
+  return uv._fs_list(path)
+end

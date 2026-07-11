@@ -9,7 +9,7 @@ local function assert_entry_catch_precedes_gc(generated, signature, following,
         generated, signature, following)
     local slots = tonumber(assert(definition:match(
         "L%->stack_last%.p %- L%->top%.p > (%d+)")))
-    assert.equals(expected_slots, slots)
+    if expected_slots then assert.equals(expected_slots, slots) end
     assert.is_true(slots + 4 <= LUA_MINSTACK)
     local setjmp = assert(definition:find("TITAN_SETJMP", 1, true))
     local first_gc = assert(definition:find("luaC_checkGC", 1, true))
@@ -44,6 +44,14 @@ describe("uv Phase 2 isolated scheduler faults", function()
     it("keeps fault controls out of production and in the variant", function()
         local production = phase2.read("stdlib/uv.c")
         assert.falsy(production:find("__test_", 1, true))
+        local submit_fs = phase2.c_function_definition(production,
+            "static Udata* uv_submit_fs_operation_titan(",
+            "static Udata* uv_start_owner_titan(")
+        local published = assert(submit_fs:find(
+            "uv_allocate_fs_owner_titan", 1, true))
+        local after_publication = submit_fs:sub(published)
+        assert.falsy(after_publication:find("luaL_error", 1, true))
+        assert.falsy(after_publication:find("lua_checkstack", 1, true))
         local variant = phase2.read(workspace .. "/stdlib/uv.c")
         assert.match("uv___test_run_main_titan", variant, 1, true)
         assert.match("uv___test_cancel_main_titan", variant, 1, true)
@@ -52,6 +60,17 @@ describe("uv Phase 2 isolated scheduler faults", function()
         assert_entry_catch_precedes_gc(variant,
             "static void uv_timer_dispatch_titan(",
             "static int uv_timer_dispatch_titanentry_lua(", 10)
+        assert_entry_catch_precedes_gc(variant,
+            "static void uv_fs_dispatch_titan(",
+            "static int uv_fs_dispatch_titanentry_lua(")
+
+        local start_owner = phase2.c_function_definition(variant,
+            "static Udata* uv_start_owner_titan(",
+            "static int uv_terminal_titan(")
+        assert.falsy(start_owner:find("uv_unlink_owner_titan", 1, true))
+        assert.falsy(start_owner:find("uv_close_owner_titan", 1, true))
+        assert.match("uv_timer_stop", start_owner, 1, true)
+        assert.match("titan_uvshim_timer_close", start_owner, 1, true)
 
         local loop = phase2.c_function_definition(variant,
             "void uv_loop_titan(", "static int uv_loop_titanentry_lua(")

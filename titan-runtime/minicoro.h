@@ -305,7 +305,7 @@ struct mco_coro {
   unsigned char* storage;
   size_t bytes_stored;
   size_t storage_size;
-  void* asan_prev_stack; /* Used by address sanitizer. */
+  void* asan_prev_stack; /* Fake stack saved while this coroutine is inactive. */
   void* tsan_prev_fiber; /* Used by thread sanitizer. */
   void* tsan_fiber; /* Used by thread sanitizer. */
   size_t magic_number; /* Used to check stack overflow. */
@@ -559,6 +559,50 @@ extern "C" {
 #ifdef _MCO_USE_ASAN
 void __sanitizer_start_switch_fiber(void** fake_stack_save, const void *bottom, size_t size);
 void __sanitizer_finish_switch_fiber(void* fake_stack_save, const void **bottom_old, size_t *size_old);
+
+static MCO_THREAD_LOCAL void* mco_asan_main_fake_stack = NULL;
+static MCO_THREAD_LOCAL const void* mco_asan_main_stack_bottom = NULL;
+static MCO_THREAD_LOCAL size_t mco_asan_main_stack_size = 0;
+
+/* ASan requires start before the context transfer and finish immediately on
+ * the destination stack. Coroutines keep their own fake-stack token; the
+ * ordinary thread stack needs the TLS slot because it has no mco_coro. */
+static MCO_FORCE_INLINE void _mco_asan_start_switch(mco_coro* from, mco_coro* to) {
+  void** fake_stack_save;
+  const void* bottom;
+  size_t size;
+  if(from && from->state == MCO_DEAD) {
+    fake_stack_save = NULL;
+  } else if(from) {
+    fake_stack_save = &from->asan_prev_stack;
+  } else {
+    fake_stack_save = &mco_asan_main_fake_stack;
+  }
+  if(to) {
+    bottom = to->stack_base;
+    size = to->stack_size;
+  } else {
+    bottom = mco_asan_main_stack_bottom;
+    size = mco_asan_main_stack_size;
+  }
+  __sanitizer_start_switch_fiber(fake_stack_save, bottom, size);
+}
+
+static MCO_FORCE_INLINE void _mco_asan_finish_switch(mco_coro* current) {
+  void* fake_stack = current ? current->asan_prev_stack : mco_asan_main_fake_stack;
+  const void* bottom_old = NULL;
+  size_t size_old = 0;
+  __sanitizer_finish_switch_fiber(fake_stack, &bottom_old, &size_old);
+  if(current) {
+    current->asan_prev_stack = NULL;
+  } else {
+    mco_asan_main_fake_stack = NULL;
+  }
+  if(!mco_asan_main_stack_bottom) {
+    mco_asan_main_stack_bottom = bottom_old;
+    mco_asan_main_stack_size = size_old;
+  }
+}
 #endif
 #ifdef _MCO_USE_TSAN
 void* __tsan_get_current_fiber(void);
@@ -594,13 +638,7 @@ static MCO_FORCE_INLINE void _mco_prepare_jumpin(mco_coro* co) {
   }
   mco_current_co = co;
 #ifdef _MCO_USE_ASAN
-  if(prev_co) {
-    void* bottom_old = NULL;
-    size_t size_old = 0;
-    __sanitizer_finish_switch_fiber(prev_co->asan_prev_stack, (const void**)&bottom_old, &size_old);
-    prev_co->asan_prev_stack = NULL;
-  }
-  __sanitizer_start_switch_fiber(&co->asan_prev_stack, co->stack_base, co->stack_size);
+  _mco_asan_start_switch(prev_co, co);
 #endif
 #ifdef _MCO_USE_TSAN
   co->tsan_prev_fiber = __tsan_get_current_fiber();
@@ -619,13 +657,7 @@ static MCO_FORCE_INLINE void _mco_prepare_jumpout(mco_coro* co) {
   }
   mco_current_co = prev_co;
 #ifdef _MCO_USE_ASAN
-  void* bottom_old = NULL;
-  size_t size_old = 0;
-  __sanitizer_finish_switch_fiber(co->asan_prev_stack, (const void**)&bottom_old, &size_old);
-  co->asan_prev_stack = NULL;
-  if(prev_co) {
-    __sanitizer_start_switch_fiber(&prev_co->asan_prev_stack, bottom_old, size_old);
-  }
+  _mco_asan_start_switch(co, prev_co);
 #endif
 #ifdef _MCO_USE_TSAN
   void* tsan_prev_fiber = co->tsan_prev_fiber;
@@ -654,13 +686,7 @@ static MCO_FORCE_INLINE void _mco_prepare_tagged_yield(mco_coro* co, mco_coro* t
   }
   mco_current_co = prev_co;
 #ifdef _MCO_USE_ASAN
-  void* bottom_old = NULL;
-  size_t size_old = 0;
-  __sanitizer_finish_switch_fiber(co->asan_prev_stack, (const void**)&bottom_old, &size_old);
-  co->asan_prev_stack = NULL;
-  if(prev_co) {
-    __sanitizer_start_switch_fiber(&prev_co->asan_prev_stack, bottom_old, size_old);
-  }
+  _mco_asan_start_switch(co, prev_co);
 #endif
 #ifdef _MCO_USE_TSAN
   void* tsan_prev_fiber = co->tsan_prev_fiber;
@@ -688,13 +714,7 @@ static MCO_FORCE_INLINE void _mco_prepare_stacked_resume(mco_coro* co, mco_coro*
   }
   mco_current_co = stacked_co;
 #ifdef _MCO_USE_ASAN
-  if(prev_co) {
-    void* bottom_old = NULL;
-    size_t size_old = 0;
-    __sanitizer_finish_switch_fiber(prev_co->asan_prev_stack, (const void**)&bottom_old, &size_old);
-    prev_co->asan_prev_stack = NULL;
-  }
-  __sanitizer_start_switch_fiber(&stacked_co->asan_prev_stack, stacked_co->stack_base, stacked_co->stack_size);
+  _mco_asan_start_switch(prev_co, stacked_co);
 #endif
 #ifdef _MCO_USE_TSAN
   stacked_co->tsan_prev_fiber = __tsan_get_current_fiber();
@@ -719,6 +739,9 @@ static MCO_FORCE_INLINE void _mco_abandon_stacked(mco_coro* co) {
 }
 
 static MCO_NO_INLINE void _mco_main(mco_coro* co) {
+#ifdef _MCO_USE_ASAN
+  _mco_asan_finish_switch(co);
+#endif
   co->func(co); /* Run the coroutine function. */
   co->state = MCO_DEAD; /* Coroutine finished successfully, set state to dead. */
   _mco_jumpout(co); /* Jump back to the old context .*/
@@ -1416,11 +1439,17 @@ typedef struct _mco_context {
 static void _mco_jumpin(mco_coro* co) {
   _mco_prepare_jumpin(co);
   _mco_transfer(co, _MCO_CONTEXT_BACK, co, _MCO_CONTEXT_SELF);
+#ifdef _MCO_USE_ASAN
+  _mco_asan_finish_switch(mco_running());
+#endif
 }
 
 static void _mco_jumpout(mco_coro* co) {
   _mco_prepare_jumpout(co);
   _mco_transfer(co, _MCO_CONTEXT_SELF, co, _MCO_CONTEXT_BACK);
+#ifdef _MCO_USE_ASAN
+  _mco_asan_finish_switch(mco_running());
+#endif
 }
 
 static void _mco_transfer(mco_coro* from, _mco_context_slot from_slot,
@@ -1500,6 +1529,9 @@ typedef struct _mco_context {
 static void _mco_jumpin(mco_coro* co) {
   _mco_prepare_jumpin(co);
   _mco_transfer(co, _MCO_CONTEXT_BACK, co, _MCO_CONTEXT_SELF);
+#ifdef _MCO_USE_ASAN
+  _mco_asan_finish_switch(mco_running());
+#endif
 }
 
 static void CALLBACK _mco_wrap_main(void* co) {
@@ -1509,6 +1541,9 @@ static void CALLBACK _mco_wrap_main(void* co) {
 static void _mco_jumpout(mco_coro* co) {
   _mco_prepare_jumpout(co);
   _mco_transfer(co, _MCO_CONTEXT_SELF, co, _MCO_CONTEXT_BACK);
+#ifdef _MCO_USE_ASAN
+  _mco_asan_finish_switch(mco_running());
+#endif
 }
 
 static void _mco_transfer(mco_coro* from, _mco_context_slot from_slot,
@@ -1610,11 +1645,17 @@ static void _mco_wrap_main(void* co) {
 static void _mco_jumpin(mco_coro* co) {
   _mco_prepare_jumpin(co);
   _mco_transfer(co, _MCO_CONTEXT_BACK, co, _MCO_CONTEXT_SELF);
+#ifdef _MCO_USE_ASAN
+  _mco_asan_finish_switch(mco_running());
+#endif
 }
 
 static void _mco_jumpout(mco_coro* co) {
   _mco_prepare_jumpout(co);
   _mco_transfer(co, _MCO_CONTEXT_SELF, co, _MCO_CONTEXT_BACK);
+#ifdef _MCO_USE_ASAN
+  _mco_asan_finish_switch(mco_running());
+#endif
 }
 
 static void _mco_transfer(mco_coro* from, _mco_context_slot from_slot,
@@ -1882,6 +1923,9 @@ mco_result mco_resume(mco_coro* co, void* tag) {
     mco_coro* stacked_co = co->stacked_co;
     _mco_prepare_stacked_resume(co, stacked_co);
     _mco_transfer(co, _MCO_CONTEXT_BACK, stacked_co, _MCO_CONTEXT_SELF);
+#ifdef _MCO_USE_ASAN
+    _mco_asan_finish_switch(mco_running());
+#endif
   } else {
     co->state = MCO_RUNNING;
     _mco_jumpin(co);
@@ -1896,6 +1940,9 @@ static mco_result _mco_yield_to(mco_coro* co, mco_coro* target) {
   } else {
     _mco_prepare_tagged_yield(co, target);
     _mco_transfer(co, _MCO_CONTEXT_SELF, target, _MCO_CONTEXT_BACK);
+#ifdef _MCO_USE_ASAN
+    _mco_asan_finish_switch(mco_running());
+#endif
   }
   return MCO_SUCCESS;
 }

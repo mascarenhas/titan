@@ -30,8 +30,11 @@ LIBUV_SHA256      := 66d511b9e6e334c0e62279eb234fbfb2b3110b1479c09b95b44c7afca8c
 LIBUV_BUNDLED_LIB := $(LIBUV_BUILD_DIR)/libuv.a
 LIBUV_EXTRACTED   := $(LIBUV_SRC_DIR)/.titan-extracted
 LIBUV_PKG_CONFIG  ?= pkg-config
+LIBUV_BUILD_TYPE  ?= Release
 LIBUV_CMAKE_FLAGS := -DLIBUV_BUILD_SHARED=OFF -DBUILD_TESTING=OFF \
-	-DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_BUILD_TYPE=Release
+	-DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+	-DCMAKE_BUILD_TYPE=$(LIBUV_BUILD_TYPE)
+LIBUV_BUILD_CFLAGS ?=
 
 HOST_OS   := $(shell uname -s)
 HOST_ARCH := $(shell uname -m)
@@ -94,6 +97,10 @@ endif
 # Kept in sync with titan-compiler/driver.lua (driver.CC / driver.CFLAGS).
 CC        ?= cc
 CFLAGS    ?= --std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls
+LUA_MYCFLAGS  ?= -fPIC
+LUA_MYLDFLAGS ?=
+LUA_MYLIBS    ?=
+LIBBT_CFLAGS  ?= -fPIC -g -O2
 TITAN_EXTRA_CPPFLAGS ?=
 TITAN_EXTRA_CFLAGS   ?=
 TITAN_EXTRA_LDFLAGS  ?=
@@ -107,8 +114,9 @@ UV_O      := titan-runtime/titan_uv.o
 COROUTINE_SO := coroutine.so
 UV_SO        := uv.so
 TIMER_SO     := timer.so
+FS_SO        := fs.so
 UV_CONFIG_STAMP := $(LIBUV_BUILD_DIR)/.titan-uv-config
-STDLIB_MODULES := coroutine uv timer
+STDLIB_MODULES := coroutine uv timer fs
 STDLIB_SOS     := $(addsuffix .so,$(STDLIB_MODULES))
 STDLIB_ALIASES := $(addprefix titan/,$(STDLIB_SOS))
 ROCK_RUNTIME_SO := titan.so
@@ -182,8 +190,11 @@ $(LUA_LIB):
 	  tar zxf "$(LUA_TARBALL)"; \
 	fi
 	rm "$(LUA_TARBALL)"
-	@echo "==> Building Lua ($(LUA_PLATFORM), MYCFLAGS=-fPIC)"
-	$(MAKE) -C "$(LUA_DIR)" $(LUA_PLATFORM) MYCFLAGS=-fPIC
+	@echo "==> Building Lua ($(LUA_PLATFORM), MYCFLAGS=$(LUA_MYCFLAGS))"
+	$(MAKE) -C "$(LUA_DIR)" $(LUA_PLATFORM) \
+		MYCFLAGS=$(call make_shell_quote,$(LUA_MYCFLAGS)) \
+		MYLDFLAGS=$(call make_shell_quote,$(LUA_MYLDFLAGS)) \
+		MYLIBS=$(call make_shell_quote,$(LUA_MYLIBS))
 
 .lua/bin/lua: $(LUA_LIB)
 	$(MAKE) -C "$(LUA_DIR)" install INSTALL_TOP="$(CURDIR)/.lua"	
@@ -195,8 +206,10 @@ $(LIBBT_LIB):
 	  echo "==> Cloning $(LIBBT_URL)"; \
 	  git clone "$(LIBBT_URL)" "$(LIBBT_DIR)"; \
 	fi
-	@echo "==> Building libbacktrace (configure + make, -fPIC)"
-	cd "$(LIBBT_DIR)" && ./configure CFLAGS="-fPIC -g -O2" && $(MAKE)
+	@echo "==> Building libbacktrace (configure + make, $(LIBBT_CFLAGS))"
+	cd "$(LIBBT_DIR)" && \
+		./configure CFLAGS=$(call make_shell_quote,$(LIBBT_CFLAGS)) && \
+		$(MAKE)
 
 ifeq ($(LIBUV_MODE),bundled)
 libuv: $(LIBUV_LIB)
@@ -271,8 +284,10 @@ $(LIBUV_EXTRACTED): $(LIBUV_TARBALL)
 
 $(LIBUV_LIB): $(LIBUV_EXTRACTED) Makefile
 	@$(MAKE) --no-print-directory check-libuv-tools
-	@echo "==> Configuring libuv $(LIBUV_VERSION) (static, PIC, Release)"
-	cmake -S "$(LIBUV_SRC_DIR)" -B "$(LIBUV_BUILD_DIR)" $(LIBUV_CMAKE_FLAGS)
+	@echo "==> Configuring libuv $(LIBUV_VERSION) (static, PIC, $(LIBUV_BUILD_TYPE))"
+	cmake -S "$(LIBUV_SRC_DIR)" -B "$(LIBUV_BUILD_DIR)" \
+		$(LIBUV_CMAKE_FLAGS) \
+		$(if $(strip $(LIBUV_BUILD_CFLAGS)),-DCMAKE_C_FLAGS=$(call make_shell_quote,$(LIBUV_BUILD_CFLAGS)))
 	@echo "==> Building libuv $(LIBUV_VERSION)"
 	cmake --build "$(LIBUV_BUILD_DIR)" --target uv_a
 	@test -f "$(LIBUV_LIB)" || { \
@@ -316,9 +331,11 @@ endif
 libuv-config: libuv ## Print the effective libuv compiler and linker inputs
 	@echo "LIBUV_MODE=$(LIBUV_MODE)"
 	@echo "LIBUV_VERSION=$(LIBUV_VERSION)"
+	@echo "LIBUV_BUILD_TYPE=$(LIBUV_BUILD_TYPE)"
 	@echo "LIBUV_INCLUDE_DIR=$(LIBUV_INCLUDE_DIR)"
 	@echo "LIBUV_CPPFLAGS=$(LIBUV_CPPFLAGS)"
 	@echo "LIBUV_CFLAGS=$(LIBUV_CFLAGS)"
+	@echo "LIBUV_BUILD_CFLAGS=$(LIBUV_BUILD_CFLAGS)"
 	@echo "LIBUV_EXTRA_OBJECTS=$(LIBUV_EXTRA_OBJECTS)"
 	@echo "LIBUV_LINK_LIBS=$(LIBUV_LINK_LIBS)"
 	@echo "LIBUV_LDFLAGS=$(LIBUV_LDFLAGS)"
@@ -410,6 +427,18 @@ $(TIMER_SO): stdlib/timer.titan $(UV_SO) $(RUNTIME_O) titanc \
 		$(TITANC) --stdlib-build --tree stdlib \
 		--lua-name titan.timer timer
 
+# The filesystem facade imports the canonical uv image and keeps all native
+# libuv types, shim symbols, and link inputs confined to uv.so.
+$(FS_SO): stdlib/fs.titan $(UV_SO) $(RUNTIME_O) titanc \
+		$(TITAN_COMPILER_LUA) Makefile | .lua/bin/lua $(LIBBT_LIB)
+	CC=$(call make_shell_quote,$(CC)) TITAN_PATH_0_11= TITAN_PATH= \
+		TITAN_STDLIB_PATH=$(call make_shell_quote,$(CURDIR)) \
+		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
+		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CFLAGS)) \
+		TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_LDFLAGS)) \
+		$(TITANC) --stdlib-build --tree stdlib \
+		--lua-name titan.fs fs
+
 titan/%.so: %.so
 	mkdir -p "$(@D)"
 	rm -f "$@"
@@ -432,9 +461,11 @@ install-stdlib: stdlib ## Install canonical standard modules and relative Lua al
 rock-build: stdlib $(ROCK_RUNTIME_SO) ## Build all artifacts consumed by the LuaRocks manifest
 
 $(ROCK_RUNTIME_SO): titan-runtime/titanlib.c
-	$(CC) $(ROCK_CFLAGS) -I"$(ROCK_LUA_INCDIR)" \
+	$(CC) $(ROCK_CFLAGS) $(TITAN_EXTRA_CFLAGS) \
+		-I"$(ROCK_LUA_INCDIR)" \
 		-c titan-runtime/titanlib.c -o titan-runtime/titanlib.o
-	$(ROCK_LD) $(ROCK_LIBFLAG) -o $@ titan-runtime/titanlib.o
+	$(ROCK_LD) $(ROCK_LIBFLAG) -o $@ titan-runtime/titanlib.o \
+		$(TITAN_EXTRA_LDFLAGS)
 
 test: lua libbacktrace libuv ## Build/install the rock and run the suite via `luarocks test`
 	luarocks make

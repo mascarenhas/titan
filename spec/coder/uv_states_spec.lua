@@ -29,10 +29,27 @@ describe("uv Phase 2 multiple Lua states", function()
         append(argv, {
             "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
             "-I", phase2.repo .. "/lua-5.5.0/src",
+        })
+        local sanitizer_cflags = os.getenv("TITAN_TEST_EXTRA_CFLAGS")
+        if sanitizer_cflags and #sanitizer_cflags > 0 then
+            local flags, flags_error =
+                cdriver.split_shell_words(sanitizer_cflags)
+            assert.truthy(flags, flags_error)
+            append(argv, flags)
+        end
+        append(argv, {
             phase2.repo .. "/spec/fixtures/uv/phase2/two_states.c",
             phase2.repo .. "/lua-5.5.0/src/liblua.a",
-            "-ldl", "-lm", "-o", executable,
+            "-ldl", "-lm",
         })
+        local sanitizer_ldflags = os.getenv("TITAN_TEST_EXTRA_LDFLAGS")
+        if sanitizer_ldflags and #sanitizer_ldflags > 0 then
+            local flags, flags_error =
+                cdriver.split_shell_words(sanitizer_ldflags)
+            assert.truthy(flags, flags_error)
+            append(argv, flags)
+        end
+        append(argv, { "-o", executable })
         local ok, _, output = phase2.run(shell_command(argv), workspace)
         assert.truthy(ok, output)
     end)

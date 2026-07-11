@@ -12,11 +12,13 @@ local render = util.render
 -- Functions for C literals
 --
 
--- Technically, we only need to escape the quote and backslash
--- But quoting some extra things helps readability...
+-- Preserve arbitrary Titan string bytes while keeping generated C source
+-- textual and readable.
 local some_c_escape_sequences = {
     ["\\"] = "\\\\",
     ["\""] = "\\\"",
+    ["?"] = "\\077",
+    ["\0"] = "\\000",
     ["\a"] = "\\a",
     ["\b"] = "\\b",
     ["\f"] = "\\f",
@@ -27,7 +29,26 @@ local some_c_escape_sequences = {
 }
 
 local function c_string_literal(s)
-    return '"' .. (s:gsub('.', some_c_escape_sequences)) .. '"'
+    local out = { '"' }
+    for i = 1, #s do
+        local c = s:sub(i, i)
+        local escaped = some_c_escape_sequences[c]
+        if escaped then
+            out[#out + 1] = escaped
+        else
+            local byte = string.byte(c)
+            -- Keep generated C source textual and encoding-independent. Three
+            -- octal digits cannot consume a following digit as part of the
+            -- escape.
+            if byte < 32 or byte == 127 or byte >= 128 then
+                out[#out + 1] = string.format("\\%03o", byte)
+            else
+                out[#out + 1] = c
+            end
+        end
+    end
+    out[#out + 1] = '"'
+    return table.concat(out)
 end
 
 local function c_integer_literal(n)
@@ -2274,10 +2295,18 @@ local function codemultiassignment(ctx, node)
     return table.concat(stats, "\n")
 end
 
-local function makestring(ctx, cexp, target)
-    local cstr = render("luaS_new(L, $VALUE)", {
-        VALUE = cexp
-    })
+local function makestring(ctx, cexp, target, length)
+    local cstr
+    if length then
+        cstr = render("luaS_newlstr(L, $VALUE, $LENGTH)", {
+            VALUE = cexp,
+            LENGTH = length,
+        })
+    else
+        cstr = render("luaS_new(L, $VALUE)", {
+            VALUE = cexp,
+        })
+    end
     if target then
         return "", cstr
     else
@@ -4642,7 +4671,8 @@ local function codevalue(ctx, node, target)
     elseif tag == "Ast.ExpFloat" then
         return "", c_float_literal(node.value)
     elseif tag == "Ast.ExpString" then
-        return makestring(ctx, c_string_literal(node.value), target)
+        return makestring(ctx, c_string_literal(node.value), target,
+            tostring(#node.value))
     else
         error("invalid tag for a literal value: " .. tag)
     end

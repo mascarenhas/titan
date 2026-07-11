@@ -61,7 +61,7 @@ Two facts shape everything downstream of the checker:
 | [Error handling](error-handling.md) | Unified Titan/Lua tracebacks via libbacktrace, `#line` source attribution, trace pinning, `raise`/`catch`/`finally` frontend rules, inline Lua longjmp boundaries, pending finally actions, stack relocation, and ABI/search-path notes. |
 | [Defer](defer.md) | The parser-only `defer` marker and recursive `simpleblock` lowering into nested `Ast.StatTry` nodes, relying on existing checker/codegen `finally` machinery. |
 | [Coroutines](coroutines.md) | The `stdlib/coroutine.titan` module's Titan-owned transfer policy with a minimal C shim; its canonical Titan identity and qualified Lua alias; the `TValue` FFI boundary; tagged minicoro, suspended matching handlers with stacked inner coroutines, traceback handoff, and coroutine stack sizing. |
-| [Libuv continuation runtime](libuv-runtime.md) | Canonical `uv`/`timer` images, GC-owned native storage, opaque exact-pointer wrappers, the shared-tag continuation pump, direct native callbacks with a Titan trailing catch, cancellation, bootstrap, and deterministic shutdown. |
+| [Libuv continuation runtime](libuv-runtime.md) | Canonical `uv`/`timer`/`fs` images, GC-owned native storage, opaque exact-handle wrappers, the shared-tag continuation pump, direct native callbacks with a Titan trailing catch, filesystem request/File lifetimes, cancellation, bootstrap, and deterministic shutdown. |
 | [Lua interop internals](lua-interop-internals.md) | The boundary machinery: Lua entry wrappers and per-type checks, record metatables and metatable-based type identity, the module `Udata`'s member metatable, dynamic module loading, the error handler, the standalone entrypoint, and the safety argument. |
 | [FFI internals](ffi-internals.md) | The pure-Lua C toolchain under `foreign import` (preprocessor, C99 grammar, type extraction) and how foreign declarations become Titan types and direct C calls. |
 | [Lua C API FFI follow-up](ffi-lua-api-followup.md) | Preliminary notes for a later design pass on calling the Lua C API through the C FFI. This is not part of FFI v1. |
@@ -111,7 +111,7 @@ cause.
 | `titan-compiler/` | The compiler proper: `lexer`, `parser`, `syntax_errors`, `ast`, `typedecl`, `checker`, `types`, `symtab`, `coder`, `pretty`, `driver`, `foreigntypes`, `location`, `util`. |
 | `c-parser/` | The pure-Lua C preprocessor and C99 parser behind `foreign import`. |
 | `stdlib/` | Titan standard-library sources. Reserved canonical modules are built from here explicitly and installed in the ABI-qualified standard-library directory. |
-| `titan-runtime/` | `titan.h`/`titan.c`, compiled into every module (dynamic loader, error handler); `titanlib.c`, the optional `titan` Lua module (`titan.backtrace()`); `titan_coro.c` and vendored `minicoro.h` for the `coroutine` standard module. |
+| `titan-runtime/` | `titan.h`/`titan.c`, compiled into every module (dynamic loader, error handler); `titanlib.c`, the optional `titan` Lua module (`titan.backtrace()`); `titan_coro.c` and vendored `minicoro.h` for `coroutine`; `titan_uv.c` and `titan/uv.h` for fixed libuv callback and portable helper ABIs. |
 | `spec/` | The busted test suite; `coder_spec.lua` is end-to-end (generates, compiles and runs C). |
 | `examples/`, `testfiles/` | Manual benchmark/demo material (not used by the suite). |
 | `doc/` | This documentation, the [language reference](../language/index.md), and the migration reports. |

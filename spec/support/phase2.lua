@@ -122,13 +122,25 @@ function M.compile(workspace, modname, options)
         environment[#environment + 1] =
             "TITAN_EXTRA_CPPFLAGS=" .. quote(options.cppflags)
     end
-    if options.cflags then
-        environment[#environment + 1] =
-            "TITAN_EXTRA_CFLAGS=" .. quote(options.cflags)
+    local sanitizer_cflags = os.getenv("TITAN_TEST_EXTRA_CFLAGS") or ""
+    local cflags = options.cflags or ""
+    if #sanitizer_cflags > 0 then
+        if #cflags > 0 then cflags = cflags .. " " end
+        cflags = cflags .. sanitizer_cflags
     end
-    if options.ldflags then
+    if #cflags > 0 then
         environment[#environment + 1] =
-            "TITAN_EXTRA_LDFLAGS=" .. quote(options.ldflags)
+            "TITAN_EXTRA_CFLAGS=" .. quote(cflags)
+    end
+    local sanitizer_ldflags = os.getenv("TITAN_TEST_EXTRA_LDFLAGS") or ""
+    local ldflags = options.ldflags or ""
+    if #sanitizer_ldflags > 0 then
+        if #ldflags > 0 then ldflags = ldflags .. " " end
+        ldflags = ldflags .. sanitizer_ldflags
+    end
+    if #ldflags > 0 then
+        environment[#environment + 1] =
+            "TITAN_EXTRA_LDFLAGS=" .. quote(ldflags)
     end
     local command = {
         table.concat(environment, " "),
@@ -179,11 +191,17 @@ function M.variant_workspace(transformer)
         "env CCACHE_DISABLE=1", "TITAN_PATH_0_11=", "TITAN_PATH=",
         "TITAN_STDLIB_PATH=" .. quote(workspace),
     }, " ")
+    -- Sanitizer CI opts private generated variants in explicitly. Ordinary
+    -- focused runs retain the empty flags that keep these workspaces isolated
+    -- from a developer's ambient build configuration.
+    local variant_cflags = os.getenv("TITAN_TEST_EXTRA_CFLAGS") or ""
+    local variant_ldflags = os.getenv("TITAN_TEST_EXTRA_LDFLAGS") or ""
     assert.truthy(exists(workspace .. "/titan-runtime/titan_coro.o"),
         "Phase 2 variant requires make stdlib's titan_coro.o")
     local coroutine_command = table.concat({
-        base, "TITAN_EXTRA_CPPFLAGS=''", "TITAN_EXTRA_CFLAGS=''",
-        "TITAN_EXTRA_LDFLAGS=''", compiler_command(),
+        base, "TITAN_EXTRA_CPPFLAGS=''",
+        "TITAN_EXTRA_CFLAGS=" .. quote(variant_cflags),
+        "TITAN_EXTRA_LDFLAGS=" .. quote(variant_ldflags), compiler_command(),
         "--stdlib-build --tree", quote(workspace .. "/stdlib"),
         "--lua-name titan.coroutine coroutine -X",
         quote(workspace .. "/titan-runtime/titan_coro.o"),
@@ -192,9 +210,15 @@ function M.variant_workspace(transformer)
     assert.truthy(ok, output)
 
     local cppflags, ldflags, archive = host_libuv_config()
+    local uv_cflags = variant_cflags
+    if #uv_cflags > 0 then uv_cflags = uv_cflags .. " " end
+    uv_cflags = uv_cflags .. "-fno-strict-aliasing"
+    if #variant_ldflags > 0 then
+        ldflags = variant_ldflags .. " " .. ldflags
+    end
     local uv_command = table.concat({
         base, "TITAN_EXTRA_CPPFLAGS=" .. quote(cppflags),
-        "TITAN_EXTRA_CFLAGS=" .. quote("-fno-strict-aliasing"),
+        "TITAN_EXTRA_CFLAGS=" .. quote(uv_cflags),
         "TITAN_EXTRA_LDFLAGS=" .. quote(ldflags), compiler_command(),
         "--stdlib-build --tree", quote(workspace .. "/stdlib"),
         "--lua-name titan.uv uv -X",
@@ -204,8 +228,9 @@ function M.variant_workspace(transformer)
     assert.truthy(ok, output)
 
     local timer_command = table.concat({
-        base, "TITAN_EXTRA_CPPFLAGS=''", "TITAN_EXTRA_CFLAGS=''",
-        "TITAN_EXTRA_LDFLAGS=''", compiler_command(),
+        base, "TITAN_EXTRA_CPPFLAGS=''",
+        "TITAN_EXTRA_CFLAGS=" .. quote(variant_cflags),
+        "TITAN_EXTRA_LDFLAGS=" .. quote(variant_ldflags), compiler_command(),
         "--stdlib-build --tree", quote(workspace .. "/stdlib"),
         "--lua-name titan.timer timer",
     }, " ")

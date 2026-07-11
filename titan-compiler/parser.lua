@@ -13,6 +13,12 @@ local syntax_errors = require "titan-compiler.syntax_errors"
 -- a better way yet. (If only lpeg.re had Carg...)
 local THIS_FILENAME = nil
 
+-- Top-level declarations are consumed by a match-time capture as soon as each
+-- declaration has been parsed. This keeps LPeg's pending capture result stack
+-- bounded for large modules. The parser is already deliberately non-reentrant
+-- (see THIS_FILENAME), so the per-parse accumulator follows the same contract.
+local PROGRAM_NODES = nil
+
 -- Parse-time guardrail on the length of parameter/expression lists (not a
 -- runtime bound; runtime vararg counts have their own cap, TITAN_VARARG_MAX).
 local LIST_LIMIT = 100
@@ -411,11 +417,23 @@ function defs.typefunc(pos, argtypes, varargtype, rettypes)
     return ast.TypeFunction(pos, argtypes, rettypes, varargtype)
 end
 
-function defs.makeprogram(_, nodes, init)
+function defs.makeprogram(_, init)
+    local nodes = assert(PROGRAM_NODES)
     if init then
         table.insert(nodes, init)
     end
     return nodes
+end
+
+function defs.appendprogram(_, pos, ...)
+    local nodes = assert(PROGRAM_NODES)
+    for i = 1, select("#", ...) do
+        local node = select(i, ...)
+        table.insert(nodes, node)
+    end
+    -- Consume the declaration captures instead of returning them to the
+    -- enclosing program capture.
+    return pos
 end
 
 -- Match-time guard against absurdly long parameter/expression lists. Used as a
@@ -433,13 +451,13 @@ end
 local grammar = re.compile([[
 
     program         <-  SKIP*
-                        (P {| ( method
+                        (P (( method
                               / static
                               / toplevelfunc
                               / toplevelvar
                               / toplevelrecord
                               / import
-                              / foreign )* |}
+                              / foreign ) => appendprogram)*
                            ((moduleinit)? -> opt) !.) -> makeprogram
 
     method          <- (P  localopt FUNCTION NAME COLON NAME^NameMethod
@@ -850,7 +868,9 @@ function parser.parse(filename, input)
     assert(THIS_FILENAME == nil)
 
     THIS_FILENAME = filename
+    PROGRAM_NODES = {}
     local ast, err, errpos = grammar:match(input)
+    PROGRAM_NODES = nil
     THIS_FILENAME = nil
 
     if ast then

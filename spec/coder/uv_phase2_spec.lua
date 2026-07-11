@@ -102,6 +102,16 @@ describe("uv Phase 2 continuation pump", function()
         assert.is_true(setjmp < first_gc)
         assert.match("uv_stop", dispatcher, 1, true)
 
+        local fs_dispatcher = phase2.c_function_definition(uv_c,
+            "static void uv_fs_dispatch_titan(",
+            "static int uv_fs_dispatch_titanentry_lua(")
+        local fs_setjmp = assert(fs_dispatcher:find(
+            "TITAN_SETJMP", 1, true))
+        local fs_gc = assert(fs_dispatcher:find("luaC_checkGC", 1, true))
+        assert.is_true(fs_setjmp < fs_gc)
+        assert.match("uv_fs_req_cleanup", fs_dispatcher, 1, true)
+        assert.match("uv_stop", fs_dispatcher, 1, true)
+
         local uv_so = phase2.standard_dir() .. "/uv.so"
         local uname = assert(io.popen("uname -s"))
         local host = assert(uname:read("*l"))

@@ -70,7 +70,17 @@ source = replace_exact_count(source,
     [[libuv.uv_run(runtime.loop.handle, libuv.UV_RUN_DEFAULT)]],
     [[test_uv_run_enter()
     libuv.uv_run(runtime.loop.handle, libuv.UV_RUN_DEFAULT)
-    test_uv_run_exit()]], 3, "outer uv_run calls")
+    test_uv_run_exit()]], 2, "outer uv_run calls")
+
+source = replace_once(source, [==[
+    local callbacks = libuv.uv_run(runtime.loop.handle,
+                                  libuv.UV_RUN_DEFAULT) as integer
+]==], [==[
+    test_uv_run_enter()
+    local callbacks = libuv.uv_run(runtime.loop.handle,
+                                  libuv.UV_RUN_DEFAULT) as integer
+    test_uv_run_exit()
+]==], "close-runtime uv_run call")
 
 source = replace_once(source,
 [[local active_runtime: Runtime? = nil]],
@@ -114,14 +124,14 @@ local function start_owner(runtime: Runtime, kind: integer, task: value,
                            peer: value, epoch: integer,
                            timeout: integer, repeat_time: integer):
                            (uv_timer_t, integer)
-  local owner = allocate_owner(runtime, kind, task, peer, epoch)
+  local owner, pointer = allocate_owner(runtime, kind, task, peer, epoch)
 ]==], [==[
 local function start_owner(runtime: Runtime, kind: integer, task: value,
                            peer: value, epoch: integer,
                            timeout: integer, repeat_time: integer):
                            (uv_timer_t, integer)
   test_owner_starts = test_owner_starts + 1
-  local owner = allocate_owner(runtime, kind, task, peer, epoch)
+  local owner, pointer = allocate_owner(runtime, kind, task, peer, epoch)
 ]==], "owner-start counter")
 
 source = replace_once(source, [==[
@@ -167,15 +177,29 @@ catch
 ]==], "dispatcher normal exit counter")
 
 source = replace_once(source, [==[
+catch
+  if not owner.metadata.runtime.fatal then
+    owner.metadata.runtime.fatal = true
+    owner.metadata.runtime.closing = true
+    owner.metadata.runtime.fatal_error = error
+    owner.metadata.runtime.fatal_traceback = traceback
+  end
   libuv.uv_stop(owner.metadata.runtime.loop.handle)
   return
 end
 ]==], [==[
+catch
+  if not owner.metadata.runtime.fatal then
+    owner.metadata.runtime.fatal = true
+    owner.metadata.runtime.closing = true
+    owner.metadata.runtime.fatal_error = error
+    owner.metadata.runtime.fatal_traceback = traceback
+  end
   libuv.uv_stop(owner.metadata.runtime.loop.handle)
   test_callback_depth = test_callback_depth - 1
   return
 end
-]==], "dispatcher catch exit counter")
+]==], "timer dispatcher catch exit counter")
 
 source = replace_once(source, [==[
     local owner, status = start_owner(task.runtime, OWNER_JOIN_WAKE,
@@ -450,8 +474,10 @@ local function cleanup_end()
   end
   task.cleanup_shield_depth = task.cleanup_shield_depth - 1
   if task.cleanup_shield_depth == 0 and task.cancel_requested then
+    -- Keep cancellation sticky without interrupting a sequence of library
+    -- cleanup operations.  The next ordinary await injects it, or drive_task
+    -- classifies a returning Task as cancelled.
     task.cancel_deferred = false
-    raise task.cancel_value
   end
 end
 ]==], [==[
@@ -462,8 +488,10 @@ local function cleanup_end()
   end
   task.cleanup_shield_depth = task.cleanup_shield_depth - 1
   if task.cleanup_shield_depth == 0 and task.cancel_requested then
+    -- Keep cancellation sticky without interrupting a sequence of library
+    -- cleanup operations.  The next ordinary await injects it, or drive_task
+    -- classifies a returning Task as cancelled.
     task.cancel_deferred = false
-    raise task.cancel_value
   end
 end
 ]==] .. hook_api, "variant hook API")

@@ -63,6 +63,10 @@ void titan_uvshim_timer_close(uv_timer_t *timer);
 
 void titan_uvshim_fs_set_data(uv_fs_t *req, void *data);
 void *titan_uvshim_fs_get_data(const uv_fs_t *req);
+int titan_uvshim_fs_cancel(uv_fs_t *req);
+int titan_uvshim_fs_scandir_next(uv_fs_t *req, void *entry);
+const char *titan_uvshim_dirent_name(const void *entry);
+int titan_uvshim_error_eio(void);
 
 /* Fixed callback shapes passed directly to public libuv start functions. */
 void titan_uvshim_timer_cb(uv_timer_t *timer);
@@ -76,6 +80,28 @@ void titan_uvshim_fs_cb(uv_fs_t *req);
  * uv_buf_init API cannot represent are rejected instead of truncated.
  */
 int titan_uvshim_buf_init(void *buf, char *base, int64_t len);
+int titan_uvshim_buf_init_slice(void *buf, char *base, int64_t total,
+                                int64_t offset, int64_t length);
+int titan_uvshim_bytes_copy(char *destination, int64_t capacity,
+                            const char *source, int64_t length);
+int titan_uvshim_allocation_length_is_valid(int64_t length);
+int titan_uvshim_buf_length_is_valid(int64_t length);
+
+/* Copy a retained text argument into caller-owned NUL-terminated storage. */
+int titan_uvshim_text_copy(char *destination, int64_t capacity,
+                           const char *source, int64_t length);
+
+enum titan_uvshim_stat_kind {
+  TITAN_UV_STAT_OTHER = 0,
+  TITAN_UV_STAT_FILE = 1,
+  TITAN_UV_STAT_DIRECTORY = 2,
+  TITAN_UV_STAT_SYMLINK = 3
+};
+
+/* Extract the portable public portion of an opaque uv_stat_t. */
+int titan_uvshim_stat_extract(const void *statbuf, int64_t *size,
+                              int64_t *mode, int64_t *modified_seconds,
+                              int64_t *modified_nanoseconds, int *kind);
 
 /* Outer-driver diagnostics for an unexpected UV_EBUSY loop close. */
 int titan_uvshim_loop_handle_count(uv_loop_t *loop);

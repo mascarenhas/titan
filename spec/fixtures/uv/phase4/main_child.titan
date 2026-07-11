@@ -1,0 +1,15 @@
+local fs = import "fs"
+local timer = import "timer"
+local uv = import "uv"
+
+function main(args: {string}): integer
+  local marker = args[1]
+  uv.run(function (): value
+    timer.sleep(10)
+    fs.write_file(marker, "independent-child-finished")
+    return nil
+  end)
+  -- The async bootstrap must keep driving the independent child even though
+  -- its main Task has already returned this result.
+  return 0
+end

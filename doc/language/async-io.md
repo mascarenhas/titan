@@ -110,6 +110,18 @@ again. An unobserved cancelled non-main Task is not session-fatal; cancellation
 of the main Task is reported.
 
 Resource cleanup is physically completed even after logical cancellation.
-The runtime closes and drains every remaining owner before
-`uv_loop_close`; it does not let a Lua-GC finalizer free an initialized
-libuv handle.
+The runtime closes and drains every remaining request/handle owner before
+`uv_loop_close`; it does not let a Lua-GC finalizer reclaim native storage
+before its terminal callback and cleanup. Persistent descriptor-close failure
+is the bounded exception: after retry exhaustion the idle loop is closed, the
+failed File and terminal Runtime remain rooted, and the saved error is reported
+instead of retrying forever or claiming that the descriptor closed.
+
+Filesystem cancellation distinguishes logical delivery from physical native
+lifetime. Cancelling a queued File operation removes it from that File's FIFO.
+A submitted request remains rooted through its callback even if `uv_cancel`
+cannot stop it in time, and its stale result is not delivered. File close is
+cleanup-shielded so cancellation is reinjected only after physical close.
+
+See the [filesystem standard library](standard-library-fs.md) for the public
+File, whole-file, metadata, and path APIs.

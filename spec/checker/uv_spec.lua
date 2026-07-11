@@ -68,14 +68,35 @@ describe("uv Phase 2 public interface", function()
     it("locks the Task, error, loop, and timer middle-layer surface", function()
         local modtype = check_uv()
         assert.same({
-            "Cancelled", "Error", "Task", "_sleep", "_ticker",
+            "Cancelled", "Error", "Task", "_fs_close", "_fs_flush",
+            "_fs_is_closed", "_fs_list", "_fs_mkdir", "_fs_open",
+            "_fs_read", "_fs_rename", "_fs_rmdir", "_fs_stat",
+            "_fs_unlink", "_fs_write", "_sleep", "_ticker",
             "_ticker_close", "_ticker_tick", "_yield", "loop", "run",
-            "uv_timer_t", "version",
+            "uv_file", "uv_timer_t", "version",
         }, sorted_keys(modtype.members))
 
         assert.equals("(() -> value) -> uv.Task", signature(modtype, "run"))
         assert.equals("() -> ()", signature(modtype, "loop"))
         assert.equals("() -> string", signature(modtype, "version"))
+        assert.equals("(string) -> (integer, string, integer, integer, integer)",
+            signature(modtype, "_fs_stat"))
+        assert.equals("(string, string) -> uv.uv_file",
+            signature(modtype, "_fs_open"))
+        assert.equals("(uv.uv_file, integer) -> string?",
+            signature(modtype, "_fs_read"))
+        assert.equals("(uv.uv_file, string) -> integer",
+            signature(modtype, "_fs_write"))
+        assert.equals("(uv.uv_file) -> ()", signature(modtype, "_fs_flush"))
+        assert.equals("(uv.uv_file) -> ()", signature(modtype, "_fs_close"))
+        assert.equals("(uv.uv_file) -> boolean",
+            signature(modtype, "_fs_is_closed"))
+        assert.equals("(string) -> ()", signature(modtype, "_fs_mkdir"))
+        assert.equals("(string) -> ()", signature(modtype, "_fs_unlink"))
+        assert.equals("(string) -> ()", signature(modtype, "_fs_rmdir"))
+        assert.equals("(string, string) -> ()",
+            signature(modtype, "_fs_rename"))
+        assert.equals("(string) -> { string }", signature(modtype, "_fs_list"))
         assert.equals("(integer) -> ()", signature(modtype, "_sleep"))
         assert.equals("() -> ()", signature(modtype, "_yield"))
         assert.equals("(integer) -> uv.uv_timer_t",
@@ -89,8 +110,11 @@ describe("uv Phase 2 public interface", function()
     it("keeps all native and scheduler controls out of the interface", function()
         local modtype = check_uv()
         for _, name in ipairs({
-            "Loop", "Runtime", "TimerControl", "Request", "TickerState",
-            "timer_dispatch", "UV_TAG", "active_runtime",
+            "Loop", "Runtime", "TimerControl", "DriveControl", "Request",
+            "FsConstants", "Bytes", "Text", "Buffer", "Dirent",
+            "FsStatResult", "FsOperation", "FsControl", "uv_fs_t",
+            "TickerState", "timer_dispatch", "fs_dispatch",
+            "UV_TAG", "active_runtime",
         }) do
             assert.falsy(modtype.members[name], name .. " leaked")
         end
@@ -105,6 +129,11 @@ describe("uv Phase 2 public interface", function()
         assert.equals(8, owner.nfields)
         assert.equals(8, #owner.fields)
         for _, field in ipairs(owner.fields) do assert.is_true(field.islocal) end
+
+        local file = assert(types.registry["uv.uv_file"])
+        assert.equals(15, file.nfields)
+        assert.equals(15, #file.fields)
+        for _, field in ipairs(file.fields) do assert.is_true(field.islocal) end
 
         local err = assert(types.registry["uv.Error"])
         assert.equals(5, err.nfields)
@@ -147,6 +176,7 @@ describe("uv Phase 2 public interface", function()
             local uv = import "uv"
             function bad_task(): uv.Task return uv.Task.new() end
             function bad_owner(): uv.uv_timer_t return uv.uv_timer_t.new() end
+            function bad_file(): uv.uv_file return uv.uv_file.new() end
         ]])
         assert.match("invalid record function 'new'", opaque)
 

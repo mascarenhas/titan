@@ -154,6 +154,84 @@ describe("Titan parser", function()
         assert.are.same({}, ast)
     end)
 
+    it("incrementally consumes large top-level declaration lists", function()
+        local source = { "local first = 1" }
+        local records = 180
+        for i = 1, records do
+            source[#source + 1] = string.format("local record R%d end", i)
+        end
+        source[#source + 1] = "local last = 2"
+        source[#source + 1] = "do return end"
+
+        local ast = assert_parses_successfuly(table.concat(source, "\n"))
+        -- Each record contributes the declaration followed by its synthesized
+        -- local constructor; the surrounding variables and initializer retain
+        -- their source order.
+        assert.are.equal(2 * records + 3, #ast)
+        assert.are.equal("first", ast[1].decl.name)
+        assert.are.equal("Ast.TopLevelRecord", ast[2]._tag)
+        assert.are.equal("R1", ast[2].name)
+        assert.are.equal("Ast.TopLevelStatic", ast[3]._tag)
+        assert.are.equal("new", ast[3].name)
+        assert.are.equal("last", ast[#ast - 1].decl.name)
+        assert.are.equal("Ast.StatBlock", ast[#ast]._tag)
+    end)
+
+    it("preserves mixed top-level ordering while consuming incrementally",
+    function()
+        local source = {}
+        local groups = 40
+        for i = 1, groups do
+            source[#source + 1] = string.format(
+                'local m%d = import "module.%d"', i, i)
+            source[#source + 1] = string.format(
+                'local c%d = foreign import "header%d.h"', i, i)
+            source[#source + 1] = string.format(
+                "record R%d item: integer end", i)
+            source[#source + 1] = string.format(
+                "function R%d:method(): integer return %d end", i, i)
+            source[#source + 1] = string.format(
+                "function R%d.static(): integer return %d end", i, i)
+            source[#source + 1] = string.format(
+                "local function f%d(): integer return %d end", i, i)
+            source[#source + 1] = string.format("local v%d = %d", i, i)
+        end
+
+        local ast = assert_parses_successfuly(table.concat(source, "\n"))
+        assert.are.equal(groups * 8, #ast)
+        for i = 1, groups do
+            local base = (i - 1) * 8
+            assert.are.equal("Ast.TopLevelImport", ast[base + 1]._tag)
+            assert.are.equal("Ast.TopLevelForeignImport", ast[base + 2]._tag)
+            assert.are.equal("Ast.TopLevelRecord", ast[base + 3]._tag)
+            assert.are.equal("R" .. i, ast[base + 3].name)
+            assert.are.equal("Ast.TopLevelStatic", ast[base + 4]._tag)
+            assert.are.equal("new", ast[base + 4].name)
+            assert.are.equal("Ast.TopLevelMethod", ast[base + 5]._tag)
+            assert.are.equal("Ast.TopLevelStatic", ast[base + 6]._tag)
+            assert.are.equal("Ast.TopLevelFunc", ast[base + 7]._tag)
+            assert.are.equal("Ast.TopLevelVar", ast[base + 8]._tag)
+        end
+    end)
+
+    it("clears incremental state after a large syntax failure", function()
+        local source = {}
+        for i = 1, 180 do
+            source[#source + 1] = string.format("local value%d = %d", i, i)
+        end
+        source[#source + 1] = "function broken("
+        local ast, err = parser.parse("(large-malformed)",
+            table.concat(source, "\n"))
+        assert.falsy(ast)
+        assert.truthy(err)
+
+        local clean = assert(parser.parse("(after-large-malformed)",
+            "local clean = 1"))
+        assert.are.equal(1, #clean)
+        assert.are.equal("clean", clean[1].decl.name)
+        assert.are.equal("(after-large-malformed)", clean[1].loc.filename)
+    end)
+
     it("can parse a module initializer block", function()
         assert_program_ast([[
             local x = 1

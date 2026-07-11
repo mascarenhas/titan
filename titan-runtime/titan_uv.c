@@ -1,6 +1,8 @@
 #include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
+#include <sys/stat.h>
 
 #include "lobject.h"
 #include "lua.h"
@@ -93,6 +95,23 @@ void *titan_uvshim_fs_get_data(const uv_fs_t *req) {
   return uv_req_get_data((const uv_req_t *)req);
 }
 
+int titan_uvshim_fs_cancel(uv_fs_t *req) {
+  return uv_cancel((uv_req_t *)req);
+}
+
+int titan_uvshim_fs_scandir_next(uv_fs_t *req, void *opaque_entry) {
+  int status = uv_fs_scandir_next(req, (uv_dirent_t *)opaque_entry);
+  return status == UV_EOF ? 1 : status;
+}
+
+const char *titan_uvshim_dirent_name(const void *opaque_entry) {
+  return ((const uv_dirent_t *)opaque_entry)->name;
+}
+
+int titan_uvshim_error_eio(void) {
+  return UV_EIO;
+}
+
 void titan_uvshim_timer_cb(uv_timer_t *timer) {
   Udata *owner = (Udata *)uv_handle_get_data((uv_handle_t *)timer);
   titan_uvshim_dispatch(owner, TITAN_UV_EVENT_TIMER, 0, 0);
@@ -116,6 +135,84 @@ int titan_uvshim_buf_init(void *buf, char *base, int64_t len) {
     return UV_EINVAL;
   }
   *uvbuf = uv_buf_init(base, (unsigned int)len);
+  return 0;
+}
+
+int titan_uvshim_allocation_length_is_valid(int64_t length) {
+  return length >= 0 && (uint64_t)length <= SIZE_MAX;
+}
+
+int titan_uvshim_buf_length_is_valid(int64_t length) {
+  return titan_uvshim_allocation_length_is_valid(length) &&
+         (uint64_t)length <= UINT_MAX;
+}
+
+int titan_uvshim_buf_init_slice(void *buf, char *base, int64_t total,
+                                int64_t offset, int64_t length) {
+  if (base == NULL || total < 0 || offset < 0 || length < 0 ||
+      offset > total || length > total - offset ||
+      (uint64_t)total > SIZE_MAX || (uint64_t)offset > PTRDIFF_MAX ||
+      (uint64_t)length > UINT_MAX) {
+    return UV_EINVAL;
+  }
+  return titan_uvshim_buf_init(buf, base + offset, length);
+}
+
+int titan_uvshim_bytes_copy(char *destination, int64_t capacity,
+                            const char *source, int64_t length) {
+  if (destination == NULL || source == NULL || capacity < 0 || length < 0 ||
+      capacity < length || (uint64_t)capacity > SIZE_MAX ||
+      (uint64_t)length > SIZE_MAX) {
+    return UV_EINVAL;
+  }
+  memcpy(destination, source, (size_t)length);
+  return 0;
+}
+
+int titan_uvshim_text_copy(char *destination, int64_t capacity,
+                           const char *source, int64_t length) {
+  if (destination == NULL || source == NULL || length < 0 ||
+      capacity <= 0 || length > INT64_MAX - 1 || capacity != length + 1) {
+    return UV_EINVAL;
+  }
+  if ((uint64_t)capacity > SIZE_MAX || (uint64_t)length > PTRDIFF_MAX) {
+    return UV_EINVAL;
+  }
+  if (memchr(source, '\0', (size_t)length) != NULL) {
+    return UV_EINVAL;
+  }
+  memcpy(destination, source, (size_t)length);
+  destination[length] = '\0';
+  return 0;
+}
+
+int titan_uvshim_stat_extract(const void *opaque_statbuf, int64_t *size,
+                              int64_t *mode, int64_t *modified_seconds,
+                              int64_t *modified_nanoseconds, int *kind) {
+  const uv_stat_t *statbuf = (const uv_stat_t *)opaque_statbuf;
+
+  if (statbuf == NULL || size == NULL || mode == NULL ||
+      modified_seconds == NULL || modified_nanoseconds == NULL ||
+      kind == NULL) {
+    return UV_EINVAL;
+  }
+  if (statbuf->st_size > INT64_MAX || statbuf->st_mode > INT64_MAX) {
+    return UV_EOVERFLOW;
+  }
+
+  *size = (int64_t)statbuf->st_size;
+  *mode = (int64_t)statbuf->st_mode;
+  *modified_seconds = statbuf->st_mtim.tv_sec;
+  *modified_nanoseconds = statbuf->st_mtim.tv_nsec;
+  if (S_ISREG((mode_t)statbuf->st_mode)) {
+    *kind = TITAN_UV_STAT_FILE;
+  } else if (S_ISDIR((mode_t)statbuf->st_mode)) {
+    *kind = TITAN_UV_STAT_DIRECTORY;
+  } else if (S_ISLNK((mode_t)statbuf->st_mode)) {
+    *kind = TITAN_UV_STAT_SYMLINK;
+  } else {
+    *kind = TITAN_UV_STAT_OTHER;
+  }
   return 0;
 }
 

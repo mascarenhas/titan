@@ -21,6 +21,8 @@ the `linux`/`macosx` build target from `uname` (override with
 `make lua LUA_PLATFORM=...`). To do it by hand instead, download and extract the
 tarball into a `lua-5.5.0` folder and run `make linux MYCFLAGS=-fPIC` inside it.
 
+## Libuv setup
+
 Titan's async standard library uses libuv. The supported default is a pinned
 libuv 1.52.1 static PIC build, so neither the compiler nor the resulting
 standard modules depend on an unversioned system libuv at runtime. Install a C
@@ -113,13 +115,14 @@ The reserved standard modules (`coroutine`, `uv`, `timer`, `fs`, `net`, and
 `/usr/local/lib/titan/0.11`) and cannot be shadowed through `--tree` or
 `TITAN_PATH`. Titan code imports them by their short names, while Lua uses the
 qualified aliases such as `require "titan.coroutine"`, `require "titan.uv"`,
-and `require "titan.timer"`; Lua's own `coroutine` and `os` modules remain
-unchanged.
+`require "titan.timer"`, and `require "titan.fs"`; Lua's own `coroutine` and
+`os` modules remain unchanged.
 
-The currently implemented async chain is `coroutine.so -> uv.so -> timer.so`.
-Only the canonical `uv.so` contains libuv; `timer.so` dynamically imports that
-standard image instead of linking a second copy. `make stdlib` builds all three
-canonical modules and their `titan.*` Lua aliases in dependency order.
+The currently implemented async chain is `coroutine.so -> uv.so ->
+{timer.so, fs.so}`. Only the canonical `uv.so` contains libuv; `timer.so` and
+`fs.so` dynamically import that standard image instead of linking another
+copy. `make stdlib` builds all four canonical modules and their `titan.*` Lua
+aliases in dependency order.
 
 From Titan, importing `timer` is enough to enable the standalone async
 bootstrap:
@@ -129,6 +132,19 @@ local timer = import "timer"
 
 function main(args: {string}): integer
   timer.sleep(10)
+  return 0
+end
+```
+
+Filesystem calls have the same synchronous appearance inside a Task. Payloads
+are binary, while paths are text and reject embedded NUL:
+
+```titan
+local fs = import "fs"
+
+function main(args: {string}): integer
+  fs.write_file(args[1], "Titan\0data")
+  if fs.read_file(args[1]) ~= "Titan\0data" then return 1 end
   return 0
 end
 ```
@@ -153,7 +169,8 @@ that callback until it finishes or starts another async operation and yields.
 There is no extra protected callback wrapper or implicit ready queue;
 `timer.yield()` explicitly cedes an event-loop turn. See
 [Asynchronous I/O and tasks](doc/language/async-io.md) and the
-[timer module](doc/language/standard-library-timer.md).
+[timer](doc/language/standard-library-timer.md) and
+[filesystem](doc/language/standard-library-fs.md) modules.
 
 If everything is all right with your modules, you will get the result of
 your compilation as a native binary:
@@ -267,10 +284,13 @@ they are in the roadmap:
 * error handling with `raise`, `catch`, `finally`, Lua `pcall`, and
   unified Lua/Titan backtraces via `titan.backtrace()`
 * asymmetric, tagged (nested) coroutines as building block for async IO
+* libuv-backed Tasks, timers, and asynchronous binary filesystem I/O
 
 ## Next
 
-* minimal standard library (string library including tostring, math library including tonumber, file/socket IO using libuv, lua library to load/run Lua code)
+* minimal standard library, continued (string library including tostring, math
+  library including tonumber, socket I/O using libuv, and a Lua library to
+  load/run Lua code)
 * FFI with C, continued (function pointers, callbacks from C into Titan, owned structs with flexible array members)
 * tagged variants (unions of records with some syntax for switch/case on the record tag)
 * parametric polymorphism (via type erasure and boxed values)
