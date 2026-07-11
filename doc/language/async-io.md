@@ -132,4 +132,6 @@ native handle close behind already submitted and queued FIFO output.
 
 See the [filesystem standard library](standard-library-fs.md) and
 [TCP networking standard library](standard-library-net.md) for their public
-APIs.
+I/O APIs. The [operating-system standard library](standard-library-os.md)
+documents portable synchronous helpers and one-shot signal waits built on the
+same Runtime.

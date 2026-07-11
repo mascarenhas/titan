@@ -1,8 +1,10 @@
 # Titan libuv async I/O standard library
 
 Status: implementation in progress. Phases 0 through 5 are implemented and
-covered by the normal, deterministic fault, packaging, and sanitizer suites;
-Phase 6 and the final Phase 7 audit remain. The design below is based on the
+covered by normal, deterministic fault, packaging, and sanitizer suites.
+Phase 6's portable OS-helper/one-shot-signal slice is implemented and locally
+verified; its Linux sanitizer and manual macOS gates, Phase 6's process/pipe
+slice, and the final Phase 7 audit remain. The design below is based on the
 current repository checkout, the sketch in `/tmp/uv-io.md`, the implemented
 `coroutine`/`uv` standard modules, focused Titan and libuv prototypes, and the
 public libuv 1.x contracts.
@@ -2043,6 +2045,9 @@ Exit criteria:
 - All handles close and the loop drains after both success and failure.
 
 ### Phase 6 - OS helpers, signals, and processes
+
+Status: portable OS helpers and one-shot signals are implemented; child
+process and stdio-pipe ownership remain.
 
 Files:
 

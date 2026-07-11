@@ -59,6 +59,25 @@ print(counter.bump(1))    --> 101
 The module value's metatable is protected: `getmetatable` on it returns
 the string `"Titan module counter"`, and `setmetatable` on it fails.
 
+### Qualified standard-library names
+
+Titan's standard modules keep short canonical identities for Titan imports but
+use `titan.*` names at the Lua boundary. For example:
+
+```lua
+local lua_os = require "os"          -- Lua's standard table
+local titan_os = require "titan.os"  -- Titan module userdata
+
+assert(type(lua_os) == "table")
+assert(type(titan_os) == "userdata")
+assert(require "os" == lua_os)
+```
+
+The same rule applies to `titan.coroutine`, `titan.uv`, `titan.timer`,
+`titan.fs`, and `titan.net`. Each qualified path is a relative alias to the
+canonical Titan DSO, so a Lua require and a Titan short-name import initialize
+one module Udata and one copy of its mutable state.
+
 ## How values map between the two languages
 
 Titan values *are* Lua values; nothing is converted on the way out of

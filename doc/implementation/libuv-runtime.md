@@ -6,19 +6,21 @@ The asynchronous standard library has one low-level owner:
 coroutine.so -> uv.so
                  |-> timer.so
                  |-> fs.so
-                 `-> net.so
+                 |-> net.so
+                 `-> os.so
 ```
 
 `uv.so` links `titan_uv.o` and the selected libuv exactly once. `timer.so`,
-`fs.so`, and `net.so` import the canonical binary `uv.so` with `loadstdlib`;
-they do not compile `uv.titan`, link `titan_uv.o`, or embed another libuv
-archive. Their `titan.*` Lua aliases are relative symlinks to the canonical
-images. Bundled and system acquisition, including Linux and macOS packages, is
-documented in the [README](../../README.md#libuv-setup).
+`fs.so`, `net.so`, and `os.so` import the canonical binary `uv.so` with
+`loadstdlib`; they do not compile `uv.titan`, link `titan_uv.o`, or embed
+another libuv archive. Their `titan.*` Lua aliases are relative symlinks to the
+canonical images. Bundled and system acquisition, including Linux and macOS
+packages, is documented in the [README](../../README.md#libuv-setup).
 
 ## GC-owned native storage
 
-Every loop, timer, filesystem/network request, TCP handle, I/O buffer,
+Every loop, timer, one-shot signal, filesystem/network request, TCP handle,
+I/O buffer,
 `uv_buf_t`, opaque address cell, and scandir entry used by the runtime is
 allocated in Lua full-userdata payload bytes. The Titan source uses the
 imported foreign type's `<module>.<type>.sizeof` and `.alignof`, captures the
@@ -56,9 +58,10 @@ the corresponding zero-based indices.
 
 One `uv` module instance owns one private coroutine tag and at most one active
 Runtime. A Runtime contains a Titan-owned private `uv_loop_t`, the main Lua
-thread, separate linked lists for timer owners, pending filesystem/network
-requests, persistent Files and TCP resources, and Tasks, the currently running
-Task, and the first fatal error/trace. The lists reflect different terminal
+thread, separate linked lists for timer and signal owners, pending
+filesystem/network requests, persistent Files and TCP resources, and Tasks,
+the currently running Task, and the first fatal error/trace. The lists reflect
+different terminal
 events: handle close, request callback plus cleanup, descriptor close request,
 and coroutine completion. Sequential sessions reuse the tag but allocate a
 fresh loop and generation.
@@ -142,10 +145,35 @@ classifies the resulting target kind. Titan exposes no `lstat` operation yet.
 All actual I/O and path changes use public libuv APIs; the shim contains no
 POSIX `open`, `read`, `write`, or `close` fallback.
 
+## Portable OS helpers and signals
+
+The `os.so` facade contains no foreign import. Its `_os_*` calls cross the
+binary-only boundary into canonical `uv.so`, which invokes public `uv_os_*`,
+`uv_cwd`/`uv_chdir`, and `uv_exepath` APIs. Variable-size text results use
+Titan-owned byte storage and checked growth. `UV_ENOSYS` is reported as an
+ordinary `uv.Error`; there is no hidden POSIX fallback.
+
+On the supported Linux and macOS implementations, `uv_exepath` reports success
+even when its result filled the entire payload capacity. The runtime treats
+that saturated result as ambiguous and retries with a larger GC-owned buffer.
+Those two implementations do not consult `uv_setup_args`; adding another host
+would require auditing that host's public `uv_exepath` prerequisite first.
+
+A one-shot signal wait uses GC-owned `uv_signal_t` storage and the same fixed
+owner layout as other callback handles. Host signal-number mapping is isolated
+in the shim; the Titan interface exposes only the common lowercase Linux/macOS
+names. Before arbitrary continuation code runs, the callback records the
+signal, stops the watcher, clears its waiter epoch, and initiates `uv_close`.
+Cancellation performs the same physical stop-and-close path without delivering
+a stale signal.
+
+Child-process and stdio-pipe ownership are the remaining Phase 6 runtime work
+and are not described as implemented here yet.
+
 ## Direct native callback boundary
 
-`titan-runtime/titan_uv.c` recovers a rooted timer, filesystem, DNS, or stream
-owner through public libuv data accessors, reads its
+`titan-runtime/titan_uv.c` recovers a rooted timer, signal, filesystem, DNS, or
+stream owner through public libuv data accessors, reads its
 main-thread/module/dispatcher slots, obtains the native Titan function pointer,
 and calls:
 
@@ -153,10 +181,10 @@ and calls:
 dispatch(L, M, NULL, owner, event_kind, result, size, pointer);
 ```
 
-The fixed final payload is `NULL` for timer, close, filesystem, and stream
-status callbacks. DNS completion uses it for libuv's borrowed `addrinfo` list,
-which the trusted dispatcher copies into GC-owned opaque address storage and
-releases before returning to libuv.
+The fixed final payload is `NULL` for timer, signal, close, filesystem, and
+stream status callbacks. DNS completion uses it for libuv's borrowed
+`addrinfo` list, which the trusted dispatcher copies into GC-owned opaque
+address storage and releases before returning to libuv.
 
 There is no `lua_pcall`, Lua entry wrapper, or VM generic-call path around this
 call. Dispatchers are trusted library code. Each function-level trailing Titan
@@ -204,11 +232,12 @@ operations while it closes every remaining TCP resource. The complete network
 state machine is documented in [Libuv DNS and TCP
 implementation](libuv-networking.md).
 
-Normal and fatal shutdown close remaining timer owners, enqueue internal closes
-for every persistent File, close remaining TCP resources, and repeatedly run
-the loop only from the outer driver. It repairs late successful opens and
-drains all filesystem and network request callbacks and cleanups. Normally it
-continues until the timer, request, File, and TCP root lists are empty. If
+Normal and fatal shutdown close remaining timer and signal owners, enqueue
+internal closes for every persistent File, close remaining TCP resources, and
+repeatedly run the loop only from the outer driver. It repairs late successful
+opens and drains all filesystem and network request callbacks and cleanups.
+Normally it continues until the timer, signal, request, File, and TCP root
+lists are empty. If
 bounded descriptor-close retries are exhausted,
 only those failed File roots remain; the idle loop is still closed, while the
 terminal Runtime retains the wrappers and rejects reuse. An
@@ -226,9 +255,10 @@ standalone entrypoint loads imports first, then calls that hook under its
 existing outer protected entry. Programs without the hook retain direct
 synchronous `main`.
 
-The focused suites cover source and binary interfaces, native timer/FS/network
-owner layout, direct callbacks, callback depth/main-thread dispatch, Task and
-timer behavior, filesystem and network binary data, FIFO/close state machines,
+The focused suites cover source and binary interfaces, native
+timer/FS/network/signal owner layout, direct callbacks, callback
+depth/main-thread dispatch, Task and timer behavior, filesystem and network
+binary data, portable OS helpers, one-shot signals, FIFO/close state machines,
 path operations, pre-submission allocation and bounded-close faults, request
 cleanup/cancellation faults, trace propagation, GC, sequential sessions,
 standalone bootstrap, canonical aliases, LuaRocks ownership, and bundled/system

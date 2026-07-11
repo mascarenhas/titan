@@ -33,7 +33,7 @@ test = {
 hooks = {
    post_install = [[set -e
       titan_libdir="$(PREFIX)/../../../../lua/$(LUA_VERSION)/titan"
-      for module in coroutine uv timer fs net; do
+      for module in coroutine uv timer fs net os; do
          test -f "$titan_libdir/stdlib_0_11/$module.so"
          rm -f "$titan_libdir/$module.so"
          ln -s "stdlib_0_11/$module.so" "$titan_libdir/$module.so"
@@ -87,7 +87,9 @@ build = {
          ["titan.stdlib_0_11.fs"] = "fs.so",
          ["titan.fs"] = "fs.so",
          ["titan.stdlib_0_11.net"] = "net.so",
-         ["titan.net"] = "net.so"
+         ["titan.net"] = "net.so",
+         ["titan.stdlib_0_11.os"] = "os.so",
+         ["titan.os"] = "os.so"
       },
       bin = {
          "titanc"

@@ -1,0 +1,111 @@
+-- Deterministic checked-resize faults for the synchronous Titan os facade.
+local os = import "os"
+local uv = import "uv"
+
+local function check(condition: boolean, message: string)
+  if not condition then raise message end
+end
+
+local function restore_environment(name: string, original: string?)
+  if original then
+    os.setenv(name, original as string)
+  else
+    os.unsetenv(name)
+  end
+end
+
+function exercise_exepath_saturation(): string
+  uv.__test_phase6_reset_os_buffer_state()
+  uv.__test_phase6_os_initial_capacity(1)
+  local path = os.exepath()
+  check(#path > 0, "saturated exepath retry returned an empty path")
+  check(uv.__test_phase6_os_last_initial() == 1,
+        "exepath did not use the one-byte initial test capacity")
+  check(uv.__test_phase6_os_result_attempts() > 1 and
+        uv.__test_phase6_os_grows() > 0,
+        "successful saturated exepath did not retry")
+  return "exepath-saturation-retry-ok"
+end
+
+function exercise_non_growing_enobufs(name: string): string
+  local original: string? = os.getenv(name)
+  do
+    os.setenv(name, "x")
+    uv.__test_phase6_reset_os_buffer_state()
+    uv.__test_phase6_os_initial_capacity(16)
+    uv.__test_phase6_os_buffer_fault("non-growing")
+    check(os.getenv(name) == "x",
+          "non-growing ENOBUFS retry changed the environment value")
+    check(uv.__test_phase6_os_result_attempts() == 2 and
+          uv.__test_phase6_os_grows() == 1,
+          "non-growing ENOBUFS did not retry exactly once")
+    check(uv.__test_phase6_os_last_grow_from() == 16 and
+          uv.__test_phase6_os_last_grow_to() == 32,
+          "non-growing ENOBUFS did not use checked doubling")
+  finally
+    restore_environment(name, original)
+  end
+  return "non-growing-enobufs-doubling-ok"
+end
+
+function exercise_required_overflow(): string
+  uv.__test_phase6_reset_os_buffer_state()
+  uv.__test_phase6_os_buffer_fault("required-overflow")
+  do
+    os.cwd()
+  catch
+    local failure = error as uv.Error
+    check(failure.name == "EOVERFLOW" and failure.operation == "os.cwd",
+          "unrepresentable required size reported the wrong Error")
+    check(uv.__test_phase6_os_result_attempts() == 1 and
+          uv.__test_phase6_os_grows() == 0,
+          "required-size overflow reached buffer growth")
+    return "required-size-overflow-ok"
+  end
+  raise "unrepresentable required size unexpectedly succeeded"
+  return nil
+end
+
+function exercise_allocation_overflow(): string
+  uv.__test_phase6_reset_os_buffer_state()
+  uv.__test_phase6_os_buffer_fault("allocation-overflow")
+  do
+    os.cwd()
+  catch
+    local failure = error as uv.Error
+    check(failure.name == "EOVERFLOW" and failure.operation == "os.cwd",
+          "INT64_MAX allocation size reported the wrong Error")
+    check(uv.__test_phase6_os_result_attempts() == 1 and
+          uv.__test_phase6_os_allocations() == 1 and
+          uv.__test_phase6_os_grows() == 0,
+          "INT64_MAX reached growth or a second lua_newuserdatauv")
+    return "allocation-payload-overflow-ok"
+  end
+  raise "INT64_MAX allocation size unexpectedly succeeded"
+  return nil
+end
+
+function exercise_retry_exhaustion(): string
+  uv.__test_phase6_reset_os_buffer_state()
+  uv.__test_phase6_os_initial_capacity(1)
+  uv.__test_phase6_os_buffer_fault("retry-exhaustion")
+  do
+    os.cwd()
+  catch
+    local failure = error as uv.Error
+    local attempts = uv.__test_phase6_os_result_attempts()
+    local grows = uv.__test_phase6_os_grows()
+    local from = uv.__test_phase6_os_last_grow_from()
+    local to = uv.__test_phase6_os_last_grow_to()
+    uv.__test_phase6_reset_os_buffer_state()
+    check(failure.name == "EOVERFLOW" and failure.operation == "os.cwd",
+          "retry exhaustion reported the wrong Error")
+    check(attempts == 32 and grows == 32,
+          "OS buffer retry limit was not exact")
+    check(from == 1 and to == 2,
+          "retry exhaustion bypassed checked doubling")
+    return "os-buffer-retry-exhaustion-ok"
+  end
+  raise "OS buffer retry exhaustion unexpectedly succeeded"
+  return nil
+end

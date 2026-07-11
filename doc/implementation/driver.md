@@ -424,14 +424,18 @@ TITAN_STDLIB_PATH="$PWD" ./titanc --stdlib-build --tree stdlib \
   --lua-name titan.fs fs
 TITAN_STDLIB_PATH="$PWD" ./titanc --stdlib-build --tree stdlib \
   --lua-name titan.net net
+TITAN_STDLIB_PATH="$PWD" ./titanc --stdlib-build --tree stdlib \
+  --lua-name titan.os os
 ```
 
 `--lua-name` accepts one valid dot-qualified Lua module name and exactly
 one non-`main` root. It changes only that root's exported Lua loader
 symbol (`titan.coroutine` becomes `luaopen_titan_coroutine`, `titan.uv`
 becomes `luaopen_titan_uv`, `titan.timer` becomes `luaopen_titan_timer`, and
-`titan.fs` becomes `luaopen_titan_fs`, and `titan.net` becomes
-`luaopen_titan_net`); canonical Titan symbols keep their short module prefixes.
+`titan.fs` becomes `luaopen_titan_fs`, `titan.net` becomes
+`luaopen_titan_net`, and `titan.os` becomes `luaopen_titan_os`); canonical
+Titan symbols keep their short module prefixes. In particular, the OS facade
+does not export `luaopen_os`, so Lua's built-in OS library remains distinct.
 It is not propagated to dependencies. The Makefile
 installs one canonical image per module and exposes the same DSOs under Lua's
 `titan/` paths, so Titan short-name imports and Lua's qualified `titan.*`
@@ -446,7 +450,8 @@ managed canonical directory is therefore
 `lib/lua/5.5/titan/stdlib_0_11`, with each managed `titan/<module>.so`
 replaced after deployment by a relative link such as
 `stdlib_0_11/coroutine.so`, `stdlib_0_11/uv.so`,
-`stdlib_0_11/timer.so`, `stdlib_0_11/fs.so`, or `stdlib_0_11/net.so`. A
+`stdlib_0_11/timer.so`, `stdlib_0_11/fs.so`, `stdlib_0_11/net.so`, or
+`stdlib_0_11/os.so`. A
 LuaRocks-prefix Titan host selects that canonical directory through
 `TITAN_STDLIB_PATH`.
 

@@ -1,0 +1,52 @@
+local uv = import "uv"
+
+-- Portable operating-system helpers. The low-level uv module owns every C
+-- type and libuv call; this facade exposes only ordinary Titan values.
+
+function getenv(name: string): string?
+  return uv._os_getenv(name)
+end
+
+function setenv(name: string, contents: string)
+  uv._os_setenv(name, contents)
+end
+
+function unsetenv(name: string)
+  uv._os_unsetenv(name)
+end
+
+function cwd(): string
+  return uv._os_cwd()
+end
+
+function chdir(path: string)
+  uv._os_chdir(path)
+end
+
+function homedir(): string
+  return uv._os_homedir()
+end
+
+function tmpdir(): string
+  return uv._os_tmpdir()
+end
+
+function hostname(): string
+  return uv._os_hostname()
+end
+
+function exepath(): string
+  return uv._os_exepath()
+end
+
+function pid(): integer
+  return uv._os_pid()
+end
+
+function ppid(): integer
+  return uv._os_ppid()
+end
+
+function wait_signal(name: string): string
+  return uv._os_wait_signal(name)
+end

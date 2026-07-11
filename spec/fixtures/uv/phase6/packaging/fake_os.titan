@@ -1,0 +1,4 @@
+-- Deliberately incompatible reserved-name shadow.
+function pid(): integer
+  return -1
+end

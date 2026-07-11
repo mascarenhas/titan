@@ -1,4 +1,5 @@
 #include <limits.h>
+#include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -90,6 +91,11 @@ static void titan_uvshim_dispatch(Udata *owner, lua_Integer event_kind,
 
   /* Direct native Titan entry: the trusted dispatcher owns its outer catch. */
   dispatch(L, M, NULL, owner, event_kind, result, size, pointer);
+}
+
+static void titan_uvshim_signal_cb(uv_signal_t *signal, int signum) {
+  Udata *owner = (Udata *)uv_handle_get_data((uv_handle_t *)signal);
+  titan_uvshim_dispatch(owner, TITAN_UV_EVENT_SIGNAL, signum, 0, NULL);
 }
 
 static void titan_uvshim_getaddrinfo_cb(uv_getaddrinfo_t *req,
@@ -420,6 +426,100 @@ int titan_uvshim_error_eaddrnotavail(void) {
   return UV_EADDRNOTAVAIL;
 }
 
+int titan_uvshim_error_eoverflow(void) {
+  return UV_EOVERFLOW;
+}
+
+int titan_uvshim_status_is_enobufs(int status) {
+  return status == UV_ENOBUFS;
+}
+
+int titan_uvshim_status_is_enoent(int status) {
+  return status == UV_ENOENT;
+}
+
+int64_t titan_uvshim_size_as_int64(size_t size) {
+#if SIZE_MAX > INT64_MAX
+  if (size > (size_t)INT64_MAX)
+    return -1;
+#endif
+  return (int64_t)size;
+}
+
+int titan_uvshim_signal_number(const char *name) {
+  if (name == NULL)
+    return UV_EINVAL;
+  if (strcmp(name, "hup") == 0)
+    return SIGHUP;
+  if (strcmp(name, "int") == 0)
+    return SIGINT;
+  if (strcmp(name, "quit") == 0)
+    return SIGQUIT;
+  if (strcmp(name, "kill") == 0)
+    return SIGKILL;
+  if (strcmp(name, "term") == 0)
+    return SIGTERM;
+  if (strcmp(name, "usr1") == 0)
+    return SIGUSR1;
+  if (strcmp(name, "usr2") == 0)
+    return SIGUSR2;
+  return UV_EINVAL;
+}
+
+const char *titan_uvshim_signal_name(int signum) {
+  if (signum == SIGHUP)
+    return "hup";
+  if (signum == SIGINT)
+    return "int";
+  if (signum == SIGQUIT)
+    return "quit";
+  if (signum == SIGKILL)
+    return "kill";
+  if (signum == SIGTERM)
+    return "term";
+  if (signum == SIGUSR1)
+    return "usr1";
+  if (signum == SIGUSR2)
+    return "usr2";
+  return NULL;
+}
+
+int titan_uvshim_signal_is_waitable(int signum) {
+  return signum != SIGKILL && titan_uvshim_signal_name(signum) != NULL;
+}
+
+int titan_uvshim_signal_init(uv_loop_t *loop,
+                             uv_signal_t *signal,
+                             void *data) {
+  int status;
+  if (loop == NULL || signal == NULL || data == NULL)
+    return UV_EINVAL;
+  status = uv_signal_init(loop, signal);
+  if (status == 0)
+    uv_handle_set_data((uv_handle_t *)signal, data);
+  return status;
+}
+
+int titan_uvshim_signal_start_oneshot(uv_signal_t *signal, int signum) {
+  if (signal == NULL || !titan_uvshim_signal_is_waitable(signum))
+    return UV_EINVAL;
+  return uv_signal_start_oneshot(signal, titan_uvshim_signal_cb, signum);
+}
+
+int titan_uvshim_signal_stop(uv_signal_t *signal) {
+  if (signal == NULL)
+    return UV_EINVAL;
+  return uv_signal_stop(signal);
+}
+
+int titan_uvshim_signal_is_closing(const uv_signal_t *signal) {
+  return uv_is_closing((const uv_handle_t *)signal);
+}
+
+void titan_uvshim_signal_close(uv_signal_t *signal) {
+  uv_close((uv_handle_t *)signal, titan_uvshim_close_cb);
+}
+
 void titan_uvshim_timer_cb(uv_timer_t *timer) {
   Udata *owner = (Udata *)uv_handle_get_data((uv_handle_t *)timer);
   titan_uvshim_dispatch(owner, TITAN_UV_EVENT_TIMER, 0, 0, NULL);
@@ -447,7 +547,8 @@ int titan_uvshim_buf_init(void *buf, char *base, int64_t len) {
 }
 
 int titan_uvshim_allocation_length_is_valid(int64_t length) {
-  return length >= 0 && (uint64_t)length <= SIZE_MAX;
+  const size_t maximum_userdata = MAX_SIZE - udatamemoffset(0);
+  return length >= 0 && (uint64_t)length <= maximum_userdata;
 }
 
 int titan_uvshim_buf_length_is_valid(int64_t length) {

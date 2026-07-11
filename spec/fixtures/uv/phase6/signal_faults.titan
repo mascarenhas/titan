@@ -1,0 +1,87 @@
+-- Runs only against the isolated __test_phase6_* uv variant.
+local os = import "os"
+local timer = import "timer"
+local uv = import "uv"
+
+local function check(condition: boolean, message: string)
+  if not condition then raise message end
+end
+
+local function wait_for_arm(baseline: integer)
+  while uv.__test_phase6_signal_arms() <= baseline do timer.yield() end
+end
+
+function schedule_init_rejection(): uv.Task
+  return uv.run(function (): value
+    uv.__test_phase6_force_signal_rejection("init")
+    do
+      os.wait_signal("usr1")
+    catch
+      local failure = error as uv.Error
+      check(failure.operation == "signal.init" and failure.code < 0,
+            "signal init rejection reported the wrong Error")
+      return "signal-init-rejection-ok"
+    end
+    raise "forced signal init rejection unexpectedly succeeded"
+    return nil
+  end)
+end
+
+function schedule_start_rejection(): uv.Task
+  return uv.run(function (): value
+    uv.__test_phase6_force_signal_rejection("start")
+    do
+      os.wait_signal("usr1")
+    catch
+      local failure = error as uv.Error
+      check(failure.operation == "signal.start" and failure.code < 0,
+            "signal start rejection reported the wrong Error")
+      return "signal-start-rejection-ok"
+    end
+    raise "forced signal start rejection unexpectedly succeeded"
+    return nil
+  end)
+end
+
+function schedule_callback_failure(): uv.Task
+  uv.__test_phase6_fail_next_signal_callback()
+  local baseline = uv.__test_phase6_signal_arms()
+  local target = uv.run(function (): value
+    return os.wait_signal("usr1")
+  end)
+  uv.run(function (): value
+    wait_for_arm(baseline)
+    uv.__test_phase6_send_signal("usr1")
+    return nil
+  end)
+  return target
+end
+
+function schedule_close_callback_failure(): uv.Task
+  uv.__test_phase6_fail_next_signal_close_callback()
+  local baseline = uv.__test_phase6_signal_arms()
+  local target = uv.run(function (): value
+    return os.wait_signal("usr2")
+  end)
+  uv.run(function (): value
+    wait_for_arm(baseline)
+    uv.__test_phase6_send_signal("usr2")
+    return nil
+  end)
+  return target
+end
+
+function schedule_forced_shutdown(): uv.Task
+  local baseline = uv.__test_phase6_signal_arms()
+  local target = uv.run(function (): value
+    return os.wait_signal("usr1")
+  end)
+  -- This failure is intentionally unobserved. Its observation deadline enters
+  -- fatal Runtime shutdown while the one-shot watcher is still armed.
+  uv.run(function (): value
+    wait_for_arm(baseline)
+    raise "phase6-forced-signal-runtime-shutdown"
+    return nil
+  end)
+  return target
+end

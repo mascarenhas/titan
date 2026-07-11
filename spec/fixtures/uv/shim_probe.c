@@ -20,14 +20,18 @@ static uv_timer_t *expected_timer;
 static uv_fs_t *expected_fs;
 static uv_getaddrinfo_t *expected_dns;
 static uv_tcp_t *expected_tcp;
+static uv_signal_t *expected_signal;
 static int lua_wrapper_calls;
 static int timer_dispatches;
 static int close_dispatches;
 static int fs_dispatches;
 static int dns_dispatches;
 static int tcp_close_dispatches;
+static int signal_dispatches;
+static int signal_close_dispatches;
 static int fs_cleanups;
 static int timer_dispatch_finished;
+static int signal_dispatch_finished;
 
 static int forbidden_lua_wrapper(lua_State *L) {
   (void)L;
@@ -66,6 +70,9 @@ static void test_dispatch(lua_State *L, Udata *_mod, CClosure *_fn,
     if (native == expected_timer) {
       assert(timer_dispatch_finished == 1);
       close_dispatches++;
+    } else if (native == expected_signal) {
+      assert(signal_dispatch_finished == 1);
+      signal_close_dispatches++;
     } else {
       assert(native == expected_tcp);
       tcp_close_dispatches++;
@@ -108,6 +115,24 @@ static void test_dispatch(lua_State *L, Udata *_mod, CClosure *_fn,
     free(addresses);
     titan_uvshim_addrinfo_free(pointer);
     dns_dispatches++;
+  } else if (event_kind == TITAN_UV_EVENT_SIGNAL) {
+    uv_signal_t *signal =
+        (uv_signal_t *)pvalue(
+            &owner->uv[TITAN_UV_OWNER_NATIVE_C_INDEX].uv);
+    int usr1 = titan_uvshim_signal_number("usr1");
+
+    assert(signal == expected_signal);
+    assert(result == usr1);
+    assert(pointer == NULL);
+    assert(signal_dispatches == 0);
+    signal_dispatches++;
+
+    /* Titan's trusted dispatcher stops/closes before running user code. */
+    assert(titan_uvshim_signal_stop(signal) == 0);
+    assert(!titan_uvshim_signal_is_closing(signal));
+    titan_uvshim_signal_close(signal);
+    assert(titan_uvshim_signal_is_closing(signal));
+    signal_dispatch_finished = 1;
   } else {
     assert(!"unexpected shim event kind");
   }
@@ -208,11 +233,114 @@ static void test_slot_numbering(void) {
   assert(TITAN_UV_EVENT_SHUTDOWN == 7);
   assert(TITAN_UV_EVENT_STREAM_READ == 8);
   assert(TITAN_UV_EVENT_CONNECTION == 9);
+  assert(TITAN_UV_EVENT_SIGNAL == 10);
+}
+
+static void test_os_helpers(void) {
+  static const char env_name[] = "TITAN_UV_SHIM_PROBE_ENV";
+  static const char env_value[] = "a deliberately resized environment value";
+  char buffer[4096];
+  size_t size;
+  int status;
+
+  assert(titan_uvshim_status_is_enobufs(UV_ENOBUFS));
+  assert(!titan_uvshim_status_is_enobufs(UV_ENOENT));
+  assert(titan_uvshim_status_is_enoent(UV_ENOENT));
+  assert(!titan_uvshim_status_is_enoent(UV_ENOBUFS));
+  assert(titan_uvshim_error_eoverflow() == UV_EOVERFLOW);
+  assert(titan_uvshim_size_as_int64(0) == 0);
+  assert(titan_uvshim_size_as_int64(42) == 42);
+#if SIZE_MAX > INT64_MAX
+  assert(titan_uvshim_size_as_int64(SIZE_MAX) == -1);
+#else
+  assert(titan_uvshim_size_as_int64(SIZE_MAX) == (int64_t)SIZE_MAX);
+#endif
+
+  assert(uv_os_unsetenv(env_name) == 0);
+  size = sizeof(buffer);
+  assert(uv_os_getenv(env_name, buffer, &size) == UV_ENOENT);
+  assert(uv_os_setenv(env_name, env_value) == 0);
+  size = 2;
+  assert(uv_os_getenv(env_name, buffer, &size) == UV_ENOBUFS);
+  assert(size == sizeof(env_value));
+  size = sizeof(buffer);
+  assert(uv_os_getenv(env_name, buffer, &size) == 0);
+  assert(size == sizeof(env_value) - 1);
+  assert(strcmp(buffer, env_value) == 0);
+  assert(uv_os_setenv(env_name, "") == 0);
+  size = sizeof(buffer);
+  assert(uv_os_getenv(env_name, buffer, &size) == 0);
+  assert(size == 0);
+  assert(buffer[0] == '\0');
+  assert(uv_os_unsetenv(env_name) == 0);
+
+  size = sizeof(buffer);
+  assert(uv_cwd(buffer, &size) == 0);
+  assert(size > 0);
+  assert(buffer[size] == '\0');
+  assert(uv_chdir(buffer) == 0);
+
+  size = sizeof(buffer);
+  status = uv_os_homedir(buffer, &size);
+  assert(status == 0);
+  assert(size < sizeof(buffer));
+  assert(buffer[size] == '\0');
+
+  size = sizeof(buffer);
+  status = uv_os_tmpdir(buffer, &size);
+  assert(status == 0);
+  assert(size < sizeof(buffer));
+  assert(buffer[size] == '\0');
+
+  size = sizeof(buffer);
+  assert(uv_os_gethostname(buffer, &size) == 0);
+  assert(size > 0 && size < sizeof(buffer));
+  assert(buffer[size] == '\0');
+
+  /* Linux and Darwin report a successful, explicitly NUL-terminated prefix. */
+  size = 2;
+  assert(uv_exepath(buffer, &size) == 0);
+  assert(size == 1);
+  assert(buffer[1] == '\0');
+  size = sizeof(buffer);
+  assert(uv_exepath(buffer, &size) == 0);
+  assert(size > 0 && size < sizeof(buffer));
+  assert(buffer[size] == '\0');
+
+  assert((int64_t)uv_os_getpid() > 0);
+  assert((int64_t)uv_os_getppid() > 0);
+}
+
+static void test_signal_mapping(void) {
+  static const char *const names[] = {
+      "hup", "int", "quit", "kill", "term", "usr1", "usr2"};
+  size_t i;
+
+  assert(titan_uvshim_signal_number(NULL) == UV_EINVAL);
+  assert(titan_uvshim_signal_number("") == UV_EINVAL);
+  assert(titan_uvshim_signal_number("USR1") == UV_EINVAL);
+  assert(titan_uvshim_signal_name(-1) == NULL);
+  for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+    int signum = titan_uvshim_signal_number(names[i]);
+    assert(signum > 0);
+    assert(strcmp(titan_uvshim_signal_name(signum), names[i]) == 0);
+    assert(titan_uvshim_signal_is_waitable(signum) ==
+           (strcmp(names[i], "kill") != 0));
+  }
 }
 
 static void test_buffers(void) {
   char bytes[] = {'a', '\0', 'b', '\0', 'c'};
   uv_buf_t buf;
+  size_t maximum_userdata = MAX_SIZE - udatamemoffset(0);
+
+  assert(maximum_userdata <= INT64_MAX);
+  assert(titan_uvshim_allocation_length_is_valid(0));
+  assert(titan_uvshim_allocation_length_is_valid(
+      (int64_t)maximum_userdata));
+  if (maximum_userdata < INT64_MAX)
+    assert(!titan_uvshim_allocation_length_is_valid(
+        (int64_t)maximum_userdata + 1));
 
   assert(titan_uvshim_buf_init(&buf, bytes, sizeof(bytes)) == 0);
   assert(buf.base == bytes);
@@ -271,6 +399,7 @@ static void test_native_storage_layout(lua_State *L) {
   uv_write_t *write;
   uv_shutdown_t *shutdown;
   uv_tcp_t *tcp;
+  uv_signal_t *signal;
   titan_uvshim_address *address;
 
   assert(sizeof(uv_loop_t) > 0);
@@ -335,6 +464,12 @@ static void test_native_storage_layout(lua_State *L) {
   assert((void *)tcp == storage);
   lua_pop(L, 1);
 
+  storage = lua_newuserdatauv(L, sizeof(uv_signal_t), 0);
+  assert((uintptr_t)storage % _Alignof(uv_signal_t) == 0);
+  signal = (uv_signal_t *)storage;
+  assert((void *)signal == storage);
+  lua_pop(L, 1);
+
   storage = lua_newuserdatauv(L, sizeof(titan_uvshim_address), 0);
   assert((uintptr_t)storage % _Alignof(titan_uvshim_address) == 0);
   address = (titan_uvshim_address *)storage;
@@ -342,13 +477,14 @@ static void test_native_storage_layout(lua_State *L) {
   lua_pop(L, 1);
 }
 
-int main(void) {
-  lua_State *L = luaL_newstate();
+int main(int argc, char **argv) {
+  lua_State *L;
   uv_loop_t loop;
   uv_timer_t timer;
   uv_fs_t fs_req;
   uv_getaddrinfo_t dns_req;
   uv_tcp_t tcp;
+  uv_signal_t signal;
   struct sockaddr_in bind_address;
   titan_uvshim_address address;
   int module_ref;
@@ -359,7 +495,10 @@ int main(void) {
   Udata *fs_owner;
   Udata *dns_owner;
   Udata *tcp_owner;
+  Udata *signal_owner;
 
+  assert(uv_setup_args(argc, argv) != NULL);
+  L = luaL_newstate();
   assert(L != NULL);
   assert(uv_loop_init(&loop) == 0);
   assert(titan_uvshim_loop_handle_count(&loop) == 0);
@@ -375,6 +514,8 @@ int main(void) {
   test_slot_numbering();
   test_buffers();
   test_binary_helpers();
+  test_os_helpers();
+  test_signal_mapping();
   test_native_storage_layout(L);
 
   module_ref = registry_ref_for_new_udata(L, 0);
@@ -402,6 +543,26 @@ int main(void) {
   assert(close_dispatches == 1);
   assert(lua_wrapper_calls == 0);
   pending_remove(L, pending_ref, 1);
+
+  expected_signal = &signal;
+  signal_owner = push_owner(L, &signal, module_ref, dispatcher_ref);
+  assert(titan_uvshim_signal_init(&loop, &signal, signal_owner) == 0);
+  assert(!titan_uvshim_signal_is_closing(&signal));
+  assert(titan_uvshim_signal_start_oneshot(
+             &signal, titan_uvshim_signal_number("kill")) == UV_EINVAL);
+  assert(titan_uvshim_signal_start_oneshot(
+             &signal, titan_uvshim_signal_number("usr1")) == 0);
+  pending_store_and_pop(L, pending_ref, 5);
+  stack_top = lua_gettop(L);
+  lua_gc(L, LUA_GCCOLLECT);
+  assert(uv_kill(uv_os_getpid(),
+                 titan_uvshim_signal_number("usr1")) == 0);
+  assert(uv_run(&loop, UV_RUN_DEFAULT) == 0);
+  assert(lua_gettop(L) == stack_top);
+  assert(signal_dispatches == 1);
+  assert(signal_close_dispatches == 1);
+  assert(lua_wrapper_calls == 0);
+  pending_remove(L, pending_ref, 5);
 
   expected_fs = &fs_req;
   fs_owner = push_owner(L, &fs_req, module_ref, dispatcher_ref);

@@ -115,13 +115,13 @@ The reserved standard modules (`coroutine`, `uv`, `timer`, `fs`, `net`, and
 `/usr/local/lib/titan/0.11`) and cannot be shadowed through `--tree` or
 `TITAN_PATH`. Titan code imports them by their short names, while Lua uses the
 qualified aliases such as `require "titan.coroutine"`, `require "titan.uv"`,
-`require "titan.timer"`, `require "titan.fs"`, and `require "titan.net"`;
-Lua's own `coroutine` and `os` modules remain unchanged.
+`require "titan.timer"`, `require "titan.fs"`, `require "titan.net"`, and
+`require "titan.os"`. Lua's own `coroutine` and `os` modules remain unchanged.
 
 The currently implemented async chain is `coroutine.so -> uv.so ->
-{timer.so, fs.so, net.so}`. Only the canonical `uv.so` contains libuv; the
+{timer.so, fs.so, net.so, os.so}`. Only the canonical `uv.so` contains libuv; the
 higher modules dynamically import that standard image instead of linking
-another copy. `make stdlib` builds all five canonical modules and their
+another copy. `make stdlib` builds all six canonical modules and their
 `titan.*` Lua aliases in dependency order.
 
 From Titan, importing `timer` is enough to enable the standalone async
@@ -171,7 +171,9 @@ There is no extra protected callback wrapper or implicit ready queue;
 [Asynchronous I/O and tasks](doc/language/async-io.md) and the
 [timer](doc/language/standard-library-timer.md),
 [filesystem](doc/language/standard-library-fs.md), and
-[TCP networking](doc/language/standard-library-net.md) modules.
+[TCP networking](doc/language/standard-library-net.md) modules. Portable
+environment, directory, identity, executable-path, and one-shot signal helpers
+are documented in the [OS standard library](doc/language/standard-library-os.md).
 
 If everything is all right with your modules, you will get the result of
 your compilation as a native binary:
@@ -285,7 +287,8 @@ they are in the roadmap:
 * error handling with `raise`, `catch`, `finally`, Lua `pcall`, and
   unified Lua/Titan backtraces via `titan.backtrace()`
 * asymmetric, tagged (nested) coroutines as building block for async IO
-* libuv-backed Tasks, timers, asynchronous binary filesystem I/O, DNS, and TCP
+* libuv-backed Tasks, timers, asynchronous binary filesystem I/O, DNS, TCP,
+  portable OS helpers, and one-shot signal waits
 
 ## Next
 

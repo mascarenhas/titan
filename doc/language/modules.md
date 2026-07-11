@@ -320,9 +320,19 @@ the structure of the generated C is in
   directories, not a Lua-style template path. The same path is used at
   run time by compiled modules that load dependencies dynamically.
 
+The reserved standard modules `coroutine`, `uv`, `timer`, `fs`, `net`, and
+`os` are the exception to the ordinary application paths. Titan resolves their
+canonical short names from the dedicated ABI-qualified
+`TITAN_STDLIB_PATH`; an application source or binary cannot shadow them.
+Standard sources are compiled only by the repository's explicit standard
+build, one root at a time. Thus `local os = import "os"` always means Titan's
+standard `os` module, independently of Lua's own module namespace.
+
 Lua's `require`, for its part, finds the `.so` through Lua's ordinary
 `package.cpath` — a compiled Titan module is a regular Lua C module
 (see [Requiring a Titan module](lua-interop.md#requiring-a-titan-module)).
+Standard modules use qualified aliases such as `titan.os`; the alias maps the
+same canonical DSO rather than installing another copy.
 
 ## Static and dynamic linking
 

@@ -65,7 +65,7 @@ describe("uv public interface", function()
         driver.imported = {}
     end)
 
-    it("locks the scheduler, filesystem, timer, and network surface", function()
+    it("locks the scheduler, filesystem, network, and OS surface", function()
         local modtype = check_uv()
         assert.same({
             "Cancelled", "Error", "Task", "_fs_close", "_fs_flush",
@@ -74,7 +74,10 @@ describe("uv public interface", function()
             "_fs_unlink", "_fs_write", "_net_accept", "_net_close",
             "_net_connect", "_net_eof_error", "_net_find",
             "_net_is_closed", "_net_listen", "_net_read",
-            "_net_shutdown", "_net_slice", "_net_write", "_sleep",
+            "_net_shutdown", "_net_slice", "_net_write", "_os_chdir",
+            "_os_cwd", "_os_exepath", "_os_getenv", "_os_homedir",
+            "_os_hostname", "_os_pid", "_os_ppid", "_os_setenv",
+            "_os_tmpdir", "_os_unsetenv", "_os_wait_signal", "_sleep",
             "_ticker", "_ticker_close", "_ticker_tick", "_yield", "loop",
             "run", "uv_file", "uv_tcp_t", "uv_timer_t", "version",
         }, sorted_keys(modtype.members))
@@ -122,6 +125,22 @@ describe("uv public interface", function()
             signature(modtype, "_net_slice"))
         assert.equals("(string, string, string) -> uv.Error",
             signature(modtype, "_net_eof_error"))
+        assert.equals("(string) -> string?",
+            signature(modtype, "_os_getenv"))
+        assert.equals("(string, string) -> ()",
+            signature(modtype, "_os_setenv"))
+        assert.equals("(string) -> ()", signature(modtype, "_os_unsetenv"))
+        assert.equals("() -> string", signature(modtype, "_os_cwd"))
+        assert.equals("(string) -> ()", signature(modtype, "_os_chdir"))
+        for _, name in ipairs({
+            "_os_homedir", "_os_tmpdir", "_os_hostname", "_os_exepath",
+        }) do
+            assert.equals("() -> string", signature(modtype, name))
+        end
+        assert.equals("() -> integer", signature(modtype, "_os_pid"))
+        assert.equals("() -> integer", signature(modtype, "_os_ppid"))
+        assert.equals("(string) -> string",
+            signature(modtype, "_os_wait_signal"))
         assert.equals("(integer) -> ()", signature(modtype, "_sleep"))
         assert.equals("() -> ()", signature(modtype, "_yield"))
         assert.equals("(integer) -> uv.uv_timer_t",
@@ -138,7 +157,8 @@ describe("uv public interface", function()
             "Loop", "Runtime", "TimerControl", "DriveControl", "Request",
             "FsConstants", "Bytes", "Text", "Buffer", "Dirent",
             "FsStatResult", "FsOperation", "FsControl", "uv_fs_t",
-            "TickerState", "timer_dispatch", "fs_dispatch",
+            "TickerState", "SignalSpec", "SignalControl", "uv_signal_t",
+            "timer_dispatch", "fs_dispatch", "signal_dispatch",
             "UV_TAG", "active_runtime",
         }) do
             assert.falsy(modtype.members[name], name .. " leaked")
@@ -154,6 +174,13 @@ describe("uv public interface", function()
         assert.equals(8, owner.nfields)
         assert.equals(8, #owner.fields)
         for _, field in ipairs(owner.fields) do assert.is_true(field.islocal) end
+
+        local signal = assert(types.registry["uv.uv_signal_t"])
+        assert.equals(8, signal.nfields)
+        assert.equals(8, #signal.fields)
+        for _, field in ipairs(signal.fields) do
+            assert.is_true(field.islocal)
+        end
 
         local file = assert(types.registry["uv.uv_file"])
         assert.equals(15, file.nfields)
@@ -174,7 +201,9 @@ describe("uv public interface", function()
         assert.not_match("uv_loop_t", serialized, 1, true)
         assert.not_match("uv_timer_t %*", serialized)
         assert.not_match("uv_fs_t", serialized, 1, true)
+        assert.not_match("uv_signal_t", serialized, 1, true)
         assert.not_match("TimerControl", serialized, 1, true)
+        assert.not_match("SignalControl", serialized, 1, true)
         assert.not_match("Request", serialized, 1, true)
         assert.not_match("dispatcher", serialized, 1, true)
         assert.truthy(serialized:find(

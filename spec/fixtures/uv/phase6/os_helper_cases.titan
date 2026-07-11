@@ -1,0 +1,140 @@
+-- Runs against the isolated Phase 6 uv variant, but exercises the public
+-- Titan os facade rather than its private middle-layer entry points.
+local os = import "os"
+local timer = import "timer"
+local uv = import "uv"
+
+local function check(condition: boolean, message: string)
+  if not condition then raise message end
+end
+
+local function long_environment_value(): string
+  local contents = "0123456789abcdef"
+  while #contents < 8192 do contents = contents .. contents end
+  return contents
+end
+
+local function restore_environment(name: string, original: string?)
+  if original then
+    os.setenv(name, original as string)
+  else
+    os.unsetenv(name)
+  end
+end
+
+function exercise_environment(name: string): string
+  local original: string? = os.getenv(name)
+  local long_value = long_environment_value()
+  do
+    os.unsetenv(name)
+    local missing: string? = os.getenv(name)
+    check(not missing,
+          "missing environment variable did not return nil")
+
+    os.setenv(name, "")
+    local empty: string? = os.getenv(name)
+    check(empty and (empty as string) == "",
+          "empty environment value was confused with a missing variable")
+
+    os.setenv(name, long_value)
+    local copied: string? = os.getenv(name)
+    check(copied and (copied as string) == long_value,
+          "long environment value was truncated during resize")
+    check(uv.__test_phase6_os_result_attempts() > 1 and
+          uv.__test_phase6_os_grows() > 0,
+          "long environment value did not exercise buffer growth")
+  finally
+    restore_environment(name, original)
+  end
+
+  local restored: string? = os.getenv(name)
+  if original then
+    check(restored and
+          (restored as string) == (original as string),
+          "existing environment value was not restored")
+  else
+    check(not restored,
+          "previously missing environment variable leaked globally")
+  end
+  return "environment-helpers-ok"
+end
+
+function exercise_nul_rejections(name: string, path: string): string
+  local rejections = 0
+  do
+    os.getenv(name .. "\0get")
+  catch
+    local failure = error as uv.Error
+    check(failure.operation == "os.getenv",
+          "NUL getenv reported the wrong operation")
+    rejections = rejections + 1
+  end
+  do
+    os.setenv(name .. "\0set", "value")
+  catch
+    local failure = error as uv.Error
+    check(failure.operation == "os.setenv",
+          "NUL setenv name reported the wrong operation")
+    rejections = rejections + 1
+  end
+  do
+    os.setenv(name, "value\0suffix")
+  catch
+    local failure = error as uv.Error
+    check(failure.operation == "os.setenv" and failure.subject == name,
+          "NUL environment value leaked into the Error subject")
+    rejections = rejections + 1
+  end
+  do
+    os.unsetenv(name .. "\0unset")
+  catch
+    local failure = error as uv.Error
+    check(failure.operation == "os.unsetenv",
+          "NUL unsetenv reported the wrong operation")
+    rejections = rejections + 1
+  end
+  do
+    os.chdir(path .. "\0suffix")
+  catch
+    local failure = error as uv.Error
+    check(failure.operation == "os.chdir",
+          "NUL chdir reported the wrong operation")
+    rejections = rejections + 1
+  end
+  check(rejections == 5,
+        "an embedded-NUL OS text argument reached libuv")
+  return "os-nul-rejections-ok"
+end
+
+function exercise_paths_and_identity(temp: string): string
+  local original = os.cwd()
+  do
+    os.chdir(temp)
+    check(os.cwd() == temp, "chdir did not update cwd")
+  finally
+    os.chdir(original)
+  end
+  check(os.cwd() == original, "cwd was not restored after chdir")
+
+  check(#os.homedir() > 0, "homedir returned an empty path")
+  check(#os.tmpdir() > 0, "tmpdir returned an empty path")
+  check(#os.hostname() > 0, "hostname returned an empty name")
+  check(#os.exepath() > 0, "exepath returned an empty path")
+  check(os.pid() > 0, "pid was not positive")
+  check(os.ppid() >= 0, "ppid was negative")
+  return "path-and-identity-helpers-ok"
+end
+
+function schedule_signal_roundtrip(): uv.Task
+  return uv.run(function (): value
+    local baseline = uv.__test_phase6_signal_arms()
+    local waiter = uv.run(function (): value
+      return os.wait_signal("usr1")
+    end)
+    while uv.__test_phase6_signal_arms() <= baseline do timer.yield() end
+    uv.__test_phase6_send_signal("usr1")
+    check(waiter:join() == "usr1",
+          "signal roundtrip between synchronous helper sessions failed")
+    return "signal-between-os-helper-sessions-ok"
+  end)
+end

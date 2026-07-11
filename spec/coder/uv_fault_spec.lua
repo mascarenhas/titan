@@ -78,6 +78,9 @@ describe("uv Phase 2 isolated scheduler faults", function()
         assert_entry_catch_precedes_gc(variant,
             "static void uv_tcp_dispatch_titan(",
             "static int uv_tcp_dispatch_titanentry_lua(")
+        assert_entry_catch_precedes_gc(variant,
+            "static void uv_signal_dispatch_titan(",
+            "static int uv_signal_dispatch_titanentry_lua(")
 
         local start_owner = phase2.c_function_definition(variant,
             "static Udata* uv_start_owner_titan(",

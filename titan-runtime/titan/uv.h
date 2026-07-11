@@ -1,6 +1,7 @@
 #ifndef TITAN_UV_H
 #define TITAN_UV_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 /*
@@ -28,6 +29,7 @@ typedef struct uv_fs_s uv_fs_t;
 typedef struct uv_getaddrinfo_s uv_getaddrinfo_t;
 typedef struct uv_handle_s uv_handle_t;
 typedef struct uv_loop_s uv_loop_t;
+typedef struct uv_signal_s uv_signal_t;
 typedef struct uv_shutdown_s uv_shutdown_t;
 typedef struct uv_tcp_s uv_tcp_t;
 typedef struct uv_timer_s uv_timer_t;
@@ -75,7 +77,8 @@ enum titan_uvshim_event_kind {
   TITAN_UV_EVENT_WRITE = 6,
   TITAN_UV_EVENT_SHUTDOWN = 7,
   TITAN_UV_EVENT_STREAM_READ = 8,
-  TITAN_UV_EVENT_CONNECTION = 9
+  TITAN_UV_EVENT_CONNECTION = 9,
+  TITAN_UV_EVENT_SIGNAL = 10
 };
 
 /* Concrete wrappers for libuv's public base-handle/base-request API. */
@@ -94,6 +97,34 @@ int titan_uvshim_error_eio(void);
 int titan_uvshim_error_eof(void);
 int titan_uvshim_error_ecanceled(void);
 int titan_uvshim_error_eaddrnotavail(void);
+int titan_uvshim_error_eoverflow(void);
+
+/*
+ * Normalize public libuv buffer-sizing results without exposing host errno
+ * values or truncating an unsigned size_t into Titan's signed integer range.
+ */
+int titan_uvshim_status_is_enobufs(int status);
+int titan_uvshim_status_is_enoent(int status);
+int64_t titan_uvshim_size_as_int64(size_t size);
+
+/*
+ * Common Linux/macOS signal names.  Host signal numbers intentionally stay in
+ * this shim because the user-defined signal numbers differ by platform.
+ * The number helper also recognizes "kill" for Process:kill; one-shot waits
+ * must additionally require titan_uvshim_signal_is_waitable().
+ */
+int titan_uvshim_signal_number(const char *name);
+const char *titan_uvshim_signal_name(int signum);
+int titan_uvshim_signal_is_waitable(int signum);
+
+/* Concrete one-shot signal wrappers around public libuv handle APIs. */
+int titan_uvshim_signal_init(uv_loop_t *loop,
+                             uv_signal_t *signal,
+                             void *data);
+int titan_uvshim_signal_start_oneshot(uv_signal_t *signal, int signum);
+int titan_uvshim_signal_stop(uv_signal_t *signal);
+int titan_uvshim_signal_is_closing(const uv_signal_t *signal);
+void titan_uvshim_signal_close(uv_signal_t *signal);
 
 /*
  * DNS is submitted through this wrapper so the private header does not need

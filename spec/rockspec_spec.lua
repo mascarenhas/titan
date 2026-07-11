@@ -2,7 +2,7 @@ local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
 local lfs = require "lfs"
 
-local STDLIB_MODULES = { "coroutine", "uv", "timer", "fs", "net" }
+local STDLIB_MODULES = { "coroutine", "uv", "timer", "fs", "net", "os" }
 
 local function quote(word)
     local quoted = assert(cdriver.shell_quote(word))
@@ -118,6 +118,32 @@ local function assert_net_load_order(raw_lua, environment, canonical,
         tostring(code) .. ")")
 end
 
+local function assert_os_load_order(raw_lua, environment, canonical,
+                                    canonical_first)
+    local program = string.format([[
+        local builtin = require "os"
+        local canonical = %q
+        local open = assert(package.loadlib(canonical,
+            "luaopen_titan_os"))
+        local first, second
+        if %s then
+            first = open()
+            second = require "titan.os"
+        else
+            first = require "titan.os"
+            second = open()
+        end
+        assert(type(first) == "userdata")
+        assert(rawequal(first, second))
+        assert(rawequal(second, package.loaded["titan.os"]))
+        assert(require "os" == builtin)
+        assert(package.loaded.os == builtin)
+    ]], canonical, tostring(canonical_first))
+    local ok, output, why, code = run({ raw_lua, "-e", program }, environment)
+    assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+        tostring(code) .. ")")
+end
+
 describe("LuaRocks standard-library packaging", function()
     local tree
     local rock
@@ -173,17 +199,24 @@ describe("LuaRocks standard-library packaging", function()
             " TITAN_STDLIB_PATH=" .. quote(stdlib_dir)
         ok, output, why, code = run({ raw_lua, "-e", [[
             local builtin = require "coroutine"
+            local builtin_os = require "os"
             local standard_coroutine = require "titan.coroutine"
             local standard_uv = require "titan.uv"
             local standard_timer = require "titan.timer"
             local standard_fs = require "titan.fs"
             local standard_net = require "titan.net"
+            local standard_os = require "titan.os"
             assert(type(builtin) == "table")
+            assert(type(builtin_os) == "table")
             assert(type(standard_coroutine) == "userdata")
             assert(type(standard_uv) == "userdata")
             assert(type(standard_timer) == "userdata")
             assert(type(standard_fs) == "userdata")
             assert(type(standard_net) == "userdata")
+            assert(type(standard_os) == "userdata")
+            assert(require "os" == builtin_os)
+            assert(package.loaded.os == builtin_os)
+            assert(standard_os.pid() > 0)
             assert(type(standard_uv.version()) == "string")
             local task = standard_uv.run(function()
                 standard_timer.yield()
@@ -199,12 +232,15 @@ describe("LuaRocks standard-library packaging", function()
         local timer_canonical = stdlib_dir .. "/timer.so"
         local fs_canonical = stdlib_dir .. "/fs.so"
         local net_canonical = stdlib_dir .. "/net.so"
+        local os_canonical = stdlib_dir .. "/os.so"
         assert_uv_load_order(raw_lua, environment, uv_canonical, false)
         assert_uv_load_order(raw_lua, environment, uv_canonical, true)
         assert_timer_load_order(raw_lua, environment, timer_canonical, false)
         assert_timer_load_order(raw_lua, environment, timer_canonical, true)
         assert_net_load_order(raw_lua, environment, net_canonical, false)
         assert_net_load_order(raw_lua, environment, net_canonical, true)
+        assert_os_load_order(raw_lua, environment, os_canonical, false)
+        assert_os_load_order(raw_lua, environment, os_canonical, true)
 
         ok, output, why, code = run({ raw_lua, "-e", string.format([[
             local timer = require "titan.timer"
@@ -239,6 +275,11 @@ describe("LuaRocks standard-library packaging", function()
             tostring(deps_why) .. ", " .. tostring(deps_code) .. ")")
         assert.falsy(deps_output:lower():find("libuv", 1, true), deps_output)
         dependency_argv[#dependency_argv] = net_canonical
+        deps_ok, deps_output, deps_why, deps_code = run(dependency_argv)
+        assert.truthy(deps_ok, deps_output .. "\n(" ..
+            tostring(deps_why) .. ", " .. tostring(deps_code) .. ")")
+        assert.falsy(deps_output:lower():find("libuv", 1, true), deps_output)
+        dependency_argv[#dependency_argv] = os_canonical
         deps_ok, deps_output, deps_why, deps_code = run(dependency_argv)
         assert.truthy(deps_ok, deps_output .. "\n(" ..
             tostring(deps_why) .. ", " .. tostring(deps_code) .. ")")
@@ -287,10 +328,16 @@ describe("LuaRocks standard-library packaging", function()
             local timer = require "titan.timer"
             local fs = require "titan.fs"
             local net = require "titan.net"
+            local builtin_os = require "os"
+            local system = require "titan.os"
             assert(type(uv) == "userdata")
             assert(type(timer) == "userdata")
             assert(type(fs) == "userdata")
             assert(type(net) == "userdata")
+            assert(type(system) == "userdata")
+            assert(require "os" == builtin_os)
+            assert(package.loaded.os == builtin_os)
+            assert(system.pid() > 0)
             assert(type(uv.version()) == "string")
             local task = uv.run(function() timer.yield(); return "ok" end)
             uv.loop()
