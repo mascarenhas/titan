@@ -216,4 +216,6 @@ libuv topology. Linux CI also rebuilds Lua, libbacktrace, libuv, the Titan
 runtime, standard modules, and isolated fault variants under ASan/UBSan. Its
 stack-use-after-return coverage relies on `minicoro.h` announcing every native
 coroutine stack switch to the ASan fiber API, including tagged and stacked
-terminal transfers.
+terminal transfers. In that mode minicoro retains its stack-corruption sentinel
+but leaves address-range checking to ASan, because GCC's use-after-return
+instrumentation can move an address-taken local onto the sanitizer fake stack.

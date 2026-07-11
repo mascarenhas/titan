@@ -45,9 +45,10 @@ local function run_c_probe(source, cflags, runner)
     local cfile = stem .. ".c"
     local exe = stem
     write_file(cfile, source)
+    local cc = os.getenv("MINICORO_TEST_CC") or "cc"
     local compile = string.format(
-        "cc --std=c99 -Wall -Wextra -I. %s -o %s %s",
-        cflags or "", exe, cfile)
+        "%s --std=c99 -Wall -Wextra -I. %s -o %s %s",
+        cc, cflags or "", exe, cfile)
     local ok, compile_out = run_command(compile)
     os.remove(cfile)
     assert.truthy(ok, compile_out)
@@ -347,6 +348,27 @@ static void test_error_cases(void) {
   assert(mco_destroy(error_co) == MCO_SUCCESS);
 }
 
+static int corrupt_magic_seen;
+
+static void corrupt_magic_entry(mco_coro *co) {
+  size_t saved = co->magic_number;
+  co->magic_number = 0;
+  assert(mco_yield(co, (void *)main_tag) == MCO_STACK_OVERFLOW);
+  co->magic_number = saved;
+  corrupt_magic_seen = 1;
+}
+
+static void test_magic_sentinel_under_sanitizers(void) {
+  mco_coro *co;
+  mco_desc desc = test_desc(corrupt_magic_entry);
+  corrupt_magic_seen = 0;
+  assert(mco_create(&co, &desc) == MCO_SUCCESS);
+  assert(mco_resume(co, (void *)main_tag) == MCO_SUCCESS);
+  assert(corrupt_magic_seen == 1);
+  assert(mco_status(co) == MCO_DEAD);
+  assert(mco_destroy(co) == MCO_SUCCESS);
+}
+
 int main(void) {
   mco_set_tag_comparator(tagcmp);
   test_immediate_tagged_yield();
@@ -355,6 +377,7 @@ int main(void) {
   test_stacked_handler_can_be_resumed_by_a_different_resumer();
   test_storage_across_tagged_transfers();
   test_error_cases();
+  test_magic_sentinel_under_sanitizers();
   puts("ok");
   return 0;
 }
@@ -363,7 +386,10 @@ end
 
 local function run_suite_variant(variant)
     local function run(include_dir)
-        local cflags = variant.cflags or ""
+        local cflags = table.concat({
+            variant.cflags or "",
+            os.getenv("MINICORO_TEST_CFLAGS") or "",
+        }, " ")
         if include_dir then
             cflags = cflags .. " -I" .. include_dir
         end

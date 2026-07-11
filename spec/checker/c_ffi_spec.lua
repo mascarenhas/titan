@@ -881,6 +881,37 @@ describe("C FFI type checking", function()
         end)
     end)
 
+    it("matches decimal and hexadecimal C limit macro ranks", function()
+        with_header([[
+            #define FFI_LONG_MAX 0x7fffffffffffffffL
+            #define FFI_LONG_MIN (-0x7fffffffffffffffL - 1)
+            #define FFI_LLONG_MAX 0x7fffffffffffffffLL
+            #define FFI_LLONG_MIN (-0x7fffffffffffffffLL - 1)
+            #define FFI_ULONG_MAX 0xffffffffffffffffUL
+            #define FFI_ULLONG_MAX 0xffffffffffffffffULL
+        ]], function(header1)
+            with_header([[
+                #define FFI_LONG_MAX 9223372036854775807L
+                #define FFI_LONG_MIN (-9223372036854775807L - 1)
+                #define FFI_LLONG_MAX 9223372036854775807LL
+                #define FFI_LLONG_MIN (-9223372036854775807LL - 1)
+                #define FFI_ULONG_MAX 18446744073709551615UL
+                #define FFI_ULLONG_MAX 18446744073709551615ULL
+            ]], function(header2)
+                local ok, err = run_checker([[
+                    local c1 = foreign import "]] .. header1 .. [["
+                    local c2 = foreign import "]] .. header2 .. [["
+
+                    local function limits(): integer
+                        return (c1.FFI_LONG_MAX as integer) +
+                               (c2.FFI_LLONG_MIN as integer)
+                    end
+                ]])
+                assert.truthy(ok, err)
+            end)
+        end)
+    end)
+
     it("rejects C arrays crossing through value", function()
         with_header([[
             typedef int ffi_arr[2];

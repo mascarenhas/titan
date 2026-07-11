@@ -66,10 +66,19 @@ get_type_of_exp = typed("Exp, TypeList -> {string}?", function(exp, lst)
             return base_c_types.CONST_CHAR_PTR
         elseif val:sub(1,1) == "'" or val:sub(1,2) == "L'" then
             return base_c_types.CONST_CHAR
-        elseif val:match("^[0-9]*LL$") then
-            return base_c_types.LONG_LONG
-        elseif val:match("^[0-9]*L$") then
-            return base_c_types.LONG
+        elseif val:match("^0[xX][0-9a-fA-F]+[uUlL]*$") or
+               val:match("^[0-9]+[uUlL]*$") then
+            -- Recognize explicit L/LL rank suffixes on decimal, octal, and
+            -- hexadecimal literals, with or without U. System headers commonly
+            -- spell the same limit in different bases; treating 0x...L or
+            -- ...ULL as int creates false cross-header declaration conflicts.
+            local suffix = val:match("([uUlL]*)$"):lower()
+            if suffix:find("ll", 1, true) then
+                return base_c_types.LONG_LONG
+            elseif suffix:find("l", 1, true) then
+                return base_c_types.LONG
+            end
+            return base_c_types.INT
         elseif val:match("%.") then
             return base_c_types.DOUBLE
         else

@@ -60,6 +60,7 @@ void titan_uvshim_timer_set_data(uv_timer_t *timer, void *data);
 void *titan_uvshim_timer_get_data(const uv_timer_t *timer);
 int titan_uvshim_timer_is_closing(const uv_timer_t *timer);
 void titan_uvshim_timer_close(uv_timer_t *timer);
+void titan_uvshim_timer_close_discard(uv_timer_t *timer);
 
 void titan_uvshim_fs_set_data(uv_fs_t *req, void *data);
 void *titan_uvshim_fs_get_data(const uv_fs_t *req);

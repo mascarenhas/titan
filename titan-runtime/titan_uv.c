@@ -87,6 +87,10 @@ void titan_uvshim_timer_close(uv_timer_t *timer) {
   uv_close((uv_handle_t *)timer, titan_uvshim_close_cb);
 }
 
+void titan_uvshim_timer_close_discard(uv_timer_t *timer) {
+  uv_close((uv_handle_t *)timer, NULL);
+}
+
 void titan_uvshim_fs_set_data(uv_fs_t *req, void *data) {
   uv_req_set_data((uv_req_t *)req, data);
 }

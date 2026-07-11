@@ -263,8 +263,11 @@ jobs:
         env:
           TITAN_TEST_EXTRA_CFLAGS: ${{ env.SANITIZER_FLAGS }}
           TITAN_TEST_EXTRA_LDFLAGS: ${{ env.SANITIZER_FLAGS }}
+          MINICORO_TEST_CC: gcc
+          MINICORO_TEST_CFLAGS: ${{ env.SANITIZER_FLAGS }}
         run: |
           ./lua_modules/bin/busted -v \
+            spec/minicoro_spec.lua \
             spec/coder/uv_spec.lua \
             spec/coder/uv_phase2_spec.lua \
             spec/coder/uv_fault_spec.lua \

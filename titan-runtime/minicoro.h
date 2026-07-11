@@ -1953,15 +1953,24 @@ mco_result mco_yield(mco_coro* co, void* tag) {
     MCO_LOG("attempt to yield an invalid coroutine");
     return MCO_INVALID_COROUTINE;
   }
-  /* This check happens when the stack overflow already happened, but better later than never. */
+  if(co->magic_number != MCO_MAGIC_NUMBER) { /* Stack overflow. */
+    MCO_LOG("coroutine stack overflow, try increasing the stack size");
+    return MCO_STACK_OVERFLOW;
+  }
+  /* This range check happens when the stack overflow already happened, but
+   * better later than never. ASan's use-after-return mode may place `dummy` on
+   * its fake stack, outside the registered coroutine range, so let ASan own
+   * the address-range check there while retaining the sentinel above. */
+#ifndef _MCO_USE_ASAN
   volatile size_t dummy;
   size_t stack_addr = (size_t)&dummy;
   size_t stack_min = (size_t)co->stack_base;
   size_t stack_max = stack_min + co->stack_size;
-  if(co->magic_number != MCO_MAGIC_NUMBER || stack_addr < stack_min || stack_addr > stack_max) { /* Stack overflow. */
+  if(stack_addr < stack_min || stack_addr > stack_max) { /* Stack overflow. */
     MCO_LOG("coroutine stack overflow, try increasing the stack size");
     return MCO_STACK_OVERFLOW;
   }
+#endif
   if(co->state != MCO_RUNNING) {
     MCO_LOG("attempt to yield a coroutine that is not running");
     return MCO_NOT_RUNNING;

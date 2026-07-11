@@ -98,6 +98,7 @@ local test_join_wake_delay = 0
 local test_deferred_error_delay = 0
 local test_owner_starts = 0
 local test_untracked_timer_storage: value = nil
+local test_untracked_timer_handle: *libuv.uv_timer_t = nil
 local test_callback_depth = 0
 local test_max_callback_depth = 0
 local test_non_main_dispatches = 0
@@ -418,13 +419,26 @@ function __test_init_untracked_timer()
   local top = lua.lua_gettop(L)
   local memory = lua.lua_newuserdatauv(L, libuv.uv_timer_t.sizeof, 0)
   test_untracked_timer_storage = ffi.lua_totvalue(L, -1)
-  local status = libuv.uv_timer_init(
-      runtime.loop.handle, memory as *libuv.uv_timer_t)
+  test_untracked_timer_handle = memory as *libuv.uv_timer_t
+  local status = libuv.uv_timer_init(runtime.loop.handle,
+                                    test_untracked_timer_handle)
   lua.lua_settop(L, top)
   if (status as integer) < 0 then
+    test_untracked_timer_handle = nil
     test_untracked_timer_storage = nil
     raise make_error(status as integer, "test.untracked.timer.init", nil)
   end
+end
+
+function __test_close_untracked_timer()
+  if test_untracked_timer_handle ~= nil then
+    shim.titan_uvshim_timer_close_discard(test_untracked_timer_handle)
+  end
+end
+
+function __test_release_untracked_timer()
+  test_untracked_timer_handle = nil
+  test_untracked_timer_storage = nil
 end
 
 function __test_delay_next_deferred_error(milliseconds: integer)
@@ -502,6 +516,8 @@ assert(source:find("function __test_max_uv_run_depth", 1, true))
 assert(source:find("function __test_delay_next_join_wake", 1, true))
 assert(source:find("function __test_owner_starts", 1, true))
 assert(source:find("function __test_init_untracked_timer", 1, true))
+assert(source:find("function __test_close_untracked_timer", 1, true))
+assert(source:find("function __test_release_untracked_timer", 1, true))
 assert(source:find("local function test_uv_run_enter", 1, true))
 assert(source:find("local function test_uv_run_exit", 1, true))
 assert(count_plain(source, "libuv.uv_run(") == 3,
