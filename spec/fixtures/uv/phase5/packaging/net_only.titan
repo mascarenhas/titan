@@ -1,0 +1,11 @@
+local net = import "net"
+
+local function keep_type(connection: net.Connection): net.Connection
+  return connection
+end
+
+function main(args: {string}): integer
+  -- The executable need only prove that its dependency is the pinned net DSO;
+  -- loopback behavior belongs to net_spec's runtime fixture.
+  return 0
+end

@@ -147,7 +147,7 @@ describe("libuv Makefile configuration", function()
 
     it("builds facade modules from binary uv without another libuv input",
        function()
-        for _, module in ipairs({ "timer", "fs" }) do
+        for _, module in ipairs({ "timer", "fs", "net" }) do
             for _, mode in ipairs({ "bundled", "system" }) do
                 local ok, output, why, code =
                     run_facade_dry_run(mode, module)

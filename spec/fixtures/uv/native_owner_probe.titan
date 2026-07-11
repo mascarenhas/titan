@@ -70,7 +70,8 @@ record uv_timer_t
   local storage: value           -- slot 2 / C index 1
   local main_thread: value       -- slot 3 / C index 2
   local module: value            -- slot 4 / C index 3
-  local dispatcher: (uv_timer_t, integer, integer, libuv.size_t) -> () -- 5/4
+  local dispatcher: (uv_timer_t, integer, integer, libuv.size_t,
+                     ffi.titan_ffi_void_ptr) -> () -- 5/4
   local root: value              -- slot 6 / C index 5
   local metadata: CallbackState  -- slot 7 / C index 6
   local buffer: value            -- slot 8 / C index 7
@@ -84,7 +85,8 @@ local record uv_fs_t
   local storage: value
   local main_thread: value
   local module: value
-  local dispatcher: (uv_fs_t, integer, integer, libuv.size_t) -> ()
+  local dispatcher: (uv_fs_t, integer, integer, libuv.size_t,
+                     ffi.titan_ffi_void_ptr) -> ()
   local root: value
   local metadata: CallbackState
   local buffer: value
@@ -287,7 +289,11 @@ end
 -- callback ABI in titan_uv.c.  They are invoked directly with _fn == NULL.
 -- Every potentially raising operation is inside the function-level catch.
 local function timer_dispatch(owner: uv_timer_t, event_kind: integer,
-                              result: integer, size: libuv.size_t)
+                              result: integer, size: libuv.size_t,
+                              pointer: ffi.titan_ffi_void_ptr)
+  if pointer ~= nil then
+    raise "timer callback carried an unexpected pointer payload"
+  end
   if owner.metadata.inject_dispatch_failure then
     owner.metadata.inject_dispatch_failure = false
     raise "phase-1 injected dispatcher failure"
@@ -325,7 +331,11 @@ catch
 end
 
 local function fs_dispatch(owner: uv_fs_t, event_kind: integer,
-                           result: integer, size: libuv.size_t)
+                           result: integer, size: libuv.size_t,
+                           pointer: ffi.titan_ffi_void_ptr)
+  if pointer ~= nil then
+    raise "filesystem callback carried an unexpected pointer payload"
+  end
   if owner.metadata.inject_dispatch_failure then
     owner.metadata.inject_dispatch_failure = false
     raise "phase-1 injected filesystem dispatcher failure"

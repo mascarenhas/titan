@@ -91,7 +91,8 @@ describe("uv Phase 2 continuation pump", function()
         local shim = phase2.read("titan-runtime/titan_uv.c")
         assert.not_match("lua_pcall", shim, 1, true)
         assert.not_match("luaD_call", shim, 1, true)
-        assert.match("dispatch%(L, M, NULL, owner", shim)
+        assert.match("dispatch%(L, M, NULL, owner, event_kind, result, size, pointer%)",
+            shim)
 
         local uv_c = phase2.read("stdlib/uv.c")
         local dispatcher = phase2.c_function_definition(uv_c,

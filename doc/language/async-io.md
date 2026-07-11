@@ -123,5 +123,13 @@ A submitted request remains rooted through its callback even if `uv_cancel`
 cannot stop it in time, and its stale result is not delivered. File close is
 cleanup-shielded so cancellation is reinjected only after physical close.
 
-See the [filesystem standard library](standard-library-fs.md) for the public
-File, whole-file, metadata, and path APIs.
+Networking uses the same separation. A queued write can be removed, while
+cancelling an active write is logical: its native callback still owns cleanup
+and cannot deliver the stale result. The first `Connection:shutdown()` is
+cleanup-shielded through its `uv_shutdown` callback; repeated calls are
+idempotent. Explicit close rejects new work and stops reads, but serializes the
+native handle close behind already submitted and queued FIFO output.
+
+See the [filesystem standard library](standard-library-fs.md) and
+[TCP networking standard library](standard-library-net.md) for their public
+APIs.

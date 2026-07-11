@@ -56,7 +56,7 @@ local function sorted_keys(table_value)
     return keys
 end
 
-describe("uv Phase 2 public interface", function()
+describe("uv public interface", function()
     setup(configure_foreign_headers)
 
     teardown(function()
@@ -65,15 +65,18 @@ describe("uv Phase 2 public interface", function()
         driver.imported = {}
     end)
 
-    it("locks the Task, error, loop, and timer middle-layer surface", function()
+    it("locks the scheduler, filesystem, timer, and network surface", function()
         local modtype = check_uv()
         assert.same({
             "Cancelled", "Error", "Task", "_fs_close", "_fs_flush",
             "_fs_is_closed", "_fs_list", "_fs_mkdir", "_fs_open",
             "_fs_read", "_fs_rename", "_fs_rmdir", "_fs_stat",
-            "_fs_unlink", "_fs_write", "_sleep", "_ticker",
-            "_ticker_close", "_ticker_tick", "_yield", "loop", "run",
-            "uv_file", "uv_timer_t", "version",
+            "_fs_unlink", "_fs_write", "_net_accept", "_net_close",
+            "_net_connect", "_net_eof_error", "_net_find",
+            "_net_is_closed", "_net_listen", "_net_read",
+            "_net_shutdown", "_net_slice", "_net_write", "_sleep",
+            "_ticker", "_ticker_close", "_ticker_tick", "_yield", "loop",
+            "run", "uv_file", "uv_tcp_t", "uv_timer_t", "version",
         }, sorted_keys(modtype.members))
 
         assert.equals("(() -> value) -> uv.Task", signature(modtype, "run"))
@@ -97,6 +100,28 @@ describe("uv Phase 2 public interface", function()
         assert.equals("(string, string) -> ()",
             signature(modtype, "_fs_rename"))
         assert.equals("(string) -> { string }", signature(modtype, "_fs_list"))
+        assert.equals("(string, integer) -> uv.uv_tcp_t",
+            signature(modtype, "_net_connect"))
+        assert.equals("(string, integer, integer) -> uv.uv_tcp_t",
+            signature(modtype, "_net_listen"))
+        assert.equals("(uv.uv_tcp_t, integer) -> string?",
+            signature(modtype, "_net_read"))
+        assert.equals("(uv.uv_tcp_t, string) -> ()",
+            signature(modtype, "_net_write"))
+        assert.equals("(uv.uv_tcp_t) -> ()",
+            signature(modtype, "_net_shutdown"))
+        assert.equals("(uv.uv_tcp_t) -> uv.uv_tcp_t",
+            signature(modtype, "_net_accept"))
+        assert.equals("(uv.uv_tcp_t) -> ()",
+            signature(modtype, "_net_close"))
+        assert.equals("(uv.uv_tcp_t) -> boolean",
+            signature(modtype, "_net_is_closed"))
+        assert.equals("(string, string) -> integer",
+            signature(modtype, "_net_find"))
+        assert.equals("(string, integer, integer) -> string",
+            signature(modtype, "_net_slice"))
+        assert.equals("(string, string, string) -> uv.Error",
+            signature(modtype, "_net_eof_error"))
         assert.equals("(integer) -> ()", signature(modtype, "_sleep"))
         assert.equals("() -> ()", signature(modtype, "_yield"))
         assert.equals("(integer) -> uv.uv_timer_t",

@@ -4,6 +4,18 @@
 #include <stdint.h>
 
 /*
+ * GC-owned normalized address storage. The C implementation statically
+ * verifies that this parser-visible opaque cell is large and aligned enough
+ * for sockaddr_storage on every supported target. Titan allocates arrays with
+ * titan_uvshim_address.sizeof/alignof and never inspects their bytes.
+ */
+typedef union titan_uvshim_address {
+  void *align_pointer;
+  int64_t align_integer;
+  unsigned char bytes[256];
+} titan_uvshim_address;
+
+/*
  * Minimal libuv forward declarations for Titan's FFI.  The standard uv module
  * imports <uv.h> separately and generated C includes it first; keeping this
  * header narrow avoids presenting a second copy of libuv's declarations as
@@ -11,10 +23,15 @@
  * independent parse of this header.
  */
 #ifndef UV_H
+typedef struct uv_connect_s uv_connect_t;
 typedef struct uv_fs_s uv_fs_t;
+typedef struct uv_getaddrinfo_s uv_getaddrinfo_t;
 typedef struct uv_handle_s uv_handle_t;
 typedef struct uv_loop_s uv_loop_t;
+typedef struct uv_shutdown_s uv_shutdown_t;
+typedef struct uv_tcp_s uv_tcp_t;
 typedef struct uv_timer_s uv_timer_t;
+typedef struct uv_write_s uv_write_t;
 #endif
 
 /*
@@ -52,7 +69,13 @@ enum titan_uvshim_owner_c_index {
 enum titan_uvshim_event_kind {
   TITAN_UV_EVENT_TIMER = 1,
   TITAN_UV_EVENT_HANDLE_CLOSE = 2,
-  TITAN_UV_EVENT_FS = 3
+  TITAN_UV_EVENT_FS = 3,
+  TITAN_UV_EVENT_GETADDRINFO = 4,
+  TITAN_UV_EVENT_CONNECT = 5,
+  TITAN_UV_EVENT_WRITE = 6,
+  TITAN_UV_EVENT_SHUTDOWN = 7,
+  TITAN_UV_EVENT_STREAM_READ = 8,
+  TITAN_UV_EVENT_CONNECTION = 9
 };
 
 /* Concrete wrappers for libuv's public base-handle/base-request API. */
@@ -68,6 +91,57 @@ int titan_uvshim_fs_cancel(uv_fs_t *req);
 int titan_uvshim_fs_scandir_next(uv_fs_t *req, void *entry);
 const char *titan_uvshim_dirent_name(const void *entry);
 int titan_uvshim_error_eio(void);
+int titan_uvshim_error_eof(void);
+int titan_uvshim_error_ecanceled(void);
+int titan_uvshim_error_eaddrnotavail(void);
+
+/*
+ * DNS is submitted through this wrapper so the private header does not need
+ * to expose platform addrinfo constants to Titan. The wrapper still calls
+ * only public libuv APIs. Libuv copies node before this function returns.
+ */
+int titan_uvshim_getaddrinfo_start(uv_loop_t *loop,
+                                   uv_getaddrinfo_t *req,
+                                   void *data,
+                                   const char *node,
+                                   int port);
+int titan_uvshim_getaddrinfo_cancel(uv_getaddrinfo_t *req);
+int64_t titan_uvshim_addrinfo_count(const void *result);
+int titan_uvshim_addrinfo_copy(const void *result,
+                               void *address_storage,
+                               int64_t capacity);
+void titan_uvshim_addrinfo_free(void *result);
+
+/* Concrete TCP/stream/request wrappers around public libuv base APIs. */
+int titan_uvshim_tcp_init(uv_loop_t *loop, uv_tcp_t *tcp, void *data);
+int titan_uvshim_tcp_is_closing(const uv_tcp_t *tcp);
+void titan_uvshim_tcp_close(uv_tcp_t *tcp);
+/* Private fault-test hook; production close remains graceful uv_close. */
+int titan_uvshim_tcp_close_reset(uv_tcp_t *tcp);
+int titan_uvshim_tcp_bind(uv_tcp_t *tcp,
+                          const void *address_storage,
+                          int64_t count,
+                          int64_t index);
+/* Private test-variant diagnostic; the public net API exposes no endpoint. */
+int titan_uvshim_tcp_bound_port(const uv_tcp_t *tcp);
+int titan_uvshim_tcp_listen_backlog_is_valid(int64_t backlog);
+int titan_uvshim_tcp_listen(uv_tcp_t *tcp, int64_t backlog);
+int titan_uvshim_tcp_accept(uv_tcp_t *server, uv_tcp_t *client);
+int titan_uvshim_tcp_read_start(uv_tcp_t *tcp);
+int titan_uvshim_tcp_read_stop(uv_tcp_t *tcp);
+int titan_uvshim_tcp_connect_start(uv_connect_t *req,
+                                   uv_tcp_t *tcp,
+                                   void *data,
+                                   const void *address_storage,
+                                   int64_t count,
+                                   int64_t index);
+int titan_uvshim_tcp_write_start(uv_write_t *req,
+                                 uv_tcp_t *tcp,
+                                 void *data,
+                                 const void *buffer);
+int titan_uvshim_tcp_shutdown_start(uv_shutdown_t *req,
+                                    uv_tcp_t *tcp,
+                                    void *data);
 
 /* Fixed callback shapes passed directly to public libuv start functions. */
 void titan_uvshim_timer_cb(uv_timer_t *timer);
@@ -85,6 +159,13 @@ int titan_uvshim_buf_init_slice(void *buf, char *base, int64_t total,
                                 int64_t offset, int64_t length);
 int titan_uvshim_bytes_copy(char *destination, int64_t capacity,
                             const char *source, int64_t length);
+/* Zero-based binary search: -1 means absent; UV_EINVAL means bad arguments. */
+int64_t titan_uvshim_bytes_find(const char *haystack, int64_t haystack_length,
+                                const char *needle, int64_t needle_length);
+/* Checked explicit-length binary slice copy; no NUL-termination semantics. */
+int titan_uvshim_bytes_slice_copy(char *destination, int64_t capacity,
+                                  const char *source, int64_t total,
+                                  int64_t offset, int64_t length);
 int titan_uvshim_allocation_length_is_valid(int64_t length);
 int titan_uvshim_buf_length_is_valid(int64_t length);
 

@@ -147,7 +147,7 @@ source = replace_once(source, [==[
     local fs_owner = owner.metadata.task as uv_fs_t
     test_phase4_fs_deliveries = test_phase4_fs_deliveries + 1
     fs_dispatch(fs_owner, EVENT_FS, fs_owner.metadata.callback_result,
-                0 as libuv.size_t)
+                0 as libuv.size_t, nil)
   elseif kind == OWNER_TASK_DRIVE then
     local task = owner.metadata.task as Task
 ]==], "delayed FS logical delivery")

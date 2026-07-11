@@ -1,0 +1,221 @@
+local uv = import "uv"
+
+-- Stream payloads are binary strings. Titan does not yet expose string
+-- indexing/slicing, so the uv middle layer supplies length-aware binary find
+-- and slice helpers. Their offsets are zero-based and never use NUL
+-- termination.
+
+record Connection
+  local handle: uv.uv_tcp_t
+  local excess: string
+  local reading: boolean
+end
+
+record Server
+  local handle: uv.uv_tcp_t
+end
+
+-- Isolated runtime variants replace this marker with endpoint and queue
+-- diagnostics. Production exports no endpoint/test-introspection API.
+-- TITAN_NET_TEST_HOOKS
+
+local function check_host(host: string)
+  if #host == 0 then raise "network host must not be empty" end
+end
+
+local function check_connect_port(port: integer)
+  if port <= 0 or port > 65535 then
+    raise "connect port must be between 1 and 65535"
+  end
+end
+
+local function check_listen_port(port: integer)
+  if port < 0 or port > 65535 then
+    raise "listen port must be between 0 and 65535"
+  end
+end
+
+local function join_chunks(chunks: {string}, first: integer,
+                           last: integer): string
+  if first > last then return "" end
+  if first == last then return chunks[first] as string end
+  local middle = first + (last - first) // 2
+  return join_chunks(chunks, first, middle) ..
+         join_chunks(chunks, middle + 1, last)
+end
+
+local function begin_read(connection: Connection)
+  if connection.reading then
+    raise "Connection already has a reader"
+  end
+  connection.reading = true
+end
+
+-- This helper runs only while the public reader lock is held. It serves
+-- retained excess first, then performs at most one middle-layer read.
+local function read_some_unlocked(connection: Connection,
+                                  max_bytes: integer): string?
+  if #connection.excess > 0 then
+    if #connection.excess <= max_bytes then
+      local result = connection.excess
+      connection.excess = ""
+      return result
+    end
+    local result = uv._net_slice(connection.excess, 0, max_bytes)
+    connection.excess = uv._net_slice(connection.excess, max_bytes,
+                                      #connection.excess - max_bytes)
+    return result
+  end
+  return uv._net_read(connection.handle, max_bytes)
+end
+
+local function restore_chunks(connection: Connection, chunks: {string},
+                              count: integer)
+  if count > 0 then
+    connection.excess = join_chunks(chunks, 1, count) .. connection.excess
+  end
+end
+
+function connect(host: string, port: integer): Connection
+  check_host(host)
+  check_connect_port(port)
+  return Connection.new(uv._net_connect(host, port), "", false)
+end
+
+function listen(host: string, port: integer,
+                backlog: integer): Server
+  check_host(host)
+  check_listen_port(port)
+  if backlog <= 0 then raise "listen backlog must be positive" end
+  return Server.new(uv._net_listen(host, port, backlog))
+end
+
+function Connection:read_some(max_bytes: integer): string?
+  if max_bytes <= 0 then raise "read size must be positive" end
+  begin_read(self)
+  local result: string? = nil
+  do
+    result = read_some_unlocked(self, max_bytes)
+  finally
+    self.reading = false
+  end
+  return result
+end
+
+function Connection:read_exactly(bytes: integer): string
+  if bytes < 0 then raise "exact read size must not be negative" end
+  if bytes == 0 then return "" end
+
+  begin_read(self)
+  local chunks: {string} = {}
+  local count = 0
+  local total = 0
+  local result = ""
+  do
+    while total < bytes do
+      local maybe_chunk: string? =
+          read_some_unlocked(self, bytes - total)
+      if not maybe_chunk then
+        local subject = "requested=" .. bytes .. ", partial=" .. total
+        raise uv._net_eof_error("net.read_exactly",
+            "premature EOF while reading " .. bytes ..
+            " bytes after " .. total .. " bytes", subject)
+      end
+      local chunk = maybe_chunk as string
+      if #chunk == 0 then
+        raise "network read returned an empty non-EOF chunk"
+      end
+      count = count + 1
+      chunks[count] = chunk
+      total = total + #chunk
+    end
+    result = join_chunks(chunks, 1, count)
+  catch
+    restore_chunks(self, chunks, count)
+    raise error
+  finally
+    self.reading = false
+  end
+  return result
+end
+
+function Connection:read_until(delimiter: string,
+                               max_bytes: integer): string
+  if #delimiter == 0 then raise "read delimiter must not be empty" end
+  if max_bytes <= 0 then raise "read limit must be positive" end
+  if #delimiter > max_bytes then
+    raise "read delimiter is longer than the read limit"
+  end
+
+  begin_read(self)
+  local chunks: {string} = {}
+  local count = 0
+  local total = 0
+  local tail = ""
+  local result = ""
+  local found = false
+  do
+    while not found and total < max_bytes do
+      local maybe_chunk: string? =
+          read_some_unlocked(self, max_bytes - total)
+      if not maybe_chunk then
+        local subject = "delimiter_bytes=" .. #delimiter ..
+                        ", partial=" .. total
+        raise uv._net_eof_error("net.read_until",
+            "premature EOF before the delimiter after " .. total ..
+            " bytes", subject)
+      end
+      local chunk = maybe_chunk as string
+      if #chunk == 0 then
+        raise "network read returned an empty non-EOF chunk"
+      end
+
+      count = count + 1
+      chunks[count] = chunk
+      local boundary = tail .. chunk
+      local match = uv._net_find(boundary, delimiter)
+      total = total + #chunk
+      if match >= 0 then
+        local match_end = total - #boundary + match + #delimiter
+        local all = join_chunks(chunks, 1, count)
+        result = uv._net_slice(all, 0, match_end)
+        self.excess = uv._net_slice(all, match_end, #all - match_end) ..
+                      self.excess
+        found = true
+      else
+        local keep = #delimiter - 1
+        if keep > #boundary then keep = #boundary end
+        tail = uv._net_slice(boundary, #boundary - keep, keep)
+      end
+    end
+    if not found then
+      raise "delimiter not found within " .. max_bytes .. " bytes"
+    end
+  catch
+    restore_chunks(self, chunks, count)
+    raise error
+  finally
+    self.reading = false
+  end
+  return result
+end
+
+function Connection:write(data: string)
+  uv._net_write(self.handle, data)
+end
+
+function Connection:shutdown()
+  uv._net_shutdown(self.handle)
+end
+
+function Connection:close()
+  uv._net_close(self.handle)
+end
+
+function Server:accept(): Connection
+  return Connection.new(uv._net_accept(self.handle), "", false)
+end
+
+function Server:close()
+  uv._net_close(self.handle)
+end

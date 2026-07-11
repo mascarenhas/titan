@@ -137,11 +137,13 @@ local function start_owner(runtime: Runtime, kind: integer, task: value,
 
 source = replace_once(source, [==[
 local function timer_dispatch(owner: uv_timer_t, event_kind: integer,
-                              result: integer, size: libuv.size_t)
+                              result: integer, size: libuv.size_t,
+                              pointer: ffi.titan_ffi_void_ptr)
   local runtime = owner.metadata.runtime
 ]==], [==[
 local function timer_dispatch(owner: uv_timer_t, event_kind: integer,
-                              result: integer, size: libuv.size_t)
+                              result: integer, size: libuv.size_t,
+                              pointer: ffi.titan_ffi_void_ptr)
   test_callback_depth = test_callback_depth + 1
   test_native_dispatches = test_native_dispatches + 1
   if test_callback_depth > test_max_callback_depth then
@@ -188,6 +190,8 @@ catch
   libuv.uv_stop(owner.metadata.runtime.loop.handle)
   return
 end
+
+local function adapt(func: () -> value): (value) -> value
 ]==], [==[
 catch
   if not owner.metadata.runtime.fatal then
@@ -200,6 +204,8 @@ catch
   test_callback_depth = test_callback_depth - 1
   return
 end
+
+local function adapt(func: () -> value): (value) -> value
 ]==], "timer dispatcher catch exit counter")
 
 source = replace_once(source, [==[
@@ -331,22 +337,36 @@ source = replace_once(source, [==[
 ]==], "fallback counter")
 
 source = replace_once(source, [==[
+local function retire_closed_owners(runtime: Runtime)
+  local raw = runtime.timer_owner_head
+  while raw ~= nil do
+    local owner = raw as uv_timer_t
+    raw = owner.metadata.next_owner
+    if owner.metadata.lifecycle == OWNER_CLOSED then
+      owner.handle = nil
+      owner.storage = nil
+      owner.root = nil
       owner.buffer = nil
       unlink_owner(owner)
     end
   end
 end
-
-local function close_runtime(runtime: Runtime)
 ]==], [==[
+local function retire_closed_owners(runtime: Runtime)
+  local raw = runtime.timer_owner_head
+  while raw ~= nil do
+    local owner = raw as uv_timer_t
+    raw = owner.metadata.next_owner
+    if owner.metadata.lifecycle == OWNER_CLOSED then
+      owner.handle = nil
+      owner.storage = nil
+      owner.root = nil
       owner.buffer = nil
       unlink_owner(owner)
       test_retired_closed_owners = test_retired_closed_owners + 1
     end
   end
 end
-
-local function close_runtime(runtime: Runtime)
 ]==], "retired-owner counter")
 
 local hook_api = [==[

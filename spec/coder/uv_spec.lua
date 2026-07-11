@@ -72,9 +72,9 @@ describe("uv native-owner fixture", function()
         assert.is_true(lua_header < ffi_header)
         assert.is_true(ffi_header < shim_header)
 
-        assert.match("native_owner_probe_timer_dispatch_titan%(lua_State %*L, Udata %*_mod, CClosure %*_fn, Udata%* _param_owner, lua_Integer _param_event_kind, lua_Integer _param_result, size_t _param_size%)",
+        assert.match("native_owner_probe_timer_dispatch_titan%(lua_State %*L, Udata %*_mod, CClosure %*_fn, Udata%* _param_owner, lua_Integer _param_event_kind, lua_Integer _param_result, size_t _param_size, titan_ffi_void_ptr _param_pointer%)",
             generated)
-        assert.match("native_owner_probe_fs_dispatch_titan%(lua_State %*L, Udata %*_mod, CClosure %*_fn, Udata%* _param_owner, lua_Integer _param_event_kind, lua_Integer _param_result, size_t _param_size%)",
+        assert.match("native_owner_probe_fs_dispatch_titan%(lua_State %*L, Udata %*_mod, CClosure %*_fn, Udata%* _param_owner, lua_Integer _param_event_kind, lua_Integer _param_result, size_t _param_size, titan_ffi_void_ptr _param_pointer%)",
             generated)
 
         local timer = phase2.c_function_definition(generated,
@@ -112,7 +112,8 @@ describe("uv native-owner fixture", function()
         local shim = read_file("titan-runtime/titan_uv.c")
         assert.not_match("lua_pcall", shim, 1, true)
         assert.not_match("luaD_call", shim, 1, true)
-        assert.match("dispatch%(L, M, NULL, owner", shim)
+        assert.match("dispatch%(L, M, NULL, owner, event_kind, result, size, pointer%)",
+            shim)
     end)
 
     it("uses an isolated Lua entry and checks wrong owner identities", function()

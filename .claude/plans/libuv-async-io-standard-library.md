@@ -1,9 +1,11 @@
 # Titan libuv async I/O standard library
 
-Status: reviewed design and implementation plan. No production library code has
-been implemented. The design below is based on the current repository checkout,
-the sketch in `/tmp/uv-io.md`, the implemented `coro` module, focused Titan and
-libuv prototypes, and the public libuv 1.x contracts.
+Status: implementation in progress. Phases 0 through 5 are implemented and
+covered by the normal, deterministic fault, packaging, and sanitizer suites;
+Phase 6 and the final Phase 7 audit remain. The design below is based on the
+current repository checkout, the sketch in `/tmp/uv-io.md`, the implemented
+`coroutine`/`uv` standard modules, focused Titan and libuv prototypes, and the
+public libuv 1.x contracts.
 
 ## Executive decision
 
@@ -87,7 +89,7 @@ This design does not require general Titan-function-to-C callback support,
 
 - Reproducible libuv availability and build integration on Linux and macOS.
 - A private loop and direct callback/coroutine continuation pump built on the
-  `coroutine` standard module, renamed from the current `coro` module.
+  `coroutine` standard module (renamed from the original `coro` prototype).
 - Fixed native C-to-Titan callback trampolines.
 - Timers, recurring ticks, and next-turn yielding.
 - Asynchronous filesystem I/O.
@@ -116,16 +118,17 @@ This design does not require general Titan-function-to-C callback support,
 
 The current architecture already supplies the necessary substrate:
 
-- `coro.titan` owns coroutine policy while `titan-runtime/titan_coro.c` owns a
-  small native trampoline (`doc/implementation/coroutines.md:3-14`).
+- `stdlib/coroutine.titan` owns coroutine policy while
+  `titan-runtime/titan_coro.c` owns a small native trampoline
+  (`doc/implementation/coroutines.md:3-14`).
 - The trampoline recovers a rooted module and entry `CClosure`, reads the native
   pointer from `upvalue[2]`, and calls it directly with `_fn == NULL`
   (`titan-runtime/titan_coro.c:16-27`).
 - A hidden identity tag can route a yield out through nested coroutines. The
   matching root becomes `suspended`, inner coroutines become `stacked`, and
   resuming the root restores the chain (`doc/language/coroutines.md:77-88`).
-- `coro.titan` already selects `stacked_co` when transferring values, so the
-  callback only needs to own and resume the task root (`coro.titan:91-139`).
+- `stdlib/coroutine.titan` selects `stacked_co` when transferring values, so
+  the callback only needs to own and resume the task root.
 - Minicoro searches the active dynamic `prev_co` chain for a matching tag; it
   does not search unrelated suspended roots (`titan-runtime/minicoro.h:1854-1864`).
   One hidden tag can therefore be shared safely by all independent UV tasks.
@@ -710,7 +713,7 @@ and add a parser regression before introducing one.
 
 Use library/shim allocation only when an API allocates and returns its own
 object or when callback-driven variable storage cannot practically be created
-in Titan. The fallback mirrors `coro.titan`: one pointer-owner full userdata is
+in Titan. The fallback mirrors `stdlib/coroutine.titan`: one pointer-owner full userdata is
 captured in the wrapper's local `storage` field, the matching library cleanup is
 explicit, and `__gc` is a last-resort passive memory release. Never free an
 initialized libuv handle from `__gc` before its close callback.
@@ -831,7 +834,8 @@ typedef void (*titan_uv_dispatch_func)(lua_State *L, Udata *_mod,
                                        CClosure *_fn, Udata *owner,
                                        lua_Integer event_kind,
                                        lua_Integer result,
-                                       size_t size);
+                                       size_t size,
+                                       void *pointer);
 
 /* Public libuv accessors and trusted raw owner fields do not allocate. */
 Udata *owner = uv_req_get_data((uv_req_t *)req);
@@ -843,15 +847,18 @@ titan_uv_dispatch_func dispatch =
                     pvalue(&dispatcher->upvalue[2]));
 
 /* Direct native Titan entry, exactly like titan_coro_entry. */
-dispatch(L, M, NULL, owner, event_kind, result, size);
+dispatch(L, M, NULL, owner, event_kind, result, size, pointer);
 ```
 
 The owner remains strongly rooted by `Runtime.pending` or `Runtime.resources`
 for the entire callback. Its fixed uservalues supply `Runtime.main_thread`, the
 module Udata, and the dispatcher closure; the C trampoline only reads those
 trusted fields, normalizes the particular libuv callback ABI, and transfers
-primitive result values. Request/handle families use the corresponding public
-libuv data getter.
+primitive result values plus one fixed pointer payload. That payload is `NULL`
+except when a callback supplies borrowed native result storage, such as DNS's
+`addrinfo` list; the dispatcher copies and releases such storage before it can
+drive user code. Request/handle families use the corresponding public libuv
+data getter.
 
 The dispatcher is a fixed module-local top-level function with no captures, so
 `_fn == NULL` matches `titan_coro_entry`. Do not route through its Lua wrapper;
@@ -860,7 +867,7 @@ private shim.
 
 There is deliberately no `titan_uv_callprotected` layer. The dispatcher is
 trusted library code, not an arbitrary user callback, and follows the same
-direct native-entry contract as `coro.titan`/`titan_coro_entry`. Its entire
+direct native-entry contract as `stdlib/coroutine.titan`/`titan_coro_entry`. Its entire
 controlled body is followed by a trailing function-level Titan `catch`. The
 catch arm uses the still-rooted owner to store the exact `error` and `traceback`
 in the Runtime, marks it fatal, calls public `uv_stop`, and returns. Because a
@@ -1020,7 +1027,8 @@ Do not depend on `registry[TITAN_BACKTRACE_KEY]` retaining a task failure while
 other callbacks run. Store the traceback string in the Task/Runtime immediately.
 
 Before `Task:join` or the outer bootstrap re-raises a stored error, reinstall
-the saved trace and set `TITAN_TRACE_PINNED`, following `coro.titan:57-89` and
+the saved trace and set `TITAN_TRACE_PINNED`, following
+`stdlib/coroutine.titan` and
 `doc/implementation/error-handling.md:27-49`. Joining a failed child appends a
 join-site propagation trace so both the child failure and observer are visible.
 
@@ -1736,6 +1744,8 @@ lifetime gate is green.
 
 ### Phase 0 - lock dependency and proof fixtures
 
+Status: complete.
+
 Files:
 
 - `Makefile`
@@ -1835,6 +1845,9 @@ Exit criteria:
 
 ### Phase 1 - GC-owned low-level objects and native callbacks
 
+Status: complete for the callback/storage families required through Phase 5;
+Phase 6 adds its process, pipe, and signal shapes on the same fixed boundary.
+
 Files:
 
 - `stdlib/uv.titan`
@@ -1903,6 +1916,8 @@ Exit criteria:
 
 ### Phase 2 - continuation pump, bootstrap, tasks, errors, and timers
 
+Status: complete.
+
 Files:
 
 - `stdlib/uv.titan`
@@ -1918,8 +1933,8 @@ Work:
 - Implement nonblocking `run`, `join`, cancel/status, public embedding `loop`,
   and automatic standalone bootstrap. Remove the redundant `spawn`/`run_main`
   split.
-- Adapt public `() -> value` functions to the renamed `coroutine.create`
-  (current `coro.create`) `(value) -> value` entry and lock timer init/start
+- Adapt public `() -> value` functions to `coroutine.create`'s
+  `(value) -> value` entry and lock timer init/start
   failure semantics.
 - Implement immediate failure, async failure, trace copying/reinstallation, and
   first-error policy.
@@ -1951,6 +1966,8 @@ Exit criteria:
 
 ### Phase 3 - filesystem core
 
+Status: complete.
+
 Files:
 
 - `stdlib/fs.titan`
@@ -1973,6 +1990,9 @@ Exit criteria:
 - No operation runs after close; double close is harmless.
 
 ### Phase 4 - task races and cancellation hardening
+
+Status: complete for the timer, filesystem, and networking families currently
+implemented; the same matrix remains an exit gate for Phase 6 resources.
 
 Before sockets/processes multiply handle types, complete the race matrix:
 
@@ -1997,6 +2017,8 @@ Add an ASan/UBSan CI job for the shim and focused library specs. Local sanitizer
 availability is not assumed; CI is the release gate.
 
 ### Phase 5 - TCP and DNS
+
+Status: complete.
 
 Files:
 

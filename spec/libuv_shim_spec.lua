@@ -96,6 +96,8 @@ describe("native libuv shim", function()
         assert.not_match("timer%-%>", source)
         assert.not_match("handle%-%>", source)
         assert.not_match("req%-%>", source)
+        assert.not_match("strlen", source, 1, true)
+        assert.not_match("memmem", source, 1, true)
         assert.match("uv_handle_set_data", source, 1, true)
         assert.match("uv_handle_get_data", source, 1, true)
         assert.match("uv_req_set_data", source, 1, true)
@@ -104,7 +106,25 @@ describe("native libuv shim", function()
         assert.match("uv_is_closing", source, 1, true)
         assert.match("uv_fs_get_result", source, 1, true)
         assert.match("uv_buf_init", source, 1, true)
-        assert.match("dispatch%(L, M, NULL, owner", source)
+        assert.match("titan_uvshim_bytes_find", source, 1, true)
+        assert.match("titan_uvshim_bytes_slice_copy", source, 1, true)
+        assert.match("uv_getaddrinfo", source, 1, true)
+        assert.match("uv_freeaddrinfo", source, 1, true)
+        assert.match("uv_tcp_init", source, 1, true)
+        assert.match("uv_tcp_bind", source, 1, true)
+        assert.match("uv_tcp_close_reset", source, 1, true)
+        assert.match("uv_tcp_getsockname", source, 1, true)
+        assert.match("uv_listen", source, 1, true)
+        assert.match("uv_accept", source, 1, true)
+        assert.match("uv_read_start", source, 1, true)
+        assert.match("uv_read_stop", source, 1, true)
+        assert.match("uv_tcp_connect", source, 1, true)
+        assert.match("uv_write", source, 1, true)
+        assert.match("uv_shutdown", source, 1, true)
+        assert.match("sizeof%(titan_uvshim_address%)", source)
+        assert.match("sizeof%(struct sockaddr_storage%)", source)
+        assert.match("dispatch%(L, M, NULL, owner, event_kind, result, size, pointer%)",
+            source)
     end)
 
     it("preserves libuv types across the public and private Titan FFI imports", function()
@@ -130,6 +150,9 @@ describe("native libuv shim", function()
 
                 local function layout(timer: *uv.uv_timer_t,
                                       req: *uv.uv_fs_t,
+                                      dns: *uv.uv_getaddrinfo_t,
+                                      tcp: *uv.uv_tcp_t,
+                                      connect: *uv.uv_connect_t,
                                       owner: ffi.titan_ffi_void_ptr): integer
                     local loop_storage: *uv.uv_loop_t = lua.lua_newuserdatauv(
                         L, uv.uv_loop_t.sizeof, 0)
@@ -137,13 +160,30 @@ describe("native libuv shim", function()
                         L, uv.uv_timer_t.sizeof, 0)
                     local fs_storage: *uv.uv_fs_t = lua.lua_newuserdatauv(
                         L, uv.uv_fs_t.sizeof, 0)
+                    local dns_storage: *uv.uv_getaddrinfo_t =
+                        lua.lua_newuserdatauv(
+                            L, uv.uv_getaddrinfo_t.sizeof, 0)
+                    local tcp_storage: *uv.uv_tcp_t = lua.lua_newuserdatauv(
+                        L, uv.uv_tcp_t.sizeof, 0)
+                    local address_storage: *shim.titan_uvshim_address =
+                        lua.lua_newuserdatauv(
+                            L, shim.titan_uvshim_address.sizeof, 0)
                     shim.titan_uvshim_timer_set_data(timer, owner)
                     shim.titan_uvshim_fs_set_data(req, owner)
+                    shim.titan_uvshim_getaddrinfo_start(
+                        nil, dns, owner, "127.0.0.1", 80)
+                    shim.titan_uvshim_tcp_init(nil, tcp, owner)
+                    shim.titan_uvshim_tcp_connect_start(
+                        connect, tcp, owner, address_storage, 1, 0)
                     uv.uv_timer_start(timer, shim.titan_uvshim_timer_cb, 0, 0)
                     uv.uv_fs_stat(nil, req, ".", shim.titan_uvshim_fs_cb)
-                    if loop_storage and timer_storage and fs_storage then
+                    if loop_storage and timer_storage and fs_storage and
+                        dns_storage and tcp_storage and address_storage then
                         return uv.uv_loop_t.alignof
                             + uv.uv_timer_t.alignof + uv.uv_fs_t.alignof
+                            + uv.uv_getaddrinfo_t.alignof
+                            + uv.uv_tcp_t.alignof
+                            + shim.titan_uvshim_address.alignof
                     end
                     return 0
                 end
@@ -167,12 +207,22 @@ describe("native libuv shim", function()
         assert.match("sizeof%(uv_loop_t%)", result)
         assert.match("sizeof%(uv_timer_t%)", result)
         assert.match("sizeof%(uv_fs_t%)", result)
+        assert.match("sizeof%(uv_getaddrinfo_t%)", result)
+        assert.match("sizeof%(uv_tcp_t%)", result)
+        assert.match("sizeof%(titan_uvshim_address%)", result)
         assert.match("_Alignof%(uv_loop_t%)", result)
         assert.match("_Alignof%(uv_timer_t%)", result)
         assert.match("_Alignof%(uv_fs_t%)", result)
+        assert.match("_Alignof%(uv_getaddrinfo_t%)", result)
+        assert.match("_Alignof%(uv_tcp_t%)", result)
+        assert.match("_Alignof%(titan_uvshim_address%)", result)
         assert.match("%(%(uv_loop_t %*%)%(lua_newuserdatauv", result)
         assert.match("%(%(uv_timer_t %*%)%(lua_newuserdatauv", result)
         assert.match("%(%(uv_fs_t %*%)%(lua_newuserdatauv", result)
+        assert.match("%(%(uv_getaddrinfo_t %*%)%(lua_newuserdatauv", result)
+        assert.match("%(%(uv_tcp_t %*%)%(lua_newuserdatauv", result)
+        assert.match("%(%(titan_uvshim_address %*%)%(lua_newuserdatauv",
+            result)
         assert.match("%(%(uv_timer_cb%)%(titan_uvshim_timer_cb%)%)", result)
         assert.match("%(%(uv_fs_cb%)%(titan_uvshim_fs_cb%)%)", result)
     end)
@@ -212,7 +262,7 @@ describe("native libuv shim", function()
         end
     end)
 
-    it("runs timer, close, filesystem, layout, and buffer probes", function()
+    it("runs timer, filesystem, DNS, TCP, layout, and buffer probes", function()
         local config = bundled_libuv_config()
         local cc = shell_command_words(os.getenv("CC") or "cc")
         local lua_system_libs = "-lm"

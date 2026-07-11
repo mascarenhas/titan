@@ -115,8 +115,9 @@ COROUTINE_SO := coroutine.so
 UV_SO        := uv.so
 TIMER_SO     := timer.so
 FS_SO        := fs.so
+NET_SO       := net.so
 UV_CONFIG_STAMP := $(LIBUV_BUILD_DIR)/.titan-uv-config
-STDLIB_MODULES := coroutine uv timer fs
+STDLIB_MODULES := coroutine uv timer fs net
 STDLIB_SOS     := $(addsuffix .so,$(STDLIB_MODULES))
 STDLIB_ALIASES := $(addprefix titan/,$(STDLIB_SOS))
 ROCK_RUNTIME_SO := titan.so
@@ -438,6 +439,18 @@ $(FS_SO): stdlib/fs.titan $(UV_SO) $(RUNTIME_O) titanc \
 		TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_LDFLAGS)) \
 		$(TITANC) --stdlib-build --tree stdlib \
 		--lua-name titan.fs fs
+
+# The networking facade has the same binary-only boundary as fs: native TCP,
+# DNS, and libuv ownership remain implemented by the canonical uv image.
+$(NET_SO): stdlib/net.titan $(UV_SO) $(RUNTIME_O) titanc \
+		$(TITAN_COMPILER_LUA) Makefile | .lua/bin/lua $(LIBBT_LIB)
+	CC=$(call make_shell_quote,$(CC)) TITAN_PATH_0_11= TITAN_PATH= \
+		TITAN_STDLIB_PATH=$(call make_shell_quote,$(CURDIR)) \
+		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
+		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CFLAGS)) \
+		TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_LDFLAGS)) \
+		$(TITANC) --stdlib-build --tree stdlib \
+		--lua-name titan.net net
 
 titan/%.so: %.so
 	mkdir -p "$(@D)"

@@ -163,7 +163,8 @@ source = replace_once(source, [==[
     local write_length = bytes.length - operation.write_offset
     -- TITAN_UV_FS_TEST_WRITE_LIMIT
     operation.prepared_buffer =
-        make_buffer(bytes, operation.write_offset, write_length)
+        make_buffer(bytes, operation.write_offset, write_length,
+                    "fs.buffer.init")
 ]==], [==[
     local write_length = bytes.length - operation.write_offset
     -- TITAN_UV_FS_TEST_WRITE_LIMIT
@@ -171,7 +172,8 @@ source = replace_once(source, [==[
       write_length = test_fs_write_limit
     end
     operation.prepared_buffer =
-        make_buffer(bytes, operation.write_offset, write_length)
+        make_buffer(bytes, operation.write_offset, write_length,
+                    "fs.buffer.init")
 ]==], "partial-write clamp")
 
 source = replace_once(source, [==[
@@ -194,12 +196,14 @@ source = replace_once(source, [==[
 
 source = replace_once(source, [==[
 local function fs_dispatch(owner: uv_fs_t, event_kind: integer,
-                           result: integer, size: libuv.size_t)
+                           result: integer, size: libuv.size_t,
+                           pointer: ffi.titan_ffi_void_ptr)
   owner.metadata.callback_result = result
   owner.metadata.callback_recorded = true
 ]==], [==[
 local function fs_dispatch(owner: uv_fs_t, event_kind: integer,
-                           result: integer, size: libuv.size_t)
+                           result: integer, size: libuv.size_t,
+                           pointer: ffi.titan_ffi_void_ptr)
   local callback_operation = owner.metadata.operation
   if test_fs_close_callback_errors > 0 and
       (callback_operation.kind == FS.close or
