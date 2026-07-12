@@ -14,17 +14,31 @@ Titan is a statically-typed, ahead-of-time-compiled sister language to Lua. This
   smokes, fixed native ABI tests, and a commit-seeded 5% sample of each
   compiler/language spec file. A manual `workflow_dispatch` replaces that
   sample with the complete uncovered macOS suite; use it as the **pre-merge
-  check** with `gh workflow run ci.yml --ref <branch>`. The complete Linux
-  suite runs on three 1-core `ubuntu-slim` shards designed to remain below
-  that runner's 15-minute limit. Regular and sanitizer Linux builds each have
-  one preparation job that uploads a same-run, full-tree tar artifact for
-  their three test shards. Keep Linux dependency builds in those preparation
-  jobs and the Linux production mode smokes in the regular preparation job:
-  rebuilding them in every shard wastes aggregate billed runner time even
-  when the workflow's wall-clock critical path is unchanged. The full-tree
-  archive is intentional because partial output archives lose source/output
-  timestamp ordering and trigger Make rebuilds; it also preserves `.lua`,
-  executable bits, and standard-library symlinks.
+  check** with `gh workflow run ci.yml --ref <branch>`. Each complete Linux
+  flow uses two 1-core `ubuntu-slim` jobs designed to remain below that
+  runner's 15-minute limit. The regular build job runs compiler/language plus
+  serial and net/OS tests on its warm tree, and uploads a same-run, full-tree
+  tar artifact for one uv/timer/fs consumer. The sanitizer build job similarly
+  runs timer/fs itself so its very large instrumented-C compilation keeps the
+  warm compiler/filesystem state, then one consumer runs core/uv followed by
+  net/OS. Keep Linux dependency builds in those producer jobs and the Linux
+  production mode smokes in the regular producer: rebuilding them in a
+  consumer wastes aggregate billed runner time even when the workflow's
+  wall-clock critical path is unchanged. Pack the regular artifact before the
+  mode smoke replaces the bundled `uv.so`, but upload it only after both modes
+  pass; repacking the system-linked tree makes every facade stale and shifts
+  recompilation into a consumer. The full-tree archive is intentional because
+  partial output archives lose source/output timestamp ordering and trigger
+  Make rebuilds; it also preserves `.lua`, executable bits, and
+  standard-library symlinks. Run the serial and net/OS library groups before
+  compiler coverage in that producer. Several compiler specs deliberately
+  rebuild `titan.o`; reversing the order makes the packaging gate see a newer
+  runtime object and rebuild the complete standard library without exercising
+  a new configuration. The complete macOS flow likewise runs the library
+  group before its uncovered compiler group. CI snapshots and restores the
+  prepared `titan.o` around compiler-only groups so their deliberate rebuilds
+  also do not stale an unchanged coroutine image before the production mode
+  smoke.
 - **A built Lua 5.5.0 source tree at `./lua-5.5.0`** (gitignored). Generated C includes Lua *internal* headers (`lobject.h`, `lgc.h`, `lvm.h`, ...) and links `lua-5.5.0/src/liblua.a`. Easiest: `make lua` (downloads the tarball, extracts, builds with `MYCFLAGS=-fPIC`, auto-picking the `linux`/`macosx` target from `uname`; override with `make lua LUA_PLATFORM=...`). By hand:
   ```
   wget http://www.lua.org/ftp/lua-5.5.0.tar.gz && tar zxvf lua-5.5.0.tar.gz
@@ -53,7 +67,7 @@ make test                                           # `luarocks make` + `luarock
 luarocks make && bash spec/support/ci_test_groups.sh compiler  # CI's covered compiler/language group
 bash spec/support/ci_test_groups.sh libraries       # CI's complete uncovered library group
 bash spec/support/ci_test_groups.sh macos-canary SEED # replay the sampled macOS test gate locally
-make clean                                           # remove generated artifacts; `make distclean` also removes the lua tree
+make clean                                           # remove generated artifacts; `make distclean` also removes downloaded Lua/libbacktrace/libuv trees
 
 busted                                              # full test suite — MUST run from repo root (all driver paths are relative); busted recurses into spec/ subdirs
 busted spec/parser_spec.lua                         # single spec file
@@ -77,7 +91,16 @@ full outside coverage. If a library suite exposes a compiler coverage gap, add
 a small focused compiler/checker test for that code path instead of covering
 the library integration suite.
 
-**Spec layout.** Pure, layer-level specs live at `spec/` root (`abi_spec`, `cdriver_spec`, `cpp_spec`, `ctypes_spec`, `driver_spec`, `foreigntypes_spec`, `lexer_spec`, `location_spec`, `parser_spec`, `symtab_spec`, `types_spec`, `util_spec`). Checker-only specs (run the checker, never generate or execute code) live under `spec/checker/` (`checker_spec`, `first_class_functions_spec`, `so_rehydration_spec`, `variadic_spec`, `uv_spec`, `timer_spec`, `fs_spec`, `net_spec`, `os_spec`); end-to-end specs (generate C, compile, run) under `spec/coder/` (`coder_spec`, `first_class_functions_spec`, `so_import_spec`, `variadic_spec`, `uv_spec`, `uv_phase2_spec`, `uv_states_spec`, `uv_fault_spec`, `uv_bootstrap_spec`, `uv_phase4_spec`, `timer_spec`, `fs_spec`, `fs_fault_spec`, `fs_packaging_spec`, `net_spec`, `net_fault_spec`, `net_packaging_spec`, `os_signal_spec`, `os_signal_fault_spec`, `os_helpers_spec`, `os_helpers_fault_spec`, `os_process_spec`, `os_process_fault_spec`, `os_packaging_spec`). Keep the two apart — a checker assertion belongs in `spec/checker/`, anything that compiles and runs in `spec/coder/`. A sizable per-feature suite gets its own topical `<feature>_spec.lua` in each layer (e.g. `variadic_spec`, `first_class_functions_spec`) rather than bloating the catch-all `checker_spec`/`coder_spec`. All driver/artifact paths inside specs are relative to the repo-root CWD (not the spec file), so subdir specs still run from repo root. The shared compile/run/import scaffolding (`parse`, `compile`, `call`, `run_coder`, `generate_modules`, `build_so_chain`, `check_against_so`, `run_checker`, `check_errs`, `DEPTH_PROBE`, ...) lives in **`spec/support/helpers.lua`**, `require`d as `spec.support.helpers`; libuv runtime tests use `spec/support/phase2.lua` plus the filesystem, networking, and OS/signal extensions `spec/support/phase3.lua`, `spec/support/phase5.lua`, and `spec/support/phase6.lua` to compile into unique `/tmp` workspaces while treating Makefile-owned standard DSOs and the libuv archive as read-only. These helpers may not clean or rebuild shared root artifacts during Busted. Helpers pull in luassert explicitly (`require 'luassert'`) because a `require`d module does not inherit busted's `assert` global. Set `helpers.verbose = true` (was a per-file `local verbose`) to print `cc` command lines and keep generated `.c` files.
+**Spec layout.** Pure, layer-level specs live at `spec/` root (`abi_spec`, `cdriver_spec`, `cpp_spec`, `ctypes_spec`, `driver_spec`, `foreigntypes_spec`, `lexer_spec`, `location_spec`, `parser_spec`, `symtab_spec`, `types_spec`, `util_spec`); serial native-build and packaging gates also live there (`libuv_build_spec`, `libuv_shim_spec`, `rockspec_spec`). Checker-only specs (run the checker, never generate or execute code) live under `spec/checker/` (`checker_spec`, `first_class_functions_spec`, `so_rehydration_spec`, `variadic_spec`, `uv_spec`, `timer_spec`, `fs_spec`, `net_spec`, `os_spec`); end-to-end specs (generate C, compile, run) under `spec/coder/` (`coder_spec`, `first_class_functions_spec`, `so_import_spec`, `variadic_spec`, `uv_spec`, `uv_phase2_spec`, `uv_states_spec`, `uv_fault_spec`, `uv_bootstrap_spec`, `uv_phase4_spec`, `timer_spec`, `timer_packaging_spec`, `fs_spec`, `fs_fault_spec`, `fs_packaging_spec`, `net_spec`, `net_fault_spec`, `net_packaging_spec`, `os_signal_spec`, `os_signal_fault_spec`, `os_helpers_spec`, `os_helpers_fault_spec`, `os_process_spec`, `os_process_fault_spec`, `os_packaging_spec`). Keep the two apart — a checker assertion belongs in `spec/checker/`, anything that compiles and runs in `spec/coder/`. A sizable per-feature suite gets its own topical `<feature>_spec.lua` in each layer (e.g. `variadic_spec`, `first_class_functions_spec`) rather than bloating the catch-all `checker_spec`/`coder_spec`. All driver/artifact paths inside specs are relative to the repo-root CWD (not the spec file), so subdir specs still run from repo root. The shared compile/run/import scaffolding (`parse`, `compile`, `call`, `run_coder`, `generate_modules`, `build_so_chain`, `check_against_so`, `run_checker`, `check_errs`, `DEPTH_PROBE`, ...) lives in **`spec/support/helpers.lua`**, `require`d as `spec.support.helpers`; libuv runtime tests use `spec/support/phase2.lua` plus the filesystem, networking, and OS/signal extensions `spec/support/phase3.lua`, `spec/support/phase5.lua`, and `spec/support/phase6.lua` to compile into unique `/tmp` workspaces while treating Makefile-owned standard DSOs and the libuv archive as read-only. These helpers may not clean or rebuild shared root artifacts during Busted. Helpers pull in luassert explicitly (`require 'luassert'`) because a `require`d module does not inherit busted's `assert` global. Set `helpers.verbose = true` (was a per-file `local verbose`) to print `cc` command lines and keep generated `.c` files.
+
+The standard-library facade checker specs use
+`spec/support/stdlib_checker.lua` to check the current `uv.titan` source once
+per Busted process, then rehydrate a fresh serialized public interface for
+each isolated facade/negative test. Do not recursively recheck the full uv
+source in every case; that repeats dependency work without adding coverage.
+The serial coroutine suite temporarily exercises its root build path, but must
+restore the prepared runtime/coroutine artifacts and mtimes in teardown so a
+later packaging test does not rebuild the whole standard library.
 
 Filesystem transition faults have their own end-to-end suite,
 `spec/coder/fs_fault_spec.lua`; its isolated source transformer is
@@ -149,7 +172,7 @@ Lexing and parsing are fused in one LPegLabel/relabel grammar; `lexer.lua` expor
 - Module state is a `Udata` (`_mod`), allocated with `luaS_newudata(L, 0, NUPVALS)`: there is no reserved user value; the module's user values (0-based) hold module globals, exported-function canonical closures, imported-module `Udata`s, record metatables, and per-record static-namespace tables. There is **no** Lua-facing module table — `require` returns the module `Udata` itself (so `type(require "m")` is `"userdata"`), and all member access (functions, variables, record namespaces `m.Rec`) flows through a metatable `__index`/`__newindex` over a unified name→slot member map; functions and record namespaces are served read-only (assigning errors), variables coerce in/out, and the "not found" message is "member '%s' does not exist". A record instance is likewise a single `Udata` (fields in `uv[0..N-1]`, type identity is its metatable pointer (no raw payload), metatable on the udata).
 - First-class function values are `CClosure`s (upvalue 0 = `_mod`, then a type tag, the native pointer, and one upvalue per captured variable); anonymous functions/closures and `obj:method` **bound methods** are supported as values. A captured-and-mutated local is stored in a **box** so all sharers mutate one cell. A box is a Lua *userdata* (not a CClosure): a userdata's GC traversal calls `genlink`, so an overwriting write can use the back barrier (`luaC_barrierback`) without floating fresh values to the old generation — which a `CClosure`/forward-barrier box would (`traverseCclosure` does not call `genlink`). Two forms, chosen by `not types.is_gc(typ)`: a 1-user-value `Udata` holding a `TValue` written with `luaC_barrierback` (GC-typed values), or a 0-user-value `Udata0` holding the raw non-GC C scalar inline via `getudatamem` (no tagging, no barrier). Boxes are module-internal (never cross a module boundary), so the representation is not part of the ABI.
 - Generated C must follow the style contract in `pretty.lua`'s header (K&R braces, `/**/` comments never after `{`, braces mandatory) — `reindent_c` is purely heuristic.
-- Deps with available `.titan` source are compiled in and statically linked; `.so`-only deps are dlopened at runtime by the generated `_init`. Every compiled module exports `luaopen_<mangled>`, `<mangled>_init` (idempotent), `<mangled>_abi` (returns `TITAN_VER`; checked before trusting a `.so`), and `<mangled>_types` (serialized interface type, evaluated with `types.lua` as env).
+- Ordinary deps with available `.titan` source are compiled in and statically linked; ordinary `.so`-only deps are dlopened at runtime by the generated `_init`. Reserved standard imports are the deliberate exception: applications resolve their interfaces and canonical images from `TITAN_STDLIB_PATH` and load those images through the standard-library registry instead of compiling the standard sources into each artifact. Every compiled module exports `luaopen_<mangled>`, `<mangled>_init` (idempotent), `<mangled>_abi` (returns `TITAN_VER`; checked before trusting a `.so`), and `<mangled>_types` (serialized interface type, evaluated with `types.lua` as env).
 - `titan-runtime/titan.o` is rebuilt lazily by the driver from `titan.c` (dlopen-based module loader, error handler with C backtrace). `titanlib.c` is a separate optional Lua module exposing `titan.backtrace()`.
 - **Operand expressions are not auto-hoisted: a template that references one more than once multiply-evaluates its side effects.** `codeexp` returns `(stats, expr)` and for a non-GC return `codecall` puts the bare call *in `expr`*, not in `stats` — so a `render` template that splices an operand into several slots (as the naive integer `//`/`%`/shift templates did) calls a side-effecting operand like `f() // g()` multiple times, unlike Lua which evaluates each once. Materialize each operand into a temp first (the pattern in `codebinaryop`'s `and`/`or` arms, the shift/idiv/mod helpers, and the mixed int/float comparison branch).
 

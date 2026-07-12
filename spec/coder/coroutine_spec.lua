@@ -1,4 +1,15 @@
 local assert = require 'luassert'
+local lfs = require 'lfs'
+
+local ROOT_ARTIFACTS = {
+    "titan-runtime/titan.o",
+    "titan-runtime/titan_coro.o",
+    "coroutine.so",
+    "titan/coroutine.so",
+    "stdlib/coroutine.c",
+    "stdlib/coroutine.o",
+}
+local artifact_backup
 
 local function file_exists(path)
     local f = io.open(path, "r")
@@ -23,6 +34,44 @@ end
 local function exec_ok(cmd)
     local ok, _, code = os.execute(cmd)
     return ok == true or ok == 0 or code == 0
+end
+
+local function preserve_root_artifacts()
+    assert.is_nil(artifact_backup)
+    local directory = os.tmpname() .. "-titan-coroutine-artifacts"
+    os.remove(directory)
+    assert.truthy(lfs.mkdir(directory))
+    local entries = {}
+    for index, path in ipairs(ROOT_ARTIFACTS) do
+        local attributes = lfs.symlinkattributes(path)
+        local entry = { path = path, mode = attributes and attributes.mode }
+        if entry.mode == "link" then
+            local pipe = assert(io.popen("readlink " .. path))
+            entry.target = assert(pipe:read("*l"))
+            assert.truthy(pipe:close())
+        elseif entry.mode then
+            entry.backup = directory .. "/" .. index
+            assert.truthy(exec_ok("cp -p " .. path .. " " .. entry.backup))
+        end
+        entries[#entries + 1] = entry
+    end
+    artifact_backup = { directory = directory, entries = entries }
+end
+
+local function restore_root_artifacts()
+    local backup = assert(artifact_backup)
+    for _, entry in ipairs(backup.entries) do
+        os.remove(entry.path)
+        if entry.mode == "link" then
+            assert.truthy(exec_ok(
+                "ln -s " .. entry.target .. " " .. entry.path))
+        elseif entry.mode then
+            assert.truthy(exec_ok(
+                "cp -p " .. entry.backup .. " " .. entry.path))
+        end
+    end
+    assert.truthy(exec_ok("rm -rf " .. backup.directory))
+    artifact_backup = nil
 end
 
 local function write_file(path, contents)
@@ -148,6 +197,7 @@ end
 
 describe("coroutine standard module", function()
     setup(function()
+        preserve_root_artifacts()
         os.remove("titan-runtime/titan.o")
         build_coroutine()
     end)
@@ -155,6 +205,7 @@ describe("coroutine standard module", function()
     after_each(clean_test_artifacts)
     teardown(function()
         clean_coroutine_artifacts()
+        restore_root_artifacts()
     end)
 
     it("creates a coroutine and returns a callback result", function()

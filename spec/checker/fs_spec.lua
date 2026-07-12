@@ -2,6 +2,7 @@ local checker = require "titan-compiler.checker"
 local driver = require "titan-compiler.driver"
 local parser = require "titan-compiler.parser"
 local types = require "titan-compiler.types"
+local stdlib_checker = require "spec.support.stdlib_checker"
 
 local function read_file(path)
     local file = assert(io.open(path, "rb"))
@@ -37,9 +38,6 @@ local function check_modules(extra)
     types.registry = {}
     driver.imported = {}
     local modules = {
-        coroutine = read_file("stdlib/coroutine.titan"),
-        uv = read_file("stdlib/uv.titan"),
-        timer = read_file("stdlib/timer.titan"),
         fs = read_file("stdlib/fs.titan"),
     }
     for name, source in pairs(extra or {}) do modules[name] = source end
@@ -49,7 +47,7 @@ local function check_modules(extra)
     assert.truthy(ast, parse_errors and
         parser.error_to_string(parse_errors, root .. ".titan"))
     return checker.check(root, ast, source, root .. ".titan",
-        driver.tableloader(modules, {}, {}))
+        driver.tableloader(modules, stdlib_checker.uv_imported(), {}))
 end
 
 describe("fs Phase 3 public interface", function()

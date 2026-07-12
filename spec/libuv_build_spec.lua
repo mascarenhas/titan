@@ -67,6 +67,27 @@ local function run_facade_dry_run(mode, module)
 end
 
 describe("libuv Makefile configuration", function()
+    it("keys the bundled archive on effective build inputs", function()
+        local file = assert(io.open("Makefile", "rb"))
+        local makefile = file:read("*a")
+        file:close()
+        assert.truthy(makefile:find(
+            "$(LIBUV_LIB): $(LIBUV_EXTRACTED) $(LIBUV_BUILD_CONFIG)",
+            1, true), makefile)
+        assert.falsy(makefile:find(
+            "$(LIBUV_LIB): $(LIBUV_EXTRACTED) Makefile", 1, true),
+            makefile)
+        for _, input in ipairs({
+            "LIBUV_VERSION=$(LIBUV_VERSION)",
+            "LIBUV_BUILD_PROFILE=$(LIBUV_BUILD_PROFILE)",
+            "LIBUV_BUILD_TYPE=$(LIBUV_BUILD_TYPE)",
+            "LIBUV_CMAKE_FLAGS=$(LIBUV_CMAKE_FLAGS)",
+            "LIBUV_BUILD_CFLAGS=$(LIBUV_BUILD_CFLAGS)",
+        }) do
+            assert.truthy(makefile:find(input, 1, true), input)
+        end
+    end)
+
     it("preserves complete pkg-config flags and Linux feature macros",
        function()
         local ok, output, why, code = run_make("Linux")

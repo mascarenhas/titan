@@ -8,11 +8,11 @@ on:
   workflow_dispatch:  # Manual trigger to run the complete macOS suite
 
 jobs:
-  # Build and install the regular Linux tree once per workflow. The three
-  # isolated 1-core test shards restore this exact tree instead of each paying
-  # to rebuild Lua, libbacktrace, libuv, Titan, and the test dependencies.
+  # Build and install the regular Linux tree once per workflow. Keep the
+  # compiler and net/OS groups on this warm 1-core runner; the isolated uv/fs
+  # consumer restores the pristine tree instead of rebuilding dependencies.
   prepare-linux:
-    name: prepare (ubuntu-slim, regular)
+    name: regular (ubuntu-slim, build+compiler+net-os)
     runs-on: ubuntu-slim
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -45,7 +45,9 @@ jobs:
             libuv-v${{ env.LIBUV_VERSION }}
             libuv-v${{ env.LIBUV_VERSION }}.tar.gz
             libuv-build
-          key: ubuntu-slim-${{ runner.arch }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-${{ hashFiles('Makefile') }}
+          key: ubuntu-slim-${{ runner.arch }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}
+          restore-keys: |
+            ubuntu-slim-${{ runner.arch }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-
 
       - name: Install regular build dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake curl libreadline-dev libuv1-dev pkg-config
@@ -92,17 +94,9 @@ jobs:
       - name: Prepare test dependencies
         run: ./luarocks test --prepare
 
-      - name: Build child-process smoke fixture
-        run: |
-          process_smoke_dir="$RUNNER_TEMP/titan-process-smoke"
-          mkdir -p "$process_smoke_dir"
-          TITAN_PROCESS_SMOKE_DIR="$process_smoke_dir" \
-            .lua/bin/lua -e 'require("spec.support.phase6").process_child(assert(os.getenv("TITAN_PROCESS_SMOKE_DIR")))'
-          echo "TITAN_PROCESS_SMOKE_CHILD=$process_smoke_dir/process_child" >> "$GITHUB_ENV"
-
-      - name: Smoke-test system libuv mode and mode switching
-        run: bash spec/support/ci_libuv_mode_smoke.sh
-
+      # Archive the pristine bundled build before the mode smoke replaces its
+      # uv.so. Upload remains after the smoke, so a portability failure still
+      # prevents downstream runner spend.
       # A tar layer preserves the complete checkout's source/output mtimes,
       # hidden .lua tree, executable bits, and relative standard-library
       # symlinks. Direct artifact upload avoids wrapping it in another archive.
@@ -113,6 +107,48 @@ jobs:
             --exclude='./.git' \
             --exclude='./libbacktrace/.git' \
             -czf "$RUNNER_TEMP/titan-linux-prepared.tar.gz" .
+
+      # These groups plus preparation remain comfortably below ubuntu-slim's
+      # 15-minute cap. Keeping them here avoids two separately rounded jobs and
+      # reuses the warm compiler/filesystem state. Run the library groups first:
+      # compiler specs deliberately rebuild titan.o, which would otherwise make
+      # the serial packaging gate rebuild the complete standard library again.
+      - name: Run serial and net/OS library tests without coverage
+        run: |
+          bash spec/support/ci_test_groups.sh library-serial
+          bash spec/support/ci_test_groups.sh library-net-os
+
+      # Compiler specs intentionally rebuild the root runtime object. Restore
+      # the prepared copy so the production smoke does not relink an unchanged
+      # coroutine prerequisite before switching the uv boundary.
+      - name: Run compiler and language tests with coverage
+        run: |
+          cp -p titan-runtime/titan.o \
+            "$RUNNER_TEMP/titan-runtime-before-compiler.o"
+          bash spec/support/ci_test_groups.sh compiler
+          cp -p "$RUNNER_TEMP/titan-runtime-before-compiler.o" \
+            titan-runtime/titan.o
+
+      - name: Generate coverage report
+        run: |
+          luacov "titan%-compiler" "/spec/[^/]+.lua" "titanc"
+          grep "Summary" -B1 -A1000 luacov.report.out
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          fail_ci_if_error: false
+
+      - name: Build child-process smoke fixture
+        run: |
+          process_smoke_dir="$RUNNER_TEMP/titan-process-smoke"
+          mkdir -p "$process_smoke_dir"
+          TITAN_PROCESS_SMOKE_DIR="$process_smoke_dir" \
+            .lua/bin/lua -e 'require("spec.support.phase6").process_child(assert(os.getenv("TITAN_PROCESS_SMOKE_DIR")))'
+          echo "TITAN_PROCESS_SMOKE_CHILD=$process_smoke_dir/process_child" >> "$GITHUB_ENV"
+
+      - name: Smoke-test bundled and system libuv modes
+        run: bash spec/support/ci_libuv_mode_smoke.sh
 
       - name: Upload prepared Linux tree
         uses: actions/upload-artifact@v7
@@ -125,14 +161,9 @@ jobs:
           overwrite: true
 
   test-linux:
-    name: test (ubuntu-slim, ${{ matrix.group }})
+    name: test (ubuntu-slim, library-uv-fs)
     needs: prepare-linux
     runs-on: ubuntu-slim
-
-    strategy:
-      fail-fast: false
-      matrix:
-        group: [compiler, library-uv-fs, library-net-os]
 
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -157,38 +188,10 @@ jobs:
           echo "LUA_CPATH=$(./luarocks path --lr-cpath);;" >> "$GITHUB_ENV"
           .lua/bin/lua -v
 
-      # Compiler and language tests own LuaCov coverage. Library suites still
-      # run in full outside LuaCov because it cannot measure Titan/C libraries.
-      - name: Run selected Linux test group
-        run: |
-          case "${{ matrix.group }}" in
-            compiler)
-              bash spec/support/ci_test_groups.sh compiler
-              ;;
-            library-uv-fs)
-              bash spec/support/ci_test_groups.sh library-uv-fs
-              ;;
-            library-net-os)
-              bash spec/support/ci_test_groups.sh library-serial
-              bash spec/support/ci_test_groups.sh library-net-os
-              ;;
-            *)
-              echo "unknown regular test group: ${{ matrix.group }}" >&2
-              exit 2
-              ;;
-          esac
-
-      - name: Generate coverage report
-        if: success() && matrix.group == 'compiler'
-        run: |
-          luacov "titan%-compiler" "/spec/[^/]+.lua" "titanc"
-          grep "Summary" -B1 -A1000 luacov.report.out
-
-      - name: Upload coverage to Codecov
-        if: success() && matrix.group == 'compiler'
-        uses: codecov/codecov-action@v7
-        with:
-          fail_ci_if_error: false
+      # Library suites run in full outside LuaCov because it cannot measure
+      # Titan/C library implementations.
+      - name: Run uv/timer/fs library tests without coverage
+        run: bash spec/support/ci_test_groups.sh library-uv-fs
 
   # macOS remains independent of Linux preparation: a transient Linux build
   # failure must not suppress the per-push canary or a manually requested full
@@ -228,7 +231,9 @@ jobs:
             libuv-v${{ env.LIBUV_VERSION }}
             libuv-v${{ env.LIBUV_VERSION }}.tar.gz
             libuv-build
-          key: macos-latest-${{ runner.arch }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-${{ hashFiles('Makefile') }}
+          key: macos-latest-${{ runner.arch }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}
+          restore-keys: |
+            macos-latest-${{ runner.arch }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-
 
       - name: Install system dependencies (macOS)
         run: brew install cmake libuv pkgconf
@@ -309,31 +314,43 @@ jobs:
             .lua/bin/lua -e 'require("spec.support.phase6").process_child(assert(os.getenv("TITAN_PROCESS_SMOKE_DIR")))'
           echo "TITAN_PROCESS_SMOKE_CHILD=$process_smoke_dir/process_child" >> "$GITHUB_ENV"
 
-      # The normal build above proves the pinned, self-contained archive path.
-      # Also compile and load against the platform development package, then
-      # switch back without cleaning. This locks the optional pkg-config mode
-      # and the Makefile configuration stamp on both supported hosts.
-      - name: Smoke-test system libuv mode and mode switching
-        run: bash spec/support/ci_libuv_mode_smoke.sh
-
+      # Keep either compiler path's intentional titan.o rebuild local to its
+      # tests, preserving the prepared stdlib image for the production smoke.
       - name: Run complete macOS tests without coverage
         if: github.event_name == 'workflow_dispatch'
         run: |
-          bash spec/support/ci_test_groups.sh compiler-uncovered
           bash spec/support/ci_test_groups.sh libraries
+          cp -p titan-runtime/titan.o \
+            "$RUNNER_TEMP/titan-runtime-before-compiler.o"
+          bash spec/support/ci_test_groups.sh compiler-uncovered
+          cp -p "$RUNNER_TEMP/titan-runtime-before-compiler.o" \
+            titan-runtime/titan.o
 
       # Busted has no percentage-sampling option. The repository sampler uses
-      # the commit as a replayable seed, while the production smokes above and
-      # fixed native tests keep every async portability boundary represented.
+      # the commit as a replayable seed, while the production smokes in this
+      # job and fixed native tests keep every async portability boundary
+      # represented.
       - name: Run macOS canary tests
         if: github.event_name != 'workflow_dispatch'
-        run: bash spec/support/ci_test_groups.sh macos-canary "$GITHUB_SHA"
+        run: |
+          cp -p titan-runtime/titan.o \
+            "$RUNNER_TEMP/titan-runtime-before-compiler.o"
+          bash spec/support/ci_test_groups.sh macos-canary "$GITHUB_SHA"
+          cp -p "$RUNNER_TEMP/titan-runtime-before-compiler.o" \
+            titan-runtime/titan.o
+
+      # Run this after the bundled test suite. The smoke first exercises the
+      # existing self-contained image, then rebuilds only uv.so against the
+      # platform package; the job can end in system mode without another build.
+      - name: Smoke-test bundled and system libuv modes
+        run: bash spec/support/ci_libuv_mode_smoke.sh
 
   # The sanitizer dependency and Titan build used to consume about 3.5 minutes
-  # in every shard. Produce it once, verify its instrumentation, and distribute
-  # the exact tree to the three isolated native-memory test processes.
+  # in every shard. Produce it once, verify its instrumentation, keep the
+  # heaviest test family on that warm runner, and distribute the pristine tree
+  # to the remaining native-memory test runner.
   prepare-sanitizer:
-    name: prepare (ubuntu-slim, sanitizer)
+    name: sanitizer (ubuntu-slim, build+timer-fs)
     runs-on: ubuntu-slim
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -410,6 +427,23 @@ jobs:
             --exclude='./libbacktrace/.git' \
             -czf "$RUNNER_TEMP/titan-sanitizer-prepared.tar.gz" .
 
+      # Sanitized transformed-C compilation benefits materially from the
+      # compiler and filesystem state warmed by the root sanitizer build. Run
+      # the heaviest affected group here after packing the pristine tree;
+      # the remaining groups run as separate processes against one pristine
+      # restored copy of that archive.
+      - name: Run native async sanitizer gate (timer-fs)
+        env:
+          TITAN_TEST_EXTRA_CFLAGS: ${{ env.SANITIZER_FLAGS }}
+          TITAN_TEST_EXTRA_LDFLAGS: ${{ env.SANITIZER_FLAGS }}
+        run: |
+          ./lua_modules/bin/busted -o gtest -v \
+            spec/coder/uv_states_spec.lua \
+            spec/coder/timer_spec.lua \
+            spec/coder/fs_spec.lua \
+            spec/coder/fs_fault_spec.lua \
+            spec/coder/uv_phase4_spec.lua
+
       - name: Upload prepared sanitizer tree
         uses: actions/upload-artifact@v7
         with:
@@ -420,18 +454,13 @@ jobs:
           retention-days: 1
           overwrite: true
 
-  # Linux owns the native-memory release gate. Each family gets its own 1-core
-  # runner so the expensive transformed uv variants stay below the slim
-  # runner's limit without duplicating the sanitizer build.
+  # Linux owns the native-memory release gate. The remaining core/uv and net/OS
+  # families share one 1-core consumer; their measured sum stays below the
+  # slim runner's limit without another rounded job or sanitizer build.
   sanitizer:
-    name: sanitizer (${{ matrix.group }})
+    name: sanitizer (core-uv + net-os)
     needs: prepare-sanitizer
     runs-on: ubuntu-slim
-
-    strategy:
-      fail-fast: false
-      matrix:
-        group: [core-uv, timer-fs, net-os]
 
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -463,43 +492,31 @@ jobs:
           readelf -Ws .lua/bin/lua | grep __asan_
           readelf -Ws uv.so | grep __ubsan_
 
-      - name: Run native async sanitizer gate (${{ matrix.group }})
+      - name: Run native async sanitizer gate (core-uv)
         env:
           TITAN_TEST_EXTRA_CFLAGS: ${{ env.SANITIZER_FLAGS }}
           TITAN_TEST_EXTRA_LDFLAGS: ${{ env.SANITIZER_FLAGS }}
           MINICORO_TEST_CC: gcc
           MINICORO_TEST_CFLAGS: ${{ env.SANITIZER_FLAGS }}
         run: |
-          case "${{ matrix.group }}" in
-            core-uv)
-              ./lua_modules/bin/busted -o gtest -v \
-                spec/minicoro_spec.lua \
-                spec/coder/uv_spec.lua \
-                spec/coder/uv_phase2_spec.lua \
-                spec/coder/uv_fault_spec.lua \
-                spec/coder/uv_bootstrap_spec.lua
-              ;;
-            timer-fs)
-              ./lua_modules/bin/busted -o gtest -v \
-                spec/coder/uv_states_spec.lua \
-                spec/coder/timer_spec.lua \
-                spec/coder/fs_spec.lua \
-                spec/coder/fs_fault_spec.lua \
-                spec/coder/uv_phase4_spec.lua
-              ;;
-            net-os)
-              ./lua_modules/bin/busted -o gtest -v \
-                spec/coder/net_spec.lua \
-                spec/coder/net_fault_spec.lua \
-                spec/coder/os_signal_spec.lua \
-                spec/coder/os_signal_fault_spec.lua \
-                spec/coder/os_helpers_spec.lua \
-                spec/coder/os_helpers_fault_spec.lua \
-                spec/coder/os_process_spec.lua \
-                spec/coder/os_process_fault_spec.lua
-              ;;
-            *)
-              echo "unknown sanitizer group: ${{ matrix.group }}" >&2
-              exit 2
-              ;;
-          esac
+          ./lua_modules/bin/busted -o gtest -v \
+            spec/minicoro_spec.lua \
+            spec/coder/uv_spec.lua \
+            spec/coder/uv_phase2_spec.lua \
+            spec/coder/uv_fault_spec.lua \
+            spec/coder/uv_bootstrap_spec.lua
+
+      - name: Run native async sanitizer gate (net-os)
+        env:
+          TITAN_TEST_EXTRA_CFLAGS: ${{ env.SANITIZER_FLAGS }}
+          TITAN_TEST_EXTRA_LDFLAGS: ${{ env.SANITIZER_FLAGS }}
+        run: |
+          ./lua_modules/bin/busted -o gtest -v \
+            spec/coder/net_spec.lua \
+            spec/coder/net_fault_spec.lua \
+            spec/coder/os_signal_spec.lua \
+            spec/coder/os_signal_fault_spec.lua \
+            spec/coder/os_helpers_spec.lua \
+            spec/coder/os_helpers_fault_spec.lua \
+            spec/coder/os_process_spec.lua \
+            spec/coder/os_process_fault_spec.lua

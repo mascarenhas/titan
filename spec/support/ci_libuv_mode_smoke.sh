@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 
 # Exercise the installed system libuv and the pinned bundled archive through
-# the production standard-library images. The caller builds the owned process
-# fixture once and passes it through TITAN_PROCESS_SMOKE_CHILD.
+# the production standard-library images. Only uv.so consumes libuv's headers
+# and linker inputs; the higher-level modules import its stable Titan ABI. Keep
+# those modules in place while swapping uv.so so this canary does not rebuild
+# four identical DSOs in each mode. The caller builds the owned process fixture
+# once and passes it through TITAN_PROCESS_SMOKE_CHILD.
 
 set -euo pipefail
 
@@ -87,14 +90,17 @@ run_mode_smoke() {
         "$TITAN_PROCESS_SMOKE_CHILD"
 }
 
-LIBUV_MODE=system make stdlib
+# The preceding rock build and tests leave every standard module in bundled
+# mode. Exercise that image before changing any build output.
+run_mode_smoke bundled
+check_aliases
+check_libuv_dependency absent
+
+# Only the uv binary boundary consumes mode-specific compile/link inputs. The
+# higher-level images intentionally remain unchanged while the system-linked
+# uv.so replaces it. CI archives/runs the bundled suite before invoking this
+# script, so the job may end here without paying for an identical rebuild.
+LIBUV_MODE=system make uv.so titan/uv.so
 run_mode_smoke system
 check_aliases
 check_libuv_dependency present
-
-# Finish in the normal bundled configuration so the prepared Linux artifact
-# is ready for every isolated test shard without another standard-library
-# rebuild.
-LIBUV_MODE=bundled make stdlib
-run_mode_smoke bundled
-check_libuv_dependency absent

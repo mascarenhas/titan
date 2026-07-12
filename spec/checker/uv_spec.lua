@@ -1,14 +1,7 @@
 local checker = require "titan-compiler.checker"
 local driver = require "titan-compiler.driver"
-local parser = require "titan-compiler.parser"
 local types = require "titan-compiler.types"
-
-local function read_file(path)
-    local file = assert(io.open(path, "rb"))
-    local contents = file:read("*a")
-    file:close()
-    return contents
-end
+local stdlib_checker = require "spec.support.stdlib_checker"
 
 local function configure_foreign_headers()
     local cppflags = { "-Ilibuv-v1.52.1/include" }
@@ -27,19 +20,7 @@ end
 local function check_uv()
     types.registry = {}
     driver.imported = {}
-    local modules = {
-        uv = read_file("stdlib/uv.titan"),
-        coroutine = read_file("stdlib/coroutine.titan"),
-    }
-    local source = modules.uv
-    local ast, parse_errors = parser.parse("stdlib/uv.titan", source)
-    assert.truthy(ast, parse_errors and
-        parser.error_to_string(parse_errors, "stdlib/uv.titan"))
-    local modtype, errors = checker.check("uv", ast, source,
-        "stdlib/uv.titan", driver.tableloader(modules, {}, {}))
-    assert.truthy(modtype)
-    assert.equals(0, #errors, table.concat(errors, "\n"))
-    return modtype
+    return stdlib_checker.source_uv()
 end
 
 local function signature(modtype, name)
@@ -249,17 +230,13 @@ describe("uv public interface", function()
 
     it("permits public error construction but not opaque native/Task forging",
     function()
-        local source = read_file("stdlib/uv.titan")
-        local coroutine_source = read_file("stdlib/coroutine.titan")
         local function check_consumer(consumer)
             types.registry = {}
             driver.imported = {}
             local _, errors = checker.checkimport("consumer",
                 driver.tableloader({
                     consumer = consumer,
-                    uv = source,
-                    coroutine = coroutine_source,
-                }, {}, {}))
+                }, stdlib_checker.uv_imported(), {}))
             return table.concat(errors, "\n")
         end
 

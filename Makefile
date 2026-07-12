@@ -24,6 +24,7 @@ LIBUV_VERSION     := 1.52.1
 LIBUV_MIN_VERSION := 1.43.0
 LIBUV_SRC_DIR     := libuv-v$(LIBUV_VERSION)
 LIBUV_BUILD_DIR   := libuv-build
+LIBUV_BUILD_CONFIG := $(LIBUV_BUILD_DIR)/.titan-libuv-build-config
 LIBUV_TARBALL     := $(LIBUV_SRC_DIR).tar.gz
 LIBUV_URL         := https://dist.libuv.org/dist/v$(LIBUV_VERSION)/$(LIBUV_TARBALL)
 LIBUV_SHA256      := 66d511b9e6e334c0e62279eb234fbfb2b3110b1479c09b95b44c7afca8cff9e7
@@ -31,6 +32,7 @@ LIBUV_BUNDLED_LIB := $(LIBUV_BUILD_DIR)/libuv.a
 LIBUV_EXTRACTED   := $(LIBUV_SRC_DIR)/.titan-extracted
 LIBUV_PKG_CONFIG  ?= pkg-config
 LIBUV_BUILD_TYPE  ?= Release
+LIBUV_BUILD_PROFILE ?= static-pic-release-tests-off-v1
 LIBUV_CMAKE_FLAGS := -DLIBUV_BUILD_SHARED=OFF -DBUILD_TESTING=OFF \
 	-DCMAKE_POSITION_INDEPENDENT_CODE=ON \
 	-DCMAKE_BUILD_TYPE=$(LIBUV_BUILD_TYPE)
@@ -135,13 +137,14 @@ TITAN_COMPILER_LUA := $(wildcard titan-compiler/*.lua c-parser/*.lua) typed.lua
 
 # Manual/prefix installs place the canonical Titan binary once and let Lua's
 # qualified module path reach that same mapped DSO through a relative symlink.
-# Custom layouts may override all three destinations/relative-target inputs.
+# Custom layouts may override each destination and the relative alias target.
 PREFIX                     ?= /usr/local
 TITAN_ABI_VERSION          := 0.11
 LUA_ABI_VERSION            ?= 5.5
 TITAN_STDLIB_DIR           ?= $(PREFIX)/lib/titan/$(TITAN_ABI_VERSION)
 LUA_LIBDIR                 ?= $(PREFIX)/lib/lua/$(LUA_ABI_VERSION)
 TITAN_STDLIB_ALIAS_PREFIX  ?= ../../../titan/$(TITAN_ABI_VERSION)
+TITAN_SHARE_DIR            ?= $(PREFIX)/share/titan
 
 # libbacktrace is cloned + built into ./libbacktrace (gitignored), mirroring the
 # ./lua-5.5.0 tree. The generated C and the runtime include its backtrace.h and
@@ -284,7 +287,32 @@ $(LIBUV_EXTRACTED): $(LIBUV_TARBALL)
 	}
 	@touch "$@"
 
-$(LIBUV_LIB): $(LIBUV_EXTRACTED) Makefile
+# Make does not otherwise notice changes to command-line CMake variables, while
+# depending on the complete Makefile rebuilds libuv after unrelated edits.
+# Preserve this stamp's mtime when every effective native-build input is
+# unchanged; CI uses the same profile string as its cross-run cache key.
+$(LIBUV_BUILD_CONFIG): FORCE
+	@mkdir -p "$(@D)"
+	@tmp="$@.tmp"; \
+	{ printf '%s\n' \
+		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
+		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
+		$(call make_shell_quote,CC=$(CC)) \
+		$(call make_shell_quote,AR=$(AR)) \
+		$(call make_shell_quote,RANLIB=$(RANLIB)) \
+		$(call make_shell_quote,CMAKE_GENERATOR=$(CMAKE_GENERATOR)) \
+		$(call make_shell_quote,LIBUV_VERSION=$(LIBUV_VERSION)) \
+		$(call make_shell_quote,LIBUV_BUILD_PROFILE=$(LIBUV_BUILD_PROFILE)) \
+		$(call make_shell_quote,LIBUV_BUILD_TYPE=$(LIBUV_BUILD_TYPE)) \
+		$(call make_shell_quote,LIBUV_CMAKE_FLAGS=$(LIBUV_CMAKE_FLAGS)) \
+		$(call make_shell_quote,LIBUV_BUILD_CFLAGS=$(LIBUV_BUILD_CFLAGS)); } > "$$tmp"; \
+	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
+		rm -f "$$tmp"; \
+	else \
+		mv -f "$$tmp" "$@"; \
+	fi
+
+$(LIBUV_LIB): $(LIBUV_EXTRACTED) $(LIBUV_BUILD_CONFIG)
 	@$(MAKE) --no-print-directory check-libuv-tools
 	@echo "==> Configuring libuv $(LIBUV_VERSION) (static, PIC, $(LIBUV_BUILD_TYPE))"
 	cmake -S "$(LIBUV_SRC_DIR)" -B "$(LIBUV_BUILD_DIR)" \
@@ -471,13 +499,16 @@ titan/%.so: %.so
 	ln -s ../$*.so "$@"
 
 install-stdlib: stdlib ## Install canonical standard modules and relative Lua aliases
-	mkdir -p "$(TITAN_STDLIB_DIR)" "$(LUA_LIBDIR)/titan"
+	mkdir -p "$(TITAN_STDLIB_DIR)" "$(LUA_LIBDIR)/titan" \
+		"$(TITAN_SHARE_DIR)/LICENSES"
 	@set -e; for module in $(STDLIB_MODULES); do \
 		cp "$$module.so" "$(TITAN_STDLIB_DIR)/$$module.so"; \
 		rm -f "$(LUA_LIBDIR)/titan/$$module.so"; \
 		ln -s "$(TITAN_STDLIB_ALIAS_PREFIX)/$$module.so" \
 			"$(LUA_LIBDIR)/titan/$$module.so"; \
 	done
+	cp THIRD_PARTY_NOTICES.md "$(TITAN_SHARE_DIR)/THIRD_PARTY_NOTICES.md"
+	cp LICENSES/libuv-LICENSE "$(TITAN_SHARE_DIR)/LICENSES/libuv-LICENSE"
 
 # LuaRocks' builtin backend cannot run the Titan compiler before it collects
 # install files. Its make backend calls this target first, then copies every
