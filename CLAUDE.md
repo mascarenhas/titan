@@ -16,7 +16,15 @@ Titan is a statically-typed, ahead-of-time-compiled sister language to Lua. This
   sample with the complete uncovered macOS suite; use it as the **pre-merge
   check** with `gh workflow run ci.yml --ref <branch>`. The complete Linux
   suite runs on three 1-core `ubuntu-slim` shards designed to remain below
-  that runner's 15-minute limit.
+  that runner's 15-minute limit. Regular and sanitizer Linux builds each have
+  one preparation job that uploads a same-run, full-tree tar artifact for
+  their three test shards. Keep Linux dependency builds in those preparation
+  jobs and the Linux production mode smokes in the regular preparation job:
+  rebuilding them in every shard wastes aggregate billed runner time even
+  when the workflow's wall-clock critical path is unchanged. The full-tree
+  archive is intentional because partial output archives lose source/output
+  timestamp ordering and trigger Make rebuilds; it also preserves `.lua`,
+  executable bits, and standard-library symlinks.
 - **A built Lua 5.5.0 source tree at `./lua-5.5.0`** (gitignored). Generated C includes Lua *internal* headers (`lobject.h`, `lgc.h`, `lvm.h`, ...) and links `lua-5.5.0/src/liblua.a`. Easiest: `make lua` (downloads the tarball, extracts, builds with `MYCFLAGS=-fPIC`, auto-picking the `linux`/`macosx` target from `uname`; override with `make lua LUA_PLATFORM=...`). By hand:
   ```
   wget http://www.lua.org/ftp/lua-5.5.0.tar.gz && tar zxvf lua-5.5.0.tar.gz
