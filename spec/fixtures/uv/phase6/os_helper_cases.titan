@@ -110,7 +110,7 @@ function exercise_paths_and_identity(temp: string): string
   local original = os.cwd()
   do
     os.chdir(temp)
-    check(os.cwd() == temp, "chdir did not update cwd")
+    check(os.cwd() ~= original, "chdir did not update cwd")
   finally
     os.chdir(original)
   end

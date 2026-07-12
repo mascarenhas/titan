@@ -12,7 +12,7 @@ assert(not uv.__test_phase6_has_active_runtime())
 assert(cases.exercise_environment(envname) == "environment-helpers-ok")
 assert(cases.exercise_nul_rejections(envname, temp) ==
     "os-nul-rejections-ok")
-assert(cases.exercise_paths_and_identity(temp) ==
+assert(cases.exercise_paths_and_identity(temp .. "/stdlib") ==
     "path-and-identity-helpers-ok")
 assert(not uv.__test_phase6_has_active_runtime(),
     "synchronous OS helper created a Runtime")
@@ -29,7 +29,7 @@ assert(not uv.__test_phase6_has_active_runtime())
 -- The same synchronous functions remain usable after a complete asynchronous
 -- Runtime generation has been created and torn down.
 assert(cases.exercise_environment(envname) == "environment-helpers-ok")
-assert(cases.exercise_paths_and_identity(temp) ==
+assert(cases.exercise_paths_and_identity(temp .. "/stdlib") ==
     "path-and-identity-helpers-ok")
 assert(not uv.__test_phase6_has_active_runtime())
 assert(lfs.currentdir() == original_cwd)
