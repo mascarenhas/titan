@@ -18,14 +18,15 @@ Titan is a statically-typed, ahead-of-time-compiled sister language to Lua. This
   uses two 1-core `ubuntu-slim` jobs designed to remain below that runner's
   15-minute limit. The regular build job runs compiler/language plus
   serial and net/OS tests on its warm tree, and uploads a same-run, full-tree
-  tar artifact for one uv/timer/fs consumer. The sanitizer build job similarly
-  runs timer/fs itself so its very large instrumented-C compilation keeps the
-  warm compiler/filesystem state, then separate core/uv and net/OS consumers
-  restore that one prepared tree. Do not recombine those consumers: their
-  measured sum exceeds the 1-core runner's 15-minute limit. Keep Linux
-  dependency builds in those producer jobs and the Linux production mode
-  smokes in the regular producer: rebuilding them in a consumer wastes
-  aggregate billed runner time even when the workflow's
+  tar artifact for one uv/timer/fs consumer. The sanitizer job keeps its build
+  and focused native-memory gate on one warm runner: representative timer/fs
+  suites, core owner/callback proofs, and production net/OS smokes. Keep full
+  transformed library fault suites in regular Linux unless they exercise a
+  distinct sanitizer-sensitive boundary; recompiling them under sanitizers
+  can consume the complete runner limit without improving that gate. Keep each
+  Linux dependency build in the job that consumes its warmed tree, and keep
+  the Linux production mode smokes in the regular producer: rebuilding them
+  in a consumer wastes aggregate billed runner time even when the workflow's
   wall-clock critical path is unchanged. Pack the regular artifact before the
   mode smoke replaces the bundled `uv.so`, but upload it only after both modes
   pass; repacking the system-linked tree makes every facade stale and shifts

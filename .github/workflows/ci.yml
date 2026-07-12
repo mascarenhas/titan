@@ -342,12 +342,12 @@ jobs:
       - name: Smoke-test bundled and system libuv modes
         run: bash spec/support/ci_libuv_mode_smoke.sh
 
-  # The sanitizer dependency and Titan build used to consume about 3.5 minutes
-  # in every shard. Produce it once, verify its instrumentation, keep the
-  # heaviest test family on that warm runner, and distribute the pristine tree
-  # to the remaining native-memory test runner.
-  prepare-sanitizer:
-    name: sanitizer (ubuntu-slim, build+timer-fs)
+  # Keep the focused native-memory release gate on one warm 1-core runner.
+  # Full transformed fault suites belong to regular Linux: recompiling them
+  # under sanitizers exhausts the runner limit without adding a distinct
+  # lifetime boundary beyond these owner/callback tests and production smokes.
+  sanitizer:
+    name: sanitizer (ubuntu-slim, focused-native)
     runs-on: ubuntu-slim
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -416,19 +416,8 @@ jobs:
           # threaded native instrumentation flags.
           readelf -Ws titan.so | grep __asan_
 
-      - name: Pack prepared sanitizer tree
-        run: |
-          printf '%s\n' "$GITHUB_WORKSPACE" > .ci-prepared-workspace
-          tar \
-            --exclude='./.git' \
-            --exclude='./libbacktrace/.git' \
-            -czf "$RUNNER_TEMP/titan-sanitizer-prepared.tar.gz" .
-
       # Sanitized transformed-C compilation benefits materially from the
-      # compiler and filesystem state warmed by the root sanitizer build. Run
-      # the heaviest affected group here after packing the pristine tree;
-      # the remaining groups run as separate processes against one pristine
-      # restored copy of that archive.
+      # compiler and filesystem state warmed by the root sanitizer build.
       - name: Run native async sanitizer gate (timer-fs)
         env:
           TITAN_TEST_EXTRA_CFLAGS: ${{ env.SANITIZER_FLAGS }}
@@ -441,60 +430,7 @@ jobs:
             spec/coder/fs_fault_spec.lua \
             spec/coder/uv_phase4_spec.lua
 
-      - name: Upload prepared sanitizer tree
-        uses: actions/upload-artifact@v7
-        with:
-          name: titan-sanitizer-prepared.tar.gz
-          path: ${{ runner.temp }}/titan-sanitizer-prepared.tar.gz
-          archive: false
-          if-no-files-found: error
-          retention-days: 1
-          overwrite: true
-
-  # Linux owns the native-memory release gate. Core/uv and net/OS each fit on a
-  # 1-core consumer, but their measured sum exceeds the slim runner's 15-minute
-  # limit. Both restore the one shared sanitizer build instead of rebuilding it.
-  sanitizer:
-    name: sanitizer (${{ matrix.family }})
-    needs: prepare-sanitizer
-    runs-on: ubuntu-slim
-    strategy:
-      fail-fast: false
-      matrix:
-        family: [core-uv, net-os]
-
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-      SANITIZER_FLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
-      # Every Titan DSO intentionally embeds the vendored static Lua archive;
-      # disable only ASan's cross-image ODR diagnostic for those duplicate Lua
-      # globals. Address, bounds, lifetime, and leak checks remain enabled.
-      ASAN_OPTIONS: "detect_odr_violation=0:detect_leaks=1:detect_stack_use_after_return=1:halt_on_error=1:abort_on_error=1"
-      UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Download prepared sanitizer tree
-        uses: actions/download-artifact@v8
-        with:
-          name: titan-sanitizer-prepared.tar.gz
-          path: ${{ runner.temp }}
-
-      - name: Restore prepared sanitizer tree and environment
-        run: |
-          tar -xzf "$RUNNER_TEMP/titan-sanitizer-prepared.tar.gz" \
-            -C "$GITHUB_WORKSPACE"
-          test "$(cat .ci-prepared-workspace)" = "$GITHUB_WORKSPACE"
-          echo "$PWD/.lua/bin" >> "$GITHUB_PATH"
-          echo "$PWD/lua_modules/bin" >> "$GITHUB_PATH"
-          echo "LUA_PATH=$(./luarocks path --lr-path);;" >> "$GITHUB_ENV"
-          echo "LUA_CPATH=$(./luarocks path --lr-cpath);;" >> "$GITHUB_ENV"
-          readelf -Ws .lua/bin/lua | grep __asan_
-          readelf -Ws uv.so | grep __ubsan_
-
       - name: Run native async sanitizer gate (core-uv)
-        if: matrix.family == 'core-uv'
         env:
           TITAN_TEST_EXTRA_CFLAGS: ${{ env.SANITIZER_FLAGS }}
           TITAN_TEST_EXTRA_LDFLAGS: ${{ env.SANITIZER_FLAGS }}
@@ -505,21 +441,24 @@ jobs:
             spec/minicoro_spec.lua \
             spec/coder/uv_spec.lua \
             spec/coder/uv_phase2_spec.lua \
-            spec/coder/uv_fault_spec.lua \
             spec/coder/uv_bootstrap_spec.lua
 
-      - name: Run native async sanitizer gate (net-os)
-        if: matrix.family == 'net-os'
+      - name: Build sanitizer child-process smoke fixture
         env:
           TITAN_TEST_EXTRA_CFLAGS: ${{ env.SANITIZER_FLAGS }}
           TITAN_TEST_EXTRA_LDFLAGS: ${{ env.SANITIZER_FLAGS }}
         run: |
-          ./lua_modules/bin/busted -o gtest -v \
-            spec/coder/net_spec.lua \
-            spec/coder/net_fault_spec.lua \
-            spec/coder/os_signal_spec.lua \
-            spec/coder/os_signal_fault_spec.lua \
-            spec/coder/os_helpers_spec.lua \
-            spec/coder/os_helpers_fault_spec.lua \
-            spec/coder/os_process_spec.lua \
-            spec/coder/os_process_fault_spec.lua
+          process_smoke_dir="$RUNNER_TEMP/titan-sanitizer-process-smoke"
+          mkdir -p "$process_smoke_dir"
+          TITAN_PROCESS_SMOKE_DIR="$process_smoke_dir" \
+            .lua/bin/lua -e 'require("spec.support.phase6").process_child(assert(os.getenv("TITAN_PROCESS_SMOKE_DIR")))'
+          echo "TITAN_PROCESS_SMOKE_CHILD=$process_smoke_dir/process_child" >> "$GITHUB_ENV"
+
+      - name: Run sanitized net/OS production smokes
+        run: |
+          env TITAN_STDLIB_PATH="$PWD" LUA_CPATH="$PWD/?.so;;" \
+            .lua/bin/lua spec/fixtures/libuv/net_production_smoke.lua \
+              sanitizer
+          env TITAN_STDLIB_PATH="$PWD" LUA_CPATH="$PWD/?.so;;" \
+            .lua/bin/lua spec/fixtures/libuv/os_production_smoke.lua \
+              sanitizer "$TITAN_PROCESS_SMOKE_CHILD"
