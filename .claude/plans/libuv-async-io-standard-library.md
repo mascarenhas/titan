@@ -1,11 +1,11 @@
 # Titan libuv async I/O standard library
 
-Status: implementation complete through Phase 6. Portable OS helpers,
-one-shot signals, child processes, binary stdio pipes, retained exit status,
-and concurrent `communicate` are covered by normal, deterministic fault, and
-packaging suites. Phase 7 documentation and CI integration are complete;
-focused and integrated local async gates plus the current-head Linux and
-sanitizer push gates are green. The complete manual macOS gate remains.
+Status: complete. Portable OS helpers, one-shot signals, child processes,
+binary stdio pipes, retained exit status, and concurrent `communicate` are
+covered by normal, deterministic fault, and packaging suites. Phase 7
+documentation and CI integration are complete; focused and integrated local
+async gates, final Linux/sanitizer push run 29210101752, and complete manual
+macOS run 29210586062 are green.
 The design below is based on the current repository checkout, the sketch in
 `/tmp/uv-io.md`, the implemented `coroutine`/`uv` standard modules, focused
 Titan and libuv prototypes, and the public libuv 1.x contracts.
@@ -2113,9 +2113,9 @@ Exit criteria:
 
 ### Phase 7 - packaging and documentation
 
-Status: implementation complete; focused and integrated local async gates plus
-the current-head Linux and sanitizer push gates pass. The complete manual
-macOS release gate remains.
+Status: complete; focused and integrated local async gates, final
+Linux/sanitizer push run 29210101752, and complete manual macOS run 29210586062
+pass.
 
 Files:
 
@@ -2352,7 +2352,7 @@ snapshot can otherwise shadow source edits.
 - [x] Reserved standard identities cannot be captured by local source/binaries,
       and canonical/Lua paths map one DSO/libuv instance in either load order.
 - [x] Source, `.so`-only, and standalone paths are covered.
-- [ ] Incremental, generational, sanitizer, Linux, and macOS gates pass.
+- [x] Incremental, generational, sanitizer, Linux, and macOS gates pass.
 - [x] Both language and implementation manuals, README, CLAUDE, Makefile,
       rockspec, and CI are updated in the same change.
 
