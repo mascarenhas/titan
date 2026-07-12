@@ -118,16 +118,15 @@ jobs:
           bash spec/support/ci_test_groups.sh library-serial
           bash spec/support/ci_test_groups.sh library-net-os
 
-      # Compiler specs intentionally rebuild the root runtime object. Restore
-      # the prepared copy so the production smoke does not relink an unchanged
-      # coroutine prerequisite before switching the uv boundary.
+      # Compiler specs intentionally rebuild and clean root artifacts. Restore
+      # the exact prepared runtime, canonical DSOs, and aliases before the
+      # production smoke.
       - name: Run compiler and language tests with coverage
         run: |
-          cp -p titan-runtime/titan.o \
-            "$RUNNER_TEMP/titan-runtime-before-compiler.o"
+          snapshot="$RUNNER_TEMP/titan-stdlib-before-compiler.tar"
+          bash spec/support/ci_stdlib_snapshot.sh save "$snapshot"
           bash spec/support/ci_test_groups.sh compiler
-          cp -p "$RUNNER_TEMP/titan-runtime-before-compiler.o" \
-            titan-runtime/titan.o
+          bash spec/support/ci_stdlib_snapshot.sh restore "$snapshot"
 
       - name: Generate coverage report
         run: |
@@ -314,17 +313,16 @@ jobs:
             .lua/bin/lua -e 'require("spec.support.phase6").process_child(assert(os.getenv("TITAN_PROCESS_SMOKE_DIR")))'
           echo "TITAN_PROCESS_SMOKE_CHILD=$process_smoke_dir/process_child" >> "$GITHUB_ENV"
 
-      # Keep either compiler path's intentional titan.o rebuild local to its
-      # tests, preserving the prepared stdlib image for the production smoke.
+      # Keep either compiler path's root cleanup/rebuilds local to its tests,
+      # preserving the prepared stdlib image for the production smoke.
       - name: Run complete macOS tests without coverage
         if: github.event_name == 'workflow_dispatch'
         run: |
           bash spec/support/ci_test_groups.sh libraries
-          cp -p titan-runtime/titan.o \
-            "$RUNNER_TEMP/titan-runtime-before-compiler.o"
+          snapshot="$RUNNER_TEMP/titan-stdlib-before-compiler.tar"
+          bash spec/support/ci_stdlib_snapshot.sh save "$snapshot"
           bash spec/support/ci_test_groups.sh compiler-uncovered
-          cp -p "$RUNNER_TEMP/titan-runtime-before-compiler.o" \
-            titan-runtime/titan.o
+          bash spec/support/ci_stdlib_snapshot.sh restore "$snapshot"
 
       # Busted has no percentage-sampling option. The repository sampler uses
       # the commit as a replayable seed, while the production smokes in this
@@ -333,11 +331,10 @@ jobs:
       - name: Run macOS canary tests
         if: github.event_name != 'workflow_dispatch'
         run: |
-          cp -p titan-runtime/titan.o \
-            "$RUNNER_TEMP/titan-runtime-before-compiler.o"
+          snapshot="$RUNNER_TEMP/titan-stdlib-before-compiler.tar"
+          bash spec/support/ci_stdlib_snapshot.sh save "$snapshot"
           bash spec/support/ci_test_groups.sh macos-canary "$GITHUB_SHA"
-          cp -p "$RUNNER_TEMP/titan-runtime-before-compiler.o" \
-            titan-runtime/titan.o
+          bash spec/support/ci_stdlib_snapshot.sh restore "$snapshot"
 
       # Run this after the bundled test suite. The smoke first exercises the
       # existing self-contained image, then rebuilds only uv.so against the

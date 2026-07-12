@@ -36,9 +36,9 @@ Titan is a statically-typed, ahead-of-time-compiled sister language to Lua. This
   runtime object and rebuild the complete standard library without exercising
   a new configuration. The complete macOS flow likewise runs the library
   group before its uncovered compiler group. CI snapshots and restores the
-  prepared `titan.o` around compiler-only groups so their deliberate rebuilds
-  also do not stale an unchanged coroutine image before the production mode
-  smoke.
+  prepared `titan.o`, canonical standard DSOs, and Lua aliases around
+  compiler-only groups so their deliberate root cleanup/rebuilds cannot stale
+  or remove the production image before the mode smoke.
 - **A built Lua 5.5.0 source tree at `./lua-5.5.0`** (gitignored). Generated C includes Lua *internal* headers (`lobject.h`, `lgc.h`, `lvm.h`, ...) and links `lua-5.5.0/src/liblua.a`. Easiest: `make lua` (downloads the tarball, extracts, builds with `MYCFLAGS=-fPIC`, auto-picking the `linux`/`macosx` target from `uname`; override with `make lua LUA_PLATFORM=...`). By hand:
   ```
   wget http://www.lua.org/ftp/lua-5.5.0.tar.gz && tar zxvf lua-5.5.0.tar.gz
@@ -92,6 +92,12 @@ a small focused compiler/checker test for that code path instead of covering
 the library integration suite.
 
 **Spec layout.** Pure, layer-level specs live at `spec/` root (`abi_spec`, `cdriver_spec`, `cpp_spec`, `ctypes_spec`, `driver_spec`, `foreigntypes_spec`, `lexer_spec`, `location_spec`, `parser_spec`, `symtab_spec`, `types_spec`, `util_spec`); serial native-build and packaging gates also live there (`libuv_build_spec`, `libuv_shim_spec`, `rockspec_spec`). Checker-only specs (run the checker, never generate or execute code) live under `spec/checker/` (`checker_spec`, `first_class_functions_spec`, `so_rehydration_spec`, `variadic_spec`, `uv_spec`, `timer_spec`, `fs_spec`, `net_spec`, `os_spec`); end-to-end specs (generate C, compile, run) under `spec/coder/` (`coder_spec`, `first_class_functions_spec`, `so_import_spec`, `variadic_spec`, `uv_spec`, `uv_phase2_spec`, `uv_states_spec`, `uv_fault_spec`, `uv_bootstrap_spec`, `uv_phase4_spec`, `timer_spec`, `timer_packaging_spec`, `fs_spec`, `fs_fault_spec`, `fs_packaging_spec`, `net_spec`, `net_fault_spec`, `net_packaging_spec`, `os_signal_spec`, `os_signal_fault_spec`, `os_helpers_spec`, `os_helpers_fault_spec`, `os_process_spec`, `os_process_fault_spec`, `os_packaging_spec`). Keep the two apart — a checker assertion belongs in `spec/checker/`, anything that compiles and runs in `spec/coder/`. A sizable per-feature suite gets its own topical `<feature>_spec.lua` in each layer (e.g. `variadic_spec`, `first_class_functions_spec`) rather than bloating the catch-all `checker_spec`/`coder_spec`. All driver/artifact paths inside specs are relative to the repo-root CWD (not the spec file), so subdir specs still run from repo root. The shared compile/run/import scaffolding (`parse`, `compile`, `call`, `run_coder`, `generate_modules`, `build_so_chain`, `check_against_so`, `run_checker`, `check_errs`, `DEPTH_PROBE`, ...) lives in **`spec/support/helpers.lua`**, `require`d as `spec.support.helpers`; libuv runtime tests use `spec/support/phase2.lua` plus the filesystem, networking, and OS/signal extensions `spec/support/phase3.lua`, `spec/support/phase5.lua`, and `spec/support/phase6.lua` to compile into unique `/tmp` workspaces while treating Makefile-owned standard DSOs and the libuv archive as read-only. These helpers may not clean or rebuild shared root artifacts during Busted. Helpers pull in luassert explicitly (`require 'luassert'`) because a `require`d module does not inherit busted's `assert` global. Set `helpers.verbose = true` (was a per-file `local verbose`) to print `cc` command lines and keep generated `.c` files.
+
+New or modified specs that generate compiler fixtures in the repository root
+must remove only their exact module artifacts. The grouped CI commands also
+snapshot and restore the prepared runtime, canonical standard-library images,
+and aliases around legacy compiler suites that still clean root artifacts;
+later production smokes deliberately consume that restored image.
 
 The standard-library facade checker specs use
 `spec/support/stdlib_checker.lua` to check the current `uv.titan` source once

@@ -13,14 +13,27 @@
 -- run-time behaviour of the same path lives in spec/coder/so_import_spec.lua.
 local h = require 'spec.support.helpers'
 local types = require 'titan-compiler.types'
-local so_check = h.check_against_so
+local generated_modules = {}
+
+local function clean_generated_modules()
+    for name in pairs(generated_modules) do
+        os.remove(name .. ".c")
+        os.remove(name .. ".o")
+        os.remove(name .. ".so")
+    end
+    generated_modules = {}
+end
+
+local function so_check(deps, ...)
+    for _, dep in ipairs(deps) do
+        generated_modules[dep.name] = true
+    end
+    return h.check_against_so(deps, ...)
+end
 
 describe("typechecker rehydration of .so-only imports", function()
     setup(function () os.remove("titan-runtime/titan.o") end)
-    after_each(function ()
-        os.execute("rm -f *.o *.so")
-        os.execute("rm -f *.c")
-    end)
+    after_each(clean_generated_modules)
 
     it("rehydrates a function signature and checks calls against it", function ()
         local dep = { name = "rhfoo", src = [[
