@@ -112,5 +112,8 @@ Fault-source variants count callback arrival, calls into the DNS-result release
 shim, handle close, pending owners, and TCP resources. The DNS release counter
 observes the Titan-to-C shim call; the physical `uv_freeaddrinfo` executes
 synchronously inside that C helper rather than in instrumented Titan code.
-Linux ASan/UBSan runs those variants; manual macOS CI repeats the normal suite
-and linkage checks.
+Regular Linux and manual macOS CI run those variants. The focused Linux
+ASan/UBSan gate instead uses the production DNS/TCP smoke, including a delayed
+reader that keeps a large `uv_write_t` pending across Task cancellation,
+coroutine unwind, forced GC, exact binary delivery, and a follow-up write.
+Manual macOS CI also repeats the normal linkage checks.

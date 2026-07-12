@@ -2254,7 +2254,7 @@ Linux push CI:
 2. Build/cache pinned libuv.
 3. Build/install the rock and standard modules.
 4. Run focused sanitizer/lifetime job.
-5. Run full coverage suite.
+5. Run the full regular suite, with LuaCov only on compiler/language specs.
 
 Manual macOS pre-merge CI:
 

@@ -346,8 +346,11 @@ failed-spawn and exit-before-close ordering, callback repair, observed helper
 failure, request cleanup/cancellation faults, trace propagation, GC, sequential
 sessions, standalone bootstrap, canonical aliases, LuaRocks ownership, and
 bundled/system libuv topology. Linux CI also rebuilds Lua, libbacktrace, libuv,
-the Titan runtime, standard modules, and isolated fault variants under
-ASan/UBSan. Its
+the Titan runtime, and standard modules under ASan/UBSan, then runs
+representative timer/FS and core owner/callback suites plus production net/OS
+smokes. Exhaustive transformed fault variants remain in regular Linux CI; the
+sanitizer net smoke specifically keeps a large write pending across Task
+cancellation, unwind, and forced GC. Its
 stack-use-after-return coverage relies on `minicoro.h` announcing every native
 coroutine stack switch to the ASan fiber API, including tagged and stacked
 terminal transfers. In that mode minicoro retains its stack-corruption sentinel
