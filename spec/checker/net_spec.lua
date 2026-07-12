@@ -137,6 +137,9 @@ describe("net Phase 5 public interface", function()
             function bad_field(connection: net.Connection): value
               return connection.handle
             end
+            function bad_native_field(handle: uv.uv_tcp_t): value
+              return handle.handle
+            end
             local function takes_connection(connection: net.Connection)
               connection:close()
             end
@@ -152,17 +155,8 @@ describe("net Phase 5 public interface", function()
             message)
         assert.match("field 'handle' not found in record 'net%.Connection'",
             message)
-        assert.match("expected net%.Connection", message)
-    end)
-
-    it("keeps the native pointer field local to uv", function()
-        local _, errors = check_modules({ consumer = [[
-            local uv = import "uv"
-            function leak(handle: uv.uv_tcp_t): value
-              return handle.handle
-            end
-        ]] })
         assert.match("field 'handle' not found in record 'uv%.uv_tcp_t'",
-            table.concat(errors, "\n"))
+            message)
+        assert.match("expected net%.Connection", message)
     end)
 end)

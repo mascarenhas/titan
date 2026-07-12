@@ -1059,6 +1059,7 @@ describe("Titan type checker", function()
                 local v: value = 1
                 local of_v = of or v
                 local v_f = v or f
+                local inferred_boolean = b or f
             end
         ]]
         local ok, err, ast = run_checker(code)
@@ -1074,6 +1075,7 @@ describe("Titan type checker", function()
         assert.same(types.Float(), ast[1].block.stats[12].exps[1]._type)
         assert.same(types.Value(), ast[1].block.stats[14].exps[1]._type)
         assert.same(types.Value(), ast[1].block.stats[15].exps[1]._type)
+        assert.same(types.Boolean(), ast[1].block.stats[16].exps[1]._type)
     end)
 
     for _, op in ipairs({"|", "&", "<<", ">>"}) do

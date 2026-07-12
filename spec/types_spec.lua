@@ -12,6 +12,12 @@ describe("Titan types", function()
         assert.same("(integer) -> (integer, string)", types.tostring(f))
     end)
 
+    it("pretty-prints a method with one return type", function()
+        local method = types.Method("sample.Box", "get",
+            {types.Integer()}, {types.String()}, false)
+        assert.same("sample.Box:get(integer): string", types.tostring(method))
+    end)
+
     -- TODO test vararg functions (types.Function with third argument as true)
 
     it("checks if a type is garbage collected", function()

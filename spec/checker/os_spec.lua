@@ -19,6 +19,17 @@ local function sorted_keys(value)
     return keys
 end
 
+local function count_plain(value, needle)
+    local count = 0
+    local start = 1
+    while true do
+        local found = value:find(needle, start, true)
+        if not found then return count end
+        count = count + 1
+        start = found + #needle
+    end
+end
+
 local function configure_foreign_headers()
     local cppflags = { "-Ilibuv-v1.52.1/include" }
     local uname = assert(io.popen("uname -s"))
@@ -64,7 +75,7 @@ describe("os Phase 6 public interface", function()
         driver.imported = {}
     end)
 
-    it("exports the portable helper, signal, and process API", function()
+    it("exports only the portable helper, signal, and process API", function()
         local modtype, errors = check_modules()
         assert.equals(0, #errors, table.concat(errors, "\n"))
         assert.same({
@@ -137,12 +148,6 @@ describe("os Phase 6 public interface", function()
         assert.equals(8, native.nfields)
         assert.equals(0, #native.fields)
         assert.falsy(native.functions.new)
-    end)
-
-    it("keeps the C boundary and uv bridge out of the serialized interface",
-    function()
-        local modtype, errors = check_modules()
-        assert.equals(0, #errors, table.concat(errors, "\n"))
         local serialized = types.serialize(modtype)
         for _, hidden in ipairs({
             "_os_", "uv_", "uv%.", "handle", "titan_uvshim", "ffi%.",
@@ -156,52 +161,33 @@ describe("os Phase 6 public interface", function()
     end)
 
     it("keeps Process opaque and enforces exact record identities", function()
-        local function consumer_errors(source)
-            local _, errors = check_modules({ consumer = source })
-            return table.concat(errors, "\n")
-        end
-
-        local constructor = consumer_errors([[
+        local _, errors = check_modules({ consumer = [[
             local os = import "os"
-            function bad_new(): os.Process return os.Process.new() end
-        ]])
-        assert.match("invalid record function 'new'", constructor)
-
-        local literal = consumer_errors([[
-            local os = import "os"
-            function bad_literal(): os.Process return {} end
-        ]])
-        assert.match("cannot construct record type 'os%.Process' outside module 'os' because it has local fields",
-            literal)
-
-        local native_constructor = consumer_errors([[
             local uv = import "uv"
+            record Other end
+            function bad_new(): os.Process return os.Process.new() end
+            function bad_literal(): os.Process return {} end
             function bad_native_new(): uv.uv_process_t
               return uv.uv_process_t.new()
             end
-        ]])
-        assert.match("invalid record function 'new'", native_constructor)
-
-        local field = consumer_errors([[
-            local os = import "os"
             function bad_field(process: os.Process): value
               return process.handle
             end
-        ]])
-        assert.match("field 'handle' not found in record 'os%.Process'",
-            field)
-
-        local identity = consumer_errors([[
-            local os = import "os"
-            record Other end
             local function takes_process(process: os.Process)
               process:wait()
             end
             function bad_receiver(other: Other)
               takes_process(other)
             end
-        ]])
-        assert.match("expected os%.Process", identity)
+        ]] })
+        local message = table.concat(errors, "\n")
+        assert.equals(2,
+            count_plain(message, "invalid record function 'new'"))
+        assert.match("cannot construct record type 'os%.Process' outside module 'os' because it has local fields",
+            message)
+        assert.match("field 'handle' not found in record 'os%.Process'",
+            message)
+        assert.match("expected os%.Process", message)
     end)
 
     it("enforces the public argument types", function()

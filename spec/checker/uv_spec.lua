@@ -65,7 +65,7 @@ describe("uv public interface", function()
         driver.imported = {}
     end)
 
-    it("locks the scheduler, filesystem, network, and OS surface", function()
+    it("locks the public surface and keeps native controls private", function()
         local modtype = check_uv()
         assert.same({
             "Cancelled", "Error", "Task", "_fs_close", "_fs_flush",
@@ -174,10 +174,6 @@ describe("uv public interface", function()
             signature(modtype, "_ticker_tick"))
         assert.equals("(uv.uv_timer_t) -> ()",
             signature(modtype, "_ticker_close"))
-    end)
-
-    it("keeps all native and scheduler controls out of the interface", function()
-        local modtype = check_uv()
         for _, name in ipairs({
             "Loop", "Runtime", "TimerControl", "DriveControl", "Request",
             "FsConstants", "Bytes", "Text", "Buffer", "Dirent",
@@ -267,7 +263,7 @@ describe("uv public interface", function()
             return table.concat(errors, "\n")
         end
 
-        local opaque = check_consumer([[
+        local private = check_consumer([[
             local uv = import "uv"
             function bad_task(): uv.Task return uv.Task.new() end
             function bad_owner(): uv.uv_timer_t return uv.uv_timer_t.new() end
@@ -275,31 +271,19 @@ describe("uv public interface", function()
               return uv.uv_process_t.new()
             end
             function bad_file(): uv.uv_file return uv.uv_file.new() end
-        ]])
-        assert.match("invalid record function 'new'", opaque)
-
-        local process_literal = check_consumer([[
-            local uv = import "uv"
-            function bad(): uv.uv_process_t return {} end
-        ]])
-        assert.match("cannot construct record type 'uv%.uv_process_t' outside module 'uv' because it has local fields",
-            process_literal)
-
-        local process_field = check_consumer([[
-            local uv = import "uv"
-            function bad(process: uv.uv_process_t): value
+            function bad_process_literal(): uv.uv_process_t return {} end
+            function bad_process_field(process: uv.uv_process_t): value
               return process.handle
             end
+            function bad_task_literal(): uv.Task return {} end
         ]])
+        assert.match("invalid record function 'new'", private)
+        assert.match("cannot construct record type 'uv%.uv_process_t' outside module 'uv' because it has local fields",
+            private)
         assert.match("field 'handle' not found in record 'uv%.uv_process_t'",
-            process_field)
-
-        local literal = check_consumer([[
-            local uv = import "uv"
-            function bad(): uv.Task return {} end
-        ]])
+            private)
         assert.match("cannot construct record type 'uv%.Task' outside module 'uv' because it has local fields",
-            literal)
+            private)
 
         local errors = check_consumer([[
             local uv = import "uv"

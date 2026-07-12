@@ -203,10 +203,14 @@ jobs:
             ! readelf -d os.so | grep -i libuv
           fi
 
-      # `luarocks test` installs the test_dependencies (busted, cluacov) declared
-      # in the rockspec and runs the suite; flags after `--` are forwarded to busted.
-      - name: Run tests
-        run: ./luarocks test -- -c -o gtest -v
+      # Compiler and language tests own LuaCov coverage. Library suites still
+      # run in full, but outside LuaCov: its debug hook cannot measure Titan/C
+      # library implementations and greatly amplifies repeated source checks.
+      - name: Run compiler and language tests with coverage
+        run: bash spec/support/ci_test_groups.sh compiler
+
+      - name: Run library tests without coverage
+        run: bash spec/support/ci_test_groups.sh libraries
 
       - name: Generate coverage report
         if: success()
@@ -300,6 +304,9 @@ jobs:
           MINICORO_TEST_CC: gcc
           MINICORO_TEST_CFLAGS: ${{ env.SANITIZER_FLAGS }}
         run: |
+          core_log="$RUNNER_TEMP/sanitizer-core.log"
+          net_os_log="$RUNNER_TEMP/sanitizer-net-os.log"
+
           ./lua_modules/bin/busted -v \
             spec/minicoro_spec.lua \
             spec/coder/uv_spec.lua \
@@ -311,6 +318,10 @@ jobs:
             spec/coder/fs_spec.lua \
             spec/coder/fs_fault_spec.lua \
             spec/coder/uv_phase4_spec.lua \
+            >"$core_log" 2>&1 &
+          core_pid=$!
+
+          ./lua_modules/bin/busted -v \
             spec/coder/net_spec.lua \
             spec/coder/net_fault_spec.lua \
             spec/coder/os_signal_spec.lua \
@@ -318,4 +329,22 @@ jobs:
             spec/coder/os_helpers_spec.lua \
             spec/coder/os_helpers_fault_spec.lua \
             spec/coder/os_process_spec.lua \
-            spec/coder/os_process_fault_spec.lua
+            spec/coder/os_process_fault_spec.lua \
+            >"$net_os_log" 2>&1 &
+          net_os_pid=$!
+
+          core_status=0
+          wait "$core_pid" || core_status=$?
+          net_os_status=0
+          wait "$net_os_pid" || net_os_status=$?
+
+          echo "::group::Sanitizer core/uv/fs worker"
+          cat "$core_log"
+          echo "::endgroup::"
+          echo "::group::Sanitizer net/OS worker"
+          cat "$net_os_log"
+          echo "::endgroup::"
+
+          if (( core_status != 0 || net_os_status != 0 )); then
+            exit 1
+          fi

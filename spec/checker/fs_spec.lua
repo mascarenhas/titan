@@ -124,7 +124,8 @@ describe("fs Phase 3 public interface", function()
         assert.not_match("__test_", serialized, 1, true)
     end)
 
-    it("rejects opaque File construction and wrong record identities", function()
+    it("rejects opaque File construction, fields, and wrong identities",
+    function()
         local _, errors = check_modules({ consumer = [[
             local fs = import "fs"
             local uv = import "uv"
@@ -135,22 +136,16 @@ describe("fs Phase 3 public interface", function()
             function bad_receiver(other: Other): boolean
               return fs.File.is_closed(other)
             end
+            function leak(file: uv.uv_file): integer
+              return file.handle as integer
+            end
         ]] })
         local message = table.concat(errors, "\n")
         assert.match("invalid record function 'new'", message)
         assert.match("cannot construct record type 'fs%.File' outside module 'fs' because it has local fields",
             message)
         assert.match("expected fs%.File", message)
-    end)
-
-    it("keeps the native descriptor field local to uv", function()
-        local _, errors = check_modules({ consumer = [[
-            local uv = import "uv"
-            function leak(file: uv.uv_file): integer
-              return file.handle as integer
-            end
-        ]] })
         assert.match("field 'handle' not found in record 'uv%.uv_file'",
-            table.concat(errors, "\n"))
+            message)
     end)
 end)

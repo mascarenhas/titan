@@ -225,10 +225,10 @@ describe("typechecker rehydration of .so-only imports", function()
         assert.match("expected integer but found string", table.concat(bad, "\n"))
     end)
 
-    it("rehydrates a record referenced transitively through a .so chain", function ()
-        -- recpoint defines Point; recwrap (a .so) returns a Point but does not
-        -- re-export it; rectop imports only recwrap. The checker must still
-        -- recover Point (from recpoint's .so) so the nominal type resolves.
+    it("rehydrates a record referenced transitively through an option", function ()
+        -- recpoint defines Point; recwrap (a .so) returns a Point? but does not
+        -- re-export it; rectop imports only recwrap. The checker must descend
+        -- through the option and recover Point so the nominal type resolves.
         local good = so_check({
             { name = "recpoint", src = [[
                 record Point
@@ -241,7 +241,7 @@ describe("typechecker rehydration of .so-only imports", function()
             ]] },
             { name = "recwrap", src = [[
                 local p = import "recpoint"
-                function make(x: float, y: float): p.Point
+                function make(x: float, y: float): p.Point?
                     return { x = x, y = y }
                 end
             ]] },
@@ -254,6 +254,8 @@ describe("typechecker rehydration of .so-only imports", function()
             end
         ]])
         assert.equal(0, #good, table.concat(good, "\n"))
+        assert.truthy(types.registry["recpoint.Point"],
+            "recpoint.Point should be registered through the option type")
     end)
 
     it("recovers a record referenced ONLY as a vararg element type through a .so chain", function ()
