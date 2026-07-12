@@ -9,7 +9,14 @@ Titan is a statically-typed, ahead-of-time-compiled sister language to Lua. This
 ## Prerequisites (important — the suite cannot run without these)
 
 - **Lua 5.5.** Both the compiler's own Lua code and the generated C target Lua 5.5 (rockspec: `lua ~> 5.5`). `make lua` builds Lua 5.5 into `.lua/` and `lua-5.5.0/`. CI (`.github/workflows/ci.yml`) builds LuaRocks from source against the vendored `.lua/` tree (no hererocks or Python dependency), then runs `luarocks init --lua-dir=$PWD/.lua` to set up the same project-local tree (`lua_modules/`) as the README workflow.
-- **CI runs Linux only on push; macOS is manual-dispatch only.** The CI matrix dynamically includes macOS (`macos-latest`) only on `workflow_dispatch` events to save runner costs. Use macOS CI as a **pre-merge check** when a feature branch is ready, not during active development. Trigger it with: `gh workflow run ci.yml --ref <branch>`.
+- **CI runs a macOS canary on every push and the complete macOS suite on
+  manual dispatch.** The push canary combines the system/bundled libuv runtime
+  smokes, fixed native ABI tests, and a commit-seeded 5% sample of each
+  compiler/language spec file. A manual `workflow_dispatch` replaces that
+  sample with the complete uncovered macOS suite; use it as the **pre-merge
+  check** with `gh workflow run ci.yml --ref <branch>`. The complete Linux
+  suite runs on three 1-core `ubuntu-slim` shards designed to remain below
+  that runner's 15-minute limit.
 - **A built Lua 5.5.0 source tree at `./lua-5.5.0`** (gitignored). Generated C includes Lua *internal* headers (`lobject.h`, `lgc.h`, `lvm.h`, ...) and links `lua-5.5.0/src/liblua.a`. Easiest: `make lua` (downloads the tarball, extracts, builds with `MYCFLAGS=-fPIC`, auto-picking the `linux`/`macosx` target from `uname`; override with `make lua LUA_PLATFORM=...`). By hand:
   ```
   wget http://www.lua.org/ftp/lua-5.5.0.tar.gz && tar zxvf lua-5.5.0.tar.gz
@@ -37,6 +44,7 @@ make stdlib                                         # build coroutine -> uv -> t
 make test                                           # `luarocks make` + `luarocks test`: (re)install the rock, then run the full suite
 luarocks make && bash spec/support/ci_test_groups.sh compiler  # CI's covered compiler/language group
 bash spec/support/ci_test_groups.sh libraries       # CI's complete uncovered library group
+bash spec/support/ci_test_groups.sh macos-canary SEED # replay the sampled macOS test gate locally
 make clean                                           # remove generated artifacts; `make distclean` also removes the lua tree
 
 busted                                              # full test suite — MUST run from repo root (all driver paths are relative); busted recurses into spec/ subdirs

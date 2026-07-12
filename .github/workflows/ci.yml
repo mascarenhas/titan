@@ -5,24 +5,30 @@ on:
     # "*" matches only top-level branch names; "**" also matches names with
     # slashes (e.g. "tooling/foo"), so every pushed branch triggers CI.
     branches: ["**"]
-  workflow_dispatch:  # Manual trigger to include macOS builds
+  workflow_dispatch:  # Manual trigger to run the complete macOS suite
 
 jobs:
-  # macOS runners are expensive; only include them on manual dispatch.
+  # The full Linux suite is split across 1-core runners so every shard stays
+  # below ubuntu-slim's 15-minute limit. Pushes also run a small macOS canary;
+  # manual dispatch replaces it with the complete macOS suite.
   matrix-setup:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
       - id: set-matrix
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo 'matrix={"include":[{"os":"ubuntu-latest","lua_os":"linux"},{"os":"macos-latest","lua_os":"macosx"}]}' >> "$GITHUB_OUTPUT"
+            mac_group=macos-full
           else
-            echo 'matrix={"include":[{"os":"ubuntu-latest","lua_os":"linux"}]}' >> "$GITHUB_OUTPUT"
+            mac_group=macos-canary
           fi
+          linux='{"os":"ubuntu-slim","lua_os":"linux","group":"compiler"},{"os":"ubuntu-slim","lua_os":"linux","group":"library-uv-fs"},{"os":"ubuntu-slim","lua_os":"linux","group":"library-net-os"}'
+          mac="{\"os\":\"macos-latest\",\"lua_os\":\"macosx\",\"group\":\"$mac_group\"}"
+          echo "matrix={\"include\":[$linux,$mac]}" >> "$GITHUB_OUTPUT"
 
   test:
+    name: test (${{ matrix.os }}, ${{ matrix.group }})
     needs: matrix-setup
     strategy:
       fail-fast: false
@@ -44,15 +50,15 @@ jobs:
         uses: actions/cache@v5
         with:
           path: lua_install
-          key: ${{ runner.os }}-luarocks-${{ env.LUAROCKS_VERSION }}
+          key: ${{ matrix.os }}-luarocks-${{ env.LUAROCKS_VERSION }}
 
       - name: Cache project lua_modules
         uses: actions/cache@v5
         with:
           path: lua_modules
-          key: ${{ runner.os }}-lua_modules-${{ hashFiles('titan-dev-1.rockspec') }}
+          key: ${{ matrix.os }}-${{ runner.arch }}-lua_modules-${{ hashFiles('titan-dev-1.rockspec') }}
           restore-keys: |
-            ${{ runner.os }}-lua_modules-
+            ${{ matrix.os }}-${{ runner.arch }}-lua_modules-
 
       - name: Cache bundled libuv source and static build
         uses: actions/cache@v5
@@ -61,7 +67,7 @@ jobs:
             libuv-v${{ env.LIBUV_VERSION }}
             libuv-v${{ env.LIBUV_VERSION }}.tar.gz
             libuv-build
-          key: ${{ runner.os }}-${{ runner.arch }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-${{ hashFiles('Makefile') }}
+          key: ${{ matrix.os }}-${{ runner.arch }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-${{ hashFiles('Makefile') }}
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -132,14 +138,17 @@ jobs:
       - name: Verify titanc shebang environment
         run: ./titanc --help
 
+      # Test-only dependencies are not installed by `luarocks make`. Prepare
+      # them on every isolated shard, including a cold lua_modules cache.
+      - name: Prepare test dependencies
+        run: ./luarocks test --prepare
+
       # Build one native argv/stdio child with the pinned bundled archive and
       # reuse it while smoke-testing both standard-library link modes. The OS
       # smoke invokes this executable directly through os.spawn/communicate.
       - name: Build child-process smoke fixture
+        if: matrix.group == 'library-uv-fs' || startsWith(matrix.group, 'macos-')
         run: |
-          # phase6's test support uses luassert; prepare the declared test
-          # dependencies here so a cold lua_modules cache is deterministic.
-          ./luarocks test --prepare
           process_smoke_dir="$RUNNER_TEMP/titan-process-smoke"
           mkdir -p "$process_smoke_dir"
           TITAN_PROCESS_SMOKE_DIR="$process_smoke_dir" \
@@ -151,6 +160,7 @@ jobs:
       # switch back without cleaning. This locks the optional pkg-config mode
       # and the Makefile configuration stamp on both supported hosts.
       - name: Smoke-test system libuv mode and mode switching
+        if: matrix.group == 'library-uv-fs' || startsWith(matrix.group, 'macos-')
         run: |
           if [ "${{ runner.os }}" = "macOS" ]; then
             export PKG_CONFIG_PATH="$(brew --prefix libuv)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
@@ -207,28 +217,57 @@ jobs:
       # run in full, but outside LuaCov: its debug hook cannot measure Titan/C
       # library implementations and greatly amplifies repeated source checks.
       - name: Run compiler and language tests with coverage
+        if: matrix.group == 'compiler'
         run: bash spec/support/ci_test_groups.sh compiler
 
-      - name: Run library tests without coverage
-        run: bash spec/support/ci_test_groups.sh libraries
+      - name: Run uv/timer/fs library tests without coverage
+        if: matrix.group == 'library-uv-fs'
+        run: bash spec/support/ci_test_groups.sh library-uv-fs
+
+      - name: Run shared-root and net/OS library tests without coverage
+        if: matrix.group == 'library-net-os'
+        run: |
+          bash spec/support/ci_test_groups.sh library-serial
+          bash spec/support/ci_test_groups.sh library-net-os
+
+      - name: Run complete macOS tests without coverage
+        if: matrix.group == 'macos-full'
+        run: |
+          bash spec/support/ci_test_groups.sh compiler-uncovered
+          bash spec/support/ci_test_groups.sh libraries
+
+      # Busted has no percentage-sampling option. The repository sampler uses
+      # the commit as a replayable seed, while the production smokes above and
+      # fixed native tests keep every async portability boundary represented.
+      - name: Run macOS canary tests
+        if: matrix.group == 'macos-canary'
+        run: bash spec/support/ci_test_groups.sh macos-canary "$GITHUB_SHA"
 
       - name: Generate coverage report
-        if: success()
+        if: success() && matrix.group == 'compiler'
         run: |
           luacov "titan%-compiler" "/spec/[^/]+.lua" "titanc"
           grep "Summary" -B1 -A1000 luacov.report.out
 
       - name: Upload coverage to Codecov
-        if: success()
+        if: success() && matrix.group == 'compiler'
         uses: codecov/codecov-action@v7
         with:
           fail_ci_if_error: false
 
   # Linux owns the native-memory release gate. Build Lua, libbacktrace, the
   # pinned static libuv, Titan's runtime shims, generated standard modules, and
-  # private fault variants with the same ASan/UBSan instrumentation.
+  # private fault variants with the same ASan/UBSan instrumentation. Each
+  # variant family gets its own 1-core runner: two instrumented uv builds in
+  # one runner contend heavily enough to erase same-runner parallelism.
   sanitizer:
-    runs-on: ubuntu-latest
+    name: sanitizer (${{ matrix.group }})
+    runs-on: ubuntu-slim
+
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [core-uv, timer-fs, net-os]
 
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -297,54 +336,43 @@ jobs:
           # threaded native instrumentation flags.
           readelf -Ws titan.so | grep __asan_
 
-      - name: Run native async sanitizer gate
+      - name: Run native async sanitizer gate (${{ matrix.group }})
         env:
           TITAN_TEST_EXTRA_CFLAGS: ${{ env.SANITIZER_FLAGS }}
           TITAN_TEST_EXTRA_LDFLAGS: ${{ env.SANITIZER_FLAGS }}
           MINICORO_TEST_CC: gcc
           MINICORO_TEST_CFLAGS: ${{ env.SANITIZER_FLAGS }}
         run: |
-          core_log="$RUNNER_TEMP/sanitizer-core.log"
-          net_os_log="$RUNNER_TEMP/sanitizer-net-os.log"
-
-          ./lua_modules/bin/busted -v \
-            spec/minicoro_spec.lua \
-            spec/coder/uv_spec.lua \
-            spec/coder/uv_phase2_spec.lua \
-            spec/coder/uv_fault_spec.lua \
-            spec/coder/uv_bootstrap_spec.lua \
-            spec/coder/uv_states_spec.lua \
-            spec/coder/timer_spec.lua \
-            spec/coder/fs_spec.lua \
-            spec/coder/fs_fault_spec.lua \
-            spec/coder/uv_phase4_spec.lua \
-            >"$core_log" 2>&1 &
-          core_pid=$!
-
-          ./lua_modules/bin/busted -v \
-            spec/coder/net_spec.lua \
-            spec/coder/net_fault_spec.lua \
-            spec/coder/os_signal_spec.lua \
-            spec/coder/os_signal_fault_spec.lua \
-            spec/coder/os_helpers_spec.lua \
-            spec/coder/os_helpers_fault_spec.lua \
-            spec/coder/os_process_spec.lua \
-            spec/coder/os_process_fault_spec.lua \
-            >"$net_os_log" 2>&1 &
-          net_os_pid=$!
-
-          core_status=0
-          wait "$core_pid" || core_status=$?
-          net_os_status=0
-          wait "$net_os_pid" || net_os_status=$?
-
-          echo "::group::Sanitizer core/uv/fs worker"
-          cat "$core_log"
-          echo "::endgroup::"
-          echo "::group::Sanitizer net/OS worker"
-          cat "$net_os_log"
-          echo "::endgroup::"
-
-          if (( core_status != 0 || net_os_status != 0 )); then
-            exit 1
-          fi
+          case "${{ matrix.group }}" in
+            core-uv)
+              ./lua_modules/bin/busted -v \
+                spec/minicoro_spec.lua \
+                spec/coder/uv_spec.lua \
+                spec/coder/uv_phase2_spec.lua \
+                spec/coder/uv_fault_spec.lua \
+                spec/coder/uv_bootstrap_spec.lua
+              ;;
+            timer-fs)
+              ./lua_modules/bin/busted -v \
+                spec/coder/uv_states_spec.lua \
+                spec/coder/timer_spec.lua \
+                spec/coder/fs_spec.lua \
+                spec/coder/fs_fault_spec.lua \
+                spec/coder/uv_phase4_spec.lua
+              ;;
+            net-os)
+              ./lua_modules/bin/busted -v \
+                spec/coder/net_spec.lua \
+                spec/coder/net_fault_spec.lua \
+                spec/coder/os_signal_spec.lua \
+                spec/coder/os_signal_fault_spec.lua \
+                spec/coder/os_helpers_spec.lua \
+                spec/coder/os_helpers_fault_spec.lua \
+                spec/coder/os_process_spec.lua \
+                spec/coder/os_process_fault_spec.lua
+              ;;
+            *)
+              echo "unknown sanitizer group: ${{ matrix.group }}" >&2
+              exit 2
+              ;;
+          esac
