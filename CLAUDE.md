@@ -14,7 +14,8 @@ Titan is a statically-typed, ahead-of-time-compiled sister language to Lua. This
   smokes, fixed native ABI tests, and a commit-seeded 5% sample of each
   compiler/language spec file. A manual `workflow_dispatch` replaces that
   sample with the complete uncovered macOS suite; use it as the **pre-merge
-  check** with `gh workflow run ci.yml --ref <branch>`. The regular Linux flow
+  check** with `gh workflow run ci.yml --ref <branch>`. Linux jobs are
+  push-only and are not repeated by that macOS dispatch. The regular Linux flow
   uses two 1-core `ubuntu-slim` jobs designed to remain below that runner's
   15-minute limit. The regular build job runs compiler/language plus
   serial and net/OS tests on its warm tree, and uploads a same-run, full-tree

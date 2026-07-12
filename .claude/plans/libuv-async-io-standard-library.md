@@ -4,8 +4,8 @@ Status: implementation complete through Phase 6. Portable OS helpers,
 one-shot signals, child processes, binary stdio pipes, retained exit status,
 and concurrent `communicate` are covered by normal, deterministic fault, and
 packaging suites. Phase 7 documentation and CI integration are complete;
-focused and integrated local async gates are green, while the authoritative
-full `make test` and external Linux/sanitizer/manual-macOS gates remain.
+focused and integrated local async gates plus the current-head Linux and
+sanitizer push gates are green. The complete manual macOS gate remains.
 The design below is based on the current repository checkout, the sketch in
 `/tmp/uv-io.md`, the implemented `coroutine`/`uv` standard modules, focused
 Titan and libuv prototypes, and the public libuv 1.x contracts.
@@ -2113,8 +2113,9 @@ Exit criteria:
 
 ### Phase 7 - packaging and documentation
 
-Status: implementation complete; focused and integrated local async gates pass,
-while the authoritative full `make test` and external release gates remain.
+Status: implementation complete; focused and integrated local async gates plus
+the current-head Linux and sanitizer push gates pass. The complete manual
+macOS release gate remains.
 
 Files:
 
