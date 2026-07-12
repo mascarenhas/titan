@@ -18,6 +18,7 @@ assert(cases.exercise_allocation_overflow() ==
     "allocation-payload-overflow-ok")
 assert(cases.exercise_retry_exhaustion() ==
     "os-buffer-retry-exhaustion-ok")
+assert(cases.exercise_enosys() == "os-enosys-no-fallback-ok")
 
 assert(not uv.__test_phase6_has_active_runtime(),
     "OS resize fault created a Runtime")

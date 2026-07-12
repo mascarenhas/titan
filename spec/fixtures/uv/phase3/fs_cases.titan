@@ -307,3 +307,26 @@ function schedule_second_session(root: string): uv.Task
     return fs.read_file(root .. "/session-two.dat")
   end)
 end
+
+function schedule_stale_file(file: fs.File): uv.Task
+  return uv.run(function (): value
+    local failures = 0
+    do file:read(1) catch
+      check(error == "File belongs to a stale libuv Runtime",
+            "stale File read reported the wrong error")
+      failures = failures + 1
+    end
+    do file:write("stale") catch
+      check(error == "File belongs to a stale libuv Runtime",
+            "stale File write reported the wrong error")
+      failures = failures + 1
+    end
+    do file:flush() catch
+      check(error == "File belongs to a stale libuv Runtime",
+            "stale File flush reported the wrong error")
+      failures = failures + 1
+    end
+    check(failures == 3, "old-generation File accepted an operation")
+    return "stale-file-rejected"
+  end)
+end

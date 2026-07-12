@@ -14,6 +14,7 @@ local sticky_owner_after = 0
 local delayed_waiter_resumed = false
 local concurrent_failure_observed = false
 local fs_result_delivered = false
+local fs_open_result_delivered = false
 
 local function check(condition: boolean, message: string)
   if not condition then raise message end
@@ -282,5 +283,68 @@ function schedule_late_fs_cancellation(path: string,
       return "late-fs-success-cancellation-ok"
     end
     return "late-fs-too-late-cancellation-ok"
+  end)
+end
+
+function schedule_late_open_cancellation(path: string): uv.Task
+  fs_open_result_delivered = false
+  uv.__test_phase4_reset_fs_counters()
+  uv.__test_phase4_delay_next_fs_callback(40)
+
+  local target = uv.run(function (): value
+    local file = fs.open(path, "w")
+    fs_open_result_delivered = true
+    file:close()
+    return "late-open-result-must-not-win"
+  end)
+
+  local canceller = uv.run(function (): value
+    while uv.__test_phase4_fs_physical_callbacks() == 0 do
+      timer.yield()
+    end
+    -- The native open has returned a valid descriptor, but the generated
+    -- variant has not yet entered the allocating publication body.
+    check(uv.__test_phase4_fs_open_successes() == 1,
+          "delayed filesystem open did not complete successfully")
+    check(uv.__test_phase4_fs_open_publications() == 0,
+          "filesystem open was published before cancellation")
+    target:cancel("late-successful-open-cancel")
+    return nil
+  end)
+
+  return uv.run(function (): value
+    canceller:join()
+    local caught = false
+    do
+      target:join()
+    catch
+      local cancelled = error as uv.Cancelled
+      check(cancelled.reason == "late-successful-open-cancel",
+            "late successful-open cancellation reason changed")
+      caught = true
+    end
+    check(caught and target:status() == "cancelled",
+          "late successful-open cancellation did not win logically")
+
+    while uv.__test_phase4_fs_internal_close_callbacks() == 0 do
+      timer.yield()
+    end
+    check(not fs_open_result_delivered and
+          uv.__test_phase4_fs_open_publications() == 0,
+          "cancelled successful open published a File")
+    check(uv.__test_phase4_fs_cancel_calls() == 1 and
+          uv.__test_phase4_fs_cancel_status() < 0,
+          "completed successful open did not observe one too-late cancel")
+    check(uv.__test_phase4_fs_deliveries() == 1,
+          "successful open result did not reach logical disposal once")
+    check(uv.__test_phase4_fs_internal_close_enqueues() == 1 and
+          uv.__test_phase4_fs_internal_close_callbacks() == 1,
+          "cancelled successful open did not close internally exactly once")
+    check(uv.__test_phase4_fs_cleanups() == 2,
+          "open and internal-close requests were not cleaned exactly once")
+    check(uv.__test_phase4_fs_pending_roots() == 0 and
+          uv.__test_phase4_file_roots() == 0,
+          "cancelled successful open retained native owner roots")
+    return "late-successful-open-cancellation-ok"
   end)
 end

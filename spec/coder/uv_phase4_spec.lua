@@ -60,6 +60,13 @@ describe("uv Phase 4 deterministic races", function()
             "__test_phase4_fs_cancel_calls",
             "__test_phase4_fs_cancel_status",
             "__test_phase4_fs_cleanups",
+            "__test_phase4_fs_open_successes",
+            "__test_phase4_fs_open_publications",
+            "__test_phase4_fs_internal_close_enqueues",
+            "__test_phase4_fs_internal_close_callbacks",
+            "__test_phase4_fs_pending_roots",
+            "__test_phase4_file_roots",
+            "__test_phase4_runtime_active",
         }) do
             assert.match(hook, variant_titan, 1, true)
             assert.match(hook, variant_interface, 1, true)
@@ -76,7 +83,8 @@ describe("uv Phase 4 deterministic races", function()
     end)
 
     it("makes completion/cancellation races, sticky awaits, public errors, " ..
-       "late FS callbacks, and cross-generation roots deterministic", function()
+       "late FS callbacks/open disposal, and cross-generation roots " ..
+       "deterministic", function()
         local command = phase3.variant_lua_command(workspace,
             phase3.repo .. "/spec/fixtures/uv/phase4/runtime.lua", root)
         local ok, status, output = phase3.run(command, workspace)

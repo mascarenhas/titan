@@ -34,6 +34,13 @@ local function remove_tree(path)
     end
 end
 
+local function read_file(path)
+    local file = assert(io.open(path, "rb"))
+    local contents = file:read("*a")
+    assert.truthy(file:close())
+    return contents
+end
+
 local function assert_relative_alias(canonical, alias, expected_target)
     assert.equal("file", lfs.attributes(canonical, "mode"))
     assert.equal("link", lfs.symlinkattributes(alias, "mode"))
@@ -318,6 +325,10 @@ describe("LuaRocks standard-library packaging", function()
                 tree .. "/lib/lua/5.5/titan/" .. module .. ".so",
                 "../../../titan/0.11/" .. module .. ".so")
         end
+        assert.equal(read_file("THIRD_PARTY_NOTICES.md"), read_file(
+            tree .. "/share/titan/THIRD_PARTY_NOTICES.md"))
+        assert.equal(read_file("LICENSES/libuv-LICENSE"), read_file(
+            tree .. "/share/titan/LICENSES/libuv-LICENSE"))
 
         local environment = "env LUA_CPATH=" .. quote(
             tree .. "/lib/lua/5.5/?.so;;") ..

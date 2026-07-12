@@ -36,11 +36,12 @@ describe("os Phase 6 checked buffer faults", function()
             assert.match(hook, variant, 1, true)
         end
         assert.match("status = libuv.uv_cwd%(bytes.data, sizes%)", variant)
+        assert.match("titan_uvshim_error_enosys", variant, 1, true)
         assert.falsy(variant:find("getcwd(", 1, true))
         assert.falsy(variant:find("lpeg", 1, true))
     end)
 
-    it("retries saturation and rejects non-growing or overflowing sizes",
+    it("retries saturation and rejects invalid growth or unsupported results",
     function()
         local script = phase6.repo ..
             "/spec/fixtures/uv/phase6/os_helper_fault_runtime.lua"

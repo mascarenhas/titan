@@ -9,10 +9,12 @@ describe("uv Phase 2 standalone bootstrap", function()
 
     setup(function()
         workspace = phase2.workspace("bootstrap")
+        phase2.copy_fixture(workspace, "bootstrap_conflict_provider.titan",
+            "bootstrap_conflict_provider")
         for _, fixture in ipairs({
             "async_bootstrap", "sync_main", "unobserved_failure",
             "unobserved_cancel", "cancelled_observer",
-            "timer_only_bootstrap",
+            "timer_only_bootstrap", "bootstrap_conflict",
         }) do
             phase2.copy_fixture(workspace, fixture .. ".titan", fixture)
             phase2.compile(workspace, fixture)
@@ -73,6 +75,15 @@ describe("uv Phase 2 standalone bootstrap", function()
         local entry = phase2.read(
             workspace .. "/timer_only_bootstrap__entrypoint.c")
         assert.match("TITAN_MAIN_BOOTSTRAP_KEY", entry, 1, true)
+    end)
+
+    it("rejects a different pre-existing bootstrap provider", function()
+        local ok, status, output = phase2.run(
+            phase2.app_command(workspace, "bootstrap_conflict"), workspace)
+        assert.falsy(ok)
+        assert.equals(1, status)
+        assert.match("a different Titan main bootstrap is already installed",
+            output, 1, true)
     end)
 
     it("revokes observation when a joining Task is cancelled", function()

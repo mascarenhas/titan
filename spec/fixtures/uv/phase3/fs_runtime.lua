@@ -93,8 +93,10 @@ elseif scenario == "gc-sequential" then
     assert(old_file:is_closed(), "final-Task cleanup did not close idle File")
     old_file:close() -- idempotent after the Runtime generation is retired
 
+    local stale = cases.schedule_stale_file(old_file)
     local second = cases.schedule_second_session(root)
     uv.loop()
+    assert(stale:join() == "stale-file-rejected")
     assert(second:join() == "session-two")
     print("RESULT phase3 fs GC and sequential sessions passed")
 else

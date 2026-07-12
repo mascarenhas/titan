@@ -4,6 +4,8 @@ local net = import "net"
 local timer = import "timer"
 local uv = import "uv"
 
+local dns_result_delivered = false
+
 local function check(condition: boolean, message: string)
   if not condition then raise message end
 end
@@ -82,6 +84,79 @@ function schedule_dns_failure_and_cleanup(): uv.Task
     check(uv.__test_phase5_dns_release_calls() == 1,
           "DNS result release shim was not called exactly once")
     return "dns-failure-cleaned"
+  end)
+end
+
+local function check_dns_cancel_cleanup(target: uv.Task,
+                                        reason: string,
+                                        expected_status: integer)
+  expect_cancelled(target, reason)
+  wait_for_network_clear()
+  check(uv.__test_phase5_dns_submissions() == 1,
+        "DNS cancellation did not follow one accepted submission")
+  check(uv.__test_phase5_dns_cancel_calls() == 1,
+        "DNS cancellation did not call uv_cancel exactly once")
+  if expected_status == 0 then
+    check(uv.__test_phase5_dns_cancel_status() == 0,
+          "successful DNS uv_cancel status was not observed")
+  else
+    check(uv.__test_phase5_dns_cancel_status() < 0 and
+          uv.__test_phase5_dns_cancel_actual_status() < 0,
+          "completed DNS request did not report a too-late cancel")
+  end
+  check(uv.__test_phase5_dns_callbacks() == 1,
+        "cancelled DNS did not consume one completion callback")
+  local results = uv.__test_phase5_dns_nonnull_results()
+  check(results >= 0 and results <= 1,
+        "cancelled DNS callback reported an invalid result count")
+  check(uv.__test_phase5_dns_release_calls() == results,
+        "cancelled DNS did not free each non-null result exactly once")
+  check(not dns_result_delivered,
+        "cancelled DNS result resumed stale user code")
+end
+
+function schedule_inflight_dns_cancel_success(): uv.Task
+  uv.__test_phase5_reset_counters()
+  uv.__test_phase5_cancel_next_dns_inflight()
+  dns_result_delivered = false
+  local target = uv.run(function (): value
+    net.connect("127.0.0.1", 9)
+    dns_result_delivered = true
+    return "cancelled-dns-result-must-not-win"
+  end)
+  return uv.run(function (): value
+    check_dns_cancel_cleanup(target, "cancel-inflight-dns", 0)
+    check(uv.__test_phase5_inflight_dns_observed(),
+          "DNS was not cancelled while libuv owned its request")
+    return "inflight-dns-cancel-success-ok"
+  end)
+end
+
+function schedule_late_dns_cancel_failure(): uv.Task
+  uv.__test_phase5_reset_counters()
+  uv.__test_phase5_delay_next_dns_callback(40)
+  dns_result_delivered = false
+  local target = uv.run(function (): value
+    net.connect("127.0.0.1", 9)
+    dns_result_delivered = true
+    return "late-dns-result-must-not-win"
+  end)
+  return uv.run(function (): value
+    local turns = 0
+    while uv.__test_phase5_dns_callbacks() == 0 and turns < 1000 do
+      timer.yield()
+      turns = turns + 1
+    end
+    check(uv.__test_phase5_dns_callbacks() == 1,
+          "delayed DNS callback did not arrive exactly once")
+    target:cancel("cancel-late-dns")
+    lua.lua_gc(L, lua.LUA_GCGEN)
+    lua.lua_gc(L, lua.LUA_GCCOLLECT)
+    check_dns_cancel_cleanup(target, "cancel-late-dns", -1)
+    check(uv.__test_phase5_dns_nonnull_results() == 1 and
+          uv.__test_phase5_dns_release_calls() == 1,
+          "late DNS callback did not free its addrinfo exactly once")
+    return "late-dns-cancel-failure-ok"
   end)
 end
 
@@ -481,6 +556,88 @@ function schedule_reset_terminal_read(): uv.Task
   end)
 end
 
+local function connected_pair(): (net.Server, net.Connection, net.Connection)
+  local server = net.listen("127.0.0.1", 0, 4)
+  local port = net.__test_phase5_bound_port(server)
+  local acceptor = uv.run(function (): value
+    return server:accept()
+  end)
+  local client = net.connect("127.0.0.1", port)
+  local peer = acceptor:join() as net.Connection
+  return server, client, peer
+end
+
+function schedule_dispatch_dns_after_free(): uv.Task
+  uv.__test_phase5_reset_counters()
+  uv.__test_phase5_fail_next_dispatch("dns-after-free")
+  return uv.run(function (): value
+    net.connect("127.0.0.1", 9)
+    raise "DNS dispatcher fault returned to user code"
+    return nil
+  end)
+end
+
+function schedule_dispatch_unpublished_connect(): uv.Task
+  return uv.run(function (): value
+    local server = net.listen("127.0.0.1", 0, 4)
+    local port = net.__test_phase5_bound_port(server)
+    -- Close the listener first so the injected connect callback owns exactly
+    -- one unpublished TCP handle and cannot race an accepted peer handle.
+    server:close()
+    uv.__test_phase5_reset_counters()
+    uv.__test_phase5_fail_next_dispatch("connect-before-publish")
+    net.connect("127.0.0.1", port)
+    raise "connect dispatcher fault published its Connection"
+    return nil
+  end)
+end
+
+function schedule_dispatch_published_write(): uv.Task
+  return uv.run(function (): value
+    local server, client, peer = connected_pair()
+    server:close()
+    uv.__test_phase5_reset_counters()
+    uv.__test_phase5_fail_next_dispatch("write-before-unlink")
+    client:write("dispatcher-write")
+    peer:close()
+    raise "write dispatcher fault returned to user code"
+    return nil
+  end)
+end
+
+function schedule_dispatch_tcp_read(): uv.Task
+  return uv.run(function (): value
+    local server, client, peer = connected_pair()
+    server:close()
+    uv.__test_phase5_reset_counters()
+    uv.__test_phase5_fail_next_dispatch("tcp-read-after-root-clear")
+    uv.run(function (): value
+      peer:write("R")
+      return nil
+    end)
+    client:read_exactly(1)
+    raise "read dispatcher fault returned to user code"
+    return nil
+  end)
+end
+
+function schedule_dispatch_tcp_close(): uv.Task
+  return uv.run(function (): value
+    local server, client, peer = connected_pair()
+    peer:close()
+    server:close()
+    uv.__test_phase5_reset_counters()
+    uv.__test_phase5_fail_next_dispatch("tcp-close-after-terminal")
+    client:close()
+    raise "close dispatcher fault returned to user code"
+    return nil
+  end)
+end
+
 function counters(): (integer, integer)
   return uv.__test_phase5_net_pending(), uv.__test_phase5_tcp_resources()
+end
+
+function runtime_active(): boolean
+  return uv.__test_phase5_runtime_active()
 end

@@ -52,4 +52,18 @@ assert(uv.__test_phase4_fs_cancel_calls() == 1)
 assert(uv.__test_phase4_fs_cancel_status() == 0)
 assert(uv.__test_phase4_fs_cleanups() == 1)
 
+local late_open_path = root .. "/late-cancelled-open.dat"
+local late_open = cases.schedule_late_open_cancellation(late_open_path)
+uv.loop()
+assert(late_open:join() == "late-successful-open-cancellation-ok")
+assert(uv.__test_phase4_fs_open_successes() == 1)
+assert(uv.__test_phase4_fs_open_publications() == 0)
+assert(uv.__test_phase4_fs_internal_close_enqueues() == 1)
+assert(uv.__test_phase4_fs_internal_close_callbacks() == 1)
+assert(uv.__test_phase4_fs_cleanups() == 2)
+assert(uv.__test_phase4_fs_pending_roots() == 0)
+assert(uv.__test_phase4_file_roots() == 0)
+assert(not uv.__test_phase4_runtime_active())
+assert(os.remove(late_open_path))
+
 print("RESULT phase4 race and GC cases passed")

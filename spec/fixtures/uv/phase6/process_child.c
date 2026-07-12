@@ -112,6 +112,12 @@ static int echo_stdin(void) {
   return copy_stdin(stdout, &total);
 }
 
+static int delayed_echo_stdin(void) {
+  /* Keep a write larger than the platform pipe capacity physically pending. */
+  uv_sleep(1000u);
+  return echo_stdin();
+}
+
 static int wait_eof(void) {
   size_t total;
   if (copy_stdin(NULL, &total) != 0)
@@ -149,9 +155,10 @@ static void ignore_signal(uv_signal_t *handle, int signum) {
   (void)signum;
 }
 
-static int ignore_term(void) {
+static int ignore_term(const char *pid_path) {
   uv_loop_t loop;
   uv_signal_t signal_handle;
+  FILE *pid_file;
   int status;
   status = uv_loop_init(&loop);
   if (status < 0)
@@ -162,10 +169,18 @@ static int ignore_term(void) {
   status = uv_signal_start(&signal_handle, ignore_signal, SIGTERM);
   if (status < 0)
     return 3;
+  if (pid_path != NULL) {
+    pid_file = fopen(pid_path, "wb");
+    if (pid_file == NULL)
+      return 4;
+    if (fprintf(pid_file, "%lld\n", (long long)uv_os_getpid()) < 0 ||
+        fclose(pid_file) != 0)
+      return 4;
+  }
   if (fputs("READY\n", stdout) == EOF || fflush(stdout) != 0)
-    return 4;
+    return 5;
   uv_run(&loop, UV_RUN_DEFAULT);
-  return 5;
+  return 6;
 }
 
 static int ready_wait(void) {
@@ -209,6 +224,8 @@ int main(int argc, char **argv) {
     return argv_env_cwd(argc, argv);
   if (strcmp(argv[1], "echo") == 0)
     return echo_stdin();
+  if (strcmp(argv[1], "delay-read-echo") == 0)
+    return delayed_echo_stdin();
   if (strcmp(argv[1], "wait-eof") == 0)
     return wait_eof();
   if (strcmp(argv[1], "delay-read-eof") == 0) {
@@ -231,7 +248,8 @@ int main(int argc, char **argv) {
   if (strcmp(argv[1], "ready-wait") == 0)
     return ready_wait();
   if (strcmp(argv[1], "ignore-term") == 0)
-    return ignore_term();
+    return argc == 2 ? ignore_term(NULL) :
+           argc == 3 ? ignore_term(argv[2]) : 65;
   if (strcmp(argv[1], "self-unknown-signal") == 0)
     return self_unknown_signal();
   if (strcmp(argv[1], "early-output-exit") == 0) {

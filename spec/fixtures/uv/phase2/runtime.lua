@@ -20,6 +20,9 @@ if scenario == "scheduler" then
     local traced = behavior.schedule_observed_trace()
     local observed = behavior.schedule_next_turn_observer()
     local child_loop = behavior.schedule_loop_rejection()
+    local self_join = behavior.schedule_self_join()
+    local multiple_joiners = behavior.schedule_multiple_joiners()
+    local lookalike_cancelled = behavior.schedule_lookalike_cancelled()
 
     -- A non-UV Lua child is also forbidden from driving the main-state loop.
     local ordinary = lua_coroutine.create(function()
@@ -40,6 +43,9 @@ if scenario == "scheduler" then
     assert(ordered:join() == "out-of-order-ok")
     assert(observed:join() == "observed-before-promotion")
     assert(child_loop:join() == "nested-run-on-child-state")
+    assert(self_join:join() == "self-join-rejected")
+    assert(multiple_joiners:join() == "multiple-joiners-ok")
+    assert(lookalike_cancelled:join() == "lookalike-cancelled-failed")
 
     local trace = traced:join()
     assert(type(trace) == "string" and #trace > 0)
@@ -128,6 +134,11 @@ elseif scenario == "sequential-gc" then
     uv.loop()
     assert(second_started and second:join() == 23)
     print("RESULT phase2 sequential GC sessions passed")
+elseif scenario == "join-cycle" then
+    local behavior = require "phase2_behavior"
+    behavior.schedule_join_cycle()
+    uv.loop()
+    error("cyclic Task joins unexpectedly completed")
 else
     error("unknown Phase 2 runtime scenario: " .. scenario)
 end

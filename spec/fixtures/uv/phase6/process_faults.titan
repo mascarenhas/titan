@@ -1,9 +1,38 @@
 -- Runs only against the isolated __test_phase6_* uv variant.
+local lua = foreign import "lua.h"
 local os = import "os"
+local timer = import "timer"
 local uv = import "uv"
 
 local function check(condition: boolean, message: string)
   if not condition then raise message end
+end
+
+local function expect_cancelled(task: uv.Task, reason: string)
+  local caught = false
+  do
+    task:join()
+  catch
+    local cancelled = error as uv.Cancelled
+    check(cancelled.reason == reason, "cancellation reason changed")
+    caught = true
+  end
+  check(caught and task:status() == "cancelled",
+        "Task did not finish cancelled")
+end
+
+local function doubled(seed: string, turns: integer): string
+  local result = seed
+  for _ = 1, turns do result = result .. result end
+  return result
+end
+
+local function schedule_process_write(process: os.Process,
+                                      data: string): uv.Task
+  return uv.run(function (): value
+    process:write_stdin(data)
+    return "in-flight-write-result-must-not-win"
+  end)
 end
 
 local function read_stdout_all(process: os.Process): string
@@ -107,6 +136,84 @@ function schedule_write_rejection(child: string): uv.Task
     check(process:wait().code == 0,
           "write-rejection child did not exit normally")
     return "write-rejection-cleaned"
+  end)
+end
+
+function schedule_inflight_write_cancel_gc(child: string): uv.Task
+  return uv.run(function (): value
+    local process = os.spawn(child, { "delay-read-echo" })
+    local reader = uv.run(function (): value
+      return read_stdout_all(process)
+    end)
+
+    -- Age the live Runtime/Process graph before attaching the young write
+    -- owner and copied-buffer graph, so the later minor collection also tests
+    -- the old-to-young barriers on the accepted native request.
+    lua.lua_gc(L, lua.LUA_GCGEN)
+    lua.lua_gc(L, lua.LUA_GCCOLLECT)
+    lua.lua_gc(L, lua.LUA_GCSTEP, 0 as lua.lua_Integer)
+
+    local payload: string? = doubled("process-owned\0binary:", 16)
+    local expected = payload as string
+
+    uv.__test_phase6_track_next_process_write_inflight()
+    local writer = schedule_process_write(process, payload as string)
+    payload = nil
+    while uv.__test_phase6_process_counter("write-native") == 0 do
+      timer.yield()
+    end
+    check(uv.__test_phase6_process_counter("write-callbacks") == 0,
+          "delayed reader did not keep the accepted write in flight")
+
+    writer:cancel("cancel-inflight-process-write")
+    expect_cancelled(writer, "cancel-inflight-process-write")
+    check(uv.__test_phase6_inflight_process_write_observed(),
+          "accepted write owner graph was not observed")
+
+    -- The submission frame and cancelled writer continuation have both
+    -- unwound. Only the Runtime/FIFO/native-request graph can now retain the
+    -- weakly observed owner, storage, Buffer, Bytes, and their native storage.
+    lua.lua_gc(L, lua.LUA_GCSTEP, 0 as lua.lua_Integer)
+    lua.lua_gc(L, lua.LUA_GCCOLLECT)
+    check(uv.__test_phase6_process_requests() == 1,
+          "in-flight process write lost its linked native request")
+    check(uv.__test_phase6_inflight_process_write_roots_alive(),
+          "accepted process write graph did not survive collection")
+
+    -- The cancellation wake and native completion may be delivered in either
+    -- order, but the accepted request must still consume exactly one callback.
+    while uv.__test_phase6_process_counter("write-callbacks") == 0 do
+      timer.yield()
+    end
+    check(uv.__test_phase6_process_counter("write-callbacks") == 1,
+          "in-flight process write did not consume exactly one callback")
+    check(uv.__test_phase6_process_requests() == 0,
+          "cancelled in-flight process write retained its request owner")
+    lua.lua_gc(L, lua.LUA_GCCOLLECT)
+    check(uv.__test_phase6_inflight_process_write_roots_released(),
+          "completed process write retained its native owner graph")
+
+    -- A logical cancellation does not close the shared process pipe.  A fresh
+    -- binary write must follow the physically completed cancelled write.
+    local followup = "after-cancel\0process-usable"
+    process:write_stdin(followup)
+    process:close_stdin()
+    check(reader:join() == expected .. followup,
+          "cancelled in-flight process write lost or changed binary bytes")
+    check(read_stderr_all(process) == "",
+          "in-flight write child wrote unexpected stderr")
+    local status = process:wait()
+    check(status.code == 0 and not status.signal,
+          "process was unusable after in-flight write cancellation")
+    check(uv.__test_phase6_process_counter("write-callbacks") == 2,
+          "follow-up process write did not consume exactly one callback")
+    check(uv.__test_phase6_process_requests() == 0,
+          "in-flight cancellation left process request roots")
+    -- The process-close dispatcher resumes this waiter before its final
+    -- finish_process_control call.  The outer post-loop assertion therefore
+    -- owns the authoritative ProcessControl/pipe-root drain check.
+    lua.lua_gc(L, lua.LUA_GCSTEP, 0 as lua.lua_Integer)
+    return "inflight-process-write-cancelled"
   end)
 end
 

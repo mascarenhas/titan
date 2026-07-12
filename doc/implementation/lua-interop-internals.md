@@ -472,7 +472,9 @@ lives in the Lua registry. The complete key inventory:
 | `"Titan record <fqtn> metatable"` | the record metatable (`luaL_newmetatable`) — also the record's type identity (a type check compares `uvalue(v)->metatable`) |
 | the metatable pointer itself (via `lua_rawsetp`) | the FQTN string — the reverse map, metatable → name, used only in error messages |
 | `TITAN_PATH_KEY` (`"ec10e486-d8fd-11e7-87f4-e7e9581a929c"`) | the resolved Titan search path (cached by `pushpath`) |
+| `TITAN_STDLIB_PATH_KEY` (`"7f0d54d5-0955-47e6-a83d-40e6868417ca"`) | the dedicated canonical standard-module path, cached separately from ordinary Titan lookup |
 | `TITAN_LIBS_KEY` (`"ecfc9174-d8fd-11e7-8be2-abbaa3ded45f"`) | the dlopen-handle cache table (below) |
+| `TITAN_MAIN_BOOTSTRAP_KEY` (`"41c48a97-55a5-4514-a76f-79ab028ae6e0"`) | an optional async standalone hook installed by the canonical `uv` module |
 | `TITAN_BT_GENERATION_KEY` (`"a222927d-0e7b-4f7a-93d9-1a6ce7111a5c"`) | a shared generation counter that tells every loaded module's local libbacktrace state to resnapshot after any Titan `.so` is dlopened |
 | `TITAN_BACKTRACE_KEY` (`"57d80578-2534-4856-ad3b-bde8cba4c445"`) | the last error's raw merged backtrace string |
 | `TITAN_TRACE_APPEND_KEY` (`"4f895b66-bae0-4e97-afb3-83a31f2f9e96"`) | temporary coroutine trace handoff slot used before appending resume/error propagation frames |
@@ -482,7 +484,7 @@ lives in the Lua registry. The complete key inventory:
 
 The UUID-string constants are defined in `titan-runtime/titan.h`.
 
-## Dynamic loading: `loadlib` and `loadsym`
+## Dynamic loading: `loadlib`, `loadstdlib`, and `loadsym`
 
 When a dependency exists only as a compiled `.so`, the importer's
 `_init` loads it at run time with two helpers from
@@ -510,8 +512,17 @@ code calls `titan_check_abi(L, handle, "<mangled>_abi", file)`, rejecting
 missing or mismatched ABI markers before any native entry point is used.
 `loadsym` is `dlsym` plus the same `dlerror()` raise on a missing symbol.
 
-Every cross-module function called from a dynamic dependency is declared
-as a `static` C *function pointer* and stitched by symbol name in
+Reserved standard dependencies use `loadstdlib(L, file)` instead. It shares
+the same `TITAN_LIBS_KEY` handle cache and ABI/symbol checks, but searches only
+`TITAN_STDLIB_PATH` or the ABI-qualified installed default cached under
+`TITAN_STDLIB_PATH_KEY`. It never adds `.`, ordinary `TITAN_PATH`, or
+`package.cpath`. The canonical binary and relative Lua `titan.*` alias therefore
+map one DSO image, while local same-named application modules cannot replace an
+internal standard dependency.
+
+Every cross-module function called from an ordinary dynamic or canonical
+standard dependency is declared as a `static` C *function pointer* and stitched
+by symbol name in
 `_init` (`<sym> = titan_cast_func(<type>, loadsym(L, <handle>,
 "<sym>"));`); static dependencies use plain `extern` declarations and
 direct calls. The full wiring — including the re-initialization branch
@@ -519,8 +530,8 @@ that re-stitches pointers when the same module's code is present twice
 in a process, and its `#loadmods > 1` quirk that can leave that branch
 empty — is in the
 [code generator overview](codegen-overview.md#static-vs-dynamic-dependency-wiring);
-the source-vs-`.so` decision that selects dynamic linking from a compiled
-`.so` (no source present) over static linking from source is covered in
+the source-vs-`.so` decision for ordinary modules and the reserved-standard
+exception are covered in
 [driver and toolchain](driver.md#source-vs-so-the-selection-logic).
 
 ## The error handler and `titan.backtrace()`
@@ -589,18 +600,22 @@ chapter](../language/error-handling.md).
 
 When exactly one requested module defines `main(args: {string}):
 integer`, `driver.compile_program` emits a srlua-derived C entrypoint
-(`entrypoint_template` in `driver.lua`) and links it with all module
+(`entrypoint_template` in `driver.lua`) and links it with all source module
 objects, `titan-runtime/titan.o`, `libbacktrace.a`, and `liblua.a`:
 
 * **Preload registration, not eager loading.** The C `main` creates a
   state, runs `luaL_openlibs`, and registers the module's `luaopen_`
   function in `package.preload["<modname>"]`; the module initializes
   only when the script `require`s it.
-* **`pmain`** loads the fixed chunk
-  `local arg = ...;\nreturn\nrequire('<modname>').main(arg);`, builds
-  the argument table with `lua_rawseti(L, -2, i)` for `i = 0 .. argc-1`
-  — so `args[0]` is the program name, Lua-convention — and calls it. (No
-  spec passes or inspects command-line arguments.)
+* **`pmain`** calls `require("<modname>")`, retrieves and retains its `main`
+  callable, then builds the argument table with
+  `lua_rawseti(L, -2, i)` for `i = 0 .. argc-1` — so `args[0]` is the program
+  name and `args[1]` is the first real argument. Requiring first initializes
+  transitive imports, which may install an async hook under
+  `TITAN_MAIN_BOOTSTRAP_KEY`. After retaining the exact `main`, `pmain` calls
+  `main(arg)` when the key is nil or `hook(main, arg)` when it is present. Both
+  paths remain inside the one outer protected call, and the hook cannot replace
+  the program's entry callable.
 * **Top-level error handler.** The standalone bootstrap installs Titan's
   own `errorhandler` as the message handler for the `lua_pcall` of
   `pmain`. On failure, `errorhandler` captures the raw unified trace into

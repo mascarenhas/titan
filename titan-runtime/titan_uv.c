@@ -671,6 +671,10 @@ int titan_uvshim_error_eoverflow(void) {
   return UV_EOVERFLOW;
 }
 
+int titan_uvshim_error_enosys(void) {
+  return UV_ENOSYS;
+}
+
 int titan_uvshim_status_is_enobufs(int status) {
   return status == UV_ENOBUFS;
 }

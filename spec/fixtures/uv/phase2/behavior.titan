@@ -139,3 +139,78 @@ function schedule_loop_rejection(): uv.Task
     return nil
   end)
 end
+
+function schedule_self_join(): uv.Task
+  local self_task: uv.Task? = nil
+  self_task = uv.run(function (): value
+    local task = self_task as uv.Task
+    do
+      task:join()
+    catch
+      if error ~= "a Task cannot join itself" then
+        raise "self-join reported the wrong error"
+      end
+      return "self-join-rejected"
+    end
+    raise "a Task joined itself"
+    return nil
+  end)
+  return self_task as uv.Task
+end
+
+function schedule_multiple_joiners(): uv.Task
+  local deliveries = 0
+  local target = uv.run(function (): value
+    timer.sleep(5)
+    return 17
+  end)
+  local first = uv.run(function (): value
+    local result = target:join() as integer
+    deliveries = deliveries + 1
+    return result
+  end)
+  local second = uv.run(function (): value
+    local result = target:join() as integer
+    deliveries = deliveries + 1
+    return result + 1
+  end)
+  return uv.run(function (): value
+    if (first:join() as integer) ~= 17 or
+        (second:join() as integer) ~= 18 or deliveries ~= 2 then
+      raise "multiple Task joiners were not each resumed exactly once"
+    end
+    return "multiple-joiners-ok"
+  end)
+end
+
+function schedule_lookalike_cancelled(): uv.Task
+  local target = uv.run(function (): value
+    raise uv.Cancelled.new("not-requested")
+    return nil
+  end)
+  return uv.run(function (): value
+    do
+      target:join()
+    catch
+      local lookalike = error as uv.Cancelled
+      if lookalike.reason ~= "not-requested" or
+          target:status() ~= "failed" then
+        raise "unrequested Cancelled value was not an ordinary failure"
+      end
+      return "lookalike-cancelled-failed"
+    end
+    raise "lookalike Cancelled value unexpectedly succeeded"
+    return nil
+  end)
+end
+
+function schedule_join_cycle()
+  local first: uv.Task? = nil
+  local second: uv.Task? = nil
+  first = uv.run(function (): value
+    return (second as uv.Task):join()
+  end)
+  second = uv.run(function (): value
+    return (first as uv.Task):join()
+  end)
+end

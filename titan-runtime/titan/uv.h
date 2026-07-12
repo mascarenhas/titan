@@ -120,6 +120,7 @@ int titan_uvshim_error_eof(void);
 int titan_uvshim_error_ecanceled(void);
 int titan_uvshim_error_eaddrnotavail(void);
 int titan_uvshim_error_eoverflow(void);
+int titan_uvshim_error_enosys(void);
 
 /*
  * Normalize public libuv buffer-sizing results without exposing host errno

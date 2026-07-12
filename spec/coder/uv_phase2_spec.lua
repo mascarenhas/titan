@@ -44,6 +44,15 @@ describe("uv Phase 2 continuation pump", function()
         assert.match("RESULT phase2 cancellation passed", output, 1, true)
     end)
 
+    it("reports a cyclic Task join as an idle-loop deadlock", function()
+        local ok, status, output = run_scenario("join-cycle")
+        assert.falsy(ok, output)
+        assert.not_equals(0, status)
+        assert.match("libuv loop became idle while Tasks were waiting", output,
+            1, true)
+        assert.match("request=join", output, 1, true)
+    end)
+
     it("roots dropped Tasks through generational GC and closes sequential loops",
     function()
         local ok, status, output = run_scenario("sequential-gc")
@@ -149,6 +158,23 @@ describe("uv Phase 2 continuation pump", function()
         assert.is_true(fs_setjmp < fs_gc)
         assert.match("uv_fs_req_cleanup", fs_dispatcher, 1, true)
         assert.match("uv_stop", fs_dispatcher, 1, true)
+
+        -- The real allocation counter in uv_spec covers the foundational
+        -- timer wrapper. Lock representative File, TCP, and Process
+        -- middle-layer paths too: their exact local pointer fields must never
+        -- be boxed into a fresh userdata during repeated handle use.
+        for _, accessor in ipairs({
+            { "int uv__fs_is_closed_titan(",
+              "static int uv__fs_is_closed_titanentry_lua(" },
+            { "int uv__net_is_closed_titan(",
+              "static int uv__net_is_closed_titanentry_lua(" },
+            { "lua_Integer uv__os_process_wait_titan(",
+              "static int uv__os_process_wait_titanentry_lua(" },
+        }) do
+            local body = phase2.c_function_definition(
+                uv_c, accessor[1], accessor[2])
+            assert.not_match("lua_newuserdatauv", body, 1, true)
+        end
 
         local uv_so = phase2.standard_dir() .. "/uv.so"
         local uname = assert(io.popen("uname -s"))

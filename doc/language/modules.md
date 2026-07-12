@@ -336,8 +336,8 @@ same canonical DSO rather than installing another copy.
 
 ## Static and dynamic linking
 
-The linking policy (set by pull request #237) is *static when source is
-available, dynamic otherwise*:
+For ordinary application and library modules, the linking policy (set by pull
+request #237) is *static when source is available, dynamic otherwise*:
 
 * If an imported module's `.titan` source can be found in the source
   tree, it is compiled and **statically linked** into the artifact
@@ -350,6 +350,11 @@ available, dynamic otherwise*:
   generated code **dlopens** the dependency at run time, finding it on
   the binary search path. This is what makes distributing binary-only
   Titan modules possible.
+* Reserved standard imports are a deliberate exception. Even though Titan's
+  own standard-library sources exist in the repository, an application does
+  not compile them into its artifact. It resolves the canonical ABI-qualified
+  binary from `TITAN_STDLIB_PATH` and shares that one runtime image with other
+  standard-library consumers in the Lua state.
 
 A statically linked dependency is still a module of its own from Lua's
 point of view: if `main.so` embeds `geom.point` and a Lua script also
@@ -367,9 +372,13 @@ function main(args: {string}): integer
 ```
 
 the output is a standalone executable instead of shared libraries (the
-declared return type must literally be `integer`). All requested
-modules and all dependencies with source are statically bundled into
-the binary — no dynamic loading of Titan modules is involved. `args` is
+declared return type must literally be `integer`). All requested modules and
+ordinary dependencies selected from source are statically bundled into the
+binary. Reserved standard modules remain canonical binary dependencies and are
+loaded through the dedicated `TITAN_STDLIB_PATH`, even when their sources are
+visible; this prevents a standalone from embedding a second `coroutine` or
+libuv implementation. Deploy those standard DSOs as described under
+[where modules are found](#where-modules-are-found). `args` is
 Lua-style: `args[0]` is the program name and `args[1]` onward are the
 arguments, so `#args` is the argument count. The integer returned by
 `main` becomes the process exit status; an uncaught run-time error

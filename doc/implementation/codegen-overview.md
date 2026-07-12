@@ -508,11 +508,17 @@ to re-stitch, and skipping it just avoids declaring an unused handle.
 (The converse is not exact: two dynamic deps with no functions called
 would still re-emit their handles.)
 
-### `luaopen_<prefix>`, `<prefix>_abi`, and `<prefix>_types`
+### Lua entry aliases, `<prefix>_abi`, and `<prefix>_types`
 
-`luaopen_<mangled-modname>` is what `require` finds: it calls `_init` and
-pushes the module `Udata` itself — so **`require` returns a userdata**,
-not a table, with **no separate module table at all**. Its members —
+By default `luaopen_<mangled-modname>` is what `require` finds. A standard
+module is instead compiled with `--lua-name titan.<modname>`, which emits
+`luaopen_titan_<mangled-modname>` while retaining the canonical Titan
+`<prefix>_init`, `<prefix>_abi`, `<prefix>_types`, registry identity, and native
+symbol prefix. This lets Titan `import "os"` and Lua `require "titan.os"`
+initialize the same canonical module without defining `luaopen_os` or replacing
+Lua's own `os` library. In either case the Lua entry calls `_init` and pushes
+the module `Udata` itself — so **`require` returns a userdata**, not a table,
+with **no separate module table at all**. Its members —
 exported functions, exported variables, and one static-namespace table
 per record (carrying its public record functions) — are all served by a metatable on the
 `Udata` ([Lua interop internals](lua-interop-internals.md)).
@@ -539,10 +545,11 @@ as its environment. When the driver's loader finds only a compiled `.so`
 for an import, it first loads and calls `<prefix>_abi`, rejects missing or
 mismatched markers, then loads `<prefix>_types` and `load`s
 `"return " .. serialized` to recover the interface — letting the checker
-type the importing module against a dependency whose source is gone. The
-policy is static linkage when the source is present and dynamic linkage
-otherwise, and the tests' in-memory `tableloader` exercises the same
-serialization round-trip. See
+type the importing module against a dependency whose source is gone. Ordinary
+dependencies use static linkage when source wins lookup and dynamic linkage
+otherwise; reserved standard identities always use their pinned canonical
+binary. The tests' in-memory `tableloader` exercises the same serialization
+round-trip. See
 [driver and toolchain](driver.md).
 
 ## Static vs dynamic dependency wiring
@@ -560,7 +567,15 @@ extern Udata *dep_init(lua_State *L);
 /* in _init: */ { Udata *_m = dep_init(L); setuvalue(L, &_mod->uv[1].uv, _m); }
 ```
 
-**Dynamic** (`.so`-only dep): each imported function is declared in
+**Reserved standard** (`static_deps[modname] == "standard"`): the dependency is
+binary-only even when its source is visible. Its imported functions use the
+same function-pointer wiring as an ordinary dynamic dependency, but generated
+initialization calls `loadstdlib(L, "dep.so")`. That loader consults only the
+ABI-qualified `TITAN_STDLIB_PATH`/installed standard root; it never searches
+`.` or ordinary `TITAN_PATH`, so an application-local `uv.so` cannot capture a
+standard `fs` module's dependency.
+
+**Ordinary dynamic** (`.so`-only dep): each imported function is declared in
 `$INCLUDES` as a `static` function *pointer*; the generated `_init`
 dlopens the library and stitches the pointers by symbol name with the
 runtime's `loadlib`/`loadsym` (`titan-runtime/titan.c`: Titan-path
@@ -575,7 +590,7 @@ dep_mk_titan = titan_cast_func(Udata* (*)(lua_State *L, Udata *_mod, CClosure *_
 ```
 
 The dep's `_init` is fetched and called the same way inside
-`$INITMODULES`. In both regimes the *call sites are identical* C calls —
+`$INITMODULES`. In all three regimes the *call sites are identical* C calls —
 only the storage class of the callee name differs — and the caller passes
 the callee's module `Udata` read from its own user value and `NULL` for
 the direct-call `_fn`: `dep_mk_titan(L, uvalue(&_mod->uv[1].uv), NULL, 7)`.

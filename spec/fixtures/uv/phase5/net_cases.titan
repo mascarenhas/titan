@@ -55,6 +55,14 @@ end
 function schedule_ipv4_core(): uv.Task
   return uv.run(function (): value
     expect_failure(function (): value
+      net.connect("localhost\0ignored", 1)
+      return nil
+    end, "NUL-containing DNS host reached libuv")
+    expect_failure(function (): value
+      net.listen("127.0.0.1\0ignored", 1, 8)
+      return nil
+    end, "NUL-containing listen host reached libuv")
+    expect_failure(function (): value
       net.listen("127.0.0.1", 0, 4294967297)
       return nil
     end, "oversized listen backlog was truncated to a C int")
@@ -434,4 +442,8 @@ end
 function drop_retained()
   retained_connection = nil
   retained_server = nil
+end
+
+function retained_server_value(): net.Server?
+  return retained_server
 end

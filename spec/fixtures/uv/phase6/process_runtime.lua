@@ -38,10 +38,30 @@ elseif scenario == "communicate-failure" then
         "communicate-cancellation-ok", child)
     print("RESULT phase6 communicate failure and cancellation passed")
 elseif scenario == "shutdown" then
+    local pid_path = module_path .. ".shutdown.pid"
     run("schedule_forced_runtime_shutdown",
-        "forced-runtime-shutdown-ready", child)
+        "forced-runtime-shutdown-ready", child, pid_path)
+    local pid_file = assert(io.open(pid_path, "rb"))
+    local pid = assert(tonumber(assert(pid_file:read("*l"))))
+    assert(pid_file:close())
+    -- This host-side probe is intentionally POSIX-only: Linux and macOS are
+    -- the supported stdlib platforms. Exit 1 means the reaped PID no longer
+    -- exists; shell lookup/execution failures (126/127) must not false-pass.
+    local alive, kind, status = os.execute("kill -0 " .. pid ..
+        " >/dev/null 2>&1")
+    assert(alive == nil and kind == "exit" and status == 1,
+        "forced-shutdown child was live/unreaped or kill probe failed: " ..
+        tostring(alive) .. "/" .. tostring(kind) .. "/" .. tostring(status))
+    assert(os.remove(pid_path))
+    local weak = setmetatable({
+        process = cases.retained_process_value(),
+    }, { __mode = "v" })
     run("schedule_stale_process_rejection",
         "stale-process-rejected", child)
+    collectgarbage("collect")
+    collectgarbage("collect")
+    assert(weak.process == nil,
+        "closed old-generation Process stayed rooted")
     print("RESULT phase6 forced process shutdown passed")
 else
     error("unknown process scenario " .. scenario)

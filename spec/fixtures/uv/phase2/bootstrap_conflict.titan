@@ -1,0 +1,6 @@
+local provider = import "bootstrap_conflict_provider"
+local uv = import "uv"
+
+function main(args: {string}): integer
+  return 0
+end

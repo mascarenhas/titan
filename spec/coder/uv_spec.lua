@@ -1,4 +1,5 @@
 local lfs = require "lfs"
+local cdriver = require "c-parser.cdriver"
 local phase2 = require "spec.support.phase2"
 
 local function read_file(path)
@@ -8,11 +9,43 @@ local function read_file(path)
     return contents
 end
 
+local function shell_quote(word)
+    return "'" .. word:gsub("'", "'\\''") .. "'"
+end
+
+local function append_shell_words(argv, words, label)
+    local parsed, err = cdriver.split_shell_words(words or "")
+    assert.is_table(parsed, label .. ": " .. tostring(err))
+    for _, word in ipairs(parsed) do argv[#argv + 1] = word end
+end
+
+local function compile_allocation_counter(workspace)
+    local object = workspace .. "/titan_uv_test_allocation.o"
+    local argv = {}
+    append_shell_words(argv, os.getenv("CC") or "cc", "CC")
+    argv[#argv + 1] = "-std=c99"
+    argv[#argv + 1] = "-fPIC"
+    argv[#argv + 1] = "-I" .. phase2.repo .. "/lua-5.5.0/src"
+    argv[#argv + 1] = "-I" .. phase2.repo .. "/spec/fixtures/uv"
+    append_shell_words(argv, os.getenv("TITAN_TEST_EXTRA_CFLAGS") or "",
+        "TITAN_TEST_EXTRA_CFLAGS")
+    argv[#argv + 1] = "-c"
+    argv[#argv + 1] = phase2.repo ..
+        "/spec/fixtures/uv/titan_uv_test_allocation.c"
+    argv[#argv + 1] = "-o"
+    argv[#argv + 1] = object
+    for index, word in ipairs(argv) do argv[index] = shell_quote(word) end
+    local ok, _, output = phase2.run(table.concat(argv, " "), workspace)
+    assert.truthy(ok, output)
+    return object
+end
+
 local function host_config()
     local pipe = assert(io.popen("uname -s"))
     local host = assert(pipe:read("*l"))
     assert.truthy(pipe:close())
-    local cppflags = "-I" .. phase2.repo .. "/libuv-v1.52.1/include"
+    local cppflags = "-I" .. phase2.repo .. "/libuv-v1.52.1/include" ..
+        " -I" .. phase2.repo .. "/spec/fixtures/uv"
     local ldflags = "-lpthread"
     if host == "Linux" then
         cppflags = cppflags .. " -D_GNU_SOURCE"
@@ -24,29 +57,53 @@ end
 describe("uv native-owner fixture", function()
     local workspace
     local generated
+    local consumer_generated
     local module_path
+    local consumer_module_path
 
     setup(function()
         workspace = phase2.workspace("native-owner")
         phase2.copy_source(workspace,
             "spec/fixtures/uv/native_owner_probe.titan",
             "native_owner_probe")
+        phase2.copy_source(workspace,
+            "spec/fixtures/uv/native_owner_consumer.titan",
+            "native_owner_consumer")
         local _, cppflags, ldflags = host_config()
         local shim = workspace .. "/titan-runtime/titan_uv.o"
         assert.truthy(lfs.attributes(shim),
             "Phase 1 fixture requires make stdlib's titan_uv.o")
+        local allocation_counter = compile_allocation_counter(workspace)
         phase2.compile(workspace, "native_owner_probe", {
             cppflags = cppflags,
-            cflags = "-fno-strict-aliasing",
+            cflags = "-fno-strict-aliasing " ..
+                "-Dlua_newuserdatauv=titan_uv_test_newuserdatauv " ..
+                "-DluaS_newudata=titan_uv_test_newudata",
             ldflags = ldflags,
             extra_objects = {
+                allocation_counter,
+                shim,
+                phase2.repo .. "/libuv-build/libuv.a",
+            },
+        })
+        phase2.compile(workspace, "native_owner_consumer", {
+            cppflags = cppflags,
+            cflags = "-fno-strict-aliasing " ..
+                "-Dlua_newuserdatauv=titan_uv_test_newuserdatauv " ..
+                "-DluaS_newudata=titan_uv_test_newudata",
+            ldflags = ldflags,
+            extra_objects = {
+                allocation_counter,
                 shim,
                 phase2.repo .. "/libuv-build/libuv.a",
             },
         })
         generated = read_file(
             workspace .. "/src/native_owner_probe.c")
+        consumer_generated = read_file(
+            workspace .. "/src/native_owner_consumer.c")
         module_path = workspace .. "/native_owner_probe.so"
+        consumer_module_path = workspace .. "/native_owner_consumer.so"
     end)
 
     teardown(function()
@@ -107,7 +164,17 @@ describe("uv native-owner fixture", function()
         assert.truthy(access)
         assert.match("titan_uvshim_timer_is_closing", access, 1, true)
         assert.not_match("lua_newuserdatauv", access, 1, true)
+        assert.not_match("titan_uv_test_newuserdatauv", access, 1, true)
         assert.not_match("lua_togco", access, 1, true)
+
+        local cross_module_access = phase2.c_function_definition(
+            consumer_generated,
+            "static int native_owner_consumer_cross_module_timer_access_titan(",
+            "static int native_owner_consumer_cross_module_timer_access_titanentry_lua(")
+        assert.match("native_owner_probe__timer_is_closing_titan",
+            cross_module_access, 1, true)
+        assert.not_match("native_owner_probe__timer_is_closing_titanentry_lua",
+            cross_module_access, 1, true)
 
         local shim = read_file("titan-runtime/titan_uv.c")
         assert.not_match("lua_pcall", shim, 1, true)
@@ -139,7 +206,8 @@ describe("uv native-owner fixture", function()
         assert.truthy(ok, symbols)
     end)
 
-    it("cleans timer, close, and filesystem callbacks after GC", function()
+    it("cleans timer, close, and filesystem callbacks after GC",
+       function()
         local ok, _, output = run_lua([[
             local probe = require "native_owner_probe"
             local r = probe._phase1_probe(".", false, false, false, false)
@@ -151,6 +219,40 @@ describe("uv native-owner fixture", function()
             assert(r[10] == 0 and r[11] == 32)
             assert(r[12] == 1 and r[13] == 0)
             assert(r[20] == 1)
+            for _ = 1, 4 do collectgarbage("collect") end
+            assert(probe._phase1_owner_roots_released(),
+                   "terminal callback owners or native storage stayed rooted")
+        ]])
+        assert.truthy(ok, output)
+    end)
+
+    it("roots owner graphs across incremental and generational GC without " ..
+       "cross-module handle boxing", function()
+        local host = host_config()
+        local dependencies = host == "Darwin" and
+            ("otool -L " .. consumer_module_path) or
+            ("readelf -d " .. consumer_module_path)
+        local linked, _, linked_output = phase2.run(dependencies, workspace)
+        assert.truthy(linked, linked_output)
+        assert.not_match("native_owner_probe", linked_output, 1, true)
+
+        local ok, _, output = run_lua([[
+            local consumer = require "native_owner_consumer"
+            local r = consumer.gc_proof(".")
+            assert(r[1],
+                   "incremental cycle never observed both owners black")
+            assert(r[2], "incremental owner-to-buffer barrier failed")
+            assert(r[3], "Runtime maps did not retain the accepted owner graph")
+            assert(r[4], "generational owner-to-buffer barrier failed")
+            assert(r[5], "owner layout changed during GC proof")
+            assert(r[6], "internal Titan userdata allocator was not intercepted")
+            assert(r[7],
+                   "cross-module typed-handle access allocated a userdata")
+            assert(r[8] == 32 and r[9] == 32)
+            assert(r[10] == 5)
+            assert(r[11] == 2 and r[12] == 2 and r[13] == 1)
+            assert(not r[14] and r[15] and r[16] == 0)
+            assert(r[17], "terminal owner or buffer graph stayed rooted")
         ]])
         assert.truthy(ok, output)
     end)

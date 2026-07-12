@@ -25,13 +25,19 @@ elseif scenario == "dns-ipv6" then
     print("RESULT phase5 net DNS and IPv6 passed: " .. ipv6)
 elseif scenario == "gc-sequential" then
     local leaked = run("schedule_leaked_connection")
-    local weak = setmetatable({ leaked }, { __mode = "v" })
+    local weak = setmetatable({
+        connection = leaked,
+        server = cases.retained_server_value(),
+    }, { __mode = "v" })
     leaked = nil
     assert(run("schedule_stale_rejection") == "stale-rejected")
     cases.drop_retained()
     collectgarbage("collect")
     collectgarbage("collect")
-    assert(weak[1] == nil, "closed old-generation Connection stayed rooted")
+    assert(weak.connection == nil,
+        "closed old-generation Connection stayed rooted")
+    assert(weak.server == nil,
+        "closed old-generation Server stayed rooted")
     print("RESULT phase5 net GC and sequential sessions passed")
 else
     error("unknown scenario " .. scenario)

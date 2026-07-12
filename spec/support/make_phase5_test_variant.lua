@@ -35,19 +35,36 @@ source = replace_once(source, "-- TITAN_UV_PHASE5_OWNER_KINDS", [==[
 -- TITAN_UV_PHASE5_OWNER_KINDS
 -- Variant-only timer kinds defer logical request delivery after the physical
 -- libuv callback has returned to Titan.
-local OWNER_PHASE5_CONNECT_DELAY = 101
-local OWNER_PHASE5_WRITE_DELAY = 102
+local OWNER_PHASE5_DNS_DELAY = 101
+local OWNER_PHASE5_CONNECT_DELAY = 102
+local OWNER_PHASE5_WRITE_DELAY = 103
 ]==], "private delay owner kinds")
 
 source = replace_once(source, "-- TITAN_UV_PHASE5_TEST_STATE", [==[
 -- TITAN_UV_PHASE5_TEST_STATE
 -- Variant-only networking state. This generated source is never installed.
 local test_phase5_dns_callbacks = 0
+local test_phase5_dns_nonnull_results = 0
 local test_phase5_dns_release_calls = 0
+local test_phase5_dns_submissions = 0
+local test_phase5_dns_cancel_calls = 0
+local test_phase5_dns_cancel_actual_status = 0
+local test_phase5_dns_cancel_status = 0
 local test_phase5_connect_callbacks = 0
 local test_phase5_write_callbacks = 0
+local test_phase5_tcp_read_callbacks = 0
 local test_phase5_tcp_close_callbacks = 0
 local test_phase5_connect_publications = 0
+local test_phase5_dns_retires = 0
+local test_phase5_connect_retires = 0
+local test_phase5_write_retires = 0
+local test_phase5_shutdown_retires = 0
+local test_phase5_output_unlinks = 0
+local test_phase5_tcp_close_starts = 0
+local test_phase5_tcp_unlinks = 0
+local test_phase5_dispatch_fault: string? = nil
+local test_phase5_dispatch_fault_hits = 0
+local test_phase5_dns_delay = 0
 local test_phase5_connect_delay = 0
 local test_phase5_write_delay = 0
 local test_phase5_force_dns_failure = false
@@ -58,11 +75,93 @@ local test_phase5_force_sync_listen = false
 local test_phase5_force_sync_write = false
 local test_phase5_force_sync_shutdown = false
 local test_phase5_force_sync_read_start = false
+local test_phase5_dns_cancel_override_success = false
+local test_phase5_cancel_inflight_dns = false
 local test_phase5_cancel_inflight_connect = false
 local test_phase5_cancel_inflight_write = false
+local test_phase5_inflight_dns_observed = false
 local test_phase5_inflight_connect_observed = false
 local test_phase5_inflight_write_observed = false
+
+local function test_phase5_dispatch_fault_point(stage: string)
+  local configured: string? = test_phase5_dispatch_fault
+  if configured and (configured as string) == stage then
+    test_phase5_dispatch_fault = nil
+    test_phase5_dispatch_fault_hits = test_phase5_dispatch_fault_hits + 1
+    raise "phase5-forced-net-" .. stage .. "-dispatcher-failure"
+  end
+end
 ]==], "networking counters and fault controls")
+
+source = replace_once(source, [==[local function retire_net_control(control: NetRequestControl)
+  if control.lifecycle == NET_OWNER_RETIRED then return end
+  free_dns_result(control)]==], [==[local function retire_net_control(control: NetRequestControl)
+  if control.lifecycle == NET_OWNER_RETIRED then return end
+  if control.kind == NET_OWNER_DNS then
+    test_phase5_dns_retires = test_phase5_dns_retires + 1
+  elseif control.kind == NET_OWNER_CONNECT then
+    test_phase5_connect_retires = test_phase5_connect_retires + 1
+  elseif control.kind == NET_OWNER_WRITE then
+    test_phase5_write_retires = test_phase5_write_retires + 1
+  elseif control.kind == NET_OWNER_SHUTDOWN then
+    test_phase5_shutdown_retires = test_phase5_shutdown_retires + 1
+  else
+    raise "unknown network owner kind retired by Phase 5 variant"
+  end
+  free_dns_result(control)]==], "network request terminal retirement counters")
+
+source = replace_once(source, [==[local function remove_output(tcp: uv_tcp_t, operation: NetOperation)
+  if not operation.linked or operation.close_waiter then return end
+  local control = tcp.metadata]==], [==[local function remove_output(tcp: uv_tcp_t, operation: NetOperation)
+  if not operation.linked or operation.close_waiter then return end
+  test_phase5_output_unlinks = test_phase5_output_unlinks + 1
+  local control = tcp.metadata]==], "network output FIFO unlink counter")
+
+source = replace_once(source, [==[local function discard_tcp_storage(tcp: uv_tcp_t)
+  local control = tcp.metadata
+  if control.owner == nil then return end
+  -- Unlink while every owner/root field is still intact.]==], [==[local function discard_tcp_storage(tcp: uv_tcp_t)
+  local control = tcp.metadata
+  if control.owner == nil then return end
+  test_phase5_tcp_unlinks = test_phase5_tcp_unlinks + 1
+  -- Unlink while every owner/root field is still intact.]==],
+    "TCP terminal storage unlink counter")
+
+source = replace_once(source, [==[  control.lifecycle = TCP_CLOSING
+  shim.titan_uvshim_tcp_close(tcp.handle)
+end
+
+local function new_process_control]==], [==[  control.lifecycle = TCP_CLOSING
+  test_phase5_tcp_close_starts = test_phase5_tcp_close_starts + 1
+  shim.titan_uvshim_tcp_close(tcp.handle)
+end
+
+local function new_process_control]==], "TCP native close submission counter")
+
+source = replace_once(source, [==[    operation.addresses = addresses
+    free_dns_result(control)
+    if addresses.count == 0 then]==], [==[    operation.addresses = addresses
+    free_dns_result(control)
+    test_phase5_dispatch_fault_point("dns-after-free")
+    if addresses.count == 0 then]==],
+    "DNS fault after borrowed-result copy and release")
+
+source = replace_once(source, [==[local function tcp_read_dispatch(tcp: uv_tcp_t, result: integer)
+  local control = tcp.metadata
+  if result == 0 then return end
+  local raw_waiter = control.read_waiter]==], [==[local function tcp_read_dispatch(tcp: uv_tcp_t, result: integer)
+  local control = tcp.metadata
+  if result == 0 then return end
+  test_phase5_tcp_read_callbacks = test_phase5_tcp_read_callbacks + 1
+  local raw_waiter = control.read_waiter]==], "TCP read callback counter")
+
+source = replace_once(source, [==[  control.read_bytes = nil
+  tcp.buffer = nil
+  if raw_waiter ~= nil then]==], [==[  control.read_bytes = nil
+  tcp.buffer = nil
+  test_phase5_dispatch_fault_point("tcp-read-after-root-clear")
+  if raw_waiter ~= nil then]==],
+    "TCP read fault after waiter buffer-root clear")
 
 -- These one-shot branches replace only the native submit call.  The
 -- production rejection path immediately following each call is left intact,
@@ -89,6 +188,68 @@ source = replace_once(source, [==[  -- TITAN_UV_PHASE5_DNS_SUBMIT
     status = shim.titan_uvshim_getaddrinfo_start(
         loop_handle, owner.handle, pointer, node, port)
   end]==], "synchronous DNS rejection")
+
+source = replace_once(source, [==[  if (status as integer) >= 0 then
+    owner.metadata.lifecycle = NET_OWNER_SUBMITTED
+  else
+    owner.metadata.callback_result = status as integer
+    retire_net_control(owner.metadata)
+  end
+  return owner, status as integer
+end
+
+local function finish_net_setup]==], [==[  if (status as integer) >= 0 then
+    owner.metadata.lifecycle = NET_OWNER_SUBMITTED
+    test_phase5_dns_submissions = test_phase5_dns_submissions + 1
+  else
+    owner.metadata.callback_result = status as integer
+    retire_net_control(owner.metadata)
+  end
+  return owner, status as integer
+end
+
+local function finish_net_setup]==], "accepted DNS submission count")
+
+source = replace_once(source, [==[        shim.titan_uvshim_getaddrinfo_cancel(dns.handle)
+]==], [==[        test_phase5_dns_cancel_calls =
+            test_phase5_dns_cancel_calls + 1
+        -- Always exercise the real public API.  As in the Phase 4 FS race
+        -- variant, the one-shot override changes only the observed status so
+        -- both lifecycle outcomes are deterministic even if a worker claims
+        -- the request before this loop-thread cancellation runs.
+        local actual_cancel_status =
+            shim.titan_uvshim_getaddrinfo_cancel(dns.handle) as integer
+        test_phase5_dns_cancel_actual_status = actual_cancel_status
+        if test_phase5_dns_cancel_override_success then
+          test_phase5_dns_cancel_status = 0
+          test_phase5_dns_cancel_override_success = false
+        else
+          test_phase5_dns_cancel_status = actual_cancel_status
+        end
+]==], "DNS cancellation observation")
+
+source = replace_once(source, [==[    task.operation = owner
+    task.state = TASK_WAITING
+    return nil
+  end
+
+  local tcp = operation.tcp as uv_tcp_t]==], [==[    task.operation = owner
+    task.state = TASK_WAITING
+    if test_phase5_cancel_inflight_dns then
+      if test_phase5_dns_callbacks ~= 0 then
+        raise "DNS callback ran before in-flight cancellation hook"
+      end
+      test_phase5_cancel_inflight_dns = false
+      test_phase5_inflight_dns_observed = true
+      lua.lua_gc(L, lua.LUA_GCGEN)
+      lua.lua_gc(L, lua.LUA_GCCOLLECT)
+      request_cancel(task, "cancel-inflight-dns")
+    end
+    return nil
+  end
+
+  local tcp = operation.tcp as uv_tcp_t]==],
+    "in-flight DNS cancellation after Task publication")
 
 source = replace_once(source, [==[        -- TITAN_UV_PHASE5_CONNECT_SUBMIT
         local status = shim.titan_uvshim_tcp_connect_start(
@@ -197,11 +358,32 @@ source = replace_once(source, "    -- TITAN_UV_PHASE5_DNS_RELEASE", [==[
 source = replace_once(source, "  -- TITAN_UV_PHASE5_DNS_CALLBACK", [==[
   -- TITAN_UV_PHASE5_DNS_CALLBACK
   test_phase5_dns_callbacks = test_phase5_dns_callbacks + 1
+  if pointer ~= nil then
+    test_phase5_dns_nonnull_results =
+        test_phase5_dns_nonnull_results + 1
+  end
   if test_phase5_force_dns_failure then
     test_phase5_force_dns_failure = false
     result = shim.titan_uvshim_error_eaddrnotavail() as integer
   end
 ]==], "DNS callback control")
+
+source = replace_once(source, [==[  owner.metadata.result_pointer = pointer
+  dns_dispatch_body(owner, event_kind, result, size, pointer)
+catch]==], [==[  owner.metadata.result_pointer = pointer
+  if test_phase5_dns_delay > 0 then
+    local delay = test_phase5_dns_delay
+    test_phase5_dns_delay = 0
+    local wake, status = start_owner(owner.metadata.runtime,
+        OWNER_PHASE5_DNS_DELAY, owner, nil, 0, delay, 0)
+    if status < 0 then
+      raise make_error(status, "test.net.resolve.delay", nil)
+    end
+    wake.root = owner
+    return
+  end
+  dns_dispatch_body(owner, event_kind, result, size, pointer)
+catch]==], "DNS callback deferral")
 
 source = replace_once(source, "  -- TITAN_UV_PHASE5_CONNECT_CALLBACK", [==[
   -- TITAN_UV_PHASE5_CONNECT_CALLBACK
@@ -223,6 +405,7 @@ source = replace_once(source, "  -- TITAN_UV_PHASE5_CONNECT_CALLBACK", [==[
     wake.root = owner
     return
   end
+  test_phase5_dispatch_fault_point("connect-before-publish")
 ]==], "connect callback deferral")
 
 source = replace_once(source, "  -- TITAN_UV_PHASE5_WRITE_CALLBACK", [==[
@@ -239,10 +422,16 @@ source = replace_once(source, "  -- TITAN_UV_PHASE5_WRITE_CALLBACK", [==[
     wake.root = owner
     return
   end
+  test_phase5_dispatch_fault_point("write-before-unlink")
 ]==], "write callback deferral")
 
 source = replace_once(source, "  -- TITAN_UV_PHASE5_TIMER_DISPATCH", [==[
   -- TITAN_UV_PHASE5_TIMER_DISPATCH
+  elseif kind == OWNER_PHASE5_DNS_DELAY then
+    local delayed = owner.metadata.task as uv_getaddrinfo_t
+    dns_dispatch_body(delayed, EVENT_GETADDRINFO,
+        delayed.metadata.callback_result, 0 as libuv.size_t,
+        delayed.metadata.result_pointer)
   elseif kind == OWNER_PHASE5_CONNECT_DELAY then
     local delayed = owner.metadata.task as uv_connect_t
     local tcp = delayed.metadata.operation.tcp as uv_tcp_t
@@ -266,6 +455,7 @@ source = replace_once(source, "    -- TITAN_UV_PHASE5_TCP_CLOSE_CALLBACK", [==[
     -- TITAN_UV_PHASE5_TCP_CLOSE_CALLBACK
     test_phase5_tcp_close_callbacks =
         test_phase5_tcp_close_callbacks + 1
+    test_phase5_dispatch_fault_point("tcp-close-after-terminal")
 ]==], "TCP close callback count")
 
 source = replace_once(source, "    -- TITAN_UV_PHASE5_READ_START", [==[
@@ -285,12 +475,33 @@ local hook_api = [==[
 -- Variant-only networking controls and diagnostics. The generated DSO is
 -- isolated from installed/package artifacts.
 function __test_phase5_reset_counters()
+  if test_phase5_dns_delay ~= 0 or test_phase5_cancel_inflight_dns or
+      test_phase5_dns_cancel_override_success or
+      test_phase5_dispatch_fault then
+    raise "cannot reset while a Phase 5 one-shot control is pending"
+  end
   test_phase5_dns_callbacks = 0
+  test_phase5_dns_nonnull_results = 0
   test_phase5_dns_release_calls = 0
+  test_phase5_dns_submissions = 0
+  test_phase5_dns_cancel_calls = 0
+  test_phase5_dns_cancel_actual_status = 0
+  test_phase5_dns_cancel_status = 0
   test_phase5_connect_callbacks = 0
   test_phase5_write_callbacks = 0
+  test_phase5_tcp_read_callbacks = 0
   test_phase5_tcp_close_callbacks = 0
   test_phase5_connect_publications = 0
+  test_phase5_dns_retires = 0
+  test_phase5_connect_retires = 0
+  test_phase5_write_retires = 0
+  test_phase5_shutdown_retires = 0
+  test_phase5_output_unlinks = 0
+  test_phase5_tcp_close_starts = 0
+  test_phase5_tcp_unlinks = 0
+  test_phase5_dispatch_fault = nil
+  test_phase5_dispatch_fault_hits = 0
+  test_phase5_dns_delay = 0
   test_phase5_connect_delay = 0
   test_phase5_write_delay = 0
   test_phase5_force_dns_failure = false
@@ -301,10 +512,47 @@ function __test_phase5_reset_counters()
   test_phase5_force_sync_write = false
   test_phase5_force_sync_shutdown = false
   test_phase5_force_sync_read_start = false
+  test_phase5_dns_cancel_override_success = false
+  test_phase5_cancel_inflight_dns = false
   test_phase5_cancel_inflight_connect = false
   test_phase5_cancel_inflight_write = false
+  test_phase5_inflight_dns_observed = false
   test_phase5_inflight_connect_observed = false
   test_phase5_inflight_write_observed = false
+end
+
+function __test_phase5_fail_next_dispatch(stage: string)
+  if test_phase5_dispatch_fault then
+    raise "a network dispatcher fault is already pending"
+  end
+  if stage ~= "dns-after-free" and stage ~= "connect-before-publish" and
+      stage ~= "write-before-unlink" and
+      stage ~= "tcp-read-after-root-clear" and
+      stage ~= "tcp-close-after-terminal" then
+    raise "unknown network dispatcher fault stage"
+  end
+  test_phase5_dispatch_fault = stage
+end
+
+function __test_phase5_dispatch_fault_pending(): boolean
+  if test_phase5_dispatch_fault then return true end
+  return false
+end
+
+function __test_phase5_dispatch_fault_hits(): integer
+  return test_phase5_dispatch_fault_hits
+end
+
+function __test_phase5_cancel_next_dns_inflight()
+  if test_phase5_cancel_inflight_dns then
+    raise "an in-flight DNS cancellation is already pending"
+  end
+  if test_phase5_dns_cancel_override_success then
+    raise "a DNS cancel-status override is already pending"
+  end
+  test_phase5_cancel_inflight_dns = true
+  test_phase5_dns_cancel_override_success = true
+  test_phase5_inflight_dns_observed = false
 end
 
 function __test_phase5_cancel_next_connect_inflight()
@@ -325,6 +573,10 @@ end
 
 function __test_phase5_inflight_connect_observed(): boolean
   return test_phase5_inflight_connect_observed
+end
+
+function __test_phase5_inflight_dns_observed(): boolean
+  return test_phase5_inflight_dns_observed
 end
 
 function __test_phase5_inflight_write_observed(): boolean
@@ -372,6 +624,14 @@ function __test_phase5_delay_next_connect_callback(milliseconds: integer)
   test_phase5_connect_delay = milliseconds
 end
 
+function __test_phase5_delay_next_dns_callback(milliseconds: integer)
+  if milliseconds <= 0 then raise "DNS callback delay must be positive" end
+  if test_phase5_dns_delay ~= 0 then
+    raise "a DNS callback delay is already pending"
+  end
+  test_phase5_dns_delay = milliseconds
+end
+
 function __test_phase5_delay_next_write_callback(milliseconds: integer)
   if milliseconds <= 0 then raise "write callback delay must be positive" end
   if test_phase5_write_delay ~= 0 then
@@ -391,6 +651,26 @@ function __test_phase5_dns_callbacks(): integer
   return test_phase5_dns_callbacks
 end
 
+function __test_phase5_dns_nonnull_results(): integer
+  return test_phase5_dns_nonnull_results
+end
+
+function __test_phase5_dns_submissions(): integer
+  return test_phase5_dns_submissions
+end
+
+function __test_phase5_dns_cancel_calls(): integer
+  return test_phase5_dns_cancel_calls
+end
+
+function __test_phase5_dns_cancel_actual_status(): integer
+  return test_phase5_dns_cancel_actual_status
+end
+
+function __test_phase5_dns_cancel_status(): integer
+  return test_phase5_dns_cancel_status
+end
+
 function __test_phase5_dns_release_calls(): integer
   return test_phase5_dns_release_calls
 end
@@ -403,12 +683,37 @@ function __test_phase5_write_callbacks(): integer
   return test_phase5_write_callbacks
 end
 
+function __test_phase5_tcp_read_callbacks(): integer
+  return test_phase5_tcp_read_callbacks
+end
+
 function __test_phase5_tcp_close_callbacks(): integer
   return test_phase5_tcp_close_callbacks
 end
 
 function __test_phase5_connect_publications(): integer
   return test_phase5_connect_publications
+end
+
+function __test_phase5_net_retires(kind: string): integer
+  if kind == "dns" then return test_phase5_dns_retires end
+  if kind == "connect" then return test_phase5_connect_retires end
+  if kind == "write" then return test_phase5_write_retires end
+  if kind == "shutdown" then return test_phase5_shutdown_retires end
+  raise "unknown network retirement counter"
+  return 0
+end
+
+function __test_phase5_output_unlinks(): integer
+  return test_phase5_output_unlinks
+end
+
+function __test_phase5_tcp_close_starts(): integer
+  return test_phase5_tcp_close_starts
+end
+
+function __test_phase5_tcp_unlinks(): integer
+  return test_phase5_tcp_unlinks
 end
 
 function __test_phase5_bound_port(server: uv_tcp_t): integer
@@ -467,6 +772,11 @@ function __test_phase5_tcp_resources(): integer
   end
   return count
 end
+
+function __test_phase5_runtime_active(): boolean
+  if active_runtime then return true end
+  return false
+end
 ]==]
 
 source = replace_once(source, "-- TITAN_UV_TEST_HOOKS",
@@ -474,21 +784,37 @@ source = replace_once(source, "-- TITAN_UV_TEST_HOOKS",
 
 for _, hook in ipairs({
     "__test_phase5_reset_counters",
+    "__test_phase5_fail_next_dispatch",
+    "__test_phase5_dispatch_fault_pending",
+    "__test_phase5_dispatch_fault_hits",
+    "__test_phase5_cancel_next_dns_inflight",
     "__test_phase5_cancel_next_connect_inflight",
     "__test_phase5_cancel_next_write_inflight",
     "__test_phase5_inflight_connect_observed",
     "__test_phase5_inflight_write_observed",
+    "__test_phase5_inflight_dns_observed",
     "__test_phase5_force_sync_rejection",
     "__test_phase5_sync_rejection_pending",
     "__test_phase5_delay_next_connect_callback",
     "__test_phase5_delay_next_write_callback",
+    "__test_phase5_delay_next_dns_callback",
     "__test_phase5_force_next_dns_failure",
     "__test_phase5_dns_callbacks",
+    "__test_phase5_dns_nonnull_results",
+    "__test_phase5_dns_submissions",
+    "__test_phase5_dns_cancel_calls",
+    "__test_phase5_dns_cancel_actual_status",
+    "__test_phase5_dns_cancel_status",
     "__test_phase5_dns_release_calls",
     "__test_phase5_connect_callbacks",
     "__test_phase5_write_callbacks",
+    "__test_phase5_tcp_read_callbacks",
     "__test_phase5_tcp_close_callbacks",
     "__test_phase5_connect_publications",
+    "__test_phase5_net_retires",
+    "__test_phase5_output_unlinks",
+    "__test_phase5_tcp_close_starts",
+    "__test_phase5_tcp_unlinks",
     "__test_phase5_bound_port",
     "__test_phase5_accept_queue_size",
     "__test_phase5_accept_overflow_closes",
@@ -496,6 +822,7 @@ for _, hook in ipairs({
     "__test_phase5_read_starts",
     "__test_phase5_net_pending",
     "__test_phase5_tcp_resources",
+    "__test_phase5_runtime_active",
 }) do
     assert(source:find("function " .. hook, 1, true),
         "Phase 5 hook was not inserted: " .. hook)

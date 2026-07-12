@@ -107,6 +107,7 @@ describe("native libuv shim", function()
         assert.match("uv_close", source, 1, true)
         assert.match("uv_is_closing", source, 1, true)
         assert.match("uv_fs_get_result", source, 1, true)
+        assert.match("UV_ENOSYS", source, 1, true)
         assert.match("uv_buf_init", source, 1, true)
         assert.match("titan_uvshim_bytes_find", source, 1, true)
         assert.match("titan_uvshim_bytes_slice_copy", source, 1, true)
@@ -219,6 +220,16 @@ describe("native libuv shim", function()
                         lua.lua_newuserdatauv(L, uv.uv_pipe_t.sizeof, 0)
                     local process_storage: *uv.uv_process_t =
                         lua.lua_newuserdatauv(L, uv.uv_process_t.sizeof, 0)
+                    local connect_storage: *uv.uv_connect_t =
+                        lua.lua_newuserdatauv(L, uv.uv_connect_t.sizeof, 0)
+                    local write_storage: *uv.uv_write_t =
+                        lua.lua_newuserdatauv(L, uv.uv_write_t.sizeof, 0)
+                    local shutdown_storage: *uv.uv_shutdown_t =
+                        lua.lua_newuserdatauv(L, uv.uv_shutdown_t.sizeof, 0)
+                    local buffer_storage: *uv.uv_buf_t =
+                        lua.lua_newuserdatauv(L, uv.uv_buf_t.sizeof, 0)
+                    local dirent_storage: *uv.uv_dirent_t =
+                        lua.lua_newuserdatauv(L, uv.uv_dirent_t.sizeof, 0)
                     local address_storage: *shim.titan_uvshim_address =
                         lua.lua_newuserdatauv(
                             L, shim.titan_uvshim_address.sizeof, 0)
@@ -277,8 +288,9 @@ describe("native libuv shim", function()
                     uv.uv_fs_stat(nil, req, ".", shim.titan_uvshim_fs_cb)
                     if loop_storage and timer_storage and fs_storage and
                         dns_storage and tcp_storage and signal_storage and
-                        pipe_storage and process_storage and address_storage and
-                        argv then
+                        pipe_storage and process_storage and connect_storage and
+                        write_storage and shutdown_storage and buffer_storage and
+                        dirent_storage and address_storage and argv then
                         return uv.uv_loop_t.alignof
                             + uv.uv_timer_t.alignof + uv.uv_fs_t.alignof
                             + uv.uv_getaddrinfo_t.alignof
@@ -286,6 +298,11 @@ describe("native libuv shim", function()
                             + uv.uv_signal_t.alignof
                             + uv.uv_pipe_t.alignof
                             + uv.uv_process_t.alignof
+                            + uv.uv_connect_t.alignof
+                            + uv.uv_write_t.alignof
+                            + uv.uv_shutdown_t.alignof
+                            + uv.uv_buf_t.alignof
+                            + uv.uv_dirent_t.alignof
                             + shim.titan_uvshim_address.alignof
                             + shim.titan_uvshim_char_ptr.alignof
                     end
@@ -316,6 +333,11 @@ describe("native libuv shim", function()
         assert.match("sizeof%(uv_signal_t%)", result)
         assert.match("sizeof%(uv_pipe_t%)", result)
         assert.match("sizeof%(uv_process_t%)", result)
+        assert.match("sizeof%(uv_connect_t%)", result)
+        assert.match("sizeof%(uv_write_t%)", result)
+        assert.match("sizeof%(uv_shutdown_t%)", result)
+        assert.match("sizeof%(uv_buf_t%)", result)
+        assert.match("sizeof%(uv_dirent_t%)", result)
         assert.match("sizeof%(titan_uvshim_address%)", result)
         assert.match("sizeof%(titan_uvshim_char_ptr%)", result)
         assert.match("_Alignof%(uv_loop_t%)", result)
@@ -326,6 +348,11 @@ describe("native libuv shim", function()
         assert.match("_Alignof%(uv_signal_t%)", result)
         assert.match("_Alignof%(uv_pipe_t%)", result)
         assert.match("_Alignof%(uv_process_t%)", result)
+        assert.match("_Alignof%(uv_connect_t%)", result)
+        assert.match("_Alignof%(uv_write_t%)", result)
+        assert.match("_Alignof%(uv_shutdown_t%)", result)
+        assert.match("_Alignof%(uv_buf_t%)", result)
+        assert.match("_Alignof%(uv_dirent_t%)", result)
         assert.match("_Alignof%(titan_uvshim_address%)", result)
         assert.match("_Alignof%(titan_uvshim_char_ptr%)", result)
         assert.match("%(%(uv_loop_t %*%)%(lua_newuserdatauv", result)
@@ -336,6 +363,11 @@ describe("native libuv shim", function()
         assert.match("%(%(uv_signal_t %*%)%(lua_newuserdatauv", result)
         assert.match("%(%(uv_pipe_t %*%)%(lua_newuserdatauv", result)
         assert.match("%(%(uv_process_t %*%)%(lua_newuserdatauv", result)
+        assert.match("%(%(uv_connect_t %*%)%(lua_newuserdatauv", result)
+        assert.match("%(%(uv_write_t %*%)%(lua_newuserdatauv", result)
+        assert.match("%(%(uv_shutdown_t %*%)%(lua_newuserdatauv", result)
+        assert.match("%(%(uv_buf_t %*%)%(lua_newuserdatauv", result)
+        assert.match("%(%(uv_dirent_t %*%)%(lua_newuserdatauv", result)
         assert.match("%(%(titan_uvshim_address %*%)%(lua_newuserdatauv",
             result)
         assert.match("%(%(titan_uvshim_char_ptr %*%)%(lua_newuserdatauv",

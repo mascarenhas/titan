@@ -85,6 +85,24 @@ local function test_partial_write_resubmission(root: string)
         "partial-write verification leaked a request cleanup")
 end
 
+local function test_whole_file_overflow(root: string)
+  uv.__test_fs_reset_counters()
+  local caught = false
+  do
+    fs.read_file(root .. "/overflow-read.dat")
+  catch
+    check(error == "file is too large to read into a string",
+          "whole-file overflow reported the wrong error")
+    caught = true
+  end
+  check(caught, "whole-file overflow guard did not run")
+  check(uv.__test_fs_current_active() == 0,
+        "whole-file overflow left an active request")
+  check(uv.__test_fs_submission_count() ==
+        uv.__test_fs_cleanup_count(),
+        "whole-file overflow leaked request cleanup")
+end
+
 local function test_close_retry(root: string)
   local path = root .. "/close-retry.dat"
   local file = fs.open(path, "w")
@@ -266,6 +284,7 @@ function main(args: {string}): integer
   end
   test_sync_and_callback_paths(root)
   test_partial_write_resubmission(root)
+  test_whole_file_overflow(root)
   test_close_retry(root)
   test_cancel_before_allocation(root)
   test_close_waiter_epoch_change(root)

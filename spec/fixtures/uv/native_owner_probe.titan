@@ -2,6 +2,7 @@ local libuv = foreign import "uv.h"
 local lua = foreign import "lua.h"
 local ffi = foreign import "titan/ffi.h"
 local shim = foreign import "titan/uv.h"
+local allocation = foreign import "titan_uv_test_allocation.h"
 local coroutine = import "coroutine"
 
 -- Private native-owner lifecycle values.  Public Task/cancellation state is a
@@ -44,6 +45,11 @@ local record Runtime
   local fs_count: integer
   local task_failure_sequence: integer
   local followup_timer_sequence: integer
+  local proof_incremental_paused: boolean
+  local proof_layout_valid: boolean
+  local proof_allocation_counter_active: boolean
+  local proof_access_without_allocation: boolean
+  local proof_incremental_buffer_length: integer
 end
 
 local record CallbackState
@@ -106,6 +112,63 @@ end
 
 local generation = 0
 local active_runtime: Runtime? = nil
+local weak_owners: value = nil
+
+local function ensure_weak_owners()
+  if weak_owners == nil then
+    local top = lua.lua_gettop(L)
+    lua.lua_createtable(L, 0, 0)
+    lua.lua_createtable(L, 0, 1)
+    lua.lua_pushstring(L, "v")
+    lua.lua_setfield(L, -2, "__mode")
+    lua.lua_setmetatable(L, -2)
+    weak_owners = ffi.lua_totvalue(L, -1)
+    lua.lua_settop(L, top)
+  end
+end
+
+local function weak_store(slot: integer, item: value)
+  ensure_weak_owners()
+  local top = lua.lua_gettop(L)
+  ffi.lua_pushtvalue(L, weak_owners)
+  ffi.lua_pushtvalue(L, item)
+  lua.lua_rawseti(L, -2, slot as lua.lua_Integer)
+  lua.lua_settop(L, top)
+end
+
+local function weak_present(slot: integer): boolean
+  ensure_weak_owners()
+  local top = lua.lua_gettop(L)
+  ffi.lua_pushtvalue(L, weak_owners)
+  lua.lua_rawgeti(L, -1, slot as lua.lua_Integer)
+  local present = lua.lua_type(L, -1) ~= lua.LUA_TNIL
+  lua.lua_settop(L, top)
+  return present
+end
+
+local function weak_item(slot: integer): value
+  ensure_weak_owners()
+  local top = lua.lua_gettop(L)
+  ffi.lua_pushtvalue(L, weak_owners)
+  lua.lua_rawgeti(L, -1, slot as lua.lua_Integer)
+  local item = ffi.lua_totvalue(L, -1)
+  lua.lua_settop(L, top)
+  return item
+end
+
+local function weak_range_present(first: integer, last: integer): boolean
+  for slot = first, last do
+    if not weak_present(slot) then return false end
+  end
+  return true
+end
+
+local function weak_range_absent(first: integer, last: integer): boolean
+  for slot = first, last do
+    if weak_present(slot) then return false end
+  end
+  return true
+end
 
 -- Lua userdata payloads have LUAI_MAXALIGN.  TValue is a member of that
 -- aligned union, so this comparison rejects a target requiring a fallback
@@ -216,8 +279,8 @@ local function allocate_buffer(length: integer): Buffer
   return buffer
 end
 
-local function install_young_buffer(timer: uv_timer_t,
-                                    request: uv_fs_t): integer
+local function install_young_buffer(timer: uv_timer_t, request: uv_fs_t,
+                                    weak_slot: integer): integer
   local buffer = allocate_buffer(32)
   -- Slot 6 models the later Task/root coroutine, while slot 8 is the distinct
   -- I/O buffer role.  Both writes are old-owner -> young-record barriers.
@@ -225,6 +288,12 @@ local function install_young_buffer(timer: uv_timer_t,
   request.root = buffer
   timer.buffer = buffer
   request.buffer = buffer
+  if weak_slot > 0 then
+    weak_store(weak_slot, buffer)
+    weak_store(weak_slot + 1, buffer.storage)
+    weak_store(weak_slot + 2, buffer.bytes)
+    weak_store(weak_slot + 3, buffer.bytes.storage)
+  end
   return buffer.bytes.length
 end
 
@@ -240,7 +309,8 @@ local function new_runtime(): Runtime
   end
   loop.state = OWNER_ACTIVE
   local runtime = Runtime.new(loop, generation, {}, {}, false, nil, "",
-                              0, 0, 0, 0, 0, 0)
+                              0, 0, 0, 0, 0, 0, false, false, false,
+                              false, 0)
   active_runtime = runtime
   return runtime
 end
@@ -478,6 +548,117 @@ local function close_runtime(runtime: Runtime)
   active_runtime = nil
 end
 
+-- Start three live owners, age their graph, and suspend an incremental cycle
+-- only after both destination owners have become black. The caller completes
+-- that same cycle after this frame (and all its owner/buffer locals) returns.
+local function start_gc_proof(path: string,
+                              access: (uv_timer_t) -> boolean): Runtime
+  local runtime = new_runtime()
+  local timer = start_timer(runtime, false, false, false, 1, 0)
+  local followup = start_timer(runtime, false, false, false, 2, 5)
+  local request = start_fs_stat(runtime, path)
+
+  weak_store(1, timer)
+  weak_store(2, timer.storage)
+  weak_store(3, followup)
+  weak_store(4, followup.storage)
+  weak_store(5, request)
+  weak_store(6, request.storage)
+
+  lua.lua_gc(L, lua.LUA_GCINC)
+  lua.lua_gc(L, lua.LUA_GCCOLLECT)
+  runtime.proof_incremental_paused =
+      (allocation.titan_uv_test_gc_pause_when_black(
+          L, timer_owner_pointer(timer), fs_owner_pointer(request))
+          as integer) ~= 0
+
+  runtime.proof_incremental_buffer_length =
+      install_young_buffer(timer, request, 7)
+  runtime.proof_layout_valid = owner_layout_is_valid(timer) and
+                               owner_layout_is_valid(request)
+
+  -- Calibrate the internal allocator interception with a real Titan record
+  -- construction, then measure only the exact typed access path.  The access
+  -- callback used by uv_spec lives in another Titan module and calls back into
+  -- this module's public middle-layer function.
+  allocation.titan_uv_test_reset_userdata_allocations()
+  local calibration = new_state(runtime)
+  runtime.proof_allocation_counter_active =
+      (allocation.titan_uv_test_get_internal_userdata_allocations()
+          as integer) > 0 and
+      calibration.generation == runtime.generation
+  allocation.titan_uv_test_reset_userdata_allocations()
+  runtime.proof_access_without_allocation = access(timer) and
+      (allocation.titan_uv_test_get_userdata_allocations() as integer) == 0 and
+      (allocation.titan_uv_test_get_internal_userdata_allocations()
+          as integer) == 0
+  return runtime
+end
+
+-- Reacquire owners through weak observations only after a full collection has
+-- proved that Runtime's pending/resource tables kept them alive.  Entering
+-- generational mode first makes that accepted owner graph old; the fresh
+-- buffer is then reachable only through the two old owner records.
+local function install_generational_buffer(runtime: Runtime): integer
+  local timer = weak_item(1) as uv_timer_t
+  local request = weak_item(5) as uv_fs_t
+  if timer.metadata.runtime ~= runtime or request.metadata.runtime ~= runtime then
+    raise "weak owner observation resolved outside its Runtime"
+  end
+  return install_young_buffer(timer, request, 11)
+end
+
+-- Executable GC proof used through native_owner_consumer.  It separates the
+-- creation frame from both collection steps, so Titan locals cannot mask a
+-- missing Runtime root or record-field barrier.
+function _phase1_gc_proof(path: string,
+                          access: (uv_timer_t) -> boolean): {value}
+  if active_runtime then
+    raise "a libuv Runtime is already active"
+  end
+  local runtime = start_gc_proof(path, access)
+
+  local incremental_finished =
+      (allocation.titan_uv_test_gc_finish_incremental(L) as integer) ~= 0
+  local incremental_barrier = incremental_finished and
+                              weak_range_present(1, 10)
+
+  -- This fresh complete collection starts after start_gc_proof returned.
+  -- Therefore the pending/resource maps are now the only strong owner roots,
+  -- and owner fields are the only strong roots for the first buffer graph.
+  lua.lua_gc(L, lua.LUA_GCCOLLECT)
+  local accepted_graph_rooted = weak_range_present(1, 10)
+
+  lua.lua_gc(L, lua.LUA_GCGEN)
+  local generational_buffer_length = install_generational_buffer(runtime)
+  lua.lua_gc(L, lua.LUA_GCSTEP, 0 as libuv.size_t)
+  local generational_barrier = weak_range_present(1, 6) and
+                               weak_range_present(11, 14)
+
+  local stack_top = lua.lua_gettop(L)
+  local run_status = libuv.uv_run(runtime.loop.handle, libuv.UV_RUN_DEFAULT)
+  local stack_balanced = lua.lua_gettop(L) == stack_top
+  local callback_count = runtime.callback_count
+  local timer_count = runtime.timer_count
+  local close_count = runtime.close_count
+  local fs_count = runtime.fs_count
+  local fatal = runtime.fatal
+  close_runtime(runtime)
+
+  lua.lua_gc(L, lua.LUA_GCINC)
+  lua.lua_gc(L, lua.LUA_GCCOLLECT)
+  local roots_released = weak_range_absent(1, 14)
+  return { runtime.proof_incremental_paused, incremental_barrier,
+           accepted_graph_rooted, generational_barrier,
+           runtime.proof_layout_valid,
+           runtime.proof_allocation_counter_active,
+           runtime.proof_access_without_allocation,
+           runtime.proof_incremental_buffer_length,
+           generational_buffer_length, callback_count, timer_count,
+           close_count, fs_count, fatal, stack_balanced,
+           run_status as integer, roots_released }
+end
+
 -- A narrow executable Phase-1 probe covers the native foundation without
 -- pretending that Task/run/cancellation already exist.  Phase 2 replaces this
 -- diagnostic surface with the public continuation API.
@@ -497,13 +678,20 @@ function _phase1_probe(path: string, fail_task: boolean,
   local request = start_fs_stat(runtime, path)
   request.metadata.inject_dispatch_failure = inject_fs_dispatch_failure
 
-  -- First make the rooted owners old, then store a newly allocated buffer in
-  -- both of them and force a generational step.  The generated record-field
-  -- writes must use back barriers for the young buffer graph to survive.
-  lua.lua_gc(L, lua.LUA_GCCOLLECT)
-  local buffer_length = install_young_buffer(timer, request)
-  lua.lua_gc(L, lua.LUA_GCGEN)
-  lua.lua_gc(L, lua.LUA_GCSTEP, 0 as libuv.size_t)
+  -- These weak values let the Lua-side fixture prove that both the callback
+  -- owner records and their separate native-storage userdata lose their last
+  -- strong root after the terminal callbacks and loop close.
+  weak_store(1, timer)
+  weak_store(2, timer.storage)
+  weak_store(3, followup)
+  weak_store(4, followup.storage)
+  weak_store(5, request)
+  weak_store(6, request.storage)
+
+  -- The dedicated cross-module proof above isolates collection from these
+  -- strong diagnostic locals.  This path still checks the concrete layout and
+  -- callback-visible buffer graph while exercising failure cleanup.
+  local buffer_length = install_young_buffer(timer, request, 0)
   local owner_layout_ok = owner_layout_is_valid(timer) and
                           owner_layout_is_valid(request)
   local repeated_timer_access_ok = 0
@@ -565,6 +753,13 @@ end
 
 function version(): string
   return libuv.uv_version_string() as string
+end
+
+function _phase1_owner_roots_released(): boolean
+  for slot = 1, 6 do
+    if weak_present(slot) then return false end
+  end
+  return true
 end
 
 -- Foundational exact-wrapper entry used by the higher timer layer.  Its Lua

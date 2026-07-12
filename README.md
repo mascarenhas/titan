@@ -94,7 +94,9 @@ export TITAN_STDLIB_PATH="$PWD/lua_modules/lib/lua/5.5/titan/stdlib_0_11"
 
 For a manual prefix, `make install-stdlib PREFIX=/opt/titan` installs canonical
 modules under `/opt/titan/lib/titan/0.11` and Lua aliases under
-`/opt/titan/lib/lua/5.5/titan`; set `TITAN_STDLIB_PATH` to the former and add
+`/opt/titan/lib/lua/5.5/titan`. It also installs the bundled-libuv attribution
+and license under `/opt/titan/share/titan`; set `TITAN_STDLIB_PATH` to the
+canonical `/opt/titan/lib/titan/0.11` directory and add
 `/opt/titan/lib/lua/5.5/?.so` to `LUA_CPATH` for Lua hosts. The standard path is
 separate from ordinary `TITAN_PATH` by design, so an application-local module
 cannot replace a standard dependency.
@@ -181,16 +183,19 @@ your compilation as a native binary:
 
 * if one of your Titan modules has a `main` function, with signature
   `function({string}):integer`, then `titanc` will bundle all modules
-  given in the command-line, along with all their dependencies where
-  source code was available, as a stand-alone executable program.
+  given in the command-line, along with all ordinary dependencies where
+  source code was available, as a stand-alone executable program. Reserved
+  standard modules remain canonical runtime images loaded from the Titan
+  standard-library path.
 * Otherwise, it will compile each module into a shared library that you
   can `import` from Titan as well as `require` from Lua, and call any
   exported functions/access exported variables. The generated `.c` and
   `.o` files are written next to the `.titan` source; linked `.so` files
   are written relative to the directory where `titanc` runs. For each
-  generated module, any of its transitive imports is statically linked if
-  source code was found; dependencies that were only available as a shared
-  library will be dynamically loaded.
+  generated module, any ordinary transitive import is statically linked if
+  source code was found; ordinary dependencies that were only available as a
+  shared library will be dynamically loaded. Reserved standard imports use
+  their canonical shared images instead.
 
 # Running the test suite
 
@@ -237,8 +242,9 @@ need the SDL2 development headers installed.
 # Cleaning up
 
 `make clean` removes generated build and test artifacts (object files, generated
-C, compiled modules, coverage data) while keeping the downloaded Lua tree.
-`make distclean` additionally removes the `lua-5.*` source tree(s) and tarball.
+C, compiled modules, coverage data) while keeping downloaded dependency trees.
+`make distclean` additionally removes the downloaded Lua, libbacktrace, and
+libuv source/build trees and release tarballs.
 
 # Compiler options
 

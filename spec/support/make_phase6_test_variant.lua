@@ -73,6 +73,9 @@ local test_phase6_os_last_grow_from = 0
 local test_phase6_os_last_grow_to = 0
 local test_phase6_process_fault = 0
 local test_phase6_process_callback_fault = 0
+local test_phase6_track_inflight_write = false
+local test_phase6_inflight_write_observed = false
+local test_phase6_process_write_weak: value = nil
 local test_phase6_process_stdio_attempts = 0
 local test_phase6_process_stdio_native_calls = 0
 local test_phase6_process_init_attempts = 0
@@ -94,6 +97,39 @@ local test_phase6_process_grace_callbacks = 0
 local test_phase6_process_close_before_exit = 0
 local test_phase6_process_helper_starts = 0
 local test_phase6_process_helper_completions = 0
+
+local function test_phase6_ensure_process_write_weak()
+  if test_phase6_process_write_weak == nil then
+    local top = lua.lua_gettop(L)
+    lua.lua_createtable(L, 6, 0)
+    lua.lua_createtable(L, 0, 1)
+    lua.lua_pushstring(L, "v")
+    lua.lua_setfield(L, -2, "__mode")
+    lua.lua_setmetatable(L, -2)
+    test_phase6_process_write_weak = ffi.lua_totvalue(L, -1)
+    lua.lua_settop(L, top)
+  end
+end
+
+local function test_phase6_weak_process_write_store(slot: integer,
+                                                     item: value)
+  test_phase6_ensure_process_write_weak()
+  local top = lua.lua_gettop(L)
+  ffi.lua_pushtvalue(L, test_phase6_process_write_weak)
+  ffi.lua_pushtvalue(L, item)
+  lua.lua_rawseti(L, -2, slot as lua.lua_Integer)
+  lua.lua_settop(L, top)
+end
+
+local function test_phase6_weak_process_write_present(slot: integer): boolean
+  test_phase6_ensure_process_write_weak()
+  local top = lua.lua_gettop(L)
+  ffi.lua_pushtvalue(L, test_phase6_process_write_weak)
+  lua.lua_rawgeti(L, -1, slot as lua.lua_Integer)
+  local present = lua.lua_type(L, -1) ~= lua.LUA_TNIL
+  lua.lua_settop(L, top)
+  return present
+end
 ]==], "signal counters and controls")
 
 source = replace_once(source, [==[  -- TITAN_UV_PHASE6_OS_BUFFER_INIT
@@ -151,6 +187,11 @@ source = replace_once(source, "    -- TITAN_UV_PHASE6_OS_BUFFER_RESULT", [==[
       -- before the grow marker or a second allocate_bytes call.
       test_phase6_os_fault_mode = 0
       sizes[0] = 9223372036854775807 as libuv.size_t
+    elseif test_phase6_os_fault_mode == 5 then
+      -- A portable libuv UV_ENOSYS result must surface as uv.Error without a
+      -- hidden host-OS fallback.
+      test_phase6_os_fault_mode = 0
+      status = shim.titan_uvshim_error_enosys()
     end
 ]==], "OS buffer result faults")
 
@@ -229,6 +270,28 @@ source = replace_once(source, [==[      -- TITAN_UV_PHASE6_PROCESS_WRITE_SUBMIT
             test_phase6_process_write_native_calls + 1
         status = shim.titan_uvshim_pipe_write_start(
             owner.handle, pipe.handle, pointer, buffer.handle)
+        if (status as integer) >= 0 and
+            test_phase6_track_inflight_write then
+          -- Observe the real accepted graph without changing its production
+          -- lifecycle. The fixture cancels and collects only after this
+          -- submission frame has returned and the writer Task has unwound.
+          if test_phase6_process_write_callbacks ~= 0 then
+            raise "process write callback ran before in-flight tracking hook"
+          end
+          if operation.owner == nil or owner.metadata.owner == nil or
+              owner.storage == nil or owner.root == nil or owner.buffer == nil
+          then
+            raise "in-flight process write lost its accepted-request roots"
+          end
+          test_phase6_weak_process_write_store(1, owner)
+          test_phase6_weak_process_write_store(2, owner.storage)
+          test_phase6_weak_process_write_store(3, buffer)
+          test_phase6_weak_process_write_store(4, buffer.storage)
+          test_phase6_weak_process_write_store(5, buffer.bytes)
+          test_phase6_weak_process_write_store(6, buffer.bytes.storage)
+          test_phase6_track_inflight_write = false
+          test_phase6_inflight_write_observed = true
+        end
       end]==], "process write submission")
 
 source = replace_once(source, [==[      -- TITAN_UV_PHASE6_PROCESS_STDIN_CLOSE
@@ -597,6 +660,8 @@ function __test_phase6_os_buffer_fault(mode: string)
     test_phase6_os_fault_mode = 3
   elseif mode == "allocation-overflow" then
     test_phase6_os_fault_mode = 4
+  elseif mode == "enosys" then
+    test_phase6_os_fault_mode = 5
   else
     raise "unknown OS buffer fault mode"
   end
@@ -640,6 +705,9 @@ function __test_phase6_reset_process_state()
   end
   test_phase6_process_fault = 0
   test_phase6_process_callback_fault = 0
+  test_phase6_track_inflight_write = false
+  test_phase6_inflight_write_observed = false
+  test_phase6_process_write_weak = nil
   test_phase6_process_stdio_attempts = 0
   test_phase6_process_stdio_native_calls = 0
   test_phase6_process_init_attempts = 0
@@ -698,9 +766,40 @@ function __test_phase6_fail_next_process_callback(stage: string)
   end
 end
 
+function __test_phase6_track_next_process_write_inflight()
+  if test_phase6_track_inflight_write then
+    raise "an in-flight process write observation is already pending"
+  end
+  test_phase6_process_write_weak = nil
+  test_phase6_ensure_process_write_weak()
+  test_phase6_track_inflight_write = true
+  test_phase6_inflight_write_observed = false
+end
+
+function __test_phase6_inflight_process_write_observed(): boolean
+  return test_phase6_inflight_write_observed
+end
+
+function __test_phase6_inflight_process_write_roots_alive(): boolean
+  if not test_phase6_inflight_write_observed then return false end
+  for slot = 1, 6 do
+    if not test_phase6_weak_process_write_present(slot) then return false end
+  end
+  return true
+end
+
+function __test_phase6_inflight_process_write_roots_released(): boolean
+  if not test_phase6_inflight_write_observed then return false end
+  for slot = 1, 6 do
+    if test_phase6_weak_process_write_present(slot) then return false end
+  end
+  return true
+end
+
 function __test_phase6_process_fault_pending(): boolean
   return test_phase6_process_fault ~= 0 or
-         test_phase6_process_callback_fault ~= 0
+         test_phase6_process_callback_fault ~= 0 or
+         test_phase6_track_inflight_write
 end
 
 function __test_phase6_process_counter(name: string): integer
@@ -816,6 +915,10 @@ for _, hook in ipairs({
     "__test_phase6_reset_process_state",
     "__test_phase6_force_process_failure",
     "__test_phase6_fail_next_process_callback",
+    "__test_phase6_track_next_process_write_inflight",
+    "__test_phase6_inflight_process_write_observed",
+    "__test_phase6_inflight_process_write_roots_alive",
+    "__test_phase6_inflight_process_write_roots_released",
     "__test_phase6_process_fault_pending",
     "__test_phase6_process_counter",
     "__test_phase6_process_resources",

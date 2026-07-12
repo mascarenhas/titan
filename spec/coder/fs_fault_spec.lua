@@ -27,7 +27,8 @@ describe("fs Phase 3 isolated lifecycle faults", function()
 
     setup(function()
         workspace, root = phase3.variant_workspace(
-            "spec/support/make_fs_test_variant.lua")
+            "spec/support/make_fs_test_variant.lua",
+            "spec/support/make_fs_read_limit_variant.lua")
         phase3.copy_fixture(workspace, "fs_faults.titan",
             "phase3_fs_faults")
         phase3.compile(workspace, "phase3_fs_faults", {
@@ -111,12 +112,21 @@ describe("fs Phase 3 isolated lifecycle faults", function()
         assert.is_true(pause < early_return and early_return < allocation)
 
         local variant_fs_c = phase3.read(workspace .. "/stdlib/fs.c")
+        local variant_fs_source = phase3.read(
+            workspace .. "/stdlib/fs.titan")
+        assert.match("local MAX_STRING_BYTES = 131071", variant_fs_source,
+            1, true)
+        assert.match("local MAX_STRING_BYTES = 9223372036854775807",
+            production_fs_source, 1, true)
         assert.falsy(interface_definition(variant_fs_c, "fs"):find(
             "__test_fs_", 1, true))
     end)
 
     it("balances sync, callback, partial-write, close, and cancellation paths",
     function()
+        local overflow = assert(io.open(root .. "/overflow-read.dat", "wb"))
+        assert.truthy(overflow:write(("x"):rep(131072)))
+        assert.truthy(overflow:close())
         local command = phase3.variant_app_command(
             workspace, "phase3_fs_faults") .. " " .. quote(root)
         local ok, status, output = phase3.run(command, workspace)

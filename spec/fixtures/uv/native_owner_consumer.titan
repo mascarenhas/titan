@@ -1,0 +1,26 @@
+local native = import "native_owner_probe"
+local allocation = foreign import "titan_uv_test_allocation.h"
+
+-- This is deliberately a different Titan module.  The callback crosses into
+-- native_owner_probe._timer_is_closing through the imported module ABI, which
+-- is the representative middle-layer handle access whose allocation behavior
+-- the native-owner fixture measures.
+local function cross_module_timer_access(timer: native.uv_timer_t): boolean
+  local result = not native._timer_is_closing(timer) and
+                 not native._timer_is_closing(timer)
+  -- On a two-level-namespace platform this module may have a DSO-local test
+  -- counter distinct from the provider's.  Check this side explicitly; the
+  -- provider checks its own counter after this callback returns.
+  return result and
+      (allocation.titan_uv_test_get_userdata_allocations() as integer) == 0 and
+      (allocation.titan_uv_test_get_internal_userdata_allocations()
+          as integer) == 0
+end
+
+function gc_proof(path: string): {value}
+  -- Reset this module's counter before any cross-module call.  The provider
+  -- independently calibrates and resets its counter immediately before it
+  -- invokes cross_module_timer_access.
+  allocation.titan_uv_test_reset_userdata_allocations()
+  return native._phase1_gc_proof(path, cross_module_timer_access)
+end

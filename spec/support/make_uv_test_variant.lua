@@ -97,6 +97,20 @@ local test_fail_next_join_wake = false
 local test_join_wake_delay = 0
 local test_deferred_error_delay = 0
 local test_owner_starts = 0
+local test_task_creations = 0
+local test_fail_next_loop_init = false
+local test_fail_next_timer_init = false
+local test_fail_next_timer_start = false
+local test_loop_init_attempts = 0
+local test_loop_native_inits = 0
+local test_loop_init_releases = 0
+local test_timer_init_attempts = 0
+local test_timer_native_inits = 0
+local test_timer_init_releases = 0
+local test_timer_start_attempts = 0
+local test_timer_native_starts = 0
+local test_timer_close_callbacks = 0
+local test_start_owner_close_callbacks = 0
 local test_untracked_timer_storage: value = nil
 local test_untracked_timer_handle: *libuv.uv_timer_t = nil
 local test_callback_depth = 0
@@ -119,6 +133,82 @@ local function test_uv_run_exit()
   end
   test_uv_run_depth = test_uv_run_depth - 1
 end]], "test state and outer uv_run counters")
+
+source = replace_once(source, [==[
+  local status = libuv.uv_loop_init(loop.handle)
+  if (status as integer) < 0 then
+    loop.handle = nil
+    loop.storage = nil
+    raise make_error(status as integer, "loop.init", nil)
+  end
+]==], [==[
+  test_loop_init_attempts = test_loop_init_attempts + 1
+  local status: ffi.titan_ffi_int = 0 as ffi.titan_ffi_int
+  if test_fail_next_loop_init then
+    test_fail_next_loop_init = false
+    status = shim.titan_uvshim_error_ecanceled()
+  else
+    test_loop_native_inits = test_loop_native_inits + 1
+    status = libuv.uv_loop_init(loop.handle)
+  end
+  if (status as integer) < 0 then
+    loop.handle = nil
+    loop.storage = nil
+    test_loop_init_releases = test_loop_init_releases + 1
+    raise make_error(status as integer, "loop.init", nil)
+  end
+]==], "loop-init rejection and release counters")
+
+source = replace_once(source, [==[
+  local status = libuv.uv_timer_init(runtime.loop.handle, owner.handle)
+]==], [==[
+  test_timer_init_attempts = test_timer_init_attempts + 1
+  local status: ffi.titan_ffi_int = 0 as ffi.titan_ffi_int
+  if test_fail_next_timer_init then
+    test_fail_next_timer_init = false
+    status = shim.titan_uvshim_error_ecanceled()
+  else
+    test_timer_native_inits = test_timer_native_inits + 1
+    status = libuv.uv_timer_init(runtime.loop.handle, owner.handle)
+  end
+]==], "timer-init rejection counters")
+
+source = replace_once(source, [==[
+    owner.metadata.lifecycle = OWNER_CLOSED
+    return owner, status as integer
+  end
+  owner.metadata.lifecycle = OWNER_ACTIVE
+  shim.titan_uvshim_timer_set_data(owner.handle, pointer)
+  status = libuv.uv_timer_start(owner.handle, shim.titan_uvshim_timer_cb,
+                               timeout, repeat_time)
+]==], [==[
+    owner.metadata.lifecycle = OWNER_CLOSED
+    test_timer_init_releases = test_timer_init_releases + 1
+    return owner, status as integer
+  end
+  owner.metadata.lifecycle = OWNER_ACTIVE
+  shim.titan_uvshim_timer_set_data(owner.handle, pointer)
+  test_timer_start_attempts = test_timer_start_attempts + 1
+  if test_fail_next_timer_start then
+    test_fail_next_timer_start = false
+    status = shim.titan_uvshim_error_ecanceled()
+  else
+    test_timer_native_starts = test_timer_native_starts + 1
+    status = libuv.uv_timer_start(owner.handle, shim.titan_uvshim_timer_cb,
+                                 timeout, repeat_time)
+  end
+]==], "timer init release and timer-start rejection counters")
+
+source = replace_once(source, [==[
+local function run_internal(func: () -> value, is_main: boolean): Task
+  local runtime = ensure_runtime()
+  local root = coroutine.create(adapt(func), UV_TAG)
+]==], [==[
+local function run_internal(func: () -> value, is_main: boolean): Task
+  local runtime = ensure_runtime()
+  test_task_creations = test_task_creations + 1
+  local root = coroutine.create(adapt(func), UV_TAG)
+]==], "Task creation counter after Runtime initialization")
 
 source = replace_once(source, [==[
 local function start_owner(runtime: Runtime, kind: integer, task: value,
@@ -315,6 +405,11 @@ source = replace_once(source, [==[
     if kind == OWNER_OBSERVE then
       runtime.pending_observations = runtime.pending_observations - 1
     end
+    test_timer_close_callbacks = test_timer_close_callbacks + 1
+    if kind == OWNER_START then
+      test_start_owner_close_callbacks =
+          test_start_owner_close_callbacks + 1
+    end
     if test_fail_next_close_bookkeeping then
       test_fail_next_close_bookkeeping = false
       raise "injected close-bookkeeping failure"
@@ -442,6 +537,90 @@ function __test_owner_starts(): integer
   return test_owner_starts
 end
 
+function __test_fail_next_loop_init()
+  if active_runtime then
+    raise "cannot fail loop init with an active Runtime"
+  end
+  test_fail_next_loop_init = true
+end
+
+function __test_fail_next_timer_init()
+  test_fail_next_timer_init = true
+end
+
+function __test_fail_next_timer_start()
+  test_fail_next_timer_start = true
+end
+
+function __test_task_creations(): integer
+  return test_task_creations
+end
+
+function __test_loop_init_attempts(): integer
+  return test_loop_init_attempts
+end
+
+function __test_loop_native_inits(): integer
+  return test_loop_native_inits
+end
+
+function __test_loop_init_releases(): integer
+  return test_loop_init_releases
+end
+
+function __test_timer_init_attempts(): integer
+  return test_timer_init_attempts
+end
+
+function __test_timer_native_inits(): integer
+  return test_timer_native_inits
+end
+
+function __test_timer_init_releases(): integer
+  return test_timer_init_releases
+end
+
+function __test_timer_start_attempts(): integer
+  return test_timer_start_attempts
+end
+
+function __test_timer_native_starts(): integer
+  return test_timer_native_starts
+end
+
+function __test_timer_close_callbacks(): integer
+  return test_timer_close_callbacks
+end
+
+function __test_start_owner_close_callbacks(): integer
+  return test_start_owner_close_callbacks
+end
+
+function __test_timer_resources(): integer
+  if not active_runtime then return 0 end
+  local count = 0
+  local raw = (active_runtime as Runtime).timer_owner_head
+  while raw ~= nil do
+    count = count + 1
+    raw = (raw as uv_timer_t).metadata.next_owner
+  end
+  return count
+end
+
+function __test_closing_timer_resources(): integer
+  if not active_runtime then return 0 end
+  local count = 0
+  local raw = (active_runtime as Runtime).timer_owner_head
+  while raw ~= nil do
+    local owner = raw as uv_timer_t
+    if owner.metadata.lifecycle == OWNER_CLOSING then
+      count = count + 1
+    end
+    raw = owner.metadata.next_owner
+  end
+  return count
+end
+
 function __test_init_untracked_timer()
   local runtime = current_runtime()
   local top = lua.lua_gettop(L)
@@ -543,6 +722,11 @@ assert(source:find("function __test_max_callback_depth", 1, true))
 assert(source:find("function __test_max_uv_run_depth", 1, true))
 assert(source:find("function __test_delay_next_join_wake", 1, true))
 assert(source:find("function __test_owner_starts", 1, true))
+assert(source:find("function __test_fail_next_loop_init", 1, true))
+assert(source:find("function __test_fail_next_timer_init", 1, true))
+assert(source:find("function __test_fail_next_timer_start", 1, true))
+assert(source:find("function __test_timer_resources", 1, true))
+assert(source:find("function __test_closing_timer_resources", 1, true))
 assert(source:find("function __test_init_untracked_timer", 1, true))
 assert(source:find("function __test_close_untracked_timer", 1, true))
 assert(source:find("function __test_release_untracked_timer", 1, true))

@@ -57,6 +57,9 @@ describe("uv Phase 2 isolated scheduler faults", function()
         assert.match("uv___test_cancel_main_titan", variant, 1, true)
         assert.match("uv___test_fail_next_close_bookkeeping_titan",
             variant, 1, true)
+        assert.match("uv___test_fail_next_loop_init_titan", variant, 1, true)
+        assert.match("uv___test_fail_next_timer_init_titan", variant, 1, true)
+        assert.match("uv___test_fail_next_timer_start_titan", variant, 1, true)
         assert_entry_catch_precedes_gc(variant,
             "static void uv_timer_dispatch_titan(",
             "static int uv_timer_dispatch_titanentry_lua(", 10)
@@ -129,6 +132,23 @@ describe("uv Phase 2 isolated scheduler faults", function()
         assert.match("stack traceback:", output, 1, true)
         assert.match("in bootstrap_main_cancel.main", output, 1, true)
     end)
+
+    for _, scenario in ipairs({
+        "loop-init", "timer-init", "timer-start-observed",
+        "timer-start-unobserved",
+    }) do
+        it("drains the " .. scenario .. " startup transition", function()
+            local script = phase2.repo ..
+                "/spec/fixtures/uv/phase2/startup_faults.lua"
+            local ok, status, output = phase2.run(
+                phase2.variant_lua_command(workspace, script, scenario),
+                workspace)
+            assert.truthy(ok, output)
+            assert.equals(0, status, output)
+            assert.match("RESULT startup fault passed: " .. scenario,
+                output, 1, true)
+        end)
+    end
 
     for _, case in ipairs({
         { "pre_runtime_child_loop.lua", "rejects a child loop before Runtime creation" },

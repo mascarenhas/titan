@@ -463,9 +463,10 @@ end
 
 local retained_process: os.Process? = nil
 
-function schedule_forced_runtime_shutdown(child: string): uv.Task
+function schedule_forced_runtime_shutdown(child: string,
+                                          pid_path: string): uv.Task
   return uv.run(function (): value
-    local process = os.spawn(child, { "ignore-term" })
+    local process = os.spawn(child, { "ignore-term", pid_path })
     retained_process = process
     process:close_stdin()
     check(process:read_stdout(64) == "READY\n",
@@ -478,10 +479,16 @@ end
 
 function schedule_stale_process_rejection(child: string): uv.Task
   return uv.run(function (): value
-    expect_failure(function (): value
+    local caught = false
+    do
       (retained_process as os.Process):wait()
-      return nil
-    end, "closed Process from an older Runtime generation was accepted")
+    catch
+      check(error == "Process belongs to a stale libuv Runtime",
+            "stale Process wait reported the wrong error")
+      caught = true
+    end
+    check(caught,
+          "closed Process from an older Runtime generation was accepted")
     retained_process = nil
     local output, diagnostics, status =
       os.communicate(child, { "echo" }, "new-generation")
@@ -490,4 +497,8 @@ function schedule_stale_process_rejection(child: string): uv.Task
     check_normal(status, "new-generation child did not exit normally")
     return "stale-process-rejected"
   end)
+end
+
+function retained_process_value(): os.Process?
+  return retained_process
 end

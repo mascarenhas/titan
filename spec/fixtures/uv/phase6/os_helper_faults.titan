@@ -109,3 +109,21 @@ function exercise_retry_exhaustion(): string
   raise "OS buffer retry exhaustion unexpectedly succeeded"
   return nil
 end
+
+function exercise_enosys(): string
+  uv.__test_phase6_reset_os_buffer_state()
+  uv.__test_phase6_os_buffer_fault("enosys")
+  do
+    os.cwd()
+  catch
+    local failure = error as uv.Error
+    check(failure.name == "ENOSYS" and failure.operation == "os.cwd",
+          "UV_ENOSYS reported the wrong Error")
+    check(uv.__test_phase6_os_result_attempts() == 1 and
+          uv.__test_phase6_os_grows() == 0,
+          "UV_ENOSYS unexpectedly entered buffer retry/fallback")
+    return "os-enosys-no-fallback-ok"
+  end
+  raise "UV_ENOSYS unexpectedly succeeded"
+  return nil
+end

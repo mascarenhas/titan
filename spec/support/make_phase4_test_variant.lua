@@ -56,6 +56,10 @@ local test_phase4_fs_cancel_status = 0
 local test_phase4_fs_cancel_override = 0
 local test_phase4_fs_cancel_override_armed = false
 local test_phase4_fs_cleanups = 0
+local test_phase4_fs_open_successes = 0
+local test_phase4_fs_open_publications = 0
+local test_phase4_fs_internal_close_enqueues = 0
+local test_phase4_fs_internal_close_callbacks = 0
 ]==], "race-control state")
 
 source = replace_once(source, [==[
@@ -121,6 +125,10 @@ source = replace_once(source, [==[
       owner.metadata.operation.kind == FS.open then
     owner.metadata.acquired_file = result as libuv.uv_file
     owner.metadata.has_acquired_file = true
+    if test_phase4_fs_delay > 0 then
+      test_phase4_fs_open_successes =
+          test_phase4_fs_open_successes + 1
+    end
   end
   if test_phase4_fs_delay > 0 then
     local delay = test_phase4_fs_delay
@@ -138,6 +146,44 @@ source = replace_once(source, [==[
   end
   fs_dispatch_body(owner, event_kind, result, size)
 ]==], "physical FS callback deferral")
+
+source = replace_once(source, [==[
+  file.state = FS.file_closing
+  local operation = make_fs_operation(FS.internal_close, nil, nil,
+]==], [==[
+  file.state = FS.file_closing
+  test_phase4_fs_internal_close_enqueues =
+      test_phase4_fs_internal_close_enqueues + 1
+  local operation = make_fs_operation(FS.internal_close, nil, nil,
+]==], "internal close enqueue")
+
+source = replace_once(source, [==[
+  local operation = owner.metadata.operation
+  local payload: value = nil
+]==], [==[
+  local operation = owner.metadata.operation
+  if operation.kind == FS.internal_close then
+    test_phase4_fs_internal_close_callbacks =
+        test_phase4_fs_internal_close_callbacks + 1
+  end
+  local payload: value = nil
+]==], "internal close callback")
+
+source = replace_once(source, [==[
+    if fs_operation_deliverable(operation) then
+      payload = file
+    else
+      queue_internal_close(file)
+    end
+]==], [==[
+    if fs_operation_deliverable(operation) then
+      test_phase4_fs_open_publications =
+          test_phase4_fs_open_publications + 1
+      payload = file
+    else
+      queue_internal_close(file)
+    end
+]==], "successful open publication")
 
 source = replace_once(source, [==[
   elseif kind == OWNER_TASK_DRIVE then
@@ -184,6 +230,10 @@ function __test_phase4_reset_fs_counters()
   test_phase4_fs_cancel_override = 0
   test_phase4_fs_cancel_override_armed = false
   test_phase4_fs_cleanups = 0
+  test_phase4_fs_open_successes = 0
+  test_phase4_fs_open_publications = 0
+  test_phase4_fs_internal_close_enqueues = 0
+  test_phase4_fs_internal_close_callbacks = 0
 end
 
 function __test_phase4_override_next_fs_cancel_success()
@@ -213,6 +263,49 @@ end
 function __test_phase4_fs_cleanups(): integer
   return test_phase4_fs_cleanups
 end
+
+function __test_phase4_fs_open_successes(): integer
+  return test_phase4_fs_open_successes
+end
+
+function __test_phase4_fs_open_publications(): integer
+  return test_phase4_fs_open_publications
+end
+
+function __test_phase4_fs_internal_close_enqueues(): integer
+  return test_phase4_fs_internal_close_enqueues
+end
+
+function __test_phase4_fs_internal_close_callbacks(): integer
+  return test_phase4_fs_internal_close_callbacks
+end
+
+function __test_phase4_fs_pending_roots(): integer
+  if not active_runtime then return 0 end
+  local count = 0
+  local raw = (active_runtime as Runtime).fs_pending_head
+  while raw ~= nil do
+    count = count + 1
+    raw = (raw as uv_fs_t).metadata.next_owner
+  end
+  return count
+end
+
+function __test_phase4_file_roots(): integer
+  if not active_runtime then return 0 end
+  local count = 0
+  local raw = (active_runtime as Runtime).file_head
+  while raw ~= nil do
+    count = count + 1
+    raw = (raw as uv_file).next_file
+  end
+  return count
+end
+
+function __test_phase4_runtime_active(): boolean
+  if active_runtime then return true end
+  return false
+end
 ]==]
 
 source = replace_once(source, [==[
@@ -232,6 +325,13 @@ for _, hook in ipairs({
     "__test_phase4_fs_cancel_calls",
     "__test_phase4_fs_cancel_status",
     "__test_phase4_fs_cleanups",
+    "__test_phase4_fs_open_successes",
+    "__test_phase4_fs_open_publications",
+    "__test_phase4_fs_internal_close_enqueues",
+    "__test_phase4_fs_internal_close_callbacks",
+    "__test_phase4_fs_pending_roots",
+    "__test_phase4_file_roots",
+    "__test_phase4_runtime_active",
 }) do
     assert(source:find("function " .. hook, 1, true),
         "Phase 4 hook was not inserted: " .. hook)

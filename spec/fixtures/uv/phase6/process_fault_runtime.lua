@@ -102,6 +102,28 @@ elseif scenario == "write" then
     assert(counter("write-callbacks") == 0)
     assert(counter("stdin-close-transitions") == 1)
     print("RESULT phase6 process write rejection passed")
+elseif scenario == "inflight-write" then
+    uv.__test_phase6_reset_process_state()
+    run_success("schedule_inflight_write_cancel_gc",
+        "inflight-process-write-cancelled", child)
+    assert(uv.__test_phase6_inflight_process_write_observed(),
+        "post-submission owner observation did not run")
+    collectgarbage("collect")
+    collectgarbage("collect")
+    assert(uv.__test_phase6_inflight_process_write_roots_released(),
+        "terminal process write owner graph stayed reachable")
+    assert(counter("write-attempts") == 2,
+        "cancelled and follow-up writes were not both attempted")
+    assert(counter("write-native") == 2,
+        "cancelled and follow-up writes were not both submitted")
+    assert(counter("write-callbacks") == 2,
+        "each submitted process write did not consume one callback")
+    assert(counter("stdin-close-transitions") == 1)
+    assert(counter("exit-callbacks") == 1)
+    assert(counter("process-close-callbacks") == 1)
+    assert(counter("pipe-close-callbacks") == 3,
+        "process pipes did not all drain after in-flight cancellation")
+    print("RESULT phase6 in-flight process write cancellation passed")
 elseif scenario == "close" then
     uv.__test_phase6_reset_process_state()
     run_success("schedule_close_transition_failure",

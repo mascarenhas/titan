@@ -446,6 +446,7 @@ static void test_native_storage_layout(lua_State *L) {
   uv_signal_t *signal;
   uv_pipe_t *pipe;
   uv_process_t *process;
+  uv_dirent_t *dirent;
   titan_uvshim_address *address;
   titan_uvshim_char_ptr *argv;
 
@@ -527,6 +528,12 @@ static void test_native_storage_layout(lua_State *L) {
   assert((uintptr_t)storage % _Alignof(uv_process_t) == 0);
   process = (uv_process_t *)storage;
   assert((void *)process == storage);
+  lua_pop(L, 1);
+
+  storage = lua_newuserdatauv(L, sizeof(uv_dirent_t), 0);
+  assert((uintptr_t)storage % _Alignof(uv_dirent_t) == 0);
+  dirent = (uv_dirent_t *)storage;
+  assert((void *)dirent == storage);
   lua_pop(L, 1);
 
   storage = lua_newuserdatauv(L, 3 * sizeof(titan_uvshim_char_ptr), 0);

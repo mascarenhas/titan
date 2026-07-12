@@ -3,9 +3,9 @@
 Status: implementation complete through Phase 6. Portable OS helpers,
 one-shot signals, child processes, binary stdio pipes, retained exit status,
 and concurrent `communicate` are covered by normal, deterministic fault, and
-packaging suites. Phase 7 documentation and CI integration are complete; the
-full local suite is green, and the external Linux/sanitizer/manual-macOS gates
-remain.
+packaging suites. Phase 7 documentation and CI integration are complete;
+focused and integrated local async gates are green, while the authoritative
+full `make test` and external Linux/sanitizer/manual-macOS gates remain.
 The design below is based on the current repository checkout, the sketch in
 `/tmp/uv-io.md`, the implemented `coroutine`/`uv` standard modules, focused
 Titan and libuv prototypes, and the public libuv 1.x contracts.
@@ -133,7 +133,7 @@ The current architecture already supplies the necessary substrate:
 - `stdlib/coroutine.titan` selects `stacked_co` when transferring values, so
   the callback only needs to own and resume the task root.
 - Minicoro searches the active dynamic `prev_co` chain for a matching tag; it
-  does not search unrelated suspended roots (`titan-runtime/minicoro.h:1854-1864`).
+  does not search unrelated suspended roots (`titan-runtime/minicoro.h:1888-1905`).
   One hidden tag can therefore be shared safely by all independent UV tasks.
 - C FFI types may be used locally but may not appear in exported Titan
   interfaces (`doc/language/ffi.md:102-118`). The public libraries therefore
@@ -154,15 +154,18 @@ The current architecture already supplies the necessary substrate:
   stops at NUL and a generic `string -> char *` borrow is documented as
   call-duration-only (`doc/language/ffi.md:280-300`). Async buffers therefore
   need an explicit length and an operation-owned root/copy.
-- The standalone launcher currently evaluates
-  `require('<module>').main(arg)` directly (`titan-compiler/driver.lua:326-343`).
-  Async wrapping is therefore a concrete compiler/entrypoint bootstrap change,
-  not an overload of the public `uv.run` implementation.
-- Source dependencies are statically linked while binary-only modules are
-  dynamically loaded (`doc/language/modules.md:327-347`). The build must produce
-  canonical `uv.so` first and make higher-level standard modules import that
-  binary, so the shim and libuv archive are linked exactly once. Packaging also
-  exposes a single-image Lua alias at `titan/uv.so` with
+- The standalone launcher requires the main module, retains its exact `main`
+  callable, and then either calls it directly or passes it to the private
+  bootstrap hook installed by a transitive async standard import
+  (`titan-compiler/driver.lua:603-635`). Async wrapping is an entrypoint
+  bootstrap decision, not an overload of the public `uv.run` implementation.
+- Ordinary source dependencies are statically linked while ordinary
+  binary-only modules are dynamically loaded. Reserved standards are the
+  deliberate exception: applications load their canonical ABI-qualified
+  images from `TITAN_STDLIB_PATH` (`doc/language/modules.md:327-360`). The build
+  produces canonical `uv.so` first and higher-level standard modules import
+  that binary, so the shim and libuv archive are linked exactly once. Packaging
+  exposes the same image through the Lua alias `titan/uv.so` with
   `luaopen_titan_uv`.
 - Module state is per Lua state (`doc/implementation/codegen-overview.md:483-490`).
   Libuv state must also be per Lua state/bootstrap session; no process-global
@@ -181,6 +184,12 @@ All spike artifacts were kept under `/tmp`; none are production files.
   Titan's real `cpp.parse_file -> c99 -> ctypes` pipeline. Generated modules
   called `uv_version_string` and emitted `sizeof(uv_loop_t)`,
   `sizeof(uv_timer_t)`, and `sizeof(uv_fs_t)` successfully.
+- The final selected public API was re-audited against upstream tag `v1.43.0`
+  (commit `988f2bfc4defb9a85a536a3e645834c161143ee0`): every `uv`/shim symbol is
+  declared by that release, and the production shim plus current generated
+  `uv` translation unit compile against its headers with the Linux C99 feature
+  flags. This locks `1.43.0` as the optional system-mode minimum without adding
+  a second full dependency build to every CI run.
 - Some libuv structs remain incomplete in Titan's parsed type model on current
   headers, so `uv.Type.new()` is not a dependable production mechanism.
   `uv.Type.sizeof` still emits the C compiler's correct size.
@@ -239,7 +248,7 @@ This pins the two different libuv lifetime families:
   is not the selected design.
 - Existing coroutine tests cover nested tagged routing, injected errors,
   stacked-resume rejection, traceback preservation, and generational rooting
-  (`spec/coder/coro_spec.lua:295-428,647-733`).
+  (`spec/coder/coroutine_spec.lua:452-685,804-929`).
 
 ### Shared-tag probe and prior art
 
@@ -875,10 +884,14 @@ controlled body is followed by a trailing function-level Titan `catch`. The
 catch arm uses the still-rooted owner to store the exact `error` and `traceback`
 in the Runtime, marks it fatal, calls public `uv_stop`, and returns. Because a
 trailing catch arm is not itself protected, keep it inline and non-raising:
-existing-field assignments, scalar state changes, and `uv_stop` only—no
-allocation, formatting, potentially raising Titan helper call, or user code.
-The outer bootstrap performs phased cleanup and reporting only after C `uv_run`
-has returned.
+existing-field assignments, scalar state changes, `uv_stop`, and mandatory
+nonallocating public terminal cleanup such as `uv_fs_req_cleanup` when the
+callback proves a request has ended. A mandatory terminal handle-close request
+such as `uv_close(..., close_cb)` is also permitted: it retires the failed
+owner and is not new user work. The catch may unlink already-rooted owners; it
+performs no allocation, formatting, potentially raising Titan helper call, new
+asynchronous operation, or user code. The outer bootstrap performs phased or
+allocating cleanup and reporting only after C `uv_run` has returned.
 
 The loop driver, not each callback, owns the active Titan `errfunc`. The
 standalone outer `lua_pcall` or generated Lua entry for `uv.loop()` keeps the
@@ -1916,7 +1929,10 @@ Exit criteria:
   libuv; separate coverage proves an unobserved failure stops the session.
 - Its trailing function-level catch saves the exact error/trace in already
   rooted Runtime fields, marks fatal, requests `uv_stop`, and returns;
-  formatting, cleanup, and reporting wait until bootstrap control.
+  formatting, new asynchronous work, phased cleanup, and reporting wait until
+  bootstrap control, while mandatory nonallocating terminal cleanup is
+  completed inline, including a terminal `uv_close(..., close_cb)` request when
+  a failed handle still needs its close callback.
 - Main-stack top is unchanged after dispatch, and standalone plus Lua
   `uv.loop()` failure tests retain a nonempty Titan traceback, proving the loop
   entry keeps `errfunc` active throughout C `uv_run`.
@@ -2097,8 +2113,8 @@ Exit criteria:
 
 ### Phase 7 - packaging and documentation
 
-Status: implementation and local release gates complete; external release
-gates remain.
+Status: implementation complete; focused and integrated local async gates pass,
+while the authoritative full `make test` and external release gates remain.
 
 Files:
 
