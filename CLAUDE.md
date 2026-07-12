@@ -14,16 +14,18 @@ Titan is a statically-typed, ahead-of-time-compiled sister language to Lua. This
   smokes, fixed native ABI tests, and a commit-seeded 5% sample of each
   compiler/language spec file. A manual `workflow_dispatch` replaces that
   sample with the complete uncovered macOS suite; use it as the **pre-merge
-  check** with `gh workflow run ci.yml --ref <branch>`. Each complete Linux
-  flow uses two 1-core `ubuntu-slim` jobs designed to remain below that
-  runner's 15-minute limit. The regular build job runs compiler/language plus
+  check** with `gh workflow run ci.yml --ref <branch>`. The regular Linux flow
+  uses two 1-core `ubuntu-slim` jobs designed to remain below that runner's
+  15-minute limit. The regular build job runs compiler/language plus
   serial and net/OS tests on its warm tree, and uploads a same-run, full-tree
   tar artifact for one uv/timer/fs consumer. The sanitizer build job similarly
   runs timer/fs itself so its very large instrumented-C compilation keeps the
-  warm compiler/filesystem state, then one consumer runs core/uv followed by
-  net/OS. Keep Linux dependency builds in those producer jobs and the Linux
-  production mode smokes in the regular producer: rebuilding them in a
-  consumer wastes aggregate billed runner time even when the workflow's
+  warm compiler/filesystem state, then separate core/uv and net/OS consumers
+  restore that one prepared tree. Do not recombine those consumers: their
+  measured sum exceeds the 1-core runner's 15-minute limit. Keep Linux
+  dependency builds in those producer jobs and the Linux production mode
+  smokes in the regular producer: rebuilding them in a consumer wastes
+  aggregate billed runner time even when the workflow's
   wall-clock critical path is unchanged. Pack the regular artifact before the
   mode smoke replaces the bundled `uv.so`, but upload it only after both modes
   pass; repacking the system-linked tree makes every facade stale and shifts

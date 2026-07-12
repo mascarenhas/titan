@@ -451,13 +451,17 @@ jobs:
           retention-days: 1
           overwrite: true
 
-  # Linux owns the native-memory release gate. The remaining core/uv and net/OS
-  # families share one 1-core consumer; their measured sum stays below the
-  # slim runner's limit without another rounded job or sanitizer build.
+  # Linux owns the native-memory release gate. Core/uv and net/OS each fit on a
+  # 1-core consumer, but their measured sum exceeds the slim runner's 15-minute
+  # limit. Both restore the one shared sanitizer build instead of rebuilding it.
   sanitizer:
-    name: sanitizer (core-uv + net-os)
+    name: sanitizer (${{ matrix.family }})
     needs: prepare-sanitizer
     runs-on: ubuntu-slim
+    strategy:
+      fail-fast: false
+      matrix:
+        family: [core-uv, net-os]
 
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -490,6 +494,7 @@ jobs:
           readelf -Ws uv.so | grep __ubsan_
 
       - name: Run native async sanitizer gate (core-uv)
+        if: matrix.family == 'core-uv'
         env:
           TITAN_TEST_EXTRA_CFLAGS: ${{ env.SANITIZER_FLAGS }}
           TITAN_TEST_EXTRA_LDFLAGS: ${{ env.SANITIZER_FLAGS }}
@@ -504,6 +509,7 @@ jobs:
             spec/coder/uv_bootstrap_spec.lua
 
       - name: Run native async sanitizer gate (net-os)
+        if: matrix.family == 'net-os'
         env:
           TITAN_TEST_EXTRA_CFLAGS: ${{ env.SANITIZER_FLAGS }}
           TITAN_TEST_EXTRA_LDFLAGS: ${{ env.SANITIZER_FLAGS }}
