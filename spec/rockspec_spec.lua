@@ -312,12 +312,27 @@ describe("LuaRocks standard-library packaging", function()
         os.remove(tree)
         assert(lfs.mkdir(tree))
 
+        -- Reuse the compiler identity that prepared these artifacts. On macOS
+        -- LuaRocks includes its deployment-target wrapper in this value; using
+        -- plain `cc` would correctly invalidate the native configuration.
+        local cc = os.getenv("CC")
+        if not cc or cc == "" then
+            local cc_ok, cc_output, cc_why, cc_code = run({
+                "./luarocks", "config", "variables.CC",
+            })
+            assert.truthy(cc_ok, cc_output .. "\n(" ..
+                tostring(cc_why) .. ", " .. tostring(cc_code) .. ")")
+            cc = assert(cc_output:match("^%s*(.-)%s*$"))
+            assert.not_equal("", cc)
+        end
         local ok, output, why, code = run({
             "make", "--no-print-directory", "install-stdlib",
-            "PREFIX=" .. tree,
+            "CC=" .. cc, "PREFIX=" .. tree,
         }, "env CCACHE_DISABLE=1")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
+        assert.falsy(output:find("--stdlib-build", 1, true), output)
+        assert.falsy(output:find("Configuring libuv", 1, true), output)
 
         for _, module in ipairs(STDLIB_MODULES) do
             assert_relative_alias(
