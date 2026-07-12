@@ -142,10 +142,13 @@ function schedule_late_dns_cancel_failure(): uv.Task
     return "late-dns-result-must-not-win"
   end)
   return uv.run(function (): value
-    local turns = 0
-    while uv.__test_phase5_dns_callbacks() == 0 and turns < 1000 do
-      timer.yield()
-      turns = turns + 1
+    local milliseconds = 0
+    while uv.__test_phase5_dns_callbacks() == 0 and milliseconds < 5000 do
+      -- Give libuv's worker thread CPU even on a contended 1-core runner.
+      -- Counting zero-delay loop turns can exhaust an arbitrary iteration
+      -- limit before the worker gets scheduled.
+      timer.sleep(5)
+      milliseconds = milliseconds + 5
     end
     check(uv.__test_phase5_dns_callbacks() == 1,
           "delayed DNS callback did not arrive exactly once")
