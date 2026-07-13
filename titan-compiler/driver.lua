@@ -649,11 +649,22 @@ local RUNTIME_ARCHIVE_MEMBERS = {
     "titan_uv.o",
 }
 
+local function is_archive_symbol_index(member)
+    -- BSD/Darwin `ar t` exposes ranlib's generated symbol-table pseudo-member;
+    -- GNU `ar t` hides its equivalent. Neither is a runtime object.
+    return member == "__.SYMDEF" or
+        member == "__.SYMDEF SORTED" or
+        member == "__.SYMDEF_64" or
+        member == "__.SYMDEF_64 SORTED"
+end
+
 function driver.runtime_archive_members_are_exact(output)
     if type(output) ~= "string" then return false end
     local members = {}
     for member in output:gmatch("[^\r\n]+") do
-        table.insert(members, member)
+        if not is_archive_symbol_index(member) then
+            table.insert(members, member)
+        end
     end
     if #members ~= #RUNTIME_ARCHIVE_MEMBERS then return false end
     for index, expected in ipairs(RUNTIME_ARCHIVE_MEMBERS) do

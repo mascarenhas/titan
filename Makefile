@@ -766,7 +766,8 @@ $(RUNTIME_ARCHIVE_CONFIG): FORCE
 	expected="$$(printf '%s\n' $(notdir $(TITAN_RUNTIME_OBJECTS)))"; \
 	actual=""; \
 	if test -r "$(TITAN_RUNTIME_LIB)"; then \
-		actual="$$( $(AR) t "$(TITAN_RUNTIME_LIB)" 2>/dev/null )"; \
+		actual="$$( $(AR) t "$(TITAN_RUNTIME_LIB)" 2>/dev/null | \
+			awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
 	fi; \
 	if test -r "$@" && cmp -s "$$tmp" "$@" && \
 			test "$$actual" = "$$expected"; then \

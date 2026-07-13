@@ -99,8 +99,14 @@ describe("compiler installation discovery", function()
     it("requires exactly the three runtime archive members", function()
         assert.is_true(driver.runtime_archive_members_are_exact(
             "titan.o\ntitan_coro.o\ntitan_uv.o\n"))
+        assert.is_true(driver.runtime_archive_members_are_exact(
+            "__.SYMDEF SORTED\ntitan.o\ntitan_coro.o\ntitan_uv.o\n"))
+        assert.is_true(driver.runtime_archive_members_are_exact(
+            "__.SYMDEF_64\ntitan.o\ntitan_coro.o\ntitan_uv.o\n"))
         assert.is_false(driver.runtime_archive_members_are_exact(
             "titan.o\ntitan_coro.o\ntitan_uv.o\nstale.o\n"))
+        assert.is_false(driver.runtime_archive_members_are_exact(
+            "__.SYMDEF\ntitan.o\ntitan_coro.o\ntitan_uv.o\nstale.o\n"))
         assert.is_false(driver.runtime_archive_members_are_exact(
             "titan_coro.o\ntitan.o\ntitan_uv.o\n"))
     end)

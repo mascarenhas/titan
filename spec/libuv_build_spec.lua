@@ -24,11 +24,31 @@ local function write_file(path, contents)
     assert.truthy(file:close())
 end
 
+local function read_file(path)
+    local file = assert(io.open(path, "rb"))
+    local contents = assert(file:read("*a"))
+    assert.truthy(file:close())
+    return contents
+end
+
 local function file_exists(path)
     local file = io.open(path, "rb")
     if not file then return false end
     file:close()
     return true
+end
+
+local function archive_object_members(output)
+    local members = {}
+    for member in output:gmatch("[^\r\n]+") do
+        if member ~= "__.SYMDEF" and
+           member ~= "__.SYMDEF SORTED" and
+           member ~= "__.SYMDEF_64" and
+           member ~= "__.SYMDEF_64 SORTED" then
+            table.insert(members, member)
+        end
+    end
+    return members
 end
 
 local function make_temp_dir()
@@ -267,10 +287,72 @@ describe("libuv Makefile configuration", function()
             ok, output, why, code = run_argv({ "ar", "t", archive })
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
-            assert.equal("titan.o\ntitan_coro.o\ntitan_uv.o\n", output)
+            assert.same({ "titan.o", "titan_coro.o", "titan_uv.o" },
+                archive_object_members(output))
         end)
         for _, path in ipairs({
             stale, archive, config, config .. ".tmp",
+            objects[1], objects[2], objects[3],
+        }) do
+            os.remove(path)
+        end
+        assert.truthy(lfs.rmdir(root))
+        if not ran then error(run_error, 0) end
+    end)
+
+    it("ignores the BSD ranlib index when validating archive objects",
+       function()
+        local root = make_temp_dir()
+        local archive = root .. "/libtitan.a"
+        local config = root .. "/archive-build-config"
+        local fake_ar = root .. "/ar-with-bsd-index"
+        local build_log = root .. "/archive-builds"
+        local objects = {
+            root .. "/titan.o",
+            root .. "/titan_coro.o",
+            root .. "/titan_uv.o",
+        }
+        for _, object in ipairs(objects) do
+            write_file(object, "isolated archive fixture\n")
+        end
+        write_file(fake_ar, string.format([[#!/bin/sh
+if test "$1" = t; then
+  printf '%%s\n' '__.SYMDEF SORTED'
+  exec ar "$@"
+fi
+if test "$1" = rcs; then
+  printf 'build\n' >> %s
+  shift
+  exec ar rc "$@"
+fi
+exec ar "$@"
+]], quote(build_log)))
+        local ok, output, why, code = run_argv({ "chmod", "+x", fake_ar })
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        local make_archive = {
+            "make", "--no-print-directory", "-s",
+            "AR=" .. fake_ar,
+            "RANLIB=true",
+            "TITAN_RUNTIME_OBJECTS=" .. table.concat(objects, " "),
+            "TITAN_RUNTIME_LIB=" .. archive,
+            "RUNTIME_ARCHIVE_CONFIG=" .. config,
+            archive,
+        }
+        local ran, run_error = pcall(function()
+            ok, output, why, code = run_argv(make_archive)
+            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+                tostring(code) .. ")")
+            assert.equal("build\n", read_file(build_log))
+
+            write_file(build_log, "")
+            ok, output, why, code = run_argv(make_archive)
+            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+                tostring(code) .. ")")
+            assert.equal("", read_file(build_log))
+        end)
+        for _, path in ipairs({
+            archive, config, config .. ".tmp", fake_ar, build_log,
             objects[1], objects[2], objects[3],
         }) do
             os.remove(path)
