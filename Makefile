@@ -753,9 +753,10 @@ $(UV_O): titan-runtime/titan_uv.c titan-runtime/titan/uv.h \
 		-I titan-runtime -I $(TITAN_RUNTIME_LUA_SOURCE_PATH) \
 		-I $(LIBBT_DIR) -o $@
 
-# Validate both the archive tools and its exact member contract on every Make
-# invocation. Preserve this stamp's mtime on a warm build; update it when a
-# newer-but-invalid archive has acquired stale or extra members.
+# Record the archive tools and exact member contract on every Make invocation,
+# while preserving this stamp's mtime on a warm build. Archive membership is
+# validated by the archive target itself below, independently of filesystem
+# timestamp granularity.
 $(RUNTIME_ARCHIVE_CONFIG): FORCE
 	@tmp="$@.tmp"; \
 	{ printf '%s\n' \
@@ -763,23 +764,34 @@ $(RUNTIME_ARCHIVE_CONFIG): FORCE
 		$(call make_shell_quote,RANLIB=$(RANLIB)) \
 		$(call make_shell_quote,MEMBERS=$(notdir $(TITAN_RUNTIME_OBJECTS))); } \
 		> "$$tmp"; \
-	expected="$$(printf '%s\n' $(notdir $(TITAN_RUNTIME_OBJECTS)))"; \
-	actual=""; \
-	if test -r "$(TITAN_RUNTIME_LIB)"; then \
-		actual="$$( $(AR) t "$(TITAN_RUNTIME_LIB)" 2>/dev/null | \
-			awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
-	fi; \
-	if test -r "$@" && cmp -s "$$tmp" "$@" && \
-			test "$$actual" = "$$expected"; then \
+	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
 		rm -f "$$tmp"; \
 	else \
 		mv -f "$$tmp" "$@"; \
 	fi
 
-$(TITAN_RUNTIME_LIB): $(TITAN_RUNTIME_OBJECTS) $(RUNTIME_ARCHIVE_CONFIG)
+$(TITAN_RUNTIME_LIB):: $(TITAN_RUNTIME_OBJECTS) $(RUNTIME_ARCHIVE_CONFIG)
 	rm -f "$@"
 	$(AR) rcs "$@" $(TITAN_RUNTIME_OBJECTS)
 	$(RANLIB) "$@"
+
+# A second, forced rule makes exact membership a content invariant instead of
+# relying on a refreshed prerequisite being observably newer than the archive.
+# GNU Make runs double-colon recipes for one target serially, so this remains
+# safe under `make -j` and becomes a no-op for a valid warm archive.
+$(TITAN_RUNTIME_LIB):: FORCE
+	@set -e; \
+	expected="$$(printf '%s\n' $(notdir $(TITAN_RUNTIME_OBJECTS)))"; \
+	actual=""; \
+	if test -r "$@"; then \
+		actual="$$( $(AR) t "$@" 2>/dev/null | \
+			awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
+	fi; \
+	if test "$$actual" != "$$expected"; then \
+		rm -f "$@"; \
+		$(AR) rcs "$@" $(TITAN_RUNTIME_OBJECTS); \
+		$(RANLIB) "$@"; \
+	fi
 
 $(TITANLIB_O): titan-runtime/titanlib.c $(TITANLIB_BUILD_CONFIG)
 	$(CC) $(ROCK_CFLAGS) $(TITAN_EXTRA_CFLAGS) \
