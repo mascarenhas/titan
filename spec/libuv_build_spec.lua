@@ -30,6 +30,16 @@ local function write_file(path, contents)
     assert.truthy(file:close())
 end
 
+local function compile_archive_objects(source, objects)
+    write_file(source, "int titan_archive_fixture(void) { return 0; }\n")
+    for _, object in ipairs(objects) do
+        local ok, output, why, code = run_argv(compiler_argv(
+            "-c", source, "-o", object))
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+    end
+end
+
 local function read_file(path)
     local file = assert(io.open(path, "rb"))
     local contents = assert(file:read("*a"))
@@ -274,15 +284,7 @@ describe("libuv Makefile configuration", function()
         }
         local stale = root .. "/stale.o"
         local ran, run_error = pcall(function()
-            write_file(source,
-                "int titan_archive_fixture(void) { return 0; }\n")
-            for _, object in ipairs(objects) do
-                local compiled, compile_output, compile_why, compile_code =
-                    run_argv(compiler_argv("-c", source, "-o", object))
-                assert.truthy(compiled, compile_output .. "\n(" ..
-                    tostring(compile_why) .. ", " ..
-                    tostring(compile_code) .. ")")
-            end
+            compile_archive_objects(source, objects)
 
             local ok, output, why, code = run_argv(make_archive)
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
@@ -327,19 +329,19 @@ describe("libuv Makefile configuration", function()
             root .. "/titan_uv.o",
         }
         for _, object in ipairs(objects) do
-            write_file(object, "isolated archive fixture\n")
+            write_file(object, "isolated fake-archive fixture\n")
         end
         write_file(fake_ar, string.format([[#!/bin/sh
 if test "$1" = t; then
-  printf '%%s\n' '__.SYMDEF SORTED'
-  exec ar "$@"
+  printf '%%s\n' '__.SYMDEF SORTED' titan.o titan_coro.o titan_uv.o
+  exit 0
 fi
 if test "$1" = rcs; then
   printf 'build\n' >> %s
-  shift
-  exec ar rc "$@"
+  : > "$2"
+  exit 0
 fi
-exec ar "$@"
+exit 64
 ]], quote(build_log)))
         local ok, output, why, code = run_argv({ "chmod", "+x", fake_ar })
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
@@ -358,6 +360,18 @@ exec ar "$@"
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
             assert.equal("build\n", read_file(build_log))
+
+            local aged = { "touch", "-t", "200001010000" }
+            for _, path in ipairs(objects) do aged[#aged + 1] = path end
+            aged[#aged + 1] = config
+            ok, output, why, code = run_argv(aged)
+            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+                tostring(code) .. ")")
+            ok, output, why, code = run_argv({
+                "touch", "-t", "200101010000", archive,
+            })
+            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+                tostring(code) .. ")")
 
             write_file(build_log, "")
             ok, output, why, code = run_argv(make_archive)
