@@ -107,6 +107,21 @@ local function compiler_argv(...)
     return argv
 end
 
+local function archive_object_members(output)
+    local members = {}
+    for member in output:gmatch("[^\r\n]+") do
+        local basename = assert(member:match("([^/]+)$"))
+        if basename ~= "__.SYMDEF" and
+           basename ~= "__.SYMDEF SORTED" and
+           basename ~= "__.SYMDEF_64" and
+           basename ~= "__.SYMDEF_64 SORTED" then
+            members[#members + 1] = basename
+        end
+    end
+    table.sort(members)
+    return members
+end
+
 local function assert_file(path)
     assert.equal("file", lfs.attributes(path, "mode"), path)
 end
@@ -207,11 +222,7 @@ describe("standalone-prefix source installation", function()
         })
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
-        local members = {}
-        for member in output:gmatch("[^\r\n]+") do
-            members[#members + 1] = assert(member:match("([^/]+)$"))
-        end
-        table.sort(members)
+        local members = archive_object_members(output)
         assert.same({ "titan.o", "titan_coro.o", "titan_uv.o" }, members)
 
         ok, output, why, code = run({
@@ -305,7 +316,7 @@ describe("standalone-prefix source installation", function()
             "make", "--no-print-directory", "-s",
             "MAKE=true",
             "ROCKS_TREE=" .. workspace,
-            "ROCK_TITANC=/bin/true",
+            "ROCK_TITANC=" .. TITANC,
             "STDLIB_MODULES=coroutine",
             "rock-post-install",
         })

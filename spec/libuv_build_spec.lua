@@ -18,6 +18,12 @@ local function run_argv(argv)
     return ok == true, output, why, code
 end
 
+local function compiler_argv(...)
+    local argv = assert(cdriver.split_shell_words(os.getenv("CC") or "cc"))
+    for _, word in ipairs({ ... }) do argv[#argv + 1] = word end
+    return argv
+end
+
 local function write_file(path, contents)
     local file = assert(io.open(path, "wb"))
     assert.truthy(file:write(contents))
@@ -253,14 +259,12 @@ describe("libuv Makefile configuration", function()
         local root = make_temp_dir()
         local archive = root .. "/libtitan.a"
         local config = root .. "/archive-build-config"
+        local source = root .. "/archive-fixture.c"
         local objects = {
             root .. "/titan.o",
             root .. "/titan_coro.o",
             root .. "/titan_uv.o",
         }
-        for _, object in ipairs(objects) do
-            write_file(object, "isolated archive fixture\n")
-        end
         local make_archive = {
             "make", "--no-print-directory", "-s",
             "TITAN_RUNTIME_OBJECTS=" .. table.concat(objects, " "),
@@ -270,6 +274,16 @@ describe("libuv Makefile configuration", function()
         }
         local stale = root .. "/stale.o"
         local ran, run_error = pcall(function()
+            write_file(source,
+                "int titan_archive_fixture(void) { return 0; }\n")
+            for _, object in ipairs(objects) do
+                local compiled, compile_output, compile_why, compile_code =
+                    run_argv(compiler_argv("-c", source, "-o", object))
+                assert.truthy(compiled, compile_output .. "\n(" ..
+                    tostring(compile_why) .. ", " ..
+                    tostring(compile_code) .. ")")
+            end
+
             local ok, output, why, code = run_argv(make_archive)
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
@@ -291,7 +305,7 @@ describe("libuv Makefile configuration", function()
                 archive_object_members(output))
         end)
         for _, path in ipairs({
-            stale, archive, config, config .. ".tmp",
+            stale, archive, config, config .. ".tmp", source,
             objects[1], objects[2], objects[3],
         }) do
             os.remove(path)
