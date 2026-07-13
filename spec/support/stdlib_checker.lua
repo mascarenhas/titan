@@ -36,6 +36,7 @@ local function build_uv_interface()
     local source_registry = {}
     for name, typ in pairs(types.registry) do source_registry[name] = typ end
     local result = {
+        source_ast = ast,
         source_type = modtype,
         source_registry = source_registry,
         serialized = types.serialize(modtype),
@@ -64,6 +65,13 @@ function M.source_uv()
         types.registry[name] = typ
     end
     return cached.source_type
+end
+
+-- Return the already-parsed and checked source AST for invariants over private
+-- declarations. Call source_uv first when the test also needs its nominal
+-- registry restored.
+function M.source_uv_ast()
+    return cached_uv().source_ast
 end
 
 -- Rehydrate a fresh binary-boundary view for each facade/consumer check. This

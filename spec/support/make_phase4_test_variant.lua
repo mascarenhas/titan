@@ -74,13 +74,13 @@ source = replace_once(source, [==[
 ]==], "FS cleanup counter")
 
 source = replace_once(source, [==[
-local function start_owner(runtime: Runtime, kind: integer, task: value,
+local function start_owner(runtime: Runtime, kind: integer, task: Task?,
                            peer: value, epoch: integer,
                            timeout: integer, repeat_time: integer):
                            (uv_timer_t, integer)
   local owner, pointer = allocate_owner(runtime, kind, task, peer, epoch)
 ]==], [==[
-local function start_owner(runtime: Runtime, kind: integer, task: value,
+local function start_owner(runtime: Runtime, kind: integer, task: Task?,
                            peer: value, epoch: integer,
                            timeout: integer, repeat_time: integer):
                            (uv_timer_t, integer)
@@ -137,7 +137,7 @@ source = replace_once(source, [==[
         test_phase4_fs_physical_callbacks + 1
     owner.metadata.callback_result = result
     local wake, status = start_owner(owner.metadata.runtime,
-        OWNER_PHASE4_FS_DELAY, owner, nil, 0, delay, 0)
+        OWNER_PHASE4_FS_DELAY, nil, owner, 0, delay, 0)
     if status < 0 then
       raise make_error(status, "test.fs.delay", nil)
     end
@@ -190,7 +190,7 @@ source = replace_once(source, [==[
     local task = owner.metadata.task as Task
 ]==], [==[
   elseif kind == OWNER_PHASE4_FS_DELAY then
-    local fs_owner = owner.metadata.task as uv_fs_t
+    local fs_owner = owner.metadata.peer as uv_fs_t
     test_phase4_fs_deliveries = test_phase4_fs_deliveries + 1
     fs_dispatch(fs_owner, EVENT_FS, fs_owner.metadata.callback_result,
                 0 as libuv.size_t, nil)
@@ -283,10 +283,11 @@ end
 function __test_phase4_fs_pending_roots(): integer
   if not active_runtime then return 0 end
   local count = 0
-  local raw = (active_runtime as Runtime).fs_pending_head
-  while raw ~= nil do
+  local raw? = (active_runtime as Runtime).fs_pending_head
+  while raw do
     count = count + 1
-    raw = (raw as uv_fs_t).metadata.next_owner
+    local owner = raw as uv_fs_t
+    raw = owner.metadata.next_owner
   end
   return count
 end
@@ -294,10 +295,11 @@ end
 function __test_phase4_file_roots(): integer
   if not active_runtime then return 0 end
   local count = 0
-  local raw = (active_runtime as Runtime).file_head
-  while raw ~= nil do
+  local raw? = (active_runtime as Runtime).file_head
+  while raw do
     count = count + 1
-    raw = (raw as uv_file).next_file
+    local file = raw as uv_file
+    raw = file.next_file
   end
   return count
 end

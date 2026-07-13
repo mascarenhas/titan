@@ -119,10 +119,10 @@ source = replace_once(source, [==[local function remove_output(tcp: uv_tcp_t, op
 
 source = replace_once(source, [==[local function discard_tcp_storage(tcp: uv_tcp_t)
   local control = tcp.metadata
-  if control.owner == nil then return end
+  if not control.owner then return end
   -- Unlink while every owner/root field is still intact.]==], [==[local function discard_tcp_storage(tcp: uv_tcp_t)
   local control = tcp.metadata
-  if control.owner == nil then return end
+  if not control.owner then return end
   test_phase5_tcp_unlinks = test_phase5_tcp_unlinks + 1
   -- Unlink while every owner/root field is still intact.]==],
     "TCP terminal storage unlink counter")
@@ -149,18 +149,18 @@ source = replace_once(source, [==[    operation.addresses = addresses
 source = replace_once(source, [==[local function tcp_read_dispatch(tcp: uv_tcp_t, result: integer)
   local control = tcp.metadata
   if result == 0 then return end
-  local raw_waiter = control.read_waiter]==], [==[local function tcp_read_dispatch(tcp: uv_tcp_t, result: integer)
+  local raw_waiter? = control.read_waiter]==], [==[local function tcp_read_dispatch(tcp: uv_tcp_t, result: integer)
   local control = tcp.metadata
   if result == 0 then return end
   test_phase5_tcp_read_callbacks = test_phase5_tcp_read_callbacks + 1
-  local raw_waiter = control.read_waiter]==], "TCP read callback counter")
+  local raw_waiter? = control.read_waiter]==], "TCP read callback counter")
 
 source = replace_once(source, [==[  control.read_bytes = nil
   tcp.buffer = nil
-  if raw_waiter ~= nil then]==], [==[  control.read_bytes = nil
+  if raw_waiter then]==], [==[  control.read_bytes = nil
   tcp.buffer = nil
   test_phase5_dispatch_fault_point("tcp-read-after-root-clear")
-  if raw_waiter ~= nil then]==],
+  if raw_waiter then]==],
     "TCP read fault after waiter buffer-root clear")
 
 -- These one-shot branches replace only the native submit call.  The
@@ -277,7 +277,11 @@ source = replace_once(source, [==[        -- TITAN_UV_PHASE5_CONNECT_SUBMIT
           test_phase5_inflight_connect_observed = true
           lua.lua_gc(L, lua.LUA_GCGEN)
           lua.lua_gc(L, lua.LUA_GCCOLLECT)
-          request_cancel(operation.task as Task, "cancel-inflight-connect")
+          local raw_task? = operation.task
+          if not raw_task then
+            raise "in-flight connect operation lost its Task"
+          end
+          request_cancel(raw_task as Task, "cancel-inflight-connect")
         end]==], "synchronous connect rejection")
 
 source = replace_once(source, [==[          status = shim.titan_uvshim_tcp_listen(tcp.handle,
@@ -312,7 +316,11 @@ source = replace_once(source, [==[      -- TITAN_UV_PHASE5_WRITE_SUBMIT
         operation.prepared_buffer = nil
         lua.lua_gc(L, lua.LUA_GCGEN)
         lua.lua_gc(L, lua.LUA_GCCOLLECT)
-        request_cancel(operation.task as Task, "cancel-inflight-write")
+        local raw_task? = operation.task
+        if not raw_task then
+          raise "in-flight write operation lost its Task"
+        end
+        request_cancel(raw_task as Task, "cancel-inflight-write")
       end]==], "synchronous write rejection")
 
 source = replace_once(source, [==[      -- TITAN_UV_PHASE5_SHUTDOWN_SUBMIT
@@ -375,7 +383,7 @@ catch]==], [==[  owner.metadata.result_pointer = pointer
     local delay = test_phase5_dns_delay
     test_phase5_dns_delay = 0
     local wake, status = start_owner(owner.metadata.runtime,
-        OWNER_PHASE5_DNS_DELAY, owner, nil, 0, delay, 0)
+        OWNER_PHASE5_DNS_DELAY, nil, owner, 0, delay, 0)
     if status < 0 then
       raise make_error(status, "test.net.resolve.delay", nil)
     end
@@ -393,7 +401,7 @@ source = replace_once(source, "  -- TITAN_UV_PHASE5_CONNECT_CALLBACK", [==[
     test_phase5_connect_delay = 0
     local tcp = owner.metadata.operation.tcp as uv_tcp_t
     local wake, status = start_owner(owner.metadata.runtime,
-        OWNER_PHASE5_CONNECT_DELAY, owner, nil, 0, delay, 0)
+        OWNER_PHASE5_CONNECT_DELAY, nil, owner, 0, delay, 0)
     if status < 0 then
       raise make_error(status, "test.net.connect.delay", nil)
     end
@@ -415,7 +423,7 @@ source = replace_once(source, "  -- TITAN_UV_PHASE5_WRITE_CALLBACK", [==[
     local delay = test_phase5_write_delay
     test_phase5_write_delay = 0
     local wake, status = start_owner(owner.metadata.runtime,
-        OWNER_PHASE5_WRITE_DELAY, owner, nil, 0, delay, 0)
+        OWNER_PHASE5_WRITE_DELAY, nil, owner, 0, delay, 0)
     if status < 0 then
       raise make_error(status, "test.net.write.delay", nil)
     end
@@ -428,19 +436,19 @@ source = replace_once(source, "  -- TITAN_UV_PHASE5_WRITE_CALLBACK", [==[
 source = replace_once(source, "  -- TITAN_UV_PHASE5_TIMER_DISPATCH", [==[
   -- TITAN_UV_PHASE5_TIMER_DISPATCH
   elseif kind == OWNER_PHASE5_DNS_DELAY then
-    local delayed = owner.metadata.task as uv_getaddrinfo_t
+    local delayed = owner.metadata.peer as uv_getaddrinfo_t
     dns_dispatch_body(delayed, EVENT_GETADDRINFO,
         delayed.metadata.callback_result, 0 as libuv.size_t,
         delayed.metadata.result_pointer)
   elseif kind == OWNER_PHASE5_CONNECT_DELAY then
-    local delayed = owner.metadata.task as uv_connect_t
+    local delayed = owner.metadata.peer as uv_connect_t
     local tcp = delayed.metadata.operation.tcp as uv_tcp_t
     tcp.metadata.connect_pending = false
     connect_dispatch_body(delayed, EVENT_CONNECT,
                           delayed.metadata.callback_result,
                           0 as libuv.size_t)
   elseif kind == OWNER_PHASE5_WRITE_DELAY then
-    local delayed = owner.metadata.task as uv_write_t
+    local delayed = owner.metadata.peer as uv_write_t
     complete_output_callback(delayed.metadata, EVENT_WRITE, EVENT_WRITE,
                              delayed.metadata.callback_result, "net.write")
 ]==], "delayed logical callback delivery")
@@ -736,8 +744,13 @@ end
 function __test_phase5_reset(connection: uv_tcp_t)
   validate_tcp(connection, "reset", false, false)
   local control = connection.metadata
-  if control.output_head ~= nil or control.output_current ~= nil or
-      control.read_active then
+  if control.output_head then
+    raise "test reset requires an idle Connection"
+  end
+  if control.output_current then
+    raise "test reset requires an idle Connection"
+  end
+  if control.read_active then
     raise "test reset requires an idle Connection"
   end
   local status = shim.titan_uvshim_tcp_close_reset(connection.handle) as integer
@@ -754,8 +767,8 @@ end
 function __test_phase5_net_pending(): integer
   if not active_runtime then return 0 end
   local count = 0
-  local raw = (active_runtime as Runtime).net_pending_head
-  while raw ~= nil do
+  local raw? = (active_runtime as Runtime).net_pending_head
+  while raw do
     count = count + 1
     raw = (raw as NetRequestControl).next_control
   end
@@ -765,8 +778,8 @@ end
 function __test_phase5_tcp_resources(): integer
   if not active_runtime then return 0 end
   local count = 0
-  local raw = (active_runtime as Runtime).tcp_head
-  while raw ~= nil do
+  local raw? = (active_runtime as Runtime).tcp_head
+  while raw do
     count = count + 1
     raw = (raw as TcpControl).next_control
   end

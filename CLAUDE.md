@@ -312,6 +312,11 @@ does not unload the native image.
   instead of performing Lua-registry table lookups; use the registry for
   identity, bootstrap, or genuinely shared lookup rather than as the default
   access path.
+  Likewise, use an exact record type (or `T?` for an absent-or-record link) for
+  homogeneous record fields and private function signatures. Reserve `value`
+  for opaque Lua roots, arbitrary payloads, and genuinely heterogeneous state:
+  recovering a record from `value` performs a metatable/tag check, while
+  unwrapping `T?` needs only the nil check.
   Translation-unit statics may hold only immutable
   constants and non-stateful wiring that is known to be identical for every
   Titan module; native caches belong in registry-owned userdata rather than

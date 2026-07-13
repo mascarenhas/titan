@@ -40,13 +40,13 @@ local test_cstring = foreign import "string.h"
 ]==], "variant memset import")
 
 source = replace_once(source, [==[
-  local previous_file: value
+  local previous_file: uv_file?
   local close_enqueued: boolean
   local close_failures: integer
   local close_retry_exhausted: boolean
 end
 ]==], [==[
-  local previous_file: value
+  local previous_file: uv_file?
   local close_enqueued: boolean
   local close_failures: integer
   local close_retry_exhausted: boolean
@@ -110,7 +110,7 @@ local function submit_fs_operation(operation: FsOperation):
 ]==], [==[
 local function test_fs_mark_submitted(operation: FsOperation)
   test_fs_active = test_fs_active + 1
-  if operation.file ~= nil then
+  if operation.file then
     local file = operation.file as uv_file
     file.test_active = file.test_active + 1
     if file.test_active > test_fs_max_file_active then
@@ -124,7 +124,7 @@ local function test_fs_mark_callback(operation: FsOperation)
     raise "filesystem test active-request counter underflow"
   end
   test_fs_active = test_fs_active - 1
-  if operation.file ~= nil then
+  if operation.file then
     local file = operation.file as uv_file
     if file.test_active <= 0 then
       raise "filesystem test per-File counter underflow"

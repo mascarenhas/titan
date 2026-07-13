@@ -273,4 +273,151 @@ describe("uv public interface", function()
         ]])
         assert.equals("", errors)
     end)
+
+    it("uses value only for genuinely dynamic private state", function()
+        check_uv()
+
+        local expected_fields = {
+            "AddressList.storage",
+            "Buffer.storage",
+            "Bytes.storage",
+            "Cancelled.reason",
+            "Dirent.storage",
+            "DriveControl.payload",
+            "HelperGroup.first_error",
+            "Loop.storage",
+            "NetOperation.owner",
+            "NetRequestControl.owner",
+            "Request.subject",
+            "Runtime.fatal_error",
+            "Runtime.main_thread",
+            "Runtime.module",
+            "Task.cancel_reason",
+            "Task.error_value",
+            "Task.operation",
+            "Task.result",
+            "TimerControl.peer",
+            "uv_pipe_t.buffer",
+            "uv_process_t.buffer",
+            "uv_tcp_t.buffer",
+            "uv_timer_t.root",
+        }
+        for _, record_name in ipairs({
+            "uv_connect_t", "uv_fs_t", "uv_getaddrinfo_t", "uv_pipe_t",
+            "uv_pipe_write_t", "uv_process_grace_t", "uv_process_t",
+            "uv_shutdown_t", "uv_signal_t", "uv_tcp_t", "uv_timer_t",
+            "uv_write_t",
+        }) do
+            for _, field_name in ipairs({
+                "main_thread", "module", "storage",
+            }) do
+                expected_fields[#expected_fields + 1] =
+                    record_name .. "." .. field_name
+            end
+        end
+        table.sort(expected_fields)
+
+        local actual_fields = {}
+        for fqtn, record_type in pairs(types.registry) do
+            if fqtn:match("^uv%.") and record_type._tag == "Type.Record" then
+                local record_name = fqtn:sub(4)
+                for _, field in ipairs(record_type.fields) do
+                    if types.tostring(field.type):find("value", 1, true) then
+                        actual_fields[#actual_fields + 1] =
+                            record_name .. "." .. field.name
+                    end
+                end
+            end
+        end
+        table.sort(actual_fields)
+        assert.same(expected_fields, actual_fields)
+
+        local function field_type(record_name, field_name)
+            local record_type = assert(types.registry["uv." .. record_name])
+            for _, field in ipairs(record_type.fields) do
+                if field.name == field_name then
+                    return types.tostring(field.type)
+                end
+            end
+            error("missing field " .. record_name .. "." .. field_name)
+        end
+        assert.equals("uv.Task", field_type("Request", "task"))
+        assert.equals("uv.Task", field_type("HelperGroup", "parent"))
+        assert.equals("uv.uv_process_t",
+            field_type("HelperGroup", "process"))
+        assert.equals("{ uv.Task }", field_type("HelperGroup", "helpers"))
+        assert.equals("uv.Task?", field_type("Runtime", "task_head"))
+        assert.equals("uv.Request?",
+            field_type("ProcessOperation", "request"))
+        assert.equals("uv.uv_fs_t?", field_type("FsOperation", "owner"))
+        assert.equals("uv.Buffer?", field_type("uv_fs_t", "buffer"))
+        assert.equals("uv.NetOperation?",
+            field_type("TcpControl", "setup_operation"))
+        assert.equals("nil",
+            field_type("uv_process_grace_t", "buffer"))
+        assert.equals("nil", field_type("uv_shutdown_t", "buffer"))
+        assert.equals("nil", field_type("uv_timer_t", "buffer"))
+
+        local function contains_value(type_node)
+            if type(type_node) ~= "table" then return false end
+            if type_node._tag == "Ast.TypeValue" then return true end
+            for key, child in pairs(type_node) do
+                if key ~= "loc" and
+                   (type(key) ~= "string" or key:sub(1, 1) ~= "_") and
+                   contains_value(child) then
+                    return true
+                end
+            end
+            return false
+        end
+
+        local actual_signatures = {}
+        for _, declaration in ipairs(stdlib_checker.source_uv_ast()) do
+            if declaration._tag == "Ast.TopLevelFunc" or
+               declaration._tag == "Ast.TopLevelMethod" then
+                local prefix = declaration.name
+                if declaration.class then
+                    prefix = declaration.class .. ":" .. prefix
+                end
+                for _, parameter in ipairs(declaration.params) do
+                    if contains_value(parameter.type) then
+                        actual_signatures[#actual_signatures + 1] =
+                            prefix .. "." .. parameter.name
+                    end
+                end
+                for _, return_type in ipairs(declaration.rettypes) do
+                    if contains_value(return_type) then
+                        actual_signatures[#actual_signatures + 1] =
+                            prefix .. " return"
+                        break
+                    end
+                end
+            end
+        end
+        table.sort(actual_signatures)
+        assert.same({
+            "Task:cancel.reason",
+            "Task:join return",
+            "adapt return",
+            "adapt.func",
+            "allocate_owner.peer",
+            "cancel_helper_group.reason",
+            "communicate_cleanup.reason",
+            "complete_helper.failure",
+            "complete_helper.payload",
+            "drive_task.initial_payload",
+            "finish_task.err",
+            "finish_task.result",
+            "main_thread_value return",
+            "new_request.subject",
+            "promote_fatal.err",
+            "raise_joined.err",
+            "raise_saved.err",
+            "request_cancel.reason",
+            "run.func",
+            "run_internal.func",
+            "schedule_task_drive.payload",
+            "start_owner.peer",
+        }, actual_signatures)
+    end)
 end)

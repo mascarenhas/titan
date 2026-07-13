@@ -90,14 +90,31 @@ The process boundary uses the same pattern twice. The exported
 `uv.uv_process_t` has an exact `*uv_process_t` local field and is wrapped by
 `os.Process`, whose sole field is itself local. Private `uv_pipe_t`,
 `uv_write_t`, and grace-timer records likewise retain exact native pointers.
-Recursive and heterogeneous ownership links use `value`, but native handles
-never do; a process or pipe therefore pays for its record and storage once,
-not for repeated pointer-to-`value` coercions on every operation.
+Homogeneous ownership links use their exact record type, with `T?` only where
+the link may be absent. `value` is reserved for opaque Lua roots, arbitrary
+task/error payloads, and genuinely heterogeneous owner slots. Native handles
+never use `value`; a process or pipe therefore pays for its record and storage
+once, not for repeated pointer-to-`value` coercions on every operation.
+
+This distinction also matters for the continuation graph. Recovering a record
+from `value` must validate its record metatable at run time. Unwrapping `T?`
+checks only for nil because the checker already guarantees the non-nil nominal
+type. Runtime lists, FIFO links, waiters, operation-specific roots, and helper
+references therefore keep their record identity in the static type instead of
+revalidating it at every traversal.
 
 Each callback owner has eight stable record/uservalue slots: native pointer,
 storage, main Lua thread, module Udata, dispatcher closure, Task/resource root,
 operation metadata, and an additional buffer/resource root. The C shim uses
-the corresponding zero-based indices.
+the corresponding zero-based indices. Timer, process-grace, and shutdown
+owners never need the final buffer/resource slot; they retain that ABI slot, but type it as
+`nil` instead of widening the placeholder to `value`.
+Filesystem owners type the same slot as `Buffer?`; their path is already rooted
+through exact operation metadata, and the slot becomes populated only for a
+submitted read or write buffer.
+Pipe and TCP owners keep the slot as `value` because the native allocation
+callback consumes the raw full userdata directly. Process owners likewise use
+it briefly for opaque synchronous-close request storage.
 
 ## Runtime and continuation graph
 

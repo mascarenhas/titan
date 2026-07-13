@@ -211,13 +211,13 @@ local function run_internal(func: () -> value, is_main: boolean): Task
 ]==], "Task creation counter after Runtime initialization")
 
 source = replace_once(source, [==[
-local function start_owner(runtime: Runtime, kind: integer, task: value,
+local function start_owner(runtime: Runtime, kind: integer, task: Task?,
                            peer: value, epoch: integer,
                            timeout: integer, repeat_time: integer):
                            (uv_timer_t, integer)
   local owner, pointer = allocate_owner(runtime, kind, task, peer, epoch)
 ]==], [==[
-local function start_owner(runtime: Runtime, kind: integer, task: value,
+local function start_owner(runtime: Runtime, kind: integer, task: Task?,
                            peer: value, epoch: integer,
                            timeout: integer, repeat_time: integer):
                            (uv_timer_t, integer)
@@ -441,8 +441,8 @@ source = replace_once(source, [==[
 
 source = replace_once(source, [==[
 local function retire_closed_owners(runtime: Runtime)
-  local raw = runtime.timer_owner_head
-  while raw ~= nil do
+  local raw? = runtime.timer_owner_head
+  while raw do
     local owner = raw as uv_timer_t
     raw = owner.metadata.next_owner
     if owner.metadata.lifecycle == OWNER_CLOSED then
@@ -456,8 +456,8 @@ local function retire_closed_owners(runtime: Runtime)
 end
 ]==], [==[
 local function retire_closed_owners(runtime: Runtime)
-  local raw = runtime.timer_owner_head
-  while raw ~= nil do
+  local raw? = runtime.timer_owner_head
+  while raw do
     local owner = raw as uv_timer_t
     raw = owner.metadata.next_owner
     if owner.metadata.lifecycle == OWNER_CLOSED then
@@ -481,7 +481,7 @@ end
 
 function __test_cancel_main(reason: value)
   local runtime = current_runtime()
-  if runtime.main_task == nil then
+  if not runtime.main_task then
     raise "test Runtime has no main Task"
   end
   request_cancel(runtime.main_task as Task, reason)
@@ -599,8 +599,8 @@ end
 function __test_timer_resources(): integer
   if not active_runtime then return 0 end
   local count = 0
-  local raw = (active_runtime as Runtime).timer_owner_head
-  while raw ~= nil do
+  local raw? = (active_runtime as Runtime).timer_owner_head
+  while raw do
     count = count + 1
     raw = (raw as uv_timer_t).metadata.next_owner
   end
@@ -610,8 +610,8 @@ end
 function __test_closing_timer_resources(): integer
   if not active_runtime then return 0 end
   local count = 0
-  local raw = (active_runtime as Runtime).timer_owner_head
-  while raw ~= nil do
+  local raw? = (active_runtime as Runtime).timer_owner_head
+  while raw do
     local owner = raw as uv_timer_t
     if owner.metadata.lifecycle == OWNER_CLOSING then
       count = count + 1

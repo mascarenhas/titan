@@ -64,7 +64,7 @@ describe("uv Phase 2 isolated scheduler faults", function()
         assert.match("uv___test_fail_next_timer_start_titan", variant, 1, true)
         assert_entry_catch_precedes_gc(variant,
             "static void uv_timer_dispatch_titan(",
-            "static int uv_timer_dispatch_titanentry_lua(", 10)
+            "static int uv_timer_dispatch_titanentry_lua(", 9)
         assert_entry_catch_precedes_gc(variant,
             "static void uv_fs_dispatch_titan(",
             "static int uv_fs_dispatch_titanentry_lua(")

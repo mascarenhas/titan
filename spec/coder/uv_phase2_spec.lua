@@ -176,6 +176,27 @@ describe("uv Phase 2 continuation pump", function()
             assert.not_match("lua_newuserdatauv", body, 1, true)
         end
 
+        -- Homogeneous private ownership links use exact records or record
+        -- options, not value. Their generated hot paths therefore need only
+        -- the option nil check and must not validate record metatables or
+        -- consult the registry while linking, traversing, or unwrapping them.
+        for _, path in ipairs({
+            { "static TString* uv_waiting_task_diagnostic_titan(",
+              "static void uv_check_alignment_titan(" },
+            { "static void uv_link_task_titan(",
+              "static void uv_unlink_task_titan(" },
+            { "static void uv_link_process_control_titan(",
+              "static void uv_unlink_process_control_titan(" },
+            { "static Udata* uv_process_pipe_titan(",
+              "Udata* uv__os_process_spawn_titan(" },
+        }) do
+            local body = phase2.c_function_definition(
+                uv_c, path[1], path[2])
+            assert.not_match("->metatable", body, 1, true)
+            assert.not_match("lua_rawget(L, LUA_REGISTRYINDEX)",
+                body, 1, true)
+        end
+
         local uv_so = phase2.standard_dir() .. "/uv.so"
         local uname = assert(io.popen("uname -s"))
         local host = assert(uname:read("*l"))

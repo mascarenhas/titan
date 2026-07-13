@@ -278,8 +278,8 @@ source = replace_once(source, [==[      -- TITAN_UV_PHASE6_PROCESS_WRITE_SUBMIT
           if test_phase6_process_write_callbacks ~= 0 then
             raise "process write callback ran before in-flight tracking hook"
           end
-          if operation.owner == nil or owner.metadata.owner == nil or
-              owner.storage == nil or owner.root == nil or owner.buffer == nil
+          if not operation.owner or not owner.metadata.owner or
+              owner.storage == nil or not owner.root or not owner.buffer
           then
             raise "in-flight process write lost its accepted-request roots"
           end
@@ -529,7 +529,7 @@ local hooks = [==[
 
 function __test_phase6_reset_signal_state()
   if active_runtime and
-      (active_runtime as Runtime).signal_owner_head ~= nil then
+      (active_runtime as Runtime).signal_owner_head then
     raise "cannot reset Phase 6 signal state with a live owner"
   end
   test_phase6_signal_init_attempts = 0
@@ -624,10 +624,10 @@ end
 function __test_phase6_signal_resources(): integer
   if not active_runtime then return 0 end
   local count = 0
-  local raw = (active_runtime as Runtime).signal_owner_head
-  while raw ~= nil do
+  local raw: uv_signal_t? = (active_runtime as Runtime).signal_owner_head
+  while raw do
     count = count + 1
-    raw = (raw as uv_signal_t).metadata.next_owner
+    raw = raw.metadata.next_owner
   end
   return count
 end
@@ -698,10 +698,14 @@ function __test_phase6_has_active_runtime(): boolean
 end
 
 function __test_phase6_reset_process_state()
-  if active_runtime and
-      ((active_runtime as Runtime).process_head ~= nil or
-       (active_runtime as Runtime).process_request_head ~= nil) then
-    raise "cannot reset Phase 6 process state with live native owners"
+  if active_runtime then
+    local runtime = active_runtime as Runtime
+    if runtime.process_head then
+      raise "cannot reset Phase 6 process state with live native owners"
+    end
+    if runtime.process_request_head then
+      raise "cannot reset Phase 6 process state with live native owners"
+    end
   end
   test_phase6_process_fault = 0
   test_phase6_process_callback_fault = 0
@@ -850,10 +854,10 @@ end
 function __test_phase6_process_resources(): integer
   if not active_runtime then return 0 end
   local count = 0
-  local raw = (active_runtime as Runtime).process_head
-  while raw ~= nil do
+  local raw: ProcessControl? = (active_runtime as Runtime).process_head
+  while raw do
     count = count + 1
-    raw = (raw as ProcessControl).next_control
+    raw = raw.next_control
   end
   return count
 end
@@ -861,10 +865,11 @@ end
 function __test_phase6_process_requests(): integer
   if not active_runtime then return 0 end
   local count = 0
-  local raw = (active_runtime as Runtime).process_request_head
-  while raw ~= nil do
+  local raw: ProcessRequestControl? =
+      (active_runtime as Runtime).process_request_head
+  while raw do
     count = count + 1
-    raw = (raw as ProcessRequestControl).next_control
+    raw = raw.next_control
   end
   return count
 end
@@ -872,10 +877,10 @@ end
 function __test_phase6_process_live_helpers(): integer
   if not active_runtime then return 0 end
   local count = 0
-  local raw = (active_runtime as Runtime).task_head
-  while raw ~= nil do
-    local task = raw as Task
-    if task.helper_group ~= nil and not terminal(task.state) then
+  local raw: Task? = (active_runtime as Runtime).task_head
+  while raw do
+    local task = raw
+    if task.helper_group and not terminal(task.state) then
       count = count + 1
     end
     raw = task.next_task
