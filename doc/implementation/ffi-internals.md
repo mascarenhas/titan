@@ -144,12 +144,14 @@ compatibility/coercion relations add the Titan boundary conversions:
   `void *` out-parameters by address;
 * Titan `string` -> C `char *` or `void *`;
 * C `TValue` -> Titan `value`, and Titan `value` -> C `TValue`;
-* C integers, C floats, non-function C pointers, and `COwned` <-> `value`.
+* C integers, C floats, non-function C pointers, and `COwned` <-> `value`;
+* Lua-internal `Udata *` <-> full-userdata `value`, with NULL <-> nil.
 
-C `TValue` is treated as a GC-bearing C type by the code generator. A local,
-temporary, or parameter with that C type gets the same Lua-stack anchoring used
-for Titan `value`, because the by-value C object may itself contain a pointer to
-a collectable Lua object.
+C `TValue` and typedef-resolved pointers to Lua's internal `Udata` are treated
+as GC-bearing C types by the code generator. A local, temporary, or parameter
+with either type gets the same Lua-stack anchoring used for Titan `value`.
+A by-value `TValue` may itself contain a collectable pointer, while a
+non-NULL `Udata *` denotes the full userdata GC object directly.
 
 Serialization rejects any type tree containing a C FFI type. This is the
 enforcement point for "C types are local to the importing module": exported
@@ -210,6 +212,13 @@ The checker has FFI-specific handling in a few narrow places:
 * `Ast.ExpCall` validates C allocation pseudo-functions, rejecting `void`,
   incomplete aggregates, C array typedefs, and structs with flexible array
   members.
+* Top-level initializer validation recognizes `Type.CPseudoNew` as a sound
+  constructor. `T.new()` and `T.new_array(count)` are accepted when their
+  actual argument list is constant; a count that reads module state is
+  rejected just like a non-constant record-constructor argument. The
+  `Ast.ExpAdjust` introduced by parenthesizing a call is transparent to this
+  check. The same validator checks both expression-valued map keys and their
+  values in initializer lists.
 * `Ast.ExpCall` also recognizes callees whose resolved type is
   `CPointer(CFunction(...))`. It checks arguments against the C function
   signature and records `_c_pointer_call` for codegen.
@@ -314,11 +323,14 @@ them; C pointers/arrays/aggregates remain C values; C `char *` / `void *` to
 
 `getslot` and `setslot` know how to box C scalars, non-function pointers, owned
 userdata, and by-value C `TValue`s for `value` conversions and for Lua-facing
-slots. C object pointers are exposed as light userdata in `value`; `COwned` is
-full userdata. C arrays are not accepted through `value` because there is no
-array unboxing path. C function pointers are not object pointers in portable C
-and cannot cross through `value` or the object-pointer address coercions.
-By-value C structs/unions are deliberately not boxable in v1.
+slots. Ordinary C object pointers are exposed as light userdata in `value`;
+`COwned` is full userdata. Lua-internal `Udata *` is the deliberate exception:
+boxing emits the full-userdata tag for that same object (or nil for NULL), and
+unboxing accepts full userdata or nil rather than lightuserdata. C arrays are
+not accepted through `value` because there is no array unboxing path. C
+function pointers are not object pointers in portable C and cannot cross
+through `value` or the object-pointer address coercions. By-value C
+structs/unions are deliberately not boxable in v1.
 
 ### C Arrays And Fields
 
@@ -361,6 +373,11 @@ There is no finalizer. Titan owns the lifetime through the Lua GC, and the
 payload size in `Udata.len` is enough to reconstruct the dynamic count for
 counted owned arrays. The userdata is anchored in a stack slot immediately after
 allocation, before any later operation can trigger a collection.
+
+The top-level constant-expression check admits these pseudo-constructors when
+all arguments are constant. The allocation still occurs once per module
+instance at initialization time, and the resulting `COwned` userdata is stored
+in a GC-traced module slot.
 
 Each distinct owned C pointee/count shape also gets a hidden module slot holding
 a metatable. New allocations stamp that metatable onto the `Udata`, and

@@ -505,6 +505,33 @@ describe("C FFI type checking", function()
         assert.truthy(ok, err)
     end)
 
+    it("allows owned C allocation in sound top-level initializers", function()
+        local ok, err = run_checker([[
+            local ffi = foreign import "titan/ffi.h"
+
+            local one = ffi.titan_ffi_int.new()
+            local many = ffi.titan_ffi_int.new_array(8)
+            local parenthesized_one = (ffi.titan_ffi_int.new())
+            local parenthesized_many = (ffi.titan_ffi_int.new_array(4))
+
+            function count(): integer
+                return #many + #parenthesized_many
+            end
+        ]])
+        assert.truthy(ok, err)
+    end)
+
+    it("rejects top-level C allocation counts that read module state", function()
+        local ok, err = run_checker([[
+            local ffi = foreign import "titan/ffi.h"
+
+            count = 8
+            local many = ffi.titan_ffi_int.new_array(count)
+        ]])
+        assert.falsy(ok)
+        assert.match("top level variable initialization must be constant", err)
+    end)
+
     it("offers sizeof and alignof pseudo-members on C types", function()
         local ok, err = run_checker([[
             local ffi = foreign import "titan/ffi.h"

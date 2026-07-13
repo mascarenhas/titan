@@ -209,16 +209,18 @@ The C helper interface is deliberately tiny. `stdlib/coroutine.titan` imports
 `minicoro.h` directly, reads the `mco_coro` fields it needs, constructs
 the owner userdata and typed handle, and calls the minicoro
 storage/control APIs directly.
-The C helper surface used by `stdlib/coroutine.titan` consists of the entry
-trampoline, fixed tag comparator, and access to the Lua-registry-owned
-minicoro runtime shared by every coroutine in the Lua state:
+The C helper surface used by `stdlib/coroutine.titan` consists only of the
+entry trampoline and fixed tag comparator:
 
 ```c
 void titan_coro_entry(mco_coro *co);
 int titan_coro_tag_equal(void *t1, void *t2);
-void titan_coro_configure(lua_State *L, mco_desc *desc);
-mco_coro *titan_coro_running(lua_State *L);
 ```
+
+The complete `mco_runtime` layout is available through `minicoro.h`, so Titan
+allocates one GC-owned runtime as a local top-level module variable. This keeps
+current-coroutine and ASan bookkeeping in traced per-state storage without a
+Lua-registry lookup on each coroutine operation.
 
 The split is the important point. `mco_resume`, `mco_yield`,
 `mco_push`, and `mco_pop` return `mco_result`, not the user's payload.
@@ -233,10 +235,12 @@ simply the injected error.
 `stdlib/coroutine.titan` then has the public shape:
 
 ```lua
+local runtime = mco.mco_runtime.new()
+
 function create(func: (value) -> value, default_tag: value): Coro
   -- after creating the owner userdata:
   local desc = mco.mco_desc_init(nil, STACK_SIZE)
-  coro_native.titan_coro_configure(L, desc)
+  desc.runtime = runtime
   -- set desc.func/user_data, then let mco_create fill slot
   return Coro.new(ffi.lua_totvalue(L, -1), slot[0], default_tag)
 end
@@ -285,7 +289,7 @@ function yield(arg: value, tag: value): value
   if tag == nil then
     raise "must provide non-nil tag argument to coroutine.yield"
   end
-  local co = coro_native.titan_coro_running(L)
+  local co = runtime.current_co
   push_transfer(co, 1, arg)
   return yield_result_or_raise(co, tag)
 end
@@ -389,9 +393,11 @@ The owner userdata has four uservalues that root:
 4. the callback function value passed to `create`.
 
 The module slot is a real full-userdata root, not a boxed native pointer.
-`M` is a native `Udata *`, so `create` obtains the module value from Lua
-upvalue 1 of the canonical entry closure through `lua_getupvalue` and stores
-that already existing value in the owner userdata.
+`M` is a native `Udata *`, which the coder treats specially when it crosses a
+`value` boundary: a non-NULL pointer becomes a full-userdata `TValue`, not
+lightuserdata, and NULL becomes nil. `create` therefore stores `M` directly in
+the owner userdata. The owner traces the actual module object without a
+closure-upvalue lookup or an intermediate userdata allocation.
 
 The child-thread frame roots a final callback return/error payload while
 the entry point copies it into minicoro storage, stages any captured
@@ -611,13 +617,13 @@ and vendored minicoro implementation. Static archive selection extracts
 
 Avoid semantic mutable process-global state in runtime or generated code. The
 fixed Titan tag comparator is a compile-time constant, while current-coroutine
-and ASan main-stack bookkeeping lives in one `mco_runtime` userdata recovered
-from the Lua registry and assigned to every new descriptor; per-coroutine ASan
-tokens remain in each `mco_coro`. Module and coroutine ownership remains in
-registry/GC-owned module and owner userdata. `mco_coro->user_data` is only a
-non-rooting raw back-pointer to that owner. Titan and Lua enter the one
-canonical `coroutine.so`; that DSO is the sole native owner, while each Lua
-state retains its own registry-owned runtime.
+and ASan main-stack bookkeeping lives in one `mco_runtime` userdata allocated
+by the Titan module initializer and assigned to every new descriptor;
+per-coroutine ASan tokens remain in each `mco_coro`. Module and coroutine
+ownership remains in GC-owned module and owner userdata.
+`mco_coro->user_data` is only a non-rooting raw back-pointer to that owner.
+Titan and Lua enter the one canonical `coroutine.so`; that DSO is the sole
+native owner, while each Lua state retains its own module-local runtime.
 
 Titan's vendored minicoro should not include the Binaryen
 `MCO_USE_ASYNCIFY` backend: its unwind/rewind model does not implement

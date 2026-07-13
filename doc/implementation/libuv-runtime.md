@@ -392,8 +392,9 @@ cancellation, unwind, and forced GC. Its
 stack-use-after-return coverage relies on `minicoro.h` announcing every native
 coroutine stack switch to the ASan fiber API, including tagged and stacked
 terminal transfers. The main-stack fake-stack token, bottom, and size live in
-the same registry-owned `mco_runtime` as the current-coroutine pointer, so
-nested tagged transfers pair each sanitizer switch through one shared runtime.
+the same GC-owned, module-local `mco_runtime` as the current-coroutine pointer,
+so nested tagged transfers pair each sanitizer switch through one shared
+runtime without registry lookups on coroutine hot paths.
 In that mode minicoro retains its stack-corruption sentinel but leaves
 address-range checking to ASan, because GCC's use-after-return instrumentation
 can move an address-taken local onto the sanitizer fake stack.

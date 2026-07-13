@@ -55,7 +55,9 @@ for locals, parameters, return values and temporaries alike:
 | function type (`(P...) -> R`) | `TValue` | boxed callable value: exact Titan closures can fast-path, other Lua callables go through `luaD_callnoyield` |
 | record type (`Type.Nominal`) | `Udata*` | the record value *is* this userdata (below) |
 | `T?` (option) | `TValue` | boxed: nil or the payload |
-| foreign pointer | per `foreignctype` | e.g. `void*`, `char*` ([FFI internals](ffi-internals.md)) |
+| foreign pointer except Lua `Udata *` | per `foreignctype` | e.g. `void*`, `char*`; ordinary borrowed pointers are not GC objects ([FFI internals](ffi-internals.md)) |
+| Lua-internal `Udata *` | `Udata *` | raw pointer to the full userdata object; GC-bearing |
+| Lua-internal `TValue` | `TValue` | boxed value copied by value; GC-bearing |
 
 This is the central performance fact of the backend: Titan locals,
 parameters and return values are ordinary C variables in their native,
@@ -78,12 +80,14 @@ Three helper families in `coder.lua` mediate between C variables and
 
 * `getslot(typ, dst, src)` reads a `TValue*` into a C variable —
   `ivalue`, `fltvalue`, `ttistrue`, `tsvalue`, `hvalue`, `uvalue` (for
-  records), or a struct copy `*($SRC)` for `value`/options.
+  records and non-nil `Udata *`), or a struct copy `*($SRC)` for
+  `value`/options. A nil slot becomes NULL for `Udata *`.
 * `setslot(typ, dst, src)` writes a C value into a `TValue*` —
   `setivalue`, `setfltvalue`, `titan_setbvalue` (a `titan.h` macro; 5.5
   removed `setbvalue` along with the boolean payload), `setsvalue`,
   `sethvalue`, `setuvalue` (for records), `setobj2t` for
-  `value`/options.
+  `value`/options. For `Udata *`, it emits `setuvalue` for a non-NULL pointer
+  and nil for NULL rather than boxing the pointer as lightuserdata.
 * `setwrapped(typ, dst, src)` was historically `setslot` except for
   records, where it had to swap the Titan-side closure for the
   Lua-visible userdata. Now that a record *is* its userdata, `setwrapped`
@@ -96,10 +100,10 @@ Three helper families in `coder.lua` mediate between C variables and
 
 `types.is_gc` in `types.lua` decides which types the collector cares
 about, and therefore which values need anchoring: string, value,
-function, array, map, record/nominal, and `T?` when `T` is itself
-GC-able (the list also tests a `Type.Interface` tag for which no
-constructor exists). Integers, floats, booleans, nil and foreign
-pointers need none.
+function, array, map, record/nominal, C `TValue`, Lua-internal `Udata *`,
+and `T?` when `T` is itself GC-able (the list also tests a
+`Type.Interface` tag for which no constructor exists). Integers, floats,
+booleans, nil and ordinary foreign pointers need none.
 
 ## Records: a single tagged Udata
 

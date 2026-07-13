@@ -611,8 +611,12 @@ complete inventory of conversions:
     `if(TITAN_UNLIKELY(ttisnil(&$CEXP))) { luaL_error(L, "%s:%d:%d: type error, expected %s but found nil", ...); } else { $GETSLOT }`,
     so a nil reaching any unwrap position raises a clean
     `expected <T> but found nil` at run time.
-11. **→ foreign pointer**: a plain C cast `(($CTYPE)($CEXP))` via
-    `nativetoforeignexp` ([FFI internals](ffi-internals.md)).
+11. **→ foreign pointer**: `nativetoforeignexp` first performs any required
+    boundary conversion, followed by the target C cast. A `value` source uses
+    `checkandget`; in particular, Lua-internal `Udata *` accepts full userdata
+    or nil and rejects lightuserdata. Ordinary already-native pointer
+    conversions can remain a plain `(($CTYPE)($CEXP))` cast
+    ([FFI internals](ffi-internals.md)).
 
 `Ast.ExpAdjust` (truncating a multi-value expression to one value, the
 `(f())` form) is a pass-through to the inner expression.

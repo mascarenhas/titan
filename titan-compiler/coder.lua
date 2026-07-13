@@ -116,6 +116,9 @@ local function getslot(typ --[[:table]], dst --[[:string?]], src --[[:string]])
            (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CFloat") then
         tmpl = "$DST (($CT)fltvalue($SRC))"
         ct = foreignctype(typ)
+    elseif types.is_c_udata_pointer(typ) then
+        tmpl = "$DST (ttisnil($SRC) ? NULL : (($CT)uvalue($SRC)))"
+        ct = foreignctype(typ)
     elseif typ._tag == "Type.CPointer" or typ._tag == "Type.CArray" or
            (typ._tag == "Type.CTypedef"
             and (types.resolve_c_typedef(typ)._tag == "Type.CPointer"
@@ -427,6 +430,24 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
             COL = c_integer_literal(loc.col),
             THROW = codethrow(loc, "%s:%d:%d: type error, expected float but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($EXP))" })
         })
+    elseif types.is_c_udata_pointer(typ) then
+        return render([[
+            if (TITAN_LIKELY(ttisfulluserdata($EXP))) {
+                $VAR = ($CT)uvalue($EXP);
+            } else if (ttisnil($EXP)) {
+                $VAR = NULL;
+            } else {
+                $THROW
+            }
+        ]], {
+            EXP = exp,
+            VAR = cvar,
+            CT = foreignctype(typ),
+            FILE = c_string_literal(loc.filename),
+            LINE = c_integer_literal(loc.line),
+            COL = c_integer_literal(loc.col),
+            THROW = codethrow(loc, "%s:%d:%d: type error, expected C userdata pointer but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($EXP))" })
+        })
     elseif typ._tag == "Type.CPointer" or
            (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CPointer") then
         return render([[
@@ -688,6 +709,12 @@ local function setslot(typ --[[:table]], dst --[[:string]], src --[[:string]])
     elseif typ._tag == "Type.CFloat" or
            (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CFloat") then
         tmpl = "setfltvalue($DST, ((lua_Number)$SRC));"
+    elseif types.is_c_udata_pointer(typ) then
+        tmpl = [[do {
+            Udata *_titan_u = (Udata *)($SRC);
+            if (_titan_u == NULL) setnilvalue($DST);
+            else setuvalue(L, $DST, _titan_u);
+        } while (0);]]
     elseif typ._tag == "Type.CPointer" or
            (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CPointer") then
         tmpl = "setpvalue($DST, ((void*)$SRC));"
@@ -1541,14 +1568,15 @@ end
 -- and does not affect the cross-module ABI (no TITAN_VER bump).
 --
 -- Two representations, chosen by `is_rawbox` (= `not types.is_gc(typ)`):
---   (N) any non-gc type (integer/float/boolean/Nil/foreign pointer/scalar
---       typedef, plus an Option of a non-gc base whose TValue is only ever
---       nil-or-scalar): a 0-uservalue userdata (`Udata0`) with the raw,
---       non-collectable C value stored inline (`getudatamem`). No TValue
+--   (N) any non-gc type (integer/float/boolean/Nil/ordinary foreign
+--       pointer/scalar typedef, plus an Option of a non-gc base whose TValue is
+--       only ever nil-or-scalar): a 0-uservalue userdata (`Udata0`) with the
+--       raw, non-collectable C value stored inline (`getudatamem`). No TValue
 --       tagging and no barrier — ever.
---   (G) every gc type (TValue-stored: String/Array/Map/record/Function/Value
---       and an Option of a gc base): a 1-uservalue userdata holding a TValue in
---       `uv[0].uv`, written with the BACK barrier.
+--   (G) every gc type (TValue-stored: String/Array/Map/record/Function/Value,
+--       COwned, C TValue, Lua-internal Udata*, and an Option of a gc base): a
+--       1-uservalue userdata holding a TValue in `uv[0].uv`, written with the
+--       BACK barrier.
 
 -- A box uses the raw (N) representation iff its value can never hold a GC
 -- pointer, i.e. `not types.is_gc(typ)`. `is_gc` is exactly the predicate that
@@ -1557,8 +1585,8 @@ end
 -- box_read / box_write derive the storage type and size from ctype(typ) /
 -- sizeof(ctype(typ)), any non-gc type works with no enumeration: integer, float,
 -- boolean, Nil (a dummy int), an Option of a non-gc base (a TValue that is only
--- ever nil-or-scalar), foreign pointers, and scalar typedefs all route here
--- automatically. Everything that may hold a GC object uses (G).
+-- ever nil-or-scalar), ordinary foreign pointers, and scalar typedefs all route
+-- here automatically. Everything that may hold a GC object uses (G).
 local function is_rawbox(typ --[[:table]])
     return not types.is_gc(typ)
 end

@@ -16,6 +16,13 @@ local function with_header(contents, fn)
 end
 
 describe("C FFI code generation", function()
+    after_each(function()
+        os.remove("test.o")
+        os.remove("test.so")
+        if not h.verbose then os.remove("test.c") end
+        os.execute("rm -rf test.so.dSYM")
+    end)
+
     it("passes the built-in Lua state and module pointers to C functions", function()
         with_header([[
             typedef struct lua_State lua_State;
@@ -36,6 +43,86 @@ describe("C FFI code generation", function()
             ]], [[
                 assert(test.has_state() == 1)
                 assert(test.has_module() == 1)
+            ]])
+        end)
+    end)
+
+    it("preserves Udata pointers as full-userdata TValues", function()
+        h.run_coder([[
+            local lua = foreign import "lua.h"
+            local ffi = foreign import "titan/ffi.h"
+
+            function pushed_module(): value
+                local top = lua.lua_gettop(L)
+                ffi.lua_pushtvalue(L, M)
+                local module = ffi.lua_totvalue(L, -1)
+                lua.lua_settop(L, top)
+                return module
+            end
+
+            function module_value(): value
+                return M
+            end
+
+            function same_module(item: value): boolean
+                local module = item as *ffi.Udata
+                return module == M
+            end
+
+            function null_roundtrip(): boolean
+                local module: *ffi.Udata = nil
+                local item: value = module
+                return item == nil and (item as *ffi.Udata) == nil
+            end
+        ]], [[
+            assert(rawequal(test.pushed_module(), test))
+            assert(rawequal(test.module_value(), test))
+            assert(test.same_module(test))
+            assert(test.null_roundtrip())
+
+            local captured = 1
+            local function closure() return captured end
+            local light = debug.upvalueid(closure, 1)
+            local ok, err = pcall(test.same_module, light)
+            assert(not ok)
+            assert(tostring(err):match("expected C userdata pointer"))
+        ]])
+    end)
+
+    it("keeps top-level owned C state rooted in the module", function()
+        with_header([[
+            typedef struct lua_State lua_State;
+            typedef struct ffi_state { int count; } ffi_state;
+            static int ffi_increment(ffi_state *state) {
+                return ++state->count;
+            }
+            static void ffi_collect(lua_State *L) {
+                lua_gc(L, LUA_GCCOLLECT, 0);
+            }
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                local state = c.ffi_state.new()
+
+                function state_value(): value
+                    return state
+                end
+
+                function increment(): integer
+                    c.ffi_collect(L)
+                    return c.ffi_increment(state) as integer
+                end
+            ]], [[
+                local weak = setmetatable({ test.state_value() }, {
+                    __mode = "v",
+                })
+                collectgarbage("collect")
+                collectgarbage("collect")
+                assert(weak[1] ~= nil)
+                assert(rawequal(weak[1], test.state_value()))
+                assert(test.increment() == 1)
+                assert(test.increment() == 2)
             ]])
         end)
     end)

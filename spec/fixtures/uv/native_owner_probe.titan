@@ -191,19 +191,6 @@ local function main_thread_value(): value
   return thread
 end
 
--- M is a native Udata* inside Titan code; coercing that C pointer directly to
--- value would produce lightuserdata, not a tracing root.  A canonical Titan
--- function closure keeps the module Udata in Lua upvalue 1, so capture that
--- already existing full-userdata TValue once through the public Lua API.
-local function dispatcher_module_value(dispatcher: value): value
-  local top = lua.lua_gettop(L)
-  ffi.lua_pushtvalue(L, dispatcher)
-  lua.lua_getupvalue(L, -1, 1)
-  local module = ffi.lua_totvalue(L, -1)
-  lua.lua_settop(L, top)
-  return module
-end
-
 local function owner_slot_type(owner: value, slot: integer): integer
   local top = lua.lua_gettop(L)
   ffi.lua_pushtvalue(L, owner)
@@ -458,7 +445,7 @@ local function allocate_timer(runtime: Runtime): uv_timer_t
     handle = handle,
     storage = storage,
     main_thread = main_thread_value(),
-    module = dispatcher_module_value(timer_dispatch),
+    module = M,
     dispatcher = timer_dispatch,
     root = nil,
     metadata = new_state(runtime),
@@ -478,7 +465,7 @@ local function allocate_fs(runtime: Runtime): uv_fs_t
     handle = handle,
     storage = storage,
     main_thread = main_thread_value(),
-    module = dispatcher_module_value(fs_dispatch),
+    module = M,
     dispatcher = fs_dispatch,
     root = nil,
     metadata = new_state(runtime),

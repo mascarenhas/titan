@@ -799,15 +799,6 @@ local function main_thread_value(): value
   return thread
 end
 
-local function dispatcher_module_value(dispatcher: value): value
-  local top = lua.lua_gettop(L)
-  ffi.lua_pushtvalue(L, dispatcher)
-  lua.lua_getupvalue(L, -1, 1)
-  local module = ffi.lua_totvalue(L, -1)
-  lua.lua_settop(L, top)
-  return module
-end
-
 local function on_main_thread(): boolean
   local top = lua.lua_gettop(L)
   local is_main = lua.lua_pushthread(L)
@@ -1141,8 +1132,8 @@ local function new_runtime(): Runtime
     loop.storage = nil
     raise make_error(status as integer, "loop.init", nil)
   end
-  local runtime = Runtime.new(loop, generation, main_thread_value(),
-      dispatcher_module_value(timer_dispatch), nil, nil, nil, nil, nil, nil,
+  local runtime = Runtime.new(loop, generation, main_thread_value(), M,
+      nil, nil, nil, nil, nil, nil,
       nil, nil, nil, nil, nil, false, false, false, nil, "", 0)
   active_runtime = runtime
   return runtime

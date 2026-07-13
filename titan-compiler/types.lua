@@ -180,6 +180,22 @@ function types.is_c_tvalue(t)
     return rt and rt._tag == "Type.CStruct" and rt.tagname == "TValue"
 end
 
+-- A pointer to Lua's internal Udata object is not an ordinary C object
+-- pointer when wrapped in a TValue: it already denotes a full userdata GC
+-- object. Recognize typedef and tag-only spellings alike.
+function types.is_c_udata_pointer(t)
+    if not t then
+        return false
+    end
+    local rt = types.resolve_c_typedef(t)
+    if not (rt and rt._tag == "Type.CPointer") then
+        return false
+    end
+    local pointee = types.resolve_c_typedef(rt.pointee)
+    return pointee and pointee._tag == "Type.CStruct"
+        and (pointee.tagname == "Udata" or pointee.cname == "Udata")
+end
+
 function types.contains_c_ffi_type(t)
     return types.first_c_ffi_type(t) ~= nil
 end
@@ -197,6 +213,7 @@ end
 function types.is_gc(t)
     local tag = t._tag
     return types.is_c_tvalue(t) or
+           types.is_c_udata_pointer(t) or
            tag == "Type.String" or
            tag == "Type.Value" or
            tag == "Type.Function" or

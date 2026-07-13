@@ -154,7 +154,7 @@ describe("uv native-owner fixture", function()
         assert.match("_Alignof%(uv_loop_t%)", generated)
         assert.match("_Alignof%(uv_timer_t%)", generated)
         assert.match("_Alignof%(uv_fs_t%)", generated)
-        assert.match("lua_getupvalue%(L,.-1.-1", generated)
+        assert.not_match("lua_getupvalue%(L,.-1.-1", generated)
 
         local access = generated:match(
             "int native_owner_probe__timer_is_closing_titan%b()%s*{(.-)static int native_owner_probe__timer_is_closing_titanentry_lua")

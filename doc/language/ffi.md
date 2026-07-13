@@ -54,10 +54,10 @@ code: `titan_ffi_void`, `titan_ffi_bool`, `titan_ffi_char`,
 `titan_ffi_long`, `titan_ffi_unsigned_long`, `titan_ffi_long_long`,
 `titan_ffi_unsigned_long_long`, `titan_ffi_float`, `titan_ffi_double`, and the
 opaque Lua state type `lua_State`. It also exposes Lua's internal `TValue`
-type as a real C type for private runtime helpers; Titan `value` and C
+type and `Udata` object type for private runtime helpers; Titan `value` and C
 `TValue` are distinct types with explicit FFI coercions between them. A local,
-temporary, or parameter whose C type is `TValue` is treated as GC-bearing, like
-Titan `value`.
+temporary, or parameter whose C type is `TValue` or `Udata *` is treated as
+GC-bearing, like Titan `value`.
 
 ## Imported Members
 
@@ -196,6 +196,9 @@ Allowed conversions include:
   `value`, with the same run-time checks used at the Lua boundary.
 * Titan `value` to C `TValue` by value, and C `TValue` back to Titan `value`,
   for private runtime helper APIs that include `<titan/ffi.h>`.
+* Lua-internal `Udata *` to the same full-userdata `value` and back. NULL maps
+  to nil; unlike an ordinary C pointer, a non-NULL `Udata *` does not become
+  lightuserdata, and converting back rejects lightuserdata.
 
 By-value C structs and unions cannot cross through `value` in v1. C function
 pointers are callable and nullable, but they are not C object pointers: they
@@ -391,6 +394,20 @@ end
 zeroed adjacent objects and records the count through the userdata payload size.
 The returned value is an owned C userdata whose lifetime belongs to Titan's Lua
 GC. No finalizer is installed.
+
+These pseudo-constructor calls are also valid module-variable initializers when
+their arguments are constant:
+
+```lua
+local ffi = foreign import "titan/ffi.h"
+
+local counter = ffi.titan_ffi_int.new()
+local samples = ffi.titan_ffi_float.new_array(16)
+```
+
+Each module instance performs the allocation once and keeps the owned userdata
+in its GC-traced module state. A `new_array` count that reads another module
+variable is not a constant initializer and is rejected.
 
 Passing an owned C object or owned C array to a C function expecting `T *`
 passes a pointer to the userdata payload:

@@ -5,6 +5,7 @@ local ffi = foreign import "titan/ffi.h"
 local coro_native = foreign import "titan/coro.h"
 
 local STACK_SIZE = 2 * 1024 * 1024
+local runtime = mco.mco_runtime.new()
 
 record Coro
   local udata: value -- just for GC rooting
@@ -75,19 +76,6 @@ local function pop_trace_for_append(): value
   lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_APPEND_KEY)
   lua.lua_settop(L, top)
   return trace
-end
-
--- M is a native Udata pointer, so coercing it directly to value would create
--- only a lightuserdata navigation value.  Recover the generated closure's
--- first Lua upvalue instead: it is the canonical full-userdata module value
--- and therefore makes owner slot 2 an actual GC root.
-local function closure_module_value(func: value): value
-  local top = lua.lua_gettop(L)
-  ffi.lua_pushtvalue(L, func)
-  lua.lua_getupvalue(L, -1, 1)
-  local module = ffi.lua_totvalue(L, -1)
-  lua.lua_settop(L, top)
-  return module
 end
 
 local function raise_with_appended_trace(err: value)
@@ -190,7 +178,7 @@ function yield(arg: value, tag: value): value
   if tag == nil then
     missing_yield_tag()
   end
-  local co = coro_native.titan_coro_running(L)
+  local co = runtime.current_co
   push_transfer(co, 1, arg)
   return yield_result_or_raise(co, tag)
 end
@@ -200,7 +188,7 @@ function is_yieldable(tag: value): boolean
     missing_yield_tag()
   end
   local ctag: ffi.TValue = tag
-  return (mco.mco_is_yieldable(coro_native.titan_coro_running(L), ctag) as integer) ~= 0
+  return (mco.mco_is_yieldable(runtime.current_co, ctag) as integer) ~= 0
 end
 
 local function coro_gc(handle: value)
@@ -222,7 +210,7 @@ function create(func: (value) -> value, default_tag: value): Coro
   local slot: **mco.mco_coro = lua.lua_newuserdatauv(L, ffi.titan_ffi_void_ptr.sizeof, 4)
   local T = ffi.titan_newthread(L)
   lua.lua_setiuservalue(L, -2, 1)
-  ffi.lua_pushtvalue(L, closure_module_value(coro_entry))
+  ffi.lua_pushtvalue(L, M)
   lua.lua_setiuservalue(L, -2, 2)
   ffi.lua_pushtvalue(L, coro_entry)
   lua.lua_setiuservalue(L, -2, 3)
@@ -231,7 +219,7 @@ function create(func: (value) -> value, default_tag: value): Coro
   lual.luaL_setmetatable(L, "titan.coroutine")
 
   local desc = mco.mco_desc_init(nil, STACK_SIZE)
-  coro_native.titan_coro_configure(L, desc)
+  desc.runtime = runtime
   desc.func = coro_native.titan_coro_entry
   desc.user_data = ffi.lua_togco(L, -1)
 

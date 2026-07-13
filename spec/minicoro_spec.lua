@@ -497,6 +497,24 @@ describe("minicoro tagged extension", function()
         end)
     end
 
+    it("exposes complete runtime storage to embedders", function()
+        local out = run_c_probe([[
+#include <assert.h>
+#include <stdio.h>
+#include "titan-runtime/minicoro.h"
+
+int main(void) {
+  mco_runtime runtime = {0};
+  mco_desc desc = {0};
+  desc.runtime = &runtime;
+  assert(desc.runtime->current_co == NULL);
+  puts("ok");
+  return 0;
+}
+        ]])
+        assert.match("ok", out)
+    end)
+
     it("runs tagged coroutine behavior under real Valgrind when available", function()
         if not command_available("valgrind") then
             return

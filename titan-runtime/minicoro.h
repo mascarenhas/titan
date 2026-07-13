@@ -291,6 +291,12 @@ typedef enum mco_result {
 typedef struct mco_coro mco_coro;
 typedef int (*mco_tag_comparator)(void* t1, void* t2);
 typedef struct mco_runtime mco_runtime;
+struct mco_runtime {
+  mco_coro* current_co;
+  void* asan_main_fake_stack;
+  const void* asan_main_stack_bottom;
+  size_t asan_main_stack_size;
+};
 struct mco_coro {
   void* context;
   mco_runtime* runtime;
@@ -563,13 +569,6 @@ extern "C" {
 
 /* The default runtime preserves minicoro's thread-local behavior. Embedders
  * can instead assign a shared runtime through mco_desc. */
-struct mco_runtime {
-  mco_coro* current_co;
-  void* asan_main_fake_stack;
-  const void* asan_main_stack_bottom;
-  size_t asan_main_stack_size;
-};
-
 static MCO_THREAD_LOCAL mco_runtime mco_default_runtime = {0};
 
 #ifdef MCO_NO_MULTITHREAD

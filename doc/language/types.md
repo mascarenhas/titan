@@ -211,7 +211,9 @@ comparisons, and as the precondition of explicit `as` casts. The rules:
    compatible `const *T` parameters, mutable non-pointer C locals/formals with
    compatible mutable pointer parameters, Titan `string` with C `char *`/`void
    *`, C `TValue` with Titan `value`, and boxable C values with `value`. C
-   `char *`/`void *` to Titan `string` is explicit-cast-only.
+   `char *`/`void *` to Titan `string` is explicit-cast-only. Lua's internal
+   `Udata *` is a special boxable pointer: non-NULL values cross as the same
+   full userdata rather than lightuserdata, and NULL crosses as nil.
 
 When two types are merely compatible — related through `value` inside a
 compound type rather than by a direct coercion — **no conversion happens
@@ -270,8 +272,10 @@ the value does not conform.
 | non-pointer C object expression | compatible `const *T` or `const void *` | no (FFI calls; materializes the address for the call) |
 | mutable non-pointer C local or formal | compatible `*T` or `void *` | no (FFI calls; C may write through the pointer) |
 | `string` | C `char *` or `void *` | no (FFI only) |
-| C integer, C float, C pointer, C array-as-pointer, or owned C userdata | `value` | no |
-| `value` | C integer, C float, C pointer, C array-as-pointer, or owned C userdata | yes — checked against the target C representation |
+| C integer, C float, ordinary C pointer, C array-as-pointer, or owned C userdata | `value` | no — ordinary pointers become lightuserdata; owned objects stay full userdata |
+| `value` | C integer, C float, ordinary C pointer, C array-as-pointer, or owned C userdata | yes — checked against the target C representation |
+| Lua-internal `Udata *` | `value` | no — non-NULL becomes that same full userdata; NULL becomes nil |
+| `value` | Lua-internal `Udata *` | yes — accepts full userdata or nil, not lightuserdata |
 | C `TValue` | `value` | no |
 | `value` | C `TValue` | no |
 
@@ -477,6 +481,8 @@ C integers can be cast to `integer`, C floats can be cast to `float`, Titan
 floats, C numeric types can be explicitly cast among themselves, boxable C values
 can cross through `value`, C `TValue` can cross to/from Titan `value`, and C
 `char *` / `void *` can be cast to `string` (copying bytes up to the first `\0`
-and raising if the pointer is `NULL`). There is no separate FFI cast form.
+and raising if the pointer is `NULL`). Lua-internal `Udata *` crosses the
+`value` boundary as full userdata rather than an ordinary lightuserdata
+pointer. There is no separate FFI cast form.
 Full details and examples are in [Expressions](expressions.md) and
 [The C FFI](ffi.md).

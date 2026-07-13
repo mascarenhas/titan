@@ -3098,10 +3098,17 @@ local function checkbodies(ast, st, errors)
 end
 
 local function isconstructor(node)
-    return node.var and node.var._decl and node.var._decl._tag == "Type.StaticMethod"
-        and #node.var._decl.rettypes == 1
-        and node.var._decl.rettypes[1]._tag == "Type.Nominal"
-        and node.var._decl.rettypes[1].fqtn == node.var._decl.fqtn
+    local decl = node.var and node.var._decl
+    if not decl then
+        return false
+    end
+    if decl._tag == "Type.CPseudoNew" then
+        return true
+    end
+    return decl._tag == "Type.StaticMethod"
+        and #decl.rettypes == 1
+        and decl.rettypes[1]._tag == "Type.Nominal"
+        and decl.rettypes[1].fqtn == decl.fqtn
 end
 
 -- Verify if an expression is constant
@@ -3117,6 +3124,9 @@ local function isconst(node)
     elseif tag == "Ast.ExpInitList" then
         local const = true
         for _, field in ipairs(node.fields) do
+            if type(field.name) == "table" then
+                const = const and isconst(field.name)
+            end
             const = const and isconst(field.exp)
         end
         return const
@@ -3124,7 +3134,7 @@ local function isconst(node)
     elseif tag == "Ast.ExpCall" then
         if isconstructor(node.exp) then
             local const = true
-            for _, arg in ipairs(node.args) do
+            for _, arg in ipairs(node.args.args) do
                 const = const and isconst(arg)
             end
             return const
@@ -3149,6 +3159,12 @@ local function isconst(node)
         return isconst(node.lhs) and isconst(node.rhs)
 
     elseif tag == "Ast.ExpCast" then
+        return isconst(node.exp)
+
+    elseif tag == "Ast.ExpAdjust" then
+        -- Parenthesizing a call adds an adjustment node that keeps only its
+        -- first result. It does not change whether evaluating the expression
+        -- reads module state during initialization.
         return isconst(node.exp)
 
     elseif tag == "Ast.ExpFunction" then

@@ -122,6 +122,8 @@ expression. The allowed forms are:
 * array, map, and record [constructor expressions](expressions.md)
   whose elements, keys, values, and fields are themselves constant;
 * calls to a record's `new` constructor with constant arguments;
+* calls to an imported C type's `.new()` or `.new_array(count)` pseudo-
+  constructor, with a constant `count`;
 * concatenations, unary operators, binary operators, and `as` casts
   applied to constant operands.
 
@@ -141,7 +143,10 @@ n = -(2 * 3)       -- ok: constant expression
 
 Record constructors are accepted by this rule, so
 `p: Point = { x = 1.0, y = 2.0 }` and `p = Point.new(1.0, 2.0)` both
-work as module-variable declarations, at compile time and at run time.
+work as module-variable declarations. Owned C constructors work as well, for
+example `local state = c.State.new()` or
+`local slots = c.Slot.new_array(4)`. The constructors run once when that module
+instance initializes; the resulting objects are rooted in its GC-traced state.
 *Reassigning* such a variable with a constructor expression from inside
 a function works the same way — `p = { x = 30.0, y = 40.0 }` as a
 statement is equivalent to the initializer form. See

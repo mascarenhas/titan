@@ -277,6 +277,12 @@ does not unload the native image.
 
 - Each Titan function becomes **two** C functions: a raw native-convention one (`RETTYPE f(lua_State *L, Udata *_mod, CClosure *_fn, params..., out-params for returns 2..n)`; the **caller** anchors GC-able arguments on the Lua stack) and a Lua-stack entry wrapper that coerces arguments and installs the error handler. `_fn` is the function value's own closure (still a `CClosure`): `NULL` on fully-static top-level calls, and the callee itself on first-class/closure/value calls; for anonymous functions it carries the captured variables (this uniform parameter is what bumped the module ABI to `0.6`). `_mod` becoming `Udata*` and record instances becoming a single `Udata` (so every record-typed param/return changes C type and `<mangled>_init` returns `Udata*`) is what bumped it to `0.7`; the ABI then bumped to `0.8` when a record's type tag became its metatable pointer (no `getudatamem` payload), to `0.9` when a variadic function's native signature gained the trailing `TitanVargX *_varargs, int _start` pair (after the declared params, before the out-params) and `<mangled>_types` began encoding the `varargtype` element type, to `0.10` when the `TitanVargX` structs changed from inline flexible arrays to descriptor structs with an `args` pointer, and to `0.11` when local records/members changed record interface serialization.
 - Module state is a `Udata` (`_mod`), allocated with `luaS_newudata(L, 0, NUPVALS)`: there is no reserved user value; the module's user values (0-based) hold module globals, exported-function canonical closures, imported-module `Udata`s, record metatables, and per-record static-namespace tables. There is **no** Lua-facing module table — `require` returns the module `Udata` itself (so `type(require "m")` is `"userdata"`), and all member access (functions, variables, record namespaces `m.Rec`) flows through a metatable `__index`/`__newindex` over a unified name→slot member map; functions and record namespaces are served read-only (assigning errors), variables coerce in/out, and the "not found" message is "member '%s' does not exist". A record instance is likewise a single `Udata` (fields in `uv[0..N-1]`, type identity is its metatable pointer (no raw payload), metatable on the udata).
+- Typedef-resolved pointers to Lua's internal `Udata` are GC-bearing FFI
+  values, not ordinary C pointers: boxing a non-NULL `Udata *` emits a full
+  userdata `TValue` for that same object, NULL boxes as nil, and unboxing
+  accepts full userdata or nil rather than lightuserdata. Owned C
+  pseudo-constructors (`T.new()` and `T.new_array(constant_count)`) are valid
+  top-level initializers and keep their userdata rooted in the module state.
 - **Semantic state must live in the Lua registry or GC-traced Lua objects, never
   in shared C globals.** The standard library has one canonical installed DSO
   per module, shared by Titan imports and Lua requires. Canonical `uv.so` is
@@ -301,6 +307,11 @@ does not unload the native image.
   Provider-first mapping also supports eager data/function-address relocations
   and native constructors. A compiler process records the provider's canonical
   path and rejects an attempt to switch providers.
+  When either representation satisfies the ownership invariant, hot Titan
+  paths should keep state directly reachable through module/userdata fields
+  instead of performing Lua-registry table lookups; use the registry for
+  identity, bootstrap, or genuinely shared lookup rather than as the default
+  access path.
   Translation-unit statics may hold only immutable
   constants and non-stateful wiring that is known to be identical for every
   Titan module; native caches belong in registry-owned userdata rather than

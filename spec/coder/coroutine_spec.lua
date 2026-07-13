@@ -93,6 +93,13 @@ local function write_file(path, contents)
     f:close()
 end
 
+local function read_file(path)
+    local f = assert(io.open(path, "rb"))
+    local contents = f:read("*a")
+    f:close()
+    return contents
+end
+
 local function build_coroutine()
     assert.truthy(exec_ok(
         TEST_ENV .. "TITAN_PATH_0_11= TITAN_PATH= " ..
@@ -221,6 +228,21 @@ describe("coroutine standard module", function()
         restore_root_artifacts()
     end)
 
+    it("keeps minicoro runtime state in GC-owned module-local storage", function()
+        local generated = read_file("stdlib/coroutine.c")
+        assert.match("sizeof%(mco_runtime%)", generated)
+        assert.match("getudatamem.-current_co", generated)
+        assert.not_match("titan_coro_configure", generated, 1, true)
+        assert.not_match("titan_coro_running", generated, 1, true)
+        assert.not_match("Titan coroutine runtime 0.11", generated, 1, true)
+        assert.not_match("lua_getupvalue", generated, 1, true)
+
+        local native = read_file("titan-runtime/titan_coro.c")
+        assert.not_match("titan_coro_runtime", native, 1, true)
+        assert.not_match("titan_coro_configure", native, 1, true)
+        assert.not_match("titan_coro_running", native, 1, true)
+    end)
+
     it("creates a coroutine and returns a callback result", function()
         local out = compile_and_run([[
             local coroutine = import "coroutine"
@@ -266,6 +288,7 @@ describe("coroutine standard module", function()
                    debug.getmetatable(from_lua))
             assert(debug.getregistry()["titan.coroutine"] ~= nil)
             assert(debug.getregistry()["titan.coro"] == nil)
+            assert(debug.getregistry()["Titan coroutine runtime 0.11"] == nil)
             local open = assert(package.loadlib(
                 "./titan/coroutine.so", "luaopen_titan_coroutine"))
             assert(open() == titan_coroutine)
