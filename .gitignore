@@ -19,3 +19,5 @@
 /lua
 /lua_modules
 /.luarocks
+
+/stdlib/*.c
