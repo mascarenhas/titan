@@ -2,7 +2,7 @@
 
 The `coroutine` standard module is split deliberately:
 
-* `stdlib/coroutine.titan` owns the public API and policy: tag defaults, status
+* `titan/coroutine.titan` owns the public API and policy: tag defaults, status
   strings, result-code checks, `resume` versus `error`, the
   success/error payload convention, Lua-thread/userdata setup, traceback
   handoff, and the transfer choreography around minicoro.
@@ -13,17 +13,17 @@ The `coroutine` standard module is split deliberately:
 * `titan-runtime/minicoro.h` is a vendored copy of minicoro extended with
   tagged nested yield and a `MCO_STACKED` state.
 
-The source compiles under the canonical Titan identity `coroutine`, so
-Titan code uses `import "coroutine"`. Its Lua-facing entry is
-`luaopen_titan_coroutine`, installed for `require "titan.coroutine"`;
-both names reach the one installed file at
+The source compiles under the qualified Titan identity `titan.coroutine`.
+Titan code uses `import "coroutine"`, which the parser desugars to that name;
+Lua uses the ordinary `luaopen_titan_coroutine` entry through
+`require "titan.coroutine"`. Both paths reach the one installed file at
 `<root>/lib/titan/0.11/titan/coroutine.so`. There is no legacy `coro` alias,
 parent-level or `lib/lua` copy, or bare `luaopen_coroutine` entry to collide
 with Lua's standard coroutine library.
 
 ## Public Wrapper
 
-`stdlib/coroutine.titan` imports minicoro's private struct layout plus
+`titan/coroutine.titan` imports minicoro's private struct layout plus
 the Lua and private helper headers:
 
 ```lua
@@ -60,7 +60,7 @@ the Titan type system cannot prevent a module that imports `minicoro.h`
 directly from storing a stale pointer or violating the transfer order.
 FFI calls that need the calling Lua state use Titan's built-in `L` local.
 
-`stdlib/coroutine.titan` calls minicoro directly for storage and control
+`titan/coroutine.titan` calls minicoro directly for storage and control
 transfer: `mco_push`, `mco_pop`, `mco_resume`, `mco_yield`,
 `mco_status`, `mco_is_yieldable`, and `mco_result_description`. It obtains
 the current coroutine directly from the module-local `mco_runtime` object.
@@ -94,7 +94,7 @@ The C FFI imports Lua's by-value `TValue` as a distinct C type and has
 coercions between Titan `value` and C `TValue`. It also lets Titan form
 source-level C pointer types (`*T`, `const *T`), read `T.sizeof`, and
 coerce C locals/formals to mutable pointer parameters. This is enough for
-`stdlib/coroutine.titan` to call minicoro's storage and tag APIs directly:
+`titan/coroutine.titan` to call minicoro's storage and tag APIs directly:
 
 ```lua
 local payload: ffi.TValue = nil
@@ -110,7 +110,7 @@ control switch and the result pops in the same Titan function, so no
 generated helper prologue can run a GC check while a final dead-coroutine
 payload exists only in minicoro storage.
 
-For resume/yield tags, `stdlib/coroutine.titan` materializes the
+For resume/yield tags, `titan/coroutine.titan` materializes the
 effective Titan `value` as a local C `TValue` and passes that local to
 minicoro's `void *` tag parameter:
 
@@ -153,7 +153,7 @@ raw `prev_co` pointers so their later finalizers can destroy them safely.
 This is cleanup for unreachable coroutines, not cancellation for reachable
 ones.
 
-Transfer itself uses minicoro storage. `stdlib/coroutine.titan` pushes
+Transfer itself uses minicoro storage. `titan/coroutine.titan` pushes
 the payload `TValue` and then the `ok` flag with `mco_push`; the receiver
 pops `ok` first and the payload second with `mco_pop`. Minicoro copies
 the struct bytes. It never owns a Lua root for the collectable object
@@ -214,7 +214,7 @@ This implementation intentionally pushes the C FFI boundary: the Titan
 module manipulates borrowed `mco_coro *` values, calls minicoro directly,
 moves arbitrary Lua values as by-value `TValue`s, and owns the order of
 `mco_push`/`mco_pop` operations. That raw pointer surface is deliberately
-private to `stdlib/coroutine.titan`; it is not a safe general-purpose
+private to `titan/coroutine.titan`; it is not a safe general-purpose
 coroutine FFI.
 The pieces that remain in C are the ones that still require capabilities
 outside the current FFI or a native callback ABI:

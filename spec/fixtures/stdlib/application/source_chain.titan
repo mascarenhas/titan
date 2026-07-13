@@ -1,5 +1,0 @@
-local helper = import "source_helper"
-
-function bump(): integer
-    return helper.bump()
-end

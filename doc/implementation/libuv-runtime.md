@@ -14,36 +14,38 @@ titan/coroutine.so -> titan/uv.so
 exactly once. Both checkout and installed driver modes link the runtime archive,
 never a direct `titan.o`; static selection extracts only referenced shim
 members. `titan/timer.so`, `titan/fs.so`, `titan/net.so`, and `titan/os.so`
-import the qualified binary `uv.so` with `loadstdlib`; they do not compile
-`uv.titan`, extract `titan_uv.o`, or embed another libuv archive. Installation
-writes exactly one ordinary file per standard module under
+import the qualified binary `titan/uv.so` with the ordinary Titan loader; they
+do not compile `titan/uv.titan`, extract `titan_uv.o`, or embed another libuv
+archive. Dependency resolution is binary-first, while the explicit
+`titanc titan.uv` build root is source-first. Installation writes exactly one
+ordinary file per standard module under
 `<root>/lib/titan/0.11/titan/`.
-Titan's patched Lua C-module path and Titan's implicit standard-module prefix
-both resolve those canonical files, with no copied, symbolic-link, or hard-link
-aliases. Thus every facade reaches the same `uv.so` image. In the normal
+Titan's patched Lua C-module path and ordinary qualified Titan lookup both
+resolve those files, with no copied, symbolic-link, or hard-link aliases. Thus
+every facade reaches the same `titan/uv.so` image. In the normal
 bundled build, `titan/uv.so` is the process's sole complete libuv provider; its
 private static archive is consumed only for that link and is not installed in
 the Titan SDK, while the headers remain available under the installed include
 directory. An ordinary extension DSO may call libuv directly without embedding
-or linking it: it must import standard `uv` as well as
+or linking it: it must import `uv` (desugared to `titan.uv`) as well as
 foreign-import `uv.h`, leaving its `uv_*` calls unresolved. Titan maps the
 extension's interface once through `package.loadlib`; its `<mangled>_types`
 function returns `"uv-provider"` as an optional second result, deterministically
 marking the dependency `"dynamic-uv"` even when libuv was already global.
-Reading it establishes or validates canonical `uv.so` and records its
+Reading it establishes or validates canonical `titan/uv.so` and records its
 compiler-process file identity. If an eager unresolved `uv_*` relocation
 prevents that initial interface load, the open-stage diagnostic bootstraps
-canonical `uv.so` and the compiler retries before requiring the marker. A
-binary without it is rejected and must be rebuilt with an explicit standard
-`uv` import. Generated
-consumers call `loadlibwithuv`, which loads canonical `uv.so` globally before it maps the
+canonical `titan/uv.so` and the compiler retries before requiring the marker. A
+binary without it is rejected and must be rebuilt with an explicit `titan.uv`
+import. Generated consumers call `loadlibwithuv`, which loads
+`titan/uv.so` globally before it maps the
 extension. Unmarked ordinary DSOs retain eager/local loading. A Lua caller must
 `require "titan.uv"` before requiring that extension directly. Titan's patched
 Lua `loadlib.c` recognizes exactly the `luaopen_titan_uv` entry and gives that
 DSO global visibility on its first load; other Lua C modules remain local.
-This loader-level path works on Linux and macOS, and `uv.so` has no
+This loader-level path works on Linux and macOS, and `titan/uv.so` has no
 self-dlopen/promotion helper. System mode may instead link the extension and
-canonical `uv.so` against the same shared libuv selected by pkg-config.
+canonical `titan/uv.so` against the same shared libuv selected by pkg-config.
 Statically embedding the bundled archive again would create a second native
 instance. Because both consumption paths preload the provider before the
 extension itself, bundled mode supports eager libuv data/function-address
@@ -210,7 +212,7 @@ POSIX `open`, `read`, `write`, or `close` fallback.
 ## Portable OS helpers and signals
 
 The `os.so` facade contains no foreign import. Its `_os_*` calls cross the
-binary-only boundary into canonical `uv.so`, which invokes public `uv_os_*`,
+binary-only boundary into canonical `titan/uv.so`, which invokes public `uv_os_*`,
 `uv_cwd`/`uv_chdir`, and `uv_exepath` APIs. Variable-size text results use
 Titan-owned byte storage and checked growth. `UV_ENOSYS` is reported as an
 ordinary `uv.Error`; there is no hidden POSIX fallback.

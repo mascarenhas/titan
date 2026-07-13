@@ -1,5 +1,0 @@
-local helper = import "cached_helper"
-
-function bump(): integer
-    return helper.bump()
-end

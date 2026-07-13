@@ -32,15 +32,15 @@ end
 
 if scenario == "setup" then
     local stages = {
-        { "stdio", "process.stdio", 0, 0, 0, 0, 0, 0, 0 },
-        { "stdin-init", "process.stdin.init", 1, 0, 0, 0, 0, 0, 0 },
-        { "stdout-init", "process.stdout.init", 2, 1, 0, 0, 0, 0, 1 },
-        { "stderr-init", "process.stderr.init", 3, 2, 0, 0, 0, 0, 2 },
-        { "stdin-open", "process.stdin.open", 3, 3, 1, 0, 0, 0, 3 },
-        { "stdout-open", "process.stdout.open", 3, 3, 2, 1, 0, 0, 3 },
-        { "stderr-open", "process.stderr.open", 3, 3, 3, 2, 0, 0, 3 },
-        { "spawn", "process.spawn", 3, 3, 3, 3, 0, 0, 3 },
-        { "raw-close", "process.stdio.close", 3, 3, 3, 3, 1, 1, 3 },
+        { "stdio", "process.stdio", 0, 0, 0, 0, 0, 0 },
+        { "stdin-init", "process.stdin.init", 1, 0, 0, 0, 0, 0 },
+        { "stdout-init", "process.stdout.init", 2, 1, 0, 0, 0, 1 },
+        { "stderr-init", "process.stderr.init", 3, 2, 0, 0, 0, 2 },
+        { "stdin-open", "process.stdin.open", 3, 3, 1, 0, 0, 3 },
+        { "stdout-open", "process.stdout.open", 3, 3, 2, 1, 0, 3 },
+        { "stderr-open", "process.stderr.open", 3, 3, 3, 2, 0, 3 },
+        { "spawn", "process.spawn", 3, 3, 3, 3, 0, 3 },
+        { "raw-close", "process.stdio.close", 3, 3, 3, 3, 1, 3 },
     }
     for _, item in ipairs(stages) do
         uv.__test_phase6_reset_process_state()
@@ -55,8 +55,7 @@ if scenario == "setup" then
         assert(counter("open-attempts") == item[5])
         assert(counter("open-native") == item[6])
         assert(counter("spawn-native") == item[7])
-        assert(counter("native-initialized") == item[8])
-        assert(counter("pipe-close-callbacks") == item[9])
+        assert(counter("pipe-close-callbacks") == item[8])
         if item[1] == "raw-close" then
             assert(counter("spawn-attempts") == 1)
             assert(counter("exit-callbacks") == 1)
@@ -78,11 +77,10 @@ elseif scenario == "missing" then
     run_success("schedule_missing_executable",
         "missing-executable-cleaned", child)
     assert(counter("spawn-native") == 1)
-    assert(counter("native-initialized") == 1)
     assert(counter("exit-callbacks") == 0,
         "failed spawn unexpectedly received an exit callback")
     assert(counter("process-close-callbacks") == 1,
-        "initialized failed-spawn handle did not close")
+        "failed-spawn handle did not close")
     assert(counter("pipe-close-callbacks") == 3,
         "failed spawn did not drain all initialized pipes")
     print("RESULT phase6 failed spawn lifecycle passed")

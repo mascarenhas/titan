@@ -84,7 +84,6 @@ local test_phase6_process_open_attempts = 0
 local test_phase6_process_open_native_calls = 0
 local test_phase6_process_spawn_attempts = 0
 local test_phase6_process_spawn_native_calls = 0
-local test_phase6_process_native_initialized = 0
 local test_phase6_process_exit_callbacks = 0
 local test_phase6_process_close_callbacks = 0
 local test_phase6_process_pipe_close_callbacks = 0
@@ -309,14 +308,12 @@ source = replace_once(source, [==[      -- TITAN_UV_PHASE6_PROCESS_STDIN_CLOSE
       start_pipe_close(pipe)]==], "ordered stdin close transition")
 
 source = replace_once(source, [==[  -- TITAN_UV_PHASE6_PROCESS_STDIO_CREATE
-  local status = shim.titan_uvshim_stdio_pipes(
-      endpoints, endpoint_count, fillers, filler_count)]==], [==[  -- TITAN_UV_PHASE6_PROCESS_STDIO_CREATE
+  local status = shim.titan_uvshim_stdio_pipes(endpoints, fillers)]==], [==[  -- TITAN_UV_PHASE6_PROCESS_STDIO_CREATE
   test_phase6_process_stdio_attempts =
       test_phase6_process_stdio_attempts + 1
   test_phase6_process_stdio_native_calls =
       test_phase6_process_stdio_native_calls + 1
-  local status = shim.titan_uvshim_stdio_pipes(
-      endpoints, endpoint_count, fillers, filler_count)
+  local status = shim.titan_uvshim_stdio_pipes(endpoints, fillers)
   if test_phase6_process_fault == 1 then
     test_phase6_process_fault = 0
     status = shim.titan_uvshim_error_ecanceled()
@@ -351,42 +348,37 @@ replace_process_transition(
 replace_process_transition(
     "      -- TITAN_UV_PHASE6_PROCESS_STDIN_OPEN",
     [==[      status = shim.titan_uvshim_pipe_open(stdin_pipe.handle, endpoints,
-          endpoint_count[0],
           shim.TITAN_UV_STDIO_STDIN_PARENT as ffi.titan_ffi_int)]==],
     "5", "stdin pipe open", "open")
 replace_process_transition(
     "      -- TITAN_UV_PHASE6_PROCESS_STDOUT_OPEN",
     [==[      status = shim.titan_uvshim_pipe_open(stdout_pipe.handle, endpoints,
-          endpoint_count[0],
           shim.TITAN_UV_STDIO_STDOUT_PARENT as ffi.titan_ffi_int)]==],
     "6", "stdout pipe open", "open")
 replace_process_transition(
     "      -- TITAN_UV_PHASE6_PROCESS_STDERR_OPEN",
     [==[      status = shim.titan_uvshim_pipe_open(stderr_pipe.handle, endpoints,
-          endpoint_count[0],
           shim.TITAN_UV_STDIO_STDERR_PARENT as ffi.titan_ffi_int)]==],
     "7", "stderr pipe open", "open")
 
 source = replace_once(source, [==[      -- TITAN_UV_PHASE6_PROCESS_SPAWN_SUBMIT
       status = shim.titan_uvshim_process_spawn(runtime.loop.handle,
-          process.handle, process_pointer, file.bytes.data, argv,
-          argument_count, endpoints, endpoint_count[0], initialized)]==], [==[      -- TITAN_UV_PHASE6_PROCESS_SPAWN_SUBMIT
+          process.handle, process_pointer, argv, endpoints)
+      failed_operation = "process.spawn"
+      process_control.lifecycle = PROCESS_SPAWNED]==], [==[      -- TITAN_UV_PHASE6_PROCESS_SPAWN_SUBMIT
       test_phase6_process_spawn_attempts =
           test_phase6_process_spawn_attempts + 1
       if test_phase6_process_fault == 8 then
         test_phase6_process_fault = 0
-        initialized[0] = 0 as ffi.titan_ffi_int
         status = shim.titan_uvshim_error_ecanceled()
+        failed_operation = "process.spawn"
       else
         test_phase6_process_spawn_native_calls =
             test_phase6_process_spawn_native_calls + 1
         status = shim.titan_uvshim_process_spawn(runtime.loop.handle,
-            process.handle, process_pointer, file.bytes.data, argv,
-            argument_count, endpoints, endpoint_count[0], initialized)
-        if (initialized[0] as integer) ~= 0 then
-          test_phase6_process_native_initialized =
-              test_phase6_process_native_initialized + 1
-        end
+            process.handle, process_pointer, argv, endpoints)
+        failed_operation = "process.spawn"
+        process_control.lifecycle = PROCESS_SPAWNED
       end]==], "process spawn submission")
 
 source = replace_once(source, [==[  -- TITAN_UV_PHASE6_PROCESS_RAW_CLOSE
@@ -720,7 +712,6 @@ function __test_phase6_reset_process_state()
   test_phase6_process_open_native_calls = 0
   test_phase6_process_spawn_attempts = 0
   test_phase6_process_spawn_native_calls = 0
-  test_phase6_process_native_initialized = 0
   test_phase6_process_exit_callbacks = 0
   test_phase6_process_close_callbacks = 0
   test_phase6_process_pipe_close_callbacks = 0
@@ -820,8 +811,6 @@ function __test_phase6_process_counter(name: string): integer
     return test_phase6_process_spawn_attempts
   elseif name == "spawn-native" then
     return test_phase6_process_spawn_native_calls
-  elseif name == "native-initialized" then
-    return test_phase6_process_native_initialized
   elseif name == "exit-callbacks" then
     return test_phase6_process_exit_callbacks
   elseif name == "process-close-callbacks" then

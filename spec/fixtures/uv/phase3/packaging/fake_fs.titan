@@ -1,5 +1,0 @@
--- Deliberately incompatible reserved-name shadow. A successful test must never
--- typecheck, compile, or load this source as the standard `fs` module.
-function impostor(): string
-  return "not titan.fs"
-end

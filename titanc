@@ -14,8 +14,6 @@ p:option('-u --lua', 'Path to Lua source tree (source checkouts only; installed 
 p:option('-t --tree', 'Root of the source tree, used for looking for source modules (defaults to ".").')
 p:option('-l --link', 'Comma-separated list of additional libraries to link into module.')
 p:option('-X --extra-object', 'Additional object file to link into the output.'):args("*")
-p:flag('--stdlib-build', 'Build exactly one reserved standard-library source root.')
-p:option('--lua-name', 'Qualified Lua require name exported by the requested non-main root module.')
 local args = p:parse()
 
 -- Work like assert, but don't print the stack trace
@@ -26,50 +24,9 @@ end
 
 if driver.TOOLCHAIN_ERROR then exit(driver.TOOLCHAIN_ERROR) end
 
-local function valid_qualified_name(name)
-    if type(name) ~= "string" or name == "" then return false end
-    if name:match("^[.]") or name:match("[.]$") or name:match("[.][.]") then
-        return false
-    end
-    for part in name:gmatch("[^.]+") do
-        if not part:match("^[%a_][%w_]*$") then return false end
-    end
-    return true
-end
-
 local function link_failed(kind, modname, term, code)
     return string.format("failed to link %s '%s' (%s%s)",
         kind, modname, tostring(term), code and (", " .. tostring(code)) or "")
-end
-
-if args.stdlib_build then
-    if #args.module ~= 1 then
-        exit("--stdlib-build requires exactly one module")
-    end
-    if not driver.STANDARD_MODULES[args.module[1]] then
-        exit("--stdlib-build requires a reserved standard module name")
-    end
-    local expected_lua_name = "titan." .. args.module[1]
-    if args.lua_name ~= expected_lua_name then
-        exit("--stdlib-build for '" .. args.module[1]
-            .. "' requires --lua-name " .. expected_lua_name)
-    end
-else
-    for _, modname in ipairs(args.module) do
-        if driver.STANDARD_MODULES[modname] then
-            exit("reserved standard module '" .. modname
-                .. "' must be built with --stdlib-build")
-        end
-    end
-end
-
-if args.lua_name then
-    if #args.module ~= 1 then
-        exit("--lua-name requires exactly one module")
-    end
-    if not valid_qualified_name(args.lua_name) then
-        exit("invalid qualified Lua name '" .. tostring(args.lua_name) .. "'")
-    end
 end
 
 if args.lua and driver.INSTALLED then
@@ -85,18 +42,15 @@ local errors = {}
 local main_module = nil
 
 local modules = {}
+local requested_roots = {}
+for _, modname in ipairs(args.module) do
+    requested_roots[modname] = true
+end
 
 for _, modname in ipairs(args.module) do
     local static_deps = {}
-    local loader_options = nil
-    if args.stdlib_build then
-        loader_options = {
-            stdlib_build_root = modname,
-            stdlib_source_path = args.tree or driver.TITAN_STDLIB_SOURCE_PATH,
-        }
-    end
     local ok, errs = checker.checkimport(modname,
-        driver.defaultloader(static_deps, loader_options))
+        driver.defaultloader(static_deps, { source_roots = requested_roots }))
     if not ok then 
         table.insert(errors, errs)
     else
@@ -116,25 +70,13 @@ for _, modname in ipairs(args.module) do
     end
 end
 
-if args.lua_name and main_module then
-    table.insert(errors, "--lua-name cannot be used with a module that defines main")
-end
-
 if #errors > 0 then exit(table.concat(errors, "\n")) end
 
 local libnames = {}
 
 for name, mod in pairs(driver.imported) do
-    local compile_options = nil
-    if name == args.module[1] then
-        compile_options = {
-            lua_name = args.lua_name,
-            stdlib_build = args.stdlib_build,
-        }
-    end
     local ok, err, libname = driver.compile_module(
-        name, mod, modules[name] or mod.deps or {}, args.verbose,
-        compile_options)
+        name, mod, modules[name] or mod.deps or {}, args.verbose)
     if not ok then
         table.insert(errors, err)
     else

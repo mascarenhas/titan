@@ -9,27 +9,27 @@ local uv = require "titan.uv"
 
 local expected = {
     schedule_dispatch_dns_after_free = {
-        stage = "dns-after-free", dispatch = "uv.dns_dispatch",
+        stage = "dns-after-free", dispatch = "titan.uv.dns_dispatch",
         dns = 1, connect = 0, write = 0, output = 0,
         closes = 0, dns_result = true,
     },
     schedule_dispatch_unpublished_connect = {
-        stage = "connect-before-publish", dispatch = "uv.connect_dispatch",
+        stage = "connect-before-publish", dispatch = "titan.uv.connect_dispatch",
         dns = 1, connect = 1, write = 0, output = 0,
         closes = 1, unpublished = true,
     },
     schedule_dispatch_published_write = {
-        stage = "write-before-unlink", dispatch = "uv.write_dispatch",
+        stage = "write-before-unlink", dispatch = "titan.uv.write_dispatch",
         dns = 0, connect = 0, write = 1, output = 1,
         closes = 2, write_callback = true,
     },
     schedule_dispatch_tcp_read = {
-        stage = "tcp-read-after-root-clear", dispatch = "uv.tcp_dispatch",
+        stage = "tcp-read-after-root-clear", dispatch = "titan.uv.tcp_dispatch",
         dns = 0, connect = 0, write = 1, output = 1,
         closes = 2, read_callback = true,
     },
     schedule_dispatch_tcp_close = {
-        stage = "tcp-close-after-terminal", dispatch = "uv.tcp_dispatch",
+        stage = "tcp-close-after-terminal", dispatch = "titan.uv.tcp_dispatch",
         dns = 0, connect = 0, write = 0, output = 0,
         closes = 1, close_fault = true,
     },

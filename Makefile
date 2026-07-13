@@ -73,7 +73,7 @@ HOST_ARCH := $(shell uname -m)
 
 # These are the complete inputs consumed by the later standard-module rules.
 # In bundled mode libuv's archive is a private input used to construct the one
-# canonical uv.so provider; in system mode pkg-config's ordered linker output
+# canonical titan/uv.so provider; in system mode pkg-config's ordered linker output
 # must stay intact.
 ifeq ($(LIBUV_MODE),bundled)
   LIBUV_LIB           := $(LIBUV_BUNDLED_LIB)
@@ -834,7 +834,7 @@ install-titan-sdk: $(TITAN_RUNTIME_LIB) $(ROCK_RUNTIME_SO) $(LUA_LIB) \
 # rather than smuggling source-tree runtime objects into standard modules. System
 # libuv still needs pkg-config's flags; bundled mode gets headers from the
 # staged SDK but consumes the source build's private archive only while linking
-# the canonical uv.so provider.
+# the canonical titan/uv.so provider.
 ifeq ($(STDLIB_USE_INSTALLED_RUNTIME),1)
   STDLIB_PLATFORM_PREREQS :=
   STDLIB_COMMON_RUNTIME_PREREQS :=
@@ -842,8 +842,6 @@ ifeq ($(STDLIB_USE_INSTALLED_RUNTIME),1)
   STDLIB_UV_RUNTIME_PREREQS :=
   STDLIB_RUNTIME_ARCHIVE_PREREQ :=
   STDLIB_TOOL_PREREQS :=
-  STDLIB_CORO_EXTRA_ARGS :=
-  STDLIB_UV_EXTRA_ARGS :=
   ifeq ($(LIBUV_MODE),system)
     STDLIB_UV_CPPFLAGS := $(LIBUV_CPPFLAGS)
     STDLIB_UV_LDFLAGS := $(LIBUV_PROVIDER_LDFLAGS)
@@ -866,8 +864,6 @@ else
   # on its prefix-local stamp keeps native source builds ordered without
   # rerunning Lua's installation for every module (or during Make dry runs).
   STDLIB_TOOL_PREREQS := $(LUA_INSTALL_STAMP) $(LIBBT_LIB)
-  STDLIB_CORO_EXTRA_ARGS :=
-  STDLIB_UV_EXTRA_ARGS :=
   STDLIB_UV_CPPFLAGS := $(LIBUV_CPPFLAGS)
   STDLIB_UV_CFLAGS := $(LIBUV_CFLAGS)
   # Put bundled libuv in the final-link flags, after libtitan.a has extracted
@@ -880,115 +876,86 @@ stdlib: $(STDLIB_PLATFORM_PREREQS) $(STDLIB_QUALIFIED_SOS) ## Build standard mod
 	rm -f $(STDLIB_SOS) coro.so
 	rm -rf $(addsuffix .dSYM,$(STDLIB_SOS)) coro.so.dSYM
 
-# Build the reserved canonical module only through the explicit standard-source
-# mode.  Empty ordinary paths prevent an installed or application module from
-# capturing this root while it is being built.
-titan/$(COROUTINE_SO): stdlib/coroutine.titan $(STDLIB_CORO_RUNTIME_PREREQS) titanc \
+# Standard-library sources use their ordinary qualified module names. Explicit
+# titanc roots are built from source; their imports remain binary-first and find
+# the already-built qualified modules through this checkout's Titan path.
+titan/$(COROUTINE_SO): titan/coroutine.titan $(STDLIB_CORO_RUNTIME_PREREQS) titanc \
 		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
 		$(STDLIB_TOOL_PREREQS)
-	CC=$(call make_shell_quote,$(CC)) TITAN_PATH_0_11= TITAN_PATH= \
+	CC=$(call make_shell_quote,$(CC)) \
+		TITAN_PATH_0_11=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 		TITAN_RUNTIME_PREBUILT=1 \
 		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
 		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CFLAGS)) \
 		TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_LDFLAGS)) \
-		$(TITANC) --stdlib-build --tree stdlib \
-		--lua-name titan.coroutine coroutine $(STDLIB_CORO_EXTRA_ARGS)
-	mkdir -p "$(@D)"
-	mv -f "$(COROUTINE_SO)" "$@"
-	rm -rf "$@.dSYM"
-	if test -d "$(COROUTINE_SO).dSYM"; then mv -f "$(COROUTINE_SO).dSYM" "$@.dSYM"; fi
+		$(TITANC) titan.coroutine
 
 # uv imports the already-built canonical coroutine image. Both checkout and
 # installed builds extract the uv shim from libtitan.a. Bundled mode force-loads
 # one private static libuv archive into this provider image; system mode supplies
 # pkg-config's ordered output only through the final-link flags.
-titan/$(UV_SO): stdlib/uv.titan titan/$(COROUTINE_SO) $(STDLIB_UV_RUNTIME_PREREQS) titanc \
+titan/$(UV_SO): titan/uv.titan titan/$(COROUTINE_SO) $(STDLIB_UV_RUNTIME_PREREQS) titanc \
 		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_TOOL_PREREQS) \
 		$(STDLIB_PLATFORM_PREREQS) $(STDLIB_RUNTIME_ARCHIVE_PREREQ)
-	CC=$(call make_shell_quote,$(CC)) TITAN_PATH_0_11= TITAN_PATH= \
+	CC=$(call make_shell_quote,$(CC)) \
+		TITAN_PATH_0_11=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 		TITAN_RUNTIME_PREBUILT=1 \
-		TITAN_STDLIB_PATH=$(call make_shell_quote,$(CURDIR)/titan) \
 		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))) \
 		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CFLAGS) $(STDLIB_UV_CFLAGS))) \
 		TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_LDFLAGS) $(STDLIB_UV_LDFLAGS))) \
-		$(TITANC) --stdlib-build --tree stdlib --lua-name titan.uv uv \
-		$(STDLIB_UV_EXTRA_ARGS)
-	mkdir -p "$(@D)"
-	mv -f "$(UV_SO)" "$@"
-	rm -rf "$@.dSYM"
-	if test -d "$(UV_SO).dSYM"; then mv -f "$(UV_SO).dSYM" "$@.dSYM"; fi
+		$(TITANC) titan.uv
 
 # Higher-level standard modules import the already-built canonical uv image.
 # They neither compile the uv source again nor link a second copy of libuv.
-titan/$(TIMER_SO): stdlib/timer.titan titan/$(UV_SO) $(STDLIB_COMMON_RUNTIME_PREREQS) titanc \
+titan/$(TIMER_SO): titan/timer.titan titan/$(UV_SO) $(STDLIB_COMMON_RUNTIME_PREREQS) titanc \
 		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
 		$(STDLIB_TOOL_PREREQS)
-	CC=$(call make_shell_quote,$(CC)) TITAN_PATH_0_11= TITAN_PATH= \
+	CC=$(call make_shell_quote,$(CC)) \
+		TITAN_PATH_0_11=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 		TITAN_RUNTIME_PREBUILT=1 \
-		TITAN_STDLIB_PATH=$(call make_shell_quote,$(CURDIR)/titan) \
 		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
 		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CFLAGS)) \
 		TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_LDFLAGS)) \
-		$(TITANC) --stdlib-build --tree stdlib \
-		--lua-name titan.timer timer
-	mkdir -p "$(@D)"
-	mv -f "$(TIMER_SO)" "$@"
-	rm -rf "$@.dSYM"
-	if test -d "$(TIMER_SO).dSYM"; then mv -f "$(TIMER_SO).dSYM" "$@.dSYM"; fi
+		$(TITANC) titan.timer
 
 # The filesystem facade imports the canonical uv image and keeps all native
 # libuv types, shim symbols, and link inputs confined to uv.so.
-titan/$(FS_SO): stdlib/fs.titan titan/$(UV_SO) $(STDLIB_COMMON_RUNTIME_PREREQS) titanc \
+titan/$(FS_SO): titan/fs.titan titan/$(UV_SO) $(STDLIB_COMMON_RUNTIME_PREREQS) titanc \
 		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
 		$(STDLIB_TOOL_PREREQS)
-	CC=$(call make_shell_quote,$(CC)) TITAN_PATH_0_11= TITAN_PATH= \
+	CC=$(call make_shell_quote,$(CC)) \
+		TITAN_PATH_0_11=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 		TITAN_RUNTIME_PREBUILT=1 \
-		TITAN_STDLIB_PATH=$(call make_shell_quote,$(CURDIR)/titan) \
 		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
 		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CFLAGS)) \
 		TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_LDFLAGS)) \
-		$(TITANC) --stdlib-build --tree stdlib \
-		--lua-name titan.fs fs
-	mkdir -p "$(@D)"
-	mv -f "$(FS_SO)" "$@"
-	rm -rf "$@.dSYM"
-	if test -d "$(FS_SO).dSYM"; then mv -f "$(FS_SO).dSYM" "$@.dSYM"; fi
+		$(TITANC) titan.fs
 
 # The networking facade has the same binary-only boundary as fs: native TCP,
 # DNS, and libuv ownership remain implemented by the canonical uv image.
-titan/$(NET_SO): stdlib/net.titan titan/$(UV_SO) $(STDLIB_COMMON_RUNTIME_PREREQS) titanc \
+titan/$(NET_SO): titan/net.titan titan/$(UV_SO) $(STDLIB_COMMON_RUNTIME_PREREQS) titanc \
 		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
 		$(STDLIB_TOOL_PREREQS)
-	CC=$(call make_shell_quote,$(CC)) TITAN_PATH_0_11= TITAN_PATH= \
+	CC=$(call make_shell_quote,$(CC)) \
+		TITAN_PATH_0_11=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 		TITAN_RUNTIME_PREBUILT=1 \
-		TITAN_STDLIB_PATH=$(call make_shell_quote,$(CURDIR)/titan) \
 		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
 		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CFLAGS)) \
 		TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_LDFLAGS)) \
-		$(TITANC) --stdlib-build --tree stdlib \
-		--lua-name titan.net net
-	mkdir -p "$(@D)"
-	mv -f "$(NET_SO)" "$@"
-	rm -rf "$@.dSYM"
-	if test -d "$(NET_SO).dSYM"; then mv -f "$(NET_SO).dSYM" "$@.dSYM"; fi
+		$(TITANC) titan.net
 
 # The portable OS facade also imports only the canonical uv image. All native
 # libuv implementation details stay in uv.so.
-titan/$(OS_SO): stdlib/os.titan titan/$(UV_SO) $(STDLIB_COMMON_RUNTIME_PREREQS) titanc \
+titan/$(OS_SO): titan/os.titan titan/$(UV_SO) $(STDLIB_COMMON_RUNTIME_PREREQS) titanc \
 		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
 		$(STDLIB_TOOL_PREREQS)
-	CC=$(call make_shell_quote,$(CC)) TITAN_PATH_0_11= TITAN_PATH= \
+	CC=$(call make_shell_quote,$(CC)) \
+		TITAN_PATH_0_11=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 		TITAN_RUNTIME_PREBUILT=1 \
-		TITAN_STDLIB_PATH=$(call make_shell_quote,$(CURDIR)/titan) \
 		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
 		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CFLAGS)) \
 		TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_LDFLAGS)) \
-		$(TITANC) --stdlib-build --tree stdlib \
-		--lua-name titan.os os
-	mkdir -p "$(@D)"
-	mv -f "$(OS_SO)" "$@"
-	rm -rf "$@.dSYM"
-	if test -d "$(OS_SO).dSYM"; then mv -f "$(OS_SO).dSYM" "$@.dSYM"; fi
+		$(TITANC) titan.os
 
 install-stdlib: stdlib ## Install the canonical qualified standard modules
 	mkdir -p "$(TITAN_STDLIB_DIR)" "$(TITAN_SHARE_DIR)/LICENSES"
@@ -1076,11 +1043,10 @@ clean: ## Remove generated build/test artifacts (keeps the Lua tree)
 	rm -f $(RUNTIME_O) titan-runtime/*.o $(TITAN_RUNTIME_LIB)
 	rm -f $(RUNTIME_BUILD_CONFIG) $(RUNTIME_ARCHIVE_CONFIG) \
 		$(TITANLIB_BUILD_CONFIG) $(UV_CONFIG_STAMP)
-	rm -f stdlib/*.c stdlib/*.o
+	rm -f titan/*.c titan/*.o
 	rm -f titan/*.so
 	rm -rf $(addsuffix .dSYM,$(STDLIB_SOS)) \
 		$(addsuffix .dSYM,$(STDLIB_QUALIFIED_SOS))
-	-rmdir titan
 	rm -f examples/*.c examples/*.o examples/*.so examples/sdl_demo
 	rm -f testfiles/*.c testfiles/*.o testfiles/*.so
 	rm -f *.c *.o *.so test

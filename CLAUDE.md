@@ -157,8 +157,7 @@ busted spec/parser_spec.lua                         # single spec file
 busted spec/coder/coder_spec.lua --filter='for loop' # single test (Lua pattern on test name)
 
 ./titanc [--print-ast] [-v] [--lua <luasrc>] [--tree <srcroot>] \
-  [-l lib1,lib2] [-X object...] [--stdlib-build] \
-  [--lua-name qualified.name] <module>...
+  [-l lib1,lib2] [-X object...] <module>...
 ```
 
 **Coverage is for compiler and language behavior, not library suites.** Do not
@@ -173,7 +172,38 @@ full outside coverage. If a library suite exposes a compiler coverage gap, add
 a small focused compiler/checker test for that code path instead of covering
 the library integration suite.
 
-**Spec layout.** Pure, layer-level specs live at `spec/` root (`abi_spec`, `cdriver_spec`, `cpp_spec`, `ctypes_spec`, `driver_spec`, `foreigntypes_spec`, `lexer_spec`, `location_spec`, `parser_spec`, `symtab_spec`, `types_spec`, `util_spec`); serial native-build and packaging gates also live there (`libuv_build_spec`, `libuv_shim_spec`, `rockspec_spec`). Checker-only specs (run the checker, never generate or execute code) live under `spec/checker/` (`checker_spec`, `first_class_functions_spec`, `so_rehydration_spec`, `variadic_spec`, `uv_spec`, `timer_spec`, `fs_spec`, `net_spec`, `os_spec`); end-to-end specs (generate C, compile, run) under `spec/coder/` (`coder_spec`, `first_class_functions_spec`, `so_import_spec`, `variadic_spec`, `uv_spec`, `uv_phase2_spec`, `uv_states_spec`, `uv_fault_spec`, `uv_bootstrap_spec`, `uv_phase4_spec`, `timer_spec`, `timer_packaging_spec`, `fs_spec`, `fs_fault_spec`, `fs_packaging_spec`, `net_spec`, `net_fault_spec`, `net_packaging_spec`, `os_signal_spec`, `os_signal_fault_spec`, `os_helpers_spec`, `os_helpers_fault_spec`, `os_process_spec`, `os_process_fault_spec`, `os_packaging_spec`). Keep the two apart — a checker assertion belongs in `spec/checker/`, anything that compiles and runs in `spec/coder/`. A sizable per-feature suite gets its own topical `<feature>_spec.lua` in each layer (e.g. `variadic_spec`, `first_class_functions_spec`) rather than bloating the catch-all `checker_spec`/`coder_spec`. All driver/artifact paths inside specs are relative to the repo-root CWD (not the spec file), so subdir specs still run from repo root. The shared compile/run/import scaffolding (`parse`, `compile`, `call`, `run_coder`, `generate_modules`, `build_so_chain`, `check_against_so`, `run_checker`, `check_errs`, `DEPTH_PROBE`, ...) lives in **`spec/support/helpers.lua`**, `require`d as `spec.support.helpers`; libuv runtime tests use `spec/support/phase2.lua` plus the filesystem, networking, and OS/signal extensions `spec/support/phase3.lua`, `spec/support/phase5.lua`, and `spec/support/phase6.lua` to compile into unique `/tmp` workspaces while treating Makefile-owned standard DSOs and the libuv archive as read-only. These helpers may not clean or rebuild shared root artifacts during Busted. Helpers pull in luassert explicitly (`require 'luassert'`) because a `require`d module does not inherit busted's `assert` global. Set `helpers.verbose = true` (was a per-file `local verbose`) to print `cc` command lines and keep generated `.c` files.
+**Spec layout.** Pure, layer-level specs live at `spec/` root (`abi_spec`,
+`cdriver_spec`, `cpp_spec`, `ctypes_spec`, `driver_spec`,
+`foreigntypes_spec`, `lexer_spec`, `location_spec`, `parser_spec`,
+`symtab_spec`, `types_spec`, `util_spec`); serial native-build and packaging
+gates also live there (`libuv_build_spec`, `libuv_shim_spec`,
+`rockspec_spec`). Compiler and language specs are split by layer:
+checker-only specs (run the checker, never generate or execute code) live
+under `spec/checker/`, while compiler end-to-end specs (generate C, compile,
+run) live under `spec/coder/`. Standard-library API, runtime, fault, and
+packaging behavior lives under `spec/stdlib/`, including `coroutine` and the
+async-I/O modules; these suites deliberately run without LuaCov. Do not put a
+library integration suite under `spec/checker/` or `spec/coder/` merely
+because it typechecks or compiles Titan source. If it reveals missing compiler
+coverage, add a small compiler-focused case for that path instead. A sizable
+compiler feature gets its own topical `<feature>_spec.lua` in the relevant
+layer rather than bloating `checker_spec` or `coder_spec`.
+
+All driver/artifact paths inside specs are relative to the repo-root CWD (not
+the spec file), so subdir specs still run from repo root. The shared
+compile/run/import scaffolding (`parse`, `compile`, `call`, `run_coder`,
+`generate_modules`, `build_so_chain`, `check_against_so`, `run_checker`,
+`check_errs`, `DEPTH_PROBE`, ...) lives in **`spec/support/helpers.lua`**,
+`require`d as `spec.support.helpers`; libuv runtime tests use
+`spec/support/phase2.lua` plus the filesystem, networking, and OS/signal
+extensions `spec/support/phase3.lua`, `spec/support/phase5.lua`, and
+`spec/support/phase6.lua` to compile into unique `/tmp` workspaces while
+treating Makefile-owned standard DSOs and the libuv archive as read-only.
+These helpers may not clean or rebuild shared root artifacts during Busted.
+Helpers pull in luassert explicitly (`require 'luassert'`) because a
+`require`d module does not inherit busted's `assert` global. Set
+`helpers.verbose = true` (was a per-file `local verbose`) to print `cc`
+command lines and keep generated `.c` files.
 
 New or modified specs that generate compiler fixtures in the repository root
 must remove only their exact module artifacts and must treat
@@ -182,26 +212,22 @@ also snapshot and restore the prepared runtime and canonical standard-library
 images around legacy compiler suites that still clean root artifacts; later
 production smokes deliberately consume that restored image.
 
-The standard-library facade checker specs use
-`spec/support/stdlib_checker.lua` to check the current `uv.titan` source once
-per Busted process, then rehydrate a fresh serialized public interface for
-each isolated facade/negative test. Do not recursively recheck the full uv
-source in every case; that repeats dependency work without adding coverage.
-The serial coroutine suite temporarily exercises its root build path, but must
+The serial `spec/stdlib/coroutine_spec.lua` suite temporarily exercises its
+root build path, but must
 restore the prepared runtime/coroutine artifacts and mtimes in teardown so a
 later packaging test does not rebuild the whole standard library.
 
-Filesystem transition faults have their own end-to-end suite,
-`spec/coder/fs_fault_spec.lua`; its isolated source transformer is
+Filesystem transition faults live in
+`spec/stdlib/fs_fault_spec.lua`; its isolated source transformer is
 `spec/support/make_fs_test_variant.lua`.
 
-Networking transition faults use `spec/coder/net_fault_spec.lua` and the
+Networking transition faults use `spec/stdlib/net_fault_spec.lua` and the
 isolated `spec/support/make_phase5_test_variant.lua` transformer.
 
 OS/signal, checked-buffer, and child-process transition faults use
-`spec/coder/os_signal_fault_spec.lua`,
-`spec/coder/os_helpers_fault_spec.lua`,
-`spec/coder/os_process_fault_spec.lua`, and the isolated
+`spec/stdlib/os_signal_fault_spec.lua`,
+`spec/stdlib/os_helpers_fault_spec.lua`,
+`spec/stdlib/os_process_fault_spec.lua`, and the isolated
 `spec/support/make_phase6_test_variant.lua` transformer.
 
 The Phase 5 and Phase 6 helpers compile each identical transformed standard
@@ -212,7 +238,40 @@ returned workspace; never mutate or hard-link the cached template. Cache keys
 include the compiler and sanitizer flags, and Lua-state shutdown removes the
 templates.
 
-`titanc` takes dot-separated **module names**, not file paths (dots map to directory separators under `--tree`, default `.`). It recovers the Titan SDK/rocks-tree root from the first `package.cpath` template ending in `/lib/lua/5.5/?.so`; that works because the supported install currently sets `ROCKS_TREE == PREFIX`, not because the two owners are inherently identical. Ordinary compiled modules default to `.;<root>/lib/titan/0.11`, while reserved standard modules live under `<root>/lib/titan/0.11/titan`. Default standard lookup uses the parent with an implicit `titan/` filename prefix; an explicit `TITAN_STDLIB_PATH` is a direct directory containing short names. `TITAN_PATH_0_11`/`TITAN_PATH` override the ordinary path. The compiled-module ABI version is `0.11` (bumped from `0.10` when module-local records and record members changed `<mangled>_types` serialization to omit local records/members while preserving record field-slot counts; `0.10` itself was bumped from `0.9` when the `TitanVargX` family changed from inline flexible-array backing objects to `{ n_args, args pointer }` descriptors; `0.9` itself was bumped from `0.8` for variadic parameters: a variadic function's native signature gained a trailing `TitanVargX *_varargs, int _start` pair after the declared params and before the out-params, and `<mangled>_types` now encodes the `varargtype` element type for variadic functions/methods; `0.8` itself was bumped from `0.7` when a record's type identity moved from a `getudatamem` tag word to the udata's metatable pointer — records now carry no raw payload; `0.7` itself was bumped from `0.6` when record instances and module state (`_mod`) collapsed from a `CClosure`+`Udata` pair to a single Lua 5.5 `Udata` — `ctype(Type.Nominal)` and `_mod` are now `Udata*` throughout the native ABI and `<mangled>_init` returns `Udata*`; `0.6` itself was bumped from `0.5` when the native calling convention gained the `_fn` closure parameter — see the coder section); `.so`s built by an older Titan are incompatible. `-v` prints the exact `cc` command lines. Without the prepared Lua 5.5.0 installation, only the pure specs pass (cpp, lexer, location, parser, symtab, types, util); `spec/checker/` and `spec/coder/` need the full setup.
+`titanc` takes dot-separated **module names**, not file paths (dots map to
+directory separators under `--tree`, default `.`). It recovers the Titan
+SDK/rocks-tree root from the first `package.cpath` template ending in
+`/lib/lua/5.5/?.so`; that works because the supported install currently sets
+`ROCKS_TREE == PREFIX`, not because the two owners are inherently identical.
+Compiled-module lookup defaults to `.;<root>/lib/titan/0.11`, with
+`TITAN_PATH_0_11`/`TITAN_PATH` overriding that ordinary path. The standard
+library uses ordinary qualified module names: source files are
+`titan/<module>.titan`, installed binaries are
+`<root>/lib/titan/0.11/titan/<module>.so`, and `import "uv"` is parser sugar
+for `import "titan.uv"` (likewise for `coroutine`, `timer`, `fs`, `net`, and
+`os`). A checkout build therefore invokes roots such as `titanc titan.uv` and
+uses the directory containing `titan/` as its Titan path. Dependencies resolve
+binaries before sources; modules explicitly named on the `titanc` command
+line are the generic exception and are built from source.
+
+The compiled-module ABI version is `0.11` (bumped from `0.10` when
+module-local records and record members changed `<mangled>_types`
+serialization to omit local records/members while preserving record
+field-slot counts; `0.10` itself was bumped from `0.9` when the `TitanVargX`
+family changed from inline flexible-array backing objects to
+`{ n_args, args pointer }` descriptors; `0.9` itself was bumped from `0.8` for
+variadic parameters: a variadic function's native signature gained a trailing
+`TitanVargX *_varargs, int _start` pair after the declared params and before
+the out-params, and `<mangled>_types` now encodes the `varargtype` element type
+for variadic functions/methods; `0.8` itself was bumped from `0.7` when a
+record's type identity moved from a `getudatamem` tag word to the udata's
+metatable pointer; `0.7` itself was bumped from `0.6` when record instances and
+module state collapsed to single Lua 5.5 `Udata` objects; `0.6` added the
+native `_fn` closure parameter). `.so`s built by an older Titan are
+incompatible. `-v` prints the exact `cc` command lines. Without the prepared
+Lua 5.5.0 installation, only the pure specs pass (cpp, lexer, location,
+parser, symtab, types, util); `spec/checker/`, `spec/coder/`, and
+`spec/stdlib/` need the full setup.
 
 **Gotcha — the installed rock shadows the working tree under busted.** The Busted launcher uses `luarocks.loader`, so once `$PREFIX/bin/luarocks make` has installed the `titan` rock, `require "titan-compiler.X"` inside specs resolves to the *installed snapshot* in `ROCKS_TREE` (currently the same directory as `PREFIX`), not your edited source files — edits silently do not take effect. Re-run `$PREFIX/bin/luarocks make` after changing compiler sources, before running Busted. (`make test` re-runs `luarocks make` for you each time, so it always tests current sources; `luarocks test` on its own does **not** rebuild the rock.) A bare `busted` without a preceding `luarocks make` can silently load a stale installed snapshot and pass or fail misleadingly.
 
@@ -242,7 +301,7 @@ AST nodes (`ast.lua`) and types (`types.lua`) are plain tables created by `typed
 
 ### Frontend (`lexer.lua`, `parser.lua`, `syntax_errors.lua`)
 
-Lexing and parsing are fused in one LPegLabel/relabel grammar; `lexer.lua` exports raw LPeg patterns referenced as `%TOKEN` terminals (no token stream). Every AST constructor is auto-injected into the grammar's defs table, so grammar actions like `-> TopLevelFunc` call constructors directly. Every error label used in the grammar (`^Label`, `%{Label}`) or lexer (`lpeg.T`) **must** have an entry in `syntax_errors.errors` or error formatting breaks. The parser is not reentrant (module-global `THIS_FILENAME`, asserted nil on entry). `record` declarations are desugared at parse time into a `TopLevelRecord` plus a synthesized `new` static function.
+Lexing and parsing are fused in one LPegLabel/relabel grammar; `lexer.lua` exports raw LPeg patterns referenced as `%TOKEN` terminals (no token stream). Every AST constructor is auto-injected into the grammar's defs table, so grammar actions like `-> TopLevelFunc` call constructors directly. Every error label used in the grammar (`^Label`, `%{Label}`) or lexer (`lpeg.T`) **must** have an entry in `syntax_errors.errors` or error formatting breaks. The parser is not reentrant (module-global `THIS_FILENAME`, asserted nil on entry). `record` declarations are desugared at parse time into a `TopLevelRecord` plus a synthesized `new` static function. Short standard-library imports are also parser sugar: `coroutine`, `uv`, `timer`, `fs`, `net`, and `os` become the ordinary qualified module names under `titan.*` before module resolution.
 
 ### Checker (`checker.lua`, `types.lua`, `symtab.lua`)
 
@@ -265,7 +324,7 @@ Lexing and parsing are fused in one LPegLabel/relabel grammar; `lexer.lua` expor
 `types.registry` (FQTN → `Type.Record`; `Type.Nominal` carries only the FQTN
 string and resolves through the registry at every use), `driver.imported`
 (import cache with a `CIRCULAR_MARK` sentinel for cycle detection), and
-`driver._uv_provider_path` (the canonical `uv.so` identity loaded while probing
+`driver._uv_provider_path` (the canonical `titan/uv.so` identity loaded while probing
 a direct-libuv DSO). Tests must save/restore all three together. A real
 long-lived compiler must retain the provider path and reject a request that
 would switch to another provider in the same process; clearing the Lua field
@@ -285,23 +344,26 @@ does not unload the native image.
   top-level initializers and keep their userdata rooted in the module state.
 - **Semantic state must live in the Lua registry or GC-traced Lua objects, never
   in shared C globals.** The standard library has one canonical installed DSO
-  per module, shared by Titan imports and Lua requires. Canonical `uv.so` is
+  per module, shared by Titan imports and Lua requires. Canonical
+  `titan/uv.so` is
   the sole complete bundled-libuv provider. A Titan extension DSO that directly
-  foreign-imports libuv must also import standard `uv`, leave its `uv_*`
+  foreign-imports libuv must also `import "uv"` (desugared to
+  `titan.uv`), leave its `uv_*`
   references unresolved, and let the optional second `"uv-provider"` result
   from `<mangled>_types` classify it as `"dynamic-uv"`. The coder emits that
-  marker for standard `uv` or a `"dynamic-uv"` dependency, so classification
+  marker for `titan.uv` or a `"dynamic-uv"` dependency, so classification
   is stable even when a provider is already visible. Reading it establishes or
-  validates canonical `uv.so` and its compiler-process identity. An open-stage
-  unresolved `uv_*` error is the bootstrap fallback: load canonical `uv.so`,
+  validates canonical `titan/uv.so` and its compiler-process identity. An
+  open-stage unresolved `uv_*` error is the bootstrap fallback: load canonical
+  `titan/uv.so`,
   retry, and then require the marker. Reject the binary if it is absent: it
-  was not built with the required explicit standard `uv` import. Generated Titan
-  consumers use `loadlibwithuv` to load canonical `uv.so` globally before
+  was not built with the required explicit `titan.uv` import. Generated Titan
+  consumers use `loadlibwithuv` to load canonical `titan/uv.so` globally before
   mapping that extension; unmarked ordinary DSOs remain eager/local. A Lua caller
   must `require "titan.uv"` before requiring such an extension. The
   Titan-owned Lua's patched `loadlib.c` opens a DSO globally only when its
   requested entry symbol is exactly `luaopen_titan_uv`; all other Lua C modules
-  remain local, and `uv.so` has no self-dlopen/promotion shim. System mode may
+  remain local, and `titan/uv.so` has no self-dlopen/promotion shim. System mode may
   instead link both against the same pkg-config-selected shared libuv; the
   private bundled `libuv.a` must never be linked into another DSO.
   Provider-first mapping also supports eager data/function-address relocations
@@ -323,7 +385,19 @@ does not unload the native image.
   mutable per-DSO globals.
 - First-class function values are `CClosure`s (upvalue 0 = `_mod`, then a type tag, the native pointer, and one upvalue per captured variable); anonymous functions/closures and `obj:method` **bound methods** are supported as values. A captured-and-mutated local is stored in a **box** so all sharers mutate one cell. A box is a Lua *userdata* (not a CClosure): a userdata's GC traversal calls `genlink`, so an overwriting write can use the back barrier (`luaC_barrierback`) without floating fresh values to the old generation — which a `CClosure`/forward-barrier box would (`traverseCclosure` does not call `genlink`). Two forms, chosen by `not types.is_gc(typ)`: a 1-user-value `Udata` holding a `TValue` written with `luaC_barrierback` (GC-typed values), or a 0-user-value `Udata0` holding the raw non-GC C scalar inline via `getudatamem` (no tagging, no barrier). Boxes are module-internal (never cross a module boundary), so the representation is not part of the ABI.
 - Generated C must follow the style contract in `pretty.lua`'s header (K&R braces, `/**/` comments never after `{`, braces mandatory) — `reindent_c` is purely heuristic.
-- Ordinary deps with available `.titan` source are compiled in and statically linked; ordinary `.so`-only deps are dlopened at runtime by the generated `_init`. Reserved standard imports are the deliberate exception: canonical images live under `<root>/lib/titan/0.11/titan`; default lookup starts at the parent and implicitly prefixes `titan/`, while an explicit `TITAN_STDLIB_PATH` names a direct directory containing short filenames. Applications load those images through the standard-library registry instead of compiling standard sources into each artifact. Every compiled module exports `luaopen_<mangled>`, `<mangled>_init` (idempotent), `<mangled>_abi` (returns `TITAN_VER`; checked before trusting a `.so`), and `<mangled>_types` (serialized interface type, evaluated with `types.lua` as env, plus optional `"uv-provider"` dependency metadata). For an explicit root, `titanc` gives code generation the full recursive source dependency closure, so that metadata propagates from standard `uv` or `"dynamic-uv"` used by a statically linked source dependency.
+- Module resolution is binary-first for dependencies. A dependency with no
+  binary but available `.titan` source is compiled in and statically linked;
+  a binary dependency is dlopened at runtime by the generated `_init`.
+  Explicit `titanc` roots are forced through source, so the same ordinary rule
+  builds `titan.uv` from `titan/uv.titan` while its already-built qualified
+  dependencies remain binary. There is no separate standard-module origin or
+  loader. Every compiled module exports `luaopen_<mangled>`, `<mangled>_init`
+  (idempotent), `<mangled>_abi` (returns `TITAN_VER`; checked before trusting a
+  `.so`), and `<mangled>_types` (serialized interface type, evaluated with
+  `types.lua` as env, plus optional `"uv-provider"` dependency metadata). For
+  an explicit root, `titanc` gives code generation the full recursive source
+  dependency closure, so that metadata propagates from `titan.uv` or a
+  `"dynamic-uv"` dependency used by a statically linked source dependency.
 - Installed and checkout driver modes both link `libtitan.a`, never
   `titan.o` directly. The installed path is `<root>/lib/libtitan.a`; checkout
   mode lazily rebuilds and links `titan-runtime/libtitan.a`. The archive

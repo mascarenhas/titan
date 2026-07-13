@@ -449,8 +449,8 @@ compiler extensions may fail with a compile-time parse error.
 Bundled Titan gives libuv a single complete native owner: the canonical
 `titan/uv.so`. Its SDK installs `uv.h` and the `uv/` headers, but not the
 private static archive used to build that provider. A Titan extension DSO that
-calls functions declared by `uv.h` must establish that standard dependency in
-addition to importing the header:
+calls functions declared by `uv.h` must import `titan.uv` (normally through its
+short spelling) in addition to importing the header:
 
 ```titan
 local runtime = import "uv"
@@ -460,19 +460,19 @@ local uv = foreign import "uv.h"
 Build that extension without `-luv` and without a `libuv.a` linker input. Its
 `uv_*` references remain unresolved in the DSO. The bundled archive used to
 build `titan/uv.so` is private and is not installed as part of the Titan SDK.
-Titan's generated consumer establishes canonical `uv.so` globally before
+Titan's generated consumer establishes canonical `titan/uv.so` globally before
 mapping the extension, as described below.
 
 When a Titan consumer imports the compiled extension, compiler interface
 recovery reads an optional second `"uv-provider"` result from
-`<mangled>_types`; Titan emits that marker when a module has standard `uv` or a
+`<mangled>_types`; Titan emits that marker when a module has `titan.uv` or a
 `"dynamic-uv"` dependency, so classification remains deterministic if a
 provider was already loaded. Reading the marker establishes or validates
-canonical `uv.so`, records its compiler-process file identity, and marks the
+canonical `titan/uv.so`, records its compiler-process file identity, and marks the
 dependency `"dynamic-uv"`. If the initial interface open cannot reach the marker because of
 an unresolved `uv_*`, the compiler uses that open-stage error to bootstrap
-canonical `uv.so`, retries, and then requires the marker. If it is absent,
-Titan rejects the binary and asks for a rebuild with an explicit standard `uv`
+canonical `titan/uv.so`, retries, and then requires the marker. If it is absent,
+Titan rejects the binary and asks for a rebuild with an explicit `titan.uv`
 import. Generated consumers use
 `loadlibwithuv`, which preloads the same provider before mapping the extension;
 unmarked ordinary DSOs keep eager, local loading. Provider-first mapping means
@@ -490,7 +490,7 @@ local extension = require "my.libuv_extension"
 The Lua installed by Titan recognizes exactly the `luaopen_titan_uv` entry and
 loads that one C module globally on its first `require`; all other Lua C modules
 retain ordinary local loading. This special case lives in Lua's dynamic loader,
-not in a self-loading or self-promoting `uv.so`, and works on both Linux and
+not in a self-loading or self-promoting `titan/uv.so`, and works on both Linux and
 macOS. An unmodified Lua does not provide this bundled direct-extension
 contract; use Titan's Lua or link the extension through the system-mode path.
 

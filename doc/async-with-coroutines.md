@@ -201,15 +201,15 @@ local coro_native = foreign import "titan/coro.h"
 ```
 
 The FFI calls that need the current Lua state use Titan's existing
-built-in `L` local. The functions in `stdlib/coroutine.titan` that
+built-in `L` local. The functions in `titan/coroutine.titan` that
 create handles already have that `L`; no new language surface is needed
 to pass the calling state to C.
 
-The C helper interface is deliberately tiny. `stdlib/coroutine.titan` imports
+The C helper interface is deliberately tiny. `titan/coroutine.titan` imports
 `minicoro.h` directly, reads the `mco_coro` fields it needs, constructs
 the owner userdata and typed handle, and calls the minicoro
 storage/control APIs directly.
-The C helper surface used by `stdlib/coroutine.titan` consists only of the
+The C helper surface used by `titan/coroutine.titan` consists only of the
 entry trampoline and fixed tag comparator:
 
 ```c
@@ -232,7 +232,7 @@ the caller appends its propagation traceback before re-raising. On
 `ok=false` after `yield`, the source is still live and the payload is
 simply the injected error.
 
-`stdlib/coroutine.titan` then has the public shape:
+`titan/coroutine.titan` then has the public shape:
 
 ```lua
 local runtime = mco.mco_runtime.new()
@@ -363,7 +363,7 @@ traced Lua object. The coroutine helpers are allowed to keep by-value copies
 across a minicoro stack switch because the Titan frames that supplied those
 parameters are not unwound by `yield`.
 
-With those rules, `stdlib/coroutine.titan` does not need C shims for storage or
+With those rules, `titan/coroutine.titan` does not need C shims for storage or
 tag-only minicoro operations. It can call `mco_push`/`mco_pop` directly
 with `TValue` and `int` locals, and it can materialize a tag as a local
 C `TValue` before passing it to `mco_resume`, `mco_yield`, or
@@ -596,13 +596,14 @@ coroutine transfer.
 
 ## Build and packaging
 
-Build `stdlib/coroutine.titan` under the canonical Titan module name
-`coroutine`. Its canonical binary exports `coroutine_init`,
-`coroutine_abi`, and `coroutine_types`; its Lua entry is the distinct
+Build `titan/coroutine.titan` as the ordinary qualified Titan module
+`titan.coroutine`. Its binary exports `titan_coroutine_init`,
+`titan_coroutine_abi`, `titan_coroutine_types`, and
 `luaopen_titan_coroutine`. Install the binary exactly once as
 `<root>/lib/titan/0.11/titan/coroutine.so`. Titan's patched Lua C-module path
-contains `<root>/lib/titan/0.11/?.so`, so both `import "coroutine"` and
-`require "titan.coroutine"` load that file. Do not install an alias or copy as
+contains `<root>/lib/titan/0.11/?.so`; the parser desugars
+`import "coroutine"` to that qualified identity, and
+`require "titan.coroutine"` loads the same file. Do not install an alias or copy as
 `coro.so`, a parent-level `coroutine.so`, or a `lib/lua` DSO, and do not export
 `luaopen_coro` or `luaopen_coroutine`.
 
@@ -651,13 +652,13 @@ Add FFI coverage for the new `TValue` boundary:
   arrays/maps, and function values;
 * raw `TValue *`, `const TValue *`, and `TValue[]` interfaces import as C
   pointer/array types, and the new address coercions cover the scoped
-  pointer arguments used by `stdlib/coroutine.titan`.
+  pointer arguments used by `titan/coroutine.titan`.
 
 Add Titan runtime/coder coverage for:
 
 * create/resume/yield round trips with nil, booleans, integers, floats,
   strings, records, arrays, maps, function values, and Lua closures;
-* `stdlib/coroutine.titan` resolving default tags, recording resume as success,
+* `titan/coroutine.titan` resolving default tags, recording resume as success,
   recording error injection as failure, checking `mco_result`, and
   raising a returned failure payload;
 * default tag use, explicit tag override, missing effective tag errors,
@@ -690,7 +691,7 @@ Add Titan runtime/coder coverage for:
 * GC stress in incremental and generational modes, including old
   coroutine owner userdata rooting young Lua threads, callback closures,
   default tags, record/table payloads, and function-valued payloads;
-* `.so`-only import of `coroutine` from another Titan module and use from a
+* `.so`-only import of `titan.coroutine` (via the short import) from another Titan module and use from a
   standalone executable.
 
 ## Feasibility evidence

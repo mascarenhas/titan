@@ -65,7 +65,6 @@ function driver.installed_paths(root)
         libbacktrace = root_join(root, "lib/libbacktrace.a"),
         liblua = root_join(root, "lib/liblua.a"),
         titan_bin = titan_lib,
-        titan_stdlib = titan_lib .. "/titan",
         lua_cpath = titan_lib .. "/?.so",
     }
 end
@@ -113,23 +112,9 @@ driver.TITAN_BIN_PATH = os.getenv("TITAN_PATH" .. driver.TITAN_VER_SUFFIX)
     or os.getenv("TITAN_PATH")
     or default_titan_bin_path
 driver.TITAN_SOURCE_PATH = "."
-driver.TITAN_STDLIB_SOURCE_PATH = os.getenv("TITAN_STDLIB_SOURCE_PATH")
-    or "stdlib"
-local titan_stdlib_path_override = os.getenv("TITAN_STDLIB_PATH")
-driver.TITAN_STDLIB_PATH = titan_stdlib_path_override
-    or (driver.INSTALL_PATHS and driver.INSTALL_PATHS.titan_bin)
-    or ("/usr/local/lib/titan/" .. driver.TITAN_VER)
-driver.TITAN_STDLIB_IMPLICIT_PREFIX = titan_stdlib_path_override == nil
-driver.STANDARD_DEPENDENCY = "standard"
+driver.UV_PROVIDER_MODULE = "titan.uv"
+driver.UV_PROVIDER_DEPENDENCY = "uv-provider"
 driver.UV_DYNAMIC_DEPENDENCY = "dynamic-uv"
-driver.STANDARD_MODULES = {
-    coroutine = true,
-    uv = true,
-    timer = true,
-    fs = true,
-    net = true,
-    os = true,
-}
 driver.LUA_SOURCE_PATH = driver.INSTALLED and driver.INSTALL_PATHS and
     driver.INSTALL_PATHS.lua_source or "lua-5.5.0/src"
 driver.TITAN_RUNTIME_PATH = "titan-runtime/"
@@ -260,23 +245,9 @@ local function findmodule(paths, modname, extension)
     local modf = modname:gsub("[.]", "/") .. extension
     for path in paths:gmatch("[^;]+") do
         local filename = path .. "/" .. modf
-        local mtime = lfs.attributes(filename, "modification")
-        if mtime then return mtime, filename end
+        if lfs.attributes(filename, "mode") then return filename end
     end
     return nil
-end
-
-local function findmodules(paths, modname, extension)
-    local found = {}
-    local modf = modname:gsub("[.]", "/") .. extension
-    for path in paths:gmatch("[^;]+") do
-        local filename = path .. "/" .. modf
-        local attr = lfs.attributes(filename)
-        if attr then
-            table.insert(found, { mtime = attr.modification, filename = filename })
-        end
-    end
-    return found
 end
 
 local function normalize_path(path)
@@ -305,16 +276,12 @@ end
 
 driver._uv_provider_path = nil
 
-local function ensure_uv_provider(options)
-    options = options or {}
-    local stdlib_path = options.stdlib_path or driver.TITAN_STDLIB_PATH
-    local explicit_stdlib_path = options.stdlib_path ~= nil or
-        not driver.TITAN_STDLIB_IMPLICIT_PREFIX
-    local stdlib_modname = explicit_stdlib_path and "uv" or "titan.uv"
-    local _, binf = findmodule(stdlib_path, stdlib_modname, ".so")
+local function ensure_uv_provider()
+    local binf = findmodule(
+        driver.TITAN_BIN_PATH, driver.UV_PROVIDER_MODULE, ".so")
     if not binf then
-        return nil, "canonical standard module 'uv' is not installed under '" ..
-            stdlib_path .. "'"
+        return nil, "canonical libuv provider module '" ..
+            driver.UV_PROVIDER_MODULE .. "' is not installed on TITAN_PATH"
     end
     local provider_path = normalize_path(binf)
     if driver._uv_provider_path then
@@ -332,23 +299,22 @@ local function ensure_uv_provider(options)
     return true
 end
 
-local function load_compiled_interface(modname, binf, options,
-                                       needs_uv_provider)
+local function load_compiled_interface(modname, binf)
     -- A compiled Titan extension may intentionally leave public uv_* function
     -- references unresolved. Interface recovery itself uses Lua's RTLD_NOW
     -- loader. Load uv itself globally up front; for an ordinary binary, first
     -- preserve the normal no-uv path and retry with the canonical provider
     -- only when the native loader identifies an unresolved uv_* symbol.
-    if modname == "uv" then
-        local provider_ok, provider_err = ensure_uv_provider(options)
+    if modname == driver.UV_PROVIDER_MODULE then
+        local provider_ok, provider_err = ensure_uv_provider()
         if not provider_ok then return nil, provider_err end
     end
     local prefix = modname:gsub("[%-.]", "_")
     local requires_uv = false
     local abif, err, where = package.loadlib(binf, prefix .. "_abi")
-    if not abif and needs_uv_provider and where == "open" and
+    if not abif and where == "open" and
        tostring(err):match("[_ ]uv_[%w_]+") then
-        local provider_ok, provider_err = ensure_uv_provider(options)
+        local provider_ok, provider_err = ensure_uv_provider()
         if not provider_ok then return nil, provider_err end
         requires_uv = true
         abif, err, where = package.loadlib(binf, prefix .. "_abi")
@@ -373,10 +339,10 @@ local function load_compiled_interface(modname, binf, options,
         return nil, "compiled module '" .. modname
             .. "' required the canonical libuv provider while loading but "
             .. "does not declare 'uv-provider' dependency metadata; rebuild "
-            .. "it with an explicit import of standard module 'uv'"
+            .. "it with an explicit import of module 'titan.uv'"
     end
-    if dependency_metadata == "uv-provider" and needs_uv_provider then
-        local provider_ok, provider_err = ensure_uv_provider(options)
+    if dependency_metadata == "uv-provider" then
+        local provider_ok, provider_err = ensure_uv_provider()
         if not provider_ok then return nil, provider_err end
         requires_uv = true
     end
@@ -384,12 +350,19 @@ local function load_compiled_interface(modname, binf, options,
     if not modtf then return nil, lerr end
     local mok, modt_or_err = pcall(modtf)
     if not mok then return nil, modt_or_err end
-    return modt_or_err, nil, requires_uv
+    local origin
+    if modname == driver.UV_PROVIDER_MODULE then
+        origin = driver.UV_PROVIDER_DEPENDENCY
+    elseif requires_uv then
+        origin = driver.UV_DYNAMIC_DEPENDENCY
+    end
+    return modt_or_err, nil, origin
 end
 
 function driver.defaultloader(static_deps, options)
     static_deps = static_deps or {}
     options = options or {}
+    local source_roots = options.source_roots or {}
     local dependency_stack = {}
 
     local function remember_dependency_closure(modname, seen)
@@ -406,10 +379,8 @@ function driver.defaultloader(static_deps, options)
                     remember_dependency_closure(depname, seen)
                 end
             end
-        elseif mod.origin == "standard" then
-            static_deps[modname] = driver.STANDARD_DEPENDENCY
-        elseif mod.origin == driver.UV_DYNAMIC_DEPENDENCY then
-            static_deps[modname] = driver.UV_DYNAMIC_DEPENDENCY
+        elseif mod.origin then
+            static_deps[modname] = mod.origin
         end
     end
 
@@ -420,15 +391,13 @@ function driver.defaultloader(static_deps, options)
         if mod and mod ~= CIRCULAR_MARK then
             if mod.ast then
                 direct[modname] = true
-            elseif mod.origin == "standard" then
-                direct[modname] = driver.STANDARD_DEPENDENCY
-            elseif mod.origin == driver.UV_DYNAMIC_DEPENDENCY then
-                direct[modname] = driver.UV_DYNAMIC_DEPENDENCY
+            elseif mod.origin then
+                direct[modname] = mod.origin
             end
         end
     end
 
-    local function parse_source(modname, srcf, loader, origin)
+    local function parse_source(modname, srcf, loader)
         local input, err = util.get_file_contents(srcf)
         if not input then return false, err end
         local ast, perr = parser.parse(srcf, input)
@@ -442,40 +411,23 @@ function driver.defaultloader(static_deps, options)
             ast = ast,
             type = modt,
             filename = srcf,
-            origin = origin,
             deps = direct_deps,
         }
         static_deps[modname] = true
         return true, modt, errors
     end
 
-    local function standard_conflict(modname, canonical_bin)
-        local _, canonical_src = findmodule(
-            options.stdlib_source_path or driver.TITAN_STDLIB_SOURCE_PATH,
-            modname, ".titan")
-        for _, match in ipairs(findmodules(
-            driver.TITAN_SOURCE_PATH, modname, ".titan")) do
-            if not same_file(match.filename, canonical_src) then
-                return "reserved standard module '" .. modname
-                    .. "' is shadowed by application source '"
-                    .. match.filename .. "'"
-            end
-        end
-        for _, match in ipairs(findmodules(
-            driver.TITAN_BIN_PATH, modname, ".so")) do
-            if not same_file(match.filename, canonical_bin) then
-                return "reserved standard module '" .. modname
-                    .. "' is shadowed by local binary '"
-                    .. match.filename .. "'"
-            end
-        end
-        return nil
-    end
-
     local function loader(modname)
         if driver.imported[modname] == CIRCULAR_MARK then
             driver.imported[modname] = nil
             return false, "circular reference to module"
+        end
+        if source_roots[modname] and driver.imported[modname] and
+           not driver.imported[modname].ast then
+            -- An explicit root is a source build request even if this
+            -- long-lived compiler process saw its binary as an earlier
+            -- dependency. Dependencies remain unconditionally binary-first.
+            driver.imported[modname] = nil
         end
         if driver.imported[modname] then
             local mod = driver.imported[modname]
@@ -484,59 +436,23 @@ function driver.defaultloader(static_deps, options)
             return true, mod.type, {}
         end
 
-        if driver.STANDARD_MODULES[modname] then
-            if options.stdlib_build_root == modname then
-                local _, srcf = findmodule(
-                    options.stdlib_source_path or driver.TITAN_STDLIB_SOURCE_PATH,
-                    modname, ".titan")
-                if not srcf then
-                    return false, "standard module source '" .. modname
-                        .. ".titan' not found under '"
-                        .. (options.stdlib_source_path
-                            or driver.TITAN_STDLIB_SOURCE_PATH) .. "'"
-                end
-                local ok, modt, errors = parse_source(
-                    modname, srcf, loader, "standard")
-                if ok then remember_direct_dependency(modname) end
-                return ok, modt, errors
+        local srcf
+        if source_roots[modname] then
+            srcf = findmodule(
+                driver.TITAN_SOURCE_PATH, modname, ".titan")
+            if not srcf then
+                return false, "source module '" .. modname .. "' not found"
             end
-
-            local stdlib_path = options.stdlib_path or
-                driver.TITAN_STDLIB_PATH
-            local explicit_stdlib_path = options.stdlib_path ~= nil or
-                not driver.TITAN_STDLIB_IMPLICIT_PREFIX
-            local stdlib_modname = explicit_stdlib_path and modname or
-                ("titan." .. modname)
-            local _, binf = findmodule(stdlib_path, stdlib_modname, ".so")
-            local conflict = standard_conflict(modname, binf)
-            if conflict then return false, conflict end
-            if not binf then
-                return false, "standard module '" .. modname
-                    .. "' is not installed under TITAN_STDLIB_PATH ('"
-                    .. stdlib_path
-                    .. "'); run 'make stdlib' or configure TITAN_STDLIB_PATH"
-            end
-            local modt, err = load_compiled_interface(
-                modname, binf, options, false)
-            if not modt then return false, err end
-            driver.imported[modname] = {
-                type = modt,
-                compiled = true,
-                filename = binf,
-                origin = "standard",
-            }
-            static_deps[modname] = driver.STANDARD_DEPENDENCY
-            remember_direct_dependency(modname)
-            return true, modt, {}
+            local ok, modt, errors = parse_source(modname, srcf, loader)
+            if ok then remember_direct_dependency(modname) end
+            return ok, modt, errors
         end
 
-        local mtime_bin, binf = findmodule(driver.TITAN_BIN_PATH, modname, ".so")
-        local mtime_src, srcf = findmodule(driver.TITAN_SOURCE_PATH, modname, ".titan")
-        if mtime_bin and binf and ((not mtime_src) or mtime_bin >= mtime_src) then
-            local modt_or_err, err, requires_uv = load_compiled_interface(
-                modname, binf, options, true)
+        local binf = findmodule(driver.TITAN_BIN_PATH, modname, ".so")
+        if binf then
+            local modt_or_err, err, origin = load_compiled_interface(
+                modname, binf)
             if not modt_or_err then return false, err end
-            local origin = requires_uv and driver.UV_DYNAMIC_DEPENDENCY or nil
             driver.imported[modname] = {
                 type = modt_or_err,
                 compiled = true,
@@ -547,9 +463,9 @@ function driver.defaultloader(static_deps, options)
             remember_direct_dependency(modname)
             return true, modt_or_err, {}
         end
-        if not mtime_src then return false, "module '" .. modname .. "' not found" end
-        local ok, modt, errors = parse_source(
-            modname, srcf, loader, "application")
+        srcf = findmodule(driver.TITAN_SOURCE_PATH, modname, ".titan")
+        if not srcf then return false, "module '" .. modname .. "' not found" end
+        local ok, modt, errors = parse_source(modname, srcf, loader)
         if ok then remember_direct_dependency(modname) end
         return ok, modt, errors
     end
@@ -623,10 +539,10 @@ local function static_flag()
     return "-c"
 end
 
-function driver.compile_module(modname, mod, static_deps, verbose, options)
+function driver.compile_module(modname, mod, static_deps, verbose)
     if mod.compiled then return true, nil, nil end
     local ok, err, libname = driver.compile(
-        modname, mod.ast, mod.filename, static_deps, verbose, options)
+        modname, mod.ast, mod.filename, static_deps, verbose)
     if not ok then return nil, err end
     mod.compiled = libname
     return true, nil, libname
@@ -784,12 +700,12 @@ local function append_runtime_libraries(args)
     end
 end
 
-function driver.compile(modname, ast, sourcef, static_deps, verbose, options)
+function driver.compile(modname, ast, sourcef, static_deps, verbose)
     local runtime_ok, runtime_err = check_runtime(verbose)
     if not runtime_ok then return nil, runtime_err end
     sourcef = sourcef or modname:gsub("[.]", "/") .. ".titan"
     static_deps = static_deps or {}
-    local code = coder.generate(modname, ast, static_deps, options)
+    local code = coder.generate(modname, ast, static_deps)
     code = pretty.reindent_c(code)
     local filename = sourcef:gsub("[.]titan$", "") .. ".c"
     local libname = sourcef:gsub("[.]titan$", "") .. ".o"

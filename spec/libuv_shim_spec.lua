@@ -159,7 +159,7 @@ describe("native libuv shim", function()
             assert.not_match("[^%w_]" .. name .. "%s*%(", source)
         end
         local private_header = read_file("titan-runtime/titan/uv.h")
-        local titan_source = read_file("stdlib/uv.titan")
+        local titan_source = read_file("titan/uv.titan")
         assert.match("#include <signal.h>", source, 1, true)
         assert.not_match("signal.h", private_header, 1, true)
         assert.not_match("signal.h", titan_source, 1, true)
@@ -238,10 +238,8 @@ describe("native libuv shim", function()
                             L, shim.titan_uvshim_char_ptr.sizeof * 2, 0)
                     local endpoints = ffi.titan_ffi_int.new_array(
                         shim.TITAN_UV_STDIO_ENDPOINT_COUNT)
-                    local endpoint_count = ffi.titan_ffi_int.new_array(1)
                     local fillers = ffi.titan_ffi_int.new_array(
                         shim.TITAN_UV_STDIO_FILLER_CAPACITY)
-                    local filler_count = ffi.titan_ffi_int.new_array(1)
                     local size = uv.size_t.new_array(1)
                     size[0] = 256 as uv.size_t
                     shim.titan_uvshim_timer_set_data(timer, owner)
@@ -250,18 +248,15 @@ describe("native libuv shim", function()
                         nil, dns, owner, "127.0.0.1", 80)
                     shim.titan_uvshim_tcp_init(nil, tcp, owner)
                     shim.titan_uvshim_tcp_connect_start(
-                        connect, tcp, owner, address_storage, 1, 0)
+                        connect, tcp, owner, address_storage, 0)
                     shim.titan_uvshim_signal_init(nil, signal, owner)
                     shim.titan_uvshim_signal_start_oneshot(
                         signal, shim.titan_uvshim_signal_number("usr1"))
                     shim.titan_uvshim_signal_stop(signal)
-                    shim.titan_uvshim_stdio_pipes(
-                        endpoints, endpoint_count, fillers, filler_count)
+                    shim.titan_uvshim_stdio_pipes(endpoints, fillers)
                     shim.titan_uvshim_pipe_init(nil, pipe, owner)
                     shim.titan_uvshim_pipe_open(
                         pipe, endpoints,
-                        shim.TITAN_UV_STDIO_ENDPOINT_COUNT
-                            as ffi.titan_ffi_int,
                         shim.TITAN_UV_STDIO_STDIN_PARENT
                             as ffi.titan_ffi_int)
                     shim.titan_uvshim_pipe_read_start(pipe)
@@ -271,16 +266,13 @@ describe("native libuv shim", function()
                     shim.titan_uvshim_pipe_is_closing(pipe)
                     shim.titan_uvshim_pipe_close(pipe)
                     shim.titan_uvshim_process_spawn(
-                        nil, process, owner, nil, argv, 1,
-                        endpoints,
-                        shim.TITAN_UV_STDIO_ENDPOINT_COUNT
-                            as ffi.titan_ffi_int,
-                        endpoint_count)
+                        nil, process, owner, argv, endpoints)
                     shim.titan_uvshim_process_kill(process, 15)
                     shim.titan_uvshim_process_get_pid(process)
                     shim.titan_uvshim_process_is_closing(process)
                     shim.titan_uvshim_process_close(process)
                     shim.titan_uvshim_status_is_esrch(-1)
+                    shim.titan_uvshim_error_einval()
                     shim.titan_uvshim_size_as_int64(size[0])
                     shim.titan_uvshim_status_is_enobufs(-1)
                     shim.titan_uvshim_status_is_enoent(-1)

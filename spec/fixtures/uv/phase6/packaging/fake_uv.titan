@@ -1,5 +1,0 @@
--- Deliberately incompatible reserved-name shadow. Production os.so must load
--- its canonical uv dependency instead of parsing or linking this source.
-function captured(): integer
-  return -1
-end

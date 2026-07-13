@@ -214,7 +214,15 @@ describe("Titan driver generic build flags", function()
     it("builds the source runtime against the Lua tree selected by --lua",
        function()
         local lua_source = lfs.currentdir() .. "/lua-5.5.0/src"
-        local ok, output, why, code = titanc({ MAKE = "true" }, "-v",
+        -- Explicit command-line roots are source-first. Supply this fixture's
+        -- required foreign-import inputs instead of relying on the binary
+        -- produced by setup to hide its source.
+        local ok, output, why, code = titanc({
+            MAKE = "true",
+            CC = "cc -DTITAN_DRIVER_CC_HONORED=1",
+            TITAN_EXTRA_CPPFLAGS = "-I '" .. INCLUDE .. "' " ..
+                "-DTITAN_DRIVER_CPP_BRANCH=37",
+        }, "-v",
             "--lua", lua_source, "--tree", APPLICATION, MODULE)
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")

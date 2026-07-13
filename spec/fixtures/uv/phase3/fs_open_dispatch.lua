@@ -21,7 +21,7 @@ assert(tostring(err):find(
     "injected filesystem dispatcher failure", 1, true), tostring(err))
 local trace = titan.backtrace()
 assert(type(trace) == "string" and
-       trace:find("in uv.fs_dispatch", 1, true), trace)
+       trace:find("in titan.uv.fs_dispatch", 1, true), trace)
 
 -- One successful open plus exactly one outer-repair close. Both requests own
 -- one cleanup, and the internal close has reached its terminal callback.

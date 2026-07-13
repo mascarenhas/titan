@@ -119,6 +119,7 @@ int titan_uvshim_error_eio(void);
 int titan_uvshim_error_eof(void);
 int titan_uvshim_error_ecanceled(void);
 int titan_uvshim_error_eaddrnotavail(void);
+int titan_uvshim_error_einval(void);
 int titan_uvshim_error_eoverflow(void);
 int titan_uvshim_error_enosys(void);
 
@@ -133,8 +134,9 @@ int64_t titan_uvshim_size_as_int64(size_t size);
 /*
  * Common Linux/macOS signal names.  Host signal numbers intentionally stay in
  * this shim because the user-defined signal numbers differ by platform.
- * The number helper also recognizes "kill" for Process:kill; one-shot waits
- * must additionally require titan_uvshim_signal_is_waitable().
+ * The number helper returns zero for unknown names and also recognizes "kill"
+ * for Process:kill; one-shot waits must additionally require
+ * titan_uvshim_signal_is_waitable().
  */
 int titan_uvshim_signal_number(const char *name);
 const char *titan_uvshim_signal_name(int signum);
@@ -161,9 +163,8 @@ int titan_uvshim_getaddrinfo_start(uv_loop_t *loop,
                                    int port);
 int titan_uvshim_getaddrinfo_cancel(uv_getaddrinfo_t *req);
 int64_t titan_uvshim_addrinfo_count(const void *result);
-int titan_uvshim_addrinfo_copy(const void *result,
-                               void *address_storage,
-                               int64_t capacity);
+void titan_uvshim_addrinfo_copy(const void *result,
+                                void *address_storage);
 void titan_uvshim_addrinfo_free(void *result);
 
 /* Concrete TCP/stream/request wrappers around public libuv base APIs. */
@@ -174,11 +175,9 @@ void titan_uvshim_tcp_close(uv_tcp_t *tcp);
 int titan_uvshim_tcp_close_reset(uv_tcp_t *tcp);
 int titan_uvshim_tcp_bind(uv_tcp_t *tcp,
                           const void *address_storage,
-                          int64_t count,
                           int64_t index);
 /* Private test-variant diagnostic; the public net API exposes no endpoint. */
 int titan_uvshim_tcp_bound_port(const uv_tcp_t *tcp);
-int titan_uvshim_tcp_listen_backlog_is_valid(int64_t backlog);
 int titan_uvshim_tcp_listen(uv_tcp_t *tcp, int64_t backlog);
 int titan_uvshim_tcp_accept(uv_tcp_t *server, uv_tcp_t *client);
 int titan_uvshim_tcp_read_start(uv_tcp_t *tcp);
@@ -187,7 +186,6 @@ int titan_uvshim_tcp_connect_start(uv_connect_t *req,
                                    uv_tcp_t *tcp,
                                    void *data,
                                    const void *address_storage,
-                                   int64_t count,
                                    int64_t index);
 int titan_uvshim_tcp_write_start(uv_write_t *req,
                                  uv_tcp_t *tcp,
@@ -198,24 +196,21 @@ int titan_uvshim_tcp_shutdown_start(uv_shutdown_t *req,
                                     void *data);
 
 /*
- * Create the three raw stdio pairs using only public libuv. endpoint_count and
- * filler_count are in/out capacities: initialize them to the number of int
- * cells supplied; on return they report every descriptor still owned by the
- * caller, including on error.  The fixed endpoint layout is defined above.
+ * Create the three raw stdio pairs using only public libuv. The caller
+ * supplies arrays with the fixed capacities defined above. Every cell is set
+ * to -1 before descriptors are acquired, so scanning both complete arrays
+ * finds every descriptor still owned by the caller, including on error.
+ * The fixed endpoint layout is likewise defined above.
  * Filler descriptors reserve fd 0..2 so uv_pipe_t never owns a descriptor
  * that libuv's Unix stream close deliberately treats as stdio.
  */
-int titan_uvshim_stdio_pipes(int *endpoints,
-                             int *endpoint_count,
-                             int *fillers,
-                             int *filler_count);
+int titan_uvshim_stdio_pipes(int *endpoints, int *fillers);
 
 /* Typed pipe wrappers; Titan never casts a uv_pipe_t through uv_stream_t. */
 int titan_uvshim_pipe_init(uv_loop_t *loop, uv_pipe_t *pipe, void *data);
 /* Clears endpoints[index] only when uv_pipe_open takes ownership. */
 int titan_uvshim_pipe_open(uv_pipe_t *pipe,
                            int *endpoints,
-                           int endpoint_count,
                            int index);
 int titan_uvshim_pipe_read_start(uv_pipe_t *pipe);
 int titan_uvshim_pipe_read_stop(uv_pipe_t *pipe);
@@ -227,22 +222,16 @@ int titan_uvshim_pipe_is_closing(const uv_pipe_t *pipe);
 void titan_uvshim_pipe_close(uv_pipe_t *pipe);
 
 /*
- * argv_count includes argv[0] and excludes the required trailing NULL.  A
- * validation error leaves process uninitialized.  initialized is set to zero
- * before validation and to one after a call reaches uv_spawn.  On supported
- * Linux and desktop macOS, each such process is closeable, including after a
- * negative spawn result: exactly three valid UV_INHERIT_FD entries avoid
- * libuv's pre-initialization error cleanup path.
+ * argv contains argv[0], the caller arguments, and a trailing NULL. On
+ * supported Linux and desktop macOS, each process is initialized and closeable
+ * after this call, including after a negative uv_spawn result: exactly three
+ * valid UV_INHERIT_FD entries avoid libuv's pre-initialization error path.
  */
 int titan_uvshim_process_spawn(uv_loop_t *loop,
                                uv_process_t *process,
                                void *data,
-                               const char *file,
                                titan_uvshim_char_ptr *argv,
-                               int64_t argv_count,
-                               const int *endpoints,
-                               int endpoint_count,
-                               int *initialized);
+                               const int *endpoints);
 int titan_uvshim_process_kill(uv_process_t *process, int signum);
 int64_t titan_uvshim_process_get_pid(const uv_process_t *process);
 int titan_uvshim_process_is_closing(const uv_process_t *process);
@@ -257,27 +246,26 @@ void titan_uvshim_fs_cb(uv_fs_t *req);
 /*
  * Initialize a public uv_buf_t through an opaque pointer.  The opaque
  * parameter keeps uv_buf_t out of this private header while the implementation
- * still delegates construction to uv_buf_init.  Lengths that the portable
- * uv_buf_init API cannot represent are rejected instead of truncated.
+ * still delegates construction to uv_buf_init. Callers validate user-derived
+ * lengths before entering these trusted helpers.
  */
-int titan_uvshim_buf_init(void *buf, char *base, int64_t len);
-int titan_uvshim_buf_init_slice(void *buf, char *base, int64_t total,
-                                int64_t offset, int64_t length);
-int titan_uvshim_bytes_copy(char *destination, int64_t capacity,
-                            const char *source, int64_t length);
-/* Zero-based binary search: -1 means absent; UV_EINVAL means bad arguments. */
+void titan_uvshim_buf_init(void *buf, char *base, int64_t len);
+void titan_uvshim_buf_init_slice(void *buf, char *base, int64_t offset,
+                                 int64_t length);
+void titan_uvshim_bytes_copy(char *destination, const char *source,
+                             int64_t length);
+/* Zero-based binary search: -1 means absent. */
 int64_t titan_uvshim_bytes_find(const char *haystack, int64_t haystack_length,
                                 const char *needle, int64_t needle_length);
-/* Checked explicit-length binary slice copy; no NUL-termination semantics. */
-int titan_uvshim_bytes_slice_copy(char *destination, int64_t capacity,
-                                  const char *source, int64_t total,
-                                  int64_t offset, int64_t length);
+/* Explicit-length binary slice copy; no NUL-termination semantics. */
+void titan_uvshim_bytes_slice_copy(char *destination, const char *source,
+                                   int64_t offset, int64_t length);
 int titan_uvshim_allocation_length_is_valid(int64_t length);
 int titan_uvshim_buf_length_is_valid(int64_t length);
 
-/* Copy a retained text argument into caller-owned NUL-terminated storage. */
-int titan_uvshim_text_copy(char *destination, int64_t capacity,
-                           const char *source, int64_t length);
+/* Copy validated text into caller-owned NUL-terminated storage. */
+void titan_uvshim_text_copy(char *destination, const char *source,
+                            int64_t length);
 
 enum titan_uvshim_stat_kind {
   TITAN_UV_STAT_OTHER = 0,

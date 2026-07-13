@@ -1,4 +1,0 @@
--- A valid application module that deliberately claims a reserved name.
-function marker(): integer
-  return 902
-end

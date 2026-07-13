@@ -91,8 +91,6 @@ local function clean_environment(argv)
         "-u", "LUAROCKS_SYSCONFDIR",
         "-u", "TITAN_PATH_0_11",
         "-u", "TITAN_PATH",
-        "-u", "TITAN_STDLIB_PATH",
-        "-u", "TITAN_STDLIB_SOURCE_PATH",
         "-u", "TITAN_ROCKS_ROOT",
         "PATH=" .. PREFIX .. "/bin:" ..
             (os.getenv("PATH") or "/usr/bin:/bin"),

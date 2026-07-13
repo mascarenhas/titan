@@ -22,7 +22,7 @@ local function compiler_command()
 end
 
 local function net_test_source()
-    local source = phase2.read(M.repo .. "/stdlib/net.titan")
+    local source = phase2.read(M.repo .. "/titan/net.titan")
     local hooks = [[
 function __test_phase5_bound_port(server: Server): integer
   return uv.__test_phase5_bound_port(server.handle)
@@ -47,21 +47,19 @@ end
 end
 
 local function build_net(workspace)
-    write(workspace .. "/stdlib/net.titan", net_test_source())
+    write(workspace .. "/titan/net.titan", net_test_source())
     local cflags = os.getenv("TITAN_TEST_EXTRA_CFLAGS") or ""
     local ldflags = os.getenv("TITAN_TEST_EXTRA_LDFLAGS") or ""
     local command = table.concat({
-        "env CCACHE_DISABLE=1", "TITAN_PATH_0_11=", "TITAN_PATH=",
-        "TITAN_STDLIB_PATH=" .. quote(workspace .. "/titan"),
+        "env CCACHE_DISABLE=1",
+        "TITAN_PATH_0_11=" .. quote(workspace), "TITAN_PATH=",
         "TITAN_EXTRA_CPPFLAGS=''",
         "TITAN_EXTRA_CFLAGS=" .. quote(cflags),
         "TITAN_EXTRA_LDFLAGS=" .. quote(ldflags),
-        compiler_command(), "--stdlib-build --tree",
-        quote(workspace .. "/stdlib"), "--lua-name titan.net net",
+        compiler_command(), "--tree", quote(workspace), "titan.net",
     }, " ")
     local ok, _, output = phase2.run(command, workspace)
     assert.truthy(ok, output)
-    phase2.move_compiled_module(workspace, "net")
 end
 
 -- The ordinary Phase 5 suite intentionally uses an isolated instrumented uv

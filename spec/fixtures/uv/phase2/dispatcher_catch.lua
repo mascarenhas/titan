@@ -12,7 +12,7 @@ assert(task:status() == "succeeded")
 assert(task:join() == "closed-before-retire")
 local trace = titan.backtrace()
 assert(type(trace) == "string" and
-       trace:find("in uv.timer_dispatch", 1, true), trace)
+       trace:find("in titan.uv.timer_dispatch", 1, true), trace)
 assert(uv.__test_retired_closed_owners() >= 1)
 
 -- The fatal session closed completely; a fresh session still works.

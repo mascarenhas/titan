@@ -249,7 +249,8 @@ runs at run time, returns a first-class value, and resolves the module
 by searching paths at that moment. Titan's `import` is static — the
 imported module's interface is resolved and typechecked at compile
 time, the alias is a compile-time namespace rather than a value, and
-the dependency is (by default) compiled in. In the words of the same
+the dependency is selected from source or from a compiled module at compile
+time. In the words of the same
 discussion: "`require` is our analogue to `dlopen`, while the static
 import is more like `#include`/`-l`. ... Let's just call it `import`,
 make it an evident keyword, and make a clear distinction between the
@@ -341,15 +342,12 @@ developer installation currently makes those paths equal, which is why the
 driver can discover the Titan root from Lua's `package.cpath`; the names do not
 have inherently identical ownership.
 
-The reserved standard modules `coroutine`, `uv`, `timer`, `fs`, `net`, and
-`os` are the exception to the ordinary application paths. Titan resolves their
-canonical short names from `<root>/lib/titan/0.11/titan`. Default lookup uses
-the parent `<root>/lib/titan/0.11` and implicitly prefixes `titan/`; an explicit
-`TITAN_STDLIB_PATH` instead names a direct directory containing short files
-such as `timer.so`. An application source or binary cannot shadow them.
-Standard sources are compiled only by the repository's explicit standard
-build, one root at a time. Thus `local os = import "os"` always means Titan's
-standard `os` module, independently of Lua's own module namespace.
+The standard-library names `coroutine`, `uv`, `timer`, `fs`, `net`, and `os`
+are parser sugar for the qualified module names `titan.coroutine`, `titan.uv`,
+`titan.timer`, `titan.fs`, `titan.net`, and `titan.os`. The qualified names then
+follow the ordinary module lookup rules. Thus `local os = import "os"` means
+Titan's `titan.os` module without colliding with Lua's own `os` library, which
+is not importable as a Titan module.
 
 Lua's `require`, for its part, finds the `.so` through Lua's ordinary
 `package.cpath` — a compiled Titan module is a regular Lua C module
@@ -358,43 +356,43 @@ Titan's installed Lua default puts `<root>/lib/titan/0.11/?.so` before the
 ordinary `lib/lua` templates, and each standalone program ensures that same
 entry is present. A qualified standard name such as `titan.os`
 therefore resolves the single canonical file
-`<root>/lib/titan/0.11/titan/os.so`. Titan imports resolve that very file
-through their implicit `titan/` prefix. Installation creates no parent-level
-or `lib/lua` copy and requires no symbolic- or hard-link alias.
+`<root>/lib/titan/0.11/titan/os.so`. Titan imports resolve that same file by its
+qualified name. Installation creates no parent-level or `lib/lua` copy and
+requires no symbolic- or hard-link alias.
 
 ## Static and dynamic linking
 
-For ordinary application and library modules, the linking policy (set by pull
-request #237) is *static when source is available, dynamic otherwise*:
+Module dependencies are resolved *binary first*:
 
-* If an imported module's `.titan` source can be found in the source
-  tree, it is compiled and **statically linked** into the artifact
-  being built. Building `main` from the example above with
-  `./titanc main` compiles `geom/point.titan` too and produces a
-  `main.so` that contains both modules — there is nothing else to
-  deploy, and cross-module calls are direct C calls.
-* If only a compiled `.so` is found, the compiler recovers the module's
+* If an imported module's compiled `.so` is found on the binary path, the
+  compiler recovers the module's
   interface from type information embedded in the library, and the
   generated code **dlopens** the dependency at run time, finding it on
-  the binary search path. This is what makes distributing binary-only
-  Titan modules possible.
-* Reserved standard imports are a deliberate exception. Even though Titan's
-  own standard-library sources exist in the repository, an application does
-  not compile them into its artifact. It resolves the canonical ABI-qualified
-  binary through the implicit `titan/` default (or the direct
-  `TITAN_STDLIB_PATH` override) and shares that one runtime image with other
-  standard-library consumers in the Lua state.
+  the binary search path. The binary wins even when source with the same module
+  name is visible under `--tree`.
+* If there is no binary, but the imported module's `.titan` source is found, it
+  is compiled and **statically linked** into the artifact being built.
+  Cross-module calls are then direct C calls.
+* A module named explicitly on the `titanc` command line is a build root, so
+  its source is selected before any same-named binary. This is why
+  `titanc titan.uv` rebuilds `titan/uv.titan` while that module's own imports
+  still resolve binary first.
+
+This ordinary ordering is enough to keep the installed standard-library
+binaries from being displaced accidentally by source files in `./titan`.
+Changing `TITAN_PATH` so the installed binary is hidden deliberately selects a
+different module graph.
 
 A binary extension DSO may use that ordering to call bundled libuv directly.
 Its source must both `import "uv"` and `foreign import "uv.h"`, and its link
 must leave `uv_*` unresolved rather than adding `-luv` or a static archive.
 The extension's `<mangled>_types` returns `"uv-provider"` as an optional second
-result because it imports standard `uv`; that metadata records a `dynamic-uv`
+result because it imports `titan.uv`; that metadata records a `dynamic-uv`
 dependency even if a provider was already visible. Reading it also establishes
 or validates canonical `titan/uv.so` and its compiler-process file identity. An
 initial open-stage unresolved `uv_*` error bootstraps that provider globally
 and retries the interface so the compiler can require the marker. A binary
-without it is rejected and must be rebuilt with an explicit standard `uv`
+without it is rejected and must be rebuilt with an explicit `titan.uv`
 import. Generated
 consumers use `loadlibwithuv`, which establishes that provider before mapping
 the extension; unmarked ordinary binary dependencies remain eager and local. A
@@ -426,14 +424,13 @@ function main(args: {string}): integer
 
 the output is a standalone executable instead of shared libraries (the
 declared return type must literally be `integer`). All requested modules and
-ordinary dependencies selected from source are statically bundled into the
-binary. Reserved standard modules remain canonical binary dependencies and are
-loaded through the dedicated standard path, even when their sources are
-visible; this prevents a standalone from embedding a second `coroutine` or
-libuv implementation. After `luaL_openlibs`, the executable parses the
+dependencies selected from source are statically bundled into the binary.
+Qualified standard-library dependencies are normally found as installed
+binaries first and therefore remain dynamic, just like other binary modules.
+After `luaL_openlibs`, the executable parses the
 inherited `package.cpath` for its `/lib/lua/5.5/?.so` entry, adds
-`<root>/lib/titan/0.11/?.so` if it is absent, and initializes the ordinary and
-standard Titan paths from that same root. Deploy those standard DSOs as described under
+`<root>/lib/titan/0.11/?.so` if it is absent, and initializes the Titan module
+path from that same root. Deploy those standard DSOs as described under
 [where modules are found](#where-modules-are-found). `args` is
 Lua-style: `args[0]` is the program name and `args[1]` onward are the
 arguments, so `#args` is the argument count. The integer returned by

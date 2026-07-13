@@ -17,7 +17,9 @@ for index = 5, #arg do
     extra_objects[#extra_objects + 1] = arg[index]
 end
 
-local root, errors = checker.checkimport(modname, driver.defaultloader({}))
+local root, errors = checker.checkimport(modname, driver.defaultloader({}, {
+    source_roots = { [modname] = true },
+}))
 if not root then error(errors, 0) end
 if #errors ~= 0 then error(table.concat(errors, "\n"), 0) end
 

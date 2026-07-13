@@ -126,7 +126,7 @@ end
 local function run_uv_dry_run(mode, host)
     local argv = {
         "make", "--no-print-directory", "-n",
-        "-W", "stdlib/uv.titan",
+        "-W", "titan/uv.titan",
         "LIBUV_MODE=" .. mode,
         "HOST_OS=" .. (host or "Linux"),
         "LIBUV_PKG_CONFIG=" .. PKG_CONFIG,
@@ -142,7 +142,7 @@ end
 local function run_facade_dry_run(mode, module)
     local argv = {
         "make", "--no-print-directory", "-n",
-        "-W", "stdlib/" .. module .. ".titan",
+        "-W", "titan/" .. module .. ".titan",
         "LIBUV_MODE=" .. mode,
         "HOST_OS=Linux",
         "LIBUV_PKG_CONFIG=" .. PKG_CONFIG,
@@ -506,10 +506,9 @@ exit 64
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
         local normalized = output:gsub("%s+", " ")
-        local command_tail = assert(normalized:match(
-            "%-%-lua%-name titan%.uv uv (.+)$"), normalized)
-        assert.falsy(command_tail:find("-X", 1, true), command_tail)
-        assert.falsy(command_tail:find("titan_uv.o", 1, true), command_tail)
+        assert.truthy(normalized:find("titanc titan.uv", 1, true), normalized)
+        assert.falsy(normalized:find("-X", 1, true), normalized)
+        assert.falsy(normalized:find("titan_uv.o", 1, true), normalized)
         assert.truthy(normalized:find([[CC='ccache cc']], 1, true), normalized)
         assert.truthy(normalized:find(
             [[TITAN_EXTRA_CPPFLAGS='-DUSER_CPP=1 -Ilibuv-v1.52.1/include -D_GNU_SOURCE']],
@@ -525,8 +524,8 @@ exit 64
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
         normalized = output:gsub("%s+", " ")
-        command_tail = assert(normalized:match(
-            "%-%-lua%-name titan%.uv uv (.+)$"), normalized)
+        assert.truthy(normalized:find("titanc titan.uv", 1, true), normalized)
+        command_tail = normalized
         assert.falsy(command_tail:find("-X", 1, true), command_tail)
         assert.falsy(command_tail:find("titan_uv.o", 1, true), command_tail)
         assert.falsy(command_tail:find("libuv-build/libuv.a", 1, true),
@@ -556,7 +555,7 @@ exit 64
                 assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                     tostring(code) .. ")")
                 local normalized = output:gsub("%s+", " ")
-                local marker = "--lua-name titan." .. module .. " " .. module
+                local marker = "titanc titan." .. module
                 local marker_start = assert(normalized:find(marker, 1, true),
                     normalized)
                 local prefix = normalized:sub(1, marker_start)

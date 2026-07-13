@@ -254,7 +254,7 @@ source = replace_once(source, [==[    task.operation = owner
 source = replace_once(source, [==[        -- TITAN_UV_PHASE5_CONNECT_SUBMIT
         local status = shim.titan_uvshim_tcp_connect_start(
             owner.handle, tcp_handle, pointer, address_data,
-            address_count, address_index)]==], [==[        -- TITAN_UV_PHASE5_CONNECT_SUBMIT
+            address_index)]==], [==[        -- TITAN_UV_PHASE5_CONNECT_SUBMIT
         local status: ffi.titan_ffi_int = 0 as ffi.titan_ffi_int
         if test_phase5_force_sync_connect then
           test_phase5_force_sync_connect = false
@@ -262,7 +262,7 @@ source = replace_once(source, [==[        -- TITAN_UV_PHASE5_CONNECT_SUBMIT
         else
           status = shim.titan_uvshim_tcp_connect_start(
               owner.handle, tcp_handle, pointer, address_data,
-              address_count, address_index)
+              address_index)
         end
         if (status as integer) >= 0 and
             test_phase5_cancel_inflight_connect then

@@ -8,9 +8,9 @@ coder.generate(modname, ast, static_deps)  --> string (one C translation unit)
 
 where `modname` is the dot-separated module name, `ast` is the module's
 AST *after* `checker.check` has decorated and rewritten it, and
-`static_deps` is the driver's origin map: source imports are `true`, reserved
-binary standards are `"standard"`, detected direct-libuv binary extensions are
-`"dynamic-uv"`, and unmarked ordinary binary imports are absent. `titanc` uses
+`static_deps` is the driver's origin map: source imports are `true`, the
+qualified libuv provider is `"uv-provider"`, detected direct-libuv binary
+extensions are `"dynamic-uv"`, and unmarked binary imports are absent. `titanc` uses
 the recorded direct map for a non-root source dependency and the full recursive
 `driver.dependency_closure` for an explicit root, so metadata includes origins
 reachable through source objects statically linked into that root. The return
@@ -510,15 +510,14 @@ to re-stitch, and skipping it just avoids declaring an unused handle.
 (The converse is not exact: two dynamic deps with no functions called
 would still re-emit their handles.)
 
-### Lua entry aliases, `<prefix>_abi`, and `<prefix>_types`
+### Lua entries, `<prefix>_abi`, and `<prefix>_types`
 
-By default `luaopen_<mangled-modname>` is what `require` finds. A standard
-module is instead compiled with `--lua-name titan.<modname>`, which emits
-`luaopen_titan_<mangled-modname>` while retaining the canonical Titan
-`<prefix>_init`, `<prefix>_abi`, `<prefix>_types`, registry identity, and native
-symbol prefix. This lets Titan `import "os"` and Lua `require "titan.os"`
-initialize the same canonical module without defining `luaopen_os` or replacing
-Lua's own `os` library. In either case the Lua entry calls `_init` and pushes
+`luaopen_<mangled-modname>` is what `require` finds. Standard-library short
+imports are desugared before module resolution, so Titan `import "os"` compiles
+as an import of `titan.os`; its ordinary qualified module name naturally emits
+`luaopen_titan_os`, the same entry used by Lua `require "titan.os"`, without
+defining `luaopen_os` or replacing Lua's own `os` library. The Lua entry calls
+`_init` and pushes
 the module `Udata` itself — so **`require` returns a userdata**, not a table,
 with **no separate module table at all**. Its members —
 exported functions, exported variables, and one static-namespace table
@@ -544,8 +543,8 @@ int counter_types(lua_State* L) {
 The literal is `types.serialize(ast._type)`: a Lua *expression* that
 rebuilds the module's type when evaluated with `types.lua`'s constructors
 as its environment. `<prefix>_types` optionally pushes a second result,
-`"uv-provider"`, when the module's origin map contains either the canonical
-standard `uv` dependency or a `"dynamic-uv"` dependency. That marker propagates
+`"uv-provider"`, when the module's origin map contains either the qualified
+`titan.uv` provider dependency or a `"dynamic-uv"` dependency. That marker propagates
 the provider requirement through separately compiled modules and, because root
 code generation receives the full source dependency closure, through statically
 linked source dependencies embedded in the root DSO.
@@ -559,11 +558,11 @@ whose source is gone. The optional second result classifies the binary as
 visible. Reading it establishes or validates the canonical provider and records
 its compiler-process file identity. If eager `uv_*` relocation prevents the
 initial ABI load, an open-stage unresolved-symbol diagnostic bootstraps
-canonical `uv.so` and the driver retries before requiring the marker. A binary
-without it is rejected and must be rebuilt with an explicit standard `uv`
-import. Ordinary dependencies use static
-linkage when source wins lookup and dynamic linkage otherwise; reserved
-standard identities always use their pinned canonical binary. The tests'
+`titan/uv.so` and the driver retries before requiring the marker. A binary
+without it is rejected and must be rebuilt with an explicit `titan.uv`
+import. Dependencies use dynamic linkage when a binary wins lookup and static
+linkage when no binary exists and source is selected. Explicit command-line
+roots are the source-first exception. The tests'
 in-memory `tableloader` exercises the same serialization round-trip. See
 [driver and toolchain](driver.md).
 
@@ -582,23 +581,13 @@ extern Udata *dep_init(lua_State *L);
 /* in _init: */ { Udata *_m = dep_init(L); setuvalue(L, &_mod->uv[1].uv, _m); }
 ```
 
-**Reserved standard** (`static_deps[modname] == "standard"`): the dependency is
-binary-only even when its source is visible. Its imported functions use the
-same function-pointer wiring as an ordinary dynamic dependency, but generated
-initialization calls `loadstdlib(L, "dep.so")`. That loader consults only the
-ABI-qualified installed parent `<root>/lib/titan/0.11` and implicitly inserts
-`titan/`, reaching the canonical `titan/dep.so`. An explicit
-`TITAN_STDLIB_PATH` is instead a direct directory containing `dep.so`. The
-loader never searches `.` or ordinary `TITAN_PATH`, so an application-local
-`uv.so` cannot capture a standard `fs` module's dependency.
-
 **Direct-libuv dynamic** (`static_deps[modname] == "dynamic-uv"`): interface
 recovery read the dependency's `"uv-provider"` metadata marker and established
-or identity-checked the canonical provider. If an eager `uv_*` relocation
+or identity-checked the qualified `titan.uv` provider. If an eager `uv_*` relocation
 prevented that first interface load, the driver established the provider and
 retried as a bootstrap fallback. Wiring is otherwise
 the same as an ordinary dynamic dependency, but generated initialization calls
-`loadlibwithuv(L, "dep.so")`. That helper loads canonical `uv.so` globally
+`loadlibwithuv(L, "dep.so")`. That helper loads `titan/uv.so` globally
 before mapping the extension, so eager relocations and constructors are safe as
 well as ordinary calls.
 

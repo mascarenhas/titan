@@ -37,6 +37,24 @@ for tag, cons in pairs(ast) do
     defs[tag] = cons
 end
 
+-- Titan's standard library has qualified module names so its Lua-facing names
+-- do not collide with Lua's own libraries.  Keep Titan source convenient by
+-- desugaring the short standard-library imports before module resolution sees
+-- them.
+local standard_imports = {
+    coroutine = "titan.coroutine",
+    uv = "titan.uv",
+    timer = "titan.timer",
+    fs = "titan.fs",
+    net = "titan.net",
+    os = "titan.os",
+}
+
+function defs.importdecl(loc, localname, modname)
+    return ast.TopLevelImport(
+        loc, localname, standard_imports[modname] or modname)
+end
+
 function defs.get_loc(s, pos)
     return true, location.from_pos(THIS_FILENAME, s, pos)
 end
@@ -485,7 +503,7 @@ local grammar = re.compile([[
     import          <- (P  LOCAL NAME^NameImport ASSIGN^AssignImport
                           !FOREIGN IMPORT^ImportImport
                           (LPAREN STRINGLIT^StringLParImport RPAREN^RParImport /
-                          STRINGLIT^StringImport))               -> TopLevelImport
+                          STRINGLIT^StringImport))               -> importdecl
 
     foreign         <- (P  LOCAL NAME^NameImport ASSIGN^AssignImport
                            FOREIGN IMPORT^ImportImport

@@ -502,10 +502,6 @@ static void push_default_titan_path(lua_State *L) {
     lua_remove(L, -2);
 }
 
-static void push_default_stdlib_path(lua_State *L) {
-    push_root_path(L, "/lib/titan/" TITAN_VER);
-}
-
 static void pushpath (lua_State *L) {
     lua_pushliteral(L, TITAN_PATH_KEY);
     lua_rawget(L, LUA_REGISTRYINDEX);
@@ -534,38 +530,6 @@ static void pushpath (lua_State *L) {
         lua_pushvalue(L, -2);
         lua_rawset(L, LUA_REGISTRYINDEX);
     }
-}
-
-static void pushstdlibpath (lua_State *L) {
-    lua_pushliteral(L, TITAN_STDLIB_PATH_KEY);
-    lua_rawget(L, LUA_REGISTRYINDEX);
-    if(lua_isnil(L, -1)) {
-        const char *path;
-        int implicit_prefix;
-        lua_pop(L, 1);
-        path = getenv(TITAN_STDLIB_PATH_VAR);
-        implicit_prefix = path == NULL;
-        if(path == NULL) {
-            push_default_stdlib_path(L);
-        } else {
-            lua_pushstring(L, path);
-        }
-        lua_pushliteral(L, TITAN_STDLIB_PATH_KEY);
-        lua_pushvalue(L, -2);
-        lua_rawset(L, LUA_REGISTRYINDEX);
-        lua_pushliteral(L, TITAN_STDLIB_IMPLICIT_PREFIX_KEY);
-        lua_pushboolean(L, implicit_prefix);
-        lua_rawset(L, LUA_REGISTRYINDEX);
-    }
-}
-
-static int stdlib_uses_implicit_prefix(lua_State *L) {
-    int implicit_prefix;
-    lua_pushliteral(L, TITAN_STDLIB_IMPLICIT_PREFIX_KEY);
-    lua_rawget(L, LUA_REGISTRYINDEX);
-    implicit_prefix = lua_toboolean(L, -1);
-    lua_pop(L, 1);
-    return implicit_prefix;
 }
 
 static int path_has_template(const char *path, size_t path_len,
@@ -615,8 +579,6 @@ void titan_init_paths(lua_State *L) {
     add_titan_package_cpath(L);
     pushpath(L);
     lua_pop(L, 1);
-    pushstdlibpath(L);
-    lua_pop(L, 1);
     lua_settop(L, top);
 }
 
@@ -651,19 +613,10 @@ static void pushlibs(lua_State *L) {
     }
 }
 
-static void pushlibkey(lua_State *L, const char *file, int standard) {
-    if(standard) {
-        lua_pushfstring(L, "stdlib:%s", file);
-    } else {
-        lua_pushstring(L, file);
-    }
-}
-
-static void *loadlibfrompath(lua_State *L, const char *file, int standard) {
-    int implicit_stdlib_prefix = 0;
+static void *loadlibfrompath(lua_State *L, const char *file) {
     int flags = RTLD_NOW;
-    if(standard && strcmp(file, "uv.so") == 0) {
-        /* uv.so is the single bundled-libuv provider. Direct-libuv extension
+    if(strcmp(file, "titan/uv.so") == 0) {
+        /* titan/uv.so is the single bundled-libuv provider. Direct-libuv extension
         ** dependencies use loadlibwithuv, which establishes this global image
         ** before their ordinary eager/local load. */
         flags |= RTLD_GLOBAL;
@@ -671,7 +624,7 @@ static void *loadlibfrompath(lua_State *L, const char *file, int standard) {
         flags |= RTLD_LOCAL;
     }
     pushlibs(L);
-    pushlibkey(L, file, standard);
+    lua_pushstring(L, file);
     lua_rawget(L, -2); // try to get lib
     if(!lua_isnil(L, -1)) {
         void *lib = lua_touserdata(L, -1);
@@ -679,21 +632,11 @@ static void *loadlibfrompath(lua_State *L, const char *file, int standard) {
         return lib;
     } else {
         lua_pop(L, 1); // pop nil
-        if(standard) {
-            pushstdlibpath(L);
-            implicit_stdlib_prefix = stdlib_uses_implicit_prefix(L);
-        } else {
-            pushpath(L);
-        }
+        pushpath(L);
         const char *path = lua_tostring(L, -1);
         while((path = pushnextdir(L, path)) != NULL) {
             const char *dir = lua_tostring(L, -1);
-            if(implicit_stdlib_prefix) {
-                lua_pushfstring(L, "%s" TITAN_PATH_SEP "titan"
-                    TITAN_PATH_SEP "%s", dir, file);
-            } else {
-                lua_pushfstring(L, "%s" TITAN_PATH_SEP "%s", dir, file);
-            }
+            lua_pushfstring(L, "%s" TITAN_PATH_SEP "%s", dir, file);
             const char *filename = lua_tostring(L, -1);
             void *lib = dlopen(filename, flags);
             if(lib != NULL) {
@@ -703,7 +646,7 @@ static void *loadlibfrompath(lua_State *L, const char *file, int standard) {
                 ** path above loads nothing, so it must NOT invalidate). */
                 titan_invalidate_backtrace_state(L);
                 lua_pop(L, 3); // pop path, filename, and dir
-                pushlibkey(L, file, standard);
+                lua_pushstring(L, file);
                 lua_pushlightuserdata(L, lib);
                 lua_rawset(L, -3); // add to libs table
                 lua_pop(L, 1); // pop libs table
@@ -713,19 +656,14 @@ static void *loadlibfrompath(lua_State *L, const char *file, int standard) {
         }
         lua_pop(L, 2); // pop path and libs table
         const char *err = dlerror();
-        luaL_error(L, "cannot load %s '%s': %s",
-            standard ? "standard module" : "module", file,
+        luaL_error(L, "cannot load module '%s': %s", file,
             err != NULL ? err : "search path is empty");
         return NULL;
     }
 }
 
 void *loadlib (lua_State *L, const char *file) {
-    return loadlibfrompath(L, file, 0);
-}
-
-void *loadstdlib (lua_State *L, const char *file) {
-    return loadlibfrompath(L, file, 1);
+    return loadlibfrompath(L, file);
 }
 
 void *loadlibwithuv (lua_State *L, const char *file) {
@@ -734,7 +672,7 @@ void *loadlibwithuv (lua_State *L, const char *file) {
     ** reach that metadata in a clean process). Establish the complete
     ** provider before mapping the image, including for eager relocations and
     ** constructors. */
-    loadstdlib(L, "uv.so");
+    loadlib(L, "titan/uv.so");
     return loadlib(L, file);
 }
 

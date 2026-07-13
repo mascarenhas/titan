@@ -43,22 +43,20 @@ local function compiler_command()
 end
 
 local function build_os(workspace)
-    write(workspace .. "/stdlib/os.titan",
-        phase2.read(M.repo .. "/stdlib/os.titan"))
+    write(workspace .. "/titan/os.titan",
+        phase2.read(M.repo .. "/titan/os.titan"))
     local cflags = os.getenv("TITAN_TEST_EXTRA_CFLAGS") or ""
     local ldflags = os.getenv("TITAN_TEST_EXTRA_LDFLAGS") or ""
     local command = table.concat({
-        "env CCACHE_DISABLE=1", "TITAN_PATH_0_11=", "TITAN_PATH=",
-        "TITAN_STDLIB_PATH=" .. quote(workspace .. "/titan"),
+        "env CCACHE_DISABLE=1",
+        "TITAN_PATH_0_11=" .. quote(workspace), "TITAN_PATH=",
         "TITAN_EXTRA_CPPFLAGS=''",
         "TITAN_EXTRA_CFLAGS=" .. quote(cflags),
         "TITAN_EXTRA_LDFLAGS=" .. quote(ldflags),
-        compiler_command(), "--stdlib-build --tree",
-        quote(workspace .. "/stdlib"), "--lua-name titan.os os",
+        compiler_command(), "--tree", quote(workspace), "titan.os",
     }, " ")
     local ok, _, output = phase2.run(command, workspace)
     assert.truthy(ok, output)
-    phase2.move_compiled_module(workspace, "os")
 end
 
 local function build_process_child(workspace)

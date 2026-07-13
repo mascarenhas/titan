@@ -140,19 +140,20 @@ rebuilds the libuv-facing objects without requiring a manual clean.
 
 In bundled mode, `titan/uv.so` is the sole complete libuv provider. A compiled
 Titan extension DSO that directly `foreign import`s `uv.h` must also import the
-standard `uv` module and leave its `uv_*` function references unresolved; do
+`titan.uv` module (normally written `import "uv"`) and leave its `uv_*`
+function references unresolved; do
 not link it with `-luv` or the private bundled archive. During compiled-interface
 recovery, `<mangled>_types` returns a second `"uv-provider"` result when the
-module has standard `uv` or a `"dynamic-uv"` dependency; that metadata marks
+module has a `titan.uv` or `"dynamic-uv"` dependency; that metadata marks
 the dependency `"dynamic-uv"` even if libuv was already visible. Reading the marker
 also establishes or validates the canonical provider and records its file
 identity for the compiler process. If the first interface open instead fails
 on an unresolved `uv_*`, the compiler uses that open-stage diagnostic to
 bootstrap the canonical provider, retries, and then requires the marker; a
 binary that still omits it is rejected with instructions to rebuild with an
-explicit standard `uv` import. Generated
+explicit `titan.uv` import. Generated
 Titan consumers call `loadlibwithuv`, which
-establishes canonical `uv.so` before mapping the extension itself.
+establishes canonical `titan/uv.so` before mapping the extension itself.
 Ordinary binary dependencies without that marker retain eager, local loading.
 Because the provider precedes the extension's `dlopen`, regular calls, data and
 function-address relocations, and native constructors are all supported. For
@@ -173,11 +174,12 @@ local extension = require "my.libuv_extension"
 Titan's patched Lua `loadlib.c` recognizes exactly the
 `luaopen_titan_uv` entry and opens that DSO globally on its first load; every
 other Lua C module keeps Lua's ordinary local-loading behavior. Thus the first
-`require` above establishes the same provider on Linux and macOS. `uv.so` does
+`require` above establishes the same provider on Linux and macOS.
+`titan/uv.so` does
 not reopen or promote itself.
 
 A long-lived compiler process remembers the canonical provider's resolved file
-identity and refuses to switch to a different standard-library `uv.so` after
+identity and refuses to switch to a different `titan/uv.so` after
 the first provider has been loaded.
 
 System mode may instead link the extension against the same
@@ -199,9 +201,9 @@ second remains the root-discovery anchor. In the currently supported layout
 `/lib/lua/5.5/?.so` to recover its Titan SDK/rocks root.
 During the source rock's post-install build, the internal `TITAN_ROCKS_ROOT`
 override identifies `ROCKS_TREE` directly. The recovered Titan root supplies
-the staged Lua sources and archives, ordinary modules under
-`$ROCKS_TREE/lib/titan/0.11/`, and reserved standard modules under
-`$ROCKS_TREE/lib/titan/0.11/titan/`. This discovery rule implements the
+the staged Lua sources and archives and compiled modules under
+`$ROCKS_TREE/lib/titan/0.11/`; the standard library's qualified `titan.*`
+modules consequently live below its `titan/` subdirectory. This discovery rule implements the
 supported equal-root layout; it does not redefine the separately owned
 `PREFIX` and `ROCKS_TREE` as one concept.
 
@@ -211,11 +213,10 @@ Lua therefore resolve `titan.<name>` to the same canonical file at
 `$ROCKS_TREE/lib/titan/0.11/titan/<name>.so`; there are no Lua-facing or
 parent-level compatibility copies.
 
-`TITAN_PATH_0_11` (or the unversioned `TITAN_PATH`) overrides the ordinary
-Titan binary search path. By default a standard import uses the
-`$ROCKS_TREE/lib/titan/0.11` parent with an implicit `titan/` prefix, reaching
-the qualified directory shown above. An explicit `TITAN_STDLIB_PATH` instead names
-a direct directory containing short files such as `timer.so`. In a source
+`TITAN_PATH_0_11` (or the unversioned `TITAN_PATH`) overrides the Titan binary
+search path. A short standard-library import is desugared before resolution
+(`import "timer"` becomes `import "titan.timer"`), so ordinary qualified
+lookup below `$ROCKS_TREE/lib/titan/0.11` reaches the canonical file. In a source
 checkout, `--lua` can select another complete Lua source/build tree for an
 individual compiler invocation. An installed compiler rejects `--lua` because
 its headers, `liblua.a`, and `libtitan.a` are one matched SDK. These overrides
@@ -251,11 +252,12 @@ binary path, a semicolon-separated list of paths. By default this is the
 current directory plus `<root>/lib/titan/0.11`, where `<root>` is recovered
 from `package.cpath`; override it with `TITAN_PATH_0_11` or `TITAN_PATH`.
 
-The reserved standard modules (`coroutine`, `uv`, `timer`, `fs`, `net`, and
-`os`) cannot be shadowed through `--tree` or `TITAN_PATH`. Installed lookup
-uses `<root>/lib/titan/0.11` with an implicit `titan/` prefix; an explicit
-`TITAN_STDLIB_PATH` is a direct-directory override. Titan code imports them by
-their short names, while Lua uses the
+The standard-library short names (`coroutine`, `uv`, `timer`, `fs`, `net`, and
+`os`) are parser sugar for the corresponding `titan.*` module names. Module
+resolution checks binary dependencies before source, so an ordinary
+`./titan/uv.titan` cannot displace the installed `titan/uv.so`; someone who
+explicitly changes `TITAN_PATH` to hide that binary is choosing a different
+module installation. Titan code uses the short imports, while Lua uses the
 qualified names `require "titan.coroutine"`, `require "titan.uv"`,
 `require "titan.timer"`, `require "titan.fs"`, `require "titan.net"`, and
 `require "titan.os"`. Lua's own `coroutine` and `os` modules remain unchanged.
@@ -264,9 +266,9 @@ The currently implemented async chain is `titan/coroutine.so -> titan/uv.so ->
 titan/{timer.so, fs.so, net.so, os.so}`. Only the canonical `titan/uv.so`
 consumes libuv directly: bundled mode links its private archive there, while
 system mode links the pkg-config-selected shared library. The higher modules
-dynamically import that standard image instead of linking libuv themselves.
-The standard build compiles all six canonical modules with their qualified
-`titan.*` Lua entry points in dependency order.
+dynamically import that qualified image instead of linking libuv themselves.
+The standard build runs ordinary commands such as `titanc titan.uv`, producing
+the qualified Lua entry points in dependency order.
 
 From Titan, importing `timer` is enough to enable the standalone async
 bootstrap:
@@ -325,19 +327,16 @@ your compilation as a native binary:
 
 * if one of your Titan modules has a `main` function, with signature
   `function({string}):integer`, then `titanc` will bundle all modules
-  given in the command-line, along with all ordinary dependencies where
-  source code was available, as a stand-alone executable program. Reserved
-  standard modules remain canonical runtime images loaded from the Titan
-  standard-library path.
+  given in the command-line, along with every dependency that module resolution
+  selected from source, as a stand-alone executable program. Dependencies
+  selected from compiled modules remain dynamically loaded.
 * Otherwise, it will compile each module into a shared library that you
   can `import` from Titan as well as `require` from Lua, and call any
   exported functions/access exported variables. The generated `.c` and
   `.o` files are written next to the `.titan` source; linked `.so` files
   are written relative to the directory where `titanc` runs. For each
-  generated module, any ordinary transitive import is statically linked if
-  source code was found; ordinary dependencies that were only available as a
-  shared library will be dynamically loaded. Reserved standard imports use
-  their canonical shared images instead.
+  generated module, any transitive import selected from source is statically
+  linked; dependencies selected from shared libraries are dynamically loaded.
 
 # Running the test suite
 
@@ -409,8 +408,6 @@ when it is no longer needed.
         --tree <path>                     Path to the source tree for Titan modules (default '.').
         -l, --link <lib1,lib2>            Add libraries to the final link.
         -X, --extra-object <object...>     Add object/archive inputs to the final link.
-        --stdlib-build                    Build one reserved standard source root (Makefile use).
-        --lua-name <qualified.name>        Export a distinct Lua require entry for one root.
         -h, --help                        Show this help message and exit.
 
 `CC` selects the compiler. `TITAN_EXTRA_CPPFLAGS` carries append-only `-I`/`-D`

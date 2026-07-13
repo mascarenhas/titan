@@ -45,7 +45,7 @@ while IFS= read -r test_file; do
             # insulation and compiler modules loaded by earlier specs.
             compiler_unit_tests+=("$test_file")
             ;;
-        spec/coder/coroutine_spec.lua | \
+        spec/stdlib/coroutine_spec.lua | \
         spec/libuv_build_spec.lua | \
         spec/libuv_shim_spec.lua | \
         spec/minicoro_spec.lua | \
@@ -54,18 +54,13 @@ while IFS= read -r test_file; do
             # them out of the two private-workspace workers below.
             library_serial_tests+=("$test_file")
             ;;
-        spec/checker/uv_spec.lua | \
-        spec/checker/timer_spec.lua | \
-        spec/checker/fs_spec.lua | \
-        spec/coder/uv*_spec.lua | \
-        spec/coder/timer*_spec.lua | \
-        spec/coder/fs*_spec.lua)
+        spec/stdlib/uv*_spec.lua | \
+        spec/stdlib/timer*_spec.lua | \
+        spec/stdlib/fs*_spec.lua)
             library_uv_fs_tests+=("$test_file")
             ;;
-        spec/checker/net_spec.lua | \
-        spec/checker/os_spec.lua | \
-        spec/coder/net*_spec.lua | \
-        spec/coder/os*_spec.lua)
+        spec/stdlib/net*_spec.lua | \
+        spec/stdlib/os*_spec.lua)
             library_net_os_tests+=("$test_file")
             ;;
         *)

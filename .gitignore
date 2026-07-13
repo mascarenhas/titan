@@ -26,7 +26,7 @@
 /lua_modules
 /.luarocks
 
-/stdlib/*.c
+/titan/*.c
 
 # Native runtime command-line configuration stamps
 /titan-runtime/.titan-*-build-config

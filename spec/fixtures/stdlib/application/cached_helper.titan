@@ -1,5 +1,0 @@
-local standard_os = import "os"
-
-function bump(): integer
-    return standard_os.bump()
-end

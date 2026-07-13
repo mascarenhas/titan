@@ -45,8 +45,8 @@ function M.variant_workspace(transformer, fs_transformer)
     local root = workspace .. "/data"
     assert.truthy(lfs.mkdir(root))
 
-    -- Build fs only after the transformed uv DSO exists. Keeping uv.titan out
-    -- of src forces this through the private compiled-module boundary.
+    -- Build fs only after the transformed uv DSO exists. Dependencies use the
+    -- private compiled-module boundary even when their sources are visible.
     local raw_lua = phase2.host_lua()
     if fs_transformer then
         local transform = fs_transformer
@@ -55,13 +55,13 @@ function M.variant_workspace(transformer, fs_transformer)
         end
         local ok, _, output = phase2.run(table.concat({
             quote(raw_lua), quote(transform),
-            quote(M.repo .. "/stdlib/fs.titan"),
-            quote(workspace .. "/stdlib/fs.titan"),
+            quote(M.repo .. "/titan/fs.titan"),
+            quote(workspace .. "/titan/fs.titan"),
         }, " "), workspace)
         assert.truthy(ok, output)
     else
-        write(workspace .. "/stdlib/fs.titan",
-            phase2.read(M.repo .. "/stdlib/fs.titan"))
+        write(workspace .. "/titan/fs.titan",
+            phase2.read(M.repo .. "/titan/fs.titan"))
     end
     local variant_cflags = os.getenv("TITAN_TEST_EXTRA_CFLAGS") or ""
     local variant_ldflags = os.getenv("TITAN_TEST_EXTRA_LDFLAGS") or ""
@@ -69,17 +69,15 @@ function M.variant_workspace(transformer, fs_transformer)
         "package.path=\"" .. M.repo .. "/?.lua;" .. M.repo ..
         "/?/init.lua;\" .. package.path") .. " " .. quote(M.repo .. "/titanc")
     local command = table.concat({
-        "env CCACHE_DISABLE=1", "TITAN_PATH_0_11=", "TITAN_PATH=",
-        "TITAN_STDLIB_PATH=" .. quote(workspace .. "/titan"),
+        "env CCACHE_DISABLE=1",
+        "TITAN_PATH_0_11=" .. quote(workspace), "TITAN_PATH=",
         "TITAN_EXTRA_CPPFLAGS=''",
         "TITAN_EXTRA_CFLAGS=" .. quote(variant_cflags),
         "TITAN_EXTRA_LDFLAGS=" .. quote(variant_ldflags), compiler,
-        "--stdlib-build --tree", quote(workspace .. "/stdlib"),
-        "--lua-name titan.fs fs",
+        "--tree", quote(workspace), "titan.fs",
     }, " ")
     local ok, _, output = phase2.run(command, workspace)
     assert.truthy(ok, output)
-    phase2.move_compiled_module(workspace, "fs")
     return workspace, root
 end
 

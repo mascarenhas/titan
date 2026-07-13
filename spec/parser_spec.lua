@@ -1184,6 +1184,29 @@ describe("Titan parser", function()
         })
     end)
 
+    it("desugars standard-library short imports to qualified modules",
+       function()
+        local names = { "coroutine", "uv", "timer", "fs", "net", "os" }
+        for _, name in ipairs(names) do
+            assert_program_ast(
+                'local library = import "' .. name .. '"', {
+                    {
+                        _tag = "Ast.TopLevelImport",
+                        localname = "library",
+                        modname = "titan." .. name,
+                    },
+                })
+            assert_program_ast(
+                'local library = import "titan.' .. name .. '"', {
+                    {
+                        _tag = "Ast.TopLevelImport",
+                        localname = "library",
+                        modname = "titan." .. name,
+                    },
+                })
+        end
+    end)
+
     it("can parse multiple assignment", function ()
         assert_statements_ast([[
             x, foo.bar, z[2] = 20, 30, "foo"

@@ -61,8 +61,9 @@ the string `"Titan module counter"`, and `setmetatable` on it fails.
 
 ### Qualified standard-library names
 
-Titan's standard modules keep short canonical identities for Titan imports but
-use `titan.*` names at the Lua boundary. For example:
+Titan's standard modules have qualified `titan.*` identities. The parser
+desugars their convenient short Titan imports to those qualified names, while
+Lua requires the qualified names directly. For example:
 
 ```lua
 local lua_os = require "os"          -- Lua's standard table
@@ -79,8 +80,8 @@ names resolve to qualified standard-module files under
 `<root>/lib/titan/0.11/titan/`. Titan's installed Lua has
 `<root>/lib/titan/0.11/?.so` before its ordinary `lib/lua` entries in the
 default `package.cpath`, and standalone Titan programs ensure the same template
-is present. A Lua require and a Titan short-name import therefore open the same
-canonical DSO. The installation does not create parent-level or `lib/lua`
+is present. A Lua require and a desugared Titan short-name import therefore
+open the same DSO. The installation does not create parent-level or `lib/lua`
 copies, symbolic links, or hard links.
 
 ## How values map between the two languages

@@ -1,5 +1,0 @@
--- An ordinary fs-only application must not use this application source for
--- fs.so's pinned binary dependency on the canonical standard uv image.
-function impostor(): string
-  return "not titan.uv"
-end

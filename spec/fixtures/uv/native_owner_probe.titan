@@ -255,12 +255,8 @@ local function allocate_buffer(length: integer): Buffer
   local memory = lua.lua_newuserdatauv(L, libuv.uv_buf_t.sizeof, 0)
   local storage = ffi.lua_totvalue(L, -1)
   local handle = memory as *libuv.uv_buf_t
-  local status = shim.titan_uvshim_buf_init(
+  shim.titan_uvshim_buf_init(
       handle as ffi.titan_ffi_void_ptr, bytes.data, length)
-  if (status as integer) < 0 then
-    lua.lua_settop(L, top)
-    raise "buffer length is not representable by libuv"
-  end
   local buffer = Buffer.new(handle, storage, bytes)
   lua.lua_settop(L, top)
   return buffer

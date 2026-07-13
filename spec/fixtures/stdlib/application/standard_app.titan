@@ -1,8 +1,0 @@
-local standard_os = import "os"
-
-function main(args: {string}): integer
-    if standard_os.bump() == 101 then
-        return 0
-    end
-    return 1
-end

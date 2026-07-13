@@ -7379,7 +7379,7 @@ int $TYPESNAME(lua_State* L) {
 -- Generates the code for importing the module, and storing it
 -- in the corresponding local state slot
 local function import_module(loadmods, initmods, sigs, mprefixes,
-                             dynamic, standard, needs_uv_provider, node)
+                             dynamic, needs_uv_provider, node)
     local modname = node.modname
     local upvalue = node._upvalue
     local mprefix = mangle_qn(modname) .. "_"
@@ -7393,8 +7393,7 @@ local function import_module(loadmods, initmods, sigs, mprefixes,
             HANDLE = mprefix .. "handle",
             FILE = file,
             ABI = mprefix .. "abi",
-            LOAD = standard and "loadstdlib" or
-                (needs_uv_provider and "loadlibwithuv" or "loadlib"),
+            LOAD = needs_uv_provider and "loadlibwithuv" or "loadlib",
         }))
         table.insert(initmods, render([[
             {
@@ -7446,7 +7445,6 @@ local function init_data_from_other_modules(tlcontext, includes, loadmods,
     for _, func in pairs(tlcontext.functions) do
         local origin = static_deps[func.module]
         local is_dynamic = origin ~= true
-        local is_standard = origin == "standard"
         local needs_uv_provider = origin == "dynamic-uv"
         local storage_class = is_dynamic and "static" or "extern"
         local fname = func.mangled
@@ -7464,8 +7462,7 @@ local function init_data_from_other_modules(tlcontext, includes, loadmods,
                     HANDLE = mprefix .. "handle",
                     FILE = file,
                     ABI = mprefix .. "abi",
-                    LOAD = is_standard and "loadstdlib" or
-                        (needs_uv_provider and "loadlibwithuv" or "loadlib"),
+                    LOAD = needs_uv_provider and "loadlibwithuv" or "loadlib",
                 }))
             end
             table.insert(loadmods, render([[
@@ -7739,8 +7736,7 @@ local function allocate_upvalues(tlcontext, ast)
     end
 end
 
-function coder.generate(modname, ast, static_deps, options)
-    options = options or {}
+function coder.generate(modname, ast, static_deps)
     local tlcontext = {
         module = modname,
         prefix = mangle_qn(modname) .. "_",
@@ -7817,8 +7813,7 @@ function coder.generate(modname, ast, static_deps, options)
             if tag == "Ast.TopLevelImport" then
                 local origin = static_deps[node.modname]
                 import_module(loadmods, initmods, sigs, mprefixes,
-                    origin ~= true, origin == "standard",
-                    origin == "dynamic-uv", node)
+                    origin ~= true, origin == "dynamic-uv", node)
             elseif tag == "Ast.TopLevelForeignImport" then
                 local include
                 local include_name = node.headername
@@ -8103,13 +8098,11 @@ function coder.generate(modname, ast, static_deps, options)
         table.insert(initvars, "L->top.p = _base;")
     end
 
-    local needs_uv_provider = static_deps.uv == "standard"
-    if not needs_uv_provider then
-        for _, origin in pairs(static_deps) do
-            if origin == "dynamic-uv" then
-                needs_uv_provider = true
-                break
-            end
+    local needs_uv_provider = false
+    for _, origin in pairs(static_deps) do
+        if origin == "uv-provider" or origin == "dynamic-uv" then
+            needs_uv_provider = true
+            break
         end
     end
     table.insert(code, render(modtypes, {
@@ -8217,7 +8210,7 @@ function coder.generate(modname, ast, static_deps, options)
     }))
 
     table.insert(code, render(postamble, {
-        LUAOPEN_NAME = 'luaopen_' .. mangle_qn(options.lua_name or modname),
+        LUAOPEN_NAME = 'luaopen_' .. mangle_qn(modname),
         INITNAME = tlcontext.prefix .. 'init',
     }))
 

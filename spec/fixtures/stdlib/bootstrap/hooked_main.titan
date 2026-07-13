@@ -1,5 +1,0 @@
-local provider = import "provider"
-
-function main(args: {string}): integer
-    return 7
-end

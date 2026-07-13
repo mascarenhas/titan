@@ -95,16 +95,16 @@ run_mode_smoke() {
     local mode=$1
 
     if [[ $mode == system ]]; then
-        env TITAN_STDLIB_PATH="$PWD/titan" LUA_CPATH="$PWD/?.so;;" \
+        env TITAN_PATH_0_11="$PWD" LUA_CPATH="$PWD/?.so;;" \
             "$LUA" -e 'local uv = require "titan.uv"; local timer = require "titan.timer"; local fs = require "titan.fs"; local net = require "titan.net"; local path = os.tmpname(); os.remove(path); local task = uv.run(function() timer.sleep(0); fs.write_file(path, "system\0uv"); assert(fs.read_file(path) == "system\0uv"); fs.unlink(path); return true end); uv.loop(); assert(task:join()); assert(type(uv.version()) == "string"); assert(type(net) == "userdata")'
     else
-        env TITAN_STDLIB_PATH="$PWD/titan" LUA_CPATH="$PWD/?.so;;" \
+        env TITAN_PATH_0_11="$PWD" LUA_CPATH="$PWD/?.so;;" \
             "$LUA" -e 'local uv = require "titan.uv"; local timer = require "titan.timer"; local fs = require "titan.fs"; local net = require "titan.net"; local path = os.tmpname(); os.remove(path); local task = uv.run(function() timer.yield(); fs.write_file(path, "bundled"); local data = fs.read_file(path); fs.unlink(path); return data end); uv.loop(); assert(task:join() == "bundled"); assert(type(net) == "userdata")'
     fi
 
-    env TITAN_STDLIB_PATH="$PWD/titan" LUA_CPATH="$PWD/?.so;;" \
+    env TITAN_PATH_0_11="$PWD" LUA_CPATH="$PWD/?.so;;" \
         "$LUA" spec/fixtures/libuv/net_production_smoke.lua "$mode"
-    env TITAN_STDLIB_PATH="$PWD/titan" LUA_CPATH="$PWD/?.so;;" \
+    env TITAN_PATH_0_11="$PWD" LUA_CPATH="$PWD/?.so;;" \
         "$LUA" spec/fixtures/libuv/os_production_smoke.lua "$mode" \
         "$TITAN_PROCESS_SMOKE_CHILD"
 }

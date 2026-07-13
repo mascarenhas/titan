@@ -130,7 +130,7 @@ static void test_dispatch(lua_State *L, Udata *_mod, CClosure *_fn,
     assert((uint64_t)count <= SIZE_MAX / sizeof(*addresses));
     addresses = calloc((size_t)count, sizeof(*addresses));
     assert(addresses != NULL);
-    assert(titan_uvshim_addrinfo_copy(pointer, addresses, count) == 0);
+    titan_uvshim_addrinfo_copy(pointer, addresses);
     free(addresses);
     titan_uvshim_addrinfo_free(pointer);
     dns_dispatches++;
@@ -360,9 +360,8 @@ static void test_signal_mapping(void) {
       "hup", "int", "quit", "kill", "term", "usr1", "usr2"};
   size_t i;
 
-  assert(titan_uvshim_signal_number(NULL) == UV_EINVAL);
-  assert(titan_uvshim_signal_number("") == UV_EINVAL);
-  assert(titan_uvshim_signal_number("USR1") == UV_EINVAL);
+  assert(titan_uvshim_signal_number("") == 0);
+  assert(titan_uvshim_signal_number("USR1") == 0);
   assert(titan_uvshim_signal_name(-1) == NULL);
   for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
     int signum = titan_uvshim_signal_number(names[i]);
@@ -386,18 +385,15 @@ static void test_buffers(void) {
     assert(!titan_uvshim_allocation_length_is_valid(
         (int64_t)maximum_userdata + 1));
 
-  assert(titan_uvshim_buf_init(&buf, bytes, sizeof(bytes)) == 0);
+  titan_uvshim_buf_init(&buf, bytes, sizeof(bytes));
   assert(buf.base == bytes);
   assert(buf.len == sizeof(bytes));
   assert(memcmp(buf.base, bytes, sizeof(bytes)) == 0);
 
-  assert(titan_uvshim_buf_init(&buf, NULL, 0) == 0);
+  titan_uvshim_buf_init(&buf, NULL, 0);
   assert(buf.base == NULL);
   assert(buf.len == 0);
 
-  assert(titan_uvshim_buf_init(&buf, bytes, -1) == UV_EINVAL);
-  assert(titan_uvshim_buf_init(&buf, bytes, (int64_t)UINT_MAX + 1) ==
-         UV_EINVAL);
 }
 
 static void test_binary_helpers(void) {
@@ -415,21 +411,10 @@ static void test_binary_helpers(void) {
                                  sizeof(absent)) == -1);
   assert(titan_uvshim_bytes_find(haystack, sizeof(haystack), NULL, 0) == 0);
   assert(titan_uvshim_bytes_find(NULL, 0, first, sizeof(first)) == -1);
-  assert(titan_uvshim_bytes_find(NULL, 1, first, sizeof(first)) == UV_EINVAL);
-  assert(titan_uvshim_bytes_find(haystack, -1, first, sizeof(first)) ==
-         UV_EINVAL);
 
-  assert(titan_uvshim_bytes_slice_copy(destination, sizeof(destination),
-                                       haystack, sizeof(haystack), 1, 4) == 0);
+  titan_uvshim_bytes_slice_copy(destination, haystack, 1, 4);
   assert(memcmp(destination, haystack + 1, sizeof(destination)) == 0);
-  assert(titan_uvshim_bytes_slice_copy(NULL, 0, NULL, 0, 0, 0) == 0);
-  assert(titan_uvshim_bytes_slice_copy(destination, sizeof(destination),
-                                       haystack, sizeof(haystack), 4, 3) ==
-         UV_EINVAL);
-  assert(titan_uvshim_bytes_slice_copy(destination, 2, haystack,
-                                       sizeof(haystack), 0, 3) == UV_EINVAL);
-  assert(titan_uvshim_bytes_slice_copy(NULL, 3, haystack, sizeof(haystack),
-                                       0, 3) == UV_EINVAL);
+  titan_uvshim_bytes_slice_copy(NULL, NULL, 0, 0);
 }
 
 static void test_native_storage_layout(lua_State *L) {
@@ -595,29 +580,26 @@ static void test_process_spawn(lua_State *L,
   titan_uvshim_char_ptr child_argv[3];
   int endpoints[TITAN_UV_STDIO_ENDPOINT_COUNT];
   int fillers[TITAN_UV_STDIO_FILLER_CAPACITY];
-  int endpoint_count = TITAN_UV_STDIO_ENDPOINT_COUNT;
-  int filler_count = TITAN_UV_STDIO_FILLER_CAPACITY;
+  int filler_count = 0;
   uv_pipe_t pipes[3];
   uv_process_t process;
   int exit_before = process_exit_dispatches;
   int process_close_before = process_close_dispatches;
   int pipe_close_before = pipe_close_dispatches;
   int raw_close_before = raw_close_cleanups;
-  int initialized = -1;
   int status;
   int i;
   Udata *owner;
 
-  memset(endpoints, -1, sizeof(endpoints));
-  memset(fillers, -1, sizeof(fillers));
-  status = titan_uvshim_stdio_pipes(endpoints, &endpoint_count,
-                                    fillers, &filler_count);
+  status = titan_uvshim_stdio_pipes(endpoints, fillers);
   assert(status == 0);
-  assert(endpoint_count == TITAN_UV_STDIO_ENDPOINT_COUNT);
-  assert(filler_count >= 0 && filler_count <= 4);
-  assert(filler_count % 2 == 0);
-  for (i = 0; i < endpoint_count; i++)
+  for (i = 0; i < TITAN_UV_STDIO_ENDPOINT_COUNT; i++)
     assert(endpoints[i] > 2);
+  for (i = 0; i < TITAN_UV_STDIO_FILLER_CAPACITY; i++)
+    if (fillers[i] >= 0)
+      filler_count++;
+  assert(filler_count <= 4);
+  assert(filler_count % 2 == 0);
 
   expected_process = &process;
   process_exit_required = should_succeed;
@@ -627,20 +609,8 @@ static void test_process_spawn(lua_State *L,
     expected_pipes[i] = &pipes[i];
     owner = push_owner(L, &pipes[i], module_ref, dispatcher_ref);
     assert(titan_uvshim_pipe_init(loop, &pipes[i], owner) == 0);
-    if (i == 0) {
-      int parent_fd = endpoints[parent_indexes[i]];
-      assert(titan_uvshim_pipe_open(
-                 &pipes[i], endpoints,
-                 TITAN_UV_STDIO_ENDPOINT_COUNT - 1,
-                 parent_indexes[i]) == UV_EINVAL);
-      assert(titan_uvshim_pipe_open(
-                 &pipes[i], endpoints, endpoint_count,
-                 TITAN_UV_STDIO_STDIN_CHILD) == UV_EINVAL);
-      assert(endpoints[parent_indexes[i]] == parent_fd);
-    }
     assert(titan_uvshim_pipe_open(
-               &pipes[i], endpoints, endpoint_count,
-               parent_indexes[i]) == 0);
+               &pipes[i], endpoints, parent_indexes[i]) == 0);
     assert(uv_fileno((const uv_handle_t *)&pipes[i], &fd) == 0);
     assert((int)fd > 2);
     assert(endpoints[parent_indexes[i]] == -1);
@@ -653,24 +623,20 @@ static void test_process_spawn(lua_State *L,
     child_argv[1] = (char *)child_mode;
     child_argv[2] = NULL;
     status = titan_uvshim_process_spawn(
-        loop, &process, owner, executable, child_argv, 2,
-        endpoints, endpoint_count, &initialized);
+        loop, &process, owner, child_argv, endpoints);
     assert(status == 0);
-    assert(initialized == 1);
     assert(titan_uvshim_process_get_pid(&process) > 0);
   } else {
     child_argv[0] = (char *)missing_executable;
     child_argv[1] = NULL;
     status = titan_uvshim_process_spawn(
-        loop, &process, owner, missing_executable, child_argv, 1,
-        endpoints, endpoint_count, &initialized);
+        loop, &process, owner, child_argv, endpoints);
     assert(status == UV_ENOENT);
-    assert(initialized == 1);
   }
   pending_store_and_pop(L, pending_ref, pending_base + 3);
 
-  close_raw_array(endpoints, endpoint_count);
-  close_raw_array(fillers, filler_count);
+  close_raw_array(endpoints, TITAN_UV_STDIO_ENDPOINT_COUNT);
+  close_raw_array(fillers, TITAN_UV_STDIO_FILLER_CAPACITY);
   assert(raw_close_cleanups == raw_close_before + 3 + filler_count);
 
   for (i = 0; i < 3; i++) {
@@ -700,34 +666,6 @@ static void test_process_wrappers(lua_State *L,
                                   int module_ref,
                                   int dispatcher_ref,
                                   int pending_ref) {
-  int endpoints[TITAN_UV_STDIO_ENDPOINT_COUNT];
-  int fillers[TITAN_UV_STDIO_FILLER_CAPACITY];
-  int endpoint_count = TITAN_UV_STDIO_ENDPOINT_COUNT - 1;
-  int filler_count = TITAN_UV_STDIO_FILLER_CAPACITY;
-  int initialized = -1;
-
-  assert(titan_uvshim_stdio_pipes(endpoints, &endpoint_count,
-                                  fillers, &filler_count) == UV_EINVAL);
-  assert(endpoint_count == 0);
-  assert(filler_count == 0);
-  endpoint_count = TITAN_UV_STDIO_ENDPOINT_COUNT;
-  filler_count = TITAN_UV_STDIO_FILLER_CAPACITY - 1;
-  assert(titan_uvshim_stdio_pipes(endpoints, &endpoint_count,
-                                  fillers, &filler_count) == UV_EINVAL);
-  assert(endpoint_count == 0);
-  assert(filler_count == 0);
-  assert(titan_uvshim_pipe_init(NULL, NULL, NULL) == UV_EINVAL);
-  assert(titan_uvshim_pipe_open(NULL, endpoints,
-                                TITAN_UV_STDIO_ENDPOINT_COUNT, 0) ==
-         UV_EINVAL);
-  assert(titan_uvshim_pipe_read_start(NULL) == UV_EINVAL);
-  assert(titan_uvshim_pipe_read_stop(NULL) == UV_EINVAL);
-  assert(titan_uvshim_pipe_write_start(NULL, NULL, NULL, NULL) == UV_EINVAL);
-  assert(titan_uvshim_process_spawn(NULL, NULL, NULL, NULL, NULL, 0,
-                                    NULL, 0, &initialized) == UV_EINVAL);
-  assert(initialized == 0);
-  assert(titan_uvshim_process_kill(NULL, 1) == UV_EINVAL);
-  assert(titan_uvshim_process_get_pid(NULL) == UV_EINVAL);
   assert(titan_uvshim_status_is_esrch(UV_ESRCH));
   assert(!titan_uvshim_status_is_esrch(UV_EINVAL));
 
@@ -740,22 +678,20 @@ static void test_process_wrappers(lua_State *L,
 static void test_low_stdio_descriptors(void) {
   int endpoints[TITAN_UV_STDIO_ENDPOINT_COUNT];
   int fillers[TITAN_UV_STDIO_FILLER_CAPACITY];
-  int endpoint_count = TITAN_UV_STDIO_ENDPOINT_COUNT;
-  int filler_count = TITAN_UV_STDIO_FILLER_CAPACITY;
+  int filler_count = 0;
   int i;
 
   for (i = 0; i < 3; i++)
     close_standard_fd(i);
-  memset(endpoints, -1, sizeof(endpoints));
-  memset(fillers, -1, sizeof(fillers));
-  assert(titan_uvshim_stdio_pipes(endpoints, &endpoint_count,
-                                  fillers, &filler_count) == 0);
-  assert(endpoint_count == TITAN_UV_STDIO_ENDPOINT_COUNT);
-  assert(filler_count == 4);
-  for (i = 0; i < endpoint_count; i++)
+  assert(titan_uvshim_stdio_pipes(endpoints, fillers) == 0);
+  for (i = 0; i < TITAN_UV_STDIO_ENDPOINT_COUNT; i++)
     assert(endpoints[i] > 2);
-  close_raw_array(endpoints, endpoint_count);
-  close_raw_array(fillers, filler_count);
+  for (i = 0; i < TITAN_UV_STDIO_FILLER_CAPACITY; i++)
+    if (fillers[i] >= 0)
+      filler_count++;
+  assert(filler_count == 4);
+  close_raw_array(endpoints, TITAN_UV_STDIO_ENDPOINT_COUNT);
+  close_raw_array(fillers, TITAN_UV_STDIO_FILLER_CAPACITY);
 }
 
 int main(int argc, char **argv) {
@@ -792,7 +728,7 @@ int main(int argc, char **argv) {
   assert(titan_uvshim_error_eof() == UV_EOF);
   assert(titan_uvshim_error_ecanceled() == UV_ECANCELED);
   assert(titan_uvshim_error_eaddrnotavail() == UV_EADDRNOTAVAIL);
-  assert(titan_uvshim_tcp_close_reset(NULL) == UV_EINVAL);
+  assert(titan_uvshim_error_einval() == UV_EINVAL);
   expected_L = L;
   test_slot_numbering();
   test_buffers();
@@ -832,8 +768,6 @@ int main(int argc, char **argv) {
   assert(titan_uvshim_signal_init(&loop, &signal, signal_owner) == 0);
   assert(!titan_uvshim_signal_is_closing(&signal));
   assert(titan_uvshim_signal_start_oneshot(
-             &signal, titan_uvshim_signal_number("kill")) == UV_EINVAL);
-  assert(titan_uvshim_signal_start_oneshot(
              &signal, titan_uvshim_signal_number("usr1")) == 0);
   pending_store_and_pop(L, pending_ref, 5);
   stack_top = lua_gettop(L);
@@ -870,13 +804,8 @@ int main(int argc, char **argv) {
   tcp_owner = push_owner(L, &tcp, module_ref, dispatcher_ref);
   assert(titan_uvshim_tcp_init(&loop, &tcp, tcp_owner) == 0);
   assert(!titan_uvshim_tcp_is_closing(&tcp));
-  assert(titan_uvshim_tcp_bind(&tcp, &address, 1, 0) == 0);
+  assert(titan_uvshim_tcp_bind(&tcp, &address, 0) == 0);
   assert(titan_uvshim_tcp_bound_port(&tcp) > 0);
-  assert(titan_uvshim_tcp_listen_backlog_is_valid(1));
-  assert(titan_uvshim_tcp_listen_backlog_is_valid(INT_MAX));
-  assert(!titan_uvshim_tcp_listen_backlog_is_valid(0));
-  assert(!titan_uvshim_tcp_listen_backlog_is_valid((int64_t)INT_MAX + 1));
-  assert(titan_uvshim_tcp_listen(&tcp, (int64_t)INT_MAX + 1) == UV_EINVAL);
   assert(titan_uvshim_tcp_listen(&tcp, 8) == 0);
   titan_uvshim_tcp_close(&tcp);
   assert(titan_uvshim_tcp_is_closing(&tcp));
