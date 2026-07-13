@@ -261,6 +261,12 @@ Each `mco_coro` also points to an `mco_runtime`. That small context contains
 the current-coroutine pointer and, under ASan, the main-stack fake-stack token,
 bottom, and size used by the fiber-switch API. A generic minicoro descriptor
 with no explicit runtime uses the implementation's thread-local default.
+Sanitizer detection occurs before these public struct declarations. Ordinary
+builds give `mco_runtime` only its current-coroutine pointer and omit all
+sanitizer words from `mco_coro`; ASan adds its three main-stack fields and one
+per-coroutine fake-stack field, while TSan adds only its two per-coroutine fiber
+fields. Every translation unit sharing these layouts must therefore use the
+same sanitizer configuration.
 Minicoro exposes the complete runtime layout so the Titan module can allocate
 one with its ordinary owned-C-object constructor:
 

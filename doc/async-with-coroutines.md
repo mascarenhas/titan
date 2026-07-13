@@ -621,6 +621,10 @@ and ASan main-stack bookkeeping lives in one `mco_runtime` userdata allocated
 by the Titan module initializer and assigned to every new descriptor;
 per-coroutine ASan tokens remain in each `mco_coro`. Module and coroutine
 ownership remains in GC-owned module and owner userdata.
+The ASan fields exist only when the translation unit is compiled with ASan;
+the two TSan fiber fields likewise exist only in TSan builds. Ordinary builds
+carry none of that sanitizer-only storage. All translation units that share
+these public minicoro layouts use the same sanitizer flags.
 `mco_coro->user_data` is only a non-rooting raw back-pointer to that owner.
 Titan and Lua enter the one canonical `coroutine.so`; that DSO is the sole
 native owner, while each Lua state retains its own module-local runtime.

@@ -497,17 +497,89 @@ describe("minicoro tagged extension", function()
         end)
     end
 
-    it("exposes complete runtime storage to embedders", function()
+    it("omits sanitizer bookkeeping from standard public layouts", function()
         local out = run_c_probe([[
 #include <assert.h>
+#include <stddef.h>
 #include <stdio.h>
 #include "titan-runtime/minicoro.h"
+
+#ifdef _MCO_USE_ASAN
+#error unexpected ASan layout in standard build
+#endif
+#ifdef _MCO_USE_TSAN
+#error unexpected TSan layout in standard build
+#endif
 
 int main(void) {
   mco_runtime runtime = {0};
   mco_desc desc = {0};
   desc.runtime = &runtime;
   assert(desc.runtime->current_co == NULL);
+  assert(sizeof(mco_runtime) == sizeof(mco_coro *));
+  assert(offsetof(mco_coro, magic_number) ==
+         offsetof(mco_coro, storage_size) + sizeof(size_t));
+  puts("ok");
+  return 0;
+}
+        ]])
+        assert.match("ok", out)
+    end)
+
+    it("includes only ASan bookkeeping in ASan public layouts", function()
+        local out = run_c_probe([[
+#include <assert.h>
+#include <stddef.h>
+#include <stdio.h>
+#define __SANITIZE_ADDRESS__ 1
+#include "titan-runtime/minicoro.h"
+
+#ifndef _MCO_USE_ASAN
+#error missing ASan layout in ASan build
+#endif
+#ifdef _MCO_USE_TSAN
+#error unexpected TSan layout in ASan-only build
+#endif
+
+int main(void) {
+  mco_runtime runtime = {0};
+  mco_coro co = {0};
+  runtime.asan_main_fake_stack = NULL;
+  runtime.asan_main_stack_bottom = NULL;
+  runtime.asan_main_stack_size = 0;
+  co.asan_prev_stack = NULL;
+  assert(offsetof(mco_coro, magic_number) ==
+         offsetof(mco_coro, asan_prev_stack) + sizeof(void *));
+  puts("ok");
+  return 0;
+}
+        ]])
+        assert.match("ok", out)
+    end)
+
+    it("includes only TSan bookkeeping in TSan public layouts", function()
+        local out = run_c_probe([[
+#include <assert.h>
+#include <stddef.h>
+#include <stdio.h>
+#define __SANITIZE_THREAD__ 1
+#include "titan-runtime/minicoro.h"
+
+#ifdef _MCO_USE_ASAN
+#error unexpected ASan layout in TSan-only build
+#endif
+#ifndef _MCO_USE_TSAN
+#error missing TSan layout in TSan build
+#endif
+
+int main(void) {
+  mco_runtime runtime = {0};
+  mco_coro co = {0};
+  co.tsan_prev_fiber = NULL;
+  co.tsan_fiber = NULL;
+  assert(sizeof(runtime) == sizeof(mco_coro *));
+  assert(offsetof(mco_coro, magic_number) ==
+         offsetof(mco_coro, tsan_fiber) + sizeof(void *));
   puts("ok");
   return 0;
 }

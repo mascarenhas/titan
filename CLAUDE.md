@@ -327,6 +327,11 @@ does not unload the native image.
   `titanlib.o` and that object alone is linked into `titan.so`; its public
   `backtrace` function and internal testing helpers `pin` and `clear` are not
   part of the generated-code archive.
+- In `minicoro.h`, sanitizer detection must remain before the public
+  `mco_runtime`/`mco_coro` declarations. Gate ASan and TSan bookkeeping fields
+  with their matching feature macros so ordinary builds carry no sanitizer
+  words, and compile every translation unit sharing those layouts with the
+  same sanitizer configuration.
 - **Operand expressions are not auto-hoisted: a template that references one more than once multiply-evaluates its side effects.** `codeexp` returns `(stats, expr)` and for a non-GC return `codecall` puts the bare call *in `expr`*, not in `stats` — so a `render` template that splices an operand into several slots (as the naive integer `//`/`%`/shift templates did) calls a side-effecting operand like `f() // g()` multiple times, unlike Lua which evaluates each once. Materialize each operand into a temp first (the pattern in `codebinaryop`'s `and`/`or` arms, the shift/idiv/mod helpers, and the mixed int/float comparison branch).
 
 ### C FFI (`c-parser/`, `foreigntypes.lua`)

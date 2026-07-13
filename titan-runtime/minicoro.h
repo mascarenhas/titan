@@ -259,6 +259,24 @@ extern "C" {
 
 #include <stddef.h> /* for size_t */
 
+/* Sanitizer support changes the public coroutine/runtime layouts, so detect it
+ * before declaring those structs in every translation unit, not only in the
+ * one that defines MINICORO_IMPL. */
+#if defined(__has_feature)
+  #if __has_feature(address_sanitizer)
+    #define _MCO_USE_ASAN
+  #endif
+  #if __has_feature(thread_sanitizer)
+    #define _MCO_USE_TSAN
+  #endif
+#endif
+#if defined(__SANITIZE_ADDRESS__)
+  #define _MCO_USE_ASAN
+#endif
+#if defined(__SANITIZE_THREAD__)
+  #define _MCO_USE_TSAN
+#endif
+
 /* ---------------------------------------------------------------------------------------------- */
 
 /* Coroutine states. */
@@ -293,9 +311,11 @@ typedef int (*mco_tag_comparator)(void* t1, void* t2);
 typedef struct mco_runtime mco_runtime;
 struct mco_runtime {
   mco_coro* current_co;
+#ifdef _MCO_USE_ASAN
   void* asan_main_fake_stack;
   const void* asan_main_stack_bottom;
   size_t asan_main_stack_size;
+#endif
 };
 struct mco_coro {
   void* context;
@@ -314,9 +334,13 @@ struct mco_coro {
   unsigned char* storage;
   size_t bytes_stored;
   size_t storage_size;
+#ifdef _MCO_USE_ASAN
   void* asan_prev_stack; /* Fake stack saved while this coroutine is inactive. */
+#endif
+#ifdef _MCO_USE_TSAN
   void* tsan_prev_fiber; /* Used by thread sanitizer. */
   void* tsan_fiber; /* Used by thread sanitizer. */
+#endif
   size_t magic_number; /* Used to check stack overflow. */
 };
 
@@ -551,21 +575,6 @@ extern "C" {
     }
   #endif /* MCO_USE_VMEM_ALLOCATOR */
 #endif /* MCO_NO_DEFAULT_ALLOCATOR */
-
-#if defined(__has_feature)
-  #if __has_feature(address_sanitizer)
-    #define _MCO_USE_ASAN
-  #endif
-  #if __has_feature(thread_sanitizer)
-    #define _MCO_USE_TSAN
-  #endif
-#endif
-#if defined(__SANITIZE_ADDRESS__)
-  #define _MCO_USE_ASAN
-#endif
-#if defined(__SANITIZE_THREAD__)
-  #define _MCO_USE_TSAN
-#endif
 
 /* The default runtime preserves minicoro's thread-local behavior. Embedders
  * can instead assign a shared runtime through mco_desc. */
