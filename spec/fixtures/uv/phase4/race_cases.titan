@@ -13,6 +13,8 @@ local sticky_owner_before = 0
 local sticky_owner_after = 0
 local delayed_waiter_resumed = false
 local concurrent_failure_observed = false
+local concurrent_observer_armed = false
+local concurrent_independent_started = false
 local fs_result_delivered = false
 local fs_open_result_delivered = false
 
@@ -112,13 +114,21 @@ end
 
 function schedule_concurrent_public_error(): uv.Task
   concurrent_failure_observed = false
+  concurrent_observer_armed = false
+  concurrent_independent_started = false
+  -- Synchronize in event-loop turns: the failure must cross an armed join
+  -- while another Task is already live, then that Task resumes afterward.
   local failed = uv.run(function (): value
-    timer.yield()
+    while not concurrent_observer_armed or
+          not concurrent_independent_started do
+      timer.yield()
+    end
     raise "phase4-public-task-failure"
     return nil
   end)
 
   local observer = uv.run(function (): value
+    concurrent_observer_armed = true
     do
       failed:join()
     catch
@@ -132,9 +142,8 @@ function schedule_concurrent_public_error(): uv.Task
   end)
 
   local independent = uv.run(function (): value
-    timer.sleep(5)
-    check(concurrent_failure_observed,
-          "independent Task ran before the public failure was observed")
+    concurrent_independent_started = true
+    while not concurrent_failure_observed do timer.yield() end
     return 41
   end)
 
