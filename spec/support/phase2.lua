@@ -177,9 +177,9 @@ function M.workspace(label)
     local path = fresh_workspace_path(label)
     assert.truthy(lfs.mkdir(path))
     assert.truthy(lfs.mkdir(path .. "/src"))
-    -- A private runtime copy prevents driver mtime checks from rebuilding the
-    -- repository's shared libtitan.a when specs execute concurrently.
-    local ok, _, output = run("cp -R " .. quote(REPO .. "/titan-runtime") ..
+    -- A private, timestamp-preserving runtime copy keeps the archive current
+    -- while preventing concurrent specs from rebuilding the shared checkout.
+    local ok, _, output = run("cp -Rp " .. quote(REPO .. "/titan-runtime") ..
         " " .. quote(path .. "/titan-runtime"))
     assert.truthy(ok, output)
     return path
