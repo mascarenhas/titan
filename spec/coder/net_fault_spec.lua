@@ -9,7 +9,7 @@ describe("net Phase 5 transitions and faults", function()
         phase5.copy_fixture(workspace, "net_faults.titan",
             "phase5_net_faults")
         phase5.compile(workspace, "phase5_net_faults", {
-            stdlib = workspace,
+            stdlib = workspace .. "/titan",
         })
     end)
 

@@ -39,8 +39,9 @@ Two facts shape everything downstream of the checker:
   headers (`lobject.h`, `ltable.h`, `lvm.h`, …) and manipulates values,
   tables and the stack directly. That is where Titan's speed comes from,
   and it ties each compiler version to one specific Lua version —
-  currently **Lua 5.5.0**, expected as a built source tree in
-  `./lua-5.5.0` (see the migration reports below).
+  currently **Lua 5.5.0**. Installed compilers use the matching internal
+  source tree staged in the Titan SDK at `<root>/src/lua-5.5.0`; repository checkout mode uses
+  `./lua-5.5.0/src` (see the migration reports below).
 * **Titan data is Lua data.** Every Titan value is representable as a
   Lua value, every allocation is a Lua-GC allocation, and the generated
   code maintains the invariants Lua's (now generational) collector
@@ -60,7 +61,7 @@ Two facts shape everything downstream of the checker:
 | [Variadic parameters](variadic-parameters.md) | The `...: t` feature end to end: the `: type`/last-only grammar (with untyped-lambda-vararg context inference) and the `ExpDots`/`ExpDotsIndex`/`ExpDotsLen` nodes; the checker's `varargtype` slot, depth-stamped `$vararg` scope rule, and adjust-up vs. whole-tail explist handling; the seven `TitanVarg*` structs, the `_varargs` + `_start` native ABI, the `genluaentry` build and first-class tag dispatch; and the untraced-payload GC discipline. |
 | [Error handling](error-handling.md) | Unified Titan/Lua tracebacks via libbacktrace, `#line` source attribution, trace pinning, `raise`/`catch`/`finally` frontend rules, inline Lua longjmp boundaries, pending finally actions, stack relocation, and ABI/search-path notes. |
 | [Defer](defer.md) | The parser-only `defer` marker and recursive `simpleblock` lowering into nested `Ast.StatTry` nodes, relying on existing checker/codegen `finally` machinery. |
-| [Coroutines](coroutines.md) | The `stdlib/coroutine.titan` module's Titan-owned transfer policy with a minimal C shim; its canonical Titan identity and qualified Lua alias; the `TValue` FFI boundary; tagged minicoro, suspended matching handlers with stacked inner coroutines, traceback handoff, and coroutine stack sizing. |
+| [Coroutines](coroutines.md) | The `stdlib/coroutine.titan` module's Titan-owned transfer policy with a minimal C shim; its canonical Titan identity and qualified Lua entry name; the `TValue` FFI boundary; tagged minicoro, suspended matching handlers with stacked inner coroutines, traceback handoff, and coroutine stack sizing. |
 | [Libuv continuation runtime](libuv-runtime.md) | Canonical `uv`/`timer`/`fs`/`net`/`os` images, GC-owned exact native wrappers, the shared-tag continuation pump, direct native callbacks with a Titan trailing catch, filesystem/network/process ownership, portable OS/signal helpers, process stdio FIFOs, pre-observed `communicate` helpers, cancellation, bootstrap, and deterministic TERM/grace/KILL shutdown. |
 | [Libuv DNS and TCP implementation](libuv-networking.md) | The `net` facade, opaque GC-owned address and TCP storage, DNS ownership, stream callbacks, per-Connection FIFO and close state, cancellation, and portable shim boundary. |
 | [Lua interop internals](lua-interop-internals.md) | The boundary machinery: Lua entry wrappers and per-type checks, record metatables and metatable-based type identity, the module `Udata`'s member metatable, dynamic module loading, the error handler, the standalone entrypoint, and the safety argument. |
@@ -112,14 +113,19 @@ cause.
 | `titan-compiler/` | The compiler proper: `lexer`, `parser`, `syntax_errors`, `ast`, `typedecl`, `checker`, `types`, `symtab`, `coder`, `pretty`, `driver`, `foreigntypes`, `location`, `util`. |
 | `c-parser/` | The pure-Lua C preprocessor and C99 parser behind `foreign import`. |
 | `stdlib/` | Titan standard-library sources. Reserved canonical modules are built from here explicitly and installed in the ABI-qualified standard-library directory. |
-| `titan-runtime/` | `titan.h`/`titan.c`, compiled into every module (dynamic loader, error handler); `titanlib.c`, the optional `titan` Lua module (`titan.backtrace()`); `titan_coro.c` and vendored `minicoro.h` for `coroutine`; `titan_uv.c` and `titan/uv.h` for fixed libuv callback and portable helper ABIs. |
+| `titan-runtime/` | `titan.h`/`titan.c` (dynamic loader and error handler), `titan_coro.c`, and `titan_uv.c`, whose three objects are the exact members of `libtitan.a`; separate vendored `libbacktrace.a`; `titanlib.c`, built separately as `titan.so` (`backtrace` plus internal `pin`/`clear` helpers); `minicoro.h`, `titan_longjmp.h`, and the namespaced `titan/{ffi,coro,uv}.h` SDK headers. |
 | `spec/` | The busted test suite; `coder_spec.lua` is end-to-end (generates, compiles and runs C). |
 | `examples/`, `testfiles/` | Manual benchmark/demo material (not used by the suite). |
 | `doc/` | This documentation, the [language reference](../language/index.md), and the migration reports. |
 
 Development workflow, prerequisites and test commands are in the
 repository's [CLAUDE.md](../../CLAUDE.md) and [README](../../README.md);
-the short version is: build Lua 5.5.0 in-tree with `-fPIC`, install the
-rock (`luarocks make`), and run `busted` from the repository root —
-remembering that busted loads the *installed* rock, so re-run
-`luarocks make` after editing compiler sources.
+the short version is: choose an absolute local `PREFIX`, put its `bin` on
+`PATH`, run `make lua`, `make luarocks`, and `make libuv`, then install the
+rock with `$PREFIX/bin/luarocks make` and run Busted from the repository root.
+`PREFIX` owns Lua/LuaRocks; `ROCKS_TREE` owns the Titan rock, SDK, and stdlib.
+The supported workflow currently configures them to the same path, without
+making that equality an inherent invariant.
+Busted loads the *installed* rock, so re-run that `luarocks make` after editing
+compiler sources. Use distinct `/tmp` prefixes for isolated or parallel
+verification rather than checkout-local `.lua`/`lua_modules` trees.

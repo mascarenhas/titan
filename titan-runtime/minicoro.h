@@ -225,6 +225,7 @@ The following can be defined to change the library behavior:
 - `MCO_USE_VMEM_ALLOCATOR`    - Use virtual memory backed allocator, improving memory footprint per coroutine.
 - `MCO_NO_DEFAULT_ALLOCATOR`  - Disable the default allocator using `MCO_ALLOC` and `MCO_DEALLOC`.
 - `MCO_ZERO_MEMORY`           - Zero memory of stack when poping storage, intended for garbage collected environments.
+- `MCO_TAG_COMPARATOR`        - Fixed tag-comparison function. When defined, `mco_set_tag_comparator` is a no-op.
 - `MCO_DEBUG`                 - Enable debug mode, logging any runtime error to stdout. Defined automatically unless `NDEBUG` or `MCO_NO_DEBUG` is defined.
 - `MCO_NO_DEBUG`              - Disable debug mode.
 - `MCO_NO_MULTITHREAD`        - Disable multithread usage. Multithread is supported when `thread_local` is supported.
@@ -289,8 +290,10 @@ typedef enum mco_result {
 /* Coroutine structure. */
 typedef struct mco_coro mco_coro;
 typedef int (*mco_tag_comparator)(void* t1, void* t2);
+typedef struct mco_runtime mco_runtime;
 struct mco_coro {
   void* context;
+  mco_runtime* runtime;
   mco_state state;
   void (*func)(mco_coro* co);
   mco_coro* prev_co;
@@ -315,6 +318,7 @@ struct mco_coro {
 typedef struct mco_desc {
   void (*func)(mco_coro* co); /* Entry point function for the coroutine. */
   void* user_data;            /* Coroutine user data, can be get with `mco_get_user_data`. */
+  mco_runtime* runtime;       /* Optional shared execution state. The default uses thread-local state. */
   /* Custom allocation interface. */
   void* (*alloc_cb)(size_t size, void* allocator_data); /* Custom allocation function. */
   void  (*dealloc_cb)(void* ptr, size_t size, void* allocator_data);     /* Custom deallocation function. */
@@ -556,18 +560,50 @@ extern "C" {
 #if defined(__SANITIZE_THREAD__)
   #define _MCO_USE_TSAN
 #endif
+
+/* The default runtime preserves minicoro's thread-local behavior. Embedders
+ * can instead assign a shared runtime through mco_desc. */
+struct mco_runtime {
+  mco_coro* current_co;
+  void* asan_main_fake_stack;
+  const void* asan_main_stack_bottom;
+  size_t asan_main_stack_size;
+};
+
+static MCO_THREAD_LOCAL mco_runtime mco_default_runtime = {0};
+
+#ifdef MCO_NO_MULTITHREAD
+static MCO_FORCE_INLINE mco_runtime* _mco_default_runtime(void) {
+  return &mco_default_runtime;
+}
+#else
+static MCO_NO_INLINE mco_runtime* _mco_load_default_runtime(void) {
+  return &mco_default_runtime;
+}
+
+static MCO_FORCE_INLINE mco_runtime* _mco_default_runtime(void) {
+  mco_runtime* (*volatile load)(void) = _mco_load_default_runtime;
+  return load();
+}
+#endif
+
+static MCO_FORCE_INLINE mco_runtime* _mco_runtime_for(mco_coro* co) {
+  return co && co->runtime ? co->runtime : _mco_default_runtime();
+}
+
+static MCO_FORCE_INLINE mco_coro* _mco_running_for(mco_coro* co) {
+  return _mco_runtime_for(co)->current_co;
+}
+
 #ifdef _MCO_USE_ASAN
 void __sanitizer_start_switch_fiber(void** fake_stack_save, const void *bottom, size_t size);
 void __sanitizer_finish_switch_fiber(void* fake_stack_save, const void **bottom_old, size_t *size_old);
 
-static MCO_THREAD_LOCAL void* mco_asan_main_fake_stack = NULL;
-static MCO_THREAD_LOCAL const void* mco_asan_main_stack_bottom = NULL;
-static MCO_THREAD_LOCAL size_t mco_asan_main_stack_size = 0;
-
 /* ASan requires start before the context transfer and finish immediately on
  * the destination stack. Coroutines keep their own fake-stack token; the
- * ordinary thread stack needs the TLS slot because it has no mco_coro. */
+ * ordinary thread stack uses the active runtime because it has no mco_coro. */
 static MCO_FORCE_INLINE void _mco_asan_start_switch(mco_coro* from, mco_coro* to) {
+  mco_runtime* runtime = _mco_runtime_for(from ? from : to);
   void** fake_stack_save;
   const void* bottom;
   size_t size;
@@ -576,31 +612,32 @@ static MCO_FORCE_INLINE void _mco_asan_start_switch(mco_coro* from, mco_coro* to
   } else if(from) {
     fake_stack_save = &from->asan_prev_stack;
   } else {
-    fake_stack_save = &mco_asan_main_fake_stack;
+    fake_stack_save = &runtime->asan_main_fake_stack;
   }
   if(to) {
     bottom = to->stack_base;
     size = to->stack_size;
   } else {
-    bottom = mco_asan_main_stack_bottom;
-    size = mco_asan_main_stack_size;
+    bottom = runtime->asan_main_stack_bottom;
+    size = runtime->asan_main_stack_size;
   }
   __sanitizer_start_switch_fiber(fake_stack_save, bottom, size);
 }
 
-static MCO_FORCE_INLINE void _mco_asan_finish_switch(mco_coro* current) {
-  void* fake_stack = current ? current->asan_prev_stack : mco_asan_main_fake_stack;
+static MCO_FORCE_INLINE void _mco_asan_finish_switch(mco_coro* current,
+                                                     mco_runtime* runtime) {
+  void* fake_stack = current ? current->asan_prev_stack : runtime->asan_main_fake_stack;
   const void* bottom_old = NULL;
   size_t size_old = 0;
   __sanitizer_finish_switch_fiber(fake_stack, &bottom_old, &size_old);
   if(current) {
     current->asan_prev_stack = NULL;
   } else {
-    mco_asan_main_fake_stack = NULL;
+    runtime->asan_main_fake_stack = NULL;
   }
-  if(!mco_asan_main_stack_bottom) {
-    mco_asan_main_stack_bottom = bottom_old;
-    mco_asan_main_stack_size = size_old;
+  if(!runtime->asan_main_stack_bottom) {
+    runtime->asan_main_stack_bottom = bottom_old;
+    runtime->asan_main_stack_size = size_old;
   }
 }
 #endif
@@ -618,9 +655,12 @@ static MCO_FORCE_INLINE size_t _mco_align_forward(size_t addr, size_t align) {
   return (addr + (align-1)) & ~(align-1);
 }
 
-/* Variable holding the current running coroutine per thread. */
-static MCO_THREAD_LOCAL mco_coro* mco_current_co = NULL;
+#ifdef MCO_TAG_COMPARATOR
+#define _MCO_CURRENT_TAG_COMPARATOR ((mco_tag_comparator)(MCO_TAG_COMPARATOR))
+#else
 static mco_tag_comparator mco_current_tag_comparator = NULL;
+#define _MCO_CURRENT_TAG_COMPARATOR mco_current_tag_comparator
+#endif
 
 typedef enum _mco_context_slot {
   _MCO_CONTEXT_SELF,
@@ -629,14 +669,15 @@ typedef enum _mco_context_slot {
 
 static MCO_FORCE_INLINE void _mco_prepare_jumpin(mco_coro* co) {
   /* Set the old coroutine to normal state and update it. */
-  mco_coro* prev_co = mco_running(); /* Must access through `mco_running`. */
+  mco_runtime* runtime = _mco_runtime_for(co);
+  mco_coro* prev_co = runtime->current_co;
   MCO_ASSERT(co->prev_co == NULL);
   co->prev_co = prev_co;
   if(prev_co) {
     MCO_ASSERT(prev_co->state == MCO_RUNNING);
     prev_co->state = MCO_NORMAL;
   }
-  mco_current_co = co;
+  runtime->current_co = co;
 #ifdef _MCO_USE_ASAN
   _mco_asan_start_switch(prev_co, co);
 #endif
@@ -648,14 +689,15 @@ static MCO_FORCE_INLINE void _mco_prepare_jumpin(mco_coro* co) {
 
 static MCO_FORCE_INLINE void _mco_prepare_jumpout(mco_coro* co) {
   /* Switch back to the previous running coroutine. */
-  /* MCO_ASSERT(mco_running() == co); */
+  mco_runtime* runtime = _mco_runtime_for(co);
+  /* MCO_ASSERT(runtime->current_co == co); */
   mco_coro* prev_co = co->prev_co;
   co->prev_co = NULL;
   if(prev_co) {
     /* MCO_ASSERT(prev_co->state == MCO_NORMAL); */
     prev_co->state = MCO_RUNNING;
   }
-  mco_current_co = prev_co;
+  runtime->current_co = prev_co;
 #ifdef _MCO_USE_ASAN
   _mco_asan_start_switch(co, prev_co);
 #endif
@@ -672,6 +714,8 @@ static void _mco_transfer(mco_coro* from, _mco_context_slot from_slot,
                           mco_coro* to, _mco_context_slot to_slot);
 
 static MCO_FORCE_INLINE void _mco_prepare_tagged_yield(mco_coro* co, mco_coro* target) {
+  mco_runtime* runtime = _mco_runtime_for(co);
+  MCO_ASSERT(_mco_runtime_for(target) == runtime);
   mco_coro* prev_co = target->prev_co;
   mco_coro* p = co;
   while(p && p != target) {
@@ -684,7 +728,7 @@ static MCO_FORCE_INLINE void _mco_prepare_tagged_yield(mco_coro* co, mco_coro* t
   if(prev_co) {
     prev_co->state = MCO_RUNNING;
   }
-  mco_current_co = prev_co;
+  runtime->current_co = prev_co;
 #ifdef _MCO_USE_ASAN
   _mco_asan_start_switch(co, prev_co);
 #endif
@@ -698,7 +742,9 @@ static MCO_FORCE_INLINE void _mco_prepare_tagged_yield(mco_coro* co, mco_coro* t
 }
 
 static MCO_FORCE_INLINE void _mco_prepare_stacked_resume(mco_coro* co, mco_coro* stacked_co) {
-  mco_coro* prev_co = mco_running();
+  mco_runtime* runtime = _mco_runtime_for(co);
+  mco_coro* prev_co = runtime->current_co;
+  MCO_ASSERT(_mco_runtime_for(stacked_co) == runtime);
   mco_coro* p = stacked_co;
   MCO_ASSERT(co->prev_co == NULL);
   if(prev_co) {
@@ -712,7 +758,7 @@ static MCO_FORCE_INLINE void _mco_prepare_stacked_resume(mco_coro* co, mco_coro*
     p->state = (p == stacked_co) ? MCO_RUNNING : MCO_NORMAL;
     p = p->prev_co;
   }
-  mco_current_co = stacked_co;
+  runtime->current_co = stacked_co;
 #ifdef _MCO_USE_ASAN
   _mco_asan_start_switch(prev_co, stacked_co);
 #endif
@@ -740,7 +786,7 @@ static MCO_FORCE_INLINE void _mco_abandon_stacked(mco_coro* co) {
 
 static MCO_NO_INLINE void _mco_main(mco_coro* co) {
 #ifdef _MCO_USE_ASAN
-  _mco_asan_finish_switch(co);
+  _mco_asan_finish_switch(co, _mco_runtime_for(co));
 #endif
   co->func(co); /* Run the coroutine function. */
   co->state = MCO_DEAD; /* Coroutine finished successfully, set state to dead. */
@@ -1440,7 +1486,7 @@ static void _mco_jumpin(mco_coro* co) {
   _mco_prepare_jumpin(co);
   _mco_transfer(co, _MCO_CONTEXT_BACK, co, _MCO_CONTEXT_SELF);
 #ifdef _MCO_USE_ASAN
-  _mco_asan_finish_switch(mco_running());
+  _mco_asan_finish_switch(_mco_running_for(co), _mco_runtime_for(co));
 #endif
 }
 
@@ -1448,7 +1494,7 @@ static void _mco_jumpout(mco_coro* co) {
   _mco_prepare_jumpout(co);
   _mco_transfer(co, _MCO_CONTEXT_SELF, co, _MCO_CONTEXT_BACK);
 #ifdef _MCO_USE_ASAN
-  _mco_asan_finish_switch(mco_running());
+  _mco_asan_finish_switch(_mco_running_for(co), _mco_runtime_for(co));
 #endif
 }
 
@@ -1530,7 +1576,7 @@ static void _mco_jumpin(mco_coro* co) {
   _mco_prepare_jumpin(co);
   _mco_transfer(co, _MCO_CONTEXT_BACK, co, _MCO_CONTEXT_SELF);
 #ifdef _MCO_USE_ASAN
-  _mco_asan_finish_switch(mco_running());
+  _mco_asan_finish_switch(_mco_running_for(co), _mco_runtime_for(co));
 #endif
 }
 
@@ -1542,7 +1588,7 @@ static void _mco_jumpout(mco_coro* co) {
   _mco_prepare_jumpout(co);
   _mco_transfer(co, _MCO_CONTEXT_SELF, co, _MCO_CONTEXT_BACK);
 #ifdef _MCO_USE_ASAN
-  _mco_asan_finish_switch(mco_running());
+  _mco_asan_finish_switch(_mco_running_for(co), _mco_runtime_for(co));
 #endif
 }
 
@@ -1646,7 +1692,7 @@ static void _mco_jumpin(mco_coro* co) {
   _mco_prepare_jumpin(co);
   _mco_transfer(co, _MCO_CONTEXT_BACK, co, _MCO_CONTEXT_SELF);
 #ifdef _MCO_USE_ASAN
-  _mco_asan_finish_switch(mco_running());
+  _mco_asan_finish_switch(_mco_running_for(co), _mco_runtime_for(co));
 #endif
 }
 
@@ -1654,7 +1700,7 @@ static void _mco_jumpout(mco_coro* co) {
   _mco_prepare_jumpout(co);
   _mco_transfer(co, _MCO_CONTEXT_SELF, co, _MCO_CONTEXT_BACK);
 #ifdef _MCO_USE_ASAN
-  _mco_asan_finish_switch(mco_running());
+  _mco_asan_finish_switch(_mco_running_for(co), _mco_runtime_for(co));
 #endif
 }
 
@@ -1792,6 +1838,7 @@ mco_result mco_init(mco_coro* co, mco_desc* desc) {
   mco_result res = _mco_validate_desc(desc);
   if(res != MCO_SUCCESS)
     return res;
+  co->runtime = desc->runtime;
   /* Create the coroutine. */
   res = _mco_create_context(co, desc);
   if(res != MCO_SUCCESS)
@@ -1882,20 +1929,34 @@ mco_result mco_destroy(mco_coro* co) {
 }
 
 void mco_set_tag_comparator(mco_tag_comparator comparator) {
+#ifdef MCO_TAG_COMPARATOR
+  (void)comparator;
+#else
   mco_current_tag_comparator = comparator;
+#endif
 }
 
 static int _mco_tag_matches(mco_coro* co, void* tag) {
-  if(!co || !co->active_tag || !mco_current_tag_comparator) {
+  if(!co || !co->active_tag) {
     return 0;
   }
-  return mco_current_tag_comparator(co->active_tag, tag);
+#ifndef MCO_TAG_COMPARATOR
+  if(!_MCO_CURRENT_TAG_COMPARATOR) {
+    return 0;
+  }
+#endif
+  return _MCO_CURRENT_TAG_COMPARATOR(co->active_tag, tag);
 }
 
 static mco_coro* _mco_find_tag_handler(mco_coro* co, void* tag) {
-  if(!co || !tag || !mco_current_tag_comparator) {
+  if(!co || !tag) {
     return NULL;
   }
+#ifndef MCO_TAG_COMPARATOR
+  if(!_MCO_CURRENT_TAG_COMPARATOR) {
+    return NULL;
+  }
+#endif
   while(co) {
     if(_mco_tag_matches(co, tag)) {
       return co;
@@ -1924,7 +1985,7 @@ mco_result mco_resume(mco_coro* co, void* tag) {
     _mco_prepare_stacked_resume(co, stacked_co);
     _mco_transfer(co, _MCO_CONTEXT_BACK, stacked_co, _MCO_CONTEXT_SELF);
 #ifdef _MCO_USE_ASAN
-    _mco_asan_finish_switch(mco_running());
+    _mco_asan_finish_switch(_mco_running_for(co), _mco_runtime_for(co));
 #endif
   } else {
     co->state = MCO_RUNNING;
@@ -1941,7 +2002,7 @@ static mco_result _mco_yield_to(mco_coro* co, mco_coro* target) {
     _mco_prepare_tagged_yield(co, target);
     _mco_transfer(co, _MCO_CONTEXT_SELF, target, _MCO_CONTEXT_BACK);
 #ifdef _MCO_USE_ASAN
-    _mco_asan_finish_switch(mco_running());
+    _mco_asan_finish_switch(_mco_running_for(co), _mco_runtime_for(co));
 #endif
   }
   return MCO_SUCCESS;
@@ -2073,11 +2134,11 @@ size_t mco_get_storage_size(mco_coro* co) {
 
 #ifdef MCO_NO_MULTITHREAD
 mco_coro* mco_running(void) {
-  return mco_current_co;
+  return mco_default_runtime.current_co;
 }
 #else
 static MCO_NO_INLINE mco_coro* _mco_running(void) {
-  return mco_current_co;
+  return mco_default_runtime.current_co;
 }
 mco_coro* mco_running(void) {
   /*

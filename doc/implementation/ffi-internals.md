@@ -13,8 +13,10 @@ For user-facing behavior see [the C FFI](../language/ffi.md).
 The checker's `Ast.TopLevelForeignImport` handler calls
 `cdriver.process_file` with the importing source directory plus the configured
 compiler, C99 language mode, and already parsed `TITAN_EXTRA_CPPFLAGS`.
-The driver also supplies its current fixed runtime and Lua include directories;
-`titanc --lua` updates that configuration before checking begins. On success it
+The driver also supplies its current fixed runtime and Lua include directories.
+In source-checkout mode, `titanc --lua` updates that configuration before
+checking begins. Installed mode rejects the override so FFI parsing, generated
+C, `liblua.a`, and `libtitan.a` continue to use one matched SDK. On success it
 gets:
 
 * a TypeList from the C parser;
@@ -60,10 +62,12 @@ diagnostic. Preprocessing/parsing failures still fail the import itself.
 
 ## Header Support Files
 
-The compiler ships `titan-runtime/titan/ffi.h`. `cdriver` searches upward from
-the loaded compiler module until it finds `titan-runtime`, so `foreign import
-"titan/ffi.h"` works without installing a system header and without depending
-on the process cwd. The file exposes selected primitive aliases:
+The installed compiler ships `<root>/include/titan/ffi.h` and passes
+`<root>/include` as both a C-FFI probe path and a generated-C include path.
+Checkout developer mode instead searches upward from the loaded compiler
+module for `titan-runtime/titan/ffi.h`. Thus `foreign import "titan/ffi.h"`
+works without depending on the process cwd while keeping an installed compiler
+inside one SDK root. The file exposes selected primitive aliases:
 `titan_ffi_void`, `titan_ffi_bool`, `titan_ffi_char`,
 `titan_ffi_signed_char`, `titan_ffi_unsigned_char`, `titan_ffi_short`,
 `titan_ffi_unsigned_short`, `titan_ffi_int`, `titan_ffi_unsigned_int`,
@@ -73,8 +77,9 @@ opaque `lua_State` typedef, and Lua's internal `TValue` type. `TValue` remains a
 distinct C type in Titan's FFI type graph. Private runtime helpers can move
 values across that boundary through explicit `value` <-> C `TValue` coercions.
 
-Generated C already compiles with `-I titan-runtime`, so the emitted
-`#include <titan/ffi.h>` resolves through the normal C compiler path too.
+Generated C in installed mode compiles with `-I <root>/include` (checkout mode
+uses `-I titan-runtime`), so the emitted `#include <titan/ffi.h>` resolves
+through the same normal compiler path.
 
 ## TypeList Extraction
 

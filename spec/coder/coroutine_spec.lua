@@ -2,10 +2,10 @@ local assert = require 'luassert'
 local lfs = require 'lfs'
 
 local ROOT_ARTIFACTS = {
-    "titan-runtime/titan.o",
-    "titan-runtime/titan_coro.o",
-    "coroutine.so",
+    "titan-runtime/libtitan.a",
+    "titan-runtime/.titan-runtime-archive-build-config",
     "titan/coroutine.so",
+    "titan/coroutine.so.dSYM",
     "stdlib/coroutine.c",
     "stdlib/coroutine.o",
 }
@@ -20,10 +20,14 @@ local function file_exists(path)
     return false
 end
 
-local LUA = file_exists("./lua") and "./lua" or ".lua/bin/lua"
+local prefix_lua = os.getenv("PREFIX") and
+    (os.getenv("PREFIX") .. "/bin/lua") or nil
+local LUA = prefix_lua and file_exists(prefix_lua) and prefix_lua
+    or (file_exists(".lua/bin/lua") and ".lua/bin/lua" or "./lua")
 local TITANC = LUA ..
     [[ -e 'package.path="./?.lua;./?/init.lua;" .. package.path' ./titanc]]
-local TEST_ENV = "env CCACHE_DISABLE=1 TITAN_STDLIB_PATH=. "
+local TEST_ENV = "env CCACHE_DISABLE=1 TITAN_STDLIB_PATH=titan " ..
+    "LUA_CPATH='./?.so;;' "
 
 local function clean_test_artifacts()
     os.execute("rm -rf test.o test.so test.c test.titan " ..
@@ -51,7 +55,8 @@ local function preserve_root_artifacts()
             assert.truthy(pipe:close())
         elseif entry.mode then
             entry.backup = directory .. "/" .. index
-            assert.truthy(exec_ok("cp -p " .. path .. " " .. entry.backup))
+            local cp = entry.mode == "directory" and "cp -Rp " or "cp -p "
+            assert.truthy(exec_ok(cp .. path .. " " .. entry.backup))
         end
         entries[#entries + 1] = entry
     end
@@ -61,10 +66,18 @@ end
 local function restore_root_artifacts()
     local backup = assert(artifact_backup)
     for _, entry in ipairs(backup.entries) do
-        os.remove(entry.path)
+        if entry.mode == "directory" or
+                lfs.symlinkattributes(entry.path, "mode") == "directory" then
+            assert.truthy(exec_ok("rm -rf " .. entry.path))
+        else
+            os.remove(entry.path)
+        end
         if entry.mode == "link" then
             assert.truthy(exec_ok(
                 "ln -s " .. entry.target .. " " .. entry.path))
+        elseif entry.mode == "directory" then
+            assert.truthy(exec_ok(
+                "cp -Rp " .. entry.backup .. " " .. entry.path))
         elseif entry.mode then
             assert.truthy(exec_ok(
                 "cp -p " .. entry.backup .. " " .. entry.path))
@@ -82,22 +95,22 @@ end
 
 local function build_coroutine()
     assert.truthy(exec_ok(
-        "env CCACHE_DISABLE=1 cc --std=c99 -O2 -Wall -fPIC -g " ..
-        "-fno-optimize-sibling-calls -c titan-runtime/titan_coro.c " ..
-        "-I titan-runtime -I lua-5.5.0/src -I libbacktrace " ..
-        "-o titan-runtime/titan_coro.o"))
-    assert.truthy(exec_ok(
         TEST_ENV .. "TITAN_PATH_0_11= TITAN_PATH= " ..
         TITANC .. " --stdlib-build --tree stdlib " ..
-        "--lua-name titan.coroutine coroutine " ..
-        "-X titan-runtime/titan_coro.o"))
+        "--lua-name titan.coroutine coroutine"))
     assert.truthy(exec_ok("mkdir -p titan"))
     os.remove("titan/coroutine.so")
-    assert.truthy(exec_ok("ln -s ../coroutine.so titan/coroutine.so"))
+    assert.truthy(exec_ok("rm -rf titan/coroutine.so.dSYM"))
+    assert.truthy(os.rename("coroutine.so", "titan/coroutine.so"))
+    if lfs.attributes("coroutine.so.dSYM", "mode") == "directory" then
+        assert.truthy(os.rename("coroutine.so.dSYM",
+            "titan/coroutine.so.dSYM"))
+    end
 end
 
 local function clean_coroutine_artifacts()
     os.remove("titan/coroutine.so")
+    exec_ok("rm -rf titan/coroutine.so.dSYM coroutine.so.dSYM")
     os.execute("rmdir titan 2>/dev/null")
     os.remove("coroutine.so")
     os.remove("stdlib/coroutine.c")
@@ -198,7 +211,7 @@ end
 describe("coroutine standard module", function()
     setup(function()
         preserve_root_artifacts()
-        os.remove("titan-runtime/titan.o")
+        os.remove("titan-runtime/libtitan.a")
         build_coroutine()
     end)
 
@@ -254,12 +267,12 @@ describe("coroutine standard module", function()
             assert(debug.getregistry()["titan.coroutine"] ~= nil)
             assert(debug.getregistry()["titan.coro"] == nil)
             local open = assert(package.loadlib(
-                "./coroutine.so", "luaopen_titan_coroutine"))
+                "./titan/coroutine.so", "luaopen_titan_coroutine"))
             assert(open() == titan_coroutine)
             assert(package.loadlib(
-                "./coroutine.so", "luaopen_coroutine") == nil)
+                "./titan/coroutine.so", "luaopen_coroutine") == nil)
             assert(package.loadlib(
-                "./coroutine.so", "luaopen_coro") == nil)
+                "./titan/coroutine.so", "luaopen_coro") == nil)
             print("OK")
         ]==])
         assert.match("OK", out)
@@ -291,7 +304,7 @@ describe("coroutine standard module", function()
             assert(debug.getmetatable(from_titan) ==
                    debug.getmetatable(from_lua))
             local open = assert(package.loadlib(
-                "./coroutine.so", "luaopen_titan_coroutine"))
+                "./titan/coroutine.so", "luaopen_titan_coroutine"))
             assert(open() == titan_coroutine)
             print("OK")
         ]==])

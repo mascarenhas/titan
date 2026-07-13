@@ -21,8 +21,20 @@ local function clean()
 end
 
 describe("libbacktrace unified stack trace", function()
-    setup(function() os.remove("titan-runtime/titan.o") end)
     after_each(clean)
+
+    it("keeps the native symbol cache in Lua registry state", function()
+        local file = assert(io.open("titan-runtime/titan.c", "rb"))
+        local runtime = file:read("*a")
+        file:close()
+        assert.truthy(runtime:find("TITAN_BT_STATE_KEY", 1, true), runtime)
+        assert.truthy(runtime:find("lua_newuserdatauv", 1, true), runtime)
+        assert.falsy(runtime:find(
+            "static struct backtrace_state *titan_bt_state", 1, true),
+            runtime)
+        assert.falsy(runtime:find("titan_bt_generation_seen", 1, true),
+            runtime)
+    end)
 
     it("merges native frames, showing qualified Titan names not mangled symbols", function()
         -- A Titan error raised two native frames deep. The merged trace must
@@ -375,7 +387,6 @@ end)
 -- uncaught error must print the message + the unified Lua+Titan trace to stderr
 -- and exit non-zero, mirroring lua.c's msghandler/report.
 describe("standalone main top-level error handler", function()
-    setup(function() os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
     it("prints message + unified trace to stderr and exits non-zero", function()

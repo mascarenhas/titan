@@ -3,19 +3,56 @@
 The asynchronous standard library has one low-level owner:
 
 ```text
-coroutine.so -> uv.so
-                 |-> timer.so
-                 |-> fs.so
-                 |-> net.so
-                 `-> os.so
+titan/coroutine.so -> titan/uv.so
+                         |-> titan/timer.so
+                         |-> titan/fs.so
+                         |-> titan/net.so
+                         `-> titan/os.so
 ```
 
-`uv.so` links `titan_uv.o` and the selected libuv exactly once. `timer.so`,
-`fs.so`, `net.so`, and `os.so` import the canonical binary `uv.so` with
-`loadstdlib`; they do not compile `uv.titan`, link `titan_uv.o`, or embed
-another libuv archive. Their `titan.*` Lua aliases are relative symlinks to the
-canonical images. Bundled and system acquisition, including Linux and macOS
-packages, is documented in the [README](../../README.md#libuv-setup).
+`titan/uv.so` extracts `titan_uv.o` from `libtitan.a` and links the selected libuv
+exactly once. Both checkout and installed driver modes link the runtime archive,
+never a direct `titan.o`; static selection extracts only referenced shim
+members. `titan/timer.so`, `titan/fs.so`, `titan/net.so`, and `titan/os.so`
+import the qualified binary `uv.so` with `loadstdlib`; they do not compile
+`uv.titan`, extract `titan_uv.o`, or embed another libuv archive. Installation
+writes exactly one ordinary file per standard module under
+`<root>/lib/titan/0.11/titan/`.
+Titan's patched Lua C-module path and Titan's implicit standard-module prefix
+both resolve those canonical files, with no copied, symbolic-link, or hard-link
+aliases. Thus every facade reaches the same `uv.so` image. In the normal
+bundled build, `titan/uv.so` is the process's sole complete libuv provider; its
+private static archive is consumed only for that link and is not installed in
+the Titan SDK, while the headers remain available under the installed include
+directory. An ordinary extension DSO may call libuv directly without embedding
+or linking it: it must import standard `uv` as well as
+foreign-import `uv.h`, leaving its `uv_*` calls unresolved. Titan maps the
+extension's interface once through `package.loadlib`; its `<mangled>_types`
+function returns `"uv-provider"` as an optional second result, deterministically
+marking the dependency `"dynamic-uv"` even when libuv was already global.
+Reading it establishes or validates canonical `uv.so` and records its
+compiler-process file identity. If an eager unresolved `uv_*` relocation
+prevents that initial interface load, the open-stage diagnostic bootstraps
+canonical `uv.so` and the compiler retries before requiring the marker. A
+binary without it is rejected and must be rebuilt with an explicit standard
+`uv` import. Generated
+consumers call `loadlibwithuv`, which loads canonical `uv.so` globally before it maps the
+extension. Unmarked ordinary DSOs retain eager/local loading. A Lua caller must
+`require "titan.uv"` before requiring that extension directly. Titan's patched
+Lua `loadlib.c` recognizes exactly the `luaopen_titan_uv` entry and gives that
+DSO global visibility on its first load; other Lua C modules remain local.
+This loader-level path works on Linux and macOS, and `uv.so` has no
+self-dlopen/promotion helper. System mode may instead link the extension and
+canonical `uv.so` against the same shared libuv selected by pkg-config.
+Statically embedding the bundled archive again would create a second native
+instance. Because both consumption paths preload the provider before the
+extension itself, bundled mode supports eager libuv data/function-address
+relocations and native constructors as well as ordinary calls.
+
+Runtime/Task/resource state remains in registry/GC-owned objects. These
+post-install files are outside the source rock's manifest. Bundled and system
+acquisition, including Linux and macOS packages, is documented in the
+[README](../../README.md#libuv-setup).
 
 ## GC-owned native storage
 
@@ -344,7 +381,8 @@ deadlock-free `communicate`, TERM-resistant shutdown, FIFO/close state
 machines, path operations, pre-submission allocation and bounded-close faults,
 failed-spawn and exit-before-close ordering, callback repair, observed helper
 failure, request cleanup/cancellation faults, trace propagation, GC, sequential
-sessions, standalone bootstrap, canonical aliases, LuaRocks ownership, and
+sessions, standalone bootstrap, canonical installed DSOs, source-rock
+deployment, and
 bundled/system libuv topology. Linux CI also rebuilds Lua, libbacktrace, libuv,
 the Titan runtime, and standard modules under ASan/UBSan, then runs
 representative timer/FS and core owner/callback suites plus production net/OS
@@ -353,6 +391,9 @@ sanitizer net smoke specifically keeps a large write pending across Task
 cancellation, unwind, and forced GC. Its
 stack-use-after-return coverage relies on `minicoro.h` announcing every native
 coroutine stack switch to the ASan fiber API, including tagged and stacked
-terminal transfers. In that mode minicoro retains its stack-corruption sentinel
-but leaves address-range checking to ASan, because GCC's use-after-return
-instrumentation can move an address-taken local onto the sanitizer fake stack.
+terminal transfers. The main-stack fake-stack token, bottom, and size live in
+the same registry-owned `mco_runtime` as the current-coroutine pointer, so
+nested tagged transfers pair each sanitizer switch through one shared runtime.
+In that mode minicoro retains its stack-corruption sentinel but leaves
+address-range checking to ASan, because GCC's use-after-return instrumentation
+can move an address-taken local onto the sanitizer fake stack.

@@ -370,7 +370,11 @@ static void test_magic_sentinel_under_sanitizers(void) {
 }
 
 int main(void) {
+#ifdef TEST_FIXED_TAG_COMPARATOR
+  mco_set_tag_comparator(NULL);
+#else
   mco_set_tag_comparator(tagcmp);
+#endif
   test_immediate_tagged_yield();
   test_long_tagged_chain();
   test_destroy_suspended_handler_abandons_stacked_chain();
@@ -407,6 +411,14 @@ describe("minicoro tagged extension", function()
         {
             name = "default backend",
             defines = {},
+        },
+        {
+            name = "default backend with fixed tag comparator",
+            defines = {
+                "static int tagcmp(void *, void *);",
+                "#define MCO_TAG_COMPARATOR tagcmp",
+                "#define TEST_FIXED_TAG_COMPARATOR",
+            },
         },
         {
             name = "ASM backend",

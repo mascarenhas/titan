@@ -463,7 +463,11 @@ fails the userdata-has-no-`__index` way.
 ## The registry footprint
 
 Everything per-Lua-state that generated code and runtime must find again
-lives in the Lua registry. The complete key inventory:
+lives in the Lua registry or in GC-traced objects reachable from it. Semantic
+module state and native caches never live in mutable shared or per-image C
+globals; translation-unit statics are limited to immutable constants and
+non-stateful wiring that is identical for every Titan module. The complete key
+inventory:
 
 | Registry key | Value |
 | --- | --- |
@@ -471,11 +475,13 @@ lives in the Lua registry. The complete key inventory:
 | `"Titan module <modname> metatable"` | the module `Udata`'s member metatable (only if the module exports anything) |
 | `"Titan record <fqtn> metatable"` | the record metatable (`luaL_newmetatable`) — also the record's type identity (a type check compares `uvalue(v)->metatable`) |
 | the metatable pointer itself (via `lua_rawsetp`) | the FQTN string — the reverse map, metatable → name, used only in error messages |
+| `TITAN_ROOT_KEY` (`"9efb91a8-4a1b-4bdb-aa6b-b84d9ed1dd77"`) | the normalized Titan SDK/rocks-tree root cached by `titan_init_paths`/`pushroot`; current supported installs discover it through the equal Lua `PREFIX` |
 | `TITAN_PATH_KEY` (`"ec10e486-d8fd-11e7-87f4-e7e9581a929c"`) | the resolved Titan search path (cached by `pushpath`) |
-| `TITAN_STDLIB_PATH_KEY` (`"7f0d54d5-0955-47e6-a83d-40e6868417ca"`) | the dedicated canonical standard-module path, cached separately from ordinary Titan lookup |
+| `TITAN_STDLIB_PATH_KEY` (`"7f0d54d5-0955-47e6-a83d-40e6868417ca"`) | the standard-module base path, cached separately from ordinary Titan lookup |
+| `TITAN_STDLIB_IMPLICIT_PREFIX_KEY` (`"4dd637aa-f3bd-4998-82de-bb108438c7d9"`) | whether standard loads implicitly insert `titan/` below the installed default instead of using an explicit direct-directory override |
 | `TITAN_LIBS_KEY` (`"ecfc9174-d8fd-11e7-8be2-abbaa3ded45f"`) | the dlopen-handle cache table (below) |
 | `TITAN_MAIN_BOOTSTRAP_KEY` (`"41c48a97-55a5-4514-a76f-79ab028ae6e0"`) | an optional async standalone hook installed by the canonical `uv` module |
-| `TITAN_BT_GENERATION_KEY` (`"a222927d-0e7b-4f7a-93d9-1a6ce7111a5c"`) | a shared generation counter that tells every loaded module's local libbacktrace state to resnapshot after any Titan `.so` is dlopened |
+| `TITAN_BT_STATE_KEY` (`"a222927d-0e7b-4f7a-93d9-1a6ce7111a5c"`) | registry-owned userdata containing the shared per-state `backtrace_state *`; invalidation clears the slot so the next capture resnapshots loaded objects without mutable per-DSO C globals |
 | `TITAN_BACKTRACE_KEY` (`"57d80578-2534-4856-ad3b-bde8cba4c445"`) | the last error's raw merged backtrace string |
 | `TITAN_TRACE_APPEND_KEY` (`"4f895b66-bae0-4e97-afb3-83a31f2f9e96"`) | temporary coroutine trace handoff slot used before appending resume/error propagation frames |
 | `TITAN_NAMES_KEY` (`"a7c4e2f0-1d6b-4e3a-9c5f-8b2d7e0a4f16"`) | the native-symbol display-name table used by unified trace formatting |
@@ -484,7 +490,7 @@ lives in the Lua registry. The complete key inventory:
 
 The UUID-string constants are defined in `titan-runtime/titan.h`.
 
-## Dynamic loading: `loadlib`, `loadstdlib`, and `loadsym`
+## Dynamic loading: `loadlib`, `loadlibwithuv`, `loadstdlib`, and `loadsym`
 
 When a dependency exists only as a compiled `.so`, the importer's
 `_init` loads it at run time with two helpers from
@@ -500,10 +506,13 @@ Udata* (*some_dep_init)(lua_State *L) =
 `loadlib(L, file)` first consults the handle cache under
 `TITAN_LIBS_KEY`; on a miss it walks the Titan path — environment
 variable `TITAN_PATH_0_11`, then `TITAN_PATH`, then the default
-`".;/usr/local/lib/titan/0.11"`, with `;;` in an env value splicing the
-default in — trying `dlopen(dir "/" file, RTLD_NOW | RTLD_LOCAL)` per
-`;`-separated directory. Successes are cached for the Lua-state lifetime and
-the underlying DSOs remain mapped for the process lifetime. Titan does not
+`".;<root>/lib/titan/0.11"`, with `<root>` recovered from the first
+literal `package.cpath` entry ending in `/lib/lua/5.5/?.so` and `;;` in
+an env value splicing that default in — trying
+`dlopen(dir "/" file, RTLD_NOW | RTLD_LOCAL)` per `;`-separated directory.
+This remains the ordinary path for an unmarked binary dependency. Successes are
+cached for the Lua-state lifetime and the underlying DSOs remain mapped for the
+process lifetime. Titan does not
 `dlclose` this manually wired dependency graph: no fixed insertion order is
 safe for every root/dependency load order, and finalizable Lua objects can
 still retain native entry pointers while a state is closing. Total failure raises
@@ -514,11 +523,39 @@ missing or mismatched ABI markers before any native entry point is used.
 
 Reserved standard dependencies use `loadstdlib(L, file)` instead. It shares
 the same `TITAN_LIBS_KEY` handle cache and ABI/symbol checks, but searches only
-`TITAN_STDLIB_PATH` or the ABI-qualified installed default cached under
-`TITAN_STDLIB_PATH_KEY`. It never adds `.`, ordinary `TITAN_PATH`, or
-`package.cpath`. The canonical binary and relative Lua `titan.*` alias therefore
-map one DSO image, while local same-named application modules cannot replace an
-internal standard dependency.
+an explicit `TITAN_STDLIB_PATH` direct directory or the ABI-qualified
+installed default `<root>/lib/titan/0.11`, cached under
+`TITAN_STDLIB_PATH_KEY`. The default also caches a true implicit-prefix flag,
+so `loadstdlib(L, "timer.so")` opens `titan/timer.so` below that parent; an
+explicit override opens `timer.so` directly below the override. It never adds
+`.` or ordinary `TITAN_PATH`. The qualified standard-loader file is at
+`<root>/lib/titan/0.11/titan/<module>.so`, and post-install writes only that
+file. The Titan-owned Lua default puts `<root>/lib/titan/0.11/?.so` before its
+ordinary `lib/lua` templates, so `require "titan.<module>"` and the implicit
+standard loader open the same DSO. There are no copied, symbolic-link, or
+hard-link aliases. `loadstdlib` opens canonical `uv.so` with
+`RTLD_NOW | RTLD_GLOBAL`, while other standard modules use
+`RTLD_NOW | RTLD_LOCAL`. Thus `uv.so` is the sole complete bundled-libuv
+provider. A compiled module's `<mangled>_types` function optionally returns
+`"uv-provider"` as its second result when its origin map contains standard `uv`
+or a `"dynamic-uv"` dependency. Compiler interface recovery uses that marker
+to classify the binary as `"dynamic-uv"`, establish or validate canonical
+`uv.so`, and record its compiler-process file identity, even when libuv was
+already global. If an eager unresolved `uv_*` relocation prevents the initial
+ABI-symbol load, the open-stage diagnostic bootstraps canonical `uv.so` and the
+compiler retries before requiring the marker; if it is absent, the binary is
+rejected and must be rebuilt with an explicit standard `uv` import. Generated imports of that origin
+call `loadlibwithuv(L, file)`, which invokes `loadstdlib(L, "uv.so")` before
+`loadlib(L, file)`. The provider therefore precedes the extension's mapping and
+satisfies eager relocations and native constructors as well as ordinary
+function calls; unmarked binaries continue through plain `loadlib`. A Lua
+caller loading the extension directly must
+`require "titan.uv"` first. The Titan-owned Lua patch
+in `loadlib.c` gives global visibility on first load only to the C module whose
+requested entry is exactly `luaopen_titan_uv`; other Lua C-module entries keep
+ordinary local visibility. This is the macOS- and Linux-portable Lua path: the
+provider does not locate, reopen, or promote itself. Local same-named
+application modules cannot replace an internal standard dependency.
 
 Every cross-module function called from an ordinary dynamic or canonical
 standard dependency is declared as a `static` C *function pointer* and stitched
@@ -584,9 +621,12 @@ trace remains a single innermost→outer section. When libbacktrace is
 unavailable (`TITAN_NO_LIBBACKTRACE`, e.g. musl/Alpine) it falls back to
 raw Lua traceback lines plus raw `execinfo` C frames.
 
-The retrieval side is the separate, optional `titan` Lua module
-(`titan-runtime/titanlib.c`, built by the rockspec): `titan.backtrace()`
-rawgets that registry key. Regeneration follows the **pin discipline**
+The retrieval side is the separate `titan` Lua support module: Make compiles
+`titan-runtime/titanlib.c` into `titanlib.o`, links that object alone into
+`titan.so`, and the rockspec installs it. `titan.backtrace()` rawgets that
+registry key. The same test-support module exposes internal `pin` and `clear`
+helpers; none of these functions is part of `libtitan.a`.
+Regeneration follows the **pin discipline**
 (`TITAN_TRACE_PINNED`): a pinned slot (a pending re-raise) is preserved
 verbatim and the pin cleared; an unpinned (fresh) error regenerates.
 Coroutines use `TITAN_TRACE_APPEND_KEY` before setting the pin: an
@@ -601,12 +641,25 @@ chapter](../language/error-handling.md).
 When exactly one requested module defines `main(args: {string}):
 integer`, `driver.compile_program` emits a srlua-derived C entrypoint
 (`entrypoint_template` in `driver.lua`) and links it with all source module
-objects, `titan-runtime/titan.o`, `libbacktrace.a`, and `liblua.a`:
+objects and the active runtime SDK. Installed mode uses `libtitan.a`, the
+separate `libbacktrace.a`, and the matching `liblua.a` from the Titan
+SDK/rocks-tree root; checkout mode uses the same archive contract with local
+`libtitan.a`, separate local `libbacktrace.a`, and local `liblua.a`. Generic
+module and program links do not receive libuv; the canonical `uv.so` build
+alone receives the private bundled archive (or system libuv through ordered
+pkg-config link flags). The bundled archive is not installed in the SDK;
+bundled-mode extension DSOs leave their `uv_*` calls unresolved:
 
 * **Preload registration, not eager loading.** The C `main` creates a
-  state, runs `luaL_openlibs`, and registers the module's `luaopen_`
-  function in `package.preload["<modname>"]`; the module initializes
-  only when the script `require`s it.
+  state and runs `luaL_openlibs`. `titan_init_paths` then parses the inherited
+  `package.cpath` for the first `/lib/lua/5.5/?.so` entry, initializes the
+  ordinary and standard Titan defaults from that root, and ensures
+  `<root>/lib/titan/0.11/?.so` is present in `package.cpath`. The
+  patched Titan-owned Lua already places that template before its `lib/lua`
+  entries. It then
+  registers the module's `luaopen_` function in
+  `package.preload["<modname>"]`; the module initializes only when the script
+  `require`s it.
 * **`pmain`** calls `require("<modname>")`, retrieves and retains its `main`
   callable, then builds the argument table with
   `lua_rawseti(L, -2, i)` for `i = 0 .. argc-1` — so `args[0]` is the program

@@ -2,13 +2,7 @@ local phase6 = require "spec.support.phase6"
 
 local function transform_only()
     local output = os.tmpname() .. "-titan-phase6-transform.titan"
-    local lua = phase6.repo .. "/.lua/bin/lua"
-    local probe = io.open(lua, "rb")
-    if probe then
-        probe:close()
-    else
-        lua = phase6.repo .. "/lua"
-    end
+    local lua = phase6.host_lua()
     local command = table.concat({
         "'" .. lua .. "'",
         "'" .. phase6.repo ..
@@ -52,7 +46,7 @@ describe("os Phase 6 signal transition faults", function()
             phase6.copy_fixture(workspace, "signal_faults.titan",
                 "phase6_signal_faults")
             phase6.compile(workspace, "phase6_signal_faults", {
-                stdlib = workspace,
+                stdlib = workspace .. "/titan",
             })
         end)
 

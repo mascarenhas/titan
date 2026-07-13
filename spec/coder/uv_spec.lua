@@ -70,10 +70,11 @@ describe("uv native-owner fixture", function()
             "spec/fixtures/uv/native_owner_consumer.titan",
             "native_owner_consumer")
         local _, cppflags, ldflags = host_config()
-        local shim = workspace .. "/titan-runtime/titan_uv.o"
-        assert.truthy(lfs.attributes(shim),
-            "Phase 1 fixture requires make stdlib's titan_uv.o")
+        local runtime = workspace .. "/titan-runtime/libtitan.a"
+        assert.truthy(lfs.attributes(runtime),
+            "Phase 1 fixture requires make runtime's libtitan.a")
         local allocation_counter = compile_allocation_counter(workspace)
+        ldflags = phase2.repo .. "/libuv-build/libuv.a " .. ldflags
         phase2.compile(workspace, "native_owner_probe", {
             cppflags = cppflags,
             cflags = "-fno-strict-aliasing " ..
@@ -82,8 +83,6 @@ describe("uv native-owner fixture", function()
             ldflags = ldflags,
             extra_objects = {
                 allocation_counter,
-                shim,
-                phase2.repo .. "/libuv-build/libuv.a",
             },
         })
         phase2.compile(workspace, "native_owner_consumer", {
@@ -94,8 +93,6 @@ describe("uv native-owner fixture", function()
             ldflags = ldflags,
             extra_objects = {
                 allocation_counter,
-                shim,
-                phase2.repo .. "/libuv-build/libuv.a",
             },
         })
         generated = read_file(

@@ -23,7 +23,6 @@ local function clean()
 end
 
 describe("raise <exp>", function()
-    setup(function() os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
     it("raises a string error caught by a Lua pcall", function()
@@ -190,7 +189,6 @@ describe("raise <exp>", function()
 end)
 
 describe("standalone uncaught errors", function()
-    setup(function() os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
     it("prints the raised error and a backtrace before exiting non-zero", function()
@@ -234,7 +232,6 @@ describe("standalone uncaught errors", function()
 end)
 
 describe("finally", function()
-    setup(function() os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
     it("runs the finally on normal completion", function()
@@ -825,7 +822,6 @@ describe("finally", function()
 end)
 
 describe("catch", function()
-    setup(function() os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
     it("catches a body error and continues after the try", function()

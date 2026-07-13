@@ -32,7 +32,7 @@ describe("fs Phase 3 isolated lifecycle faults", function()
         phase3.copy_fixture(workspace, "fs_faults.titan",
             "phase3_fs_faults")
         phase3.compile(workspace, "phase3_fs_faults", {
-            stdlib = workspace,
+            stdlib = workspace .. "/titan",
         })
     end)
 

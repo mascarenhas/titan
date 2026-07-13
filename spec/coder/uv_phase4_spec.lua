@@ -26,7 +26,7 @@ describe("uv Phase 4 deterministic races", function()
             "spec/fixtures/uv/phase4/race_cases.titan",
             "phase4_race_cases")
         local compile_options = {
-            stdlib = workspace,
+            stdlib = workspace .. "/titan",
         }
         phase3.compile(workspace, "phase4_race_cases", compile_options)
         phase2.copy_source(workspace,

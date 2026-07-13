@@ -14,35 +14,114 @@ driver.imported = {}
 
 driver.TITAN_VER = "0.11"
 driver.TITAN_VER_SUFFIX = "_0_11"
-local function package_cpath_dirs()
-    local dirs = {}
-    for template in package.cpath:gmatch("[^;]+") do
-        local q = template:find("?", 1, true)
-        if q then
-            local dir = template:sub(1, q - 1):gsub("[/\\]*$", "")
-            if dir ~= "" then
-                table.insert(dirs, dir)
-            end
+driver.LUA_VERSION = "5.5"
+
+local LUA_CPATH_SUFFIX = "/lib/lua/" .. driver.LUA_VERSION .. "/?.so"
+
+-- Return the installation prefix encoded by the first canonical Lua C-module
+-- template. Deliberately do not accept a merely similar template: this is the
+-- one layout established by Titan's prefix-owned Lua installation.
+function driver.root_from_package_cpath(cpath)
+    if type(cpath) ~= "string" then return nil end
+    for template in (cpath .. ";"):gmatch("(.-);") do
+        if #template >= #LUA_CPATH_SUFFIX and
+           template:sub(-#LUA_CPATH_SUFFIX) == LUA_CPATH_SUFFIX then
+            local root = template:sub(1, #template - #LUA_CPATH_SUFFIX)
+            return root ~= "" and root or "/"
         end
     end
-    return table.concat(dirs, ";")
+    return nil
 end
 
-local DEFAULT_TITAN_BIN_PATH = ".;/usr/local/lib/titan/" .. driver.TITAN_VER
-local cpath_dirs = package_cpath_dirs()
-if cpath_dirs ~= "" then
-    DEFAULT_TITAN_BIN_PATH = DEFAULT_TITAN_BIN_PATH .. ";" .. cpath_dirs
+local function normalize_root(root)
+    if type(root) ~= "string" or root == "" then return nil end
+    if root:sub(1, 1) ~= "/" then
+        root = lfs.currentdir() .. "/" .. root
+    end
+    root = root:gsub("/+$", "")
+    return root ~= "" and root or "/"
+end
+
+function driver.resolve_installation_root(cpath, override)
+    if override == "" then override = nil end
+    return normalize_root(override or driver.root_from_package_cpath(cpath))
+end
+
+local function root_join(root, suffix)
+    if root == "/" then return "/" .. suffix end
+    return root .. "/" .. suffix
+end
+
+function driver.installed_paths(root)
+    root = normalize_root(root)
+    if not root then return nil end
+    local titan_lib = root_join(root, "lib/titan/" .. driver.TITAN_VER)
+    return {
+        root = root,
+        lua_source = root_join(root, "src/lua-5.5.0"),
+        include = root_join(root, "include"),
+        lib = root_join(root, "lib"),
+        libtitan = root_join(root, "lib/libtitan.a"),
+        libbacktrace = root_join(root, "lib/libbacktrace.a"),
+        liblua = root_join(root, "lib/liblua.a"),
+        titan_bin = titan_lib,
+        titan_stdlib = titan_lib .. "/titan",
+        lua_cpath = titan_lib .. "/?.so",
+    }
+end
+
+function driver.source_checkout_from_driver_source(source, current_dir)
+    if type(source) ~= "string" then return false end
+    if source:sub(1, 1) ~= "@" then return false end
+    source = source:sub(2)
+    if source:sub(1, 1) ~= "/" then
+        source = (current_dir or lfs.currentdir()) .. "/" .. source
+    end
+    local root = source:match("^(.*)/titan%-compiler/driver[.]lua$")
+    return root ~= nil and
+        lfs.attributes(root .. "/titan-runtime/titan.c", "mode") == "file" and
+        lfs.attributes(root .. "/Makefile", "mode") == "file"
+end
+
+local function is_source_checkout()
+    if type(debug) ~= "table" or type(debug.getinfo) ~= "function" then
+        return false
+    end
+    return driver.source_checkout_from_driver_source(
+        debug.getinfo(1, "S").source)
+end
+
+local internal_root = os.getenv("TITAN_ROCKS_ROOT")
+if internal_root == "" then internal_root = nil end
+driver.TITAN_ROOT = driver.resolve_installation_root(
+    package.cpath, internal_root)
+driver.SOURCE_CHECKOUT = not internal_root and is_source_checkout()
+driver.INSTALLED = not driver.SOURCE_CHECKOUT
+driver.INSTALL_PATHS = driver.installed_paths(driver.TITAN_ROOT)
+driver.INSTALLATION_ERROR = driver.INSTALLED and not driver.INSTALL_PATHS and
+    ("cannot locate the Titan installation: package.cpath has no entry ending "
+        .. "in '" .. LUA_CPATH_SUFFIX .. "'") or nil
+
+local default_titan_bin_path
+if driver.INSTALL_PATHS then
+    default_titan_bin_path = ".;" .. driver.INSTALL_PATHS.titan_bin
+else
+    default_titan_bin_path = ".;/usr/local/lib/titan/" .. driver.TITAN_VER
 end
 
 driver.TITAN_BIN_PATH = os.getenv("TITAN_PATH" .. driver.TITAN_VER_SUFFIX)
     or os.getenv("TITAN_PATH")
-    or DEFAULT_TITAN_BIN_PATH
+    or default_titan_bin_path
 driver.TITAN_SOURCE_PATH = "."
 driver.TITAN_STDLIB_SOURCE_PATH = os.getenv("TITAN_STDLIB_SOURCE_PATH")
     or "stdlib"
-driver.TITAN_STDLIB_PATH = os.getenv("TITAN_STDLIB_PATH")
+local titan_stdlib_path_override = os.getenv("TITAN_STDLIB_PATH")
+driver.TITAN_STDLIB_PATH = titan_stdlib_path_override
+    or (driver.INSTALL_PATHS and driver.INSTALL_PATHS.titan_bin)
     or ("/usr/local/lib/titan/" .. driver.TITAN_VER)
+driver.TITAN_STDLIB_IMPLICIT_PREFIX = titan_stdlib_path_override == nil
 driver.STANDARD_DEPENDENCY = "standard"
+driver.UV_DYNAMIC_DEPENDENCY = "dynamic-uv"
 driver.STANDARD_MODULES = {
     coroutine = true,
     uv = true,
@@ -51,9 +130,12 @@ driver.STANDARD_MODULES = {
     net = true,
     os = true,
 }
-driver.LUA_SOURCE_PATH = "lua-5.5.0/src/"
+driver.LUA_SOURCE_PATH = driver.INSTALLED and driver.INSTALL_PATHS and
+    driver.INSTALL_PATHS.lua_source or "lua-5.5.0/src"
 driver.TITAN_RUNTIME_PATH = "titan-runtime/"
 driver.LIBBACKTRACE_PATH = "libbacktrace"
+driver.INCLUDE_PATH = driver.INSTALLED and driver.INSTALL_PATHS and
+    driver.INSTALL_PATHS.include or nil
 -- -g emits DWARF (carries the #line file/line a traceback needs) and
 -- -fno-optimize-sibling-calls keeps tail frames on the stack so libbacktrace
 -- can unwind them.
@@ -78,17 +160,24 @@ driver.EXTRA_CFLAGS, cflags_error =
     parse_extra_flags("TITAN_EXTRA_CFLAGS")
 driver.EXTRA_LDFLAGS, ldflags_error =
     parse_extra_flags("TITAN_EXTRA_LDFLAGS")
-driver.TOOLCHAIN_ERROR = cppflags_error or cflags_error or ldflags_error
+driver.TOOLCHAIN_ERROR = driver.INSTALLATION_ERROR or cppflags_error or
+    cflags_error or ldflags_error
 
 function driver.configure_foreign_c()
+    local include_dirs
+    if driver.INSTALLED then
+        include_dirs = { driver.INCLUDE_PATH, driver.LUA_SOURCE_PATH }
+    else
+        include_dirs = {
+            driver.TITAN_RUNTIME_PATH,
+            driver.LUA_SOURCE_PATH,
+        }
+    end
     checker.configure_foreign_c({
         compiler = driver.CC,
         language_mode = "c99",
         cppflags = driver.EXTRA_CPPFLAGS or {},
-        compiler_include_dirs = {
-            driver.TITAN_RUNTIME_PATH,
-            driver.LUA_SOURCE_PATH,
-        },
+        compiler_include_dirs = include_dirs,
     }, driver.TOOLCHAIN_ERROR)
 end
 
@@ -190,32 +279,80 @@ local function findmodules(paths, modname, extension)
     return found
 end
 
+local function normalize_path(path)
+    if path:sub(1, 1) ~= "/" then
+        path = lfs.currentdir() .. "/" .. path
+    end
+    local parts = {}
+    for part in path:gmatch("[^/]+") do
+        if part == ".." then
+            if #parts > 0 then table.remove(parts) end
+        elseif part ~= "." and part ~= "" then
+            table.insert(parts, part)
+        end
+    end
+    return "/" .. table.concat(parts, "/")
+end
+
 local function same_file(a, b)
     if not a or not b then return false end
     local aa, ba = lfs.attributes(a), lfs.attributes(b)
     if aa and ba and aa.dev and aa.ino and ba.dev and ba.ino then
         return aa.dev == ba.dev and aa.ino == ba.ino
     end
-    local function normalize(path)
-        if path:sub(1, 1) ~= "/" then
-            path = lfs.currentdir() .. "/" .. path
-        end
-        local parts = {}
-        for part in path:gmatch("[^/]+") do
-            if part == ".." then
-                if #parts > 0 then table.remove(parts) end
-            elseif part ~= "." and part ~= "" then
-                table.insert(parts, part)
-            end
-        end
-        return "/" .. table.concat(parts, "/")
-    end
-    return normalize(a) == normalize(b)
+    return normalize_path(a) == normalize_path(b)
 end
 
-local function load_compiled_interface(modname, binf)
+driver._uv_provider_path = nil
+
+local function ensure_uv_provider(options)
+    options = options or {}
+    local stdlib_path = options.stdlib_path or driver.TITAN_STDLIB_PATH
+    local explicit_stdlib_path = options.stdlib_path ~= nil or
+        not driver.TITAN_STDLIB_IMPLICIT_PREFIX
+    local stdlib_modname = explicit_stdlib_path and "uv" or "titan.uv"
+    local _, binf = findmodule(stdlib_path, stdlib_modname, ".so")
+    if not binf then
+        return nil, "canonical standard module 'uv' is not installed under '" ..
+            stdlib_path .. "'"
+    end
+    local provider_path = normalize_path(binf)
+    if driver._uv_provider_path then
+        if same_file(driver._uv_provider_path, provider_path) then return true end
+        return nil, "canonical libuv provider is already loaded from '" ..
+            driver._uv_provider_path .. "'; refusing a second provider '" ..
+            provider_path .. "' in the same compiler process"
+    end
+    local loaded, err = package.loadlib(provider_path, "*")
+    if not loaded then
+        return nil, "cannot load canonical libuv provider '" .. provider_path ..
+            "': " .. tostring(err)
+    end
+    driver._uv_provider_path = provider_path
+    return true
+end
+
+local function load_compiled_interface(modname, binf, options,
+                                       needs_uv_provider)
+    -- A compiled Titan extension may intentionally leave public uv_* function
+    -- references unresolved. Interface recovery itself uses Lua's RTLD_NOW
+    -- loader. Load uv itself globally up front; for an ordinary binary, first
+    -- preserve the normal no-uv path and retry with the canonical provider
+    -- only when the native loader identifies an unresolved uv_* symbol.
+    if modname == "uv" then
+        local provider_ok, provider_err = ensure_uv_provider(options)
+        if not provider_ok then return nil, provider_err end
+    end
     local prefix = modname:gsub("[%-.]", "_")
-    local abif, err = package.loadlib(binf, prefix .. "_abi")
+    local requires_uv = false
+    local abif, err, where = package.loadlib(binf, prefix .. "_abi")
+    if not abif and needs_uv_provider and where == "open" and
+       tostring(err):match("[_ ]uv_[%w_]+") then
+        local provider_ok, provider_err = ensure_uv_provider(options)
+        if not provider_ok then return nil, provider_err end
+        requires_uv = true
+        abif, err, where = package.loadlib(binf, prefix .. "_abi")
+    end
     if not abif then
         return nil, "compiled module '" .. modname
             .. "' has no compatible Titan ABI marker (expected "
@@ -230,13 +367,24 @@ local function load_compiled_interface(modname, binf)
     end
     local typesf, terr = package.loadlib(binf, prefix .. "_types")
     if not typesf then return nil, terr end
-    local tok, types_or_err = pcall(typesf)
+    local tok, types_or_err, dependency_metadata = pcall(typesf)
     if not tok then return nil, types_or_err end
+    if requires_uv and dependency_metadata ~= "uv-provider" then
+        return nil, "compiled module '" .. modname
+            .. "' required the canonical libuv provider while loading but "
+            .. "does not declare 'uv-provider' dependency metadata; rebuild "
+            .. "it with an explicit import of standard module 'uv'"
+    end
+    if dependency_metadata == "uv-provider" and needs_uv_provider then
+        local provider_ok, provider_err = ensure_uv_provider(options)
+        if not provider_ok then return nil, provider_err end
+        requires_uv = true
+    end
     local modtf, lerr = load("return " .. types_or_err, modname, "t", types)
     if not modtf then return nil, lerr end
     local mok, modt_or_err = pcall(modtf)
     if not mok then return nil, modt_or_err end
-    return modt_or_err
+    return modt_or_err, nil, requires_uv
 end
 
 function driver.defaultloader(static_deps, options)
@@ -260,6 +408,8 @@ function driver.defaultloader(static_deps, options)
             end
         elseif mod.origin == "standard" then
             static_deps[modname] = driver.STANDARD_DEPENDENCY
+        elseif mod.origin == driver.UV_DYNAMIC_DEPENDENCY then
+            static_deps[modname] = driver.UV_DYNAMIC_DEPENDENCY
         end
     end
 
@@ -272,6 +422,8 @@ function driver.defaultloader(static_deps, options)
                 direct[modname] = true
             elseif mod.origin == "standard" then
                 direct[modname] = driver.STANDARD_DEPENDENCY
+            elseif mod.origin == driver.UV_DYNAMIC_DEPENDENCY then
+                direct[modname] = driver.UV_DYNAMIC_DEPENDENCY
             end
         end
     end
@@ -349,18 +501,23 @@ function driver.defaultloader(static_deps, options)
                 return ok, modt, errors
             end
 
-            local _, binf = findmodule(
-                options.stdlib_path or driver.TITAN_STDLIB_PATH,
-                modname, ".so")
+            local stdlib_path = options.stdlib_path or
+                driver.TITAN_STDLIB_PATH
+            local explicit_stdlib_path = options.stdlib_path ~= nil or
+                not driver.TITAN_STDLIB_IMPLICIT_PREFIX
+            local stdlib_modname = explicit_stdlib_path and modname or
+                ("titan." .. modname)
+            local _, binf = findmodule(stdlib_path, stdlib_modname, ".so")
             local conflict = standard_conflict(modname, binf)
             if conflict then return false, conflict end
             if not binf then
                 return false, "standard module '" .. modname
                     .. "' is not installed under TITAN_STDLIB_PATH ('"
-                    .. (options.stdlib_path or driver.TITAN_STDLIB_PATH)
+                    .. stdlib_path
                     .. "'); run 'make stdlib' or configure TITAN_STDLIB_PATH"
             end
-            local modt, err = load_compiled_interface(modname, binf)
+            local modt, err = load_compiled_interface(
+                modname, binf, options, false)
             if not modt then return false, err end
             driver.imported[modname] = {
                 type = modt,
@@ -376,9 +533,18 @@ function driver.defaultloader(static_deps, options)
         local mtime_bin, binf = findmodule(driver.TITAN_BIN_PATH, modname, ".so")
         local mtime_src, srcf = findmodule(driver.TITAN_SOURCE_PATH, modname, ".titan")
         if mtime_bin and binf and ((not mtime_src) or mtime_bin >= mtime_src) then
-            local modt_or_err, err = load_compiled_interface(modname, binf)
+            local modt_or_err, err, requires_uv = load_compiled_interface(
+                modname, binf, options, true)
             if not modt_or_err then return false, err end
-            driver.imported[modname] = { type = modt_or_err, compiled = true }
+            local origin = requires_uv and driver.UV_DYNAMIC_DEPENDENCY or nil
+            driver.imported[modname] = {
+                type = modt_or_err,
+                compiled = true,
+                filename = binf,
+                origin = origin,
+            }
+            if origin then static_deps[modname] = origin end
+            remember_direct_dependency(modname)
             return true, modt_or_err, {}
         end
         if not mtime_src then return false, "module '" .. modname .. "' not found" end
@@ -466,24 +632,145 @@ function driver.compile_module(modname, mod, static_deps, verbose, options)
     return true, nil, libname
 end
 
+local RUNTIME_ARCHIVE_INPUTS = {
+    "titan.c",
+    "titan.h",
+    "titan_longjmp.h",
+    "titan_coro.c",
+    "minicoro.h",
+    "titan/coro.h",
+    "titan/ffi.h",
+    "titan_uv.c",
+    "titan/uv.h",
+}
+local RUNTIME_ARCHIVE_MEMBERS = {
+    "titan.o",
+    "titan_coro.o",
+    "titan_uv.o",
+}
+
+function driver.runtime_archive_members_are_exact(output)
+    if type(output) ~= "string" then return false end
+    local members = {}
+    for member in output:gmatch("[^\r\n]+") do
+        table.insert(members, member)
+    end
+    if #members ~= #RUNTIME_ARCHIVE_MEMBERS then return false end
+    for index, expected in ipairs(RUNTIME_ARCHIVE_MEMBERS) do
+        if members[index] ~= expected then return false end
+    end
+    return true
+end
+
+local function runtime_archive_has_expected_members(runtime_lib)
+    local ar, err = parsed_words(os.getenv("AR") or "ar", "AR")
+    if not ar then return false, err end
+    if #ar == 0 then return false, "AR command is empty" end
+    append_argv(ar, { "t", runtime_lib })
+    local cmd
+    cmd, err = command_argv(ar)
+    if not cmd then return false, err end
+    local pipe, popen_err = io.popen(cmd .. " 2>&1", "r")
+    if not pipe then return false, popen_err end
+    local output = pipe:read("*a")
+    local ok = pipe:close()
+    return ok == true and driver.runtime_archive_members_are_exact(output),
+        output
+end
+
+local function runtime_archive_is_current(runtime_lib)
+    local archive_mtime = lfs.attributes(runtime_lib, "modification")
+    if not archive_mtime then return false end
+    for _, relative in ipairs(RUNTIME_ARCHIVE_INPUTS) do
+        local input_mtime = lfs.attributes(
+            driver.TITAN_RUNTIME_PATH .. relative, "modification")
+        if input_mtime and input_mtime > archive_mtime then return false end
+    end
+    return true
+end
+
+local runtime_checked = false
+
 local function check_runtime(verbose)
-    local runtime_c = driver.TITAN_RUNTIME_PATH .. "titan.c"
-    local runtime_o = driver.TITAN_RUNTIME_PATH .. "titan.o"
-    local titanc_mtime = lfs.attributes(runtime_c, "modification")
-    local titano_mtime = lfs.attributes(runtime_o, "modification")
-    if (not titano_mtime) or (titano_mtime < titanc_mtime) then
-        local args, err = compiler_argv(true)
-        if not args then return nil, err end
-        append_argv(args, { "-c", runtime_c,
-            "-I", driver.TITAN_RUNTIME_PATH, "-I", driver.LUA_SOURCE_PATH,
-            "-I", driver.LIBBACKTRACE_PATH, "-o", runtime_o })
-        local ok, term, code = run_argv(args, verbose)
+    if driver.INSTALLED then return true end
+    if runtime_checked then return true end
+    local runtime_lib = driver.TITAN_RUNTIME_PATH .. "libtitan.a"
+    if os.getenv("TITAN_RUNTIME_PREBUILT") ~= "1" then
+        local make, err = parsed_words(os.getenv("MAKE") or "make", "MAKE")
+        if not make then return nil, err end
+        if #make == 0 then return nil, "MAKE command is empty" end
+        append_argv(make, {
+            "--no-print-directory",
+            "TITAN_RUNTIME_LUA_SOURCE_PATH=" .. driver.LUA_SOURCE_PATH,
+            runtime_lib,
+        })
+        local ok, term, code = run_argv(make, verbose)
         if not ok then
-            return nil, string.format("failed to compile Titan runtime (%s%s)",
+            return nil, string.format("failed to build Titan runtime (%s%s)",
                 tostring(term), code and (", " .. tostring(code)) or "")
         end
     end
+    if not runtime_archive_is_current(runtime_lib) then
+        return nil, "Titan runtime build did not produce a current '" ..
+            runtime_lib .. "'"
+    end
+    local exact, archive_err =
+        runtime_archive_has_expected_members(runtime_lib)
+    if not exact then
+        return nil, "Titan runtime archive has invalid members: " ..
+            tostring(archive_err)
+    end
+    runtime_checked = true
     return true
+end
+
+local function append_compile_includes(args)
+    if driver.INSTALLED then
+        append_argv(args, {
+            "-I", driver.INCLUDE_PATH,
+            "-I", driver.LUA_SOURCE_PATH,
+        })
+    else
+        append_argv(args, {
+            "-I", driver.TITAN_RUNTIME_PATH,
+            "-I", driver.LUA_SOURCE_PATH,
+            "-I", driver.LIBBACKTRACE_PATH,
+        })
+    end
+end
+
+function driver.installed_link_inputs(paths, is_darwin)
+    local inputs = {
+        paths.libtitan,
+        paths.libbacktrace,
+    }
+    table.insert(inputs, paths.liblua)
+    if not is_darwin then
+        table.insert(inputs, "-ldl")
+    end
+    table.insert(inputs, "-lm")
+    return inputs
+end
+
+function driver.source_link_inputs(lua_source_path)
+    lua_source_path = lua_source_path or driver.LUA_SOURCE_PATH
+    return {
+        driver.TITAN_RUNTIME_PATH .. "libtitan.a",
+        driver.LIBBACKTRACE_PATH .. "/.libs/libbacktrace.a",
+        lua_source_path .. "/liblua.a",
+        "-ldl",
+        "-lm",
+    }
+end
+
+local function append_runtime_libraries(args)
+    if driver.INSTALLED then
+        local paths = driver.INSTALL_PATHS
+        append_argv(args, driver.installed_link_inputs(
+            paths, driver.IS_DARWIN))
+    else
+        append_argv(args, driver.source_link_inputs(driver.LUA_SOURCE_PATH))
+    end
 end
 
 function driver.compile(modname, ast, sourcef, static_deps, verbose, options)
@@ -501,9 +788,9 @@ function driver.compile(modname, ast, sourcef, static_deps, verbose, options)
     if not ok then return nil, err end
     local args, flags_err = compiler_argv(true)
     if not args then return nil, flags_err end
-    append_argv(args, { static_flag(), filename,
-        "-I", driver.TITAN_RUNTIME_PATH, "-I", driver.LUA_SOURCE_PATH,
-        "-I", driver.LIBBACKTRACE_PATH, "-o", libname })
+    append_argv(args, { static_flag(), filename })
+    append_compile_includes(args)
+    append_argv(args, { "-o", libname })
     local ok, err = run_argv(args, verbose)
     if ok then
         return ok, nil, libname
@@ -650,6 +937,7 @@ int main(int argc, char** argv) {
         fatal("not enough memory for state");
     }
     luaL_openlibs(L);
+    titan_init_paths(L);
     lua_getglobal(L, "package");
     lua_getfield(L, -1, "preload");
     lua_pushcfunction(L, $LUAOPEN_FN);
@@ -697,6 +985,8 @@ local function write_entrypoint(modname)
 end
 
 function driver.compile_library(modname, libnames, link, verbose, extra_objects)
+    local runtime_ok, runtime_err = check_runtime(verbose)
+    if not runtime_ok then return nil, runtime_err end
     local soname = modname:gsub("[.]", "/") .. ".so"
     os.remove(soname)
 
@@ -711,12 +1001,7 @@ function driver.compile_library(modname, libnames, link, verbose, extra_objects)
         table.insert(args, object)
     end
 
-    table.insert(args, driver.TITAN_RUNTIME_PATH .. "titan.o")
-
-    table.insert(args, driver.LIBBACKTRACE_PATH .. "/.libs/libbacktrace.a")
-    table.insert(args, driver.LUA_SOURCE_PATH .. "/liblua.a")
-    table.insert(args, "-ldl")
-    table.insert(args, "-lm")
+    append_runtime_libraries(args)
 
     if link then
         local libs = util.split_string(link, ",")
@@ -732,6 +1017,8 @@ function driver.compile_library(modname, libnames, link, verbose, extra_objects)
 end
 
 function driver.compile_program(modname, libnames, link, verbose, extra_objects)
+    local runtime_ok, runtime_err = check_runtime(verbose)
+    if not runtime_ok then return nil, runtime_err end
     local execname = modname:gsub("[.]", "/")
     os.remove(execname)
 
@@ -743,9 +1030,9 @@ function driver.compile_program(modname, libnames, link, verbose, extra_objects)
     local compile_args
     compile_args, err = compiler_argv(true)
     if not compile_args then return nil, err end
-    append_argv(compile_args, { "-c", entrypoint_c,
-        "-I", driver.TITAN_RUNTIME_PATH, "-I", driver.LUA_SOURCE_PATH,
-        "-o", entrypoint_o })
+    append_argv(compile_args, { "-c", entrypoint_c })
+    append_compile_includes(compile_args)
+    append_argv(compile_args, { "-o", entrypoint_o })
     local compiled, cterm, ccode = run_argv(compile_args, verbose)
     if not compiled then return nil, cterm, ccode end
 
@@ -760,12 +1047,7 @@ function driver.compile_program(modname, libnames, link, verbose, extra_objects)
         table.insert(args, object)
     end
 
-    table.insert(args, driver.TITAN_RUNTIME_PATH .. "titan.o")
-
-    table.insert(args, driver.LIBBACKTRACE_PATH .. "/.libs/libbacktrace.a")
-    table.insert(args, driver.LUA_SOURCE_PATH .. "/liblua.a")
-    table.insert(args, "-ldl")
-    table.insert(args, "-lm")
+    append_runtime_libraries(args)
     if link then
         local libs = util.split_string(link, ",")
         for _, lib in ipairs(libs) do

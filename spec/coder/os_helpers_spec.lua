@@ -11,7 +11,7 @@ describe("os Phase 6 synchronous helpers", function()
         phase6.copy_fixture(workspace, "os_helper_cases.titan",
             "phase6_os_helper_cases")
         phase6.compile(workspace, "phase6_os_helper_cases", {
-            stdlib = workspace,
+            stdlib = workspace .. "/titan",
         })
     end)
 

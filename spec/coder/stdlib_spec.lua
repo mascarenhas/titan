@@ -21,11 +21,15 @@ local function file_exists(path)
     return true
 end
 
-local LUA = file_exists("./lua") and "./lua" or ".lua/bin/lua"
-local RAW_LUA = file_exists(".lua/bin/lua") and ".lua/bin/lua" or LUA
+local prefix_lua = os.getenv("PREFIX") and
+    (os.getenv("PREFIX") .. "/bin/lua") or nil
+local LUA = prefix_lua and file_exists(prefix_lua) and prefix_lua
+    or (file_exists(".lua/bin/lua") and ".lua/bin/lua" or "./lua")
+local RAW_LUA = LUA
 local TITANC = LUA ..
     [[ -e 'package.path="./?.lua;./?/init.lua;" .. package.path' ./titanc]]
 local BASE_ENV = "env CCACHE_DISABLE=1 TITAN_STDLIB_PATH=" .. BUILD ..
+    "/titan" ..
     " TITAN_PATH_0_11=" .. ORDINARY_BIN ..
     " TITAN_PATH=" .. ORDINARY_BIN ..
     " LUA_CPATH='" .. BUILD .. "/?.so;" .. ORDINARY_BIN .. "/?.so;;' "
@@ -112,13 +116,6 @@ local function clean_generated()
         "ordinary_dep.so.dSYM consumer.so.dSYM mixed_consumer.so.dSYM")
 end
 
-local function install_aliases()
-    assert_command_ok("mkdir -p " .. BUILD .. "/titan")
-    assert_command_ok("ln -s ../coroutine.so " ..
-        BUILD .. "/titan/coroutine.so")
-    assert_command_ok("ln -s ../os.so " .. BUILD .. "/titan/os.so")
-end
-
 local function compile_into(arguments, output, destination)
     local backup = BUILD .. "/saved-" .. output
     if file_exists(output) then
@@ -129,6 +126,12 @@ local function compile_into(arguments, output, destination)
         local moved, move_err = os.rename(output, destination)
         if not moved then
             ok, result = false, move_err
+        elseif lfs.attributes(output .. ".dSYM", "mode") == "directory" then
+            moved, move_err = os.rename(output .. ".dSYM",
+                destination .. ".dSYM")
+            if not moved then
+                ok, result = false, move_err
+            end
         end
     end
     if file_exists(backup) then
@@ -143,13 +146,12 @@ local function compile_into(arguments, output, destination)
 end
 
 local function build_phase0_fixture()
-    assert_command_ok("mkdir -p " .. ORDINARY_BIN)
+    assert_command_ok("mkdir -p " .. ORDINARY_BIN .. " " .. BUILD .. "/titan")
     compile_into("--stdlib-build --tree " .. MODULES ..
         " --lua-name titan.coroutine coroutine", "coroutine.so",
-        BUILD .. "/coroutine.so")
+        BUILD .. "/titan/coroutine.so")
     compile_into("--stdlib-build --tree " .. MODULES ..
-        " --lua-name titan.os os", "os.so", BUILD .. "/os.so")
-    install_aliases()
+        " --lua-name titan.os os", "os.so", BUILD .. "/titan/os.so")
     compile_into("--tree " .. ORDINARY .. " ordinary_dep",
         "ordinary_dep.so", ORDINARY_BIN .. "/ordinary_dep.so")
     assert_compile_ok("--tree " .. APPLICATION .. " consumer")
@@ -179,7 +181,6 @@ end
 describe("standard-library driver and runtime foundation", function()
     setup(function()
         clean_generated()
-        os.remove("titan-runtime/titan.o")
         build_phase0_fixture()
     end)
 
@@ -237,7 +238,7 @@ describe("standard-library driver and runtime foundation", function()
 
     it("keeps canonical ABI symbols while exporting only the Lua alias", function()
         local os_symbols = assert_has_symbol(
-            BUILD .. "/os.so", "luaopen_titan_os")
+            BUILD .. "/titan/os.so", "luaopen_titan_os")
         for _, symbol in ipairs({ "os_init", "os_abi", "os_types" }) do
             assert.truthy(os_symbols:find(symbol, 1, true), symbol)
         end
@@ -246,7 +247,7 @@ describe("standard-library driver and runtime foundation", function()
             "os.so source-linked its reserved dependency")
 
         local coroutine_symbols = assert_has_symbol(
-            BUILD .. "/coroutine.so", "luaopen_titan_coroutine")
+            BUILD .. "/titan/coroutine.so", "luaopen_titan_coroutine")
         for _, symbol in ipairs({
             "coroutine_init", "coroutine_abi", "coroutine_types",
         }) do
@@ -294,7 +295,8 @@ describe("standard-library driver and runtime foundation", function()
 
     it("pins imports to binaries when canonical standard sources are visible",
        function()
-        local env = "env CCACHE_DISABLE=1 TITAN_STDLIB_PATH=" .. BUILD .. " " ..
+        local env = "env CCACHE_DISABLE=1 TITAN_STDLIB_PATH=" .. BUILD ..
+            "/titan " ..
             "TITAN_STDLIB_SOURCE_PATH=" .. MODULES .. " " ..
             "TITAN_PATH_0_11=" .. ORDINARY_BIN .. " "
         assert_compile_ok("--tree " .. MODULES ..
@@ -322,7 +324,8 @@ describe("standard-library driver and runtime foundation", function()
        function()
         assert_command_ok("mkdir -p " .. FIXTURE .. "/shadow-bin")
         write_file(FIXTURE .. "/shadow-bin/os.so", "not a shared library\n")
-        local env = "env CCACHE_DISABLE=1 TITAN_STDLIB_PATH=" .. BUILD .. " " ..
+        local env = "env CCACHE_DISABLE=1 TITAN_STDLIB_PATH=" .. BUILD ..
+            "/titan " ..
             "TITAN_PATH_0_11=" .. FIXTURE .. "/shadow-bin "
         local ok, output = compile("--tree " .. APPLICATION ..
             " bin_consumer", env)
@@ -346,10 +349,7 @@ describe("standard-library driver and runtime foundation", function()
             assert(package.loaded.os == builtin)
 
             local canonical_open = assert(package.loadlib(
-                "]] .. BUILD .. [[/os.so", "luaopen_titan_os"))
-            local alias_open = assert(package.loadlib(
                 "]] .. BUILD .. [[/titan/os.so", "luaopen_titan_os"))
-            assert(canonical_open == alias_open)
             assert(rawequal(canonical_open(), standard_os))
         ]])
     end)
@@ -367,17 +367,14 @@ describe("standard-library driver and runtime foundation", function()
             assert(package.loaded.os == builtin)
 
             local canonical_open = assert(package.loadlib(
-                "]] .. BUILD .. [[/os.so", "luaopen_titan_os"))
-            local alias_open = assert(package.loadlib(
                 "]] .. BUILD .. [[/titan/os.so", "luaopen_titan_os"))
-            assert(canonical_open == alias_open)
-            assert(rawequal(alias_open(), standard_os))
+            assert(rawequal(canonical_open(), standard_os))
         ]])
     end)
 
-    it("coexists with Lua's coroutine library through one aliased image",
+    it("coexists with Lua's coroutine library in the canonical image",
        function()
-        assert.equal("link", lfs.symlinkattributes(
+        assert.equal("file", lfs.symlinkattributes(
             BUILD .. "/titan/coroutine.so", "mode"))
         run_lua([[
             local builtin = require "coroutine"
@@ -389,14 +386,11 @@ describe("standard-library driver and runtime foundation", function()
             assert(package.loaded.coroutine == builtin)
 
             local canonical_open = assert(package.loadlib(
-                "]] .. BUILD .. [[/coroutine.so", "luaopen_titan_coroutine"))
-            local alias_open = assert(package.loadlib(
                 "]] .. BUILD .. [[/titan/coroutine.so", "luaopen_titan_coroutine"))
-            assert(canonical_open == alias_open)
             assert(rawequal(canonical_open(), standard_coroutine))
             assert(package.loadlib(
-                "]] .. BUILD .. [[/coroutine.so", "luaopen_coroutine") == nil)
-            assert(package.loadlib("]] .. BUILD .. [[/coroutine.so",
+                "]] .. BUILD .. [[/titan/coroutine.so", "luaopen_coroutine") == nil)
+            assert(package.loadlib("]] .. BUILD .. [[/titan/coroutine.so",
                 "luaopen_coro") == nil)
         ]])
     end)

@@ -20,7 +20,6 @@ local function clean()
 end
 
 describe("zero-return () functions (code generator)", function()
-    setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
     it("exported () function returns zero values across the Lua boundary", function()
@@ -80,7 +79,6 @@ describe("zero-return () functions (code generator)", function()
 end)
 
 describe("call sequencing regressions", function()
-    setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
     it("short-circuits boolean calls with side effects", function()
@@ -159,10 +157,6 @@ describe("call sequencing regressions", function()
 end)
 
 describe("Titan code generator", function()
-    setup(function ()
-        os.remove("titan-runtime/titan.o")
-    end)
-
     after_each(clean)
 
     it("deletes array element", function()
@@ -3338,7 +3332,6 @@ describe("Titan code generator", function()
 end)
 
 describe("single-Udata representation (GC stress)", function()
-    setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
     -- 1. Record field (GC-able) mutated in a hot loop, GC forced between writes.

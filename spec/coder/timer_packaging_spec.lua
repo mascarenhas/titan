@@ -22,10 +22,7 @@ local function mkdir(path)
 end
 
 local function compiler_lua()
-    if lfs.attributes(phase2.repo .. "/lua") then
-        return phase2.repo .. "/lua"
-    end
-    return phase2.repo .. "/.lua/bin/lua"
+    return phase2.host_lua()
 end
 
 local function compile(workspace, source_root, modname, titan_path)

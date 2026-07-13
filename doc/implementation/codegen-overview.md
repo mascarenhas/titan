@@ -8,9 +8,13 @@ coder.generate(modname, ast, static_deps)  --> string (one C translation unit)
 
 where `modname` is the dot-separated module name, `ast` is the module's
 AST *after* `checker.check` has decorated and rewritten it, and
-`static_deps` is a set (module name → `true`) of the imports whose Titan
-source was available, maintained by the driver's loader. The return value
-is the complete text of one C translation unit; the driver
+`static_deps` is the driver's origin map: source imports are `true`, reserved
+binary standards are `"standard"`, detected direct-libuv binary extensions are
+`"dynamic-uv"`, and unmarked ordinary binary imports are absent. `titanc` uses
+the recorded direct map for a non-root source dependency and the full recursive
+`driver.dependency_closure` for an explicit root, so metadata includes origins
+reachable through source objects statically linked into that root. The return
+value is the complete text of one C translation unit; the driver
 (`driver.compile`) runs it through `pretty.reindent_c`, writes the `.c`
 file next to the `.titan` source, and invokes the system C compiler
 ([driver and toolchain](driver.md)). One consequence of the checker's
@@ -444,9 +448,10 @@ to interpret that layout metadata.
 
 ## The module protocol
 
-All per-Lua-state module state lives in one `Udata` (`_mod`) created by
-`_init`: the module table's slot is gone entirely, and member slots are
-0-based with no reserved user value. The user values hold module
+All semantic module state lives in the Lua registry or GC-traced Lua objects,
+never in shared C globals. In particular, per-Lua-state module state lives in
+one `Udata` (`_mod`) created by `_init`: the module table's slot is gone
+entirely, and member slots are 0-based with no reserved user value. The user values hold module
 variables, imported modules' `Udata`s, exported-function canonical
 closures, cached record metatables and per-record static-namespace tables
 (allocation order below). Every generated function receives this `Udata` as its
@@ -486,17 +491,14 @@ Idempotency works at two independent levels:
   under `"Titan module <modname>"`; a second `require`, or a dependent
   module calling `_init` again, finds it and returns it untouched. A
   second Lua *state* in the same process misses the registry and gets a
-  fresh `Udata` and metatables — there is no per-state C global state, so
+  fresh `Udata` and metatables — there is no semantic per-state C global, so
   one compiled module serves many states.
-* **Per process / translation unit**: the C `static int _initialized`
-  guards the genuinely process-global pieces — the dlsym'd function
-  pointers. This branch matters when the *same module's code* is present
-  twice in a process (e.g. linked into an executable and also dlopened as
-  someone else's dependency): the registry says the module exists, but
-  this copy of the code still needs its function pointers stitched from
-  the shared libraries. (Record type identity is the metatable, a
-  per-Lua-state object cached in a `_mod` user value rather than a C
-  static, so this branch no longer re-fetches any tag cache.)
+* **Per translation unit**: the C `static int _initialized` guards only
+  nonsemantic native wiring and caches — here, the dlsym'd function pointers.
+  The standard library installs one canonical DSO per module, shared by Titan
+  imports and Lua requires. Record type identity is the metatable, a
+  per-Lua-state object cached in a `_mod` user value rather than a C static, so
+  this branch no longer re-fetches any tag cache.
 
 *Detail:* the re-initialization branch substitutes `$LOADMODULES2` only
 when the dynamic-load list has more than one entry (`#loadmods > 1` in
@@ -541,15 +543,28 @@ int counter_types(lua_State* L) {
 
 The literal is `types.serialize(ast._type)`: a Lua *expression* that
 rebuilds the module's type when evaluated with `types.lua`'s constructors
-as its environment. When the driver's loader finds only a compiled `.so`
-for an import, it first loads and calls `<prefix>_abi`, rejects missing or
-mismatched markers, then loads `<prefix>_types` and `load`s
-`"return " .. serialized` to recover the interface — letting the checker
-type the importing module against a dependency whose source is gone. Ordinary
-dependencies use static linkage when source wins lookup and dynamic linkage
-otherwise; reserved standard identities always use their pinned canonical
-binary. The tests' in-memory `tableloader` exercises the same serialization
-round-trip. See
+as its environment. `<prefix>_types` optionally pushes a second result,
+`"uv-provider"`, when the module's origin map contains either the canonical
+standard `uv` dependency or a `"dynamic-uv"` dependency. That marker propagates
+the provider requirement through separately compiled modules and, because root
+code generation receives the full source dependency closure, through statically
+linked source dependencies embedded in the root DSO.
+
+When the driver's loader finds only a compiled `.so` for an import, it first
+loads and calls `<prefix>_abi`, rejects missing or mismatched markers, then
+loads `<prefix>_types` and `load`s `"return " .. serialized` to recover the
+interface — letting the checker type the importing module against a dependency
+whose source is gone. The optional second result classifies the binary as
+`"dynamic-uv"` deterministically, including when libuv is already globally
+visible. Reading it establishes or validates the canonical provider and records
+its compiler-process file identity. If eager `uv_*` relocation prevents the
+initial ABI load, an open-stage unresolved-symbol diagnostic bootstraps
+canonical `uv.so` and the driver retries before requiring the marker. A binary
+without it is rejected and must be rebuilt with an explicit standard `uv`
+import. Ordinary dependencies use static
+linkage when source wins lookup and dynamic linkage otherwise; reserved
+standard identities always use their pinned canonical binary. The tests'
+in-memory `tableloader` exercises the same serialization round-trip. See
 [driver and toolchain](driver.md).
 
 ## Static vs dynamic dependency wiring
@@ -571,9 +586,21 @@ extern Udata *dep_init(lua_State *L);
 binary-only even when its source is visible. Its imported functions use the
 same function-pointer wiring as an ordinary dynamic dependency, but generated
 initialization calls `loadstdlib(L, "dep.so")`. That loader consults only the
-ABI-qualified `TITAN_STDLIB_PATH`/installed standard root; it never searches
-`.` or ordinary `TITAN_PATH`, so an application-local `uv.so` cannot capture a
-standard `fs` module's dependency.
+ABI-qualified installed parent `<root>/lib/titan/0.11` and implicitly inserts
+`titan/`, reaching the canonical `titan/dep.so`. An explicit
+`TITAN_STDLIB_PATH` is instead a direct directory containing `dep.so`. The
+loader never searches `.` or ordinary `TITAN_PATH`, so an application-local
+`uv.so` cannot capture a standard `fs` module's dependency.
+
+**Direct-libuv dynamic** (`static_deps[modname] == "dynamic-uv"`): interface
+recovery read the dependency's `"uv-provider"` metadata marker and established
+or identity-checked the canonical provider. If an eager `uv_*` relocation
+prevented that first interface load, the driver established the provider and
+retried as a bootstrap fallback. Wiring is otherwise
+the same as an ordinary dynamic dependency, but generated initialization calls
+`loadlibwithuv(L, "dep.so")`. That helper loads canonical `uv.so` globally
+before mapping the extension, so eager relocations and constructors are safe as
+well as ordinary calls.
 
 **Ordinary dynamic** (`.so`-only dep): each imported function is declared in
 `$INCLUDES` as a `static` function *pointer*; the generated `_init`
@@ -590,7 +617,7 @@ dep_mk_titan = titan_cast_func(Udata* (*)(lua_State *L, Udata *_mod, CClosure *_
 ```
 
 The dep's `_init` is fetched and called the same way inside
-`$INITMODULES`. In all three regimes the *call sites are identical* C calls —
+`$INITMODULES`. In all four regimes the *call sites are identical* C calls —
 only the storage class of the callee name differs — and the caller passes
 the callee's module `Udata` read from its own user value and `NULL` for
 the direct-call `_fn`: `dep_mk_titan(L, uvalue(&_mod->uv[1].uv), NULL, 7)`.

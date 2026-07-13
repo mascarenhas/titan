@@ -190,7 +190,7 @@ function yield(arg: value, tag: value): value
   if tag == nil then
     missing_yield_tag()
   end
-  local co = mco.mco_running()
+  local co = coro_native.titan_coro_running(L)
   push_transfer(co, 1, arg)
   return yield_result_or_raise(co, tag)
 end
@@ -200,7 +200,7 @@ function is_yieldable(tag: value): boolean
     missing_yield_tag()
   end
   local ctag: ffi.TValue = tag
-  return (mco.mco_is_yieldable(mco.mco_running(), ctag) as integer) ~= 0
+  return (mco.mco_is_yieldable(coro_native.titan_coro_running(L), ctag) as integer) ~= 0
 end
 
 local function coro_gc(handle: value)
@@ -231,6 +231,7 @@ function create(func: (value) -> value, default_tag: value): Coro
   lual.luaL_setmetatable(L, "titan.coroutine")
 
   local desc = mco.mco_desc_init(nil, STACK_SIZE)
+  coro_native.titan_coro_configure(L, desc)
   desc.func = coro_native.titan_coro_entry
   desc.user_data = ffi.lua_togco(L, -1)
 
@@ -248,5 +249,4 @@ do
     ffi.lua_pushtvalue(L, coro_gc)
     lua.lua_setfield(L, -2, "__gc")
   end
-  mco.mco_set_tag_comparator(coro_native.titan_coro_tag_equal)
 end

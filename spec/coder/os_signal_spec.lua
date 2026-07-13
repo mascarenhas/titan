@@ -8,7 +8,7 @@ describe("os Phase 6 one-shot signals", function()
         phase6.copy_fixture(workspace, "signal_cases.titan",
             "phase6_signal_cases")
         phase6.compile(workspace, "phase6_signal_cases", {
-            stdlib = workspace,
+            stdlib = workspace .. "/titan",
         })
     end)
 

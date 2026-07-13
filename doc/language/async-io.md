@@ -7,7 +7,7 @@ code imports it with:
 local uv = import "uv"
 ```
 
-Lua code loads the same canonical module image with
+Lua code loads the same canonical module identity with
 `require "titan.uv"`. The qualified Lua name avoids collisions with Lua
 libraries. The module currently supports Linux and macOS.
 

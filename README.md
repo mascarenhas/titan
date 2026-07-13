@@ -8,18 +8,90 @@ application programming language with a focus on performance.
 
 # Install
 
-The Titan compiler generates C that includes Lua 5.5's *internal* headers and
-links against its static library, so you first need a built Lua 5.5.0 source
-tree alongside this checkout. The provided `Makefile` downloads and builds it
-for you:
+Titan is the primary entry point of a Titan+Lua installation. Give each
+project its own local absolute prefix, then use that prefix's Lua, LuaRocks,
+and Titan compiler to build and run the project. Two destination names have
+distinct ownership even in the current single-directory layout:
 
-        $ make lua
+* `PREFIX` owns the patched Lua installation and the LuaRocks program and
+  configuration.
+* `ROCKS_TREE` owns the installed Titan rock, compiler SDK, and standard
+  library.
 
-This fetches the [Lua 5.5.0 sources](http://www.lua.org/ftp/lua-5.5.0.tar.gz)
-into a `lua-5.5.0` folder and builds them with `MYCFLAGS=-fPIC`, auto-detecting
-the `linux`/`macosx` build target from `uname` (override with
-`make lua LUA_PLATFORM=...`). To do it by hand instead, download and extract the
-tarball into a `lua-5.5.0` folder and run `make linux MYCFLAGS=-fPIC` inside it.
+The supported developer install and CI configure LuaRocks' sole system tree so
+`ROCKS_TREE == PREFIX`. That equality is the current deployment policy, not an
+inherent requirement of what either name owns. For example:
+
+```sh
+export PREFIX="$HOME/.local/titan/my-project"
+export PATH="$PREFIX/bin:$PATH"
+
+make lua
+make luarocks
+make libuv
+"$PREFIX/bin/luarocks" make
+```
+
+`make lua` fetches the
+[Lua 5.5.0 sources](http://www.lua.org/ftp/lua-5.5.0.tar.gz), patches
+`lua-5.5.0/src/luaconf.h` so `LUA_ROOT` is this `PREFIX`, and patches
+`loadlib.c` so the exact `luaopen_titan_uv` C-module entry loads globally while
+ordinary entries remain local. It then builds Lua with `MYCFLAGS=-fPIC` and
+installs it under the prefix. It also installs the Lua `.c` and `.h` sources
+under `$PREFIX/src/lua-5.5.0/`. Consequently the
+installed `liblua.a`, the internal headers Titan-generated C uses, and the
+public headers used when LuaRocks builds other Lua libraries all describe the
+same prefix and the same Lua build. The Makefile selects the `linux` or
+`macosx` Lua target from `uname`; override it with
+`make lua LUA_PLATFORM=...` when necessary, and use `LUA_CC` to select Lua's
+C compiler. Changing the prefix, platform, compiler, or `LUA_MY*` flags
+invalidates the Lua objects before rebuilding, so the installed source headers
+cannot silently drift from `liblua.a`.
+
+`make luarocks` fetches pinned LuaRocks 3.13.0 and configures its executable and
+Lua location under `PREFIX`, with its sole system-style `ROCKS_TREE` set to the
+same directory for the supported workflow. Its forced configuration avoids a
+user or checkout-local project tree. The generated configuration also records
+Make's effective `CC`, `AR`, and `RANLIB` (using `CC` for linking), so a later
+direct `$PREFIX/bin/luarocks make` reuses the native tool identities that
+prepared the prefix instead of invalidating and rebuilding dependencies.
+Finally, that command builds and installs the Titan compiler, runtime archives
+and headers, and the standard library into `ROCKS_TREE`. Keep `$PREFIX/bin`
+first on `PATH` while developing so `lua`, `luarocks`, and `titanc` all come
+from this installation.
+
+Lua and LuaRocks record versioned, prefix-local completion stamps under
+`$PREFIX/etc/titan/`. Repeating `make luarocks` against a prepared prefix is a
+no-op, while selecting a fresh prefix performs a fresh installation; the Lua
+stamp is invalidated when its matching source build changes.
+
+Use a fresh prefix when migrating a directory that previously used
+`luarocks init` or a user-tree LuaRocks configuration. Third-party command
+launchers such as `busted` embed the active Lua paths when their rocks are
+installed; changing LuaRocks' configuration later correctly migrates the
+Titan-owned tools, but cannot rewrite arbitrary already-installed launchers.
+
+The installed files used to compile Titan code include:
+
+| Owner and path | Purpose |
+| --- | --- |
+| `$PREFIX/src/lua-5.5.0/`, `$PREFIX/include/{lua,lauxlib,lualib,luaconf}.h`, `$PREFIX/lib/liblua.a` | The patched Lua sources, public configuration/headers, and static library owned by the Lua installation |
+| `$ROCKS_TREE/src/lua-5.5.0/`, `$ROCKS_TREE/lib/liblua.a` | Matching Lua source and archive copies staged as part of the Titan compiler SDK |
+| `$ROCKS_TREE/lib/libtitan.a` | Exactly `titan.o`, `titan_coro.o`, and `titan_uv.o`: generated-code loader/error support plus the coroutine and libuv callback shims |
+| `$ROCKS_TREE/lib/libbacktrace.a` | The separate vendored native unwinder/symbolizer archive |
+| `$ROCKS_TREE/lib/lua/5.5/titan.so` | The separate Lua support module built only from `titan-runtime/titanlib.c`; it is not a member of `libtitan.a` |
+| `$ROCKS_TREE/include/minicoro.h`, `titan.h`, `titan_longjmp.h` | Non-Lua top-level SDK headers |
+| `$ROCKS_TREE/include/titan/{ffi,coro,uv}.h` | Namespaced portable FFI, coroutine, and libuv shim headers |
+| `$ROCKS_TREE/lib/titan/0.11/titan/*.so` | The single canonical files for the `coroutine`, `uv`, `timer`, `fs`, `net`, and `os` standard modules, used by both Titan imports and `require "titan.*"` |
+
+Bundled-libuv installs also contain `$ROCKS_TREE/include/uv.h` and
+`$ROCKS_TREE/include/uv/`. The bundled `libuv.a` is a private build artifact:
+it is consumed only while linking the canonical `titan/uv.so` and is not
+installed or exported as part of the Titan SDK. System mode uses the selected
+system libuv instead. Each standard module is one ordinary installed file at
+the qualified path; installation does not create aliases with symbolic links,
+hard links, or copied DSOs. Consequently Titan and Lua load the same native
+image, and `titan/uv.so` supplies the process's one complete libuv provider.
 
 ## Libuv setup
 
@@ -43,9 +115,9 @@ brew install cmake
 make libuv
 ```
 
-`make all`, `make stdlib`, and the LuaRocks build also build this bundled
-copy automatically. To use a system development package instead, install it
-with pkg-config and select the optional mode explicitly:
+The install sequence above builds this bundled copy before installing Titan.
+To use a system development package instead, install it with pkg-config and
+select the optional mode consistently for both steps:
 
 ```sh
 # Ubuntu/Debian
@@ -56,7 +128,7 @@ sudo dnf install libuv-devel pkgconf-pkg-config
 brew install libuv pkgconf
 
 LIBUV_MODE=system make libuv
-LIBUV_MODE=system ./luarocks make
+LIBUV_MODE=system "$PREFIX/bin/luarocks" make
 ```
 
 System mode requires libuv 1.43.0 or newer and consumes the complete ordered
@@ -64,42 +136,109 @@ System mode requires libuv 1.43.0 or newer and consumes the complete ordered
 effective mode, include flags, archive, and support libraries; `make help`
 lists the related targets and setup hints. The Makefile records the effective
 mode, compiler, and flags, so switching between bundled and system mode
-rebuilds `titan_uv.o` and `uv.so` without requiring a manual clean.
+rebuilds the libuv-facing objects without requiring a manual clean.
 
-You can install the Titan compiler and its dependencies using  [LuaRocks](http://luarocks.org)
-making sure that the dependencies will use the same exact Lua version Titan is using.
-After installing luarocks, run these commands in the root of this repository:
+In bundled mode, `titan/uv.so` is the sole complete libuv provider. A compiled
+Titan extension DSO that directly `foreign import`s `uv.h` must also import the
+standard `uv` module and leave its `uv_*` function references unresolved; do
+not link it with `-luv` or the private bundled archive. During compiled-interface
+recovery, `<mangled>_types` returns a second `"uv-provider"` result when the
+module has standard `uv` or a `"dynamic-uv"` dependency; that metadata marks
+the dependency `"dynamic-uv"` even if libuv was already visible. Reading the marker
+also establishes or validates the canonical provider and records its file
+identity for the compiler process. If the first interface open instead fails
+on an unresolved `uv_*`, the compiler uses that open-stage diagnostic to
+bootstrap the canonical provider, retries, and then requires the marker; a
+binary that still omits it is rejected with instructions to rebuild with an
+explicit standard `uv` import. Generated
+Titan consumers call `loadlibwithuv`, which
+establishes canonical `uv.so` before mapping the extension itself.
+Ordinary binary dependencies without that marker retain eager, local loading.
+Because the provider precedes the extension's `dlopen`, regular calls, data and
+function-address relocations, and native constructors are all supported. For
+example, the extension source starts with both imports:
 
-        $ luarocks init --lua-dir=$PWD/.lua
-        $ luarocks make
-
-The `luarocks init` step creates `./lua` and `./luarocks` wrapper scripts in
-the project root; use them directly (with `./`) to run Lua and LuaRocks with
-the correct project paths baked in.  To also put `titanc` and `busted` (from
-`lua_modules/bin/`) on your `$PATH`, run:
-
-        $ cd <titan folder> && eval $(./luarocks path --bin)
-
-LuaRocks records the canonical standard-module image under its managed,
-ABI-qualified `lib/lua/5.5/titan/stdlib_0_11/` directory and replaces the
-managed Lua-facing file with a relative symlink under `lib/lua/5.5/titan/`.
-Both paths therefore belong to the rock manifest, binary rocks, upgrades, and
-uninstall while still mapping one DSO image. A project-local `luarocks init` is
-a custom prefix, so point Titan's dedicated standard loader at it when
-compiling or running code that imports a standard module:
-
-```sh
-export TITAN_STDLIB_PATH="$PWD/lua_modules/lib/lua/5.5/titan/stdlib_0_11"
+```titan
+local runtime = import "uv"
+local uv = foreign import "uv.h"
 ```
 
-For a manual prefix, `make install-stdlib PREFIX=/opt/titan` installs canonical
-modules under `/opt/titan/lib/titan/0.11` and Lua aliases under
-`/opt/titan/lib/lua/5.5/titan`. It also installs the bundled-libuv attribution
-and license under `/opt/titan/share/titan`; set `TITAN_STDLIB_PATH` to the
-canonical `/opt/titan/lib/titan/0.11` directory and add
-`/opt/titan/lib/lua/5.5/?.so` to `LUA_CPATH` for Lua hosts. The standard path is
-separate from ordinary `TITAN_PATH` by design, so an application-local module
-cannot replace a standard dependency.
+When Lua loads such an extension directly, load the provider first:
+
+```lua
+local uv = require "titan.uv"
+local extension = require "my.libuv_extension"
+```
+
+Titan's patched Lua `loadlib.c` recognizes exactly the
+`luaopen_titan_uv` entry and opens that DSO globally on its first load; every
+other Lua C module keeps Lua's ordinary local-loading behavior. Thus the first
+`require` above establishes the same provider on Linux and macOS. `uv.so` does
+not reopen or promote itself.
+
+A long-lived compiler process remembers the canonical provider's resolved file
+identity and refuses to switch to a different standard-library `uv.so` after
+the first provider has been loaded.
+
+System mode may instead link the extension against the same
+pkg-config-selected shared libuv used by `titan/uv.so`. In either mode, never
+embed the bundled `libuv.a` in another DSO: it is private to the standard
+provider and a second static embedding would create a second native libuv
+instance.
+
+CMake owns the archiver and indexer associated with the bundled build's C
+compiler; select unusual CMake toolchain executables explicitly through
+`LIBUV_CMAKE_FLAGS` rather than Make's `AR`/`RANLIB`, which configure Titan's
+own runtime archive.
+
+The Titan-owned Lua's patched default `package.cpath` contains
+`$PREFIX/lib/titan/0.11/?.so` before `$PREFIX/lib/lua/5.5/?.so`. The first
+template lets `require "titan.*"` reach the canonical standard modules; the
+second remains the root-discovery anchor. In the currently supported layout
+`ROCKS_TREE == PREFIX`, so `titanc` can use the first entry ending in
+`/lib/lua/5.5/?.so` to recover its Titan SDK/rocks root.
+During the source rock's post-install build, the internal `TITAN_ROCKS_ROOT`
+override identifies `ROCKS_TREE` directly. The recovered Titan root supplies
+the staged Lua sources and archives, ordinary modules under
+`$ROCKS_TREE/lib/titan/0.11/`, and reserved standard modules under
+`$ROCKS_TREE/lib/titan/0.11/titan/`. This discovery rule implements the
+supported equal-root layout; it does not redefine the separately owned
+`PREFIX` and `ROCKS_TREE` as one concept.
+
+At startup a compiled executable inherits Lua's default `package.cpath` and
+ensures `$ROCKS_TREE/lib/titan/0.11/?.so` is present. Both it and the installed
+Lua therefore resolve `titan.<name>` to the same canonical file at
+`$ROCKS_TREE/lib/titan/0.11/titan/<name>.so`; there are no Lua-facing or
+parent-level compatibility copies.
+
+`TITAN_PATH_0_11` (or the unversioned `TITAN_PATH`) overrides the ordinary
+Titan binary search path. By default a standard import uses the
+`$ROCKS_TREE/lib/titan/0.11` parent with an implicit `titan/` prefix, reaching
+the qualified directory shown above. An explicit `TITAN_STDLIB_PATH` instead names
+a direct directory containing short files such as `timer.so`. In a source
+checkout, `--lua` can select another complete Lua source/build tree for an
+individual compiler invocation. An installed compiler rejects `--lua` because
+its headers, `liblua.a`, and `libtitan.a` are one matched SDK. These overrides
+are mainly useful for testing and nonstandard source builds; a normal
+local-prefix install needs none of them.
+
+This is not yet Titan's story for packaging or distributing Titan libraries
+and applications: give a project its own standalone absolute `PREFIX` and use
+the currently equal system-style `ROCKS_TREE` and installed `titanc`. The
+current Titan rock is likewise a **source-install** package. Its
+`build_target = "titan"` builds the runtime and copies the native archives,
+headers, and Lua sources directly into `ROCKS_TREE`; after LuaRocks deploys the
+compiler, a source-only `post_install` hook uses that installed `titanc` to
+build and install each standard module once at its canonical qualified path.
+There is no
+separate Make install pass or
+pre-install hook. The rockspec's C-module list contains only `titan.so`; the
+six standard DSOs are deliberately absent. LuaRocks cannot
+express these SDK and Titan-module destinations as normal Lua modules, so the
+directly copied files are outside the rock manifest and
+`luarocks remove titan` does not remove them. Titan does not provide binary
+rocks yet; packaging and uninstall ownership for these files will be revisited
+with a Titan library/application distribution system.
 
 # Usage
 
@@ -108,23 +247,26 @@ cannot replace a standard dependency.
 The compiler takes a list of module names that you want to compile. Modules
 are looked up in the source tree (defaults to the current working directory,
 but you can override this with the `--tree` option), as well as in the Titan
-binary path, a semicolon-separated list of paths 
-(defaults to `.;/usr/local/lib/titan/0.11`, you can override with a `TITAN_PATH_0_11`
-or `TITAN_PATH` environment variable).
+binary path, a semicolon-separated list of paths. By default this is the
+current directory plus `<root>/lib/titan/0.11`, where `<root>` is recovered
+from `package.cpath`; override it with `TITAN_PATH_0_11` or `TITAN_PATH`.
 
 The reserved standard modules (`coroutine`, `uv`, `timer`, `fs`, `net`, and
-`os`) use the separate `TITAN_STDLIB_PATH` (installed default
-`/usr/local/lib/titan/0.11`) and cannot be shadowed through `--tree` or
-`TITAN_PATH`. Titan code imports them by their short names, while Lua uses the
-qualified aliases such as `require "titan.coroutine"`, `require "titan.uv"`,
+`os`) cannot be shadowed through `--tree` or `TITAN_PATH`. Installed lookup
+uses `<root>/lib/titan/0.11` with an implicit `titan/` prefix; an explicit
+`TITAN_STDLIB_PATH` is a direct-directory override. Titan code imports them by
+their short names, while Lua uses the
+qualified names `require "titan.coroutine"`, `require "titan.uv"`,
 `require "titan.timer"`, `require "titan.fs"`, `require "titan.net"`, and
 `require "titan.os"`. Lua's own `coroutine` and `os` modules remain unchanged.
 
-The currently implemented async chain is `coroutine.so -> uv.so ->
-{timer.so, fs.so, net.so, os.so}`. Only the canonical `uv.so` contains libuv; the
-higher modules dynamically import that standard image instead of linking
-another copy. `make stdlib` builds all six canonical modules and their
-`titan.*` Lua aliases in dependency order.
+The currently implemented async chain is `titan/coroutine.so -> titan/uv.so ->
+titan/{timer.so, fs.so, net.so, os.so}`. Only the canonical `titan/uv.so`
+consumes libuv directly: bundled mode links its private archive there, while
+system mode links the pkg-config-selected shared library. The higher modules
+dynamically import that standard image instead of linking libuv themselves.
+The standard build compiles all six canonical modules with their qualified
+`titan.*` Lua entry points in dependency order.
 
 From Titan, importing `timer` is enough to enable the standalone async
 bootstrap:
@@ -202,30 +344,41 @@ your compilation as a native binary:
 The test suite is written using [Busted](https://lunarmodules.github.io/busted/).
 The simplest way to run it is:
 
-        $ make lua          # once, to build the bundled Lua 5.5.0 tree
+        $ export PREFIX="/tmp/titan-$USER-test"
+        $ export PATH="$PREFIX/bin:$PATH"
+        $ make lua                   # prepare an isolated local installation
+        $ make luarocks
+        $ make libuv
         $ make test
 
-`make test` runs `luarocks make` followed by `luarocks test`. The `luarocks make`
-step builds and installs the rock — including the `titan` C runtime module that a
-couple of tests need — and `luarocks test` installs the test dependencies (Busted
-and cluacov, declared in the rockspec) and runs the suite from the repository
-root. To run the steps yourself:
+`make test` runs `luarocks make --force` followed by `luarocks test`. The forced
+build installs the current checkout — including the `titan` Lua support module
+that a couple of tests need — and `luarocks test` installs the test dependencies
+(Busted and cluacov, declared in the rockspec) and runs the suite from the
+repository root. It clears ambient `LUA_PATH`/`LUA_CPATH` overrides for both
+commands, so a shell left over from an old `luarocks init` project cannot make
+the prefix tools load a different compiler snapshot. The supported workflow
+does not use `luarocks init`; avoid exporting those project-tree paths while
+working in a standalone Titan prefix. To run the iterative development steps
+yourself:
 
-        $ luarocks make                      # build/install the rock (also picks up source edits)
-        $ luarocks test                      # install test deps + run the suite
-        $ luarocks test -- -c -o gtest       # ...forwarding flags to Busted (here: luacov coverage)
+        $ "$PREFIX/bin/luarocks" make --force        # rebuild/reinstall the current checkout
+        $ "$PREFIX/bin/luarocks" test                # install test deps + run the suite
+        $ bash spec/support/ci_test_groups.sh compiler # compiler/language tests with LuaCov
+
+The grouped compiler command is the coverage entry point. Library API and
+runtime suites run without LuaCov because the hook measures the Lua compiler,
+not the generated Titan or native library implementation; use
+`bash spec/support/ci_test_groups.sh libraries` for that complete group.
 
 Note that `luarocks test` does **not** build the rock-under-test, only its
 dependencies, so always `luarocks make` first (that is what `make test` does).
-Two related gotchas if you drive Busted directly:
-
-* A few tests need the `titan` runtime support module (for `titan.backtrace()`),
-  which `luarocks make` installs; make sure the in-tree `.lua/bin/lua`
-  interpreter can find it by including your rocks tree in `LUA_CPATH`, e.g.
-  `LUA_CPATH="./?.so;$HOME/.luarocks/lib/lua/5.5/?.so;;" busted`.
-* Once the `titan` rock is installed, Busted loads the compiler modules from the
-  *installed* rock, not from your checkout — re-run `luarocks make` after editing
-  compiler sources so the tests see your changes.
+If you drive Busted directly, use the `busted` installed in `$PREFIX/bin`; the
+patched Lua paths then find the `titan` Lua support module installed by
+`luarocks make`. Once the Titan rock is installed, Busted loads compiler
+modules from that *installed* rock, not from your checkout. Re-run
+`$PREFIX/bin/luarocks make` after editing compiler sources so tests see the
+changes.
 
 # Building the examples
 
@@ -243,14 +396,16 @@ need the SDL2 development headers installed.
 
 `make clean` removes generated build and test artifacts (object files, generated
 C, compiled modules, coverage data) while keeping downloaded dependency trees.
-`make distclean` additionally removes the downloaded Lua, libbacktrace, and
-libuv source/build trees and release tarballs.
+`make distclean` additionally removes the downloaded Lua, LuaRocks,
+libbacktrace, and libuv source/build trees and release tarballs. Neither target
+removes an installed `PREFIX`; delete a throwaway `/tmp` prefix separately
+when it is no longer needed.
 
 # Compiler options
 
         --print-ast                       Print the AST.
         -v, --verbose                     Print safely quoted effective compiler commands.
-        --lua <path>                      Path to the Lua sources (default 'lua-5.5.0/src').
+        --lua <path>                      Path to a Lua source/build tree (source checkouts only).
         --tree <path>                     Path to the source tree for Titan modules (default '.').
         -l, --link <lib1,lib2>            Add libraries to the final link.
         -X, --extra-object <object...>     Add object/archive inputs to the final link.

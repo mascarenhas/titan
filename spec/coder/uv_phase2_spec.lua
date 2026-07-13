@@ -100,9 +100,8 @@ describe("uv Phase 2 continuation pump", function()
     function()
         types.registry = {}
         driver.imported = {}
-        local old = driver.TITAN_STDLIB_PATH
         local old_bin = driver.TITAN_BIN_PATH
-        driver.TITAN_STDLIB_PATH = phase2.standard_dir()
+        local stdlib = phase2.standard_dir()
         -- Coder specs may leave checkout-level DSOs behind. They are valid
         -- adversarial shadows, but this test is about binary interface
         -- rehydration, so give its ordinary search path an isolated empty root.
@@ -114,8 +113,9 @@ describe("uv Phase 2 continuation pump", function()
             parse_errors, "binary_consumer.titan"))
         local deps = {}
         local modtype, errors = checker.check("binary_consumer", ast, source,
-            "binary_consumer.titan", driver.defaultloader(deps))
-        driver.TITAN_STDLIB_PATH = old
+            "binary_consumer.titan", driver.defaultloader(deps, {
+                stdlib_path = stdlib,
+            }))
         driver.TITAN_BIN_PATH = old_bin
 
         assert.equals(0, #errors, table.concat(errors, "\n"))

@@ -2,7 +2,7 @@
 
 The `fs` standard module provides asynchronous file and path operations with a
 synchronous-looking Titan interface. Titan imports the canonical module with
-`import "fs"`; Lua loads the same module image with `require "titan.fs"`.
+`import "fs"`; Lua loads the same module identity with `require "titan.fs"`.
 The current supported hosts are Linux and macOS. The
 [libuv setup instructions](../../README.md#libuv-setup) cover the default
 pinned build and optional system-package mode on both platforms.

@@ -22,7 +22,6 @@ local function clean()
 end
 
 describe("numeric operator semantics (Lua 5.5 parity)", function()
-    setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
     -- ===== migrated from coder_spec.lua: "Lua vs C operator semantics" =====

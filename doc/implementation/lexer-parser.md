@@ -425,6 +425,6 @@ error raised inside a semantic action escapes `parse` without restoring
   self-referential post-checker AST at unlimited depth hangs busted.
 * **Remember the installed-rock shadow.** Under busted,
   `require "titan-compiler.parser"` resolves to the installed rock, not your
-  working tree — re-run `luarocks make --local titan-dev-1.rockspec` after
-  editing front-end sources, or your changes silently won't be under test
+  working tree — re-run `$PREFIX/bin/luarocks make titan-dev-1.rockspec` after
+  editing front-end sources, or your changes silently will not be under test
   (see the [implementation index](index.md)).

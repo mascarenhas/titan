@@ -263,13 +263,16 @@ The compiler driver is invoked with dot-separated *module names*, not
 file paths:
 
 ```sh
-./titanc [--print-ast] [-v] [--lua <luasrc>] [--tree <srcroot>] [-l lib1,lib2] <module>...
+titanc [--print-ast] [-v] [--lua <luasrc>] [--tree <srcroot>] [-l lib1,lib2] <module>...
 ```
 
 * `--tree <srcroot>` sets the source tree root (default `.`); module
   `foo.bar` is looked up at `<srcroot>/foo/bar.titan`.
-* `--lua <luasrc>` points at the Lua source tree the generated C is
-  built against (default `lua-5.5.0/src`).
+* `--lua <luasrc>` points a source-checkout compiler at a complete Lua
+  source/build tree. Checkout developer mode otherwise uses
+  `lua-5.5.0/src`. An installed compiler rejects this override and always
+  uses its matched `<root>/src/lua-5.5.0` headers, `liblua.a`, and
+  `libtitan.a`.
 * `-l/--link` adds extra C libraries to the link line (FFI use).
 * `-v/--verbose` prints the C compiler command lines; `--print-ast`
   dumps the parsed AST.
@@ -298,8 +301,13 @@ The `.c` and `.o` are written next to the `.titan` source; the linked
 place only when compiling from the root of the source tree (the
 `--tree` default).
 
-The driver also maintains `titan-runtime/titan.o`, a small support
-library rebuilt automatically when out of date.
+An installed compiler links `<root>/lib/libtitan.a`; compiler development
+directly from the repository lazily rebuilds and links
+`titan-runtime/libtitan.a`. Both archives contain exactly `titan.o`,
+`titan_coro.o`, and `titan_uv.o`; neither driver mode links `titan.o`
+directly. Vendored `libbacktrace.a` and the matching `liblua.a` remain separate
+link inputs, and the `titan.so` Lua support module is built separately from
+`titanlib.c`.
 
 *Implementation note:* the driver and the exact compiler invocations
 are described in [the driver documentation](../implementation/driver.md);
@@ -314,16 +322,26 @@ the structure of the generated C is in
   `.so` lands relative to the compiler's working directory, as
   described above.
 * **Compiled modules** are looked up along the *binary search path*: a
-  semicolon-separated list of directories taken from the environment
-  variable `TITAN_PATH_0_11`, or `TITAN_PATH` if that is unset,
-  defaulting to `.;/usr/local/lib/titan/0.11` — a list of plain
-  directories, not a Lua-style template path. The same path is used at
-  run time by compiled modules that load dependencies dynamically.
+  semicolon-separated list of plain directories taken from
+  `TITAN_PATH_0_11`, or `TITAN_PATH` if that is unset. Otherwise the default
+  is `.;<root>/lib/titan/0.11`. An installed `titanc` recovers `<root>` from
+  the first literal `package.cpath` entry ending in
+  `/lib/lua/5.5/?.so`. The same path is used at run time by compiled modules
+  that load dependencies dynamically; a `;;` in the run-time environment
+  override inserts the default path.
+
+Here `<root>` is the Titan SDK/rocks-tree root. `PREFIX` owns Lua and LuaRocks,
+while `ROCKS_TREE` owns the Titan SDK and standard modules. The supported
+developer installation currently makes those paths equal, which is why the
+driver can discover the Titan root from Lua's `package.cpath`; the names do not
+have inherently identical ownership.
 
 The reserved standard modules `coroutine`, `uv`, `timer`, `fs`, `net`, and
 `os` are the exception to the ordinary application paths. Titan resolves their
-canonical short names from the dedicated ABI-qualified
-`TITAN_STDLIB_PATH`; an application source or binary cannot shadow them.
+canonical short names from `<root>/lib/titan/0.11/titan`. Default lookup uses
+the parent `<root>/lib/titan/0.11` and implicitly prefixes `titan/`; an explicit
+`TITAN_STDLIB_PATH` instead names a direct directory containing short files
+such as `timer.so`. An application source or binary cannot shadow them.
 Standard sources are compiled only by the repository's explicit standard
 build, one root at a time. Thus `local os = import "os"` always means Titan's
 standard `os` module, independently of Lua's own module namespace.
@@ -331,8 +349,13 @@ standard `os` module, independently of Lua's own module namespace.
 Lua's `require`, for its part, finds the `.so` through Lua's ordinary
 `package.cpath` — a compiled Titan module is a regular Lua C module
 (see [Requiring a Titan module](lua-interop.md#requiring-a-titan-module)).
-Standard modules use qualified aliases such as `titan.os`; the alias maps the
-same canonical DSO rather than installing another copy.
+Titan's installed Lua default puts `<root>/lib/titan/0.11/?.so` before the
+ordinary `lib/lua` templates, and each standalone program ensures that same
+entry is present. A qualified standard name such as `titan.os`
+therefore resolves the single canonical file
+`<root>/lib/titan/0.11/titan/os.so`. Titan imports resolve that very file
+through their implicit `titan/` prefix. Installation creates no parent-level
+or `lib/lua` copy and requires no symbolic- or hard-link alias.
 
 ## Static and dynamic linking
 
@@ -353,8 +376,33 @@ request #237) is *static when source is available, dynamic otherwise*:
 * Reserved standard imports are a deliberate exception. Even though Titan's
   own standard-library sources exist in the repository, an application does
   not compile them into its artifact. It resolves the canonical ABI-qualified
-  binary from `TITAN_STDLIB_PATH` and shares that one runtime image with other
+  binary through the implicit `titan/` default (or the direct
+  `TITAN_STDLIB_PATH` override) and shares that one runtime image with other
   standard-library consumers in the Lua state.
+
+A binary extension DSO may use that ordering to call bundled libuv directly.
+Its source must both `import "uv"` and `foreign import "uv.h"`, and its link
+must leave `uv_*` unresolved rather than adding `-luv` or a static archive.
+The extension's `<mangled>_types` returns `"uv-provider"` as an optional second
+result because it imports standard `uv`; that metadata records a `dynamic-uv`
+dependency even if a provider was already visible. Reading it also establishes
+or validates canonical `titan/uv.so` and its compiler-process file identity. An
+initial open-stage unresolved `uv_*` error bootstraps that provider globally
+and retries the interface so the compiler can require the marker. A binary
+without it is rejected and must be rebuilt with an explicit standard `uv`
+import. Generated
+consumers use `loadlibwithuv`, which establishes that provider before mapping
+the extension; unmarked ordinary binary dependencies remain eager and local. A
+Lua caller loading the extension directly must first run
+`require "titan.uv"`. Titan's patched Lua recognizes the exact
+`luaopen_titan_uv` entry and makes only that C module global; every other Lua C
+module remains local. The provider does not reopen itself. System-mode
+extensions may instead link the same shared libuv selected by pkg-config.
+Because both Titan and Lua establish the provider before the extension is
+mapped, the bundled path also supports eager data and function-address
+relocations and native constructors. See
+[Direct libuv extensions](ffi.md#direct-libuv-extensions) for the build
+contract.
 
 A statically linked dependency is still a module of its own from Lua's
 point of view: if `main.so` embeds `geom.point` and a Lua script also
@@ -375,9 +423,12 @@ the output is a standalone executable instead of shared libraries (the
 declared return type must literally be `integer`). All requested modules and
 ordinary dependencies selected from source are statically bundled into the
 binary. Reserved standard modules remain canonical binary dependencies and are
-loaded through the dedicated `TITAN_STDLIB_PATH`, even when their sources are
+loaded through the dedicated standard path, even when their sources are
 visible; this prevents a standalone from embedding a second `coroutine` or
-libuv implementation. Deploy those standard DSOs as described under
+libuv implementation. After `luaL_openlibs`, the executable parses the
+inherited `package.cpath` for its `/lib/lua/5.5/?.so` entry, adds
+`<root>/lib/titan/0.11/?.so` if it is absent, and initializes the ordinary and
+standard Titan paths from that same root. Deploy those standard DSOs as described under
 [where modules are found](#where-modules-are-found). `args` is
 Lua-style: `args[0]` is the program name and `args[1]` onward are the
 arguments, so `#args` is the argument count. The integer returned by
@@ -413,12 +464,19 @@ sources with `-fPIC`. Each compiled module statically embeds the parts
 of the Lua core it uses (the build links `liblua.a` into every `.so`
 and executable), which is why the compiler needs a built Lua source
 tree and not just an installed interpreter. This was a deliberate
-packaging decision (pull request #231), together with the removal of
-global C state from generated modules (#233/#235): a Titan module keeps
-all of its state per Lua state, so the same module can be loaded into
+packaging decision (pull request #231), together with the removal of semantic
+global C state from generated modules (#233/#235): a Titan module keeps its
+state in registry/GC-owned objects per Lua state. Per-image C statics may hold
+only nonsemantic native wiring or caches, so the same module can be loaded into
 several Lua states in one process, each with its own copies of the
 module variables — see
 [Multiple Lua states](lua-interop.md#multiple-lua-states). Each
 compiler release does target one specific Lua version (currently
 Lua 5.5), because the generated code works against that version's
 internals.
+
+The bundled direct-libuv extension contract above is a narrow exception to the
+unmodified-Lua statement: its Lua-first loading order needs Titan's patched
+`loadlib.c` to open exactly `luaopen_titan_uv` globally. Other Titan modules do
+not need that patch, and a stock-Lua embedding can use a system-mode extension
+linked against the same shared libuv instead.

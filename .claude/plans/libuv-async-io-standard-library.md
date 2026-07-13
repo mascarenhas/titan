@@ -163,10 +163,10 @@ The current architecture already supplies the necessary substrate:
   binary-only modules are dynamically loaded. Reserved standards are the
   deliberate exception: applications load their canonical ABI-qualified
   images from `TITAN_STDLIB_PATH` (`doc/language/modules.md:327-360`). The build
-  produces canonical `uv.so` first and higher-level standard modules import
-  that binary, so the shim and libuv archive are linked exactly once. Packaging
-  exposes the same image through the Lua alias `titan/uv.so` with
-  `luaopen_titan_uv`.
+  produces canonical `titan/uv.so` first and higher-level standard modules
+  import that binary, so the shim and libuv archive are linked exactly once.
+  Lua's qualified name resolves that same file through the
+  `luaopen_titan_uv` entry.
 - Module state is per Lua state (`doc/implementation/codegen-overview.md:483-490`).
   Libuv state must also be per Lua state/bootstrap session; no process-global
   default loop or task table is acceptable.
@@ -434,10 +434,14 @@ module-name reference in the same change. The new canonical Titan import is
 alias, or bare `luaopen_coroutine` entry.
 
 Compile each module under its canonical Titan name (`os`, `uv`, and so on), and
-install the canonical binary as `<Titan ABI path>/os.so`. Lua also gets an alias
-at `<Lua C path>/titan/os.so`. Because Lua's C loader asks that path for
-`luaopen_titan_os`, add a general driver/build option that separates the
-Lua-facing require name from the canonical Titan module name, for example:
+install exactly one binary as
+`<root>/lib/titan/<Titan ABI>/titan/os.so`. Titan's default standard lookup
+implicitly prepends `titan/`, while Titan's patched Lua prepends
+`<root>/lib/titan/<Titan ABI>/?.so` to `package.cpath`; consequently
+`import "os"` and `require "titan.os"` open that exact pathname. Because Lua's
+C loader asks it for `luaopen_titan_os`, add a general driver/build option that
+separates the Lua-facing require name from the canonical Titan module name, for
+example:
 
 ```text
 titanc --stdlib-build --tree stdlib --lua-name titan.os os
@@ -458,26 +462,24 @@ module Udata, while `require "os"` still returns Lua's table. Likewise,
 `require "coroutine"` still returns Lua's standard table. Apply the same mapping
 to `math`, `string`, and `lua` when those modules are added.
 
-The canonical path and Lua alias must resolve to one mapped DSO image, not two
-byte-for-byte copies. This matters especially for `uv.so`: two independently
-loaded images would contain two statically linked libuv instances even if both
-entry functions recover the same registry Udata. Prefer a relative symbolic
-link to the canonical binary and verify loader coalescing on Linux and macOS;
-if the package layout cannot preserve that link, install a tiny forwarding
-alias DSO that contains no Titan module or libuv objects and opens/calls the
-canonical entry. Require-first and import-first tests inspect constructor/load
-counters and native symbol addresses to prove exactly one canonical image and
-one Runtime implementation are active.
+The Titan and Lua lookup names must resolve directly to that one regular DSO,
+not to byte-for-byte copies, symbolic links, hard links, or a forwarding DSO.
+This matters especially for `uv.so`: two independently loaded images would
+contain two statically linked libuv instances even if both entry functions
+recover the same registry Udata. Installed-layout tests assert that the
+qualified file is the only standard DSO, while require-first and import-first
+tests use `package.searchpath` and `package.loadlib` to prove both loaders open
+that file and share one module Udata and Runtime implementation.
 
-A scratch binary proof must be promoted into tests: an aliased `os.so` exports
+A scratch binary proof must be promoted into tests: canonical `titan/os.so` exports
 `luaopen_titan_os` plus `os_init`/`os_abi`/`os_types`, does not export
 `luaopen_os`, preserves `package.loaded.os`, and returns the same registry Udata
 and mutable module state through Lua `require "titan.os"` and a separately
 compiled Titan consumer's `import "os"`. This requires no module ABI bump.
 Also link a standalone against Lua's built-in `luaopen_os` and the distinct
 `luaopen_titan_os` to prove both symbols coexist.
-Repeat the identity/symbol proof for canonical `coroutine.so` and its
-`titan/coroutine.so` alias: `import "coroutine"` and
+Repeat the identity/symbol proof for canonical `titan/coroutine.so`:
+`import "coroutine"` and
 `require "titan.coroutine"` share one module Udata, `package.loaded.coroutine`
 is unchanged, and Lua's built-in `luaopen_coroutine` coexists with the distinct
 `luaopen_titan_coroutine`.
@@ -1633,8 +1635,8 @@ Build the generated canonical `uv` translation unit and shim with
 `-fno-strict-aliasing`, as upstream recommends for libuv's public base-handle
 casts. On Linux also put `_GNU_SOURCE` in compiler flags before all headers.
 
-After linking, assert that canonical `uv.so` and its Lua-facing installed alias
-have no dynamic libuv dependency:
+After linking, assert that canonical `titan/uv.so` has no dynamic libuv
+dependency:
 
 - Linux: inspect `readelf -d` or `ldd`;
 - macOS: inspect `otool -L`.
@@ -1670,6 +1672,31 @@ Homebrew's prefix may be outside compiler defaults; always consume pkg-config's
 include/library paths. Do not tell users to set an unversioned runtime SONAME
 manually.
 
+Bundled `titan/uv.so` is the sole complete libuv provider. An additional Titan
+extension DSO that calls libuv directly must import standard `uv` as well as
+foreign-import `uv.h` and leave its `uv_*` calls unresolved. Its generated
+`<mangled>_types` function returns an optional second `"uv-provider"` result
+because its origin map contains standard `uv`; compiler interface recovery uses
+that marker to record the dependency as `"dynamic-uv"`, even when libuv was
+already global. Reading it establishes or validates canonical `uv.so` and
+records its compiler-process file identity. If an eager unresolved `uv_*`
+relocation prevents the initial interface load, the open-stage diagnostic
+bootstraps canonical `uv.so` and the compiler retries before requiring the
+marker. A binary without it is rejected and must be rebuilt with an explicit
+standard `uv` import.
+Generated consumers use `loadlibwithuv` to establish the provider globally before mapping the extension;
+unmarked ordinary DSOs remain eager/local. A Lua caller must
+`require "titan.uv"` before requiring the
+extension directly. Titan-owned Lua's patched `loadlib.c` recognizes exactly
+the `luaopen_titan_uv` entry and loads that DSO globally on its first require;
+all other Lua C modules retain ordinary local loading. This is the portable
+Linux/macOS path, with no self-dlopen/promotion shim in `uv.so`. System mode
+remains an alternative sharing boundary: both DSOs may link the same
+pkg-config-selected shared libuv. Provider-first loading supports eager data
+and function-address relocations and native constructors as well as calls.
+Never link the bundled `libuv.a` into a second DSO merely to match versions;
+that private archive would embed a second native instance.
+
 ### Required Titan build plumbing
 
 Current `titanc` only accepts bare `-l` names and extra objects, and the FFI
@@ -1688,7 +1715,25 @@ plumbing before the standard module:
   and diagnose a conflicting application source or local binary;
 - add standard-origin dependency metadata plus a runtime `loadstdlib` which
   uses only the ABI-qualified `TITAN_STDLIB_PATH`/installed default, never `.` or
-  ordinary `TITAN_PATH` precedence;
+  ordinary `TITAN_PATH` precedence; ordinary unmarked `loadlib` maps DSOs with
+  `RTLD_NOW | RTLD_LOCAL`, while canonical `uv.so` is the one standard image
+  mapped with `RTLD_NOW | RTLD_GLOBAL`; make generated `<mangled>_types`
+  return an optional second `"uv-provider"` result when its origin map contains
+  standard `uv` or `"dynamic-uv"`, classify compiled interfaces from that
+  deterministic marker, establish or identity-check the provider on that
+  marker path, and retain an open-stage unresolved `uv_*` fallback that
+  bootstraps the provider and retries so the marker can be required, rejecting
+  a binary that still omits it; generate
+  `loadlibwithuv` so it establishes the provider before mapping that image;
+  pass each requested root's full recursive source dependency closure to code
+  generation so standard `uv` or `"dynamic-uv"` reached through a statically
+  linked source dependency also emits the marker;
+  remember the canonical provider pathname in compiler process state and
+  reject a later request that resolves to a different provider file;
+  patch Lua's C loader so
+  the exact `luaopen_titan_uv` entry receives global visibility on first load,
+  while every other C module preserves ordinary local visibility; do not add a
+  provider self-dlopen/promotion shim;
 - add `--lua-name <qualified-name>` so a canonical Titan module may export a
   distinct Lua entry name without changing its Titan ABI symbols;
 - add `--stdlib-build` for one explicit standard source root at a time; ordinary
@@ -1715,10 +1760,12 @@ This requires a real FFI-preprocessor change, not only driver link plumbing:
    splitting/quoting in the driver utility and test paths containing spaces.
 
 The bundled build sets `TITAN_EXTRA_CPPFLAGS=-I<versioned include> -D_GNU_SOURCE`
-on Linux (only the include flag on macOS), passes `libuv.a` through existing
-`-X`, and uses existing `-l` for platform support libraries. System mode splits
-`pkg-config --cflags` into the shared CPP channel and sends the complete ordered
-`pkg-config --libs` output to the link channel. Add parser/driver tests proving
+on Linux (only the include flag on macOS) and sends `libuv.a` plus its platform
+support libraries through the ordered `TITAN_EXTRA_LDFLAGS` channel for
+`uv.so` only. That archive remains a private source-build artifact rather than
+an installed SDK library. System mode splits `pkg-config --cflags` into the shared CPP
+channel and sends the complete ordered `pkg-config --libs` output to that same
+link channel. Add parser/driver tests proving
 that a header visible only through these flags is parsed with the same macro
 branches the C compiler sees, compile-only flags do not leak into the link-only
 phase, and link flags retain order.
@@ -1729,24 +1776,28 @@ Extend the build graph:
 
 ```text
 lua + libbacktrace + libuv
-  -> titan.o + titan_coro.o + titan_uv.o
-  -> coroutine.so
-  -> uv.so
-  -> timer.so, fs.so, net.so, os.so
-  -> single-image Lua aliases: titan/{coroutine,uv,timer,fs,net,os}.so
+  -> libtitan.a (exactly titan.o + titan_coro.o + titan_uv.o)
+  -> titan/coroutine.so
+  -> titan/uv.so
+  -> titan/{timer,fs,net,os}.so
 ```
 
-Build `coroutine.so` and canonical `uv.so` before higher-level modules and force
-those dependencies down the compiled-module path, so `titan_uv.o`/`libuv.a` are
-not duplicated into every library. The `coroutine.so` rule consumes
+Build canonical `titan/coroutine.so` and `titan/uv.so` before higher-level
+modules and force those dependencies down the compiled-module path, so
+`titan_uv.o`/`libuv.a` are not duplicated into every library. Each rule moves
+titanc's transient root output into its qualified target, leaving no second
+loadable image. The coroutine rule consumes
 `stdlib/coroutine.titan` through `--stdlib-build --tree stdlib`, not a
 root-level source or an ambient `TITAN_PATH` entry.
 
 Replace the rockspec's single `coro.so` copy hook with an `install-stdlib`
-target. Install canonical `{coroutine,uv,timer,fs,net,os}.so` in Titan's
-ABI-versioned binary root and expose every module under `titan/*.so` in Lua's
-`LIBDIR`, all through the single-image alias mechanism above; never install an
-independent copy. The coroutine module exports `luaopen_titan_coroutine`, not
+target. Before LuaRocks installs the compiler, build and install the Lua
+runtime/SDK, `libtitan.a`, and separate `libbacktrace.a`; build bundled libuv as
+a private prerequisite and install its headers, but do not export `libuv.a`.
+After the compiler is deployed, build the standard modules and install only
+`<root>/lib/titan/<Titan ABI>/titan/{coroutine,uv,timer,fs,net,os}.so`.
+Do not install parent-ABI or `lib/lua` copies, links, or forwarding modules.
+The coroutine module exports `luaopen_titan_coroutine`, not
 the old `luaopen_coro` or Lua's reserved `luaopen_coroutine`. Installed `uv`
 imports canonical binary `coroutine` through `loadstdlib`, and installed
 high-level modules do the same for canonical `uv`, so they need no libuv headers
@@ -1805,7 +1856,7 @@ Work:
   `titan-compiler/driver.lua`, plus `doc/implementation/driver.md`.
 - Add pinned resolution for reserved standard modules, `--stdlib-build`,
   `--lua-name`, the
-  single-image canonical/Lua alias install layout, and the registry-based
+  single-file canonical Titan/Lua install layout, and the registry-based
   main-bootstrap hook with driver and `.so`-rehydration tests.
 - Move and rename `coro.titan` to `stdlib/coroutine.titan`, rename its focused
   spec, and update the Makefile, rockspec packaging, test helper, and
@@ -2139,7 +2190,7 @@ Files:
 
 Work:
 
-- Install canonical Titan modules plus Lua `titan.*` aliases and document both
+- Install one canonical DSO for each Titan module/Lua `titan.*` name and document both
   bundled/system libuv modes.
 - Document synchronous appearance, cooperative scheduling, cancellation points,
   direct callback execution, nonblocking `uv.run`, shared-tag semantics,
@@ -2235,7 +2286,7 @@ module build order, environment flags, and standalone execution.
   `require "coroutine"`; reserved-name diagnostics and pinned standard
   source/binary resolution that local `coroutine`/`uv` sources or binaries
   cannot capture;
-- both alias load orders map one canonical DSO and one statically linked libuv
+- both Titan/Lua load orders map one canonical DSO and one statically linked libuv
   instance while sharing the registry Udata;
 - checker acceptance of local C-pointer fields without interface leakage;
   rejection of external opaque-record construction, wrong record identities,
@@ -2261,14 +2312,14 @@ Manual macOS pre-merge CI:
 
 1. Build the same pinned libuv, not an undeclared Homebrew runtime.
 2. Run focused stdlib tests and full suite.
-3. Verify `otool -L uv.so` and the Lua alias have no dynamic libuv dependency,
-   and the alias/load-order test maps one canonical DSO image.
+3. Verify `otool -L titan/uv.so` has no dynamic libuv dependency, and the
+   Titan/Lua load-order test maps one canonical DSO image.
 
 Final local gate:
 
 ```sh
 CCACHE_DISABLE=1 make libuv
-CCACHE_DISABLE=1 ./luarocks make
+CCACHE_DISABLE=1 "$PREFIX/bin/luarocks" make --force
 CCACHE_DISABLE=1 busted \
   spec/libuv_shim_spec.lua \
   spec/checker/uv_spec.lua \
@@ -2343,14 +2394,15 @@ snapshot can otherwise shadow source edits.
 - [x] Binary buffers preserve length and embedded NUL.
 - [x] Timer, file, TCP/DNS, OS/process/signal APIs match documented contracts.
 - [x] Canonical modules work as Titan `import "coroutine"`/`import "os"`/etc.;
-      Lua aliases work as `require "titan.coroutine"`/`require "titan.os"`/etc.
+      qualified Lua names work as `require "titan.coroutine"`/`require "titan.os"`/etc.
       without replacing Lua standard modules.
 - [x] The existing coroutine source is moved and renamed to
       `stdlib/coroutine.titan`; no root duplicate or legacy `coro` alias remains,
       and Makefile, rockspec, renamed tests, and documentation all consume or
       name the new source/module path.
 - [x] Reserved standard identities cannot be captured by local source/binaries,
-      and canonical/Lua paths map one DSO/libuv instance in either load order.
+      and Titan/Lua lookup maps one canonical qualified DSO/libuv instance in
+      either load order, with no installed copies or links.
 - [x] Source, `.so`-only, and standalone paths are covered.
 - [x] Incremental, generational, sanitizer, Linux, and macOS gates pass.
 - [x] Both language and implementation manuals, README, CLAUDE, Makefile,

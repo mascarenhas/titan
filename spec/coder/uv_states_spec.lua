@@ -61,7 +61,8 @@ describe("uv Phase 2 multiple Lua states", function()
         local argv = {
             "env",
             "TITAN_STDLIB_PATH=" .. phase2.standard_dir(),
-            "LUA_CPATH=" .. phase2.alias_template() .. ";;",
+            "LUA_CPATH=" ..
+                phase2.canonical_cpath(phase2.standard_dir()) .. ";;",
             executable,
         }
         local ok, status, output = phase2.run(shell_command(argv), workspace)

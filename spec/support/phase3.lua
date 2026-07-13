@@ -47,8 +47,7 @@ function M.variant_workspace(transformer, fs_transformer)
 
     -- Build fs only after the transformed uv DSO exists. Keeping uv.titan out
     -- of src forces this through the private compiled-module boundary.
-    local raw_lua = lfs.attributes(M.repo .. "/.lua/bin/lua") and
-        M.repo .. "/.lua/bin/lua" or M.repo .. "/lua"
+    local raw_lua = phase2.host_lua()
     if fs_transformer then
         local transform = fs_transformer
         if transform:sub(1, 1) ~= "/" then
@@ -71,7 +70,7 @@ function M.variant_workspace(transformer, fs_transformer)
         "/?/init.lua;\" .. package.path") .. " " .. quote(M.repo .. "/titanc")
     local command = table.concat({
         "env CCACHE_DISABLE=1", "TITAN_PATH_0_11=", "TITAN_PATH=",
-        "TITAN_STDLIB_PATH=" .. quote(workspace),
+        "TITAN_STDLIB_PATH=" .. quote(workspace .. "/titan"),
         "TITAN_EXTRA_CPPFLAGS=''",
         "TITAN_EXTRA_CFLAGS=" .. quote(variant_cflags),
         "TITAN_EXTRA_LDFLAGS=" .. quote(variant_ldflags), compiler,
@@ -80,8 +79,7 @@ function M.variant_workspace(transformer, fs_transformer)
     }, " ")
     local ok, _, output = phase2.run(command, workspace)
     assert.truthy(ok, output)
-    ok, _, output = phase2.run("ln -s ../fs.so titan/fs.so", workspace)
-    assert.truthy(ok, output)
+    phase2.move_compiled_module(workspace, "fs")
     return workspace, root
 end
 

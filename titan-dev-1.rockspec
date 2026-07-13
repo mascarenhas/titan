@@ -34,18 +34,28 @@ test = {
 }
 hooks = {
    post_install = [[set -e
-      titan_libdir="$(PREFIX)/../../../../lua/$(LUA_VERSION)/titan"
-      for module in coroutine uv timer fs net os; do
-         test -f "$titan_libdir/stdlib_0_11/$module.so"
-         rm -f "$titan_libdir/$module.so"
-         ln -s "stdlib_0_11/$module.so" "$titan_libdir/$module.so"
-      done]]
+      unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5
+      rocks_tree="$(SCRIPTS_DIR)/.."
+      rocks_tree="$(CDPATH= cd "$rocks_tree" && pwd -P)"
+      $(MAKE) rock-post-install \
+         PREFIX="$(LUA_DIR)" \
+         ROCKS_TREE="$rocks_tree" \
+         ROCK_TITANC="$(SCRIPTS_DIR)/titanc" \
+         CC="$(CC)"]]
 }
 build = {
    type = "make",
-   build_target = "rock-build",
+   -- This remains a source-only installation flow. The target builds the C
+   -- runtime and, because ROCKS_TREE is set here, stages the compiler SDK
+   -- before LuaRocks deploys the compiler modules. The stdlib is deliberately
+   -- deferred to post_install so it is compiled by the deployed titanc.
+   build_target = "titan",
    install_pass = false,
    build_variables = {
+      PREFIX = "$(LUA_DIR)",
+      ROCKS_TREE = "$(SCRIPTS_DIR)/..",
+      AR = "$(AR)",
+      RANLIB = "$(RANLIB)",
       ROCK_LUA_INCDIR = "$(LUA_INCDIR)",
       ROCK_CFLAGS = "$(CFLAGS)",
       ROCK_LD = "$(LD)",
@@ -79,19 +89,7 @@ build = {
       ["c-parser.cdefines"] = "c-parser/cdefines.lua"
       },
       lib = {
-         ["titan"] = "titan.so",
-         ["titan.stdlib_0_11.coroutine"] = "coroutine.so",
-         ["titan.coroutine"] = "coroutine.so",
-         ["titan.stdlib_0_11.uv"] = "uv.so",
-         ["titan.uv"] = "uv.so",
-         ["titan.stdlib_0_11.timer"] = "timer.so",
-         ["titan.timer"] = "timer.so",
-         ["titan.stdlib_0_11.fs"] = "fs.so",
-         ["titan.fs"] = "fs.so",
-         ["titan.stdlib_0_11.net"] = "net.so",
-         ["titan.net"] = "net.so",
-         ["titan.stdlib_0_11.os"] = "os.so",
-         ["titan.os"] = "os.so"
+         ["titan"] = "titan.so"
       },
       bin = {
          "titanc"

@@ -8,7 +8,7 @@ imports its canonical short name:
 local os = import "os"
 ```
 
-Lua loads the same canonical module image with `require "titan.os"`. The
+Lua loads the same canonical module identity with `require "titan.os"`. The
 qualified Lua name is deliberate: `require "os"` remains Lua's standard
 library table and is never replaced.
 

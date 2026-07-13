@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-slim
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-      LUAROCKS_VERSION: "3.13.0"
+      PREFIX: ${{ github.workspace }}/.lua
       LIBUV_VERSION: "1.52.1"
       # Bump when any CMake option that affects the cached archive changes.
       LIBUV_BUILD_PROFILE: "static-pic-release-tests-off-v1"
@@ -25,19 +25,26 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Cache LuaRocks bootstrap install
+      # Cache only the LuaRocks-managed portion of the standalone prefix. Lua,
+      # native SDK archives, and standard DSOs are rebuilt from this checkout;
+      # dependency rocks and their launchers can be reused safely.
+      - name: Cache standalone-prefix LuaRocks dependencies
         uses: actions/cache@v5
         with:
-          path: lua_install
-          key: ubuntu-slim-luarocks-${{ env.LUAROCKS_VERSION }}
-
-      - name: Cache project lua_modules
-        uses: actions/cache@v5
-        with:
-          path: lua_modules
-          key: ubuntu-slim-${{ runner.arch }}-lua_modules-${{ hashFiles('titan-dev-1.rockspec') }}
+          path: |
+            .lua/bin/busted
+            .lua/bin/cluacov
+            .lua/bin/luacov
+            .lua/bin/luarocks
+            .lua/bin/luarocks-admin
+            .lua/etc/luarocks
+            .lua/etc/titan
+            .lua/lib/lua/5.5
+            .lua/lib/luarocks
+            .lua/share/lua/5.5
+          key: ubuntu-slim-${{ runner.arch }}-prefix-system-tree-v2-rocks-3.13.0-${{ hashFiles('titan-dev-1.rockspec') }}
           restore-keys: |
-            ubuntu-slim-${{ runner.arch }}-lua_modules-
+            ubuntu-slim-${{ runner.arch }}-prefix-system-tree-v2-rocks-3.13.0-
 
       - name: Cache bundled libuv source and static build
         uses: actions/cache@v5
@@ -62,45 +69,32 @@ jobs:
       - name: Build the pinned bundled libuv
         run: make libuv
 
-      - name: Install LuaRocks from source
-        run: |
-          if [ ! -f lua_install/bin/luarocks ]; then
-            curl -fL -o "luarocks-${LUAROCKS_VERSION}.tar.gz" \
-              "https://luarocks.github.io/luarocks/releases/luarocks-${LUAROCKS_VERSION}.tar.gz"
-            tar zxf "luarocks-${LUAROCKS_VERSION}.tar.gz"
-            cd "luarocks-${LUAROCKS_VERSION}"
-            ./configure --prefix="$GITHUB_WORKSPACE/lua_install" \
-                        --with-lua="$GITHUB_WORKSPACE/.lua"
-            make
-            make install
-            cd ..
-            rm -rf "luarocks-${LUAROCKS_VERSION}" "luarocks-${LUAROCKS_VERSION}.tar.gz"
-          fi
+      - name: Install LuaRocks into the Titan prefix
+        run: make luarocks
 
-      - name: Set up project-local luarocks tree
+      - name: Activate the standalone Titan prefix
         run: |
-          export PATH="$PWD/lua_install/bin:$PATH"
-          luarocks init --lua-dir="$PWD/.lua"
-          echo "$PWD/.lua/bin" >> "$GITHUB_PATH"
-          echo "$PWD/lua_modules/bin" >> "$GITHUB_PATH"
-          echo "LUA_PATH=$(./luarocks path --lr-path);;" >> "$GITHUB_ENV"
-          echo "LUA_CPATH=$(./luarocks path --lr-cpath);;" >> "$GITHUB_ENV"
+          echo "$PREFIX/bin" >> "$GITHUB_PATH"
+          "$PREFIX/bin/lua" -v
+          "$PREFIX/bin/luarocks" --version
 
       - name: Build and install the rock
-        run: ./luarocks make
+        # The dependency cache may contain the preceding commit's installed
+        # titan dev-1. Force this checkout through both source-install phases.
+        run: luarocks make --force
 
       - name: Verify titanc shebang environment
-        run: ./titanc --help
+        run: titanc --help
 
       - name: Prepare test dependencies
-        run: ./luarocks test --prepare
+        run: luarocks test --prepare
 
       # Archive the pristine bundled build before the mode smoke replaces its
-      # uv.so. Upload remains after the smoke, so a portability failure still
+      # titan/uv.so. Upload remains after the smoke, so a portability failure still
       # prevents downstream runner spend.
       # A tar layer preserves the complete checkout's source/output mtimes,
-      # hidden .lua tree, executable bits, and relative standard-library
-      # symlinks. Direct artifact upload avoids wrapping it in another archive.
+      # hidden .lua tree, executable bits, and standard-library images. Direct
+      # artifact upload avoids wrapping it in another archive.
       - name: Pack prepared Linux tree
         run: |
           printf '%s\n' "$GITHUB_WORKSPACE" > .ci-prepared-workspace
@@ -111,17 +105,17 @@ jobs:
 
       # These groups plus preparation remain comfortably below ubuntu-slim's
       # 15-minute cap. Keeping them here avoids two separately rounded jobs and
-      # reuses the warm compiler/filesystem state. Run the library groups first:
-      # compiler specs deliberately rebuild titan.o, which would otherwise make
-      # the serial packaging gate rebuild the complete standard library again.
+      # reuses the warm compiler/filesystem state. Run the library groups first
+      # so legacy compiler cleanup cannot make the serial packaging gate rebuild
+      # the complete standard library again.
       - name: Run serial and net/OS library tests without coverage
         run: |
           bash spec/support/ci_test_groups.sh library-serial
           bash spec/support/ci_test_groups.sh library-net-os
 
-      # Compiler specs intentionally rebuild and clean root artifacts. Restore
-      # the exact prepared runtime, canonical DSOs, and aliases before the
-      # production smoke.
+      # Restore the exact prepared runtime and standard DSOs after legacy
+      # compiler specs clean root module outputs and before the production
+      # smoke.
       - name: Run compiler and language tests with coverage
         run: |
           snapshot="$RUNNER_TEMP/titan-stdlib-before-compiler.tar"
@@ -147,8 +141,20 @@ jobs:
             .lua/bin/lua -e 'require("spec.support.phase6").process_child(assert(os.getenv("TITAN_PROCESS_SMOKE_DIR")))'
           echo "TITAN_PROCESS_SMOKE_CHILD=$process_smoke_dir/process_child" >> "$GITHUB_ENV"
 
-      - name: Smoke-test bundled and system libuv modes
-        run: bash spec/support/ci_libuv_mode_smoke.sh
+      - name: Smoke-test bundled libuv source image
+        # The following installed-rock canary owns the Linux system-mode build;
+        # do not compile the same system uv image twice on this billed runner.
+        run: bash spec/support/ci_libuv_mode_smoke.sh bundled
+
+      # The prepared artifact was packed before the source-mode smoke, so this
+      # can mutate the producer's live prefix without changing the bundled tree
+      # restored by test-linux. Exercise only the installed system-mode boundary
+      # here; the complete library suite already ran against the bundled image.
+      - name: Canary source-rock installation with system libuv
+        run: |
+          LIBUV_MODE=system luarocks make --force
+          TITAN_EXPECT_LIBUV_MODE=system \
+            "$PREFIX/bin/busted" -o gtest -v spec/rockspec_spec.lua
 
       - name: Upload prepared Linux tree
         uses: actions/upload-artifact@v7
@@ -184,9 +190,6 @@ jobs:
             -C "$GITHUB_WORKSPACE"
           test "$(cat .ci-prepared-workspace)" = "$GITHUB_WORKSPACE"
           echo "$PWD/.lua/bin" >> "$GITHUB_PATH"
-          echo "$PWD/lua_modules/bin" >> "$GITHUB_PATH"
-          echo "LUA_PATH=$(./luarocks path --lr-path);;" >> "$GITHUB_ENV"
-          echo "LUA_CPATH=$(./luarocks path --lr-cpath);;" >> "$GITHUB_ENV"
           .lua/bin/lua -v
 
       # Library suites run in full outside LuaCov because it cannot measure
@@ -203,7 +206,7 @@ jobs:
 
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-      LUAROCKS_VERSION: "3.13.0"
+      PREFIX: ${{ github.workspace }}/.lua
       LIBUV_VERSION: "1.52.1"
       # Bump when any CMake option that affects the cached archive changes.
       LIBUV_BUILD_PROFILE: "static-pic-release-tests-off-v1"
@@ -211,19 +214,23 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Cache LuaRocks bootstrap install
+      - name: Cache standalone-prefix LuaRocks dependencies
         uses: actions/cache@v5
         with:
-          path: lua_install
-          key: macos-latest-luarocks-${{ env.LUAROCKS_VERSION }}
-
-      - name: Cache project lua_modules
-        uses: actions/cache@v5
-        with:
-          path: lua_modules
-          key: macos-latest-${{ runner.arch }}-lua_modules-${{ hashFiles('titan-dev-1.rockspec') }}
+          path: |
+            .lua/bin/busted
+            .lua/bin/cluacov
+            .lua/bin/luacov
+            .lua/bin/luarocks
+            .lua/bin/luarocks-admin
+            .lua/etc/luarocks
+            .lua/etc/titan
+            .lua/lib/lua/5.5
+            .lua/lib/luarocks
+            .lua/share/lua/5.5
+          key: macos-latest-${{ runner.arch }}-prefix-system-tree-v2-rocks-3.13.0-${{ hashFiles('titan-dev-1.rockspec') }}
           restore-keys: |
-            macos-latest-${{ runner.arch }}-lua_modules-
+            macos-latest-${{ runner.arch }}-prefix-system-tree-v2-rocks-3.13.0-
 
       - name: Cache bundled libuv source and static build
         uses: actions/cache@v5
@@ -242,67 +249,43 @@ jobs:
       - name: Build the bundled Lua 5.5 source tree
         run: make lua LUA_PLATFORM=macosx
 
-      # The runtime (titan.o) and every generated module/executable link
-      # ./libbacktrace/.libs/libbacktrace.a (unified stack traces). CI runs
-      # luarocks directly rather than `make test`, so build the tree explicitly.
+      # Every generated module and executable links the separate
+      # ./libbacktrace/.libs/libbacktrace.a (unified stack traces). CI
+      # runs LuaRocks directly rather than `make test`, so build it explicitly.
       - name: Build the bundled libbacktrace
         run: make libbacktrace
 
       - name: Build the pinned bundled libuv
         run: make libuv
 
-      # Install LuaRocks from source, pointing it at the vendored Lua 5.5 in
-      # .lua/.  This replaces hererocks and eliminates the Python dependency.
-      - name: Install LuaRocks from source
-        run: |
-          if [ ! -f lua_install/bin/luarocks ]; then
-            curl -fL -o "luarocks-${LUAROCKS_VERSION}.tar.gz" \
-              "https://luarocks.github.io/luarocks/releases/luarocks-${LUAROCKS_VERSION}.tar.gz"
-            tar zxf "luarocks-${LUAROCKS_VERSION}.tar.gz"
-            cd "luarocks-${LUAROCKS_VERSION}"
-            ./configure --prefix="$GITHUB_WORKSPACE/lua_install" \
-                        --with-lua="$GITHUB_WORKSPACE/.lua"
-            make
-            make install
-            cd ..
-            rm -rf "luarocks-${LUAROCKS_VERSION}" "luarocks-${LUAROCKS_VERSION}.tar.gz"
-          fi
+      - name: Install LuaRocks into the Titan prefix
+        run: make luarocks
 
-      # Set up the project-local luarocks tree (lua_modules/), matching the
-      # README's developer workflow.  The bootstrap luarocks binary is only
-      # needed for this one-time `luarocks init`; afterwards the project's
-      # ./luarocks wrapper is used for everything.
-      - name: Set up project-local luarocks tree
+      # The installed compiler keeps its own Lua, LuaRocks, native SDK, and
+      # standard library in one per-project prefix. This is the same
+      # system-tree workflow recommended to developers.
+      - name: Activate the standalone Titan prefix
         run: |
-          export PATH="$PWD/lua_install/bin:$PATH"
-          luarocks init --lua-dir="$PWD/.lua"
-          # Make the vendored Lua available to ordinary `#!/usr/bin/env lua`
-          # tools such as titanc, and add the rocks bin dir for busted and the
-          # installed command wrappers.  Explicit ./lua and ./luarocks calls
-          # remain useful when their project-local package paths are required.
-          echo "$PWD/.lua/bin" >> "$GITHUB_PATH"
-          echo "$PWD/lua_modules/bin" >> "$GITHUB_PATH"
-          echo "LUA_PATH=$(./luarocks path --lr-path);;" >> "$GITHUB_ENV"
-          echo "LUA_CPATH=$(./luarocks path --lr-cpath);;" >> "$GITHUB_ENV"
+          echo "$PREFIX/bin" >> "$GITHUB_PATH"
+          "$PREFIX/bin/luarocks" --version
 
       - name: Verify vendored Lua is on PATH
         run: lua -v
 
-      # Build and install the rock so the `titan` C runtime module (titanlib.c,
+      # Build and install the rock so the `titan` Lua support module (titanlib.c,
       # required by one coder spec via `require 'titan'`) is on the Lua path.
       # `luarocks test` does not build the rock-under-test, only its dependencies.
       - name: Build and install the rock
-        run: ./luarocks make
+        run: luarocks make --force
 
-      # Exercise titanc through its real /usr/bin/env shebang. This deliberately
-      # does not select a Lua interpreter inside the script: CI must provide the
-      # vendored Lua and installed compiler dependencies through PATH/LUA_PATH.
+      # Exercise titanc through its real /usr/bin/env shebang. CI must provide
+      # the prefix's Lua and installed compiler dependencies through PATH.
       - name: Verify titanc shebang environment
-        run: ./titanc --help
+        run: titanc --help
 
       # Test-only dependencies are not installed by `luarocks make`.
       - name: Prepare test dependencies
-        run: ./luarocks test --prepare
+        run: luarocks test --prepare
 
       # Build one native argv/stdio child with the pinned bundled archive and
       # reuse it while smoke-testing both standard-library link modes. The OS
@@ -315,8 +298,8 @@ jobs:
             .lua/bin/lua -e 'require("spec.support.phase6").process_child(assert(os.getenv("TITAN_PROCESS_SMOKE_DIR")))'
           echo "TITAN_PROCESS_SMOKE_CHILD=$process_smoke_dir/process_child" >> "$GITHUB_ENV"
 
-      # Keep either compiler path's root cleanup/rebuilds local to its tests,
-      # preserving the prepared stdlib image for the production smoke.
+      # Keep either compiler path's legacy root output cleanup local to its
+      # tests, preserving the prepared stdlib image for the production smoke.
       - name: Run complete macOS tests without coverage
         if: github.event_name == 'workflow_dispatch'
         run: |
@@ -339,7 +322,7 @@ jobs:
           bash spec/support/ci_stdlib_snapshot.sh restore "$snapshot"
 
       # Run this after the bundled test suite. The smoke first exercises the
-      # existing self-contained image, then rebuilds only uv.so against the
+      # existing self-contained image, then rebuilds only titan/uv.so against the
       # platform package; the job can end in system mode without another build.
       - name: Smoke-test bundled and system libuv modes
         run: bash spec/support/ci_libuv_mode_smoke.sh
@@ -354,8 +337,20 @@ jobs:
     runs-on: ubuntu-slim
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-      LUAROCKS_VERSION: "3.13.0"
+      PREFIX: ${{ github.workspace }}/.lua
       SANITIZER_FLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      # Keep these equal to SANITIZER_FLAGS (plus -fPIC where required). Make's
+      # content stamps deliberately revisit native dependencies from later
+      # targets, so the complete configuration must remain in the environment
+      # for the whole job rather than being supplied to only the first build.
+      LUA_MYCFLAGS: "-fPIC -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      LUA_MYLDFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      LUA_MYLIBS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      LIBBT_CFLAGS: "-fPIC -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      LIBUV_BUILD_TYPE: Debug
+      LIBUV_BUILD_CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      TITAN_EXTRA_CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      TITAN_EXTRA_LDFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       # Every Titan DSO intentionally embeds the vendored static Lua archive;
       # disable only ASan's cross-image ODR diagnostic for those duplicate Lua
       # globals. Address, bounds, lifetime, and leak checks remain enabled.
@@ -370,50 +365,27 @@ jobs:
 
       - name: Build sanitizer-enabled native dependencies
         run: |
-          make lua \
-            LUA_MYCFLAGS="-fPIC ${SANITIZER_FLAGS}" \
-            LUA_MYLDFLAGS="${SANITIZER_FLAGS}" \
-            LUA_MYLIBS="${SANITIZER_FLAGS}"
-          make libbacktrace \
-            LIBBT_CFLAGS="-fPIC ${SANITIZER_FLAGS}"
-          make libuv \
-            LIBUV_BUILD_TYPE=Debug \
-            LIBUV_BUILD_CFLAGS="${SANITIZER_FLAGS}"
+          make lua
+          make libbacktrace
+          make libuv
 
       - name: Install LuaRocks for the sanitizer Lua
-        run: |
-          curl -fL -o "luarocks-${LUAROCKS_VERSION}.tar.gz" \
-            "https://luarocks.github.io/luarocks/releases/luarocks-${LUAROCKS_VERSION}.tar.gz"
-          tar zxf "luarocks-${LUAROCKS_VERSION}.tar.gz"
-          cd "luarocks-${LUAROCKS_VERSION}"
-          ./configure --prefix="$GITHUB_WORKSPACE/lua_install" \
-                      --with-lua="$GITHUB_WORKSPACE/.lua"
-          make
-          make install
-          cd ..
-          rm -rf "luarocks-${LUAROCKS_VERSION}" "luarocks-${LUAROCKS_VERSION}.tar.gz"
+        run: make luarocks
 
-      - name: Set up sanitizer project tree
+      - name: Activate the sanitizer Titan prefix
         run: |
-          export PATH="$PWD/lua_install/bin:$PATH"
-          luarocks init --lua-dir="$PWD/.lua"
-          ./luarocks install busted
-          echo "$PWD/.lua/bin" >> "$GITHUB_PATH"
-          echo "$PWD/lua_modules/bin" >> "$GITHUB_PATH"
-          echo "LUA_PATH=$(./luarocks path --lr-path);;" >> "$GITHUB_ENV"
-          echo "LUA_CPATH=$(./luarocks path --lr-cpath);;" >> "$GITHUB_ENV"
+          # The install CLI accepts one exact version rather than a dependency
+          # constraint; pin the current release inside the rockspec's range.
+          "$PREFIX/bin/luarocks" install busted 2.3.0-1
+          echo "$PREFIX/bin" >> "$GITHUB_PATH"
 
       - name: Build sanitizer-enabled Titan artifacts
         run: |
-          TITAN_EXTRA_CFLAGS="${SANITIZER_FLAGS}" \
-          TITAN_EXTRA_LDFLAGS="${SANITIZER_FLAGS}" \
-          LIBUV_BUILD_TYPE=Debug \
-          LIBUV_BUILD_CFLAGS="${SANITIZER_FLAGS}" \
-            ./luarocks make
+          luarocks make --force
           readelf -Ws .lua/bin/lua | grep __asan_
           readelf -Ws .lua/bin/lua | grep __ubsan_
-          readelf -Ws uv.so | grep __asan_
-          readelf -Ws uv.so | grep __ubsan_
+          readelf -Ws titan/uv.so | grep __asan_
+          readelf -Ws titan/uv.so | grep __ubsan_
           # titanlib is small enough that UBSan may emit no handler reference;
           # an ASan registration symbol proves this separate C module used the
           # threaded native instrumentation flags.
@@ -426,7 +398,7 @@ jobs:
           TITAN_TEST_EXTRA_CFLAGS: ${{ env.SANITIZER_FLAGS }}
           TITAN_TEST_EXTRA_LDFLAGS: ${{ env.SANITIZER_FLAGS }}
         run: |
-          ./lua_modules/bin/busted -o gtest -v \
+          .lua/bin/busted -o gtest -v \
             spec/coder/uv_states_spec.lua \
             spec/coder/timer_spec.lua \
             spec/coder/fs_spec.lua \
@@ -440,7 +412,7 @@ jobs:
           MINICORO_TEST_CC: gcc
           MINICORO_TEST_CFLAGS: ${{ env.SANITIZER_FLAGS }}
         run: |
-          ./lua_modules/bin/busted -o gtest -v \
+          .lua/bin/busted -o gtest -v \
             spec/minicoro_spec.lua \
             spec/coder/uv_spec.lua \
             spec/coder/uv_phase2_spec.lua \
@@ -459,9 +431,9 @@ jobs:
 
       - name: Run sanitized net/OS production smokes
         run: |
-          env TITAN_STDLIB_PATH="$PWD" LUA_CPATH="$PWD/?.so;;" \
+          env TITAN_STDLIB_PATH="$PWD/titan" LUA_CPATH="$PWD/?.so;;" \
             .lua/bin/lua spec/fixtures/libuv/net_production_smoke.lua \
               sanitizer
-          env TITAN_STDLIB_PATH="$PWD" LUA_CPATH="$PWD/?.so;;" \
+          env TITAN_STDLIB_PATH="$PWD/titan" LUA_CPATH="$PWD/?.so;;" \
             .lua/bin/lua spec/fixtures/libuv/os_production_smoke.lua \
               sanitizer "$TITAN_PROCESS_SMOKE_CHILD"

@@ -13,7 +13,7 @@ describe("os Phase 6 child processes", function()
         phase6.copy_fixture(workspace, "process_core_cases.titan",
             "phase6_process_cases")
         phase6.compile(workspace, "phase6_process_cases", {
-            stdlib = workspace,
+            stdlib = workspace .. "/titan",
         })
     end)
 

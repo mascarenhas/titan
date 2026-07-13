@@ -6,7 +6,22 @@
 
 set -u
 
-BUSTED=${BUSTED:-./lua_modules/bin/busted}
+if [[ -z ${BUSTED:-} ]]; then
+    if [[ -n ${PREFIX:-} && -x $PREFIX/bin/busted ]]; then
+        BUSTED=$PREFIX/bin/busted
+    elif [[ -x .lua/bin/busted ]]; then
+        BUSTED=.lua/bin/busted
+    else
+        BUSTED=./lua_modules/bin/busted
+    fi
+fi
+if [[ -n ${PREFIX:-} && -x $PREFIX/bin/lua ]]; then
+    LUA=$PREFIX/bin/lua
+elif [[ -x .lua/bin/lua ]]; then
+    LUA=.lua/bin/lua
+else
+    LUA=./lua
+fi
 group=${1:-}
 compiler_tests=()
 compiler_unit_tests=()
@@ -123,10 +138,19 @@ case "$group" in
                 spec/libuv_shim_spec.lua \
                 spec/minicoro_spec.lua
 
+            # This focused installed-prefix test is the Darwin proof for the
+            # complete force-loaded uv.so provider, exact Lua-entry
+            # globalization, unresolved extension symbols, and provider-first
+            # native constructors. Keep it fixed rather than leaving those
+            # boundaries to the random compiler sample.
+            "$BUSTED" -o gtest -v \
+                --filter='uses canonical uv as the dynamic provider' \
+                spec/rockspec_spec.lua
+
             "$BUSTED" --list -o plainTerminal \
                 "${compiler_tests[@]}" "${compiler_unit_tests[@]}" \
                 >"$catalog"
-            ./lua spec/support/select_canary_tests.lua \
+            "$LUA" spec/support/select_canary_tests.lua \
                 --percent 5 --seed "$seed" \
                 "${compiler_tests[@]}" "${compiler_unit_tests[@]}" \
                 <"$catalog" >"$manifest"

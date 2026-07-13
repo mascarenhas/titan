@@ -11,7 +11,7 @@ describe("os Phase 6 checked buffer faults", function()
         phase6.copy_fixture(workspace, "os_helper_faults.titan",
             "phase6_os_helper_faults")
         phase6.compile(workspace, "phase6_os_helper_faults", {
-            stdlib = workspace,
+            stdlib = workspace .. "/titan",
         })
     end)
 

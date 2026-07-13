@@ -23,11 +23,13 @@ describe("uv Phase 2 isolated scheduler faults", function()
         workspace = phase2.variant_workspace(
             "spec/support/make_uv_test_variant.lua")
         phase2.copy_fixture(workspace, "fault_core.titan", "fault_core")
-        phase2.compile(workspace, "fault_core", { stdlib = workspace })
+        phase2.compile(workspace, "fault_core", {
+            stdlib = workspace .. "/titan",
+        })
         phase2.copy_fixture(workspace, "bootstrap_main_cancel.titan",
             "bootstrap_main_cancel")
         phase2.compile(workspace, "bootstrap_main_cancel", {
-            stdlib = workspace,
+            stdlib = workspace .. "/titan",
         })
     end)
 

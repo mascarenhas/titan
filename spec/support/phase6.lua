@@ -36,8 +36,7 @@ local function shell_words(command, label)
 end
 
 local function compiler_command()
-    local lua = lfs.attributes(M.repo .. "/lua") and
-        M.repo .. "/lua" or M.repo .. "/.lua/bin/lua"
+    local lua = phase2.host_lua()
     return quote(lua) .. " -e " .. quote(
         "package.path=\"" .. M.repo .. "/?.lua;" .. M.repo ..
         "/?/init.lua;\" .. package.path") .. " " .. quote(M.repo .. "/titanc")
@@ -50,7 +49,7 @@ local function build_os(workspace)
     local ldflags = os.getenv("TITAN_TEST_EXTRA_LDFLAGS") or ""
     local command = table.concat({
         "env CCACHE_DISABLE=1", "TITAN_PATH_0_11=", "TITAN_PATH=",
-        "TITAN_STDLIB_PATH=" .. quote(workspace),
+        "TITAN_STDLIB_PATH=" .. quote(workspace .. "/titan"),
         "TITAN_EXTRA_CPPFLAGS=''",
         "TITAN_EXTRA_CFLAGS=" .. quote(cflags),
         "TITAN_EXTRA_LDFLAGS=" .. quote(ldflags),
@@ -59,8 +58,7 @@ local function build_os(workspace)
     }, " ")
     local ok, _, output = phase2.run(command, workspace)
     assert.truthy(ok, output)
-    ok, _, output = phase2.run("ln -s ../os.so titan/os.so", workspace)
-    assert.truthy(ok, output)
+    phase2.move_compiled_module(workspace, "os")
 end
 
 local function build_process_child(workspace)
@@ -116,7 +114,7 @@ end
 
 function M.compile(workspace, modname, options)
     options = options or {}
-    options.stdlib = options.stdlib or workspace
+    options.stdlib = options.stdlib or workspace .. "/titan"
     return phase2.compile(workspace, modname, options)
 end
 
@@ -126,4 +124,5 @@ M.run = phase2.run
 M.lua_command = phase2.variant_lua_command
 M.variant_lua_command = phase2.variant_lua_command
 M.repo = phase2.repo
+M.host_lua = phase2.host_lua
 return M

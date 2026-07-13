@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
-# Compiler specs intentionally rebuild and clean root artifacts. Preserve the
-# prepared runtime and canonical standard-library image around those groups so
-# later production smokes see the exact build that the library gates tested.
+# Some compiler specs rebuild the coroutine runtime. Preserve the prepared
+# runtime archive and sole canonical standard-library image around those groups
+# so later production smokes see the exact build that the library gates tested.
 
 set -euo pipefail
 
@@ -15,17 +15,24 @@ if [[ -z $archive ]]; then
 fi
 
 artifacts=(
-    titan-runtime/titan.o
-    coroutine.so uv.so timer.so fs.so net.so os.so
+    titan-runtime/libtitan.a
+    titan-runtime/.titan-runtime-archive-build-config
     titan/coroutine.so titan/uv.so titan/timer.so
     titan/fs.so titan/net.so titan/os.so
 )
+
+for module in coroutine uv timer fs net os; do
+    if [[ -d titan/$module.so.dSYM ]]; then
+        artifacts+=("titan/$module.so.dSYM")
+    fi
+done
 
 case "$mode" in
     save)
         tar -cpf "$archive" "${artifacts[@]}"
         ;;
     restore)
+        rm -rf titan/*.so.dSYM
         tar -xpf "$archive"
         ;;
     *)

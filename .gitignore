@@ -1,6 +1,7 @@
 *.o
 *.a
 *.so
+*.dSYM/
 
 # lua source trees (downloaded from lua.org)
 /lua-5.*/
@@ -15,9 +16,17 @@
 /libuv-v*/
 /libuv-build/
 /libuv-v*.tar.gz
+
+# LuaRocks source release used by `make luarocks`
+/luarocks-*/
+/luarocks-*.tar.gz
+
 /luarocks
 /lua
 /lua_modules
 /.luarocks
 
 /stdlib/*.c
+
+# Native runtime command-line configuration stamps
+/titan-runtime/.titan-*-build-config

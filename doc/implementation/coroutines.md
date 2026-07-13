@@ -8,16 +8,19 @@ The `coroutine` standard module is split deliberately:
   handoff, and the transfer choreography around minicoro.
 * `titan-runtime/titan_coro.c` owns only the pieces that still need C:
   compiling the single-file minicoro implementation, the Lua raw-equality
-  tag comparator, and a tiny minicoro entry trampoline that calls the
-  native Titan entry function stored in the owner userdata.
+  tag comparator, the Lua-registry-backed minicoro runtime lookup, and a tiny
+  minicoro entry trampoline that calls the native Titan entry function stored
+  in the owner userdata.
 * `titan-runtime/minicoro.h` is a vendored copy of minicoro extended with
   tagged nested yield and a `MCO_STACKED` state.
 
 The source compiles under the canonical Titan identity `coroutine`, so
 Titan code uses `import "coroutine"`. Its Lua-facing entry is
 `luaopen_titan_coroutine`, installed for `require "titan.coroutine"`;
-there is no legacy `coro` alias or bare `luaopen_coroutine` entry to
-collide with Lua's standard coroutine library.
+both names reach the one installed file at
+`<root>/lib/titan/0.11/titan/coroutine.so`. There is no legacy `coro` alias,
+parent-level or `lib/lua` copy, or bare `luaopen_coroutine` entry to collide
+with Lua's standard coroutine library.
 
 ## Public Wrapper
 
@@ -60,8 +63,11 @@ FFI calls that need the calling Lua state use Titan's built-in `L` local.
 
 `stdlib/coroutine.titan` calls minicoro directly for storage and control
 transfer: `mco_push`, `mco_pop`, `mco_resume`, `mco_yield`,
-`mco_status`, `mco_running`, `mco_is_yieldable`, and
-`mco_result_description`. User payloads are transported separately:
+`mco_status`, `mco_is_yieldable`, and `mco_result_description`. It obtains
+the current coroutine through `titan_coro_running(L)`, because that lookup
+must use the registry-owned runtime shared by every coroutine in the Lua
+state. User payloads are
+transported separately:
 
 1. `Coro:resume` reads its private, typed `mco_coro *` handle directly,
    selects the current transfer source (`co->stacked_co` when present,
@@ -69,8 +75,9 @@ transfer: `mco_push`, `mco_pop`, `mco_resume`, `mco_yield`,
    `mco_resume` with the resolved tag.
 2. `Coro:error` follows the same path but pushes `ok=false` and
    `payload=err`.
-3. `coroutine.yield` obtains the current running coroutine, pushes
-   `payload=arg` and `ok=true`, and calls `mco_yield`.
+3. `coroutine.yield` obtains the current running coroutine from the
+   registry-backed runtime, pushes `payload=arg` and `ok=true`, and calls
+   `mco_yield`.
 4. The same helper that calls `mco_resume` selects the transfer source
    again immediately after control returns. Tagged nested yield can change
    it from the resumed coroutine to the deepest stacked coroutine.
@@ -212,14 +219,16 @@ moves arbitrary Lua values as by-value `TValue`s, and owns the order of
 private to `stdlib/coroutine.titan`; it is not a safe general-purpose
 coroutine FFI.
 The pieces that remain in C are the ones that still require capabilities
-outside the current FFI:
+outside the current FFI or a native callback ABI:
 
-* exporting a Titan closure as a C callback with `void (*)(mco_coro *)`
-  ABI, for the minicoro entry point or tag comparator;
+* exposing the trusted native Titan entry through minicoro's
+  `void (*)(mco_coro *)` callback ABI;
 * defining `MINICORO_IMPL` exactly once while forcing Titan's minicoro
   compile-time options;
-* comparing arbitrary Lua values from minicoro's C-only comparator hook
-  with `luaV_equalobj(NULL, ...)`.
+* supplying the C tag comparator that compares arbitrary Lua values with
+  `luaV_equalobj(NULL, ...)`;
+* recovering one GC-owned minicoro runtime from the Lua registry and assigning
+  it to each new descriptor.
 
 Those are plausible future FFI extensions, but they should be designed as
 general facilities rather than coroutine-specific escape hatches.
@@ -237,17 +246,34 @@ mco_result mco_yield(mco_coro *co, void *tag);
 int mco_is_yieldable(mco_coro *co, void *tag);
 ```
 
-All resumes and yields are tagged. The comparator is a static setting of
-the minicoro implementation, not a per-call argument. Minicoro stores
-tags as opaque `void *`; it knows nothing about Lua. Titan passes
-pointers to in-flight `TValue`s, and the C comparator compares them with:
+All resumes and yields are tagged. Generic minicoro builds retain the
+implementation-level `mco_set_tag_comparator` setting. Titan instead compiles
+its image with `MCO_TAG_COMPARATOR=titan_coro_tag_equal`, making the comparator
+a fixed implementation constant rather than mutable global state or a
+per-call argument. Minicoro stores tags as opaque `void *`; it knows nothing
+about Lua. Titan passes pointers to in-flight `TValue`s, and the C comparator
+compares them with:
 
 ```c
 luaV_equalobj(NULL, (const TValue *)t1, (const TValue *)t2)
 ```
 
-Using `NULL` gives raw Lua equality: no `__eq` metamethods and no Lua
-state dependency in the minicoro extension.
+Using `NULL` gives raw Lua equality: no `__eq` metamethods and no
+`lua_State *` dependency in tag comparison.
+
+Each `mco_coro` also points to an `mco_runtime`. That small context contains
+the current-coroutine pointer and, under ASan, the main-stack fake-stack token,
+bottom, and size used by the fiber-switch API. A generic minicoro descriptor
+with no explicit runtime uses the implementation's thread-local default.
+Titan calls `titan_coro_configure(L, desc)` before creation (the FFI passes the
+address of the C-struct local); the shim recovers
+or creates one full userdata under a private Lua-registry key and assigns that
+runtime to the descriptor. Consequently all nested coroutines share the same
+dynamic chain and ASan switch bookkeeping. `titan_coro_running(L)` reads the
+same registry-owned context. The runtime userdata is owned by the Lua state and
+contains only raw execution bookkeeping; coroutine owners still provide all GC
+reachability for the coroutines and their values. Titan imports and Lua
+requires enter the same canonical DSO, which is the sole native owner.
 
 When a coroutine yields to a non-immediate outer tag, the coroutine whose
 `mco_resume` is returning becomes `MCO_SUSPENDED`. The coroutines between

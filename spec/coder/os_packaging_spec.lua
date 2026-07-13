@@ -23,10 +23,7 @@ local function mkdir(path)
 end
 
 local function compiler_lua()
-    if lfs.attributes(phase2.repo .. "/lua") then
-        return phase2.repo .. "/lua"
-    end
-    return phase2.repo .. "/.lua/bin/lua"
+    return phase2.host_lua()
 end
 
 local function compile(workspace, source_root, modname, titan_path)
@@ -212,44 +209,39 @@ describe("os standard-binary pinning", function()
             dependencies)
     end)
 
-    it("shares one image in both load orders without replacing Lua os",
+    it("uses one canonical Titan os image without replacing Lua os",
     function()
         local canonical = phase2.standard_dir() .. "/os.so"
-        local cpath = phase2.alias_template()
-        local lua = lfs.attributes(phase2.repo .. "/.lua/bin/lua") and
-            phase2.repo .. "/.lua/bin/lua" or phase2.repo .. "/lua"
-        for _, canonical_first in ipairs({ false, true }) do
-            local program = string.format([[
-                local builtin = require "os"
-                local open = assert(package.loadlib(%q, "luaopen_titan_os"))
-                local first, second
-                if %s then
-                    first, second = open(), require "titan.os"
-                else
-                    first, second = require "titan.os", open()
-                end
-                assert(type(first) == "userdata")
-                assert(rawequal(first, second))
-                assert(rawequal(second, package.loaded["titan.os"]))
-                assert(require "os" == builtin)
-                assert(package.loaded.os == builtin)
-            ]], canonical, tostring(canonical_first))
-            local command = table.concat({
-                "env TITAN_STDLIB_PATH=" .. quote(phase2.standard_dir()),
-                "LUA_CPATH=" .. quote(cpath .. ";" .. workspace ..
-                    "/?.so;;"), quote(lua), "-e", quote(program),
-            }, " ")
-            local ok, status, output = phase2.run(command, workspace)
-            assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
-        end
+        local cpath = phase2.canonical_cpath(phase2.standard_dir())
+        local lua = phase2.host_lua()
+        local program = string.format([[
+            local builtin = require "os"
+            assert(package.searchpath("titan.os", package.cpath) == %q)
+            local canonical_open = assert(package.loadlib(
+                %q, "luaopen_titan_os"))
+            local module = require "titan.os"
+            assert(type(module) == "userdata")
+            assert(rawequal(canonical_open(), module))
+            assert(rawequal(module, package.loaded["titan.os"]))
+            assert(require "os" == builtin)
+            assert(package.loaded.os == builtin)
+        ]], canonical, canonical)
+        local command = table.concat({
+            "env TITAN_STDLIB_PATH=" .. quote(phase2.standard_dir()),
+            "LUA_CPATH=" .. quote(cpath .. ";" .. workspace ..
+                "/?.so;;"), quote(lua), "-e", quote(program),
+        }, " ")
+        local ok, status, output = phase2.run(command, workspace)
+        assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
 
         local import_first = string.format([[
             local builtin = require "os"
             local consumer = require "os_consumer"
             assert(consumer.pid() > 0)
             local standard = require "titan.os"
-            local open = assert(package.loadlib(%q, "luaopen_titan_os"))
-            assert(rawequal(standard, open()))
+            local canonical_open = assert(package.loadlib(
+                %q, "luaopen_titan_os"))
+            assert(rawequal(standard, canonical_open()))
             assert(require "os" == builtin)
             assert(package.loaded.os == builtin)
         ]], canonical)

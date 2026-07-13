@@ -69,43 +69,54 @@ static void titan_add_raw_lua_trace(luaL_Buffer *buf, int *wrote_any,
 ** module dlopened after that snapshot would have no symbols, so loadlib() and
 ** generated luaopen_* functions invalidate this cached state after successful
 ** loads; the next capture lazily re-creates it and re-snapshots. The state is
-** never freed (a small, bounded leak), never recreated per-error. */
-static struct backtrace_state *titan_bt_state = NULL;
-static lua_Integer titan_bt_generation_seen = -1;
+** never freed (a small, bounded leak), never recreated per-error. Keep the
+** pointer in the Lua registry so every titan.o image in that state shares the
+** cache without relying on mutable per-DSO C globals. */
+typedef struct {
+    struct backtrace_state *state;
+} titan_bt_cache;
 
 static void titan_bt_error(void *data, const char *msg, int errnum) {
     (void)data; (void)msg; (void)errnum;  /* swallow: a missing frame is fine */
 }
 
-/* Reset after a slow-path dlopen or a Lua require that mapped a Titan .so. Each
-** Titan .so links its own titan.o, so also bump a per-state registry generation:
-** every module's errorhandler checks it before reusing its local C static state. */
-void titan_invalidate_backtrace_state(lua_State *L) {
-    lua_Integer gen = 0;
-    titan_bt_state = NULL;
-    lua_pushliteral(L, TITAN_BT_GENERATION_KEY);
+static struct backtrace_state *titan_backtrace_state(lua_State *L) {
+    int top = lua_gettop(L);
+    struct backtrace_state *state = NULL;
+    titan_bt_cache *cache;
+
+    lua_pushliteral(L, TITAN_BT_STATE_KEY);
     lua_rawget(L, LUA_REGISTRYINDEX);
-    if (lua_isinteger(L, -1)) {
-        gen = lua_tointeger(L, -1);
+    if (lua_type(L, -1) == LUA_TUSERDATA &&
+            lua_rawlen(L, -1) == sizeof(titan_bt_cache)) {
+        cache = (titan_bt_cache *)lua_touserdata(L, -1);
+        state = cache->state;
     }
-    lua_pop(L, 1);
-    lua_pushliteral(L, TITAN_BT_GENERATION_KEY);
-    lua_pushinteger(L, gen + 1);
+    lua_settop(L, top);
+    if (state != NULL) return state;
+
+    state = backtrace_create_state(NULL, 1, titan_bt_error, NULL);
+    if (state == NULL) return NULL;
+
+    cache = (titan_bt_cache *)lua_newuserdatauv(
+        L, sizeof(titan_bt_cache), 0);
+    cache->state = state;
+    lua_pushliteral(L, TITAN_BT_STATE_KEY);
+    lua_pushvalue(L, -2);
     lua_rawset(L, LUA_REGISTRYINDEX);
+    lua_settop(L, top);
+    return state;
 }
 
-static void titan_sync_backtrace_generation(lua_State *L) {
-    lua_Integer gen = 0;
-    lua_pushliteral(L, TITAN_BT_GENERATION_KEY);
-    lua_rawget(L, LUA_REGISTRYINDEX);
-    if (lua_isinteger(L, -1)) {
-        gen = lua_tointeger(L, -1);
-    }
-    lua_pop(L, 1);
-    if (titan_bt_generation_seen != gen) {
-        titan_bt_state = NULL;
-        titan_bt_generation_seen = gen;
-    }
+/* Reset after a slow-path dlopen or a Lua require that mapped a Titan .so.
+** Every titan.o copy clears the same per-state registry slot. The next capture
+** recreates it with the now-complete process image snapshot. */
+void titan_invalidate_backtrace_state(lua_State *L) {
+    int top = lua_gettop(L);
+    lua_pushliteral(L, TITAN_BT_STATE_KEY);
+    lua_pushnil(L);
+    lua_rawset(L, LUA_REGISTRYINDEX);
+    lua_settop(L, top);
 }
 
 static const char *titan_basename(const char *path) {
@@ -204,13 +215,10 @@ static int titan_bt_collect_cb(void *data, uintptr_t pc, const char *filename,
 /* Capture the filtered native stack (Titan frames + entry-wrapper boundaries
 ** only) into `st`, innermost->outer. Returns 0 if libbacktrace is unavailable. */
 static int titan_capture_native(lua_State *L, titan_native_stack *st) {
-    (void)L;
-    if (titan_bt_state == NULL) {
-        titan_bt_state = backtrace_create_state(NULL, 1, titan_bt_error, NULL);
-    }
-    if (titan_bt_state == NULL) return 0;
+    struct backtrace_state *state = titan_backtrace_state(L);
+    if (state == NULL) return 0;
     /* skip=1: drop errorhandler's own frame. */
-    backtrace_full(titan_bt_state, 1, titan_bt_collect_cb, titan_bt_error, st);
+    backtrace_full(state, 1, titan_bt_collect_cb, titan_bt_error, st);
     return 1;
 }
 
@@ -280,14 +288,12 @@ static void titan_entry_syminfo_cb(void *data, uintptr_t pc,
 }
 
 static int titan_cfunction_is_entry(lua_State *L, lua_CFunction fn) {
+    struct backtrace_state *state;
     titan_entry_probe probe;
     probe.is_entry = 0;
-    (void)L;
-    if (titan_bt_state == NULL) {
-        titan_bt_state = backtrace_create_state(NULL, 1, titan_bt_error, NULL);
-    }
-    if (titan_bt_state == NULL) return 0;
-    backtrace_syminfo(titan_bt_state,
+    state = titan_backtrace_state(L);
+    if (state == NULL) return 0;
+    backtrace_syminfo(state,
                       (uintptr_t)titan_cast_func(void *, fn),
                       titan_entry_syminfo_cb, titan_bt_error, &probe);
     return probe.is_entry;
@@ -424,39 +430,80 @@ void titan_invalidate_backtrace_state(lua_State *L) {
 }
 #endif
 
-static void add_package_cpath_dirs(lua_State *L, luaL_Buffer *buf) {
+static int push_package_cpath_root(lua_State *L) {
     int top = lua_gettop(L);
     lua_getglobal(L, "package");
     if(lua_istable(L, -1) && lua_getfield(L, -1, "cpath") == LUA_TSTRING) {
-        const char *path = lua_tostring(L, -1);
-        while(path && *path != '\0') {
-            const char *end = strchr(path, ';');
-            const char *q;
-            if(end == NULL) end = path + strlen(path);
-            q = memchr(path, '?', end - path);
-            if(q != NULL) {
-                const char *dir_end = q;
-                while(dir_end > path && (dir_end[-1] == '/' || dir_end[-1] == '\\')) {
-                    dir_end--;
+        size_t path_len;
+        const size_t suffix_len = sizeof(TITAN_LUA_CPATH_SUFFIX) - 1;
+        const char *path = lua_tolstring(L, -1, &path_len);
+        const char *entry = path;
+        const char *limit = path + path_len;
+        while(entry <= limit) {
+            const char *end = memchr(entry, ';', (size_t)(limit - entry));
+            size_t entry_len;
+            size_t root_len;
+            if(end == NULL) end = limit;
+            entry_len = (size_t)(end - entry);
+            if(entry_len >= suffix_len &&
+               memcmp(entry + entry_len - suffix_len,
+                      TITAN_LUA_CPATH_SUFFIX, suffix_len) == 0) {
+                root_len = entry_len - suffix_len;
+                while(root_len > 1 && entry[root_len - 1] == '/') root_len--;
+                if(root_len == 0) {
+                    lua_pushliteral(L, "/");
+                } else {
+                    lua_pushlstring(L, entry, root_len);
                 }
-                if(dir_end > path) {
-                    luaL_addchar(buf, ';');
-                    luaL_addlstring(buf, path, dir_end - path);
-                }
+                lua_replace(L, top + 1);
+                lua_settop(L, top + 1);
+                return 1;
             }
-            path = end;
-            if(*path == ';') path++;
+            if(end == limit) break;
+            entry = end + 1;
         }
     }
     lua_settop(L, top);
+    return 0;
+}
+
+static void pushroot(lua_State *L) {
+    lua_pushliteral(L, TITAN_ROOT_KEY);
+    lua_rawget(L, LUA_REGISTRYINDEX);
+    if(lua_type(L, -1) != LUA_TSTRING) {
+        lua_pop(L, 1);
+        if(!push_package_cpath_root(L)) {
+            lua_pushliteral(L, TITAN_ROOT_DEFAULT);
+        }
+        lua_pushliteral(L, TITAN_ROOT_KEY);
+        lua_pushvalue(L, -2);
+        lua_rawset(L, LUA_REGISTRYINDEX);
+    }
+}
+
+static void push_root_path(lua_State *L, const char *suffix) {
+    size_t root_len;
+    const char *root;
+    pushroot(L);
+    root = lua_tolstring(L, -1, &root_len);
+    if(root_len == 1 && root[0] == '/') {
+        lua_pushstring(L, suffix);
+    } else {
+        lua_pushfstring(L, "%s%s", root, suffix);
+    }
+    lua_remove(L, -2);
 }
 
 static void push_default_titan_path(lua_State *L) {
-    luaL_Buffer buf;
-    luaL_buffinit(L, &buf);
-    luaL_addstring(&buf, TITAN_PATH_DEFAULT);
-    add_package_cpath_dirs(L, &buf);
-    luaL_pushresult(&buf);
+    const char *installed;
+    push_root_path(L, "/lib/titan/" TITAN_VER);
+    installed = lua_tostring(L, -1);
+    lua_pushfstring(L, ".;%s", installed);
+    lua_remove(L, -2);
+}
+
+static void push_default_stdlib_path(lua_State *L) {
+    push_root_path(L, "/lib/titan/" TITAN_VER);
 }
 
 static void pushpath (lua_State *L) {
@@ -494,14 +541,83 @@ static void pushstdlibpath (lua_State *L) {
     lua_rawget(L, LUA_REGISTRYINDEX);
     if(lua_isnil(L, -1)) {
         const char *path;
+        int implicit_prefix;
         lua_pop(L, 1);
         path = getenv(TITAN_STDLIB_PATH_VAR);
-        if(path == NULL) path = TITAN_STDLIB_PATH_DEFAULT;
-        lua_pushstring(L, path);
+        implicit_prefix = path == NULL;
+        if(path == NULL) {
+            push_default_stdlib_path(L);
+        } else {
+            lua_pushstring(L, path);
+        }
         lua_pushliteral(L, TITAN_STDLIB_PATH_KEY);
         lua_pushvalue(L, -2);
         lua_rawset(L, LUA_REGISTRYINDEX);
+        lua_pushliteral(L, TITAN_STDLIB_IMPLICIT_PREFIX_KEY);
+        lua_pushboolean(L, implicit_prefix);
+        lua_rawset(L, LUA_REGISTRYINDEX);
     }
+}
+
+static int stdlib_uses_implicit_prefix(lua_State *L) {
+    int implicit_prefix;
+    lua_pushliteral(L, TITAN_STDLIB_IMPLICIT_PREFIX_KEY);
+    lua_rawget(L, LUA_REGISTRYINDEX);
+    implicit_prefix = lua_toboolean(L, -1);
+    lua_pop(L, 1);
+    return implicit_prefix;
+}
+
+static int path_has_template(const char *path, size_t path_len,
+                             const char *target, size_t target_len) {
+    const char *entry = path;
+    const char *limit = path + path_len;
+    while(entry <= limit) {
+        const char *end = memchr(entry, ';', (size_t)(limit - entry));
+        size_t entry_len;
+        if(end == NULL) end = limit;
+        entry_len = (size_t)(end - entry);
+        if(entry_len == target_len && memcmp(entry, target, target_len) == 0) {
+            return 1;
+        }
+        if(end == limit) break;
+        entry = end + 1;
+    }
+    return 0;
+}
+
+static void add_titan_package_cpath(lua_State *L) {
+    int top = lua_gettop(L);
+    lua_getglobal(L, "package");
+    if(lua_istable(L, -1) && lua_getfield(L, -1, "cpath") == LUA_TSTRING) {
+        size_t path_len;
+        size_t template_len;
+        const char *path = lua_tolstring(L, -1, &path_len);
+        const char *template;
+        push_root_path(L, "/lib/titan/" TITAN_VER "/?.so");
+        template = lua_tolstring(L, -1, &template_len);
+        if(!path_has_template(path, path_len, template, template_len)) {
+            if(path_len == 0) {
+                lua_pushvalue(L, -1);
+            } else {
+                lua_pushfstring(L, "%s;%s", template, path);
+            }
+            lua_setfield(L, top + 1, "cpath");
+        }
+    }
+    lua_settop(L, top);
+}
+
+void titan_init_paths(lua_State *L) {
+    int top = lua_gettop(L);
+    pushroot(L);
+    lua_pop(L, 1);
+    add_titan_package_cpath(L);
+    pushpath(L);
+    lua_pop(L, 1);
+    pushstdlibpath(L);
+    lua_pop(L, 1);
+    lua_settop(L, top);
 }
 
 static const char *pushnextdir (lua_State *L, const char *path) {
@@ -544,6 +660,16 @@ static void pushlibkey(lua_State *L, const char *file, int standard) {
 }
 
 static void *loadlibfrompath(lua_State *L, const char *file, int standard) {
+    int implicit_stdlib_prefix = 0;
+    int flags = RTLD_NOW;
+    if(standard && strcmp(file, "uv.so") == 0) {
+        /* uv.so is the single bundled-libuv provider. Direct-libuv extension
+        ** dependencies use loadlibwithuv, which establishes this global image
+        ** before their ordinary eager/local load. */
+        flags |= RTLD_GLOBAL;
+    } else {
+        flags |= RTLD_LOCAL;
+    }
     pushlibs(L);
     pushlibkey(L, file, standard);
     lua_rawget(L, -2); // try to get lib
@@ -553,13 +679,23 @@ static void *loadlibfrompath(lua_State *L, const char *file, int standard) {
         return lib;
     } else {
         lua_pop(L, 1); // pop nil
-        if(standard) pushstdlibpath(L); else pushpath(L);
+        if(standard) {
+            pushstdlibpath(L);
+            implicit_stdlib_prefix = stdlib_uses_implicit_prefix(L);
+        } else {
+            pushpath(L);
+        }
         const char *path = lua_tostring(L, -1);
         while((path = pushnextdir(L, path)) != NULL) {
             const char *dir = lua_tostring(L, -1);
-            lua_pushfstring(L, "%s" TITAN_PATH_SEP "%s", dir, file);
+            if(implicit_stdlib_prefix) {
+                lua_pushfstring(L, "%s" TITAN_PATH_SEP "titan"
+                    TITAN_PATH_SEP "%s", dir, file);
+            } else {
+                lua_pushfstring(L, "%s" TITAN_PATH_SEP "%s", dir, file);
+            }
             const char *filename = lua_tostring(L, -1);
-            void *lib = dlopen(filename, RTLD_NOW | RTLD_LOCAL);
+            void *lib = dlopen(filename, flags);
             if(lib != NULL) {
                 /* A new .so is now mapped: invalidate libbacktrace's one-time
                 ** object snapshot so the next capture re-scans and can
@@ -590,6 +726,16 @@ void *loadlib (lua_State *L, const char *file) {
 
 void *loadstdlib (lua_State *L, const char *file) {
     return loadlibfrompath(L, file, 1);
+}
+
+void *loadlibwithuv (lua_State *L, const char *file) {
+    /* The compiler selects this path for a binary carrying uv-provider
+    ** dependency metadata (with unresolved-symbol bootstrap used only to
+    ** reach that metadata in a clean process). Establish the complete
+    ** provider before mapping the image, including for eager relocations and
+    ** constructors. */
+    loadstdlib(L, "uv.so");
+    return loadlib(L, file);
 }
 
 void *loadsym (lua_State *L, void *lib, const char *sym) {
@@ -677,9 +823,6 @@ int errorhandler(lua_State *L) {
   /* Regenerate the raw traceback slot. luaL_Buffer lives on the stack from
   ** luaL_buffinit on and must stay at the top while in use, so push everything
   ** else first. */
-#ifdef TITAN_HAVE_LIBBACKTRACE
-  titan_sync_backtrace_generation(L);
-#endif
   lua_pushliteral(L, TITAN_BACKTRACE_KEY);
   luaL_Buffer buf;
   luaL_buffinit(L, &buf);

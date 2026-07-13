@@ -210,11 +210,14 @@ The C helper interface is deliberately tiny. `stdlib/coroutine.titan` imports
 the owner userdata and typed handle, and calls the minicoro
 storage/control APIs directly.
 The C helper surface used by `stdlib/coroutine.titan` consists of the entry
-trampoline and static tag comparator:
+trampoline, fixed tag comparator, and access to the Lua-registry-owned
+minicoro runtime shared by every coroutine in the Lua state:
 
 ```c
 void titan_coro_entry(mco_coro *co);
 int titan_coro_tag_equal(void *t1, void *t2);
+void titan_coro_configure(lua_State *L, mco_desc *desc);
+mco_coro *titan_coro_running(lua_State *L);
 ```
 
 The split is the important point. `mco_resume`, `mco_yield`,
@@ -231,7 +234,10 @@ simply the injected error.
 
 ```lua
 function create(func: (value) -> value, default_tag: value): Coro
-  -- after creating the owner userdata and letting mco_create fill slot:
+  -- after creating the owner userdata:
+  local desc = mco.mco_desc_init(nil, STACK_SIZE)
+  coro_native.titan_coro_configure(L, desc)
+  -- set desc.func/user_data, then let mco_create fill slot
   return Coro.new(ffi.lua_totvalue(L, -1), slot[0], default_tag)
 end
 
@@ -279,7 +285,7 @@ function yield(arg: value, tag: value): value
   if tag == nil then
     raise "must provide non-nil tag argument to coroutine.yield"
   end
-  local co = mco.mco_running()
+  local co = coro_native.titan_coro_running(L)
   push_transfer(co, 1, arg)
   return yield_result_or_raise(co, tag)
 end
@@ -549,8 +555,12 @@ Stock minicoro has `MCO_NORMAL`, `MCO_RUNNING`, `MCO_SUSPENDED`, and
 * add `MCO_STACKED`;
 * make `mco_resume`, `mco_yield`, and `mco_is_yieldable` tag-only
   operations that receive an opaque `void *tag`;
-* add an implementation-level `mco_set_tag_comparator` static setting,
-  not a per-call comparator argument;
+* retain an implementation-level `mco_set_tag_comparator` setting for generic
+  minicoro users, while allowing an embedder such as Titan to compile a fixed
+  `MCO_TAG_COMPARATOR` instead of mutable global state;
+* let `mco_desc` select an `mco_runtime` containing the current coroutine and
+  ASan main-stack bookkeeping, while retaining a thread-local default for
+  generic minicoro users;
 * record the active resume tag for each dynamic resume activation;
 * when a yield tag does not match the immediate active handler according
   to the comparator, walk the nested resume chain outward until a
@@ -583,26 +593,31 @@ coroutine transfer.
 Build `stdlib/coroutine.titan` under the canonical Titan module name
 `coroutine`. Its canonical binary exports `coroutine_init`,
 `coroutine_abi`, and `coroutine_types`; its Lua entry is the distinct
-`luaopen_titan_coroutine`. Install the binary as `coroutine.so` in
-Titan's ABI-qualified standard-library directory and expose that same
-DSO at the Lua C-module path `titan/coroutine.so`, normally with a
-relative symbolic link. Do not install `coro.so`, `luaopen_coro`, or
-`luaopen_coroutine` aliases.
+`luaopen_titan_coroutine`. Install the binary exactly once as
+`<root>/lib/titan/0.11/titan/coroutine.so`. Titan's patched Lua C-module path
+contains `<root>/lib/titan/0.11/?.so`, so both `import "coroutine"` and
+`require "titan.coroutine"` load that file. Do not install an alias or copy as
+`coro.so`, a parent-level `coroutine.so`, or a `lib/lua` DSO, and do not export
+`luaopen_coro` or `luaopen_coroutine`.
 
 Titan code reaches this binary with `import "coroutine"`, while Lua code
 uses `require "titan.coroutine"`. The bare Lua name `coroutine` remains
 owned by Lua's standard library.
 
-Update the rockspec and Makefile so `luarocks make` and `make test`
-build the coroutine module, its private helper header
-`titan/coro.h`, the helper C object, and its vendored minicoro object.
-The driver does not need to link minicoro into every generated module
-unless a future design moves coroutine primitives into `titan.o`.
+The rockspec and Makefile make `luarocks make` and `make test` build the
+coroutine module and the shared runtime archive containing its helper C object
+and vendored minicoro implementation. Static archive selection extracts
+`titan_coro.o` only for a module that references it.
 
-Avoid mutable process-global scheduler state in `titan.o` or generated
-modules. Multiple generated `.so`s can each link their own copy of
-`titan.o`; coroutine runtime state should live in the `coroutine` module, the
-owner userdata, and each `mco_coro`'s user data.
+Avoid semantic mutable process-global state in runtime or generated code. The
+fixed Titan tag comparator is a compile-time constant, while current-coroutine
+and ASan main-stack bookkeeping lives in one `mco_runtime` userdata recovered
+from the Lua registry and assigned to every new descriptor; per-coroutine ASan
+tokens remain in each `mco_coro`. Module and coroutine ownership remains in
+registry/GC-owned module and owner userdata. `mco_coro->user_data` is only a
+non-rooting raw back-pointer to that owner. Titan and Lua enter the one
+canonical `coroutine.so`; that DSO is the sole native owner, while each Lua
+state retains its own registry-owned runtime.
 
 Titan's vendored minicoro should not include the Binaryen
 `MCO_USE_ASYNCIFY` backend: its unwind/rewind model does not implement
@@ -657,6 +672,11 @@ Add Titan runtime/coder coverage for:
   suspended stack preserves pending cleanup state;
 * Lua interop through `require "titan.coroutine"`: method calls, bad argument
   counts, bad callback values, bad tags, and non-callable callbacks;
+* an installed Lua/Titan chain proving that a coroutine created through
+  `require "titan.coroutine"` yields through canonical `timer`/`uv` code while
+  nested, including the same chain under ASan so every main-stack switch pair
+  uses the shared runtime bookkeeping and each standard module resolves to its
+  one canonical DSO;
 * GC stress in incremental and generational modes, including old
   coroutine owner userdata rooting young Lua threads, callback closures,
   default tags, record/table payloads, and function-valued payloads;

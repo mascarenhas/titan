@@ -102,12 +102,17 @@ objects when the state is created. A Titan module loaded by Lua's own
 `require` also invalidates from its generated `luaopen_*`, since that
 path bypasses Titan's `loadlib`.
 
-Each generated module links its own copy of `titan.o`, so invalidation is
-not just a C static reset. The runtime also bumps
-`registry[TITAN_BT_GENERATION_KEY]`; every module's errorhandler compares
-that shared generation with its local `titan_bt_generation_seen` before
-reusing a cached libbacktrace state. Handles are cached and only closed at
-Lua-state teardown, so unload staleness is not a mid-run concern.
+Each generated module selects `titan.o` from `libtitan.a` into its own DSO;
+installed mode uses the SDK archive and checkout mode uses the lazily rebuilt
+local archive, never a direct object link. Invalidation is therefore not just
+a C static reset. Every runtime copy reads the same registry-owned userdata at
+`TITAN_BT_STATE_KEY`, whose payload is the cached `backtrace_state *`.
+Invalidation clears that slot, and the next error lazily creates a fresh state
+with the complete loaded-object snapshot. The opaque state may retain function
+pointers into the DSO whose libbacktrace copy created it; Titan never `dlclose`s
+dependency handles during the process lifetime, and a Lua C-library handle
+remains mapped until its state closes, after which that registry cache cannot
+be used. This keeps the cache per Lua state without mutable per-DSO C globals.
 
 ## Frontend representation
 
@@ -331,7 +336,9 @@ The compiler and runtime therefore agree on:
 * `TITAN_VER "0.11"`
 * `TITAN_VER_SUFFIX "_0_11"`
 * versioned binary path variable `TITAN_PATH_0_11`
-* default binary path `.;/usr/local/lib/titan/0.11`
+* default binary path `.;<root>/lib/titan/0.11`, with `<root>` recovered from
+  the Lua `PREFIX`'s `package.cpath` in the currently supported layout where
+  that path also names the equal Titan `ROCKS_TREE`
 
 Every generated module also exports `<mangled>_abi`, a Lua C function
 returning `TITAN_VER`. The compiler's `.so`-only rehydration path checks

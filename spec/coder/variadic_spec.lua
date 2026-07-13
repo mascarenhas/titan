@@ -17,7 +17,6 @@ local function clean()
 end
 
 describe("scalar variadic parameters (code generator)", function()
-    setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
     it("integer vararg: #... and ...[i] called from Lua", function()
@@ -287,7 +286,6 @@ describe("scalar variadic parameters (code generator)", function()
 end)
 
 describe("collectable variadic parameters (code generator)", function()
-    setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
     -- A `...: string` callee that FORCES a garbage collection in its body (an
@@ -486,7 +484,6 @@ describe("collectable variadic parameters (code generator)", function()
 end)
 
 describe("forwarding an existing ... to another variadic callee", function()
-    setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
     -- CASE 1 (pass-through): caller static prefix exactly fills the callee fixed
@@ -851,7 +848,6 @@ describe("forwarding an existing ... to another variadic callee", function()
 end)
 
 describe("building {...} / {e1, ..., ...} array from a vararg", function()
-    setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
     -- {...} with a scalar element type: the build is runtime-sized
@@ -1105,7 +1101,6 @@ end)
 -- mode is a minor collection) BEFORE the element read -- so a dropped anchor
 -- becomes near-deterministic corruption rather than a rare race.
 describe("variadic GC anchoring under generational mode", function()
-    setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
     -- 1. `...: value` from Lua (genluaentry path): the backing struct holds tagged
@@ -1298,7 +1293,6 @@ end)
 -- `...: boolean` through the build/forward/static paths, and the
 -- `{...: value}`-with-a-nil border semantics.
 describe("variadic parameters: functional coverage gaps (code generator)", function()
-    setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
     -- A variadic lambda stored in a local and called: the value-call path on an
@@ -1587,7 +1581,6 @@ end)
 -- type is taken from the expected `(...: T) -> R` function type, exactly like an
 -- untyped lambda parameter. End-to-end: compile and value-call through it.
 describe("untyped lambda vararg inference (code generator)", function()
-    setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
     -- An untyped `...` lambda assigned to a `(...: integer) -> integer` local

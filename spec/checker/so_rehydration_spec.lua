@@ -32,7 +32,6 @@ local function so_check(deps, ...)
 end
 
 describe("typechecker rehydration of .so-only imports", function()
-    setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(clean_generated_modules)
 
     it("rehydrates a function signature and checks calls against it", function ()

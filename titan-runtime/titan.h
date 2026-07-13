@@ -60,13 +60,16 @@
 #define TITAN_VER_SUFFIX "_0_11"
 #define TITAN_PATH_VAR "TITAN_PATH"
 #define TITAN_PATH_SEP "/"
-#define TITAN_PATH_DEFAULT ".;/usr/local/lib/titan/" TITAN_VER
+#define TITAN_ROOT_DEFAULT "/usr/local"
+#define TITAN_LUA_CPATH_SUFFIX "/lib/lua/5.5/?.so"
+#define TITAN_ROOT_KEY "9efb91a8-4a1b-4bdb-aa6b-b84d9ed1dd77"
 #define TITAN_PATH_KEY "ec10e486-d8fd-11e7-87f4-e7e9581a929c"
 #define TITAN_STDLIB_PATH_VAR "TITAN_STDLIB_PATH"
-#define TITAN_STDLIB_PATH_DEFAULT "/usr/local/lib/titan/" TITAN_VER
 #define TITAN_STDLIB_PATH_KEY "7f0d54d5-0955-47e6-a83d-40e6868417ca"
+#define TITAN_STDLIB_IMPLICIT_PREFIX_KEY                                     \
+  "4dd637aa-f3bd-4998-82de-bb108438c7d9"
 #define TITAN_LIBS_KEY "ecfc9174-d8fd-11e7-8be2-abbaa3ded45f"
-#define TITAN_BT_GENERATION_KEY "a222927d-0e7b-4f7a-93d9-1a6ce7111a5c"
+#define TITAN_BT_STATE_KEY "a222927d-0e7b-4f7a-93d9-1a6ce7111a5c"
 #define TITAN_MAIN_BOOTSTRAP_KEY "41c48a97-55a5-4514-a76f-79ab028ae6e0"
 
 #define TITAN_BACKTRACE_KEY "57d80578-2534-4856-ad3b-bde8cba4c445"
@@ -273,10 +276,12 @@ inline static TString *_float2str(lua_State *L, lua_Number f) {
 
 LUAI_FUNC void *loadlib(lua_State *L, const char *file);
 LUAI_FUNC void *loadstdlib(lua_State *L, const char *file);
+LUAI_FUNC void *loadlibwithuv(lua_State *L, const char *file);
 LUAI_FUNC void *loadsym(lua_State *L, void *lib, const char *sym);
 LUAI_FUNC void titan_check_abi(lua_State *L, void *lib, const char *sym,
                                const char *file);
 LUAI_FUNC void titan_invalidate_backtrace_state(lua_State *L);
+LUAI_FUNC void titan_init_paths(lua_State *L);
 
 TValue lua_totvalue(lua_State *L, int idx);
 void lua_pushtvalue(lua_State *L, TValue v);

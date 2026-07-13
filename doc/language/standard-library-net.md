@@ -7,7 +7,7 @@ Titan methods. Titan source imports it as:
 local net = import "net"
 ```
 
-Lua loads the same canonical module image with:
+Lua loads the same canonical module identity with:
 
 ```lua
 local net = require "titan.net"
@@ -166,20 +166,25 @@ statically links the pinned libuv release:
 
 ```sh
 make libuv
-make stdlib
+"$PREFIX/bin/luarocks" make
 ```
 
 For a system development package, install libuv and `pkg-config`, then use:
 
 ```sh
-LIBUV_MODE=system make stdlib
+LIBUV_MODE=system make libuv
+LIBUV_MODE=system "$PREFIX/bin/luarocks" make
 ```
 
 Typical packages are `libuv1-dev pkg-config` on Debian/Ubuntu,
 `libuv-devel pkgconf-pkg-config` on Fedora, and `libuv pkgconf` through
 Homebrew on macOS. Applications importing the installed binary `net` module do
 not need libuv headers at compile time; all libuv and callback-shim linkage
-remains in the canonical `uv.so`.
+remains in the qualified
+`$ROCKS_TREE/lib/titan/0.11/titan/uv.so`. The supported installation currently
+sets `ROCKS_TREE == PREFIX`; the former owns Titan's SDK/stdlib while the latter
+owns Lua and LuaRocks. Repository contributors can still use
+`make stdlib` for an in-checkout standard-library build.
 
 UDP, Unix-domain/named pipes, socket options, and endpoint-inspection APIs are
 follow-ups.

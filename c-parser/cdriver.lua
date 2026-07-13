@@ -50,10 +50,25 @@ local function find_runtime_dir(start_dir)
     end
 end
 
+local function find_sdk_include_dir(start_dir)
+    local dir = start_dir
+    while dir do
+        local include = join_path(dir, "include")
+        if file_exists(join_path(include, "titan/ffi.h")) then
+            return include
+        end
+        dir = parent_dir(dir)
+    end
+end
+
 local function find_lua_source_dir(start_dir)
     local dir = start_dir
     while dir do
         local lua_source = join_path(join_path(dir, "lua-5.5.0"), "src")
+        if file_exists(join_path(lua_source, "lua.h")) then
+            return lua_source
+        end
+        lua_source = join_path(join_path(dir, "src"), "lua-5.5.0")
         if file_exists(join_path(lua_source, "lua.h")) then
             return lua_source
         end
@@ -73,7 +88,10 @@ local function default_compiler_include_dirs()
     if not is_absolute_path(this_dir) then
         this_dir = join_path(LOAD_CWD, this_dir)
     end
-    compiler_include_dirs = { find_runtime_dir(this_dir) or "titan-runtime" }
+    compiler_include_dirs = {
+        find_runtime_dir(this_dir) or find_sdk_include_dir(this_dir)
+            or "titan-runtime",
+    }
     local lua_source = find_lua_source_dir(this_dir)
     if lua_source then
         table.insert(compiler_include_dirs, lua_source)

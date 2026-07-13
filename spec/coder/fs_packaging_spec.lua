@@ -22,10 +22,7 @@ local function mkdir(path)
 end
 
 local function compiler_lua()
-    if lfs.attributes(phase2.repo .. "/lua") then
-        return phase2.repo .. "/lua"
-    end
-    return phase2.repo .. "/.lua/bin/lua"
+    return phase2.host_lua()
 end
 
 local function compile(workspace, source_root, modname, titan_path)
@@ -181,32 +178,26 @@ describe("fs standard-binary pinning", function()
             dependencies)
     end)
 
-    it("maps canonical and Lua alias load orders to one fs module Udata",
+    it("resolves Lua require and native load through the canonical fs image",
     function()
         local canonical = phase2.standard_dir() .. "/fs.so"
-        local cpath = phase2.alias_template()
-        local lua = lfs.attributes(phase2.repo .. "/.lua/bin/lua") and
-            phase2.repo .. "/.lua/bin/lua" or phase2.repo .. "/lua"
-        for _, canonical_first in ipairs({ false, true }) do
-            local program = string.format([[
-                local open = assert(package.loadlib(%q, "luaopen_titan_fs"))
-                local first, second
-                if %s then
-                    first, second = open(), require "titan.fs"
-                else
-                    first, second = require "titan.fs", open()
-                end
-                assert(type(first) == "userdata")
-                assert(rawequal(first, second))
-                assert(rawequal(second, package.loaded["titan.fs"]))
-            ]], canonical, tostring(canonical_first))
-            local command = table.concat({
-                "env TITAN_STDLIB_PATH=" .. quote(phase2.standard_dir()),
-                "LUA_CPATH=" .. quote(cpath .. ";;"),
-                quote(lua), "-e", quote(program),
-            }, " ")
-            local ok, status, output = phase2.run(command, workspace)
-            assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
-        end
+        local cpath = phase2.canonical_cpath(phase2.standard_dir())
+        local lua = phase2.host_lua()
+        local program = string.format([[
+            assert(package.searchpath("titan.fs", package.cpath) == %q)
+            local canonical_open = assert(package.loadlib(
+                %q, "luaopen_titan_fs"))
+            local module = require "titan.fs"
+            assert(type(module) == "userdata")
+            assert(rawequal(canonical_open(), module))
+            assert(rawequal(module, package.loaded["titan.fs"]))
+        ]], canonical, canonical)
+        local command = table.concat({
+            "env TITAN_STDLIB_PATH=" .. quote(phase2.standard_dir()),
+            "LUA_CPATH=" .. quote(cpath .. ";;"),
+            quote(lua), "-e", quote(program),
+        }, " ")
+        local ok, status, output = phase2.run(command, workspace)
+        assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
     end)
 end)
