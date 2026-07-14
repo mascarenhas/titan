@@ -197,11 +197,12 @@ jobs:
       - name: Run uv/timer/fs library tests without coverage
         run: bash spec/support/ci_test_groups.sh library-uv-fs
 
-  # macOS remains independent of Linux preparation: a transient Linux build
-  # failure must not suppress the per-push canary or a manually requested full
-  # macOS release gate.
+  # macOS runners are expensive, so keep the complete cross-platform gate on
+  # explicit manual dispatch. It remains independent of Linux preparation: a
+  # transient Linux build failure must not suppress a requested macOS run.
   test-macos:
-    name: test (macos-latest, ${{ github.event_name == 'workflow_dispatch' && 'macos-full' || 'macos-canary' }})
+    name: test (macos-latest, macos-full)
+    if: github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
 
     env:
@@ -301,24 +302,11 @@ jobs:
       # Keep either compiler path's legacy root output cleanup local to its
       # tests, preserving the prepared stdlib image for the production smoke.
       - name: Run complete macOS tests without coverage
-        if: github.event_name == 'workflow_dispatch'
         run: |
           bash spec/support/ci_test_groups.sh libraries
           snapshot="$RUNNER_TEMP/titan-stdlib-before-compiler.tar"
           bash spec/support/ci_stdlib_snapshot.sh save "$snapshot"
           bash spec/support/ci_test_groups.sh compiler-uncovered
-          bash spec/support/ci_stdlib_snapshot.sh restore "$snapshot"
-
-      # Busted has no percentage-sampling option. The repository sampler uses
-      # the commit as a replayable seed, while the production smokes in this
-      # job and fixed native tests keep every async portability boundary
-      # represented.
-      - name: Run macOS canary tests
-        if: github.event_name != 'workflow_dispatch'
-        run: |
-          snapshot="$RUNNER_TEMP/titan-stdlib-before-compiler.tar"
-          bash spec/support/ci_stdlib_snapshot.sh save "$snapshot"
-          bash spec/support/ci_test_groups.sh macos-canary "$GITHUB_SHA"
           bash spec/support/ci_stdlib_snapshot.sh restore "$snapshot"
 
       # Run this after the bundled test suite. The smoke first exercises the

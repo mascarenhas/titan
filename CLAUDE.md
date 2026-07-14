@@ -38,13 +38,10 @@ not add epicycles around what may be a misunderstood simpler design.
   independently. Its generated config records Make's effective `CC`, `AR`, and
   `RANLIB` (`LD` follows `CC`), so invoke later rock builds through that
   prefix's LuaRocks rather than changing native tool identity between phases.
-- **CI runs a macOS canary on every push and the complete macOS suite on
-  manual dispatch.** The push canary combines the system/bundled libuv runtime
-  smokes, focused native/provider tests, and a commit-seeded 5% sample of each
-  compiler/language spec file. A manual `workflow_dispatch` replaces that
-  sample with the complete uncovered macOS suite; use it as the **pre-merge
-  check** with `gh workflow run ci.yml --ref <branch>`. Linux jobs are
-  push-only and are not repeated by that macOS dispatch. The regular Linux flow
+- **CI runs Linux on every push and the complete macOS suite only on manual
+  dispatch.** Use `workflow_dispatch` as the **pre-merge check** with
+  `gh workflow run ci.yml --ref <branch>`. Linux jobs are push-only and are not
+  repeated by that macOS dispatch. The regular Linux flow
   uses two 1-core `ubuntu-slim` jobs designed to remain below that runner's
   15-minute limit. The regular build job runs compiler/language plus
   serial and net/OS tests on its warm tree, and uploads a same-run, full-tree
@@ -153,7 +150,6 @@ make stdlib                                         # checkout-only standard bui
 make test                                           # `luarocks make` + `luarocks test`: (re)install the rock, then run the full suite
 luarocks make && bash spec/support/ci_test_groups.sh compiler  # CI's covered compiler/language group
 bash spec/support/ci_test_groups.sh libraries       # CI's complete uncovered library group
-bash spec/support/ci_test_groups.sh macos-canary SEED # replay the sampled macOS test gate locally
 make clean                                           # remove generated artifacts; `make distclean` also removes downloaded Lua/LuaRocks/libbacktrace/libuv trees
 
 busted                                              # full test suite — MUST run from repo root (all driver paths are relative); busted recurses into spec/ subdirs

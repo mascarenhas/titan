@@ -3,7 +3,7 @@
 # Exercise the installed system libuv and the pinned bundled archive through
 # the production standard-library images. Only titan/uv.so consumes libuv's headers
 # and linker inputs; the higher-level modules import its stable Titan ABI. Keep
-# those modules in place while swapping titan/uv.so so this canary does not rebuild
+# those modules in place while swapping titan/uv.so so this smoke does not rebuild
 # four identical DSOs in each mode. The caller builds the owned process fixture
 # once and passes it through TITAN_PROCESS_SMOKE_CHILD.
 

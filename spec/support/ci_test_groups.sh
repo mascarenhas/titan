@@ -15,28 +15,15 @@ if [[ -z ${BUSTED:-} ]]; then
         BUSTED=./lua_modules/bin/busted
     fi
 fi
-if [[ -n ${PREFIX:-} && -x $PREFIX/bin/lua ]]; then
-    LUA=$PREFIX/bin/lua
-elif [[ -x .lua/bin/lua ]]; then
-    LUA=.lua/bin/lua
-else
-    LUA=./lua
-fi
 group=${1:-}
 compiler_tests=()
 compiler_unit_tests=()
-tooling_tests=()
 library_serial_tests=()
 library_uv_fs_tests=()
 library_net_os_tests=()
 
 while IFS= read -r test_file; do
     case "$test_file" in
-        spec/canary_spec.lua)
-            # CI-selection tooling is neither compiler/language behavior nor a
-            # library API. Run it in the uncovered serial group.
-            tooling_tests+=("$test_file")
-            ;;
         spec/driver_spec.lua | \
         spec/foreigntypes_spec.lua | \
         spec/types_spec.lua)
@@ -68,11 +55,6 @@ while IFS= read -r test_file; do
     esac
 done < <(find spec -type f -name '*_spec.lua' -print | LC_ALL=C sort)
 
-uncovered_serial_tests=(
-    "${tooling_tests[@]}"
-    "${library_serial_tests[@]}"
-)
-
 case "$group" in
     compiler)
         compiler_count=$((${#compiler_tests[@]} +
@@ -99,9 +81,9 @@ case "$group" in
             "${compiler_tests[@]}" "${compiler_unit_tests[@]}"
         ;;
     library-serial)
-        echo "Running ${#uncovered_serial_tests[@]} serial tooling/library" \
+        echo "Running ${#library_serial_tests[@]} serial library" \
             "spec files without LuaCov"
-        "$BUSTED" -o gtest -v "${uncovered_serial_tests[@]}"
+        "$BUSTED" -o gtest -v "${library_serial_tests[@]}"
         ;;
     library-uv-fs)
         echo "Running ${#library_uv_fs_tests[@]} uv/timer/fs spec files" \
@@ -113,54 +95,13 @@ case "$group" in
             "without LuaCov"
         "$BUSTED" -o gtest -v "${library_net_os_tests[@]}"
         ;;
-    macos-canary)
-        seed=${2:-}
-        if [[ -z $seed ]]; then
-            echo "macos-canary requires a reproducible seed" >&2
-            exit 2
-        fi
-        (
-            set -e
-            temp_dir=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
-            catalog="$temp_dir/titan-canary.$$.list"
-            manifest="$temp_dir/titan-canary.$$.manifest"
-            trap 'rm -f "$catalog" "$manifest"' EXIT
-
-            echo "Running fixed macOS native/tooling canaries without LuaCov"
-            "$BUSTED" -o gtest -v \
-                spec/canary_spec.lua \
-                spec/minicoro_spec.lua
-
-            # This focused installed-prefix test is the Darwin proof for the
-            # complete force-loaded uv.so provider, Lua-shim globalization,
-            # unresolved extension symbols, and provider-first
-            # native constructors. Keep it fixed rather than leaving those
-            # boundaries to the random compiler sample.
-            "$BUSTED" -o gtest -v \
-                --filter='uses canonical uv as the dynamic provider' \
-                spec/rockspec_spec.lua
-
-            "$BUSTED" --list -o plainTerminal \
-                "${compiler_tests[@]}" "${compiler_unit_tests[@]}" \
-                >"$catalog"
-            "$LUA" spec/support/select_canary_tests.lua \
-                --percent 5 --seed "$seed" \
-                "${compiler_tests[@]}" "${compiler_unit_tests[@]}" \
-                <"$catalog" >"$manifest"
-            cat "$manifest"
-            "$BUSTED" -o gtest -v \
-                --helper=spec/support/canary_filter.lua \
-                -Xhelper="$manifest" \
-                "${compiler_tests[@]}" "${compiler_unit_tests[@]}"
-        )
-        ;;
     libraries)
-        library_count=$((${#uncovered_serial_tests[@]} +
+        library_count=$((${#library_serial_tests[@]} +
             ${#library_uv_fs_tests[@]} + ${#library_net_os_tests[@]}))
-        echo "Running $library_count tooling/library spec files without LuaCov"
+        echo "Running $library_count library spec files without LuaCov"
 
         serial_status=0
-        "$BUSTED" -o gtest -v "${uncovered_serial_tests[@]}" ||
+        "$BUSTED" -o gtest -v "${library_serial_tests[@]}" ||
             serial_status=$?
 
         log_dir=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
@@ -203,8 +144,7 @@ case "$group" in
         ;;
     *)
         echo "usage: $0 {compiler|compiler-uncovered|libraries|" \
-            "library-serial|library-uv-fs|library-net-os|" \
-            "macos-canary [seed]}" >&2
+            "library-serial|library-uv-fs|library-net-os}" >&2
         exit 2
         ;;
 esac

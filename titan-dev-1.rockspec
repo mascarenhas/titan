@@ -24,9 +24,7 @@ dependencies = {
    "luafilesystem >= 1.7.0"
 }
 test_dependencies = {
-   -- The deterministic CI canary mirrors Busted 2.3's list and registration
-   -- identities; review spec/support/canary.lua before widening this range.
-   "busted >= 2.3, < 2.4",
+   "busted >= 2.0",
    "cluacov >= 0.1"
 }
 test = {
