@@ -99,14 +99,13 @@ local function default_compiler_include_dirs()
     return compiler_include_dirs
 end
 
-local function find_system_header(filename, incdirs)
-    for _, incdir in ipairs(incdirs.system or {}) do
+local function find_header(filename, incdirs)
+    for _, incdir in ipairs(incdirs or {}) do
         local candidate = join_path(incdir, filename)
         if file_exists(candidate) then
             return candidate
         end
     end
-    return filename
 end
 
 local function normalize_options(options)
@@ -143,9 +142,19 @@ local function resolve_include(filename, options, incdirs)
         end
     end
 
+    local quote_header = find_header(filename, incdirs.quote)
+    if quote_header then
+        return {
+            original = filename,
+            resolved = quote_header,
+            include_kind = "quote",
+            include_name = filename,
+        }
+    end
+
     return {
         original = filename,
-        resolved = find_system_header(filename, incdirs),
+        resolved = find_header(filename, incdirs.system) or filename,
         include_kind = "angle",
         include_name = filename,
     }

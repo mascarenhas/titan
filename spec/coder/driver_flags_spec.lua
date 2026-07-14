@@ -115,7 +115,7 @@ describe("Titan driver generic build flags", function()
             -- Make's dependency configuration stamps; the real compile and
             -- foreign-import probe below still use that CC.
             MAKE = "true",
-            TITAN_EXTRA_CPPFLAGS = "-I '" .. INCLUDE .. "' " ..
+            TITAN_EXTRA_CPPFLAGS = "-iquote '" .. INCLUDE .. "' " ..
                 "-DTITAN_DRIVER_CPP_BRANCH=37",
             TITAN_EXTRA_CFLAGS =
                 "-DTITAN_DRIVER_COMPILE_ONLY_MARKER=1",
@@ -145,7 +145,7 @@ describe("Titan driver generic build flags", function()
             "'-DTITAN_DRIVER_CC_HONORED=1'"
         assert.truthy(verbose_output:find(cc_prefix, 1, true), verbose_output)
 
-        local cpp_sequence = "'-I' '" .. INCLUDE .. "' " ..
+        local cpp_sequence = "'-iquote' '" .. INCLUDE .. "' " ..
             "'-DTITAN_DRIVER_CPP_BRANCH=37'"
         assert.truthy(verbose_output:find(cpp_sequence, 1, true),
             verbose_output)
@@ -155,8 +155,8 @@ describe("Titan driver generic build flags", function()
         local csource = generated:read("*a")
         generated:close()
         assert.truthy(csource:find(
-            "#include <driver_flags_config.h>", 1, true), csource)
-        assert.truthy(csource:find("#include <titan/ffi.h>", 1, true),
+            '#include "driver_flags_config.h"', 1, true), csource)
+        assert.truthy(csource:find('#include "titan/ffi.h"', 1, true),
             csource)
     end)
 
@@ -196,7 +196,7 @@ describe("Titan driver generic build flags", function()
     it("prints the complete effective argv with shell-safe quoting", function()
         assert.truthy(verbose_output:find("'--std=c99'", 1, true),
             verbose_output)
-        assert.truthy(verbose_output:find("'-I' '" .. INCLUDE .. "'", 1,
+        assert.truthy(verbose_output:find("'-iquote' '" .. INCLUDE .. "'", 1,
             true), verbose_output)
         assert.truthy(verbose_output:find(
             "'-DTITAN_DRIVER_COMPILE_ONLY_MARKER=1'", 1, true),

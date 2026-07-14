@@ -141,6 +141,25 @@ typedef double selected_by_flag;
             remove_tree({ outer, inner }, { incdir, root })
         end)
 
+        it("resolves -iquote headers as quoted includes", function()
+            local root = tmp_dir()
+            local incdir = mkdir(root, "quote includes")
+            local header = incdir .. "/quote_only.h"
+            write_file(header, "typedef int titan_quote_only;\n")
+
+            local types, include = assert_process_file("quote_only.h", {
+                compiler = { "cc" },
+                language_mode = "c99",
+                cppflags = { "-iquote", incdir },
+            })
+            assert.same({ "int" }, types.titan_quote_only.def)
+            assert.equal(header, include.resolved)
+            assert.equal("quote", include.include_kind)
+            assert.equal("quote_only.h", include.include_name)
+
+            remove_tree({ header }, { incdir, root })
+        end)
+
         it("searches user -I directories before Titan's fixed include dirs",
            function()
             local root = tmp_dir()
