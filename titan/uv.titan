@@ -698,7 +698,7 @@ local function pop_trace_for_append(): string?
   lua.lua_pushnil(L)
   lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_APPEND_KEY)
   lua.lua_settop(L, top)
-  return trace as string?
+  return trace
 end
 
 local function raise_joined(err: value, target_trace: string)
@@ -804,8 +804,7 @@ end
 local function bytes_string(bytes: Bytes, length: integer): string
   local top = lua.lua_gettop(L)
   lua.lua_pushlstring(L, bytes.data, length as libuv.size_t)
-  local raw: value = ffi.lua_totvalue(L, -1)
-  local result = raw as string
+  local result: value = ffi.lua_totvalue(L, -1)
   lua.lua_settop(L, top)
   return result
 end
@@ -814,8 +813,7 @@ local function bytes_to_string(bytes: *ffi.titan_ffi_char,
                                length: libuv.size_t): string
   local top = lua.lua_gettop(L)
   lua.lua_pushlstring(L, bytes, length)
-  local raw: value = ffi.lua_totvalue(L, -1)
-  local result = raw as string
+  local result: value = ffi.lua_totvalue(L, -1)
   lua.lua_settop(L, top)
   return result
 end
@@ -4961,7 +4959,7 @@ function _fs_read(file: uv_file, max_bytes: integer): string?
   end
   validate_file(file, "read from", false)
   local request = new_file_request(FS.read, file, "", max_bytes, false)
-  return coroutine.yield(request, UV_TAG) as string?
+  return coroutine.yield(request, UV_TAG)
 end
 
 function _fs_write(file: uv_file, data: string): integer
@@ -5071,7 +5069,7 @@ function _net_read(tcp: uv_tcp_t, max_bytes: integer): string?
   end
   local request = new_net_request(NET_READ, nil, 0, 0,
                                   tcp, "", max_bytes, false)
-  return coroutine.yield(request, UV_TAG) as string?
+  return coroutine.yield(request, UV_TAG)
 end
 
 function _net_write(tcp: uv_tcp_t, data: string)
@@ -5438,7 +5436,7 @@ local function process_read(process: uv_process_t, kind: integer,
   end
   local request = new_process_request(kind, process, pipe,
                                       maximum, false)
-  return coroutine.yield(request, UV_TAG) as string?
+  return coroutine.yield(request, UV_TAG)
 end
 
 function _os_process_read_stdout(process: uv_process_t,
@@ -5816,14 +5814,14 @@ end
 local function retire_fs_owners(runtime: Runtime)
   local owner? = runtime.fs_pending_head
   while owner do
-    local next? = owner.metadata.next_owner
-    if owner.metadata.lifecycle == FS_OWNER_CLEANED then
-      repair_aborted_fs_callback(owner)
-      if (owner.metadata.acquired_file as integer) < 0 then
-        retire_fs_owner_now(owner)
+    local to_retire = owner
+    owner = to_retire.metadata.next_owner
+    if to_retire.metadata.lifecycle == FS_OWNER_CLEANED then
+      repair_aborted_fs_callback(to_retire)
+      if (to_retire.metadata.acquired_file as integer) < 0 then
+        retire_fs_owner_now(to_retire)
       end
     end
-    owner = next
   end
 end
 
@@ -5857,65 +5855,65 @@ end
 local function advance_file_shutdown(runtime: Runtime)
   local file? = runtime.file_head
   while file do
-    local next? = file.next_file
-    if file.state == FS.file_closed then
-      wake_close_waiters(file, nil)
-      if not file.close_waiter_head then unlink_file(file) end
-    elseif not file.current and not file.close_enqueued and
-        not file.queue_head then
-      queue_internal_close(file)
-    elseif not file.current then
-      advance_file(file)
+    local to_advance = file
+    file = to_advance.next_file
+    if to_advance.state == FS.file_closed then
+      wake_close_waiters(to_advance, nil)
+      if not to_advance.close_waiter_head then unlink_file(to_advance) end
+    elseif not to_advance.current and not to_advance.close_enqueued and
+        not to_advance.queue_head then
+      queue_internal_close(to_advance)
+    elseif not to_advance.current then
+      advance_file(to_advance)
     end
-    file = next
   end
 end
 
 local function retire_aborted_net_requests(runtime: Runtime)
   local control? = runtime.net_pending_head
   while control do
-    local next? = control.next_control
-    if control.lifecycle == NET_OWNER_CALLBACK or
-        control.lifecycle == NET_OWNER_ALLOCATED then
-      local operation = control.operation
-      if control.kind == NET_OWNER_CONNECT and operation.tcp then
+    local to_retire = control
+    control = to_retire.next_control
+    if to_retire.lifecycle == NET_OWNER_CALLBACK or
+        to_retire.lifecycle == NET_OWNER_ALLOCATED then
+      local operation = to_retire.operation
+      if to_retire.kind == NET_OWNER_CONNECT and operation.tcp then
         local tcp = operation.tcp
         tcp.metadata.connect_pending = false
         start_tcp_close(tcp)
-      elseif (control.kind == NET_OWNER_WRITE or
-              control.kind == NET_OWNER_SHUTDOWN) and
+      elseif (to_retire.kind == NET_OWNER_WRITE or
+              to_retire.kind == NET_OWNER_SHUTDOWN) and
              operation.tcp then
         if operation.linked then remove_output(operation.tcp, operation) end
       end
-      retire_net_control(control)
+      retire_net_control(to_retire)
     end
-    control = next
   end
 end
 
 local function begin_tcp_shutdown(runtime: Runtime)
   local control? = runtime.tcp_head
   while control do
-    local next? = control.next_control
-    local owner? = control.owner
+    local to_shutdown = control
+    control = to_shutdown.next_control
+    local owner? = to_shutdown.owner
     if owner then
       local tcp = owner
-      control.close_requested = true
-      if control.server then
-        control.accept_waiter = nil
-        control.accept_epoch = 0
+      to_shutdown.close_requested = true
+      if to_shutdown.server then
+        to_shutdown.accept_waiter = nil
+        to_shutdown.accept_epoch = 0
         close_accepted_queue(tcp)
       else
         stop_tcp_read(tcp, false)
       end
       start_tcp_close(tcp)
-      if not control.output_current then
-        while control.output_head do
-          remove_output(tcp, control.output_head)
+      if not to_shutdown.output_current then
+        while to_shutdown.output_head do
+          remove_output(tcp, to_shutdown.output_head)
         end
       end
     end
-    control = next
   end
 end
 
@@ -5923,32 +5921,32 @@ local function advance_tcp_shutdown(runtime: Runtime)
   retire_aborted_net_requests(runtime)
   local control? = runtime.tcp_head
   while control do
-    local next? = control.next_control
-    if control.owner then
-      local tcp = control.owner
-      if control.lifecycle == TCP_CLOSED then
+    local to_advance = control
+    control = to_advance.next_control
+    if to_advance.owner then
+      local tcp = to_advance.owner
+      if to_advance.lifecycle == TCP_CLOSED then
         finish_closed_tcp(tcp)
-      elseif control.lifecycle ~= TCP_CLOSING then
+      elseif to_advance.lifecycle ~= TCP_CLOSING then
         start_tcp_close(tcp)
       end
     end
-    control = next
   end
 end
 
 local function retire_aborted_process_requests(runtime: Runtime)
   local control? = runtime.process_request_head
   while control do
-    local next? = control.next_control
-    if control.lifecycle == PROCESS_OWNER_CALLBACK or
-        control.lifecycle == PROCESS_OWNER_ALLOCATED then
-      local operation = control.operation
+    local to_retire = control
+    control = to_retire.next_control
+    if to_retire.lifecycle == PROCESS_OWNER_CALLBACK or
+        to_retire.lifecycle == PROCESS_OWNER_ALLOCATED then
+      local operation = to_retire.operation
       local pipe = operation.pipe
       if operation.linked then remove_pipe_output(pipe, operation) end
       advance_pipe_output(pipe, nil)
-      retire_process_request(control)
+      retire_process_request(to_retire)
     end
-    control = next
   end
 end
 
@@ -6040,24 +6038,24 @@ local function advance_process_shutdown(runtime: Runtime)
   begin_process_shutdown(runtime)
   local control? = runtime.process_head
   while control do
-    local next? = control.next_control
-    repair_aborted_process(control)
-    if control.linked and process_all_native_closed(control) then
-      finish_process_control(control)
+    local to_advance = control
+    control = to_advance.next_control
+    repair_aborted_process(to_advance)
+    if to_advance.linked and process_all_native_closed(to_advance) then
+      finish_process_control(to_advance)
     end
-    control = next
   end
 end
 
 local function drive_cancel_fallbacks(runtime: Runtime)
   local task? = runtime.task_head
   while task do
-    local next? = task.next_task
-    if task.cancel_fallback and not terminal(task.state) then
-      task.cancel_fallback = false
-      drive_task(task, DRIVE_ERROR, task.cancel_value, "")
+    local to_drive = task
+    task = to_drive.next_task
+    if to_drive.cancel_fallback and not terminal(to_drive.state) then
+      to_drive.cancel_fallback = false
+      drive_task(to_drive, DRIVE_ERROR, to_drive.cancel_value, "")
     end
-    task = next
   end
 end
 
@@ -6083,26 +6081,26 @@ end
 local function retire_closed_owners(runtime: Runtime)
   local owner? = runtime.timer_owner_head
   while owner do
-    local next? = owner.metadata.next_owner
-    if owner.metadata.lifecycle == OWNER_CLOSED then
-      owner.handle = nil
-      owner.storage = nil
-      unlink_owner(owner)
+    local to_retire = owner
+    owner = to_retire.metadata.next_owner
+    if to_retire.metadata.lifecycle == OWNER_CLOSED then
+      to_retire.handle = nil
+      to_retire.storage = nil
+      unlink_owner(to_retire)
     end
-    owner = next
   end
 end
 
 local function retire_closed_signal_owners(runtime: Runtime)
   local owner? = runtime.signal_owner_head
   while owner do
-    local next? = owner.metadata.next_owner
-    if owner.metadata.lifecycle == OWNER_CLOSED then
-      owner.handle = nil
-      owner.storage = nil
-      unlink_signal_owner(owner)
+    local to_retire = owner
+    owner = to_retire.metadata.next_owner
+    if to_retire.metadata.lifecycle == OWNER_CLOSED then
+      to_retire.handle = nil
+      to_retire.storage = nil
+      unlink_signal_owner(to_retire)
     end
-    owner = next
   end
 end
 
@@ -6256,9 +6254,9 @@ function loop()
           local invariant_error = internal_error("shutdown.deadlock")
           local stranded? = runtime.task_head
           while stranded do
-            local next? = stranded.next_task
-            finish_task(stranded, TASK_FAILED, nil, invariant_error, "")
-            stranded = next
+            local to_finish = stranded
+            stranded = to_finish.next_task
+            finish_task(to_finish, TASK_FAILED, nil, invariant_error, "")
           end
         end
       else

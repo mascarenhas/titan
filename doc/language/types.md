@@ -253,7 +253,7 @@ the value does not conform.
 | `float` | `integer` | yes — error if the float has no exact integer representation (`2.0` is fine, `2.5` raises) |
 | any type except `boolean` | `boolean` | no — `nil` and `false` become `false`, everything else `true` |
 | any type except `value` | `value` | no |
-| `value` | any type except `value` | yes — checked against the target type |
+| `value` | any type except `value` | yes — checked against the target type; for `t?`, nil is accepted and preserved while a present value must successfully convert to `t` |
 | `t` | `t?` | no |
 | `t?` | `t` | yes — error `expected t but found nil` if the value is absent |
 | `nil` | `t?` | no |

@@ -141,10 +141,7 @@ One big disjunction. True iff any of:
     `boolean? → integer` is rejected, since `coerceable(boolean, integer)` is
     false (truthiness only goes *to* Boolean), so `local i: integer = b` with
     `b: boolean?` is a clean type error rather than a coercion the coder
-    cannot honor. A cross-base option conversion such as `integer? → float?`
-    likewise does not slip through this clause; it is a compile-time type
-    error (unwrap and rebuild explicitly), while same-base option types still
-    interconvert freely.
+    cannot honor.
 
 Note that `coerceable` is **irreflexive**: no clause matches two equal
 non-Value types. That matters for `as` casts and `checkmatch`, both below.
@@ -218,9 +215,12 @@ emits code for the wrong type.
 `ast.ExpCast(loc, exp, target)` with `_type = target`; otherwise it returns
 the node unchanged. Option types make the synthesis recursive:
 
-* If the source is an Option and the target is neither Boolean nor Value, it
-  first synthesizes an inner cast from `t?` to `t` (the runtime nil-check, or
-  "force"), then recursively coerces that to the target. With `of: float?`:
+* An Option-to-Option conversion is one cast that propagates nil and converts
+  a present value between the base types.
+* If the source is an Option and the non-option target is neither Boolean nor
+  Value, it first synthesizes an inner cast from `t?` to `t` (the runtime
+  nil-check, or "force"), then recursively coerces that to the target. With
+  `of: float?`:
 
   ```lua
   local i: integer = of
@@ -229,9 +229,13 @@ the node unchanged. Option types make the synthesis recursive:
 
   Boolean and Value targets skip the force on purpose — an option's nil-ness
   *is* its falsiness, and boxing to `value` needs no unwrapping.
-* If the target is an Option, it coerces to the base first and then wraps:
-  `ExpCast(loc, trycoerce(source, target.base), target)`. So
-  `local x: float? = 1` becomes `Cast(Cast(1, float), float?)`.
+* If the target is an Option, a Nil or Value source becomes one direct cast to
+  that option. This preserves nil and, for Value, checks a present value
+  against the option's base. Other sources coerce to the base first and then
+  wrap: `ExpCast(loc, trycoerce(source, target.base), target)`. So
+  `local x: float? = 1` becomes `Cast(Cast(1, float), float?)`, while returning
+  a `value` from a `string?` function becomes `Cast(value, string?)` rather
+  than `Cast(Cast(value, string), string?)`.
 
 `tryforce(node)` wraps any Option-typed node in a cast to its base — the
 implicit "must not be nil here" check. It is applied at: `for` bounds;

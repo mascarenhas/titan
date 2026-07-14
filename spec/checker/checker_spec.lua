@@ -606,6 +606,21 @@ describe("Titan type checker", function()
         assert.same("Type.Nil", init.exp._type._tag)
     end)
 
+    it("coerces value to an option return with one nil-preserving cast", function ()
+        local ok, err, ast = run_checker([[
+            function f(v: value): string?
+                return v
+            end
+        ]])
+        assert.truthy(ok, err)
+        local returned = ast[1].block.stats[1].exps[1]
+        assert.same("Ast.ExpCast", returned._tag)
+        assert.same("Type.Option", returned.target._tag)
+        assert.same("Type.String", returned.target.base._tag)
+        assert.same("Ast.ExpVar", returned.exp._tag)
+        assert.same("Type.Value", returned.exp._type._tag)
+    end)
+
     it("rejects coercing an option to a non-coercible base", function ()
         local ok, err = run_checker([[
             function f(b: boolean?): integer return b end

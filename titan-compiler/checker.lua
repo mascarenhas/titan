@@ -528,11 +528,13 @@ local function trycoerce(source, target, errors)
             inner._type = source._type.base
             n = trycoerce(inner, target, errors)
         elseif target._tag == "Type.Option" then
-            if source._type._tag == "Type.Nil" then
-                -- nil -> T?: emit the cast directly so the coder's Nil->Option
-                -- path runs (setnilvalue). Recursing through target.base would
-                -- coerce nil to the base first (e.g. nil -> boolean = false),
-                -- destroying the nil/false distinction that is the point of T?.
+            if source._type._tag == "Type.Nil"
+               or source._type._tag == "Type.Value" then
+                -- nil/value -> T?: emit the cast directly so nil remains nil.
+                -- Recursing through target.base would first coerce nil (or a
+                -- value holding nil) to the non-option base, either changing
+                -- its meaning (nil -> boolean = false) or raising before the
+                -- option has a chance to preserve it.
                 n = ast.ExpCast(source.loc, source, target)
             else
                 n = ast.ExpCast(source.loc, trycoerce(source, target.base, errors), target)

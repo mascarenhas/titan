@@ -572,6 +572,21 @@ describe("Titan code generator", function()
         ]])
     end)
 
+    it("preserves nil when contextually coercing value to an option", function()
+        run_coder([[
+            local function accept(x: string?): string? return x end
+
+            function option_argument(v: value): string?
+                return accept(v)
+            end
+        ]], [[
+            assert(test.option_argument(nil) == nil)
+            assert(test.option_argument("ok") == "ok")
+            local ok, err = pcall(test.option_argument, 42)
+            assert(not ok and err:match("expected string but found number"), err)
+        ]])
+    end)
+
     it("keeps nil distinct from false when coercing nil to boolean?", function()
         -- regression: coercing nil to an option whose base nil is itself
         -- coerceable to (boolean) must yield nil, not the base's coercion of
