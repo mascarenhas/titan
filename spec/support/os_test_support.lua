@@ -5,12 +5,6 @@ local async_stdlib = require "spec.support.async_stdlib"
 
 local M = {}
 
-local function write(path, contents)
-    local file = assert(io.open(path, "wb"))
-    file:write(contents)
-    file:close()
-end
-
 local function append(destination, source)
     for _, value in ipairs(source) do
         destination[#destination + 1] = value
@@ -45,7 +39,7 @@ local function build_process_child(workspace)
     end
     append(argv, shell_words(cppflags, "libuv CPPFLAGS"))
     append(argv, {
-        M.repo .. "/spec/fixtures/stdlib/os/process/child.c",
+        M.repo .. "/spec/fixtures/stdlib/native/os_process_child.c",
         archive,
     })
     append(argv, shell_words(ldflags, "libuv LDFLAGS"))
@@ -72,12 +66,6 @@ function M.process_child(workspace)
     return path
 end
 
-function M.copy_fixture(workspace, fixture, modname)
-    write(workspace .. "/src/" .. modname .. ".titan",
-        async_stdlib.read(M.repo ..
-            "/spec/fixtures/stdlib/os/" .. fixture))
-end
-
 function M.compile(workspace, modname, options)
     local standard = async_stdlib.standard_dir()
     assert.truthy(lfs.attributes(standard .. "/os.so"),
@@ -91,7 +79,8 @@ function M.libuv_cppflags()
 end
 
 M.cleanup = async_stdlib.cleanup
-M.run = async_stdlib.run
-M.lua_command = async_stdlib.lua_command
+M.run_lua_source = async_stdlib.run_lua_source
+M.run_app = async_stdlib.run_app
+M.write_source = async_stdlib.write_source
 M.repo = async_stdlib.repo
 return M

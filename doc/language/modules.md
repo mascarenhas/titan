@@ -397,9 +397,10 @@ import. Generated
 consumers use `loadlibwithuv`, which establishes that provider before mapping
 the extension; unmarked ordinary binary dependencies remain eager and local. A
 Lua caller loading the extension directly must first run
-`require "titan.uv"`. Titan's patched Lua recognizes the exact
-`luaopen_titan_uv` entry and makes only that C module global; every other Lua C
-module remains local. The provider does not reopen itself. System-mode
+`require "titan.uv"`. The installed `titan/uv.lua` loader finds the canonical
+DSO through `package.cpath`, maps it with `package.loadlib(path, "*")`, and
+then invokes the exact `luaopen_titan_uv` entry. Every other Lua C module keeps
+stock Lua's local-loading behavior. The provider does not reopen itself. System-mode
 extensions may instead link the same shared libuv selected by pkg-config.
 Because both Titan and Lua establish the provider before the extension is
 mapped, the bundled path also supports eager data and function-address
@@ -469,8 +470,8 @@ with `<module>: multiple main functions found (already declared in
 
 ## Running with a stock Lua
 
-Compiled Titan modules and executables run against an unmodified Lua —
-no patched interpreter, no custom build flags beyond compiling the Lua
+Compiled Titan modules and executables run against an unmodified Lua loader —
+no `loadlib.c` patch and no custom build flags beyond compiling the Lua
 sources with `-fPIC`. Each compiled module statically embeds the parts
 of the Lua core it uses (the build links `liblua.a` into every `.so`
 and executable), which is why the compiler needs a built Lua source
@@ -486,8 +487,19 @@ compiler release does target one specific Lua version (currently
 Lua 5.5), because the generated code works against that version's
 internals.
 
-The bundled direct-libuv extension contract above is a narrow exception to the
-unmodified-Lua statement: its Lua-first loading order needs Titan's patched
-`loadlib.c` to open exactly `luaopen_titan_uv` globally. Other Titan modules do
-not need that patch, and a stock-Lua embedding can use a system-mode extension
-linked against the same shared libuv instead.
+The bundled direct-libuv extension contract also works with stock Lua 5.5. The
+installed `$ROCKS_TREE/share/lua/5.5/titan/uv.lua` module performs the global
+provider load through Lua's public `package.loadlib` API before it invokes the
+native entry. A stock interpreter can reproduce Titan's configured search
+paths with:
+
+```sh
+export LUA_PATH_5_5="$ROCKS_TREE/share/lua/5.5/?.lua;$ROCKS_TREE/share/lua/5.5/?/init.lua;;"
+export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.11/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
+```
+
+The ordinary `/lib/lua/5.5/?.so` template is Titan's root-discovery anchor. If
+it is omitted, also set
+`TITAN_PATH_0_11="$ROCKS_TREE/lib/titan/0.11"`. Titan still targets the exact
+Lua 5.5 runtime ABI and internals; removing the loader patch does not make a
+module compatible with another Lua version or configuration.

@@ -89,6 +89,5 @@ int main(void) {
     if (first != NULL) lua_close(first);
     if (!ok) return 1;
 
-    puts("RESULT two Lua states kept independent uv Runtimes and main L values");
     return 0;
 }

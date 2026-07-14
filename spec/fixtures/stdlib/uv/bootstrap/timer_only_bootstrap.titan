@@ -1,6 +1,0 @@
--- Transitive bootstrap proof: this application never directly imports uv.
-local timer = import "timer"
-function main(args: {string}): integer
-  timer.sleep(0)
-  return 0
-end

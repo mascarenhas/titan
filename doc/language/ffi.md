@@ -487,12 +487,15 @@ local uv = require "titan.uv"
 local extension = require "my.libuv_extension"
 ```
 
-The Lua installed by Titan recognizes exactly the `luaopen_titan_uv` entry and
-loads that one C module globally on its first `require`; all other Lua C modules
-retain ordinary local loading. This special case lives in Lua's dynamic loader,
-not in a self-loading or self-promoting `titan/uv.so`, and works on both Linux and
-macOS. An unmodified Lua does not provide this bundled direct-extension
-contract; use Titan's Lua or link the extension through the system-mode path.
+The installed `titan/uv.lua` loader resolves canonical `titan/uv.so` through
+`package.cpath`, calls `package.loadlib(path, "*")` to make its symbols global,
+and then invokes `luaopen_titan_uv` from the same handle. All other Lua C
+modules retain ordinary local loading. This uses stock Lua's public package
+API, not a `loadlib.c` patch or a self-loading/self-promoting provider, and
+works on both Linux and macOS. A stock Lua 5.5 host can use the bundled
+direct-extension contract when its `LUA_PATH_5_5` finds the loader and its
+`LUA_CPATH_5_5` finds the canonical DSO (see
+[Running with a stock Lua](modules.md#running-with-a-stock-lua)).
 
 With `LIBUV_MODE=system`, an extension may instead consume the same shared
 library selected for Titan by passing the complete pkg-config output through

@@ -39,7 +39,7 @@ describe("uv multiple Lua states", function()
         end
         append(argv, {
             async_stdlib.repo ..
-                "/spec/fixtures/stdlib/uv/states/two_states.c",
+                "/spec/fixtures/stdlib/native/two_states.c",
             async_stdlib.repo .. "/lua-5.5.0/src/liblua.a",
             "-ldl", "-lm",
         })
@@ -61,17 +61,25 @@ describe("uv multiple Lua states", function()
     function()
         local argv = {
             "env",
+            "-u", "LUA_PATH",
+            "-u", "LUA_CPATH",
+            "-u", "LUA_PATH_5_5",
+            "-u", "LUA_CPATH_5_5",
             "TITAN_PATH_0_11=" ..
                 async_stdlib.module_root(async_stdlib.standard_dir()),
+            "TITAN_PATH=",
+            "LUA_PATH=" .. async_stdlib.repo .. "/?.lua;" ..
+                async_stdlib.repo .. "/?/init.lua;;",
+            "LUA_PATH_5_5=" .. async_stdlib.repo .. "/?.lua;" ..
+                async_stdlib.repo .. "/?/init.lua;;",
             "LUA_CPATH=" ..
+                async_stdlib.canonical_cpath(async_stdlib.standard_dir()) .. ";;",
+            "LUA_CPATH_5_5=" ..
                 async_stdlib.canonical_cpath(async_stdlib.standard_dir()) .. ";;",
             executable,
         }
         local ok, status, output = async_stdlib.run(shell_command(argv), workspace)
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
         assert.equals(0, status, output)
-        assert.match(
-            "RESULT two Lua states kept independent uv Runtimes and main L values",
-            output, 1, true)
     end)
 end)

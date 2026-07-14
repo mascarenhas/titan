@@ -18,11 +18,13 @@ not add epicycles around what may be a misunderstood simpler design.
 
 - **Lua 5.5.** Both the compiler's own Lua code and generated C target Lua
   5.5 (rockspec: `lua ~> 5.5`). Use an absolute project-local prefix such as
-  `PREFIX=$HOME/.local/titan/titan-dev`. `make lua` patches Lua 5.5.0's
-  `LUA_ROOT` to that prefix and patches `loadlib.c` so the exact
-  `luaopen_titan_uv` entry is globally visible while other required C modules
-  remain local. It builds and installs Lua there and copies its matching `.c`
-  and `.h` files to `$PREFIX/src/lua-5.5.0/`; `make luarocks` builds and installs
+  `PREFIX=$HOME/.local/titan/titan-dev`. `make lua` configures Lua 5.5.0's
+  `LUA_ROOT` to that prefix while leaving upstream `loadlib.c` unchanged. The
+  installed `titan/uv.lua` loader uses `package.loadlib(path, "*")` before
+  invoking `luaopen_titan_uv`, so direct Lua loading establishes the provider
+  globally through stock Lua's public API. It builds and installs Lua there
+  and copies its matching `.c` and `.h` files to `$PREFIX/src/lua-5.5.0/`;
+  `make luarocks` builds and installs
   pinned LuaRocks 3.13.0 against that Lua with `--prefix`, `--rocks-tree`, and
   `--with-lua` all set to the prefix and `--force-config`. CI uses these same
   targets. `PREFIX` owns Lua and the LuaRocks program/configuration;
@@ -75,12 +77,13 @@ not add epicycles around what may be a misunderstood simpler design.
   exception described below.
 - **A local Titan prefix prepared by `make lua`.** The checkout keeps the
   gitignored `./lua-5.5.0` build tree, while the installation contains the
-  same patched internal sources under `$PREFIX/src/lua-5.5.0/` and the
+  same internal sources, including the configured `luaconf.h`, under
+  `$PREFIX/src/lua-5.5.0/` and the
   matching `$PREFIX/lib/liblua.a`. Generated C includes Lua internal headers
   (`lobject.h`, `lgc.h`, `lvm.h`, ...) from that installed source tree and
-  links the matching archive. The patched `luaconf.h` is also the public
-  configuration used when this LuaRocks builds other Lua libraries and Titan
-  packages. `make lua` uses `MYCFLAGS=-fPIC` and selects `linux`/`macosx`
+  links the matching archive. That `luaconf.h` is also the public configuration
+  used when this LuaRocks builds other Lua libraries and Titan packages.
+  `make lua` uses `MYCFLAGS=-fPIC` and selects `linux`/`macosx`
   from `uname`; override with `make lua LUA_PLATFORM=...`, and use `LUA_CC`
   for Lua's compiler. Its configuration stamp cleans Lua objects whenever
   `PREFIX`, `LUA_PLATFORM`, `LUA_CC`, or a `LUA_MY*` input changes.
@@ -106,8 +109,9 @@ not add epicycles around what may be a misunderstood simpler design.
   which deliberately uses the just-installed `titanc`. There is no
   `pre_install` hook. Each standard DSO is installed exactly once at
   `$ROCKS_TREE/lib/titan/0.11/titan/<module>.so`; Titan imports and Lua
-  `require "titan.<module>"` load that same canonical file. The Titan-owned
-  Lua's patched default `package.cpath` places
+  `require "titan.<module>"` load that same canonical file. The stdlib also
+  installs its provider loader at `$ROCKS_TREE/share/lua/5.5/titan/uv.lua`.
+  The Titan-owned Lua's configured default `package.cpath` places
   `$PREFIX/lib/titan/0.11/?.so` before its ordinary `lib/lua` templates. No
   symbolic links, hard links, Lua-facing copies, or parent-level compatibility
   copies are used. These direct SDK/stdlib files are
@@ -141,7 +145,7 @@ keeps their installed compiler snapshots and native SDKs independent and makes
 parallel isolated builds possible.
 
 ```sh
-make lua                                            # build/install patched Lua and matching source headers
+make lua                                            # build/install prefix-configured Lua and matching source headers
 make luarocks                                       # build/install LuaRocks for that Lua
 make libuv                                          # build pinned static PIC libuv (bundled default)
 "$PREFIX/bin/luarocks" make                        # build/install Titan runtime, compiler, and stdlib
@@ -180,8 +184,8 @@ gates also live there (`libuv_build_spec`, `rockspec_spec`). Compiler and
 language specs are split by layer:
 checker-only specs (run the checker, never generate or execute code) live
 under `spec/checker/`, while compiler end-to-end specs (generate C, compile,
-run) live under `spec/coder/`. Standard-library API, runtime, and packaging
-behavior lives under `spec/stdlib/`, including `coroutine` and the
+run) live under `spec/coder/`. Standard-library API and runtime behavior live
+under `spec/stdlib/`, including `coroutine` and the
 async-I/O modules; these suites deliberately run without LuaCov. Do not put a
 library integration suite under `spec/checker/` or `spec/coder/` merely
 because it typechecks or compiles Titan source. If it reveals missing compiler
@@ -197,10 +201,11 @@ compile/run/import scaffolding (`parse`, `compile`, `call`, `run_coder`,
 `require`d as `spec.support.helpers`; async standard-library tests use
 `spec/support/async_stdlib.lua` plus the filesystem and OS/process extensions
 `spec/support/fs_test_support.lua` and `spec/support/os_test_support.lua` to
-compile behavior-oriented fixtures under `spec/fixtures/stdlib/` into unique
-`/tmp` workspaces while
-treating Makefile-owned standard DSOs and the libuv archive as read-only.
-These helpers may not clean or rebuild shared root artifacts during Busted.
+compile inline Titan sources and execute inline Lua assertions in unique
+`/tmp` workspaces. Only genuine reusable C/H host and interposer artifacts
+remain under `spec/fixtures/stdlib/native/`. These tests treat Makefile-owned
+standard DSOs and the libuv archive as read-only. These helpers may not clean
+or rebuild shared root artifacts during Busted.
 Helpers pull in luassert explicitly (`require 'luassert'`) because a
 `require`d module does not inherit busted's `assert` global. Set
 `helpers.verbose = true` (was a per-file `local verbose`) to print `cc`
@@ -350,10 +355,11 @@ does not unload the native image.
   was not built with the required explicit `titan.uv` import. Generated Titan
   consumers use `loadlibwithuv` to load canonical `titan/uv.so` globally before
   mapping that extension; unmarked ordinary DSOs remain eager/local. A Lua caller
-  must `require "titan.uv"` before requiring such an extension. The
-  Titan-owned Lua's patched `loadlib.c` opens a DSO globally only when its
-  requested entry symbol is exactly `luaopen_titan_uv`; all other Lua C modules
-  remain local, and `titan/uv.so` has no self-dlopen/promotion shim. System mode may
+  must `require "titan.uv"` before requiring such an extension. The installed
+  `titan/uv.lua` loader resolves the canonical DSO through `package.cpath`, maps
+  it with `package.loadlib(path, "*")`, and then invokes the exact
+  `luaopen_titan_uv` entry. All other Lua C modules retain stock Lua's local
+  loading, and `titan/uv.so` has no self-dlopen/promotion shim. System mode may
   instead link both against the same pkg-config-selected shared libuv; the
   private bundled `libuv.a` must never be linked into another DSO.
   Provider-first mapping also supports eager data/function-address relocations

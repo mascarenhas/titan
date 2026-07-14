@@ -1,3 +1,0 @@
-function main(args: {string}): integer
-  return 19
-end

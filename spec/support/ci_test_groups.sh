@@ -132,8 +132,8 @@ case "$group" in
                 spec/minicoro_spec.lua
 
             # This focused installed-prefix test is the Darwin proof for the
-            # complete force-loaded uv.so provider, exact Lua-entry
-            # globalization, unresolved extension symbols, and provider-first
+            # complete force-loaded uv.so provider, Lua-shim globalization,
+            # unresolved extension symbols, and provider-first
             # native constructors. Keep it fixed rather than leaving those
             # boundaries to the random compiler sample.
             "$BUSTED" -o gtest -v \

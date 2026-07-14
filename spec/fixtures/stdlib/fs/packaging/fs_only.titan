@@ -1,8 +1,0 @@
-local fs = import "fs"
-
-function main(args: {string}): integer
-  local path = args[1]
-  fs.write_file(path, "canonical-fs")
-  if fs.read_file(path) ~= "canonical-fs" then return 1 end
-  return 0
-end

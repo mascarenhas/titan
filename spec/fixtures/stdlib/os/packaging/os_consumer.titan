@@ -1,5 +1,0 @@
-local system = import "os"
-
-function pid(): integer
-  return system.pid()
-end

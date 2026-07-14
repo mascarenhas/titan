@@ -183,6 +183,20 @@ describe("libuv Makefile configuration", function()
         end
     end)
 
+    it("reextracts pristine Lua and installs the public uv loader",
+       function()
+        local makefile = read_file("Makefile")
+        for _, contract in ipairs({
+            "LUA_EXTRACTED    := $(LUA_DIR)/.titan-extracted-v2",
+            'rm -rf "$(LUA_DIR)"',
+            'install -m 0644 titan/uv.lua',
+        }) do
+            assert.truthy(makefile:find(contract, 1, true), contract)
+        end
+        assert.falsy(makefile:find(
+            'strcmp(sym, "luaopen_titan_uv")', 1, true), makefile)
+    end)
+
     it("keys every runtime object and archive member to the selected Lua SDK",
        function()
         local file = assert(io.open("Makefile", "rb"))
@@ -196,7 +210,6 @@ describe("libuv Makefile configuration", function()
                 "$(TITAN_RUNTIME_LUA_SOURCE_PATH)",
             "LUA_AR=$(LUA_AR)",
             "LUA_RANLIB=$(LUA_RANLIB)",
-            "luaopen_titan_uv%c) == 0",
             "$(UV_CONFIG_STAMP) $(RUNTIME_BUILD_CONFIG)",
             "LIBUV_PROVIDER_LDFLAGS=$(LIBUV_PROVIDER_LDFLAGS)",
             "MEMBERS=$(notdir $(TITAN_RUNTIME_OBJECTS))",

@@ -545,11 +545,12 @@ call `loadlibwithuv(L, file)`, which invokes `loadlib(L, "titan/uv.so")` before
 satisfies eager relocations and native constructors as well as ordinary
 function calls; unmarked binaries continue through plain `loadlib`. A Lua
 caller loading the extension directly must
-`require "titan.uv"` first. The Titan-owned Lua patch
-in `loadlib.c` gives global visibility on first load only to the C module whose
-requested entry is exactly `luaopen_titan_uv`; other Lua C-module entries keep
-ordinary local visibility. This is the macOS- and Linux-portable Lua path: the
-provider does not locate, reopen, or promote itself. Binary-first qualified
+`require "titan.uv"` first. The installed `titan/uv.lua` module resolves the
+canonical DSO through `package.cpath`, uses `package.loadlib(path, "*")` for
+global visibility, and then invokes its exact `luaopen_titan_uv` entry. Other
+Lua C-module entries keep ordinary local visibility. This stock-Lua path is
+portable across macOS and Linux: the provider does not locate, reopen, or
+promote itself. Binary-first qualified
 module resolution prevents a visible source file from accidentally replacing
 the installed provider.
 
@@ -650,8 +651,8 @@ bundled-mode extension DSOs leave their `uv_*` calls unresolved:
   `package.cpath` for the first `/lib/lua/5.5/?.so` entry, initializes the
   Titan module-path default from that root, and ensures
   `<root>/lib/titan/0.11/?.so` is present in `package.cpath`. The
-  patched Titan-owned Lua already places that template before its `lib/lua`
-  entries. It then
+  prefix-configured Titan-owned Lua already places that template before its
+  `lib/lua` entries. It then
   registers the module's `luaopen_` function in
   `package.preload["<modname>"]`; the module initializes only when the script
   `require`s it.

@@ -80,12 +80,16 @@ local TITANC = PREFIX .. "/bin/titanc"
 local TITAN_LIBDIR = PREFIX .. "/lib/titan/0.11"
 local STDLIB_DIR = TITAN_LIBDIR .. "/titan"
 local LUA_LIBDIR = PREFIX .. "/lib/lua/5.5"
+local LUA_SHAREDIR = PREFIX .. "/share/lua/5.5"
+local UV_LOADER = LUA_SHAREDIR .. "/titan/uv.lua"
 
 local function clean_environment(argv)
     local command = {
         "env",
         "-u", "LUA_PATH",
         "-u", "LUA_CPATH",
+        "-u", "LUA_PATH_5_5",
+        "-u", "LUA_CPATH_5_5",
         "-u", "LUAROCKS_CONFIG",
         "-u", "LUAROCKS_CONFIG_5_5",
         "-u", "LUAROCKS_SYSCONFDIR",
@@ -172,6 +176,7 @@ describe("standalone-prefix source installation", function()
         assert_file(LUAROCKS)
         assert_file(TITANC)
         assert_file(LUA_LIBDIR .. "/titan.so")
+        assert_file(UV_LOADER)
 
         local configured_tools = {}
         for _, variable in ipairs({ "CC", "LD", "AR", "RANLIB" }) do
@@ -211,8 +216,10 @@ describe("standalone-prefix source installation", function()
         local _, titan_cpath_templates = public_config:gsub(
             'LUA_TITAN_CDIR"%?%.so;"', "")
         assert.equal(1, titan_cpath_templates, public_config)
+        assert.falsy(source_loadlib:find("luaopen_titan_uv", 1, true),
+            source_loadlib)
         assert.truthy(source_loadlib:find(
-            'strcmp(sym, "luaopen_titan_uv") == 0', 1, true),
+            "reg = lsys_load(L, path, *sym == '*');", 1, true),
             source_loadlib)
 
         local ok, output, why, code = run({
@@ -255,6 +262,7 @@ describe("standalone-prefix source installation", function()
         for _, module in ipairs(STDLIB_MODULES) do
             assert.falsy(manifest:find(module .. ".so", 1, true), manifest)
         end
+        assert.falsy(manifest:find('["uv.lua"]', 1, true), manifest)
     end)
 
     it("removes obsolete standard-module layouts during migration",
@@ -357,6 +365,7 @@ describe("standalone-prefix source installation", function()
         local runtime_program = string.format([[
             local canonical_root = %q
             local titan_module_path = %q
+            local uv_loader_path = %q
             local builtin_coroutine = require "coroutine"
             local builtin_os = require "os"
             local titan = require "titan"
@@ -372,6 +381,8 @@ describe("standalone-prefix source installation", function()
             assert(type(titan.backtrace) == "function")
             assert(package.searchpath("titan", package.cpath) ==
                 titan_module_path)
+            assert(package.searchpath("titan.uv", package.path) ==
+                uv_loader_path)
             assert(type(coroutine) == "userdata")
             assert(type(uv) == "userdata")
             assert(type(timer) == "userdata")
@@ -413,7 +424,7 @@ describe("standalone-prefix source installation", function()
             end)
             uv.loop()
             assert(direct:join() == "direct")
-        ]], STDLIB_DIR, LUA_LIBDIR .. "/titan.so")
+        ]], STDLIB_DIR, LUA_LIBDIR .. "/titan.so", UV_LOADER)
         ok, output, why, code = run(clean_environment({
             LUA, "-e", runtime_program,
         }), workspace)
@@ -421,7 +432,7 @@ describe("standalone-prefix source installation", function()
             tostring(code) .. ")")
     end)
 
-    it("compiles and runs outside the checkout using only patched Lua paths",
+    it("compiles and runs outside the checkout using configured Lua paths",
     function()
         workspace = temporary_directory("installed-compiler")
         local source = assert(io.open(workspace .. "/installed.titan", "wb"))
@@ -635,14 +646,39 @@ end
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
 
-        local lua_probe = [[
-package.cpath = "./?.so;" .. package.cpath
+        local local_provider_probe = string.format([[
+local provider = assert(package.loadlib(%q, "luaopen_titan_uv"))
+local direct, load_error = package.loadlib(%q, "luaopen_direct_uv")
+assert(direct == nil, "the ordinary Lua C loader globalized titan.uv")
+assert(type(load_error) == "string" and
+    load_error:find("uv_random", 1, true), load_error)
+]], STDLIB_DIR .. "/uv.so", workspace .. "/direct_uv.so")
+        ok, output, why, code = run(clean_environment({
+            LUA, "-e", local_provider_probe,
+        }), workspace)
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+
+        local lua_probe = string.format([[
+assert(package.searchpath("titan.uv", package.path) == %q)
+assert(package.searchpath("titan.uv", package.cpath) == %q)
 local uv = require "titan.uv"
 local direct_uv = require "direct_uv"
 assert(direct_uv.check())
 assert(type(uv.version()) == "string")
-]]
+]], UV_LOADER, STDLIB_DIR .. "/uv.so")
+        local lua_path = table.concat({
+            LUA_SHAREDIR .. "/?.lua",
+            LUA_SHAREDIR .. "/?/init.lua",
+        }, ";")
+        local lua_cpath = table.concat({
+            workspace .. "/?.so",
+            TITAN_LIBDIR .. "/?.so",
+            LUA_LIBDIR .. "/?.so",
+        }, ";")
         ok, output, why, code = run(clean_environment({
+            "LUA_PATH_5_5=" .. lua_path,
+            "LUA_CPATH_5_5=" .. lua_cpath,
             LUA, "-e", lua_probe,
         }), workspace)
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..

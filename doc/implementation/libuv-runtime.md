@@ -20,7 +20,7 @@ archive. Dependency resolution is binary-first, while the explicit
 `titanc titan.uv` build root is source-first. Installation writes exactly one
 ordinary file per standard module under
 `<root>/lib/titan/0.11/titan/`.
-Titan's patched Lua C-module path and ordinary qualified Titan lookup both
+Lua's configured C-module path and ordinary qualified Titan lookup both
 resolve those files, with no copied, symbolic-link, or hard-link aliases. Thus
 every facade reaches the same `titan/uv.so` image. In the normal
 bundled build, `titan/uv.so` is the process's sole complete libuv provider; its
@@ -40,10 +40,11 @@ binary without it is rejected and must be rebuilt with an explicit `titan.uv`
 import. Generated consumers call `loadlibwithuv`, which loads
 `titan/uv.so` globally before it maps the
 extension. Unmarked ordinary DSOs retain eager/local loading. A Lua caller must
-`require "titan.uv"` before requiring that extension directly. Titan's patched
-Lua `loadlib.c` recognizes exactly the `luaopen_titan_uv` entry and gives that
-DSO global visibility on its first load; other Lua C modules remain local.
-This loader-level path works on Linux and macOS, and `titan/uv.so` has no
+`require "titan.uv"` before requiring that extension directly. The installed
+`titan/uv.lua` loader resolves the DSO with `package.searchpath`, maps it with
+`package.loadlib(path, "*")`, and invokes its `luaopen_titan_uv` entry. Other
+Lua C modules remain local. This public Lua package path works with stock Lua
+5.5 on Linux and macOS, and `titan/uv.so` has no
 self-dlopen/promotion helper. System mode may instead link the extension and
 canonical `titan/uv.so` against the same shared libuv selected by pkg-config.
 Statically embedding the bundled archive again would create a second native

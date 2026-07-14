@@ -21,7 +21,10 @@ LUA_ABI_VERSION  ?= 5.5
 LUA_DIR          := lua-$(LUA_VERSION)
 LUA_TARBALL      := $(LUA_DIR).tar.gz
 LUA_URL          := https://www.lua.org/ftp/$(LUA_TARBALL)
-LUA_EXTRACTED    := $(LUA_DIR)/.titan-extracted
+# Version the extraction stamp when Titan's policy for the downloaded source
+# tree changes.  v2 deliberately restores upstream loadlib.c: global provider
+# visibility now comes from the installed titan/uv.lua loader, not a Lua patch.
+LUA_EXTRACTED    := $(LUA_DIR)/.titan-extracted-v2
 LUA_BUILD_CONFIG := $(LUA_DIR)/src/.titan-build-config
 LUA_LIB          := $(LUA_DIR)/src/liblua.a
 # A source-checkout compiler can target another built Lua source tree through
@@ -191,7 +194,7 @@ export TITAN_ROCKS_ROOT
 TITAN_LUA ?= $(LUA_BIN)
 # Run the checkout's compiler sources with PREFIX's Lua. Prepending the checkout
 # keeps developer stdlib rebuilds on the edits that triggered them, while Lua's
-# patched default paths still find third-party dependencies under PREFIX.
+# configured default paths still find third-party dependencies under PREFIX.
 TITANC    ?= $(TITAN_LUA) -e 'package.path="./?.lua;./?/init.lua;" .. package.path' ./titanc
 TITAN_COMPILER_LUA := $(wildcard titan-compiler/*.lua c-parser/*.lua) typed.lua
 
@@ -203,6 +206,7 @@ TITAN_INSTALL_TREE         := $(if $(strip $(ROCKS_TREE)),$(ROCKS_TREE),$(PREFIX
 TITAN_ABI_VERSION          := 0.11
 TITAN_STDLIB_ABI_DIR       ?= $(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_ABI_VERSION)
 TITAN_STDLIB_DIR           ?= $(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_ABI_VERSION)/titan
+TITAN_STDLIB_LUA_DIR       ?= $(TITAN_INSTALL_TREE)/share/lua/$(LUA_ABI_VERSION)/titan
 LUA_LIBDIR                 ?= $(TITAN_INSTALL_TREE)/lib/lua/$(LUA_ABI_VERSION)
 TITAN_STDLIB_LEGACY_DIR    ?= $(LUA_LIBDIR)/titan/stdlib_$(subst .,_,$(TITAN_ABI_VERSION))
 TITAN_SHARE_DIR            ?= $(TITAN_INSTALL_TREE)/share/titan
@@ -247,7 +251,7 @@ help: ## Show this help
 
 libuv: ## Build/validate libuv (bundled by default; LIBUV_MODE=system is optional)
 
-lua: $(LUA_INSTALL_STAMP) ## Build and install Titan's patched Lua into PREFIX
+lua: $(LUA_INSTALL_STAMP) ## Build and install Titan's prefix-configured Lua
 
 $(LUA_INSTALL_STAMP): $(LUA_LIB) $(LUA_BUILD_CONFIG)
 	@echo "==> Installing Lua $(LUA_VERSION) into $(PREFIX)"
@@ -268,31 +272,21 @@ $(LUA_TARBALL):
 	  echo "ERROR: need 'curl' or 'wget' to download Lua" >&2; exit 1; \
 	fi
 
-$(LUA_EXTRACTED):
-	@if [ ! -d "$(LUA_DIR)" ]; then \
-	  mkdir -p "$(LUA_DIR)"; \
-	  touch "$(LUA_DIR)/.titan-needs-extract"; \
-	fi
-	@if test -r "$(LUA_DIR)/.titan-needs-extract"; then \
-	  $(MAKE) --no-print-directory "$(LUA_TARBALL)"; \
-	fi
-	@if test -r "$(LUA_DIR)/.titan-needs-extract"; then \
-	  echo "==> Extracting $(LUA_TARBALL)"; \
-	  tar zxf "$(LUA_TARBALL)"; \
-	  rm -f "$(LUA_DIR)/.titan-needs-extract"; \
-	fi
+$(LUA_EXTRACTED): $(LUA_TARBALL)
+	@echo "==> Replacing generated Lua source tree from $(LUA_TARBALL)"
+	rm -rf "$(LUA_DIR)"
+	tar zxf "$(LUA_TARBALL)"
 	@touch "$@"
 
 # Lua's own Makefile does not track source/header dependencies.  This content
-# stamp patches luaconf.h plus loadlib.c's narrow Titan-uv visibility rule, and
-# cleans Lua objects whenever either patch or any effective native-build input
-# changes.  An unchanged invocation preserves the stamp mtime and leaves the
-# already-built interpreter warm.
+# stamp configures luaconf.h with Titan's installation paths and cleans Lua
+# objects whenever that configuration or any effective native-build input
+# changes. An unchanged invocation preserves the stamp mtime and leaves the
+# already-built interpreter warm. loadlib.c remains the pristine upstream file.
 $(LUA_BUILD_CONFIG): $(LUA_EXTRACTED) FORCE
 	@tmp="$@.tmp"; header="$(LUA_DIR)/src/luaconf.h"; \
-	loadlib="$(LUA_DIR)/src/loadlib.c"; \
 	tmp_header="$$header.titan.tmp"; \
-	tmp_loadlib="$$loadlib.titan.tmp"; changed="$@.changed"; \
+	changed="$@.changed"; \
 	rm -f "$$changed"; \
 	{ printf '%s\n' \
 		$(call make_shell_quote,PREFIX=$(PREFIX)) \
@@ -325,26 +319,14 @@ $(LUA_BUILD_CONFIG): $(LUA_EXTRACTED) FORCE
 	           "LUA_TITAN_CDIR\"?.so;\" LUA_CDIR\"?.so;\"", line); \
 	     } \
 	     print line; }' "$$header" > "$$tmp_header"; \
-	awk '{ \
-	     if ($$0 ~ /reg = lsys_load[(]L, path, [*]sym ==/ && \
-	         $$0 !~ /luaopen_titan_uv/) { \
-	       print "    /* titan/uv.so provides libuv to later extension images. */"; \
-	       printf("    reg = lsys_load(L, path, *sym == %c*%c || strcmp(sym, %cluaopen_titan_uv%c) == 0);\n", \
-	              39, 39, 34, 34); \
-	       next; \
-	     } \
-	     print; }' "$$loadlib" > "$$tmp_loadlib"; \
 	grep -q '^#define LUA_ROOT' "$$tmp_header"; \
 	grep -q '^#define LUA_TITAN_CDIR' "$$tmp_header"; \
-	grep -q 'strcmp(sym, "luaopen_titan_uv") == 0' "$$tmp_loadlib"; \
 	if test -r "$@" && cmp -s "$$tmp" "$@" && \
-	   cmp -s "$$tmp_header" "$$header" && \
-	   cmp -s "$$tmp_loadlib" "$$loadlib"; then \
-	  rm -f "$$tmp" "$$tmp_header" "$$tmp_loadlib"; \
+	   cmp -s "$$tmp_header" "$$header"; then \
+	  rm -f "$$tmp" "$$tmp_header"; \
 	else \
-	  echo "==> Configuring Lua for Titan paths and uv visibility"; \
+	  echo "==> Configuring Lua for Titan paths"; \
 	  mv -f "$$tmp_header" "$$header"; \
-	  mv -f "$$tmp_loadlib" "$$loadlib"; \
 	  mv -f "$$tmp" "$$changed"; \
 	fi
 	@if test -r "$@.changed"; then \
@@ -969,8 +951,10 @@ titan/$(OS_SO): titan/os.titan titan/$(UV_SO) $(STDLIB_COMMON_RUNTIME_PREREQS) t
 		TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_LDFLAGS)) \
 		$(TITANC) titan.os
 
-install-stdlib: stdlib ## Install the canonical qualified standard modules
-	mkdir -p "$(TITAN_STDLIB_DIR)" "$(TITAN_SHARE_DIR)/LICENSES"
+install-stdlib: stdlib titan/uv.lua ## Install the canonical qualified standard modules
+	mkdir -p "$(TITAN_STDLIB_DIR)" "$(TITAN_STDLIB_LUA_DIR)" \
+		"$(TITAN_SHARE_DIR)/LICENSES"
+	install -m 0644 titan/uv.lua "$(TITAN_STDLIB_LUA_DIR)/uv.lua"
 	@set -e; for module in $(STDLIB_MODULES); do \
 		rm -f "$(TITAN_STDLIB_DIR)/$$module.so"; \
 		install -m 0755 "titan/$$module.so" \
@@ -1017,10 +1001,12 @@ rock-post-install:
 	rocks_tree=$$(CDPATH= cd "$(ROCKS_TREE)" && pwd -P); \
 	stdlib_abi_dir="$$rocks_tree/lib/titan/$(TITAN_ABI_VERSION)"; \
 	stdlib_dir="$$stdlib_abi_dir/titan"; \
+	stdlib_lua_dir="$$rocks_tree/share/lua/$(LUA_ABI_VERSION)/titan"; \
 	lua_cdir="$$rocks_tree/lib/lua/$(LUA_ABI_VERSION)"; \
 	lua_module_dir="$$lua_cdir/titan"; \
 	legacy_stdlib_dir="$$lua_module_dir/stdlib_$(subst .,_,$(TITAN_ABI_VERSION))"; \
-	mkdir -p "$$stdlib_dir"; \
+	mkdir -p "$$stdlib_dir" "$$stdlib_lua_dir"; \
+	install -m 0644 titan/uv.lua "$$stdlib_lua_dir/uv.lua"; \
 	for module in $(STDLIB_MODULES); do \
 	  rm -f "$$stdlib_dir/$$module.so"; \
 	  install -m 0755 "titan/$$module.so" "$$stdlib_dir/$$module.so"; \

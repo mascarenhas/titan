@@ -5,6 +5,7 @@
 
 # lua source trees (downloaded from lua.org)
 /lua-5.*/
+/lua-5.*.tar.gz
 
 # local lua install
 /.lua

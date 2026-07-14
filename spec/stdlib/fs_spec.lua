@@ -1,12 +1,343 @@
 local fs_support = require "spec.support.fs_test_support"
 
+local FS_CASES = [==[
+local fs = import "fs"
+local timer = import "timer"
+local uv = import "uv"
+
+local retained_file: fs.File? = nil
+
+local function check(condition: boolean, message: string)
+  if not condition then raise message end
+end
+
+local function expect_failure(func: () -> value, message: string)
+  local failed = false
+  do
+    func()
+  catch
+    failed = true
+  end
+  check(failed, message)
+end
+
+local function contains(entries: {string}, wanted: string): boolean
+  for i = 1, #entries do
+    local entry = entries[i] as string
+    if entry == wanted then return true end
+  end
+  return false
+end
+
+function schedule_modes(root: string): uv.Task
+  return uv.run(function (): value
+    local path = root .. "/modes.dat"
+
+    local file = fs.open(path, "w")
+    check(file:write("abcdef") == 6, "w did not report a full write")
+    file:flush()
+    file:close()
+    file:close()
+    check(file:is_closed(), "double close did not leave File closed")
+    expect_failure(function (): value
+      file:read(1)
+      return nil
+    end, "read after close succeeded")
+    expect_failure(function (): value
+      file:write("x")
+      return nil
+    end, "write after close succeeded")
+    expect_failure(function (): value
+      file:flush()
+      return nil
+    end, "flush after close succeeded")
+
+    file = fs.open(path, "r")
+    check(file:read(2) == "ab", "r returned the wrong first chunk")
+    check(file:read(100) == "cdef", "r did not preserve a short read")
+    check(not file:read(1), "read did not return nil at EOF")
+    check(not file:read(1), "EOF was not sticky")
+    expect_failure(function (): value
+      file:read(0)
+      return nil
+    end, "read(0) succeeded")
+    expect_failure(function (): value
+      file:read(-1)
+      return nil
+    end, "negative read succeeded")
+    file:close()
+
+    file = fs.open(path, "a")
+    check(file:write("GH") == 2, "a did not report a full write")
+    file:close()
+    check(fs.read_file(path) == "abcdefGH", "a did not append")
+
+    file = fs.open(path, "r+")
+    check(file:read(3) == "abc", "r+ read failed")
+    check(file:write("XYZ") == 3, "r+ write failed")
+    file:close()
+    check(fs.read_file(path) == "abcXYZGH", "r+ position was wrong")
+
+    file = fs.open(path, "w+")
+    check(file:write("new") == 3, "w+ write failed")
+    file:close()
+    check(fs.read_file(path) == "new", "w+ did not truncate")
+
+    file = fs.open(path, "a+")
+    check(file:write("tail") == 4, "a+ write failed")
+    file:close()
+    check(fs.read_file(path) == "newtail", "a+ did not append")
+
+    -- The optional b is accepted but does not change Linux/macOS behavior.
+    local binary_modes = { "rb", "wb", "ab", "r+b", "w+b", "a+b" }
+    for i = 1, #binary_modes do
+      local mode = binary_modes[i] as string
+      local binary = fs.open(path, mode)
+      binary:close()
+    end
+
+    local invalid_modes = { "", "x", "rr", "br", "rbb", "r++" }
+    for i = 1, #invalid_modes do
+      local mode = invalid_modes[i] as string
+      expect_failure(function (): value
+        local invalid = fs.open(path, mode)
+        invalid:close()
+        return nil
+      end, "invalid mode was accepted: " .. mode)
+    end
+
+    expect_failure(function (): value
+      fs.open(root .. "/bad\0suffix", "r")
+      return nil
+    end, "NUL-containing path was accepted")
+
+    return "modes-ok"
+  end)
+end
+
+function schedule_binary(root: string, payload: string): uv.Task
+  return uv.run(function (): value
+    local path = root .. "/binary.dat"
+    fs.write_file(path, payload)
+    check(fs.read_file(path) == payload,
+          "whole-file helper changed binary payload")
+
+    local file = fs.open(path, "rb")
+    local rebuilt = ""
+    while true do
+      local chunk: string? = file:read(4093)
+      if not chunk then break end
+      rebuilt = rebuilt .. (chunk as string)
+    end
+    file:close()
+    check(rebuilt == payload, "chunked read changed binary payload")
+
+    local empty_path = root .. "/empty.dat"
+    fs.write_file(empty_path, "")
+    check(fs.read_file(empty_path) == "", "empty file did not round-trip")
+    file = fs.open(empty_path, "r")
+    check(not file:read(1), "empty file did not report EOF")
+    file:close()
+    return #payload
+  end)
+end
+
+function schedule_paths(root: string): uv.Task
+  return uv.run(function (): value
+    local dir = root .. "/tree"
+    local sub = dir .. "/sub"
+    local first = dir .. "/first.bin"
+    local renamed = dir .. "/renamed.bin"
+
+    fs.mkdir(dir)
+    fs.mkdir(sub)
+    fs.write_file(first, "abc\0def")
+
+    local file_stat = fs.stat(first)
+    check(file_stat.size == 7, "stat returned the wrong file size")
+    check(file_stat.kind == "file", "stat did not classify a regular file")
+    check(file_stat.mode >= 0, "stat returned a negative mode")
+    check(file_stat.modified_nanoseconds >= 0 and
+          file_stat.modified_nanoseconds < 1000000000,
+          "stat returned invalid modification nanoseconds")
+
+    local dir_stat = fs.stat(sub)
+    check(dir_stat.kind == "directory",
+          "stat did not classify a directory")
+
+    local entries = fs.list(dir)
+    check(#entries == 2 and contains(entries, "first.bin") and
+          contains(entries, "sub"), "list returned the wrong entries")
+    for i = 1, #entries do
+      local entry = entries[i] as string
+      check(entry ~= "." and entry ~= "..", "list exposed dot entries")
+    end
+
+    fs.rename(first, renamed)
+    check(fs.read_file(renamed) == "abc\0def", "rename lost file data")
+    expect_failure(function (): value
+      fs.stat(first)
+      return nil
+    end, "renamed source still exists")
+    expect_failure(function (): value
+      fs.rmdir(dir)
+      return nil
+    end, "rmdir removed a non-empty directory")
+    expect_failure(function (): value
+      fs.unlink(sub)
+      return nil
+    end, "unlink removed a directory")
+
+    fs.unlink(renamed)
+    fs.rmdir(sub)
+    check(#fs.list(dir) == 0, "path cleanup left directory entries")
+    fs.rmdir(dir)
+
+    expect_failure(function (): value
+      fs.stat(root .. "/missing")
+      return nil
+    end, "stat accepted a missing path")
+    expect_failure(function (): value
+      fs.list(root .. "/missing")
+      return nil
+    end, "list accepted a missing path")
+    return "paths-ok"
+  end)
+end
+
+function schedule_symlink_stat(target: string, link: string): uv.Task
+  return uv.run(function (): value
+    local result = fs.stat(link)
+    check(result.kind == "file",
+          "stat did not follow a symlink to its regular-file target")
+    check(result.size == 6, "stat returned the wrong symlink-target size")
+    fs.unlink(link)
+    fs.unlink(target)
+    return "symlink-stat-ok"
+  end)
+end
+
+function schedule_permission_error(path: string): uv.Task
+  return uv.run(function (): value
+    expect_failure(function (): value
+      fs.stat(path)
+      return nil
+    end, "stat accepted a path below an inaccessible directory")
+    return "permission-error-ok"
+  end)
+end
+
+function schedule_fifo_and_close(root: string): uv.Task
+  return uv.run(function (): value
+    local path = root .. "/fifo.dat"
+    local file = fs.open(path, "w")
+    local first = uv.run(function (): value
+      return file:write("first")
+    end)
+    local second = uv.run(function (): value
+      return file:write("-second")
+    end)
+    local third = uv.run(function (): value
+      return file:write("-third")
+    end)
+
+    -- Wait until every writer has had a start turn and is either active or
+    -- queued on the File. The per-File pump must never submit two together.
+    while first:status() == "ready" or second:status() == "ready" or
+        third:status() == "ready" do
+      timer.yield()
+    end
+
+    local closer = uv.run(function (): value
+      file:close()
+      return nil
+    end)
+    while closer:status() == "ready" do timer.yield() end
+
+    local late = uv.run(function (): value
+      do
+        file:write("-late")
+      catch
+        return "rejected"
+      end
+      return "accepted"
+    end)
+
+    check((first:join() as integer) == 5, "first FIFO write failed")
+    check((second:join() as integer) == 7, "second FIFO write failed")
+    check((third:join() as integer) == 6, "third FIFO write failed")
+    closer:join()
+    check(late:join() == "rejected", "operation after close was accepted")
+    file:close()
+    check(file:is_closed(), "FIFO File did not close")
+    check(fs.read_file(path) == "first-second-third",
+          "File operations did not run in FIFO order")
+    return "fifo-close-ok"
+  end)
+end
+
+function schedule_retained_file(root: string): uv.Task
+  return uv.run(function (): value
+    retained_file = fs.open(root .. "/retained.dat", "w")
+    local file = retained_file as fs.File
+    file:write("retained")
+    timer.sleep(5)
+    file:close()
+    retained_file = nil
+    return nil
+  end)
+end
+
+function retained(): value
+  return retained_file
+end
+
+function schedule_leaked_file(root: string): uv.Task
+  return uv.run(function (): value
+    local file = fs.open(root .. "/leaked.dat", "w")
+    file:write("session-one")
+    return file
+  end)
+end
+
+function schedule_second_session(root: string): uv.Task
+  return uv.run(function (): value
+    fs.write_file(root .. "/session-two.dat", "session-two")
+    return fs.read_file(root .. "/session-two.dat")
+  end)
+end
+
+function schedule_stale_file(file: fs.File): uv.Task
+  return uv.run(function (): value
+    local failures = 0
+    do file:read(1) catch
+      check(error == "File belongs to a stale libuv Runtime",
+            "stale File read reported the wrong error")
+      failures = failures + 1
+    end
+    do file:write("stale") catch
+      check(error == "File belongs to a stale libuv Runtime",
+            "stale File write reported the wrong error")
+      failures = failures + 1
+    end
+    do file:flush() catch
+      check(error == "File belongs to a stale libuv Runtime",
+            "stale File flush reported the wrong error")
+      failures = failures + 1
+    end
+    check(failures == 3, "old-generation File accepted an operation")
+    return "stale-file-rejected"
+  end)
+end
+]==]
+
 describe("fs runtime", function()
     local workspace
     local root
 
     setup(function()
         workspace, root = fs_support.workspace("runtime")
-        fs_support.copy_fixture(workspace, "cases.titan", "fs_cases")
+        fs_support.write_source(workspace, "fs_cases", FS_CASES)
         fs_support.compile(workspace, "fs_cases")
     end)
 
@@ -14,33 +345,118 @@ describe("fs runtime", function()
         fs_support.cleanup(workspace)
     end)
 
-    local function run_scenario(name)
-        local script = fs_support.repo ..
-            "/spec/fixtures/stdlib/fs/runtime.lua"
-        return fs_support.run(fs_support.lua_command(workspace, script, name, root),
-            workspace)
+    local function run_lua(source)
+        local ok, status, output = fs_support.run_lua_source(workspace, source)
+        assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
+        assert.equals(0, status, output)
     end
 
     it("covers modes, binary/NUL data, EOF/short reads, stat symlinks, " ..
        "permission errors, and paths",
     function()
-        local ok, status, output = run_scenario("core")
-        assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
-        assert.match("RESULT fs core passed", output, 1, true)
+        run_lua("local root = " .. string.format("%q", root) .. [==[
+local uv = require "titan.uv"
+local fs = require "titan.fs"
+local cases = require "fs_cases"
+
+assert(type(fs) == "userdata")
+
+local function shell_quote(value)
+    return "'" .. value:gsub("'", "'\\''") .. "'"
+end
+
+local function shell_success(command)
+    local ok, _, status = os.execute(command)
+    return ok == true or status == 0
+end
+
+local function chmod(path, mode)
+    assert(shell_success("chmod " .. mode .. " " .. shell_quote(path)),
+        "could not chmod filesystem test directory")
+end
+
+local unit = "A\0B\255tail"
+local payload = unit:rep(32769)
+local symlink_target = root .. "/stat-target.dat"
+local symlink_path = root .. "/stat-link.dat"
+local target = assert(io.open(symlink_target, "wb"))
+assert(target:write("target"))
+assert(target:close())
+assert(shell_success("ln -s " .. shell_quote(symlink_target) .. " " ..
+    shell_quote(symlink_path)), "could not create test symlink")
+local blocked_dir = root .. "/permission-denied"
+local blocked_path = blocked_dir .. "/target.dat"
+assert(shell_success("mkdir " .. shell_quote(blocked_dir)))
+local blocked = assert(io.open(blocked_path, "wb"))
+assert(blocked:write("blocked"))
+assert(blocked:close())
+chmod(blocked_dir, "000")
+local permission_is_enforced = not shell_success(
+    "test -e " .. shell_quote(blocked_path))
+local modes = cases.schedule_modes(root)
+local binary = cases.schedule_binary(root, payload)
+local paths = cases.schedule_paths(root)
+local symlink = cases.schedule_symlink_stat(symlink_target, symlink_path)
+local permission = permission_is_enforced and
+    cases.schedule_permission_error(blocked_path) or nil
+local loop_ok, loop_error = pcall(uv.loop)
+chmod(blocked_dir, "700")
+assert(loop_ok, loop_error)
+assert(modes:join() == "modes-ok")
+assert(binary:join() == #payload)
+assert(paths:join() == "paths-ok")
+assert(symlink:join() == "symlink-stat-ok")
+if permission then assert(permission:join() == "permission-error-ok") end
+]==])
     end)
 
     it("serializes each File FIFO and makes close immediate and idempotent",
     function()
-        local ok, status, output = run_scenario("fifo")
-        assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
-        assert.match("RESULT fs FIFO passed", output, 1, true)
+        run_lua("local root = " .. string.format("%q", root) .. [==[
+local cases = require "fs_cases"
+local uv = require "titan.uv"
+local task = cases.schedule_fifo_and_close(root)
+uv.loop()
+assert(task:join() == "fifo-close-ok")
+]==])
     end)
 
     it("roots pending files, releases closed owners, and resets sessions",
     function()
-        local ok, status, output = run_scenario("gc-sequential")
-        assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
-        assert.match("RESULT fs GC and sequential sessions passed",
-            output, 1, true)
+        run_lua("local root = " .. string.format("%q", root) .. [==[
+local cases = require "fs_cases"
+local uv = require "titan.uv"
+local timer = require "titan.timer"
+
+collectgarbage("collect")
+collectgarbage("generational")
+local weak = setmetatable({}, { __mode = "v" })
+local holder = cases.schedule_retained_file(root)
+local observer = uv.run(function()
+    while cases.retained() == nil do timer.yield() end
+    weak.file = cases.retained()
+    collectgarbage("collect")
+    assert(weak.file ~= nil, "pending File was not rooted")
+    return true
+end)
+uv.loop()
+assert(holder:join() == nil)
+assert(observer:join())
+holder, observer = nil, nil
+for _ = 1, 4 do collectgarbage("collect") end
+assert(weak.file == nil, "closed File was retained after session cleanup")
+
+local leaked_task = cases.schedule_leaked_file(root)
+uv.loop()
+local old_file = leaked_task:join()
+assert(old_file:is_closed(), "final-Task cleanup did not close idle File")
+old_file:close()
+
+local stale = cases.schedule_stale_file(old_file)
+local second = cases.schedule_second_session(root)
+uv.loop()
+assert(stale:join() == "stale-file-rejected")
+assert(second:join() == "session-two")
+]==])
     end)
 end)

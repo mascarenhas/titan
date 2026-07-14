@@ -1,6 +1,0 @@
-local timer = import "timer"
-
-function main(args: {string}): integer
-  timer.yield()
-  return 0
-end

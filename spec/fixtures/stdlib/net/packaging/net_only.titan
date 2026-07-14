@@ -1,7 +1,0 @@
-local net = import "net"
-
-function main(args: {string}): integer
-  -- The executable need only prove that its dependency is the pinned net DSO;
-  -- loopback behavior belongs to net_spec's runtime fixture.
-  return 0
-end

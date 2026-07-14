@@ -2,8 +2,8 @@
 
 Status: complete. Portable OS helpers, one-shot signals, child processes,
 binary stdio pipes, retained exit status, and concurrent `communicate` are
-covered by normal behavior and packaging suites, plus deterministic delayed-FS
-callback and cross-generation GC cases. Phase 7
+covered by normal behavior suites and the build/installation gates, plus
+deterministic delayed-FS callback and cross-generation GC cases. Phase 7
 documentation and CI integration are complete; focused and integrated local
 async gates are green. Linux push CI and the manual macOS workflow remain the
 authoritative release gates for each branch head.
@@ -1645,10 +1645,11 @@ marker. A binary without it is rejected and must be rebuilt with an explicit
 Generated consumers use `loadlibwithuv` to establish the provider globally before mapping the extension;
 unmarked ordinary DSOs remain eager/local. A Lua caller must
 `require "titan.uv"` before requiring the
-extension directly. Titan-owned Lua's patched `loadlib.c` recognizes exactly
-the `luaopen_titan_uv` entry and loads that DSO globally on its first require;
-all other Lua C modules retain ordinary local loading. This is the portable
-Linux/macOS path, with no self-dlopen/promotion shim in `titan/uv.so`. System mode
+extension directly. The installed `titan/uv.lua` loader resolves the canonical
+DSO through `package.cpath`, maps it with `package.loadlib(path, "*")`, and
+then invokes the exact `luaopen_titan_uv` entry. All other Lua C modules retain
+ordinary local loading. This stock-Lua path is portable across Linux/macOS,
+with no self-dlopen/promotion shim in `titan/uv.so`. System mode
 remains an alternative sharing boundary: both DSOs may link the same
 pkg-config-selected shared libuv. Provider-first loading supports eager data
 and function-address relocations and native constructors as well as calls.
@@ -1688,10 +1689,11 @@ plumbing before the standard module:
   linked source dependency also emits the marker;
   remember the canonical provider pathname in compiler process state and
   reject a later request that resolves to a different provider file;
-  patch Lua's C loader so
-  the exact `luaopen_titan_uv` entry receives global visibility on first load,
-  while every other C module preserves ordinary local visibility; do not add a
-  provider self-dlopen/promotion shim;
+  install `titan/uv.lua` so direct Lua loading resolves canonical `titan/uv.so`
+  with `package.searchpath`, maps it through `package.loadlib(path, "*")`, and
+  invokes the exact `luaopen_titan_uv` entry while every other C module
+  preserves ordinary local visibility; do not add a provider
+  self-dlopen/promotion shim or patch Lua's C loader;
 - add the generic registry-based standalone main-bootstrap hook described
   above, preserving the current direct path when no hook is installed.
 
@@ -1796,7 +1798,8 @@ Files:
 - `doc/implementation/coroutines.md`
 - `doc/implementation/driver.md`
 - `doc/implementation/index.md`
-- optional `spec/fixtures/stdlib/`
+- `spec/fixtures/stdlib/native/` for C-only native probes; behavioral Titan
+  sources and Lua assertions live inline in their owning `spec/stdlib/` specs
 
 Work:
 
@@ -2086,7 +2089,6 @@ Files:
 - `spec/stdlib/os_signal_spec.lua`
 - `spec/stdlib/os_helpers_spec.lua`
 - `spec/stdlib/os_process_spec.lua`
-- `spec/stdlib/os_packaging_spec.lua`
 
 Work:
 
@@ -2167,15 +2169,11 @@ Add topical suites instead of growing catch-all files:
 - `spec/stdlib/uv_bootstrap_spec.lua`
 - `spec/stdlib/uv_late_fs_callbacks_spec.lua`
 - `spec/stdlib/timer_spec.lua`
-- `spec/stdlib/timer_packaging_spec.lua`
 - `spec/stdlib/fs_spec.lua`
-- `spec/stdlib/fs_packaging_spec.lua`
 - `spec/stdlib/net_spec.lua`
-- `spec/stdlib/net_packaging_spec.lua`
 - `spec/stdlib/os_signal_spec.lua`
 - `spec/stdlib/os_helpers_spec.lua`
 - `spec/stdlib/os_process_spec.lua`
-- `spec/stdlib/os_packaging_spec.lua`
 
 Extend `spec/support/helpers.lua` once for native archives/objects, standard
 module build order, environment flags, and standalone execution.
@@ -2268,15 +2266,11 @@ CCACHE_DISABLE=1 busted \
   spec/stdlib/uv_bootstrap_spec.lua \
   spec/stdlib/uv_late_fs_callbacks_spec.lua \
   spec/stdlib/timer_spec.lua \
-  spec/stdlib/timer_packaging_spec.lua \
   spec/stdlib/fs_spec.lua \
-  spec/stdlib/fs_packaging_spec.lua \
   spec/stdlib/net_spec.lua \
-  spec/stdlib/net_packaging_spec.lua \
   spec/stdlib/os_signal_spec.lua \
   spec/stdlib/os_helpers_spec.lua \
-  spec/stdlib/os_process_spec.lua \
-  spec/stdlib/os_packaging_spec.lua
+  spec/stdlib/os_process_spec.lua
 CCACHE_DISABLE=1 make test
 git diff --check
 ```

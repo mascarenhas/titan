@@ -31,7 +31,6 @@ local function host_lua()
     end
     return REPO .. "/lua"
 end
-M.host_lua = host_lua
 
 local function fresh_workspace_path(label)
     local path = os.tmpname() .. "-titan-async-stdlib-" .. label
@@ -105,6 +104,19 @@ local function copy_file(source, destination)
     output:close()
 end
 
+local function make_directory(path)
+    if lfs.attributes(path, "mode") then return end
+    local parent = path:match("^(.+)/[^/]+$")
+    if parent then make_directory(parent) end
+    assert.truthy(lfs.mkdir(path), "could not create " .. path)
+end
+
+local function write_file(path, contents)
+    local output = assert(io.open(path, "wb"))
+    assert.truthy(output:write(contents))
+    assert.truthy(output:close())
+end
+
 function M.workspace(label)
     local path = fresh_workspace_path(label)
     assert.truthy(lfs.mkdir(path))
@@ -117,14 +129,12 @@ function M.workspace(label)
     return path
 end
 
-function M.copy_fixture(workspace, fixture, modname)
-    copy_file(REPO .. "/spec/fixtures/stdlib/" .. fixture,
-        workspace .. "/src/" .. modname .. ".titan")
-end
-
-function M.copy_source(workspace, source, modname)
-    copy_file(REPO .. "/" .. source,
-        workspace .. "/src/" .. modname .. ".titan")
+function M.write_source(workspace, modname, source)
+    local path = workspace .. "/src/" .. modname:gsub("%.", "/") ..
+        ".titan"
+    make_directory(assert(path:match("^(.+)/[^/]+$")))
+    write_file(path, source)
+    return path
 end
 
 function M.compile(workspace, modname, options)
@@ -132,8 +142,10 @@ function M.compile(workspace, modname, options)
     local stdlib = options.stdlib or find_standard_dir()
     local lua = host_lua()
     local environment = {
-        "env CCACHE_DISABLE=1",
+        "env -u LUA_PATH -u LUA_CPATH" ..
+            " -u LUA_PATH_5_5 -u LUA_CPATH_5_5 CCACHE_DISABLE=1",
         "TITAN_PATH_0_11=" .. quote(module_root(stdlib)),
+        "TITAN_PATH=",
     }
     if options.cppflags then
         environment[#environment + 1] =
@@ -172,80 +184,43 @@ function M.compile(workspace, modname, options)
     assert.truthy(ok, output)
 end
 
-local function compiler_command()
-    local lua = host_lua()
-    return quote(lua) .. " -e " .. quote(
-        "package.path=\"" .. REPO .. "/?.lua;" .. REPO ..
-        "/?/init.lua;\" .. package.path") .. " " .. quote(REPO .. "/titanc")
-end
-
 local function build_variant_workspace(transformer)
     local workspace = M.workspace("variant")
     assert.truthy(lfs.mkdir(workspace .. "/titan"))
+    make_directory(workspace .. "/src/titan")
     local transform = transformer
     if transform:sub(1, 1) ~= "/" then transform = REPO .. "/" .. transform end
     local raw_lua = host_lua()
     local ok, _, output = run(table.concat({
         quote(raw_lua), quote(transform), quote(REPO .. "/titan/uv.titan"),
-        quote(workspace .. "/titan/uv.titan"),
+        quote(workspace .. "/src/titan/uv.titan"),
     }, " "), workspace)
     assert.truthy(ok, output)
     copy_file(REPO .. "/titan/timer.titan",
-        workspace .. "/titan/timer.titan")
+        workspace .. "/src/titan/timer.titan")
     copy_file(REPO .. "/titan/coroutine.titan",
-        workspace .. "/titan/coroutine.titan")
-    ok, _, output = run("ln -s " .. quote(REPO .. "/lua-5.5.0") ..
-        " " .. quote(workspace .. "/lua-5.5.0"), workspace)
-    assert.truthy(ok, output)
-    ok, _, output = run("ln -s " .. quote(REPO .. "/libbacktrace") ..
-        " " .. quote(workspace .. "/libbacktrace"), workspace)
-    assert.truthy(ok, output)
+        workspace .. "/src/titan/coroutine.titan")
 
-    local base = table.concat({
-        "env CCACHE_DISABLE=1",
-        "TITAN_PATH_0_11=" .. quote(workspace), "TITAN_PATH=",
-    }, " ")
-    -- Sanitizer CI opts private generated variants in explicitly. Ordinary
-    -- focused runs retain the empty flags that keep these workspaces isolated
-    -- from a developer's ambient build configuration.
-    local variant_cflags = os.getenv("TITAN_TEST_EXTRA_CFLAGS") or ""
-    local variant_ldflags = os.getenv("TITAN_TEST_EXTRA_LDFLAGS") or ""
     assert.truthy(exists(workspace .. "/titan-runtime/libtitan.a"),
         "async stdlib variant requires make runtime's libtitan.a")
-    local coroutine_command = table.concat({
-        base, "TITAN_EXTRA_CPPFLAGS=''",
-        "TITAN_EXTRA_CFLAGS=" .. quote(variant_cflags),
-        "TITAN_EXTRA_LDFLAGS=" .. quote(variant_ldflags), compiler_command(),
-        "--tree", quote(workspace), "titan.coroutine",
-    }, " ")
-    ok, _, output = run(coroutine_command, workspace)
-    assert.truthy(ok, output)
+    local variant_stdlib = workspace .. "/titan"
+    M.compile(workspace, "titan.coroutine", {
+        stdlib = variant_stdlib,
+        cppflags = "",
+    })
 
     local cppflags, ldflags, archive = host_libuv_config()
     ldflags = archive .. " " .. ldflags
-    local uv_cflags = variant_cflags
-    if #uv_cflags > 0 then uv_cflags = uv_cflags .. " " end
-    uv_cflags = uv_cflags .. "-fno-strict-aliasing"
-    if #variant_ldflags > 0 then
-        ldflags = variant_ldflags .. " " .. ldflags
-    end
-    local uv_command = table.concat({
-        base, "TITAN_EXTRA_CPPFLAGS=" .. quote(cppflags),
-        "TITAN_EXTRA_CFLAGS=" .. quote(uv_cflags),
-        "TITAN_EXTRA_LDFLAGS=" .. quote(ldflags), compiler_command(),
-        "--tree", quote(workspace), "titan.uv",
-    }, " ")
-    ok, _, output = run(uv_command, workspace)
-    assert.truthy(ok, output)
-
-    local timer_command = table.concat({
-        base, "TITAN_EXTRA_CPPFLAGS=''",
-        "TITAN_EXTRA_CFLAGS=" .. quote(variant_cflags),
-        "TITAN_EXTRA_LDFLAGS=" .. quote(variant_ldflags), compiler_command(),
-        "--tree", quote(workspace), "titan.timer",
-    }, " ")
-    ok, _, output = run(timer_command, workspace)
-    assert.truthy(ok, output)
+    M.compile(workspace, "titan.uv", {
+        stdlib = variant_stdlib,
+        cppflags = cppflags,
+        cflags = "-fno-strict-aliasing",
+        ldflags = ldflags,
+    })
+    M.compile(workspace, "titan.timer", {
+        stdlib = variant_stdlib,
+        cppflags = "",
+    })
     return workspace
 end
 
@@ -253,35 +228,41 @@ function M.variant_workspace(transformer)
     return build_variant_workspace(transformer)
 end
 
-function M.variant_lua_command(workspace, script, ...)
+function M.run_lua_source(workspace, source, options)
+    options = options or {}
+    local stdlib = options.stdlib or find_standard_dir()
+    local root = module_root(stdlib)
+    local cpath = workspace .. "/?.so;" .. root .. "/?.so;;"
+    local lua_path = REPO .. "/?.lua;" .. REPO .. "/?/init.lua;;"
     local lua = host_lua()
-    local args = { ... }
-    for index, value in ipairs(args) do args[index] = quote(value) end
-    local cpath = workspace .. "/?.so;;"
-    return table.concat({
-        "env TITAN_PATH_0_11=" .. quote(workspace),
-        "LUA_CPATH=" .. quote(cpath), quote(lua), quote(script),
-        table.concat(args, " "),
+    local command = table.concat({
+        "env -u LUA_PATH -u LUA_CPATH" ..
+            " -u LUA_PATH_5_5 -u LUA_CPATH_5_5",
+        "TITAN_PATH_0_11=" .. quote(root),
+        "TITAN_PATH=",
+        "LUA_PATH=" .. quote(lua_path),
+        "LUA_PATH_5_5=" .. quote(lua_path),
+        "LUA_CPATH=" .. quote(cpath),
+        "LUA_CPATH_5_5=" .. quote(cpath),
+        quote(lua), "-e", quote(source),
     }, " ")
+    return run(command, options.cwd or workspace)
 end
 
-function M.lua_command(workspace, script, ...)
+local function app_command(workspace, modname)
     local stdlib = find_standard_dir()
-    local alias = canonical_cpath(stdlib)
-    local lua = host_lua()
-    local args = { ... }
-    for index, value in ipairs(args) do args[index] = quote(value) end
-    return table.concat({
-        "env TITAN_PATH_0_11=" .. quote(module_root(stdlib)),
-        "LUA_CPATH=" .. quote(workspace .. "/?.so;" .. alias .. ";;"),
-        quote(lua), quote(script), table.concat(args, " "),
-    }, " ")
+    return "env -u LUA_PATH -u LUA_CPATH" ..
+        " -u LUA_PATH_5_5 -u LUA_CPATH_5_5" ..
+        " TITAN_PATH_0_11=" .. quote(module_root(stdlib)) .. " " ..
+        "TITAN_PATH= " .. quote(workspace .. "/" .. modname)
 end
 
-function M.app_command(workspace, modname)
-    local stdlib = find_standard_dir()
-    return "env TITAN_PATH_0_11=" .. quote(module_root(stdlib)) .. " " ..
-        quote(workspace .. "/" .. modname)
+function M.run_app(workspace, modname, ...)
+    local command = { app_command(workspace, modname) }
+    for _, argument in ipairs({ ... }) do
+        command[#command + 1] = quote(argument)
+    end
+    return run(table.concat(command, " "), workspace)
 end
 
 function M.read(path)
