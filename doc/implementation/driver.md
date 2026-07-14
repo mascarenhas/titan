@@ -411,10 +411,15 @@ error alerts):
   captured raw traceback before exiting with `EXIT_FAILURE`. On success
   the integer returned by the Titan `main` becomes the **process exit status**:
   `ret = lua_tointeger(L, -1); lua_close(L); return ret;`.
-* **`pmain`** calls global `require("$MODNAME")`, retrieves and retains
-  that module's `main` callable, then builds the `arg` table from `argv`
-  with Lua's convention — index 0 is the program name, indices 1..n the
-  arguments (`for (i = 0; i < argc; i++) ... lua_rawseti(L, -2, i)`).
+* **`pmain`** first publishes the original `argc` integer and `argv` pointer
+  under `TITAN_MAIN_ARGC_KEY` and `TITAN_MAIN_ARGV_KEY`, then calls global
+  `require("$MODNAME")` and retrieves and retains that module's `main`
+  callable. A transitive `titan.uv` initialization can therefore call
+  `uv_setup_args` in the canonical provider and replace the private `argv`
+  slot with the pointer returned by libuv. After `require`, `pmain` rereads
+  that pointer and builds the `arg` table with Lua's convention — index 0 is
+  the program name, indices 1..n the arguments
+  (`for (i = 0; i < argc; i++) ... lua_rawseti(L, -2, i)`).
   So a Titan `main(args: {string}): integer` sees `args[1]` as the first
   real argument and `#args == argc - 1`. Requiring the main module first
   initializes all imports; an async standard module may install a
@@ -677,7 +682,9 @@ be tested before reinstalling.
   strings used as Lua-registry keys: `TITAN_PATH_KEY` (cached module search
   path), `TITAN_ROOT_KEY` (normalized Titan SDK/rocks-tree root),
   `TITAN_LIBS_KEY` (dlopen handle table), `TITAN_MAIN_BOOTSTRAP_KEY` (optional
-  standalone-main hook),
+  standalone-main hook), `TITAN_MAIN_ARGC_KEY` and `TITAN_MAIN_ARGV_KEY`
+  (generated-entrypoint process arguments and libuv's possibly replaced
+  `argv` pointer),
   `TITAN_BT_STATE_KEY` (registry-owned libbacktrace state cache),
   `TITAN_BACKTRACE_KEY` (last raw error backtrace),
   `TITAN_NAMES_KEY` (native-symbol display-name table), and
@@ -837,7 +844,7 @@ user-facing story.
 | checkout link set | `driver.source_link_inputs` / `append_runtime_libraries` | local `libtitan.a` + separate local `libbacktrace.a` + local `liblua.a` + `-ldl -lm` | Preserves the writable source-development path while using the same archive contract; it never links `titan.o` directly. |
 | `TITAN_ROOT_DEFAULT` / `TITAN_LUA_CPATH_SUFFIX` | `titan.h`/`titan.c` | `/usr/local` / `/lib/lua/5.5/?.so` | Legacy run-time root fallback and exact template suffix used for root discovery. |
 | `titan_init_paths` | generated standalone entrypoint / `titan.c` | root parsed from inherited `package.cpath` | Caches the root and Titan module path and ensures `<root>/lib/titan/0.11/?.so` is in `package.cpath`; patched Titan-owned Lua has it first by default. |
-| registry keys | `titan.h` | `TITAN_ROOT_KEY`, `TITAN_PATH_KEY`, `TITAN_LIBS_KEY`, `TITAN_MAIN_BOOTSTRAP_KEY`, `TITAN_BT_STATE_KEY`, `TITAN_BACKTRACE_KEY`, `TITAN_NAMES_KEY`, `TITAN_TRACE_PINNED`, `TITAN_TRACE_APPEND_KEY` (UUID strings) | Per-state caches and hooks: Titan SDK/rocks-tree root, module path, dlopen handles, optional standalone bootstrap, registry-owned libbacktrace state, last raw backtrace, native-frame display names, re-raise traceback pin, and coroutine traceback append handoff. |
+| registry keys | `titan.h` | `TITAN_ROOT_KEY`, `TITAN_PATH_KEY`, `TITAN_LIBS_KEY`, `TITAN_MAIN_BOOTSTRAP_KEY`, `TITAN_MAIN_ARGC_KEY`, `TITAN_MAIN_ARGV_KEY`, `TITAN_BT_STATE_KEY`, `TITAN_BACKTRACE_KEY`, `TITAN_NAMES_KEY`, `TITAN_TRACE_PINNED`, `TITAN_TRACE_APPEND_KEY` (UUID strings) | Per-state caches and hooks: Titan SDK/rocks-tree root, module path, dlopen handles, optional standalone bootstrap, original process arguments and libuv's possibly replaced `argv`, registry-owned libbacktrace state, last raw backtrace, native-frame display names, re-raise traceback pin, and coroutine traceback append handoff. |
 | generated ABI symbol | `coder.lua` | `<mangled>_abi` returning `TITAN_VER` | Checked before `.so` type rehydration and before run-time dynamic-import `dlsym`; markerless modules are treated as incompatible. |
 
 The pieces upstream of the driver are described in

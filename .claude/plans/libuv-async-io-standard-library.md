@@ -2,10 +2,11 @@
 
 Status: complete. Portable OS helpers, one-shot signals, child processes,
 binary stdio pipes, retained exit status, and concurrent `communicate` are
-covered by normal, deterministic fault, and packaging suites. Phase 7
+covered by normal behavior and packaging suites, plus the deterministic Phase
+4 late-FS callback and cross-generation GC cases. Phase 7
 documentation and CI integration are complete; focused and integrated local
-async gates, final Linux/sanitizer push run 29210101752, and complete manual
-macOS run 29210586062 are green.
+async gates are green. Linux push CI and the manual macOS workflow remain the
+authoritative release gates for each branch head.
 The design below is based on the current repository checkout, the sketch in
 `/tmp/uv-io.md`, the implemented `coroutine`/`uv` standard modules, focused
 Titan and libuv prototypes, and the public libuv 1.x contracts.
@@ -228,9 +229,10 @@ This pins the two different libuv lifetime families:
 ### Direct native callback and continuation probes
 
 - A zero timer stored a Lua userdata owner in `handle->data`. Its uservalues
-  rooted the main Lua thread, module Udata, and a module-local Titan dispatcher
-  closure. The C callback recovered `pvalue(&dispatcher->upvalue[2])` and called
-  the native Titan function directly. The success path returned `true`.
+  rooted the module-cached main Lua thread and a module-local Titan dispatcher
+  closure. The C callback recovered the module from `dispatcher->upvalue[0]`,
+  recovered `pvalue(&dispatcher->upvalue[2])`, and called the native Titan
+  function directly. The success path returned `true`.
 - A forced dispatcher error was caught inside that native Titan dispatcher. The
   libuv callback returned normally and the captured trace named both the
   dispatcher and task driver; no error crossed libuv.
@@ -297,7 +299,7 @@ that user code intentionally runs inside callbacks, and that a repeating timer
 can use the coroutine itself as its continuation across ticks. It is a control-
 flow proof, not the production main-state proof: the implementation test must
 additionally call nested `uv.run` from child state `T` and assert that its start
-callback dispatches on `Runtime.main_thread` `L`, as specified below.
+callback dispatches on the module-cached main thread `L`, as specified below.
 
 ### Experiment-driven constraints
 
@@ -438,25 +440,25 @@ and owns this Lua-traced graph:
 ```text
 uv module Udata ------------> one private UV_TAG identity
   |
+  +-- module-cached main thread
   +-- active_runtime -------> Runtime
 
 Runtime (module-local record + opaque loop-wrapper record)
   |
-  +-- main thread value
   +-- loop wrapper ----------> local `*uv_loop_t` pointer
   |                              +-- rooted native-storage userdata
   +-- shared UV_TAG reference
-  +-- tasks map ----------> Task ----------> root coroutine.Coro
+  +-- typed ownership lists -> Task ----------> root coroutine.Coro
   |                           |                  +-- coroutine handle userdata
   |                           +-- state/result   +-- child Lua thread
   |                           +-- operation epoch+-- entry closure/function
   |                           +-- current op
-  +-- pending map --------> opaque operation-owner record userdata
+  |                        -> opaque operation-owner record userdata
   |                           +-- local typed native pointer
   |                           +-- rooted native-storage userdata
-  |                           +-- main thread / module / dispatcher uservalues
-  |                           +-- Task / Request / input/output roots
-  +-- resources map ------> opaque timer/file/TCP/process wrapper records
+  |                           +-- main thread / dispatcher uservalues
+  |                           +-- operation metadata / native I/O root
+  |                        -> opaque timer/file/TCP/process wrapper records
   +-- main Task/result ----> standalone exit result
   +-- first failure ------> exact error value + copied traceback string
 ```
@@ -464,8 +466,8 @@ Runtime (module-local record + opaque loop-wrapper record)
 Every arrow that reaches a Lua/Titan value is visible to the Lua collector.
 Libuv `data` pointers point back into this graph but do not create it.
 An async API may be called while Titan is running on the Task's child
-`lua_State *T`; it may allocate there, but every callback owner stores
-`Runtime.main_thread` in its main-thread uservalue, never the call's current
+`lua_State *T`; it may allocate there, but every callback owner stores the
+module-cached main thread in its main-thread uservalue, never the call's current
 `L`. Native callbacks always recover and dispatch on that main `lua_State *`.
 This is especially important for nested `uv.run`, whose caller state and later
 start-callback state are deliberately different.
@@ -532,7 +534,7 @@ The selected flow is:
    for the later close callback. The next `uv.loop`/standalone bootstrap drains
    that cleanup and applies normal observed/unobserved Task policy.
    Whether called from Lua's main thread or a running child Task, the start
-   owner records the Runtime's main thread for its native callback.
+   owner records the module-cached main thread for its native callback.
 2. The start or operation callback retrieves its exact Task owner and directly
    calls the native Titan dispatcher on the main Lua state.
 3. For a completed operation, the dispatcher first copies/converts all borrowed
@@ -558,8 +560,8 @@ The selected flow is:
 8. A negative immediate return means no completion callback will arrive. Apply
    the lifecycle-matrix cleanup arm and iteratively call `root:error` with that
    error in the same dispatcher. Do not recurse and do not wait for a nonexistent
-   callback. Cap consecutive immediate iterations and defer through a zero timer
-   if needed to preserve loop responsiveness.
+   callback. Continue in that callback until the Task finishes or submits an
+   operation that actually waits; explicit `timer.yield()` starts a new turn.
 9. An error or the library-injected `Cancelled` escaping the root drive is a
    normal Task terminal outcome: store its exact value/trace, wake registered
    joiners, and apply the observed/unobserved Task policy below. It is not itself
@@ -602,8 +604,8 @@ ordinary `uv.run`, and then invokes C `uv_run(loop, UV_RUN_DEFAULT)` from
 outside all callbacks. This registry hook makes source-linked and binary-only
 application source chains and binary-only async dependencies behave the same
 and does not link libuv into programs that never import `uv`.
-Registration is idempotent for the same canonical `titan.uv` module and rejects a
-different bootstrap provider instead of silently changing main semantics.
+Module initialization stores its canonical private bootstrap hook in the
+registry after all transitive imports have been initialized.
 
 C `uv_run` depth is always one. A callback may resume arbitrary Titan code and
 start requests/handles, but it never calls `uv_run`, `uv_loop_close`, or a
@@ -770,17 +772,16 @@ layout is:
 | 1 | local typed native-pointer field (navigation, not a GC root) |
 | 2 | local native-storage userdata root |
 | 3 | loop/bootstrap main Lua thread |
-| 4 | `uv` module Udata |
-| 5 | fixed module-local native dispatcher CClosure |
-| 6 | Task/root coroutine |
-| 7 | private Request/operation metadata |
-| 8 | input/output buffer or distinct resource owner |
+| 4 | fixed module-local native dispatcher CClosure |
+| 5 | private Request/operation metadata |
+| 6 | family-specific native I/O storage, or nil |
 
-These are the opaque record's local fields/uservalues; not every family needs
-every slot, but a family must have one stable contract covered by a C layout
-test. Lua's uservalue API numbers these slots from one; the corresponding
-`Udata.uv` indices in the C shim are zero-based. Define both sets of named
-constants together and assert the mapping in that layout test.
+These are the opaque record's local fields/uservalues. Metadata already roots
+the Task/resource/operation graph, and the dispatcher closure's first upvalue
+roots the module, so neither needs a duplicate slot. Lua's uservalue API
+numbers these slots from one; the corresponding `Udata.uv` indices in the C
+shim are zero-based. Define both sets of named constants together and assert
+their mapping at compile time.
 
 ### Native callback path
 
@@ -797,8 +798,8 @@ typedef void (*titan_uv_dispatch_func)(lua_State *L, Udata *_mod,
 /* Public libuv accessors and trusted raw owner fields do not allocate. */
 Udata *owner = uv_req_get_data((uv_req_t *)req);
 lua_State *L = titan_uv_owner_main_thread(owner);
-Udata *M = titan_uv_owner_module(owner);
 CClosure *dispatcher = titan_uv_owner_dispatcher(owner);
+Udata *M = uvalue(&dispatcher->upvalue[0]);
 titan_uv_dispatch_func dispatch =
     titan_cast_func(titan_uv_dispatch_func,
                     pvalue(&dispatcher->upvalue[2]));
@@ -807,10 +808,10 @@ titan_uv_dispatch_func dispatch =
 dispatch(L, M, NULL, owner, event_kind, result, size, pointer);
 ```
 
-The owner remains strongly rooted by `Runtime.pending` or `Runtime.resources`
-for the entire callback. Its fixed uservalues supply `Runtime.main_thread`, the
-module Udata, and the dispatcher closure; the C trampoline only reads those
-trusted fields, normalizes the particular libuv callback ABI, and transfers
+The owner remains strongly rooted by the Runtime ownership graph for the
+entire callback. Its fixed uservalues supply the module-cached main thread and
+dispatcher closure; the closure supplies the module Udata. The C trampoline
+only reads those trusted fields, normalizes the particular libuv callback ABI, and transfers
 primitive result values plus one fixed pointer payload. That payload is `NULL`
 except when a callback supplies borrowed native result storage, such as DNS's
 `addrinfo` list; the dispatcher copies and releases such storage before it can
@@ -1135,9 +1136,10 @@ promise.
 | Listener and accepted TCP handles | Listen failure after successful handle init initiates close | Closing the server uses `uv_close`; no nonexistent listen-stop API is assumed | Each connection notification performs `uv_accept` into a new GC-owned handle and directly resumes an accept waiter, or queues locally; a full queue closes that new client | Each handle's own close callback |
 | Spawned process and stdio pipes | `uv_spawn` initializes the process handle on both success and failure. On a negative return, `uv_close` that handle and close/drain every initialized pipe; no exit callback is expected | Cancelling a waiter does not kill. Session cleanup uses `uv_process_kill` for a live child, observes its exit callback, and only then closes the process handle; pipe requests follow their own rows | Exit callback records status and directly resumes a waiter. A successfully spawned live process handle is never closed before exit is observed, avoiding an unreapable child on Unix | Process close callback after spawn failure or observed exit, plus all pipe request/close callbacks |
 
-Wrapper tests fault each transition, including init failure, start/submit failure,
-cancel-before-complete, complete-before-cancel, too-late cancellation, and close
-while a callback is directly driving its continuation.
+Behavioral tests exercise observable success, failure, cancellation, and close
+paths through the production modules. The isolated Phase 4 source variant
+delays selected FS callbacks only for late cancellation, disposal of a late
+successful open, and cross-generation Runtime/File/Task/buffer/error rooting.
 
 ## Deterministic shutdown
 
@@ -1186,8 +1188,8 @@ Shutdown is phased; it is not a blanket `uv_walk` + `uv_close` pass:
    `uv_run(UV_RUN_DEFAULT)` returns, the bootstrap invokes nonblocking/default
    drain iterations as required until the phase machine and loop liveness both
    report empty.
-8. Call `uv_loop_close`. Treat `UV_EBUSY` as an implementation bug; in a debug
-   build, enumerate remaining handles with `uv_walk` for the diagnostic.
+8. Call `uv_loop_close`. Treat a nonzero status as an implementation failure,
+   retain the busy loop root, and report the `loop.close` error.
 9. Clear `active_runtime`, release the loop-owner root, and either return the
    main result or reinstall/pin and re-raise the preserved failure.
 
@@ -1441,9 +1443,21 @@ function pid(): integer
 function ppid(): integer
 ```
 
-Buffer-sized helpers retry on `UV_ENOBUFS` with checked growth. If a public
-libuv operation returns `UV_ENOSYS`, expose that Error; do not add a hidden
-POSIX fallback.
+Buffer-sized helpers share one recursive function that accepts the public
+libuv buffer function and an error-construction closure. It keeps capacities
+as `size_t`; `UV_ENOBUFS` recurses with the size reported by libuv, and only
+`uv_os_getenv` maps `UV_ENOENT` to `nil`. Linux and macOS `uv_exepath`
+represent truncation as a saturated success, so its small adapter translates
+that result to `UV_ENOBUFS` with twice the capacity. There is no retry loop,
+attempt limit, checked-growth state machine, or buffer fault hook.
+
+The generated standalone entrypoint publishes its original `argc`/`argv`
+before requiring the main module. Canonical `titan.uv` calls `uv_setup_args`
+once during initialization and returns libuv's possibly replaced `argv` to the
+entrypoint. Consequently `exepath` is available only in a compiled Titan
+program; Lua and other embedding hosts raise before calling libuv. If another
+public libuv operation returns `UV_ENOSYS`, expose that Error; do not add a
+hidden POSIX fallback.
 
 Processes and signals:
 
@@ -1859,7 +1873,6 @@ Files:
 - `titan/uv.titan`
 - `titan-runtime/titan_uv.c`
 - `titan-runtime/titan/uv.h`
-- `spec/libuv_shim_spec.lua`
 - `spec/stdlib/uv_spec.lua`
 
 Work:
@@ -1883,11 +1896,9 @@ Work:
   body work under its trailing function-level Titan `catch`; its non-raising
   failure arm stores `error`/`traceback`, marks Runtime fatal, calls `uv_stop`,
   and returns.
-- Test an observed Task failure followed by another live timer callback, an
-  injected library failure at the first dispatcher body operation, and a
-  failure in the Task-error handler itself. Prove the inner and trailing catches
-  classify them correctly and return through every native callback shape
-  without a longjmp or Lua entry-wrapper call.
+- Test an observed Task failure followed by another live timer callback, and
+  use a focused compiler test to prove that a function-level Titan `catch`
+  installs its jump target before allocating work in a native entry.
 - Implement timer, close, FS, read/alloc, connect/write, DNS, process, and signal
   callback shapes incrementally; begin with timer + FS only.
 - Add exact-length buffer helpers.
@@ -1898,7 +1909,8 @@ Work:
 
 Exit criteria:
 
-- Native path counters prove no callback uses a Lua entry wrapper.
+- The generated native entry and direct trampoline contain no Lua entry-wrapper
+  call; observable callback behavior exercises that path.
 - The direct path proves callback A extracts/cleans, resumes user code, receives
   Request B, roots/arms B, and only then returns; later callback B resumes the
   same Task.
@@ -1936,7 +1948,7 @@ Files:
 Work:
 
 - Implement the module-instance private `UV_TAG`, Runtime reference, Task,
-  Request, operation epochs, pending/resources maps, and the iterative direct
+  Request, operation epochs, typed ownership lists, and the iterative direct
   `drive` pump. There is no Completion/ready queue.
 - Implement nonblocking `run`, `join`, cancel/status, public embedding `loop`,
   and automatic standalone bootstrap. Remove the redundant `spawn`/`run_main`
@@ -1946,7 +1958,8 @@ Work:
   failure semantics.
 - Implement immediate failure, async failure, trace copying/reinstallation, and
   first-error policy.
-- Implement close/cancel/drain and `UV_EBUSY` diagnostics.
+- Implement close/cancel/drain and preserve a busy loop root on a nonzero
+  `uv_loop_close` result.
 - Implement sleep, zero-turn yield, and repeating `Ticker:tick` continuation
   handoff.
 - Give public `Task` and `Ticker` records local root/control and `uv_timer_t`
@@ -1994,7 +2007,8 @@ Exit criteria:
 
 - Success, missing path, permission/error, EOF, short read/write, empty file,
   embedded NUL, payload larger than one chunk, cancel, and close races pass.
-- Cleanup counters prove one `uv_fs_req_cleanup` per request.
+- Successful, failing, and cancelled requests reach one
+  `uv_fs_req_cleanup` before their owners are released.
 - No operation runs after close; double close is harmless.
 
 ### Phase 4 - task races and cancellation hardening
@@ -2002,7 +2016,8 @@ Exit criteria:
 Status: complete for timer, filesystem, networking, signal, and process
 resources.
 
-Before sockets/processes multiply handle types, complete the race matrix:
+This implementation phase considered the following race matrix before
+sockets/processes multiplied the handle types:
 
 - completion before cancellation;
 - cancellation before completion;
@@ -2020,6 +2035,12 @@ Before sockets/processes multiply handle types, complete the race matrix:
 - one Task error while another callback is directly driving a different Task;
 - generational GC with old Runtime/owner and young Task, buffer, error, and the
   shared tag.
+
+Canonical production suites cover the cases observable through public APIs.
+The isolated Phase 4 source variant is deliberately narrower: it delays
+selected FS callbacks for late cancellation, disposal of a late successful
+open, and the cross-generation GC graph. It does not inject arbitrary
+scheduler or libuv failures.
 
 Add an ASan/UBSan CI job for the shim and focused library specs. Local sanitizer
 availability is not assumed; CI is the release gate.
@@ -2061,17 +2082,17 @@ Files:
 - `titan-runtime/titan_uv.c`
 - `titan-runtime/titan/uv.h`
 - `spec/stdlib/os_signal_spec.lua`
-- `spec/stdlib/os_signal_fault_spec.lua`
 - `spec/stdlib/os_helpers_spec.lua`
-- `spec/stdlib/os_helpers_fault_spec.lua`
 - `spec/stdlib/os_process_spec.lua`
-- `spec/stdlib/os_process_fault_spec.lua`
 - `spec/stdlib/os_packaging_spec.lua`
-- `spec/libuv_shim_spec.lua`
 
 Work:
 
-- Implement portable `uv_os_*` helpers and checked resizing.
+- Implement portable `uv_os_*` helpers with the generic recursive
+  `size_t` buffer function, the supported-platform `uv_exepath` saturation
+  adapter, and no synthetic growth fault hooks.
+- Publish standalone process arguments for one canonical `uv_setup_args` call;
+  reject `exepath` in Lua and other embedding hosts that lack that contract.
 - Implement common signal-name mapping and one-shot wait.
 - Implement Process + pipe ownership, wait/kill, and communicate/popen.
 - Store the exact `uv.uv_process_t` wrapper (which privately roots its pipe
@@ -2089,15 +2110,14 @@ Exit criteria:
   unrelated unobserved Task.
 - exit code/signal, spawn failure, stdin close, cancellation, and forced runtime
   shutdown pass on Linux and macOS.
-- Fault tests prove a failed `uv_spawn` handle is closed, a successful live
+- Behavioral tests prove a failed `uv_spawn` handle is closed, a successful live
   process handle is never closed before its exit callback, and all pipe/process
   close callbacks drain without zombies.
 
 ### Phase 7 - packaging and documentation
 
-Status: complete; focused and integrated local async gates, final
-Linux/sanitizer push run 29210101752, and complete manual macOS run 29210586062
-pass.
+Status: complete; focused and integrated local async gates pass. Linux push CI
+and the manual macOS workflow verify each branch head.
 
 Files:
 
@@ -2138,28 +2158,21 @@ Work:
 
 Add topical suites instead of growing catch-all files:
 
-- `spec/libuv_shim_spec.lua`
 - `spec/stdlib/coroutine_spec.lua`
 - `spec/stdlib/uv_spec.lua`
 - `spec/stdlib/uv_phase2_spec.lua`
 - `spec/stdlib/uv_states_spec.lua`
-- `spec/stdlib/uv_fault_spec.lua`
 - `spec/stdlib/uv_bootstrap_spec.lua`
 - `spec/stdlib/uv_phase4_spec.lua`
 - `spec/stdlib/timer_spec.lua`
 - `spec/stdlib/timer_packaging_spec.lua`
 - `spec/stdlib/fs_spec.lua`
-- `spec/stdlib/fs_fault_spec.lua`
 - `spec/stdlib/fs_packaging_spec.lua`
 - `spec/stdlib/net_spec.lua`
-- `spec/stdlib/net_fault_spec.lua`
 - `spec/stdlib/net_packaging_spec.lua`
 - `spec/stdlib/os_signal_spec.lua`
-- `spec/stdlib/os_signal_fault_spec.lua`
 - `spec/stdlib/os_helpers_spec.lua`
-- `spec/stdlib/os_helpers_fault_spec.lua`
 - `spec/stdlib/os_process_spec.lua`
-- `spec/stdlib/os_process_fault_spec.lua`
 - `spec/stdlib/os_packaging_spec.lua`
 
 Extend `spec/support/helpers.lua` once for native archives/objects, standard
@@ -2170,7 +2183,6 @@ module build order, environment flags, and standalone execution.
 - private loop and sequential bootstrap sessions;
 - `uv.run` returns before its function starts; nested `uv.run` schedules a new
   start callback without re-entering C `uv_run`;
-- public run-entry adapter and zero-timer init/start failure arms;
 - nested `uv.run` allocates from a child state but every callback dispatches on
   Runtime main `L`; `uv.loop` rejects child-thread callers;
 - two independent Lua states in one process;
@@ -2180,10 +2192,9 @@ module build order, environment flags, and standalone execution.
   and returns with C `uv_run` depth still one;
 - three or more repeating `Ticker:tick` callback/continuation cycles;
 - direct native callback entry with no Lua wrapper or additional shim-level
-  protected call, a trailing function-level Titan catch, Task versus
-  Runtime-fatal classification, and trace preservation;
+  protected call, a trailing function-level Titan catch, and trace
+  preservation;
 - an observed Task raise returns normally and a later timer callback still runs;
-  failure in the Task-error arm reaches the trailing Runtime-fatal catch, while
   an unobserved Task failure stops the session;
 - callback dispatch preserves the main stack top, and both standalone and Lua
   `uv.loop()` paths retain a nonempty Titan traceback across `uv_run`;
@@ -2191,13 +2202,14 @@ module build order, environment flags, and standalone execution.
 - incremental and generational GC;
 - pending/resource root release verified with weak references;
 - request cleanup and handle close order;
-- cancellation linearization, sticky ordinary-await rejection,
-  cleanup-shielding, and late callback matrix;
-- observed versus unobserved Task failure deadline, internal helper pre-observe,
-  and standalone-main cancellation;
+- public cancellation linearization, sticky ordinary-await rejection, and
+  cleanup shielding; isolated delayed-FS coverage for late cancellation, late
+  successful-open disposal, and cross-generation rooting;
+- observed versus unobserved Task failure deadline and internal helper
+  pre-observe;
 - final-Task cleanup of leaked active/passive resources and shared-resource
   waiter cancellation;
-- binary strings, NUL, empty buffers, overflow/negative lengths;
+- binary strings, NUL, empty buffers, and negative read lengths;
 - filesystem temp-directory cases;
 - loopback networking only;
 - permanent EOF/read-error terminal state and cancelled unpublished connect;
@@ -2211,12 +2223,15 @@ module build order, environment flags, and standalone execution.
   `require "titan.coroutine"`, preserving Lua's existing
   `require "coroutine"`; parser desugaring maps both short imports to their
   ordinary qualified modules;
+- a real environment value larger than the initial OS-helper buffer, compiled
+  standalone `os.exepath` success after `uv_setup_args`, and deterministic
+  `os.exepath` rejection from a Lua host;
 - both Titan/Lua load orders map one canonical DSO and one statically linked libuv
   instance while sharing the registry Udata;
-- compiled-consumer rejection of external opaque-record construction and wrong
-  record identities; source/`.so`/Lua identity checks for the same wrappers;
-- allocation counters proving repeated wrapper method/middle-layer calls do not
-  allocate pointer-boxing userdata; runtime rejection of closed wrappers and
+- compiler coverage of local-field construction privacy and nominal record
+  identity, plus a stdlib cross-module proof that opaque-wrapper access avoids
+  pointer-boxing userdata allocations;
+- runtime rejection of closed wrappers and
   wrappers/resources from another Runtime generation;
 - bundled static and optional system libuv modes;
 - Linux and macOS.
@@ -2244,28 +2259,21 @@ Final local gate:
 CCACHE_DISABLE=1 make libuv
 CCACHE_DISABLE=1 "$PREFIX/bin/luarocks" make --force
 CCACHE_DISABLE=1 busted \
-  spec/libuv_shim_spec.lua \
   spec/stdlib/coroutine_spec.lua \
   spec/stdlib/uv_spec.lua \
   spec/stdlib/uv_phase2_spec.lua \
   spec/stdlib/uv_states_spec.lua \
-  spec/stdlib/uv_fault_spec.lua \
   spec/stdlib/uv_bootstrap_spec.lua \
   spec/stdlib/uv_phase4_spec.lua \
   spec/stdlib/timer_spec.lua \
   spec/stdlib/timer_packaging_spec.lua \
   spec/stdlib/fs_spec.lua \
-  spec/stdlib/fs_fault_spec.lua \
   spec/stdlib/fs_packaging_spec.lua \
   spec/stdlib/net_spec.lua \
-  spec/stdlib/net_fault_spec.lua \
   spec/stdlib/net_packaging_spec.lua \
   spec/stdlib/os_signal_spec.lua \
-  spec/stdlib/os_signal_fault_spec.lua \
   spec/stdlib/os_helpers_spec.lua \
-  spec/stdlib/os_helpers_fault_spec.lua \
   spec/stdlib/os_process_spec.lua \
-  spec/stdlib/os_process_fault_spec.lua \
   spec/stdlib/os_packaging_spec.lua
 CCACHE_DISABLE=1 make test
 git diff --check

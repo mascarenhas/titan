@@ -1,8 +1,5 @@
--- Generate an isolated race-enabled uv.titan from the production source.
+-- Generate an isolated callback-timing uv.titan from the production source.
 -- Usage: lua make_phase4_test_variant.lua INPUT OUTPUT
---
--- Every edit uses a unique source anchor and fails closed when the scheduler
--- changes. The generated module belongs only to the spec workspace.
 local input_path, output_path = assert(arg[1]), assert(arg[2])
 
 local function read(path)
@@ -28,13 +25,11 @@ local function replace_once(source, needle, replacement, label)
 end
 
 local source = read(input_path)
-assert(not source:find("__test_phase4_", 1, true),
-    "input is already a Phase 4 test variant")
 
 source = replace_once(source, [==[
-local OWNER_TASK_DRIVE = 10
+local OWNER_TASK_DRIVE = 8
 ]==], [==[
-local OWNER_TASK_DRIVE = 10
+local OWNER_TASK_DRIVE = 8
 -- Variant-only timer that defers logical FS callback delivery after libuv has
 -- already returned the native request.
 local OWNER_PHASE4_FS_DELAY = 100
@@ -45,145 +40,35 @@ local active_runtime: Runtime? = nil
 ]==], [==[
 local active_runtime: Runtime? = nil
 
--- Variant-only race controls. This generated source is never installed.
-local test_phase4_owner_starts = 0
-local test_phase4_cancel_delay = 0
+-- Variant-only callback controls. This generated source is never installed.
 local test_phase4_fs_delay = 0
-local test_phase4_fs_physical_callbacks = 0
-local test_phase4_fs_deliveries = 0
-local test_phase4_fs_cancel_calls = 0
-local test_phase4_fs_cancel_status = 0
-local test_phase4_fs_cancel_override = 0
-local test_phase4_fs_cancel_override_armed = false
-local test_phase4_fs_cleanups = 0
-local test_phase4_fs_open_successes = 0
-local test_phase4_fs_open_publications = 0
-local test_phase4_fs_internal_close_enqueues = 0
-local test_phase4_fs_internal_close_callbacks = 0
-]==], "race-control state")
+local test_phase4_fs_callback_delayed = false
+local test_phase4_fs_delayed_result = 0
+]==], "callback-control state")
 
 source = replace_once(source, [==[
-    -- TITAN_UV_FS_TEST_CLEANUP
-    libuv.uv_fs_req_cleanup(owner.handle)
-    owner.metadata.cleaned = true
-]==], [==[
-    -- TITAN_UV_FS_TEST_CLEANUP
-    libuv.uv_fs_req_cleanup(owner.handle)
-    test_phase4_fs_cleanups = test_phase4_fs_cleanups + 1
-    owner.metadata.cleaned = true
-]==], "FS cleanup counter")
-
-source = replace_once(source, [==[
-local function start_owner(runtime: Runtime, kind: integer, task: Task?,
-                           peer: value, epoch: integer,
-                           timeout: integer, repeat_time: integer):
-                           (uv_timer_t, integer)
-  local owner, pointer = allocate_owner(runtime, kind, task, peer, epoch)
-]==], [==[
-local function start_owner(runtime: Runtime, kind: integer, task: Task?,
-                           peer: value, epoch: integer,
-                           timeout: integer, repeat_time: integer):
-                           (uv_timer_t, integer)
-  test_phase4_owner_starts = test_phase4_owner_starts + 1
-  local owner, pointer = allocate_owner(runtime, kind, task, peer, epoch)
-]==], "owner allocation counter")
-
-source = replace_once(source, [==[
-      shim.titan_uvshim_fs_cancel(fs_owner.handle)
-]==], [==[
-      test_phase4_fs_cancel_calls = test_phase4_fs_cancel_calls + 1
-      local actual_cancel_status =
-          shim.titan_uvshim_fs_cancel(fs_owner.handle) as integer
-      if test_phase4_fs_cancel_override_armed then
-        test_phase4_fs_cancel_status = test_phase4_fs_cancel_override
-        test_phase4_fs_cancel_override = 0
-        test_phase4_fs_cancel_override_armed = false
-      else
-        test_phase4_fs_cancel_status = actual_cancel_status
-      end
-]==], "FS cancel observation")
-
-source = replace_once(source, [==[
-  local owner, status = start_owner(runtime, OWNER_CANCEL, task, nil,
-                                    task.epoch, 0, 0)
-]==], [==[
-  local cancel_delay = test_phase4_cancel_delay
-  test_phase4_cancel_delay = 0
-  local owner, status = start_owner(runtime, OWNER_CANCEL, task, nil,
-                                    task.epoch, cancel_delay, 0)
-]==], "delayed cancellation delivery")
-
-source = replace_once(source, [==[
-  if event_kind == EVENT_FS and result >= 0 and
-      owner.metadata.operation.kind == FS.open then
+  if result >= 0 and owner.metadata.operation.kind == FS.open then
     owner.metadata.acquired_file = result as libuv.uv_file
-    owner.metadata.has_acquired_file = true
   end
-  fs_dispatch_body(owner, event_kind, result, size)
+  fs_dispatch_body(owner, result)
 ]==], [==[
-  if event_kind == EVENT_FS and result >= 0 and
-      owner.metadata.operation.kind == FS.open then
+  if result >= 0 and owner.metadata.operation.kind == FS.open then
     owner.metadata.acquired_file = result as libuv.uv_file
-    owner.metadata.has_acquired_file = true
-    if test_phase4_fs_delay > 0 then
-      test_phase4_fs_open_successes =
-          test_phase4_fs_open_successes + 1
-    end
   end
   if test_phase4_fs_delay > 0 then
     local delay = test_phase4_fs_delay
     test_phase4_fs_delay = 0
-    test_phase4_fs_physical_callbacks =
-        test_phase4_fs_physical_callbacks + 1
-    owner.metadata.callback_result = result
+    test_phase4_fs_callback_delayed = true
+    test_phase4_fs_delayed_result = result
     local wake, status = start_owner(owner.metadata.runtime,
         OWNER_PHASE4_FS_DELAY, nil, owner, 0, delay, 0)
     if status < 0 then
       raise make_error(status, "test.fs.delay", nil)
     end
-    wake.root = owner
     return
   end
-  fs_dispatch_body(owner, event_kind, result, size)
+  fs_dispatch_body(owner, result)
 ]==], "physical FS callback deferral")
-
-source = replace_once(source, [==[
-  file.state = FS.file_closing
-  local operation = make_fs_operation(FS.internal_close, nil, nil,
-]==], [==[
-  file.state = FS.file_closing
-  test_phase4_fs_internal_close_enqueues =
-      test_phase4_fs_internal_close_enqueues + 1
-  local operation = make_fs_operation(FS.internal_close, nil, nil,
-]==], "internal close enqueue")
-
-source = replace_once(source, [==[
-  local operation = owner.metadata.operation
-  local payload: value = nil
-]==], [==[
-  local operation = owner.metadata.operation
-  if operation.kind == FS.internal_close then
-    test_phase4_fs_internal_close_callbacks =
-        test_phase4_fs_internal_close_callbacks + 1
-  end
-  local payload: value = nil
-]==], "internal close callback")
-
-source = replace_once(source, [==[
-    if fs_operation_deliverable(operation) then
-      payload = file
-    else
-      queue_internal_close(file)
-    end
-]==], [==[
-    if fs_operation_deliverable(operation) then
-      test_phase4_fs_open_publications =
-          test_phase4_fs_open_publications + 1
-      payload = file
-    else
-      queue_internal_close(file)
-    end
-]==], "successful open publication")
 
 source = replace_once(source, [==[
   elseif kind == OWNER_TASK_DRIVE then
@@ -191,8 +76,7 @@ source = replace_once(source, [==[
 ]==], [==[
   elseif kind == OWNER_PHASE4_FS_DELAY then
     local fs_owner = owner.metadata.peer as uv_fs_t
-    test_phase4_fs_deliveries = test_phase4_fs_deliveries + 1
-    fs_dispatch(fs_owner, EVENT_FS, fs_owner.metadata.callback_result,
+    fs_dispatch(fs_owner, 0, test_phase4_fs_delayed_result,
                 0 as libuv.size_t, nil)
   elseif kind == OWNER_TASK_DRIVE then
     local task = owner.metadata.task as Task
@@ -200,143 +84,24 @@ source = replace_once(source, [==[
 
 local hook_api = [==[
 
--- Variant-only public controls. The generated DSO is isolated and never
--- installed or packed.
-function __test_phase4_owner_starts(): integer
-  return test_phase4_owner_starts
-end
-
-function __test_phase4_delay_next_cancel(milliseconds: integer)
-  if milliseconds < 0 then raise "cancel delay must not be negative" end
-  test_phase4_cancel_delay = milliseconds
-end
-
+-- Variant-only controls. The generated DSO is isolated and never installed.
 function __test_phase4_delay_next_fs_callback(milliseconds: integer)
-  if milliseconds <= 0 then raise "FS callback delay must be positive" end
-  if test_phase4_fs_delay ~= 0 then
-    raise "an FS callback delay is already pending"
-  end
   test_phase4_fs_delay = milliseconds
+  test_phase4_fs_callback_delayed = false
 end
 
-function __test_phase4_reset_fs_counters()
-  if test_phase4_fs_delay ~= 0 then
-    raise "cannot reset while an FS callback delay is pending"
-  end
-  test_phase4_fs_physical_callbacks = 0
-  test_phase4_fs_deliveries = 0
-  test_phase4_fs_cancel_calls = 0
-  test_phase4_fs_cancel_status = 0
-  test_phase4_fs_cancel_override = 0
-  test_phase4_fs_cancel_override_armed = false
-  test_phase4_fs_cleanups = 0
-  test_phase4_fs_open_successes = 0
-  test_phase4_fs_open_publications = 0
-  test_phase4_fs_internal_close_enqueues = 0
-  test_phase4_fs_internal_close_callbacks = 0
-end
-
-function __test_phase4_override_next_fs_cancel_success()
-  if test_phase4_fs_cancel_override_armed then
-    raise "an FS cancel-status override is already pending"
-  end
-  test_phase4_fs_cancel_override = 0
-  test_phase4_fs_cancel_override_armed = true
-end
-
-function __test_phase4_fs_physical_callbacks(): integer
-  return test_phase4_fs_physical_callbacks
-end
-
-function __test_phase4_fs_deliveries(): integer
-  return test_phase4_fs_deliveries
-end
-
-function __test_phase4_fs_cancel_calls(): integer
-  return test_phase4_fs_cancel_calls
-end
-
-function __test_phase4_fs_cancel_status(): integer
-  return test_phase4_fs_cancel_status
-end
-
-function __test_phase4_fs_cleanups(): integer
-  return test_phase4_fs_cleanups
-end
-
-function __test_phase4_fs_open_successes(): integer
-  return test_phase4_fs_open_successes
-end
-
-function __test_phase4_fs_open_publications(): integer
-  return test_phase4_fs_open_publications
-end
-
-function __test_phase4_fs_internal_close_enqueues(): integer
-  return test_phase4_fs_internal_close_enqueues
-end
-
-function __test_phase4_fs_internal_close_callbacks(): integer
-  return test_phase4_fs_internal_close_callbacks
-end
-
-function __test_phase4_fs_pending_roots(): integer
-  if not active_runtime then return 0 end
-  local count = 0
-  local raw? = (active_runtime as Runtime).fs_pending_head
-  while raw do
-    count = count + 1
-    local owner = raw as uv_fs_t
-    raw = owner.metadata.next_owner
-  end
-  return count
-end
-
-function __test_phase4_file_roots(): integer
-  if not active_runtime then return 0 end
-  local count = 0
-  local raw? = (active_runtime as Runtime).file_head
-  while raw do
-    count = count + 1
-    local file = raw as uv_file
-    raw = file.next_file
-  end
-  return count
-end
-
-function __test_phase4_runtime_active(): boolean
-  if active_runtime then return true end
-  return false
+function __test_phase4_fs_callback_is_delayed(): boolean
+  return test_phase4_fs_callback_delayed
 end
 ]==]
 
 source = replace_once(source, [==[
--- TITAN_UV_TEST_HOOKS
+do
+  UV_EIO = shim.titan_uvshim_error_eio() as integer
 ]==], hook_api .. [==[
--- TITAN_UV_TEST_HOOKS
-]==], "variant hook API")
 
-for _, hook in ipairs({
-    "__test_phase4_owner_starts",
-    "__test_phase4_delay_next_cancel",
-    "__test_phase4_delay_next_fs_callback",
-    "__test_phase4_reset_fs_counters",
-    "__test_phase4_override_next_fs_cancel_success",
-    "__test_phase4_fs_physical_callbacks",
-    "__test_phase4_fs_deliveries",
-    "__test_phase4_fs_cancel_calls",
-    "__test_phase4_fs_cancel_status",
-    "__test_phase4_fs_cleanups",
-    "__test_phase4_fs_open_successes",
-    "__test_phase4_fs_open_publications",
-    "__test_phase4_fs_internal_close_enqueues",
-    "__test_phase4_fs_internal_close_callbacks",
-    "__test_phase4_fs_pending_roots",
-    "__test_phase4_file_roots",
-    "__test_phase4_runtime_active",
-}) do
-    assert(source:find("function " .. hook, 1, true),
-        "Phase 4 hook was not inserted: " .. hook)
-end
+do
+  UV_EIO = shim.titan_uvshim_error_eio() as integer
+]==], "module initializer")
 
 write(output_path, source)

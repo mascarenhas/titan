@@ -820,6 +820,16 @@ static int pmain(lua_State *L) {
     char** argv = lua_touserdata(L, 2);
     int i;
 
+    /* Publish the original process arguments before loading the main module.
+    ** A transitive titan.uv import may pass them through uv_setup_args and
+    ** replace the argv pointer in the private registry slot. Keeping that call
+    ** in titan.uv leaves its canonical shared object as the sole libuv
+    ** provider. */
+    lua_pushinteger(L, argc);
+    lua_setfield(L, LUA_REGISTRYINDEX, TITAN_MAIN_ARGC_KEY);
+    lua_pushlightuserdata(L, argv);
+    lua_setfield(L, LUA_REGISTRYINDEX, TITAN_MAIN_ARGV_KEY);
+
     /* Requiring the main module first initializes every transitive import. An
     ** async standard module may install the private bootstrap hook while that
     ** happens, but it must not change which main callable this executable
@@ -831,6 +841,12 @@ static int pmain(lua_State *L) {
     lua_call(L, 1, 1);
     lua_getfield(L, -1, "main");
     lua_remove(L, -2);                 /* leave the main callable */
+
+    /* uv_setup_args may return replacement storage. Use the pointer published
+    ** by titan.uv when constructing the Titan argument table. */
+    lua_getfield(L, LUA_REGISTRYINDEX, TITAN_MAIN_ARGV_KEY);
+    argv = lua_touserdata(L, -1);
+    lua_pop(L, 1);
 
     lua_createtable(L, argc, 0);
     for (i = 0; i < argc; i++) {

@@ -70,7 +70,7 @@ of an opaque record:
 record uv_timer_t
   local handle: *uv.uv_timer_t
   local storage: value
-  -- six more local owner fields
+  -- four more local owner fields
 end
 ```
 
@@ -105,24 +105,22 @@ type. Runtime lists, FIFO links, waiters, operation-specific roots, and helper
 references therefore keep their record identity in the static type instead of
 revalidating it at every traversal.
 
-Each callback owner has eight stable record/uservalue slots: native pointer,
-storage, main Lua thread, module Udata, dispatcher closure, Task/resource root,
-operation metadata, and an additional buffer/resource root. The C shim uses
-the corresponding zero-based indices. Timer, process-grace, and shutdown
-owners never need the final buffer/resource slot; they retain that ABI slot, but type it as
-`nil` instead of widening the placeholder to `value`.
-Filesystem owners type the same slot as `Buffer?`; their path is already rooted
-through exact operation metadata, and the slot becomes populated only for a
-submitted read or write buffer.
-Pipe and TCP owners keep the slot as `value` because the native allocation
-callback consumes the raw full userdata directly. Process owners likewise use
-it briefly for opaque synchronous-close request storage.
+Each callback owner has six stable record/uservalue slots: native pointer,
+storage, the module-cached main Lua thread, dispatcher closure, operation
+metadata, and family-specific native I/O storage. The C shim uses the
+corresponding zero-based indices and recovers the module Udata from the
+dispatcher closure's first upvalue. Metadata already roots each Task, resource,
+or operation graph, so owners carry no duplicate root slot. Timer, signal,
+process, process-grace, DNS, connect, and shutdown owners type the final slot as
+`nil`. Filesystem and write-request owners retain their submitted `Buffer?`
+there, while Pipe and TCP handles keep a `value` because the native allocation
+callback consumes the raw full userdata directly.
 
 ## Runtime and continuation graph
 
-One `uv` module instance owns one private coroutine tag and at most one active
-Runtime. A Runtime contains a Titan-owned private `uv_loop_t`, the main Lua
-thread, separate linked lists for timer and signal owners, pending
+One `uv` module instance owns one private coroutine tag, caches the main Lua
+thread once, and has at most one active Runtime. A Runtime contains a
+Titan-owned private `uv_loop_t`, separate linked lists for timer and signal owners, pending
 filesystem/network/process requests, persistent Files, TCP resources and
 Process controls, and Tasks, the currently running Task, and the first fatal
 error/trace. The lists reflect different terminal events: handle close,
@@ -134,8 +132,9 @@ but allocate a fresh loop and generation.
 callback drives the root coroutine until it finishes or yields a private
 Request with the shared tag. The dispatcher validates the Task epoch and
 either registers the new owner or iteratively injects an immediate submission
-error. Consecutive immediate failures are bounded and deferred through a zero
-timer so one callback cannot spin indefinitely.
+error. Immediate results continue in that callback until the Task either
+finishes or submits an operation that actually waits; `timer.yield()` is the
+explicit way for user code to cede to a new loop turn.
 
 Joiners are linked to the target and woken by independent zero-timer callbacks.
 An observer count is acquired only while a join is pending. Observation becomes
@@ -155,7 +154,7 @@ binary.
 
 For reads and writes, `submit_fs_operation` finishes every allocating buffer
 copy/descriptor preparation and roots it through the logical operation before
-it allocates and publishes an eight-field `uv_fs_t` owner. It also validates
+it allocates and publishes a six-field `uv_fs_t` owner. It also validates
 the private operation kind and caches the exact loop, path, descriptor, and
 buffer arguments first. After publication, no Titan record cast or error path
 can run before the public `uv_fs_*` call. Thus an OOM, buffer-validation error,
@@ -170,17 +169,17 @@ The filesystem callback records its terminal state before allocating a result.
 It copies read bytes, stat fields, or scandir names while request-owned pointers
 are valid, calls `uv_fs_req_cleanup`, updates File bookkeeping, and only then
 drives user code. The direct native `fs_dispatch` is intentionally thin: it
-installs its trailing Titan catch, records the callback result and any
-successfully opened descriptor without allocating, then calls the allocating
+installs its trailing Titan catch, records any successfully opened descriptor
+without allocating, then calls the allocating
 dispatcher body. If even body-entry GC, extraction, or bookkeeping raises, the
 catch performs any still-needed
 non-allocating request cleanup, records the first Runtime failure, stops the
-loop, records the callback result as needing logical repair, and returns through
+loop, marks the callback as needing logical repair, and returns through
 libuv. The outer loop safe point repairs a completed File's current/FIFO state
 before retiring its cleaned owner. It also converts a successfully opened but
-undelivered descriptor into an internal close operation. A physical close that
-reached the catch is distinguished from a failed close, so it is never
-submitted twice; a failed close remains rooted for an internal retry.
+undelivered descriptor into an internal close operation. A close callback is
+terminal whether it succeeds or reports an error: retrying `close` could act on
+a descriptor number the OS has already reused.
 
 Each persistent File owns one logical FIFO. Only its head can own a submitted
 request. A partial `uv_fs_write` is resubmitted from the same logical operation
@@ -196,12 +195,8 @@ operations. The close request remains behind operations already in the FIFO;
 additional close callers wait on the same physical request. A successful close
 invalidates the descriptor, marks the File closed, wakes other close waiters
 through task-specific callbacks, and removes the Runtime root. A failed close
-is retried internally, but the retry chain is bounded. If every attempt fails,
-the Runtime records the close error, finishes draining unrelated owners, closes
-the now-idle libuv loop, and retains the failed File/Runtime instead of spinning
-inside `UV_RUN_DEFAULT` or pretending that the descriptor was released. Later
-work is rejected and another `uv.loop()` reports the saved failure without
-re-entering libuv.
+also invalidates the wrapper and reports that one error to the waiting Task, or
+to the Runtime for an internal shutdown close. It is never submitted again.
 
 `stat` uses public `uv_fs_stat`, which follows symbolic links. The narrow shim
 copies the portable `uv_stat_t` size, mode, and modification fields and
@@ -214,14 +209,31 @@ POSIX `open`, `read`, `write`, or `close` fallback.
 The `os.so` facade contains no foreign import. Its `_os_*` calls cross the
 binary-only boundary into canonical `titan/uv.so`, which invokes public `uv_os_*`,
 `uv_cwd`/`uv_chdir`, and `uv_exepath` APIs. Variable-size text results use
-Titan-owned byte storage and checked growth. `UV_ENOSYS` is reported as an
-ordinary `uv.Error`; there is no hidden POSIX fallback.
+Titan-owned byte storage. A generic helper accepts the libuv buffer function
+and an error-construction closure, keeps both the capacity and returned length
+as `size_t`, and starts with a 256-byte GC-owned buffer. `UV_ENOBUFS` recurses
+with the exact capacity reported through libuv's size pointer; success passes
+that `size_t` directly to `lua_pushlstring`. `uv_os_getenv` additionally maps
+`UV_ENOENT` to `nil`. Other failures become ordinary `uv.Error` values; there
+is no hidden POSIX fallback or private checked-growth policy.
 
-On the supported Linux and macOS implementations, `uv_exepath` reports success
-even when its result filled the entire payload capacity. The runtime treats
-that saturated result as ambiguous and retries with a larger GC-owned buffer.
-Those two implementations do not consult `uv_setup_args`; adding another host
-would require auditing that host's public `uv_exepath` prerequisite first.
+The supported Linux and macOS `uv_exepath` implementations signal truncation
+as a successful result whose reported length saturates `capacity - 1`, rather
+than returning `UV_ENOBUFS`. Its small adapter translates only that result to
+`UV_ENOBUFS` and supplies twice the previous capacity, after which the same
+recursive helper handles the retry. There is no retry loop, attempt limit, or
+fault-injection growth hook.
+
+Libuv's public `uv_exepath` contract requires `uv_setup_args` to run once at
+process startup. Before requiring the compiled main module, Titan's generated
+entrypoint publishes its original `argc` and `argv` under private registry
+keys. If `titan.uv` sees those keys during module initialization, this canonical
+provider calls `uv_setup_args` exactly once, writes libuv's possibly replaced
+`argv` pointer back to the registry, and records readiness in a module-local
+boolean. The entrypoint rereads that pointer before constructing the Titan
+argument table. A Lua or other embedding host has no published arguments, so
+the provider skips setup and `os.exepath` raises instead of calling libuv
+outside its documented prerequisite.
 
 A one-shot signal wait uses GC-owned `uv_signal_t` storage and the same fixed
 owner layout as other callback handles. Host signal-number mapping is isolated
@@ -235,19 +247,15 @@ a stale signal.
 
 `os.spawn` copies the executable and every argument into rooted NUL-terminated
 GC storage, then builds a GC-owned `char *` array containing `argv[0]`, the
-caller arguments, and the final `NULL`. Before acquiring a descriptor it also
-allocates the process, three pipe owners, descriptor/filler arrays, and one
-GC-owned `uv_fs_t` used for synchronous raw-descriptor cleanup. From the first
-descriptor acquisition through that cleanup, the submission frame performs no
-Titan allocation.
+caller arguments, and the final `NULL`. It allocates the process and three
+GC-owned pipe owners, initializes each with public `uv_pipe_init`, and passes
+their handles to the spawn shim.
 
-The shim creates anonymous pipes through public `uv_pipe`. It temporarily
-retains filler pairs containing descriptors 0, 1, or 2, ensuring a libuv pipe
-handle never owns a descriptor that libuv's Unix stream-close path treats as
-stdio. The three child ends are passed to `uv_spawn` as exactly three valid
-`UV_INHERIT_FD` entries; the parent ends are opened into GC-owned `uv_pipe_t`
-handles. Titan closes every still-caller-owned child end and filler through
-public synchronous `uv_fs_close` plus `uv_fs_req_cleanup`. There is no POSIX
+The shim describes stdin as `UV_CREATE_PIPE | UV_READABLE_PIPE` and stdout and
+stderr as `UV_CREATE_PIPE | UV_WRITABLE_PIPE`. Public `uv_spawn` therefore
+creates and opens the parent endpoints itself; Titan never manages raw pipe
+descriptors or child ends. A failed initialization or spawn closes every
+initialized handle through the ordinary libuv callback path. There is no POSIX
 `pipe`, `dup`, or `close` fallback.
 
 `ProcessControl`, `PipeControl`, `ProcessOperation`, and
@@ -259,9 +267,7 @@ records the exit code and termination signal, closes stdin, and starts
 `uv_close` on the process; only the process close callback publishes the
 retained result to a waiter. An ordinary negative `uv_spawn` result owes no
 exit callback, but the initialized process and pipe handles are closed before
-the spawn error reaches user code. If spawn itself succeeded but later
-caller-owned descriptor cleanup failed, the unpublished child is terminated,
-reaped, and drained before the setup error is delivered.
+the spawn error reaches user code.
 
 Stdin writes have a per-pipe FIFO of logical operations. A submitted
 `uv_write_t`, its `uv_buf_t`, and copied binary payload remain rooted through
@@ -291,8 +297,9 @@ stdin/stdout/stderr pipe deadlock that a series of ordinary joins would allow.
 
 `titan-runtime/titan_uv.c` recovers a rooted timer, signal, filesystem, DNS,
 stream, pipe, write-request, or process owner through public libuv data
-accessors, reads its main-thread/module/dispatcher slots, obtains the native
-Titan function pointer, and calls:
+accessors, reads its main-thread and dispatcher slots, recovers the module from
+the dispatcher's first upvalue, obtains the native Titan function pointer, and
+calls:
 
 ```c
 dispatch(L, M, NULL, owner, event_kind, result, size, pointer);
@@ -373,41 +380,36 @@ early.
 The outer driver repairs late successful opens and aborted process/pipe
 callbacks and drains all filesystem, network, and process request callbacks
 and cleanups. Normally it continues until the timer, signal, request, File,
-TCP, Process, pipe, and process-request root lists are empty. If
-bounded descriptor-close retries are exhausted,
-only those failed File roots remain; the idle loop is still closed, while the
-terminal Runtime retains the wrappers and rejects reuse. An
-unexpected `UV_EBUSY` uses public `uv_walk` and handle-type accessors to report
-the remaining count/type rather than hanging on an unknown active handle; the
-busy loop root is preserved rather than risking native use-after-free.
-The known-owner drain also detects consecutive idle passes and preserves its
-remaining roots while reporting `shutdown.no-progress`, rather than spinning
-forever if future bookkeeping violates a lifecycle invariant.
+TCP, Process, pipe, and process-request root lists are empty. An unexpected
+nonzero `uv_loop_close` status becomes the `loop.close` failure, and the busy
+loop root is preserved rather than risking native use-after-free.
+If `uv_run` reports no live work while known owners remain, the driver preserves
+those roots and reports `shutdown.no-progress` instead of running the same idle
+loop again.
 
 ## Bootstrap and tests
 
-Module initialization installs an idempotent registry bootstrap. The generated
+Module initialization stores its private registry bootstrap. The generated
 standalone entrypoint loads imports first, then calls that hook under its
 existing outer protected entry. Programs without the hook retain direct
 synchronous `main`.
 
-The focused suites cover source and binary interfaces, native
-timer/FS/network/signal/process/pipe owner layout, direct callbacks, callback
-depth/main-thread dispatch, Task and timer behavior, filesystem and network
+The focused suites cover source and binary interfaces, direct callback
+continuations, Task and timer behavior, filesystem and network
 binary data, portable OS helpers, one-shot signals, child argv/environment/cwd,
 retained exit status, binary stdio FIFO, replaceable wait/read cancellation,
 deadlock-free `communicate`, TERM-resistant shutdown, FIFO/close state
-machines, path operations, pre-submission allocation and bounded-close faults,
-failed-spawn and exit-before-close ordering, callback repair, observed helper
-failure, request cleanup/cancellation faults, trace propagation, GC, sequential
-sessions, standalone bootstrap, canonical installed DSOs, source-rock
-deployment, and
+machines, path operations, failed-spawn and exit-before-close ordering,
+observed helper failure, trace propagation, GC, sequential sessions,
+standalone bootstrap, canonical installed DSOs, source-rock deployment, and
 bundled/system libuv topology. Linux CI also rebuilds Lua, libbacktrace, libuv,
 the Titan runtime, and standard modules under ASan/UBSan, then runs
 representative timer/FS and core owner/callback suites plus production net/OS
-smokes. Exhaustive transformed fault variants remain in regular Linux CI; the
-sanitizer net smoke specifically keeps a large write pending across Task
-cancellation, unwind, and forced GC. Its
+smokes. Regular Linux runs the complete production behavior suites; the sole
+isolated source variant delays selected Phase 4 FS callbacks to cover late
+cancellation, disposal of a late successful open, and cross-generation
+Runtime/File/Task/buffer/error rooting. The sanitizer net smoke specifically
+keeps a large write pending across Task cancellation, unwind, and forced GC. Its
 stack-use-after-return coverage relies on `minicoro.h` announcing every native
 coroutine stack switch to the ASan fiber API, including tagged and stacked
 terminal transfers. The main-stack fake-stack token, bottom, and size live in

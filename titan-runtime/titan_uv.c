@@ -27,15 +27,9 @@ TITAN_UV_STATIC_ASSERT(storage_slot,
 TITAN_UV_STATIC_ASSERT(main_thread_slot,
                        TITAN_UV_OWNER_MAIN_THREAD_LUA_SLOT - 1 ==
                            TITAN_UV_OWNER_MAIN_THREAD_C_INDEX);
-TITAN_UV_STATIC_ASSERT(module_slot,
-                       TITAN_UV_OWNER_MODULE_LUA_SLOT - 1 ==
-                           TITAN_UV_OWNER_MODULE_C_INDEX);
 TITAN_UV_STATIC_ASSERT(dispatcher_slot,
                        TITAN_UV_OWNER_DISPATCHER_LUA_SLOT - 1 ==
                            TITAN_UV_OWNER_DISPATCHER_C_INDEX);
-TITAN_UV_STATIC_ASSERT(root_slot,
-                       TITAN_UV_OWNER_ROOT_LUA_SLOT - 1 ==
-                           TITAN_UV_OWNER_ROOT_C_INDEX);
 TITAN_UV_STATIC_ASSERT(metadata_slot,
                        TITAN_UV_OWNER_METADATA_LUA_SLOT - 1 ==
                            TITAN_UV_OWNER_METADATA_C_INDEX);
@@ -81,19 +75,21 @@ typedef void (*titan_uv_dispatch_func)(lua_State *L, Udata *_mod,
                                        lua_Integer result, size_t size,
                                        void *pointer);
 
+static void titan_uvshim_close_cb(uv_handle_t *handle);
+
 /*
- * The Runtime pending/resource table strongly roots owner while libuv can call
- * us.  These fixed fields are therefore trusted in exactly the same way as the
- * four fixed coroutine-owner fields read by titan_coro_entry.
+ * The Runtime-owned owner/resource graph strongly roots owner while libuv can
+ * call us.  These fixed fields are therefore trusted in exactly the same way
+ * as the four fixed coroutine-owner fields read by titan_coro_entry.
  */
 static void titan_uvshim_dispatch(Udata *owner, lua_Integer event_kind,
                                   lua_Integer result, size_t size,
                                   void *pointer) {
   lua_State *L =
       thvalue(&owner->uv[TITAN_UV_OWNER_MAIN_THREAD_C_INDEX].uv);
-  Udata *M = uvalue(&owner->uv[TITAN_UV_OWNER_MODULE_C_INDEX].uv);
   CClosure *dispatcher =
       clCvalue(&owner->uv[TITAN_UV_OWNER_DISPATCHER_C_INDEX].uv);
+  Udata *M = uvalue(&dispatcher->upvalue[0]);
   titan_uv_dispatch_func dispatch =
       titan_cast_func(titan_uv_dispatch_func,
                       pvalue(&dispatcher->upvalue[2]));
@@ -221,11 +217,8 @@ int64_t titan_uvshim_addrinfo_count(const void *result) {
   int64_t count = 0;
 
   while (entry != NULL) {
-    if (titan_uvshim_addrinfo_is_usable(entry)) {
-      if (count == INT64_MAX)
-        return UV_EOVERFLOW;
+    if (titan_uvshim_addrinfo_is_usable(entry))
       count++;
-    }
     entry = entry->ai_next;
   }
   return count;
@@ -272,17 +265,8 @@ int titan_uvshim_tcp_init(uv_loop_t *loop, uv_tcp_t *tcp, void *data) {
   return status;
 }
 
-int titan_uvshim_tcp_is_closing(const uv_tcp_t *tcp) {
-  return uv_is_closing((const uv_handle_t *)tcp);
-}
-
 void titan_uvshim_tcp_close(uv_tcp_t *tcp) {
   uv_close((uv_handle_t *)tcp, titan_uvshim_close_cb);
-}
-
-int titan_uvshim_tcp_close_reset(uv_tcp_t *tcp) {
-  assert(tcp != NULL);
-  return uv_tcp_close_reset(tcp, titan_uvshim_close_cb);
 }
 
 int titan_uvshim_tcp_bind(uv_tcp_t *tcp,
@@ -293,22 +277,6 @@ int titan_uvshim_tcp_bind(uv_tcp_t *tcp,
   assert(tcp != NULL);
   assert(address != NULL);
   return uv_tcp_bind(tcp, address, 0);
-}
-
-int titan_uvshim_tcp_bound_port(const uv_tcp_t *tcp) {
-  struct sockaddr_storage address;
-  int length = sizeof(address);
-  int status;
-
-  assert(tcp != NULL);
-  status = uv_tcp_getsockname(tcp, (struct sockaddr *)&address, &length);
-  if (status < 0)
-    return status;
-  if (address.ss_family == AF_INET)
-    return ntohs(((const struct sockaddr_in *)&address)->sin_port);
-  if (address.ss_family == AF_INET6)
-    return ntohs(((const struct sockaddr_in6 *)&address)->sin6_port);
-  return UV_EAFNOSUPPORT;
 }
 
 int titan_uvshim_tcp_listen(uv_tcp_t *tcp, int64_t backlog) {
@@ -373,76 +341,6 @@ int titan_uvshim_tcp_shutdown_start(uv_shutdown_t *req,
   return uv_shutdown(req, (uv_stream_t *)tcp, titan_uvshim_shutdown_cb);
 }
 
-enum { TITAN_UV_LAST_STDIO_FD = 2 };
-
-static int titan_uvshim_pair_contains_stdio(const int pair[2]) {
-  return pair[0] <= TITAN_UV_LAST_STDIO_FD ||
-         pair[1] <= TITAN_UV_LAST_STDIO_FD;
-}
-
-static void titan_uvshim_store_pair(int *storage,
-                                    int *count,
-                                    const int pair[2]) {
-  storage[*count] = pair[0];
-  storage[*count + 1] = pair[1];
-  *count += 2;
-}
-
-int titan_uvshim_stdio_pipes(int *endpoints,
-                             int *fillers) {
-  int endpoint_count = 0;
-  int filler_count = 0;
-  int pair[2];
-  int status;
-  int index;
-
-  assert(endpoints != NULL);
-  assert(fillers != NULL);
-  for (index = 0; index < TITAN_UV_STDIO_ENDPOINT_COUNT; index++)
-    endpoints[index] = -1;
-  for (index = 0; index < TITAN_UV_STDIO_FILLER_CAPACITY; index++)
-    fillers[index] = -1;
-
-  /*
-   * POSIX assigns the lowest available descriptors to each public uv_pipe()
-   * call.  Keeping both ends of a low candidate open fills fd 0..2 in at most
-   * two pairs when the process descriptor table is not racing.  A third low
-   * candidate is still returned to the caller for cleanup, then diagnosed.
-   */
-  for (;;) {
-    status = uv_pipe(pair, 0, UV_NONBLOCK_PIPE);
-    if (status < 0)
-      return status;
-    if (!titan_uvshim_pair_contains_stdio(pair)) {
-      titan_uvshim_store_pair(endpoints, &endpoint_count, pair);
-      break;
-    }
-    titan_uvshim_store_pair(fillers, &filler_count, pair);
-    if (filler_count > TITAN_UV_STDIO_FILLER_CAPACITY - 2)
-      return UV_EBUSY;
-  }
-
-  status = uv_pipe(pair, UV_NONBLOCK_PIPE, 0);
-  if (status < 0)
-    return status;
-  if (titan_uvshim_pair_contains_stdio(pair)) {
-    titan_uvshim_store_pair(fillers, &filler_count, pair);
-    return UV_EBUSY;
-  }
-  titan_uvshim_store_pair(endpoints, &endpoint_count, pair);
-
-  status = uv_pipe(pair, UV_NONBLOCK_PIPE, 0);
-  if (status < 0)
-    return status;
-  if (titan_uvshim_pair_contains_stdio(pair)) {
-    titan_uvshim_store_pair(fillers, &filler_count, pair);
-    return UV_EBUSY;
-  }
-  titan_uvshim_store_pair(endpoints, &endpoint_count, pair);
-  assert(endpoint_count == TITAN_UV_STDIO_ENDPOINT_COUNT);
-  return 0;
-}
-
 int titan_uvshim_pipe_init(uv_loop_t *loop,
                            uv_pipe_t *pipe,
                            void *data) {
@@ -453,25 +351,6 @@ int titan_uvshim_pipe_init(uv_loop_t *loop,
   status = uv_pipe_init(loop, pipe, 0);
   if (status == 0)
     uv_handle_set_data((uv_handle_t *)pipe, data);
-  return status;
-}
-
-int titan_uvshim_pipe_open(uv_pipe_t *pipe,
-                           int *endpoints,
-                           int index) {
-  int *fd;
-  int status;
-  assert(pipe != NULL);
-  assert(endpoints != NULL);
-  assert(index >= 0 && index < TITAN_UV_STDIO_ENDPOINT_COUNT);
-  assert(index == TITAN_UV_STDIO_STDIN_PARENT ||
-         index == TITAN_UV_STDIO_STDOUT_PARENT ||
-         index == TITAN_UV_STDIO_STDERR_PARENT);
-  fd = &endpoints[index];
-  assert(*fd > TITAN_UV_LAST_STDIO_FD);
-  status = uv_pipe_open(pipe, *fd);
-  if (status == 0)
-    *fd = -1;
   return status;
 }
 
@@ -499,10 +378,6 @@ int titan_uvshim_pipe_write_start(uv_write_t *req,
                   titan_uvshim_write_cb);
 }
 
-int titan_uvshim_pipe_is_closing(const uv_pipe_t *pipe) {
-  return uv_is_closing((const uv_handle_t *)pipe);
-}
-
 void titan_uvshim_pipe_close(uv_pipe_t *pipe) {
   uv_close((uv_handle_t *)pipe, titan_uvshim_close_cb);
 }
@@ -511,7 +386,9 @@ int titan_uvshim_process_spawn(uv_loop_t *loop,
                                uv_process_t *process,
                                void *data,
                                titan_uvshim_char_ptr *argv,
-                               const int *endpoints) {
+                               uv_pipe_t *stdin_pipe,
+                               uv_pipe_t *stdout_pipe,
+                               uv_pipe_t *stderr_pipe) {
   uv_process_options_t options;
   uv_stdio_container_t stdio[3];
   int status;
@@ -521,19 +398,18 @@ int titan_uvshim_process_spawn(uv_loop_t *loop,
   assert(data != NULL);
   assert(argv != NULL);
   assert(argv[0] != NULL);
-  assert(endpoints != NULL);
-  assert(endpoints[TITAN_UV_STDIO_STDIN_CHILD] > TITAN_UV_LAST_STDIO_FD);
-  assert(endpoints[TITAN_UV_STDIO_STDOUT_CHILD] > TITAN_UV_LAST_STDIO_FD);
-  assert(endpoints[TITAN_UV_STDIO_STDERR_CHILD] > TITAN_UV_LAST_STDIO_FD);
+  assert(stdin_pipe != NULL);
+  assert(stdout_pipe != NULL);
+  assert(stderr_pipe != NULL);
 
   memset(&options, 0, sizeof(options));
   memset(stdio, 0, sizeof(stdio));
-  stdio[0].flags = UV_INHERIT_FD;
-  stdio[0].data.fd = endpoints[TITAN_UV_STDIO_STDIN_CHILD];
-  stdio[1].flags = UV_INHERIT_FD;
-  stdio[1].data.fd = endpoints[TITAN_UV_STDIO_STDOUT_CHILD];
-  stdio[2].flags = UV_INHERIT_FD;
-  stdio[2].data.fd = endpoints[TITAN_UV_STDIO_STDERR_CHILD];
+  stdio[0].flags = UV_CREATE_PIPE | UV_READABLE_PIPE;
+  stdio[0].data.stream = (uv_stream_t *)stdin_pipe;
+  stdio[1].flags = UV_CREATE_PIPE | UV_WRITABLE_PIPE;
+  stdio[1].data.stream = (uv_stream_t *)stdout_pipe;
+  stdio[2].flags = UV_CREATE_PIPE | UV_WRITABLE_PIPE;
+  stdio[2].data.stream = (uv_stream_t *)stderr_pipe;
   options.exit_cb = titan_uvshim_process_exit_cb;
   options.file = argv[0];
   options.args = argv;
@@ -542,47 +418,17 @@ int titan_uvshim_process_spawn(uv_loop_t *loop,
   options.stdio_count = 3;
   options.stdio = stdio;
 
-  /*
-   * Exactly three valid UV_INHERIT_FD entries use libuv's stack stdio array;
-   * init_stdio cannot reject them and open_stream is a no-op.  On supported
-   * Linux/desktop-macOS every uv_spawn return therefore follows process.c's
-   * ordinary return path, where the process handle is initialized and
-   * closeable even when uv_spawn returns an error.
-   * Inherit entries remain caller-owned on both success and failure.
-   */
   status = uv_spawn(loop, process, &options);
   uv_handle_set_data((uv_handle_t *)process, data);
   return status;
-}
-
-int titan_uvshim_process_kill(uv_process_t *process, int signum) {
-  assert(process != NULL);
-  return uv_process_kill(process, signum);
-}
-
-int64_t titan_uvshim_process_get_pid(const uv_process_t *process) {
-  assert(process != NULL);
-  return (int64_t)uv_process_get_pid(process);
-}
-
-int titan_uvshim_process_is_closing(const uv_process_t *process) {
-  return uv_is_closing((const uv_handle_t *)process);
 }
 
 void titan_uvshim_process_close(uv_process_t *process) {
   uv_close((uv_handle_t *)process, titan_uvshim_close_cb);
 }
 
-int titan_uvshim_status_is_esrch(int status) {
-  return status == UV_ESRCH;
-}
-
 void titan_uvshim_timer_set_data(uv_timer_t *timer, void *data) {
   uv_handle_set_data((uv_handle_t *)timer, data);
-}
-
-void *titan_uvshim_timer_get_data(const uv_timer_t *timer) {
-  return uv_handle_get_data((const uv_handle_t *)timer);
 }
 
 int titan_uvshim_timer_is_closing(const uv_timer_t *timer) {
@@ -593,29 +439,12 @@ void titan_uvshim_timer_close(uv_timer_t *timer) {
   uv_close((uv_handle_t *)timer, titan_uvshim_close_cb);
 }
 
-void titan_uvshim_timer_close_discard(uv_timer_t *timer) {
-  uv_close((uv_handle_t *)timer, NULL);
-}
-
 void titan_uvshim_fs_set_data(uv_fs_t *req, void *data) {
   uv_req_set_data((uv_req_t *)req, data);
 }
 
-void *titan_uvshim_fs_get_data(const uv_fs_t *req) {
-  return uv_req_get_data((const uv_req_t *)req);
-}
-
 int titan_uvshim_fs_cancel(uv_fs_t *req) {
   return uv_cancel((uv_req_t *)req);
-}
-
-int titan_uvshim_fs_scandir_next(uv_fs_t *req, void *opaque_entry) {
-  int status = uv_fs_scandir_next(req, (uv_dirent_t *)opaque_entry);
-  return status == UV_EOF ? 1 : status;
-}
-
-const char *titan_uvshim_dirent_name(const void *opaque_entry) {
-  return ((const uv_dirent_t *)opaque_entry)->name;
 }
 
 int titan_uvshim_error_eio(void) {
@@ -638,28 +467,16 @@ int titan_uvshim_error_einval(void) {
   return UV_EINVAL;
 }
 
-int titan_uvshim_error_eoverflow(void) {
-  return UV_EOVERFLOW;
+int titan_uvshim_error_enobufs(void) {
+  return UV_ENOBUFS;
 }
 
-int titan_uvshim_error_enosys(void) {
-  return UV_ENOSYS;
+int titan_uvshim_error_enoent(void) {
+  return UV_ENOENT;
 }
 
-int titan_uvshim_status_is_enobufs(int status) {
-  return status == UV_ENOBUFS;
-}
-
-int titan_uvshim_status_is_enoent(int status) {
-  return status == UV_ENOENT;
-}
-
-int64_t titan_uvshim_size_as_int64(size_t size) {
-#if SIZE_MAX > INT64_MAX
-  if (size > (size_t)INT64_MAX)
-    return -1;
-#endif
-  return (int64_t)size;
+int titan_uvshim_error_esrch(void) {
+  return UV_ESRCH;
 }
 
 int titan_uvshim_signal_number(const char *name) {
@@ -699,10 +516,6 @@ const char *titan_uvshim_signal_name(int signum) {
   return NULL;
 }
 
-int titan_uvshim_signal_is_waitable(int signum) {
-  return signum != SIGKILL && titan_uvshim_signal_name(signum) != NULL;
-}
-
 int titan_uvshim_signal_init(uv_loop_t *loop,
                              uv_signal_t *signal,
                              void *data) {
@@ -718,17 +531,9 @@ int titan_uvshim_signal_init(uv_loop_t *loop,
 
 int titan_uvshim_signal_start_oneshot(uv_signal_t *signal, int signum) {
   assert(signal != NULL);
-  assert(titan_uvshim_signal_is_waitable(signum));
+  assert(signum != SIGKILL);
+  assert(titan_uvshim_signal_name(signum) != NULL);
   return uv_signal_start_oneshot(signal, titan_uvshim_signal_cb, signum);
-}
-
-int titan_uvshim_signal_stop(uv_signal_t *signal) {
-  assert(signal != NULL);
-  return uv_signal_stop(signal);
-}
-
-int titan_uvshim_signal_is_closing(const uv_signal_t *signal) {
-  return uv_is_closing((const uv_handle_t *)signal);
 }
 
 void titan_uvshim_signal_close(uv_signal_t *signal) {
@@ -740,7 +545,7 @@ void titan_uvshim_timer_cb(uv_timer_t *timer) {
   titan_uvshim_dispatch(owner, TITAN_UV_EVENT_TIMER, 0, 0, NULL);
 }
 
-void titan_uvshim_close_cb(uv_handle_t *handle) {
+static void titan_uvshim_close_cb(uv_handle_t *handle) {
   Udata *owner = (Udata *)uv_handle_get_data(handle);
   titan_uvshim_dispatch(owner, TITAN_UV_EVENT_HANDLE_CLOSE, 0, 0, NULL);
 }
@@ -751,27 +556,13 @@ void titan_uvshim_fs_cb(uv_fs_t *req) {
   titan_uvshim_dispatch(owner, TITAN_UV_EVENT_FS, result, 0, NULL);
 }
 
-void titan_uvshim_buf_init(void *buf, char *base, int64_t len) {
-  uv_buf_t *uvbuf = (uv_buf_t *)buf;
-
-  assert(uvbuf != NULL);
-  assert(len >= 0 && (uint64_t)len <= UINT_MAX);
-  assert(base != NULL || len == 0);
-  *uvbuf = uv_buf_init(base, (unsigned int)len);
-}
-
-int titan_uvshim_allocation_length_is_valid(int64_t length) {
-  const size_t maximum_userdata = MAX_SIZE - udatamemoffset(0);
-  return length >= 0 && (uint64_t)length <= maximum_userdata;
-}
-
-int titan_uvshim_buf_length_is_valid(int64_t length) {
-  return titan_uvshim_allocation_length_is_valid(length) &&
-         (uint64_t)length <= UINT_MAX;
+int64_t titan_uvshim_buf_max_length(void) {
+  return UINT_MAX;
 }
 
 void titan_uvshim_buf_init_slice(void *buf, char *base, int64_t offset,
                                  int64_t length) {
+  uv_buf_t *uvbuf = (uv_buf_t *)buf;
   char *slice;
 
   assert(buf != NULL);
@@ -781,7 +572,7 @@ void titan_uvshim_buf_init_slice(void *buf, char *base, int64_t offset,
   assert((uint64_t)length <= UINT_MAX);
   assert(base != NULL || (offset == 0 && length == 0));
   slice = base == NULL ? NULL : base + offset;
-  titan_uvshim_buf_init(buf, slice, length);
+  *uvbuf = uv_buf_init(slice, (unsigned int)length);
 }
 
 void titan_uvshim_bytes_copy(char *destination, const char *source,
@@ -845,9 +636,9 @@ void titan_uvshim_text_copy(char *destination, const char *source,
   destination[length] = '\0';
 }
 
-int titan_uvshim_stat_extract(const void *opaque_statbuf, int64_t *size,
-                              int64_t *mode, int64_t *modified_seconds,
-                              int64_t *modified_nanoseconds, int *kind) {
+void titan_uvshim_stat_extract(const void *opaque_statbuf, int64_t *size,
+                               int64_t *mode, int64_t *modified_seconds,
+                               int64_t *modified_nanoseconds, int *kind) {
   const uv_stat_t *statbuf = (const uv_stat_t *)opaque_statbuf;
 
   assert(statbuf != NULL);
@@ -856,10 +647,6 @@ int titan_uvshim_stat_extract(const void *opaque_statbuf, int64_t *size,
   assert(modified_seconds != NULL);
   assert(modified_nanoseconds != NULL);
   assert(kind != NULL);
-  if (statbuf->st_size > INT64_MAX || statbuf->st_mode > INT64_MAX) {
-    return UV_EOVERFLOW;
-  }
-
   *size = (int64_t)statbuf->st_size;
   *mode = (int64_t)statbuf->st_mode;
   *modified_seconds = statbuf->st_mtim.tv_sec;
@@ -873,39 +660,4 @@ int titan_uvshim_stat_extract(const void *opaque_statbuf, int64_t *size,
   } else {
     *kind = TITAN_UV_STAT_OTHER;
   }
-  return 0;
-}
-
-struct titan_uv_walk_summary {
-  int count;
-  uv_handle_type first_type;
-};
-
-static void titan_uvshim_walk_summary_cb(uv_handle_t *handle, void *arg) {
-  struct titan_uv_walk_summary *summary =
-      (struct titan_uv_walk_summary *)arg;
-  if (summary->count == 0)
-    summary->first_type = uv_handle_get_type(handle);
-  summary->count++;
-}
-
-static struct titan_uv_walk_summary titan_uvshim_walk_summary(
-    uv_loop_t *loop) {
-  struct titan_uv_walk_summary summary = {0, UV_UNKNOWN_HANDLE};
-  uv_walk(loop, titan_uvshim_walk_summary_cb, &summary);
-  return summary;
-}
-
-int titan_uvshim_loop_handle_count(uv_loop_t *loop) {
-  return titan_uvshim_walk_summary(loop).count;
-}
-
-const char *titan_uvshim_loop_first_handle_type(uv_loop_t *loop) {
-  struct titan_uv_walk_summary summary = titan_uvshim_walk_summary(loop);
-  const char *name = uv_handle_type_name(summary.first_type);
-  return name != NULL ? name : "unknown";
-}
-
-int titan_uvshim_status_is_ebusy(int status) {
-  return status == UV_EBUSY;
 }

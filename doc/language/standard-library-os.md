@@ -48,11 +48,20 @@ function ppid(): integer
 `cwd` returns the current working directory and `chdir` changes it for the
 whole process. `homedir` and `tmpdir` follow libuv's platform rules, including
 their documented environment-variable precedence. `hostname` returns the host
-name and `exepath` the current executable path. `pid` and `ppid` return the
-current and parent process identifiers.
+name. `pid` and `ppid` return the current and parent process identifiers.
 
-Paths are text and reject embedded NUL. Buffer-sized results grow and retry
-with checked arithmetic, so callers do not need to choose a capacity.
+`exepath` returns the current executable path only inside a compiled Titan
+program. Libuv requires the process's original `argc` and `argv` to be passed
+through `uv_setup_args` before `uv_exepath`; Titan's generated executable
+entrypoint performs that handoff when it loads `titan.uv`. A Lua or other
+embedding host does not provide that entrypoint contract, so calling
+`exepath` there raises `os.exepath is only available in a compiled Titan
+program`.
+
+Paths are text and reject embedded NUL. Buffer-sized results retry with the
+capacity reported by libuv, so callers do not need to choose one. On Linux and
+macOS, `exepath` also adapts libuv's saturated-success truncation convention
+into the same automatic retry behavior.
 
 ## Waiting for a signal
 

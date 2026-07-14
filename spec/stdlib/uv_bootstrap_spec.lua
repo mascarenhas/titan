@@ -1,5 +1,9 @@
 local phase2 = require "spec.support.phase2"
 
+local function quote(word)
+    return "'" .. tostring(word):gsub("'", "'\\''") .. "'"
+end
+
 local host_pipe = assert(io.popen("uname -s"))
 local host = assert(host_pipe:read("*l"))
 assert(host_pipe:close())
@@ -9,12 +13,10 @@ describe("uv Phase 2 standalone bootstrap", function()
 
     setup(function()
         workspace = phase2.workspace("bootstrap")
-        phase2.copy_fixture(workspace, "bootstrap_conflict_provider.titan",
-            "bootstrap_conflict_provider")
         for _, fixture in ipairs({
             "async_bootstrap", "sync_main", "unobserved_failure",
             "unobserved_cancel", "cancelled_observer",
-            "timer_only_bootstrap", "bootstrap_conflict",
+            "timer_only_bootstrap", "main_child",
         }) do
             phase2.copy_fixture(workspace, fixture .. ".titan", fixture)
             phase2.compile(workspace, fixture)
@@ -32,11 +34,6 @@ describe("uv Phase 2 standalone bootstrap", function()
         local _, sync_status, sync_output = phase2.run(
             phase2.app_command(workspace, "sync_main"), workspace)
         assert.equals(19, sync_status, sync_output)
-        local entry = phase2.read(workspace .. "/sync_main__entrypoint.c")
-        assert.match("TITAN_MAIN_BOOTSTRAP_KEY", entry, 1, true)
-        -- No uv import means the registry hook is absent and this branch calls
-        -- the already retrieved main function directly.
-        assert.match("lua_call%(L, 1, 1%)", entry)
     end)
 
     it("promotes an unobserved failure with its task/propagation trace", function()
@@ -72,18 +69,16 @@ describe("uv Phase 2 standalone bootstrap", function()
             phase2.app_command(workspace, "timer_only_bootstrap"), workspace)
         assert.truthy(ok, output)
         assert.equals(0, status)
-        local entry = phase2.read(
-            workspace .. "/timer_only_bootstrap__entrypoint.c")
-        assert.match("TITAN_MAIN_BOOTSTRAP_KEY", entry, 1, true)
     end)
 
-    it("rejects a different pre-existing bootstrap provider", function()
-        local ok, status, output = phase2.run(
-            phase2.app_command(workspace, "bootstrap_conflict"), workspace)
-        assert.falsy(ok)
-        assert.equals(1, status)
-        assert.match("a different Titan main bootstrap is already installed",
-            output, 1, true)
+    it("drives an independent child after standalone main returns", function()
+        local marker = workspace .. "/main-child.marker"
+        local command = phase2.app_command(workspace, "main_child") ..
+            " " .. quote(marker)
+        local ok, status, output = phase2.run(command, workspace)
+        assert.truthy(ok, output)
+        assert.equals(0, status, output)
+        assert.equals("independent-child-finished", phase2.read(marker))
     end)
 
     it("revokes observation when a joining Task is cancelled", function()

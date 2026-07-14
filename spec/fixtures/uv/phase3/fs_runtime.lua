@@ -82,7 +82,6 @@ elseif scenario == "gc-sequential" then
     uv.loop()
     assert(holder:join() == nil)
     assert(observer:join())
-    cases.drop_retained()
     holder, observer = nil, nil
     for _ = 1, 4 do collectgarbage("collect") end
     assert(weak.file == nil, "closed File was retained after session cleanup")

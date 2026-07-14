@@ -5,10 +5,6 @@ local phase2 = require "spec.support.phase2"
 
 local M = {}
 
-local function quote(word)
-    return "'" .. tostring(word):gsub("'", "'\\''") .. "'"
-end
-
 local function write(path, contents)
     local file = assert(io.open(path, "wb"))
     file:write(contents)
@@ -33,30 +29,6 @@ local function shell_words(command, label)
     local words, err = cdriver.split_shell_words(command)
     assert.truthy(words, (label or "command") .. ": " .. tostring(err))
     return words
-end
-
-local function compiler_command()
-    local lua = phase2.host_lua()
-    return quote(lua) .. " -e " .. quote(
-        "package.path=\"" .. M.repo .. "/?.lua;" .. M.repo ..
-        "/?/init.lua;\" .. package.path") .. " " .. quote(M.repo .. "/titanc")
-end
-
-local function build_os(workspace)
-    write(workspace .. "/titan/os.titan",
-        phase2.read(M.repo .. "/titan/os.titan"))
-    local cflags = os.getenv("TITAN_TEST_EXTRA_CFLAGS") or ""
-    local ldflags = os.getenv("TITAN_TEST_EXTRA_LDFLAGS") or ""
-    local command = table.concat({
-        "env CCACHE_DISABLE=1",
-        "TITAN_PATH_0_11=" .. quote(workspace), "TITAN_PATH=",
-        "TITAN_EXTRA_CPPFLAGS=''",
-        "TITAN_EXTRA_CFLAGS=" .. quote(cflags),
-        "TITAN_EXTRA_LDFLAGS=" .. quote(ldflags),
-        compiler_command(), "--tree", quote(workspace), "titan.os",
-    }, " ")
-    local ok, _, output = phase2.run(command, workspace)
-    assert.truthy(ok, output)
 end
 
 local function build_process_child(workspace)
@@ -87,16 +59,11 @@ local function build_process_child(workspace)
     assert.truthy(ok, output)
 end
 
-local PHASE6_TRANSFORMER =
-    "spec/support/make_phase6_test_variant.lua"
-
-function M.workspace()
-    return phase2.cached_workspace(
-        "phase6-os:" .. PHASE6_TRANSFORMER, function()
-            local workspace = phase2.variant_workspace(PHASE6_TRANSFORMER)
-            build_os(workspace)
-            return workspace
-        end)
+function M.workspace(label)
+    local standard = phase2.standard_dir()
+    assert.truthy(lfs.attributes(standard .. "/os.so"),
+        "Phase 6 specs require prebuilt os.so; run make stdlib first")
+    return phase2.workspace("phase6-os-" .. (label or "runtime"))
 end
 
 function M.process_child(workspace)
@@ -111,16 +78,19 @@ function M.copy_fixture(workspace, fixture, modname)
 end
 
 function M.compile(workspace, modname, options)
-    options = options or {}
-    options.stdlib = options.stdlib or workspace .. "/titan"
+    local standard = phase2.standard_dir()
+    assert.truthy(lfs.attributes(standard .. "/os.so"),
+        "Phase 6 specs require prebuilt os.so; run make stdlib first")
     return phase2.compile(workspace, modname, options)
 end
 
+function M.libuv_cppflags()
+    local cppflags = phase2.host_libuv_config()
+    return cppflags
+end
+
 M.cleanup = phase2.cleanup
-M.read = phase2.read
 M.run = phase2.run
-M.lua_command = phase2.variant_lua_command
-M.variant_lua_command = phase2.variant_lua_command
+M.lua_command = phase2.lua_command
 M.repo = phase2.repo
-M.host_lua = phase2.host_lua
 return M

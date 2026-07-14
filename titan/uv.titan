@@ -4,6 +4,19 @@ local ffi = foreign import "titan/ffi.h"
 local shim = foreign import "titan/uv.h"
 local coroutine = import "coroutine"
 
+-- Portable libuv error values are macros hidden behind the private C shim.
+-- Resolve them once when this module image initializes; callback and error
+-- paths should not repeatedly cross the FFI boundary for constants.
+local UV_EIO = 0
+local UV_EOF = 0
+local UV_ECANCELED = 0
+local UV_EADDRNOTAVAIL = 0
+local UV_EINVAL = 0
+local UV_ENOBUFS = 0
+local UV_ENOENT = 0
+local UV_ESRCH = 0
+local UV_BUF_MAX = 0
+
 -- Private continuation runtime. Native pointers stay in exact local fields;
 -- every callback is a direct call to timer_dispatch's native Titan entry.
 
@@ -12,17 +25,11 @@ local OWNER_ACTIVE = 1
 local OWNER_CLOSING = 2
 local OWNER_CLOSED = 3
 
-local EVENT_TIMER = 1
-local EVENT_HANDLE_CLOSE = 2
-local EVENT_FS = 3
-local EVENT_GETADDRINFO = 4
-local EVENT_CONNECT = 5
-local EVENT_WRITE = 6
-local EVENT_SHUTDOWN = 7
-local EVENT_STREAM_READ = 8
-local EVENT_CONNECTION = 9
-local EVENT_SIGNAL = 10
-local EVENT_PROCESS_EXIT = 11
+local EVENT_TIMER = 0
+local EVENT_HANDLE_CLOSE = 0
+local EVENT_STREAM_READ = 0
+local EVENT_CONNECTION = 0
+local EVENT_PROCESS_EXIT = 0
 
 local TASK_NEW = 0
 local TASK_READY = 1
@@ -39,20 +46,16 @@ local OWNER_JOIN_WAKE = 4
 local OWNER_OBSERVE = 5
 local OWNER_TICKER = 6
 local OWNER_TICKER_CLOSE_WAKE = 7
-local OWNER_CLEANUP_SLEEP = 8
-local OWNER_DEFER_ERROR = 9
-local OWNER_TASK_DRIVE = 10
--- TITAN_UV_PHASE5_OWNER_KINDS
+local OWNER_TASK_DRIVE = 8
 
 local REQUEST_SLEEP = 1
 local REQUEST_JOIN = 2
 local REQUEST_TICK = 3
-local REQUEST_CLEANUP_SLEEP = 4
-local REQUEST_FS = 5
-local REQUEST_NET = 6
-local REQUEST_SIGNAL = 7
-local REQUEST_PROCESS = 8
-local REQUEST_HELPER = 9
+local REQUEST_FS = 4
+local REQUEST_NET = 5
+local REQUEST_SIGNAL = 6
+local REQUEST_PROCESS = 7
+local REQUEST_HELPER = 8
 
 local NET_CONNECT = 1
 local NET_LISTEN = 2
@@ -73,14 +76,7 @@ local NET_OWNER_SUBMITTED = 1
 local NET_OWNER_CALLBACK = 2
 local NET_OWNER_RETIRED = 3
 
-local OS_GETENV = 1
-local OS_CWD = 2
-local OS_HOMEDIR = 3
-local OS_TMPDIR = 4
-local OS_HOSTNAME = 5
-local OS_EXEPATH = 6
 local OS_BUFFER_INITIAL = 256
-local OS_BUFFER_RETRY_LIMIT = 32
 
 local TCP_ALLOCATED = 0
 local TCP_INITIALIZED = 1
@@ -116,8 +112,6 @@ local PROCESS_CLOSE_STDIN = 4
 local PROCESS_READ_STDOUT = 5
 local PROCESS_READ_STDERR = 6
 local PROCESS_DISPOSE = 7
-
-local PROCESS_OWNER_WRITE = 1
 
 local PROCESS_OWNER_ALLOCATED = 0
 local PROCESS_OWNER_SUBMITTED = 1
@@ -157,11 +151,9 @@ local FS_OWNER_ALLOCATED = 0
 local FS_OWNER_SUBMITTED = 1
 local FS_OWNER_CALLBACK = 2
 local FS_OWNER_CLEANED = 3
-local FS_CLOSE_RETRY_LIMIT = 3
 
 local DRIVE_RESUME = 1
 local DRIVE_ERROR = 2
-local IMMEDIATE_BUDGET = 8
 
 record Error
   code: integer
@@ -178,7 +170,6 @@ end
 local record Loop
   local handle: *libuv.uv_loop_t
   local storage: value
-  local generation: integer
 end
 
 -- Values are used only for opaque Lua roots and genuinely heterogeneous
@@ -187,8 +178,6 @@ end
 local record Runtime
   local loop: Loop
   local generation: integer
-  local main_thread: value
-  local module: value
   local timer_owner_head: uv_timer_t?
   local fs_pending_head: uv_fs_t?
   local file_head: uv_file?
@@ -199,7 +188,6 @@ local record Runtime
   local process_request_head: ProcessRequestControl?
   local task_head: Task?
   local running_task: Task?
-  local main_task: Task?
   local in_loop: boolean
   local closing: boolean
   local fatal: boolean
@@ -210,7 +198,6 @@ end
 
 local record TimerControl
   local runtime: Runtime
-  local generation: integer
   local lifecycle: integer
   local kind: integer
   local task: Task?
@@ -234,16 +221,12 @@ end
 
 local record SignalControl
   local runtime: Runtime
-  local generation: integer
   local lifecycle: integer
   local task: Task?
   local epoch: integer
   local name: string
-  local signum: integer
   local next_owner: uv_signal_t?
   local previous_owner: uv_signal_t?
-  local callback_seen: boolean
-  local close_seen: boolean
 end
 
 -- Process, pipe, and request controls are deliberately separate from their
@@ -252,7 +235,6 @@ local record ProcessControl
   local runtime: Runtime
   local generation: integer
   local lifecycle: integer
-  local published: boolean
   local owner: uv_process_t?
   local linked: boolean
   local next_control: ProcessControl?
@@ -269,11 +251,8 @@ local record ProcessControl
   local exit_seen: boolean
   local exit_status: integer
   local term_signal: integer
-  local close_requested: boolean
-  local close_callback_seen: boolean
   local callback_aborted: boolean
   local shutdown_started: boolean
-  local term_sent: boolean
   local kill_sent: boolean
   local grace_owner: uv_process_grace_t?
   local grace_fired: boolean
@@ -282,13 +261,10 @@ end
 
 local record PipeControl
   local runtime: Runtime
-  local generation: integer
   local lifecycle: integer
   local kind: integer
   local owner: uv_pipe_t?
   local process: ProcessControl
-  local close_requested: boolean
-  local close_callback_seen: boolean
   local callback_aborted: boolean
   local read_active: boolean
   local read_terminal: integer
@@ -312,7 +288,6 @@ local record ProcessOperation
   local pipe: uv_pipe_t?
   local file: Text?
   local arguments: {Text}?
-  local data: string
   local maximum: integer
   local copied_bytes: Bytes?
   local prepared_buffer: Buffer?
@@ -320,21 +295,15 @@ local record ProcessOperation
   local next_operation: ProcessOperation?
   local previous_operation: ProcessOperation?
   local linked: boolean
-  local last_error: Error?
 end
 
 local record ProcessRequestControl
   local runtime: Runtime
-  local generation: integer
   local lifecycle: integer
-  local kind: integer
   local owner: uv_pipe_write_t?
   local operation: ProcessOperation
   local next_control: ProcessRequestControl?
   local previous_control: ProcessRequestControl?
-  local callback_recorded: boolean
-  local callback_result: integer
-  local callback_aborted: boolean
 end
 
 local record ProcessExitResult
@@ -345,7 +314,6 @@ end
 local record HelperGroup
   local runtime: Runtime
   local generation: integer
-  local parent: Task
   local process: uv_process_t
   local input: string?
   local helpers: {Task}
@@ -363,15 +331,15 @@ local record HelperGroup
   local canceling: boolean
 end
 
--- Fixed eight-slot owner layout consumed by titan_uv.c.
+-- Fixed six-slot owner layout consumed by titan_uv.c. Metadata roots each
+-- operation/control graph; the final slot retains family-specific native I/O
+-- storage only while libuv may consume it.
 record uv_timer_t
   local handle: *libuv.uv_timer_t
   local storage: value
   local main_thread: value
-  local module: value
   local dispatcher: (uv_timer_t, integer, integer, libuv.size_t,
                      ffi.titan_ffi_void_ptr) -> ()
-  local root: value
   local metadata: TimerControl
   local buffer: nil
 end
@@ -382,37 +350,31 @@ local record uv_signal_t
   local handle: *libuv.uv_signal_t
   local storage: value
   local main_thread: value
-  local module: value
   local dispatcher: (uv_signal_t, integer, integer, libuv.size_t,
                      ffi.titan_ffi_void_ptr) -> ()
-  local root: Task?
   local metadata: SignalControl
-  local buffer: SignalSpec?
+  local buffer: nil
 end
 
 -- Persistent process handles are the only process resource that crosses the
--- private os/uv bridge.  All native callback owners keep the same exact eight
+-- private os/uv bridge.  All native callback owners keep the same exact six
 -- slots consumed by titan_uv.c.
 record uv_process_t
   local handle: *libuv.uv_process_t
   local storage: value
   local main_thread: value
-  local module: value
   local dispatcher: (uv_process_t, integer, integer, libuv.size_t,
                      ffi.titan_ffi_void_ptr) -> ()
-  local root: ProcessControl?
   local metadata: ProcessControl
-  local buffer: value
+  local buffer: nil
 end
 
 local record uv_pipe_t
   local handle: *libuv.uv_pipe_t
   local storage: value
   local main_thread: value
-  local module: value
   local dispatcher: (uv_pipe_t, integer, integer, libuv.size_t,
                      ffi.titan_ffi_void_ptr) -> ()
-  local root: ProcessControl?
   local metadata: PipeControl
   local buffer: value
 end
@@ -421,10 +383,8 @@ local record uv_pipe_write_t
   local handle: *libuv.uv_write_t
   local storage: value
   local main_thread: value
-  local module: value
   local dispatcher: (uv_pipe_write_t, integer, integer, libuv.size_t,
                      ffi.titan_ffi_void_ptr) -> ()
-  local root: ProcessOperation?
   local metadata: ProcessRequestControl
   local buffer: Buffer?
 end
@@ -435,10 +395,8 @@ local record uv_process_grace_t
   local handle: *libuv.uv_timer_t
   local storage: value
   local main_thread: value
-  local module: value
   local dispatcher: (uv_process_grace_t, integer, integer, libuv.size_t,
                      ffi.titan_ffi_void_ptr) -> ()
-  local root: ProcessControl?
   local metadata: ProcessControl
   local buffer: nil
 end
@@ -458,6 +416,13 @@ local record Bytes
   local length: integer
 end
 
+-- Synchronous libuv helpers report lengths as size_t. Keep that type until
+-- lua_pushlstring consumes it instead of narrowing through Titan integer.
+local record SizedBytes
+  local data: *ffi.titan_ffi_char
+  local storage: value
+end
+
 local record AddressList
   local data: *shim.titan_uvshim_address
   local storage: value
@@ -473,8 +438,6 @@ local record Buffer
   local handle: *libuv.uv_buf_t
   local storage: value
   local bytes: Bytes
-  local offset: integer
-  local length: integer
 end
 
 local record Dirent
@@ -507,35 +470,27 @@ local record FsOperation
   local previous_operation: FsOperation?
   local linked: boolean
   local close_waiter: boolean
-  local close_failure_recorded: boolean
 end
 
 local record FsControl
   local runtime: Runtime
-  local generation: integer
   local lifecycle: integer
-  local cleaned: boolean
-  local callback_recorded: boolean
-  local callback_result: integer
   local callback_aborted: boolean
   local operation: FsOperation
   local next_owner: uv_fs_t?
   local previous_owner: uv_fs_t?
   local acquired_file: libuv.uv_file
-  local has_acquired_file: boolean
 end
 
--- Filesystem requests stay private to uv.  The fixed eight fields have the
+-- Filesystem requests stay private to uv.  The fixed six fields have the
 -- same native callback layout as uv_timer_t while retaining their exact Titan
 -- types and GC roots.
 local record uv_fs_t
   local handle: *libuv.uv_fs_t
   local storage: value
   local main_thread: value
-  local module: value
   local dispatcher: (uv_fs_t, integer, integer, libuv.size_t,
                      ffi.titan_ffi_void_ptr) -> ()
-  local root: Task?
   local metadata: FsControl
   local buffer: Buffer?
 end
@@ -563,18 +518,13 @@ end
 
 local record NetRequestControl
   local runtime: Runtime
-  local generation: integer
   local lifecycle: integer
   local kind: integer
   local owner: value
   local operation: NetOperation
   local next_control: NetRequestControl?
   local previous_control: NetRequestControl?
-  local callback_recorded: boolean
-  local callback_result: integer
-  local callback_aborted: boolean
   local result_pointer: ffi.titan_ffi_void_ptr
-  local result_freed: boolean
 end
 
 local record TcpControl
@@ -582,12 +532,10 @@ local record TcpControl
   local generation: integer
   local lifecycle: integer
   local server: boolean
-  local published: boolean
   local owner: uv_tcp_t?
   local next_control: TcpControl?
   local previous_control: TcpControl?
   local connect_pending: boolean
-  local close_callback_seen: boolean
   local close_requested: boolean
   local shutdown_requested: boolean
   local write_shutdown: boolean
@@ -611,43 +559,36 @@ local record TcpControl
   local accept_capacity: integer
   local accept_error: Error?
   local setup_operation: NetOperation?
-  -- TITAN_UV_PHASE5_TCP_TEST_FIELDS
 end
 
--- DNS and stream request owners share the native trampoline's fixed eight
+-- DNS and stream request owners share the native trampoline's fixed six
 -- slots, but retain exact request-pointer and dispatcher types.
 local record uv_getaddrinfo_t
   local handle: *libuv.uv_getaddrinfo_t
   local storage: value
   local main_thread: value
-  local module: value
   local dispatcher: (uv_getaddrinfo_t, integer, integer, libuv.size_t,
                      ffi.titan_ffi_void_ptr) -> ()
-  local root: Task?
   local metadata: NetRequestControl
-  local buffer: Text?
+  local buffer: nil
 end
 
 local record uv_connect_t
   local handle: *libuv.uv_connect_t
   local storage: value
   local main_thread: value
-  local module: value
   local dispatcher: (uv_connect_t, integer, integer, libuv.size_t,
                      ffi.titan_ffi_void_ptr) -> ()
-  local root: Task?
   local metadata: NetRequestControl
-  local buffer: AddressList?
+  local buffer: nil
 end
 
 local record uv_write_t
   local handle: *libuv.uv_write_t
   local storage: value
   local main_thread: value
-  local module: value
   local dispatcher: (uv_write_t, integer, integer, libuv.size_t,
                      ffi.titan_ffi_void_ptr) -> ()
-  local root: Task?
   local metadata: NetRequestControl
   local buffer: Buffer?
 end
@@ -656,10 +597,8 @@ local record uv_shutdown_t
   local handle: *libuv.uv_shutdown_t
   local storage: value
   local main_thread: value
-  local module: value
   local dispatcher: (uv_shutdown_t, integer, integer, libuv.size_t,
                      ffi.titan_ffi_void_ptr) -> ()
-  local root: Task?
   local metadata: NetRequestControl
   local buffer: nil
 end
@@ -671,10 +610,8 @@ record uv_tcp_t
   local handle: *libuv.uv_tcp_t
   local storage: value
   local main_thread: value
-  local module: value
   local dispatcher: (uv_tcp_t, integer, integer, libuv.size_t,
                      ffi.titan_ffi_void_ptr) -> ()
-  local root: TcpControl?
   local metadata: TcpControl
   local buffer: value
 end
@@ -696,8 +633,6 @@ record uv_file
   local next_file: uv_file?
   local previous_file: uv_file?
   local close_enqueued: boolean
-  local close_failures: integer
-  local close_retry_exhausted: boolean
 end
 
 record Task
@@ -710,7 +645,6 @@ record Task
   local error_value: value
   local error_traceback: string
   local cancel_requested: boolean
-  local cancel_reason: value
   local cancel_value: Cancelled?
   local operation: value
   local current_request: Request?
@@ -723,11 +657,9 @@ record Task
   local permanently_observed: boolean
   local observer_count: integer
   local cleanup_shield_depth: integer
-  local cancel_deferred: boolean
   local cancel_fallback: boolean
   local helper_group: HelperGroup?
   local helper_kind: integer
-  -- TITAN_UV_PHASE6_HELPER_TASK_FIELDS
   local main: boolean
 end
 
@@ -735,7 +667,6 @@ local record TickerState
   local runtime: Runtime
   local generation: integer
   local open: boolean
-  local interval: integer
   local owner: uv_timer_t?
   local waiter: Task?
   local waiter_epoch: integer
@@ -746,8 +677,7 @@ end
 local UV_TAG: value = {}
 local generation = 0
 local active_runtime: Runtime? = nil
--- TITAN_UV_PHASE5_TEST_STATE
--- TITAN_UV_PHASE6_TEST_STATE
+local program_args_ready = false
 
 local function reinstall_trace(trace: string)
   ffi.lua_pushtvalue(L, trace)
@@ -800,6 +730,8 @@ local function main_thread_value(): value
   return thread
 end
 
+local main_thread: value = nil
+
 local function on_main_thread(): boolean
   local top = lua.lua_gettop(L)
   local is_main = lua.lua_pushthread(L)
@@ -808,13 +740,6 @@ local function on_main_thread(): boolean
 end
 
 local function allocate_bytes(length: integer): Bytes
-  if length < 0 then
-    raise "buffer length must not be negative"
-  end
-  if (shim.titan_uvshim_allocation_length_is_valid(
-          length) as integer) == 0 then
-    raise "buffer length exceeds the platform allocation limit"
-  end
   local top = lua.lua_gettop(L)
   local memory = lua.lua_newuserdatauv(L, length, 0)
   local storage = ffi.lua_totvalue(L, -1)
@@ -823,31 +748,20 @@ local function allocate_bytes(length: integer): Bytes
   return bytes
 end
 
-local function copy_text(source: string, operation: string): Text
-  local length = #source
-  if length >= 9223372036854775807 then
-    raise make_error(shim.titan_uvshim_error_eoverflow() as integer,
-                     operation, source)
-  end
-  if (shim.titan_uvshim_bytes_find(source, length, "\0", 1) as integer) >= 0 then
-    raise make_error(shim.titan_uvshim_error_einval() as integer,
-                     operation, source)
-  end
-  local bytes = allocate_bytes(length + 1)
-  shim.titan_uvshim_text_copy(bytes.data, source, length)
-  return Text.new(bytes, source)
+local function allocate_sized_bytes(length: libuv.size_t): SizedBytes
+  local top = lua.lua_gettop(L)
+  local memory = lua.lua_newuserdatauv(L, length, 0)
+  local storage = ffi.lua_totvalue(L, -1)
+  local bytes = SizedBytes.new(memory as *ffi.titan_ffi_char, storage)
+  lua.lua_settop(L, top)
+  return bytes
 end
 
-local function copy_text_with_subject(source: string, operation: string,
-                                      subject: string?): Text
+local function copy_text(source: string, operation: string,
+                         subject: string?): Text
   local length = #source
-  if length >= 9223372036854775807 then
-    raise make_error(shim.titan_uvshim_error_eoverflow() as integer,
-                     operation, subject)
-  end
   if (shim.titan_uvshim_bytes_find(source, length, "\0", 1) as integer) >= 0 then
-    raise make_error(shim.titan_uvshim_error_einval() as integer,
-                     operation, subject)
+    raise make_error(UV_EINVAL, operation, subject)
   end
   local bytes = allocate_bytes(length + 1)
   shim.titan_uvshim_text_copy(bytes.data, source, length)
@@ -864,14 +778,7 @@ end
 local function copy_addresses(pointer: ffi.titan_ffi_void_ptr,
                               subject: string): AddressList
   local count = shim.titan_uvshim_addrinfo_count(pointer) as integer
-  if count < 0 then
-    raise make_error(count, "net.resolve.copy", subject)
-  end
   local cell_size = shim.titan_uvshim_address.sizeof as integer
-  if count > 0 and count > 9223372036854775807 // cell_size then
-    raise make_error(shim.titan_uvshim_error_eoverflow() as integer,
-                     "net.resolve.copy", subject)
-  end
   local bytes = allocate_bytes(count * cell_size)
   shim.titan_uvshim_addrinfo_copy(pointer, bytes.data)
   return AddressList.new((bytes.data as ffi.titan_ffi_void_ptr) as
@@ -880,31 +787,21 @@ local function copy_addresses(pointer: ffi.titan_ffi_void_ptr,
 end
 
 local function make_buffer(bytes: Bytes, offset: integer,
-                           length: integer, operation: string): Buffer
-  if offset < 0 or length < 0 or offset > bytes.length or
-      length > bytes.length - offset or
-      (shim.titan_uvshim_buf_length_is_valid(length) as integer) == 0 then
-    raise make_error(shim.titan_uvshim_error_einval() as integer,
-                     operation, nil)
-  end
+                           length: integer): Buffer
   local top = lua.lua_gettop(L)
   local memory = lua.lua_newuserdatauv(L, libuv.uv_buf_t.sizeof, 0)
   local storage = ffi.lua_totvalue(L, -1)
   shim.titan_uvshim_buf_init_slice(memory, bytes.data, offset, length)
-  local buffer = Buffer.new(memory as *libuv.uv_buf_t, storage, bytes,
-                            offset, length)
+  local buffer = Buffer.new(memory as *libuv.uv_buf_t, storage, bytes)
   lua.lua_settop(L, top)
   return buffer
 end
 
 local function allocate_read_buffer(length: integer): Buffer
-  return make_buffer(allocate_bytes(length), 0, length, "fs.buffer.init")
+  return make_buffer(allocate_bytes(length), 0, length)
 end
 
 local function bytes_string(bytes: Bytes, length: integer): string
-  if length < 0 or length > bytes.length then
-    raise "native result exceeds its rooted buffer"
-  end
   local top = lua.lua_gettop(L)
   lua.lua_pushlstring(L, bytes.data, length as libuv.size_t)
   local raw: value = ffi.lua_totvalue(L, -1)
@@ -913,97 +810,34 @@ local function bytes_string(bytes: Bytes, length: integer): string
   return result
 end
 
-local function os_buffer_operation(kind: integer): string
-  if kind == OS_GETENV then return "os.getenv" end
-  if kind == OS_CWD then return "os.cwd" end
-  if kind == OS_HOMEDIR then return "os.homedir" end
-  if kind == OS_TMPDIR then return "os.tmpdir" end
-  if kind == OS_HOSTNAME then return "os.hostname" end
-  return "os.exepath"
+local function bytes_to_string(bytes: *ffi.titan_ffi_char,
+                               length: libuv.size_t): string
+  local top = lua.lua_gettop(L)
+  lua.lua_pushlstring(L, bytes, length)
+  local raw: value = ffi.lua_totvalue(L, -1)
+  local result = raw as string
+  lua.lua_settop(L, top)
+  return result
 end
 
-local function os_buffer_subject(argument: Text?): string?
-  if argument then return (argument as Text).source end
-  return nil
-end
-
-local function os_sized_buffer(kind: integer,
-                               argument: Text?): string?
-  -- TITAN_UV_PHASE6_OS_BUFFER_INIT
-  local capacity = OS_BUFFER_INITIAL
+local function os_sized_buffer(
+    uv_buffer_func: (*ffi.titan_ffi_char, *libuv.size_t) ->
+                    ffi.titan_ffi_int,
+    capacity: libuv.size_t,
+    error_from_status: (ffi.titan_ffi_int) -> Error): string?
   local sizes = libuv.size_t.new_array(1)
-  local attempts = 0
-  while attempts < OS_BUFFER_RETRY_LIMIT do
-    attempts = attempts + 1
-    local bytes = allocate_bytes(capacity)
-    sizes[0] = capacity as libuv.size_t
-    local status: ffi.titan_ffi_int = 0 as ffi.titan_ffi_int
-    if kind == OS_GETENV then
-      local name = argument as Text
-      status = libuv.uv_os_getenv(name.bytes.data, bytes.data, sizes)
-    elseif kind == OS_CWD then
-      status = libuv.uv_cwd(bytes.data, sizes)
-    elseif kind == OS_HOMEDIR then
-      status = libuv.uv_os_homedir(bytes.data, sizes)
-    elseif kind == OS_TMPDIR then
-      status = libuv.uv_os_tmpdir(bytes.data, sizes)
-    elseif kind == OS_HOSTNAME then
-      status = libuv.uv_os_gethostname(bytes.data, sizes)
-    elseif kind == OS_EXEPATH then
-      status = libuv.uv_exepath(bytes.data, sizes)
-    else
-      raise "invalid private OS buffer operation"
-    end
-    -- TITAN_UV_PHASE6_OS_BUFFER_RESULT
-
-    if (status as integer) >= 0 then
-      local used = shim.titan_uvshim_size_as_int64(sizes[0]) as integer
-      if used < 0 or used >= capacity then
-        raise make_error(shim.titan_uvshim_error_eoverflow() as integer,
-                         os_buffer_operation(kind),
-                         os_buffer_subject(argument))
-      end
-      -- Linux and macOS uv_exepath return success when truncating.  A result
-      -- that saturates the payload capacity is ambiguous, so retry larger;
-      -- an exact fit resolves on that next iteration as an unsaturated result.
-      if kind ~= OS_EXEPATH or used ~= capacity - 1 then
-        return bytes_string(bytes, used)
-      end
-    elseif kind == OS_GETENV and
-        (shim.titan_uvshim_status_is_enoent(status) as integer) ~= 0 then
-      return nil
-    elseif (shim.titan_uvshim_status_is_enobufs(status) as integer) == 0 then
-      raise make_error(status as integer, os_buffer_operation(kind),
-                       os_buffer_subject(argument))
-    end
-
-    local required = shim.titan_uvshim_size_as_int64(sizes[0]) as integer
-    if required < 0 then
-      raise make_error(shim.titan_uvshim_error_eoverflow() as integer,
-                       os_buffer_operation(kind),
-                       os_buffer_subject(argument))
-    end
-    local next_capacity = required
-    if next_capacity <= capacity then
-      if capacity > 9223372036854775807 // 2 then
-        raise make_error(shim.titan_uvshim_error_eoverflow() as integer,
-                         os_buffer_operation(kind),
-                         os_buffer_subject(argument))
-      end
-      next_capacity = capacity * 2
-    end
-    if next_capacity <= capacity or
-        (shim.titan_uvshim_allocation_length_is_valid(
-            next_capacity) as integer) == 0 then
-      raise make_error(shim.titan_uvshim_error_eoverflow() as integer,
-                       os_buffer_operation(kind),
-                       os_buffer_subject(argument))
-    end
-    -- TITAN_UV_PHASE6_OS_BUFFER_GROW
-    capacity = next_capacity
+  local bytes = allocate_sized_bytes(capacity)
+  sizes[0] = capacity
+  local status = uv_buffer_func(bytes.data, sizes)
+  if (status as integer) >= 0 then
+    return bytes_to_string(bytes.data, sizes[0])
+  elseif (status as integer) == UV_ENOBUFS then
+    return os_sized_buffer(uv_buffer_func, sizes[0], error_from_status)
+  elseif (status as integer) == UV_ENOENT then
+    return nil
+  else
+    raise error_from_status(status)
   end
-  raise make_error(shim.titan_uvshim_error_eoverflow() as integer,
-                   os_buffer_operation(kind), os_buffer_subject(argument))
 end
 
 local function allocate_dirent(): Dirent
@@ -1019,15 +853,13 @@ local function extract_fs_list(owner: uv_fs_t): {string}
   local names: {string} = {}
   local entry = allocate_dirent()
   while true do
-    local status = shim.titan_uvshim_fs_scandir_next(owner.handle,
-        entry.handle as ffi.titan_ffi_void_ptr)
-    if (status as integer) == 1 then break end
+    local status = libuv.uv_fs_scandir_next(owner.handle, entry.handle)
+    if (status as integer) == UV_EOF then break end
     if (status as integer) < 0 then
       raise make_error(status as integer, "fs.list.next",
                        fs_operation_subject(owner.metadata.operation))
     end
-    names[#names + 1] = shim.titan_uvshim_dirent_name(
-        entry.handle as ffi.titan_ffi_void_ptr) as string
+    names[#names + 1] = entry.handle.name as string
   end
   return names
 end
@@ -1042,50 +874,6 @@ end
 local function internal_error(operation: string): Error
   return Error.new(-1, "EINTERNAL", "libuv Runtime invariant failed",
                    operation, nil)
-end
-
-local function task_state_name(state: integer): string
-  if state == TASK_NEW then return "new" end
-  if state == TASK_READY then return "ready" end
-  if state == TASK_RUNNING then return "running" end
-  if state == TASK_WAITING then return "waiting" end
-  if state == TASK_SUCCEEDED then return "succeeded" end
-  if state == TASK_FAILED then return "failed" end
-  return "cancelled"
-end
-
-local function request_kind_name(kind: integer): string
-  if kind == REQUEST_SLEEP then return "sleep" end
-  if kind == REQUEST_JOIN then return "join" end
-  if kind == REQUEST_TICK then return "ticker.tick" end
-  if kind == REQUEST_CLEANUP_SLEEP then return "cleanup.sleep" end
-  if kind == REQUEST_FS then return "filesystem" end
-  if kind == REQUEST_NET then return "network" end
-  if kind == REQUEST_SIGNAL then return "signal" end
-  if kind == REQUEST_PROCESS then return "process" end
-  if kind == REQUEST_HELPER then return "helper" end
-  return "unknown"
-end
-
-local function waiting_task_diagnostic(runtime: Runtime): string
-  local diagnostic = ""
-  local raw? = runtime.task_head
-  while raw do
-    local task = raw as Task
-    if #diagnostic > 0 then diagnostic = diagnostic .. ", " end
-    diagnostic = diagnostic .. "Task(state=" .. task_state_name(task.state)
-    if task.current_request then
-      local request = task.current_request as Request
-      diagnostic = diagnostic .. ", request=" ..
-                   request_kind_name(request.kind)
-    else
-      diagnostic = diagnostic .. ", request=none"
-    end
-    diagnostic = diagnostic .. ")"
-    raw = task.next_task
-  end
-  if #diagnostic == 0 then return "no live Tasks" end
-  return diagnostic
 end
 
 local function check_alignment()
@@ -1107,28 +895,44 @@ local function check_alignment()
   end
 end
 
-local function allocate_loop(next_generation: integer): Loop
+local function allocate_loop(): Loop
   local top = lua.lua_gettop(L)
   local memory = lua.lua_newuserdatauv(L, libuv.uv_loop_t.sizeof, 0)
   local storage = ffi.lua_totvalue(L, -1)
-  local loop = Loop.new(memory as *libuv.uv_loop_t, storage, next_generation)
+  local loop = Loop.new(memory as *libuv.uv_loop_t, storage)
   lua.lua_settop(L, top)
   return loop
 end
 
 local function new_runtime(): Runtime
-  check_alignment()
   generation = generation + 1
-  local loop = allocate_loop(generation)
+  local loop = allocate_loop()
   local status = libuv.uv_loop_init(loop.handle)
   if (status as integer) < 0 then
     loop.handle = nil
     loop.storage = nil
     raise make_error(status as integer, "loop.init", nil)
   end
-  local runtime = Runtime.new(loop, generation, main_thread_value(), M,
-      nil, nil, nil, nil, nil, nil,
-      nil, nil, nil, nil, nil, false, false, false, nil, "", 0)
+  local runtime: Runtime = {
+    loop = loop,
+    generation = generation,
+    timer_owner_head = nil,
+    fs_pending_head = nil,
+    file_head = nil,
+    net_pending_head = nil,
+    tcp_head = nil,
+    signal_owner_head = nil,
+    process_head = nil,
+    process_request_head = nil,
+    task_head = nil,
+    running_task = nil,
+    in_loop = false,
+    closing = false,
+    fatal = false,
+    fatal_error = nil,
+    fatal_traceback = "",
+    pending_observations = 0,
+  }
   active_runtime = runtime
   return runtime
 end
@@ -1553,7 +1357,7 @@ end
 local function create_file(runtime: Runtime, handle: libuv.uv_file,
                            subject: string): uv_file
   local file = uv_file.new(handle, runtime, runtime.generation, FS.file_open,
-      subject, nil, nil, nil, nil, nil, nil, nil, false, 0, false)
+      subject, nil, nil, nil, nil, nil, nil, nil, false)
   link_file(runtime, file)
   return file
 end
@@ -1674,7 +1478,7 @@ end
 
 local function close_signal_owner(owner: uv_signal_t)
   if owner.metadata.lifecycle == OWNER_ACTIVE then
-    shim.titan_uvshim_signal_stop(owner.handle)
+    libuv.uv_signal_stop(owner.handle)
     owner.metadata.lifecycle = OWNER_CLOSING
     shim.titan_uvshim_signal_close(owner.handle)
   end
@@ -1706,15 +1510,13 @@ local function allocate_owner(runtime: Runtime, kind: integer, task: Task?,
   local top = lua.lua_gettop(L)
   local memory = lua.lua_newuserdatauv(L, libuv.uv_timer_t.sizeof, 0)
   local storage = ffi.lua_totvalue(L, -1)
-  local metadata = TimerControl.new(runtime, runtime.generation,
-      OWNER_ALLOCATED, kind, task, peer, epoch, nil, nil)
+  local metadata = TimerControl.new(runtime, OWNER_ALLOCATED, kind, task,
+                                    peer, epoch, nil, nil)
   local owner: uv_timer_t = {
     handle = memory as *libuv.uv_timer_t,
     storage = storage,
-    main_thread = runtime.main_thread,
-    module = runtime.module,
+    main_thread = main_thread,
     dispatcher = timer_dispatch,
-    root = task,
     metadata = metadata,
     buffer = nil,
   }
@@ -1734,18 +1536,22 @@ local function allocate_signal_owner(runtime: Runtime, task: Task,
   local top = lua.lua_gettop(L)
   local memory = lua.lua_newuserdatauv(L, libuv.uv_signal_t.sizeof, 0)
   local storage = ffi.lua_totvalue(L, -1)
-  local metadata = SignalControl.new(runtime, runtime.generation,
-      OWNER_ALLOCATED, task, epoch, spec.name, spec.signum, nil, nil,
-      false, false)
+  local metadata: SignalControl = {
+    runtime = runtime,
+    lifecycle = OWNER_ALLOCATED,
+    task = task,
+    epoch = epoch,
+    name = spec.name,
+    next_owner = nil,
+    previous_owner = nil,
+  }
   local owner: uv_signal_t = {
     handle = memory as *libuv.uv_signal_t,
     storage = storage,
-    main_thread = runtime.main_thread,
-    module = runtime.module,
+    main_thread = main_thread,
     dispatcher = signal_dispatch,
-    root = task,
     metadata = metadata,
-    buffer = spec,
+    buffer = nil,
   }
   ffi.lua_pushtvalue(L, owner)
   local pointer = ffi.lua_togco(L, -1)
@@ -1759,16 +1565,20 @@ local function allocate_fs_owner(runtime: Runtime,
   local top = lua.lua_gettop(L)
   local memory = lua.lua_newuserdatauv(L, libuv.uv_fs_t.sizeof, 0)
   local storage = ffi.lua_totvalue(L, -1)
-  local metadata = FsControl.new(runtime, runtime.generation,
-      FS_OWNER_ALLOCATED, false, false, 0, false, operation, nil, nil,
-      -1 as libuv.uv_file, false)
+  local metadata: FsControl = {
+    runtime = runtime,
+    lifecycle = FS_OWNER_ALLOCATED,
+    callback_aborted = false,
+    operation = operation,
+    next_owner = nil,
+    previous_owner = nil,
+    acquired_file = -1 as libuv.uv_file,
+  }
   local owner: uv_fs_t = {
     handle = memory as *libuv.uv_fs_t,
     storage = storage,
-    main_thread = runtime.main_thread,
-    module = runtime.module,
+    main_thread = main_thread,
     dispatcher = fs_dispatch,
-    root = operation.task,
     metadata = metadata,
     buffer = nil,
   }
@@ -1786,18 +1596,13 @@ local function new_net_control(runtime: Runtime, kind: integer,
                                operation: NetOperation): NetRequestControl
   local control: NetRequestControl = {
     runtime = runtime,
-    generation = runtime.generation,
     lifecycle = NET_OWNER_ALLOCATED,
     kind = kind,
     owner = nil,
     operation = operation,
     next_control = nil,
     previous_control = nil,
-    callback_recorded = false,
-    callback_result = 0,
-    callback_aborted = false,
     result_pointer = nil,
-    result_freed = false,
   }
   return control
 end
@@ -1813,12 +1618,10 @@ local function allocate_dns_owner(runtime: Runtime,
   local owner: uv_getaddrinfo_t = {
     handle = memory as *libuv.uv_getaddrinfo_t,
     storage = storage,
-    main_thread = runtime.main_thread,
-    module = runtime.module,
+    main_thread = main_thread,
     dispatcher = dns_dispatch,
-    root = operation.task,
     metadata = control,
-    buffer = operation.host,
+    buffer = nil,
   }
   -- Root and derive the raw callback navigation pointer before publishing the
   -- request control.  No allocating Titan helper runs between publication and
@@ -1842,12 +1645,10 @@ local function allocate_connect_owner(runtime: Runtime,
   local owner: uv_connect_t = {
     handle = memory as *libuv.uv_connect_t,
     storage = storage,
-    main_thread = runtime.main_thread,
-    module = runtime.module,
+    main_thread = main_thread,
     dispatcher = connect_dispatch,
-    root = operation.task,
     metadata = control,
-    buffer = operation.addresses,
+    buffer = nil,
   }
   ffi.lua_pushtvalue(L, owner)
   local pointer = ffi.lua_togco(L, -1)
@@ -1868,10 +1669,8 @@ local function allocate_write_owner(runtime: Runtime,
   local owner: uv_write_t = {
     handle = memory as *libuv.uv_write_t,
     storage = storage,
-    main_thread = runtime.main_thread,
-    module = runtime.module,
+    main_thread = main_thread,
     dispatcher = write_dispatch,
-    root = operation.task,
     metadata = control,
     buffer = operation.prepared_buffer,
   }
@@ -1894,10 +1693,8 @@ local function allocate_shutdown_owner(runtime: Runtime,
   local owner: uv_shutdown_t = {
     handle = memory as *libuv.uv_shutdown_t,
     storage = storage,
-    main_thread = runtime.main_thread,
-    module = runtime.module,
+    main_thread = main_thread,
     dispatcher = shutdown_dispatch,
-    root = operation.task,
     metadata = control,
     buffer = nil,
   }
@@ -1919,12 +1716,10 @@ local function allocate_tcp_owner(runtime: Runtime):
     generation = runtime.generation,
     lifecycle = TCP_ALLOCATED,
     server = false,
-    published = false,
     owner = nil,
     next_control = nil,
     previous_control = nil,
     connect_pending = false,
-    close_callback_seen = false,
     close_requested = false,
     shutdown_requested = false,
     write_shutdown = false,
@@ -1947,16 +1742,13 @@ local function allocate_tcp_owner(runtime: Runtime):
     accept_count = 0,
     accept_capacity = 0,
     accept_error = nil,
-    -- TITAN_UV_PHASE5_TCP_TEST_INIT
     setup_operation = nil,
   }
   local owner: uv_tcp_t = {
     handle = memory as *libuv.uv_tcp_t,
     storage = storage,
-    main_thread = runtime.main_thread,
-    module = runtime.module,
+    main_thread = main_thread,
     dispatcher = tcp_dispatch,
-    root = control,
     metadata = control,
     buffer = nil,
   }
@@ -1971,12 +1763,11 @@ end
 local function discard_tcp_storage(tcp: uv_tcp_t)
   local control = tcp.metadata
   if not control.owner then return end
-  -- Unlink while every owner/root field is still intact.  After unlinking,
+  -- Unlink while every owner field is still intact.  After unlinking,
   -- only non-raising field clears remain in this frame.
   unlink_tcp_control(control)
   tcp.handle = nil
   tcp.storage = nil
-  tcp.root = nil
   tcp.buffer = nil
   control.lifecycle = TCP_CLOSED
   control.owner = nil
@@ -2006,7 +1797,6 @@ local function initialize_tcp(runtime: Runtime): (uv_tcp_t, integer)
     control.next_control = nil
     tcp.handle = nil
     tcp.storage = nil
-    tcp.root = nil
     tcp.buffer = nil
     control.lifecycle = TCP_CLOSED
     control.owner = nil
@@ -2042,7 +1832,6 @@ local function new_process_control(runtime: Runtime): ProcessControl
     runtime = runtime,
     generation = runtime.generation,
     lifecycle = PROCESS_ALLOCATED,
-    published = false,
     owner = nil,
     linked = false,
     next_control = nil,
@@ -2059,11 +1848,8 @@ local function new_process_control(runtime: Runtime): ProcessControl
     exit_seen = false,
     exit_status = 0,
     term_signal = 0,
-    close_requested = false,
-    close_callback_seen = false,
     callback_aborted = false,
     shutdown_started = false,
-    term_sent = false,
     kill_sent = false,
     grace_owner = nil,
     grace_fired = false,
@@ -2082,10 +1868,8 @@ local function allocate_process_owner(runtime: Runtime):
   local owner: uv_process_t = {
     handle = memory as *libuv.uv_process_t,
     storage = storage,
-    main_thread = runtime.main_thread,
-    module = runtime.module,
+    main_thread = main_thread,
     dispatcher = process_dispatch,
-    root = control,
     metadata = control,
     buffer = nil,
   }
@@ -2103,13 +1887,10 @@ local function new_pipe_control(process: ProcessControl,
                                 kind: integer): PipeControl
   local control: PipeControl = {
     runtime = process.runtime,
-    generation = process.generation,
     lifecycle = PIPE_ALLOCATED,
     kind = kind,
     owner = nil,
     process = process,
-    close_requested = false,
-    close_callback_seen = false,
     callback_aborted = false,
     read_active = false,
     read_terminal = TCP_READ_OPEN,
@@ -2138,10 +1919,8 @@ local function allocate_pipe_owner(process: ProcessControl,
   local owner: uv_pipe_t = {
     handle = memory as *libuv.uv_pipe_t,
     storage = storage,
-    main_thread = process.runtime.main_thread,
-    module = process.runtime.module,
+    main_thread = main_thread,
     dispatcher = pipe_dispatch,
-    root = process,
     metadata = control,
     buffer = nil,
   }
@@ -2163,18 +1942,14 @@ local function discard_pipe_storage(pipe: uv_pipe_t)
   local control = pipe.metadata
   if control.lifecycle == PIPE_CLOSED then return end
   control.lifecycle = PIPE_CLOSED
-  control.close_requested = true
-  control.close_callback_seen = true
   pipe.handle = nil
   pipe.storage = nil
-  pipe.root = nil
   pipe.buffer = nil
   control.owner = nil
 end
 
 local function start_pipe_close(pipe: uv_pipe_t)
   local control = pipe.metadata
-  control.close_requested = true
   if control.lifecycle == PIPE_CLOSED or
       control.lifecycle == PIPE_CLOSING then return end
   if control.read_active then
@@ -2195,18 +1970,13 @@ local function discard_process_storage(process: uv_process_t)
   local control = process.metadata
   if control.lifecycle == PROCESS_CLOSED then return end
   control.lifecycle = PROCESS_CLOSED
-  control.close_requested = true
-  control.close_callback_seen = true
   process.handle = nil
   process.storage = nil
-  process.root = nil
-  process.buffer = nil
   control.owner = nil
 end
 
 local function start_process_close(process: uv_process_t)
   local control = process.metadata
-  control.close_requested = true
   if control.lifecycle == PROCESS_CLOSED or
       control.lifecycle == PROCESS_CLOSING then return end
   if control.lifecycle == PROCESS_ALLOCATED then
@@ -2217,21 +1987,16 @@ local function start_process_close(process: uv_process_t)
   shim.titan_uvshim_process_close(process.handle)
 end
 
-local function new_process_request_control(runtime: Runtime, kind: integer,
+local function new_process_request_control(runtime: Runtime,
                                            operation: ProcessOperation):
                                            ProcessRequestControl
   local control: ProcessRequestControl = {
     runtime = runtime,
-    generation = runtime.generation,
     lifecycle = PROCESS_OWNER_ALLOCATED,
-    kind = kind,
     owner = nil,
     operation = operation,
     next_control = nil,
     previous_control = nil,
-    callback_recorded = false,
-    callback_result = 0,
-    callback_aborted = false,
   }
   return control
 end
@@ -2243,15 +2008,12 @@ local function allocate_pipe_write_owner(runtime: Runtime,
   local top = lua.lua_gettop(L)
   local memory = lua.lua_newuserdatauv(L, libuv.uv_write_t.sizeof, 0)
   local storage = ffi.lua_totvalue(L, -1)
-  local control = new_process_request_control(
-      runtime, PROCESS_OWNER_WRITE, operation)
+  local control = new_process_request_control(runtime, operation)
   local owner: uv_pipe_write_t = {
     handle = memory as *libuv.uv_write_t,
     storage = storage,
-    main_thread = runtime.main_thread,
-    module = runtime.module,
+    main_thread = main_thread,
     dispatcher = pipe_write_dispatch,
-    root = operation,
     metadata = control,
     buffer = operation.prepared_buffer,
   }
@@ -2274,7 +2036,6 @@ local function retire_process_request(control: ProcessRequestControl)
     unlink_process_request(control)
     owner.handle = nil
     owner.storage = nil
-    owner.root = nil
     owner.buffer = nil
   end
   if operation.owner == raw_owner then operation.owner = nil end
@@ -2292,10 +2053,8 @@ local function allocate_process_grace(control: ProcessControl):
   local owner: uv_process_grace_t = {
     handle = memory as *libuv.uv_timer_t,
     storage = storage,
-    main_thread = runtime.main_thread,
-    module = runtime.module,
+    main_thread = main_thread,
     dispatcher = process_grace_dispatch,
-    root = control,
     metadata = control,
     buffer = nil,
   }
@@ -2325,7 +2084,6 @@ local function start_process_grace(control: ProcessControl): integer
     control.grace_owner = nil
     owner.handle = nil
     owner.storage = nil
-    owner.root = nil
     return status as integer
   end
   shim.titan_uvshim_timer_set_data(owner.handle, pointer)
@@ -2338,10 +2096,8 @@ local function start_process_grace(control: ProcessControl): integer
 end
 
 local function free_dns_result(control: NetRequestControl)
-  if control.result_pointer ~= nil and not control.result_freed then
+  if control.result_pointer ~= nil then
     shim.titan_uvshim_addrinfo_free(control.result_pointer)
-    -- TITAN_UV_PHASE5_DNS_RELEASE
-    control.result_freed = true
     control.result_pointer = nil
   end
 end
@@ -2358,29 +2114,22 @@ local function retire_net_control(control: NetRequestControl)
     unlink_net_control(control)
     owner.handle = nil
     owner.storage = nil
-    owner.root = nil
-    owner.buffer = nil
   elseif control.kind == NET_OWNER_CONNECT then
     local owner = raw_owner as uv_connect_t
     unlink_net_control(control)
     owner.handle = nil
     owner.storage = nil
-    owner.root = nil
-    owner.buffer = nil
   elseif control.kind == NET_OWNER_WRITE then
     local owner = raw_owner as uv_write_t
     unlink_net_control(control)
     owner.handle = nil
     owner.storage = nil
-    owner.root = nil
     owner.buffer = nil
   else
     local owner = raw_owner as uv_shutdown_t
     unlink_net_control(control)
     owner.handle = nil
     owner.storage = nil
-    owner.root = nil
-    owner.buffer = nil
   end
   if operation.owner == raw_owner then operation.owner = nil end
   control.owner = nil
@@ -2388,10 +2137,8 @@ local function retire_net_control(control: NetRequestControl)
 end
 
 local function clean_fs_owner(owner: uv_fs_t)
-  if not owner.metadata.cleaned then
-    -- TITAN_UV_FS_TEST_CLEANUP
+  if owner.metadata.lifecycle ~= FS_OWNER_CLEANED then
     libuv.uv_fs_req_cleanup(owner.handle)
-    owner.metadata.cleaned = true
   end
   owner.metadata.lifecycle = FS_OWNER_CLEANED
 end
@@ -2473,10 +2220,8 @@ local function submit_fs_operation(operation: FsOperation):
     end
     local bytes = operation.write_bytes as Bytes
     local write_length = bytes.length - operation.write_offset
-    -- TITAN_UV_FS_TEST_WRITE_LIMIT
     operation.prepared_buffer =
-        make_buffer(bytes, operation.write_offset, write_length,
-                    "fs.buffer.init")
+        make_buffer(bytes, operation.write_offset, write_length)
   end
   -- Validate private operation state and cache every borrowed native argument
   -- before publishing the owner. The fast path of a record cast does not
@@ -2509,7 +2254,6 @@ local function submit_fs_operation(operation: FsOperation):
   else
     raise "cannot submit unsupported filesystem operation"
   end
-  -- TITAN_UV_FS_TEST_AFTER_PREPARE
   local owner = allocate_fs_owner(runtime, operation)
   if operation.prepared_buffer then
     owner.buffer = operation.prepared_buffer
@@ -2518,7 +2262,6 @@ local function submit_fs_operation(operation: FsOperation):
   owner.metadata.lifecycle = FS_OWNER_SUBMITTED
   operation.owner = owner
   local status: ffi.titan_ffi_int = 0 as ffi.titan_ffi_int
-  -- TITAN_UV_FS_TEST_BEFORE_SUBMIT
   if kind == FS.stat then
     status = libuv.uv_fs_stat(loop_handle, owner.handle, path_data,
                              shim.titan_uvshim_fs_cb)
@@ -2558,7 +2301,6 @@ local function submit_fs_operation(operation: FsOperation):
   if (status as integer) < 0 then
     clean_fs_owner(owner)
   end
-  -- TITAN_UV_FS_TEST_AFTER_SUBMIT
   return owner, status as integer
 end
 
@@ -2610,7 +2352,6 @@ local function start_signal_owner(runtime: Runtime, task: Task,
                                   spec: SignalSpec, epoch: integer):
                                   (uv_signal_t, integer)
   local owner, pointer = allocate_signal_owner(runtime, task, spec, epoch)
-  -- TITAN_UV_PHASE6_SIGNAL_INIT
   local status = shim.titan_uvshim_signal_init(runtime.loop.handle,
                                                owner.handle, pointer)
   if (status as integer) < 0 then
@@ -2634,16 +2375,13 @@ local function start_signal_owner(runtime: Runtime, task: Task,
     owner.metadata.lifecycle = OWNER_CLOSED
     owner.handle = nil
     owner.storage = nil
-    owner.root = nil
-    owner.buffer = nil
     return owner, status as integer
   end
   owner.metadata.lifecycle = OWNER_ACTIVE
-  -- TITAN_UV_PHASE6_SIGNAL_START
   status = shim.titan_uvshim_signal_start_oneshot(
       owner.handle, spec.signum as ffi.titan_ffi_int)
   if (status as integer) < 0 then
-    shim.titan_uvshim_signal_stop(owner.handle)
+    libuv.uv_signal_stop(owner.handle)
     owner.metadata.lifecycle = OWNER_CLOSING
     shim.titan_uvshim_signal_close(owner.handle)
   end
@@ -2717,8 +2455,6 @@ local function schedule_observation(task: Task)
       runtime.pending_observations = runtime.pending_observations - 1
     end
     promote_fatal(runtime, make_error(status, "task.observe", nil), "")
-  else
-    owner.root = task
   end
 end
 
@@ -2750,7 +2486,6 @@ local function finish_task(task: Task, state: integer, result: value,
   task.error_value = err
   task.error_traceback = trace
   task.state = state
-  task.cancel_deferred = false
   task.cancel_fallback = false
   task.cleanup_shield_depth = 0
   local raw_helper_group? = task.helper_group
@@ -2779,17 +2514,11 @@ local function finish_task(task: Task, state: integer, result: value,
 end
 
 local function ticker_state(owner: uv_timer_t): TickerState
-  if owner.metadata.kind ~= OWNER_TICKER then
-    raise "timer wrapper is not a Ticker"
-  end
   return owner.metadata.peer as TickerState
 end
 
 local function detach_fs_wait(task: Task, request: Request)
   local operation = request.subject as FsOperation
-  if operation.task ~= task or operation.request ~= request then
-    raise "malformed filesystem cancellation state"
-  end
   if request.cleanup then
     return
   end
@@ -2817,9 +2546,6 @@ end
 
 local function detach_net_wait(task: Task, request: Request)
   local operation = request.subject as NetOperation
-  if operation.task ~= task or operation.request ~= request then
-    raise "malformed network cancellation state"
-  end
   if request.cleanup then return end
   if operation.kind == NET_CONNECT or operation.kind == NET_LISTEN then
     if operation.tcp then
@@ -2863,9 +2589,6 @@ end
 
 local function detach_process_wait(task: Task, request: Request)
   local operation = request.subject as ProcessOperation
-  if operation.task ~= task or operation.request ~= request then
-    raise "malformed process cancellation state"
-  end
   if request.cleanup then return end
   if operation.kind == PROCESS_SPAWN then
     -- Native setup/close ownership is monotonic.  Cancellation revokes only
@@ -2953,11 +2676,9 @@ local function detach_wait(task: Task)
           owner.metadata.epoch == request.generation then
         owner.metadata.task = nil
         owner.metadata.epoch = 0
-        owner.root = nil
         close_signal_owner(owner)
       end
-    elseif (request.kind == REQUEST_SLEEP or
-            request.kind == REQUEST_CLEANUP_SLEEP) and raw_owner ~= nil then
+    elseif request.kind == REQUEST_SLEEP and raw_owner ~= nil then
       close_owner(raw_owner as uv_timer_t)
     end
   elseif raw_owner ~= nil then
@@ -2976,11 +2697,9 @@ local function request_cancel(task: Task, reason: value)
     raise "Task belongs to a stale libuv Runtime"
   end
   task.cancel_requested = true
-  task.cancel_reason = reason
   task.cancel_value = Cancelled.new(reason)
   task.epoch = task.epoch + 1
   if task.cleanup_shield_depth > 0 then
-    task.cancel_deferred = true
     return
   end
   if task.state ~= TASK_RUNNING then
@@ -2992,7 +2711,6 @@ local function request_cancel(task: Task, reason: value)
     task.cancel_fallback = true
     promote_fatal(runtime, make_error(status, "task.cancel", nil), "")
   else
-    task.cancel_deferred = false
     task.operation = owner
   end
 end
@@ -3002,14 +2720,7 @@ local function running_task(): Task
     raise "async operation used outside a UV Task"
   end
   local runtime = current_runtime()
-  if not runtime.running_task then
-    raise "UV Task continuation is not active"
-  end
-  local task = runtime.running_task as Task
-  if task.generation ~= runtime.generation then
-    raise "Task belongs to a stale libuv Runtime"
-  end
-  return task
+  return runtime.running_task as Task
 end
 
 local function ordinary_task(): Task
@@ -3030,14 +2741,11 @@ local function new_request(kind: integer, subject: value,
   return Request.new(kind, task.epoch, task, subject, milliseconds, false)
 end
 
-local function new_cleanup_request(milliseconds: integer): Request
+local function new_cleanup_request(kind: integer, subject: value,
+                                   milliseconds: integer): Request
   local task = running_task()
-  if task.cleanup_shield_depth <= 0 then
-    raise "cleanup await used outside a cleanup shield"
-  end
   task.epoch = task.epoch + 1
-  return Request.new(REQUEST_CLEANUP_SLEEP, task.epoch, task, nil,
-                     milliseconds, true)
+  return Request.new(kind, task.epoch, task, subject, milliseconds, true)
 end
 
 local function make_fs_operation(kind: integer, task: Task?,
@@ -3045,7 +2753,7 @@ local function make_fs_operation(kind: integer, task: Task?,
                                  second_path: Text?, file: uv_file?,
                                  data: string, maximum: integer): FsOperation
   return FsOperation.new(kind, task, request, path, second_path, file,
-      data, maximum, 0, nil, nil, nil, nil, nil, false, false, false)
+      data, maximum, 0, nil, nil, nil, nil, nil, false, false)
 end
 
 local function make_net_operation(kind: integer, task: Task,
@@ -3081,10 +2789,11 @@ local function new_fs_request(kind: integer, path: string,
   local request = new_request(REQUEST_FS, nil, 0)
   local copied_second: Text? = nil
   if second_path then
-    copied_second = copy_text(second_path as string, "fs.path")
+    copied_second = copy_text(second_path as string, "fs.path",
+                              second_path as string)
   end
   local operation = make_fs_operation(kind, request.task, request,
-      copy_text(path, "fs.path"), copied_second, nil, data, 0)
+      copy_text(path, "fs.path", path), copied_second, nil, data, 0)
   request.subject = operation
   return request
 end
@@ -3094,12 +2803,7 @@ local function new_file_request(kind: integer, file: uv_file, data: string,
                                 cleanup: boolean): Request
   local maybe_request: Request? = nil
   if cleanup then
-    local task = running_task()
-    if task.cleanup_shield_depth <= 0 then
-      raise "filesystem cleanup used outside a cleanup shield"
-    end
-    task.epoch = task.epoch + 1
-    maybe_request = Request.new(REQUEST_FS, task.epoch, task, nil, 0, true)
+    maybe_request = new_cleanup_request(REQUEST_FS, nil, 0)
   else
     maybe_request = new_request(REQUEST_FS, nil, 0)
   end
@@ -3115,19 +2819,14 @@ local function new_net_request(kind: integer, host: string?, port: integer,
                                maximum: integer, cleanup: boolean): Request
   local maybe_request: Request? = nil
   if cleanup then
-    local task = running_task()
-    if task.cleanup_shield_depth <= 0 then
-      raise "network cleanup used outside a cleanup shield"
-    end
-    task.epoch = task.epoch + 1
-    maybe_request = Request.new(REQUEST_NET, task.epoch, task, nil, 0, true)
+    maybe_request = new_cleanup_request(REQUEST_NET, nil, 0)
   else
     maybe_request = new_request(REQUEST_NET, nil, 0)
   end
   local request = maybe_request as Request
   local copied_host: Text? = nil
   if host then
-    copied_host = copy_text(host as string, "net.host")
+    copied_host = copy_text(host as string, "net.host", host as string)
   end
   local operation = make_net_operation(kind, request.task, request,
       copied_host, port, backlog, tcp, data, maximum)
@@ -3139,7 +2838,7 @@ local function make_process_operation(kind: integer, task: Task,
                                       request: Request,
                                       process: uv_process_t?,
                                       pipe: uv_pipe_t?, file: Text?,
-                                      arguments: {Text}?, data: string,
+                                      arguments: {Text}?,
                                       maximum: integer): ProcessOperation
   local operation: ProcessOperation = {
     kind = kind,
@@ -3149,7 +2848,6 @@ local function make_process_operation(kind: integer, task: Task,
     pipe = pipe,
     file = file,
     arguments = arguments,
-    data = data,
     maximum = maximum,
     copied_bytes = nil,
     prepared_buffer = nil,
@@ -3157,30 +2855,22 @@ local function make_process_operation(kind: integer, task: Task,
     next_operation = nil,
     previous_operation = nil,
     linked = false,
-    last_error = nil,
   }
   return operation
 end
 
 local function new_process_request(kind: integer, process: uv_process_t,
-                                   pipe: uv_pipe_t?, data: string,
-                                   maximum: integer,
+                                   pipe: uv_pipe_t?, maximum: integer,
                                    cleanup: boolean): Request
   local maybe_request: Request? = nil
   if cleanup then
-    local task = running_task()
-    if task.cleanup_shield_depth <= 0 then
-      raise "process cleanup used outside a cleanup shield"
-    end
-    task.epoch = task.epoch + 1
-    maybe_request = Request.new(REQUEST_PROCESS, task.epoch, task,
-                                nil, 0, true)
+    maybe_request = new_cleanup_request(REQUEST_PROCESS, nil, 0)
   else
     maybe_request = new_request(REQUEST_PROCESS, nil, 0)
   end
   local request = maybe_request as Request
   local operation = make_process_operation(kind, request.task, request,
-      process, pipe, nil, nil, data, maximum)
+      process, pipe, nil, nil, maximum)
   request.subject = operation
   return request
 end
@@ -3189,15 +2879,15 @@ local function new_process_spawn_request(file: string,
                                           args: {string}): Request
   if #file == 0 then raise "process executable must not be empty" end
   local request = new_request(REQUEST_PROCESS, nil, 0)
-  -- Copy every text root before any native owner or raw descriptor exists.
-  local copied_file = copy_text_with_subject(file, "process.spawn", file)
+  -- Copy every text root before any native process or pipe owner exists.
+  local copied_file = copy_text(file, "process.spawn", file)
   local copied_args: {Text} = {}
   for index = 1, #args do
-    copied_args[index] = copy_text_with_subject(
+    copied_args[index] = copy_text(
         args[index], "process.spawn", args[index])
   end
   local operation = make_process_operation(PROCESS_SPAWN,
-      request.task, request, nil, nil, copied_file, copied_args, "", 0)
+      request.task, request, nil, nil, copied_file, copied_args, 0)
   request.subject = operation
   return request
 end
@@ -3206,13 +2896,8 @@ local function new_helper_request(group: HelperGroup, wait_all: boolean,
                                   cleanup: boolean): Request
   local maybe_request: Request? = nil
   if cleanup then
-    local task = running_task()
-    if task.cleanup_shield_depth <= 0 then
-      raise "helper cleanup used outside a cleanup shield"
-    end
-    task.epoch = task.epoch + 1
-    maybe_request = Request.new(REQUEST_HELPER, task.epoch, task,
-                                group, wait_all and 1 or 0, true)
+    maybe_request = new_cleanup_request(
+        REQUEST_HELPER, group, wait_all and 1 or 0)
   else
     maybe_request = new_request(REQUEST_HELPER, group,
                                 wait_all and 1 or 0)
@@ -3318,22 +3003,20 @@ local function begin_one_process_shutdown(control: ProcessControl): integer
   process_close_all_pipes(control)
   local process = control.owner as uv_process_t
   local term = shim.titan_uvshim_signal_number("term")
-  control.term_sent = true
-  local kill_status = shim.titan_uvshim_process_kill(process.handle, term)
+  local kill_status = libuv.uv_process_kill(process.handle, term)
   local grace_status = start_process_grace(control)
   if grace_status < 0 and not control.exit_seen then
     control.kill_sent = true
     local kill = shim.titan_uvshim_signal_number("kill")
-    local emergency_status = shim.titan_uvshim_process_kill(process.handle,
-                                                            kill)
+    local emergency_status = libuv.uv_process_kill(process.handle, kill)
     if (emergency_status as integer) < 0 and
-        (shim.titan_uvshim_status_is_esrch(emergency_status) as integer) == 0
+        (emergency_status as integer) ~= UV_ESRCH
     then
       return emergency_status as integer
     end
   end
   if (kill_status as integer) < 0 and
-      (shim.titan_uvshim_status_is_esrch(kill_status) as integer) == 0 then
+      (kill_status as integer) ~= UV_ESRCH then
     return kill_status as integer
   end
   return grace_status
@@ -3371,15 +3054,13 @@ local function advance_pipe_output(pipe: uv_pipe_t,
     if operation.kind == PROCESS_WRITE_STDIN then
       if not operation.prepared_buffer then
         local bytes = operation.copied_bytes as Bytes
-        operation.prepared_buffer = make_buffer(bytes, 0, bytes.length,
-                                                "process.stdin.buffer")
+        operation.prepared_buffer = make_buffer(bytes, 0, bytes.length)
       end
       local buffer = operation.prepared_buffer as Buffer
       local owner, pointer = allocate_pipe_write_owner(control.runtime,
                                                        operation)
       operation.owner = owner
       control.output_current = operation
-      -- TITAN_UV_PHASE6_PROCESS_WRITE_SUBMIT
       status = shim.titan_uvshim_pipe_write_start(
           owner.handle, pipe.handle, pointer, buffer.handle)
       if (status as integer) >= 0 then
@@ -3387,7 +3068,6 @@ local function advance_pipe_output(pipe: uv_pipe_t,
         operation.prepared_buffer = nil
         return nil
       end
-      owner.metadata.callback_result = status as integer
       retire_process_request(owner.metadata)
       remove_pipe_output(pipe, operation)
       local failure = make_error(status as integer,
@@ -3414,15 +3094,10 @@ local function advance_pipe_output(pipe: uv_pipe_t,
       -- the ordered write-end close that publishes EOF to the child.
       remove_pipe_output(pipe, operation)
       control.close_waiter = operation
-      -- TITAN_UV_PHASE6_PROCESS_STDIN_CLOSE
       control.write_shutdown = true
       start_pipe_close(pipe)
       return nil
     end
-  end
-  if not control.output_current and not control.output_head and
-      control.close_requested then
-    start_pipe_close(pipe)
   end
   return nil
 end
@@ -3431,17 +3106,12 @@ local function arm_process_spawn(task: Task,
                                  request: Request): DriveControl?
   local runtime = task.runtime
   local operation = request.subject as ProcessOperation
-  if operation.kind ~= PROCESS_SPAWN or operation.task ~= task or
-      operation.request ~= request then
-    raise "malformed process spawn Request"
-  end
   local file = operation.file as Text
   local arguments = operation.arguments as {Text}
   local argument_count = #arguments + 1
 
-  -- Allocate every GC-owned wrapper, argv cell, descriptor cell, and sync
-  -- close request before acquiring a raw descriptor.  From stdio_pipes until
-  -- the final uv_fs_req_cleanup below, this frame calls only non-allocating C.
+  -- The three initialized uv_pipe_t handles are passed directly to uv_spawn;
+  -- libuv creates and opens their parent endpoints through UV_CREATE_PIPE.
   local process, process_pointer = allocate_process_owner(runtime)
   local process_control = process.metadata
   process_control.spawn_operation = operation
@@ -3452,111 +3122,42 @@ local function arm_process_spawn(task: Task,
       process_control, PIPE_STDOUT)
   local stderr_pipe, stderr_pointer = allocate_pipe_owner(
       process_control, PIPE_STDERR)
-  local endpoints = ffi.titan_ffi_int.new_array(
-      shim.TITAN_UV_STDIO_ENDPOINT_COUNT as integer)
-  local fillers = ffi.titan_ffi_int.new_array(
-      shim.TITAN_UV_STDIO_FILLER_CAPACITY as integer)
   local argv = shim.titan_uvshim_char_ptr.new_array(argument_count + 1)
-  local close_top = lua.lua_gettop(L)
-  local close_memory = lua.lua_newuserdatauv(L, libuv.uv_fs_t.sizeof, 0)
-  local close_request_storage: value = ffi.lua_totvalue(L, -1)
-  local close_request = close_memory as *libuv.uv_fs_t
-  process.buffer = close_request_storage
-  lua.lua_settop(L, close_top)
   argv[0] = file.bytes.data
   for index = 1, #arguments do
     argv[index] = arguments[index].bytes.data
   end
   argv[argument_count] = nil
 
-  -- TITAN_UV_PHASE6_PROCESS_STDIO_CREATE
-  local status = shim.titan_uvshim_stdio_pipes(endpoints, fillers)
-  local failed_operation = "process.stdio"
+  local status = shim.titan_uvshim_pipe_init(runtime.loop.handle,
+      stdin_pipe.handle, stdin_pointer)
+  local failed_operation = "process.stdin.init"
   if (status as integer) >= 0 then
-    -- TITAN_UV_PHASE6_PROCESS_STDIN_INIT
+    stdin_pipe.metadata.lifecycle = PIPE_INITIALIZED
     status = shim.titan_uvshim_pipe_init(runtime.loop.handle,
-        stdin_pipe.handle, stdin_pointer)
-    failed_operation = "process.stdin.init"
-    if (status as integer) >= 0 then
-      stdin_pipe.metadata.lifecycle = PIPE_INITIALIZED
-      -- TITAN_UV_PHASE6_PROCESS_STDOUT_INIT
-      status = shim.titan_uvshim_pipe_init(runtime.loop.handle,
-          stdout_pipe.handle, stdout_pointer)
-      failed_operation = "process.stdout.init"
-    end
-    if (status as integer) >= 0 then
-      stdout_pipe.metadata.lifecycle = PIPE_INITIALIZED
-      -- TITAN_UV_PHASE6_PROCESS_STDERR_INIT
-      status = shim.titan_uvshim_pipe_init(runtime.loop.handle,
-          stderr_pipe.handle, stderr_pointer)
-      failed_operation = "process.stderr.init"
-    end
-    if (status as integer) >= 0 then
-      stderr_pipe.metadata.lifecycle = PIPE_INITIALIZED
-      -- TITAN_UV_PHASE6_PROCESS_STDIN_OPEN
-      status = shim.titan_uvshim_pipe_open(stdin_pipe.handle, endpoints,
-          shim.TITAN_UV_STDIO_STDIN_PARENT as ffi.titan_ffi_int)
-      failed_operation = "process.stdin.open"
-    end
-    if (status as integer) >= 0 then
-      stdin_pipe.metadata.lifecycle = PIPE_OPEN
-      -- TITAN_UV_PHASE6_PROCESS_STDOUT_OPEN
-      status = shim.titan_uvshim_pipe_open(stdout_pipe.handle, endpoints,
-          shim.TITAN_UV_STDIO_STDOUT_PARENT as ffi.titan_ffi_int)
-      failed_operation = "process.stdout.open"
-    end
-    if (status as integer) >= 0 then
-      stdout_pipe.metadata.lifecycle = PIPE_OPEN
-      -- TITAN_UV_PHASE6_PROCESS_STDERR_OPEN
-      status = shim.titan_uvshim_pipe_open(stderr_pipe.handle, endpoints,
-          shim.TITAN_UV_STDIO_STDERR_PARENT as ffi.titan_ffi_int)
-      failed_operation = "process.stderr.open"
-    end
-    if (status as integer) >= 0 then
-      stderr_pipe.metadata.lifecycle = PIPE_OPEN
-      -- TITAN_UV_PHASE6_PROCESS_SPAWN_SUBMIT
-      status = shim.titan_uvshim_process_spawn(runtime.loop.handle,
-          process.handle, process_pointer, argv, endpoints)
-      failed_operation = "process.spawn"
-      process_control.lifecycle = PROCESS_SPAWNED
-    end
+        stdout_pipe.handle, stdout_pointer)
+    failed_operation = "process.stdout.init"
   end
-
-  -- Synchronous uv_fs_close with a NULL loop/callback is the portable libuv
-  -- descriptor close.  Reuse one GC-owned request and attempt every still
-  -- caller-owned endpoint/filler even after an earlier close error.
-  -- TITAN_UV_PHASE6_PROCESS_RAW_CLOSE
-  local raw_close_status = 0
-  for index = 0, (shim.TITAN_UV_STDIO_ENDPOINT_COUNT as integer) - 1 do
-    local descriptor = endpoints[index] as integer
-    if descriptor >= 0 then
-      local close_status = libuv.uv_fs_close(nil, close_request,
-          descriptor as libuv.uv_file, nil)
-      libuv.uv_fs_req_cleanup(close_request)
-      if (close_status as integer) < 0 and raw_close_status == 0 then
-        raw_close_status = close_status as integer
-      end
-      endpoints[index] = -1 as ffi.titan_ffi_int
-    end
+  if (status as integer) >= 0 then
+    stdout_pipe.metadata.lifecycle = PIPE_INITIALIZED
+    status = shim.titan_uvshim_pipe_init(runtime.loop.handle,
+        stderr_pipe.handle, stderr_pointer)
+    failed_operation = "process.stderr.init"
   end
-  for index = 0, (shim.TITAN_UV_STDIO_FILLER_CAPACITY as integer) - 1 do
-    local descriptor = fillers[index] as integer
-    if descriptor >= 0 then
-      local close_status = libuv.uv_fs_close(nil, close_request,
-          descriptor as libuv.uv_file, nil)
-      libuv.uv_fs_req_cleanup(close_request)
-      if (close_status as integer) < 0 and raw_close_status == 0 then
-        raw_close_status = close_status as integer
-      end
-      fillers[index] = -1 as ffi.titan_ffi_int
-    end
+  if (status as integer) >= 0 then
+    stderr_pipe.metadata.lifecycle = PIPE_INITIALIZED
+    status = shim.titan_uvshim_process_spawn(runtime.loop.handle,
+        process.handle, process_pointer, argv, stdin_pipe.handle,
+        stdout_pipe.handle, stderr_pipe.handle)
+    failed_operation = "process.spawn"
+    process_control.lifecycle = PROCESS_SPAWNED
   end
-  -- The process wrapper rooted this synchronous request through every close.
-  process.buffer = nil
 
   local spawn_status = status as integer
-  if spawn_status >= 0 and raw_close_status == 0 then
-    process_control.published = true
+  if spawn_status >= 0 then
+    stdin_pipe.metadata.lifecycle = PIPE_OPEN
+    stdout_pipe.metadata.lifecycle = PIPE_OPEN
+    stderr_pipe.metadata.lifecycle = PIPE_OPEN
     process_control.spawn_operation = nil
     operation.process = nil
     operation.file = nil
@@ -3565,28 +3166,15 @@ local function arm_process_spawn(task: Task,
     return DriveControl.new(DRIVE_RESUME, process, "", nil)
   end
 
-  local failure_status = spawn_status
-  if failure_status >= 0 then
-    failure_status = raw_close_status
-    failed_operation = "process.stdio.close"
-  end
   process_control.pending_failure = make_error(
-      failure_status, failed_operation, file.source)
+      spawn_status, failed_operation, file.source)
   process_close_all_pipes(process_control)
   if process_control.lifecycle == PROCESS_ALLOCATED then
     discard_process_storage(process)
-  elseif spawn_status < 0 then
-    -- Failed uv_spawn owes no exit callback, but its initialized handle and
-    -- all initialized pipes still owe close callbacks.
-    start_process_close(process)
   else
-    -- A successfully spawned child is never published after raw cleanup
-    -- fails.  Terminate and reap it before delivering the setup failure.
-    local shutdown_status = begin_one_process_shutdown(process_control)
-    if shutdown_status < 0 and not runtime.fatal then
-      promote_fatal(runtime, make_error(shutdown_status,
-          "process.shutdown", file.source), "")
-    end
+    -- Failed uv_spawn owes no exit callback.  Its process and initialized
+    -- pipe handles still owe the ordinary libuv close callbacks.
+    start_process_close(process)
   end
   if process_all_native_closed(process_control) then
     local failure: Error? = retire_unpublished_process(process_control)
@@ -3601,9 +3189,6 @@ end
 local function arm_process_request(task: Task,
                                    request: Request): DriveControl?
   local operation = request.subject as ProcessOperation
-  if operation.task ~= task or operation.request ~= request then
-    raise "malformed process Request"
-  end
   if operation.kind == PROCESS_SPAWN then
     return arm_process_spawn(task, request)
   end
@@ -3617,9 +3202,6 @@ local function arm_process_request(task: Task,
           ProcessExitResult.new(process_control.exit_status,
                                 process_control.term_signal), "", nil)
     end
-    if process_control.wait_task then
-      raise "Process already has a waiting Task"
-    end
     process_control.wait_task = task
     process_control.wait_epoch = request.generation
     task.operation = process
@@ -3629,9 +3211,6 @@ local function arm_process_request(task: Task,
     if process_all_native_closed(process_control) then
       task.current_request = nil
       return DriveControl.new(DRIVE_RESUME, nil, "", request)
-    end
-    if process_control.dispose_task then
-      raise "Process already has a cleanup disposer"
     end
     process_control.dispose_task = task
     process_control.dispose_epoch = request.generation
@@ -3644,17 +3223,6 @@ local function arm_process_request(task: Task,
   local pipe_control = pipe.metadata
   if operation.kind == PROCESS_READ_STDOUT or
       operation.kind == PROCESS_READ_STDERR then
-    if pipe_control.read_terminal == TCP_READ_EOF then
-      task.current_request = nil
-      return DriveControl.new(DRIVE_RESUME, nil, "", nil)
-    elseif pipe_control.read_terminal == TCP_READ_ERROR then
-      task.current_request = nil
-      return DriveControl.new(DRIVE_ERROR,
-                              pipe_control.read_error, "", nil)
-    end
-    if pipe_control.read_waiter then
-      raise "process pipe already has a waiting reader"
-    end
     local bytes = allocate_bytes(operation.maximum)
     pipe_control.read_waiter = task
     pipe_control.read_epoch = request.generation
@@ -3680,23 +3248,17 @@ local function arm_process_request(task: Task,
     task.operation = pipe
     task.state = TASK_WAITING
     return nil
-  elseif operation.kind == PROCESS_WRITE_STDIN or
-         operation.kind == PROCESS_CLOSE_STDIN then
+  else
     enqueue_pipe_output(pipe, operation)
     task.operation = operation
     task.state = TASK_WAITING
     return advance_pipe_output(pipe, task)
   end
-  raise "malformed process operation"
 end
 
 local function arm_helper_request(task: Task,
                                   request: Request): DriveControl?
   local group = request.subject as HelperGroup
-  if group.parent ~= task or group.runtime ~= task.runtime or
-      group.generation ~= task.generation then
-    raise "malformed HelperGroup Request"
-  end
   local wait_all = request.milliseconds ~= 0
   local ready = group.pending == 0 or
                 (not wait_all and group.first_error ~= nil)
@@ -3705,9 +3267,6 @@ local function arm_helper_request(task: Task,
     local cleanup_request: Request? = nil
     if request.cleanup then cleanup_request = request end
     return DriveControl.new(DRIVE_RESUME, group, "", cleanup_request)
-  end
-  if group.waiter then
-    raise "HelperGroup already has a waiting parent"
   end
   group.waiter = task
   group.waiter_epoch = request.generation
@@ -3720,10 +3279,6 @@ end
 
 local function arm_request(task: Task, request: Request): DriveControl?
   local runtime = task.runtime
-  if request.task ~= task or request.generation ~= task.epoch or
-      task.generation ~= runtime.generation then
-    raise "stale private UV Request"
-  end
   task.current_request = request
   if request.kind == REQUEST_SLEEP then
     local owner, status = start_owner(runtime, OWNER_SLEEP, task, request,
@@ -3737,32 +3292,8 @@ local function arm_request(task: Task, request: Request): DriveControl?
     task.operation = owner
     task.state = TASK_WAITING
     return nil
-  elseif request.kind == REQUEST_CLEANUP_SLEEP then
-    if task.cleanup_shield_depth <= 0 then
-      raise "cleanup Request escaped its cleanup shield"
-    end
-    local owner, status = start_owner(runtime, OWNER_CLEANUP_SLEEP,
-                                      task, request, request.generation,
-                                      request.milliseconds, 0)
-    if status < 0 then
-      task.current_request = nil
-      return DriveControl.new(DRIVE_ERROR,
-          make_error(status, "cleanup.timer.start", nil), "", request)
-    end
-    task.operation = owner
-    task.state = TASK_WAITING
-    return nil
   elseif request.kind == REQUEST_JOIN then
     local target = request.subject as Task
-    if target.runtime ~= runtime or target.generation ~= runtime.generation then
-      raise "cannot join a Task from another libuv Runtime"
-    end
-    if target == task then
-      raise "a Task cannot join itself"
-    end
-    if terminal(target.state) then
-      raise "terminal Task unexpectedly yielded a Join Request"
-    end
     add_joiner(target, task)
     task.operation = nil
     task.state = TASK_WAITING
@@ -3770,15 +3301,6 @@ local function arm_request(task: Task, request: Request): DriveControl?
   elseif request.kind == REQUEST_TICK then
     local owner = request.subject as uv_timer_t
     local state = ticker_state(owner)
-    if state.runtime ~= runtime or state.generation ~= runtime.generation then
-      raise "Ticker belongs to a stale libuv Runtime"
-    end
-    if not state.open then
-      raise "closed Ticker unexpectedly yielded a wait Request"
-    end
-    if state.waiter then
-      raise "Ticker already has a waiting Task"
-    end
     state.waiter = task
     state.waiter_epoch = request.generation
     task.operation = owner
@@ -3786,9 +3308,6 @@ local function arm_request(task: Task, request: Request): DriveControl?
     return nil
   elseif request.kind == REQUEST_FS then
     local operation = request.subject as FsOperation
-    if operation.task ~= task or operation.request ~= request then
-      raise "malformed filesystem Request"
-    end
     if operation.file then
       local file = operation.file as uv_file
       if operation.kind == FS.close_wait then
@@ -3846,10 +3365,9 @@ local function arm_request(task: Task, request: Request): DriveControl?
     return nil
   elseif request.kind == REQUEST_PROCESS then
     return arm_process_request(task, request)
-  elseif request.kind == REQUEST_HELPER then
+  else
     return arm_helper_request(task, request)
   end
-  raise "malformed private UV Request"
 end
 
 local function drive_task(task: Task, initial_mode: integer,
@@ -3859,7 +3377,6 @@ local function drive_task(task: Task, initial_mode: integer,
   local mode = initial_mode
   local payload = initial_payload
   local source_trace = initial_trace
-  local immediate_iterations = 0
   while true do
     runtime.running_task = task
     task.state = TASK_RUNNING
@@ -3903,9 +3420,6 @@ local function drive_task(task: Task, initial_mode: integer,
     end
 
     local request = yielded as Request
-    if request.task ~= task or request.generation ~= task.epoch then
-      raise "malformed or stale private UV Request"
-    end
     local cleanup_request = request.cleanup and
                             task.cleanup_shield_depth > 0
     if task.cancel_requested and not cleanup_request then
@@ -3918,22 +3432,6 @@ local function drive_task(task: Task, initial_mode: integer,
         return
       end
       local outcome = immediate as DriveControl
-      immediate_iterations = immediate_iterations + 1
-      if immediate_iterations >= IMMEDIATE_BUDGET then
-        local deferred, deferred_status = start_owner(runtime,
-            OWNER_DEFER_ERROR, task, outcome, task.epoch,
-            0, 0)
-        if deferred_status < 0 then
-          local infrastructure_error = make_error(deferred_status,
-                                                  "task.defer", nil)
-          promote_fatal(runtime, infrastructure_error, "")
-          finish_task(task, TASK_FAILED, nil, infrastructure_error, "")
-        else
-          task.operation = deferred
-          task.state = TASK_WAITING
-        end
-        return
-      end
       mode = outcome.mode
       payload = outcome.payload
       source_trace = outcome.trace
@@ -3960,7 +3458,6 @@ end
 local function retire_fs_owner_now(owner: uv_fs_t)
   owner.handle = nil
   owner.storage = nil
-  owner.root = nil
   owner.buffer = nil
   if owner.metadata.operation.owner == owner then
     owner.metadata.operation.owner = nil
@@ -3972,7 +3469,6 @@ local function submit_file_head(file: uv_file, inline_task: Task?): Error?
   while not file.current and file.queue_head do
     local operation = file.queue_head as FsOperation
     file.current = operation
-    -- TITAN_UV_FS_TEST_PAUSE_BEFORE_ALLOCATION
     local owner, status = submit_fs_operation(operation)
     if status >= 0 then
       if operation.task then
@@ -4072,13 +3568,11 @@ local function start_dns(operation: NetOperation):
   local port = operation.port as ffi.titan_ffi_int
   local owner, pointer = allocate_dns_owner(runtime, operation)
   operation.owner = owner
-  -- TITAN_UV_PHASE5_DNS_SUBMIT
   local status = shim.titan_uvshim_getaddrinfo_start(
       loop_handle, owner.handle, pointer, node, port)
   if (status as integer) >= 0 then
     owner.metadata.lifecycle = NET_OWNER_SUBMITTED
   else
-    owner.metadata.callback_result = status as integer
     retire_net_control(owner.metadata)
   end
   return owner, status as integer
@@ -4098,8 +3592,6 @@ local function finish_net_setup(operation: NetOperation, tcp: uv_tcp_t?,
     drive_task(task, DRIVE_ERROR, failure, "")
   else
     local resource = tcp as uv_tcp_t
-    -- TITAN_UV_PHASE5_PUBLISH
-    resource.metadata.published = true
     resource.metadata.setup_operation = nil
     drive_task(task, DRIVE_RESUME, resource, "")
   end
@@ -4132,7 +3624,6 @@ local function continue_net_setup(operation: NetOperation)
         local owner, pointer = allocate_connect_owner(runtime, operation)
         operation.owner = owner
         tcp.metadata.connect_pending = true
-        -- TITAN_UV_PHASE5_CONNECT_SUBMIT
         local status = shim.titan_uvshim_tcp_connect_start(
             owner.handle, tcp_handle, pointer, address_data,
             address_index)
@@ -4141,7 +3632,6 @@ local function continue_net_setup(operation: NetOperation)
           return
         end
         tcp.metadata.connect_pending = false
-        owner.metadata.callback_result = status as integer
         retire_net_control(owner.metadata)
         operation.last_error = make_error(status as integer, "net.connect",
                                           net_operation_subject(operation))
@@ -4171,7 +3661,7 @@ local function continue_net_setup(operation: NetOperation)
   end
   local failure? = operation.last_error
   if not failure then
-    failure = make_error(shim.titan_uvshim_error_eaddrnotavail() as integer,
+    failure = make_error(UV_EADDRNOTAVAIL,
                          "net.resolve", net_operation_subject(operation))
   end
   finish_net_setup(operation, nil, failure)
@@ -4197,8 +3687,7 @@ local function advance_tcp_output(tcp: uv_tcp_t,
       -- an ordinary queued operation that shutdown can still repair.
       if not operation.prepared_buffer then
         local bytes = copy_bytes(operation.data)
-        operation.prepared_buffer = make_buffer(bytes, 0, bytes.length,
-                                                "net.buffer.init")
+        operation.prepared_buffer = make_buffer(bytes, 0, bytes.length)
       end
       local buffer = operation.prepared_buffer as Buffer
       local buffer_handle = buffer.handle
@@ -4206,7 +3695,6 @@ local function advance_tcp_output(tcp: uv_tcp_t,
       local owner, pointer = allocate_write_owner(control.runtime, operation)
       operation.owner = owner
       control.output_current = operation
-      -- TITAN_UV_PHASE5_WRITE_SUBMIT
       status = shim.titan_uvshim_tcp_write_start(
           owner.handle, tcp_handle, pointer, buffer_handle)
       if (status as integer) >= 0 then
@@ -4214,7 +3702,6 @@ local function advance_tcp_output(tcp: uv_tcp_t,
         operation.prepared_buffer = nil
         return nil
       end
-      owner.metadata.callback_result = status as integer
       retire_net_control(owner.metadata)
     else
       local tcp_handle = tcp.handle
@@ -4222,14 +3709,12 @@ local function advance_tcp_output(tcp: uv_tcp_t,
                                                      operation)
       operation.owner = owner
       control.output_current = operation
-      -- TITAN_UV_PHASE5_SHUTDOWN_SUBMIT
       status = shim.titan_uvshim_tcp_shutdown_start(
           owner.handle, tcp_handle, pointer)
       if (status as integer) >= 0 then
         owner.metadata.lifecycle = NET_OWNER_SUBMITTED
         return nil
       end
-      owner.metadata.callback_result = status as integer
       retire_net_control(owner.metadata)
     end
 
@@ -4304,7 +3789,7 @@ local function stop_server_accept(server: uv_tcp_t)
     local task = raw_waiter as Task
     if task.state == TASK_WAITING and not task.cancel_requested and
         task.epoch == epoch then
-      local failure = make_error(shim.titan_uvshim_error_ecanceled() as integer,
+      local failure = make_error(UV_ECANCELED,
                                  "net.accept", "server closed")
       schedule_task_drive(task, epoch, DRIVE_ERROR, failure, "", nil)
     end
@@ -4348,9 +3833,6 @@ end
 
 local function arm_net_request(task: Task, request: Request): Error?
   local operation = request.subject as NetOperation
-  if operation.task ~= task or operation.request ~= request then
-    raise "malformed network Request"
-  end
   if operation.kind == NET_CONNECT or operation.kind == NET_LISTEN then
     local owner, status = start_dns(operation)
     if status < 0 then
@@ -4366,15 +3848,11 @@ local function arm_net_request(task: Task, request: Request): Error?
   local tcp = operation.tcp as uv_tcp_t
   local control = tcp.metadata
   if operation.kind == NET_READ then
-    if control.read_waiter then
-      raise "Connection already has a waiting reader"
-    end
     local bytes = allocate_bytes(operation.maximum)
     control.read_waiter = task
     control.read_epoch = request.generation
     control.read_bytes = bytes
     tcp.buffer = bytes.storage
-    -- TITAN_UV_PHASE5_READ_START
     local status = shim.titan_uvshim_tcp_read_start(tcp.handle)
     if (status as integer) < 0 then
       control.read_waiter = nil
@@ -4396,40 +3874,22 @@ local function arm_net_request(task: Task, request: Request): Error?
     task.state = TASK_WAITING
     return advance_tcp_output(tcp, task)
   elseif operation.kind == NET_ACCEPT then
-    if control.accept_waiter then
-      raise "Server already has a waiting accept Task"
-    end
     control.accept_waiter = task
     control.accept_epoch = request.generation
     task.operation = tcp
     task.state = TASK_WAITING
     return nil
-  elseif operation.kind == NET_CLOSE or
-         operation.kind == NET_CLOSE_WAIT then
+  else
     enqueue_tcp_close_waiter(tcp, operation)
     task.operation = operation
     task.state = TASK_WAITING
     request_tcp_close(tcp)
     return nil
   end
-  raise "malformed network operation"
-end
-
-local function record_close_failure(file: uv_file,
-                                    operation: FsOperation): boolean
-  if not operation.close_failure_recorded then
-    operation.close_failure_recorded = true
-    file.close_failures = file.close_failures + 1
-    if file.close_failures >= FS_CLOSE_RETRY_LIMIT then
-      file.close_retry_exhausted = true
-    end
-  end
-  return not file.close_retry_exhausted
 end
 
 local function queue_internal_close(file: uv_file)
-  if file.state == FS.file_closed or file.close_enqueued or
-      file.close_retry_exhausted then return end
+  if file.state == FS.file_closed or file.close_enqueued then return end
   file.state = FS.file_closing
   local operation = make_fs_operation(FS.internal_close, nil, nil,
       nil, nil, file, "", 0)
@@ -4466,9 +3926,11 @@ local function wake_close_waiters(file: uv_file, failure: Error?)
 end
 
 local function fs_stat_kind(kind: integer): string
-  if kind == 1 then return "file" end
-  if kind == 2 then return "directory" end
-  if kind == 3 then return "symlink" end
+  if kind == (shim.TITAN_UV_STAT_FILE as integer) then return "file" end
+  if kind == (shim.TITAN_UV_STAT_DIRECTORY as integer) then
+    return "directory"
+  end
+  if kind == (shim.TITAN_UV_STAT_SYMLINK as integer) then return "symlink" end
   return "other"
 end
 
@@ -4479,27 +3941,16 @@ local function extract_fs_stat(owner: uv_fs_t): FsStatResult
   local modified_nanoseconds: libuv.int64_t = 0 as libuv.int64_t
   local kind: ffi.titan_ffi_int = 0 as ffi.titan_ffi_int
   local statbuf = libuv.uv_fs_get_statbuf(owner.handle)
-  local status = shim.titan_uvshim_stat_extract(
+  shim.titan_uvshim_stat_extract(
       statbuf as ffi.titan_ffi_void_ptr, size, mode,
       modified_seconds, modified_nanoseconds, kind)
-  if (status as integer) < 0 then
-    raise make_error(status as integer, "fs.stat.extract",
-                     (owner.metadata.operation.path as Text).source)
-  end
   return FsStatResult.new(size as integer, fs_stat_kind(kind as integer),
       mode as integer, modified_seconds as integer,
       modified_nanoseconds as integer)
 end
 
-local function fs_dispatch_body(owner: uv_fs_t, event_kind: integer,
-                                result: integer, size: libuv.size_t)
+local function fs_dispatch_body(owner: uv_fs_t, result: integer)
   local runtime = owner.metadata.runtime
-  if owner.metadata.generation ~= runtime.generation then
-    raise "filesystem callback owner belongs to a stale libuv Runtime"
-  end
-  if event_kind ~= EVENT_FS then
-    raise "filesystem owner received an invalid callback event"
-  end
   owner.metadata.lifecycle = FS_OWNER_CALLBACK
   local operation = owner.metadata.operation
   local payload: value = nil
@@ -4522,13 +3973,10 @@ local function fs_dispatch_body(owner: uv_fs_t, event_kind: integer,
     end
   elseif operation.kind == FS.write then
     if result == 0 then
-      failure = make_error(shim.titan_uvshim_error_eio() as integer,
+      failure = make_error(UV_EIO,
                            "fs.write",
                            fs_operation_subject(operation))
     else
-      if result > #operation.data - operation.write_offset then
-        raise "filesystem write result exceeds its rooted buffer"
-      end
       operation.write_offset = operation.write_offset + result
     end
   elseif operation.kind == FS.list then
@@ -4541,7 +3989,6 @@ local function fs_dispatch_body(owner: uv_fs_t, event_kind: integer,
   if operation.kind == FS.open and not failure then
     local file = create_file(runtime, owner.metadata.acquired_file,
                              fs_operation_subject(operation) as string)
-    owner.metadata.has_acquired_file = false
     owner.metadata.acquired_file = -1 as libuv.uv_file
     if fs_operation_deliverable(operation) then
       payload = file
@@ -4570,14 +4017,10 @@ local function fs_dispatch_body(owner: uv_fs_t, event_kind: integer,
     local file = operation.file as uv_file
     file.close_enqueued = false
     remove_file_operation(file, operation)
-    if not failure then
-      file.handle = -1 as libuv.uv_file
-      file.state = FS.file_closed
-    else
-      if record_close_failure(file, operation) then
-        queue_internal_close(file)
-      end
-    end
+    -- A close callback is terminal even when it reports an error. Retrying a
+    -- failed close can act on a descriptor that the OS has already reused.
+    file.handle = -1 as libuv.uv_file
+    file.state = FS.file_closed
     wake_close_waiters(file, failure)
     if fs_operation_deliverable(operation) then
       local task = operation.task as Task
@@ -4586,8 +4029,7 @@ local function fs_dispatch_body(owner: uv_fs_t, event_kind: integer,
       else
         drive_task(task, DRIVE_ERROR, failure, "")
       end
-    elseif failure and
-        (not operation.task or file.close_retry_exhausted) then
+    elseif failure then
       promote_fatal(runtime, failure, "")
     end
     if file.state == FS.file_closed and not file.close_waiter_head then
@@ -4619,35 +4061,17 @@ end
 -- Trusted direct filesystem dispatcher.  The native entry stays deliberately
 -- thin; every allocating/extracting/bookkeeping helper call runs after this
 -- function's setjmp target and under its trailing catch.
-local function fs_dispatch(owner: uv_fs_t, event_kind: integer,
-                           result: integer, size: libuv.size_t,
-                           pointer: ffi.titan_ffi_void_ptr)
-  owner.metadata.callback_result = result
-  owner.metadata.callback_recorded = true
-  if pointer ~= nil then
-    raise "filesystem callback carried an unexpected pointer payload"
-  end
-  if event_kind == EVENT_FS and result >= 0 and
-      owner.metadata.operation.kind == FS.open then
+local function fs_dispatch(owner: uv_fs_t, _event_kind: integer,
+                           result: integer, _size: libuv.size_t,
+                           _pointer: ffi.titan_ffi_void_ptr)
+  if result >= 0 and owner.metadata.operation.kind == FS.open then
     owner.metadata.acquired_file = result as libuv.uv_file
-    owner.metadata.has_acquired_file = true
   end
-  fs_dispatch_body(owner, event_kind, result, size)
+  fs_dispatch_body(owner, result)
 catch
-  if not owner.metadata.callback_recorded then
-    owner.metadata.callback_result = result
-    owner.metadata.callback_recorded = true
-    if event_kind == EVENT_FS and result >= 0 and
-        owner.metadata.operation.kind == FS.open then
-      owner.metadata.acquired_file = result as libuv.uv_file
-      owner.metadata.has_acquired_file = true
-    end
-  end
   owner.metadata.callback_aborted = true
-  if not owner.metadata.cleaned then
-    -- TITAN_UV_FS_TEST_CATCH_CLEANUP
+  if owner.metadata.lifecycle ~= FS_OWNER_CLEANED then
     libuv.uv_fs_req_cleanup(owner.handle)
-    owner.metadata.cleaned = true
   end
   owner.metadata.lifecycle = FS_OWNER_CLEANED
   if not owner.metadata.runtime.fatal then
@@ -4681,18 +4105,9 @@ local function finish_closed_tcp(tcp: uv_tcp_t)
   end
 end
 
-local function dns_dispatch_body(owner: uv_getaddrinfo_t,
-                                 event_kind: integer, result: integer,
-                                 size: libuv.size_t,
+local function dns_dispatch_body(owner: uv_getaddrinfo_t, result: integer,
                                  pointer: ffi.titan_ffi_void_ptr)
   local control = owner.metadata
-  local runtime = control.runtime
-  if control.generation ~= runtime.generation then
-    raise "DNS callback owner belongs to a stale libuv Runtime"
-  end
-  if event_kind ~= EVENT_GETADDRINFO then
-    raise "DNS owner received an invalid callback event"
-  end
   control.lifecycle = NET_OWNER_CALLBACK
   local operation = control.operation
   local failure: Error? = nil
@@ -4700,8 +4115,6 @@ local function dns_dispatch_body(owner: uv_getaddrinfo_t,
     free_dns_result(control)
     failure = make_error(result, "net.resolve",
                          net_operation_subject(operation))
-  elseif pointer == nil then
-    failure = internal_error("net.resolve.result")
   else
     local addresses = copy_addresses(pointer, net_operation_subject(operation))
     -- Root the copied address array in the operation before entering another
@@ -4709,7 +4122,7 @@ local function dns_dispatch_body(owner: uv_getaddrinfo_t,
     operation.addresses = addresses
     free_dns_result(control)
     if addresses.count == 0 then
-      failure = make_error(shim.titan_uvshim_error_eaddrnotavail() as integer,
+      failure = make_error(UV_EADDRNOTAVAIL,
                            "net.resolve", net_operation_subject(operation))
     end
   end
@@ -4730,22 +4143,16 @@ end
 -- The borrowed addrinfo pointer is captured before the allocating body.  The
 -- trailing catch can therefore release it exactly once without allowing a
 -- longjmp to cross libuv.
-local function dns_dispatch(owner: uv_getaddrinfo_t, event_kind: integer,
-                            result: integer, size: libuv.size_t,
+local function dns_dispatch(owner: uv_getaddrinfo_t, _event_kind: integer,
+                            result: integer, _size: libuv.size_t,
                             pointer: ffi.titan_ffi_void_ptr)
-  -- TITAN_UV_PHASE5_DNS_CALLBACK
-  owner.metadata.callback_result = result
-  owner.metadata.callback_recorded = true
   owner.metadata.result_pointer = pointer
-  dns_dispatch_body(owner, event_kind, result, size, pointer)
+  dns_dispatch_body(owner, result, pointer)
 catch
-  if owner.metadata.result_pointer ~= nil and
-      not owner.metadata.result_freed then
+  if owner.metadata.result_pointer ~= nil then
     shim.titan_uvshim_addrinfo_free(owner.metadata.result_pointer)
-    owner.metadata.result_freed = true
     owner.metadata.result_pointer = nil
   end
-  owner.metadata.callback_aborted = true
   owner.metadata.lifecycle = NET_OWNER_CALLBACK
   if not owner.metadata.runtime.fatal then
     owner.metadata.runtime.fatal = true
@@ -4757,26 +4164,14 @@ catch
   return
 end
 
-local function connect_dispatch_body(owner: uv_connect_t,
-                                     event_kind: integer,
-                                     result: integer,
-                                     size: libuv.size_t)
+local function connect_dispatch_body(owner: uv_connect_t, result: integer)
   local control = owner.metadata
-  local runtime = control.runtime
-  if control.generation ~= runtime.generation then
-    raise "connect callback owner belongs to a stale libuv Runtime"
-  end
-  if event_kind ~= EVENT_CONNECT then
-    raise "connect owner received an invalid callback event"
-  end
   control.lifecycle = NET_OWNER_CALLBACK
   local operation = control.operation
   local tcp = operation.tcp as uv_tcp_t
   if result >= 0 and net_operation_deliverable(operation) then
     tcp.metadata.lifecycle = TCP_CONNECTION
     tcp.metadata.server = false
-    tcp.metadata.published = true
-    -- TITAN_UV_PHASE5_CONNECT_PUBLISH
     tcp.metadata.setup_operation = nil
     operation.addresses = nil
     operation.tcp = nil
@@ -4790,26 +4185,18 @@ local function connect_dispatch_body(owner: uv_connect_t,
                                       net_operation_subject(operation))
   end
   start_tcp_close(tcp)
-  if tcp.metadata.close_callback_seen then finish_closed_tcp(tcp) end
   retire_net_control(control)
 end
 
-local function connect_dispatch(owner: uv_connect_t, event_kind: integer,
-                                result: integer, size: libuv.size_t,
-                                pointer: ffi.titan_ffi_void_ptr)
-  owner.metadata.callback_result = result
-  owner.metadata.callback_recorded = true
+local function connect_dispatch(owner: uv_connect_t, _event_kind: integer,
+                                result: integer, _size: libuv.size_t,
+                                _pointer: ffi.titan_ffi_void_ptr)
   if owner.metadata.operation.tcp then
     local tcp = owner.metadata.operation.tcp as uv_tcp_t
     tcp.metadata.connect_pending = false
   end
-  if pointer ~= nil then
-    raise "connect callback carried an unexpected pointer payload"
-  end
-  -- TITAN_UV_PHASE5_CONNECT_CALLBACK
-  connect_dispatch_body(owner, event_kind, result, size)
+  connect_dispatch_body(owner, result)
 catch
-  owner.metadata.callback_aborted = true
   owner.metadata.lifecycle = NET_OWNER_CALLBACK
   if not owner.metadata.runtime.fatal then
     owner.metadata.runtime.fatal = true
@@ -4822,17 +4209,9 @@ catch
 end
 
 local function complete_output_callback(control: NetRequestControl,
-                                        event_kind: integer,
-                                        expected_event: integer,
                                         result: integer,
                                         operation_name: string)
   local runtime = control.runtime
-  if control.generation ~= runtime.generation then
-    raise "stream request owner belongs to a stale libuv Runtime"
-  end
-  if event_kind ~= expected_event then
-    raise "stream request owner received an invalid callback event"
-  end
   control.lifecycle = NET_OWNER_CALLBACK
   local operation = control.operation
   local tcp = operation.tcp as uv_tcp_t
@@ -4840,8 +4219,6 @@ local function complete_output_callback(control: NetRequestControl,
   if result < 0 then
     failure = make_error(result, operation_name,
                          net_operation_subject(operation))
-  elseif operation.kind == NET_SHUTDOWN then
-    tcp.metadata.write_shutdown = true
   end
 
   -- The completed owner remains linked and roots operation while the FIFO is
@@ -4849,7 +4226,6 @@ local function complete_output_callback(control: NetRequestControl,
   -- tail, preserving a valid owner for the outer catch on every earlier path.
   remove_output(tcp, operation)
   advance_tcp_output(tcp, nil)
-  if tcp.metadata.close_callback_seen then finish_closed_tcp(tcp) end
   if net_operation_deliverable(operation) then
     if failure then
       drive_task(operation.task as Task, DRIVE_ERROR, failure, "")
@@ -4862,19 +4238,11 @@ local function complete_output_callback(control: NetRequestControl,
   retire_net_control(control)
 end
 
-local function write_dispatch(owner: uv_write_t, event_kind: integer,
-                              result: integer, size: libuv.size_t,
-                              pointer: ffi.titan_ffi_void_ptr)
-  owner.metadata.callback_result = result
-  owner.metadata.callback_recorded = true
-  if pointer ~= nil then
-    raise "write callback carried an unexpected pointer payload"
-  end
-  -- TITAN_UV_PHASE5_WRITE_CALLBACK
-  complete_output_callback(owner.metadata, event_kind, EVENT_WRITE,
-                           result, "net.write")
+local function write_dispatch(owner: uv_write_t, _event_kind: integer,
+                              result: integer, _size: libuv.size_t,
+                              _pointer: ffi.titan_ffi_void_ptr)
+  complete_output_callback(owner.metadata, result, "net.write")
 catch
-  owner.metadata.callback_aborted = true
   owner.metadata.lifecycle = NET_OWNER_CALLBACK
   if not owner.metadata.runtime.fatal then
     owner.metadata.runtime.fatal = true
@@ -4887,18 +4255,15 @@ catch
 end
 
 local function shutdown_dispatch(owner: uv_shutdown_t,
-                                 event_kind: integer, result: integer,
-                                 size: libuv.size_t,
-                                 pointer: ffi.titan_ffi_void_ptr)
-  owner.metadata.callback_result = result
-  owner.metadata.callback_recorded = true
-  if pointer ~= nil then
-    raise "shutdown callback carried an unexpected pointer payload"
+                                 _event_kind: integer, result: integer,
+                                 _size: libuv.size_t,
+                                 _pointer: ffi.titan_ffi_void_ptr)
+  if result >= 0 and owner.metadata.operation.tcp then
+    local tcp = owner.metadata.operation.tcp as uv_tcp_t
+    tcp.metadata.write_shutdown = true
   end
-  complete_output_callback(owner.metadata, event_kind, EVENT_SHUTDOWN,
-                           result, "net.shutdown")
+  complete_output_callback(owner.metadata, result, "net.shutdown")
 catch
-  owner.metadata.callback_aborted = true
   owner.metadata.lifecycle = NET_OWNER_CALLBACK
   if not owner.metadata.runtime.fatal then
     owner.metadata.runtime.fatal = true
@@ -4921,18 +4286,12 @@ local function tcp_read_dispatch(tcp: uv_tcp_t, result: integer)
   local payload: string? = nil
   local failure: Error? = nil
   if result < 0 then
-    if result ~= (shim.titan_uvshim_error_eof() as integer) then
+    if result ~= UV_EOF then
       failure = make_error(result, "net.read", "connection")
       control.read_error = failure
     end
   else
-    if not raw_bytes then
-      raise "stream read callback has no rooted buffer"
-    end
     local bytes = raw_bytes as Bytes
-    if result > bytes.length then
-      raise "stream read result exceeds its rooted buffer"
-    end
     -- Keep both the control and native owner buffer roots through conversion.
     payload = bytes_string(bytes, result)
   end
@@ -5000,65 +4359,50 @@ local function tcp_connection_dispatch(server: uv_tcp_t, result: integer)
     control.accept_epoch = 0
     if task.state == TASK_WAITING and not task.cancel_requested and
         task.epoch == epoch then
-      client.metadata.published = true
       drive_task(task, DRIVE_RESUME, client, "")
       return
     end
   end
   if not enqueue_accepted(server, client) then
-    -- TITAN_UV_PHASE5_ACCEPT_OVERFLOW
     start_tcp_close(client)
   end
 end
 
 local function tcp_dispatch_body(owner: uv_tcp_t, event_kind: integer,
-                                 result: integer, size: libuv.size_t)
+                                 result: integer)
   local control = owner.metadata
-  if control.generation ~= control.runtime.generation then
-    raise "TCP callback owner belongs to a stale libuv Runtime"
-  end
   if event_kind == EVENT_HANDLE_CLOSE then
     finish_closed_tcp(owner)
   elseif event_kind == EVENT_STREAM_READ then
     tcp_read_dispatch(owner, result)
   elseif event_kind == EVENT_CONNECTION then
-    if control.server and (control.lifecycle == TCP_CLOSING or
-                           control.lifecycle == TCP_CLOSED) then
+    if control.lifecycle == TCP_CLOSING or
+       control.lifecycle == TCP_CLOSED then
       return
     end
-    if not control.server or control.lifecycle ~= TCP_SERVER then
-      raise "non-server TCP owner received a connection callback"
-    end
     tcp_connection_dispatch(owner, result)
-  else
-    raise "TCP owner received an invalid callback event"
   end
 end
 
 local function tcp_dispatch(owner: uv_tcp_t, event_kind: integer,
-                            result: integer, size: libuv.size_t,
-                            pointer: ffi.titan_ffi_void_ptr)
+                            result: integer, _size: libuv.size_t,
+                            _pointer: ffi.titan_ffi_void_ptr)
   if event_kind == EVENT_HANDLE_CLOSE then
-    owner.metadata.close_callback_seen = true
     owner.metadata.lifecycle = TCP_CLOSED
-    -- TITAN_UV_PHASE5_TCP_CLOSE_CALLBACK
   elseif event_kind == EVENT_STREAM_READ and result ~= 0 then
     if owner.metadata.read_active then
       shim.titan_uvshim_tcp_read_stop(owner.handle)
       owner.metadata.read_active = false
     end
     if result < 0 then
-      if result == (shim.titan_uvshim_error_eof() as integer) then
+      if result == UV_EOF then
         owner.metadata.read_terminal = TCP_READ_EOF
       else
         owner.metadata.read_terminal = TCP_READ_ERROR
       end
     end
   end
-  if pointer ~= nil then
-    raise "TCP callback carried an unexpected pointer payload"
-  end
-  tcp_dispatch_body(owner, event_kind, result, size)
+  tcp_dispatch_body(owner, event_kind, result)
 catch
   if not owner.metadata.runtime.fatal then
     owner.metadata.runtime.fatal = true
@@ -5088,7 +4432,7 @@ end
 
 local function finish_process_control(control: ProcessControl)
   if not control.linked or not process_all_native_closed(control) then return end
-  if not control.published then
+  if not control.exit_seen then
     local raw_operation? = control.spawn_operation
     local failure = control.pending_failure
     retire_unpublished_process(control)
@@ -5101,8 +4445,9 @@ local function finish_process_control(control: ProcessControl)
     end
     return
   end
-  -- Published wrappers retain their terminal PipeControls so repeated EOF,
-  -- read-error, stdin-close, and cached-wait queries remain allocation-free.
+  -- Successfully spawned wrappers retain their terminal PipeControls so
+  -- repeated EOF, read-error, stdin-close, and cached-wait queries remain
+  -- allocation-free.
   local raw_disposer? = control.dispose_task
   local dispose_epoch = control.dispose_epoch
   control.dispose_task = nil
@@ -5132,18 +4477,10 @@ local function deliver_process_waiter(control: ProcessControl)
 end
 
 local function process_dispatch_body(owner: uv_process_t,
-                                     event_kind: integer,
-                                     result: integer,
-                                     size: libuv.size_t)
+                                     event_kind: integer)
   local control = owner.metadata
   local runtime = control.runtime
-  if control.generation ~= runtime.generation then
-    raise "process callback owner belongs to a stale libuv Runtime"
-  end
   if event_kind == EVENT_PROCESS_EXIT then
-    if control.lifecycle ~= PROCESS_EXITED or not control.exit_seen then
-      raise "process exit callback was not recorded"
-    end
     close_process_grace(control)
     if control.stdin_pipe then
       start_pipe_close(control.stdin_pipe as uv_pipe_t)
@@ -5154,13 +4491,8 @@ local function process_dispatch_body(owner: uv_process_t,
     control.callback_aborted = false
     return
   elseif event_kind == EVENT_HANDLE_CLOSE then
-    if not control.exit_seen and control.published then
-      raise "published process closed before its exit callback"
-    end
     owner.handle = nil
     owner.storage = nil
-    owner.root = nil
-    owner.buffer = nil
     control.owner = owner
     deliver_process_waiter(control)
     control.callback_aborted = false
@@ -5168,7 +4500,6 @@ local function process_dispatch_body(owner: uv_process_t,
     maybe_finish_session(runtime)
     return
   end
-  raise "process owner received an invalid callback event"
 end
 
 -- The native trampoline calls this trusted Titan entry directly.  Exit/close
@@ -5176,22 +4507,16 @@ end
 -- sole longjmp fence and no protected Lua call is inserted in the hot path.
 local function process_dispatch(owner: uv_process_t, event_kind: integer,
                                 result: integer, size: libuv.size_t,
-                                pointer: ffi.titan_ffi_void_ptr)
+                                _pointer: ffi.titan_ffi_void_ptr)
   if event_kind == EVENT_PROCESS_EXIT then
-    -- TITAN_UV_PHASE6_PROCESS_EXIT_CALLBACK
     owner.metadata.exit_seen = true
     owner.metadata.exit_status = result
     owner.metadata.term_signal = size as integer
     owner.metadata.lifecycle = PROCESS_EXITED
   elseif event_kind == EVENT_HANDLE_CLOSE then
-    -- TITAN_UV_PHASE6_PROCESS_CLOSE_CALLBACK
-    owner.metadata.close_callback_seen = true
     owner.metadata.lifecycle = PROCESS_CLOSED
   end
-  if pointer ~= nil then
-    raise "process callback carried an unexpected pointer payload"
-  end
-  process_dispatch_body(owner, event_kind, result, size)
+  process_dispatch_body(owner, event_kind)
 catch
   owner.metadata.callback_aborted = true
   if not owner.metadata.runtime.fatal then
@@ -5216,20 +4541,14 @@ local function pipe_read_dispatch(pipe: uv_pipe_t, result: integer)
   local payload: string? = nil
   local failure: Error? = nil
   if result < 0 then
-    if result ~= (shim.titan_uvshim_error_eof() as integer) then
+    if result ~= UV_EOF then
       local operation = control.kind == PIPE_STDOUT and
                         "process.stdout.read" or "process.stderr.read"
       failure = make_error(result, operation, nil)
       control.read_error = failure
     end
   else
-    if not raw_bytes then
-      raise "process read callback has no rooted buffer"
-    end
     local bytes = raw_bytes as Bytes
-    if result > bytes.length then
-      raise "process read result exceeds its rooted buffer"
-    end
     payload = bytes_string(bytes, result)
   end
   control.read_bytes = nil
@@ -5259,15 +4578,12 @@ local function finish_pipe_close(pipe: uv_pipe_t)
       raw_close = operation
       control.close_waiter = operation
     elseif process_operation_deliverable(operation) then
-      local failure = make_error(
-          shim.titan_uvshim_error_ecanceled() as integer,
-          "process.stdin.write", nil)
+      local failure = make_error(UV_ECANCELED, "process.stdin.write", nil)
       drive_task(operation.task as Task, DRIVE_ERROR, failure, "")
     end
   end
   pipe.handle = nil
   pipe.storage = nil
-  pipe.root = nil
   pipe.buffer = nil
   control.owner = nil
   control.callback_aborted = false
@@ -5277,60 +4593,40 @@ local function finish_pipe_close(pipe: uv_pipe_t)
     local operation = raw_close as ProcessOperation
     control.close_waiter = nil
     if process_operation_deliverable(operation) then
-      if operation.last_error then
-        drive_task(operation.task as Task, DRIVE_ERROR,
-                   operation.last_error, "")
-      else
-        drive_task(operation.task as Task, DRIVE_RESUME, nil, "")
-      end
+      drive_task(operation.task as Task, DRIVE_RESUME, nil, "")
     end
   end
 end
 
 local function pipe_dispatch_body(owner: uv_pipe_t, event_kind: integer,
-                                  result: integer, size: libuv.size_t)
-  local control = owner.metadata
-  if control.generation ~= control.runtime.generation then
-    raise "pipe callback owner belongs to a stale libuv Runtime"
-  end
+                                  result: integer)
   if event_kind == EVENT_HANDLE_CLOSE then
     finish_pipe_close(owner)
   elseif event_kind == EVENT_STREAM_READ then
-    if control.kind == PIPE_STDIN then
-      raise "stdin pipe received a read callback"
-    end
     pipe_read_dispatch(owner, result)
-  else
-    raise "pipe owner received an invalid callback event"
   end
 end
 
 local function pipe_dispatch(owner: uv_pipe_t, event_kind: integer,
-                             result: integer, size: libuv.size_t,
-                             pointer: ffi.titan_ffi_void_ptr)
+                             result: integer, _size: libuv.size_t,
+                             _pointer: ffi.titan_ffi_void_ptr)
   if event_kind == EVENT_HANDLE_CLOSE then
-    -- TITAN_UV_PHASE6_PROCESS_PIPE_CLOSE_CALLBACK
-    owner.metadata.close_callback_seen = true
     owner.metadata.lifecycle = PIPE_CLOSED
   elseif event_kind == EVENT_STREAM_READ and result ~= 0 and
          owner.metadata.read_waiter then
-    -- TITAN_UV_PHASE6_PROCESS_PIPE_READ_CALLBACK
     if owner.metadata.read_active then
       shim.titan_uvshim_pipe_read_stop(owner.handle)
       owner.metadata.read_active = false
     end
     if result < 0 then
-      if result == (shim.titan_uvshim_error_eof() as integer) then
+      if result == UV_EOF then
         owner.metadata.read_terminal = TCP_READ_EOF
       else
         owner.metadata.read_terminal = TCP_READ_ERROR
       end
     end
   end
-  if pointer ~= nil then
-    raise "pipe callback carried an unexpected pointer payload"
-  end
-  pipe_dispatch_body(owner, event_kind, result, size)
+  pipe_dispatch_body(owner, event_kind, result)
 catch
   owner.metadata.callback_aborted = true
   if not owner.metadata.runtime.fatal then
@@ -5344,22 +4640,10 @@ catch
 end
 
 local function complete_pipe_request(control: ProcessRequestControl,
-                                     event_kind: integer,
-                                     expected_event: integer,
                                      result: integer)
-  local runtime = control.runtime
-  if control.generation ~= runtime.generation then
-    raise "pipe request owner belongs to a stale libuv Runtime"
-  end
-  if event_kind ~= expected_event then
-    raise "pipe request owner received an invalid callback event"
-  end
   control.lifecycle = PROCESS_OWNER_CALLBACK
   local operation = control.operation
   local pipe = operation.pipe as uv_pipe_t
-  if control.kind ~= PROCESS_OWNER_WRITE then
-    raise "pipe write request has an invalid owner kind"
-  end
   local failure: Error? = nil
   if result < 0 then
     failure = make_error(result, "process.stdin.write", nil)
@@ -5377,19 +4661,12 @@ local function complete_pipe_request(control: ProcessRequestControl,
 end
 
 local function pipe_write_dispatch(owner: uv_pipe_write_t,
-                                   event_kind: integer,
+                                   _event_kind: integer,
                                    result: integer,
-                                   size: libuv.size_t,
-                                   pointer: ffi.titan_ffi_void_ptr)
-  owner.metadata.callback_result = result
-  owner.metadata.callback_recorded = true
-  -- TITAN_UV_PHASE6_PROCESS_WRITE_CALLBACK
-  if pointer ~= nil then
-    raise "pipe write callback carried an unexpected pointer payload"
-  end
-  complete_pipe_request(owner.metadata, event_kind, EVENT_WRITE, result)
+                                   _size: libuv.size_t,
+                                   _pointer: ffi.titan_ffi_void_ptr)
+  complete_pipe_request(owner.metadata, result)
 catch
-  owner.metadata.callback_aborted = true
   owner.metadata.lifecycle = PROCESS_OWNER_CALLBACK
   if not owner.metadata.runtime.fatal then
     owner.metadata.runtime.fatal = true
@@ -5403,24 +4680,20 @@ end
 
 local function process_grace_dispatch(owner: uv_process_grace_t,
                                       event_kind: integer,
-                                      result: integer,
-                                      size: libuv.size_t,
-                                      pointer: ffi.titan_ffi_void_ptr)
+                                      _result: integer,
+                                      _size: libuv.size_t,
+                                      _pointer: ffi.titan_ffi_void_ptr)
   local control = owner.metadata
   local runtime = control.runtime
   if event_kind == EVENT_TIMER then control.grace_fired = true end
-  if pointer ~= nil or result ~= 0 or (size as integer) ~= 0 then
-    raise "process grace callback carried an invalid payload"
-  end
   if event_kind == EVENT_TIMER then
-    -- TITAN_UV_PHASE6_PROCESS_GRACE_CALLBACK
     libuv.uv_timer_stop(owner.handle)
     if not control.exit_seen and not control.kill_sent then
       local process = control.owner as uv_process_t
       local kill = shim.titan_uvshim_signal_number("kill")
-      local status = shim.titan_uvshim_process_kill(process.handle, kill)
+      local status = libuv.uv_process_kill(process.handle, kill)
       if (status as integer) < 0 and
-          (shim.titan_uvshim_status_is_esrch(status) as integer) == 0 then
+          (status as integer) ~= UV_ESRCH then
         raise make_error(status as integer, "process.kill", "kill")
       end
       control.kill_sent = true
@@ -5431,12 +4704,8 @@ local function process_grace_dispatch(owner: uv_process_grace_t,
     control.grace_callback_aborted = false
     owner.handle = nil
     owner.storage = nil
-    owner.root = nil
-    owner.buffer = nil
     finish_process_control(control)
     maybe_finish_session(runtime)
-  else
-    raise "process grace owner received an invalid callback event"
   end
 catch
   owner.metadata.grace_callback_aborted = true
@@ -5446,9 +4715,9 @@ catch
         owner.metadata.owner then
       local process = owner.metadata.owner as uv_process_t
       local kill = shim.titan_uvshim_signal_number("kill")
-      local status = shim.titan_uvshim_process_kill(process.handle, kill)
+      local status = libuv.uv_process_kill(process.handle, kill)
       if (status as integer) >= 0 or
-          (shim.titan_uvshim_status_is_esrch(status) as integer) ~= 0 then
+          (status as integer) == UV_ESRCH then
         owner.metadata.kill_sent = true
       end
     end
@@ -5459,8 +4728,6 @@ catch
     owner.metadata.grace_owner = nil
     owner.handle = nil
     owner.storage = nil
-    owner.root = nil
-    owner.buffer = nil
   end
   if not owner.metadata.runtime.fatal then
     owner.metadata.runtime.fatal = true
@@ -5476,46 +4743,26 @@ end
 -- a signal can resume arbitrary Titan code; the trailing catch never unwinds
 -- through libuv's native callback frame.
 local function signal_dispatch(owner: uv_signal_t, event_kind: integer,
-                               result: integer, size: libuv.size_t,
-                               pointer: ffi.titan_ffi_void_ptr)
+                               _result: integer, _size: libuv.size_t,
+                               _pointer: ffi.titan_ffi_void_ptr)
   local runtime = owner.metadata.runtime
-  if owner.metadata.generation ~= runtime.generation then
-    raise "signal owner belongs to a stale libuv Runtime"
-  end
 
   if event_kind == EVENT_HANDLE_CLOSE then
-    owner.metadata.close_seen = true
     owner.metadata.lifecycle = OWNER_CLOSED
-    -- TITAN_UV_PHASE6_SIGNAL_CLOSE_CALLBACK
-    if pointer ~= nil or result ~= 0 or (size as integer) ~= 0 then
-      raise "signal close callback carried an invalid payload"
-    end
     maybe_finish_session(runtime)
     owner.handle = nil
     owner.storage = nil
-    owner.root = nil
-    owner.buffer = nil
     unlink_signal_owner(owner)
     return
-  end
-  if event_kind ~= EVENT_SIGNAL then
-    raise "signal owner received an invalid callback event"
   end
 
   local raw_task? = owner.metadata.task
   local epoch = owner.metadata.epoch
   local name = owner.metadata.name
-  owner.metadata.callback_seen = true
-  -- TITAN_UV_PHASE6_SIGNAL_CALLBACK
   owner.metadata.task = nil
   owner.metadata.epoch = 0
-  owner.root = nil
   close_signal_owner(owner)
 
-  if pointer ~= nil or (size as integer) ~= 0 or
-      result ~= owner.metadata.signum then
-    raise "signal callback carried an invalid payload"
-  end
   if raw_task then
     local task = raw_task as Task
     if task.state == TASK_WAITING and not task.cancel_requested and
@@ -5537,15 +4784,9 @@ end
 -- Trusted direct native dispatcher.  drive_task owns the inner Task catch;
 -- this function's trailing catch is the non-raising Runtime invariant fence.
 local function timer_dispatch(owner: uv_timer_t, event_kind: integer,
-                              result: integer, size: libuv.size_t,
-                              pointer: ffi.titan_ffi_void_ptr)
+                              _result: integer, _size: libuv.size_t,
+                              _pointer: ffi.titan_ffi_void_ptr)
   local runtime = owner.metadata.runtime
-  if pointer ~= nil then
-    raise "timer callback carried an unexpected pointer payload"
-  end
-  if owner.metadata.generation ~= runtime.generation then
-    raise "callback owner belongs to a stale libuv Runtime"
-  end
 
   if event_kind == EVENT_HANDLE_CLOSE then
     local kind = owner.metadata.kind
@@ -5559,13 +4800,8 @@ local function timer_dispatch(owner: uv_timer_t, event_kind: integer,
     maybe_finish_session(runtime)
     owner.handle = nil
     owner.storage = nil
-    owner.root = nil
-    owner.buffer = nil
     unlink_owner(owner)
     return
-  end
-  if event_kind ~= EVENT_TIMER then
-    raise "timer owner received an invalid callback event"
   end
 
   local kind = owner.metadata.kind
@@ -5582,11 +4818,6 @@ local function timer_dispatch(owner: uv_timer_t, event_kind: integer,
     local task = owner.metadata.task as Task
     if task.state == TASK_WAITING and not task.cancel_requested and
         task.epoch == owner.metadata.epoch then
-      drive_task(task, DRIVE_RESUME, nil, "")
-    end
-  elseif kind == OWNER_CLEANUP_SLEEP then
-    local task = owner.metadata.task as Task
-    if task.state == TASK_WAITING and task.cleanup_shield_depth > 0 then
       drive_task(task, DRIVE_RESUME, nil, "")
     end
   elseif kind == OWNER_CANCEL then
@@ -5620,23 +4851,6 @@ local function timer_dispatch(owner: uv_timer_t, event_kind: integer,
         task.observer_count == 0 then
       promote_fatal(runtime, task.error_value, task.error_traceback)
     end
-  elseif kind == OWNER_DEFER_ERROR then
-    local task = owner.metadata.task as Task
-    local control = owner.metadata.peer as DriveControl
-    local deliver = false
-    if control.cleanup_request then
-      local request = control.cleanup_request as Request
-      deliver = request.cleanup and task.state == TASK_WAITING and
-                task.current_request == request and
-                task.cleanup_shield_depth > 0
-    else
-      deliver = task.state == TASK_WAITING and not task.cancel_requested and
-                task.epoch == owner.metadata.epoch
-    end
-    if deliver then
-      drive_task(task, control.mode, control.payload, control.trace)
-    end
-  -- TITAN_UV_PHASE5_TIMER_DISPATCH
   elseif kind == OWNER_TASK_DRIVE then
     local task = owner.metadata.task as Task
     local control = owner.metadata.peer as DriveControl
@@ -5671,8 +4885,6 @@ local function timer_dispatch(owner: uv_timer_t, event_kind: integer,
         task.epoch == owner.metadata.epoch then
       drive_task(task, DRIVE_RESUME, false, "")
     end
-  else
-    raise "timer owner has an invalid operation kind"
   end
 catch
   if not owner.metadata.runtime.fatal then
@@ -5694,13 +4906,34 @@ end
 local function run_internal(func: () -> value, is_main: boolean): Task
   local runtime = ensure_runtime()
   local root = coroutine.create(adapt(func), UV_TAG)
-  local task = Task.new(root, runtime, runtime.generation, TASK_NEW, 0,
-      nil, nil, "", false, nil, nil, nil, nil, nil, nil, nil, nil,
-      nil, nil, false, 0, 0, false, false, nil, 0, is_main)
+  local task: Task = {
+    root = root,
+    runtime = runtime,
+    generation = runtime.generation,
+    state = TASK_NEW,
+    epoch = 0,
+    result = nil,
+    error_value = nil,
+    error_traceback = "",
+    cancel_requested = false,
+    cancel_value = nil,
+    operation = nil,
+    current_request = nil,
+    joiner_head = nil,
+    join_next = nil,
+    join_previous = nil,
+    joining_target = nil,
+    next_task = nil,
+    previous_task = nil,
+    permanently_observed = false,
+    observer_count = 0,
+    cleanup_shield_depth = 0,
+    cancel_fallback = false,
+    helper_group = nil,
+    helper_kind = 0,
+    main = is_main,
+  }
   link_task(runtime, task)
-  if is_main then
-    runtime.main_task = task
-  end
 
   local owner, status = start_owner(runtime, OWNER_START, task, nil, 0, 0, 0)
   task.operation = owner
@@ -5776,33 +5009,8 @@ local function cleanup_begin()
   task.cleanup_shield_depth = task.cleanup_shield_depth + 1
 end
 
-local function cleanup_sleep(milliseconds: integer)
-  if milliseconds < 0 then
-    raise "cleanup sleep duration must not be negative"
-  end
-  local request = new_cleanup_request(milliseconds)
-  coroutine.yield(request, UV_TAG)
-end
-
 local function cleanup_end()
   local task = running_task()
-  if task.cleanup_shield_depth <= 0 then
-    raise "cleanup shield is not active"
-  end
-  task.cleanup_shield_depth = task.cleanup_shield_depth - 1
-  if task.cleanup_shield_depth == 0 and task.cancel_requested then
-    -- Keep cancellation sticky without interrupting a sequence of library
-    -- cleanup operations.  The next ordinary await injects it, or drive_task
-    -- classifies a returning Task as cancelled.
-    task.cancel_deferred = false
-  end
-end
-
-local function cleanup_abort()
-  local task = running_task()
-  if task.cleanup_shield_depth <= 0 then
-    raise "cleanup shield is not active"
-  end
   task.cleanup_shield_depth = task.cleanup_shield_depth - 1
 end
 
@@ -5814,7 +5022,7 @@ end
 
 function _fs_read(file: uv_file, max_bytes: integer): string?
   if max_bytes <= 0 then raise "read size must be positive" end
-  if (shim.titan_uvshim_buf_length_is_valid(max_bytes) as integer) == 0 then
+  if max_bytes > UV_BUF_MAX then
     raise "read size exceeds the portable libuv buffer limit"
   end
   validate_file(file, "read from", false)
@@ -5826,6 +5034,9 @@ function _fs_write(file: uv_file, data: string): integer
   ordinary_task()
   validate_file(file, "write to", false)
   if #data == 0 then return 0 end
+  if #data > UV_BUF_MAX then
+    raise "write data exceeds the portable libuv buffer limit"
+  end
   local request = new_file_request(FS.write, file, data, 0, false)
   coroutine.yield(request, UV_TAG)
   return #data
@@ -5852,13 +5063,11 @@ function _fs_close(file: uv_file)
     kind = FS.close
   end
   cleanup_begin()
-  local completed = false
   do
     local request = new_file_request(kind, file, "", 0, true)
     coroutine.yield(request, UV_TAG)
-    completed = true
   finally
-    if completed then cleanup_end() else cleanup_abort() end
+    cleanup_end()
   end
 end
 
@@ -5916,7 +5125,7 @@ end
 function _net_read(tcp: uv_tcp_t, max_bytes: integer): string?
   ordinary_task()
   if max_bytes <= 0 then raise "TCP read size must be positive" end
-  if (shim.titan_uvshim_buf_length_is_valid(max_bytes) as integer) == 0 then
+  if max_bytes > UV_BUF_MAX then
     raise "TCP read size exceeds the portable libuv buffer limit"
   end
   validate_tcp(tcp, "read from", false, false)
@@ -5938,6 +5147,9 @@ function _net_write(tcp: uv_tcp_t, data: string)
     raise "cannot write after Connection shutdown"
   end
   if #data == 0 then return end
+  if #data > UV_BUF_MAX then
+    raise "TCP write data exceeds the portable libuv buffer limit"
+  end
   local request = new_net_request(NET_WRITE, nil, 0, 0,
                                   tcp, data, 0, false)
   coroutine.yield(request, UV_TAG)
@@ -5948,7 +5160,6 @@ function _net_shutdown(tcp: uv_tcp_t)
   validate_tcp(tcp, "shut down", false, false)
   if tcp.metadata.shutdown_requested then return end
   cleanup_begin()
-  local completed = false
   do
     -- Construct the complete shielded Request before publishing the monotonic
     -- shutdown flag. Once visible, cancellation cannot detach the physical
@@ -5957,9 +5168,8 @@ function _net_shutdown(tcp: uv_tcp_t)
                                     tcp, "", 0, true)
     tcp.metadata.shutdown_requested = true
     coroutine.yield(request, UV_TAG)
-    completed = true
   finally
-    if completed then cleanup_end() else cleanup_abort() end
+    cleanup_end()
   end
 end
 
@@ -5970,7 +5180,6 @@ function _net_accept(server: uv_tcp_t): uv_tcp_t
   if control.accept_error then raise control.accept_error end
   if control.accept_count > 0 then
     local client = dequeue_accepted(server)
-    client.metadata.published = true
     return client
   end
   if control.accept_waiter then
@@ -5985,16 +5194,14 @@ function _net_close(tcp: uv_tcp_t)
   if tcp.metadata.lifecycle == TCP_CLOSED then return end
   validate_tcp(tcp, "close", tcp.metadata.server, true)
   cleanup_begin()
-  local completed = false
   do
     local kind = NET_CLOSE
     if tcp.metadata.close_requested then kind = NET_CLOSE_WAIT end
     local request = new_net_request(kind, nil, 0, 0,
                                     tcp, "", 0, true)
     coroutine.yield(request, UV_TAG)
-    completed = true
   finally
-    if completed then cleanup_end() else cleanup_abort() end
+    cleanup_end()
   end
 end
 
@@ -6020,21 +5227,73 @@ end
 
 function _net_eof_error(operation: string, message: string,
                         subject: string): Error
-  local code = shim.titan_uvshim_error_eof() as integer
+  local code = UV_EOF
   return Error.new(code,
       libuv.uv_err_name(code as ffi.titan_ffi_int) as string,
       message, operation, subject)
 end
 
+local function os_error_from_status(operation: string,
+                                    subject: string?):
+                                    (ffi.titan_ffi_int) -> Error
+  return function (status: ffi.titan_ffi_int): Error
+    return make_error(status as integer, operation, subject)
+  end
+end
+
+-- Foreign C functions are not Titan closure values, so these tiny adapters
+-- give the generic sized-buffer helper one uniform callable type.
+local function os_cwd_buffer(bytes: *ffi.titan_ffi_char,
+                             sizes: *libuv.size_t): ffi.titan_ffi_int
+  return libuv.uv_cwd(bytes, sizes)
+end
+
+local function os_homedir_buffer(bytes: *ffi.titan_ffi_char,
+                                 sizes: *libuv.size_t): ffi.titan_ffi_int
+  return libuv.uv_os_homedir(bytes, sizes)
+end
+
+local function os_tmpdir_buffer(bytes: *ffi.titan_ffi_char,
+                                sizes: *libuv.size_t): ffi.titan_ffi_int
+  return libuv.uv_os_tmpdir(bytes, sizes)
+end
+
+local function os_hostname_buffer(bytes: *ffi.titan_ffi_char,
+                                  sizes: *libuv.size_t): ffi.titan_ffi_int
+  return libuv.uv_os_gethostname(bytes, sizes)
+end
+
+local function os_exepath_buffer(bytes: *ffi.titan_ffi_char,
+                                 sizes: *libuv.size_t): ffi.titan_ffi_int
+  local capacity = sizes[0]
+  local status = libuv.uv_exepath(bytes, sizes)
+  -- Linux and macOS report a truncated path as a saturated success rather
+  -- than UV_ENOBUFS. Translate only that public-API result into the generic
+  -- recursive retry contract.
+  local supplied = capacity as integer
+  if (status as integer) >= 0 and
+      (sizes[0] as integer) == supplied - 1 then
+    sizes[0] = (supplied * 2) as libuv.size_t
+    return UV_ENOBUFS as ffi.titan_ffi_int
+  end
+  return status
+end
+
 function _os_getenv(name: string): string?
-  local copied = copy_text_with_subject(name, "os.getenv", name)
-  return os_sized_buffer(OS_GETENV, copied)
+  local copied = copy_text(name, "os.getenv", name)
+  local getenv_buffer = function (bytes: *ffi.titan_ffi_char,
+                                  sizes: *libuv.size_t): ffi.titan_ffi_int
+    return libuv.uv_os_getenv(copied.bytes.data, bytes, sizes)
+  end
+  return os_sized_buffer(getenv_buffer,
+      OS_BUFFER_INITIAL as libuv.size_t,
+      os_error_from_status("os.getenv", name))
 end
 
 function _os_setenv(name: string, contents: string)
-  local copied_name = copy_text_with_subject(name, "os.setenv", name)
+  local copied_name = copy_text(name, "os.setenv", name)
   -- Never retain or echo the environment value in an Error subject.
-  local copied_value = copy_text_with_subject(contents, "os.setenv", name)
+  local copied_value = copy_text(contents, "os.setenv", name)
   local status = libuv.uv_os_setenv(copied_name.bytes.data,
                                     copied_value.bytes.data)
   if (status as integer) < 0 then
@@ -6043,7 +5302,7 @@ function _os_setenv(name: string, contents: string)
 end
 
 function _os_unsetenv(name: string)
-  local copied = copy_text_with_subject(name, "os.unsetenv", name)
+  local copied = copy_text(name, "os.unsetenv", name)
   local status = libuv.uv_os_unsetenv(copied.bytes.data)
   if (status as integer) < 0 then
     raise make_error(status as integer, "os.unsetenv", name)
@@ -6051,11 +5310,13 @@ function _os_unsetenv(name: string)
 end
 
 function _os_cwd(): string
-  return os_sized_buffer(OS_CWD, nil) as string
+  return os_sized_buffer(os_cwd_buffer,
+      OS_BUFFER_INITIAL as libuv.size_t,
+      os_error_from_status("os.cwd", nil)) as string
 end
 
 function _os_chdir(path: string)
-  local copied = copy_text_with_subject(path, "os.chdir", path)
+  local copied = copy_text(path, "os.chdir", path)
   local status = libuv.uv_chdir(copied.bytes.data)
   if (status as integer) < 0 then
     raise make_error(status as integer, "os.chdir", path)
@@ -6063,19 +5324,30 @@ function _os_chdir(path: string)
 end
 
 function _os_homedir(): string
-  return os_sized_buffer(OS_HOMEDIR, nil) as string
+  return os_sized_buffer(os_homedir_buffer,
+      OS_BUFFER_INITIAL as libuv.size_t,
+      os_error_from_status("os.homedir", nil)) as string
 end
 
 function _os_tmpdir(): string
-  return os_sized_buffer(OS_TMPDIR, nil) as string
+  return os_sized_buffer(os_tmpdir_buffer,
+      OS_BUFFER_INITIAL as libuv.size_t,
+      os_error_from_status("os.tmpdir", nil)) as string
 end
 
 function _os_hostname(): string
-  return os_sized_buffer(OS_HOSTNAME, nil) as string
+  return os_sized_buffer(os_hostname_buffer,
+      OS_BUFFER_INITIAL as libuv.size_t,
+      os_error_from_status("os.hostname", nil)) as string
 end
 
 function _os_exepath(): string
-  return os_sized_buffer(OS_EXEPATH, nil) as string
+  if not program_args_ready then
+    raise "os.exepath is only available in a compiled Titan program"
+  end
+  return os_sized_buffer(os_exepath_buffer,
+      OS_BUFFER_INITIAL as libuv.size_t,
+      os_error_from_status("os.exepath", nil)) as string
 end
 
 function _os_pid(): integer
@@ -6087,12 +5359,10 @@ function _os_ppid(): integer
 end
 
 function _os_wait_signal(name: string): string
-  local copied = copy_text_with_subject(name, "signal.name", name)
+  local copied = copy_text(name, "signal.name", name)
   local signum = shim.titan_uvshim_signal_number(
       copied.bytes.data) as integer
-  if signum <= 0 or
-      (shim.titan_uvshim_signal_is_waitable(
-          signum as ffi.titan_ffi_int) as integer) == 0 then
+  if signum <= 0 or name == "kill" then
     raise "unsupported waitable signal name '" .. name .. "'"
   end
   local canonical = shim.titan_uvshim_signal_name(
@@ -6118,9 +5388,6 @@ local function validate_process(process: uv_process_t,
   if control.runtime ~= runtime or
       control.generation ~= runtime.generation then
     raise "Process belongs to a stale libuv Runtime"
-  end
-  if not control.published then
-    raise "cannot " .. operation .. " an unpublished Process"
   end
   if control.exit_seen and not allow_exited then
     raise "cannot " .. operation .. " an exited Process"
@@ -6154,7 +5421,7 @@ function _os_process_wait(process: uv_process_t): (integer, integer)
     raise "Process already has a waiting Task"
   end
   local request = new_process_request(PROCESS_WAIT, process, nil,
-                                      "", 0, false)
+                                      0, false)
   local result = coroutine.yield(request, UV_TAG) as ProcessExitResult
   return result.code, result.signal_number
 end
@@ -6162,14 +5429,14 @@ end
 function _os_process_kill(process: uv_process_t, signal: string)
   ordinary_task()
   validate_process(process, "signal", false)
-  local copied = copy_text_with_subject(signal, "process.kill", signal)
+  local copied = copy_text(signal, "process.kill", signal)
   local signum = shim.titan_uvshim_signal_number(copied.bytes.data)
   if (signum as integer) <= 0 then
     raise "unsupported process signal name '" .. signal .. "'"
   end
-  local status = shim.titan_uvshim_process_kill(process.handle, signum)
+  local status = libuv.uv_process_kill(process.handle, signum)
   if (status as integer) < 0 and
-      (shim.titan_uvshim_status_is_esrch(status) as integer) == 0 then
+      (status as integer) ~= UV_ESRCH then
     raise make_error(status as integer, "process.kill", signal)
   end
 end
@@ -6185,11 +5452,14 @@ function _os_process_write_stdin(process: uv_process_t, data: string)
     raise "cannot write after Process stdin close"
   end
   if #data == 0 then return end
+  if #data > UV_BUF_MAX then
+    raise "process stdin data exceeds the portable libuv buffer limit"
+  end
   -- Writes own their bytes before entering the shared FIFO; later cancellation
   -- can detach a Task without invalidating submitted native storage.
   local bytes = copy_bytes(data)
   local request = new_process_request(PROCESS_WRITE_STDIN,
-      process, pipe, data, 0, false)
+      process, pipe, 0, false)
   local operation = request.subject as ProcessOperation
   operation.copied_bytes = bytes
   coroutine.yield(request, UV_TAG)
@@ -6204,17 +5474,15 @@ function _os_process_close_stdin(process: uv_process_t)
       control.lifecycle == PIPE_CLOSING or
       control.lifecycle == PIPE_CLOSED then return end
   cleanup_begin()
-  local completed = false
   do
     -- Construct the cleanup Request before publishing the monotonic flag.
     -- Once visible, cancellation cannot revoke the ordered pipe close.
     local request = new_process_request(PROCESS_CLOSE_STDIN,
-        process, pipe, "", 0, true)
+        process, pipe, 0, true)
     control.shutdown_requested = true
     coroutine.yield(request, UV_TAG)
-    completed = true
   finally
-    if completed then cleanup_end() else cleanup_abort() end
+    cleanup_end()
   end
 end
 
@@ -6223,7 +5491,7 @@ local function process_read(process: uv_process_t, kind: integer,
   ordinary_task()
   validate_process(process, "read from", true)
   if maximum <= 0 then raise "process read size must be positive" end
-  if (shim.titan_uvshim_buf_length_is_valid(maximum) as integer) == 0 then
+  if maximum > UV_BUF_MAX then
     raise "process read size exceeds the portable libuv buffer limit"
   end
   local pipe = process_pipe(process,
@@ -6235,7 +5503,7 @@ local function process_read(process: uv_process_t, kind: integer,
     raise "process pipe already has a waiting reader"
   end
   local request = new_process_request(kind, process, pipe,
-                                      "", maximum, false)
+                                      maximum, false)
   return coroutine.yield(request, UV_TAG) as string?
 end
 
@@ -6272,7 +5540,6 @@ end
 local function complete_helper(group: HelperGroup, kind: integer,
                                payload: value, failure: value,
                                trace: string)
-  -- TITAN_UV_PHASE6_PROCESS_HELPER_COMPLETE
   if group.completed[kind] then return end
   group.completed[kind] = true
   if failure ~= nil and group.first_error == nil and not group.canceling then
@@ -6364,18 +5631,38 @@ local function start_helper(group: HelperGroup, kind: integer)
     execute_helper(group, kind)
     return nil
   end), UV_TAG)
-  local task = Task.new(root, group.runtime, group.generation, TASK_NEW, 0,
-      nil, nil, "", false, nil, nil, nil, nil, nil, nil, nil, nil,
-      nil, nil, true, 0, 0, false, false, group, kind, false)
+  local task: Task = {
+    root = root,
+    runtime = group.runtime,
+    generation = group.generation,
+    state = TASK_NEW,
+    epoch = 0,
+    result = nil,
+    error_value = nil,
+    error_traceback = "",
+    cancel_requested = false,
+    cancel_value = nil,
+    operation = nil,
+    current_request = nil,
+    joiner_head = nil,
+    join_next = nil,
+    join_previous = nil,
+    joining_target = nil,
+    next_task = nil,
+    previous_task = nil,
+    permanently_observed = true,
+    observer_count = 0,
+    cleanup_shield_depth = 0,
+    cancel_fallback = false,
+    helper_group = group,
+    helper_kind = kind,
+    main = false,
+  }
   -- Publish permanent observation and HelperGroup identity before OWNER_START
   -- is armed.  Even synchronous infrastructure failure is therefore owned by
   -- the parent group before any observation callback can run.
-  task.permanently_observed = true
-  task.helper_group = group
-  task.helper_kind = kind
   group.helpers[kind] = task
   link_task(group.runtime, task)
-  -- TITAN_UV_PHASE6_PROCESS_HELPER_START
   local owner, status = start_owner(group.runtime, OWNER_START,
                                     task, nil, 0, 0, 0)
   task.operation = owner
@@ -6405,13 +5692,12 @@ end
 
 local function dispose_process_cleanup(process: uv_process_t)
   local request = new_process_request(PROCESS_DISPOSE, process, nil,
-                                      "", 0, true)
+                                      0, true)
   coroutine.yield(request, UV_TAG)
 end
 
 local function communicate_cleanup(group: HelperGroup, reason: value,
                                    trace: string)
-  -- TITAN_UV_PHASE6_PROCESS_COMMUNICATE_CLEANUP
   cancel_helper_group(group, reason)
   local process = group.process
   local control = process.metadata
@@ -6441,7 +5727,7 @@ function _os_communicate(file: string, args: {string},
   local copied_input: string? = nil
   if input then copied_input = input as string end
   local group = HelperGroup.new(parent.runtime, parent.generation,
-      parent, process, copied_input, {}, {}, 4, nil, 0, false, false,
+      process, copied_input, {}, {}, 4, nil, 0, false, false,
       nil, "", "", "", nil, false)
   for index = 1, 4 do group.completed[index] = false end
   start_helper(group, HELPER_STDOUT)
@@ -6464,16 +5750,14 @@ function _os_communicate(file: string, args: {string},
   end
 
   cleanup_begin()
-  local cleanup_completed = false
   do
     if succeeded then
       dispose_process_cleanup(process)
     else
       communicate_cleanup(group, primary_error, primary_traceback)
     end
-    cleanup_completed = true
   finally
-    if cleanup_completed then cleanup_end() else cleanup_abort() end
+    cleanup_end()
   end
 
   if not succeeded then
@@ -6482,11 +5766,6 @@ function _os_communicate(file: string, args: {string},
   local exit = group.exit_result as ProcessExitResult
   return group.stdout, group.stderr, exit.code, exit.signal_number
 end
-
--- Test-source variants insert fault controls here. Production keeps the
--- corresponding branches private and unreachable from the module interface.
--- TITAN_UV_TEST_HOOKS
--- TITAN_UV_PHASE6_TEST_HOOKS
 
 function _ticker(milliseconds: integer): uv_timer_t
   if milliseconds <= 0 then
@@ -6500,12 +5779,17 @@ function _ticker(milliseconds: integer): uv_timer_t
     raise "the libuv Runtime is shutting down"
   end
   local runtime = task.runtime
-  local state = TickerState.new(runtime, runtime.generation, true,
-                                milliseconds, nil, nil, 0)
+  local state: TickerState = {
+    runtime = runtime,
+    generation = runtime.generation,
+    open = true,
+    owner = nil,
+    waiter = nil,
+    waiter_epoch = 0,
+  }
   local owner, status = start_owner(runtime, OWNER_TICKER, nil, state, 0,
                                     milliseconds, milliseconds)
   state.owner = owner
-  owner.root = state
   if status < 0 then
     state.open = false
     raise make_error(status, "ticker.start", nil)
@@ -6574,9 +5858,8 @@ local function repair_aborted_fs_callback(owner: uv_fs_t)
     end
 
     -- A public close whose native callback reached the invariant catch still
-    -- owns a shielded continuation. Convert it into an ordinary close waiter;
-    -- an outer safe point will either deliver the successful physical close or
-    -- retry a failed close before waking it.
+    -- owns a shielded continuation. Convert it into an ordinary close waiter
+    -- so an outer safe point can finish that continuation.
     if operation.kind == FS.close and operation.task and
         operation.request and not operation.linked then
       local task = operation.task as Task
@@ -6588,13 +5871,8 @@ local function repair_aborted_fs_callback(owner: uv_fs_t)
       end
     end
 
-    if owner.metadata.callback_result >= 0 then
-      file.handle = -1 as libuv.uv_file
-      file.state = FS.file_closed
-    else
-      file.state = FS.file_closing
-      record_close_failure(file, operation)
-    end
+    file.handle = -1 as libuv.uv_file
+    file.state = FS.file_closed
   elseif operation.linked and not operation.close_waiter then
     -- The native operation is terminal even though result delivery or
     -- bookkeeping failed. Remove it so fatal cancellation and File shutdown
@@ -6610,7 +5888,7 @@ local function retire_fs_owners(runtime: Runtime)
     raw = owner.metadata.next_owner
     if owner.metadata.lifecycle == FS_OWNER_CLEANED then
       repair_aborted_fs_callback(owner)
-      if not owner.metadata.has_acquired_file then
+      if (owner.metadata.acquired_file as integer) < 0 then
         retire_fs_owner_now(owner)
       end
     end
@@ -6623,7 +5901,7 @@ local function repair_acquired_files(runtime: Runtime)
     local owner = raw as uv_fs_t
     raw = owner.metadata.next_owner
     if owner.metadata.lifecycle == FS_OWNER_CLEANED and
-        owner.metadata.has_acquired_file then
+        (owner.metadata.acquired_file as integer) >= 0 then
       local operation = owner.metadata.operation
       local subject = "<late-open>"
       local actual_subject = fs_operation_subject(operation)
@@ -6631,7 +5909,6 @@ local function repair_acquired_files(runtime: Runtime)
       local file = create_file(runtime, owner.metadata.acquired_file,
                                subject)
       owner.metadata.acquired_file = -1 as libuv.uv_file
-      owner.metadata.has_acquired_file = false
       queue_internal_close(file)
     end
   end
@@ -6680,10 +5957,6 @@ local function retire_aborted_net_requests(runtime: Runtime)
               control.kind == NET_OWNER_SHUTDOWN) and
              operation.tcp then
         local tcp = operation.tcp as uv_tcp_t
-        if control.kind == NET_OWNER_SHUTDOWN and
-            control.callback_recorded and control.callback_result >= 0 then
-          tcp.metadata.write_shutdown = true
-        end
         if operation.linked then remove_output(tcp, operation) end
       end
       retire_net_control(control)
@@ -6792,9 +6065,9 @@ local function repair_aborted_grace(control: ProcessControl)
         control.owner then
       local process = control.owner as uv_process_t
       local kill = shim.titan_uvshim_signal_number("kill")
-      local status = shim.titan_uvshim_process_kill(process.handle, kill)
+      local status = libuv.uv_process_kill(process.handle, kill)
       if (status as integer) >= 0 or
-          (shim.titan_uvshim_status_is_esrch(status) as integer) ~= 0 then
+          (status as integer) == UV_ESRCH then
         control.kill_sent = true
       end
     end
@@ -6830,8 +6103,7 @@ local function repair_aborted_process(control: ProcessControl)
     start_process_close(process)
     control.callback_aborted = false
   elseif control.lifecycle == PROCESS_CLOSED then
-    process_dispatch_body(process, EVENT_HANDLE_CLOSE, 0,
-                          0 as libuv.size_t)
+    process_dispatch_body(process, EVENT_HANDLE_CLOSE)
     control.callback_aborted = false
   end
 end
@@ -6848,24 +6120,6 @@ local function advance_process_shutdown(runtime: Runtime)
       finish_process_control(control)
     end
   end
-end
-
-local function only_exhausted_files_remain(runtime: Runtime): boolean
-  if not not runtime.timer_owner_head or not not runtime.fs_pending_head or
-      not not runtime.net_pending_head or not not runtime.tcp_head or
-      not not runtime.signal_owner_head or
-      not not runtime.process_head or
-      not not runtime.process_request_head or
-      not runtime.file_head then
-    return false
-  end
-  local raw? = runtime.file_head
-  while raw do
-    local file = raw as uv_file
-    if not file.close_retry_exhausted then return false end
-    raw = file.next_file
-  end
-  return true
 end
 
 local function drive_cancel_fallbacks(runtime: Runtime)
@@ -6909,8 +6163,6 @@ local function retire_closed_owners(runtime: Runtime)
     if owner.metadata.lifecycle == OWNER_CLOSED then
       owner.handle = nil
       owner.storage = nil
-      owner.root = nil
-      owner.buffer = nil
       unlink_owner(owner)
     end
   end
@@ -6924,87 +6176,9 @@ local function retire_closed_signal_owners(runtime: Runtime)
     if owner.metadata.lifecycle == OWNER_CLOSED then
       owner.handle = nil
       owner.storage = nil
-      owner.root = nil
-      owner.buffer = nil
       unlink_signal_owner(owner)
     end
   end
-end
-
-local function shutdown_no_progress_error(runtime: Runtime): Error
-  local timers = 0
-  local raw_timer? = runtime.timer_owner_head
-  while raw_timer do
-    timers = timers + 1
-    raw_timer = (raw_timer as uv_timer_t).metadata.next_owner
-  end
-  local signals = 0
-  local raw_signal? = runtime.signal_owner_head
-  while raw_signal do
-    signals = signals + 1
-    raw_signal = (raw_signal as uv_signal_t).metadata.next_owner
-  end
-  local filesystem = 0
-  local raw_fs? = runtime.fs_pending_head
-  while raw_fs do
-    filesystem = filesystem + 1
-    raw_fs = (raw_fs as uv_fs_t).metadata.next_owner
-  end
-  local files = 0
-  local raw_file? = runtime.file_head
-  while raw_file do
-    files = files + 1
-    raw_file = (raw_file as uv_file).next_file
-  end
-  local requests = 0
-  local first_request_state = -1
-  local raw_request? = runtime.net_pending_head
-  while raw_request do
-    local control = raw_request as NetRequestControl
-    if first_request_state < 0 then first_request_state = control.lifecycle end
-    requests = requests + 1
-    raw_request = control.next_control
-  end
-  local tcp = 0
-  local first_tcp_state = -1
-  local raw_tcp? = runtime.tcp_head
-  while raw_tcp do
-    local control = raw_tcp as TcpControl
-    if first_tcp_state < 0 then first_tcp_state = control.lifecycle end
-    tcp = tcp + 1
-    raw_tcp = control.next_control
-  end
-  local process_requests = 0
-  local first_process_request_state = -1
-  local raw_process_request? = runtime.process_request_head
-  while raw_process_request do
-    local control = raw_process_request as ProcessRequestControl
-    if first_process_request_state < 0 then
-      first_process_request_state = control.lifecycle
-    end
-    process_requests = process_requests + 1
-    raw_process_request = control.next_control
-  end
-  local processes = 0
-  local first_process_state = -1
-  local raw_process? = runtime.process_head
-  while raw_process do
-    local control = raw_process as ProcessControl
-    if first_process_state < 0 then
-      first_process_state = control.lifecycle
-    end
-    processes = processes + 1
-    raw_process = control.next_control
-  end
-  return Error.new(-1, "EINTERNAL", "libuv Runtime made no shutdown progress",
-      "shutdown.no-progress", "timers=" .. timers ..
-      ", signals=" .. signals .. ", fs=" .. filesystem ..
-      ", files=" .. files .. ", net_requests=" .. requests ..
-      "(first_state=" .. first_request_state .. "), tcp=" .. tcp ..
-      "(first_state=" .. first_tcp_state .. "), process_requests=" ..
-      process_requests .. "(first_state=" .. first_process_request_state ..
-      "), processes=" .. processes .. "(first_state=" ..
-      first_process_state .. ")")
 end
 
 local function close_runtime(runtime: Runtime)
@@ -7024,22 +6198,19 @@ local function close_runtime(runtime: Runtime)
   close_all_signal_owners(runtime)
   retire_closed_owners(runtime)
   retire_closed_signal_owners(runtime)
-  local terminal_files = only_exhausted_files_remain(runtime)
-  local idle_passes = 0
   -- Drain owners registered in the Runtime. An unknown active handle must not
   -- make UV_RUN_DEFAULT hang here; once known owners are gone, loop_close
-  -- reports UV_EBUSY and the public uv_walk diagnostic below identifies it.
-  while not terminal_files and
-        (not not runtime.timer_owner_head or
-         not not runtime.fs_pending_head or
-         not not runtime.file_head or
-         not not runtime.net_pending_head or
-         not not runtime.tcp_head or
-         not not runtime.signal_owner_head or
-         not not runtime.process_head or
-         not not runtime.process_request_head) do
-    local callbacks = libuv.uv_run(runtime.loop.handle,
-                                  libuv.UV_RUN_DEFAULT) as integer
+  -- reports the remaining failure.
+  while not not runtime.timer_owner_head or
+        not not runtime.fs_pending_head or
+        not not runtime.file_head or
+        not not runtime.net_pending_head or
+        not not runtime.tcp_head or
+        not not runtime.signal_owner_head or
+        not not runtime.process_head or
+        not not runtime.process_request_head do
+    local alive = libuv.uv_run(runtime.loop.handle,
+                              libuv.UV_RUN_DEFAULT) as integer
     retire_closed_owners(runtime)
     retire_closed_signal_owners(runtime)
     retire_fs_owners(runtime)
@@ -7056,26 +6227,19 @@ local function close_runtime(runtime: Runtime)
     retire_fs_owners(runtime)
     advance_tcp_shutdown(runtime)
     advance_process_shutdown(runtime)
-    terminal_files = only_exhausted_files_remain(runtime)
-    if not terminal_files and
-       (not not runtime.timer_owner_head or
+    if not not runtime.timer_owner_head or
         not not runtime.fs_pending_head or
         not not runtime.file_head or
         not not runtime.net_pending_head or
         not not runtime.tcp_head or
         not not runtime.signal_owner_head or
         not not runtime.process_head or
-        not not runtime.process_request_head) then
-      if callbacks == 0 then
-        idle_passes = idle_passes + 1
-      else
-        idle_passes = 0
-      end
-      if idle_passes >= 2 then
+        not not runtime.process_request_head then
+      if alive == 0 then
         if not runtime.fatal then
           runtime.fatal = true
           runtime.closing = true
-          runtime.fatal_error = shutdown_no_progress_error(runtime)
+          runtime.fatal_error = internal_error("shutdown.no-progress")
           runtime.fatal_traceback = ""
         end
         -- Preserve every still-rooted native allocation and return the first
@@ -7088,17 +6252,7 @@ local function close_runtime(runtime: Runtime)
   if (status as integer) ~= 0 then
     if not runtime.fatal then
       runtime.fatal = true
-      local subject: string? = nil
-      if (shim.titan_uvshim_status_is_ebusy(
-              status as ffi.titan_ffi_int) as integer) ~= 0 then
-        local count = shim.titan_uvshim_loop_handle_count(
-            runtime.loop.handle) as integer
-        local first = shim.titan_uvshim_loop_first_handle_type(
-            runtime.loop.handle) as string
-        subject = "remaining handles=" .. count .. ", first=" .. first
-      end
-      runtime.fatal_error = make_error(status as integer, "loop.close",
-                                       subject)
+      runtime.fatal_error = make_error(status as integer, "loop.close", nil)
       runtime.fatal_traceback = ""
     end
     -- Keep active_runtime and its storage root intact: reclaiming a busy loop
@@ -7144,8 +6298,7 @@ function loop()
   if not runtime.fatal and runtime.task_head then
     runtime.fatal = true
     runtime.closing = true
-    runtime.fatal_error = "libuv loop became idle while Tasks were waiting: " ..
-                          waiting_task_diagnostic(runtime)
+    runtime.fatal_error = "libuv loop became idle while Tasks were waiting"
     runtime.fatal_traceback = ""
   end
   if runtime.fatal then
@@ -7225,19 +6378,45 @@ function version(): string
   return libuv.uv_version_string() as string
 end
 
-local function install_bootstrap()
+-- A generated Titan entrypoint publishes its original argc/argv before it
+-- loads any module. Keep uv_setup_args in this canonical provider image and
+-- publish libuv's possibly replaced argv pointer back to the entrypoint.
+local function setup_program_args(): boolean
   local top = lua.lua_gettop(L)
-  lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_BOOTSTRAP_KEY)
-  local installed: value = ffi.lua_totvalue(L, -1)
-  if installed ~= nil and installed ~= bootstrap then
+  lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGC_KEY)
+  if (lua.lua_type(L, -1) as integer) == (lua.LUA_TNIL as integer) then
     lua.lua_settop(L, top)
-    raise "a different Titan main bootstrap is already installed"
+    return false
   end
-  ffi.lua_pushtvalue(L, bootstrap)
-  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_BOOTSTRAP_KEY)
+  local argc = lua.lua_tointegerx(L, -1, nil) as ffi.titan_ffi_int
+  lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGV_KEY)
+  local argv = lua.lua_touserdata(L, -1) as *shim.titan_uvshim_char_ptr
+  local configured = libuv.uv_setup_args(argc, argv)
+  lua.lua_pushlightuserdata(
+      L, configured as ffi.titan_ffi_void_ptr)
+  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGV_KEY)
   lua.lua_settop(L, top)
+  return true
 end
 
 do
-  install_bootstrap()
+  UV_EIO = shim.titan_uvshim_error_eio() as integer
+  UV_EOF = shim.titan_uvshim_error_eof() as integer
+  UV_ECANCELED = shim.titan_uvshim_error_ecanceled() as integer
+  UV_EADDRNOTAVAIL = shim.titan_uvshim_error_eaddrnotavail() as integer
+  UV_EINVAL = shim.titan_uvshim_error_einval() as integer
+  UV_ENOBUFS = shim.titan_uvshim_error_enobufs() as integer
+  UV_ENOENT = shim.titan_uvshim_error_enoent() as integer
+  UV_ESRCH = shim.titan_uvshim_error_esrch() as integer
+  UV_BUF_MAX = shim.titan_uvshim_buf_max_length() as integer
+  EVENT_TIMER = shim.TITAN_UV_EVENT_TIMER as integer
+  EVENT_HANDLE_CLOSE = shim.TITAN_UV_EVENT_HANDLE_CLOSE as integer
+  EVENT_STREAM_READ = shim.TITAN_UV_EVENT_STREAM_READ as integer
+  EVENT_CONNECTION = shim.TITAN_UV_EVENT_CONNECTION as integer
+  EVENT_PROCESS_EXIT = shim.TITAN_UV_EVENT_PROCESS_EXIT as integer
+  main_thread = main_thread_value()
+  check_alignment()
+  program_args_ready = setup_program_args()
+  ffi.lua_pushtvalue(L, bootstrap)
+  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_BOOTSTRAP_KEY)
 end

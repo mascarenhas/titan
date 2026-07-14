@@ -112,6 +112,9 @@ describe("os standard-module packaging", function()
         local entrypoint = phase2.read(
             workspace .. "/process_only__entrypoint.c")
         assert.match("TITAN_MAIN_BOOTSTRAP_KEY", entrypoint, 1, true)
+        assert.match("TITAN_MAIN_ARGC_KEY", entrypoint, 1, true)
+        assert.match("TITAN_MAIN_ARGV_KEY", entrypoint, 1, true)
+        assert.not_match("uv_setup_args(", entrypoint, 1, true)
         assert_no_uv_implementation(workspace .. "/process_only")
 
         local command = table.concat({

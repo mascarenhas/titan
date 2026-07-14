@@ -479,6 +479,8 @@ inventory:
 | `TITAN_PATH_KEY` (`"ec10e486-d8fd-11e7-87f4-e7e9581a929c"`) | the resolved Titan search path (cached by `pushpath`) |
 | `TITAN_LIBS_KEY` (`"ecfc9174-d8fd-11e7-8be2-abbaa3ded45f"`) | the dlopen-handle cache table (below) |
 | `TITAN_MAIN_BOOTSTRAP_KEY` (`"41c48a97-55a5-4514-a76f-79ab028ae6e0"`) | an optional async standalone hook installed by the canonical `uv` module |
+| `TITAN_MAIN_ARGC_KEY` (`"fd9c8d85-f521-4052-92e6-8af5c349e5bb"`) | the original process argument count published by a generated standalone entrypoint before module initialization |
+| `TITAN_MAIN_ARGV_KEY` (`"fc1376f3-2cb7-48d4-969c-c02df930cf68"`) | the original process argument vector, replaced with the pointer returned by `uv_setup_args` when canonical `titan.uv` initializes |
 | `TITAN_BT_STATE_KEY` (`"a222927d-0e7b-4f7a-93d9-1a6ce7111a5c"`) | registry-owned userdata containing the shared per-state `backtrace_state *`; invalidation clears the slot so the next capture resnapshots loaded objects without mutable per-DSO C globals |
 | `TITAN_BACKTRACE_KEY` (`"57d80578-2534-4856-ad3b-bde8cba4c445"`) | the last error's raw merged backtrace string |
 | `TITAN_TRACE_APPEND_KEY` (`"4f895b66-bae0-4e97-afb3-83a31f2f9e96"`) | temporary coroutine trace handoff slot used before appending resume/error propagation frames |
@@ -653,8 +655,12 @@ bundled-mode extension DSOs leave their `uv_*` calls unresolved:
   registers the module's `luaopen_` function in
   `package.preload["<modname>"]`; the module initializes only when the script
   `require`s it.
-* **`pmain`** calls `require("<modname>")`, retrieves and retains its `main`
-  callable, then builds the argument table with
+* **`pmain`** publishes the original `argc` and `argv` under
+  `TITAN_MAIN_ARGC_KEY` and `TITAN_MAIN_ARGV_KEY`, then calls
+  `require("<modname>")` and retrieves and retains its `main` callable. A
+  transitive canonical `titan.uv` initialization calls `uv_setup_args` once
+  and stores its possibly replaced `argv` pointer back in the registry.
+  `pmain` rereads that pointer, then builds the argument table with
   `lua_rawseti(L, -2, i)` for `i = 0 .. argc-1` — so `args[0]` is the program
   name and `args[1]` is the first real argument. Requiring first initializes
   transitive imports, which may install an async hook under

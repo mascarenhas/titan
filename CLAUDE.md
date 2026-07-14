@@ -38,7 +38,7 @@ not add epicycles around what may be a misunderstood simpler design.
   prefix's LuaRocks rather than changing native tool identity between phases.
 - **CI runs a macOS canary on every push and the complete macOS suite on
   manual dispatch.** The push canary combines the system/bundled libuv runtime
-  smokes, fixed native ABI tests, and a commit-seeded 5% sample of each
+  smokes, focused native/provider tests, and a commit-seeded 5% sample of each
   compiler/language spec file. A manual `workflow_dispatch` replaces that
   sample with the complete uncovered macOS suite; use it as the **pre-merge
   check** with `gh workflow run ci.yml --ref <branch>`. Linux jobs are
@@ -49,7 +49,7 @@ not add epicycles around what may be a misunderstood simpler design.
   tar artifact for one uv/timer/fs consumer. The sanitizer job keeps its build
   and focused native-memory gate on one warm runner: representative timer/fs
   suites, core owner/callback proofs, and production net/OS smokes. Keep full
-  transformed library fault suites in regular Linux unless they exercise a
+  library behavior suites in regular Linux unless they exercise a
   distinct sanitizer-sensitive boundary; recompiling them under sanitizers
   can consume the complete runner limit without improving that gate. Keep each
   Linux dependency build in the job that consumes its warmed tree, and keep
@@ -176,12 +176,12 @@ the library integration suite.
 `cdriver_spec`, `cpp_spec`, `ctypes_spec`, `driver_spec`,
 `foreigntypes_spec`, `lexer_spec`, `location_spec`, `parser_spec`,
 `symtab_spec`, `types_spec`, `util_spec`); serial native-build and packaging
-gates also live there (`libuv_build_spec`, `libuv_shim_spec`,
-`rockspec_spec`). Compiler and language specs are split by layer:
+gates also live there (`libuv_build_spec`, `rockspec_spec`). Compiler and
+language specs are split by layer:
 checker-only specs (run the checker, never generate or execute code) live
 under `spec/checker/`, while compiler end-to-end specs (generate C, compile,
-run) live under `spec/coder/`. Standard-library API, runtime, fault, and
-packaging behavior lives under `spec/stdlib/`, including `coroutine` and the
+run) live under `spec/coder/`. Standard-library API, runtime, and packaging
+behavior lives under `spec/stdlib/`, including `coroutine` and the
 async-I/O modules; these suites deliberately run without LuaCov. Do not put a
 library integration suite under `spec/checker/` or `spec/coder/` merely
 because it typechecks or compiles Titan source. If it reveals missing compiler
@@ -195,9 +195,9 @@ compile/run/import scaffolding (`parse`, `compile`, `call`, `run_coder`,
 `generate_modules`, `build_so_chain`, `check_against_so`, `run_checker`,
 `check_errs`, `DEPTH_PROBE`, ...) lives in **`spec/support/helpers.lua`**,
 `require`d as `spec.support.helpers`; libuv runtime tests use
-`spec/support/phase2.lua` plus the filesystem, networking, and OS/signal
-extensions `spec/support/phase3.lua`, `spec/support/phase5.lua`, and
-`spec/support/phase6.lua` to compile into unique `/tmp` workspaces while
+`spec/support/phase2.lua` plus the filesystem and OS/process extensions
+`spec/support/phase3.lua` and `spec/support/phase6.lua` to compile into unique
+`/tmp` workspaces while
 treating Makefile-owned standard DSOs and the libuv archive as read-only.
 These helpers may not clean or rebuild shared root artifacts during Busted.
 Helpers pull in luassert explicitly (`require 'luassert'`) because a
@@ -217,26 +217,14 @@ root build path, but must
 restore the prepared runtime/coroutine artifacts and mtimes in teardown so a
 later packaging test does not rebuild the whole standard library.
 
-Filesystem transition faults live in
-`spec/stdlib/fs_fault_spec.lua`; its isolated source transformer is
-`spec/support/make_fs_test_variant.lua`.
-
-Networking transition faults use `spec/stdlib/net_fault_spec.lua` and the
-isolated `spec/support/make_phase5_test_variant.lua` transformer.
-
-OS/signal, checked-buffer, and child-process transition faults use
-`spec/stdlib/os_signal_fault_spec.lua`,
-`spec/stdlib/os_helpers_fault_spec.lua`,
-`spec/stdlib/os_process_fault_spec.lua`, and the isolated
-`spec/support/make_phase6_test_variant.lua` transformer.
-
-The Phase 5 and Phase 6 helpers compile each identical transformed standard
-image once per Busted process, retain the pristine template in the Lua
-registry (so it survives per-file insulation), and give every suite an
-independent `cp -Rp` clone. Keep fixture sources and generated artifacts in the
-returned workspace; never mutate or hard-link the cached template. Cache keys
-include the compiler and sanitizer flags, and Lua-state shutdown removes the
-templates.
+Async standard-library behavioral specs compile against the canonical
+production modules whenever public behavior can prove the contract. The narrow
+exception is `spec/stdlib/uv_phase4_spec.lua`: its isolated
+`spec/support/make_phase4_test_variant.lua` source copy delays selected FS
+callbacks to cover late cancellation, disposal of a late successful open, and
+cross-generation Runtime/File/Task/buffer/error rooting. Keep that timing hook
+out of installed modules; it is not a general scheduler or fault-injection
+variant.
 
 `titanc` takes dot-separated **module names**, not file paths (dots map to
 directory separators under `--tree`, default `.`). It recovers the Titan
@@ -252,7 +240,8 @@ for `import "titan.uv"` (likewise for `coroutine`, `timer`, `fs`, `net`, and
 `os`). A checkout build therefore invokes roots such as `titanc titan.uv` and
 uses the directory containing `titan/` as its Titan path. Dependencies resolve
 binaries before sources; modules explicitly named on the `titanc` command
-line are the generic exception and are built from source.
+line are the generic exception and are built from source. There is no parallel
+root `stdlib/` source tree.
 
 The compiled-module ABI version is `0.11` (bumped from `0.10` when
 module-local records and record members changed `<mangled>_types`
@@ -369,6 +358,16 @@ does not unload the native image.
   Provider-first mapping also supports eager data/function-address relocations
   and native constructors. A compiler process records the provider's canonical
   path and rejects an attempt to switch providers.
+  A generated standalone entrypoint publishes its original `argc` and `argv`
+  under `TITAN_MAIN_ARGC_KEY`/`TITAN_MAIN_ARGV_KEY` before requiring the main
+  module. Canonical `titan.uv` calls `uv_setup_args` once during initialization,
+  writes libuv's possibly replaced `argv` back, and keeps readiness in a
+  module-local boolean; the entrypoint rereads the pointer before building the
+  Titan argument table. A Lua or other embedding host has no such keys, so
+  `os.exepath` raises before calling libuv. Variable-size OS text helpers keep
+  sizes as `size_t` and recurse on `UV_ENOBUFS`; the Linux/macOS `uv_exepath`
+  adapter translates a saturated success into one such recursive retry. Do not
+  reintroduce a retry loop, attempt limit, or synthetic growth fault hooks.
   When either representation satisfies the ownership invariant, hot Titan
   paths should keep state directly reachable through module/userdata fields
   instead of performing Lua-registry table lookups; use the registry for

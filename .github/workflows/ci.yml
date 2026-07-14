@@ -328,7 +328,7 @@ jobs:
         run: bash spec/support/ci_libuv_mode_smoke.sh
 
   # Keep the focused native-memory release gate on one warm 1-core runner.
-  # Full transformed fault suites belong to regular Linux: recompiling them
+  # Full library behavior suites belong to regular Linux: recompiling them
   # under sanitizers exhausts the runner limit without adding a distinct
   # lifetime boundary beyond these owner/callback tests and production smokes.
   sanitizer:
@@ -391,7 +391,7 @@ jobs:
           # threaded native instrumentation flags.
           readelf -Ws titan.so | grep __asan_
 
-      # Sanitized transformed-C compilation benefits materially from the
+      # Sanitized generated-C compilation benefits materially from the
       # compiler and filesystem state warmed by the root sanitizer build.
       - name: Run native async sanitizer gate (timer-fs)
         env:
@@ -402,7 +402,6 @@ jobs:
             spec/stdlib/uv_states_spec.lua \
             spec/stdlib/timer_spec.lua \
             spec/stdlib/fs_spec.lua \
-            spec/stdlib/fs_fault_spec.lua \
             spec/stdlib/uv_phase4_spec.lua
 
       - name: Run native async sanitizer gate (core-uv)

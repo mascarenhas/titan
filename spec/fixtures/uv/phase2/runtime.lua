@@ -6,6 +6,18 @@ local timer = require "titan.timer"
 assert(require "coroutine" == lua_coroutine)
 
 if scenario == "scheduler" then
+    -- A Lua child cannot drive the main-state loop even before a Runtime
+    -- exists.  The same call on the main thread remains a harmless no-op.
+    local before_runtime = lua_coroutine.create(function()
+        return pcall(uv.loop)
+    end)
+    local resumed, loop_ok, loop_err =
+        lua_coroutine.resume(before_runtime)
+    assert(resumed and not loop_ok)
+    assert(tostring(loop_err):find("main thread", 1, true),
+        tostring(loop_err))
+    assert(uv.loop() == nil)
+
     local behavior = require "phase2_behavior"
     behavior.reset()
 
@@ -28,7 +40,7 @@ if scenario == "scheduler" then
     local ordinary = lua_coroutine.create(function()
         return pcall(uv.loop)
     end)
-    local resumed, loop_ok, loop_err = lua_coroutine.resume(ordinary)
+    resumed, loop_ok, loop_err = lua_coroutine.resume(ordinary)
     assert(resumed and not loop_ok)
     assert(tostring(loop_err):find("main thread", 1, true))
 

@@ -17,33 +17,6 @@ local function run(command, cwd)
 end
 M.run = run
 
--- Building the transformed uv standard module dominates the async coder
--- suites (roughly twenty seconds per invocation). Busted loads every spec in
--- one Lua process, so keep one pristine template for each identical standard
--- library variant and clone it for each caller. Callers still receive private
--- source, runtime, generated-object, and DSO trees; only the compilation work
--- is shared.
--- Busted auto-insulates each spec file by restoring _G and package.loaded.
--- The Lua registry is deliberately outside that snapshot, so independently
--- loaded copies of this helper still share the same process-local templates.
-local registry = debug.getregistry()
-local cache_registry_key =
-    "titan.spec.support.phase2.workspace-templates:" .. REPO
-local workspace_templates = registry[cache_registry_key]
-if not workspace_templates then
-    workspace_templates = setmetatable({}, {
-        __gc = function(templates)
-            for _, path in pairs(templates) do
-                if type(path) == "string" then
-                    pcall(run, "rm -rf " .. quote(path))
-                end
-            end
-            registry[cache_registry_key] = nil
-        end,
-    })
-    registry[cache_registry_key] = workspace_templates
-end
-
 local function exists(path)
     return lfs.attributes(path) ~= nil
 end
@@ -64,43 +37,6 @@ local function fresh_workspace_path(label)
     local path = os.tmpname() .. "-titan-phase2-" .. label
     os.remove(path)
     return path
-end
-
-local function clone_workspace(template)
-    local path = fresh_workspace_path("cached")
-    -- -p matters here: driver.compile's private-runtime staleness check must
-    -- see the same source/object ordering as the prepared template on both
-    -- GNU and BSD/macOS cp.
-    local ok, _, output = run("cp -Rp " .. quote(template) ..
-        " " .. quote(path))
-    assert.truthy(ok, output)
-    return path
-end
-
-local function cache_context()
-    return table.concat({
-        os.getenv("CC") or "",
-        os.getenv("TITAN_TEST_EXTRA_CFLAGS") or "",
-        os.getenv("TITAN_TEST_EXTRA_LDFLAGS") or "",
-    }, "\0")
-end
-
--- Cache only within this Lua process: every fresh Busted/CI invocation still
--- rebuilds variants from the current source, transformer, native objects, and
--- libuv archive. The successfully built workspace becomes the immutable
--- template until Lua closes; callers always receive disposable clones.
-function M.cached_workspace(key, builder)
-    local full_key = key .. "\0" .. cache_context()
-    local template = workspace_templates[full_key]
-    if template then
-        assert.truthy(exists(template),
-            "cached test workspace disappeared: " .. template)
-        return clone_workspace(template)
-    end
-
-    template = assert(builder())
-    workspace_templates[full_key] = template
-    return clone_workspace(template)
 end
 
 local function find_standard_dir()
@@ -313,9 +249,7 @@ local function build_variant_workspace(transformer)
 end
 
 function M.variant_workspace(transformer)
-    local transform = transformer
-    if transform:sub(1, 1) ~= "/" then transform = REPO .. "/" .. transform end
-    return build_variant_workspace(transform)
+    return build_variant_workspace(transformer)
 end
 
 function M.variant_lua_command(workspace, script, ...)
@@ -328,11 +262,6 @@ function M.variant_lua_command(workspace, script, ...)
         "LUA_CPATH=" .. quote(cpath), quote(lua), quote(script),
         table.concat(args, " "),
     }, " ")
-end
-
-function M.variant_app_command(workspace, modname)
-    return "env TITAN_PATH_0_11=" .. quote(workspace) .. " " ..
-        quote(workspace .. "/" .. modname)
 end
 
 function M.lua_command(workspace, script, ...)
@@ -359,23 +288,6 @@ function M.read(path)
     local contents = file:read("*a")
     file:close()
     return contents
-end
-
-function M.c_function_definition(source, signature, following_signature)
-    local cursor = 1
-    while true do
-        local first = source:find(signature, cursor, true)
-        assert.truthy(first, "missing C function definition: " .. signature)
-        local brace = source:find("{", first + #signature, true)
-        local semicolon = source:find(";", first + #signature, true)
-        if brace and (not semicolon or brace < semicolon) then
-            local following = source:find(following_signature, brace + 1, true)
-            assert.truthy(following,
-                "missing C function following " .. signature)
-            return source:sub(first, following - 1)
-        end
-        cursor = first + #signature
-    end
 end
 
 function M.cleanup(workspace)

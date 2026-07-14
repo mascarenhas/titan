@@ -6,15 +6,13 @@ describe("os Phase 6 child processes", function()
     local envname
 
     setup(function()
-        workspace = phase6.workspace()
+        workspace = phase6.workspace("process")
         child = phase6.process_child(workspace)
         envname = ("TITAN_PHASE6_PROCESS_" .. workspace):
             gsub("[^A-Za-z0-9_]", "_")
         phase6.copy_fixture(workspace, "process_core_cases.titan",
             "phase6_process_cases")
-        phase6.compile(workspace, "phase6_process_cases", {
-            stdlib = workspace .. "/titan",
-        })
+        phase6.compile(workspace, "phase6_process_cases")
     end)
 
     teardown(function()
@@ -24,7 +22,7 @@ describe("os Phase 6 child processes", function()
     local function run_scenario(name)
         local script = phase6.repo ..
             "/spec/fixtures/uv/phase6/process_runtime.lua"
-        local command = phase6.variant_lua_command(
+        local command = phase6.lua_command(
             workspace, script, workspace .. "/phase6_process_cases.so",
             name, child, envname)
         return phase6.run(command, workspace)

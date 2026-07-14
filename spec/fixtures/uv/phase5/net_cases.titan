@@ -1,4 +1,3 @@
-local lua = foreign import "lua.h"
 local net = import "net"
 local timer = import "timer"
 local uv = import "uv"
@@ -37,22 +36,29 @@ local function wait_until_started(task: uv.Task)
   while task:status() == "ready" do timer.yield() end
 end
 
-local function wait_for_accept_notifications(server: net.Server,
-                                             expected: integer)
-  local turns = 0
-  local observed = net.__test_phase5_accept_queue_size(server) +
-                   net.__test_phase5_accept_overflow_closes(server)
-  while observed < expected and turns < 1000 do
-    timer.yield()
-    turns = turns + 1
-    observed = net.__test_phase5_accept_queue_size(server) +
-               net.__test_phase5_accept_overflow_closes(server)
+-- Tests use explicit ports so every endpoint remains expressible through the
+-- public net API. The Lua harness derives a per-workspace starting point, and
+-- this retry loop handles collisions with other processes running in parallel.
+local function listen_available(host: string, first_port: integer,
+                                backlog: integer): (net.Server, integer)
+  local port = first_port
+  local attempts = 0
+  while attempts < 1024 do
+    do
+      local server = net.listen(host, port, backlog)
+      return server, port
+    catch
+      local failure = error as uv.Error
+      if failure.name ~= "EADDRINUSE" then raise error end
+    end
+    attempts = attempts + 1
+    port = port + 1
+    if port > 60999 then port = 20000 end
   end
-  check(observed == expected,
-        "timed out waiting for deterministic accept notifications")
+  raise "could not find an available loopback port"
 end
 
-function schedule_ipv4_core(): uv.Task
+function schedule_ipv4_core(first_port: integer): uv.Task
   return uv.run(function (): value
     expect_failure(function (): value
       net.connect("localhost\0ignored", 1)
@@ -67,9 +73,7 @@ function schedule_ipv4_core(): uv.Task
       return nil
     end, "oversized listen backlog was truncated to a C int")
 
-    local server = net.listen("127.0.0.1", 0, 8)
-    local port = net.__test_phase5_bound_port(server)
-    check(port > 0, "port-0 listener did not receive a bound port")
+    local server, port = listen_available("127.0.0.1", first_port, 8)
 
     local peer = uv.run(function (): value
       local connection = server:accept()
@@ -106,10 +110,9 @@ function schedule_ipv4_core(): uv.Task
   end)
 end
 
-function schedule_partial_and_excess(): uv.Task
+function schedule_partial_and_excess(first_port: integer): uv.Task
   return uv.run(function (): value
-    local server = net.listen("127.0.0.1", 0, 8)
-    local port = net.__test_phase5_bound_port(server)
+    local server, port = listen_available("127.0.0.1", first_port, 8)
     local peer = uv.run(function (): value
       local first = server:accept()
       first:write("left\r")
@@ -180,10 +183,9 @@ function schedule_partial_and_excess(): uv.Task
   end)
 end
 
-function schedule_fifo_and_shutdown(): uv.Task
+function schedule_fifo_and_shutdown(first_port: integer): uv.Task
   return uv.run(function (): value
-    local server = net.listen("127.0.0.1", 0, 8)
-    local port = net.__test_phase5_bound_port(server)
+    local server, port = listen_available("127.0.0.1", first_port, 8)
     local reader = uv.run(function (): value
       local peer = server:accept()
       local payload = peer:read_exactly(18)
@@ -252,10 +254,9 @@ function schedule_fifo_and_shutdown(): uv.Task
   end)
 end
 
-function schedule_accept_and_read_cancellation(): uv.Task
+function schedule_accept_and_read_cancellation(first_port: integer): uv.Task
   return uv.run(function (): value
-    local server = net.listen("127.0.0.1", 0, 2)
-    local port = net.__test_phase5_bound_port(server)
+    local server, port = listen_available("127.0.0.1", first_port, 2)
     local accept_waiter = uv.run(function (): value
       return server:accept()
     end)
@@ -322,10 +323,9 @@ function schedule_accept_and_read_cancellation(): uv.Task
   end)
 end
 
-function schedule_bounded_accept_queue(): uv.Task
+function schedule_bounded_accept_queue(first_port: integer): uv.Task
   return uv.run(function (): value
-    local server = net.listen("127.0.0.1", 0, 2)
-    local port = net.__test_phase5_bound_port(server)
+    local server, port = listen_available("127.0.0.1", first_port, 2)
     local clients: {net.Connection} = {}
     local connectors: {uv.Task} = {}
     for i = 1, 4 do
@@ -336,16 +336,22 @@ function schedule_bounded_accept_queue(): uv.Task
     for i = 1, 4 do
       clients[i] = (connectors[i] as uv.Task):join() as net.Connection
     end
-    wait_for_accept_notifications(server, 4)
-    check(net.__test_phase5_accept_queue_size(server) == 2,
-          "Server accept queue did not stop at backlog capacity")
-    check(net.__test_phase5_accept_overflow_closes(server) == 2,
-          "overflow accepted clients were not closed")
+    -- Let all four server-side connection notifications run before consuming
+    -- the public accept queue. With backlog two, exactly two can remain queued;
+    -- the overflow peers are closed by the implementation.
+    for _ = 1, 20 do timer.yield() end
 
     local first = server:accept()
     local second = server:accept()
-    check(net.__test_phase5_accept_queue_size(server) == 0,
-          "accept did not consume the bounded queue")
+    local third = uv.run(function (): value
+      return server:accept()
+    end)
+    wait_until_started(third)
+    for _ = 1, 20 do timer.yield() end
+    check(third:status() == "waiting",
+          "Server retained more accepted clients than its backlog")
+    third:cancel("bounded-accept")
+    expect_cancelled(third, "bounded-accept")
     first:close()
     second:close()
     for i = 1, 4 do (clients[i] as net.Connection):close() end
@@ -354,10 +360,9 @@ function schedule_bounded_accept_queue(): uv.Task
   end)
 end
 
-function schedule_localhost_retry(): uv.Task
+function schedule_localhost_retry(first_port: integer): uv.Task
   return uv.run(function (): value
-    local server = net.listen("127.0.0.1", 0, 4)
-    local port = net.__test_phase5_bound_port(server)
+    local server, port = listen_available("127.0.0.1", first_port, 4)
     local accept = uv.run(function (): value
       local peer = server:accept()
       check(peer:read_exactly(1) == "x", "localhost peer read failed")
@@ -375,11 +380,12 @@ function schedule_localhost_retry(): uv.Task
   end)
 end
 
-function schedule_ipv6_optional(): uv.Task
+function schedule_ipv6_optional(first_port: integer): uv.Task
   return uv.run(function (): value
     local server: net.Server? = nil
+    local port = 0
     do
-      server = net.listen("::1", 0, 4)
+      server, port = listen_available("::1", first_port, 4)
     catch
       local failure = error as uv.Error
       if failure.name == "EAFNOSUPPORT" or
@@ -391,7 +397,6 @@ function schedule_ipv6_optional(): uv.Task
       raise error
     end
     local listener = server as net.Server
-    local port = net.__test_phase5_bound_port(listener)
     local peer_task = uv.run(function (): value
       local peer = listener:accept()
       check(peer:read_exactly(4) == "ipv6", "IPv6 payload changed")
@@ -407,11 +412,10 @@ function schedule_ipv6_optional(): uv.Task
   end)
 end
 
-function schedule_leaked_connection(): uv.Task
+function schedule_leaked_connection(first_port: integer): uv.Task
   return uv.run(function (): value
-    local server = net.listen("127.0.0.1", 0, 2)
+    local server, port = listen_available("127.0.0.1", first_port, 2)
     retained_server = server
-    local port = net.__test_phase5_bound_port(server)
     local connector = uv.run(function (): value
       return net.connect("127.0.0.1", port)
     end)
@@ -422,7 +426,7 @@ function schedule_leaked_connection(): uv.Task
   end)
 end
 
-function schedule_stale_rejection(): uv.Task
+function schedule_stale_rejection(_first_port: integer): uv.Task
   return uv.run(function (): value
     expect_failure(function (): value
       (retained_connection as net.Connection):write("stale")
@@ -434,14 +438,8 @@ function schedule_stale_rejection(): uv.Task
     end, "old-generation Server was accepted")
     retained_connection = nil
     retained_server = nil
-    lua.lua_gc(L, lua.LUA_GCCOLLECT)
     return "stale-rejected"
   end)
-end
-
-function drop_retained()
-  retained_connection = nil
-  retained_server = nil
 end
 
 function retained_server_value(): net.Server?

@@ -47,7 +47,6 @@ while IFS= read -r test_file; do
             ;;
         spec/stdlib/coroutine_spec.lua | \
         spec/libuv_build_spec.lua | \
-        spec/libuv_shim_spec.lua | \
         spec/minicoro_spec.lua | \
         spec/rockspec_spec.lua)
             # These suites mutate or inspect shared root artifacts, so keep
@@ -130,7 +129,6 @@ case "$group" in
             echo "Running fixed macOS native/tooling canaries without LuaCov"
             "$BUSTED" -o gtest -v \
                 spec/canary_spec.lua \
-                spec/libuv_shim_spec.lua \
                 spec/minicoro_spec.lua
 
             # This focused installed-prefix test is the Darwin proof for the

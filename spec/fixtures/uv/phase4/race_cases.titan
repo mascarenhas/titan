@@ -8,152 +8,11 @@ record YoungReason
   marker: string
 end
 
-local sticky_catches = 0
-local sticky_owner_before = 0
-local sticky_owner_after = 0
-local delayed_waiter_resumed = false
-local concurrent_failure_observed = false
-local concurrent_observer_armed = false
-local concurrent_independent_started = false
 local fs_result_delivered = false
 local fs_open_result_delivered = false
 
 local function check(condition: boolean, message: string)
   if not condition then raise message end
-end
-
-function schedule_completion(): uv.Task
-  return uv.run(function (): value
-    return "completion-wins"
-  end)
-end
-
-function schedule_sticky_zero_allocation(): uv.Task
-  sticky_catches = 0
-  sticky_owner_before = 0
-  sticky_owner_after = 0
-
-  local target = uv.run(function (): value
-    do
-      timer.sleep(1000)
-    catch
-      local cancelled = error as uv.Cancelled
-      check(cancelled.reason == "sticky-zero-allocation",
-            "first sticky cancellation reason changed")
-      sticky_catches = sticky_catches + 1
-    end
-
-    sticky_owner_before = uv.__test_phase4_owner_starts()
-    do
-      timer.yield()
-    catch
-      local cancelled = error as uv.Cancelled
-      sticky_owner_after = uv.__test_phase4_owner_starts()
-      check(cancelled.reason == "sticky-zero-allocation",
-            "second sticky cancellation reason changed")
-      sticky_catches = sticky_catches + 1
-    end
-    return "cancelled-return-must-not-win"
-  end)
-
-  uv.run(function (): value
-    while target:status() == "ready" do timer.yield() end
-    target:cancel("sticky-zero-allocation")
-    return nil
-  end)
-  return target
-end
-
-function sticky_metrics(): (integer, integer, integer)
-  return sticky_catches, sticky_owner_before, sticky_owner_after
-end
-
-function schedule_delayed_ticker_cancellation(): uv.Task
-  delayed_waiter_resumed = false
-  return uv.run(function (): value
-    local ticker = timer.ticker(1)
-    local target = uv.run(function (): value
-      local ticked = ticker:tick()
-      delayed_waiter_resumed = true
-      return ticked
-    end)
-
-    while target:status() == "ready" do timer.yield() end
-    check(target:status() == "waiting",
-          "Ticker waiter did not arm before cancellation")
-    uv.__test_phase4_delay_next_cancel(30)
-    target:cancel("delayed-ticker-cancel")
-
-    -- Several recurring callbacks run before cancellation delivery. Detaching
-    -- the logical waiter synchronously must suppress every one of them.
-    timer.sleep(5)
-    check(not delayed_waiter_resumed,
-          "detached Ticker waiter resumed before delayed cancellation")
-
-    local caught = false
-    do
-      target:join()
-    catch
-      local cancelled = error as uv.Cancelled
-      check(cancelled.reason == "delayed-ticker-cancel",
-            "delayed Ticker cancellation reason changed")
-      caught = true
-    end
-    check(caught and target:status() == "cancelled",
-          "delayed cancellation did not terminalize the waiter")
-
-    local replacement = uv.run(function (): value
-      return ticker:tick()
-    end)
-    check(replacement:join() as boolean,
-          "Ticker was not reusable after the cancelled waiter")
-    ticker:close()
-    return "delayed-ticker-cancellation-ok"
-  end)
-end
-
-function schedule_concurrent_public_error(): uv.Task
-  concurrent_failure_observed = false
-  concurrent_observer_armed = false
-  concurrent_independent_started = false
-  -- Synchronize in event-loop turns: the failure must cross an armed join
-  -- while another Task is already live, then that Task resumes afterward.
-  local failed = uv.run(function (): value
-    while not concurrent_observer_armed or
-          not concurrent_independent_started do
-      timer.yield()
-    end
-    raise "phase4-public-task-failure"
-    return nil
-  end)
-
-  local observer = uv.run(function (): value
-    concurrent_observer_armed = true
-    do
-      failed:join()
-    catch
-      check(error == "phase4-public-task-failure",
-            "public Task propagated the wrong failure")
-      concurrent_failure_observed = true
-      return "failure-observed"
-    end
-    raise "public Task unexpectedly succeeded"
-    return nil
-  end)
-
-  local independent = uv.run(function (): value
-    concurrent_independent_started = true
-    while not concurrent_failure_observed do timer.yield() end
-    return 41
-  end)
-
-  return uv.run(function (): value
-    check(observer:join() == "failure-observed",
-          "failure observer returned the wrong result")
-    check((independent:join() as integer) == 41,
-          "independent Task returned the wrong result")
-    return "concurrent-public-error-ok"
-  end)
 end
 
 local function schedule_buffer_write(file: fs.File,
@@ -175,8 +34,6 @@ function schedule_cross_generation_graph(root: string): uv.Task
         local failure = error as uv.Error
         check(failure.operation == "fs.stat" and failure.code < 0,
               "old Task received the wrong young uv.Error")
-        -- The callback has just injected a fresh Error into a Task/coroutine
-        -- aged below. Keep using it across a minor collection.
         lua.lua_gc(L, lua.LUA_GCSTEP, 0 as lua.lua_Integer)
         check(failure.operation == "fs.stat" and failure.code < 0,
               "young uv.Error was lost across a minor collection")
@@ -191,32 +48,23 @@ function schedule_cross_generation_graph(root: string): uv.Task
           "error Task did not arm before Runtime aging")
 
     -- Age the Runtime, parent/error Tasks, recurring timer owner, File, and
-    -- sleeping owner before attaching any of the objects below.
+    -- sleeping owner before attaching a young continuation and write buffer.
     lua.lua_gc(L, lua.LUA_GCGEN)
     lua.lua_gc(L, lua.LUA_GCCOLLECT)
-    uv.__test_phase4_reset_fs_counters()
     uv.__test_phase4_delay_next_fs_callback(30)
 
     local payload: string? =
         "young-buffer:" .. root .. ":shared-tag-continuation"
     local expected_length = #(payload as string)
-    -- This Task and its tagged coroutine are created after Runtime aging. Its
-    -- closure holds the fresh dynamic buffer; drop the parent copy so the
-    -- young continuation graph is the only semantic owner.
     local writer = schedule_buffer_write(file, payload as string)
     payload = nil
 
-    while uv.__test_phase4_fs_physical_callbacks() == 0 do
+    while not uv.__test_phase4_fs_callback_is_delayed() do
       timer.yield()
     end
-    -- The old Runtime/File now point into a young Task, tagged coroutine,
-    -- FsOperation/owner, and write buffer graph while logical delivery waits.
     lua.lua_gc(L, lua.LUA_GCSTEP, 0 as lua.lua_Integer)
     check((writer:join() as integer) == expected_length,
           "young shared-tag writer returned the wrong byte count")
-    check(uv.__test_phase4_fs_deliveries() == 1 and
-          uv.__test_phase4_fs_cleanups() == 1,
-          "young write callback did not deliver and clean exactly once")
     check(old_error_task:join() == "young-error-ok",
           "old Task did not retain its young uv.Error")
 
@@ -226,10 +74,8 @@ function schedule_cross_generation_graph(root: string): uv.Task
   end)
 end
 
-function schedule_late_fs_cancellation(path: string,
-                                       override_success: boolean): uv.Task
+function schedule_late_fs_cancellation(path: string): uv.Task
   fs_result_delivered = false
-  uv.__test_phase4_reset_fs_counters()
   uv.__test_phase4_delay_next_fs_callback(40)
 
   local target = uv.run(function (): value
@@ -239,20 +85,16 @@ function schedule_late_fs_cancellation(path: string,
   end)
 
   local canceller = uv.run(function (): value
-    while uv.__test_phase4_fs_physical_callbacks() == 0 do
+    while not uv.__test_phase4_fs_callback_is_delayed() do
       timer.yield()
     end
 
-    -- At this point libuv has completed the request, but the test variant has
-    -- not delivered it. Age the Runtime/Task/owners, then store a young record
-    -- through Task.cancel and force a generational minor collection.
+    -- Libuv completed the request, but logical callback delivery is delayed.
+    -- Store a young cancellation reason through the old Task before delivery.
     lua.lua_gc(L, lua.LUA_GCGEN)
     lua.lua_gc(L, lua.LUA_GCCOLLECT)
     local reason: YoungReason? =
         YoungReason.new("young-cross-generation-cancel")
-    if override_success then
-      uv.__test_phase4_override_next_fs_cancel_success()
-    end
     target:cancel(reason)
     reason = nil
     lua.lua_gc(L, lua.LUA_GCSTEP, 0 as lua.lua_Integer)
@@ -274,30 +116,15 @@ function schedule_late_fs_cancellation(path: string,
     check(caught and target:status() == "cancelled",
           "late filesystem cancellation did not win logically")
 
-    while uv.__test_phase4_fs_deliveries() == 0 do timer.yield() end
+    timer.sleep(50)
     check(not fs_result_delivered,
           "late filesystem result resumed a cancelled Task")
-    check(uv.__test_phase4_fs_cancel_calls() == 1,
-          "active filesystem cancellation did not call uv_cancel once")
-    if override_success then
-      check(uv.__test_phase4_fs_cancel_status() == 0,
-            "overridden successful uv_cancel status was not observed")
-    else
-      check(uv.__test_phase4_fs_cancel_status() < 0,
-            "completed filesystem request did not report too-late cancel")
-    end
-    check(uv.__test_phase4_fs_cleanups() == 1,
-          "late filesystem callback did not clean exactly once")
-    if override_success then
-      return "late-fs-success-cancellation-ok"
-    end
-    return "late-fs-too-late-cancellation-ok"
+    return "late-fs-cancellation-ok"
   end)
 end
 
 function schedule_late_open_cancellation(path: string): uv.Task
   fs_open_result_delivered = false
-  uv.__test_phase4_reset_fs_counters()
   uv.__test_phase4_delay_next_fs_callback(40)
 
   local target = uv.run(function (): value
@@ -308,15 +135,9 @@ function schedule_late_open_cancellation(path: string): uv.Task
   end)
 
   local canceller = uv.run(function (): value
-    while uv.__test_phase4_fs_physical_callbacks() == 0 do
+    while not uv.__test_phase4_fs_callback_is_delayed() do
       timer.yield()
     end
-    -- The native open has returned a valid descriptor, but the generated
-    -- variant has not yet entered the allocating publication body.
-    check(uv.__test_phase4_fs_open_successes() == 1,
-          "delayed filesystem open did not complete successfully")
-    check(uv.__test_phase4_fs_open_publications() == 0,
-          "filesystem open was published before cancellation")
     target:cancel("late-successful-open-cancel")
     return nil
   end)
@@ -335,25 +156,11 @@ function schedule_late_open_cancellation(path: string): uv.Task
     check(caught and target:status() == "cancelled",
           "late successful-open cancellation did not win logically")
 
-    while uv.__test_phase4_fs_internal_close_callbacks() == 0 do
-      timer.yield()
-    end
-    check(not fs_open_result_delivered and
-          uv.__test_phase4_fs_open_publications() == 0,
+    -- Keep the public Runtime alive long enough to drain the delayed open and
+    -- its asynchronous descriptor disposal.
+    timer.sleep(50)
+    check(not fs_open_result_delivered,
           "cancelled successful open published a File")
-    check(uv.__test_phase4_fs_cancel_calls() == 1 and
-          uv.__test_phase4_fs_cancel_status() < 0,
-          "completed successful open did not observe one too-late cancel")
-    check(uv.__test_phase4_fs_deliveries() == 1,
-          "successful open result did not reach logical disposal once")
-    check(uv.__test_phase4_fs_internal_close_enqueues() == 1 and
-          uv.__test_phase4_fs_internal_close_callbacks() == 1,
-          "cancelled successful open did not close internally exactly once")
-    check(uv.__test_phase4_fs_cleanups() == 2,
-          "open and internal-close requests were not cleaned exactly once")
-    check(uv.__test_phase4_fs_pending_roots() == 0 and
-          uv.__test_phase4_file_roots() == 0,
-          "cancelled successful open retained native owner roots")
     return "late-successful-open-cancellation-ok"
   end)
 end

@@ -40,7 +40,7 @@ function M.lua_command(workspace, script, ...)
     return phase2.lua_command(workspace, script, ...)
 end
 
-function M.variant_workspace(transformer, fs_transformer)
+function M.variant_workspace(transformer)
     local workspace = phase2.variant_workspace(transformer)
     local root = workspace .. "/data"
     assert.truthy(lfs.mkdir(root))
@@ -48,21 +48,8 @@ function M.variant_workspace(transformer, fs_transformer)
     -- Build fs only after the transformed uv DSO exists. Dependencies use the
     -- private compiled-module boundary even when their sources are visible.
     local raw_lua = phase2.host_lua()
-    if fs_transformer then
-        local transform = fs_transformer
-        if transform:sub(1, 1) ~= "/" then
-            transform = M.repo .. "/" .. transform
-        end
-        local ok, _, output = phase2.run(table.concat({
-            quote(raw_lua), quote(transform),
-            quote(M.repo .. "/titan/fs.titan"),
-            quote(workspace .. "/titan/fs.titan"),
-        }, " "), workspace)
-        assert.truthy(ok, output)
-    else
-        write(workspace .. "/titan/fs.titan",
-            phase2.read(M.repo .. "/titan/fs.titan"))
-    end
+    write(workspace .. "/titan/fs.titan",
+        phase2.read(M.repo .. "/titan/fs.titan"))
     local variant_cflags = os.getenv("TITAN_TEST_EXTRA_CFLAGS") or ""
     local variant_ldflags = os.getenv("TITAN_TEST_EXTRA_LDFLAGS") or ""
     local compiler = quote(raw_lua) .. " -e " .. quote(
@@ -82,9 +69,7 @@ function M.variant_workspace(transformer, fs_transformer)
 end
 
 M.cleanup = phase2.cleanup
-M.read = phase2.read
 M.run = phase2.run
 M.variant_lua_command = phase2.variant_lua_command
-M.variant_app_command = phase2.variant_app_command
 M.repo = phase2.repo
 return M

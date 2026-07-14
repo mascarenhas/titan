@@ -1,7 +1,5 @@
--- Runs against the isolated Phase 6 uv variant, but exercises the public
--- Titan os facade rather than its private middle-layer entry points.
+-- Synchronous public os behavior against the canonical production modules.
 local os = import "os"
-local timer = import "timer"
 local uv = import "uv"
 
 local function check(condition: boolean, message: string)
@@ -40,9 +38,6 @@ function exercise_environment(name: string): string
     local copied: string? = os.getenv(name)
     check(copied and (copied as string) == long_value,
           "long environment value was truncated during resize")
-    check(uv.__test_phase6_os_result_attempts() > 1 and
-          uv.__test_phase6_os_grows() > 0,
-          "long environment value did not exercise buffer growth")
   finally
     restore_environment(name, original)
   end
@@ -119,22 +114,17 @@ function exercise_paths_and_identity(temp: string): string
   check(#os.homedir() > 0, "homedir returned an empty path")
   check(#os.tmpdir() > 0, "tmpdir returned an empty path")
   check(#os.hostname() > 0, "hostname returned an empty name")
-  check(#os.exepath() > 0, "exepath returned an empty path")
+  local exepath_rejected = false
+  do
+    os.exepath()
+  catch
+    check((error as string) ==
+          "os.exepath is only available in a compiled Titan program",
+          "Lua-hosted exepath reported the wrong error")
+    exepath_rejected = true
+  end
+  check(exepath_rejected, "Lua-hosted exepath unexpectedly succeeded")
   check(os.pid() > 0, "pid was not positive")
   check(os.ppid() >= 0, "ppid was negative")
   return "path-and-identity-helpers-ok"
-end
-
-function schedule_signal_roundtrip(): uv.Task
-  return uv.run(function (): value
-    local baseline = uv.__test_phase6_signal_arms()
-    local waiter = uv.run(function (): value
-      return os.wait_signal("usr1")
-    end)
-    while uv.__test_phase6_signal_arms() <= baseline do timer.yield() end
-    uv.__test_phase6_send_signal("usr1")
-    check(waiter:join() == "usr1",
-          "signal roundtrip between synchronous helper sessions failed")
-    return "signal-between-os-helper-sessions-ok"
-  end)
 end

@@ -30,7 +30,6 @@ typedef char *titan_uvshim_char_ptr;
 typedef struct uv_connect_s uv_connect_t;
 typedef struct uv_fs_s uv_fs_t;
 typedef struct uv_getaddrinfo_s uv_getaddrinfo_t;
-typedef struct uv_handle_s uv_handle_t;
 typedef struct uv_loop_s uv_loop_t;
 typedef struct uv_pipe_s uv_pipe_t;
 typedef struct uv_process_s uv_process_t;
@@ -46,31 +45,27 @@ typedef struct uv_write_s uv_write_t;
  * fields are numbered from one at the Lua API/source level and live at the
  * corresponding zero-based Udata.uv index in the native trampoline.
  *
- * The first five fields are the common callback prefix.  Slots 6 through 8
- * are family-specific but retain the documented root/metadata/buffer roles.
+ * All callback owners use the same six fields. The final slot is
+ * family-specific native I/O storage; families that need no such root use nil.
  */
 enum titan_uvshim_owner_lua_slot {
   TITAN_UV_OWNER_NATIVE_LUA_SLOT = 1,
   TITAN_UV_OWNER_STORAGE_LUA_SLOT = 2,
   TITAN_UV_OWNER_MAIN_THREAD_LUA_SLOT = 3,
-  TITAN_UV_OWNER_MODULE_LUA_SLOT = 4,
-  TITAN_UV_OWNER_DISPATCHER_LUA_SLOT = 5,
-  TITAN_UV_OWNER_ROOT_LUA_SLOT = 6,
-  TITAN_UV_OWNER_METADATA_LUA_SLOT = 7,
-  TITAN_UV_OWNER_BUFFER_LUA_SLOT = 8,
-  TITAN_UV_OWNER_LUA_SLOT_COUNT = 8
+  TITAN_UV_OWNER_DISPATCHER_LUA_SLOT = 4,
+  TITAN_UV_OWNER_METADATA_LUA_SLOT = 5,
+  TITAN_UV_OWNER_BUFFER_LUA_SLOT = 6,
+  TITAN_UV_OWNER_LUA_SLOT_COUNT = 6
 };
 
 enum titan_uvshim_owner_c_index {
   TITAN_UV_OWNER_NATIVE_C_INDEX = 0,
   TITAN_UV_OWNER_STORAGE_C_INDEX = 1,
   TITAN_UV_OWNER_MAIN_THREAD_C_INDEX = 2,
-  TITAN_UV_OWNER_MODULE_C_INDEX = 3,
-  TITAN_UV_OWNER_DISPATCHER_C_INDEX = 4,
-  TITAN_UV_OWNER_ROOT_C_INDEX = 5,
-  TITAN_UV_OWNER_METADATA_C_INDEX = 6,
-  TITAN_UV_OWNER_BUFFER_C_INDEX = 7,
-  TITAN_UV_OWNER_C_INDEX_COUNT = 8
+  TITAN_UV_OWNER_DISPATCHER_C_INDEX = 3,
+  TITAN_UV_OWNER_METADATA_C_INDEX = 4,
+  TITAN_UV_OWNER_BUFFER_C_INDEX = 5,
+  TITAN_UV_OWNER_C_INDEX_COUNT = 6
 };
 
 enum titan_uvshim_event_kind {
@@ -87,68 +82,36 @@ enum titan_uvshim_event_kind {
   TITAN_UV_EVENT_PROCESS_EXIT = 11
 };
 
-/*
- * Raw stdio endpoints returned by titan_uvshim_stdio_pipes().  Directions are
- * from the parent process: stdin's child end is readable and its parent end is
- * writable; stdout/stderr have readable parent ends and writable child ends.
- */
-enum titan_uvshim_stdio_endpoint_index {
-  TITAN_UV_STDIO_STDIN_CHILD = 0,
-  TITAN_UV_STDIO_STDIN_PARENT = 1,
-  TITAN_UV_STDIO_STDOUT_PARENT = 2,
-  TITAN_UV_STDIO_STDOUT_CHILD = 3,
-  TITAN_UV_STDIO_STDERR_PARENT = 4,
-  TITAN_UV_STDIO_STDERR_CHILD = 5,
-  TITAN_UV_STDIO_ENDPOINT_COUNT = 6,
-  TITAN_UV_STDIO_FILLER_CAPACITY = 6
-};
-
 /* Concrete wrappers for libuv's public base-handle/base-request API. */
 void titan_uvshim_timer_set_data(uv_timer_t *timer, void *data);
-void *titan_uvshim_timer_get_data(const uv_timer_t *timer);
 int titan_uvshim_timer_is_closing(const uv_timer_t *timer);
 void titan_uvshim_timer_close(uv_timer_t *timer);
-void titan_uvshim_timer_close_discard(uv_timer_t *timer);
 
 void titan_uvshim_fs_set_data(uv_fs_t *req, void *data);
-void *titan_uvshim_fs_get_data(const uv_fs_t *req);
 int titan_uvshim_fs_cancel(uv_fs_t *req);
-int titan_uvshim_fs_scandir_next(uv_fs_t *req, void *entry);
-const char *titan_uvshim_dirent_name(const void *entry);
 int titan_uvshim_error_eio(void);
 int titan_uvshim_error_eof(void);
 int titan_uvshim_error_ecanceled(void);
 int titan_uvshim_error_eaddrnotavail(void);
 int titan_uvshim_error_einval(void);
-int titan_uvshim_error_eoverflow(void);
-int titan_uvshim_error_enosys(void);
-
-/*
- * Normalize public libuv buffer-sizing results without exposing host errno
- * values or truncating an unsigned size_t into Titan's signed integer range.
- */
-int titan_uvshim_status_is_enobufs(int status);
-int titan_uvshim_status_is_enoent(int status);
-int64_t titan_uvshim_size_as_int64(size_t size);
+int titan_uvshim_error_enobufs(void);
+int titan_uvshim_error_enoent(void);
+int titan_uvshim_error_esrch(void);
 
 /*
  * Common Linux/macOS signal names.  Host signal numbers intentionally stay in
  * this shim because the user-defined signal numbers differ by platform.
  * The number helper returns zero for unknown names and also recognizes "kill"
- * for Process:kill; one-shot waits must additionally require
- * titan_uvshim_signal_is_waitable().
+ * for Process:kill; Titan rejects that name for one-shot waits.
  */
 int titan_uvshim_signal_number(const char *name);
 const char *titan_uvshim_signal_name(int signum);
-int titan_uvshim_signal_is_waitable(int signum);
 
 /* Concrete one-shot signal wrappers around public libuv handle APIs. */
 int titan_uvshim_signal_init(uv_loop_t *loop,
                              uv_signal_t *signal,
                              void *data);
 int titan_uvshim_signal_start_oneshot(uv_signal_t *signal, int signum);
-int titan_uvshim_signal_stop(uv_signal_t *signal);
-int titan_uvshim_signal_is_closing(const uv_signal_t *signal);
 void titan_uvshim_signal_close(uv_signal_t *signal);
 
 /*
@@ -169,15 +132,10 @@ void titan_uvshim_addrinfo_free(void *result);
 
 /* Concrete TCP/stream/request wrappers around public libuv base APIs. */
 int titan_uvshim_tcp_init(uv_loop_t *loop, uv_tcp_t *tcp, void *data);
-int titan_uvshim_tcp_is_closing(const uv_tcp_t *tcp);
 void titan_uvshim_tcp_close(uv_tcp_t *tcp);
-/* Private fault-test hook; production close remains graceful uv_close. */
-int titan_uvshim_tcp_close_reset(uv_tcp_t *tcp);
 int titan_uvshim_tcp_bind(uv_tcp_t *tcp,
                           const void *address_storage,
                           int64_t index);
-/* Private test-variant diagnostic; the public net API exposes no endpoint. */
-int titan_uvshim_tcp_bound_port(const uv_tcp_t *tcp);
 int titan_uvshim_tcp_listen(uv_tcp_t *tcp, int64_t backlog);
 int titan_uvshim_tcp_accept(uv_tcp_t *server, uv_tcp_t *client);
 int titan_uvshim_tcp_read_start(uv_tcp_t *tcp);
@@ -195,61 +153,40 @@ int titan_uvshim_tcp_shutdown_start(uv_shutdown_t *req,
                                     uv_tcp_t *tcp,
                                     void *data);
 
-/*
- * Create the three raw stdio pairs using only public libuv. The caller
- * supplies arrays with the fixed capacities defined above. Every cell is set
- * to -1 before descriptors are acquired, so scanning both complete arrays
- * finds every descriptor still owned by the caller, including on error.
- * The fixed endpoint layout is likewise defined above.
- * Filler descriptors reserve fd 0..2 so uv_pipe_t never owns a descriptor
- * that libuv's Unix stream close deliberately treats as stdio.
- */
-int titan_uvshim_stdio_pipes(int *endpoints, int *fillers);
-
 /* Typed pipe wrappers; Titan never casts a uv_pipe_t through uv_stream_t. */
 int titan_uvshim_pipe_init(uv_loop_t *loop, uv_pipe_t *pipe, void *data);
-/* Clears endpoints[index] only when uv_pipe_open takes ownership. */
-int titan_uvshim_pipe_open(uv_pipe_t *pipe,
-                           int *endpoints,
-                           int index);
 int titan_uvshim_pipe_read_start(uv_pipe_t *pipe);
 int titan_uvshim_pipe_read_stop(uv_pipe_t *pipe);
 int titan_uvshim_pipe_write_start(uv_write_t *req,
                                   uv_pipe_t *pipe,
                                   void *data,
                                   const void *buffer);
-int titan_uvshim_pipe_is_closing(const uv_pipe_t *pipe);
 void titan_uvshim_pipe_close(uv_pipe_t *pipe);
 
 /*
- * argv contains argv[0], the caller arguments, and a trailing NULL. On
- * supported Linux and desktop macOS, each process is initialized and closeable
- * after this call, including after a negative uv_spawn result: exactly three
- * valid UV_INHERIT_FD entries avoid libuv's pre-initialization error path.
+ * argv contains argv[0], the caller arguments, and a trailing NULL. The three
+ * pipe handles have been initialized, but not opened: uv_spawn creates their
+ * parent endpoints through its public UV_CREATE_PIPE stdio contract.
  */
 int titan_uvshim_process_spawn(uv_loop_t *loop,
                                uv_process_t *process,
                                void *data,
                                titan_uvshim_char_ptr *argv,
-                               const int *endpoints);
-int titan_uvshim_process_kill(uv_process_t *process, int signum);
-int64_t titan_uvshim_process_get_pid(const uv_process_t *process);
-int titan_uvshim_process_is_closing(const uv_process_t *process);
+                               uv_pipe_t *stdin_pipe,
+                               uv_pipe_t *stdout_pipe,
+                               uv_pipe_t *stderr_pipe);
 void titan_uvshim_process_close(uv_process_t *process);
-int titan_uvshim_status_is_esrch(int status);
 
 /* Fixed callback shapes passed directly to public libuv start functions. */
 void titan_uvshim_timer_cb(uv_timer_t *timer);
-void titan_uvshim_close_cb(uv_handle_t *handle);
 void titan_uvshim_fs_cb(uv_fs_t *req);
 
 /*
- * Initialize a public uv_buf_t through an opaque pointer.  The opaque
+ * Initialize a public uv_buf_t slice through an opaque pointer. The opaque
  * parameter keeps uv_buf_t out of this private header while the implementation
  * still delegates construction to uv_buf_init. Callers validate user-derived
- * lengths before entering these trusted helpers.
+ * lengths before entering this trusted helper.
  */
-void titan_uvshim_buf_init(void *buf, char *base, int64_t len);
 void titan_uvshim_buf_init_slice(void *buf, char *base, int64_t offset,
                                  int64_t length);
 void titan_uvshim_bytes_copy(char *destination, const char *source,
@@ -260,8 +197,7 @@ int64_t titan_uvshim_bytes_find(const char *haystack, int64_t haystack_length,
 /* Explicit-length binary slice copy; no NUL-termination semantics. */
 void titan_uvshim_bytes_slice_copy(char *destination, const char *source,
                                    int64_t offset, int64_t length);
-int titan_uvshim_allocation_length_is_valid(int64_t length);
-int titan_uvshim_buf_length_is_valid(int64_t length);
+int64_t titan_uvshim_buf_max_length(void);
 
 /* Copy validated text into caller-owned NUL-terminated storage. */
 void titan_uvshim_text_copy(char *destination, const char *source,
@@ -275,13 +211,8 @@ enum titan_uvshim_stat_kind {
 };
 
 /* Extract the portable public portion of an opaque uv_stat_t. */
-int titan_uvshim_stat_extract(const void *statbuf, int64_t *size,
-                              int64_t *mode, int64_t *modified_seconds,
-                              int64_t *modified_nanoseconds, int *kind);
-
-/* Outer-driver diagnostics for an unexpected UV_EBUSY loop close. */
-int titan_uvshim_loop_handle_count(uv_loop_t *loop);
-const char *titan_uvshim_loop_first_handle_type(uv_loop_t *loop);
-int titan_uvshim_status_is_ebusy(int status);
+void titan_uvshim_stat_extract(const void *statbuf, int64_t *size,
+                               int64_t *mode, int64_t *modified_seconds,
+                               int64_t *modified_nanoseconds, int *kind);
 
 #endif

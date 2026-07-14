@@ -1044,9 +1044,11 @@ rock-build: titan
 
 test: luarocks libbacktrace libuv ## Build/install the rock and run the suite via `luarocks test`
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
-	  PATH="$(PREFIX)/bin:$$PATH" "$(PREFIX)/bin/luarocks" make --force
+	  PREFIX="$(PREFIX)" PATH="$(PREFIX)/bin:$$PATH" \
+	  "$(PREFIX)/bin/luarocks" make --force
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
-	  PATH="$(PREFIX)/bin:$$PATH" "$(PREFIX)/bin/luarocks" test
+	  PREFIX="$(PREFIX)" PATH="$(PREFIX)/bin:$$PATH" \
+	  "$(PREFIX)/bin/luarocks" test
 
 examples: lua ## Compile the example Titan modules (SDL examples need SDL2 headers)
 	$(MAKE) -C examples all

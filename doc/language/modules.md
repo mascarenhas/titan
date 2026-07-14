@@ -440,6 +440,15 @@ tab-indented unified traceback frames through the Titan `main` frame to
 standard error, then exits with a failure status. The synthetic Lua
 bootstrap is not shown (see [Error handling](error-handling.md)).
 
+Before it loads the main module, the generated entrypoint publishes the
+process's original `argc` and `argv`. If a transitive import initializes
+`titan.uv`, that canonical provider calls libuv's required `uv_setup_args`
+once and returns its possibly replaced argument vector to the entrypoint before
+the `args` table is built. This startup contract is also why
+[`os.exepath`](standard-library-os.md#directories-and-host-identity) is
+available in compiled Titan programs but not when the standard module is
+loaded by a Lua or other embedding host.
+
 ```lua
 -- Titan: hello.titan
 function main(args: {string}): integer

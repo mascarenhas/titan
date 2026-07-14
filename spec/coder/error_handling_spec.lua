@@ -1214,6 +1214,31 @@ describe("catch", function()
         assert.not_match("volatile%s+lua_Integer%s+_local_m_1", csrc)
     end)
 
+    it("installs a trailing catch target before allocating in a native entry",
+    function()
+        local csrc = compile_and_read_c([[
+            local function native_callback()
+                local values = { 1 }
+                if #values == 0 then raise "unreachable" end
+            catch
+                return
+            end
+
+            function call_callback()
+                native_callback()
+            end
+        ]])
+        local _, prototype = assert(csrc:find(
+            "native_callback_titan", 1, true))
+        local definition = assert(csrc:find(
+            "native_callback_titan", prototype + 1, true))
+        local next_function = assert(csrc:find("\nstatic ", definition, true))
+        local body = csrc:sub(definition, next_function - 1)
+        local setjmp = assert(body:find("TITAN_SETJMP", 1, true))
+        local first_gc = assert(body:find("luaC_checkGC", 1, true))
+        assert.is_true(setjmp < first_gc)
+    end)
+
     it("a GC local mutated in the body reads correctly after a handled error", function()
         local out = compile_and_run([[
             function run(): string

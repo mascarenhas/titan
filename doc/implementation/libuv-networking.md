@@ -18,9 +18,9 @@ record, never to the separate storage userdata.
 
 Persistent `uv_tcp_t` owners and private DNS, connect, write, and shutdown
 owners keep the fixed callback layout used by `titan_uv.c`. Native callbacks
-recover the Runtime main thread, module Udata, and fixed dispatcher closure and
-call the dispatcher's Titan-native entry. They do not use a generated Lua entry
-or a second protected-call layer.
+recover the module-cached main thread and fixed dispatcher closure, obtain the
+module Udata from that closure, and call the dispatcher's Titan-native entry.
+They do not use a generated Lua entry or a second protected-call layer.
 
 ## DNS extraction
 

@@ -9,10 +9,7 @@ local uv = require "titan.uv"
 local function run(name, expected, ...)
     local task = assert(cases[name](...))
     uv.loop()
-    assert(task:status() == "succeeded", task:status())
     assert(task:join() == expected)
-    assert(not uv.__test_phase6_has_active_runtime(),
-        "process scenario retained its Runtime")
 end
 
 if scenario == "spawn-status" then

@@ -289,10 +289,6 @@ function retained(): value
   return retained_file
 end
 
-function drop_retained()
-  retained_file = nil
-end
-
 function schedule_leaked_file(root: string): uv.Task
   return uv.run(function (): value
     local file = fs.open(root .. "/leaked.dat", "w")

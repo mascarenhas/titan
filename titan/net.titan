@@ -15,10 +15,6 @@ record Server
   local handle: uv.uv_tcp_t
 end
 
--- Isolated runtime variants replace this marker with endpoint and queue
--- diagnostics. Production exports no endpoint/test-introspection API.
--- TITAN_NET_TEST_HOOKS
-
 local function check_host(host: string)
   if #host == 0 then raise "network host must not be empty" end
 end

@@ -105,11 +105,10 @@ first physical close.
 
 When the final Task ends, session shutdown closes any File that application
 code left open. Explicit close is still preferred because it reports errors at
-the relevant call site and releases the descriptor earlier. Native close
-failures receive a small bounded set of internal retries. Persistent failure is
-terminal for that Runtime: `uv.loop()` reports the close error, later work is
-rejected, and the File wrapper remains rooted rather than being reported as
-closed or retried forever.
+the relevant call site and releases the descriptor earlier. A native close
+callback is terminal even when it reports an error: the File wrapper is marked
+closed and the error is reported once. The runtime never retries a failed close,
+because the operating system may already have reused that descriptor number.
 
 ## Whole-file helpers
 
