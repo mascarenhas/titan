@@ -72,14 +72,14 @@ source = replace_once(source, [==[
 
 source = replace_once(source, [==[
   elseif kind == OWNER_TASK_DRIVE then
-    local task = owner.metadata.task as Task
+    local task = owner.metadata.task
 ]==], [==[
   elseif kind == OWNER_DELAYED_FS_CALLBACK then
     local fs_owner = owner.metadata.peer as uv_fs_t
     fs_dispatch(fs_owner, 0, test_fs_delayed_result,
                 0 as libuv.size_t, nil)
   elseif kind == OWNER_TASK_DRIVE then
-    local task = owner.metadata.task as Task
+    local task = owner.metadata.task
 ]==], "delayed FS logical delivery")
 
 local hook_api = [==[
