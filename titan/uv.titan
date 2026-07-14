@@ -698,7 +698,7 @@ local function pop_trace_for_append(): string?
   lua.lua_pushnil(L)
   lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_APPEND_KEY)
   lua.lua_settop(L, top)
-  return trace as string?
+  return trace
 end
 
 local function raise_joined(err: value, target_trace: string)
@@ -708,7 +708,7 @@ local function raise_joined(err: value, target_trace: string)
   catch
     local inner? = pop_trace_for_append()
     if inner then
-      reinstall_trace((inner as string) .. "\n" .. traceback)
+      reinstall_trace(inner .. "\n" .. traceback)
     end
     raise error
   end
@@ -804,8 +804,7 @@ end
 local function bytes_string(bytes: Bytes, length: integer): string
   local top = lua.lua_gettop(L)
   lua.lua_pushlstring(L, bytes.data, length as libuv.size_t)
-  local raw: value = ffi.lua_totvalue(L, -1)
-  local result = raw as string
+  local result = ffi.lua_totvalue(L, -1)
   lua.lua_settop(L, top)
   return result
 end
@@ -814,8 +813,7 @@ local function bytes_to_string(bytes: *ffi.titan_ffi_char,
                                length: libuv.size_t): string
   local top = lua.lua_gettop(L)
   lua.lua_pushlstring(L, bytes, length)
-  local raw: value = ffi.lua_totvalue(L, -1)
-  local result = raw as string
+  local result = ffi.lua_totvalue(L, -1)
   lua.lua_settop(L, top)
   return result
 end
@@ -859,7 +857,7 @@ local function extract_fs_list(owner: uv_fs_t): {string}
       raise make_error(status as integer, "fs.list.next",
                        fs_operation_subject(owner.metadata.operation))
     end
-    names[#names + 1] = entry.handle.name as string
+    names[#names + 1] = entry.handle.name
   end
   return names
 end
@@ -941,12 +939,12 @@ local function current_runtime(): Runtime
   if not active_runtime then
     raise "no active libuv Runtime"
   end
-  return active_runtime as Runtime
+  return active_runtime
 end
 
 local function ensure_runtime(): Runtime
   if active_runtime then
-    local runtime = active_runtime as Runtime
+    local runtime = active_runtime
     if runtime.closing then
       raise "the libuv Runtime is shutting down"
     end
@@ -960,8 +958,7 @@ local function link_owner(runtime: Runtime, owner: uv_timer_t)
   owner.metadata.next_owner = previous
   owner.metadata.previous_owner = nil
   if previous then
-    local old = previous as uv_timer_t
-    old.metadata.previous_owner = owner
+    previous.metadata.previous_owner = owner
   end
   runtime.timer_owner_head = owner
 end
@@ -971,14 +968,12 @@ local function unlink_owner(owner: uv_timer_t)
   local previous? = owner.metadata.previous_owner
   local next? = owner.metadata.next_owner
   if previous then
-    local before = previous as uv_timer_t
-    before.metadata.next_owner = next
+    previous.metadata.next_owner = next
   else
     runtime.timer_owner_head = next
   end
   if next then
-    local after = next as uv_timer_t
-    after.metadata.previous_owner = previous
+    next.metadata.previous_owner = previous
   end
   owner.metadata.previous_owner = nil
   owner.metadata.next_owner = nil
@@ -989,8 +984,7 @@ local function link_signal_owner(runtime: Runtime, owner: uv_signal_t)
   owner.metadata.next_owner = previous
   owner.metadata.previous_owner = nil
   if previous then
-    local old = previous as uv_signal_t
-    old.metadata.previous_owner = owner
+    previous.metadata.previous_owner = owner
   end
   runtime.signal_owner_head = owner
 end
@@ -1000,14 +994,12 @@ local function unlink_signal_owner(owner: uv_signal_t)
   local previous? = owner.metadata.previous_owner
   local next? = owner.metadata.next_owner
   if previous then
-    local before = previous as uv_signal_t
-    before.metadata.next_owner = next
+    previous.metadata.next_owner = next
   else
     runtime.signal_owner_head = next
   end
   if next then
-    local after = next as uv_signal_t
-    after.metadata.previous_owner = previous
+    next.metadata.previous_owner = previous
   end
   owner.metadata.previous_owner = nil
   owner.metadata.next_owner = nil
@@ -1018,8 +1010,7 @@ local function link_fs_owner(runtime: Runtime, owner: uv_fs_t)
   owner.metadata.next_owner = previous
   owner.metadata.previous_owner = nil
   if previous then
-    local old = previous as uv_fs_t
-    old.metadata.previous_owner = owner
+    previous.metadata.previous_owner = owner
   end
   runtime.fs_pending_head = owner
 end
@@ -1029,14 +1020,12 @@ local function unlink_fs_owner(owner: uv_fs_t)
   local previous? = owner.metadata.previous_owner
   local next? = owner.metadata.next_owner
   if previous then
-    local before = previous as uv_fs_t
-    before.metadata.next_owner = next
+    previous.metadata.next_owner = next
   else
     runtime.fs_pending_head = next
   end
   if next then
-    local after = next as uv_fs_t
-    after.metadata.previous_owner = previous
+    next.metadata.previous_owner = previous
   end
   owner.metadata.previous_owner = nil
   owner.metadata.next_owner = nil
@@ -1047,8 +1036,7 @@ local function link_task(runtime: Runtime, task: Task)
   task.next_task = previous
   task.previous_task = nil
   if previous then
-    local old = previous as Task
-    old.previous_task = task
+    previous.previous_task = task
   end
   runtime.task_head = task
 end
@@ -1058,14 +1046,12 @@ local function unlink_task(task: Task)
   local previous? = task.previous_task
   local next? = task.next_task
   if previous then
-    local before = previous as Task
-    before.next_task = next
+    previous.next_task = next
   else
     runtime.task_head = next
   end
   if next then
-    local after = next as Task
-    after.previous_task = previous
+    next.previous_task = previous
   end
   task.previous_task = nil
   task.next_task = nil
@@ -1076,8 +1062,7 @@ local function link_file(runtime: Runtime, file: uv_file)
   file.next_file = previous
   file.previous_file = nil
   if previous then
-    local old = previous as uv_file
-    old.previous_file = file
+    previous.previous_file = file
   end
   runtime.file_head = file
 end
@@ -1087,14 +1072,12 @@ local function unlink_file(file: uv_file)
   local previous? = file.previous_file
   local next? = file.next_file
   if previous then
-    local before = previous as uv_file
-    before.next_file = next
+    previous.next_file = next
   else
     runtime.file_head = next
   end
   if next then
-    local after = next as uv_file
-    after.previous_file = previous
+    next.previous_file = previous
   end
   file.previous_file = nil
   file.next_file = nil
@@ -1106,8 +1089,7 @@ local function link_net_control(runtime: Runtime,
   control.next_control = previous
   control.previous_control = nil
   if previous then
-    local old = previous as NetRequestControl
-    old.previous_control = control
+    previous.previous_control = control
   end
   runtime.net_pending_head = control
 end
@@ -1117,14 +1099,12 @@ local function unlink_net_control(control: NetRequestControl)
   local previous? = control.previous_control
   local next? = control.next_control
   if previous then
-    local before = previous as NetRequestControl
-    before.next_control = next
+    previous.next_control = next
   else
     runtime.net_pending_head = next
   end
   if next then
-    local after = next as NetRequestControl
-    after.previous_control = previous
+    next.previous_control = previous
   end
   control.previous_control = nil
   control.next_control = nil
@@ -1135,8 +1115,7 @@ local function link_tcp_control(runtime: Runtime, control: TcpControl)
   control.next_control = previous
   control.previous_control = nil
   if previous then
-    local old = previous as TcpControl
-    old.previous_control = control
+    previous.previous_control = control
   end
   runtime.tcp_head = control
 end
@@ -1146,14 +1125,12 @@ local function unlink_tcp_control(control: TcpControl)
   local previous? = control.previous_control
   local next? = control.next_control
   if previous then
-    local before = previous as TcpControl
-    before.next_control = next
+    previous.next_control = next
   else
     runtime.tcp_head = next
   end
   if next then
-    local after = next as TcpControl
-    after.previous_control = previous
+    next.previous_control = previous
   end
   control.previous_control = nil
   control.next_control = nil
@@ -1165,8 +1142,7 @@ local function link_process_control(runtime: Runtime,
   control.next_control = previous
   control.previous_control = nil
   if previous then
-    local old = previous as ProcessControl
-    old.previous_control = control
+    previous.previous_control = control
   end
   runtime.process_head = control
   control.linked = true
@@ -1178,14 +1154,12 @@ local function unlink_process_control(control: ProcessControl)
   local previous? = control.previous_control
   local next? = control.next_control
   if previous then
-    local before = previous as ProcessControl
-    before.next_control = next
+    previous.next_control = next
   else
     runtime.process_head = next
   end
   if next then
-    local after = next as ProcessControl
-    after.previous_control = previous
+    next.previous_control = previous
   end
   control.previous_control = nil
   control.next_control = nil
@@ -1198,8 +1172,7 @@ local function link_process_request(control: ProcessRequestControl)
   control.next_control = previous
   control.previous_control = nil
   if previous then
-    local old = previous as ProcessRequestControl
-    old.previous_control = control
+    previous.previous_control = control
   end
   runtime.process_request_head = control
 end
@@ -1209,14 +1182,12 @@ local function unlink_process_request(control: ProcessRequestControl)
   local previous? = control.previous_control
   local next? = control.next_control
   if previous then
-    local before = previous as ProcessRequestControl
-    before.next_control = next
+    previous.next_control = next
   else
     runtime.process_request_head = next
   end
   if next then
-    local after = next as ProcessRequestControl
-    after.previous_control = previous
+    next.previous_control = previous
   end
   control.previous_control = nil
   control.next_control = nil
@@ -1255,8 +1226,7 @@ local function enqueue_output(tcp: uv_tcp_t, operation: NetOperation)
   operation.previous_operation = previous
   operation.next_operation = nil
   if previous then
-    local tail = previous as NetOperation
-    tail.next_operation = operation
+    previous.next_operation = operation
   else
     control.output_head = operation
   end
@@ -1271,14 +1241,12 @@ local function remove_output(tcp: uv_tcp_t, operation: NetOperation)
   local previous? = operation.previous_operation
   local next? = operation.next_operation
   if previous then
-    local before = previous as NetOperation
-    before.next_operation = next
+    previous.next_operation = next
   else
     control.output_head = next
   end
   if next then
-    local after = next as NetOperation
-    after.previous_operation = previous
+    next.previous_operation = previous
   else
     control.output_tail = previous
   end
@@ -1299,8 +1267,7 @@ local function enqueue_tcp_close_waiter(tcp: uv_tcp_t,
   operation.previous_operation = previous
   operation.next_operation = nil
   if previous then
-    local tail = previous as NetOperation
-    tail.next_operation = operation
+    previous.next_operation = operation
   else
     control.close_waiter_head = operation
   end
@@ -1316,14 +1283,12 @@ local function remove_tcp_close_waiter(tcp: uv_tcp_t,
   local previous? = operation.previous_operation
   local next? = operation.next_operation
   if previous then
-    local before = previous as NetOperation
-    before.next_operation = next
+    previous.next_operation = next
   else
     control.close_waiter_head = next
   end
   if next then
-    local after = next as NetOperation
-    after.previous_operation = previous
+    next.previous_operation = previous
   else
     control.close_waiter_tail = previous
   end
@@ -1351,7 +1316,7 @@ local function dequeue_accepted(server: uv_tcp_t): uv_tcp_t
   control.accept_queue[control.accept_head] = nil
   control.accept_head = control.accept_head % control.accept_capacity + 1
   control.accept_count = control.accept_count - 1
-  return raw as uv_tcp_t
+  return raw
 end
 
 local function create_file(runtime: Runtime, handle: libuv.uv_file,
@@ -1381,8 +1346,7 @@ local function enqueue_file_operation(file: uv_file, operation: FsOperation)
   operation.previous_operation = previous
   operation.next_operation = nil
   if previous then
-    local tail = previous as FsOperation
-    tail.next_operation = operation
+    previous.next_operation = operation
   else
     file.queue_head = operation
   end
@@ -1400,14 +1364,12 @@ local function remove_file_operation(file: uv_file,
   local previous? = operation.previous_operation
   local next? = operation.next_operation
   if previous then
-    local before = previous as FsOperation
-    before.next_operation = next
+    previous.next_operation = next
   else
     file.queue_head = next
   end
   if next then
-    local after = next as FsOperation
-    after.previous_operation = previous
+    next.previous_operation = previous
   else
     file.queue_tail = previous
   end
@@ -1423,8 +1385,7 @@ local function enqueue_close_waiter(file: uv_file, operation: FsOperation)
   operation.previous_operation = previous
   operation.next_operation = nil
   if previous then
-    local tail = previous as FsOperation
-    tail.next_operation = operation
+    previous.next_operation = operation
   else
     file.close_waiter_head = operation
   end
@@ -1438,14 +1399,12 @@ local function remove_close_waiter(file: uv_file, operation: FsOperation)
   local previous? = operation.previous_operation
   local next? = operation.next_operation
   if previous then
-    local before = previous as FsOperation
-    before.next_operation = next
+    previous.next_operation = next
   else
     file.close_waiter_head = next
   end
   if next then
-    local after = next as FsOperation
-    after.previous_operation = previous
+    next.previous_operation = previous
   else
     file.close_waiter_tail = previous
   end
@@ -1458,7 +1417,7 @@ end
 local function close_owner(owner: uv_timer_t)
   if owner.metadata.lifecycle == OWNER_ACTIVE then
     if owner.metadata.kind == OWNER_TICKER then
-      local state = owner.metadata.peer as TickerState
+      local state: TickerState = owner.metadata.peer
       state.open = false
     end
     libuv.uv_timer_stop(owner.handle)
@@ -1468,11 +1427,10 @@ local function close_owner(owner: uv_timer_t)
 end
 
 local function close_all_owners(runtime: Runtime)
-  local raw? = runtime.timer_owner_head
-  while raw do
-    local owner = raw as uv_timer_t
-    raw = owner.metadata.next_owner
+  local owner? = runtime.timer_owner_head
+  while owner do
     close_owner(owner)
+    owner = owner.metadata.next_owner
   end
 end
 
@@ -1485,11 +1443,10 @@ local function close_signal_owner(owner: uv_signal_t)
 end
 
 local function close_all_signal_owners(runtime: Runtime)
-  local raw? = runtime.signal_owner_head
-  while raw do
-    local owner = raw as uv_signal_t
-    raw = owner.metadata.next_owner
+  local owner? = runtime.signal_owner_head
+  while owner do
     close_signal_owner(owner)
+    owner = owner.metadata.next_owner
   end
 end
 
@@ -1784,14 +1741,12 @@ local function initialize_tcp(runtime: Runtime): (uv_tcp_t, integer)
     local previous? = control.previous_control
     local next? = control.next_control
     if previous then
-      local before = previous as TcpControl
-      before.next_control = next
+      previous.next_control = next
     else
       runtime.tcp_head = next
     end
     if next then
-      local after = next as TcpControl
-      after.previous_control = previous
+      next.previous_control = previous
     end
     control.previous_control = nil
     control.next_control = nil
@@ -2027,18 +1982,18 @@ end
 
 local function retire_process_request(control: ProcessRequestControl)
   if control.lifecycle == PROCESS_OWNER_RETIRED then return end
-  local raw_owner? = control.owner
+  local owner? = control.owner
   local operation = control.operation
-  if not raw_owner then
+  if not owner then
     unlink_process_request(control)
   else
-    local owner = raw_owner as uv_pipe_write_t
+    local owner = owner
     unlink_process_request(control)
     owner.handle = nil
     owner.storage = nil
     owner.buffer = nil
   end
-  if operation.owner == raw_owner then operation.owner = nil end
+  if operation.owner == owner then operation.owner = nil end
   control.owner = nil
   control.lifecycle = PROCESS_OWNER_RETIRED
 end
@@ -2067,7 +2022,7 @@ end
 
 local function close_process_grace(control: ProcessControl)
   if not control.grace_owner then return end
-  local owner = control.grace_owner as uv_process_grace_t
+  local owner = control.grace_owner
   if owner.handle == nil then return end
   if (shim.titan_uvshim_timer_is_closing(owner.handle) as integer) == 0 then
     libuv.uv_timer_stop(owner.handle)
@@ -2105,33 +2060,33 @@ end
 local function retire_net_control(control: NetRequestControl)
   if control.lifecycle == NET_OWNER_RETIRED then return end
   free_dns_result(control)
-  local raw_owner = control.owner
+  local owner = control.owner
   local operation = control.operation
-  if raw_owner == nil then
+  if owner == nil then
     unlink_net_control(control)
   elseif control.kind == NET_OWNER_DNS then
-    local owner = raw_owner as uv_getaddrinfo_t
+    local owner: uv_getaddrinfo_t = owner
     unlink_net_control(control)
     owner.handle = nil
     owner.storage = nil
   elseif control.kind == NET_OWNER_CONNECT then
-    local owner = raw_owner as uv_connect_t
+    local owner: uv_connect_t = owner
     unlink_net_control(control)
     owner.handle = nil
     owner.storage = nil
   elseif control.kind == NET_OWNER_WRITE then
-    local owner = raw_owner as uv_write_t
+    local owner: uv_write_t = owner
     unlink_net_control(control)
     owner.handle = nil
     owner.storage = nil
     owner.buffer = nil
   else
-    local owner = raw_owner as uv_shutdown_t
+    local owner: uv_shutdown_t = owner
     unlink_net_control(control)
     owner.handle = nil
     owner.storage = nil
   end
-  if operation.owner == raw_owner then operation.owner = nil end
+  if operation.owner == owner then operation.owner = nil end
   control.owner = nil
   control.lifecycle = NET_OWNER_RETIRED
 end
@@ -2160,9 +2115,9 @@ end
 
 local function fs_operation_subject(operation: FsOperation): string?
   if operation.file then
-    return (operation.file as uv_file).subject
+    return operation.file.subject
   elseif operation.path then
-    return (operation.path as Text).source
+    return operation.path.source
   end
   return nil
 end
@@ -2195,9 +2150,9 @@ end
 
 local function fs_operation_runtime(operation: FsOperation): Runtime
   if operation.file then
-    return (operation.file as uv_file).runtime
+    return operation.file.runtime
   end
-  return (operation.task as Task).runtime
+  return operation.task.runtime
 end
 
 local function submit_fs_operation(operation: FsOperation):
@@ -2218,7 +2173,7 @@ local function submit_fs_operation(operation: FsOperation):
     if not operation.write_bytes then
       operation.write_bytes = copy_bytes(operation.data)
     end
-    local bytes = operation.write_bytes as Bytes
+    local bytes = operation.write_bytes
     local write_length = bytes.length - operation.write_offset
     operation.prepared_buffer =
         make_buffer(bytes, operation.write_offset, write_length)
@@ -2235,22 +2190,16 @@ local function submit_fs_operation(operation: FsOperation):
   local buffer_handle: *libuv.uv_buf_t = nil
   if kind == FS.stat or kind == FS.open or kind == FS.mkdir or
      kind == FS.unlink or kind == FS.rmdir or kind == FS.list then
-    local path = operation.path as Text
-    path_data = path.bytes.data
+    path_data = operation.path.bytes.data
   elseif kind == FS.rename then
-    local path = operation.path as Text
-    local second = operation.second_path as Text
-    path_data = path.bytes.data
-    second_path_data = second.bytes.data
+    path_data = operation.path.bytes.data
+    second_path_data = operation.second_path.bytes.data
   elseif kind == FS.read or kind == FS.write then
-    local file = operation.file as uv_file
-    local buffer = operation.prepared_buffer as Buffer
-    file_handle = file.handle
-    buffer_handle = buffer.handle
+    file_handle = operation.file.handle
+    buffer_handle = operation.prepared_buffer.handle
   elseif kind == FS.flush or kind == FS.close or
          kind == FS.internal_close then
-    local file = operation.file as uv_file
-    file_handle = file.handle
+    file_handle = operation.file.handle
   else
     raise "cannot submit unsupported filesystem operation"
   end
@@ -2317,14 +2266,12 @@ local function start_owner(runtime: Runtime, kind: integer, task: Task?,
     local previous? = owner.metadata.previous_owner
     local next? = owner.metadata.next_owner
     if previous then
-      local before = previous as uv_timer_t
-      before.metadata.next_owner = next
+      previous.metadata.next_owner = next
     else
       runtime.timer_owner_head = next
     end
     if next then
-      local after = next as uv_timer_t
-      after.metadata.previous_owner = previous
+      next.metadata.previous_owner = previous
     end
     owner.metadata.previous_owner = nil
     owner.metadata.next_owner = nil
@@ -2361,14 +2308,12 @@ local function start_signal_owner(runtime: Runtime, task: Task,
     local previous? = owner.metadata.previous_owner
     local next? = owner.metadata.next_owner
     if previous then
-      local before = previous as uv_signal_t
-      before.metadata.next_owner = next
+      previous.metadata.next_owner = next
     else
       runtime.signal_owner_head = next
     end
     if next then
-      local after = next as uv_signal_t
-      after.metadata.previous_owner = previous
+      next.metadata.previous_owner = previous
     end
     owner.metadata.previous_owner = nil
     owner.metadata.next_owner = nil
@@ -2406,22 +2351,20 @@ local function promote_fatal(runtime: Runtime, err: value, trace: string)
 end
 
 local function remove_joiner(task: Task)
-  local raw_target? = task.joining_target
-  if not raw_target then
+  local target? = task.joining_target
+  if not target then
     return
   end
-  local target = raw_target as Task
+  local target = target
   local previous? = task.join_previous
   local next? = task.join_next
   if previous then
-    local before = previous as Task
-    before.join_next = next
+    previous.join_next = next
   else
     target.joiner_head = next
   end
   if next then
-    local after = next as Task
-    after.join_previous = previous
+    next.join_previous = previous
   end
   task.join_previous = nil
   task.join_next = nil
@@ -2438,8 +2381,7 @@ local function add_joiner(target: Task, task: Task)
   task.join_previous = nil
   task.join_next = previous
   if previous then
-    local old = previous as Task
-    old.join_previous = task
+    previous.join_previous = task
   end
   target.joiner_head = task
   target.observer_count = target.observer_count + 1
@@ -2459,10 +2401,8 @@ local function schedule_observation(task: Task)
 end
 
 local function wake_joiners(task: Task)
-  local raw? = task.joiner_head
-  while raw do
-    local joiner = raw as Task
-    raw = joiner.join_next
+  local joiner? = task.joiner_head
+  while joiner do
     local owner, status = start_owner(task.runtime, OWNER_JOIN_WAKE,
                                       joiner, task, joiner.epoch, 0, 0)
     if status < 0 then
@@ -2471,6 +2411,7 @@ local function wake_joiners(task: Task)
     else
       joiner.operation = owner
     end
+    joiner = joiner.join_next
   end
 end
 
@@ -2488,13 +2429,13 @@ local function finish_task(task: Task, state: integer, result: value,
   task.state = state
   task.cancel_fallback = false
   task.cleanup_shield_depth = 0
-  local raw_helper_group? = task.helper_group
+  local helper_group? = task.helper_group
   local helper_kind = task.helper_kind
   task.helper_group = nil
   task.helper_kind = 0
   unlink_task(task)
-  if raw_helper_group then
-    complete_helper(raw_helper_group as HelperGroup, helper_kind,
+  if helper_group then
+    complete_helper(helper_group, helper_kind,
                     result, err, trace)
   end
   if state == TASK_FAILED and task.main then
@@ -2514,29 +2455,29 @@ local function finish_task(task: Task, state: integer, result: value,
 end
 
 local function ticker_state(owner: uv_timer_t): TickerState
-  return owner.metadata.peer as TickerState
+  return owner.metadata.peer
 end
 
 local function detach_fs_wait(task: Task, request: Request)
-  local operation = request.subject as FsOperation
+  local operation: FsOperation = request.subject
   if request.cleanup then
     return
   end
   if operation.kind == FS.close_wait and operation.file then
     if operation.linked and operation.close_waiter then
-      remove_close_waiter(operation.file as uv_file, operation)
+      remove_close_waiter(operation.file, operation)
     end
     return
   end
   if operation.owner then
-    local fs_owner = operation.owner as uv_fs_t
+    local fs_owner = operation.owner
     if fs_owner.metadata.lifecycle == FS_OWNER_SUBMITTED then
       -- Success still completes through the normal callback.  A too-late
       -- failure is likewise harmless because logical cancellation already won.
       shim.titan_uvshim_fs_cancel(fs_owner.handle)
     end
   elseif operation.file then
-    local file = operation.file as uv_file
+    local file = operation.file
     if operation.linked and not operation.close_waiter then
       remove_file_operation(file, operation)
       advance_file(file)
@@ -2545,20 +2486,20 @@ local function detach_fs_wait(task: Task, request: Request)
 end
 
 local function detach_net_wait(task: Task, request: Request)
-  local operation = request.subject as NetOperation
+  local operation: NetOperation = request.subject
   if request.cleanup then return end
   if operation.kind == NET_CONNECT or operation.kind == NET_LISTEN then
     if operation.tcp then
-      start_tcp_close(operation.tcp as uv_tcp_t)
+      start_tcp_close(operation.tcp)
     elseif operation.owner ~= nil then
-      local dns = operation.owner as uv_getaddrinfo_t
+      local dns: uv_getaddrinfo_t = operation.owner
       if dns.metadata.lifecycle == NET_OWNER_SUBMITTED then
         shim.titan_uvshim_getaddrinfo_cancel(dns.handle)
       end
     end
     return
   end
-  local tcp = operation.tcp as uv_tcp_t
+  local tcp = operation.tcp
   local control = tcp.metadata
   if operation.kind == NET_READ then
     if control.read_waiter == task and
@@ -2588,7 +2529,7 @@ local function detach_net_wait(task: Task, request: Request)
 end
 
 local function detach_process_wait(task: Task, request: Request)
-  local operation = request.subject as ProcessOperation
+  local operation: ProcessOperation = request.subject
   if request.cleanup then return end
   if operation.kind == PROCESS_SPAWN then
     -- Native setup/close ownership is monotonic.  Cancellation revokes only
@@ -2597,7 +2538,7 @@ local function detach_process_wait(task: Task, request: Request)
     operation.request = nil
     return
   end
-  local process = operation.process as uv_process_t
+  local process = operation.process
   local process_control = process.metadata
   if operation.kind == PROCESS_WAIT then
     if process_control.wait_task == task and
@@ -2607,7 +2548,7 @@ local function detach_process_wait(task: Task, request: Request)
     end
     return
   end
-  local pipe = operation.pipe as uv_pipe_t
+  local pipe = operation.pipe
   local pipe_control = pipe.metadata
   if operation.kind == PROCESS_READ_STDOUT or
       operation.kind == PROCESS_READ_STDERR then
@@ -2630,18 +2571,18 @@ local function detach_process_wait(task: Task, request: Request)
 end
 
 local function detach_wait(task: Task)
-  local raw_request? = task.current_request
-  local raw_owner = task.operation
-  if raw_request then
-    local request = raw_request as Request
+  local request? = task.current_request
+  local owner = task.operation
+  if request then
+    local request = request
     if request.kind == REQUEST_JOIN then
-      local raw_target? = task.joining_target
+      local target? = task.joining_target
       remove_joiner(task)
-      if raw_owner ~= nil then
-        close_owner(raw_owner as uv_timer_t)
+      if owner ~= nil then
+        close_owner(owner)
       end
-      if raw_target then
-        local target = raw_target as Task
+      if target then
+        local target = target
         if target.state == TASK_FAILED and
             not target.permanently_observed and
             target.observer_count == 0 and
@@ -2650,7 +2591,7 @@ local function detach_wait(task: Task)
         end
       end
     elseif request.kind == REQUEST_TICK then
-      local owner = request.subject as uv_timer_t
+      local owner: uv_timer_t = request.subject
       local state = ticker_state(owner)
       if state.waiter == task and state.waiter_epoch == request.generation then
         state.waiter = nil
@@ -2663,26 +2604,26 @@ local function detach_wait(task: Task)
     elseif request.kind == REQUEST_PROCESS then
       detach_process_wait(task, request)
     elseif request.kind == REQUEST_HELPER then
-      local group = request.subject as HelperGroup
+      local group: HelperGroup = request.subject
       if group.waiter == task and
           group.waiter_epoch == request.generation then
         group.waiter = nil
         group.waiter_epoch = 0
         group.waiter_all = false
       end
-    elseif request.kind == REQUEST_SIGNAL and raw_owner ~= nil then
-      local owner = raw_owner as uv_signal_t
+    elseif request.kind == REQUEST_SIGNAL and owner ~= nil then
+      local owner: uv_signal_t = owner
       if owner.metadata.task == task and
           owner.metadata.epoch == request.generation then
         owner.metadata.task = nil
         owner.metadata.epoch = 0
         close_signal_owner(owner)
       end
-    elseif request.kind == REQUEST_SLEEP and raw_owner ~= nil then
-      close_owner(raw_owner as uv_timer_t)
+    elseif request.kind == REQUEST_SLEEP and owner ~= nil then
+      close_owner(owner)
     end
-  elseif raw_owner ~= nil then
-    close_owner(raw_owner as uv_timer_t)
+  elseif owner ~= nil then
+    close_owner(owner)
   end
   task.operation = nil
   task.current_request = nil
@@ -2720,7 +2661,7 @@ local function running_task(): Task
     raise "async operation used outside a UV Task"
   end
   local runtime = current_runtime()
-  return runtime.running_task as Task
+  return runtime.running_task
 end
 
 local function ordinary_task(): Task
@@ -2789,8 +2730,8 @@ local function new_fs_request(kind: integer, path: string,
   local request = new_request(REQUEST_FS, nil, 0)
   local copied_second: Text? = nil
   if second_path then
-    copied_second = copy_text(second_path as string, "fs.path",
-                              second_path as string)
+    local path = second_path
+    copied_second = copy_text(path, "fs.path", path)
   end
   local operation = make_fs_operation(kind, request.task, request,
       copy_text(path, "fs.path", path), copied_second, nil, data, 0)
@@ -2801,13 +2742,13 @@ end
 local function new_file_request(kind: integer, file: uv_file, data: string,
                                 maximum: integer,
                                 cleanup: boolean): Request
-  local maybe_request: Request? = nil
+  local request: Request? = nil
   if cleanup then
-    maybe_request = new_cleanup_request(REQUEST_FS, nil, 0)
+    request = new_cleanup_request(REQUEST_FS, nil, 0)
   else
-    maybe_request = new_request(REQUEST_FS, nil, 0)
+    request = new_request(REQUEST_FS, nil, 0)
   end
-  local request = maybe_request as Request
+  local request = request
   local operation = make_fs_operation(kind, request.task, request,
       nil, nil, file, data, maximum)
   request.subject = operation
@@ -2817,16 +2758,17 @@ end
 local function new_net_request(kind: integer, host: string?, port: integer,
                                backlog: integer, tcp: uv_tcp_t?, data: string,
                                maximum: integer, cleanup: boolean): Request
-  local maybe_request: Request? = nil
+  local request: Request? = nil
   if cleanup then
-    maybe_request = new_cleanup_request(REQUEST_NET, nil, 0)
+    request = new_cleanup_request(REQUEST_NET, nil, 0)
   else
-    maybe_request = new_request(REQUEST_NET, nil, 0)
+    request = new_request(REQUEST_NET, nil, 0)
   end
-  local request = maybe_request as Request
+  local request = request
   local copied_host: Text? = nil
   if host then
-    copied_host = copy_text(host as string, "net.host", host as string)
+    local host = host
+    copied_host = copy_text(host, "net.host", host)
   end
   local operation = make_net_operation(kind, request.task, request,
       copied_host, port, backlog, tcp, data, maximum)
@@ -2862,13 +2804,13 @@ end
 local function new_process_request(kind: integer, process: uv_process_t,
                                    pipe: uv_pipe_t?, maximum: integer,
                                    cleanup: boolean): Request
-  local maybe_request: Request? = nil
+  local request: Request? = nil
   if cleanup then
-    maybe_request = new_cleanup_request(REQUEST_PROCESS, nil, 0)
+    request = new_cleanup_request(REQUEST_PROCESS, nil, 0)
   else
-    maybe_request = new_request(REQUEST_PROCESS, nil, 0)
+    request = new_request(REQUEST_PROCESS, nil, 0)
   end
-  local request = maybe_request as Request
+  local request = request
   local operation = make_process_operation(kind, request.task, request,
       process, pipe, nil, nil, maximum)
   request.subject = operation
@@ -2894,22 +2836,22 @@ end
 
 local function new_helper_request(group: HelperGroup, wait_all: boolean,
                                   cleanup: boolean): Request
-  local maybe_request: Request? = nil
+  local request: Request? = nil
   if cleanup then
-    maybe_request = new_cleanup_request(
+    request = new_cleanup_request(
         REQUEST_HELPER, group, wait_all and 1 or 0)
   else
-    maybe_request = new_request(REQUEST_HELPER, group,
+   request = new_request(REQUEST_HELPER, group,
                                 wait_all and 1 or 0)
   end
-  return maybe_request as Request
+  return request
 end
 
 local function process_operation_deliverable(
     operation: ProcessOperation): boolean
   if not operation.task or not operation.request then return false end
-  local task = operation.task as Task
-  local request = operation.request as Request
+  local task = operation.task
+  local request = operation.request
   if request.cleanup then
     return task.state == TASK_WAITING and
            task.current_request == request and task.cleanup_shield_depth > 0
@@ -2925,8 +2867,7 @@ local function enqueue_pipe_output(pipe: uv_pipe_t,
   operation.previous_operation = previous
   operation.next_operation = nil
   if previous then
-    local tail = previous as ProcessOperation
-    tail.next_operation = operation
+    previous.next_operation = operation
   else
     control.output_head = operation
   end
@@ -2941,14 +2882,12 @@ local function remove_pipe_output(pipe: uv_pipe_t,
   local previous? = operation.previous_operation
   local next? = operation.next_operation
   if previous then
-    local before = previous as ProcessOperation
-    before.next_operation = next
+    previous.next_operation = next
   else
     control.output_head = next
   end
   if next then
-    local after = next as ProcessOperation
-    after.previous_operation = previous
+    next.previous_operation = previous
   else
     control.output_tail = previous
   end
@@ -2965,9 +2904,9 @@ local function remove_pipe_output(pipe: uv_pipe_t,
   operation.linked = false
 end
 
-local function process_pipe_closed(raw: uv_pipe_t?): boolean
-  if not raw then return true end
-  local pipe = raw as uv_pipe_t
+local function process_pipe_closed(pipe: uv_pipe_t?): boolean
+  if not pipe then return true end
+  local pipe = pipe
   return pipe.metadata.lifecycle == PIPE_CLOSED and
          not pipe.metadata.owner
 end
@@ -2975,7 +2914,7 @@ end
 local function process_all_native_closed(control: ProcessControl): boolean
   local process_retired = control.lifecycle == PROCESS_CLOSED
   if process_retired and control.owner then
-    process_retired = (control.owner as uv_process_t).handle == nil
+    process_retired = control.owner.handle == nil
   end
   return process_retired and
          process_pipe_closed(control.stdin_pipe) and
@@ -2986,13 +2925,13 @@ end
 
 local function process_close_all_pipes(control: ProcessControl)
   if control.stdin_pipe then
-    start_pipe_close(control.stdin_pipe as uv_pipe_t)
+    start_pipe_close(control.stdin_pipe)
   end
   if control.stdout_pipe then
-    start_pipe_close(control.stdout_pipe as uv_pipe_t)
+    start_pipe_close(control.stdout_pipe)
   end
   if control.stderr_pipe then
-    start_pipe_close(control.stderr_pipe as uv_pipe_t)
+    start_pipe_close(control.stderr_pipe)
   end
 end
 
@@ -3001,7 +2940,7 @@ local function begin_one_process_shutdown(control: ProcessControl): integer
       control.lifecycle == PROCESS_CLOSED then return 0 end
   control.shutdown_started = true
   process_close_all_pipes(control)
-  local process = control.owner as uv_process_t
+  local process = control.owner
   local term = shim.titan_uvshim_signal_number("term")
   local kill_status = libuv.uv_process_kill(process.handle, term)
   local grace_status = start_process_grace(control)
@@ -3033,7 +2972,7 @@ local function retire_unpublished_process(control: ProcessControl): Error?
   control.stderr_pipe = nil
   unlink_process_control(control)
   if operation then
-    local spawn = operation as ProcessOperation
+    local spawn = operation
     spawn.process = nil
     spawn.file = nil
     spawn.arguments = nil
@@ -3049,14 +2988,14 @@ local function advance_pipe_output(pipe: uv_pipe_t,
     return nil
   end
   while not control.output_current and control.output_head do
-    local operation = control.output_head as ProcessOperation
+    local operation = control.output_head
     local status: ffi.titan_ffi_int = 0 as ffi.titan_ffi_int
     if operation.kind == PROCESS_WRITE_STDIN then
       if not operation.prepared_buffer then
-        local bytes = operation.copied_bytes as Bytes
+        local bytes = operation.copied_bytes
         operation.prepared_buffer = make_buffer(bytes, 0, bytes.length)
       end
-      local buffer = operation.prepared_buffer as Buffer
+      local buffer = operation.prepared_buffer
       local owner, pointer = allocate_pipe_write_owner(control.runtime,
                                                        operation)
       operation.owner = owner
@@ -3073,8 +3012,8 @@ local function advance_pipe_output(pipe: uv_pipe_t,
       local failure = make_error(status as integer,
                                  "process.stdin.write", nil)
       if operation.task and operation.request then
-        local task = operation.task as Task
-        local request = operation.request as Request
+        local task = operation.task
+        local request = operation.request
         if inline_task == task and task.current_request == request and
             task.epoch == request.generation then
           task.current_request = nil
@@ -3105,9 +3044,9 @@ end
 local function arm_process_spawn(task: Task,
                                  request: Request): DriveControl?
   local runtime = task.runtime
-  local operation = request.subject as ProcessOperation
-  local file = operation.file as Text
-  local arguments = operation.arguments as {Text}
+  local operation: ProcessOperation = request.subject
+  local file = operation.file
+  local arguments = operation.arguments
   local argument_count = #arguments + 1
 
   -- The three initialized uv_pipe_t handles are passed directly to uv_spawn;
@@ -3188,11 +3127,11 @@ end
 
 local function arm_process_request(task: Task,
                                    request: Request): DriveControl?
-  local operation = request.subject as ProcessOperation
+  local operation: ProcessOperation = request.subject
   if operation.kind == PROCESS_SPAWN then
     return arm_process_spawn(task, request)
   end
-  local process = operation.process as uv_process_t
+  local process = operation.process
   local process_control = process.metadata
   if operation.kind == PROCESS_WAIT then
     if process_control.exit_seen and
@@ -3219,7 +3158,7 @@ local function arm_process_request(task: Task,
     return nil
   end
 
-  local pipe = operation.pipe as uv_pipe_t
+  local pipe = operation.pipe
   local pipe_control = pipe.metadata
   if operation.kind == PROCESS_READ_STDOUT or
       operation.kind == PROCESS_READ_STDERR then
@@ -3258,7 +3197,7 @@ end
 
 local function arm_helper_request(task: Task,
                                   request: Request): DriveControl?
-  local group = request.subject as HelperGroup
+  local group: HelperGroup = request.subject
   local wait_all = request.milliseconds ~= 0
   local ready = group.pending == 0 or
                 (not wait_all and group.first_error ~= nil)
@@ -3293,13 +3232,13 @@ local function arm_request(task: Task, request: Request): DriveControl?
     task.state = TASK_WAITING
     return nil
   elseif request.kind == REQUEST_JOIN then
-    local target = request.subject as Task
+    local target: Task = request.subject
     add_joiner(target, task)
     task.operation = nil
     task.state = TASK_WAITING
     return nil
   elseif request.kind == REQUEST_TICK then
-    local owner = request.subject as uv_timer_t
+    local owner: uv_timer_t = request.subject
     local state = ticker_state(owner)
     state.waiter = task
     state.waiter_epoch = request.generation
@@ -3307,9 +3246,9 @@ local function arm_request(task: Task, request: Request): DriveControl?
     task.state = TASK_WAITING
     return nil
   elseif request.kind == REQUEST_FS then
-    local operation = request.subject as FsOperation
+    local operation: FsOperation = request.subject
     if operation.file then
-      local file = operation.file as uv_file
+      local file = operation.file
       if operation.kind == FS.close_wait then
         enqueue_close_waiter(file, operation)
         task.operation = operation
@@ -3348,7 +3287,7 @@ local function arm_request(task: Task, request: Request): DriveControl?
     end
     return nil
   elseif request.kind == REQUEST_SIGNAL then
-    local spec = request.subject as SignalSpec
+    local spec: SignalSpec = request.subject
     local owner, status = start_signal_owner(runtime, task, spec,
                                              request.generation)
     if status < 0 then
@@ -3419,7 +3358,7 @@ local function drive_task(task: Task, initial_mode: integer,
       raise "invalid UV Task coroutine state"
     end
 
-    local request = yielded as Request
+    local request: Request = yielded
     local cleanup_request = request.cleanup and
                             task.cleanup_shield_depth > 0
     if task.cancel_requested and not cleanup_request then
@@ -3427,11 +3366,11 @@ local function drive_task(task: Task, initial_mode: integer,
       payload = task.cancel_value
       source_trace = ""
     else
-      local immediate? = arm_request(task, request)
-      if not immediate then
+      local outcome? = arm_request(task, request)
+      if not outcome then
         return
       end
-      local outcome = immediate as DriveControl
+      local outcome = outcome
       mode = outcome.mode
       payload = outcome.payload
       source_trace = outcome.trace
@@ -3467,12 +3406,12 @@ end
 
 local function submit_file_head(file: uv_file, inline_task: Task?): Error?
   while not file.current and file.queue_head do
-    local operation = file.queue_head as FsOperation
+    local operation = file.queue_head
     file.current = operation
     local owner, status = submit_fs_operation(operation)
     if status >= 0 then
       if operation.task then
-        local task = operation.task as Task
+        local task = operation.task
         if task.state == TASK_WAITING and
             task.current_request == operation.request then
           task.operation = owner
@@ -3490,8 +3429,8 @@ local function submit_file_head(file: uv_file, inline_task: Task?): Error?
       file.close_enqueued = false
     end
     if operation.task then
-      local task = operation.task as Task
-      local request = operation.request as Request
+      local task = operation.task
+      local request = operation.request
       if inline_task == task and task.current_request == request and
           task.epoch == request.generation then
         task.current_request = nil
@@ -3524,8 +3463,8 @@ end
 
 local function fs_operation_deliverable(operation: FsOperation): boolean
   if not operation.task or not operation.request then return false end
-  local task = operation.task as Task
-  local request = operation.request as Request
+  local task = operation.task
+  local request = operation.request
   if request.cleanup then
     return task.state == TASK_WAITING and
            task.current_request == request and task.cleanup_shield_depth > 0
@@ -3537,8 +3476,8 @@ end
 
 local function net_operation_deliverable(operation: NetOperation): boolean
   if not operation.task or not operation.request then return false end
-  local task = operation.task as Task
-  local request = operation.request as Request
+  local task = operation.task
+  local request = operation.request
   if request.cleanup then
     return task.state == TASK_WAITING and
            task.current_request == request and task.cleanup_shield_depth > 0
@@ -3549,9 +3488,9 @@ end
 
 local function net_operation_subject(operation: NetOperation): string?
   if operation.host then
-    return (operation.host as Text).source
+    return operation.host.source
   elseif operation.tcp then
-    local tcp = operation.tcp as uv_tcp_t
+    local tcp = operation.tcp
     if tcp.metadata.server then return "server" end
     return "connection"
   end
@@ -3560,9 +3499,9 @@ end
 
 local function start_dns(operation: NetOperation):
                          (uv_getaddrinfo_t, integer)
-  local task = operation.task as Task
+  local task = operation.task
   local runtime = task.runtime
-  local host = operation.host as Text
+  local host = operation.host
   local loop_handle = runtime.loop.handle
   local node = host.bytes.data
   local port = operation.port as ffi.titan_ffi_int
@@ -3584,14 +3523,14 @@ local function finish_net_setup(operation: NetOperation, tcp: uv_tcp_t?,
   operation.owner = nil
   operation.tcp = nil
   if not net_operation_deliverable(operation) then
-    if tcp then start_tcp_close(tcp as uv_tcp_t) end
+    if tcp then start_tcp_close(tcp) end
     return
   end
-  local task = operation.task as Task
+  local task = operation.task
   if failure then
     drive_task(task, DRIVE_ERROR, failure, "")
   else
-    local resource = tcp as uv_tcp_t
+    local resource = tcp
     resource.metadata.setup_operation = nil
     drive_task(task, DRIVE_RESUME, resource, "")
   end
@@ -3602,10 +3541,10 @@ local function continue_net_setup(operation: NetOperation)
     operation.addresses = nil
     return
   end
-  local addresses = operation.addresses as AddressList
+  local addresses = operation.addresses
   while operation.address_index < addresses.count do
     operation.address_index = operation.address_index + 1
-    local task = operation.task as Task
+    local task = operation.task
     local runtime = task.runtime
     local tcp, init_status = initialize_tcp(runtime)
     if init_status < 0 then
@@ -3673,13 +3612,12 @@ local function advance_tcp_output(tcp: uv_tcp_t,
   if control.lifecycle == TCP_CLOSING or
       control.lifecycle == TCP_CLOSED then
     while control.output_head do
-      local abandoned = control.output_head as NetOperation
-      remove_output(tcp, abandoned)
+      remove_output(tcp, control.output_head)
     end
     return nil
   end
   while not control.output_current and control.output_head do
-    local operation = control.output_head as NetOperation
+    local operation = control.output_head
     local status: ffi.titan_ffi_int = 0 as ffi.titan_ffi_int
     if operation.kind == NET_WRITE then
       -- Prepare and root the copied bytes/buffer before publishing current or
@@ -3689,7 +3627,7 @@ local function advance_tcp_output(tcp: uv_tcp_t,
         local bytes = copy_bytes(operation.data)
         operation.prepared_buffer = make_buffer(bytes, 0, bytes.length)
       end
-      local buffer = operation.prepared_buffer as Buffer
+      local buffer = operation.prepared_buffer
       local buffer_handle = buffer.handle
       local tcp_handle = tcp.handle
       local owner, pointer = allocate_write_owner(control.runtime, operation)
@@ -3725,8 +3663,8 @@ local function advance_tcp_output(tcp: uv_tcp_t,
         operation.kind == NET_WRITE and "net.write" or "net.shutdown",
         net_operation_subject(operation))
     if operation.task and operation.request then
-      local task = operation.task as Task
-      local request = operation.request as Request
+      local task = operation.task
+      local request = operation.request
       if inline_task == task and task.current_request == request and
           task.epoch == request.generation then
         task.current_request = nil
@@ -3753,7 +3691,7 @@ local function stop_tcp_read(tcp: uv_tcp_t, deliver_eof: boolean)
     shim.titan_uvshim_tcp_read_stop(tcp.handle)
     control.read_active = false
   end
-  local raw_waiter? = control.read_waiter
+  local waiter? = control.read_waiter
   local epoch = control.read_epoch
   control.read_waiter = nil
   control.read_epoch = 0
@@ -3762,8 +3700,8 @@ local function stop_tcp_read(tcp: uv_tcp_t, deliver_eof: boolean)
   if deliver_eof and control.read_terminal == TCP_READ_OPEN then
     control.read_terminal = TCP_READ_EOF
   end
-  if deliver_eof and raw_waiter then
-    local task = raw_waiter as Task
+  if deliver_eof and waiter then
+    local task = waiter
     if task.state == TASK_WAITING and not task.cancel_requested and
         task.epoch == epoch then
       schedule_task_drive(task, epoch, DRIVE_RESUME, nil, "", nil)
@@ -3780,13 +3718,13 @@ end
 
 local function stop_server_accept(server: uv_tcp_t)
   local control = server.metadata
-  local raw_waiter? = control.accept_waiter
+  local waiter? = control.accept_waiter
   local epoch = control.accept_epoch
   control.accept_waiter = nil
   control.accept_epoch = 0
   close_accepted_queue(server)
-  if raw_waiter then
-    local task = raw_waiter as Task
+  if waiter then
+    local task = waiter
     if task.state == TASK_WAITING and not task.cancel_requested and
         task.epoch == epoch then
       local failure = make_error(UV_ECANCELED,
@@ -3814,12 +3752,12 @@ end
 local function wake_tcp_close_waiters(tcp: uv_tcp_t)
   local control = tcp.metadata
   while control.close_waiter_head do
-    local operation = control.close_waiter_head as NetOperation
+    local operation = control.close_waiter_head
     if not net_operation_deliverable(operation) then
       remove_tcp_close_waiter(tcp, operation)
     else
-      local task = operation.task as Task
-      local request = operation.request as Request
+      local task = operation.task
+      local request = operation.request
       local epoch = task.epoch
       if not request.cleanup then epoch = request.generation end
       if not schedule_task_drive(task, epoch, DRIVE_RESUME,
@@ -3832,7 +3770,7 @@ local function wake_tcp_close_waiters(tcp: uv_tcp_t)
 end
 
 local function arm_net_request(task: Task, request: Request): Error?
-  local operation = request.subject as NetOperation
+  local operation: NetOperation = request.subject
   if operation.kind == NET_CONNECT or operation.kind == NET_LISTEN then
     local owner, status = start_dns(operation)
     if status < 0 then
@@ -3845,7 +3783,7 @@ local function arm_net_request(task: Task, request: Request): Error?
     return nil
   end
 
-  local tcp = operation.tcp as uv_tcp_t
+  local tcp = operation.tcp
   local control = tcp.metadata
   if operation.kind == NET_READ then
     local bytes = allocate_bytes(operation.maximum)
@@ -3899,12 +3837,12 @@ end
 
 local function wake_close_waiters(file: uv_file, failure: Error?)
   while file.close_waiter_head do
-    local operation = file.close_waiter_head as FsOperation
+    local operation = file.close_waiter_head
     if not fs_operation_deliverable(operation) then
       remove_close_waiter(file, operation)
     else
-      local task = operation.task as Task
-      local request = operation.request as Request
+      local task = operation.task
+      local request = operation.request
       local epoch = request.generation
       if request.cleanup then epoch = task.epoch end
       local scheduled = false
@@ -3965,11 +3903,10 @@ local function fs_dispatch_body(owner: uv_fs_t, result: integer)
     -- this allocating body, so even body-entry GC failure can be repaired.
     payload = nil
   elseif operation.kind == FS.read then
-    local buffer = owner.buffer as Buffer
     if result == 0 then
       payload = nil
     else
-      payload = bytes_string(buffer.bytes, result)
+      payload = bytes_string(owner.buffer.bytes, result)
     end
   elseif operation.kind == FS.write then
     if result == 0 then
@@ -3988,7 +3925,7 @@ local function fs_dispatch_body(owner: uv_fs_t, result: integer)
 
   if operation.kind == FS.open and not failure then
     local file = create_file(runtime, owner.metadata.acquired_file,
-                             fs_operation_subject(operation) as string)
+                             fs_operation_subject(operation))
     owner.metadata.acquired_file = -1 as libuv.uv_file
     if fs_operation_deliverable(operation) then
       payload = file
@@ -4002,8 +3939,7 @@ local function fs_dispatch_body(owner: uv_fs_t, result: integer)
     -- submit its next request before retiring the completed request owner.
     local next_owner, status = submit_fs_operation(operation)
     if status >= 0 then
-      local task = operation.task as Task
-      task.operation = next_owner
+      operation.task.operation = next_owner
       retire_fs_owner_now(owner)
       return
     end
@@ -4014,7 +3950,7 @@ local function fs_dispatch_body(owner: uv_fs_t, result: integer)
 
   if operation.kind == FS.close or
      operation.kind == FS.internal_close then
-    local file = operation.file as uv_file
+    local file = operation.file
     file.close_enqueued = false
     remove_file_operation(file, operation)
     -- A close callback is terminal even when it reports an error. Retrying a
@@ -4023,7 +3959,7 @@ local function fs_dispatch_body(owner: uv_fs_t, result: integer)
     file.state = FS.file_closed
     wake_close_waiters(file, failure)
     if fs_operation_deliverable(operation) then
-      local task = operation.task as Task
+      local task = operation.task
       if not failure then
         drive_task(task, DRIVE_RESUME, nil, "")
       else
@@ -4042,7 +3978,7 @@ local function fs_dispatch_body(owner: uv_fs_t, result: integer)
   end
 
   if fs_operation_deliverable(operation) then
-    local task = operation.task as Task
+    local task = operation.task
     if failure then
       drive_task(task, DRIVE_ERROR, failure, "")
     else
@@ -4051,7 +3987,7 @@ local function fs_dispatch_body(owner: uv_fs_t, result: integer)
   end
 
   if operation.file then
-    local file = operation.file as uv_file
+    local file = operation.file
     remove_file_operation(file, operation)
     advance_file(file)
   end
@@ -4088,9 +4024,9 @@ local function finish_closed_tcp(tcp: uv_tcp_t)
   local control = tcp.metadata
   if control.lifecycle ~= TCP_CLOSED or control.connect_pending or
       control.output_current then return end
-  local raw_setup? = control.setup_operation
-  if raw_setup then
-    local operation = raw_setup as NetOperation
+  local setup? = control.setup_operation
+  if setup then
+    local operation = setup
     control.setup_operation = nil
     operation.tcp = nil
     continue_net_setup(operation)
@@ -4168,14 +4104,14 @@ local function connect_dispatch_body(owner: uv_connect_t, result: integer)
   local control = owner.metadata
   control.lifecycle = NET_OWNER_CALLBACK
   local operation = control.operation
-  local tcp = operation.tcp as uv_tcp_t
+  local tcp = operation.tcp
   if result >= 0 and net_operation_deliverable(operation) then
     tcp.metadata.lifecycle = TCP_CONNECTION
     tcp.metadata.server = false
     tcp.metadata.setup_operation = nil
     operation.addresses = nil
     operation.tcp = nil
-    drive_task(operation.task as Task, DRIVE_RESUME, tcp, "")
+    drive_task(operation.task, DRIVE_RESUME, tcp, "")
     retire_net_control(control)
     return
   end
@@ -4192,8 +4128,7 @@ local function connect_dispatch(owner: uv_connect_t, _event_kind: integer,
                                 result: integer, _size: libuv.size_t,
                                 _pointer: ffi.titan_ffi_void_ptr)
   if owner.metadata.operation.tcp then
-    local tcp = owner.metadata.operation.tcp as uv_tcp_t
-    tcp.metadata.connect_pending = false
+    owner.metadata.operation.tcp.metadata.connect_pending = false
   end
   connect_dispatch_body(owner, result)
 catch
@@ -4214,7 +4149,7 @@ local function complete_output_callback(control: NetRequestControl,
   local runtime = control.runtime
   control.lifecycle = NET_OWNER_CALLBACK
   local operation = control.operation
-  local tcp = operation.tcp as uv_tcp_t
+  local tcp = operation.tcp
   local failure: Error? = nil
   if result < 0 then
     failure = make_error(result, operation_name,
@@ -4228,9 +4163,9 @@ local function complete_output_callback(control: NetRequestControl,
   advance_tcp_output(tcp, nil)
   if net_operation_deliverable(operation) then
     if failure then
-      drive_task(operation.task as Task, DRIVE_ERROR, failure, "")
+      drive_task(operation.task, DRIVE_ERROR, failure, "")
     else
-      drive_task(operation.task as Task, DRIVE_RESUME, nil, "")
+      drive_task(operation.task, DRIVE_RESUME, nil, "")
     end
   elseif failure and not operation.task then
     promote_fatal(runtime, failure, "")
@@ -4259,8 +4194,7 @@ local function shutdown_dispatch(owner: uv_shutdown_t,
                                  _size: libuv.size_t,
                                  _pointer: ffi.titan_ffi_void_ptr)
   if result >= 0 and owner.metadata.operation.tcp then
-    local tcp = owner.metadata.operation.tcp as uv_tcp_t
-    tcp.metadata.write_shutdown = true
+    owner.metadata.operation.tcp.metadata.write_shutdown = true
   end
   complete_output_callback(owner.metadata, result, "net.shutdown")
 catch
@@ -4278,9 +4212,9 @@ end
 local function tcp_read_dispatch(tcp: uv_tcp_t, result: integer)
   local control = tcp.metadata
   if result == 0 then return end
-  local raw_waiter? = control.read_waiter
+  local waiter? = control.read_waiter
   local epoch = control.read_epoch
-  local raw_bytes? = control.read_bytes
+  local bytes? = control.read_bytes
   control.read_waiter = nil
   control.read_epoch = 0
   local payload: string? = nil
@@ -4291,14 +4225,13 @@ local function tcp_read_dispatch(tcp: uv_tcp_t, result: integer)
       control.read_error = failure
     end
   else
-    local bytes = raw_bytes as Bytes
     -- Keep both the control and native owner buffer roots through conversion.
     payload = bytes_string(bytes, result)
   end
   control.read_bytes = nil
   tcp.buffer = nil
-  if raw_waiter then
-    local task = raw_waiter as Task
+  if waiter then
+    local task = waiter
     if task.state == TASK_WAITING and not task.cancel_requested and
         task.epoch == epoch then
       if failure then
@@ -4313,15 +4246,15 @@ end
 local function server_callback_failure(server: uv_tcp_t, failure: Error)
   local control = server.metadata
   control.accept_error = failure
-  local raw_waiter? = control.accept_waiter
+  local waiter? = control.accept_waiter
   local epoch = control.accept_epoch
   control.accept_waiter = nil
   control.accept_epoch = 0
   close_accepted_queue(server)
   control.close_requested = true
   start_tcp_close(server)
-  if raw_waiter then
-    local task = raw_waiter as Task
+  if waiter then
+    local task = waiter
     if task.state == TASK_WAITING and not task.cancel_requested and
         task.epoch == epoch then
       drive_task(task, DRIVE_ERROR, failure, "")
@@ -4351,10 +4284,10 @@ local function tcp_connection_dispatch(server: uv_tcp_t, result: integer)
   client.metadata.lifecycle = TCP_CONNECTION
   client.metadata.server = false
   local control = server.metadata
-  local raw_waiter? = control.accept_waiter
+  local waiter? = control.accept_waiter
   local epoch = control.accept_epoch
-  if raw_waiter then
-    local task = raw_waiter as Task
+  if waiter then
+    local task = waiter
     control.accept_waiter = nil
     control.accept_epoch = 0
     if task.state == TASK_WAITING and not task.cancel_requested and
@@ -4414,12 +4347,12 @@ catch
   return
 end
 
-local function deliver_process_disposer(raw_task: Task?, epoch: integer)
-  if raw_task then
-    local task = raw_task as Task
-    local raw_request? = task.current_request
-    if raw_request then
-      local request = raw_request as Request
+local function deliver_process_disposer(task: Task?, epoch: integer)
+  if task then
+    local task = task
+    local request? = task.current_request
+    if request then
+      local request = request
       if request.kind == REQUEST_PROCESS and request.cleanup and
           task.state == TASK_WAITING and task.cleanup_shield_depth > 0 and
           request.generation == epoch then
@@ -4433,13 +4366,13 @@ end
 local function finish_process_control(control: ProcessControl)
   if not control.linked or not process_all_native_closed(control) then return end
   if not control.exit_seen then
-    local raw_operation? = control.spawn_operation
+    local operation? = control.spawn_operation
     local failure = control.pending_failure
     retire_unpublished_process(control)
-    if raw_operation then
-      local operation = raw_operation as ProcessOperation
+    if operation then
+      local operation = operation
       if process_operation_deliverable(operation) then
-        drive_task(operation.task as Task, DRIVE_ERROR,
+        drive_task(operation.task, DRIVE_ERROR,
                    failure, "")
       end
     end
@@ -4458,10 +4391,10 @@ local function finish_process_control(control: ProcessControl)
 end
 
 local function deliver_process_waiter(control: ProcessControl)
-  local raw_task? = control.wait_task
+  local task? = control.wait_task
   local epoch = control.wait_epoch
-  if raw_task then
-    local task = raw_task as Task
+  if task then
+    local task = task
     if task.state == TASK_WAITING and not task.cancel_requested and
         task.epoch == epoch then
       local result = ProcessExitResult.new(control.exit_status,
@@ -4483,7 +4416,7 @@ local function process_dispatch_body(owner: uv_process_t,
   if event_kind == EVENT_PROCESS_EXIT then
     close_process_grace(control)
     if control.stdin_pipe then
-      start_pipe_close(control.stdin_pipe as uv_pipe_t)
+      start_pipe_close(control.stdin_pipe)
     end
     -- A successful spawn is never closed before this exit callback.  Publish
     -- the close transition before any eventual waiter continuation runs.
@@ -4532,10 +4465,10 @@ end
 local function pipe_read_dispatch(pipe: uv_pipe_t, result: integer)
   if result == 0 then return end
   local control = pipe.metadata
-  local raw_waiter? = control.read_waiter
+  local waiter? = control.read_waiter
   local epoch = control.read_epoch
-  local raw_bytes? = control.read_bytes
-  if not raw_waiter and not raw_bytes then return end
+  local bytes? = control.read_bytes
+  if not waiter and not bytes then return end
   control.read_waiter = nil
   control.read_epoch = 0
   local payload: string? = nil
@@ -4548,14 +4481,13 @@ local function pipe_read_dispatch(pipe: uv_pipe_t, result: integer)
       control.read_error = failure
     end
   else
-    local bytes = raw_bytes as Bytes
     payload = bytes_string(bytes, result)
   end
   control.read_bytes = nil
   pipe.buffer = nil
   if result < 0 then start_pipe_close(pipe) end
-  if raw_waiter then
-    local task = raw_waiter as Task
+  if waiter then
+    local task = waiter
     if task.state == TASK_WAITING and not task.cancel_requested and
         task.epoch == epoch then
       if failure then
@@ -4570,16 +4502,16 @@ end
 local function finish_pipe_close(pipe: uv_pipe_t)
   local control = pipe.metadata
   local runtime = control.runtime
-  local raw_close? = control.close_waiter
+  local close? = control.close_waiter
   while control.output_head do
-    local operation = control.output_head as ProcessOperation
+    local operation = control.output_head
     remove_pipe_output(pipe, operation)
     if operation.kind == PROCESS_CLOSE_STDIN then
-      raw_close = operation
+      close = operation
       control.close_waiter = operation
     elseif process_operation_deliverable(operation) then
       local failure = make_error(UV_ECANCELED, "process.stdin.write", nil)
-      drive_task(operation.task as Task, DRIVE_ERROR, failure, "")
+      drive_task(operation.task, DRIVE_ERROR, failure, "")
     end
   end
   pipe.handle = nil
@@ -4589,11 +4521,11 @@ local function finish_pipe_close(pipe: uv_pipe_t)
   control.callback_aborted = false
   finish_process_control(control.process)
   maybe_finish_session(runtime)
-  if raw_close then
-    local operation = raw_close as ProcessOperation
+  if close then
+    local operation = close
     control.close_waiter = nil
     if process_operation_deliverable(operation) then
-      drive_task(operation.task as Task, DRIVE_RESUME, nil, "")
+      drive_task(operation.task, DRIVE_RESUME, nil, "")
     end
   end
 end
@@ -4643,7 +4575,7 @@ local function complete_pipe_request(control: ProcessRequestControl,
                                      result: integer)
   control.lifecycle = PROCESS_OWNER_CALLBACK
   local operation = control.operation
-  local pipe = operation.pipe as uv_pipe_t
+  local pipe = operation.pipe
   local failure: Error? = nil
   if result < 0 then
     failure = make_error(result, "process.stdin.write", nil)
@@ -4652,9 +4584,9 @@ local function complete_pipe_request(control: ProcessRequestControl,
   advance_pipe_output(pipe, nil)
   if process_operation_deliverable(operation) then
     if failure then
-      drive_task(operation.task as Task, DRIVE_ERROR, failure, "")
+      drive_task(operation.task, DRIVE_ERROR, failure, "")
     else
-      drive_task(operation.task as Task, DRIVE_RESUME, nil, "")
+      drive_task(operation.task, DRIVE_RESUME, nil, "")
     end
   end
   retire_process_request(control)
@@ -4689,7 +4621,7 @@ local function process_grace_dispatch(owner: uv_process_grace_t,
   if event_kind == EVENT_TIMER then
     libuv.uv_timer_stop(owner.handle)
     if not control.exit_seen and not control.kill_sent then
-      local process = control.owner as uv_process_t
+      local process = control.owner
       local kill = shim.titan_uvshim_signal_number("kill")
       local status = libuv.uv_process_kill(process.handle, kill)
       if (status as integer) < 0 and
@@ -4713,7 +4645,7 @@ catch
     libuv.uv_timer_stop(owner.handle)
     if not owner.metadata.exit_seen and not owner.metadata.kill_sent and
         owner.metadata.owner then
-      local process = owner.metadata.owner as uv_process_t
+      local process = owner.metadata.owner
       local kill = shim.titan_uvshim_signal_number("kill")
       local status = libuv.uv_process_kill(process.handle, kill)
       if (status as integer) >= 0 or
@@ -4756,15 +4688,15 @@ local function signal_dispatch(owner: uv_signal_t, event_kind: integer,
     return
   end
 
-  local raw_task? = owner.metadata.task
+  local task? = owner.metadata.task
   local epoch = owner.metadata.epoch
   local name = owner.metadata.name
   owner.metadata.task = nil
   owner.metadata.epoch = 0
   close_signal_owner(owner)
 
-  if raw_task then
-    local task = raw_task as Task
+  if task then
+    local task = task
     if task.state == TASK_WAITING and not task.cancel_requested and
         task.epoch == epoch then
       drive_task(task, DRIVE_RESUME, name, "")
@@ -4810,25 +4742,25 @@ local function timer_dispatch(owner: uv_timer_t, event_kind: integer,
   end
 
   if kind == OWNER_START then
-    local task = owner.metadata.task as Task
+    local task = owner.metadata.task
     if task.state == TASK_READY and not task.cancel_requested then
       drive_task(task, DRIVE_RESUME, nil, "")
     end
   elseif kind == OWNER_SLEEP then
-    local task = owner.metadata.task as Task
+    local task = owner.metadata.task
     if task.state == TASK_WAITING and not task.cancel_requested and
         task.epoch == owner.metadata.epoch then
       drive_task(task, DRIVE_RESUME, nil, "")
     end
   elseif kind == OWNER_CANCEL then
-    local task = owner.metadata.task as Task
+    local task = owner.metadata.task
     if not terminal(task.state) and task.cancel_requested and
         task.epoch == owner.metadata.epoch then
       drive_task(task, DRIVE_ERROR, task.cancel_value, "")
     end
   elseif kind == OWNER_JOIN_WAKE then
-    local task = owner.metadata.task as Task
-    local target = owner.metadata.peer as Task
+    local task = owner.metadata.task
+    local target: Task = owner.metadata.peer
     if task.state == TASK_WAITING and not task.cancel_requested and
         task.epoch == owner.metadata.epoch then
       -- A waiting join is only permanently observed when this delivery wins.
@@ -4846,17 +4778,17 @@ local function timer_dispatch(owner: uv_timer_t, event_kind: integer,
       end
     end
   elseif kind == OWNER_OBSERVE then
-    local task = owner.metadata.task as Task
+    local task = owner.metadata.task
     if task.state == TASK_FAILED and not task.permanently_observed and
         task.observer_count == 0 then
       promote_fatal(runtime, task.error_value, task.error_traceback)
     end
   elseif kind == OWNER_TASK_DRIVE then
-    local task = owner.metadata.task as Task
-    local control = owner.metadata.peer as DriveControl
+    local task = owner.metadata.task
+    local control: DriveControl = owner.metadata.peer
     local deliver = false
     if control.cleanup_request then
-      local request = control.cleanup_request as Request
+      local request = control.cleanup_request
       deliver = request.cleanup and task.state == TASK_WAITING and
                 task.current_request == request and
                 task.cleanup_shield_depth > 0
@@ -4868,9 +4800,9 @@ local function timer_dispatch(owner: uv_timer_t, event_kind: integer,
       drive_task(task, control.mode, control.payload, control.trace)
     end
   elseif kind == OWNER_TICKER then
-    local state = owner.metadata.peer as TickerState
+    local state: TickerState = owner.metadata.peer
     if state.open and state.waiter then
-      local task = state.waiter as Task
+      local task = state.waiter
       local epoch = state.waiter_epoch
       state.waiter = nil
       state.waiter_epoch = 0
@@ -4880,7 +4812,7 @@ local function timer_dispatch(owner: uv_timer_t, event_kind: integer,
       end
     end
   elseif kind == OWNER_TICKER_CLOSE_WAKE then
-    local task = owner.metadata.task as Task
+    local task = owner.metadata.task
     if task.state == TASK_WAITING and not task.cancel_requested and
         task.epoch == owner.metadata.epoch then
       drive_task(task, DRIVE_RESUME, false, "")
@@ -4986,7 +4918,7 @@ function Task:join(): value
   catch
     local target_trace? = pop_trace_for_append()
     if target_trace then
-      reinstall_trace((target_trace as string) .. "\n" .. traceback)
+      reinstall_trace(target_trace .. "\n" .. traceback)
     end
     raise error
   end
@@ -5017,7 +4949,7 @@ end
 function _fs_open(path: string, mode: string): uv_file
   fs_open_flags(mode)
   local request = new_fs_request(FS.open, path, nil, mode)
-  return coroutine.yield(request, UV_TAG) as uv_file
+  return coroutine.yield(request, UV_TAG)
 end
 
 function _fs_read(file: uv_file, max_bytes: integer): string?
@@ -5027,7 +4959,7 @@ function _fs_read(file: uv_file, max_bytes: integer): string?
   end
   validate_file(file, "read from", false)
   local request = new_file_request(FS.read, file, "", max_bytes, false)
-  return coroutine.yield(request, UV_TAG) as string?
+  return coroutine.yield(request, UV_TAG)
 end
 
 function _fs_write(file: uv_file, data: string): integer
@@ -5073,7 +5005,7 @@ end
 
 function _fs_stat(path: string): (integer, string, integer, integer, integer)
   local request = new_fs_request(FS.stat, path, nil, "")
-  local result = coroutine.yield(request, UV_TAG) as FsStatResult
+  local result: FsStatResult = coroutine.yield(request, UV_TAG)
   return result.size, result.kind, result.mode,
          result.modified_seconds, result.modified_nanoseconds
 end
@@ -5096,7 +5028,7 @@ end
 
 function _fs_list(path: string): {string}
   return coroutine.yield(new_fs_request(FS.list, path, nil, ""),
-                         UV_TAG) as {string}
+                         UV_TAG)
 end
 
 function _net_connect(host: string, port: integer): uv_tcp_t
@@ -5105,7 +5037,7 @@ function _net_connect(host: string, port: integer): uv_tcp_t
   end
   local request = new_net_request(NET_CONNECT, host, port, 0,
                                   nil, "", 0, false)
-  return coroutine.yield(request, UV_TAG) as uv_tcp_t
+  return coroutine.yield(request, UV_TAG)
 end
 
 function _net_listen(host: string, port: integer,
@@ -5119,7 +5051,7 @@ function _net_listen(host: string, port: integer,
   end
   local request = new_net_request(NET_LISTEN, host, port, backlog,
                                   nil, "", 0, false)
-  return coroutine.yield(request, UV_TAG) as uv_tcp_t
+  return coroutine.yield(request, UV_TAG)
 end
 
 function _net_read(tcp: uv_tcp_t, max_bytes: integer): string?
@@ -5137,7 +5069,7 @@ function _net_read(tcp: uv_tcp_t, max_bytes: integer): string?
   end
   local request = new_net_request(NET_READ, nil, 0, 0,
                                   tcp, "", max_bytes, false)
-  return coroutine.yield(request, UV_TAG) as string?
+  return coroutine.yield(request, UV_TAG)
 end
 
 function _net_write(tcp: uv_tcp_t, data: string)
@@ -5187,7 +5119,7 @@ function _net_accept(server: uv_tcp_t): uv_tcp_t
   end
   local request = new_net_request(NET_ACCEPT, nil, 0, 0,
                                   server, "", 0, false)
-  return coroutine.yield(request, UV_TAG) as uv_tcp_t
+  return coroutine.yield(request, UV_TAG)
 end
 
 function _net_close(tcp: uv_tcp_t)
@@ -5312,7 +5244,7 @@ end
 function _os_cwd(): string
   return os_sized_buffer(os_cwd_buffer,
       OS_BUFFER_INITIAL as libuv.size_t,
-      os_error_from_status("os.cwd", nil)) as string
+      os_error_from_status("os.cwd", nil))
 end
 
 function _os_chdir(path: string)
@@ -5326,19 +5258,19 @@ end
 function _os_homedir(): string
   return os_sized_buffer(os_homedir_buffer,
       OS_BUFFER_INITIAL as libuv.size_t,
-      os_error_from_status("os.homedir", nil)) as string
+      os_error_from_status("os.homedir", nil))
 end
 
 function _os_tmpdir(): string
   return os_sized_buffer(os_tmpdir_buffer,
       OS_BUFFER_INITIAL as libuv.size_t,
-      os_error_from_status("os.tmpdir", nil)) as string
+      os_error_from_status("os.tmpdir", nil))
 end
 
 function _os_hostname(): string
   return os_sized_buffer(os_hostname_buffer,
       OS_BUFFER_INITIAL as libuv.size_t,
-      os_error_from_status("os.hostname", nil)) as string
+      os_error_from_status("os.hostname", nil))
 end
 
 function _os_exepath(): string
@@ -5347,7 +5279,7 @@ function _os_exepath(): string
   end
   return os_sized_buffer(os_exepath_buffer,
       OS_BUFFER_INITIAL as libuv.size_t,
-      os_error_from_status("os.exepath", nil)) as string
+      os_error_from_status("os.exepath", nil))
 end
 
 function _os_pid(): integer
@@ -5369,7 +5301,7 @@ function _os_wait_signal(name: string): string
       signum as ffi.titan_ffi_int) as string
   local request = new_request(REQUEST_SIGNAL,
       SignalSpec.new(canonical, signum), 0)
-  return coroutine.yield(request, UV_TAG) as string
+  return coroutine.yield(request, UV_TAG)
 end
 
 function _os_signal_name(signal_number: integer): string?
@@ -5396,21 +5328,21 @@ end
 
 local function process_pipe(process: uv_process_t,
                             kind: integer): uv_pipe_t
-  local raw: uv_pipe_t? = nil
+  local pipe: uv_pipe_t? = nil
   if kind == PIPE_STDIN then
-    raw = process.metadata.stdin_pipe
+    pipe = process.metadata.stdin_pipe
   elseif kind == PIPE_STDOUT then
-    raw = process.metadata.stdout_pipe
+    pipe = process.metadata.stdout_pipe
   else
-    raw = process.metadata.stderr_pipe
+    pipe = process.metadata.stderr_pipe
   end
-  if not raw then raise "Process pipe is no longer available" end
-  return raw as uv_pipe_t
+  if not pipe then raise "Process pipe is no longer available" end
+  return pipe
 end
 
 function _os_process_spawn(file: string, args: {string}): uv_process_t
   local request = new_process_spawn_request(file, args)
-  return coroutine.yield(request, UV_TAG) as uv_process_t
+  return coroutine.yield(request, UV_TAG)
 end
 
 function _os_process_wait(process: uv_process_t): (integer, integer)
@@ -5422,7 +5354,7 @@ function _os_process_wait(process: uv_process_t): (integer, integer)
   end
   local request = new_process_request(PROCESS_WAIT, process, nil,
                                       0, false)
-  local result = coroutine.yield(request, UV_TAG) as ProcessExitResult
+  local result: ProcessExitResult = coroutine.yield(request, UV_TAG)
   return result.code, result.signal_number
 end
 
@@ -5460,7 +5392,7 @@ function _os_process_write_stdin(process: uv_process_t, data: string)
   local bytes = copy_bytes(data)
   local request = new_process_request(PROCESS_WRITE_STDIN,
       process, pipe, 0, false)
-  local operation = request.subject as ProcessOperation
+  local operation: ProcessOperation = request.subject
   operation.copied_bytes = bytes
   coroutine.yield(request, UV_TAG)
 end
@@ -5504,7 +5436,7 @@ local function process_read(process: uv_process_t, kind: integer,
   end
   local request = new_process_request(kind, process, pipe,
                                       maximum, false)
-  return coroutine.yield(request, UV_TAG) as string?
+  return coroutine.yield(request, UV_TAG)
 end
 
 function _os_process_read_stdout(process: uv_process_t,
@@ -5522,9 +5454,9 @@ local function wake_helper_group(group: HelperGroup)
   local ready = group.pending == 0 or
                 (not group.waiter_all and group.first_error ~= nil)
   if not ready then return end
-  local task = group.waiter as Task
+  local task = group.waiter
   local epoch = group.waiter_epoch
-  local request = task.current_request as Request
+  local request = task.current_request
   group.waiter = nil
   group.waiter_epoch = 0
   group.waiter_all = false
@@ -5547,9 +5479,9 @@ local function complete_helper(group: HelperGroup, kind: integer,
     group.first_traceback = trace
   elseif failure == nil then
     if kind == HELPER_STDOUT then
-      group.stdout = payload as string
+      group.stdout = payload
     elseif kind == HELPER_STDERR then
-      group.stderr = payload as string
+      group.stderr = payload
     elseif kind == HELPER_WAIT then
       group.exit_result = payload
     end
@@ -5571,7 +5503,7 @@ local function read_process_output(process: uv_process_t,
     chunk = _os_process_read_stderr(process, 65536)
   end
   while chunk do
-    chunks[#chunks + 1] = chunk as string
+    chunks[#chunks + 1] = chunk
     if stdout then
       chunk = _os_process_read_stdout(process, 65536)
     else
@@ -5609,7 +5541,7 @@ local function execute_helper(group: HelperGroup, kind: integer)
       payload = read_process_output(process, false)
     elseif kind == HELPER_STDIN then
       if group.input then
-        _os_process_write_stdin(process, group.input as string)
+        _os_process_write_stdin(process, group.input)
       end
       _os_process_close_stdin(process)
     else
@@ -5712,7 +5644,7 @@ local function communicate_cleanup(group: HelperGroup, reason: value,
     process_close_all_pipes(control)
     if control.exit_seen and control.lifecycle ~= PROCESS_CLOSING and
         control.lifecycle ~= PROCESS_CLOSED and control.owner then
-      start_process_close(control.owner as uv_process_t)
+      start_process_close(control.owner)
     end
   end
   wait_helper_group(group, true, true)
@@ -5724,10 +5656,8 @@ function _os_communicate(file: string, args: {string},
                          (string, string, integer, integer)
   local parent = ordinary_task()
   local process = _os_process_spawn(file, args)
-  local copied_input: string? = nil
-  if input then copied_input = input as string end
   local group = HelperGroup.new(parent.runtime, parent.generation,
-      process, copied_input, {}, {}, 4, nil, 0, false, false,
+      process, input, {}, {}, 4, nil, 0, false, false,
       nil, "", "", "", nil, false)
   for index = 1, 4 do group.completed[index] = false end
   start_helper(group, HELPER_STDOUT)
@@ -5763,7 +5693,7 @@ function _os_communicate(file: string, args: {string},
   if not succeeded then
     raise_saved(primary_error, primary_traceback)
   end
-  local exit = group.exit_result as ProcessExitResult
+  local exit = group.exit_result
   return group.stdout, group.stderr, exit.code, exit.signal_number
 end
 
@@ -5809,7 +5739,7 @@ function _ticker_tick(owner: uv_timer_t): boolean
     raise "Ticker already has a waiting Task"
   end
   local request = new_request(REQUEST_TICK, owner, 0)
-  return coroutine.yield(request, UV_TAG) as boolean
+  return coroutine.yield(request, UV_TAG)
 end
 
 function _ticker_close(owner: uv_timer_t)
@@ -5823,7 +5753,7 @@ function _ticker_close(owner: uv_timer_t)
   state.open = false
   close_owner(owner)
   if state.waiter then
-    local task = state.waiter as Task
+    local task = state.waiter 
     local epoch = state.waiter_epoch
     state.waiter = nil
     state.waiter_epoch = 0
@@ -5849,7 +5779,7 @@ local function repair_aborted_fs_callback(owner: uv_fs_t)
   if operation.owner == owner then operation.owner = nil end
   if not operation.file then return end
 
-  local file = operation.file as uv_file
+  local file = operation.file
   if operation.kind == FS.close or
       operation.kind == FS.internal_close then
     if operation.linked and not operation.close_waiter then
@@ -5862,8 +5792,8 @@ local function repair_aborted_fs_callback(owner: uv_fs_t)
     -- so an outer safe point can finish that continuation.
     if operation.kind == FS.close and operation.task and
         operation.request and not operation.linked then
-      local task = operation.task as Task
-      local request = operation.request as Request
+      local task = operation.task
+      local request = operation.request
       if task.state == TASK_WAITING and task.current_request == request and
           request.cleanup and task.cleanup_shield_depth > 0 then
         operation.kind = FS.close_wait
@@ -5882,53 +5812,48 @@ local function repair_aborted_fs_callback(owner: uv_fs_t)
 end
 
 local function retire_fs_owners(runtime: Runtime)
-  local raw? = runtime.fs_pending_head
-  while raw do
-    local owner = raw as uv_fs_t
-    raw = owner.metadata.next_owner
+  local owner? = runtime.fs_pending_head
+  while owner do
     if owner.metadata.lifecycle == FS_OWNER_CLEANED then
       repair_aborted_fs_callback(owner)
       if (owner.metadata.acquired_file as integer) < 0 then
         retire_fs_owner_now(owner)
       end
     end
+    owner = owner.metadata.next_owner
   end
 end
 
 local function repair_acquired_files(runtime: Runtime)
-  local raw? = runtime.fs_pending_head
-  while raw do
-    local owner = raw as uv_fs_t
-    raw = owner.metadata.next_owner
+  local owner? = runtime.fs_pending_head
+  while owner do
     if owner.metadata.lifecycle == FS_OWNER_CLEANED and
         (owner.metadata.acquired_file as integer) >= 0 then
       local operation = owner.metadata.operation
       local subject = "<late-open>"
-      local actual_subject = fs_operation_subject(operation)
-      if actual_subject then subject = actual_subject as string end
+      local actual_subject? = fs_operation_subject(operation)
+      if actual_subject then subject = actual_subject end
       local file = create_file(runtime, owner.metadata.acquired_file,
                                subject)
       owner.metadata.acquired_file = -1 as libuv.uv_file
       queue_internal_close(file)
     end
+    owner = owner.metadata.next_owner
   end
   retire_fs_owners(runtime)
 end
 
 local function begin_file_shutdown(runtime: Runtime)
-  local raw? = runtime.file_head
-  while raw do
-    local file = raw as uv_file
-    raw = file.next_file
+  local file? = runtime.file_head
+  while file do
     queue_internal_close(file)
+    file = file.next_file
   end
 end
 
 local function advance_file_shutdown(runtime: Runtime)
-  local raw? = runtime.file_head
-  while raw do
-    local file = raw as uv_file
-    raw = file.next_file
+  local file? = runtime.file_head
+  while file do
     if file.state == FS.file_closed then
       wake_close_waiters(file, nil)
       if not file.close_waiter_head then unlink_file(file) end
@@ -5938,40 +5863,37 @@ local function advance_file_shutdown(runtime: Runtime)
     elseif not file.current then
       advance_file(file)
     end
+    file = file.next_file
   end
 end
 
 local function retire_aborted_net_requests(runtime: Runtime)
-  local raw? = runtime.net_pending_head
-  while raw do
-    local control = raw as NetRequestControl
-    raw = control.next_control
+  local control? = runtime.net_pending_head
+  while control do
     if control.lifecycle == NET_OWNER_CALLBACK or
         control.lifecycle == NET_OWNER_ALLOCATED then
       local operation = control.operation
       if control.kind == NET_OWNER_CONNECT and operation.tcp then
-        local tcp = operation.tcp as uv_tcp_t
+        local tcp = operation.tcp
         tcp.metadata.connect_pending = false
         start_tcp_close(tcp)
       elseif (control.kind == NET_OWNER_WRITE or
               control.kind == NET_OWNER_SHUTDOWN) and
              operation.tcp then
-        local tcp = operation.tcp as uv_tcp_t
-        if operation.linked then remove_output(tcp, operation) end
+        if operation.linked then remove_output(operation.tcp, operation) end
       end
       retire_net_control(control)
     end
+    control = control.next_control
   end
 end
 
 local function begin_tcp_shutdown(runtime: Runtime)
-  local raw? = runtime.tcp_head
-  while raw do
-    local control = raw as TcpControl
-    raw = control.next_control
+  local control? = runtime.tcp_head
+  while control do
     local owner? = control.owner
     if owner then
-      local tcp = owner as uv_tcp_t
+      local tcp = owner
       control.close_requested = true
       if control.server then
         control.accept_waiter = nil
@@ -5983,54 +5905,51 @@ local function begin_tcp_shutdown(runtime: Runtime)
       start_tcp_close(tcp)
       if not control.output_current then
         while control.output_head do
-          remove_output(tcp, control.output_head as NetOperation)
+          remove_output(tcp, control.output_head)
         end
       end
     end
+    control = control.next_control
   end
 end
 
 local function advance_tcp_shutdown(runtime: Runtime)
   retire_aborted_net_requests(runtime)
-  local raw? = runtime.tcp_head
-  while raw do
-    local control = raw as TcpControl
-    raw = control.next_control
+  local control? = runtime.tcp_head
+  while control do
     if control.owner then
-      local tcp = control.owner as uv_tcp_t
+      local tcp = control.owner
       if control.lifecycle == TCP_CLOSED then
         finish_closed_tcp(tcp)
       elseif control.lifecycle ~= TCP_CLOSING then
         start_tcp_close(tcp)
       end
     end
+    control = control.next_control
   end
 end
 
 local function retire_aborted_process_requests(runtime: Runtime)
-  local raw? = runtime.process_request_head
-  while raw do
-    local control = raw as ProcessRequestControl
-    raw = control.next_control
+  local control? = runtime.process_request_head
+  while control do
     if control.lifecycle == PROCESS_OWNER_CALLBACK or
         control.lifecycle == PROCESS_OWNER_ALLOCATED then
       local operation = control.operation
-      local pipe = operation.pipe as uv_pipe_t
+      local pipe = operation.pipe
       if operation.linked then remove_pipe_output(pipe, operation) end
       advance_pipe_output(pipe, nil)
       retire_process_request(control)
     end
+    control = control.next_control
   end
 end
 
 local function begin_process_shutdown(runtime: Runtime)
-  local raw? = runtime.process_head
-  while raw do
-    local control = raw as ProcessControl
-    raw = control.next_control
+  local control? = runtime.process_head
+  while control do
     if control.lifecycle == PROCESS_ALLOCATED then
       if control.owner then
-        discard_process_storage(control.owner as uv_process_t)
+        discard_process_storage(control.owner)
       end
       process_close_all_pipes(control)
     elseif not control.exit_seen and
@@ -6044,16 +5963,17 @@ local function begin_process_shutdown(runtime: Runtime)
            control.lifecycle ~= PROCESS_CLOSING and
            control.lifecycle ~= PROCESS_CLOSED and
            control.owner then
-      start_process_close(control.owner as uv_process_t)
+      start_process_close(control.owner)
     end
     if control.exit_seen then process_close_all_pipes(control) end
+    control = control.next_control
   end
 end
 
 local function repair_aborted_grace(control: ProcessControl)
   if not control.grace_callback_aborted or
       not control.grace_owner then return end
-  local owner = control.grace_owner as uv_process_grace_t
+  local owner = control.grace_owner
   if owner.handle == nil then
     control.grace_owner = nil
     control.grace_callback_aborted = false
@@ -6063,9 +5983,8 @@ local function repair_aborted_grace(control: ProcessControl)
     libuv.uv_timer_stop(owner.handle)
     if not control.exit_seen and not control.kill_sent and
         control.owner then
-      local process = control.owner as uv_process_t
       local kill = shim.titan_uvshim_signal_number("kill")
-      local status = libuv.uv_process_kill(process.handle, kill)
+      local status = libuv.uv_process_kill(control.owner.handle, kill)
       if (status as integer) >= 0 or
           (status as integer) == UV_ESRCH then
         control.kill_sent = true
@@ -6077,9 +5996,9 @@ local function repair_aborted_grace(control: ProcessControl)
   end
 end
 
-local function repair_aborted_pipe(raw_pipe: uv_pipe_t?)
-  if not raw_pipe then return end
-  local pipe = raw_pipe as uv_pipe_t
+local function repair_aborted_pipe(pipe: uv_pipe_t?)
+  if not pipe then return end
+  local pipe = pipe
   if pipe.metadata.callback_aborted and
       pipe.metadata.lifecycle == PIPE_CLOSED and
       pipe.metadata.owner then
@@ -6094,11 +6013,11 @@ local function repair_aborted_process(control: ProcessControl)
   repair_aborted_pipe(control.stdout_pipe)
   repair_aborted_pipe(control.stderr_pipe)
   if not control.callback_aborted or not control.owner then return end
-  local process = control.owner as uv_process_t
+  local process = control.owner
   if control.lifecycle == PROCESS_EXITED then
     close_process_grace(control)
     if control.stdin_pipe then
-      start_pipe_close(control.stdin_pipe as uv_pipe_t)
+      start_pipe_close(control.stdin_pipe)
     end
     start_process_close(process)
     control.callback_aborted = false
@@ -6111,73 +6030,67 @@ end
 local function advance_process_shutdown(runtime: Runtime)
   retire_aborted_process_requests(runtime)
   begin_process_shutdown(runtime)
-  local raw? = runtime.process_head
-  while raw do
-    local control = raw as ProcessControl
-    raw = control.next_control
+  local control? = runtime.process_head
+  while control do
     repair_aborted_process(control)
     if control.linked and process_all_native_closed(control) then
       finish_process_control(control)
     end
+    control = control.next_control
   end
 end
 
 local function drive_cancel_fallbacks(runtime: Runtime)
-  local raw? = runtime.task_head
-  while raw do
-    local task = raw as Task
-    raw = task.next_task
+  local task? = runtime.task_head
+  while task do
     if task.cancel_fallback and not terminal(task.state) then
       task.cancel_fallback = false
       drive_task(task, DRIVE_ERROR, task.cancel_value, "")
     end
+    task = task.next_task
   end
 end
 
 local function begin_fatal_shutdown(runtime: Runtime)
   runtime.closing = true
-  local raw_task? = runtime.task_head
-  while raw_task do
-    local task = raw_task as Task
-    raw_task = task.next_task
+  local task? = runtime.task_head
+  while task do
     request_cancel(task, runtime.fatal_error)
+    task = task.next_task
   end
 
-  local raw_owner? = runtime.timer_owner_head
-  while raw_owner do
-    local owner = raw_owner as uv_timer_t
-    raw_owner = owner.metadata.next_owner
+  local owner? = runtime.timer_owner_head
+  while owner do
     if owner.metadata.kind == OWNER_TICKER or
         owner.metadata.kind == OWNER_OBSERVE then
       close_owner(owner)
     end
+    owner = owner.metadata.next_owner
   end
   close_all_signal_owners(runtime)
 end
 
 local function retire_closed_owners(runtime: Runtime)
-  local raw? = runtime.timer_owner_head
-  while raw do
-    local owner = raw as uv_timer_t
-    raw = owner.metadata.next_owner
+  local owner? = runtime.timer_owner_head
+  while owner do
     if owner.metadata.lifecycle == OWNER_CLOSED then
       owner.handle = nil
       owner.storage = nil
       unlink_owner(owner)
     end
+    owner = owner.metadata.next_owner
   end
 end
 
 local function retire_closed_signal_owners(runtime: Runtime)
-  local raw? = runtime.signal_owner_head
-  while raw do
-    local owner = raw as uv_signal_t
-    raw = owner.metadata.next_owner
+  local owner? = runtime.signal_owner_head
+  while owner do
     if owner.metadata.lifecycle == OWNER_CLOSED then
       owner.handle = nil
       owner.storage = nil
       unlink_signal_owner(owner)
     end
+    owner = owner.metadata.next_owner
   end
 end
 
@@ -6279,7 +6192,7 @@ function loop()
   if (lua.lua_checkstack(L, lua.LUA_MINSTACK) as integer) == 0 then
     raise "cannot reserve stack for libuv native callbacks"
   end
-  local runtime = active_runtime as Runtime
+  local runtime = active_runtime
   if runtime.loop.handle == nil then
     raise_saved(runtime.fatal_error, runtime.fatal_traceback)
   end
@@ -6313,13 +6226,12 @@ function loop()
       if (libuv.uv_loop_alive(runtime.loop.handle) as integer) == 0 then
         -- No callback can make progress.  The only legal callback-less
         -- cancellation delivery is this outer-driver fallback.
-        local raw? = runtime.task_head
-        while raw do
-          local task = raw as Task
-          raw = task.next_task
+        local task? = runtime.task_head
+        while task do
           if task.cancel_requested and task.cleanup_shield_depth == 0 then
             task.cancel_fallback = true
           end
+          task = task.next_task
         end
         drive_cancel_fallbacks(runtime)
         if runtime.task_head and
@@ -6332,9 +6244,8 @@ function loop()
           local invariant_error = internal_error("shutdown.deadlock")
           local stranded? = runtime.task_head
           while stranded do
-            local task = stranded as Task
-            stranded = task.next_task
-            finish_task(task, TASK_FAILED, nil, invariant_error, "")
+            finish_task(stranded, TASK_FAILED, nil, invariant_error, "")
+            stranded = stranded.next_task
           end
         end
       else
@@ -6371,7 +6282,7 @@ local function bootstrap(main_callable: ({string}) -> integer,
   if task.state ~= TASK_SUCCEEDED then
     raise_saved(task.error_value, task.error_traceback)
   end
-  return task.result as integer
+  return task.result
 end
 
 function version(): string
