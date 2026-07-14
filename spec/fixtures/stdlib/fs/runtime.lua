@@ -1,9 +1,9 @@
-local scenario = assert(arg[1], "missing Phase 3 fs scenario")
-local root = assert(arg[2], "missing Phase 3 temp directory")
+local scenario = assert(arg[1], "missing fs scenario")
+local root = assert(arg[2], "missing fs temporary directory")
 local uv = require "titan.uv"
 local timer = require "titan.timer"
 local fs = require "titan.fs"
-local cases = require "phase3_fs_cases"
+local cases = require "fs_cases"
 
 assert(type(fs) == "userdata")
 
@@ -59,13 +59,13 @@ if scenario == "core" then
     if permission then
         assert(permission:join() == "permission-error-ok")
     end
-    print("RESULT phase3 fs core passed")
+    print("RESULT fs core passed")
 
 elseif scenario == "fifo" then
     local task = cases.schedule_fifo_and_close(root)
     uv.loop()
     assert(task:join() == "fifo-close-ok")
-    print("RESULT phase3 fs fifo passed")
+    print("RESULT fs FIFO passed")
 
 elseif scenario == "gc-sequential" then
     collectgarbage("collect")
@@ -97,7 +97,7 @@ elseif scenario == "gc-sequential" then
     uv.loop()
     assert(stale:join() == "stale-file-rejected")
     assert(second:join() == "session-two")
-    print("RESULT phase3 fs GC and sequential sessions passed")
+    print("RESULT fs GC and sequential sessions passed")
 else
-    error("unknown Phase 3 fs scenario: " .. scenario)
+    error("unknown fs scenario: " .. scenario)
 end

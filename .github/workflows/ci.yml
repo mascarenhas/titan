@@ -138,7 +138,7 @@ jobs:
           process_smoke_dir="$RUNNER_TEMP/titan-process-smoke"
           mkdir -p "$process_smoke_dir"
           TITAN_PROCESS_SMOKE_DIR="$process_smoke_dir" \
-            .lua/bin/lua -e 'require("spec.support.phase6").process_child(assert(os.getenv("TITAN_PROCESS_SMOKE_DIR")))'
+            .lua/bin/lua -e 'require("spec.support.os_test_support").process_child(assert(os.getenv("TITAN_PROCESS_SMOKE_DIR")))'
           echo "TITAN_PROCESS_SMOKE_CHILD=$process_smoke_dir/process_child" >> "$GITHUB_ENV"
 
       - name: Smoke-test bundled libuv source image
@@ -295,7 +295,7 @@ jobs:
           process_smoke_dir="$RUNNER_TEMP/titan-process-smoke"
           mkdir -p "$process_smoke_dir"
           TITAN_PROCESS_SMOKE_DIR="$process_smoke_dir" \
-            .lua/bin/lua -e 'require("spec.support.phase6").process_child(assert(os.getenv("TITAN_PROCESS_SMOKE_DIR")))'
+            .lua/bin/lua -e 'require("spec.support.os_test_support").process_child(assert(os.getenv("TITAN_PROCESS_SMOKE_DIR")))'
           echo "TITAN_PROCESS_SMOKE_CHILD=$process_smoke_dir/process_child" >> "$GITHUB_ENV"
 
       # Keep either compiler path's legacy root output cleanup local to its
@@ -402,7 +402,7 @@ jobs:
             spec/stdlib/uv_states_spec.lua \
             spec/stdlib/timer_spec.lua \
             spec/stdlib/fs_spec.lua \
-            spec/stdlib/uv_phase4_spec.lua
+            spec/stdlib/uv_late_fs_callbacks_spec.lua
 
       - name: Run native async sanitizer gate (core-uv)
         env:
@@ -413,8 +413,8 @@ jobs:
         run: |
           .lua/bin/busted -o gtest -v \
             spec/minicoro_spec.lua \
-            spec/stdlib/uv_spec.lua \
-            spec/stdlib/uv_phase2_spec.lua \
+            spec/stdlib/uv_native_handles_spec.lua \
+            spec/stdlib/uv_tasks_spec.lua \
             spec/stdlib/uv_bootstrap_spec.lua
 
       - name: Build sanitizer child-process smoke fixture
@@ -425,7 +425,7 @@ jobs:
           process_smoke_dir="$RUNNER_TEMP/titan-sanitizer-process-smoke"
           mkdir -p "$process_smoke_dir"
           TITAN_PROCESS_SMOKE_DIR="$process_smoke_dir" \
-            .lua/bin/lua -e 'require("spec.support.phase6").process_child(assert(os.getenv("TITAN_PROCESS_SMOKE_DIR")))'
+            .lua/bin/lua -e 'require("spec.support.os_test_support").process_child(assert(os.getenv("TITAN_PROCESS_SMOKE_DIR")))'
           echo "TITAN_PROCESS_SMOKE_CHILD=$process_smoke_dir/process_child" >> "$GITHUB_ENV"
 
       - name: Run sanitized net/OS production smokes

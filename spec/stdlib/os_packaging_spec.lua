@@ -1,8 +1,8 @@
 local lfs = require "lfs"
-local phase2 = require "spec.support.phase2"
-local phase6 = require "spec.support.phase6"
+local async_stdlib = require "spec.support.async_stdlib"
+local os_support = require "spec.support.os_test_support"
 
-local FIXTURE = "spec/fixtures/uv/phase6/packaging/"
+local FIXTURE = "spec/fixtures/stdlib/os/packaging/"
 
 local function quote(word)
     return "'" .. tostring(word):gsub("'", "'\\''") .. "'"
@@ -15,7 +15,7 @@ local function write_file(path, contents)
 end
 
 local function copy_file(source, destination)
-    write_file(destination, phase2.read(source))
+    write_file(destination, async_stdlib.read(source))
 end
 
 local function mkdir(path)
@@ -23,31 +23,32 @@ local function mkdir(path)
 end
 
 local function compiler_lua()
-    return phase2.host_lua()
+    return async_stdlib.host_lua()
 end
 
 local function compile(workspace, source_root, modname)
     local command = table.concat({
         "env CCACHE_DISABLE=1",
         "TITAN_PATH_0_11=" .. quote(
-            phase2.module_root(phase2.standard_dir())),
+            async_stdlib.module_root(async_stdlib.standard_dir())),
         "TITAN_PATH=",
         quote(compiler_lua()),
-        quote(phase2.repo .. "/spec/support/phase2_compile.lua"),
-        quote(phase2.repo), quote(source_root), quote(modname),
+        quote(async_stdlib.repo ..
+            "/spec/support/async_stdlib_compile.lua"),
+        quote(async_stdlib.repo), quote(source_root), quote(modname),
         quote(workspace .. "/titan-runtime"),
     }, " ")
-    return phase2.run(command, workspace)
+    return async_stdlib.run(command, workspace)
 end
 
 local function defined_global_symbols(binary)
-    local ok, _, host = phase2.run("uname -s")
+    local ok, _, host = async_stdlib.run("uname -s")
     assert.truthy(ok, host)
     local darwin = host:match("^Darwin") ~= nil
     local command = darwin and
         ("nm -gU " .. quote(binary)) or
         ("nm -g --defined-only " .. quote(binary))
-    local symbols_ok, _, output = phase2.run(command)
+    local symbols_ok, _, output = async_stdlib.run(command)
     assert.truthy(symbols_ok, output)
     local symbols = {}
     for line in output:gmatch("[^\r\n]+") do
@@ -80,7 +81,7 @@ describe("os standard-module packaging", function()
     local process_child
 
     setup(function()
-        workspace = phase2.workspace("os-packaging")
+        workspace = async_stdlib.workspace("os-packaging")
         source_root = workspace .. "/os-app"
         mkdir(source_root)
         copy_file(FIXTURE .. "os_only.titan",
@@ -89,7 +90,7 @@ describe("os standard-module packaging", function()
             source_root .. "/os_consumer.titan")
         copy_file(FIXTURE .. "process_only.titan",
             source_root .. "/process_only.titan")
-        process_child = phase6.process_child(workspace)
+        process_child = os_support.process_child(workspace)
         local ok, _, output = compile(workspace, source_root, "os_only")
         assert.truthy(ok, output)
         ok, _, output = compile(workspace, source_root, "os_consumer")
@@ -99,17 +100,17 @@ describe("os standard-module packaging", function()
     end)
 
     teardown(function()
-        phase2.cleanup(workspace)
+        async_stdlib.cleanup(workspace)
     end)
 
     it("runs process I/O through canonical binaries and async bootstrap",
     function()
-        local generated = phase2.read(source_root .. "/process_only.c")
+        local generated = async_stdlib.read(source_root .. "/process_only.c")
         assert.match('loadlibwithuv%(L, "titan/os%.so"%)', generated)
         assert.not_match("#include <uv.h>", generated, 1, true)
         assert.not_match("titan_uvshim", generated, 1, true)
 
-        local entrypoint = phase2.read(
+        local entrypoint = async_stdlib.read(
             workspace .. "/process_only__entrypoint.c")
         assert.match("TITAN_MAIN_BOOTSTRAP_KEY", entrypoint, 1, true)
         assert.match("TITAN_MAIN_ARGC_KEY", entrypoint, 1, true)
@@ -119,29 +120,29 @@ describe("os standard-module packaging", function()
 
         local command = table.concat({
             "env TITAN_PATH_0_11=" .. quote(
-                phase2.module_root(phase2.standard_dir())),
+                async_stdlib.module_root(async_stdlib.standard_dir())),
             quote(workspace .. "/process_only"), quote(process_child),
         }, " ")
-        local ok, status, output = phase2.run(command, workspace)
+        local ok, status, output = async_stdlib.run(command, workspace)
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
         assert.equals(0, status, output)
     end)
 
     it("loads an os-only application through qualified binaries",
     function()
-        local generated = phase2.read(source_root .. "/os_only.c")
+        local generated = async_stdlib.read(source_root .. "/os_only.c")
         assert.match('loadlibwithuv%(L, "titan/os%.so"%)', generated)
         assert.not_match("#include <uv.h>", generated, 1, true)
         assert.not_match("titan_uvshim", generated, 1, true)
         assert_no_uv_implementation(workspace .. "/os_only")
 
         local command = "env TITAN_PATH_0_11=" ..
-            quote(phase2.module_root(phase2.standard_dir())) .. " " ..
+            quote(async_stdlib.module_root(async_stdlib.standard_dir())) .. " " ..
             quote(workspace .. "/os_only")
-        local ok, status, output = phase2.run(command, workspace)
+        local ok, status, output = async_stdlib.run(command, workspace)
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
 
-        local os_c = phase2.read("titan/os.c")
+        local os_c = async_stdlib.read("titan/os.c")
         assert.match('loadlib%(L, "titan/uv%.so"%)', os_c)
         assert.match('"titan_uv_abi"', os_c, 1, true)
         assert.match('"titan_uv_init"', os_c, 1, true)
@@ -151,7 +152,7 @@ describe("os standard-module packaging", function()
 
     it("exports only the qualified Lua entry and no libuv implementation",
     function()
-        local os_so = phase2.standard_dir() .. "/os.so"
+        local os_so = async_stdlib.standard_dir() .. "/os.so"
         local symbols, output = defined_global_symbols(os_so)
         for _, expected in ipairs({
             "titan_os_init", "titan_os_abi", "titan_os_types",
@@ -163,12 +164,12 @@ describe("os standard-module packaging", function()
         assert.falsy(symbols.luaopen_os, output)
         assert_no_uv_implementation(os_so)
 
-        local ok, _, host = phase2.run("uname -s")
+        local ok, _, host = async_stdlib.run("uname -s")
         assert.truthy(ok, host)
         local command = host:match("^Darwin") and
             ("otool -L " .. quote(os_so)) or
             ("readelf -d " .. quote(os_so))
-        local deps_ok, _, dependencies = phase2.run(command)
+        local deps_ok, _, dependencies = async_stdlib.run(command)
         assert.truthy(deps_ok, dependencies)
         assert.falsy(dependencies:lower():find("libuv", 1, true),
             dependencies)
@@ -176,9 +177,9 @@ describe("os standard-module packaging", function()
 
     it("uses one canonical Titan os image without replacing Lua os",
     function()
-        local canonical = phase2.standard_dir() .. "/os.so"
-        local cpath = phase2.canonical_cpath(phase2.standard_dir())
-        local lua = phase2.host_lua()
+        local canonical = async_stdlib.standard_dir() .. "/os.so"
+        local cpath = async_stdlib.canonical_cpath(async_stdlib.standard_dir())
+        local lua = async_stdlib.host_lua()
         local program = string.format([[
             local builtin = require "os"
             assert(package.searchpath("titan.os", package.cpath) == %q)
@@ -193,11 +194,11 @@ describe("os standard-module packaging", function()
         ]], canonical, canonical)
         local command = table.concat({
             "env TITAN_PATH_0_11=" .. quote(
-                phase2.module_root(phase2.standard_dir())),
+                async_stdlib.module_root(async_stdlib.standard_dir())),
             "LUA_CPATH=" .. quote(cpath .. ";" .. workspace ..
                 "/?.so;;"), quote(lua), "-e", quote(program),
         }, " ")
-        local ok, status, output = phase2.run(command, workspace)
+        local ok, status, output = async_stdlib.run(command, workspace)
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
 
         local import_first = string.format([[
@@ -213,20 +214,20 @@ describe("os standard-module packaging", function()
         ]], canonical)
         local command = table.concat({
             "env TITAN_PATH_0_11=" .. quote(
-                phase2.module_root(phase2.standard_dir())),
+                async_stdlib.module_root(async_stdlib.standard_dir())),
             "LUA_CPATH=" .. quote(workspace .. "/?.so;" .. cpath .. ";;"),
             quote(lua), "-e", quote(import_first),
         }, " ")
-        local ok, status, output = phase2.run(command, workspace)
+        local ok, status, output = async_stdlib.run(command, workspace)
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
     end)
 
     it("runs process APIs through the qualified Lua alias", function()
-        local script = phase2.repo ..
+        local script = async_stdlib.repo ..
             "/spec/fixtures/libuv/os_production_smoke.lua"
-        local command = phase2.lua_command(
+        local command = async_stdlib.lua_command(
             workspace, script, "packaging", process_child)
-        local ok, status, output = phase2.run(command, workspace)
+        local ok, status, output = async_stdlib.run(command, workspace)
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
         assert.equals(0, status, output)
         assert.match("RESULT os production process smoke packaging passed",

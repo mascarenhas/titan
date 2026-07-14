@@ -1,23 +1,23 @@
-local phase2 = require "spec.support.phase2"
+local async_stdlib = require "spec.support.async_stdlib"
 
 describe("net standard library", function()
     local workspace
 
     setup(function()
-        workspace = phase2.workspace("net-runtime")
-        phase2.copy_source(workspace,
-            "spec/fixtures/uv/phase5/net_cases.titan", "net_cases")
-        phase2.compile(workspace, "net_cases")
+        workspace = async_stdlib.workspace("net-runtime")
+        async_stdlib.copy_source(workspace,
+            "spec/fixtures/stdlib/net/cases.titan", "net_cases")
+        async_stdlib.compile(workspace, "net_cases")
     end)
 
     teardown(function()
-        phase2.cleanup(workspace)
+        async_stdlib.cleanup(workspace)
     end)
 
     local function run_scenario(name)
-        local script = phase2.repo ..
-            "/spec/fixtures/uv/phase5/net_runtime.lua"
-        return phase2.run(phase2.lua_command(workspace, script,
+        local script = async_stdlib.repo ..
+            "/spec/fixtures/stdlib/net/runtime.lua"
+        return async_stdlib.run(async_stdlib.lua_command(workspace, script,
             workspace .. "/net_cases.so", name), workspace)
     end
 

@@ -194,9 +194,10 @@ the spec file), so subdir specs still run from repo root. The shared
 compile/run/import scaffolding (`parse`, `compile`, `call`, `run_coder`,
 `generate_modules`, `build_so_chain`, `check_against_so`, `run_checker`,
 `check_errs`, `DEPTH_PROBE`, ...) lives in **`spec/support/helpers.lua`**,
-`require`d as `spec.support.helpers`; libuv runtime tests use
-`spec/support/phase2.lua` plus the filesystem and OS/process extensions
-`spec/support/phase3.lua` and `spec/support/phase6.lua` to compile into unique
+`require`d as `spec.support.helpers`; async standard-library tests use
+`spec/support/async_stdlib.lua` plus the filesystem and OS/process extensions
+`spec/support/fs_test_support.lua` and `spec/support/os_test_support.lua` to
+compile behavior-oriented fixtures under `spec/fixtures/stdlib/` into unique
 `/tmp` workspaces while
 treating Makefile-owned standard DSOs and the libuv archive as read-only.
 These helpers may not clean or rebuild shared root artifacts during Busted.
@@ -219,11 +220,11 @@ later packaging test does not rebuild the whole standard library.
 
 Async standard-library behavioral specs compile against the canonical
 production modules whenever public behavior can prove the contract. The narrow
-exception is `spec/stdlib/uv_phase4_spec.lua`: its isolated
-`spec/support/make_phase4_test_variant.lua` source copy delays selected FS
-callbacks to cover late cancellation, disposal of a late successful open, and
-cross-generation Runtime/File/Task/buffer/error rooting. Keep that timing hook
-out of installed modules; it is not a general scheduler or fault-injection
+exception is `spec/stdlib/uv_late_fs_callbacks_spec.lua`: its isolated
+`spec/support/make_delayed_fs_callback_variant.lua` source copy delays selected
+FS callbacks to cover late cancellation, disposal of a late successful open,
+and cross-generation Runtime/File/Task/buffer/error rooting. Keep that timing
+hook out of installed modules; it is not a general scheduler or fault-injection
 variant.
 
 `titanc` takes dot-separated **module names**, not file paths (dots map to

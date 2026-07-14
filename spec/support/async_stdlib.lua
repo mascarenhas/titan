@@ -34,7 +34,7 @@ end
 M.host_lua = host_lua
 
 local function fresh_workspace_path(label)
-    local path = os.tmpname() .. "-titan-phase2-" .. label
+    local path = os.tmpname() .. "-titan-async-stdlib-" .. label
     os.remove(path)
     return path
 end
@@ -51,7 +51,8 @@ local function find_standard_dir()
             return path
         end
     end
-    error("Phase 2 specs require prebuilt coroutine.so, uv.so, and timer.so; " ..
+    error("async stdlib specs require prebuilt coroutine.so, uv.so, and " ..
+          "timer.so; " ..
           "run the focused Makefile stdlib target first", 0)
 end
 M.standard_dir = find_standard_dir
@@ -117,7 +118,7 @@ function M.workspace(label)
 end
 
 function M.copy_fixture(workspace, fixture, modname)
-    copy_file(REPO .. "/spec/fixtures/uv/phase2/" .. fixture,
+    copy_file(REPO .. "/spec/fixtures/stdlib/" .. fixture,
         workspace .. "/src/" .. modname .. ".titan")
 end
 
@@ -160,7 +161,7 @@ function M.compile(workspace, modname, options)
     end
     local command = {
         table.concat(environment, " "),
-        quote(lua), quote(REPO .. "/spec/support/phase2_compile.lua"),
+        quote(lua), quote(REPO .. "/spec/support/async_stdlib_compile.lua"),
         quote(REPO), quote(workspace .. "/src"), quote(modname),
         quote(workspace .. "/titan-runtime"),
     }
@@ -210,7 +211,7 @@ local function build_variant_workspace(transformer)
     local variant_cflags = os.getenv("TITAN_TEST_EXTRA_CFLAGS") or ""
     local variant_ldflags = os.getenv("TITAN_TEST_EXTRA_LDFLAGS") or ""
     assert.truthy(exists(workspace .. "/titan-runtime/libtitan.a"),
-        "Phase 2 variant requires make runtime's libtitan.a")
+        "async stdlib variant requires make runtime's libtitan.a")
     local coroutine_command = table.concat({
         base, "TITAN_EXTRA_CPPFLAGS=''",
         "TITAN_EXTRA_CFLAGS=" .. quote(variant_cflags),

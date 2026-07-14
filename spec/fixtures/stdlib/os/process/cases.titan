@@ -1,4 +1,4 @@
--- Public os.Process behavior against the owned Phase 6 child executable.
+-- Public os.Process behavior against the owned test child executable.
 local lua = foreign import "lua.h"
 local os = import "os"
 local timer = import "timer"
@@ -99,7 +99,7 @@ function schedule_spawn_and_metadata(child: string,
     end, "spawn accepted an embedded NUL in an argument")
 
     local original: string? = os.getenv(envname)
-    local environment = "phase6-child-environment"
+    local environment = "os-process-child-environment"
     do
       os.setenv(envname, environment)
       local cwd = os.cwd()

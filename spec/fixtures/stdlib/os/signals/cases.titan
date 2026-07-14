@@ -58,13 +58,13 @@ function schedule_cancelled_wait(): uv.Task
     end)
 
     wait_until_waiting(target)
-    target:cancel("phase6-cancelled-signal-wait")
+    target:cancel("cancelled-signal-wait")
     local caught = false
     do
       target:join()
     catch
       local cancelled = error as uv.Cancelled
-      check(cancelled.reason == "phase6-cancelled-signal-wait",
+      check(cancelled.reason == "cancelled-signal-wait",
             "signal cancellation reason changed")
       caught = true
     end
@@ -100,13 +100,13 @@ function schedule_sent_then_cancelled_wait(): uv.Task
     -- its callback reentrantly while this continuation is still running.
     -- The synchronous cancellation mark must suppress that delivery.
     send_signal("usr1")
-    target:cancel("phase6-cancel-after-signal-send")
+    target:cancel("cancel-after-signal-send")
     local caught = false
     do
       target:join()
     catch
       local cancelled = error as uv.Cancelled
-      check(cancelled.reason == "phase6-cancel-after-signal-send",
+      check(cancelled.reason == "cancel-after-signal-send",
             "sent-signal cancellation reason changed")
       caught = true
     end

@@ -7,7 +7,7 @@ local nonblocking_started = false
 local nested_child_started = false
 
 local function fail_origin(): value
-  raise "phase2-observed-boom"
+  raise "uv-task-observed-boom"
   return nil
 end
 
@@ -115,7 +115,7 @@ function schedule_next_turn_observer(): uv.Task
     do
       child:join()
     catch
-      if error ~= "phase2-observed-boom" then
+      if error ~= "uv-task-observed-boom" then
         raise "observer received the wrong error value"
       end
       timer.yield()

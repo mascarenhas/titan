@@ -1,4 +1,4 @@
--- Runs only against the generated __test_phase4_* uv variant.
+-- Runs only against the generated delayed-FS callback uv variant.
 local lua = foreign import "lua.h"
 local fs = import "fs"
 local timer = import "timer"
@@ -51,7 +51,7 @@ function schedule_cross_generation_graph(root: string): uv.Task
     -- sleeping owner before attaching a young continuation and write buffer.
     lua.lua_gc(L, lua.LUA_GCGEN)
     lua.lua_gc(L, lua.LUA_GCCOLLECT)
-    uv.__test_phase4_delay_next_fs_callback(30)
+    uv.__test_delay_next_fs_callback(30)
 
     local payload: string? =
         "young-buffer:" .. root .. ":shared-tag-continuation"
@@ -59,7 +59,7 @@ function schedule_cross_generation_graph(root: string): uv.Task
     local writer = schedule_buffer_write(file, payload as string)
     payload = nil
 
-    while not uv.__test_phase4_fs_callback_is_delayed() do
+    while not uv.__test_fs_callback_is_delayed() do
       timer.yield()
     end
     lua.lua_gc(L, lua.LUA_GCSTEP, 0 as lua.lua_Integer)
@@ -76,7 +76,7 @@ end
 
 function schedule_late_fs_cancellation(path: string): uv.Task
   fs_result_delivered = false
-  uv.__test_phase4_delay_next_fs_callback(40)
+  uv.__test_delay_next_fs_callback(40)
 
   local target = uv.run(function (): value
     fs.stat(path)
@@ -85,7 +85,7 @@ function schedule_late_fs_cancellation(path: string): uv.Task
   end)
 
   local canceller = uv.run(function (): value
-    while not uv.__test_phase4_fs_callback_is_delayed() do
+    while not uv.__test_fs_callback_is_delayed() do
       timer.yield()
     end
 
@@ -125,7 +125,7 @@ end
 
 function schedule_late_open_cancellation(path: string): uv.Task
   fs_open_result_delivered = false
-  uv.__test_phase4_delay_next_fs_callback(40)
+  uv.__test_delay_next_fs_callback(40)
 
   local target = uv.run(function (): value
     local file = fs.open(path, "w")
@@ -135,7 +135,7 @@ function schedule_late_open_cancellation(path: string): uv.Task
   end)
 
   local canceller = uv.run(function (): value
-    while not uv.__test_phase4_fs_callback_is_delayed() do
+    while not uv.__test_fs_callback_is_delayed() do
       timer.yield()
     end
     target:cancel("late-successful-open-cancel")

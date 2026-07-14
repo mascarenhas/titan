@@ -1,4 +1,4 @@
-local scenario = assert(arg[1], "missing Phase 2 runtime scenario")
+local scenario = assert(arg[1], "missing uv Task runtime scenario")
 local lua_coroutine = require "coroutine"
 local uv = require "titan.uv"
 local timer = require "titan.timer"
@@ -18,7 +18,7 @@ if scenario == "scheduler" then
         tostring(loop_err))
     assert(uv.loop() == nil)
 
-    local behavior = require "phase2_behavior"
+    local behavior = require "uv_task_cases"
     behavior.reset()
 
     local nonblocking = behavior.schedule_nonblocking()
@@ -61,15 +61,15 @@ if scenario == "scheduler" then
 
     local trace = traced:join()
     assert(type(trace) == "string" and #trace > 0)
-    local origin = assert(trace:find("in phase2_behavior.fail_origin", 1, true),
+    local origin = assert(trace:find("in uv_task_cases.fail_origin", 1, true),
         trace)
     local propagation = assert(trace:find(
-        "in phase2_behavior.join_propagation", 1, true), trace)
+        "in uv_task_cases.join_propagation", 1, true), trace)
     assert(origin < propagation, trace)
-    print("RESULT phase2 scheduler passed")
+    print("RESULT uv task scheduling passed")
 
 elseif scenario == "cancellation" then
-    local cancellation = require "phase2_cancellation"
+    local cancellation = require "uv_task_cancellation_cases"
     local sticky = cancellation.schedule_sticky()
     local before = cancellation.schedule_cancel_before_start()
     uv.loop()
@@ -80,25 +80,7 @@ elseif scenario == "cancellation" then
     assert(sticky:status() == "succeeded") -- observer Task succeeded
     local early = before:join()
     assert(early.reason == "before-start")
-    print("RESULT phase2 cancellation passed")
-
-elseif scenario == "ticker" then
-    local cases = require "phase2_ticker_cases"
-    local ticks = cases.schedule_four_ticks()
-    local close = cases.schedule_close_waiter()
-    local dropped = cases.schedule_dropped_ticks()
-    local turns = cases.schedule_zero_turns()
-    local second_waiter = cases.schedule_second_waiter_rejected()
-    local ok, err = pcall(timer.ticker, 0)
-    assert(not ok and tostring(err):find("positive", 1, true))
-
-    uv.loop()
-    assert(ticks:join() == 4)
-    assert(close:join() == false)
-    assert(dropped:join() == "dropped-empty-ticks")
-    assert(turns:join() == "zero-turns-ok")
-    assert(second_waiter:join() == "second-waiter-rejected")
-    print("RESULT phase2 ticker passed")
+    print("RESULT uv task cancellation passed")
 
 elseif scenario == "sequential-gc" then
     collectgarbage("collect")
@@ -145,12 +127,12 @@ elseif scenario == "sequential-gc" then
     assert(not second_started and second:status() == "ready")
     uv.loop()
     assert(second_started and second:join() == 23)
-    print("RESULT phase2 sequential GC sessions passed")
+    print("RESULT uv task GC and sequential sessions passed")
 elseif scenario == "join-cycle" then
-    local behavior = require "phase2_behavior"
+    local behavior = require "uv_task_cases"
     behavior.schedule_join_cycle()
     uv.loop()
     error("cyclic Task joins unexpectedly completed")
 else
-    error("unknown Phase 2 runtime scenario: " .. scenario)
+    error("unknown uv Task runtime scenario: " .. scenario)
 end

@@ -406,7 +406,7 @@ bundled/system libuv topology. Linux CI also rebuilds Lua, libbacktrace, libuv,
 the Titan runtime, and standard modules under ASan/UBSan, then runs
 representative timer/FS and core owner/callback suites plus production net/OS
 smokes. Regular Linux runs the complete production behavior suites; the sole
-isolated source variant delays selected Phase 4 FS callbacks to cover late
+isolated source variant delays selected FS callbacks to cover late
 cancellation, disposal of a late successful open, and cross-generation
 Runtime/File/Task/buffer/error rooting. The sanitizer net smoke specifically
 keeps a large write pending across Task cancellation, unwind, and forced GC. Its

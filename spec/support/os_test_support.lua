@@ -1,7 +1,7 @@
 local lfs = require "lfs"
 local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
-local phase2 = require "spec.support.phase2"
+local async_stdlib = require "spec.support.async_stdlib"
 
 local M = {}
 
@@ -32,7 +32,7 @@ local function shell_words(command, label)
 end
 
 local function build_process_child(workspace)
-    local cppflags, ldflags, archive = phase2.host_libuv_config()
+    local cppflags, ldflags, archive = async_stdlib.host_libuv_config()
     local argv = { "env", "CCACHE_DISABLE=1" }
     append(argv, shell_words(os.getenv("CC") or "cc", "CC"))
     append(argv, {
@@ -45,7 +45,7 @@ local function build_process_child(workspace)
     end
     append(argv, shell_words(cppflags, "libuv CPPFLAGS"))
     append(argv, {
-        M.repo .. "/spec/fixtures/uv/phase6/process_child.c",
+        M.repo .. "/spec/fixtures/stdlib/os/process/child.c",
         archive,
     })
     append(argv, shell_words(ldflags, "libuv LDFLAGS"))
@@ -55,15 +55,15 @@ local function build_process_child(workspace)
             "TITAN_TEST_EXTRA_LDFLAGS"))
     end
     append(argv, { "-o", workspace .. "/process_child" })
-    local ok, _, output = phase2.run(shell_command(argv), workspace)
+    local ok, _, output = async_stdlib.run(shell_command(argv), workspace)
     assert.truthy(ok, output)
 end
 
 function M.workspace(label)
-    local standard = phase2.standard_dir()
+    local standard = async_stdlib.standard_dir()
     assert.truthy(lfs.attributes(standard .. "/os.so"),
-        "Phase 6 specs require prebuilt os.so; run make stdlib first")
-    return phase2.workspace("phase6-os-" .. (label or "runtime"))
+        "os specs require prebuilt os.so; run make stdlib first")
+    return async_stdlib.workspace("os-" .. (label or "runtime"))
 end
 
 function M.process_child(workspace)
@@ -74,23 +74,24 @@ end
 
 function M.copy_fixture(workspace, fixture, modname)
     write(workspace .. "/src/" .. modname .. ".titan",
-        phase2.read(M.repo .. "/spec/fixtures/uv/phase6/" .. fixture))
+        async_stdlib.read(M.repo ..
+            "/spec/fixtures/stdlib/os/" .. fixture))
 end
 
 function M.compile(workspace, modname, options)
-    local standard = phase2.standard_dir()
+    local standard = async_stdlib.standard_dir()
     assert.truthy(lfs.attributes(standard .. "/os.so"),
-        "Phase 6 specs require prebuilt os.so; run make stdlib first")
-    return phase2.compile(workspace, modname, options)
+        "os specs require prebuilt os.so; run make stdlib first")
+    return async_stdlib.compile(workspace, modname, options)
 end
 
 function M.libuv_cppflags()
-    local cppflags = phase2.host_libuv_config()
+    local cppflags = async_stdlib.host_libuv_config()
     return cppflags
 end
 
-M.cleanup = phase2.cleanup
-M.run = phase2.run
-M.lua_command = phase2.lua_command
-M.repo = phase2.repo
+M.cleanup = async_stdlib.cleanup
+M.run = async_stdlib.run
+M.lua_command = async_stdlib.lua_command
+M.repo = async_stdlib.repo
 return M

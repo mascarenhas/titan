@@ -1,6 +1,6 @@
 local lfs = require "lfs"
 local assert = require "luassert"
-local phase2 = require "spec.support.phase2"
+local async_stdlib = require "spec.support.async_stdlib"
 
 local M = {}
 
@@ -15,7 +15,7 @@ local function write(path, contents)
 end
 
 function M.workspace(label)
-    local workspace = phase2.workspace("phase3-fs-" .. label)
+    local workspace = async_stdlib.workspace("fs-" .. label)
     local root = workspace .. "/data"
     assert.truthy(lfs.mkdir(root))
     return workspace, root
@@ -23,33 +23,33 @@ end
 
 function M.copy_fixture(workspace, fixture, modname)
     write(workspace .. "/src/" .. modname .. ".titan",
-        phase2.read(M.repo ..
-            "/spec/fixtures/uv/phase3/" .. fixture))
+        async_stdlib.read(M.repo ..
+            "/spec/fixtures/stdlib/fs/" .. fixture))
 end
 
 function M.compile(workspace, modname, options)
-    local standard = phase2.standard_dir()
+    local standard = async_stdlib.standard_dir()
     assert.truthy(lfs.attributes(standard .. "/fs.so"),
-        "Phase 3 specs require prebuilt fs.so; run make stdlib first")
+        "fs specs require prebuilt fs.so; run make stdlib first")
     options = options or {}
     options.stdlib = options.stdlib or standard
-    return phase2.compile(workspace, modname, options)
+    return async_stdlib.compile(workspace, modname, options)
 end
 
 function M.lua_command(workspace, script, ...)
-    return phase2.lua_command(workspace, script, ...)
+    return async_stdlib.lua_command(workspace, script, ...)
 end
 
 function M.variant_workspace(transformer)
-    local workspace = phase2.variant_workspace(transformer)
+    local workspace = async_stdlib.variant_workspace(transformer)
     local root = workspace .. "/data"
     assert.truthy(lfs.mkdir(root))
 
     -- Build fs only after the transformed uv DSO exists. Dependencies use the
     -- private compiled-module boundary even when their sources are visible.
-    local raw_lua = phase2.host_lua()
+    local raw_lua = async_stdlib.host_lua()
     write(workspace .. "/titan/fs.titan",
-        phase2.read(M.repo .. "/titan/fs.titan"))
+        async_stdlib.read(M.repo .. "/titan/fs.titan"))
     local variant_cflags = os.getenv("TITAN_TEST_EXTRA_CFLAGS") or ""
     local variant_ldflags = os.getenv("TITAN_TEST_EXTRA_LDFLAGS") or ""
     local compiler = quote(raw_lua) .. " -e " .. quote(
@@ -63,13 +63,13 @@ function M.variant_workspace(transformer)
         "TITAN_EXTRA_LDFLAGS=" .. quote(variant_ldflags), compiler,
         "--tree", quote(workspace), "titan.fs",
     }, " ")
-    local ok, _, output = phase2.run(command, workspace)
+    local ok, _, output = async_stdlib.run(command, workspace)
     assert.truthy(ok, output)
     return workspace, root
 end
 
-M.cleanup = phase2.cleanup
-M.run = phase2.run
-M.variant_lua_command = phase2.variant_lua_command
-M.repo = phase2.repo
+M.cleanup = async_stdlib.cleanup
+M.run = async_stdlib.run
+M.variant_lua_command = async_stdlib.variant_lua_command
+M.repo = async_stdlib.repo
 return M

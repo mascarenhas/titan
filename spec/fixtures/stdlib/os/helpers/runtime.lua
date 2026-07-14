@@ -1,8 +1,8 @@
-local temp = assert(arg[1], "missing Phase 6 temporary directory")
-local envname = assert(arg[2], "missing Phase 6 environment name")
+local temp = assert(arg[1], "missing OS-helper temporary directory")
+local envname = assert(arg[2], "missing OS-helper environment name")
 local lfs = require "lfs"
 local lua_os = os
-local cases = require "phase6_os_helper_cases"
+local cases = require "os_helper_cases"
 
 local original_cwd = lfs.currentdir()
 local original_env = lua_os.getenv(envname)
@@ -17,4 +17,4 @@ assert(cases.exercise_paths_and_identity(alternate_cwd) ==
 assert(lfs.currentdir() == original_cwd)
 assert(lua_os.getenv(envname) == original_env)
 
-print("RESULT phase6 synchronous OS helpers passed")
+print("RESULT os synchronous helpers passed")

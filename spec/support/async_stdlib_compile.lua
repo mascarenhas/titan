@@ -1,5 +1,5 @@
--- Child-process compiler used by Phase 2 specs. The parent sets CWD to its
--- unique workspace, so all generated application artifacts stay isolated.
+-- Child-process compiler used by async standard-library specs. The parent
+-- sets CWD to its unique workspace, so generated artifacts stay isolated.
 local repo, source_root, modname = assert(arg[1]), assert(arg[2]), assert(arg[3])
 package.path = repo .. "/?.lua;" .. repo .. "/?/init.lua;" .. package.path
 

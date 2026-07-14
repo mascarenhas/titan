@@ -1,7 +1,7 @@
 local uv = import "uv"
 
 local function unobserved_origin(): value
-  raise "phase2-unobserved-boom"
+  raise "uv-task-unobserved-boom"
   return nil
 end
 

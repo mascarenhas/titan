@@ -1,23 +1,23 @@
-local phase2 = require "spec.support.phase2"
+local async_stdlib = require "spec.support.async_stdlib"
 
-describe("timer Phase 2 recurring handles", function()
+describe("timer recurring handles", function()
     local workspace
 
     setup(function()
-        workspace = phase2.workspace("timer")
-        phase2.copy_fixture(workspace, "ticker_cases.titan",
-            "phase2_ticker_cases")
-        phase2.compile(workspace, "phase2_ticker_cases")
+        workspace = async_stdlib.workspace("timer")
+        async_stdlib.copy_fixture(workspace,
+            "timer/recurring_cases.titan", "timer_recurring_cases")
+        async_stdlib.compile(workspace, "timer_recurring_cases")
     end)
 
-    teardown(function() phase2.cleanup(workspace) end)
+    teardown(function() async_stdlib.cleanup(workspace) end)
 
     it("cycles four times, drops empty ticks, cedes zero turns, and closes",
     function()
-        local command = phase2.lua_command(workspace,
-            phase2.repo .. "/spec/fixtures/uv/phase2/runtime.lua", "ticker")
-        local ok, status, output = phase2.run(command, workspace)
+        local command = async_stdlib.lua_command(workspace,
+            async_stdlib.repo .. "/spec/fixtures/stdlib/timer/runtime.lua")
+        local ok, status, output = async_stdlib.run(command, workspace)
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
-        assert.match("RESULT phase2 ticker passed", output, 1, true)
+        assert.match("RESULT timer recurring handles passed", output, 1, true)
     end)
 end)

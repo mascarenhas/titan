@@ -1,38 +1,38 @@
-local phase6 = require "spec.support.phase6"
+local os_support = require "spec.support.os_test_support"
 
-describe("os Phase 6 child processes", function()
+describe("os child processes", function()
     local workspace
     local child
     local envname
 
     setup(function()
-        workspace = phase6.workspace("process")
-        child = phase6.process_child(workspace)
-        envname = ("TITAN_PHASE6_PROCESS_" .. workspace):
+        workspace = os_support.workspace("process")
+        child = os_support.process_child(workspace)
+        envname = ("TITAN_OS_PROCESS_" .. workspace):
             gsub("[^A-Za-z0-9_]", "_")
-        phase6.copy_fixture(workspace, "process_core_cases.titan",
-            "phase6_process_cases")
-        phase6.compile(workspace, "phase6_process_cases")
+        os_support.copy_fixture(workspace, "process/cases.titan",
+            "os_process_cases")
+        os_support.compile(workspace, "os_process_cases")
     end)
 
     teardown(function()
-        phase6.cleanup(workspace)
+        os_support.cleanup(workspace)
     end)
 
     local function run_scenario(name)
-        local script = phase6.repo ..
-            "/spec/fixtures/uv/phase6/process_runtime.lua"
-        local command = phase6.lua_command(
-            workspace, script, workspace .. "/phase6_process_cases.so",
+        local script = os_support.repo ..
+            "/spec/fixtures/stdlib/os/process/runtime.lua"
+        local command = os_support.lua_command(
+            workspace, script, workspace .. "/os_process_cases.so",
             name, child, envname)
-        return phase6.run(command, workspace)
+        return os_support.run(command, workspace)
     end
 
     it("preserves argv/environment/cwd and retained exit status", function()
         local ok, status, output = run_scenario("spawn-status")
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
         assert.equals(0, status, output)
-        assert.match("RESULT phase6 process spawn and status passed",
+        assert.match("RESULT os process spawn and status passed",
             output, 1, true)
     end)
 
@@ -40,14 +40,14 @@ describe("os Phase 6 child processes", function()
         local ok, status, output = run_scenario("stdio")
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
         assert.equals(0, status, output)
-        assert.match("RESULT phase6 process stdio passed", output, 1, true)
+        assert.match("RESULT os process stdio passed", output, 1, true)
     end)
 
     it("cancels replaceable wait and read waiters", function()
         local ok, status, output = run_scenario("wait-read")
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
         assert.equals(0, status, output)
-        assert.match("RESULT phase6 process wait and read passed",
+        assert.match("RESULT os process wait and read passed",
             output, 1, true)
     end)
 
@@ -55,7 +55,7 @@ describe("os Phase 6 child processes", function()
         local ok, status, output = run_scenario("communicate")
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
         assert.equals(0, status, output)
-        assert.match("RESULT phase6 communicate success passed",
+        assert.match("RESULT os process communicate passed",
             output, 1, true)
     end)
 
@@ -65,7 +65,7 @@ describe("os Phase 6 child processes", function()
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
         assert.equals(0, status, output)
         assert.match(
-            "RESULT phase6 communicate failure and cancellation passed",
+            "RESULT os process communicate failure and cancellation passed",
             output, 1, true)
     end)
 
@@ -74,7 +74,7 @@ describe("os Phase 6 child processes", function()
         local ok, status, output = run_scenario("shutdown")
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
         assert.equals(0, status, output)
-        assert.match("RESULT phase6 forced process shutdown passed",
+        assert.match("RESULT os forced process shutdown passed",
             output, 1, true)
     end)
 end)

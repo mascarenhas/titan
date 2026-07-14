@@ -2,8 +2,8 @@
 
 Status: complete. Portable OS helpers, one-shot signals, child processes,
 binary stdio pipes, retained exit status, and concurrent `communicate` are
-covered by normal behavior and packaging suites, plus the deterministic Phase
-4 late-FS callback and cross-generation GC cases. Phase 7
+covered by normal behavior and packaging suites, plus deterministic delayed-FS
+callback and cross-generation GC cases. Phase 7
 documentation and CI integration are complete; focused and integrated local
 async gates are green. Linux push CI and the manual macOS workflow remain the
 authoritative release gates for each branch head.
@@ -1137,9 +1137,9 @@ promise.
 | Spawned process and stdio pipes | `uv_spawn` initializes the process handle on both success and failure. On a negative return, `uv_close` that handle and close/drain every initialized pipe; no exit callback is expected | Cancelling a waiter does not kill. Session cleanup uses `uv_process_kill` for a live child, observes its exit callback, and only then closes the process handle; pipe requests follow their own rows | Exit callback records status and directly resumes a waiter. A successfully spawned live process handle is never closed before exit is observed, avoiding an unreapable child on Unix | Process close callback after spawn failure or observed exit, plus all pipe request/close callbacks |
 
 Behavioral tests exercise observable success, failure, cancellation, and close
-paths through the production modules. The isolated Phase 4 source variant
-delays selected FS callbacks only for late cancellation, disposal of a late
-successful open, and cross-generation Runtime/File/Task/buffer/error rooting.
+paths through the production modules. The isolated delayed-FS callback source
+variant covers late cancellation, disposal of a late successful open, and
+cross-generation Runtime/File/Task/buffer/error rooting.
 
 ## Deterministic shutdown
 
@@ -1796,7 +1796,7 @@ Files:
 - `doc/implementation/coroutines.md`
 - `doc/implementation/driver.md`
 - `doc/implementation/index.md`
-- optional `spec/fixtures/uv/`
+- optional `spec/fixtures/stdlib/`
 
 Work:
 
@@ -1873,7 +1873,7 @@ Files:
 - `titan/uv.titan`
 - `titan-runtime/titan_uv.c`
 - `titan-runtime/titan/uv.h`
-- `spec/stdlib/uv_spec.lua`
+- `spec/stdlib/uv_native_handles_spec.lua`
 
 Work:
 
@@ -1942,7 +1942,9 @@ Files:
 
 - `titan/uv.titan`
 - `titan/timer.titan`
-- `spec/stdlib/uv_spec.lua`
+- `spec/stdlib/uv_tasks_spec.lua`
+- `spec/stdlib/uv_bootstrap_spec.lua`
+- `spec/stdlib/uv_states_spec.lua`
 - `spec/stdlib/timer_spec.lua`
 
 Work:
@@ -2037,10 +2039,10 @@ sockets/processes multiplied the handle types:
   shared tag.
 
 Canonical production suites cover the cases observable through public APIs.
-The isolated Phase 4 source variant is deliberately narrower: it delays
-selected FS callbacks for late cancellation, disposal of a late successful
-open, and the cross-generation GC graph. It does not inject arbitrary
-scheduler or libuv failures.
+The isolated delayed-FS callback source variant is deliberately narrower: it
+delays selected FS callbacks for late cancellation, disposal of a late
+successful open, and the cross-generation GC graph. It does not inject
+arbitrary scheduler or libuv failures.
 
 Add an ASan/UBSan CI job for the shim and focused library specs. Local sanitizer
 availability is not assumed; CI is the release gate.
@@ -2159,11 +2161,11 @@ Work:
 Add topical suites instead of growing catch-all files:
 
 - `spec/stdlib/coroutine_spec.lua`
-- `spec/stdlib/uv_spec.lua`
-- `spec/stdlib/uv_phase2_spec.lua`
+- `spec/stdlib/uv_native_handles_spec.lua`
+- `spec/stdlib/uv_tasks_spec.lua`
 - `spec/stdlib/uv_states_spec.lua`
 - `spec/stdlib/uv_bootstrap_spec.lua`
-- `spec/stdlib/uv_phase4_spec.lua`
+- `spec/stdlib/uv_late_fs_callbacks_spec.lua`
 - `spec/stdlib/timer_spec.lua`
 - `spec/stdlib/timer_packaging_spec.lua`
 - `spec/stdlib/fs_spec.lua`
@@ -2260,11 +2262,11 @@ CCACHE_DISABLE=1 make libuv
 CCACHE_DISABLE=1 "$PREFIX/bin/luarocks" make --force
 CCACHE_DISABLE=1 busted \
   spec/stdlib/coroutine_spec.lua \
-  spec/stdlib/uv_spec.lua \
-  spec/stdlib/uv_phase2_spec.lua \
+  spec/stdlib/uv_native_handles_spec.lua \
+  spec/stdlib/uv_tasks_spec.lua \
   spec/stdlib/uv_states_spec.lua \
   spec/stdlib/uv_bootstrap_spec.lua \
-  spec/stdlib/uv_phase4_spec.lua \
+  spec/stdlib/uv_late_fs_callbacks_spec.lua \
   spec/stdlib/timer_spec.lua \
   spec/stdlib/timer_packaging_spec.lua \
   spec/stdlib/fs_spec.lua \

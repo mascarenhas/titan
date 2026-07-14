@@ -1,7 +1,7 @@
 local lfs = require "lfs"
-local phase2 = require "spec.support.phase2"
+local async_stdlib = require "spec.support.async_stdlib"
 
-local FIXTURE = "spec/fixtures/uv/phase5/packaging/"
+local FIXTURE = "spec/fixtures/stdlib/net/packaging/"
 
 local function quote(word)
     return "'" .. tostring(word):gsub("'", "'\\''") .. "'"
@@ -14,7 +14,7 @@ local function write_file(path, contents)
 end
 
 local function copy_file(source, destination)
-    write_file(destination, phase2.read(source))
+    write_file(destination, async_stdlib.read(source))
 end
 
 local function mkdir(path)
@@ -22,31 +22,32 @@ local function mkdir(path)
 end
 
 local function compiler_lua()
-    return phase2.host_lua()
+    return async_stdlib.host_lua()
 end
 
 local function compile(workspace, source_root, modname)
     local command = table.concat({
         "env CCACHE_DISABLE=1",
         "TITAN_PATH_0_11=" .. quote(
-            phase2.module_root(phase2.standard_dir())),
+            async_stdlib.module_root(async_stdlib.standard_dir())),
         "TITAN_PATH=",
         quote(compiler_lua()),
-        quote(phase2.repo .. "/spec/support/phase2_compile.lua"),
-        quote(phase2.repo), quote(source_root), quote(modname),
+        quote(async_stdlib.repo ..
+            "/spec/support/async_stdlib_compile.lua"),
+        quote(async_stdlib.repo), quote(source_root), quote(modname),
         quote(workspace .. "/titan-runtime"),
     }, " ")
-    return phase2.run(command, workspace)
+    return async_stdlib.run(command, workspace)
 end
 
 local function defined_global_symbols(binary)
-    local ok, _, host = phase2.run("uname -s")
+    local ok, _, host = async_stdlib.run("uname -s")
     assert.truthy(ok, host)
     local darwin = host:match("^Darwin") ~= nil
     local command = darwin and
         ("nm -gU " .. quote(binary)) or
         ("nm -g --defined-only " .. quote(binary))
-    local symbols_ok, _, output = phase2.run(command)
+    local symbols_ok, _, output = async_stdlib.run(command)
     assert.truthy(symbols_ok, output)
     local symbols = {}
     for line in output:gmatch("[^\r\n]+") do
@@ -78,7 +79,7 @@ describe("net standard-module packaging", function()
     local source_root
 
     setup(function()
-        workspace = phase2.workspace("net-packaging")
+        workspace = async_stdlib.workspace("net-packaging")
         source_root = workspace .. "/net-app"
         mkdir(source_root)
         copy_file(FIXTURE .. "net_only.titan",
@@ -88,24 +89,24 @@ describe("net standard-module packaging", function()
     end)
 
     teardown(function()
-        phase2.cleanup(workspace)
+        async_stdlib.cleanup(workspace)
     end)
 
     it("loads a net-only application through qualified binaries",
     function()
-        local generated = phase2.read(source_root .. "/net_only.c")
+        local generated = async_stdlib.read(source_root .. "/net_only.c")
         assert.match('loadlibwithuv%(L, "titan/net%.so"%)', generated)
         assert.not_match("#include <uv.h>", generated, 1, true)
         assert.not_match("titan_uvshim", generated, 1, true)
         assert_no_uv_implementation(workspace .. "/net_only")
 
         local command = "env TITAN_PATH_0_11=" ..
-            quote(phase2.module_root(phase2.standard_dir())) .. " " ..
+            quote(async_stdlib.module_root(async_stdlib.standard_dir())) .. " " ..
             quote(workspace .. "/net_only")
-        local ok, status, output = phase2.run(command, workspace)
+        local ok, status, output = async_stdlib.run(command, workspace)
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
 
-        local net_c = phase2.read("titan/net.c")
+        local net_c = async_stdlib.read("titan/net.c")
         assert.match('loadlib%(L, "titan/uv%.so"%)', net_c)
         assert.match('"titan_uv_abi"', net_c, 1, true)
         assert.match('"titan_uv_init"', net_c, 1, true)
@@ -114,7 +115,7 @@ describe("net standard-module packaging", function()
     end)
 
     it("keeps net.so free of a duplicate libuv implementation", function()
-        local net_so = phase2.standard_dir() .. "/net.so"
+        local net_so = async_stdlib.standard_dir() .. "/net.so"
         local symbols, output = defined_global_symbols(net_so)
         for _, expected in ipairs({
             "titan_net_init", "titan_net_abi", "titan_net_types",
@@ -126,12 +127,12 @@ describe("net standard-module packaging", function()
         assert.falsy(symbols.luaopen_net, output)
         assert_no_uv_implementation(net_so)
 
-        local ok, _, host = phase2.run("uname -s")
+        local ok, _, host = async_stdlib.run("uname -s")
         assert.truthy(ok, host)
         local command = host:match("^Darwin") and
             ("otool -L " .. quote(net_so)) or
             ("readelf -d " .. quote(net_so))
-        local deps_ok, _, dependencies = phase2.run(command)
+        local deps_ok, _, dependencies = async_stdlib.run(command)
         assert.truthy(deps_ok, dependencies)
         assert.falsy(dependencies:lower():find("libuv", 1, true),
             dependencies)
@@ -139,9 +140,9 @@ describe("net standard-module packaging", function()
 
     it("resolves Lua require and native load through the canonical net image",
     function()
-        local canonical = phase2.standard_dir() .. "/net.so"
-        local cpath = phase2.canonical_cpath(phase2.standard_dir())
-        local lua = phase2.host_lua()
+        local canonical = async_stdlib.standard_dir() .. "/net.so"
+        local cpath = async_stdlib.canonical_cpath(async_stdlib.standard_dir())
+        local lua = async_stdlib.host_lua()
         local program = string.format([[
             assert(package.searchpath("titan.net", package.cpath) == %q)
             local canonical_open = assert(package.loadlib(
@@ -153,11 +154,11 @@ describe("net standard-module packaging", function()
         ]], canonical, canonical)
         local command = table.concat({
             "env TITAN_PATH_0_11=" .. quote(
-                phase2.module_root(phase2.standard_dir())),
+                async_stdlib.module_root(async_stdlib.standard_dir())),
             "LUA_CPATH=" .. quote(cpath .. ";;"),
             quote(lua), "-e", quote(program),
         }, " ")
-        local ok, status, output = phase2.run(command, workspace)
+        local ok, status, output = async_stdlib.run(command, workspace)
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
     end)
 end)

@@ -1,6 +1,6 @@
-local root = assert(arg[1], "missing Phase 4 temp directory")
+local root = assert(arg[1], "missing late-FS callback temp directory")
 local uv = require "titan.uv"
-local cases = require "phase4_race_cases"
+local cases = require "uv_late_fs_callback_cases"
 
 local cross_generation = cases.schedule_cross_generation_graph(root)
 uv.loop()
@@ -24,4 +24,4 @@ end)
 uv.loop()
 assert(next_session:join() == "next-session-ok")
 
-print("RESULT phase4 late-FS and GC races passed")
+print("RESULT uv late filesystem callbacks and rooting passed")

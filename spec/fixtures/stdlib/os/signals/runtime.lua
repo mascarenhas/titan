@@ -1,5 +1,5 @@
 local uv = require "titan.uv"
-local cases = require "phase6_signal_cases"
+local cases = require "os_signal_cases"
 
 local function run(task, expected)
     uv.loop()
@@ -17,4 +17,4 @@ run(cases.schedule_generational_gc(), "signal-generational-gc-ok")
 run(cases.schedule_validation_rejections(),
     "signal-validation-rejections-ok")
 
-print("RESULT phase6 signal runtime passed")
+print("RESULT os signal runtime passed")

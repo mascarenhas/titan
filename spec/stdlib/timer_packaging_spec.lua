@@ -1,7 +1,7 @@
 local lfs = require "lfs"
-local phase2 = require "spec.support.phase2"
+local async_stdlib = require "spec.support.async_stdlib"
 
-local FIXTURE = "spec/fixtures/uv/packaging/"
+local FIXTURE = "spec/fixtures/stdlib/timer/packaging/"
 
 local function quote(word)
     return "'" .. tostring(word):gsub("'", "'\\''") .. "'"
@@ -14,7 +14,7 @@ local function write_file(path, contents)
 end
 
 local function copy_file(source, destination)
-    write_file(destination, phase2.read(source))
+    write_file(destination, async_stdlib.read(source))
 end
 
 local function mkdir(path)
@@ -22,31 +22,32 @@ local function mkdir(path)
 end
 
 local function compiler_lua()
-    return phase2.host_lua()
+    return async_stdlib.host_lua()
 end
 
 local function compile(workspace, source_root, modname)
     local command = table.concat({
         "env CCACHE_DISABLE=1",
         "TITAN_PATH_0_11=" .. quote(
-            phase2.module_root(phase2.standard_dir())),
+            async_stdlib.module_root(async_stdlib.standard_dir())),
         "TITAN_PATH=",
         quote(compiler_lua()),
-        quote(phase2.repo .. "/spec/support/phase2_compile.lua"),
-        quote(phase2.repo), quote(source_root), quote(modname),
+        quote(async_stdlib.repo ..
+            "/spec/support/async_stdlib_compile.lua"),
+        quote(async_stdlib.repo), quote(source_root), quote(modname),
         quote(workspace .. "/titan-runtime"),
     }, " ")
-    return phase2.run(command, workspace)
+    return async_stdlib.run(command, workspace)
 end
 
 local function defined_global_symbols(binary)
-    local ok, _, host = phase2.run("uname -s")
+    local ok, _, host = async_stdlib.run("uname -s")
     assert.truthy(ok, host)
     local darwin = host:match("^Darwin") ~= nil
     local command = darwin and
         ("nm -gU " .. quote(binary)) or
         ("nm -g --defined-only " .. quote(binary))
-    local symbols_ok, _, output = phase2.run(command)
+    local symbols_ok, _, output = async_stdlib.run(command)
     assert.truthy(symbols_ok, output)
 
     local symbols = {}
@@ -84,7 +85,7 @@ describe("timer standard-module packaging", function()
     local success_source
 
     setup(function()
-        workspace = phase2.workspace("timer-packaging")
+        workspace = async_stdlib.workspace("timer-packaging")
         success_source = workspace .. "/timer-app"
         mkdir(success_source)
         copy_file(FIXTURE .. "timer_only.titan",
@@ -95,12 +96,12 @@ describe("timer standard-module packaging", function()
     end)
 
     teardown(function()
-        phase2.cleanup(workspace)
+        async_stdlib.cleanup(workspace)
     end)
 
     it("loads a timer-only application through qualified binaries",
     function()
-        local generated = phase2.read(success_source .. "/timer_only.c")
+        local generated = async_stdlib.read(success_source .. "/timer_only.c")
         assert.match('loadlibwithuv%(L, "titan/timer%.so"%)', generated)
         assert.not_match('loadlib%(L, "titan/uv%.so"%)', generated)
         assert.not_match("#include <uv.h>", generated, 1, true)
@@ -110,16 +111,16 @@ describe("timer standard-module packaging", function()
 
         local command = table.concat({
             "env TITAN_PATH_0_11=" .. quote(
-                phase2.module_root(phase2.standard_dir())),
+                async_stdlib.module_root(async_stdlib.standard_dir())),
             quote(workspace .. "/timer_only"),
         }, " ")
-        local ok, status, output = phase2.run(command, workspace)
+        local ok, status, output = async_stdlib.run(command, workspace)
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
     end)
 
     it("contains no statically linked libuv implementation in timer.so",
     function()
-        local timer_so = phase2.standard_dir() .. "/timer.so"
+        local timer_so = async_stdlib.standard_dir() .. "/timer.so"
         local symbols, output = defined_global_symbols(timer_so)
         for _, expected in ipairs({
             "titan_timer_init", "titan_timer_abi", "titan_timer_types",

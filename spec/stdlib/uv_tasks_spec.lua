@@ -1,38 +1,41 @@
-local phase2 = require "spec.support.phase2"
+local async_stdlib = require "spec.support.async_stdlib"
 
-describe("uv Phase 2 continuation pump", function()
+describe("uv Task scheduling and lifecycle", function()
     local workspace
 
     setup(function()
-        workspace = phase2.workspace("uv")
-        phase2.copy_fixture(workspace, "behavior.titan", "phase2_behavior")
-        phase2.copy_fixture(workspace, "cancellation.titan",
-            "phase2_cancellation")
-        phase2.compile(workspace, "phase2_behavior")
-        phase2.compile(workspace, "phase2_cancellation")
+        workspace = async_stdlib.workspace("uv-tasks")
+        async_stdlib.copy_fixture(workspace, "uv/tasks/cases.titan",
+            "uv_task_cases")
+        async_stdlib.copy_fixture(workspace,
+            "uv/tasks/cancellation_cases.titan",
+            "uv_task_cancellation_cases")
+        async_stdlib.compile(workspace, "uv_task_cases")
+        async_stdlib.compile(workspace, "uv_task_cancellation_cases")
     end)
 
     teardown(function()
-        phase2.cleanup(workspace)
+        async_stdlib.cleanup(workspace)
     end)
 
     local function run_scenario(name)
-        local command = phase2.lua_command(workspace,
-            phase2.repo .. "/spec/fixtures/uv/phase2/runtime.lua", name)
-        return phase2.run(command, workspace)
+        local command = async_stdlib.lua_command(workspace,
+            async_stdlib.repo ..
+                "/spec/fixtures/stdlib/uv/tasks/runtime.lua", name)
+        return async_stdlib.run(command, workspace)
     end
 
     it("runs nonblocking/nested roots, shared-tag nesting, A-to-B handoff, " ..
        "out-of-order timers, observation, and child-loop rejection", function()
         local ok, status, output = run_scenario("scheduler")
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
-        assert.match("RESULT phase2 scheduler passed", output, 1, true)
+        assert.match("RESULT uv task scheduling passed", output, 1, true)
     end)
 
     it("preserves a first, sticky cancellation reason", function()
         local ok, status, output = run_scenario("cancellation")
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
-        assert.match("RESULT phase2 cancellation passed", output, 1, true)
+        assert.match("RESULT uv task cancellation passed", output, 1, true)
     end)
 
     it("reports a cyclic Task join as an idle-loop deadlock", function()
@@ -47,8 +50,8 @@ describe("uv Phase 2 continuation pump", function()
     function()
         local ok, status, output = run_scenario("sequential-gc")
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
-        assert.match("RESULT phase2 sequential GC sessions passed", output,
-            1, true)
+        assert.match("RESULT uv task GC and sequential sessions passed",
+            output, 1, true)
     end)
 
 end)
