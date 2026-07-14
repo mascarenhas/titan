@@ -80,7 +80,7 @@ The installed files used to compile Titan code include:
 | `$ROCKS_TREE/src/lua-5.5.0/`, `$ROCKS_TREE/lib/liblua.a` | Matching Lua source and archive copies staged as part of the Titan compiler SDK |
 | `$ROCKS_TREE/lib/libtitan.a` | Exactly `titan.o`, `titan_coro.o`, and `titan_uv.o`: generated-code loader/error support plus the coroutine and libuv callback shims |
 | `$ROCKS_TREE/lib/libbacktrace.a` | The separate vendored native unwinder/symbolizer archive |
-| `$ROCKS_TREE/lib/lua/5.5/titan.so` | The separate Lua support module built only from `titan-runtime/titanlib.c`; it is not a member of `libtitan.a` |
+| `$ROCKS_TREE/lib/lua/5.5/titan.so` | The separate Lua support module built only from `titan-runtime/titanlib.c`, including the compiler's internal `RTLD_LAZY` + `RTLD_LOCAL` interface loader; it is not a member of `libtitan.a` |
 | `$ROCKS_TREE/include/minicoro.h`, `titan.h`, `titan_longjmp.h` | Non-Lua top-level SDK headers |
 | `$ROCKS_TREE/include/titan/{ffi,coro,uv}.h` | Namespaced portable FFI, coroutine, and libuv shim headers |
 | `$ROCKS_TREE/lib/titan/0.11/titan/*.so` | The single canonical files for the `coroutine`, `uv`, `timer`, `fs`, `net`, and `os` standard modules, used by both Titan imports and `require "titan.*"` |
@@ -143,28 +143,32 @@ rebuilds the libuv-facing objects without requiring a manual clean.
 In bundled mode, `titan/uv.so` is the sole complete libuv provider. A compiled
 Titan extension DSO that directly `foreign import`s `uv.h` must also import the
 `titan.uv` module (normally written `import "uv"`) and leave its `uv_*`
-function references unresolved; do
-not link it with `-luv` or the private bundled archive. During compiled-interface
-recovery, `<mangled>_types` returns a second `"uv-provider"` result when the
-module has a `titan.uv` or `"dynamic-uv"` dependency; that metadata marks
-the dependency `"dynamic-uv"` even if libuv was already visible. Reading the marker
-also establishes or validates the canonical provider and records its file
-identity for the compiler process. If the first interface open instead fails
-on an unresolved `uv_*`, the compiler uses that open-stage diagnostic to
-bootstrap the canonical provider, retries, and then requires the marker; a
-binary that still omits it is rejected with instructions to rebuild with an
-explicit `titan.uv` import. Generated
-Titan consumers call `loadlibwithuv`, which
-establishes canonical `titan/uv.so` before mapping the extension itself.
-Ordinary binary dependencies without that marker retain eager, local loading.
-Because the provider precedes the extension's `dlopen`, regular calls, data and
-function-address relocations, and native constructors are all supported. For
-example, the extension source starts with both imports:
+function references unresolved; do not link it with `-luv` or the private
+bundled archive. Titan maps every compiled runtime dependency with its ordinary
+`RTLD_LAZY | RTLD_GLOBAL` loader. Lazy binding lets the extension image map
+while its libuv calls are still unresolved; its generated initializer then
+loads the explicit `uv` import globally before Titan code can make one of those
+calls. `RTLD_NOW` would instead fail while mapping the extension, before that
+initializer could load the provider, while `RTLD_LOCAL` would not expose a
+provider loaded later to the extension's lazy bindings. There is no
+libuv-specific dependency metadata or loader entry point: these flags apply to
+every generated runtime import. Compiler interface inspection remains separate
+and uses `RTLD_LAZY | RTLD_LOCAL`.
+
+For example, the extension source starts with both imports:
 
 ```titan
 local runtime = import "uv"
 local uv = foreign import "uv.h"
 ```
+
+This Titan-side bundled contract covers ordinary function calls, whose
+bindings can remain lazy. Native constructors run before the generated module
+initializer, while imported data and function-address relocations are eager;
+do not use those forms unless the embedding process has already made the
+provider global. The explicit `uv` import remains required even if a particular
+Lua host happens to preload the provider, because it is what makes the module
+work through Titan's runtime loader.
 
 When Lua loads such an extension directly, load the provider first:
 
@@ -181,9 +185,10 @@ above establishes the same provider on stock Lua 5.5 on Linux and macOS while
 every other C module keeps Lua's ordinary local-loading behavior.
 `titan/uv.so` does not reopen or promote itself.
 
-A long-lived compiler process remembers the canonical provider's resolved file
-identity and refuses to switch to a different `titan/uv.so` after
-the first provider has been loaded.
+Because this explicit Lua preload happens before the extension is mapped, it
+also supports its eager libuv relocations and native constructors. It can make
+the native symbols available even to a Lua-only extension that omitted the
+Titan `uv` import, but such a module does not satisfy the Titan-side contract.
 
 System mode may instead link the extension against the same
 pkg-config-selected shared libuv used by `titan/uv.so`. In either mode, never

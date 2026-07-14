@@ -28,18 +28,18 @@ private static archive is consumed only for that link and is not installed in
 the Titan SDK, while the headers remain available under the installed include
 directory. An ordinary extension DSO may call libuv directly without embedding
 or linking it: it must import `uv` (desugared to `titan.uv`) as well as
-foreign-import `uv.h`, leaving its `uv_*` calls unresolved. Titan maps the
-extension's interface once through `package.loadlib`; its `<mangled>_types`
-function returns `"uv-provider"` as an optional second result, deterministically
-marking the dependency `"dynamic-uv"` even when libuv was already global.
-Reading it establishes or validates canonical `titan/uv.so` and records its
-compiler-process file identity. If an eager unresolved `uv_*` relocation
-prevents that initial interface load, the open-stage diagnostic bootstraps
-canonical `titan/uv.so` and the compiler retries before requiring the marker. A
-binary without it is rejected and must be rebuilt with an explicit `titan.uv`
-import. Generated consumers call `loadlibwithuv`, which loads
-`titan/uv.so` globally before it maps the
-extension. Unmarked ordinary DSOs retain eager/local loading. A Lua caller must
+foreign-import `uv.h`, leaving its ordinary `uv_*` function calls unresolved.
+Titan's generic runtime loader maps every compiled runtime dependency with
+`RTLD_LAZY | RTLD_GLOBAL`. Lazy binding lets the extension map before the
+provider is available; the extension's generated initializer then loads its
+explicit `uv` import globally before Titan code can make one of those calls.
+`RTLD_NOW` would fail while mapping the extension, before its initializer could
+load the provider, while a provider loaded `RTLD_LOCAL` later would not satisfy
+the extension's lazy bindings. Compiler interface inspection remains
+`RTLD_LAZY | RTLD_LOCAL`; neither path has libuv-specific metadata,
+classification, or a provider-specific loader helper. The runtime path cannot
+satisfy native constructors, imported data, or function-address relocations
+that need libuv while the extension itself is being mapped. A Lua caller must
 `require "titan.uv"` before requiring that extension directly. The installed
 `titan/uv.lua` loader resolves the DSO with `package.searchpath`, maps it with
 `package.loadlib(path, "*")`, and invokes its `luaopen_titan_uv` entry. Other
@@ -48,9 +48,9 @@ Lua C modules remain local. This public Lua package path works with stock Lua
 self-dlopen/promotion helper. System mode may instead link the extension and
 canonical `titan/uv.so` against the same shared libuv selected by pkg-config.
 Statically embedding the bundled archive again would create a second native
-instance. Because both consumption paths preload the provider before the
-extension itself, bundled mode supports eager libuv data/function-address
-relocations and native constructors as well as ordinary calls.
+instance. Lua's explicit global preload occurs before the extension is mapped,
+so that route also supports eager libuv relocations and native constructors;
+the normal Titan runtime route deliberately supports only lazy function calls.
 
 Runtime/Task/resource state remains in registry/GC-owned objects. These
 post-install files are outside the source rock's manifest. Bundled and system

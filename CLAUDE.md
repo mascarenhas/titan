@@ -310,16 +310,16 @@ Lexing and parsing are fused in one LPegLabel/relabel grammar; `lexer.lua` expor
   state argument.
 
 `checkstat` handlers return a boolean "always returns", used to enforce that non-nil-returning functions return on all paths. Imports go through a `loader` callback (`driver.defaultloader` for real lookup, `driver.tableloader` for in-memory sources in tests); source deps are recursively typechecked, `.so`-only deps first check the compiled `<mangled>_abi` marker, then recover their interface from the compiled `<mangled>_types` symbol.
+`driver.defaultloader` obtains those two Lua C functions through the internal
+`titan._loadlib` helper, which maps every compiled interface with
+`RTLD_LAZY | RTLD_LOCAL`; this is generic compiler plumbing, not a libuv
+bootstrap or dependency classifier.
 
 **Process-global mutable state** — tests and tools must reset these:
 `types.registry` (FQTN → `Type.Record`; `Type.Nominal` carries only the FQTN
 string and resolves through the registry at every use), `driver.imported`
-(import cache with a `CIRCULAR_MARK` sentinel for cycle detection), and
-`driver._uv_provider_path` (the canonical `titan/uv.so` identity loaded while probing
-a direct-libuv DSO). Tests must save/restore all three together. A real
-long-lived compiler must retain the provider path and reject a request that
-would switch to another provider in the same process; clearing the Lua field
-does not unload the native image.
+(import cache with a `CIRCULAR_MARK` sentinel for cycle detection). Tests must
+save and restore both together.
 
 ### Coder and driver (`coder.lua`, `pretty.lua`, `driver.lua`)
 
@@ -338,29 +338,31 @@ does not unload the native image.
   per module, shared by Titan imports and Lua requires. Canonical
   `titan/uv.so` is
   the sole complete bundled-libuv provider. A Titan extension DSO that directly
-  foreign-imports libuv must also `import "uv"` (desugared to
-  `titan.uv`), leave its `uv_*`
-  references unresolved, and let the optional second `"uv-provider"` result
-  from `<mangled>_types` classify it as `"dynamic-uv"`. The coder emits that
-  marker for `titan.uv` or a `"dynamic-uv"` dependency, so classification
-  is stable even when a provider is already visible. Reading it establishes or
-  validates canonical `titan/uv.so` and its compiler-process identity. An
-  open-stage unresolved `uv_*` error is the bootstrap fallback: load canonical
-  `titan/uv.so`,
-  retry, and then require the marker. Reject the binary if it is absent: it
-  was not built with the required explicit `titan.uv` import. Generated Titan
-  consumers use `loadlibwithuv` to load canonical `titan/uv.so` globally before
-  mapping that extension; unmarked ordinary DSOs remain eager/local. A Lua caller
-  must `require "titan.uv"` before requiring such an extension. The installed
+  foreign-imports libuv must also `import "uv"` (desugared to `titan.uv`) and
+  leave its `uv_*` references unresolved. Titan's one generic runtime DSO
+  loader uses `RTLD_LAZY | RTLD_GLOBAL`: lazy binding lets the extension map
+  first, then its
+  generated initializer loads the explicit `uv` import globally before
+  ordinary libuv function calls bind. `RTLD_NOW` would try to bind those calls
+  before the initializer could load the provider, and a provider mapped
+  `RTLD_LOCAL` later would not be visible to them. There is no libuv-specific
+  origin, interface metadata, compiler bootstrap, or Titan loader entry point;
+  every generated runtime import uses these flags. Compiler interface recovery
+  remains lazy/local through `titan._loadlib`. This runtime path does not
+  support native constructors, imported data, or taken-function-address
+  relocations that need libuv while the extension itself is being mapped. A
+  Lua caller must `require "titan.uv"` before requiring such an extension. The
+  installed
   `titan/uv.lua` loader resolves the canonical DSO through `package.cpath`, maps
   it with `package.loadlib(path, "*")`, and then invokes the exact
   `luaopen_titan_uv` entry. All other Lua C modules retain stock Lua's local
   loading, and `titan/uv.so` has no self-dlopen/promotion shim. System mode may
   instead link both against the same pkg-config-selected shared libuv; the
   private bundled `libuv.a` must never be linked into another DSO.
-  Provider-first mapping also supports eager data/function-address relocations
-  and native constructors. A compiler process records the provider's canonical
-  path and rejects an attempt to switch providers.
+  Lua's explicit global preload occurs before the extension is mapped, so that
+  path also supports eager relocations and native constructors. It can resolve
+  native symbols for a Lua-only extension without a Titan `uv` import, but the
+  import remains mandatory for modules that must work through Titan's loader.
   A generated standalone entrypoint publishes its original `argc` and `argv`
   under `TITAN_MAIN_ARGC_KEY`/`TITAN_MAIN_ARGV_KEY` before requiring the main
   module. Canonical `titan.uv` calls `uv_setup_args` once during initialization,
@@ -396,18 +398,18 @@ does not unload the native image.
   loader. Every compiled module exports `luaopen_<mangled>`, `<mangled>_init`
   (idempotent), `<mangled>_abi` (returns `TITAN_VER`; checked before trusting a
   `.so`), and `<mangled>_types` (serialized interface type, evaluated with
-  `types.lua` as env, plus optional `"uv-provider"` dependency metadata). For
-  an explicit root, `titanc` gives code generation the full recursive source
-  dependency closure, so that metadata propagates from `titan.uv` or a
-  `"dynamic-uv"` dependency used by a statically linked source dependency.
+  `types.lua` as env). For an explicit root, `titanc` gives code generation the
+  full recursive source dependency closure so source dependencies selected for
+  static linking are wired directly while compiled dependencies stay dynamic.
 - Installed and checkout driver modes both link `libtitan.a`, never
   `titan.o` directly. The installed path is `<root>/lib/libtitan.a`; checkout
   mode lazily rebuilds and links `titan-runtime/libtitan.a`. The archive
   contains exactly `titan.o`, `titan_coro.o`, and `titan_uv.o`. The vendored
   `libbacktrace.a` is a separate link input. `titanlib.c` is compiled into
   `titanlib.o` and that object alone is linked into `titan.so`; its public
-  `backtrace` function and internal testing helpers `pin` and `clear` are not
-  part of the generated-code archive.
+  `backtrace` function, internal testing helpers `pin` and `clear`, and
+  compiler-only lazy/local interface loader `_loadlib` are not part of the
+  generated-code archive.
 - In `minicoro.h`, sanitizer detection must remain before the public
   `mco_runtime`/`mco_coro` declarations. Gate ASan and TSan bookkeeping fields
   with their matching feature macros so ordinary builds carry no sanitizer

@@ -460,24 +460,23 @@ local uv = foreign import "uv.h"
 Build that extension without `-luv` and without a `libuv.a` linker input. Its
 `uv_*` references remain unresolved in the DSO. The bundled archive used to
 build `titan/uv.so` is private and is not installed as part of the Titan SDK.
-Titan's generated consumer establishes canonical `titan/uv.so` globally before
-mapping the extension, as described below.
+Titan uses the same `RTLD_LAZY | RTLD_GLOBAL` runtime loader for this extension
+as for every compiled dependency. Lazy binding lets the extension map with
+unresolved libuv function calls. Its generated initializer then loads the
+explicit `uv` import globally before Titan code can make one of those calls.
+`RTLD_NOW` would fail while mapping the extension, before the initializer could
+load the provider, while a provider loaded `RTLD_LOCAL` would not be visible to
+the extension's lazy bindings. No special interface marker, compiler
+classification, or provider-specific Titan loader is involved. The compiler's
+separate interface-inspection loader remains
+`RTLD_LAZY | RTLD_LOCAL`.
 
-When a Titan consumer imports the compiled extension, compiler interface
-recovery reads an optional second `"uv-provider"` result from
-`<mangled>_types`; Titan emits that marker when a module has `titan.uv` or a
-`"dynamic-uv"` dependency, so classification remains deterministic if a
-provider was already loaded. Reading the marker establishes or validates
-canonical `titan/uv.so`, records its compiler-process file identity, and marks the
-dependency `"dynamic-uv"`. If the initial interface open cannot reach the marker because of
-an unresolved `uv_*`, the compiler uses that open-stage error to bootstrap
-canonical `titan/uv.so`, retries, and then requires the marker. If it is absent,
-Titan rejects the binary and asks for a rebuild with an explicit `titan.uv`
-import. Generated consumers use
-`loadlibwithuv`, which preloads the same provider before mapping the extension;
-unmarked ordinary DSOs keep eager, local loading. Provider-first mapping means
-the bundled contract supports imported libuv data, taken function addresses,
-and native constructors as well as ordinary function calls.
+This bundled Titan path supports ordinary function calls through lazy binding.
+It does not support native constructors, imported libuv data, or taken function
+addresses that create eager relocations: those are needed while the extension
+is being mapped, before its generated initializer can load `uv`. Use the system
+mode below or arrange for the embedding process to preload the provider when
+one of those forms is required.
 
 Lua code that requires the extension directly must establish the provider
 first:
@@ -496,6 +495,11 @@ works on both Linux and macOS. A stock Lua 5.5 host can use the bundled
 direct-extension contract when its `LUA_PATH_5_5` finds the loader and its
 `LUA_CPATH_5_5` finds the canonical DSO (see
 [Running with a stock Lua](modules.md#running-with-a-stock-lua)).
+Because Lua performs this explicit global load before mapping the extension,
+this route also supports its eager relocations and native constructors. The
+global symbols can resolve a Lua-only extension even if it omitted the Titan
+`uv` import, but the import remains mandatory for a Titan module that must also
+work through Titan's runtime loader.
 
 With `LIBUV_MODE=system`, an extension may instead consume the same shared
 library selected for Titan by passing the complete pkg-config output through

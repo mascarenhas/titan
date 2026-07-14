@@ -113,7 +113,7 @@ cause.
 | `titan-compiler/` | The compiler proper: `lexer`, `parser`, `syntax_errors`, `ast`, `typedecl`, `checker`, `types`, `symtab`, `coder`, `pretty`, `driver`, `foreigntypes`, `location`, `util`. |
 | `c-parser/` | The pure-Lua C preprocessor and C99 parser behind `foreign import`. |
 | `titan/` | Titan standard-library sources. They are ordinary qualified `titan.*` modules, built explicitly from source and installed below the matching qualified directory. |
-| `titan-runtime/` | `titan.h`/`titan.c` (dynamic loader and error handler), `titan_coro.c`, and `titan_uv.c`, whose three objects are the exact members of `libtitan.a`; separate vendored `libbacktrace.a`; `titanlib.c`, built separately as `titan.so` (`backtrace` plus internal `pin`/`clear` helpers); `minicoro.h`, `titan_longjmp.h`, and the namespaced `titan/{ffi,coro,uv}.h` SDK headers. |
+| `titan-runtime/` | `titan.h`/`titan.c` (`RTLD_LAZY` + `RTLD_GLOBAL` generated-import loader and error handler), `titan_coro.c`, and `titan_uv.c`, whose three objects are the exact members of `libtitan.a`; separate vendored `libbacktrace.a`; `titanlib.c`, built separately as `titan.so` (`backtrace`, internal `pin`/`clear`, and the compiler-only `RTLD_LAZY` + `RTLD_LOCAL` interface loader `_loadlib`); `minicoro.h`, `titan_longjmp.h`, and the namespaced `titan/{ffi,coro,uv}.h` SDK headers. |
 | `spec/` | The busted test suite; `coder_spec.lua` is end-to-end (generates, compiles and runs C). |
 | `examples/`, `testfiles/` | Manual benchmark/demo material (not used by the suite). |
 | `doc/` | This documentation, the [language reference](../language/index.md), and the migration reports. |

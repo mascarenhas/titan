@@ -112,9 +112,6 @@ driver.TITAN_BIN_PATH = os.getenv("TITAN_PATH" .. driver.TITAN_VER_SUFFIX)
     or os.getenv("TITAN_PATH")
     or default_titan_bin_path
 driver.TITAN_SOURCE_PATH = "."
-driver.UV_PROVIDER_MODULE = "titan.uv"
-driver.UV_PROVIDER_DEPENDENCY = "uv-provider"
-driver.UV_DYNAMIC_DEPENDENCY = "dynamic-uv"
 driver.LUA_SOURCE_PATH = driver.INSTALLED and driver.INSTALL_PATHS and
     driver.INSTALL_PATHS.lua_source or "lua-5.5.0/src"
 driver.TITAN_RUNTIME_PATH = "titan-runtime/"
@@ -250,75 +247,10 @@ local function findmodule(paths, modname, extension)
     return nil
 end
 
-local function normalize_path(path)
-    if path:sub(1, 1) ~= "/" then
-        path = lfs.currentdir() .. "/" .. path
-    end
-    local parts = {}
-    for part in path:gmatch("[^/]+") do
-        if part == ".." then
-            if #parts > 0 then table.remove(parts) end
-        elseif part ~= "." and part ~= "" then
-            table.insert(parts, part)
-        end
-    end
-    return "/" .. table.concat(parts, "/")
-end
-
-local function same_file(a, b)
-    if not a or not b then return false end
-    local aa, ba = lfs.attributes(a), lfs.attributes(b)
-    if aa and ba and aa.dev and aa.ino and ba.dev and ba.ino then
-        return aa.dev == ba.dev and aa.ino == ba.ino
-    end
-    return normalize_path(a) == normalize_path(b)
-end
-
-driver._uv_provider_path = nil
-
-local function ensure_uv_provider()
-    local binf = findmodule(
-        driver.TITAN_BIN_PATH, driver.UV_PROVIDER_MODULE, ".so")
-    if not binf then
-        return nil, "canonical libuv provider module '" ..
-            driver.UV_PROVIDER_MODULE .. "' is not installed on TITAN_PATH"
-    end
-    local provider_path = normalize_path(binf)
-    if driver._uv_provider_path then
-        if same_file(driver._uv_provider_path, provider_path) then return true end
-        return nil, "canonical libuv provider is already loaded from '" ..
-            driver._uv_provider_path .. "'; refusing a second provider '" ..
-            provider_path .. "' in the same compiler process"
-    end
-    local loaded, err = package.loadlib(provider_path, "*")
-    if not loaded then
-        return nil, "cannot load canonical libuv provider '" .. provider_path ..
-            "': " .. tostring(err)
-    end
-    driver._uv_provider_path = provider_path
-    return true
-end
-
 local function load_compiled_interface(modname, binf)
-    -- A compiled Titan extension may intentionally leave public uv_* function
-    -- references unresolved. Interface recovery itself uses Lua's RTLD_NOW
-    -- loader. Load uv itself globally up front; for an ordinary binary, first
-    -- preserve the normal no-uv path and retry with the canonical provider
-    -- only when the native loader identifies an unresolved uv_* symbol.
-    if modname == driver.UV_PROVIDER_MODULE then
-        local provider_ok, provider_err = ensure_uv_provider()
-        if not provider_ok then return nil, provider_err end
-    end
     local prefix = modname:gsub("[%-.]", "_")
-    local requires_uv = false
-    local abif, err, where = package.loadlib(binf, prefix .. "_abi")
-    if not abif and where == "open" and
-       tostring(err):match("[_ ]uv_[%w_]+") then
-        local provider_ok, provider_err = ensure_uv_provider()
-        if not provider_ok then return nil, provider_err end
-        requires_uv = true
-        abif, err, where = package.loadlib(binf, prefix .. "_abi")
-    end
+    local loadlib = require("titan")._loadlib
+    local abif, err = loadlib(binf, prefix .. "_abi")
     if not abif then
         return nil, "compiled module '" .. modname
             .. "' has no compatible Titan ABI marker (expected "
@@ -331,32 +263,15 @@ local function load_compiled_interface(modname, binf)
             .. "' ABI mismatch: expected " .. driver.TITAN_VER
             .. " but found " .. tostring(abi_or_err)
     end
-    local typesf, terr = package.loadlib(binf, prefix .. "_types")
+    local typesf, terr = loadlib(binf, prefix .. "_types")
     if not typesf then return nil, terr end
-    local tok, types_or_err, dependency_metadata = pcall(typesf)
+    local tok, types_or_err = pcall(typesf)
     if not tok then return nil, types_or_err end
-    if requires_uv and dependency_metadata ~= "uv-provider" then
-        return nil, "compiled module '" .. modname
-            .. "' required the canonical libuv provider while loading but "
-            .. "does not declare 'uv-provider' dependency metadata; rebuild "
-            .. "it with an explicit import of module 'titan.uv'"
-    end
-    if dependency_metadata == "uv-provider" then
-        local provider_ok, provider_err = ensure_uv_provider()
-        if not provider_ok then return nil, provider_err end
-        requires_uv = true
-    end
     local modtf, lerr = load("return " .. types_or_err, modname, "t", types)
     if not modtf then return nil, lerr end
     local mok, modt_or_err = pcall(modtf)
     if not mok then return nil, modt_or_err end
-    local origin
-    if modname == driver.UV_PROVIDER_MODULE then
-        origin = driver.UV_PROVIDER_DEPENDENCY
-    elseif requires_uv then
-        origin = driver.UV_DYNAMIC_DEPENDENCY
-    end
-    return modt_or_err, nil, origin
+    return modt_or_err
 end
 
 function driver.defaultloader(static_deps, options)
@@ -373,14 +288,10 @@ function driver.defaultloader(static_deps, options)
         if not mod or mod == CIRCULAR_MARK then return end
         if mod.ast then
             static_deps[modname] = true
-            for depname, origin in pairs(mod.deps or {}) do
-                static_deps[depname] = origin
-                if origin == true then
-                    remember_dependency_closure(depname, seen)
-                end
+            for depname in pairs(mod.deps or {}) do
+                static_deps[depname] = true
+                remember_dependency_closure(depname, seen)
             end
-        elseif mod.origin then
-            static_deps[modname] = mod.origin
         end
     end
 
@@ -388,12 +299,8 @@ function driver.defaultloader(static_deps, options)
         local direct = dependency_stack[#dependency_stack]
         if not direct then return end
         local mod = driver.imported[modname]
-        if mod and mod ~= CIRCULAR_MARK then
-            if mod.ast then
-                direct[modname] = true
-            elseif mod.origin then
-                direct[modname] = mod.origin
-            end
+        if mod and mod ~= CIRCULAR_MARK and mod.ast then
+            direct[modname] = true
         end
     end
 
@@ -450,16 +357,13 @@ function driver.defaultloader(static_deps, options)
 
         local binf = findmodule(driver.TITAN_BIN_PATH, modname, ".so")
         if binf then
-            local modt_or_err, err, origin = load_compiled_interface(
-                modname, binf)
+            local modt_or_err, err = load_compiled_interface(modname, binf)
             if not modt_or_err then return false, err end
             driver.imported[modname] = {
                 type = modt_or_err,
                 compiled = true,
                 filename = binf,
-                origin = origin,
             }
-            if origin then static_deps[modname] = origin end
             remember_direct_dependency(modname)
             return true, modt_or_err, {}
         end
@@ -480,9 +384,9 @@ function driver.dependency_closure(modname)
         seen[name] = true
         local mod = driver.imported[name]
         if not mod or mod == CIRCULAR_MARK then return end
-        for depname, origin in pairs(mod.deps or {}) do
-            closure[depname] = origin
-            if origin == true then visit(depname) end
+        for depname in pairs(mod.deps or {}) do
+            closure[depname] = true
+            visit(depname)
         end
     end
     closure[modname] = true

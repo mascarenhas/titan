@@ -273,7 +273,6 @@ inline static TString *_float2str(lua_State *L, lua_Number f) {
 }
 
 LUAI_FUNC void *loadlib(lua_State *L, const char *file);
-LUAI_FUNC void *loadlibwithuv(lua_State *L, const char *file);
 LUAI_FUNC void *loadsym(lua_State *L, void *lib, const char *sym);
 LUAI_FUNC void titan_check_abi(lua_State *L, void *lib, const char *sym,
                                const char *file);

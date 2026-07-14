@@ -8,12 +8,11 @@ coder.generate(modname, ast, static_deps)  --> string (one C translation unit)
 
 where `modname` is the dot-separated module name, `ast` is the module's
 AST *after* `checker.check` has decorated and rewritten it, and
-`static_deps` is the driver's origin map: source imports are `true`, the
-qualified libuv provider is `"uv-provider"`, detected direct-libuv binary
-extensions are `"dynamic-uv"`, and unmarked binary imports are absent. `titanc` uses
+`static_deps` is the driver's origin map: source imports are `true` and binary
+imports are absent. `titanc` uses
 the recorded direct map for a non-root source dependency and the full recursive
-`driver.dependency_closure` for an explicit root, so metadata includes origins
-reachable through source objects statically linked into that root. The return
+`driver.dependency_closure` for an explicit root, so it includes source objects
+statically linked into that root. The return
 value is the complete text of one C translation unit; the driver
 (`driver.compile`) runs it through `pretty.reindent_c`, writes the `.c`
 file next to the `.titan` source, and invokes the system C compiler
@@ -542,25 +541,15 @@ int counter_types(lua_State* L) {
 
 The literal is `types.serialize(ast._type)`: a Lua *expression* that
 rebuilds the module's type when evaluated with `types.lua`'s constructors
-as its environment. `<prefix>_types` optionally pushes a second result,
-`"uv-provider"`, when the module's origin map contains either the qualified
-`titan.uv` provider dependency or a `"dynamic-uv"` dependency. That marker propagates
-the provider requirement through separately compiled modules and, because root
-code generation receives the full source dependency closure, through statically
-linked source dependencies embedded in the root DSO.
+as its environment. It returns that serialized interface as its sole result;
+there is no dependency-origin metadata in the module protocol.
 
 When the driver's loader finds only a compiled `.so` for an import, it first
 loads and calls `<prefix>_abi`, rejects missing or mismatched markers, then
 loads `<prefix>_types` and `load`s `"return " .. serialized` to recover the
 interface — letting the checker type the importing module against a dependency
-whose source is gone. The optional second result classifies the binary as
-`"dynamic-uv"` deterministically, including when libuv is already globally
-visible. Reading it establishes or validates the canonical provider and records
-its compiler-process file identity. If eager `uv_*` relocation prevents the
-initial ABI load, an open-stage unresolved-symbol diagnostic bootstraps
-`titan/uv.so` and the driver retries before requiring the marker. A binary
-without it is rejected and must be rebuilt with an explicit `titan.uv`
-import. Dependencies use dynamic linkage when a binary wins lookup and static
+whose source is gone. Libuv does not add another result or a special binary
+classification. Dependencies use dynamic linkage when a binary wins lookup and static
 linkage when no binary exists and source is selected. Explicit command-line
 roots are the source-first exception. The tests'
 in-memory `tableloader` exercises the same serialization round-trip. See
@@ -581,20 +570,10 @@ extern Udata *dep_init(lua_State *L);
 /* in _init: */ { Udata *_m = dep_init(L); setuvalue(L, &_mod->uv[1].uv, _m); }
 ```
 
-**Direct-libuv dynamic** (`static_deps[modname] == "dynamic-uv"`): interface
-recovery read the dependency's `"uv-provider"` metadata marker and established
-or identity-checked the qualified `titan.uv` provider. If an eager `uv_*` relocation
-prevented that first interface load, the driver established the provider and
-retried as a bootstrap fallback. Wiring is otherwise
-the same as an ordinary dynamic dependency, but generated initialization calls
-`loadlibwithuv(L, "dep.so")`. That helper loads `titan/uv.so` globally
-before mapping the extension, so eager relocations and constructors are safe as
-well as ordinary calls.
-
 **Ordinary dynamic** (`.so`-only dep): each imported function is declared in
 `$INCLUDES` as a `static` function *pointer*; the generated `_init`
 dlopens the library and stitches the pointers by symbol name with the
-runtime's `loadlib`/`loadsym` (`titan-runtime/titan.c`: Titan-path
+runtime's lazy/global `loadlib` and `loadsym` (`titan-runtime/titan.c`: Titan-path
 search, registry-cached handles, Lua error on failure):
 
 ```c
@@ -605,8 +584,18 @@ dep_mk_titan = titan_cast_func(Udata* (*)(lua_State *L, Udata *_mod, CClosure *_
                                loadsym(L, dep_handle, "dep_mk_titan"));
 ```
 
+A direct-libuv DSO follows this exact regime. Its explicit `import "uv"` is
+ordinary generated import wiring inside that DSO: lazy mapping leaves normal
+`uv_*` function calls unresolved long enough for the DSO's initializer to load
+`titan/uv.so` globally before those calls bind. `RTLD_NOW` would reject the DSO
+before its initializer ran, while a provider loaded `RTLD_LOCAL` later would
+not satisfy those bindings. The coder emits no provider marker or alternate
+loader call. Eager libuv relocations and constructors cannot rely on this
+initializer ordering. Compiler interface inspection is a separate
+`RTLD_LAZY | RTLD_LOCAL` operation.
+
 The dep's `_init` is fetched and called the same way inside
-`$INITMODULES`. In all four regimes the *call sites are identical* C calls —
+`$INITMODULES`. In both regimes the *call sites are identical* C calls —
 only the storage class of the callee name differs — and the caller passes
 the callee's module `Udata` read from its own user value and `NULL` for
 the direct-call `_fn`: `dep_mk_titan(L, uvalue(&_mod->uv[1].uv), NULL, 7)`.

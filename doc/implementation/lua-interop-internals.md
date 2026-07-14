@@ -490,7 +490,7 @@ inventory:
 
 The UUID-string constants are defined in `titan-runtime/titan.h`.
 
-## Dynamic loading: `loadlib`, `loadlibwithuv`, and `loadsym`
+## Dynamic loading: `loadlib` and `loadsym`
 
 When a dependency exists only as a compiled `.so`, the importer's
 `_init` loads it at run time with two helpers from
@@ -509,11 +509,13 @@ variable `TITAN_PATH_0_11`, then `TITAN_PATH`, then the default
 `".;<root>/lib/titan/0.11"`, with `<root>` recovered from the first
 literal `package.cpath` entry ending in `/lib/lua/5.5/?.so` and `;;` in
 an env value splicing that default in — trying
-`dlopen(dir "/" file, RTLD_NOW | RTLD_LOCAL)` per `;`-separated directory.
-The exact qualified filename `titan/uv.so` is the one exception: `loadlib`
-opens it with `RTLD_NOW | RTLD_GLOBAL` so it can provide bundled libuv symbols
-to extension DSOs. This remains the ordinary path for every unmarked binary
-dependency. Successes are
+`dlopen(dir "/" file, RTLD_LAZY | RTLD_GLOBAL)` per `;`-separated directory.
+There are no module-name exceptions: all generated Titan dynamic imports use
+this same runtime loader. Lazy binding is required because an imported image
+can use its generated initializer to load a provider for its own unresolved
+function calls; `RTLD_NOW` would reject the image before that initializer ran.
+Global visibility is required because a provider loaded later with
+`RTLD_LOCAL` would not satisfy the image's lazy bindings. Successes are
 cached for the Lua-state lifetime and the underlying DSOs remain mapped for the
 process lifetime. Titan does not
 `dlclose` this manually wired dependency graph: no fixed insertion order is
@@ -524,33 +526,35 @@ code calls `titan_check_abi(L, handle, "<mangled>_abi", file)`, rejecting
 missing or mismatched ABI markers before any native entry point is used.
 `loadsym` is `dlsym` plus the same `dlerror()` raise on a missing symbol.
 
+Compiler interface recovery does not use this runtime loader. The internal
+`titan._loadlib` helper in `titan.so` maps a candidate DSO with
+`RTLD_LAZY | RTLD_LOCAL` only to call its ABI and serialized-type entry points;
+it neither initializes the module nor publishes its symbols globally.
+
 Standard-library dependencies use the same loader and cache under their
 ordinary qualified filenames, such as `titan/timer.so`. The Titan-owned Lua
 default puts `<root>/lib/titan/0.11/?.so` before its ordinary `lib/lua`
 templates, so Titan's dynamic import and Lua `require "titan.<module>"` open
 the same DSO. Post-install writes only that qualified file; there are no
 copied, symbolic-link, or hard-link aliases. `titan/uv.so` is consequently the
-sole complete bundled-libuv provider. A compiled module's `<mangled>_types`
-function optionally returns `"uv-provider"` as its second result when its
-origin map contains `titan.uv`
-or a `"dynamic-uv"` dependency. Compiler interface recovery uses that marker
-to classify the binary as `"dynamic-uv"`, establish or validate canonical
-`titan/uv.so`, and record its compiler-process file identity, even when libuv was
-already global. If an eager unresolved `uv_*` relocation prevents the initial
-ABI-symbol load, the open-stage diagnostic bootstraps canonical `titan/uv.so` and the
-compiler retries before requiring the marker; if it is absent, the binary is
-rejected and must be rebuilt with an explicit `titan.uv` import. Generated imports of that origin
-call `loadlibwithuv(L, file)`, which invokes `loadlib(L, "titan/uv.so")` before
-`loadlib(L, file)`. The provider therefore precedes the extension's mapping and
-satisfies eager relocations and native constructors as well as ordinary
-function calls; unmarked binaries continue through plain `loadlib`. A Lua
-caller loading the extension directly must
+sole complete bundled-libuv provider. A direct-libuv extension must explicitly
+import `uv` as well as foreign-import `uv.h`. Lazy loading lets its ordinary
+unresolved libuv function calls survive the extension's initial mapping. Its
+generated initializer then calls the same global runtime `loadlib` for
+`titan/uv.so`, making the provider visible before Titan code can make one of
+those calls. `<mangled>_types` remains the ordinary one-result serialized
+interface; neither the compiler nor generated code assigns libuv-specific
+origins or invokes a provider-specific loader. Native constructors, imported
+data, and taken-function-address relocations are eager and therefore outside
+this Titan runtime contract. A Lua caller loading the extension directly must
 `require "titan.uv"` first. The installed `titan/uv.lua` module resolves the
 canonical DSO through `package.cpath`, uses `package.loadlib(path, "*")` for
 global visibility, and then invokes its exact `luaopen_titan_uv` entry. Other
 Lua C-module entries keep ordinary local visibility. This stock-Lua path is
 portable across macOS and Linux: the provider does not locate, reopen, or
-promote itself. Binary-first qualified
+promote itself. Because the global load precedes the extension, this explicit
+Lua route can also satisfy its eager relocations and native constructors, even
+for a Lua-only extension that omitted the Titan import. Binary-first qualified
 module resolution prevents a visible source file from accidentally replacing
 the installed provider.
 

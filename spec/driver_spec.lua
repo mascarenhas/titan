@@ -3,6 +3,7 @@ local assert = require "luassert"
 
 local driver = require "titan-compiler.driver"
 local types = require "titan-compiler.types"
+local titan = require "titan"
 
 local function write_file(path, contents)
     local file = assert(io.open(path, "wb"))
@@ -141,14 +142,12 @@ describe("compiler module loader", function()
             source_path = driver.TITAN_SOURCE_PATH,
             bin_path = driver.TITAN_BIN_PATH,
             imported = driver.imported,
-            uv_provider_path = driver._uv_provider_path,
             registry = types.registry,
-            loadlib = package.loadlib,
+            loadlib = titan._loadlib,
         }
         driver.TITAN_SOURCE_PATH = source
         driver.TITAN_BIN_PATH = binary
         driver.imported = {}
-        driver._uv_provider_path = nil
         types.registry = {}
     end)
 
@@ -156,9 +155,8 @@ describe("compiler module loader", function()
         driver.TITAN_SOURCE_PATH = previous.source_path
         driver.TITAN_BIN_PATH = previous.bin_path
         driver.imported = previous.imported
-        driver._uv_provider_path = previous.uv_provider_path
         types.registry = previous.registry
-        package.loadlib = previous.loadlib
+        titan._loadlib = previous.loadlib
         remove_tree(root)
     end)
 
@@ -171,7 +169,7 @@ describe("compiler module loader", function()
         write_file(binary .. "/titan/timer.so", "mock interface\n")
 
         local symbols = {}
-        package.loadlib = function(filename, symbol)
+        titan._loadlib = function(filename, symbol)
             assert.equal(binary .. "/titan/timer.so", filename)
             symbols[#symbols + 1] = symbol
             if symbol == "titan_timer_abi" then
@@ -206,7 +204,7 @@ describe("compiler module loader", function()
 
     it("requires source for an explicit build root", function()
         write_file(binary .. "/titan/timer.so", "existing binary\n")
-        package.loadlib = function()
+        titan._loadlib = function()
             error("an explicit source build must not load its existing binary")
         end
 
@@ -219,118 +217,17 @@ describe("compiler module loader", function()
         assert.is_nil(driver.imported["titan.timer"])
     end)
 
-    it("loads one qualified uv provider globally and keeps its identity",
-       function()
-        write_file(binary .. "/titan/uv.so", "mock provider\n")
-        local symbols = {}
-        package.loadlib = function(filename, symbol)
-            assert.equal(binary .. "/titan/uv.so", filename)
-            symbols[#symbols + 1] = symbol
-            if symbol == "*" then
-                return true
-            elseif symbol == "titan_uv_abi" then
-                return function() return driver.TITAN_VER end
-            elseif symbol == "titan_uv_types" then
-                return function() return "Module('titan.uv',{})" end
-            end
-            return nil, "unexpected symbol " .. symbol, "init"
-        end
-
-        local deps = {}
-        local ok, modtype, errors =
-            driver.defaultloader(deps)("titan.uv")
-        assert.truthy(ok)
-        assert.equal("Type.Module", modtype._tag)
-        assert.equal(0, #errors)
-        assert.same({ "*", "titan_uv_abi", "titan_uv_types" }, symbols)
-        assert.equal(driver.UV_PROVIDER_DEPENDENCY,
-            deps["titan.uv"])
-
-        local second = root .. "/second"
-        assert(lfs.mkdir(second))
-        assert(lfs.mkdir(second .. "/titan"))
-        write_file(second .. "/titan/uv.so", "second provider\n")
-        driver.TITAN_BIN_PATH = second
-        driver.imported = {}
-        ok, modtype = driver.defaultloader({})("titan.uv")
-        assert.falsy(ok)
-        assert.match("refusing a second provider", modtype)
-    end)
-
-    it("marks a binary that declares the canonical uv provider", function()
-        write_file(binary .. "/titan/uv.so", "mock provider\n")
-        write_file(binary .. "/direct.so", "mock extension\n")
-
-        local provider_loaded = false
-        package.loadlib = function(filename, symbol)
-            if filename == binary .. "/titan/uv.so" then
-                assert.equal("*", symbol)
-                provider_loaded = true
-                return true
-            end
-            assert.equal(binary .. "/direct.so", filename)
-            if symbol == "direct_abi" and not provider_loaded then
-                return nil, "undefined symbol: uv_random", "open"
-            elseif symbol == "direct_abi" then
-                return function() return driver.TITAN_VER end
-            elseif symbol == "direct_types" then
-                return function()
-                    return "Module('direct',{})", "uv-provider"
-                end
-            end
-            return nil, "unexpected symbol " .. symbol, "init"
-        end
-
-        local deps = {}
-        local ok, modtype, errors = driver.defaultloader(deps)("direct")
-        assert.truthy(ok)
-        assert.equal("Type.Module", modtype._tag)
-        assert.equal(0, #errors)
-        assert.truthy(provider_loaded)
-        assert.equal(driver.UV_DYNAMIC_DEPENDENCY, deps.direct)
-    end)
-
-    it("rejects unresolved libuv symbols without provider metadata", function()
-        write_file(binary .. "/titan/uv.so", "mock provider\n")
-        write_file(binary .. "/direct.so", "mock extension\n")
-
-        local provider_loaded = false
-        package.loadlib = function(filename, symbol)
-            if filename == binary .. "/titan/uv.so" then
-                assert.equal("*", symbol)
-                provider_loaded = true
-                return true
-            end
-            assert.equal(binary .. "/direct.so", filename)
-            if symbol == "direct_abi" and not provider_loaded then
-                return nil, "undefined symbol: uv_random", "open"
-            elseif symbol == "direct_abi" then
-                return function() return driver.TITAN_VER end
-            elseif symbol == "direct_types" then
-                return function() return "Module('direct',{})" end
-            end
-            return nil, "unexpected symbol " .. symbol, "init"
-        end
-
-        local ok, message = driver.defaultloader({})("direct")
-        assert.falsy(ok)
-        assert.match("does not declare 'uv%-provider' dependency metadata",
-            message)
-        assert.truthy(provider_loaded)
-    end)
-
-    it("does not mistake a missing uv-named ABI entry for libuv", function()
-        write_file(binary .. "/my_uv_extension.so", "mock image\n")
+    it("reports a missing ABI entry from the internal loader", function()
+        write_file(binary .. "/extension.so", "mock image\n")
         local calls = 0
-        package.loadlib = function(filename, symbol)
+        titan._loadlib = function(filename, symbol)
             calls = calls + 1
-            assert.equal(binary .. "/my_uv_extension.so", filename)
-            assert.equal("my_uv_extension_abi", symbol)
-            return nil, "undefined symbol: my_uv_extension_abi", "init"
+            assert.equal(binary .. "/extension.so", filename)
+            assert.equal("extension_abi", symbol)
+            return nil, "undefined symbol: extension_abi", "init"
         end
 
-        local ok, message =
-            driver.defaultloader({})("my_uv_extension")
+        local ok, message = driver.defaultloader({})("extension")
         assert.falsy(ok)
         assert.match("has no compatible Titan ABI marker", message)
         assert.equal(1, calls)

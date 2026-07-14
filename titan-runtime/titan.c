@@ -614,15 +614,6 @@ static void pushlibs(lua_State *L) {
 }
 
 static void *loadlibfrompath(lua_State *L, const char *file) {
-    int flags = RTLD_NOW;
-    if(strcmp(file, "titan/uv.so") == 0) {
-        /* titan/uv.so is the single bundled-libuv provider. Direct-libuv extension
-        ** dependencies use loadlibwithuv, which establishes this global image
-        ** before their ordinary eager/local load. */
-        flags |= RTLD_GLOBAL;
-    } else {
-        flags |= RTLD_LOCAL;
-    }
     pushlibs(L);
     lua_pushstring(L, file);
     lua_rawget(L, -2); // try to get lib
@@ -638,7 +629,12 @@ static void *loadlibfrompath(lua_State *L, const char *file) {
             const char *dir = lua_tostring(L, -1);
             lua_pushfstring(L, "%s" TITAN_PATH_SEP "%s", dir, file);
             const char *filename = lua_tostring(L, -1);
-            void *lib = dlopen(filename, flags);
+            /* A module's initializer loads its dynamic imports only after this
+            ** dlopen returns, so ordinary unresolved calls must bind lazily.
+            ** Titan's generated names share one process namespace; publishing
+            ** every imported image lets those later imports satisfy the calls
+            ** without module-specific loader rules. */
+            void *lib = dlopen(filename, RTLD_LAZY | RTLD_GLOBAL);
             if(lib != NULL) {
                 /* A new .so is now mapped: invalidate libbacktrace's one-time
                 ** object snapshot so the next capture re-scans and can
@@ -664,16 +660,6 @@ static void *loadlibfrompath(lua_State *L, const char *file) {
 
 void *loadlib (lua_State *L, const char *file) {
     return loadlibfrompath(L, file);
-}
-
-void *loadlibwithuv (lua_State *L, const char *file) {
-    /* The compiler selects this path for a binary carrying uv-provider
-    ** dependency metadata (with unresolved-symbol bootstrap used only to
-    ** reach that metadata in a clean process). Establish the complete
-    ** provider before mapping the image, including for eager relocations and
-    ** constructors. */
-    loadlib(L, "titan/uv.so");
-    return loadlib(L, file);
 }
 
 void *loadsym (lua_State *L, void *lib, const char *sym) {

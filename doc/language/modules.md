@@ -386,25 +386,28 @@ different module graph.
 A binary extension DSO may use that ordering to call bundled libuv directly.
 Its source must both `import "uv"` and `foreign import "uv.h"`, and its link
 must leave `uv_*` unresolved rather than adding `-luv` or a static archive.
-The extension's `<mangled>_types` returns `"uv-provider"` as an optional second
-result because it imports `titan.uv`; that metadata records a `dynamic-uv`
-dependency even if a provider was already visible. Reading it also establishes
-or validates canonical `titan/uv.so` and its compiler-process file identity. An
-initial open-stage unresolved `uv_*` error bootstraps that provider globally
-and retries the interface so the compiler can require the marker. A binary
-without it is rejected and must be rebuilt with an explicit `titan.uv`
-import. Generated
-consumers use `loadlibwithuv`, which establishes that provider before mapping
-the extension; unmarked ordinary binary dependencies remain eager and local. A
-Lua caller loading the extension directly must first run
-`require "titan.uv"`. The installed `titan/uv.lua` loader finds the canonical
+Titan maps every compiled runtime dependency with
+`RTLD_LAZY | RTLD_GLOBAL`. Lazy binding lets the extension's ordinary
+unresolved libuv calls remain unbound until its generated initializer loads the
+explicit `uv` import globally. `RTLD_NOW` would fail before that initializer
+could run, while a provider loaded `RTLD_LOCAL` later would not satisfy the
+extension's lazy bindings. There is no libuv-specific dependency
+classification or loader path; the compiler's distinct interface-inspection
+loader remains `RTLD_LAZY | RTLD_LOCAL`. This Titan-side contract does not
+cover native constructors, imported data, or taken function addresses whose
+relocations must resolve while the extension is being mapped. A Lua caller
+loading the extension directly must first run `require "titan.uv"`. The
+installed `titan/uv.lua` loader finds the canonical
 DSO through `package.cpath`, maps it with `package.loadlib(path, "*")`, and
 then invokes the exact `luaopen_titan_uv` entry. Every other Lua C module keeps
-stock Lua's local-loading behavior. The provider does not reopen itself. System-mode
-extensions may instead link the same shared libuv selected by pkg-config.
-Because both Titan and Lua establish the provider before the extension is
-mapped, the bundled path also supports eager data and function-address
-relocations and native constructors. See
+stock Lua's local-loading behavior. The provider does not reopen itself.
+System-mode extensions may instead link the same shared libuv selected by
+pkg-config.
+Because this explicit Lua preload establishes the provider before the
+extension is mapped, the Lua route also supports eager relocations and native
+constructors. It can resolve native symbols for a Lua-only extension without a
+Titan `uv` import; the import is nevertheless required for the same module to
+work through Titan's runtime loader. See
 [Direct libuv extensions](ffi.md#direct-libuv-extensions) for the build
 contract.
 

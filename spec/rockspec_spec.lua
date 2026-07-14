@@ -478,9 +478,9 @@ end
         assert.equal("", output)
     end)
 
-    it("uses canonical uv as the dynamic provider for direct libuv calls",
+    it("loads direct libuv calls lazily for Titan and explicitly for Lua",
     function()
-        workspace = temporary_directory("uv-provider")
+        workspace = temporary_directory("direct-libuv")
         write_file(workspace .. "/provider_probe.h", [[
 int titan_uv_provider_probe(void);
 ]])
@@ -488,19 +488,9 @@ int titan_uv_provider_probe(void);
 #include <stddef.h>
 #include <uv.h>
 
-static int constructor_result = -1;
-
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((constructor))
-#endif
-static void titan_uv_provider_constructor(void) {
-  unsigned char byte = 0;
-  constructor_result =
-      uv_random(NULL, NULL, &byte, sizeof(byte), 0, NULL);
-}
-
 int titan_uv_provider_probe(void) {
-  return constructor_result;
+  unsigned char byte = 0;
+  return uv_random(NULL, NULL, &byte, sizeof(byte), 0, NULL);
 }
 ]])
         write_file(workspace .. "/direct_uv.titan", [[
@@ -510,6 +500,13 @@ local uv = import "uv"
 function check(): boolean
   return (probe.titan_uv_provider_probe() as integer) == 0 and
          #uv.version() > 0
+end
+]])
+        write_file(workspace .. "/lua_direct_uv.titan", [[
+local probe = foreign import "provider_probe.h"
+
+function check(): boolean
+  return (probe.titan_uv_provider_probe() as integer) == 0
 end
 ]])
 
@@ -536,28 +533,12 @@ end
             tostring(code) .. ")")
         assert_file(workspace .. "/direct_uv.so")
 
-        write_file(workspace .. "/inner_uv.titan", [[
-local probe = foreign import "provider_probe.h"
-local uv = import "uv"
-
-function check(): boolean
-  return (probe.titan_uv_provider_probe() as integer) == 0 and
-         #uv.version() > 0
-end
-]])
-        write_file(workspace .. "/outer_uv.titan", [[
-local inner_uv = import "inner_uv"
-
-function check(): boolean
-  return inner_uv.check()
-end
-]])
         ok, output, why, code = run(clean_environment({
-            TITANC, "outer_uv", "-X", "provider_probe.o",
+            TITANC, "lua_direct_uv", "-X", "provider_probe.o",
         }), workspace)
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
-        assert_file(workspace .. "/outer_uv.so")
+        assert_file(workspace .. "/lua_direct_uv.so")
 
         ok, output, why, code = run({ "nm", "-u", "direct_uv.so" },
             workspace)
@@ -579,10 +560,6 @@ end
 
         assert.truthy(os.rename(workspace .. "/direct_uv.titan",
             workspace .. "/direct_uv.source"))
-        assert.truthy(os.rename(workspace .. "/inner_uv.titan",
-            workspace .. "/inner_uv.source"))
-        assert.truthy(os.rename(workspace .. "/outer_uv.titan",
-            workspace .. "/outer_uv.source"))
         write_file(workspace .. "/consumer.titan", [[
 local direct_uv = import "direct_uv"
 
@@ -595,67 +572,11 @@ end
             workspace)
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
-        assert.truthy(read_file(workspace .. "/consumer.c"):find(
-            'loadlibwithuv(L, "direct_uv.so")', 1, true))
+        local consumer_c = read_file(workspace .. "/consumer.c")
+        assert.truthy(consumer_c:find(
+            'loadlib(L, "direct_uv.so")', 1, true), consumer_c)
         ok, output, why, code = run(clean_environment({ "./consumer" }),
             workspace)
-        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-            tostring(code) .. ")")
-
-        write_file(workspace .. "/outer_consumer.titan", [[
-local uv = import "uv"
-local outer_uv = import "outer_uv"
-
-function main(args: {string}): integer
-  if #uv.version() > 0 and outer_uv.check() then return 0 end
-  return 1
-end
-]])
-        ok, output, why, code = run(clean_environment({
-            TITANC, "outer_consumer",
-        }), workspace)
-        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-            tostring(code) .. ")")
-        assert.truthy(read_file(workspace .. "/outer_consumer.c"):find(
-            'loadlibwithuv(L, "outer_uv.so")', 1, true))
-        ok, output, why, code = run(clean_environment({
-            "./outer_consumer",
-        }), workspace)
-        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-            tostring(code) .. ")")
-
-        write_file(workspace .. "/ordered_consumer.titan", [[
-local uv = import "uv"
-local direct_uv = import "direct_uv"
-
-function main(args: {string}): integer
-  if #uv.version() > 0 and direct_uv.check() then return 0 end
-  return 1
-end
-]])
-        ok, output, why, code = run(clean_environment({
-            TITANC, "ordered_consumer",
-        }), workspace)
-        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-            tostring(code) .. ")")
-        assert.truthy(read_file(workspace .. "/ordered_consumer.c"):find(
-            'loadlibwithuv(L, "direct_uv.so")', 1, true))
-        ok, output, why, code = run(clean_environment({
-            "./ordered_consumer",
-        }), workspace)
-        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-            tostring(code) .. ")")
-
-        local local_provider_probe = string.format([[
-local provider = assert(package.loadlib(%q, "luaopen_titan_uv"))
-local direct, load_error = package.loadlib(%q, "luaopen_direct_uv")
-assert(direct == nil, "the ordinary Lua C loader globalized titan.uv")
-assert(type(load_error) == "string" and
-    load_error:find("uv_random", 1, true), load_error)
-]], STDLIB_DIR .. "/uv.so", workspace .. "/direct_uv.so")
-        ok, output, why, code = run(clean_environment({
-            LUA, "-e", local_provider_probe,
-        }), workspace)
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
 
@@ -663,7 +584,7 @@ assert(type(load_error) == "string" and
 assert(package.searchpath("titan.uv", package.path) == %q)
 assert(package.searchpath("titan.uv", package.cpath) == %q)
 local uv = require "titan.uv"
-local direct_uv = require "direct_uv"
+local direct_uv = require "lua_direct_uv"
 assert(direct_uv.check())
 assert(type(uv.version()) == "string")
 ]], UV_LOADER, STDLIB_DIR .. "/uv.so")
