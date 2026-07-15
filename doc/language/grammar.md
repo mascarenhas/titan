@@ -1,7 +1,7 @@
 # The Titan grammar
 
 This chapter is the reference grammar of Titan as implemented by the
-0.11 prototype compiler: lexical conventions, the complete syntactic
+0.12 prototype compiler: lexical conventions, the complete syntactic
 grammar, operator precedence, and the restrictions the EBNF alone does
 not show. It replaces the old manual's stale grammar.
 
@@ -30,7 +30,7 @@ and     as      boolean  break     catch   const   defer  do      else
 elseif  end     false    finally   float   for     foreign function
 goto    if      import   in        integer local   nil     not
 or      raise   record   repeat    return  string  then    true
-until   value   while
+type    until   value   while
 ```
 
 `in` is used by the generic `for ... in` statement. `goto` is still
@@ -135,12 +135,13 @@ A Titan source file is a module: a sequence of top-level declarations,
 in any order, with no executable statements outside functions.
 
 ```
-program  ::= {tlmethod | tlrecfunc | tlfunc | tlvar | tlrecord | tlimport | tlforeignimport}
+program  ::= {tlmethod | tlrecfunc | tlfunc | tlvar | tlrecord | tltype | tlimport | tlforeignimport}
 tlmethod ::= [local] function Name ':' Name '(' [parlist] ')' [':' rettype] block end
 tlrecfunc ::= [local] function Name '.' Name '(' [parlist] ')' [':' rettype] block end
 tlfunc   ::= [local] function Name '(' [parlist] ')' [':' rettype] block end
 tlvar    ::= [local] decl '=' exp
 tlrecord ::= [local] record Name {recordfield} end
+tltype   ::= [local] type Name '=' type
 recordfield     ::= [local] Name ':' type [';']
 tlimport        ::= local Name '=' import importname
 tlforeignimport ::= local Name '=' foreign import importname
@@ -159,6 +160,7 @@ record Point
     y: float
 end
 local origin_x: float = 0.0          -- local module variable
+type Coordinates = {float}           -- exported transparent type alias
 version = "0.5"                      -- exported module variable, inferred
 function Point:move(dx: float, dy: float)
     self.x = self.x + dx

@@ -6,11 +6,11 @@ assert(host_pipe:close())
 
 local SOURCES = {
     async_bootstrap = [[
-        local uv = import "uv"
+        local async = import "async"
         local timer = import "timer"
 
         function main(args: {string}): integer
-          local child = uv.run(function (): value
+          local child = async.run(function (): value
             timer.sleep(0)
             return 17
           end)
@@ -23,7 +23,7 @@ local SOURCES = {
         end
     ]],
     unobserved_failure = [[
-        local uv = import "uv"
+        local async = import "async"
 
         local function unobserved_origin(): value
           raise "uv-task-unobserved-boom"
@@ -31,16 +31,16 @@ local SOURCES = {
         end
 
         function main(args: {string}): integer
-          uv.run(unobserved_origin)
+          async.run(unobserved_origin)
           return 0
         end
     ]],
     unobserved_cancel = [[
-        local uv = import "uv"
+        local async = import "async"
         local timer = import "timer"
 
         function main(args: {string}): integer
-          local task = uv.run(function (): value
+          local task = async.run(function (): value
             timer.sleep(1000)
             return nil
           end)
@@ -49,20 +49,20 @@ local SOURCES = {
         end
     ]],
     cancelled_observer = [[
-        local uv = import "uv"
+        local async = import "async"
         local timer = import "timer"
 
         function main(args: {string}): integer
-          local target = uv.run(function (): value
+          local target = async.run(function (): value
             timer.sleep(8)
             raise "failure-after-observer-cancel"
             return nil
           end)
-          local observer = uv.run(function (): value
+          local observer = async.run(function (): value
             do target:join() catch return nil end
             return nil
           end)
-          uv.run(function (): value
+          async.run(function (): value
             timer.sleep(1)
             observer:cancel("observer-left")
             return nil
@@ -71,7 +71,7 @@ local SOURCES = {
         end
     ]],
     timer_only_bootstrap = [[
-        -- Transitive bootstrap proof: this application never directly imports uv.
+        -- Transitive bootstrap proof: this application never directly imports async.
         local timer = import "timer"
 
         function main(args: {string}): integer
@@ -82,11 +82,11 @@ local SOURCES = {
     main_child = [[
         local fs = import "fs"
         local timer = import "timer"
-        local uv = import "uv"
+        local async = import "async"
 
         function main(args: {string}): integer
           local marker = args[1]
-          uv.run(function (): value
+          async.run(function (): value
             timer.sleep(10)
             fs.write_file(marker, "independent-child-finished")
             return nil
@@ -98,7 +98,7 @@ local SOURCES = {
     ]],
 }
 
-describe("uv standalone bootstrap", function()
+describe("async standalone bootstrap", function()
     local workspace
 
     setup(function()

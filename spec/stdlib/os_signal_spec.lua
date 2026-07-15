@@ -8,7 +8,7 @@ local lua = foreign import "lua.h"
 local ffi = foreign import "titan/ffi.h"
 local os = import "os"
 local timer = import "timer"
-local uv = import "uv"
+local async = import "async"
 
 local cancelled_wait_resumed = false
 local sent_cancelled_wait_resumed = false
@@ -17,7 +17,7 @@ local function check(condition: boolean, message: string)
   if not condition then raise message end
 end
 
-local function wait_until_waiting(task: uv.Task)
+local function wait_until_waiting(task: async.Task)
   local status = task:status()
   while status ~= "waiting" do
     check(status == "new" or status == "ready" or status == "running",
@@ -38,9 +38,9 @@ local function send_signal(name: string)
   check((status as integer) == 0, "public libuv self-delivery failed")
 end
 
-function schedule_one_shot(name: string): uv.Task
-  return uv.run(function (): value
-    local waiter = uv.run(function (): value
+function schedule_one_shot(name: string): async.Task
+  return async.run(function (): value
+    local waiter = async.run(function (): value
       return os.wait_signal(name)
     end)
     wait_until_waiting(waiter)
@@ -51,10 +51,10 @@ function schedule_one_shot(name: string): uv.Task
   end)
 end
 
-function schedule_cancelled_wait(): uv.Task
+function schedule_cancelled_wait(): async.Task
   cancelled_wait_resumed = false
-  return uv.run(function (): value
-    local target = uv.run(function (): value
+  return async.run(function (): value
+    local target = async.run(function (): value
       local result = os.wait_signal("usr1")
       cancelled_wait_resumed = true
       return result
@@ -66,7 +66,7 @@ function schedule_cancelled_wait(): uv.Task
     do
       target:join()
     catch
-      local cancelled = error as uv.Cancelled
+      local cancelled = error as async.Cancelled
       check(cancelled.reason == "cancelled-signal-wait",
             "signal cancellation reason changed")
       caught = true
@@ -76,7 +76,7 @@ function schedule_cancelled_wait(): uv.Task
 
     -- A replacement watcher receives the signal. If the cancelled watcher
     -- retained a stale waiter, it would resume too or consume this delivery.
-    local replacement = uv.run(function (): value
+    local replacement = async.run(function (): value
       return os.wait_signal("usr1")
     end)
     wait_until_waiting(replacement)
@@ -89,10 +89,10 @@ function schedule_cancelled_wait(): uv.Task
   end)
 end
 
-function schedule_sent_then_cancelled_wait(): uv.Task
+function schedule_sent_then_cancelled_wait(): async.Task
   sent_cancelled_wait_resumed = false
-  return uv.run(function (): value
-    local target = uv.run(function (): value
+  return async.run(function (): value
+    local target = async.run(function (): value
       local result = os.wait_signal("usr1")
       sent_cancelled_wait_resumed = true
       return result
@@ -108,7 +108,7 @@ function schedule_sent_then_cancelled_wait(): uv.Task
     do
       target:join()
     catch
-      local cancelled = error as uv.Cancelled
+      local cancelled = error as async.Cancelled
       check(cancelled.reason == "cancel-after-signal-send",
             "sent-signal cancellation reason changed")
       caught = true
@@ -121,9 +121,9 @@ function schedule_sent_then_cancelled_wait(): uv.Task
   end)
 end
 
-function schedule_generational_gc(): uv.Task
-  return uv.run(function (): value
-    local waiter = uv.run(function (): value
+function schedule_generational_gc(): async.Task
+  return async.run(function (): value
+    local waiter = async.run(function (): value
       return os.wait_signal("usr2")
     end)
     wait_until_waiting(waiter)
@@ -141,8 +141,8 @@ function schedule_generational_gc(): uv.Task
   end)
 end
 
-function schedule_validation_rejections(): uv.Task
-  return uv.run(function (): value
+function schedule_validation_rejections(): async.Task
+  return async.run(function (): value
     local unknown = false
     do
       os.wait_signal("not-a-signal")
@@ -159,7 +159,7 @@ function schedule_validation_rejections(): uv.Task
           "invalid or uncatchable signal name was accepted")
 
     -- Immediate validation failures must leave ordinary signal use intact.
-    local waiter = uv.run(function (): value
+    local waiter = async.run(function (): value
       return os.wait_signal("usr1")
     end)
     wait_until_waiting(waiter)
@@ -196,33 +196,33 @@ describe("os one-shot signals", function()
     it("delivers, cancels, collects, validates, and drains sequential sessions",
     function()
         run_lua([==[
-local uv = require "titan.uv"
+local async = require "titan.async"
 local cases = require "os_signal_cases"
 
 local usr1 = assert(cases.schedule_one_shot("usr1"))
-uv.loop()
+async.loop()
 assert(usr1:join() == "usr1")
 
 local usr2 = assert(cases.schedule_one_shot("usr2"))
-uv.loop()
+async.loop()
 assert(usr2:join() == "usr2")
 
 local cancelled = assert(cases.schedule_cancelled_wait())
-uv.loop()
+async.loop()
 assert(cancelled:join() == "cancelled-signal-wait-ok")
 
 local sent_then_cancelled =
     assert(cases.schedule_sent_then_cancelled_wait())
-uv.loop()
+async.loop()
 assert(sent_then_cancelled:join() ==
     "sent-then-cancelled-signal-wait-ok")
 
 local generational = assert(cases.schedule_generational_gc())
-uv.loop()
+async.loop()
 assert(generational:join() == "signal-generational-gc-ok")
 
 local validation = assert(cases.schedule_validation_rejections())
-uv.loop()
+async.loop()
 assert(validation:join() == "signal-validation-rejections-ok")
 ]==])
     end)

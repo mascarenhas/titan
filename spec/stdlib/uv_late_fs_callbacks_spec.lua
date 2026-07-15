@@ -6,6 +6,7 @@ local LATE_FS_CASES = [[
     local fs = import "fs"
     local timer = import "timer"
     local uv = import "uv"
+    local async = import "async"
 
     record YoungReason
       marker: string
@@ -19,27 +20,27 @@ local LATE_FS_CASES = [[
     end
 
     local function schedule_buffer_write(file: fs.File,
-                                         payload: string): uv.Task
-      return uv.run(function (): value
+                                         payload: string): async.Task
+      return async.run(function (): value
         return file:write(payload)
       end)
     end
 
-    function schedule_cross_generation_graph(root: string): uv.Task
-      return uv.run(function (): value
+    function schedule_cross_generation_graph(root: string): async.Task
+      return async.run(function (): value
         local file = fs.open(root .. "/cross-generation.dat", "w")
         local ticker = timer.ticker(1000)
-        local old_error_task = uv.run(function (): value
+        local old_error_task = async.run(function (): value
           timer.sleep(80)
           do
             fs.stat(root .. "/missing-cross-generation-target")
           catch
-            local failure = error as uv.Error
+            local failure = error as async.Error
             check(failure.operation == "fs.stat" and failure.code < 0,
-                  "old Task received the wrong young uv.Error")
+                  "old Task received the wrong young async.Error")
             lua.lua_gc(L, lua.LUA_GCSTEP, 0 as lua.lua_Integer)
             check(failure.operation == "fs.stat" and failure.code < 0,
-                  "young uv.Error was lost across a minor collection")
+                  "young async.Error was lost across a minor collection")
             return "young-error-ok"
           end
           raise "missing stat unexpectedly succeeded"
@@ -69,7 +70,7 @@ local LATE_FS_CASES = [[
         check((writer:join() as integer) == expected_length,
               "young shared-tag writer returned the wrong byte count")
         check(old_error_task:join() == "young-error-ok",
-              "old Task did not retain its young uv.Error")
+              "old Task did not retain its young async.Error")
 
         ticker:close()
         file:close()
@@ -77,17 +78,17 @@ local LATE_FS_CASES = [[
       end)
     end
 
-    function schedule_late_fs_cancellation(path: string): uv.Task
+    function schedule_late_fs_cancellation(path: string): async.Task
       fs_result_delivered = false
       uv.__test_delay_next_fs_callback(40)
 
-      local target = uv.run(function (): value
+      local target = async.run(function (): value
         fs.stat(path)
         fs_result_delivered = true
         return "late-result-must-not-win"
       end)
 
-      local canceller = uv.run(function (): value
+      local canceller = async.run(function (): value
         while not uv.__test_fs_callback_is_delayed() do
           timer.yield()
         end
@@ -104,13 +105,13 @@ local LATE_FS_CASES = [[
         return nil
       end)
 
-      return uv.run(function (): value
+      return async.run(function (): value
         canceller:join()
         local caught = false
         do
           target:join()
         catch
-          local cancelled = error as uv.Cancelled
+          local cancelled = error as async.Cancelled
           local reason = cancelled.reason as YoungReason
           check(reason.marker == "young-cross-generation-cancel",
                 "young cancellation reason was not retained by the old Task")
@@ -126,18 +127,18 @@ local LATE_FS_CASES = [[
       end)
     end
 
-    function schedule_late_open_cancellation(path: string): uv.Task
+    function schedule_late_open_cancellation(path: string): async.Task
       fs_open_result_delivered = false
       uv.__test_delay_next_fs_callback(40)
 
-      local target = uv.run(function (): value
+      local target = async.run(function (): value
         local file = fs.open(path, "w")
         fs_open_result_delivered = true
         file:close()
         return "late-open-result-must-not-win"
       end)
 
-      local canceller = uv.run(function (): value
+      local canceller = async.run(function (): value
         while not uv.__test_fs_callback_is_delayed() do
           timer.yield()
         end
@@ -145,13 +146,13 @@ local LATE_FS_CASES = [[
         return nil
       end)
 
-      return uv.run(function (): value
+      return async.run(function (): value
         canceller:join()
         local caught = false
         do
           target:join()
         catch
-          local cancelled = error as uv.Cancelled
+          local cancelled = error as async.Cancelled
           check(cancelled.reason == "late-successful-open-cancel",
                 "late successful-open cancellation reason changed")
           caught = true
@@ -198,10 +199,10 @@ describe("uv late filesystem callbacks", function()
     it("roots a cross-generation Runtime/File/Task/buffer/error graph", function()
         run(string.format([==[
             local root = %q
-            local uv = require "titan.uv"
+            local async = require "titan.async"
             local cases = require "uv_late_fs_callback_cases"
             local task = cases.schedule_cross_generation_graph(root)
-            uv.loop()
+            async.loop()
             assert(task:join() == "cross-generation-graph-ok")
         ]==], root))
     end)
@@ -209,10 +210,10 @@ describe("uv late filesystem callbacks", function()
     it("lets cancellation win over a delayed filesystem result", function()
         run(string.format([==[
             local root = %q
-            local uv = require "titan.uv"
+            local async = require "titan.async"
             local cases = require "uv_late_fs_callback_cases"
             local task = cases.schedule_late_fs_cancellation(root)
-            uv.loop()
+            async.loop()
             assert(task:join() == "late-fs-cancellation-ok")
         ]==], root))
     end)
@@ -220,20 +221,20 @@ describe("uv late filesystem callbacks", function()
     it("disposes a delayed successful open after cancellation", function()
         run(string.format([==[
             local root = %q
-            local uv = require "titan.uv"
+            local async = require "titan.async"
             local cases = require "uv_late_fs_callback_cases"
             local path = root .. "/late-cancelled-open.dat"
             local task = cases.schedule_late_open_cancellation(path)
-            uv.loop()
+            async.loop()
             assert(task:join() == "late-successful-open-cancellation-ok")
             assert(os.remove(path))
 
             -- A fresh public session proves the cancelled-open File and request
             -- roots were fully retired without inspecting private Runtime lists.
-            local next_session = uv.run(function()
+            local next_session = async.run(function()
                 return "next-session-ok"
             end)
-            uv.loop()
+            async.loop()
             assert(next_session:join() == "next-session-ok")
         ]==], root))
     end)

@@ -14,7 +14,8 @@ function Ticker:tick(): boolean
 function Ticker:close()
 ```
 
-These functions must be called from a running UV Task.
+These functions must be called from a running
+[`async.Task`](async-io.md#scheduling-and-driving-tasks).
 
 ## One-shot delays
 
@@ -36,7 +37,7 @@ end
 ```
 
 The async bootstrap is installed transitively through `timer`, so this
-standalone program does not need to import `uv` directly.
+standalone program does not need to import `async` explicitly.
 
 ## Recurring tickers
 

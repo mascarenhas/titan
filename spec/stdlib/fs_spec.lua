@@ -3,7 +3,7 @@ local fs_support = require "spec.support.fs_test_support"
 local FS_CASES = [==[
 local fs = import "fs"
 local timer = import "timer"
-local uv = import "uv"
+local async = import "async"
 
 local retained_file: fs.File? = nil
 
@@ -29,8 +29,8 @@ local function contains(entries: {string}, wanted: string): boolean
   return false
 end
 
-function schedule_modes(root: string): uv.Task
-  return uv.run(function (): value
+function schedule_modes(root: string): async.Task
+  return async.run(function (): value
     local path = root .. "/modes.dat"
 
     local file = fs.open(path, "w")
@@ -115,8 +115,8 @@ function schedule_modes(root: string): uv.Task
   end)
 end
 
-function schedule_binary(root: string, payload: string): uv.Task
-  return uv.run(function (): value
+function schedule_binary(root: string, payload: string): async.Task
+  return async.run(function (): value
     local path = root .. "/binary.dat"
     fs.write_file(path, payload)
     check(fs.read_file(path) == payload,
@@ -142,8 +142,8 @@ function schedule_binary(root: string, payload: string): uv.Task
   end)
 end
 
-function schedule_paths(root: string): uv.Task
-  return uv.run(function (): value
+function schedule_paths(root: string): async.Task
+  return async.run(function (): value
     local dir = root .. "/tree"
     local sub = dir .. "/sub"
     local first = dir .. "/first.bin"
@@ -205,8 +205,8 @@ function schedule_paths(root: string): uv.Task
   end)
 end
 
-function schedule_symlink_stat(target: string, link: string): uv.Task
-  return uv.run(function (): value
+function schedule_symlink_stat(target: string, link: string): async.Task
+  return async.run(function (): value
     local result = fs.stat(link)
     check(result.kind == "file",
           "stat did not follow a symlink to its regular-file target")
@@ -217,8 +217,8 @@ function schedule_symlink_stat(target: string, link: string): uv.Task
   end)
 end
 
-function schedule_permission_error(path: string): uv.Task
-  return uv.run(function (): value
+function schedule_permission_error(path: string): async.Task
+  return async.run(function (): value
     expect_failure(function (): value
       fs.stat(path)
       return nil
@@ -227,17 +227,17 @@ function schedule_permission_error(path: string): uv.Task
   end)
 end
 
-function schedule_fifo_and_close(root: string): uv.Task
-  return uv.run(function (): value
+function schedule_fifo_and_close(root: string): async.Task
+  return async.run(function (): value
     local path = root .. "/fifo.dat"
     local file = fs.open(path, "w")
-    local first = uv.run(function (): value
+    local first = async.run(function (): value
       return file:write("first")
     end)
-    local second = uv.run(function (): value
+    local second = async.run(function (): value
       return file:write("-second")
     end)
-    local third = uv.run(function (): value
+    local third = async.run(function (): value
       return file:write("-third")
     end)
 
@@ -248,13 +248,13 @@ function schedule_fifo_and_close(root: string): uv.Task
       timer.yield()
     end
 
-    local closer = uv.run(function (): value
+    local closer = async.run(function (): value
       file:close()
       return nil
     end)
     while closer:status() == "ready" do timer.yield() end
 
-    local late = uv.run(function (): value
+    local late = async.run(function (): value
       do
         file:write("-late")
       catch
@@ -276,8 +276,8 @@ function schedule_fifo_and_close(root: string): uv.Task
   end)
 end
 
-function schedule_retained_file(root: string): uv.Task
-  return uv.run(function (): value
+function schedule_retained_file(root: string): async.Task
+  return async.run(function (): value
     retained_file = fs.open(root .. "/retained.dat", "w")
     local file = retained_file as fs.File
     file:write("retained")
@@ -292,23 +292,23 @@ function retained(): value
   return retained_file
 end
 
-function schedule_leaked_file(root: string): uv.Task
-  return uv.run(function (): value
+function schedule_leaked_file(root: string): async.Task
+  return async.run(function (): value
     local file = fs.open(root .. "/leaked.dat", "w")
     file:write("session-one")
     return file
   end)
 end
 
-function schedule_second_session(root: string): uv.Task
-  return uv.run(function (): value
+function schedule_second_session(root: string): async.Task
+  return async.run(function (): value
     fs.write_file(root .. "/session-two.dat", "session-two")
     return fs.read_file(root .. "/session-two.dat")
   end)
 end
 
-function schedule_stale_file(file: fs.File): uv.Task
-  return uv.run(function (): value
+function schedule_stale_file(file: fs.File): async.Task
+  return async.run(function (): value
     local failures = 0
     do file:read(1) catch
       check(error == "File belongs to a stale libuv Runtime",
@@ -355,7 +355,7 @@ describe("fs runtime", function()
        "permission errors, and paths",
     function()
         run_lua("local root = " .. string.format("%q", root) .. [==[
-local uv = require "titan.uv"
+local async = require "titan.async"
 local fs = require "titan.fs"
 local cases = require "fs_cases"
 
@@ -399,7 +399,7 @@ local paths = cases.schedule_paths(root)
 local symlink = cases.schedule_symlink_stat(symlink_target, symlink_path)
 local permission = permission_is_enforced and
     cases.schedule_permission_error(blocked_path) or nil
-local loop_ok, loop_error = pcall(uv.loop)
+local loop_ok, loop_error = pcall(async.loop)
 chmod(blocked_dir, "700")
 assert(loop_ok, loop_error)
 assert(modes:join() == "modes-ok")
@@ -414,9 +414,9 @@ if permission then assert(permission:join() == "permission-error-ok") end
     function()
         run_lua("local root = " .. string.format("%q", root) .. [==[
 local cases = require "fs_cases"
-local uv = require "titan.uv"
+local async = require "titan.async"
 local task = cases.schedule_fifo_and_close(root)
-uv.loop()
+async.loop()
 assert(task:join() == "fifo-close-ok")
 ]==])
     end)
@@ -425,21 +425,21 @@ assert(task:join() == "fifo-close-ok")
     function()
         run_lua("local root = " .. string.format("%q", root) .. [==[
 local cases = require "fs_cases"
-local uv = require "titan.uv"
+local async = require "titan.async"
 local timer = require "titan.timer"
 
 collectgarbage("collect")
 collectgarbage("generational")
 local weak = setmetatable({}, { __mode = "v" })
 local holder = cases.schedule_retained_file(root)
-local observer = uv.run(function()
+local observer = async.run(function()
     while cases.retained() == nil do timer.yield() end
     weak.file = cases.retained()
     collectgarbage("collect")
     assert(weak.file ~= nil, "pending File was not rooted")
     return true
 end)
-uv.loop()
+async.loop()
 assert(holder:join() == nil)
 assert(observer:join())
 holder, observer = nil, nil
@@ -447,14 +447,14 @@ for _ = 1, 4 do collectgarbage("collect") end
 assert(weak.file == nil, "closed File was retained after session cleanup")
 
 local leaked_task = cases.schedule_leaked_file(root)
-uv.loop()
+async.loop()
 local old_file = leaked_task:join()
 assert(old_file:is_closed(), "final-Task cleanup did not close idle File")
 old_file:close()
 
 local stale = cases.schedule_stale_file(old_file)
 local second = cases.schedule_second_session(root)
-uv.loop()
+async.loop()
 assert(stale:join() == "stale-file-rejected")
 assert(second:join() == "session-two")
 ]==])

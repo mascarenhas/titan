@@ -668,6 +668,16 @@ void *loadsym (lua_State *L, void *lib, const char *sym) {
     return f;
 }
 
+void *loadglobalsym (lua_State *L, const char *sym) {
+    void *f;
+    const char *err;
+    dlerror();  /* clear stale error; a NULL symbol value can be valid */
+    f = dlsym(RTLD_DEFAULT, sym);
+    err = dlerror();
+    if(err != NULL) luaL_error(L, "%s", err);
+    return f;
+}
+
 void titan_check_abi(lua_State *L, void *lib, const char *sym,
                      const char *file) {
     typedef int (*titan_abi_fn)(lua_State *);

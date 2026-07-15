@@ -3,7 +3,7 @@ local async_stdlib = require "spec.support.async_stdlib"
 local NET_CASES = [==[
 local net = import "net"
 local timer = import "timer"
-local uv = import "uv"
+local async = import "async"
 
 local retained_connection: net.Connection? = nil
 local retained_server: net.Server? = nil
@@ -22,12 +22,12 @@ local function expect_failure(func: () -> value, message: string)
   check(failed, message)
 end
 
-local function expect_cancelled(task: uv.Task, reason: string)
+local function expect_cancelled(task: async.Task, reason: string)
   local caught = false
   do
     task:join()
   catch
-    local cancelled = error as uv.Cancelled
+    local cancelled = error as async.Cancelled
     check(cancelled.reason == reason, "cancellation reason changed")
     caught = true
   end
@@ -35,7 +35,7 @@ local function expect_cancelled(task: uv.Task, reason: string)
         "Task did not finish cancelled")
 end
 
-local function wait_until_started(task: uv.Task)
+local function wait_until_started(task: async.Task)
   while task:status() == "ready" do timer.yield() end
 end
 
@@ -63,7 +63,7 @@ local function listen_available(host: string, first_port: integer,
       local server = net.listen(host, port, backlog)
       return server, port
     catch
-      local failure = error as uv.Error
+      local failure = error as async.Error
       if failure.name ~= "EADDRINUSE" then raise error end
     end
     attempts = attempts + 1
@@ -73,8 +73,8 @@ local function listen_available(host: string, first_port: integer,
   raise "could not find an available loopback port"
 end
 
-function schedule_ipv4_core(first_port: integer): uv.Task
-  return uv.run(function (): value
+function schedule_ipv4_core(first_port: integer): async.Task
+  return async.run(function (): value
     expect_failure(function (): value
       net.connect("localhost\0ignored", 1)
       return nil
@@ -90,7 +90,7 @@ function schedule_ipv4_core(first_port: integer): uv.Task
 
     local server, port = listen_available("127.0.0.1", first_port, 8)
 
-    local peer = uv.run(function (): value
+    local peer = async.run(function (): value
       local connection = server:accept()
       check(connection:read_until("\r\n") ==
             "alpha\0beta\r\n", "read_until changed binary data")
@@ -125,10 +125,10 @@ function schedule_ipv4_core(first_port: integer): uv.Task
   end)
 end
 
-function schedule_partial_and_excess(first_port: integer): uv.Task
-  return uv.run(function (): value
+function schedule_partial_and_excess(first_port: integer): async.Task
+  return async.run(function (): value
     local server, port = listen_available("127.0.0.1", first_port, 8)
-    local peer = uv.run(function (): value
+    local peer = async.run(function (): value
       local first = server:accept()
       first:write("left\r")
       timer.yield()
@@ -185,10 +185,10 @@ function schedule_partial_and_excess(first_port: integer): uv.Task
   end)
 end
 
-function schedule_fifo_and_shutdown(first_port: integer): uv.Task
-  return uv.run(function (): value
+function schedule_fifo_and_shutdown(first_port: integer): async.Task
+  return async.run(function (): value
     local server, port = listen_available("127.0.0.1", first_port, 8)
-    local reader = uv.run(function (): value
+    local reader = async.run(function (): value
       local peer = server:accept()
       local payload = read_all(peer)
       check(payload == "first-second-third",
@@ -200,18 +200,18 @@ function schedule_fifo_and_shutdown(first_port: integer): uv.Task
 
     local connection = net.connect("127.0.0.1", port)
     local issued = 0
-    local first = uv.run(function (): value
+    local first = async.run(function (): value
       issued = 1
       connection:write("first")
       return "first"
     end)
-    local second = uv.run(function (): value
+    local second = async.run(function (): value
       while issued < 1 do timer.yield() end
       issued = 2
       connection:write("-second")
       return "second"
     end)
-    local third = uv.run(function (): value
+    local third = async.run(function (): value
       while issued < 2 do timer.yield() end
       issued = 3
       connection:write("-third")
@@ -221,11 +221,11 @@ function schedule_fifo_and_shutdown(first_port: integer): uv.Task
     check(first:join() == "first" and second:join() == "second" and
           third:join() == "third", "FIFO writers failed")
 
-    local shutdown_first = uv.run(function (): value
+    local shutdown_first = async.run(function (): value
       connection:shutdown()
       return "shutdown-first"
     end)
-    local shutdown_second = uv.run(function (): value
+    local shutdown_second = async.run(function (): value
       connection:shutdown()
       return "shutdown-second"
     end)
@@ -239,11 +239,11 @@ function schedule_fifo_and_shutdown(first_port: integer): uv.Task
     end, "empty write bypassed shutdown state validation")
     check(reader:join() == "first-second-third", "reader returned wrong data")
 
-    local close_first = uv.run(function (): value
+    local close_first = async.run(function (): value
       connection:close()
       return "close-first"
     end)
-    local close_second = uv.run(function (): value
+    local close_second = async.run(function (): value
       connection:close()
       return "close-second"
     end)
@@ -256,10 +256,10 @@ function schedule_fifo_and_shutdown(first_port: integer): uv.Task
   end)
 end
 
-function schedule_accept_and_read_cancellation(first_port: integer): uv.Task
-  return uv.run(function (): value
+function schedule_accept_and_read_cancellation(first_port: integer): async.Task
+  return async.run(function (): value
     local server, port = listen_available("127.0.0.1", first_port, 2)
-    local accept_waiter = uv.run(function (): value
+    local accept_waiter = async.run(function (): value
       return server:accept()
     end)
     wait_until_started(accept_waiter)
@@ -274,7 +274,7 @@ function schedule_accept_and_read_cancellation(first_port: integer): uv.Task
     local peer = server:accept()
     client:write("prefix")
     for _ = 1, 20 do timer.yield() end
-    local read_waiter = uv.run(function (): value
+    local read_waiter = async.run(function (): value
       return peer:read_until("\n", true)
     end)
     wait_until_started(read_waiter)
@@ -293,12 +293,12 @@ function schedule_accept_and_read_cancellation(first_port: integer): uv.Task
     client:close()
     peer:close()
 
-    local close_waiter = uv.run(function (): value
+    local close_waiter = async.run(function (): value
       server:accept()
       return "accepted"
     end)
     wait_until_started(close_waiter)
-    local waiter_observer = uv.run(function (): value
+    local waiter_observer = async.run(function (): value
       local failed = false
       do
         close_waiter:join()
@@ -309,11 +309,11 @@ function schedule_accept_and_read_cancellation(first_port: integer): uv.Task
       return "accept-woke"
     end)
     wait_until_started(waiter_observer)
-    local close_first = uv.run(function (): value
+    local close_first = async.run(function (): value
       server:close()
       return "server-close-first"
     end)
-    local close_second = uv.run(function (): value
+    local close_second = async.run(function (): value
       server:close()
       return "server-close-second"
     end)
@@ -327,18 +327,18 @@ function schedule_accept_and_read_cancellation(first_port: integer): uv.Task
   end)
 end
 
-function schedule_bounded_accept_queue(first_port: integer): uv.Task
-  return uv.run(function (): value
+function schedule_bounded_accept_queue(first_port: integer): async.Task
+  return async.run(function (): value
     local server, port = listen_available("127.0.0.1", first_port, 2)
     local clients: {net.Connection} = {}
-    local connectors: {uv.Task} = {}
+    local connectors: {async.Task} = {}
     for i = 1, 4 do
-      connectors[i] = uv.run(function (): value
+      connectors[i] = async.run(function (): value
         return net.connect("127.0.0.1", port)
       end)
     end
     for i = 1, 4 do
-      clients[i] = (connectors[i] as uv.Task):join() as net.Connection
+      clients[i] = (connectors[i] as async.Task):join() as net.Connection
     end
     -- Let all four server-side connection notifications run before consuming
     -- the public accept queue. With backlog two, exactly two can remain queued;
@@ -347,7 +347,7 @@ function schedule_bounded_accept_queue(first_port: integer): uv.Task
 
     local first = server:accept()
     local second = server:accept()
-    local third = uv.run(function (): value
+    local third = async.run(function (): value
       return server:accept()
     end)
     wait_until_started(third)
@@ -364,10 +364,10 @@ function schedule_bounded_accept_queue(first_port: integer): uv.Task
   end)
 end
 
-function schedule_localhost_retry(first_port: integer): uv.Task
-  return uv.run(function (): value
+function schedule_localhost_retry(first_port: integer): async.Task
+  return async.run(function (): value
     local server, port = listen_available("127.0.0.1", first_port, 4)
-    local accept = uv.run(function (): value
+    local accept = async.run(function (): value
       local peer = server:accept()
       check(read_all(peer) == "x", "localhost peer read failed")
       peer:close()
@@ -385,14 +385,14 @@ function schedule_localhost_retry(first_port: integer): uv.Task
   end)
 end
 
-function schedule_ipv6_optional(first_port: integer): uv.Task
-  return uv.run(function (): value
+function schedule_ipv6_optional(first_port: integer): async.Task
+  return async.run(function (): value
     local server: net.Server? = nil
     local port = 0
     do
       server, port = listen_available("::1", first_port, 4)
     catch
-      local failure = error as uv.Error
+      local failure = error as async.Error
       if failure.name == "EAFNOSUPPORT" or
           failure.name == "EADDRNOTAVAIL" or
           failure.name == "EAI_ADDRFAMILY" or
@@ -402,7 +402,7 @@ function schedule_ipv6_optional(first_port: integer): uv.Task
       raise error
     end
     local listener = server as net.Server
-    local peer_task = uv.run(function (): value
+    local peer_task = async.run(function (): value
       local peer = listener:accept()
       check(read_all(peer) == "ipv6", "IPv6 payload changed")
       peer:close()
@@ -418,11 +418,11 @@ function schedule_ipv6_optional(first_port: integer): uv.Task
   end)
 end
 
-function schedule_leaked_connection(first_port: integer): uv.Task
-  return uv.run(function (): value
+function schedule_leaked_connection(first_port: integer): async.Task
+  return async.run(function (): value
     local server, port = listen_available("127.0.0.1", first_port, 2)
     retained_server = server
-    local connector = uv.run(function (): value
+    local connector = async.run(function (): value
       return net.connect("127.0.0.1", port)
     end)
     retained_connection = connector:join() as net.Connection
@@ -432,8 +432,8 @@ function schedule_leaked_connection(first_port: integer): uv.Task
   end)
 end
 
-function schedule_stale_rejection(_first_port: integer): uv.Task
-  return uv.run(function (): value
+function schedule_stale_rejection(_first_port: integer): async.Task
+  return async.run(function (): value
     expect_failure(function (): value
       (retained_connection as net.Connection):write("stale")
       return nil
@@ -475,7 +475,7 @@ describe("net standard library", function()
     local function port_prelude(scenario)
         return [==[
 local cases = require "net_cases"
-local uv = require "titan.uv"
+local async = require "titan.async"
 
 local function port_seed(text)
     local hash = 0
@@ -489,7 +489,7 @@ local module_path = assert(package.searchpath("net_cases", package.cpath))
 local first_port = port_seed(module_path .. ":]==] .. scenario .. [==[")
 local function run(name)
     local task = assert(cases[name](first_port))
-    uv.loop()
+    async.loop()
     return task:join()
 end
 ]==]

@@ -63,6 +63,11 @@ return types.
 
 `checker.check` runs `checktoplevel` and then `checkbodies`.
 
+Before pass 1, `collect_type_aliases` enters every alias in a separate,
+module-wide type namespace. This makes forward aliases available to earlier
+signatures without creating value symbols. Lazy resolution stores the exact RHS
+type on the declaration and detects cycles with a `resolving` state.
+
 **Pass 1 — signatures** (`checktoplevel`). Visits every top-level node in
 order, computing its type without looking at function bodies: `TopLevelFunc`
 gets a `types.Function` built from its written parameter/return types;
@@ -90,15 +95,18 @@ reuses that type identity, otherwise it creates the same opaque declaration.
 After both passes, `makemoduletype` builds the module's interface from the
 non-`islocal`, non-`_ignore`, non-import top levels (`TopLevelVar` →
 `Type.ModuleVariable`; `TopLevelFunc`/`TopLevelRecord` →
-`Type.ModuleMember`). Local record fields, methods and functions are likewise
-left out of serialized public record interfaces.
+`Type.ModuleMember`). Public `TopLevelTypeAlias` nodes instead populate the
+module's separate `type_members` map with their resolved RHS types. Local
+aliases, local record fields, methods and functions are left out of serialized
+public interfaces.
+See [Type aliases](type-aliases.md) for the resolution and interface details.
 
 `checker.has_main(ast)` is a post-check used by `titanc` to decide between
 building a shared library and a standalone executable: it looks for a
-`TopLevelFunc` named `main` with exactly one parameter whose *checker* type
-is `{string}` and one return type whose *AST tag* is `Ast.TypeInteger` —
-checked type on the parameter side (so it only works after `checker.check`),
-raw AST node on the return side.
+`TopLevelFunc` named `main` with exactly one parameter whose checker type is
+`{string}` and one return type whose checker type is `integer`. Resolving the
+return type before this test lets a transparent alias of `integer` satisfy the
+entrypoint contract.
 
 ## The relations in `types.lua`
 
@@ -599,7 +607,8 @@ loader(modname)  -->  ok, moduletype_or_error, errors
 
 On success, the import node's `_type` is the returned `Type.Module`, and
 errors found while checking the dependency propagate into this module's
-error list. `checkimport` then walks the module's members and registers each
+error list. `checkimport` then walks both the value `members` and alias
+`type_members` namespaces and registers each
 imported record into `types.registry`: it unwraps the `Type.ModuleMember`
 wrapper and, when the underlying type is a `Type.Record` (or
 `Type.Interface`), stores it under its fqtn. This is what makes a record
@@ -631,7 +640,9 @@ Two real loaders exist in `driver.lua`:
   and local record members are omitted from the serialized interface; exported
   records still serialize their total `nfields` count and each public
   `Field.index`, so public fields keep their real `Udata` slot even when local
-  fields were skipped.
+  fields were skipped. `Type.Module.type_members` is serialized as a separate,
+  deterministically ordered map, so aliases rehydrate without becoming runtime
+  members.
 * `driver.tableloader` is the in-memory variant for tests; it deliberately
   serializes and re-loads every module type, so the round-trip is exercised
   by every import test in the suite.
@@ -644,10 +655,10 @@ declarations become `type_members` plus entries in the symbol table's
 `c.size_t` resolve (see [FFI internals](ffi-internals.md)).
 
 After the module interface is built, export validation rejects any public type
-tree that mentions a local record type, and any public type tree that mentions a
-C FFI type. For records, the walkers skip local fields, local methods and local
-record functions before applying the C-type check, which is why an exported record may
-have a private C-typed field as long as that field is local.
+tree, including an exported alias target, that mentions a local record type or
+a C FFI type. For records, the walkers skip local fields, local methods and
+local record functions before applying the C-type check, which is why an
+exported record may have a private C-typed field as long as that field is local.
 
 ## Process-global state
 

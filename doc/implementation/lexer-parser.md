@@ -33,7 +33,7 @@ synonym rules, `NEG <- SUB` and `BNEG <- BXOR`, let unary minus and unary
 `~` reuse the `-` and `~` tokens.
 
 A few tokens get the whitespace wrapper even when they are rarely used.
-`break`, `defer`, `in`, and `DOTS` (`...`) are real syntax; `goto` and `DBLCOLON`
+`break`, `defer`, `in`, `type`, and `DOTS` (`...`) are real syntax; `goto` and `DBLCOLON`
 (`::`) remain reserved/recognized but unused, so there is no `goto`
 statement or label syntax.
 
@@ -245,6 +245,11 @@ statement position get specific messages.
 ## Parse-time desugarings
 
 The parser performs several rewrites that later passes rely on:
+
+* **Type alias declarations are direct.** `[local] type Name = T` is not a
+  desugaring: it produces one `Ast.TopLevelTypeAlias` whose `type` field is the
+  ordinary type-annotation AST. The checker keeps the declaration out of the
+  value namespace and code generation. See [Type aliases](type-aliases.md).
 
 * **`record` declarations produce two toplevels.** `defs.recorddecl` returns
   an `Ast.TopLevelRecord` plus a synthesized `Ast.TopLevelStatic` named

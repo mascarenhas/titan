@@ -3,7 +3,7 @@ local os_support = require "spec.support.os_test_support"
 local HELPER_CASES = [====[
 -- Synchronous public os behavior against the canonical production modules.
 local os = import "os"
-local uv = import "uv"
+local async = import "async"
 
 local function check(condition: boolean, message: string)
   if not condition then raise message end
@@ -62,7 +62,7 @@ function exercise_nul_rejections(name: string, path: string): string
   do
     os.getenv(name .. "\0get")
   catch
-    local failure = error as uv.Error
+    local failure = error as async.Error
     check(failure.operation == "os.getenv",
           "NUL getenv reported the wrong operation")
     rejections = rejections + 1
@@ -70,7 +70,7 @@ function exercise_nul_rejections(name: string, path: string): string
   do
     os.setenv(name .. "\0set", "value")
   catch
-    local failure = error as uv.Error
+    local failure = error as async.Error
     check(failure.operation == "os.setenv",
           "NUL setenv name reported the wrong operation")
     rejections = rejections + 1
@@ -78,7 +78,7 @@ function exercise_nul_rejections(name: string, path: string): string
   do
     os.setenv(name, "value\0suffix")
   catch
-    local failure = error as uv.Error
+    local failure = error as async.Error
     check(failure.operation == "os.setenv" and failure.subject == name,
           "NUL environment value leaked into the Error subject")
     rejections = rejections + 1
@@ -86,7 +86,7 @@ function exercise_nul_rejections(name: string, path: string): string
   do
     os.unsetenv(name .. "\0unset")
   catch
-    local failure = error as uv.Error
+    local failure = error as async.Error
     check(failure.operation == "os.unsetenv",
           "NUL unsetenv reported the wrong operation")
     rejections = rejections + 1
@@ -94,7 +94,7 @@ function exercise_nul_rejections(name: string, path: string): string
   do
     os.chdir(path .. "\0suffix")
   catch
-    local failure = error as uv.Error
+    local failure = error as async.Error
     check(failure.operation == "os.chdir",
           "NUL chdir reported the wrong operation")
     rejections = rejections + 1

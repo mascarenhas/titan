@@ -76,7 +76,8 @@ nothing.
 EOF and non-EOF read errors clear any current allocation, stop reading, and
 record a sticky terminal before driving arbitrary code. EOF directly resumes a
 waiter with `nil` but leaves the TCP write side open. Another error stores a
-`uv.Error`, raises it directly in a waiter, and initiates physical close. A
+the uv-owned `Error` record (publicly `async.Error`), raises it directly in a
+waiter, and initiates physical close. A
 later low-level read first joins and drains the entire completed queue, then
 returns sticky `nil` or repeatedly raises the stored error. With no data or
 terminal it only installs one waiter; it never starts or stops libuv. Explicit

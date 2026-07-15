@@ -228,7 +228,7 @@ describe("libuv Makefile configuration", function()
             "UV_CONFIG_STAMP := $(LIBUV_BUILD_DIR)/", 1, true), makefile)
         local _, prepared_count = makefile:gsub(
             "TITAN_RUNTIME_PREBUILT=1", "")
-        assert.equal(6, prepared_count, makefile)
+        assert.equal(7, prepared_count, makefile)
 
         file = assert(io.open("titan-compiler/driver.lua", "rb"))
         local driver_source = file:read("*a")
@@ -561,7 +561,7 @@ exit 64
 
     it("builds facade modules from binary uv without another libuv input",
        function()
-        for _, module in ipairs({ "timer", "fs", "net", "os" }) do
+        for _, module in ipairs({ "async", "timer", "fs", "net", "os" }) do
             for _, mode in ipairs({ "bundled", "system" }) do
                 local ok, output, why, code =
                     run_facade_dry_run(mode, module)

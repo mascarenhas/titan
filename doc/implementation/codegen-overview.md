@@ -438,12 +438,14 @@ reading a 0.8 record's `getudatamem` would read out of bounds, so 0.7 and
 0.8 `.so`s are ABI-incompatible and live under different `TITAN_PATH`
 directories.
 
-The current ABI is **0.11**. The 0.10 to 0.11 bump covers module-local
+The 0.10 to 0.11 bump covers module-local
 records and record members: `<mangled>_types` omits local records and local
 fields/methods/record functions from the serialized public interface, while retaining
 the full record field-slot count so an imported `.so` still reads public fields
 from their original `Udata` user-value slots. A 0.10 checker would not know how
-to interpret that layout metadata.
+to interpret that layout metadata. The current ABI is **0.12**. The 0.11 to
+0.12 bump adds the separately serialized `Type.Module.type_members` map for
+public type aliases; a 0.11 checker cannot rehydrate that interface shape.
 
 ## The module protocol
 
@@ -468,6 +470,7 @@ Udata *counter_init(lua_State *L) {
         _initialized = 1;
         /* create and register _mod (luaS_newudata(L, 0, NUPVALS));
            $LOADMODULES1 (dlopen dynamic deps), $INITMODULES (dep inits),
+           $LOADGLOBALS (symbols published by transitive RTLD_GLOBAL deps),
            $INITRECORDS (record metatables), $INITVARS (variable
            initializers); install functions and public record namespaces into
            their uv slots; $CREATEMETA (member metatable on the udata) */
@@ -477,7 +480,8 @@ Udata *counter_init(lua_State *L) {
         lua_pop(L, 1);
         if(!_initialized) {
             _initialized = 1;
-            $LOADMODULES2  /* re-stitch dlopened function pointers */
+            $LOADMODULES2  /* re-stitch directly imported function pointers */
+            $LOADGLOBALS   /* re-stitch transitive global symbols */
         }
         return _mod;
     }
@@ -507,7 +511,9 @@ in two kinds — one `loadlib` handle line per dynamic dep, then one
 so a single entry is necessarily a bare handle with no function pointers
 to re-stitch, and skipping it just avoids declaring an unused handle.
 (The converse is not exact: two dynamic deps with no functions called
-would still re-emit their handles.)
+would still re-emit their handles.) `$LOADGLOBALS` is independent of that
+optimization because its symbols are not associated with a direct import
+handle.
 
 ### Lua entries, `<prefix>_abi`, and `<prefix>_types`
 
@@ -534,14 +540,16 @@ int counter_abi(lua_State* L) {
 }
 
 int counter_types(lua_State* L) {
-    lua_pushliteral(L, "Module('counter',{ModuleVariable('counter', 'x', Integer()),...})");
+    lua_pushliteral(L, "Module('counter',{ModuleVariable('counter', 'x', Integer()),...},{['Count'] = Integer()})");
     return 1;
 }
 ```
 
 The literal is `types.serialize(ast._type)`: a Lua *expression* that
 rebuilds the module's type when evaluated with `types.lua`'s constructors
-as its environment. It returns that serialized interface as its sole result;
+as its environment. A `Type.Module` serializes runtime `members` and public
+alias `type_members` separately; aliases therefore create no module slot or
+Lua-visible member. It returns that serialized interface as its sole result;
 there is no dependency-origin metadata in the module protocol.
 
 When the driver's loader finds only a compiled `.so` for an import, it first
@@ -603,6 +611,15 @@ Record tags and
 metatables of imported records are not wired through symbols at all: they
 synchronize through the Lua registry at init time (`"Titan record <fqtn>
 tag"` / `"... metatable"`; [Lua interop internals](lua-interop-internals.md)).
+
+A record type re-exported through an alias keeps its original defining module.
+If C imports only re-exporter B but calls a method owned by A, B's initializer
+has already loaded A with `RTLD_GLOBAL`. C therefore does not `loadlib` A:
+after `$INITMODULES` initializes B, `$LOADGLOBALS` resolves A's native method
+entry (and any bound-method Lua trampoline) with
+`loadglobalsym`/`dlsym(RTLD_DEFAULT, ...)`. The corresponding module userdata
+and record metatable are then recovered from the Lua registry. See
+[Type aliases](type-aliases.md).
 
 ## User-value allocation
 

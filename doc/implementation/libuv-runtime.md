@@ -4,6 +4,7 @@ The asynchronous standard library has one low-level owner:
 
 ```text
 titan/coroutine.so -> titan/uv.so
+                         |-> titan/async.so
                          |-> titan/timer.so
                          |-> titan/fs.so
                          |-> titan/net.so
@@ -13,16 +14,21 @@ titan/coroutine.so -> titan/uv.so
 `titan/uv.so` extracts `titan_uv.o` from `libtitan.a` and links the selected libuv
 exactly once. Both checkout and installed driver modes link the runtime archive,
 never a direct `titan.o`; static selection extracts only referenced shim
-members. `titan/timer.so`, `titan/fs.so`, `titan/net.so`, and `titan/os.so`
-import the qualified binary `titan/uv.so` with the ordinary Titan loader; they
+members. `titan/async.so`, `titan/timer.so`, `titan/fs.so`, `titan/net.so`, and
+`titan/os.so` import the qualified binary `titan/uv.so` with the ordinary Titan
+loader; they
 do not compile `titan/uv.titan`, extract `titan_uv.o`, or embed another libuv
 archive. Dependency resolution is binary-first, while the explicit
 `titanc titan.uv` build root is source-first. Installation writes exactly one
 ordinary file per standard module under
-`<root>/lib/titan/0.11/titan/`.
+`<root>/lib/titan/0.12/titan/`.
 Lua's configured C-module path and ordinary qualified Titan lookup both
 resolve those files, with no copied, symbolic-link, or hard-link aliases. Thus
-every facade reaches the same `titan/uv.so` image. In the normal
+every facade reaches the same `titan/uv.so` image. `titan.async` is the public
+scheduler facade: its `Error`, `Cancelled`, and `Task` exports are transparent
+aliases of the uv-owned records, while `run`, `loop`, and `version` forward to
+the provider's private `_run`, `_loop`, and `_version` functions. It allocates
+no second Runtime and exposes no alias as a runtime module member. In the normal
 bundled build, `titan/uv.so` is the process's sole complete libuv provider; its
 private static archive is consumed only for that link and is not installed in
 the Titan SDK, while the headers remain available under the installed include
@@ -135,7 +141,8 @@ request callback plus cleanup, descriptor close request, child exit followed
 by process close, and coroutine completion. Sequential sessions reuse the tag
 but allocate a fresh loop and generation.
 
-`uv.run` constructs a Task and arms a zero timer; it never resumes the Task. A
+`async.run` forwards to `uv._run`, which constructs a Task and arms a zero
+timer; it never resumes the Task. A
 callback drives the root coroutine until it finishes or yields a private
 Request with the shared tag. The dispatcher validates the Task epoch and
 either registers the new owner or iteratively injects an immediate submission
@@ -221,7 +228,8 @@ and an error-construction closure, keeps both the capacity and returned length
 as `size_t`, and starts with a 256-byte GC-owned buffer. `UV_ENOBUFS` recurses
 with the exact capacity reported through libuv's size pointer; success passes
 that `size_t` directly to `lua_pushlstring`. `uv_os_getenv` additionally maps
-`UV_ENOENT` to `nil`. Other failures become ordinary `uv.Error` values; there
+`UV_ENOENT` to `nil`. Other failures become uv-owned `Error` values, exported
+to users through the transparent `async.Error` alias; there
 is no hidden POSIX fallback or private checked-growth policy.
 
 The supported Linux and macOS `uv_exepath` implementations signal truncation
@@ -354,8 +362,8 @@ Task failure/cancellation without turning it into a broken dispatcher.
 
 Application code intentionally runs in the libuv callback until its next
 asynchronous yield. Neither the dispatcher nor any callback invokes `uv_run`;
-only `uv.loop` or the standalone bootstrap drives the loop from the outer
-main-thread boundary.
+only public `async.loop` (through `uv._loop`) or the standalone bootstrap drives
+the loop from the outer main-thread boundary.
 
 ## Cancellation and shutdown
 

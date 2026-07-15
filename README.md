@@ -83,7 +83,7 @@ The installed files used to compile Titan code include:
 | `$ROCKS_TREE/lib/lua/5.5/titan.so` | The separate Lua support module built only from `titan-runtime/titanlib.c`, including the compiler's internal `RTLD_LAZY` + `RTLD_LOCAL` interface loader; it is not a member of `libtitan.a` |
 | `$ROCKS_TREE/include/minicoro.h`, `titan.h`, `titan_longjmp.h` | Non-Lua top-level SDK headers |
 | `$ROCKS_TREE/include/titan/{ffi,coro,uv}.h` | Namespaced portable FFI, coroutine, and libuv shim headers |
-| `$ROCKS_TREE/lib/titan/0.11/titan/*.so` | The single canonical files for the `coroutine`, `uv`, `timer`, `fs`, `net`, and `os` standard modules, used by both Titan imports and `require "titan.*"` |
+| `$ROCKS_TREE/lib/titan/0.12/titan/*.so` | The single canonical files for the `coroutine`, `uv`, `async`, `timer`, `fs`, `net`, and `os` standard modules, used by both Titan imports and `require "titan.*"` |
 | `$ROCKS_TREE/share/lua/5.5/titan/uv.lua` | The Lua loader that maps canonical `titan/uv.so` globally before invoking `luaopen_titan_uv` |
 
 Bundled-libuv installs also contain `$ROCKS_TREE/include/uv.h` and
@@ -202,7 +202,7 @@ compiler; select unusual CMake toolchain executables explicitly through
 own runtime archive.
 
 The Titan-owned Lua's configured default `package.cpath` contains
-`$PREFIX/lib/titan/0.11/?.so` before `$PREFIX/lib/lua/5.5/?.so`. The first
+`$PREFIX/lib/titan/0.12/?.so` before `$PREFIX/lib/lua/5.5/?.so`. The first
 template lets `require "titan.*"` reach the canonical standard modules (with
 `titan.uv` passing through its Lua loader first); the second remains the
 root-discovery anchor. The default `package.path` likewise finds
@@ -212,15 +212,15 @@ root-discovery anchor. The default `package.path` likewise finds
 During the source rock's post-install build, the internal `TITAN_ROCKS_ROOT`
 override identifies `ROCKS_TREE` directly. The recovered Titan root supplies
 the staged Lua sources and archives and compiled modules under
-`$ROCKS_TREE/lib/titan/0.11/`; the standard library's qualified `titan.*`
+`$ROCKS_TREE/lib/titan/0.12/`; the standard library's qualified `titan.*`
 modules consequently live below its `titan/` subdirectory. This discovery
 rule implements the supported equal-root layout; it does not redefine the
 separately owned `PREFIX` and `ROCKS_TREE` as one concept.
 
 At startup a compiled executable inherits Lua's default `package.cpath` and
-ensures `$ROCKS_TREE/lib/titan/0.11/?.so` is present. Both it and the installed
+ensures `$ROCKS_TREE/lib/titan/0.12/?.so` is present. Both it and the installed
 Lua therefore resolve `titan.<name>` to the same canonical file at
-`$ROCKS_TREE/lib/titan/0.11/titan/<name>.so`; there are no Lua-facing or
+`$ROCKS_TREE/lib/titan/0.12/titan/<name>.so`; there are no Lua-facing or
 parent-level compatibility copies.
 
 An unmodified Lua 5.5 can reproduce those search paths with versioned
@@ -229,16 +229,16 @@ is also Titan's installation-root anchor:
 
 ```sh
 export LUA_PATH_5_5="$ROCKS_TREE/share/lua/5.5/?.lua;$ROCKS_TREE/share/lua/5.5/?/init.lua;;"
-export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.11/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
+export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.12/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
 ```
 
 If that root-anchor template is deliberately omitted, set
-`TITAN_PATH_0_11="$ROCKS_TREE/lib/titan/0.11"` as well.
+`TITAN_PATH_0_12="$ROCKS_TREE/lib/titan/0.12"` as well.
 
-`TITAN_PATH_0_11` (or the unversioned `TITAN_PATH`) overrides the Titan binary
+`TITAN_PATH_0_12` (or the unversioned `TITAN_PATH`) overrides the Titan binary
 search path. A short standard-library import is desugared before resolution
 (`import "timer"` becomes `import "titan.timer"`), so ordinary qualified
-lookup below `$ROCKS_TREE/lib/titan/0.11` reaches the canonical file. In a source
+lookup below `$ROCKS_TREE/lib/titan/0.12` reaches the canonical file. In a source
 checkout, `--lua` can select another complete Lua source/build tree for an
 individual compiler invocation. An installed compiler rejects `--lua` because
 its headers, `liblua.a`, and `libtitan.a` are one matched SDK. These overrides
@@ -256,7 +256,7 @@ build and install each standard module once at its canonical qualified path.
 There is no
 separate Make install pass or
 pre-install hook. The rockspec's C-module list contains only `titan.so`; the
-six standard DSOs are deliberately absent. LuaRocks cannot
+seven standard DSOs are deliberately absent. LuaRocks cannot
 express these SDK and Titan-module destinations as normal Lua modules, so the
 directly copied files are outside the rock manifest and
 `luarocks remove titan` does not remove them. Titan does not provide binary
@@ -273,21 +273,24 @@ The compiler takes a list of module names that you want to compile. Modules
 are looked up in the source tree (defaults to the current working directory,
 but you can override this with the `--tree` option), as well as in the Titan
 binary path, a semicolon-separated list of paths. By default this is the
-current directory plus `<root>/lib/titan/0.11`, where `<root>` is recovered
-from `package.cpath`; override it with `TITAN_PATH_0_11` or `TITAN_PATH`.
+current directory plus `<root>/lib/titan/0.12`, where `<root>` is recovered
+from `package.cpath`; override it with `TITAN_PATH_0_12` or `TITAN_PATH`.
 
-The standard-library short names (`coroutine`, `uv`, `timer`, `fs`, `net`, and
-`os`) are parser sugar for the corresponding `titan.*` module names. Module
-resolution checks binary dependencies before source, so an ordinary
+The standard-library short names (`coroutine`, `uv`, `async`, `timer`, `fs`,
+`net`, and `os`) are parser sugar for the corresponding `titan.*` module
+names. Module resolution checks binary dependencies before source, so an ordinary
 `./titan/uv.titan` cannot displace the installed `titan/uv.so`; someone who
 explicitly changes `TITAN_PATH` to hide that binary is choosing a different
 module installation. Titan code uses the short imports, while Lua uses the
-qualified names `require "titan.coroutine"`, `require "titan.uv"`,
+qualified names `require "titan.coroutine"`, `require "titan.async"`,
 `require "titan.timer"`, `require "titan.fs"`, `require "titan.net"`, and
-`require "titan.os"`. Lua's own `coroutine` and `os` modules remain unchanged.
+`require "titan.os"`. The private `titan.uv` provider remains available for
+runtime plumbing and direct-libuv extensions. Lua's own `coroutine` and `os`
+modules remain unchanged.
 
 The currently implemented async chain is `titan/coroutine.so -> titan/uv.so ->
-titan/{timer.so, fs.so, net.so, os.so}`. Only the canonical `titan/uv.so`
+titan/async.so`, with `titan/{timer.so, fs.so, net.so, os.so}` also built on
+the private `titan/uv.so` plumbing. Only the canonical `titan/uv.so`
 consumes libuv directly: bundled mode links its private archive there, while
 system mode links the pkg-config-selected shared library. The higher modules
 dynamically import that qualified image instead of linking libuv themselves.
@@ -319,18 +322,19 @@ function main(args: {string}): integer
 end
 ```
 
-From Lua, schedule Tasks with `uv.run` and drive them explicitly:
+From Lua, schedule Tasks with the public `async` facade and drive them
+explicitly:
 
 ```lua
-local uv = require "titan.uv"
+local async = require "titan.async"
 local timer = require "titan.timer"
 
-local task = uv.run(function()
+local task = async.run(function()
     timer.yield()
     return "done"
 end)
 assert(task:status() == "ready") -- `run` has not executed it
-uv.loop()
+async.loop()
 assert(task:join() == "done")
 ```
 
@@ -475,6 +479,7 @@ they are in the roadmap:
   buffers, explicit C varargs, and C function calls)
 * records (structs) with `:` method calls
 * maps
+* transparent type aliases, including public record re-exports
 * first-class functions
 * anonymous functions and closures, with proper lexical scoping
 * bound methods (`obj:method`) as first-class values
@@ -484,7 +489,8 @@ they are in the roadmap:
 * error handling with `raise`, `catch`, `finally`, Lua `pcall`, and
   unified Lua/Titan backtraces via `titan.backtrace()`
 * asymmetric, tagged (nested) coroutines as building block for async IO
-* libuv-backed Tasks, timers, asynchronous binary filesystem I/O, DNS, TCP,
+* libuv-backed `async` Tasks, timers, asynchronous binary filesystem I/O, DNS,
+  TCP,
   portable OS helpers, one-shot signal waits, direct child processes with
   binary stdio, and concurrent `communicate`
 

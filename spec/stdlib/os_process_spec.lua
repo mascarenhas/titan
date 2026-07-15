@@ -5,7 +5,7 @@ local PROCESS_CASES = [====[
 local lua = foreign import "lua.h"
 local os = import "os"
 local timer = import "timer"
-local uv = import "uv"
+local async = import "async"
 
 local function check(condition: boolean, message: string)
   if not condition then raise message end
@@ -21,12 +21,12 @@ local function expect_failure(func: () -> value, message: string)
   check(failed, message)
 end
 
-local function expect_cancelled(task: uv.Task, reason: string)
+local function expect_cancelled(task: async.Task, reason: string)
   local caught = false
   do
     task:join()
   catch
-    local cancelled = error as uv.Cancelled
+    local cancelled = error as async.Cancelled
     check(cancelled.reason == reason, "cancellation reason changed")
     caught = true
   end
@@ -34,7 +34,7 @@ local function expect_cancelled(task: uv.Task, reason: string)
         "Task did not finish cancelled")
 end
 
-local function wait_until_started(task: uv.Task)
+local function wait_until_started(task: async.Task)
   while task:status() == "ready" do timer.yield() end
 end
 
@@ -82,8 +82,8 @@ local function restore_environment(name: string, original: string?)
 end
 
 function schedule_spawn_and_metadata(child: string,
-                                     envname: string): uv.Task
-  return uv.run(function (): value
+                                     envname: string): async.Task
+  return async.run(function (): value
     expect_failure(function (): value
       os.spawn("", {})
       return nil
@@ -131,10 +131,10 @@ function schedule_spawn_and_metadata(child: string,
   end)
 end
 
-function schedule_binary_fifo(child: string): uv.Task
-  return uv.run(function (): value
+function schedule_binary_fifo(child: string): async.Task
+  return async.run(function (): value
     local process = os.spawn(child, { "echo" })
-    local reader = uv.run(function (): value
+    local reader = async.run(function (): value
       return read_stdout_all(process)
     end)
 
@@ -143,18 +143,18 @@ function schedule_binary_fifo(child: string): uv.Task
     local second_bytes = doubled("-second", 14)
     local third_bytes = doubled("third-", 14)
     local issued = 0
-    local first = uv.run(function (): value
+    local first = async.run(function (): value
       issued = 1
       process:write_stdin(first_bytes)
       return "first"
     end)
-    local second = uv.run(function (): value
+    local second = async.run(function (): value
       while issued < 1 do timer.yield() end
       issued = 2
       process:write_stdin(second_bytes)
       return "second"
     end)
-    local third = uv.run(function (): value
+    local third = async.run(function (): value
       while issued < 2 do timer.yield() end
       issued = 3
       process:write_stdin(third_bytes)
@@ -183,8 +183,8 @@ function schedule_binary_fifo(child: string): uv.Task
   end)
 end
 
-function schedule_delimiter_reads(child: string): uv.Task
-  return uv.run(function (): value
+function schedule_delimiter_reads(child: string): async.Task
+  return async.run(function (): value
     local framed = os.spawn(child, { "echo" })
     expect_failure(function (): value
       framed:read_stdout_until("")
@@ -214,10 +214,10 @@ function schedule_delimiter_reads(child: string): uv.Task
 
     local independent = os.spawn(child, { "early-output-exit" })
     independent:close_stdin()
-    local stdout_reader = uv.run(function (): value
+    local stdout_reader = async.run(function (): value
       return independent:read_stdout_until("\n")
     end)
-    local stderr_reader = uv.run(function (): value
+    local stderr_reader = async.run(function (): value
       return independent:read_stderr_until("\n")
     end)
     check(stdout_reader:join() == "early\0stdout" and
@@ -233,8 +233,8 @@ function schedule_delimiter_reads(child: string): uv.Task
   end)
 end
 
-function schedule_exit_statuses(child: string): uv.Task
-  return uv.run(function (): value
+function schedule_exit_statuses(child: string): async.Task
+  return async.run(function (): value
     expect_failure(function (): value
       os.spawn(child .. ".missing", {})
       return nil
@@ -292,13 +292,13 @@ function schedule_exit_statuses(child: string): uv.Task
   end)
 end
 
-function schedule_wait_and_read_cancellation(child: string): uv.Task
-  return uv.run(function (): value
+function schedule_wait_and_read_cancellation(child: string): async.Task
+  return async.run(function (): value
     local process = os.spawn(child, { "ready-wait" })
     process:close_stdin()
     check(process:read_stdout_until("\n") == "READY\n",
           "ready child did not publish its marker")
-    local waiter = uv.run(function (): value
+    local waiter = async.run(function (): value
       return process:wait()
     end)
     wait_until_started(waiter)
@@ -313,7 +313,7 @@ function schedule_wait_and_read_cancellation(child: string): uv.Task
       process:kill("not-a-signal")
       return nil
     end, "Process accepted an unknown signal name")
-    local replacement = uv.run(function (): value
+    local replacement = async.run(function (): value
       return process:wait()
     end)
     wait_until_started(replacement)
@@ -336,7 +336,7 @@ function schedule_wait_and_read_cancellation(child: string): uv.Task
     local expected_stderr = doubled("ERR\0pattern-5678", 2)
     delayed:write_stdin("x")
     timer.sleep(20)
-    local reader = uv.run(function (): value
+    local reader = async.run(function (): value
       return delayed:read_stdout_until("\n", true)
     end)
     wait_until_started(reader)
@@ -359,19 +359,19 @@ function schedule_wait_and_read_cancellation(child: string): uv.Task
   end)
 end
 
-function schedule_queued_write_cancellation(child: string): uv.Task
-  return uv.run(function (): value
+function schedule_queued_write_cancellation(child: string): async.Task
+  return async.run(function (): value
     local process = os.spawn(child, { "delay-read-eof" })
-    local output_reader = uv.run(function (): value
+    local output_reader = async.run(function (): value
       return read_stdout_all(process)
     end)
     local payload = doubled("queued-write\0", 18)
-    local first = uv.run(function (): value
+    local first = async.run(function (): value
       process:write_stdin(payload)
       return "first-write"
     end)
     wait_until_started(first)
-    local queued = uv.run(function (): value
+    local queued = async.run(function (): value
       process:write_stdin("MUST-NOT-BE-WRITTEN")
       return "queued-write"
     end)
@@ -391,8 +391,8 @@ function schedule_queued_write_cancellation(child: string): uv.Task
   end)
 end
 
-function schedule_communicate_success(child: string): uv.Task
-  return uv.run(function (): value
+function schedule_communicate_success(child: string): async.Task
+  return async.run(function (): value
     local input = doubled("input\0block-1234", 15)
     local output, diagnostics, echo_status =
       os.communicate(child, { "echo" }, input)
@@ -447,13 +447,13 @@ function schedule_communicate_success(child: string): uv.Task
   end)
 end
 
-function schedule_communicate_failure(child: string): uv.Task
-  return uv.run(function (): value
+function schedule_communicate_failure(child: string): async.Task
+  return async.run(function (): value
     local missing_caught = false
     do
       os.communicate(child .. ".missing", {}, nil)
     catch
-      local failure = error as uv.Error
+      local failure = error as async.Error
       check(#failure.operation > 0,
             "missing executable Error omitted its operation")
       missing_caught = true
@@ -465,7 +465,7 @@ function schedule_communicate_failure(child: string): uv.Task
     do
       os.communicate(child, { "close-stdin-early" }, input)
     catch
-      local failure = error as uv.Error
+      local failure = error as async.Error
       check(#failure.operation > 0,
             "communicate helper Error omitted its operation")
       helper_caught = true
@@ -484,9 +484,9 @@ function schedule_communicate_failure(child: string): uv.Task
   end)
 end
 
-function schedule_communicate_cancellation(child: string): uv.Task
-  return uv.run(function (): value
-    local target = uv.run(function (): value
+function schedule_communicate_cancellation(child: string): async.Task
+  return async.run(function (): value
+    local target = async.run(function (): value
       local output, diagnostics, status =
         os.communicate(child, { "ready-wait" }, nil)
       check(diagnostics == "" and status.code == 0,
@@ -510,8 +510,8 @@ end
 local retained_process: os.Process? = nil
 
 function schedule_forced_runtime_shutdown(child: string,
-                                          pid_path: string): uv.Task
-  return uv.run(function (): value
+                                          pid_path: string): async.Task
+  return async.run(function (): value
     local process = os.spawn(child, { "ignore-term", pid_path })
     retained_process = process
     process:close_stdin()
@@ -523,8 +523,8 @@ function schedule_forced_runtime_shutdown(child: string,
   end)
 end
 
-function schedule_stale_process_rejection(child: string): uv.Task
-  return uv.run(function (): value
+function schedule_stale_process_rejection(child: string): async.Task
+  return async.run(function (): value
     local caught = false
     do
       (retained_process as os.Process):wait()
@@ -587,63 +587,63 @@ describe("os child processes", function()
 
     it("preserves argv/environment/cwd and retained exit status", function()
         run_lua([==[
-local uv = require "titan.uv"
+local async = require "titan.async"
 local cases = require "os_process_cases"
 
 local metadata = assert(cases.schedule_spawn_and_metadata(child, envname))
-uv.loop()
+async.loop()
 assert(metadata:join() == "spawn-metadata-ok")
 
 local statuses = assert(cases.schedule_exit_statuses(child))
-uv.loop()
+async.loop()
 assert(statuses:join() == "exit-statuses-ok")
 ]==])
     end)
 
     it("keeps binary stdio FIFO across GC and queued cancellation", function()
         run_lua([==[
-local uv = require "titan.uv"
+local async = require "titan.async"
 local cases = require "os_process_cases"
 
 local fifo = assert(cases.schedule_binary_fifo(child))
-uv.loop()
+async.loop()
 assert(fifo:join() == "binary-fifo-ok")
 
 local cancellation = assert(cases.schedule_queued_write_cancellation(child))
-uv.loop()
+async.loop()
 assert(cancellation:join() == "queued-write-cancellation-ok")
 ]==])
     end)
 
     it("frames stdout and stderr with independent reader state", function()
         run_lua([==[
-local uv = require "titan.uv"
+local async = require "titan.async"
 local cases = require "os_process_cases"
 
 local task = assert(cases.schedule_delimiter_reads(child))
-uv.loop()
+async.loop()
 assert(task:join() == "delimiter-reads-ok")
 ]==])
     end)
 
     it("cancels replaceable wait and read waiters", function()
         run_lua([==[
-local uv = require "titan.uv"
+local async = require "titan.async"
 local cases = require "os_process_cases"
 
 local task = assert(cases.schedule_wait_and_read_cancellation(child))
-uv.loop()
+async.loop()
 assert(task:join() == "wait-read-cancellation-ok")
 ]==])
     end)
 
     it("communicates concurrently without large-pipe deadlock", function()
         run_lua([==[
-local uv = require "titan.uv"
+local async = require "titan.async"
 local cases = require "os_process_cases"
 
 local task = assert(cases.schedule_communicate_success(child))
-uv.loop()
+async.loop()
 assert(task:join() == "communicate-success-ok")
 ]==])
     end)
@@ -651,16 +651,16 @@ assert(task:join() == "communicate-success-ok")
     it("observes helper errors and drains cancellation before rethrow",
     function()
         run_lua([==[
-local uv = require "titan.uv"
+local async = require "titan.async"
 local cases = require "os_process_cases"
 
 local failure = assert(cases.schedule_communicate_failure(child))
-uv.loop()
+async.loop()
 assert(failure:join() == "communicate-failure-ok")
 
 local cancellation =
     assert(cases.schedule_communicate_cancellation(child))
-uv.loop()
+async.loop()
 assert(cancellation:join() == "communicate-cancellation-ok")
 ]==], true)
     end)
@@ -668,13 +668,13 @@ assert(cancellation:join() == "communicate-cancellation-ok")
     it("terminates, reaps, and closes a leaked TERM-resistant child",
     function()
         run_lua([==[
-local uv = require "titan.uv"
+local async = require "titan.async"
 local cases = require "os_process_cases"
 local pid_path = workspace .. "/shutdown.pid"
 
 local shutdown =
     assert(cases.schedule_forced_runtime_shutdown(child, pid_path))
-uv.loop()
+async.loop()
 assert(shutdown:join() == "forced-runtime-shutdown-ready")
 
 local pid_file = assert(io.open(pid_path, "rb"))
@@ -694,7 +694,7 @@ local weak = setmetatable({
     process = cases.retained_process_value(),
 }, { __mode = "v" })
 local stale = assert(cases.schedule_stale_process_rejection(child))
-uv.loop()
+async.loop()
 assert(stale:join() == "stale-process-rejected")
 collectgarbage("collect")
 collectgarbage("collect")

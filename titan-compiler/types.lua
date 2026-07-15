@@ -132,6 +132,10 @@ local function find_c_type(t, include_legacy, descend_function_values)
                 local ctyp = visit_type(member, seen)
                 if ctyp then return ctyp end
             end
+            for _, member in pairs(typ.type_members or {}) do
+                local ctyp = visit_type(member, seen)
+                if ctyp then return ctyp end
+            end
         elseif tag == "Type.CPointer" then
             return visit_type(typ.pointee, seen)
         elseif tag == "Type.CArray" then
@@ -231,14 +235,16 @@ end
 -- XXX this should not be a type. This makes it possible to
 -- construct nonsense things like a function type that returns
 -- a module type
-function types.Module(modname, members)
+function types.Module(modname, members, type_members)
     for _, member in ipairs(members) do
         members[member.name] = member
     end
+    type_members = type_members or {}
     return { _tag = "Type.Module", name = modname,
         prefix = modname:gsub("[%-.]", "_") .. "_",
         file = modname:gsub("[.]", "/") .. ".so",
-        members = members }
+        members = members,
+        type_members = type_members }
 end
 
 --- Check if two pointer types are different and can be coerced.
@@ -1010,9 +1016,17 @@ function types.serialize(t)
         for _, member in ipairs(t.members) do
             table.insert(members, types.serialize(member))
         end
+        local type_members = {}
+        for name, member in pairs(t.type_members or {}) do
+            table.insert(type_members,
+                "[" .. string.format("%q", name) .. "] = " ..
+                types.serialize(member))
+        end
+        table.sort(type_members)
         return "Module(" ..
             "'" .. t.name .. "'" .. "," ..
             "{" .. table.concat(members, ",") .. "}" ..
+            ",{" .. table.concat(type_members, ",") .. "}" ..
             ")"
     elseif tag == "Type.Function" then
         local ptypes = {}

@@ -1,26 +1,35 @@
 # Asynchronous I/O and tasks
 
-Titan's asynchronous standard library is built around the `uv` module. Titan
-code imports it with:
+Titan's public asynchronous scheduling API is the `async` module. Titan code
+imports it with:
 
 ```titan
-local uv = import "uv"
+local async = import "async"
 ```
 
 Lua code loads the same canonical module identity with
-`require "titan.uv"`. The qualified Lua name avoids collisions with Lua
-libraries. The module currently supports Linux and macOS.
+`require "titan.async"`. The qualified Lua name avoids collisions with Lua
+libraries. The module currently supports Linux and macOS. Its implementation
+forwards scheduling to the private `titan.uv` plumbing/provider module; user
+code should import `async`, not `uv`.
 
 On Unix, loading the module changes a default `SIGPIPE` disposition to ignored
-so a closed stream produces a `uv.Error` instead of terminating the process.
+so a closed stream produces an `async.Error` instead of terminating the
+process.
 An inherited ignored disposition or application-installed handler is left
 unchanged. Embedders must serialize module initialization with their own
 process-wide signal-handler changes.
 
 ## Scheduling and driving tasks
 
+The facade re-exports `Task`, `Error`, and `Cancelled` as transparent,
+type-only aliases of the nominal records owned by the private provider. Titan
+code can therefore write `async.Task` in an annotation and call methods on a
+value of that type, but neither Titan expressions nor Lua see runtime members
+named `async.Task`, `async.Error`, or `async.Cancelled`. The callable interface
+is:
+
 ```titan
-record Task
 function run(func: () -> value): Task
 function loop()
 function Task:join(): value
@@ -29,7 +38,7 @@ function Task:status(): string
 function version(): string
 ```
 
-`uv.run(func)` creates and roots a Task, registers its first zero-duration
+`async.run(func)` creates and roots a Task, registers its first zero-duration
 libuv timer, and returns. It does not call `func` before returning. The next
 event-loop callback starts the Task.
 
@@ -39,27 +48,27 @@ bootstrap hook; the generated entrypoint schedules `main` as the main Task
 and drives the private event loop. Synchronous programs retain the ordinary
 direct `main` path.
 
-A Lua host schedules work explicitly and then calls `uv.loop()`:
+A Lua host schedules work explicitly and then calls `async.loop()`:
 
 ```lua
-local uv = require "titan.uv"
+local async = require "titan.async"
 local timer = require "titan.timer"
 
-local task = uv.run(function()
+local task = async.run(function()
     timer.sleep(10)
     return "done"
 end)
 
 assert(task:status() == "ready")
-uv.loop()
+async.loop()
 assert(task:join() == "done")
 ```
 
-`uv.loop()` may run only on the Lua main thread and never from inside a UV
-Task or an active loop callback. Calling `uv.run` from a Task is valid: it
-schedules an independent Task and returns without running it inline. After a
-session closes all native owners, a later `run`/`loop` pair creates a new
-private loop.
+`async.loop()` may run only on the Lua main thread and never from inside an
+async Task or an active loop callback. Calling `async.run` from a Task is
+valid: it schedules an independent Task and returns without running it inline.
+After a session closes all native owners, a later `run`/`loop` pair creates a
+new private loop.
 
 ## Callback execution model
 
@@ -87,9 +96,9 @@ returns. Callbacks that wake a different Task because another Task explicitly
 closed a stream use the scheduled-drive path instead of nesting a second Task
 drive.
 
-All UV Tasks in one Lua state use one private coroutine tag. A UV yield can
-therefore cross nested Titan coroutines that use other tags and return control
-to the UV scheduler.
+All async Tasks in one Lua state use one private coroutine tag. An async yield
+can therefore cross nested Titan coroutines that use other tags and return
+control to the async scheduler.
 
 ## Results, errors, and cancellation
 
@@ -99,25 +108,20 @@ immutable result or error, so `status` and an already-resolved `join` remain
 usable after the loop closes. A live or pending Task cannot be joined from a
 different Runtime generation.
 
-`join()` waits when called from another live UV Task. It returns the target's
+`join()` waits when called from another live async Task. It returns the target's
 dynamic `value` result, or raises the target's original error while appending
 the join-site propagation traceback. Joining oneself raises.
 
-Libuv failures are represented by:
-
-```titan
-record Error
-  code: integer
-  name: string
-  message: string
-  operation: string
-  subject: string?
-end
-```
+Libuv failures are represented by the provider-owned record re-exported under
+the type-only name `async.Error`. Its fields are `code: integer`,
+`name: string`, `message: string`, `operation: string`, and
+`subject: string?`. The alias preserves the provider record's identity; it is
+not a second constructible record namespace.
 
 Unobserved failed Tasks become session-fatal on the next event-loop turn,
 giving an already-scheduled joiner an opportunity to observe the failure.
-Cancellation is represented by `uv.Cancelled`, whose `reason` is the exact
+Cancellation is represented by the type-only `async.Cancelled` alias, whose
+`reason` field is the exact
 first value passed to `cancel`. Cancellation is sticky: catching it and
 attempting another ordinary asynchronous wait injects the same cancellation
 again. An unobserved cancelled non-main Task is not session-fatal; cancellation

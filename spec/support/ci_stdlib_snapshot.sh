@@ -17,11 +17,11 @@ fi
 artifacts=(
     titan-runtime/libtitan.a
     titan-runtime/.titan-runtime-archive-build-config
-    titan/coroutine.so titan/uv.so titan/timer.so
+    titan/coroutine.so titan/uv.so titan/async.so titan/timer.so
     titan/fs.so titan/net.so titan/os.so
 )
 
-for module in coroutine uv timer fs net os; do
+for module in coroutine uv async timer fs net os; do
     if [[ -d titan/$module.so.dSYM ]]; then
         artifacts+=("titan/$module.so.dSYM")
     fi

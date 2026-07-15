@@ -18,6 +18,8 @@ no top-level statements. A declaration is one of:
   [the C FFI](ffi.md));
 * a **module variable** declaration: `[local] name [: type] = exp`;
 * a **function** declaration: `[local] function name(...) ... end`;
+* a **type alias** declaration: `[local] type Name = type` (see
+  [Type aliases](type-aliases.md));
 * a **record** declaration: `record Name ... end` (see
   [Records](records.md));
 * a **method** declaration: `function Name:method(...) ... end`, also
@@ -44,7 +46,9 @@ end
 Because every top-level `name = exp` is a declaration, writing the same
 name twice at the top level is not an assignment but a duplicate
 declaration — a compile-time error — and the rule holds across kinds: a
-function may not share a name with a module variable or an import.
+function may not share a name with a module variable or an import. Type aliases
+use a separate type-only namespace: they may share a spelling with those value
+declarations, but not with another alias or a record.
 
 ```lua
 -- Titan
@@ -78,12 +82,17 @@ Concretely, the rules are:
   end
   ```
 
-* **Top-level declarations themselves are checked in source order.** A
-  module-variable declaration can only mention imports and record types
-  that appear *above* it in the file; referring to one declared below
-  is a compile-time error (`module '...' referenced by type not found`,
-  or `record type '...' in context of record constructor does not
-  exist`). In practice: imports first, then records, then variables.
+* **Top-level declarations themselves are checked in source order, except for
+  type aliases.** A module-variable declaration can only use ordinary imports
+  and record value namespaces that appear *above* it in the file; referring to
+  one declared below is a compile-time error (`module '...' referenced by type
+  not found`, or `record type '...' in context of record constructor does not
+  exist`). Alias names, however, are predeclared module-wide and may be used in
+  earlier signatures, annotations, and record fields. Alias chains may point
+  forward to other aliases or records. Imports remain source ordered, so an
+  import used by a qualified alias target must already have been declared when
+  that target is first resolved. In practice: put imports first, then records
+  and variables.
 
 * **Initialization order is fixed.** When a module is loaded into a Lua
   state (the first `require` from Lua, or transitively as a dependency
@@ -211,8 +220,12 @@ end
 Exported variables of the imported module can be both read and
 assigned (`geom.origin.x = 0.0` above); writes from Titan are
 statically checked and compile to direct stores, with no run-time type
-check. Record types are referenced as `alias.Name` in type annotations,
-and their record functions as `alias.Name.new(...)` or `alias.Name.make(...)`.
+check. Exported record declarations serve two roles: their types are referenced
+as `alias.Name` in annotations, and their run-time record functions as
+`alias.Name.new(...)` or `alias.Name.make(...)`. An exported type alias is only
+the first of these: `alias.Name` is valid as a type but creates no run-time
+record-function namespace. Construct a re-exported record through the module
+that owns its record declaration.
 
 An exported function is itself a **first-class value**: besides calling it
 as `geom.norm(p)`, the importer can reference `geom.norm` as a value — pass
@@ -329,8 +342,8 @@ the structure of the generated C is in
   described above.
 * **Compiled modules** are looked up along the *binary search path*: a
   semicolon-separated list of plain directories taken from
-  `TITAN_PATH_0_11`, or `TITAN_PATH` if that is unset. Otherwise the default
-  is `.;<root>/lib/titan/0.11`. An installed `titanc` recovers `<root>` from
+  `TITAN_PATH_0_12`, or `TITAN_PATH` if that is unset. Otherwise the default
+  is `.;<root>/lib/titan/0.12`. An installed `titanc` recovers `<root>` from
   the first literal `package.cpath` entry ending in
   `/lib/lua/5.5/?.so`. The same path is used at run time by compiled modules
   that load dependencies dynamically; a `;;` in the run-time environment
@@ -342,21 +355,27 @@ developer installation currently makes those paths equal, which is why the
 driver can discover the Titan root from Lua's `package.cpath`; the names do not
 have inherently identical ownership.
 
-The standard-library names `coroutine`, `uv`, `timer`, `fs`, `net`, and `os`
-are parser sugar for the qualified module names `titan.coroutine`, `titan.uv`,
-`titan.timer`, `titan.fs`, `titan.net`, and `titan.os`. The qualified names then
+The standard-library names `coroutine`, `uv`, `async`, `timer`, `fs`, `net`,
+and `os` are parser sugar for the qualified module names `titan.coroutine`,
+`titan.uv`, `titan.async`, `titan.timer`, `titan.fs`, `titan.net`, and
+`titan.os`. The qualified names then
 follow the ordinary module lookup rules. Thus `local os = import "os"` means
 Titan's `titan.os` module without colliding with Lua's own `os` library, which
 is not importable as a Titan module.
 
+Application scheduling uses `import "async"` (or Lua's
+`require "titan.async"`). `titan.uv` is the private Runtime/libuv provider and
+remains directly importable only for standard-library plumbing and the
+direct-libuv extension contract below.
+
 Lua's `require`, for its part, finds the `.so` through Lua's ordinary
 `package.cpath` — a compiled Titan module is a regular Lua C module
 (see [Requiring a Titan module](lua-interop.md#requiring-a-titan-module)).
-Titan's installed Lua default puts `<root>/lib/titan/0.11/?.so` before the
+Titan's installed Lua default puts `<root>/lib/titan/0.12/?.so` before the
 ordinary `lib/lua` templates, and each standalone program ensures that same
 entry is present. A qualified standard name such as `titan.os`
 therefore resolves the single canonical file
-`<root>/lib/titan/0.11/titan/os.so`. Titan imports resolve that same file by its
+`<root>/lib/titan/0.12/titan/os.so`. Titan imports resolve that same file by its
 qualified name. Installation creates no parent-level or `lib/lua` copy and
 requires no symbolic- or hard-link alias.
 
@@ -427,13 +446,14 @@ function main(args: {string}): integer
 ```
 
 the output is a standalone executable instead of shared libraries (the
-declared return type must literally be `integer`). All requested modules and
-dependencies selected from source are statically bundled into the binary.
+parameter and return types may be spelled through transparent aliases). All
+requested modules and dependencies selected from source are statically bundled
+into the binary.
 Qualified standard-library dependencies are normally found as installed
 binaries first and therefore remain dynamic, just like other binary modules.
 After `luaL_openlibs`, the executable parses the
 inherited `package.cpath` for its `/lib/lua/5.5/?.so` entry, adds
-`<root>/lib/titan/0.11/?.so` if it is absent, and initializes the Titan module
+`<root>/lib/titan/0.12/?.so` if it is absent, and initializes the Titan module
 path from that same root. Deploy those standard DSOs as described under
 [where modules are found](#where-modules-are-found). `args` is
 Lua-style: `args[0]` is the program name and `args[1]` onward are the
@@ -498,11 +518,11 @@ paths with:
 
 ```sh
 export LUA_PATH_5_5="$ROCKS_TREE/share/lua/5.5/?.lua;$ROCKS_TREE/share/lua/5.5/?/init.lua;;"
-export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.11/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
+export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.12/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
 ```
 
 The ordinary `/lib/lua/5.5/?.so` template is Titan's root-discovery anchor. If
 it is omitted, also set
-`TITAN_PATH_0_11="$ROCKS_TREE/lib/titan/0.11"`. Titan still targets the exact
+`TITAN_PATH_0_12="$ROCKS_TREE/lib/titan/0.12"`. Titan still targets the exact
 Lua 5.5 runtime ABI and internals; removing the loader patch does not make a
 module compatible with another Lua version or configuration.

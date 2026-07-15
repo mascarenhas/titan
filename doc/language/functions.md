@@ -394,10 +394,11 @@ startup, their interface recovered from the compiled module. See
 
 The rules:
 
-* **The signature must match exactly**: one parameter of type `{string}`
-  and the return type written `integer`. A top-level function named
-  `main` with any other signature is an ordinary function, and the
-  module compiles to a shared library as usual.
+* **The resolved signature must match exactly**: one parameter of type
+  `{string}` and a return type of `integer`. Transparent aliases of either
+  type are accepted. A top-level function named `main` with any other
+  signature is an ordinary function, and the module compiles to a shared
+  library as usual.
 * **Only one `main` per program.** If more than one module given on the
   `titanc` command line has a qualifying `main`, compilation fails with
   `<module>: multiple main functions found (already declared in

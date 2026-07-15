@@ -43,8 +43,8 @@ end
 A local record type can be used freely inside the defining module, including in
 local functions and local variables, but it is not a module member and cannot be
 named by importers. It also cannot appear anywhere in the public type surface:
-exported functions, methods, module variables, or public record fields, because
-compiled module interfaces only serialize the public surface.
+exported functions, methods, module variables, type aliases, or public record
+fields, because compiled module interfaces only serialize the public surface.
 
 A record's field types may mention the record being declared, so
 recursive records work:

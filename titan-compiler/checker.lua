@@ -65,13 +65,62 @@ function checker.typeerror(errors, loc, fmt, ...)
     table.insert(errors, errmsg)
 end
 
--- Checks if a nominal type 'type' is valid
-local function checktype(type, loc, errors)
-    if type._tag == "Type.Nominal" and
-        not types.registry[type.fqtn] then
+-- Recursively checks that every nominal type in a resolved declaration exists.
+local function checktype(typ, loc, errors, seen)
+    if type(typ) ~= "table" or not typ._tag then return end
+    seen = seen or {}
+    if seen[typ] then return end
+    seen[typ] = true
+
+    local tag = typ._tag
+    if tag == "Type.Nominal" and not types.registry[typ.fqtn] then
         checker.typeerror(errors, loc,
-            "invalid type '%s' in type declaration", type.fqtn)
+            "invalid type '%s' in type declaration", typ.fqtn)
+    elseif tag == "Type.Array" then
+        checktype(typ.elem, loc, errors, seen)
+    elseif tag == "Type.Map" then
+        checktype(typ.keys, loc, errors, seen)
+        checktype(typ.values, loc, errors, seen)
+    elseif tag == "Type.Option" then
+        checktype(typ.base, loc, errors, seen)
+    elseif tag == "Type.Function" then
+        for _, param in ipairs(typ.params) do
+            checktype(param, loc, errors, seen)
+        end
+        for _, rettype in ipairs(typ.rettypes) do
+            checktype(rettype, loc, errors, seen)
+        end
+        if typ.varargtype then
+            checktype(typ.varargtype, loc, errors, seen)
+        end
     end
+end
+
+-- Resolve a Titan alias to the RHS type object itself. The state lives on the
+-- declaration so every use shares one pointer and a forward alias chain is
+-- resolved only once. Encountering a declaration already being resolved marks
+-- the cycle invalid before unwinding, preventing both recursion and cascades.
+local function resolve_type_alias(node, st, errors)
+    if node._alias_state == "resolved" then
+        return node._type
+    elseif node._alias_state == "resolving" then
+        checker.typeerror(errors, node.type.loc or node.loc,
+            "cyclic type alias involving '%s'", node.name)
+        node._type = types.Invalid()
+        node._alias_state = "resolved"
+        return node._type
+    end
+
+    node._alias_state = "resolving"
+    local target = typefromnode(node.type, st, errors)
+    -- A recursive visit marks this declaration resolved/invalid. Preserve that
+    -- result instead of wrapping it back in the structural RHS on unwind.
+    if node._alias_state == "resolved" then
+        return node._type
+    end
+    node._type = target
+    node._alias_state = "resolved"
+    return target
 end
 
 -- Checks if two types are the same, and logs an error message otherwise
@@ -395,13 +444,22 @@ typefromnode = util.make_visitor({
         return types.Value()
     end,
 
-    ["Ast.TypeName"] = function(node, st, _)
+    ["Ast.TypeName"] = function(node, st, errors)
+        local alias = st:find_type_alias(node.name)
+        if alias then
+            return resolve_type_alias(alias, st, errors)
+        end
         return types.Nominal(st.modname .. "." .. node.name)
     end,
 
     ["Ast.TypeQualName"] = function(node, st, errors)
         local mod = st:find_symbol(node.module)
         if mod and mod._type._tag == "Type.Module" then
+            local alias = mod._type.type_members
+                and mod._type.type_members[node.name]
+            if alias then
+                return alias
+            end
             local fqtn = mod._type.name .. "." .. node.name
             local member = mod._type.members[node.name]
             if not member then
@@ -3094,6 +3152,8 @@ local function checkbodies(ast, st, errors)
                     local ftype = field.type
                     checktype(ftype, node.fields[i].loc, errors)
                 end
+            elseif node._tag == "Ast.TopLevelTypeAlias" then
+                checktype(node._type, node.type.loc or node.loc, errors)
             end
         end
     end
@@ -3202,6 +3262,10 @@ local function toplevel_name(node)
         return node.localname
     elseif tag == "Ast.TopLevelVar" then
         return node.decl.name
+    elseif tag == "Ast.TopLevelTypeAlias" then
+        -- Type aliases occupy a separate namespace and are deliberately absent
+        -- from the ordinary top-level duplicate/value-symbol machinery.
+        return nil
     elseif tag == "Ast.TopLevelFunc" or
            tag == "Ast.TopLevelRecord" then
         return node.name
@@ -3311,6 +3375,10 @@ local toplevel_visitor = util.make_visitor({
             checker.typeerror(errors, node.value.loc,
                 "top level variable initialization must be constant")
         end
+    end,
+
+    ["Ast.TopLevelTypeAlias"] = function(node, st, errors)
+        resolve_type_alias(node, st, errors)
     end,
 
     ["Ast.TopLevelFunc"] = function(node, st, errors)
@@ -3456,6 +3524,40 @@ local toplevel_visitor = util.make_visitor({
     end,
 })
 
+-- Collect aliases before the signature pass so aliases may be used by earlier
+-- functions, variables, records, and other aliases. Record declarations share
+-- the type namespace, so an alias with a record's name is rejected; the record
+-- remains authoritative because it also owns a run-time namespace and a
+-- synthesized constructor.
+local function collect_type_aliases(ast, st, errors)
+    local records = {}
+    for _, node in ipairs(ast) do
+        if node._tag == "Ast.TopLevelRecord" and not records[node.name] then
+            records[node.name] = node
+        end
+    end
+
+    for _, node in ipairs(ast) do
+        if node._tag == "Ast.TopLevelTypeAlias" then
+            local record = records[node.name]
+            local previous = st:find_type_alias(node.name)
+            if record then
+                checker.typeerror(errors, node.loc,
+                    "type alias '%s' conflicts with record declared at line %d",
+                    node.name, record.loc.line)
+                node._ignore = true
+            elseif previous then
+                checker.typeerror(errors, node.loc,
+                    "duplicate type alias for %s, previous one at line %d",
+                    node.name, previous.loc.line)
+                node._ignore = true
+            else
+                st:add_type_alias(node.name, node)
+            end
+        end
+    end
+end
+
 -- Colect type information of toplevel nodes
 --   ast: AST for the whole module
 --   st: symbol table
@@ -3465,17 +3567,19 @@ local toplevel_visitor = util.make_visitor({
 --   field
 local function checktoplevel(ast, st, errors, loader)
     for _, node in ipairs(ast) do
-        local name = toplevel_name(node)
-        local dup = name and st:find_dup(name)
-        if dup then
-            checker.typeerror(errors, node.loc,
-                "duplicate declaration for %s, previous one at line %d",
-                name, dup.loc.line)
-            node._ignore = true
-        else
-            toplevel_visitor(node, st, errors, loader)
-            if name and not node._ignore then
-                st:add_symbol(name, node)
+        if not node._ignore then
+            local name = toplevel_name(node)
+            local dup = name and st:find_dup(name)
+            if dup then
+                checker.typeerror(errors, node.loc,
+                    "duplicate declaration for %s, previous one at line %d",
+                    name, dup.loc.line)
+                node._ignore = true
+            else
+                toplevel_visitor(node, st, errors, loader)
+                if name and not node._ignore then
+                    st:add_symbol(name, node)
+                end
             end
         end
     end
@@ -3489,8 +3593,8 @@ function checker.has_main(ast)
            and #node.params == 1
            and node.params[1]._type._tag == "Type.Array"
            and node.params[1]._type.elem._tag == "Type.String"
-           and #node.rettypes == 1
-           and node.rettypes[1]._tag == "Ast.TypeInteger" then
+           and #node._type.rettypes == 1
+           and node._type.rettypes[1]._tag == "Type.Integer" then
             return true
         end
     end
@@ -3617,6 +3721,9 @@ function checker.checkimport(modname, loader)
     for _, member in ipairs(type_or_error.members) do
         register_referenced_records(member.type or member, loader, seen)
     end
+    for _, member in pairs(type_or_error.type_members or {}) do
+        register_referenced_records(member, loader, seen)
+    end
     return type_or_error, errors
 end
 
@@ -3625,6 +3732,7 @@ end
 --   returns "Type.Module" type
 local function makemoduletype(modname, modast)
     local members = {}
+    local type_members = {}
     for _, tlnode in ipairs(modast) do
         if tlnode._tag ~= "Ast.TopLevelImport" and not tlnode.islocal and not tlnode._ignore then
             local tag = tlnode._tag
@@ -3632,10 +3740,12 @@ local function makemoduletype(modname, modast)
                 table.insert(members, types.ModuleVariable(modname, tlnode.decl.name, tlnode._type))
             elseif tag == "Ast.TopLevelFunc" or tag == "Ast.TopLevelRecord" then
                 table.insert(members, types.ModuleMember(modname, tlnode.name, tlnode._type))
+            elseif tag == "Ast.TopLevelTypeAlias" then
+                type_members[tlnode.name] = tlnode._type
             end
         end
     end
-    return types.Module(modname, members)
+    return types.Module(modname, members, type_members)
 end
 
 local function reject_exported_c_ffi_type(modname, errors, loc, typ)
@@ -3656,6 +3766,9 @@ local function reject_exported_c_ffi_types(modname, modast, errors)
                 reject_exported_c_ffi_type(modname, errors, node.loc, node._type)
             elseif tag == "Ast.TopLevelFunc" and not node.islocal then
                 reject_exported_c_ffi_type(modname, errors, node.loc, node._type)
+            elseif tag == "Ast.TopLevelTypeAlias" and not node.islocal then
+                reject_exported_c_ffi_type(modname, errors,
+                    node.type.loc or node.loc, node._type)
             elseif tag == "Ast.TopLevelRecord" and not node.islocal then
                 for i, field in ipairs(node._type.fields) do
                     if not field.islocal then
@@ -3689,6 +3802,9 @@ local function reject_exported_local_record_types(modname, modast, errors)
                 reject_exported_local_record_type(modname, errors, node.loc, node._type)
             elseif tag == "Ast.TopLevelFunc" and not node.islocal then
                 reject_exported_local_record_type(modname, errors, node.loc, node._type)
+            elseif tag == "Ast.TopLevelTypeAlias" and not node.islocal then
+                reject_exported_local_record_type(modname, errors,
+                    node.type.loc or node.loc, node._type)
             elseif tag == "Ast.TopLevelRecord" and not node.islocal then
                 for i, field in ipairs(node._type.fields) do
                     if not field.islocal then
@@ -3733,6 +3849,7 @@ function checker.check(modname, ast, subject, filename, loader)
         end
     end
     local errors = {subject = subject, filename = filename}
+    collect_type_aliases(ast, st, errors)
     checktoplevel(ast, st, errors, loader)
     checkbodies(ast, st, errors)
     reject_exported_c_ffi_types(modname, ast, errors)

@@ -5016,7 +5016,7 @@ local function run_internal(func: () -> value, is_main: boolean): Task
   return task
 end
 
-function run(func: () -> value): Task
+function _run(func: () -> value): Task
   return run_internal(func, false)
 end
 
@@ -6363,9 +6363,9 @@ local function close_runtime(runtime: Runtime)
   end
 end
 
-function loop()
+function _loop()
   if not on_main_thread() or coroutine.is_yieldable(UV_TAG) then
-    raise "uv.loop must be driven from the Lua main thread"
+    raise "async.loop must be driven from the Lua main thread"
   end
   if not active_runtime then
     return
@@ -6378,7 +6378,7 @@ function loop()
     raise_saved(runtime.fatal_error, runtime.fatal_traceback)
   end
   if runtime.in_loop then
-    raise "uv.loop is already active"
+    raise "async.loop is already active"
   end
   runtime.in_loop = true
   libuv.uv_run(runtime.loop.handle, libuv.UV_RUN_DEFAULT)
@@ -6460,14 +6460,14 @@ local function bootstrap(main_callable: ({string}) -> integer,
   local task = run_internal(function (): value
     return main_callable(args)
   end, true)
-  loop()
+  _loop()
   if task.state ~= TASK_SUCCEEDED then
     raise_saved(task.error_value, task.error_traceback)
   end
   return task.result
 end
 
-function version(): string
+function _version(): string
   return libuv.uv_version_string() as string
 end
 

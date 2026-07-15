@@ -22,6 +22,7 @@ return typedecl("Ast", {
         TopLevelStatic  = {"loc", "class", "name", "params", "rettypes", "block"},
         TopLevelFunc    = {"loc", "islocal", "name", "params", "rettypes", "block"},
         TopLevelVar     = {"loc", "islocal", "decl", "value"},
+        TopLevelTypeAlias = {"loc", "islocal", "name", "type"},
         TopLevelRecord  = {"loc", "name", "fields"},
         TopLevelImport  = {"loc", "localname", "modname"},
         TopLevelForeignImport = {"loc", "localname", "headername"},

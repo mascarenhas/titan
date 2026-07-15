@@ -4,7 +4,7 @@
 # the production standard-library images. Only titan/uv.so consumes libuv's headers
 # and linker inputs; the higher-level modules import its stable Titan ABI. Keep
 # those modules in place while swapping titan/uv.so so this smoke does not rebuild
-# four identical DSOs in each mode. The caller builds the owned process fixture
+# five identical DSOs in each mode. The caller builds the owned process fixture
 # once and passes it through TITAN_PROCESS_SMOKE_CHILD.
 
 set -euo pipefail
@@ -39,7 +39,7 @@ esac
 
 check_canonical_modules() {
     local module
-    for module in coroutine uv timer fs net os; do
+    for module in coroutine uv async timer fs net os; do
         test -f "titan/$module.so"
         test ! -L "titan/$module.so"
         test ! -e "$module.so"
@@ -82,7 +82,7 @@ check_libuv_dependency() {
             ;;
     esac
 
-    for module in timer fs net os; do
+    for module in async timer fs net os; do
         dependencies=$(inspect_dependencies "titan/$module.so")
         if grep -qi libuv <<<"$dependencies"; then
             echo "titan/$module.so unexpectedly has a dynamic libuv dependency" >&2
@@ -95,16 +95,16 @@ run_mode_smoke() {
     local mode=$1
 
     if [[ $mode == system ]]; then
-        env TITAN_PATH_0_11="$PWD" LUA_CPATH="$PWD/?.so;;" \
-            "$LUA" -e 'local uv = require "titan.uv"; local timer = require "titan.timer"; local fs = require "titan.fs"; local net = require "titan.net"; local path = os.tmpname(); os.remove(path); local task = uv.run(function() timer.sleep(0); fs.write_file(path, "system\0uv"); assert(fs.read_file(path) == "system\0uv"); fs.unlink(path); return true end); uv.loop(); assert(task:join()); assert(type(uv.version()) == "string"); assert(type(net) == "userdata")'
+        env TITAN_PATH_0_12="$PWD" LUA_CPATH="$PWD/?.so;;" \
+            "$LUA" -e 'local uv = require "titan.uv"; local async = require "titan.async"; local timer = require "titan.timer"; local fs = require "titan.fs"; local net = require "titan.net"; local path = os.tmpname(); os.remove(path); local task = async.run(function() timer.sleep(0); fs.write_file(path, "system\0uv"); assert(fs.read_file(path) == "system\0uv"); fs.unlink(path); return true end); async.loop(); assert(task:join()); assert(type(async.version()) == "string"); assert(type(uv) == "userdata"); assert(type(net) == "userdata")'
     else
-        env TITAN_PATH_0_11="$PWD" LUA_CPATH="$PWD/?.so;;" \
-            "$LUA" -e 'local uv = require "titan.uv"; local timer = require "titan.timer"; local fs = require "titan.fs"; local net = require "titan.net"; local path = os.tmpname(); os.remove(path); local task = uv.run(function() timer.yield(); fs.write_file(path, "bundled"); local data = fs.read_file(path); fs.unlink(path); return data end); uv.loop(); assert(task:join() == "bundled"); assert(type(net) == "userdata")'
+        env TITAN_PATH_0_12="$PWD" LUA_CPATH="$PWD/?.so;;" \
+            "$LUA" -e 'local uv = require "titan.uv"; local async = require "titan.async"; local timer = require "titan.timer"; local fs = require "titan.fs"; local net = require "titan.net"; local path = os.tmpname(); os.remove(path); local task = async.run(function() timer.yield(); fs.write_file(path, "bundled"); local data = fs.read_file(path); fs.unlink(path); return data end); async.loop(); assert(task:join() == "bundled"); assert(type(uv) == "userdata"); assert(type(net) == "userdata")'
     fi
 
-    env TITAN_PATH_0_11="$PWD" LUA_CPATH="$PWD/?.so;;" \
+    env TITAN_PATH_0_12="$PWD" LUA_CPATH="$PWD/?.so;;" \
         "$LUA" spec/fixtures/libuv/net_production_smoke.lua "$mode"
-    env TITAN_PATH_0_11="$PWD" LUA_CPATH="$PWD/?.so;;" \
+    env TITAN_PATH_0_12="$PWD" LUA_CPATH="$PWD/?.so;;" \
         "$LUA" spec/fixtures/libuv/os_production_smoke.lua "$mode" \
         "$TITAN_PROCESS_SMOKE_CHILD"
 }
