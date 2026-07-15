@@ -58,9 +58,10 @@ local ys = {1.5, 2.5}        -- inferred as {float} from the first element
 local zs = {}                -- no context at all: defaults to {integer}
 ```
 
-A function call in the *last* position of a constructor contributes all
-of its return values; calls in earlier positions are truncated to one
-value (see [Functions](functions.md) for the general rule):
+A function call in the *last* position of a constructor is an open sink: it
+contributes all of its statically visible fixed results and, when declared,
+the complete run-time [flexible result](flexible-returns.md). Calls in earlier
+positions are scalar (see [Functions](functions.md) for the general rule):
 
 ```lua
 function two(): (integer, integer)
@@ -71,6 +72,12 @@ function build(): {integer}
     return {10, two()}   -- {10, 20, 30}
 end
 ```
+
+Every appended result is coerced to the array's element type. A flexible
+`...: T` tail contributes only the `T` values that actually exist — no nil is
+inserted for an absent position — and is subject to the 200-element flexible
+tail bound. An explicit array remains the appropriate representation for an
+unbounded collection.
 
 ### Indexing and reads
 

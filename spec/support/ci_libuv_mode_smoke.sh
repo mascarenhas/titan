@@ -95,16 +95,16 @@ run_mode_smoke() {
     local mode=$1
 
     if [[ $mode == system ]]; then
-        env TITAN_PATH_0_13="$PWD" LUA_CPATH="$PWD/?.so;;" \
+        env TITAN_PATH_0_14="$PWD" LUA_CPATH="$PWD/?.so;;" \
             "$LUA" -e 'local uv = require "titan.uv"; local async = require "titan.async"; local timer = require "titan.timer"; local fs = require "titan.fs"; local net = require "titan.net"; local path = os.tmpname(); os.remove(path); local task = async.run(function() timer.sleep(0); fs.write_file(path, "system\0uv"); assert(fs.read_file(path) == "system\0uv"); fs.unlink(path); return true end); async.loop(); assert(task:join()); assert(type(async.version()) == "string"); assert(type(uv) == "userdata"); assert(type(net) == "userdata")'
     else
-        env TITAN_PATH_0_13="$PWD" LUA_CPATH="$PWD/?.so;;" \
+        env TITAN_PATH_0_14="$PWD" LUA_CPATH="$PWD/?.so;;" \
             "$LUA" -e 'local uv = require "titan.uv"; local async = require "titan.async"; local timer = require "titan.timer"; local fs = require "titan.fs"; local net = require "titan.net"; local path = os.tmpname(); os.remove(path); local task = async.run(function() timer.yield(); fs.write_file(path, "bundled"); local data = fs.read_file(path); fs.unlink(path); return data end); async.loop(); assert(task:join() == "bundled"); assert(type(uv) == "userdata"); assert(type(net) == "userdata")'
     fi
 
-    env TITAN_PATH_0_13="$PWD" LUA_CPATH="$PWD/?.so;;" \
+    env TITAN_PATH_0_14="$PWD" LUA_CPATH="$PWD/?.so;;" \
         "$LUA" spec/fixtures/libuv/net_production_smoke.lua "$mode"
-    env TITAN_PATH_0_13="$PWD" LUA_CPATH="$PWD/?.so;;" \
+    env TITAN_PATH_0_14="$PWD" LUA_CPATH="$PWD/?.so;;" \
         "$LUA" spec/fixtures/libuv/os_production_smoke.lua "$mode" \
         "$TITAN_PROCESS_SMOKE_CHILD"
 }

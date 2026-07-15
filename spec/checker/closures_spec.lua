@@ -286,11 +286,11 @@ describe("closures (return inference)", function()
         ]])
     end)
 
-    it("zero-return is the default with no context, so a body return is an arity error", function()
+    it("zero-return is the default with no context, so body results are discarded", function()
         -- No return annotation and no usable context defaults the lambda to
         -- zero-return `()`, exactly like an unannotated top-level function, so a
-        -- `return <expr>` is a clean arity error.
-        assert_type_error("returned 1 value%(s%) but function expected 0", [[
+        -- `return <expr>` is checked for effects and its value is ignored.
+        assert_type_check([[
             function f(): integer
                 local g = function(x: integer) return x + 1 end
                 return 1

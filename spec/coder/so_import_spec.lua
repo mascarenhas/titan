@@ -379,6 +379,81 @@ describe(".so-only cross-module imports", function()
         assert.truthy(rok, out)
     end)
 
+    it("preserves flexible string returns on direct and exact value calls across a .so", function ()
+        -- `flexsoa` is available only through its compiled interface. Besides
+        -- recovering the flexible result element type, `flexsob` must recover
+        -- the exact function tag and native signature (including the trailing
+        -- flexible-output pair) for the first-class call. A compatible view
+        -- with a narrower first parameter deliberately has a different tag and
+        -- provides the generic-path depth comparison.
+        local ok, err = build_so_chain({
+            { name = "flexsoa", src = [[
+                function values(probe: value, force: () -> (),
+                                prefix: string): (integer, ...: string)
+                    local p: () -> integer = probe
+                    local a = prefix .. "-one"
+                    local b = prefix .. "-two"
+                    force()
+                    return p(), a, b
+                end
+            ]] },
+            { name = "flexsob", src = [[
+                local a = import "flexsoa"
+
+                function direct(probe: () -> integer, force: () -> (),
+                                prefix: string): (integer, ...: string)
+                    return a.values(probe, force, prefix)
+                end
+
+                function exact(probe: () -> integer, force: () -> (),
+                               prefix: string): (integer, ...: string)
+                    local f: (value, () -> (), string)
+                        -> (integer, ...: string) = a.values
+                    return f(probe, force, prefix)
+                end
+
+                function generic(probe: () -> integer, force: () -> (),
+                                 prefix: string): (integer, ...: string)
+                    local v: value = a.values
+                    local f: (() -> integer, () -> (), string)
+                        -> (integer, ...: string) = v
+                    return f(probe, force, prefix)
+                end
+            ]] },
+        })
+        assert.truthy(ok, err)
+
+        local rok, out = call("flexsob", h.DEPTH_PROBE .. [[
+            collectgarbage("generational")
+            local prefix = ("fresh-"):rep(20) .. tostring({})
+            local collections = 0
+            local function force()
+                collections = collections + 1
+                local junk = {}
+                for i = 1, 2000 do junk[i] = { i, tostring(i) } end
+                collectgarbage("collect")
+            end
+
+            local function check(callable)
+                local d, a, b = callable(depth, force, prefix)
+                collectgarbage("collect")
+                assert(a == prefix .. "-one", a)
+                assert(b == prefix .. "-two", b)
+                return d
+            end
+
+            local directd = check(flexsob.direct)
+            local exactd = check(flexsob.exact)
+            local genericd = check(flexsob.generic)
+            assert(directd == exactd,
+                ("direct=") .. directd .. (" exact=") .. exactd)
+            assert(genericd > exactd,
+                ("exact=") .. exactd .. (" generic=") .. genericd)
+            assert(collections == 3)
+        ]])
+        assert.truthy(rok, out)
+    end)
+
     -- Regression: an imported record used ONLY as a Lua-facing parameter is
     -- never constructed in the importer, so genluaentry's checkandget is the
     -- FIRST site to allocate that record's metatable slot — and it runs with the

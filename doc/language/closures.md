@@ -39,6 +39,12 @@ and `local`, and with **optional** parameter and return annotations:
 function (p1[: T1], …, pn[: Tn]) [: rettype] <block> end
 ```
 
+The parameter list may end in an input `...: T` (or a context-inferred bare
+`...`), and a parenthesized return annotation may end in a flexible result
+tail such as `: (...: R)` or `: (R1, ...: R)`. See
+[Variadic parameters](variadic-parameters.md) and
+[Flexible returns](flexible-returns.md).
+
 It is an expression, so it appears wherever an expression may: as a
 declaration or assignment right-hand side, a call argument, a `return`
 value, a record-constructor or array/map element, and so on.
@@ -106,11 +112,12 @@ test.titan:2:30: type error: cannot infer type of parameter 'x'
 
 Annotate the parameter, or use the lambda where its type is known.
 
-**Return type.** Like the parameters, the return type comes only from the
+**Return shape.** Like the parameters, the fixed return list and any flexible
+result tail come only from the
 expected function type — it is *never* read off the body's `return`
 statements. An explicit return annotation is used as written; otherwise the
-return type is taken from the expected function type when there is one. The
-body is then checked against those return types, exactly as a top-level
+complete return shape is taken from the expected function type when there is
+one. The body is then checked against those results, exactly as a top-level
 function body is checked against its declared returns:
 
 ```lua
@@ -120,6 +127,7 @@ function f(): integer
     local g: (integer) -> (integer) = function (x) return x + 1 end
     -- h returns two values, again from h's annotation
     local h: (integer) -> (integer, integer) = function (x) return x, x + 1 end
+    local many: () -> (...: integer) = function () return 1, 2, 3 end
     return g(2)
 end
 ```
@@ -137,15 +145,17 @@ end
 ```
 
 This default applies whether or not the body contains a `return`. Because
-the lambda has no expected type, `g`'s return type is `()`, so a body that
-tries to `return` a value is a clean arity error — the documented
-zero-return footgun, consistent with an unannotated top-level function:
+the lambda has no expected type, `g`'s return type is `()`. Expressions in a
+`return` are still evaluated for their effects, but their values are discarded
+instead of becoming inferred results — consistent with an unannotated
+top-level function:
 
 ```lua
 function f(): integer
-    -- no annotation, no expected type -> g is () -> (); the return is an
-    -- arity error: returned 1 value(s) but function expected 0
+    -- no annotation, no expected type -> g is (integer) -> ();
+    -- x + 1 is evaluated and its value is discarded
     local g = function (x: integer) return x + 1 end
+    g(4)
     return 1
 end
 ```

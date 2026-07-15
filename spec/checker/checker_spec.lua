@@ -11,14 +11,16 @@ local assert_ast = h.assert_ast
 local check_errs = h.check_errs
 
 describe("zero-return () functions (typechecker)", function()
-    it("rejects return nil in a () function", function()
-        local errs = check_errs([[
+    it("discards return values in a () function", function()
+        local ok, err, tree = run_checker([[
             function f(): ()
                 return nil
             end
         ]])
-        assert.equal(1, #errs)
-        assert.match("returned 1 value.* but function expected 0", errs[1])
+        assert.truthy(ok, err)
+        local ret = tree[1].block.stats[1]
+        assert.same(1, #ret._result_adjustment.discards)
+        assert.truthy(ret.exps[1]._discard_results)
     end)
 
     it("rejects a ()-call used as a value (annotated)", function()
@@ -72,13 +74,16 @@ describe("Titan type checker", function()
         ]])
     end)
 
-    it("rejects values returned by a module initializer", function()
-        assert_type_error("returned 1 value%(s%) but function expected 0", [[
+    it("discards values returned by a module initializer", function()
+        local ok, err, tree = run_checker([[
             answer: integer = 0
             do
                 return answer
             end
         ]])
+        assert.truthy(ok, err)
+        local ret = tree[2].stats[1]
+        assert.same(1, #ret._result_adjustment.discards)
     end)
 
     it("lets a module initializer use imports", function()
@@ -526,17 +531,18 @@ describe("Titan type checker", function()
         assert.match("expects 2 value", err)
     end)
 
-    it("expands only a trailing multi-return call argument (Lua adjustment)", function ()
-        -- a trailing multi-return call expands, so over-supplying is an arity error
-        local ok, err = run_checker([[
+    it("expands only the demanded prefix of a trailing multi-return argument", function ()
+        local ok, err, tree = run_checker([[
             function dm(a: integer, b: integer): (integer, integer)
                 return a // b, a % b
             end
             function add2(a: integer, b: integer): integer return a + b end
             function f(): integer return add2(10, dm(7, 2)) end
         ]])
-        assert.falsy(ok)
-        assert.match("called with 3 arguments but expects 2", err)
+        assert.truthy(ok, err)
+        local call = tree[3].block.stats[1].exps[1]
+        assert.same(2, call._npassed_args)
+        assert.same(1, #call.args.args[2]._visible_types)
         -- a non-trailing multi-return call is adjusted to a single value; the
         -- remaining parameter is then filled with nil and typechecked normally.
         ok, err = run_checker([[
@@ -910,15 +916,17 @@ describe("Titan type checker", function()
         assert.match("returned 1 value%(s%) but function expected 2", err)
     end)
 
-    it("checks returning more values than function expects", function()
+    it("discards values beyond a fixed return signature", function()
         local code = [[
             function fn(): (integer, string)
                 return 20, "foo", true
             end
         ]]
-        local ok, err = run_checker(code)
-        assert.falsy(ok)
-        assert.match("returned 3 value%(s%) but function expected 2", err)
+        local ok, err, tree = run_checker(code)
+        assert.truthy(ok, err)
+        local ret = tree[1].block.stats[1]
+        assert.same(1, #ret._result_adjustment.discards)
+        assert.truthy(ret.exps[3]._discard_results)
     end)
 
     it("checks that returned values correctly match signature", function()
@@ -2232,13 +2240,16 @@ describe("Titan type checker", function()
         end
     end)
 
-    it("checks extra values on right hand side", function()
-        assert_type_error("left%-hand side expects 1 value%(s%) but right%-hand side produces 3 value%(s%)", [[
+    it("retains extra right-hand-side values for effects", function()
+        local ok, err, tree = run_checker([[
             function f()
                 local x: float = 10, 20, "foo"
                 x = 10, 20, "foo"
             end
         ]])
+        assert.truthy(ok, err)
+        assert.same(2, #tree[1].block.stats[1]._result_adjustment.discards)
+        assert.same(2, #tree[1].block.stats[2]._result_adjustment.discards)
     end)
 
     it("checks multiple declarations and assignment", function()
@@ -2253,8 +2264,8 @@ describe("Titan type checker", function()
         ]])
     end)
 
-    it("checks that lhs and rhs arities match on declaration and assignment", function()
-        assert_type_error("left%-hand side expects 2 value%(s%) but right%-hand side produces 3 value%(s%)", [[
+    it("truncates expanded right-hand-side results to the lhs demand", function()
+        local ok, err, tree = run_checker([[
             function g(): (integer, string)
                 return 20, "foo"
             end
@@ -2263,6 +2274,9 @@ describe("Titan type checker", function()
                 x, y = 10, g()
             end
         ]])
+        assert.truthy(ok, err)
+        assert.same(2, #tree[2].block.stats[1]._result_adjustment.fixed)
+        assert.same(2, #tree[2].block.stats[2]._result_adjustment.fixed)
     end)
 
     it("typechecks adjustment of argument lists", function()
@@ -2311,7 +2325,7 @@ describe("Titan type checker", function()
         for _, c in ipairs(code) do
             local ok, err = run_checker(c)
             assert.falsy(ok)
-            assert.match("left%-hand side expects 3 value%(s%) but right%-hand side produces 2 value%(s%)", err)
+            assert.match("left%-hand side expects 3 value%(s%) but the expression list produces 2", err)
         end
     end)
 
@@ -2344,10 +2358,14 @@ describe("Titan type checker", function()
                 f(20, (g()))
             end
         ]], err = "types in argument 3 of call to function 'f' do not match, expected integer but found nil" }}
-        for _, c in ipairs(cases) do
+        for i, c in ipairs(cases) do
             local ok, err = run_checker(c.code)
-            assert.falsy(ok)
-            assert.match(c.err, err)
+            if i == 2 then
+                assert.truthy(ok, err)
+            else
+                assert.falsy(ok)
+                assert.match(c.err, err)
+            end
         end
     end)
 end)
@@ -2433,8 +2451,7 @@ describe("Titan typecheck of records", function()
                           wrap_record[[ p = Point.new("a", "b") ]])
         assert_type_error("types in argument 2 of call to function 'Point.new' do not match, expected float but found nil",
                           wrap_record[[ p = Point.new(1) ]])
-        assert_type_error("'Point.new' called with 3 arguments but expects 2",
-                          wrap_record[[ p = Point.new(1, 2, 3) ]])
+        assert_type_check(wrap_record[[ p = Point.new(1, 2, 3); return 0 ]])
     end)
 
     it("typechecks record read/write", function()
@@ -3020,10 +3037,14 @@ describe("Titan typecheck of records", function()
                 self:f(20, (self:g()))
             end
         ]], err = "types in argument 3 of call to method 'test.R:f' do not match, expected integer but found nil" }}
-        for _, c in ipairs(cases) do
+        for i, c in ipairs(cases) do
             local ok, err = run_checker(c.code)
-            assert.falsy(ok)
-            assert.match(c.err, err)
+            if i == 2 then
+                assert.truthy(ok, err)
+            else
+                assert.falsy(ok)
+                assert.match(c.err, err)
+            end
         end
     end)
 
@@ -3144,8 +3165,8 @@ describe("Titan typecheck of records", function()
         ]])
     end)
 
-    it("cleanly reports a wrong-arity call to a multiple-return callee", function()
-        assert_type_error("function 'pair' called with 3 arguments but expects 1", [[
+    it("discards surplus arguments to a multiple-return callee", function()
+        local ok, err, tree = run_checker([[
             function pair(a: integer): (integer, integer)
                 return a, a + 1
             end
@@ -3154,5 +3175,9 @@ describe("Titan typecheck of records", function()
                 return x
             end
         ]])
+        assert.truthy(ok, err)
+        local call = tree[2].block.stats[1]._result_adjustment.fixed[1]
+        assert.same(1, call._npassed_args)
+        assert.same(2, #call._arg_adjustment.discards)
     end)
 end)

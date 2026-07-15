@@ -431,10 +431,12 @@ end
 ```
 
 Fields are separated by `,` or `;` interchangeably, and a trailing
-separator is allowed. A multiple-return call as the *last* positional
-element of an array constructor expands into all of its values; in any
-other position it contributes only its first value, and in a map
-constructor's value position extra return values are dropped. See
+separator is allowed. A call as the *last* positional element of an array
+constructor is an open result sink: it contributes all statically visible
+fixed results and, when declared, the complete run-time
+[flexible tail](flexible-returns.md). In any other position a call contributes
+one value, and in a map or record field position surplus results are dropped.
+See
 [arrays and maps](arrays-maps.md) and [records](records.md) for the full
 story on each constructor, including what `nil` elements mean.
 
@@ -476,9 +478,11 @@ functions (local or imported), record methods (`r:move(...)`), record
 functions (`Point.new(...)`, `Point.origin(...)`), and any function value held in a
 variable, parameter, field, or container slot.
 For Titan functions, too few positional arguments are padded with `nil` and
-then type-checked against the missing formals; too many arguments are rejected.
-Direct C calls made with parentheses keep strict C arity. Calls coming *from*
-Lua are adjusted and checked at run time instead; see
+then type-checked against the missing formals. Surplus argument expressions
+are evaluated, but a non-variadic Titan function ignores their values; a
+variadic one receives them in its tail. Direct C calls made with parentheses
+keep strict C arity. Calls coming *from* Lua are adjusted and checked at run
+time instead; see
 [Functions](functions.md#argument-adjustment) and
 [Lua interoperability](lua-interop.md).
 
@@ -494,11 +498,11 @@ Bare braces instead select Titan's [named-argument](named-arguments.md) form:
 constructor as one positional argument, enclose it in the call parentheses:
 `consume({ x = 1 })`, `consume({ 1, 2 })`, or `consume({})`.
 
-A call used as an operand contributes its **first** return value. A
-multiple-return call in the *last* position of an argument list, array
-constructor, multiple assignment or `return` expands into all of its
-values; wrapping the call in parentheses adjusts it to exactly one
-value, as in Lua:
+A call used as an operand contributes its **first requested** result. A call in
+the *last* position of an expression list may expand to fill the consumer's
+remaining finite slots. A variadic argument tail, flexible `return` tail, or
+final array field is open and consumes the complete visible run instead.
+Wrapping the call in parentheses always requests exactly one value, as in Lua:
 
 ```lua
 function divmod(a: integer, b: integer): (integer, integer)
@@ -509,6 +513,24 @@ function use(): integer
     local q, r = divmod(7, 2)     -- both values: q = 3, r = 1
     local just_q = (divmod(7, 2)) -- parentheses keep only the first
     return q + r + just_q
+end
+```
+
+When a finite request reaches into a declared `...: T` result tail, each such
+position has type `T?`, because that result may be absent. Open sinks receive
+only the `T` values that actually exist. See
+[Flexible returns](flexible-returns.md) for projection, forwarding, and the
+last-position rule.
+
+A callee whose static type is `value` is also callable. Titan synthesizes a
+temporary positional function type from the supplied arguments and the results
+requested by the surrounding context, then performs the ordinary run-time
+callability and boundary checks. Named braces remain unavailable because a
+`value` carries no formal parameter names:
+
+```lua
+function apply_dynamic(f: value, x: integer): integer
+    return f(x)       -- context treats f as (integer) -> integer
 end
 ```
 

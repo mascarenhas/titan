@@ -13,14 +13,14 @@ return typedecl("Ast", {
         TypeCPointer    = {"loc", "subtype", "const"},
         TypeArray       = {"loc", "subtype"},
         TypeMap         = {"loc", "keystype", "valuestype"},
-        TypeFunction    = {"loc", "argtypes", "rettypes", "varargtype"},
+        TypeFunction    = {"loc", "argtypes", "rettypes", "varargtype", "flexrettype"},
         TypeOption      = {"loc", "basetype"}
     },
 
     TopLevel = {
-        TopLevelMethod  = {"loc", "class", "name", "params", "rettypes", "block"},
-        TopLevelStatic  = {"loc", "class", "name", "params", "rettypes", "block"},
-        TopLevelFunc    = {"loc", "islocal", "name", "params", "rettypes", "block"},
+        TopLevelMethod  = {"loc", "class", "name", "params", "rettypes", "flexrettype", "block"},
+        TopLevelStatic  = {"loc", "class", "name", "params", "rettypes", "flexrettype", "block"},
+        TopLevelFunc    = {"loc", "islocal", "name", "params", "rettypes", "flexrettype", "block"},
         TopLevelVar     = {"loc", "islocal", "decl", "value"},
         TopLevelTypeAlias = {"loc", "islocal", "name", "type"},
         TopLevelRecord  = {"loc", "name", "fields"},
@@ -73,7 +73,7 @@ return typedecl("Ast", {
         ExpCast         = {"loc", "exp", "target"},
         ExpAdjust       = {"loc", "exp"},                   -- adjust call to just first value
         ExpExtra        = {"loc", "exp", "index", "_type"}, -- index-th (>1) value of call
-        ExpFunction     = {"loc", "params", "rettypes", "block"}, -- anonymous function expression
+        ExpFunction     = {"loc", "params", "rettypes", "flexrettype", "block"}, -- anonymous function expression
         ExpMethodRef    = {"loc", "exp", "name"}, -- bound method reference `obj:m` (no call)
         ExpDots         = {"loc"},          -- bare `...`
         ExpDotsIndex    = {"loc", "exp"},   -- `...[e]` (checker sets _nilfill, _type)

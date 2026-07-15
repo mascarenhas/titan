@@ -449,8 +449,10 @@ describe("Titan parser", function()
             local function bar()
             end
         ]], {
-            { _tag = "Ast.TopLevelFunc", name = "foo", rettypes = {} },
-            { _tag = "Ast.TopLevelFunc", name = "bar", rettypes = {} },
+            { _tag = "Ast.TopLevelFunc", name = "foo", rettypes = {},
+              flexrettype = false },
+            { _tag = "Ast.TopLevelFunc", name = "bar", rettypes = {},
+              flexrettype = false },
         })
     end)
 
@@ -470,6 +472,7 @@ describe("Titan parser", function()
                                     { _tag = "Ast.Decl", name = "x", type = false },
                                 },
                                 rettypes = false,
+                                flexrettype = false,
                                 block = { _tag = "Ast.StatBlock" } },
                         } },
                 } } },
@@ -493,7 +496,8 @@ describe("Titan parser", function()
                                 },
                                 rettypes = {
                                     { _tag = "Ast.TypeInteger" },
-                                } },
+                                },
+                                flexrettype = false },
                         } },
                 } } },
         })
@@ -539,7 +543,8 @@ describe("Titan parser", function()
                 block = { stats = {
                     { _tag = "Ast.StatDecl",
                         exps = {
-                            { _tag = "Ast.ExpFunction", rettypes = {} },
+                            { _tag = "Ast.ExpFunction", rettypes = {},
+                              flexrettype = false },
                         } },
                 } } },
         })
@@ -1912,6 +1917,7 @@ describe("Titan parser", function()
             ]], {
                 { _tag = "Ast.TopLevelRecord", name = "Point" },
                 { _tag = "Ast.TopLevelStatic", name = "new",
+                    flexrettype = false,
                     params = {
                         { _tag = "Ast.Decl", name = "x" },
                         { _tag = "Ast.Decl", name = "y" },
@@ -2134,7 +2140,134 @@ describe("Titan parser", function()
                         { _tag = "Ast.TypeString" },
                     },
                     rettypes = { { _tag = "Ast.TypeInteger" } },
-                    varargtype = false })
+                    varargtype = false,
+                    flexrettype = false })
+        end)
+    end)
+
+    describe("can parse flexible returns", function()
+        it("as the sole return of a module function", function()
+            assert_program_ast([[
+                function names(): (...: string)
+                end
+            ]], {
+                { _tag = "Ast.TopLevelFunc", name = "names",
+                    rettypes = {},
+                    flexrettype = { _tag = "Ast.TypeString" } },
+            })
+        end)
+
+        it("after a fixed return of a record function and method", function()
+            assert_program_ast([[
+                function Box.make(): (boolean, ...: integer)
+                end
+                function Box:items(): (string, ...: value)
+                end
+            ]], {
+                { _tag = "Ast.TopLevelStatic", class = "Box", name = "make",
+                    rettypes = { { _tag = "Ast.TypeBoolean" } },
+                    flexrettype = { _tag = "Ast.TypeInteger" } },
+                { _tag = "Ast.TopLevelMethod", class = "Box", name = "items",
+                    rettypes = { { _tag = "Ast.TypeString" } },
+                    flexrettype = { _tag = "Ast.TypeValue" } },
+            })
+        end)
+
+        it("on an anonymous function", function()
+            assert_program_ast([[
+                function outer(): nil
+                    local f = function(): (boolean, ...: integer)
+                        return true
+                    end
+                    return nil
+                end
+            ]], {
+                { _tag = "Ast.TopLevelFunc", block = { stats = {
+                    { _tag = "Ast.StatDecl", exps = {
+                        { _tag = "Ast.ExpFunction",
+                            rettypes = { { _tag = "Ast.TypeBoolean" } },
+                            flexrettype = { _tag = "Ast.TypeInteger" } },
+                    } },
+                } } },
+            })
+        end)
+
+        it("on function types, including simultaneous input and output tails", function()
+            assert_type_ast(
+                "(integer, ...: string) -> (boolean, ...: value)",
+                { _tag = "Ast.TypeFunction",
+                    argtypes = { { _tag = "Ast.TypeInteger" } },
+                    varargtype = { _tag = "Ast.TypeString" },
+                    rettypes = { { _tag = "Ast.TypeBoolean" } },
+                    flexrettype = { _tag = "Ast.TypeValue" } })
+            assert_type_ast("() -> (...: integer)",
+                { _tag = "Ast.TypeFunction", argtypes = {}, rettypes = {},
+                    varargtype = false,
+                    flexrettype = { _tag = "Ast.TypeInteger" } })
+            assert_type_ast("() -> (...: () -> integer)",
+                { _tag = "Ast.TypeFunction", rettypes = {},
+                    flexrettype = { _tag = "Ast.TypeFunction",
+                        argtypes = {},
+                        rettypes = { { _tag = "Ast.TypeInteger" } },
+                        flexrettype = false } })
+        end)
+
+        it("keeps an explicit fixed-empty lambda distinct from no annotation", function()
+            assert_program_ast([[
+                function outer(): nil
+                    local inferred = function() end
+                    local empty = function(): () end
+                    return nil
+                end
+            ]], {
+                { _tag = "Ast.TopLevelFunc", block = { stats = {
+                    { _tag = "Ast.StatDecl", exps = {
+                        { _tag = "Ast.ExpFunction", rettypes = false,
+                            flexrettype = false },
+                    } },
+                    { _tag = "Ast.StatDecl", exps = {
+                        { _tag = "Ast.ExpFunction", rettypes = {},
+                            flexrettype = false },
+                    } },
+                } } },
+            })
+        end)
+
+        it("rejects a tail before a fixed return or a second tail", function()
+            assert_program_syntax_error([[
+                function bad(): (...: integer, string)
+                end
+            ]], "FlexRetLast")
+            assert_program_syntax_error([[
+                function bad(): (integer, ...: string, ...: value)
+                end
+            ]], "FlexRetLast")
+        end)
+
+        it("requires a comma between a fixed prefix and the flexible tail", function()
+            assert_program_syntax_error([[
+                function bad(): (integer ...: string)
+                end
+            ]], "RParenTypelist")
+        end)
+
+        it("uses return-specific errors for a missing colon or type", function()
+            assert_program_syntax_error([[
+                function bad(): (... integer)
+                end
+            ]], "FlexRetColon")
+            assert_program_syntax_error([[
+                function bad(): (...:)
+                end
+            ]], "FlexRetType")
+        end)
+
+        it("requires the tail to be inside a parenthesized return list", function()
+            assert_program_syntax_error([[
+                function bad(): ...: integer
+                end
+            ]], "FlexRetParens")
+            assert_type_syntax_error("() -> ...: integer", "FlexRetParens")
         end)
     end)
 

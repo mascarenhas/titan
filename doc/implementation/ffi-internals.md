@@ -198,6 +198,8 @@ Foreign function declarations are stored in the C module's value namespace with
 a `Type.Function`-shaped signature whose params and returns are C types. That
 shape is an implementation convenience for checking a direct foreign call; it
 does **not** make a foreign function a Titan first-class function value.
+The structural shape sets both Titan tail slots to false: C's `vararg` marker
+is kept separately, and a C function has no Titan `flexrettype`.
 `Ast.ExpVar` rejects taking a foreign function as a value, except when the
 surrounding context asks for a compatible C function pointer. The pre-existing
 `vararg` boolean on `Type.Function` remains the marker for a C variadic
@@ -242,6 +244,13 @@ The checker has FFI-specific handling in a few narrow places:
 * `Ast.ExpCall` also recognizes callees whose resolved type is
   `CPointer(CFunction(...))`. It checks arguments against the C function
   signature and records `_c_pointer_call` for codegen.
+* Direct C and C-function-pointer calls keep exact C arity. The shared
+  expression-list demand may project enough finite values from a trailing
+  flexible Titan producer to fill fixed C parameters, but it diagnoses a
+  missing fixed argument or an explicit surplus expression instead of applying
+  Titan's nil-padding/downward-adjustment rules. A runtime-open `...` or
+  flexible-result run is rejected at a C variadic boundary because Titan's
+  typed descriptor has no C default-promotion ABI.
 * A brace-delimited call to a direct C module function uses the member's
   declaration-only `paramnames`. The checker rejects C variadics, unavailable
   name lists, C function pointers, and allocation pseudo-constructors. For an
@@ -254,6 +263,10 @@ The checker has FFI-specific handling in a few narrow places:
   a foreign function name in a context whose target is a compatible C function
   pointer type. The node records `_foreign_function_pointer` so codegen can emit
   a C cast of the bare function name.
+  The reverse conversion also rejects a Titan function type with an input
+  `varargtype`, more than one fixed result, or a flexible `flexrettype`: none of
+  those native Titan calling-convention pieces has a compatible C function
+  pointer signature.
 * `checkforin` treats generic-for iterator and close slots as C function-pointer
   contexts when a foreign function name appears there, then records
   `_c_pointer_call` on the synthesized calls.
@@ -303,6 +316,10 @@ objects decay to payload pointers when the target is a C pointer, and most
 known. A target C type of `TValue` is special: Titan passes the raw `TValue`
 struct by value, for private runtime helpers that already know how to preserve
 the owning Lua state and root any collectable payloads.
+
+This path has no flexible-result descriptor. C returns its single ordinary
+result (or `void`) according to `CFunction.ret`; any finite projections used to
+form its fixed arguments have already been made explicit by the checker.
 
 For a checked named direct call, `codeforeigncall` freezes converted explicit
 arguments into target-typed C temporaries in `_named_arg_order`, then freezes

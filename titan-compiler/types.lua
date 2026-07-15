@@ -10,16 +10,16 @@ local types = typedecl("Type", {
         Float       = {},
         String      = {},
         Value       = {},
-        Function    = {"params", "rettypes", "vararg", "varargtype"},
+        Function    = {"params", "rettypes", "vararg", "varargtype", "flexrettype"},
         Array       = {"elem"},
         Map         = {"keys", "values"},
         Record      = {"name", "fields", "functions", "methods", "nfields"},
         Nominal     = {"fqtn"},
         Field       = {"fqtn", "name", "type", "index"},
-        Method      = {"fqtn", "name", "params", "rettypes", "varargtype", "paramnames"},
+        Method      = {"fqtn", "name", "params", "rettypes", "varargtype", "flexrettype", "paramnames"},
         ModuleMember = {"modname", "name", "type", "paramnames"},
         ModuleVariable = {"modname", "name", "type"},
-        StaticMethod = {"fqtn", "name", "params", "rettypes", "varargtype", "paramnames"},
+        StaticMethod = {"fqtn", "name", "params", "rettypes", "varargtype", "flexrettype", "paramnames"},
         Option       = {"base"},
         CVoid        = {},
         CInteger     = {"spelling", "signed", "rank", "bits"},
@@ -95,7 +95,8 @@ local function find_c_type(t, include_legacy, descend_function_values)
                 local ctyp = visit_type(ret, seen)
                 if ctyp then return ctyp end
             end
-            return visit_type(typ.varargtype, seen)
+            return visit_type(typ.varargtype, seen) or
+                   visit_type(typ.flexrettype, seen)
         elseif tag == "Type.Option" then
             return visit_type(typ.base, seen)
         elseif tag == "Type.Field" then
@@ -111,7 +112,8 @@ local function find_c_type(t, include_legacy, descend_function_values)
                 local ctyp = visit_type(ret, seen)
                 if ctyp then return ctyp end
             end
-            return visit_type(typ.varargtype, seen)
+            return visit_type(typ.varargtype, seen) or
+                   visit_type(typ.flexrettype, seen)
         elseif tag == "Type.Record" then
             for _, field in ipairs(typ.fields) do
                 local ctyp = not field.islocal and visit_type(field, seen)
@@ -580,7 +582,102 @@ function types.coerceable(source, target)
 
 end
 
--- The type consistency relation, a-la gradual typing
+local function optional_result_type(t)
+    if t._tag == "Type.Option" or t._tag == "Type.Value" then
+        return t
+    end
+    return types.Option(t)
+end
+
+-- Directional function compatibility. `expected` is the static callable type
+-- that controls future calls; `actual` is the value being stored there.
+-- Component values use the same compatibility/coercion boundary as ordinary
+-- checker slots. Parameter positions reverse the direction; result positions
+-- preserve it.
+local function slot_compatible(target, source)
+    return types.compatible(target, source)
+        or types.coerceable(source, target)
+end
+
+local function function_compatible(expected, actual)
+    -- `vararg` is the untyped C-FFI variadic bit. C call shapes remain strict;
+    -- exact equality was handled before reaching this helper.
+    if expected.vararg or actual.vararg then
+        return false
+    end
+
+    -- Do not admit hidden fixed parameters. Even an expected variadic tail is
+    -- optional, so its callers do not promise to supply those positions.
+    if #actual.params > #expected.params then
+        return false
+    end
+
+    for i = 1, #actual.params do
+        if not slot_compatible(actual.params[i], expected.params[i]) then
+            return false
+        end
+    end
+
+    -- A shorter fixed actual ignores the expected suffix. A shorter variadic
+    -- actual observes that suffix, so validate each moved fixed value and the
+    -- expected tail against the actual input element type.
+    if actual.varargtype then
+        for i = #actual.params + 1, #expected.params do
+            if not slot_compatible(actual.varargtype, expected.params[i]) then
+                return false
+            end
+        end
+        if expected.varargtype
+           and not slot_compatible(actual.varargtype,
+                                   expected.varargtype) then
+            return false
+        end
+    end
+
+    -- Expected fixed results are covariant. An actual flexible tail supplies
+    -- optional finite projections. A non-option expected slot may also accept
+    -- the raw tail type: an absent result is nil-padded at the generic boundary
+    -- and fails through the normal runtime unwrap.
+    for i = 1, #expected.rettypes do
+        local produced = actual.rettypes[i]
+        if produced then
+            if not slot_compatible(expected.rettypes[i], produced) then
+                return false
+            end
+        elseif actual.flexrettype then
+            local projected = optional_result_type(actual.flexrettype)
+            if not slot_compatible(expected.rettypes[i], projected)
+               and not slot_compatible(expected.rettypes[i],
+                                       actual.flexrettype) then
+                return false
+            end
+        else
+            return false
+        end
+    end
+
+    -- A finite expected type hides all additional actual results. An open
+    -- expected tail observes every remaining fixed result and the actual tail,
+    -- if one exists; a fixed-only actual may simply end.
+    if expected.flexrettype then
+        for i = #expected.rettypes + 1, #actual.rettypes do
+            if not slot_compatible(expected.flexrettype,
+                                   actual.rettypes[i]) then
+                return false
+            end
+        end
+        if actual.flexrettype
+           and not slot_compatible(expected.flexrettype,
+                                   actual.flexrettype) then
+            return false
+        end
+    end
+
+    return true
+end
+
+-- The type consistency relation, a-la gradual typing. Its argument order is
+-- directional: `t1` is expected and `t2` is found.
 function types.compatible(t1, t2)
     if types.equals(t1, t2) then
         return true
@@ -651,41 +748,7 @@ function types.compatible(t1, t2)
     elseif t1._tag == "Type.Nominal" and t2._tag == "Type.Nominal" then
         return t1.fqtn == t2.fqtn
     elseif t1._tag == "Type.Function" and t2._tag == "Type.Function" then
-        if #t1.params ~= #t2.params then
-            return false
-        end
-
-        for i = 1, #t1.params do
-            if not types.compatible(t1.params[i], t2.params[i]) then
-                return false
-            end
-        end
-
-        if #t1.rettypes ~= #t2.rettypes then
-            return false
-        end
-
-        for i = 1, #t1.rettypes do
-            if not types.compatible(t1.rettypes[i], t2.rettypes[i]) then
-                return false
-            end
-        end
-
-        -- Titan vararg presence must match (a variadic and a non-variadic
-        -- function are structurally distinct, never compatible); when both are
-        -- Titan-variadic, the element types must be `compatible` (gradual, so
-        -- `(integer, ...: integer)` is compatible with `(integer, ...: value)` both
-        -- ways via `value`). The C-FFI `vararg` boolean is disjoint and not
-        -- part of first-class Titan function compatibility.
-        local v1, v2 = t1.varargtype, t2.varargtype
-        if (v1 and true) ~= (v2 and true) then
-            return false
-        end
-        if v1 and v2 and not types.compatible(v1, v2) then
-            return false
-        end
-
-        return true
+        return function_compatible(t1, t2)
     else
         return false
     end
@@ -726,6 +789,39 @@ local function same_list(l1, l2, seen)
             return false
         end
     end
+    return true
+end
+
+-- Compare the callable ABI shape shared by ordinary function values and
+-- declaration descriptors for methods/record functions. `vararg` is the
+-- foreign-C variadic flag and exists only on Type.Function; the typed Titan
+-- input/output tails are present on all three shapes. Declaration-only
+-- parameter names deliberately stay outside exact type identity.
+local function callable_shape_equals(t1, t2, seen, compare_c_vararg)
+    if compare_c_vararg and t1.vararg ~= t2.vararg then
+        return false
+    end
+    if not same_list(t1.params, t2.params, seen)
+       or not same_list(t1.rettypes, t2.rettypes, seen) then
+        return false
+    end
+
+    local v1, v2 = t1.varargtype, t2.varargtype
+    if (v1 and true) ~= (v2 and true) then
+        return false
+    end
+    if v1 and not type_equals(v1, v2, seen) then
+        return false
+    end
+
+    local f1, f2 = t1.flexrettype, t2.flexrettype
+    if (f1 and true) ~= (f2 and true) then
+        return false
+    end
+    if f1 and not type_equals(f1, f2, seen) then
+        return false
+    end
+
     return true
 end
 
@@ -805,39 +901,14 @@ type_equals = function(t1, t2, seen)
     elseif tag1 == "Type.CModule" then
         return t1.name == t2.name and same_value(t1.members, t2.members, seen)
     elseif tag1 == "Type.Function" then
-        if #t1.params ~= #t2.params then
-            return false
-        end
-
-        for i = 1, #t1.params do
-            if not type_equals(t1.params[i], t2.params[i], seen) then
-                return false
-            end
-        end
-
-        if #t1.rettypes ~= #t2.rettypes then
-            return false
-        end
-
-        for i = 1, #t1.rettypes do
-            if not type_equals(t1.rettypes[i], t2.rettypes[i], seen) then
-                return false
-            end
-        end
-
-        -- Same Titan vararg presence rule as `compatible`, but element types are
-        -- compared with `equals` (this drives the runtime type tag, so
-        -- `...: integer` and `...: value` are NOT equal → different tags → the
-        -- first-class fast path correctly falls back to the generic path).
-        local v1, v2 = t1.varargtype, t2.varargtype
-        if (v1 and true) ~= (v2 and true) then
-            return false
-        end
-        if v1 and v2 and not type_equals(v1, v2, seen) then
-            return false
-        end
-
-        return true
+        -- Typed input/output tails are part of the exact runtime function tag;
+        -- differing tail element types must therefore fall back from the
+        -- first-class native path.
+        return callable_shape_equals(t1, t2, seen, true)
+    elseif tag1 == "Type.Method" or tag1 == "Type.StaticMethod" then
+        return t1.fqtn == t2.fqtn
+           and t1.name == t2.name
+           and callable_shape_equals(t1, t2, seen, false)
     elseif tag1 == "Type.Nominal" then
         return t1.fqtn == t2.fqtn
     elseif tag1 == "Type.Option" then
@@ -916,7 +987,15 @@ function types.tostring(t)
         for _, rettype in ipairs(t.rettypes) do
             table.insert(rtypes, types.tostring(rettype))
         end
-        if #rtypes == 1 then
+        if t.flexrettype then
+            table.insert(rtypes, "...: " .. types.tostring(t.flexrettype))
+            -- A flexible tail is legal only in a parenthesized result list;
+            -- retaining those parentheses also keeps the rendering
+            -- collision-free when its element type is itself a function.
+            table.insert(out, " -> (")
+            table.insert(out, table.concat(rtypes, ", "))
+            table.insert(out, ")")
+        elseif #rtypes == 1 then
             table.insert(out, " -> ")
             table.insert(out, rtypes[1])
         elseif #rtypes > 1 then
@@ -946,7 +1025,12 @@ function types.tostring(t)
         for _, rettype in ipairs(t.rettypes) do
             table.insert(rtypes, types.tostring(rettype))
         end
-        if #rtypes == 1 then
+        if t.flexrettype then
+            table.insert(rtypes, "...: " .. types.tostring(t.flexrettype))
+            table.insert(out, ": (")
+            table.insert(out, table.concat(rtypes, ", "))
+            table.insert(out, ")")
+        elseif #rtypes == 1 then
             table.insert(out, ": ")
             table.insert(out, rtypes[1])
         elseif #rtypes > 1 then
@@ -1053,7 +1137,8 @@ function types.serialize(t)
             "{" .. table.concat(ptypes, ",") .. "}" .. "," ..
             "{" .. table.concat(rettypes, ",") .. "}" .. "," ..
             tostring(t.vararg) .. "," ..
-            (t.varargtype and types.serialize(t.varargtype) or "false") .. ")"
+            (t.varargtype and types.serialize(t.varargtype) or "false") .. "," ..
+            (t.flexrettype and types.serialize(t.flexrettype) or "false") .. ")"
     elseif tag == "Type.Nominal" then
         return "Nominal('" .. t.fqtn .. "')"
     elseif tag == "Type.Field" then
@@ -1074,6 +1159,7 @@ function types.serialize(t)
             "{" .. table.concat(ptypes, ",") .. "}" .. "," ..
             "{" .. table.concat(rettypes, ",") .. "}," ..
             (t.varargtype and types.serialize(t.varargtype) or "false") .. "," ..
+            (t.flexrettype and types.serialize(t.flexrettype) or "false") .. "," ..
             serialize_names(t.paramnames) .. ")"
     elseif tag == "Type.Record" then
         local functions, fields, methods = {}, {}, {}

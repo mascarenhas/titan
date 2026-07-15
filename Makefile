@@ -204,7 +204,7 @@ TITAN_COMPILER_LUA := $(wildcard titan-compiler/*.lua c-parser/*.lua)
 # makes them the same directory, while this fallback keeps
 # `make install-stdlib PREFIX=...` useful on its own.
 TITAN_INSTALL_TREE         := $(if $(strip $(ROCKS_TREE)),$(ROCKS_TREE),$(PREFIX))
-TITAN_ABI_VERSION          := 0.13
+TITAN_ABI_VERSION          := 0.14
 TITAN_STDLIB_ABI_DIR       ?= $(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_ABI_VERSION)
 TITAN_STDLIB_DIR           ?= $(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_ABI_VERSION)/titan
 TITAN_STDLIB_LUA_DIR       ?= $(TITAN_INSTALL_TREE)/share/lua/$(LUA_ABI_VERSION)/titan
@@ -878,7 +878,7 @@ titan/$(COROUTINE_SO): titan/coroutine.titan $(STDLIB_CORO_RUNTIME_PREREQS) tita
 		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
 		$(STDLIB_TOOL_PREREQS)
 	CC=$(call make_shell_quote,$(CC)) \
-		TITAN_PATH_0_13=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
+		TITAN_PATH_0_14=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 		TITAN_RUNTIME_PREBUILT=1 \
 		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
 		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CFLAGS)) \
@@ -893,7 +893,7 @@ titan/$(UV_SO): titan/uv.titan titan/$(COROUTINE_SO) $(STDLIB_UV_RUNTIME_PREREQS
 		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_TOOL_PREREQS) \
 		$(STDLIB_PLATFORM_PREREQS) $(STDLIB_RUNTIME_ARCHIVE_PREREQ)
 	CC=$(call make_shell_quote,$(CC)) \
-		TITAN_PATH_0_13=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
+		TITAN_PATH_0_14=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 		TITAN_RUNTIME_PREBUILT=1 \
 		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))) \
 		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CFLAGS) $(STDLIB_UV_CFLAGS))) \
@@ -907,7 +907,7 @@ titan/$(ASYNC_SO): titan/async.titan titan/$(UV_SO) $(STDLIB_COMMON_RUNTIME_PRER
 		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
 		$(STDLIB_TOOL_PREREQS)
 	CC=$(call make_shell_quote,$(CC)) \
-		TITAN_PATH_0_13=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
+		TITAN_PATH_0_14=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 		TITAN_RUNTIME_PREBUILT=1 \
 		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
 		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CFLAGS)) \
@@ -920,7 +920,7 @@ titan/$(TIMER_SO): titan/timer.titan titan/$(UV_SO) $(STDLIB_COMMON_RUNTIME_PRER
 		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
 		$(STDLIB_TOOL_PREREQS)
 	CC=$(call make_shell_quote,$(CC)) \
-		TITAN_PATH_0_13=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
+		TITAN_PATH_0_14=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 		TITAN_RUNTIME_PREBUILT=1 \
 		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
 		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CFLAGS)) \
@@ -933,7 +933,7 @@ titan/$(FS_SO): titan/fs.titan titan/$(UV_SO) $(STDLIB_COMMON_RUNTIME_PREREQS) t
 		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
 		$(STDLIB_TOOL_PREREQS)
 	CC=$(call make_shell_quote,$(CC)) \
-		TITAN_PATH_0_13=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
+		TITAN_PATH_0_14=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 		TITAN_RUNTIME_PREBUILT=1 \
 		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
 		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CFLAGS)) \
@@ -946,7 +946,7 @@ titan/$(NET_SO): titan/net.titan titan/$(UV_SO) $(STDLIB_COMMON_RUNTIME_PREREQS)
 		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
 		$(STDLIB_TOOL_PREREQS)
 	CC=$(call make_shell_quote,$(CC)) \
-		TITAN_PATH_0_13=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
+		TITAN_PATH_0_14=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 		TITAN_RUNTIME_PREBUILT=1 \
 		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
 		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CFLAGS)) \
@@ -959,7 +959,7 @@ titan/$(OS_SO): titan/os.titan titan/$(UV_SO) $(STDLIB_COMMON_RUNTIME_PREREQS) t
 		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
 		$(STDLIB_TOOL_PREREQS)
 	CC=$(call make_shell_quote,$(CC)) \
-		TITAN_PATH_0_13=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
+		TITAN_PATH_0_14=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 		TITAN_RUNTIME_PREBUILT=1 \
 		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
 		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CFLAGS)) \

@@ -466,6 +466,92 @@ describe("generic for loops", function()
         ]])
     end)
 
+    it("projects a flex-only iterator and discards flexible close results", function()
+        h.run_coder([[
+            calls: integer = 0
+            closed: integer = 0
+            tuple_surplus: integer = 0
+
+            function step(): (...: integer)
+                calls = calls + 1
+                if calls == 1 then
+                    return 1, 10, 100
+                elseif calls == 2 then
+                    return 2
+                else
+                    return
+                end
+            end
+
+            function close(): (...: integer)
+                closed = closed + 1
+                return 70, 80
+            end
+
+            function surplus(): integer
+                tuple_surplus = tuple_surplus + 1
+                return 999
+            end
+
+            function run(): (integer, integer, integer, integer)
+                local total = 0
+                for n: integer, extra: integer? in
+                    step, 111, 222, close, surplus()
+                do
+                    total = total * 1000 + n * 100
+                    if extra then
+                        total = total + (extra as integer)
+                    end
+                end
+                return total, calls, closed, tuple_surplus
+            end
+        ]], [[
+            local total, calls, closed, tuple_surplus = test.run()
+            assert(total == 110200)
+            assert(calls == 3)
+            assert(closed == 1)
+            assert(tuple_surplus == 1)
+        ]])
+    end)
+
+    it("combines a fixed iterator control with projected flexible results", function()
+        h.run_coder([[
+            calls: integer = 0
+
+            function step(): (integer?, ...: string)
+                calls = calls + 1
+                if calls == 1 then
+                    return 1, "a", "bb", "surplus"
+                elseif calls == 2 then
+                    return 2, "c"
+                else
+                    return nil, "after", "exhaustion"
+                end
+            end
+
+            function run(): (integer, integer, integer)
+                local total = 0
+                local iterations = 0
+                for n: integer, first: string?, second: string? in step do
+                    iterations = iterations + 1
+                    total = total * 1000 + n * 100
+                    if first then
+                        total = total + #(first as string) * 10
+                    end
+                    if second then
+                        total = total + #(second as string)
+                    end
+                end
+                return total, iterations, calls
+            end
+        ]], [[
+            local total, iterations, calls = test.run()
+            assert(total == 112210)
+            assert(iterations == 2)
+            assert(calls == 3)
+        ]])
+    end)
+
     it("keeps gc iterator results alive across loop churn", function()
         h.run_coder([[
             function step(_: nil, n: integer): (integer?, string)

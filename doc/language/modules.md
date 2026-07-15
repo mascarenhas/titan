@@ -232,6 +232,9 @@ as `geom.norm(p)`, the importer can reference `geom.norm` as a value — pass
 it, store it, return it, and call it indirectly — with stable identity (the
 same function reference each time) and a fast call path. (Only the function
 is first-class; the module alias itself is not, as described next.)
+Its imported static type preserves both input-variadic and flexible-result
+tails, so calls through a source or compiled-module interface use the same
+finite projection and open-run rules as local calls.
 
 Modules are not first-class values: the alias can only be used as a
 prefix. Reading it as a value (`local m2 = geom`) is the compile-time
@@ -342,8 +345,8 @@ the structure of the generated C is in
   described above.
 * **Compiled modules** are looked up along the *binary search path*: a
   semicolon-separated list of plain directories taken from
-  `TITAN_PATH_0_13`, or `TITAN_PATH` if that is unset. Otherwise the default
-  is `.;<root>/lib/titan/0.13`. An installed `titanc` recovers `<root>` from
+  `TITAN_PATH_0_14`, or `TITAN_PATH` if that is unset. Otherwise the default
+  is `.;<root>/lib/titan/0.14`. An installed `titanc` recovers `<root>` from
   the first literal `package.cpath` entry ending in
   `/lib/lua/5.5/?.so`. The same path is used at run time by compiled modules
   that load dependencies dynamically; a `;;` in the run-time environment
@@ -371,11 +374,11 @@ direct-libuv extension contract below.
 Lua's `require`, for its part, finds the `.so` through Lua's ordinary
 `package.cpath` — a compiled Titan module is a regular Lua C module
 (see [Requiring a Titan module](lua-interop.md#requiring-a-titan-module)).
-Titan's installed Lua default puts `<root>/lib/titan/0.13/?.so` before the
+Titan's installed Lua default puts `<root>/lib/titan/0.14/?.so` before the
 ordinary `lib/lua` templates, and each standalone program ensures that same
 entry is present. A qualified standard name such as `titan.os`
 therefore resolves the single canonical file
-`<root>/lib/titan/0.13/titan/os.so`. Titan imports resolve that same file by its
+`<root>/lib/titan/0.14/titan/os.so`. Titan imports resolve that same file by its
 qualified name. Installation creates no parent-level or `lib/lua` copy and
 requires no symbolic- or hard-link alias.
 
@@ -445,15 +448,17 @@ the exact signature
 function main(args: {string}): integer
 ```
 
-the output is a standalone executable instead of shared libraries (the
-parameter and return types may be spelled through transparent aliases). All
+the output is a standalone executable instead of shared libraries. The
+signature is exact: neither an input-variadic parameter nor a flexible result
+tail is allowed (the fixed parameter and return types may be spelled through
+transparent aliases). All
 requested modules and dependencies selected from source are statically bundled
 into the binary.
 Qualified standard-library dependencies are normally found as installed
 binaries first and therefore remain dynamic, just like other binary modules.
 After `luaL_openlibs`, the executable parses the
 inherited `package.cpath` for its `/lib/lua/5.5/?.so` entry, adds
-`<root>/lib/titan/0.13/?.so` if it is absent, and initializes the Titan module
+`<root>/lib/titan/0.14/?.so` if it is absent, and initializes the Titan module
 path from that same root. Deploy those standard DSOs as described under
 [where modules are found](#where-modules-are-found). `args` is
 Lua-style: `args[0]` is the program name and `args[1]` onward are the
@@ -518,11 +523,11 @@ paths with:
 
 ```sh
 export LUA_PATH_5_5="$ROCKS_TREE/share/lua/5.5/?.lua;$ROCKS_TREE/share/lua/5.5/?/init.lua;;"
-export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.13/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
+export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.14/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
 ```
 
 The ordinary `/lib/lua/5.5/?.so` template is Titan's root-discovery anchor. If
 it is omitted, also set
-`TITAN_PATH_0_13="$ROCKS_TREE/lib/titan/0.13"`. Titan still targets the exact
+`TITAN_PATH_0_14="$ROCKS_TREE/lib/titan/0.14"`. Titan still targets the exact
 Lua 5.5 runtime ABI and internals; removing the loader patch does not make a
 module compatible with another Lua version or configuration.

@@ -168,6 +168,31 @@ table (`defs.get_loc` calls `location.from_pos`); since `loc` is the first
 field of every constructor in `ast.lua`, putting `P` first lands the location
 in the right positional argument with no extra plumbing.
 
+### Function result-shape carriers
+
+Fixed and flexible results are parsed separately. `resulttypelist` captures a
+dense fixed list plus an optional final `flexrettypeann` (`...: T`), with the
+comma before the tail required when a fixed prefix exists. The parser packages
+those captures temporarily as:
+
+```lua
+{ rettypes = fixed_dense_list, flexrettype = type_node_or_false }
+```
+
+`defs.rettypeopt` returns the pair to `TopLevelFunc`, `TopLevelMethod`, and
+`TopLevelStatic`; `defs.lambdarettypeopt` additionally preserves the
+no-annotation sentinel needed for contextual lambda inference. Function-type
+nodes carry `argtypes`, `rettypes`, `varargtype`, and `flexrettype` as four
+separate fields. No tail sentinel is inserted into either dense list.
+
+The grammar tries `resulttypelist !RARROW` before its arrow alternatives. That
+lookahead distinguishes `(...: T)` as a flex-only result list from
+`(...: T) -> R` as a function type with an input vararg. A flexible return must
+be parenthesized, typed, last, and comma-separated from a fixed prefix;
+`FlexRetColon`, `FlexRetType`, `FlexRetLast`, and `FlexRetParens` give those
+failures return-specific labels. See
+[Flexible returns](flexible-returns.md#parser-carriers-and-disambiguation).
+
 ### The precedence ladder
 
 Expression precedence is a ladder of twelve rules, `e1` (loosest, `or`) down
@@ -300,17 +325,20 @@ The parser performs several rewrites that later passes rely on:
   `forrest` lets malformed numeric loops still report `AssignFor` without
   swallowing valid generic loops.
 
-* **Missing return types default to `nil`.** `defs.rettypeopt` turns an
-  absent `: rettype` annotation into `{ ast.TypeNil(pos) }`, so
-  `function f() end` is nil-returning. (A source comment notes the intended
-  future default: the empty list, or inference.)
+* **Missing return types default to zero results.** `defs.rettypeopt` turns an
+  absent `: rettype` annotation into an empty fixed list and no flexible tail,
+  so `function f() end` has `() -> ()`. A written `: nil` remains one fixed
+  nil result. For lambdas, `defs.lambdarettypeopt` keeps absence distinct from
+  an explicit `: ()`, because the former may copy fixed and flexible results
+  from an expected function type.
 
 * **Parenthesized calls become `ExpAdjust`.** `defs.adjust_exp` wraps
   `( f() )` in an `Ast.ExpAdjust` node — "adjust call to just first value" —
   while parentheses around anything else vanish from the AST entirely
   (`((1))` is just `ExpInteger 1`). The complementary `Ast.ExpExtra` node for
-  *extra* multi-return values is synthesized only by
-  [the checker](checker.md), never the parser.
+  finite result positions after the first is synthesized only by
+  [the checker](checker.md), never the parser; runtime-sized flexible tails
+  stay on the call's checker decorations rather than becoming parser nodes.
 
 * **Concat flattening and constant folding** (see the ladder section), and
   the **option-mark desugarings**: the type suffix `T?` becomes

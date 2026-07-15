@@ -258,7 +258,8 @@ semantic rule:
 | Source | Error shape |
 | --- | --- |
 | wrong argument type from Lua | `FILE:LINE:COL: type error, expected T but found U` |
-| extra arguments from Lua | `calling Titan function NAME with N arguments, but expected at most M` |
+| more than 200 variadic arguments from Lua | `too many variadic arguments to Titan function NAME (N, max 200)` |
+| more than 200 open flexible results | `too many flexible return values (max 200)` |
 | failed `value as T` or implicit `value` conversion | `FILE:LINE:COL: type error, expected T but found U` |
 | float-to-integer conversion failure | `type error, number 'N' has no integer representation` |
 | integer `//` or `%` by zero | `error at line LINE, divide by zero` / `% by zero` |

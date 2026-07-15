@@ -134,8 +134,9 @@ Like any Titan function call, `Point.new` pads omitted arguments with
 `nil` and then type-checks them against the corresponding field type.
 That means `Point.new(1)` is accepted only when the second field can
 accept `nil`; for a required `float` field it is a compile-time type
-error (`expected float but found nil`). Extra arguments are still
-rejected. Each argument gets the usual implicit coercions of a function
+error (`expected float but found nil`). Surplus positional expressions are
+evaluated and ignored, like those of every fixed-parameter Titan function.
+Each argument used by `new` gets the usual implicit coercions of a function
 argument, so `Point.new(2, 3)` fills the `float` fields with `2.0` and
 `3.0`. As a record static declaration, `new` also supports
 [named-call syntax](named-arguments.md): fields may be written in any order,
@@ -402,6 +403,11 @@ local function Point.checked(x: float, y: float): Point
 end
 ```
 
+Methods and record functions may declare input-variadic parameters and
+flexible result tails exactly like module functions. A bound method reference
+preserves both tails after binding `self`; the synthesized `new` constructor
+itself remains a fixed-result function returning one record.
+
 The synthesized `new` constructor is just a record function. When `new` is local
 because the record is local or has local fields, a public record function is the
 usual way to expose a controlled factory:
@@ -504,9 +510,8 @@ The details, all run-time behavior:
   module — a small namespace table holding its public record functions — so
   `test.Point.new(1, 2)` and `test.Point.origin()` work from Lua when those
   functions are public. Missing Lua arguments are padded with `nil` and
-  then checked against the field types; extra arguments raise a run-time
-  arity error such as
-  `calling Titan function new with 3 arguments, but expected at most 2`.
+  then checked against the field types; surplus positional arguments to a
+  fixed-parameter record function are ignored.
 * **Field reads and writes** go through the record's metatable and are
   fully checked. An unknown field, read or written, raises
   `field 'z' not found in record 'test.Point'`; a wrongly-typed write

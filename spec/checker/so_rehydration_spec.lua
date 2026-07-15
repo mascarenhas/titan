@@ -457,4 +457,55 @@ describe("typechecker rehydration of .so-only imports", function()
         assert.truthy(#bad >= 1)
         assert.match("expected integer but found string", table.concat(bad, "\n"))
     end)
+
+    it("rehydrates flexible tails for functions, statics, and methods", function ()
+        local dep = { name = "frhfoo", src = [[
+            record Box
+              n: integer
+            end
+
+            function produce(): (integer, ...: string)
+                return 1, "top"
+            end
+
+            function Box.collect(): (...: integer)
+                return 2, 3
+            end
+
+            function Box:items(): (...: string)
+                return "method"
+            end
+        ]] }
+
+        local good = so_check({ dep }, "frhbar", [[
+            local f = import "frhfoo"
+
+            function use(): integer
+                local fixed: integer, tail: string? = f.produce()
+                local first: integer? = f.Box.collect()
+                local box = f.Box.new(4)
+                local item: string? = box:items()
+                if tail and first and item then
+                    return fixed + first + box.n
+                else
+                    return 0
+                end
+            end
+        ]])
+        assert.equal(0, #good, table.concat(good, "\n"))
+        local box = assert(types.registry["frhfoo.Box"])
+        assert.same(types.Integer(), box.functions.collect.flexrettype)
+        assert.same(types.String(), box.methods.items.flexrettype)
+
+        local bad = so_check({ dep }, "frhbar", [[
+            local f = import "frhfoo"
+            function use(): integer
+                local bad: string? = f.Box.collect()
+                return 0
+            end
+        ]])
+        assert.truthy(#bad >= 1)
+        assert.match("expected string%? but found integer%?",
+            table.concat(bad, "\n"))
+    end)
 end)

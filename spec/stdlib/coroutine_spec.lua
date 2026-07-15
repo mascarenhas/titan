@@ -26,7 +26,7 @@ local LUA = prefix_lua and file_exists(prefix_lua) and prefix_lua
     or "lua"
 local TITANC = LUA ..
     [[ -e 'package.path="./?.lua;./?/init.lua;" .. package.path' ./titanc]]
-local TEST_ENV = "env CCACHE_DISABLE=1 TITAN_PATH_0_13=. " ..
+local TEST_ENV = "env CCACHE_DISABLE=1 TITAN_PATH_0_14=. " ..
     "LUA_CPATH='./?.so;;' "
 
 local function clean_test_artifacts()

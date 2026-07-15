@@ -1,7 +1,7 @@
 # The Titan grammar
 
 This chapter is the reference grammar of Titan as implemented by the
-0.13 prototype compiler: lexical conventions, the complete syntactic
+0.14 prototype compiler: lexical conventions, the complete syntactic
 grammar, operator precedence, and the restrictions the EBNF alone does
 not show. It replaces the old manual's stale grammar.
 
@@ -210,10 +210,11 @@ basictype  ::= nil | boolean | integer | float | string | value
             |  '{' type '}'
 funargtypes::= '(' [type {',' type} [',' varargtype] | varargtype] ')'
 varargtype ::= '...' ':' type
-typelist   ::= '(' [type {',' type}] ')'
-rettype    ::= typelist '->' rettype
+resulttypes::= '(' [type {',' type} [',' flexrettype] | flexrettype] ')'
+flexrettype::= '...' ':' type
+rettype    ::= funargtypes '->' rettype
             |  simpletype '->' rettype
-            |  typelist
+            |  resulttypes
             |  simpletype
 ```
 
@@ -237,15 +238,22 @@ write `p: T?`.
 In types: `Name` is a record type and `mod.Name` one from an imported
 module; `{T}` is an array, `{K: V}` a map, `T?` an option type, and
 `t -> t` a function type. A function type may end its argument list with
-`...: T` to describe a variadic function value. `->` is right-associative (`a -> b -> c` is
+`...: T` to describe a variadic function value, and a parenthesized result
+list may end with `...: T` to describe a flexible result run. The two tails
+are independent. When a fixed result prefix is present, a comma is required
+before the tail: `(integer, ...: string)` is valid, while
+`(integer ...: string)` is not. `->` is right-associative (`a -> b -> c` is
 `a -> (b -> c)`) and binds tighter than the commas of an enclosing
-`typelist`. A bare parenthesized `typelist` is a valid type only in
+parenthesized result list. A bare `resulttypes` form is valid only in
 `rettype` position — a function's return annotation or the right side
-of `->` — which is how multiple return types are written:
+of `->` — which is how multiple and flexible return types are written:
 
 ```lua
 function divmod(a: integer, b: integer): (integer, integer)
     return a // b, a % b
+end
+function stream(): (boolean, ...: string)
+    return true
 end
 local maybe: integer? = nil                  -- option type
 local grid: {{float}} = {}                   -- array of arrays
@@ -260,7 +268,9 @@ are first-class values, so a function type may annotate a variable,
 parameter, return, field, or any other declaration, and a function value
 inhabiting it can be stored, passed, returned, and called. A return list
 of `()` denotes a function that returns nothing, distinct from `nil`
-(one `nil` return); `->` is right-associative and function types nest, so
+(one `nil` return). A flexible tail must be last, appear inside the
+parenthesized result list, and include its element type. `->` is
+right-associative and function types nest, so
 a higher-order type like `(integer -> integer, integer) -> integer` is
 written directly. See [the type system](types.md#function-types).
 
@@ -299,9 +309,10 @@ declaration mirror Lua, but a `local` declaration *requires* an
 initializer — plain `local x: integer` is a syntax error. `return`
 takes zero or more expressions, only as the last statement of a block.
 In a zero-return function (`(...) -> ()`), a bare `return` returns zero
-values and `return nil` is a type error. In an explicit `: nil` function,
-a bare `return` is accepted as the one `nil` return. In option- or
-`value`-returning functions, write `return nil` explicitly.
+values. Written return expressions are evaluated but their values are
+discarded, so `return nil` also exposes zero results there. In an explicit
+`: nil` function, a bare `return` is accepted as the one `nil` return. In
+option- or `value`-returning functions, write `return nil` explicitly.
 
 ```lua
 function demo(xs: {integer}, p: Point): (integer, integer)

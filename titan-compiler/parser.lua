@@ -73,9 +73,9 @@ function defs.rettypeopt(_, x)
         -- No return annotation means a zero-return `(...) -> ()` function, as
         -- in Lua where `function f() end` returns nothing. `return` (bare) is
         -- the only legal return; `: nil` is the explicit one-`nil` form.
-        return {}
+        return {}, false
     else
-        return x
+        return x.rettypes, x.flexrettype
     end
 end
 
@@ -84,9 +84,9 @@ function defs.lambdarettypeopt(_, x)
         -- No return annotation on a lambda means "infer the return type" — a
         -- distinct case from an explicit `: ()` (which is a zero-return `{}`).
         -- We return `false` so the checker can tell the two apart.
-        return false
+        return false, false
     else
-        return x
+        return x.rettypes, x.flexrettype
     end
 end
 
@@ -353,14 +353,18 @@ function defs.exp_is_call(_, pos, exp)
     end
 end
 
-function defs.methoddecl(pos, islocal, class, name, params, rettypes, block)
-    local node = ast.TopLevelMethod(pos, class, name, params, rettypes, block)
+function defs.methoddecl(pos, islocal, class, name, params, rettypes,
+                         flexrettype, block)
+    local node = ast.TopLevelMethod(pos, class, name, params, rettypes,
+        flexrettype, block)
     node.islocal = islocal
     return node
 end
 
-function defs.staticdecl(pos, islocal, class, name, params, rettypes, block)
-    local node = ast.TopLevelStatic(pos, class, name, params, rettypes, block)
+function defs.staticdecl(pos, islocal, class, name, params, rettypes,
+                         flexrettype, block)
+    local node = ast.TopLevelStatic(pos, class, name, params, rettypes,
+        flexrettype, block)
     node.islocal = islocal
     return node
 end
@@ -386,7 +390,8 @@ function defs.recorddecl(pos, islocal, name, fields)
     })
     local record = ast.TopLevelRecord(pos, name, fields)
     record.islocal = islocal
-    local new = ast.TopLevelStatic(pos, name, "new", params, { ast.TypeName(pos, name) }, body)
+    local new = ast.TopLevelStatic(pos, name, "new", params,
+        { ast.TypeName(pos, name) }, false, body)
     new.islocal = islocal or has_local_field(fields)
     return record, new
 end
@@ -441,12 +446,43 @@ function defs.varargtype(_, type)
     return type
 end
 
--- Build a TypeFunction node, reordering the captures so the optional vararg
--- element type (false when absent) lands in the node's `varargtype` field. A
--- function-type annotation parses its arg list then the return types, so the
--- captures arrive as (loc, argtypes, varargtype, rettypes).
-function defs.typefunc(pos, argtypes, varargtype, rettypes)
-    return ast.TypeFunction(pos, argtypes, rettypes, varargtype)
+-- A flexible return tail uses the same capture shape as a typed input vararg,
+-- but it is parsed by a separate production so diagnostics can describe a
+-- return rather than a parameter.
+function defs.flexrettype(_, type)
+    return type
+end
+
+-- `rettype` always returns this untagged carrier. Keeping the fixed dense list
+-- separate from the optional flexible element type avoids inserting a sentinel
+-- into `rettypes`, whose numeric indices are meaningful throughout the checker
+-- and coder.
+function defs.returnshape(rettypes, flexrettype)
+    return { rettypes = rettypes, flexrettype = flexrettype }
+end
+
+function defs.singlereturn(type)
+    return { rettypes = { type }, flexrettype = false }
+end
+
+-- A function type appearing as the sole return value of another function is a
+-- fixed one-value result shape; the nested function's own flexible return tail
+-- remains on its TypeFunction node.
+function defs.functionreturnshape(pos, argtypes, varargtype, result)
+    return {
+        rettypes = {
+            ast.TypeFunction(pos, argtypes, result.rettypes, varargtype,
+                result.flexrettype),
+        },
+        flexrettype = false,
+    }
+end
+
+-- Build a TypeFunction node, reordering the captures so both optional tails
+-- land after their corresponding fixed lists.
+function defs.typefunc(pos, argtypes, varargtype, result)
+    return ast.TypeFunction(pos, argtypes, result.rettypes, varargtype,
+        result.flexrettype)
 end
 
 function defs.makeprogram(_, init)
@@ -610,16 +646,36 @@ local grammar = re.compile([[
                          varargtypeopt
                          RPAREN^RParenTypelist )                 -- produces {Type}, varargtypeopt
 
-    typelist        <- ( LPAREN
-                         {| (type (COMMA type^TypelistType)*)? |}
-                         RPAREN^RParenTypelist )                 -- produces {Type}
+    -- A flexible return tail is legal only as the final item of a parenthesized
+    -- return list. Its labels deliberately do not reuse the input-vararg
+    -- diagnostic, which calls the construct a variadic parameter.
+    flexrettypeann  <- (P  DOTS COLON^FlexRetColon type^FlexRetType
+                           (!COMMA / %{FlexRetLast}))             -> flexrettype
 
-    rettype         <- {| (P  arglist RARROW
-                            rettype^TypeReturnTypes)             -> typefunc |}
-                     / {| (P  {| simpletype |} (''->tofalse) RARROW
-                             rettype^TypeReturnTypes)            -> typefunc |}
-                     / typelist
-                     / {| simpletype |}
+    -- A fixed prefix requires the separating comma; the comma-less form is
+    -- reserved for a flex-only result list. Keeping these productions
+    -- separate prevents `(integer ...: string)` from being accepted by the
+    -- otherwise convenient optional-tail rule.
+    flexrettypeafterfixed <- ((COMMA flexrettypeann)?) -> opt
+    flexrettypeonlyopt    <- (flexrettypeann?)         -> opt
+
+    resulttypelist  <- ( LPAREN
+                         ( {| type (COMMA !DOTS type^TypelistType)* |}
+                           flexrettypeafterfixed
+                         / {| '' |} flexrettypeonlyopt )
+                         RPAREN^RParenTypelist )                 -> returnshape
+
+    -- Try a parenthesized result list first, but commit to it only when no
+    -- arrow follows. This disambiguates `(...: T)` as a flexible result list
+    -- from `(...: T) -> R` as a function type without running the input-vararg
+    -- capture path and then backtracking through it.
+    rettype         <- (resulttypelist !RARROW)
+                     / (P  arglist RARROW
+                            rettype^TypeReturnTypes)             -> functionreturnshape
+                     / (P  {| simpletype |} (''->tofalse) RARROW
+                             rettype^TypeReturnTypes)            -> functionreturnshape
+                     / (simpletype                              -> singlereturn)
+                     / (DOTS %{FlexRetParens})
 
     type            <- (P  arglist RARROW
                            rettype^TypeReturnTypes)              -> typefunc

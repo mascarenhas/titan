@@ -323,7 +323,7 @@ local function convert_function(st, ftype)
     local cfunc, err = convert_function_type(st, ftype)
     if not cfunc then return nil, err end
     local rettypes = cfunc.ret._tag == "Type.CVoid" and {} or { cfunc.ret }
-    return types.Function(cfunc.params, rettypes, cfunc.vararg, false)
+    return types.Function(cfunc.params, rettypes, cfunc.vararg, false, false)
 end
 
 local function convert_typedef(st, ftype)

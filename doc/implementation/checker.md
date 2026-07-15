@@ -6,8 +6,9 @@ the [code generator](codegen-overview.md) consumes. It lives in three files
 under `titan-compiler/`: `checker.lua` (the traversal), `types.lua` (type
 values and relations), and `symtab.lua` (scoping). Above all: the checker
 does not merely *check* — it **rewrites** the AST so that every implicit
-conversion, every extra multiple-return value, and every defaulted loop step
-exists as an explicit node. The code generator relies on that completely; it
+conversion, every finite extra call projection, and every defaulted loop step
+exists as an explicit node, while finite/open list demand is recorded on its
+consumer. The code generator relies on that completely; it
 never decides to coerce anything on its own.
 
 ## Entry point and contract
@@ -104,9 +105,9 @@ See [Type aliases](type-aliases.md) for the resolution and interface details.
 `checker.has_main(ast)` is a post-check used by `titanc` to decide between
 building a shared library and a standalone executable: it looks for a
 `TopLevelFunc` named `main` with exactly one parameter whose checker type is
-`{string}` and one return type whose checker type is `integer`. Resolving the
-return type before this test lets a transparent alias of `integer` satisfy the
-entrypoint contract.
+`{string}` and one return type whose checker type is `integer`. Both the input
+vararg and flexible-result tail must be absent. Resolving the fixed types before
+this test lets transparent aliases satisfy the entrypoint contract.
 
 ## The relations in `types.lua`
 
@@ -117,7 +118,8 @@ Three relations drive everything. All are plain Lua functions dispatching on
 
 Structural where the type is structural, nominal where it is not: Array/Array
 compares element types; Map/Map compares keys and values; Function/Function
-requires equal arities and pointwise equality of parameters and returns;
+requires pointwise-equal fixed parameters/results and equal presence/element
+types for both the input-vararg and flexible-result tails;
 Option/Option compares bases; Nominal/Nominal compares **fqtn strings only**
 (record contents never participate); Pointer/Pointer compares pointed-to
 types and Typedef/Typedef compares names (FFI types); any other same-tag pair
@@ -162,11 +164,16 @@ Pointer-vs-Nil in either order → true (nullable pointers);
 gradual "value is consistent with everything" rule); Array/Array and Map/Map
 recurse with `compatible` (so `{value}` is compatible with `{float}` —
 Value-consistency reaches through containers); Nominal/Nominal compares fqtns
-(no recursion into record bodies); Function/Function requires equal arities
-and pointwise compatibility; otherwise false. The relation is symmetric in
-every clause except `explicitly_coerceable`, which is tested in one order
-only: `compatible(void pointer, string)` holds but `compatible(string,
-void pointer)` does not (verified).
+(no recursion into record bodies). Function/Function is deliberately
+**directional**: the first argument is the expected slot and the second the
+actual callable. Parameters are checked in the input direction, results in the
+output direction, shorter actual fixed-input lists may ignore an expected
+suffix, and finite expected results may hide actual surplus. Input and output
+tails participate in those same rules; an actual flexible result supplies
+optionized finite projections. The full matrix is in
+[Flexible returns](flexible-returns.md#strict-identity-and-directional-compatibility).
+Outside function types the relation retains its earlier symmetric behavior
+except for one-way `explicitly_coerceable` pointer/string handling.
 
 ### `types.explicitly_coerceable(source, target)`
 
@@ -209,8 +216,9 @@ access sites (see [Code generator: constructs](codegen-constructs.md)).
 
 This is the load-bearing design. **Invariant:** after `checker.check`
 succeeds, every implicit conversion is an explicit `Ast.ExpCast` node, every
-consumed multiple-return value beyond the first is an explicit `Ast.ExpExtra`
-node, every numeric `for` loop has an explicit step expression, and every
+finite consumed call result beyond the first is an explicit `Ast.ExpExtra`
+node, each shared list consumer carries its finite/open adjustment, every
+numeric `for` loop has an explicit step expression, and every
 generic `for` loop has hidden iterator tuple/call declarations. The coder
 generates conversions *only* from `ExpCast` nodes and never consults
 `coerceable`; if the checker fails to materialize a cast, the coder silently
@@ -220,8 +228,11 @@ emits code for the wrong type.
 
 `trycoerce(source, target, errors)` is the workhorse: if
 `types.coerceable(source._type, target)`, it wraps the node in a synthesized
-`ast.ExpCast(loc, exp, target)` with `_type = target`; otherwise it returns
-the node unchanged. Option types make the synthesis recursive:
+`ast.ExpCast(loc, exp, target)` with `_type = target` and
+`_implicit_coercion = true`; otherwise it returns the node unchanged. The
+marker distinguishes demanded sink conversions from written `as` casts when
+a finite flexible-return budget discards a tail result after evaluating its
+source carrier. Option types make the synthesis recursive:
 
 * An Option-to-Option conversion is one cast that propagates nil and converts
   a present value between the base types.
@@ -263,26 +274,54 @@ the [type system chapter](../language/types.md)). A contributor adding a
 context must call `trycoerce` *before* `checkmatch`, or legal programs will
 be rejected by the still-coerceable arm.
 
-### `ExpExtra` — materializing multiple returns
+### `ExpExtra` — materializing finite call results
 
-A call node gets `node._type = rettypes[1]` and `node._types = rettypes`.
-Wherever a multi-value context consumes a call in last position —
-declarations, assignments, returns, call arguments, array initializers — the
-checker appends synthesized `ast.ExpExtra(loc, exp, index, _type)` nodes, one
-per extra value, each then coerced and matched like any expression:
+A checked call keeps its declared fixed ABI shape in `_types`, its optional
+tail in `_flexrettype`, and the complete callable in `_callee_type`. The
+consumer-facing finite projection lives separately in `_visible_types` and
+`_result_sources`. Wherever finite demand consumes a trailing call beyond its
+first visible result, `finite_result_expressions` synthesizes
+`ast.ExpExtra(loc, exp, index, _type)` nodes, each coerced and matched like any
+expression:
 
 ```lua
 local a, b = f()   -- f(): (integer, integer)
 -- node.exps becomes { ExpCall(f), ExpExtra{exp = <that call>, index = 2} }
 ```
 
-The coder compiles `ExpExtra` by reading the corresponding out-parameter of
-the call (see [the calling convention](codegen-overview.md)). One asymmetry
-remains: map initializers have no expansion code, so extra values there are
-silently truncated. The `?` inference marker carries through to the extras of
-a multi-return declaration, just as on the head: `local a, b? = f()` makes
-`b` an option (`optionize(exp._type)`), while a marker-less tail variable is
-forced like any inferred local.
+For a declared fixed result the coder reads the corresponding out-parameter.
+For a position reached through `flexrettype`, `_result_sources` marks the
+projection as possibly absent and its type is `optionize(T)` (`value` remains
+`value`). Open consumers do not synthesize an unbounded `ExpExtra` list: the
+call instead receives `_open_results = {source_type, target_type, start}`.
+Map/record fields and named arguments are scalar finite consumers. The `?`
+inference marker still applies per finite declaration slot.
+
+### Shared finite/open expression-list demand
+
+`result_demand(fixed, tail, opts)` and
+`adjust_explist(exps, demand, st, errors)` own declarations, assignments,
+returns, positional calls, arrays, and the generic-for tuple. `fixed` is dense
+(`UNKNOWN_SLOT` means inferred), while `tail` is false, a typed open element,
+or `INFER_OPEN`. The result retains every written expression in lexical order,
+records delivered `fixed` and `tail_scalars`, marks effect-only `discards`, and
+identifies at most one runtime-sized final `open_source` with source/target
+types and start index.
+
+The demand options also carry the deliberately narrow `dots_nilfill` policy.
+Generic-for tuple setup sets it so missing state/control positions borrowed
+from a trailing input `...` adjust upward to nil. Ordinary fixed call
+arguments leave it false: a borrowed variadic element still uses the normal
+target-driven raising read unless that destination itself accepts nil.
+
+Only the last expression may expand. A finite sink truncates producer surplus;
+written surplus expressions remain checked and marked `_discard_results`, and
+a discarded call receives `_voidok`. A fixed-only deficit still reports the
+ordinary arity error. A declared flexible producer projects `T?` into finite
+slots, while an open sink preserves the actual `T` run. The three open sinks
+are an input-vararg call tail, a flexible return tail, and the final positional
+array field. See
+[Flexible returns](flexible-returns.md#one-finiteopen-result-demand).
 
 Named-call fields are the exception among call arguments: each field owns
 exactly one formal slot, so even the last field consumes only the first result
@@ -290,20 +329,19 @@ of its expression and never receives `ExpExtra` expansion.
 
 ### Call argument adjustment
 
-`checkargs` owns the upward adjustment of Titan function calls. After the
-ordinary argument expressions and any trailing multi-return expansion have
-been checked, a fixed-parameter deficit is filled by appending synthesized
-`Ast.ExpNil` nodes. Each synthesized nil is passed through `trycoerce` and
-`checkmatch` against the corresponding parameter type, exactly like a
-written `nil` argument; this is why omitting an `integer` parameter remains
-a compile-time type error, while omitting an `integer?`, `value` or
-`boolean` parameter is accepted under the existing coercion rules. If the
-call has too many arguments, `checkargs` still reports the arity error and
-does not drop anything.
+`checkargs` applies the shared demand to a callable's fixed parameters and
+optional input tail. A Titan fixed-parameter deficit is filled with synthesized
+`Ast.ExpNil` nodes, then coerced and matched exactly like written nils. Surplus
+Titan expressions are retained for effects but are not passed to a fixed
+callee; an input-variadic callee receives them in its tail. A trailing
+flexible-result producer can therefore supply a finite fixed prefix or feed an
+open input tail.
 
-The positional missing-argument rule is deliberately limited to Titan function
-calls. Parenthesized foreign C calls and C pseudo-constructors pass
-`allow_missing=false` to `checkargs`, preserving C-style arity. A supported
+The positional nil-padding/downward-adjustment rule is deliberately limited to
+Titan function calls. Parenthesized foreign C calls and C pseudo-constructors
+pass `allow_missing=false` to `checkargs`, preserving C-style explicit arity.
+A trailing producer may be truncated to the exact remaining C formal count,
+but an open runtime-sized run cannot cross the C-vararg boundary. A supported
 named direct-C call has its own per-name omission path described below. A
 trailing `...` into a
 non-variadic Titan call is still expanded with `ExpDotsIndex` nodes; for
@@ -320,12 +358,16 @@ the `Ast.ExpCall` checker has resolved the callee. `named_function_metadata`
 uses that declaration provenance—not merely a `Type.Function`—to accept direct
 top-level/module functions, record statics, methods, and fixed direct C members.
 Function values, lambdas, bound-method values, C function pointers, C pseudo
-constructors, and every variadic declaration are rejected. A direct C member
+constructors, input-variadic Titan declarations, and C variadic declarations
+are rejected. A flexible result tail does not prevent a declaration from using
+named arguments. A direct C member
 whose prototype did not preserve one complete unambiguous name list gets a
 separate unavailable-metadata diagnostic.
 
 `check_named_args` visits written fields in lexical order, maps each name to a
-formal index, checks/coerces the expression in that formal's context, and
+formal index, checks/coerces the expression under a finite one-result demand in
+that formal's context (so a demand that reaches a flexible tail projects
+`T?`), and
 reports unknown or repeated names. For every unsupplied formal it synthesizes
 an `ExpNil`, requires `nil_can_adjust_to`, applies `trycoerce`, and marks the
 result `_named_omitted`. It returns a dense formal-order list plus the lexical
@@ -348,24 +390,29 @@ otherwise; this describes the implementation).
 
 `checkforin` turns `for decllist in explist do block end` into an
 elaborated `Ast.StatForIn` that codegen can lower without type decisions.
-It first checks the written expressions, expands a trailing multi-return
-call if present, adjusts a trailing `...` through the same fixed-slot
-`ExpDotsIndex` machinery used by locals/returns/calls, errors on more than
-four tuple values, and pads missing slots with typed `Ast.ExpNil` nodes.
+It checks the written expressions under a finite four-slot demand, adjusts a
+trailing call or `...` through the shared machinery, discards values beyond
+four, and pads missing slots with typed `Ast.ExpNil` nodes.
 The four slots are iterator, state, initial control, and close.
 
 For `iter, ...`, the vararg spread is adjusted only through the tuple slots
 the iterator needs (state and initial control), then the remaining tuple
-slots are padded with static nil. Writing `iter, state, init, ...` reaches
+slots are padded with static nil. This tuple demand sets `dots_nilfill = true`,
+so absent state/control values borrowed from `...` become nil instead of using
+the raising read retained by ordinary fixed call arguments. Writing
+`iter, state, init, ...` reaches
 the fourth slot and can supply the close function from the spread.
 
-The iterator slot must resolve to a callable shape: a non-variadic
-`Type.Function`, a `value` coerced to a synthesized function type, or a C
+The iterator slot may itself be an optionized projection from a flexible
+tuple producer, so it is forced before callable resolution. It must then
+resolve to a callable shape: a non-variadic `Type.Function`, a `value` coerced
+to a synthesized function type, or a C
 function pointer/foreign function viewed through its C signature. The
 synthesized type for a `value` iterator uses the non-`nil` state/init slots
 as zero, one, or two parameter types, and uses the visible declaration list
-as return types, filling unannotated positions with `value` and optionizing
-the first return. The iterator returns at least one value. Its first return
+as return types, filling unannotated positions with `value`. A statically
+typed iterator may satisfy later visible declarations from optionized flexible
+projections. The iterator returns at least one visible value. Its first return
 is the control result and must be nil-capable: an option type, `value`, a
 nullable C pointer, or a raw C `TValue`; `nil` alone and non-nil-capable
 concrete types are rejected. State and initial control are coerced and
@@ -406,11 +453,10 @@ have no type to infer.
 
 ### `ExpAdjust` — truncation to one value
 
-The parser wraps a parenthesized *call* in `Ast.ExpAdjust`. The checker's
-handler propagates `exp._type` but deliberately not `_types`; since
-`ExpExtra` expansion triggers on `_types`, `(f())` is truncated to exactly
-one value in every multi-value position — Lua's parenthesis adjustment,
-implemented as the *absence* of a decoration.
+The parser wraps a parenthesized *call* in `Ast.ExpAdjust`. The checker passes a
+one-result demand explicitly to the inner call and exposes only that scalar
+type. This keeps `(f())` finite even inside an open sink; a flex-only producer
+therefore projects its first `T?` rather than forwarding its run.
 
 ## Option-type machinery
 
@@ -529,20 +575,19 @@ inference; neither is reverse-engineered from the lambda's body.
 * **Parameters.** An annotated parameter uses its annotation. An
   unannotated one takes `context.params[i]` in checking mode, and in
   synthesis mode is the clean error `cannot infer type of parameter 'x'`.
-* **Return.** An explicit `node.rettypes` list (including `{}` for an
-  explicit `: ()`) is used as written. The parser distinguishes *no return
-  annotation* from `: ()` with a sentinel, so the handler can tell them
-  apart. With no annotation: in checking mode the return comes from
-  `context.rettypes`; in synthesis mode it defaults to `{}` (zero-return
-  `()`), exactly the default an unannotated top-level function gets.
+* **Return shape.** An explicit `node.rettypes`/`node.flexrettype` pair
+  (including empty/false for explicit `: ()`) is used as written. The parser
+  distinguishes *no return annotation* from `: ()` with a sentinel. With no
+  annotation, checking mode copies both `context.rettypes` and
+  `context.flexrettype`; synthesis mode defaults to empty/false, exactly the
+  zero-return default of an unannotated top-level function.
 
-So `node._type.rettypes` is always known *before* the body is checked. The
+So the complete result shape is known *before* the body is checked. The
 body's `return`s are never inspected to synthesize a return type — they are
-checked/coerced against the now-fixed return types in `StatReturn`, exactly
-as a top-level function body is. A synthesis-mode lambda whose body does
-`return <expr>` is therefore the documented zero-return footgun: a clean
-arity error (`returned N value(s) but function expected 0`), consistent
-with an unannotated top-level function.
+checked/coerced against the finite/open return demand in `StatReturn`, exactly
+as a top-level function body is. In a synthesis-mode zero-return lambda,
+`return <expr>` evaluates the expression under discard demand; it does not
+infer or expose a result.
 
 Because the return types are fixed before the body is checked, the
 all-paths-return rule runs unconditionally inside `checkfuncbody` (no
@@ -576,6 +621,9 @@ with `_type = node._type`, the surrounding context applies its usual
   (`Ast.ExpVar`) yields a function value; calling a function *value* — a callee
   that is not a `VarName`/`VarDot` resolving to a top-level function, module
   member or static (`Ast.ExpCall`) — typechecks against the function type;
+  a callee whose static type is `value` instead receives a synthesized
+  positional function type from its arguments and surrounding result demand,
+  then rejoins the same call path;
   writing a function *type* in an annotation (`g: (integer) -> integer`) is
   handled by `typefromnode`'s `Ast.TypeFunction` handler and produces a
   `Type.Function`; and assigning a value into a function-typed variable is
@@ -622,12 +670,12 @@ go completely unchecked — a type error placed there is not reported (verified
 experimentally). The checker performs no dead-code analysis to flag or prune
 them.
 
-`checkfunc` consumes the result: if the body does not always return and the
-function has a declared return type (`rettypes` is non-empty and not a single
-`Type.Nil`), it reports `function can return nil but return type is not nil`.
-Functions declared without a return annotation default to **zero returns**
-(`() -> ()`, returning nothing as in Lua), so a procedure needs no `return`
-and is never flagged.
+`checkfuncbody` consumes the result: if the body does not always return and
+the function's **first fixed** result exists and is not `Type.Nil`, it reports
+`function can return nil but return type is not nil`. Zero-return functions,
+nil-first functions, and flex-only functions may fall through; the last case
+produces an empty run. Functions declared without a return annotation default
+to **zero results** (`() -> ()`).
 
 ## Imports and the loader protocol
 
@@ -676,8 +724,10 @@ Two real loaders exist in `driver.lua`:
   fields were skipped. `Type.Module.type_members` is serialized as a separate,
   deterministically ordered map, so aliases rehydrate without becoming runtime
   members. Exported `ModuleMember`, `Method`, and `StaticMethod` descriptors
-  likewise serialize their formal `paramnames`; names remain absent from
-  structural `Type.Function` values.
+  likewise serialize callable tail shape and formal `paramnames`; names remain
+  absent from structural `Type.Function` values. The constructor schema
+  includes `flexrettype`; ABI 0.14 gates that serialized arity so 0.13 modules
+  are rejected before rehydration.
 * `driver.tableloader` is the in-memory variant for tests; it deliberately
   serializes and re-loads every module type, so the round-trip is exercised
   by every import test in the suite.

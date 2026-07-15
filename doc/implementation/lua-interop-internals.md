@@ -70,9 +70,6 @@ argument checks (shown in the next section):
 static int interop_fmod_titanentry_lua(lua_State *L) {
     StkId func = L->ci->func.p;
     ptrdiff_t _nargs = L->top.p - func - 1;
-    if(_nargs > 2) {
-        luaL_error(L, "calling Titan function %s with %d arguments, but expected at most %d", "fmod", (int)_nargs, 2);
-    }
     if (_nargs < 2) {
         ptrdiff_t _missing = 2 - _nargs;
         lua_checkstack(L, (int)_missing);
@@ -118,14 +115,15 @@ static int interop_fmod_titanentry_lua(lua_State *L) {
 
 Walking through it:
 
-* **Argument count adjustment.** The wrapper rejects too many arguments
-  with the error `calling Titan function %s with %d arguments, but
-  expected at most %d` and the unqualified Titan name. Too few arguments
-  are padded by writing nils to fresh Lua stack slots before any
+* **Argument count adjustment.** Too few arguments are padded by writing nils to fresh Lua stack slots before any
   parameter is read; the later `checkandget` calls then accept or reject
   those nils according to the declared parameter types. `lua_checkstack`
   can relocate the stack, so the wrapper reloads
-  `func = L->ci->func.p` before filling the new slots.
+  `func = L->ci->func.p` before filling the new slots. A fixed-parameter
+  wrapper deliberately ignores surplus Lua arguments. An input-variadic
+  wrapper converts the surplus into an element-typed `TitanVargX` descriptor,
+  capped by `TITAN_VARARG_MAX`, and passes that descriptor plus `_start = 0`
+  to the native entry.
 * **Error handler.** The wrapper saves `L->errfunc` and checks whether it
   already points at Titan's runtime `errorhandler`
   ([below](#the-error-handler-and-titanbacktrace)). If not, it pushes the
@@ -156,7 +154,7 @@ Walking through it:
   `s2v(func + i)`. The location baked into boundary error messages is
   the **function declaration's** — errors point at the declaration, not
   the call site.
-* **Results.** The wrapper reserves one stack slot per declared return
+* **Results.** For a fixed result shape, the wrapper reserves one stack slot per declared return
   value, saves the first return slot as a stack offset, calls the native
   function (extra returns come back through out-parameters), restores the
   slot pointer from the offset in case the native callee relocated the
@@ -164,6 +162,13 @@ Walking through it:
   `setwrapped` — which for a record is just `setslot`, since the record
   *is* its Udata. `return NRET;` makes multiple Titan returns multiple
   Lua returns (`local x, y = titan_test.f(2)` works).
+  For a flexible result shape it reads the caller's requested count through
+  `get_nresults(L->ci->callstatus)`, subtracts the fixed prefix to derive
+  `_flexwant`, allocates bounded typed backing, and calls the native entry with
+  `_flexout`. It then reserves/restores the destination stack by offset, wraps
+  the fixed prefix plus `_flexdesc.n_args` actual tail elements, and returns
+  that actual combined count. `LUA_MULTRET` therefore requests the open tail;
+  a finite Lua caller pays only for the requested tail capacity.
 
 ## `checkandget`: the per-type entry check
 
@@ -514,8 +519,8 @@ Udata* (*some_dep_init)(lua_State *L) =
 
 `loadlib(L, file)` first consults the handle cache under
 `TITAN_LIBS_KEY`; on a miss it walks the Titan path — environment
-variable `TITAN_PATH_0_13`, then `TITAN_PATH`, then the default
-`".;<root>/lib/titan/0.13"`, with `<root>` recovered from the first
+variable `TITAN_PATH_0_14`, then `TITAN_PATH`, then the default
+`".;<root>/lib/titan/0.14"`, with `<root>` recovered from the first
 literal `package.cpath` entry ending in `/lib/lua/5.5/?.so` and `;;` in
 an env value splicing that default in — trying
 `dlopen(dir "/" file, RTLD_LAZY | RTLD_GLOBAL)` per `;`-separated directory.
@@ -545,7 +550,7 @@ it neither initializes the module nor publishes its symbols globally.
 
 Standard-library dependencies use the same loader and cache under their
 ordinary qualified filenames, such as `titan/timer.so`. The Titan-owned Lua
-default puts `<root>/lib/titan/0.13/?.so` before its ordinary `lib/lua`
+default puts `<root>/lib/titan/0.14/?.so` before its ordinary `lib/lua`
 templates, so Titan's dynamic import and Lua `require "titan.<module>"` open
 the same DSO. Post-install writes only that qualified file; there are no
 copied, symbolic-link, or hard-link aliases. `titan/uv.so` is consequently the
@@ -666,7 +671,7 @@ bundled-mode extension DSOs leave their `uv_*` calls unresolved:
   state and runs `luaL_openlibs`. `titan_init_paths` then parses the inherited
   `package.cpath` for the first `/lib/lua/5.5/?.so` entry, initializes the
   Titan module-path default from that root, and ensures
-  `<root>/lib/titan/0.13/?.so` is present in `package.cpath`. The
+  `<root>/lib/titan/0.14/?.so` is present in `package.cpath`. The
   prefix-configured Titan-owned Lua already places that template before its
   `lib/lua` entries. It then
   registers the module's `luaopen_` function in
@@ -725,7 +730,17 @@ Lua tables (aliased, never copied — the spec asserts table identity
 across the boundary); records as their stable `Udata` (the record value
 itself). Between
 those edges, Titan code runs with no checks at all — Titan→Titan calls
-use the native convention and trust the checker.
+through an exactly tagged Titan closure use the native convention and trust
+the checker. A non-exact function value, Lua closure/C function, or `__call`
+object deliberately crosses the Lua stack through Lua's internal call
+machinery; its arguments and finite or flexible results are converted against
+the contextual Titan function type. Most calls use `luaD_callnoyield`
+directly. The finite inherited-open case for a direct C closure/light C
+function uses `titan_call_cfunction_counted`, a source-matched wrapper around
+Lua 5.5.0's C-call setup that preserves the raw C return count without hidden
+state while `luaD_poscall` still performs the requested finite adjustment.
+See [flexible-return internals](flexible-returns.md) for the exact/generic
+result-demand split.
 
 The deliberate deferral: **container contents are not checked at the
 boundary.** A `{T}` or `{K:V}` argument only has to be a table; Lua can
