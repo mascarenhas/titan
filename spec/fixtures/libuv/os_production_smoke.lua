@@ -56,8 +56,8 @@ if process_child then
 
         local exited = system.spawn(process_child, { "exit", "29" })
         exited:close_stdin()
-        assert(exited:read_stdout(4096) == nil)
-        assert(exited:read_stderr(4096) == nil)
+        assert(exited:read_stdout() == nil)
+        assert(exited:read_stderr() == nil)
         local exit_status = exited:wait()
         assert(exit_status.code == 29)
         assert(exit_status.signal == nil)

@@ -9,10 +9,139 @@ record ExitStatus
   signal_number: integer
 end
 
+local record ReadState
+  local excess: string
+  local reading: boolean
+end
+
 -- The exact private uv wrapper makes Process unforgeable outside this module
 -- without converting its native handle through value on every method call.
 record Process
   local handle: uv.uv_process_t
+  local stdout_state: ReadState
+  local stderr_state: ReadState
+end
+
+local function join_chunks(chunks: {string}, first: integer,
+                           last: integer): string
+  if first > last then return "" end
+  if first == last then return chunks[first] as string end
+  local middle = first + (last - first) // 2
+  return join_chunks(chunks, first, middle) ..
+         join_chunks(chunks, middle + 1, last)
+end
+
+local function begin_read(state: ReadState, subject: string)
+  if state.reading then
+    raise "Process " .. subject .. " already has a reader"
+  end
+  state.reading = true
+end
+
+-- This helper runs only while the corresponding stdout/stderr reader lock is
+-- held. Each output pipe has independent retained excess and native state.
+local function read_unlocked(process: Process, state: ReadState,
+                             stdout: boolean): string?
+  if #state.excess > 0 then
+    local result = state.excess
+    state.excess = ""
+    return result
+  end
+  if stdout then
+    return uv._os_process_read_stdout(process.handle)
+  end
+  return uv._os_process_read_stderr(process.handle)
+end
+
+local function restore_chunks(state: ReadState, chunks: {string},
+                              count: integer)
+  if count > 0 then
+    state.excess = join_chunks(chunks, 1, count) .. state.excess
+  end
+end
+
+local function read_output(process: Process, state: ReadState,
+                           stdout: boolean, subject: string): string?
+  begin_read(state, subject)
+  local result: string? = nil
+  do
+    result = read_unlocked(process, state, stdout)
+  finally
+    state.reading = false
+  end
+  return result
+end
+
+local function read_output_until(process: Process, state: ReadState,
+                                 stdout: boolean, subject: string,
+                                 delimiter: string,
+                                 chop: boolean?): string?
+  if #delimiter == 0 then raise "read delimiter must not be empty" end
+
+  begin_read(state, subject)
+  local chunks: {string} = {}
+  local count = 0
+  local total = 0
+  local tail = ""
+  local result: string? = nil
+  local finished = false
+  do
+    while not finished do
+      local maybe_chunk: string? = nil
+      local terminal_error_tail = false
+      do
+        maybe_chunk = read_unlocked(process, state, stdout)
+      catch
+        if total > 0 and
+            uv._os_process_read_error_is(process.handle, stdout, error) then
+          terminal_error_tail = true
+        else
+          raise
+        end
+      end
+
+      if terminal_error_tail then
+        result = join_chunks(chunks, 1, count)
+        finished = true
+      elseif not maybe_chunk then
+        if total > 0 then result = join_chunks(chunks, 1, count) end
+        finished = true
+      else
+        local chunk = maybe_chunk as string
+        if #chunk == 0 then
+          raise "process read returned an empty non-EOF chunk"
+        end
+
+        count = count + 1
+        chunks[count] = chunk
+        local boundary = tail .. chunk
+        local match = uv._bytes_find(boundary, delimiter)
+        total = total + #chunk
+        if match >= 0 then
+          local match_end = total - #boundary + match + #delimiter
+          local result_end = match_end
+          if chop then result_end = result_end - #delimiter end
+          local all = join_chunks(chunks, 1, count)
+          local selected = uv._bytes_slice(all, 0, result_end)
+          local remaining = uv._bytes_slice(all, match_end,
+                                            #all - match_end)
+          result = selected
+          state.excess = remaining .. state.excess
+          finished = true
+        else
+          local keep = #delimiter - 1
+          if keep > #boundary then keep = #boundary end
+          tail = uv._bytes_slice(boundary, #boundary - keep, keep)
+        end
+      end
+    end
+  catch
+    restore_chunks(state, chunks, count)
+    raise
+  finally
+    state.reading = false
+  end
+  return result
 end
 
 function getenv(name: string): string?
@@ -60,7 +189,8 @@ function ppid(): integer
 end
 
 function spawn(file: string, args: {string}): Process
-  return Process.new(uv._os_process_spawn(file, args))
+  return Process.new(uv._os_process_spawn(file, args),
+                     ReadState.new("", false), ReadState.new("", false))
 end
 
 function Process:wait(): ExitStatus
@@ -81,12 +211,24 @@ function Process:close_stdin()
   uv._os_process_close_stdin(self.handle)
 end
 
-function Process:read_stdout(max_bytes: integer): string?
-  return uv._os_process_read_stdout(self.handle, max_bytes)
+function Process:read_stdout(): string?
+  return read_output(self, self.stdout_state, true, "stdout")
 end
 
-function Process:read_stderr(max_bytes: integer): string?
-  return uv._os_process_read_stderr(self.handle, max_bytes)
+function Process:read_stdout_until(delimiter: string,
+                                   chop: boolean?): string?
+  return read_output_until(self, self.stdout_state, true, "stdout",
+                           delimiter, chop)
+end
+
+function Process:read_stderr(): string?
+  return read_output(self, self.stderr_state, false, "stderr")
+end
+
+function Process:read_stderr_until(delimiter: string,
+                                   chop: boolean?): string?
+  return read_output_until(self, self.stderr_state, false, "stderr",
+                           delimiter, chop)
 end
 
 function communicate(file: string, args: {string},

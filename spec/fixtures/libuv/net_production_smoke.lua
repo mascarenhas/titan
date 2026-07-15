@@ -31,17 +31,17 @@ local main = uv.run(function()
 
     local peer_task = uv.run(function()
         local peer = server:accept()
-        local request = peer:read_exactly(#payload)
+        local request = peer:read_until("\n", true)
         assert(request == payload)
-        peer:write(request)
+        peer:write(request .. "\n")
         peer:shutdown()
         peer:close()
         return request
     end)
 
     local client = net.connect("127.0.0.1", port)
-    client:write(payload)
-    local response = client:read_exactly(#payload)
+    client:write(payload .. "\n")
+    local response = client:read_until("\n", true)
     assert(response == payload)
     client:shutdown()
     client:close()
@@ -51,16 +51,15 @@ local main = uv.run(function()
     if mode == "sanitizer" then
         local seed = "owned-write\0buffer:"
         local repetitions = 512 * 1024
-        local payload_size = #seed * repetitions
         local followup = "write-after-cancel\0ok"
         local slow_peer = uv.run(function()
             local peer = server:accept()
             timer.sleep(100)
-            local received = peer:read_exactly(payload_size)
+            local received = peer:read_until("\n", true)
             assert(received == string.rep(seed, repetitions))
-            peer:write("ready")
-            assert(peer:read_exactly(#followup) == followup)
-            peer:write(followup)
+            peer:write("ready\n")
+            assert(peer:read_until("\n", true) == followup)
+            peer:write(followup .. "\n")
             peer:shutdown()
             peer:close()
             return true
@@ -68,7 +67,7 @@ local main = uv.run(function()
 
         local stress_client = net.connect("127.0.0.1", port)
         collectgarbage("generational")
-        local owned_payload = string.rep(seed, repetitions)
+        local owned_payload = string.rep(seed, repetitions) .. "\n"
         local writer = uv.run(function()
             stress_client:write(owned_payload)
             return "cancelled write result must not win"
@@ -86,9 +85,9 @@ local main = uv.run(function()
         local joined = pcall(function() return writer:join() end)
         assert(not joined and writer:status() == "cancelled")
 
-        assert(stress_client:read_exactly(5) == "ready")
-        stress_client:write(followup)
-        assert(stress_client:read_exactly(#followup) == followup)
+        assert(stress_client:read_until("\n", true) == "ready")
+        stress_client:write(followup .. "\n")
+        assert(stress_client:read_until("\n", true) == followup)
         stress_client:shutdown()
         stress_client:close()
         assert(slow_peer:join())

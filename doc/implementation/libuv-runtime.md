@@ -60,9 +60,12 @@ acquisition, including Linux and macOS packages, is documented in the
 ## GC-owned native storage
 
 Every loop, timer, one-shot signal, filesystem/network/process request, TCP or
-pipe handle, process handle, private process-grace timer, I/O buffer,
-`uv_buf_t`, opaque address cell, argv cell, and scandir entry used by the
-runtime is allocated in Lua full-userdata payload bytes. The Titan source uses
+pipe handle, process handle, private process-grace timer, Titan-owned I/O
+buffer or `uv_buf_t`, opaque address cell, argv cell, and scandir entry used by
+the runtime is allocated in Lua full-userdata payload bytes. The `uv_buf_t`
+passed to a stream allocation callback is the exception: libuv owns that
+descriptor, while Titan owns and roots only the byte storage to which it
+points. The Titan source uses
 the imported foreign type's `<module>.<type>.sizeof` and `.alignof`, captures
 the storage userdata once, and stores the resulting pointer in a local field
 of an opaque record:
@@ -91,8 +94,9 @@ and neither constructor is available outside its declaring module.
 
 The process boundary uses the same pattern twice. The exported
 `uv.uv_process_t` has an exact `*uv_process_t` local field and is wrapped by
-`os.Process`, whose sole field is itself local. Private `uv_pipe_t`,
-`uv_write_t`, and grace-timer records likewise retain exact native pointers.
+`os.Process`, whose native-handle field is itself local and which also owns
+private stdout/stderr reader-state records. Private `uv_pipe_t`, `uv_write_t`,
+and grace-timer records likewise retain exact native pointers.
 Homogeneous ownership links use their exact record type, with `T?` only where
 the link may be absent. `value` is reserved for opaque Lua roots, arbitrary
 task/error payloads, and genuinely heterogeneous owner slots. Native handles
@@ -112,10 +116,12 @@ metadata, and family-specific native I/O storage. The C shim uses the
 corresponding zero-based indices and recovers the module Udata from the
 dispatcher closure's first upvalue. Metadata already roots each Task, resource,
 or operation graph, so owners carry no duplicate root slot. Timer, signal,
-process, process-grace, DNS, connect, and shutdown owners type the final slot as
-`nil`. Filesystem and write-request owners retain their submitted `Buffer?`
-there, while Pipe and TCP handles keep a `value` because the native allocation
-callback consumes the raw full userdata directly.
+process, process-grace, DNS, connect, shutdown, Pipe, and TCP owners type the
+final slot as `nil`. Filesystem and write-request owners retain their submitted
+`Buffer?` there. A Pipe or TCP control instead roots its current stream-read
+allocation as a `Bytes?`; on a positive callback that same record moves into a
+GC-traced `{Bytes}` queue, retaining the raw pointer, full-userdata root, and
+completed length until the queue is drained.
 
 ## Runtime and continuation graph
 
@@ -259,6 +265,12 @@ descriptors or child ends. A failed initialization or spawn closes every
 initialized handle through the ordinary libuv callback path. There is no POSIX
 `pipe`, `dup`, or `close` fallback.
 
+After `uv_spawn` succeeds, Titan starts continuous reads on both output pipes
+before publishing the Process. If either `uv_read_start` fails, an
+already-started sibling is stopped, all three pipes are closed, the child is
+terminated and reaped through the ordinary grace/kill path, and its process
+handle is closed before the spawn Task receives the original error.
+
 `ProcessControl`, `PipeControl`, `ProcessOperation`, and
 `ProcessRequestControl` are separate from the TCP state machine:
 anonymous-pipe lifetime, process reaping, and retained exit status are not
@@ -278,9 +290,16 @@ new output immediately. Anonymous pipes do not support socket-style
 `uv_shutdown` on the supported Unix hosts, so the FIFO finishes by calling
 `uv_close` on the write pipe and wakes the closer from the handle close
 callback. Stdout and stderr independently allow one reader; EOF and read
-failure are persistent terminal states, and a terminal read closes that pipe.
-Process exit does not synthesize pipe EOF, so output continues to drain through
-the real stream callback sequence.
+failure are persistent terminal states. Each output pipe keeps reading into a
+GC-owned `{Bytes}` queue even with no waiter, with no high-water mark. A plain
+read drains its facade excess or the entire native queue, while a delimiter
+read retains bytes beyond its first delimiter. Both methods share that pipe's
+reader lock; stdout and stderr have independent locks. Cancellation clears only
+the matching waiter and leaves physical reading active. EOF stops and may close
+the output pipe while remaining sticky `nil`; another read failure initiates
+close, but queued bytes and the sticky error remain logically readable in
+order. Process exit does not synthesize pipe EOF, so output continues to drain
+through the real stream callback sequence.
 
 `os.communicate` creates a private HelperGroup with four child Tasks: stdout
 reader, stderr reader, stdin writer/closer, and process waiter. Every helper is
@@ -306,12 +325,14 @@ calls:
 dispatch(L, M, NULL, owner, event_kind, result, size, pointer);
 ```
 
-The fixed final payload is `NULL` for timer, signal, close, filesystem, stream,
-pipe-write, and process-exit callbacks. A process exit uses `result` for the
-exit status and `size` for the termination signal. DNS completion uses the
-payload for libuv's borrowed `addrinfo` list, which the trusted dispatcher
-copies into GC-owned opaque address storage and releases before returning to
-libuv.
+The fixed final payload is `NULL` for timer, signal, close, filesystem,
+stream-read, pipe-write, and process-exit callbacks. A stream-allocation
+callback passes libuv's borrowed output `uv_buf_t *`; the Titan dispatcher
+initializes its base and length from freshly allocated, rooted GC storage
+before returning. A process exit uses `result` for the exit status and `size`
+for the termination signal. DNS completion uses the payload for libuv's
+borrowed `addrinfo` list, which the trusted dispatcher copies into GC-owned
+opaque address storage and releases before returning to libuv.
 
 There is no `lua_pcall`, Lua entry wrapper, or VM generic-call path around this
 call. Dispatchers are trusted library code. Each function-level trailing Titan
@@ -352,9 +373,11 @@ Networking cancellation follows the same owner rule. Queued writes are
 unlinked, but an active `uv_write_t` remains rooted through its callback and
 its cancellation is only logical. The first shutdown request is
 cleanup-shielded through the `uv_shutdown_t` callback; repeated shutdown calls
-are idempotent. Explicit TCP close stops reads and forbids new output, but
-leaves submitted and queued FIFO work in order and calls `uv_close` only after
-that output drains. Runtime-wide forced shutdown may instead retire queued
+are idempotent. Cancelling a stream read clears only its waiter and epoch;
+continuous physical reading and buffering remain active. Explicit TCP close
+stops reads and forbids new output, but leaves submitted and queued FIFO work
+in order and calls `uv_close` only after that output drains. Runtime-wide
+forced shutdown may instead discard completed read queues and retire queued
 operations while it closes every remaining TCP resource. The complete network
 state machine is documented in [Libuv DNS and TCP
 implementation](libuv-networking.md).
@@ -363,9 +386,10 @@ Process cancellation is also logical where libuv still owes a callback. A
 queued stdin write can be unlinked; a submitted write remains rooted until its
 callback. Cancelling a wait clears only that waiter, so another Task may wait
 and later waits use the cached exit status. Cancelling `close_stdin` cannot
-revoke the already-published FIFO close. Cancelling `communicate` is handled by
-its HelperGroup cleanup path and does not expose a partially reaped child or an
-unobserved helper failure.
+revoke the already-published FIFO close. Cancelling an output read likewise
+clears only that pipe's waiter and does not stop its continuous read.
+Cancelling `communicate` is handled by its HelperGroup cleanup path and does
+not expose a partially reaped child or an unobserved helper failure.
 
 Normal and fatal shutdown close remaining timer and signal owners, enqueue
 internal closes for every persistent File, close remaining TCP resources, and
@@ -398,7 +422,8 @@ synchronous `main`.
 The focused suites cover source and binary interfaces, direct callback
 continuations, Task and timer behavior, filesystem and network
 binary data, portable OS helpers, one-shot signals, child argv/environment/cwd,
-retained exit status, binary stdio FIFO, replaceable wait/read cancellation,
+retained exit status, binary stdio FIFO, continuous background stream reads,
+sticky EOF and stream terminal tails, replaceable wait/read cancellation,
 deadlock-free `communicate`, TERM-resistant shutdown, FIFO/close state
 machines, path operations, failed-spawn and exit-before-close ordering,
 observed helper failure, trace propagation, GC, sequential sessions,

@@ -44,30 +44,26 @@ local function doubled(seed: string, turns: integer): string
   return result
 end
 
-local function read_stdout_all(process: os.Process,
-                               max_bytes: integer): string
+local function read_stdout_all(process: os.Process): string
   local result = ""
-  local chunk: string? = process:read_stdout(max_bytes)
+  local chunk: string? = process:read_stdout()
   while chunk do
     local bytes = chunk as string
-    check(#bytes > 0 and #bytes <= max_bytes,
-          "stdout returned an invalid chunk size")
+    check(#bytes > 0, "stdout returned an empty non-EOF chunk")
     result = result .. bytes
-    chunk = process:read_stdout(max_bytes)
+    chunk = process:read_stdout()
   end
   return result
 end
 
-local function read_stderr_all(process: os.Process,
-                               max_bytes: integer): string
+local function read_stderr_all(process: os.Process): string
   local result = ""
-  local chunk: string? = process:read_stderr(max_bytes)
+  local chunk: string? = process:read_stderr()
   while chunk do
     local bytes = chunk as string
-    check(#bytes > 0 and #bytes <= max_bytes,
-          "stderr returned an invalid chunk size")
+    check(#bytes > 0, "stderr returned an empty non-EOF chunk")
     result = result .. bytes
-    chunk = process:read_stderr(max_bytes)
+    chunk = process:read_stderr()
   end
   return result
 end
@@ -110,8 +106,8 @@ function schedule_spawn_and_metadata(child: string,
         "argv-env-cwd", envname, "alpha", "", "beta",
       })
       process:close_stdin()
-      local output = read_stdout_all(process, 7)
-      local diagnostics = read_stderr_all(process, 13)
+      local output = read_stdout_all(process)
+      local diagnostics = read_stderr_all(process)
       local status = process:wait()
       local expected =
         "cwd:" .. #cwd .. ":" .. cwd .. "\n" ..
@@ -139,7 +135,7 @@ function schedule_binary_fifo(child: string): uv.Task
   return uv.run(function (): value
     local process = os.spawn(child, { "echo" })
     local reader = uv.run(function (): value
-      return read_stdout_all(process, 4093)
+      return read_stdout_all(process)
     end)
 
     process:write_stdin("")
@@ -179,11 +175,61 @@ function schedule_binary_fifo(child: string): uv.Task
     local output = reader:join() as string
     check(output == first_bytes .. second_bytes .. third_bytes,
           "stdin writes were reordered or changed binary bytes")
-    check(not process:read_stdout(1), "stdout EOF was not sticky")
-    check(read_stderr_all(process, 97) == "",
+    check(not process:read_stdout(), "stdout EOF was not sticky")
+    check(read_stderr_all(process) == "",
           "echo child wrote unexpected stderr")
     check_normal(process:wait(), "echo child did not exit normally")
     return "binary-fifo-ok"
+  end)
+end
+
+function schedule_delimiter_reads(child: string): uv.Task
+  return uv.run(function (): value
+    local framed = os.spawn(child, { "echo" })
+    expect_failure(function (): value
+      framed:read_stdout_until("")
+      return nil
+    end, "stdout accepted an empty read delimiter")
+    expect_failure(function (): value
+      framed:read_stderr_until("")
+      return nil
+    end, "stderr accepted an empty read delimiter")
+
+    framed:write_stdin("\nleft\r")
+    timer.sleep(2)
+    framed:write_stdin("\nright")
+    framed:close_stdin()
+    local empty: string? = framed:read_stdout_until("\n", true)
+    check(empty and #(empty as string) == 0,
+          "a chopped leading stdout delimiter was confused with EOF")
+    check(framed:read_stdout_until("\r\n", false) == "left\r\n",
+          "stdout did not retain a split delimiter or false chop")
+    check(framed:read_stdout_until("\n", true) == "right",
+          "stdout changed an unterminated EOF tail")
+    check(not framed:read_stdout_until("\n") and
+          not framed:read_stdout(), "stdout EOF was not sticky")
+    check(not framed:read_stderr_until("\n") and
+          not framed:read_stderr(), "empty stderr EOF was not sticky")
+    check_normal(framed:wait(), "framed echo did not exit normally")
+
+    local independent = os.spawn(child, { "early-output-exit" })
+    independent:close_stdin()
+    local stdout_reader = uv.run(function (): value
+      return independent:read_stdout_until("\n")
+    end)
+    local stderr_reader = uv.run(function (): value
+      return independent:read_stderr_until("\n")
+    end)
+    check(stdout_reader:join() == "early\0stdout" and
+          stderr_reader:join() == "early\0stderr",
+          "stdout and stderr did not drain independently")
+    check(not independent:read_stdout_until("\n") and
+          not independent:read_stderr_until("\n"),
+          "independent output EOF was not sticky")
+    local status = independent:wait()
+    check(status.code == 23 and not status.signal,
+          "independent output child exit status changed")
+    return "delimiter-reads-ok"
   end)
 end
 
@@ -196,8 +242,8 @@ function schedule_exit_statuses(child: string): uv.Task
 
     local exited = os.spawn(child, { "exit", "37" })
     exited:close_stdin()
-    check(read_stdout_all(exited, 32) == "" and
-          read_stderr_all(exited, 32) == "",
+    check(read_stdout_all(exited) == "" and
+          read_stderr_all(exited) == "",
           "exit child produced output")
     local first = exited:wait()
     local second = exited:wait()
@@ -220,21 +266,21 @@ function schedule_exit_statuses(child: string): uv.Task
     local unknown = signalled:wait()
     check(not unknown.signal and unknown.signal_number > 0,
           "unknown terminating signal number was not preserved")
-    check(read_stdout_all(signalled, 32) == "" and
-          read_stderr_all(signalled, 32) == "",
+    check(read_stdout_all(signalled) == "" and
+          read_stderr_all(signalled) == "",
           "self-signalled child produced output")
 
     local killed = os.spawn(child, { "ready-wait" })
     killed:close_stdin()
-    check(killed:read_stdout(64) == "READY\n",
+    check(killed:read_stdout_until("\n") == "READY\n",
           "kill child did not publish its marker")
     killed:kill("kill")
     local killed_status = killed:wait()
     check(killed_status.signal == "kill" and
           killed_status.signal_number > 0,
           "public kill signal was not preserved in ExitStatus")
-    check(read_stdout_all(killed, 64) == "" and
-          read_stderr_all(killed, 64) == "",
+    check(read_stdout_all(killed) == "" and
+          read_stderr_all(killed) == "",
           "killed child left unread output")
 
     -- A failed spawn has completed its close path before control returns, so
@@ -250,19 +296,7 @@ function schedule_wait_and_read_cancellation(child: string): uv.Task
   return uv.run(function (): value
     local process = os.spawn(child, { "ready-wait" })
     process:close_stdin()
-    expect_failure(function (): value
-      process:read_stdout(0)
-      return nil
-    end, "stdout accepted a zero read size")
-    expect_failure(function (): value
-      process:read_stderr(-1)
-      return nil
-    end, "stderr accepted a negative read size")
-    expect_failure(function (): value
-      process:read_stdout(9223372036854775807)
-      return nil
-    end, "stdout accepted a non-portable libuv buffer size")
-    check(process:read_stdout(64) == "READY\n",
+    check(process:read_stdout_until("\n") == "READY\n",
           "ready child did not publish its marker")
     local waiter = uv.run(function (): value
       return process:wait()
@@ -291,27 +325,36 @@ function schedule_wait_and_read_cancellation(child: string): uv.Task
     check(retained.signal == status.signal and
           retained.signal_number == status.signal_number,
           "signal status was not retained after replacement wait")
-    check(read_stdout_all(process, 64) == "" and
-          read_stderr_all(process, 64) == "",
+    check(read_stdout_all(process) == "" and
+          read_stderr_all(process) == "",
           "terminated child left unread output")
 
-    local delayed = os.spawn(child, { "delayed-output" })
-    delayed:close_stdin()
+    -- duplex publishes a delimiter-free prefix before waiting for stdin EOF,
+    -- so cancellation happens only after read_stdout_until has accumulated it.
+    local delayed = os.spawn(child, { "duplex", "64" })
+    local expected_prefix = doubled("OUT\0pattern-1234", 2)
+    local expected_stderr = doubled("ERR\0pattern-5678", 2)
+    delayed:write_stdin("x")
+    timer.sleep(20)
     local reader = uv.run(function (): value
-      return delayed:read_stdout(64)
+      return delayed:read_stdout_until("\n", true)
     end)
     wait_until_started(reader)
     expect_failure(function (): value
-      delayed:read_stdout(1)
+      delayed:read_stdout()
       return nil
     end, "stdout admitted two concurrent readers")
     reader:cancel("cancel-process-read")
     expect_cancelled(reader, "cancel-process-read")
-    check(delayed:read_stdout(64) == "LATE\0OUTPUT",
-          "replacement stdout reader lost binary output")
-    check(not delayed:read_stdout(64), "delayed stdout EOF was not sticky")
-    check(not delayed:read_stderr(64), "delayed child wrote stderr")
-    check_normal(delayed:wait(), "delayed child did not exit normally")
+    delayed:close_stdin()
+    check(delayed:read_stdout_until("\n", true) == expected_prefix,
+          "replacement stdout reader lost its restored prefix")
+    check(delayed:read_stdout_until("\n", true) == "INPUT:1",
+          "replacement stdout reader lost post-cancellation output")
+    check(not delayed:read_stdout(), "replacement stdout EOF was not sticky")
+    check(read_stderr_all(delayed) == expected_stderr,
+          "stdout cancellation interfered with independent stderr buffering")
+    check_normal(delayed:wait(), "duplex child did not exit normally")
     return "wait-read-cancellation-ok"
   end)
 end
@@ -320,7 +363,7 @@ function schedule_queued_write_cancellation(child: string): uv.Task
   return uv.run(function (): value
     local process = os.spawn(child, { "delay-read-eof" })
     local output_reader = uv.run(function (): value
-      return read_stdout_all(process, 64)
+      return read_stdout_all(process)
     end)
     local payload = doubled("queued-write\0", 18)
     local first = uv.run(function (): value
@@ -342,7 +385,7 @@ function schedule_queued_write_cancellation(child: string): uv.Task
     process:close_stdin()
     check(output_reader:join() == "EOF:" .. #payload .. "\n",
           "cancelled queued write reached the child")
-    check(not process:read_stderr(64), "wait-eof child wrote stderr")
+    check(not process:read_stderr(), "wait-eof child wrote stderr")
     check_normal(process:wait(), "wait-eof child did not exit normally")
     return "queued-write-cancellation-ok"
   end)
@@ -472,7 +515,7 @@ function schedule_forced_runtime_shutdown(child: string,
     local process = os.spawn(child, { "ignore-term", pid_path })
     retained_process = process
     process:close_stdin()
-    check(process:read_stdout(64) == "READY\n",
+    check(process:read_stdout_until("\n") == "READY\n",
           "TERM-resistant child did not publish its marker")
     -- No Task remains after this continuation. Runtime shutdown must TERM,
     -- wait through its private grace timer, KILL, reap, and close the process.
@@ -565,6 +608,17 @@ assert(fifo:join() == "binary-fifo-ok")
 local cancellation = assert(cases.schedule_queued_write_cancellation(child))
 uv.loop()
 assert(cancellation:join() == "queued-write-cancellation-ok")
+]==])
+    end)
+
+    it("frames stdout and stderr with independent reader state", function()
+        run_lua([==[
+local uv = require "titan.uv"
+local cases = require "os_process_cases"
+
+local task = assert(cases.schedule_delimiter_reads(child))
+uv.loop()
+assert(task:join() == "delimiter-reads-ok")
 ]==])
     end)
 

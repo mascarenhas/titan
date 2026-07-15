@@ -47,22 +47,15 @@ local function begin_read(connection: Connection)
   connection.reading = true
 end
 
--- This helper runs only while the public reader lock is held. It serves
+-- This helper runs only while the public reader lock is held. It serves all
 -- retained excess first, then performs at most one middle-layer read.
-local function read_some_unlocked(connection: Connection,
-                                  max_bytes: integer): string?
+local function read_unlocked(connection: Connection): string?
   if #connection.excess > 0 then
-    if #connection.excess <= max_bytes then
-      local result = connection.excess
-      connection.excess = ""
-      return result
-    end
-    local result = uv._net_slice(connection.excess, 0, max_bytes)
-    connection.excess = uv._net_slice(connection.excess, max_bytes,
-                                      #connection.excess - max_bytes)
+    local result = connection.excess
+    connection.excess = ""
     return result
   end
-  return uv._net_read(connection.handle, max_bytes)
+  return uv._net_read(connection.handle)
 end
 
 local function restore_chunks(connection: Connection, chunks: {string},
@@ -86,49 +79,11 @@ function listen(host: string, port: integer,
   return Server.new(uv._net_listen(host, port, backlog))
 end
 
-function Connection:read_some(max_bytes: integer): string?
-  if max_bytes <= 0 then raise "read size must be positive" end
+function Connection:read(): string?
   begin_read(self)
   local result: string? = nil
   do
-    result = read_some_unlocked(self, max_bytes)
-  finally
-    self.reading = false
-  end
-  return result
-end
-
-function Connection:read_exactly(bytes: integer): string
-  if bytes < 0 then raise "exact read size must not be negative" end
-  if bytes == 0 then return "" end
-
-  begin_read(self)
-  local chunks: {string} = {}
-  local count = 0
-  local total = 0
-  local result = ""
-  do
-    while total < bytes do
-      local maybe_chunk: string? =
-          read_some_unlocked(self, bytes - total)
-      if not maybe_chunk then
-        local subject = "requested=" .. bytes .. ", partial=" .. total
-        raise uv._net_eof_error("net.read_exactly",
-            "premature EOF while reading " .. bytes ..
-            " bytes after " .. total .. " bytes", subject)
-      end
-      local chunk = maybe_chunk as string
-      if #chunk == 0 then
-        raise "network read returned an empty non-EOF chunk"
-      end
-      count = count + 1
-      chunks[count] = chunk
-      total = total + #chunk
-    end
-    result = join_chunks(chunks, 1, count)
-  catch
-    restore_chunks(self, chunks, count)
-    raise error
+    result = read_unlocked(self)
   finally
     self.reading = false
   end
@@ -136,60 +91,69 @@ function Connection:read_exactly(bytes: integer): string
 end
 
 function Connection:read_until(delimiter: string,
-                               max_bytes: integer): string
+                               chop: boolean?): string?
   if #delimiter == 0 then raise "read delimiter must not be empty" end
-  if max_bytes <= 0 then raise "read limit must be positive" end
-  if #delimiter > max_bytes then
-    raise "read delimiter is longer than the read limit"
-  end
 
   begin_read(self)
   local chunks: {string} = {}
   local count = 0
   local total = 0
   local tail = ""
-  local result = ""
-  local found = false
+  local result: string? = nil
+  local finished = false
   do
-    while not found and total < max_bytes do
-      local maybe_chunk: string? =
-          read_some_unlocked(self, max_bytes - total)
-      if not maybe_chunk then
-        local subject = "delimiter_bytes=" .. #delimiter ..
-                        ", partial=" .. total
-        raise uv._net_eof_error("net.read_until",
-            "premature EOF before the delimiter after " .. total ..
-            " bytes", subject)
-      end
-      local chunk = maybe_chunk as string
-      if #chunk == 0 then
-        raise "network read returned an empty non-EOF chunk"
+    while not finished do
+      local maybe_chunk: string? = nil
+      local terminal_error_tail = false
+      do
+        maybe_chunk = read_unlocked(self)
+      catch
+        if total > 0 and
+            uv._net_read_error_is(self.handle, error) then
+          terminal_error_tail = true
+        else
+          raise
+        end
       end
 
-      count = count + 1
-      chunks[count] = chunk
-      local boundary = tail .. chunk
-      local match = uv._net_find(boundary, delimiter)
-      total = total + #chunk
-      if match >= 0 then
-        local match_end = total - #boundary + match + #delimiter
-        local all = join_chunks(chunks, 1, count)
-        result = uv._net_slice(all, 0, match_end)
-        self.excess = uv._net_slice(all, match_end, #all - match_end) ..
-                      self.excess
-        found = true
+      if terminal_error_tail then
+        result = join_chunks(chunks, 1, count)
+        finished = true
+      elseif not maybe_chunk then
+        if total > 0 then result = join_chunks(chunks, 1, count) end
+        finished = true
       else
-        local keep = #delimiter - 1
-        if keep > #boundary then keep = #boundary end
-        tail = uv._net_slice(boundary, #boundary - keep, keep)
+        local chunk = maybe_chunk as string
+        if #chunk == 0 then
+          raise "network read returned an empty non-EOF chunk"
+        end
+
+        count = count + 1
+        chunks[count] = chunk
+        local boundary = tail .. chunk
+        local match = uv._bytes_find(boundary, delimiter)
+        total = total + #chunk
+        if match >= 0 then
+          local match_end = total - #boundary + match + #delimiter
+          local result_end = match_end
+          if chop then result_end = result_end - #delimiter end
+          local all = join_chunks(chunks, 1, count)
+          local selected = uv._bytes_slice(all, 0, result_end)
+          local remaining = uv._bytes_slice(all, match_end,
+                                            #all - match_end)
+          result = selected
+          self.excess = remaining .. self.excess
+          finished = true
+        else
+          local keep = #delimiter - 1
+          if keep > #boundary then keep = #boundary end
+          tail = uv._bytes_slice(boundary, #boundary - keep, keep)
+        end
       end
-    end
-    if not found then
-      raise "delimiter not found within " .. max_bytes .. " bytes"
     end
   catch
     restore_chunks(self, chunks, count)
-    raise error
+    raise
   finally
     self.reading = false
   end

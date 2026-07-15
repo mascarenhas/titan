@@ -142,15 +142,10 @@ static void titan_uvshim_alloc_cb(uv_handle_t *handle,
                                   size_t suggested_size,
                                   uv_buf_t *buf) {
   Udata *owner = (Udata *)uv_handle_get_data(handle);
-  const TValue *slot = &owner->uv[TITAN_UV_OWNER_BUFFER_C_INDEX].uv;
-  Udata *storage;
-
-  (void)suggested_size;
-  assert(ttisfulluserdata(slot));
-  storage = uvalue(slot);
-  assert(storage->len <= UINT_MAX);
-  *buf = uv_buf_init((char *)getudatamem(storage),
-                     (unsigned int)storage->len);
+  assert(buf != NULL);
+  *buf = uv_buf_init(NULL, 0);
+  titan_uvshim_dispatch(owner, TITAN_UV_EVENT_STREAM_ALLOC, 0,
+                        suggested_size, buf);
 }
 
 static void titan_uvshim_read_cb(uv_stream_t *stream,
@@ -560,9 +555,17 @@ int64_t titan_uvshim_buf_max_length(void) {
   return UINT_MAX;
 }
 
+void titan_uvshim_buf_init(void *buf, char *base, size_t length) {
+  uv_buf_t *uvbuf = (uv_buf_t *)buf;
+
+  assert(buf != NULL);
+  assert(base != NULL || length == 0);
+  assert(length <= UINT_MAX);
+  *uvbuf = uv_buf_init(base, (unsigned int)length);
+}
+
 void titan_uvshim_buf_init_slice(void *buf, char *base, int64_t offset,
                                  int64_t length) {
-  uv_buf_t *uvbuf = (uv_buf_t *)buf;
   char *slice;
 
   assert(buf != NULL);
@@ -572,7 +575,7 @@ void titan_uvshim_buf_init_slice(void *buf, char *base, int64_t offset,
   assert((uint64_t)length <= UINT_MAX);
   assert(base != NULL || (offset == 0 && length == 0));
   slice = base == NULL ? NULL : base + offset;
-  *uvbuf = uv_buf_init(slice, (unsigned int)length);
+  titan_uvshim_buf_init(buf, slice, (size_t)length);
 }
 
 void titan_uvshim_bytes_copy(char *destination, const char *source,

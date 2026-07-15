@@ -28,10 +28,9 @@ function connect(host: string, port: integer): Connection
 function listen(host: string, port: integer,
                 backlog: integer): Server
 
-function Connection:read_some(max_bytes: integer): string?
-function Connection:read_exactly(bytes: integer): string
+function Connection:read(): string?
 function Connection:read_until(delimiter: string,
-                               max_bytes: integer): string
+                               chop: boolean?): string?
 function Connection:write(data: string)
 function Connection:shutdown()
 function Connection:close()
@@ -60,29 +59,40 @@ and may contain any byte, including NUL.
 
 ## Reading
 
-`read_some(n)` requires `n > 0`. It returns one nonempty binary string of at
-most `n` bytes, or `nil` at EOF. EOF is permanent: later reads return `nil`
-without restarting libuv. A reset or other read error raises `uv.Error` and is
-also permanent; later reads re-raise the stored error without starting another
-read.
+A Connection starts its libuv read watcher as part of successful connection or
+accept initialization. It keeps reading and retaining GC-owned chunks even
+when no Task is waiting. This avoids leaving peer data in the kernel merely
+because application code is temporarily busy, but the retained application
+buffer has no size limit: a peer that produces data faster than the program
+drains it can make memory use grow.
 
-Only one Task may read a Connection at a time. A second reader raises instead
-of racing for bytes. Cancelling the waiting reader stops that read but does not
-close the shared Connection; another Task may read afterward.
+`read()` returns the facade's oldest retained excess first. Otherwise it
+returns all native chunks already queued when the low-level call is serviced,
+or waits for the next positive callback and returns that callback's nonempty
+binary string. Batch boundaries are therefore timing-dependent. It returns
+`nil` only at EOF. EOF is sticky: every later read also returns `nil`. A reset
+or other read error is sticky as well; after already completed chunks have
+been drained, every later read raises the same or an equivalent `uv.Error`.
+A non-EOF read error also initiates physical Connection close.
 
-`read_exactly(n)` accepts `n >= 0`, returns exactly that many bytes, and returns
-`""` for zero. EOF before `n` raises a `uv.Error` whose operation is
-`net.read_exactly`; its message and subject contain the requested and partial
-byte counts. It never returns a short string.
+`read_until(delimiter, chop)` requires a nonempty delimiter. It consumes
+through the first delimiter, which may span native chunks, and retains bytes
+after it for the next call. With `chop` absent or false, the returned string
+includes an actual delimiter. With `chop == true`, the delimiter is omitted;
+if it occurs at the start, `""` is a valid result distinct from EOF `nil`.
 
-`read_until(delimiter, max_bytes)` requires a nonempty delimiter and a positive
-limit at least as long as the delimiter. It returns through and including the
-first delimiter. The delimiter may span multiple native reads. Bytes after it
-remain buffered for the next read.
+EOF after a nonempty unterminated tail returns that tail unchanged, then later
+calls return sticky `nil`. A read error after such a tail likewise returns the
+tail unchanged, then the stored error is raised by every later read. No
+delimiter is invented for a terminal tail. With no tail, EOF returns `nil` and
+an error raises immediately.
 
-Both composite readers preserve bytes they already consumed if they raise or
-are cancelled. In particular, a `read_until` limit failure does not discard
-the first `max_bytes`; the caller can recover them with another read.
+`read` and `read_until` share one per-Connection reader lock. A second Task
+cannot enter either method while another reader owns that lock. Cancelling a
+waiting reader detaches only that waiter; it does not stop the physical read or
+close the shared Connection, and another Task may read afterward. Bytes
+accumulated by a cancelled delimiter read remain retained for the replacement
+reader.
 
 ## Writing, shutdown, and close
 
@@ -97,12 +107,14 @@ later writes. The first call is cleanup-shielded until the physical
 native request.
 
 `close` closes both directions and is idempotent. Concurrent callers wait for
-the same terminal close transition. For a Connection, it stops a pending read
-and rejects new work, but submitted and queued FIFO writes/shutdown keep their
-order; the native handle closes only after that output drains. Close waits for
-the required request and handle callbacks and returns only when the handle is
-safe to reclaim. A Connection or Server retained from an earlier completed
-loop session cannot be used in a later session.
+the same terminal close transition. For a Connection, it stops the continuous
+read and rejects new output or blocking read waits, but already completed read
+chunks remain ahead of the closed-stream error. Submitted and queued FIFO
+writes/shutdown keep their order; the native handle closes only after that
+output drains. Close waits for the required request and handle callbacks and
+returns only when the handle is safe to reclaim. A Connection or Server
+retained from an earlier completed loop session cannot be used in a later
+session.
 
 Cancellation is logical first. A cancelled queued write is removed before
 submission. Cancelling an active write does not close a potentially shared
@@ -135,8 +147,8 @@ record Error
 end
 ```
 
-DNS errors use libuv's `EAI_*` names. EOF is normal for `read_some`; only a
-composite read that promised more data turns premature EOF into an Error.
+DNS errors use libuv's `EAI_*` names. EOF is normal for both `read` and
+`read_until`; an unterminated final batch is returned before sticky EOF.
 
 ## Example
 
@@ -149,7 +161,7 @@ function client(): value
   defer connection:close()
   connection:write("hello\0world\n")
   connection:shutdown()
-  return connection:read_until("\n", 4096)
+  return connection:read_until("\n", false)
 end
 
 function main(args: {string}): integer

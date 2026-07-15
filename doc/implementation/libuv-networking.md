@@ -46,13 +46,49 @@ close callbacks; late success is never published.
 
 ## Stream callbacks
 
-Connections own a GC byte buffer. The C allocation callback reads its fixed
-pointer, capacity, and active-length fields and never enters Titan. A read
-callback with positive length stops reading, copies exactly that many bytes to
-a Titan string, clears the waiter, and directly drives its Task. A zero length
-does nothing. A negative result stops reading and stores EOF or an Error before
-driving arbitrary code; the stream is never restarted after that terminal
-event.
+An outgoing Connection calls `uv_read_start` after connect succeeds and before
+it is published. An accepted Connection starts reading after `uv_accept` and
+before it is delivered to a waiter or placed in the accepted-client queue; a
+queue-full candidate is closed without starting. A synchronous start failure
+closes the unpublished Connection and fails the connect or accept operation.
+Once initialized, the read watcher remains active with or without a waiter.
+
+The C allocation callback is a thin native-Titan dispatch. It initializes
+libuv's supplied `uv_buf_t` to `{ NULL, 0 }`, then the Titan dispatcher creates
+a fresh `ffi.titan_ffi_char.new_array(suggested_size)`, roots that full userdata
+as the Connection's current allocation, and writes its raw pointer and size to
+the descriptor. The descriptor belongs to libuv; it is not the bytes' owner.
+On supported Unix libuv pairs each allocation with its read callback before
+requesting another for that stream, although one watcher dispatch can repeat
+that pair. A POLLHUP-only EOF callback can have no preceding allocation, so
+terminal handling accepts an empty current-allocation slot.
+
+Without a waiter, a positive read callback moves the current userdata into the
+Connection's `{Bytes}` queue; `Bytes.storage` is the GC edge for its raw pointer
+and queued buffers are not reused. With a waiter, the callback instead converts
+the current allocation directly to one binary string. It snapshots and clears
+the waiter and epoch before `drive_task`, clears the current root only after the
+bytes are queued or converted, and passes the string directly to the yielded
+read. The resumed Task may install a replacement waiter before the callback
+returns. A zero-length callback clears the current allocation and delivers
+nothing.
+
+EOF and non-EOF read errors clear any current allocation, stop reading, and
+record a sticky terminal before driving arbitrary code. EOF directly resumes a
+waiter with `nil` but leaves the TCP write side open. Another error stores a
+`uv.Error`, raises it directly in a waiter, and initiates physical close. A
+later low-level read first joins and drains the entire completed queue, then
+returns sticky `nil` or repeatedly raises the stored error. With no data or
+terminal it only installs one waiter; it never starts or stops libuv. Explicit
+close stops the physical read, and Runtime teardown may discard queued chunks.
+
+The `net` facade serializes both `read` and `read_until` through one reader
+lock. It keeps delimiter excess in stream order, implements optional delimiter
+chopping and terminal-tail delivery, and preserves accumulated bytes across
+cancellation. A narrow low-level identity predicate lets it recognize only the
+stream's stored sticky read error when returning a nonempty terminal tail;
+Task cancellation and unrelated exceptions are re-raised. There is no maximum
+or high-water mark: an unread peer can grow the GC-owned queue without bound.
 
 Writes and shutdown use a per-Connection FIFO with one submitted request.
 Every write request owns its copied bytes through the callback. The first
@@ -66,16 +102,20 @@ callback has released the handle root.
 Servers keep one accept waiter and a FIFO of already accepted Connections
 bounded by the listen backlog. Every incoming callback performs one
 `uv_accept`. A full queue closes that new client and keeps the listener active.
+If an accepted client's read watcher cannot start, the candidate is closed and
+the failure is delivered to the accept waiter or retained through the server's
+terminal accept-error path.
 
 ## Cancellation and shutdown
 
 Task cancellation increments the existing operation epoch synchronously. DNS
 uses `uv_cancel` but retains its request until callback. Connect closes its
-unpublished handle. Read cancellation calls idempotent `uv_read_stop`. A
-queued write is unlinked, while cancellation of an active write is logical
-because libuv cannot cancel it and a shared Connection must remain open. The
-first shutdown and every explicit close waiter are cleanup-shielded through
-their terminal callbacks.
+unpublished handle. Read cancellation clears only the matching waiter and
+epoch; continuous reading and buffering remain active. A queued write is
+unlinked, while cancellation of an active write is logical because libuv
+cannot cancel it and a shared Connection must remain open. The first shutdown
+and every explicit close waiter are cleanup-shielded through their terminal
+callbacks.
 
 Runtime shutdown first cancels DNS and unpublished acquisitions, then stops
 reads and retires queued operations, then closes Servers, accepted queues, and
@@ -100,12 +140,14 @@ DNS/TCP interface itself uses those host structures.
 
 ## Verification
 
-Checker tests lock the public signatures, local wrapper fields, and serialized
-interface hiding. Loopback tests use port 0 and query the bound port through a
-test-only `uv_tcp_getsockname` adapter. They cover IPv4, optional IPv6,
-resolver fallback, binary and NUL data, split delimiters, excess restoration,
+Compiler tests cover the language mechanisms used by the opaque wrappers;
+standard-library behavior is tested separately without compiler coverage.
+Loopback tests probe a bounded range of explicit ports through the public
+listen API. They cover IPv4, optional IPv6, resolver fallback, binary and NUL
+data, split delimiters, excess restoration,
 FIFO writes, repeated and concurrent shutdown/close, bounded accepts,
-exclusive waiters, cancellation, permanent read errors, GC, leaked-resource
+exclusive waiters, continuous background buffering, cancellation that leaves
+the watcher active, sticky EOF, delimiter terminal tails, leaked-resource
 shutdown, and sequential Runtime generations.
 
 Fault-source variants count callback arrival, calls into the DNS-result release

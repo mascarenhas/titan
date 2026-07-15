@@ -97,8 +97,12 @@ function Process:wait(): ExitStatus
 function Process:kill(signal: string)
 function Process:write_stdin(data: string)
 function Process:close_stdin()
-function Process:read_stdout(max_bytes: integer): string?
-function Process:read_stderr(max_bytes: integer): string?
+function Process:read_stdout(): string?
+function Process:read_stdout_until(delimiter: string,
+                                   chop: boolean?): string?
+function Process:read_stderr(): string?
+function Process:read_stderr_until(delimiter: string,
+                                   chop: boolean?): string?
 ```
 
 Process operations are asynchronous and must run inside a UV Task. A Titan
@@ -124,11 +128,39 @@ Closing the write-end pipe is what delivers EOF to the child; socket-style
 half-shutdown is not used. Programs whose child waits for input EOF must call
 it.
 
-`read_stdout(n)` and `read_stderr(n)` require `n > 0`. Each returns one
-nonempty chunk of at most `n` bytes, or `nil` at permanent EOF. A read error is
-also permanent and is re-raised by later reads. Each output pipe permits one
-waiting reader, while stdout and stderr are independent and can be drained
-concurrently. Cancelling a read stops only that read.
+Successful spawn initialization starts continuous reads on stdout and stderr.
+Each pipe retains GC-owned chunks even when no Task is waiting, with no maximum
+or high-water mark. This keeps draining the operating-system pipes but means an
+undrained child can make application memory use grow. If either read watcher
+cannot start, spawn initialization closes all three pipes, terminates and reaps
+the child, closes its process handle, and reports the original failure instead
+of publishing a partially initialized Process.
+
+`read_stdout()` and `read_stderr()` return that pipe's oldest facade excess
+first. Otherwise they return all native chunks already queued when the
+low-level call is serviced, or wait for the next positive callback. A positive
+batch is nonempty, binary, and timing-dependent. EOF returns `nil` permanently.
+A read error closes that output pipe; after completed chunks have drained, the
+same or an equivalent `uv.Error` is raised on every later read.
+
+`read_stdout_until(delimiter, chop)` and
+`read_stderr_until(delimiter, chop)` reject an empty delimiter and consume
+through its first occurrence. With `chop` absent or false, an actual delimiter
+is included; with `chop == true`, it is omitted. A chopped delimiter at the
+start returns `""`, not EOF. Bytes after the delimiter remain retained for the
+next call.
+
+EOF after a nonempty unterminated tail returns that tail unchanged and becomes
+`nil` on later calls. A read error after such a tail likewise returns the tail
+first, then raises persistently. A terminal tail never has a delimiter
+invented. Cancellation and unrelated errors are re-raised, and bytes already
+accumulated by a cancelled delimiter read remain retained.
+
+Stdout and stderr each have an independent reader lock shared by their plain
+and delimiter methods, so the two pipes can be drained concurrently but a
+second Task cannot enter either read method for the same pipe. Cancelling a
+waiting read detaches only its waiter; the physical read continues and another
+Task may read afterward.
 
 `wait` returns after the operating system has reaped the child. Only one Task
 may wait at a time; cancelling it does not kill the child, and a replacement

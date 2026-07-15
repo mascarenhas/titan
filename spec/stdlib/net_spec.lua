@@ -39,6 +39,18 @@ local function wait_until_started(task: uv.Task)
   while task:status() == "ready" do timer.yield() end
 end
 
+local function read_all(connection: net.Connection): string
+  local result = ""
+  local chunk: string? = connection:read()
+  while chunk do
+    local bytes = chunk as string
+    check(#bytes > 0, "Connection returned an empty non-EOF chunk")
+    result = result .. bytes
+    chunk = connection:read()
+  end
+  return result
+end
+
 -- Tests use explicit ports so every endpoint remains expressible through the
 -- public net API. The Lua harness derives a per-workspace starting point, and
 -- this retry loop handles collisions with other processes running in parallel.
@@ -80,11 +92,11 @@ function schedule_ipv4_core(first_port: integer): uv.Task
 
     local peer = uv.run(function (): value
       local connection = server:accept()
-      check(connection:read_until("\r\n", 1024) ==
+      check(connection:read_until("\r\n") ==
             "alpha\0beta\r\n", "read_until changed binary data")
-      check(connection:read_exactly(6) == "EXCESS",
+      check(read_all(connection) == "EXCESS",
             "read_until did not retain excess bytes")
-      check(not connection:read_some(32),
+      check(not connection:read(),
             "peer did not observe client write shutdown")
       connection:write("reply\0tail")
       connection:shutdown()
@@ -101,9 +113,9 @@ function schedule_ipv4_core(first_port: integer): uv.Task
     local connection = net.connect("127.0.0.1", port)
     connection:write("alpha\0beta\r\nEXCESS")
     connection:shutdown()
-    check(connection:read_exactly(10) == "reply\0tail",
+    check(read_all(connection) == "reply\0tail",
           "binary response changed")
-    check(not connection:read_some(1), "client did not observe peer EOF")
+    check(not connection:read(), "client did not observe sticky peer EOF")
     connection:close()
     connection:close()
     check(peer:join() == "peer-ok", "peer Task returned the wrong result")
@@ -124,9 +136,7 @@ function schedule_partial_and_excess(first_port: integer): uv.Task
       first:shutdown()
 
       local second = server:accept()
-      second:write("abcde")
-      timer.sleep(2)
-      second:write("\n")
+      second:write("\nalpha\nbeta")
       second:shutdown()
 
       local third = server:accept()
@@ -142,41 +152,30 @@ function schedule_partial_and_excess(first_port: integer): uv.Task
     end)
 
     local first = net.connect("127.0.0.1", port)
-    check(first:read_until("\r\n", 32) == "left\r\n",
+    check(first:read_until("\r\n") == "left\r\n",
           "delimiter split across callbacks was not found")
-    check(first:read_exactly(5) == "right",
+    check(read_all(first) == "right",
           "cross-callback delimiter excess was lost")
-    check(not first:read_some(1), "first peer did not reach EOF")
+    check(not first:read(), "first peer EOF was not sticky")
     first:close()
 
     local second = net.connect("127.0.0.1", port)
-    expect_failure(function (): value
-      second:read_until("\n", 5)
-      return nil
-    end, "read_until accepted data beyond max_bytes")
-    check(second:read_exactly(5) == "abcde",
-          "read_until limit failure discarded buffered data")
-    check(second:read_until("\n", 1) == "\n",
-          "read_until did not recover after a limit failure")
+    local empty: string? = second:read_until("\n", true)
+    check(empty and #(empty as string) == 0,
+          "a chopped leading delimiter was confused with EOF")
+    check(second:read_until("\n", false) == "alpha\n",
+          "read_until false chop omitted the delimiter")
+    check(second:read_until("\n", true) == "beta",
+          "read_until changed an unterminated EOF tail")
+    check(not second:read_until("\n") and not second:read(),
+          "EOF after multiple delimiter records was not sticky")
     second:close()
 
     local third = net.connect("127.0.0.1", port)
-    local caught = false
-    do
-      third:read_exactly(5)
-    catch
-      local failure = error as uv.Error
-      check(failure.name == "EOF" and
-            failure.operation == "net.read_exactly",
-            "premature exact read raised the wrong error")
-      check(failure.subject == "requested=5, partial=4",
-            "premature exact read omitted byte counts")
-      caught = true
-    end
-    check(caught, "premature exact read unexpectedly succeeded")
-    check(third:read_exactly(4) == "abcd",
-          "failed exact read discarded its partial bytes")
-    check(not third:read_some(1), "terminal EOF was not sticky")
+    check(third:read_until("\n") == "abcd",
+          "unterminated data was not returned as the EOF tail")
+    check(not third:read_until("\n") and not third:read_until("\n", true),
+          "terminal EOF after an unterminated tail was not sticky")
     third:close()
 
     check(peer:join() == "partial-peer-ok",
@@ -191,10 +190,10 @@ function schedule_fifo_and_shutdown(first_port: integer): uv.Task
     local server, port = listen_available("127.0.0.1", first_port, 8)
     local reader = uv.run(function (): value
       local peer = server:accept()
-      local payload = peer:read_exactly(18)
+      local payload = read_all(peer)
       check(payload == "first-second-third",
             "Connection writes were not FIFO")
-      check(not peer:read_some(1), "shutdown did not preserve read-side EOF")
+      check(not peer:read(), "shutdown did not preserve read-side EOF")
       peer:close()
       return payload
     end)
@@ -273,22 +272,24 @@ function schedule_accept_and_read_cancellation(first_port: integer): uv.Task
 
     local client = net.connect("127.0.0.1", port)
     local peer = server:accept()
+    client:write("prefix")
+    for _ = 1, 20 do timer.yield() end
     local read_waiter = uv.run(function (): value
-      return peer:read_some(16)
+      return peer:read_until("\n", true)
     end)
     wait_until_started(read_waiter)
     expect_failure(function (): value
-      peer:read_some(1)
+      peer:read()
       return nil
     end, "Connection admitted two concurrent readers")
     read_waiter:cancel("cancel-read")
     expect_cancelled(read_waiter, "cancel-read")
 
-    client:write("replacement")
-    check(peer:read_exactly(11) == "replacement",
-          "Connection was unusable after read cancellation")
+    client:write("replacement\n")
+    check(peer:read_until("\n", true) == "prefixreplacement",
+          "read cancellation did not restore bytes for its replacement")
     client:shutdown()
-    check(not peer:read_some(1), "replacement reader did not reach EOF")
+    check(not peer:read(), "replacement reader did not reach EOF")
     client:close()
     peer:close()
 
@@ -368,7 +369,7 @@ function schedule_localhost_retry(first_port: integer): uv.Task
     local server, port = listen_available("127.0.0.1", first_port, 4)
     local accept = uv.run(function (): value
       local peer = server:accept()
-      check(peer:read_exactly(1) == "x", "localhost peer read failed")
+      check(read_all(peer) == "x", "localhost peer read failed")
       peer:close()
       return nil
     end)
@@ -376,6 +377,7 @@ function schedule_localhost_retry(first_port: integer): uv.Task
     -- failed IPv6 candidate and continue to the compatible IPv4 result.
     local connection = net.connect("localhost", port)
     connection:write("x")
+    connection:shutdown()
     connection:close()
     accept:join()
     server:close()
@@ -402,12 +404,13 @@ function schedule_ipv6_optional(first_port: integer): uv.Task
     local listener = server as net.Server
     local peer_task = uv.run(function (): value
       local peer = listener:accept()
-      check(peer:read_exactly(4) == "ipv6", "IPv6 payload changed")
+      check(read_all(peer) == "ipv6", "IPv6 payload changed")
       peer:close()
       return nil
     end)
     local connection = net.connect("::1", port)
     connection:write("ipv6")
+    connection:shutdown()
     connection:close()
     peer_task:join()
     listener:close()
@@ -492,7 +495,7 @@ end
 ]==]
     end
 
-    it("covers binary IPv4, excess, exact/until, FIFO, shutdown, and EOF",
+    it("covers binary IPv4, excess, delimiter reads, FIFO, shutdown, and EOF",
     function()
         run_lua(port_prelude("core") .. [==[
 assert(run("schedule_ipv4_core") == "ipv4-core-ok")

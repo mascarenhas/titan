@@ -79,7 +79,8 @@ enum titan_uvshim_event_kind {
   TITAN_UV_EVENT_STREAM_READ = 8,
   TITAN_UV_EVENT_CONNECTION = 9,
   TITAN_UV_EVENT_SIGNAL = 10,
-  TITAN_UV_EVENT_PROCESS_EXIT = 11
+  TITAN_UV_EVENT_PROCESS_EXIT = 11,
+  TITAN_UV_EVENT_STREAM_ALLOC = 12
 };
 
 /* Concrete wrappers for libuv's public base-handle/base-request API. */
@@ -187,6 +188,7 @@ void titan_uvshim_fs_cb(uv_fs_t *req);
  * still delegates construction to uv_buf_init. Callers validate user-derived
  * lengths before entering this trusted helper.
  */
+void titan_uvshim_buf_init(void *buf, char *base, size_t length);
 void titan_uvshim_buf_init_slice(void *buf, char *base, int64_t offset,
                                  int64_t length);
 void titan_uvshim_bytes_copy(char *destination, const char *source,

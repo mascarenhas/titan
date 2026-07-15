@@ -7,6 +7,9 @@ deterministic delayed-FS callback and cross-generation GC cases. Phase 7
 documentation and CI integration are complete; focused and integrated local
 async gates are green. Linux push CI and the manual macOS workflow remain the
 authoritative release gates for each branch head.
+The continuous stream-read revision is specified independently in
+[`stream-read-redesign.md`](stream-read-redesign.md); the matching sections
+below incorporate that contract.
 The design below is based on the current repository checkout, the sketch in
 `/tmp/uv-io.md`, the implemented `coroutine`/`uv` standard modules, focused
 Titan and libuv prototypes, and the public libuv 1.x contracts.
@@ -77,6 +80,10 @@ Use these concrete decisions for v1:
 - Use only public, portable libuv APIs for runtime behavior. Platform-specific
   code is limited to build/link details and isolated mappings for concepts that
   libuv still represents with host constants, such as signal numbers.
+- Start readable TCP/process streams during successful publication, keep them
+  active without a waiter, and retain completed GC-owned chunks ahead of sticky
+  EOF/error. Stream-read cancellation detaches only its waiter; explicit close,
+  terminal read, and Runtime shutdown own physical stopping.
 - The default developer/CI build uses a pinned static libuv 1.52.1 built by the
   Makefile. A system `pkg-config` mode is optional.
 - The standalone bootstrap wraps an async program's `main` in nonblocking
@@ -334,7 +341,8 @@ callback dispatches on the module-cached main thread `L`, as specified below.
 - A hidden coroutine tag and direct-style `yield`/resume boundary.
 - A synchronous-looking high-level API.
 - Separate filesystem, network, OS/process, and timer modules.
-- Pausing stream reads and retaining excess bytes in the connection.
+- Continuously draining streams into GC-owned queues and retaining facade
+  excess for delimiter reads.
 - Fixed C trampolines that recover a Titan module dispatcher.
 
 ### Clarifications and required corrections
@@ -891,24 +899,39 @@ V1 uses explicit-length buffers throughout.
 - Filesystem/stream writes: copy the Titan string into a GC-owned byte userdata
   and root both the owner and length until `uv_write_cb`/`uv_fs_cb`. A later
   proven optimization may pin the immutable `TString` and write directly.
-- Stream reads: when a waiter starts reading, associate a preallocated
-  GC-owned buffer with the stream owner. The C alloc callback returns that
-  buffer without entering Titan. For `nread > 0`, copy exactly those bytes into
-  a Titan string before resuming the waiter. Libuv serializes callbacks on this
-  loop, so the buffer cannot be overwritten while the callback and resumed
-  continuation are executing. If the continuation yields another read Request
-  for the same Connection, keep/restart reading; if it yields a different
-  operation, completes, or closes, call public `uv_read_stop` before returning.
-- `nread == 0` is not EOF; resume nothing and keep reading.
-- Before resuming arbitrary code for any `nread < 0`, stop the read side and
-  persist its terminal state on the Connection. `UV_EOF` makes this and all
-  later reads return `nil` without another `uv_read_start`; another negative
-  result stores a `uv.Error` which later reads re-raise without restarting.
-  Libuv documents another read after a negative read callback as undefined.
-- Higher-level methods retain excess bytes in the Connection before they yield
-  again. `uv_read_stop` is idempotent and documented to always succeed. Its
-  platform-specific nonzero Windows TTY result means resource release is still
-  pending, not failure; do not turn it into an invariant error.
+- Stream reads: start `uv_read_start` exactly once while publishing a connected
+  outgoing TCP stream, an accepted client that will be delivered or queued, or
+  a spawned stdout/stderr pipe. A synchronous start failure atomically closes
+  or rolls back the unpublished owner; process failure also stops a started
+  sibling pipe, terminates and reaps the spawned child, and drains every close
+  before reporting the original error.
+- The C `alloc_cb` initializes libuv's supplied descriptor to `{ NULL, 0 }` and
+  directly dispatches to trusted Titan code. That entry creates a fresh
+  `ffi.titan_ffi_char.new_array(suggested_size)`, roots its full userdata as the
+  stream's current allocation, and writes only its raw pointer and length into
+  the borrowed `uv_buf_t`. On supported Unix libuv pairs an allocation with its
+  read callback before requesting another for that stream, but a POLLHUP-only
+  EOF callback may have no allocation.
+- For `nread > 0`, move the current allocation into an immutable `Bytes` whose
+  `storage` field remains the GC edge, then append it to the completed `{Bytes}`
+  queue when no waiter exists. With a waiter, convert that allocation directly
+  to one binary string and pass it to the yielded read. Publish or convert the
+  bytes before clearing the current root. `nread == 0` clears the root but
+  queues and resumes nothing.
+- Before any `nread < 0` drive, clear the current root, stop the read side, and
+  persist sticky EOF or a sticky `uv.Error`. EOF directly returns `nil` to a
+  waiter. Another error directly raises in the waiter and initiates physical
+  close. Already completed chunks remain ahead of either terminal; EOF stays
+  `nil` and a caught error is raised again on every later read.
+- Once initialized, low-level reads only drain the complete queued batch,
+  observe terminal/close state, or install one waiter. They never start or stop
+  libuv. Reading and buffering continue with no waiter and have no high-water
+  limit. Cancellation detaches only the matching waiter and epoch. A terminal
+  read callback, explicit close, or Runtime shutdown may call `uv_read_stop`;
+  Runtime teardown may discard completed queues.
+- Higher-level methods retain delimiter excess before yielding again. Plain and
+  delimiter reads share a facade reader lock, while stdout and stderr use
+  independent locks.
 
 No NUL-terminated cast is used for file/socket payloads.
 
@@ -932,7 +955,8 @@ resource state, not a global completion queue.
   waiter clears only the waiter/epoch and does not implicitly close the Ticker;
   `Ticker:close()` or final session cleanup owns stop-and-close.
 - A stream owner follows the read behavior above. Only one reader may wait;
-  surplus bytes live in the Connection buffer, not in extra callbacks.
+  callbacks with no waiter append GC-owned `Bytes` to its completed queue, and
+  delimiter excess lives in the facade.
 - A Server directly satisfies one waiting `accept`; without a waiter it stores
   accepted clients in its bounded resource-local queue.
 - Signal/timer/listener callbacks compare the waiter epoch before resuming.
@@ -1082,8 +1106,8 @@ physical cancellation:
 - timers: `uv_timer_stop`, then `uv_close`, free only after close callback;
 - a cancelled Ticker wait clears that waiter/epoch but leaves the independently
   shareable Ticker open; explicit close or final session cleanup stops it;
-- reads: `uv_read_stop`; clear only the waiter and keep the independently
-  shareable Connection storage and late event handling valid;
+- reads: clear only the matching waiter/epoch. Keep the continuously active,
+  independently shareable stream and its GC-owned chunk queue valid;
 - an in-flight connect owns an unpublished `uv_tcp_t`; close that handle on
   cancellation so libuv completes the connect request asynchronously, and keep
   both request and handle owners rooted through their terminal callbacks;
@@ -1131,7 +1155,7 @@ promise.
 | `uv_fs_t` including open/read/write/stat/path/scandir/close | A negative submit return follows the wrapper's cleanup arm and is injected iteratively; no callback is assumed | Call `uv_cancel` only for non-cleanup operations where supported. Never physically cancel `uv_fs_close`; logical cancellation waits for close callback + cleanup. A cancelled open that returns a valid fd is converted immediately into an uncancellable close | Callback/dispatcher copies buffer/stat/path/scandir entries through public accessors, calls `uv_fs_req_cleanup` exactly once, then directly resumes/errors the Task; cleanup-close status is consumed before delivering cancellation | After extraction, cleanup, and direct drive; any acquired `uv_file` remains owned until its close request completes |
 | DNS (`uv_getaddrinfo`/`uv_getnameinfo`) | Negative submit return has no callback and releases request inputs | `uv_cancel` success still ends in completion callback; too-late/failure leaves normal callback path | Copy normalized addresses/names, free each non-null `getaddrinfo` result, then directly drive the Task | After callback drive and any address list free |
 | Connect, write, and `uv_shutdown_t` requests | Negative submit return has no callback; release request/buffer roots and inject iteratively, while any initialized stream handle follows handle-close policy | Cancel an unpublished connect by closing its private TCP handle and consume both connect/close callbacks. Do not close a published shared Connection merely to cancel a write; consume that callback. A late successful connect is never delivered and stays on the close path | Callback copies status and directly drives only if cancellation did not win; write buffer remains rooted through callback; shutdown closes only the write side | After callback drive; a published stream remains registered until explicit/session close, an unpublished one until close callback |
-| Stream read waiter | Negative `uv_read_start` has no callback and retires/errors the waiter in the current drive | `uv_read_stop` promises no terminal read callback: clear/retire the waiter and inject cancellation separately while retaining the stream owner; its documented nonzero Windows TTY return is not failure | `nread > 0`: copy bytes and directly resume; another same-stream read Request keeps reading, otherwise stop before return. `nread == 0` is ignored. Before any `nread < 0` drive, persist EOF or stored-error read-terminal state; never start reading again | Per-wait roots after direct drive/handoff; stream handle only at close callback |
+| Continuous stream read | A negative initialization-time `uv_read_start` owes no read callback: close/roll back the unpublished TCP stream, or atomically stop and close process pipes, terminate/reap the child, and close its handle before reporting spawn failure | Cancellation clears only the matching waiter/epoch; it does not call `uv_read_stop`. Explicit close, terminal read, or Runtime shutdown stops the watcher while retaining required owners through close callbacks | `alloc_cb` roots a fresh byte userdata and fills libuv's borrowed descriptor. `nread > 0` queues an immutable `Bytes` or directly supplies a waiter payload; `nread == 0` clears the current allocation only. Before an `nread < 0` drive, persist sticky EOF/error; completed chunks drain first and a non-EOF error initiates close | Current allocation after its paired read callback; queued `Bytes` after drain/teardown; stream handle only at close callback |
 | Published passive File/Connection | Acquisition failure follows its request row; a partially acquired object is never published | Cancelling a Task/waiter does not close a shared object. Explicit close serializes after its in-flight operations; final session cleanup does the same | Idle files and connected handles need not keep `uv_run` alive, so Runtime registration—not loop liveness—controls cleanup | File after close request cleanup; Connection after close callback |
 | Listener and accepted TCP handles | Listen failure after successful handle init initiates close | Closing the server uses `uv_close`; no nonexistent listen-stop API is assumed | Each connection notification performs `uv_accept` into a new GC-owned handle and directly resumes an accept waiter, or queues locally; a full queue closes that new client | Each handle's own close callback |
 | Spawned process and stdio pipes | `uv_spawn` initializes the process handle on both success and failure. On a negative return, `uv_close` that handle and close/drain every initialized pipe; no exit callback is expected | Cancelling a waiter does not kill. Session cleanup uses `uv_process_kill` for a live child, observes its exit callback, and only then closes the process handle; pipe requests follow their own rows | Exit callback records status and directly resumes a waiter. A successfully spawned live process handle is never closed before exit is observed, avoiding an unreapable child on Unix | Process close callback after spawn failure or observed exit, plus all pipe request/close callbacks |
@@ -1383,10 +1407,9 @@ function connect(host: string, port: integer): Connection
 function listen(host: string, port: integer,
                 backlog: integer): Server
 
-function Connection:read_some(max_bytes: integer): string?
-function Connection:read_exactly(bytes: integer): string
+function Connection:read(): string?
 function Connection:read_until(delimiter: string,
-                               max_bytes: integer): string
+                               chop: boolean?): string?
 function Connection:write(data: string)
 function Connection:shutdown()
 function Connection:close()
@@ -1400,20 +1423,31 @@ Contracts:
 - Resolve through `uv_getaddrinfo`; try compatible returned addresses in order
   and always call `uv_freeaddrinfo`.
 - Use `uv_tcp_t`, `uv_tcp_connect`, `uv_listen`, and `uv_accept`; no raw sockets.
-- Exactly one reader may wait on a Connection. `read_some` starts libuv reading
-  only when needed and stops it as soon as data/EOF/error satisfies the waiter.
-- `read_exactly` and `read_until` loop over `read_some` and retain excess bytes
-  in the Connection. Premature EOF in `read_exactly` raises
-  `uv.Error` with libuv's `UV_EOF` and includes the requested and partial
-  byte counts in `message`/`subject`; it never returns a short string.
-  `read_until` enforces `max_bytes` and raises without discarding already
-  buffered bytes.
+- Start continuous reading before publishing every connected or accepted
+  Connection. With no waiter, callbacks append GC-owned chunks to an unbounded
+  queue. A synchronously failing start closes the candidate and fails connect,
+  or reaches an accept waiter/server terminal-error path without publishing the
+  client.
+- `read` and `read_until` share one reader lock. `read` returns facade excess
+  first, otherwise the complete queued native batch or the next callback
+  payload; its positive batch size is timing-dependent.
+- `read_until` requires a nonempty delimiter and retains bytes after its first
+  occurrence. With `chop` absent/false it includes the actual delimiter; with
+  `chop == true` it omits it, including a valid `""` result for a delimiter at
+  the start. EOF/error after a nonempty unterminated tail returns the tail
+  unchanged, then exposes sticky `nil`/error on later reads. Cancellation and
+  unrelated errors do not become short success, and accumulated bytes remain
+  retained.
+- Cancelling a read detaches only its waiter and leaves the physical read
+  active. There is no maximum or high-water mark; unread peer output can grow
+  application memory.
 - Writes are ordered FIFO. Each write buffer remains rooted until its callback.
 - `Connection:shutdown` queues `uv_shutdown` after earlier writes, permanently
   closes only the write side, and leaves reads active until EOF/error or
   `close`. Later writes are rejected as soon as shutdown is requested. `close`
   closes both directions and remains idempotent.
-- EOF is `nil`; reset and other errors raise `uv.Error`.
+- EOF is sticky `nil`; reset and other errors are sticky `uv.Error` values
+  raised again after already completed chunks drain.
 - `listen` requires `backlog > 0` and uses it both for `uv_listen` and as the
   accepted-connection queue capacity. Libuv exposes no public listen-stop
   operation, so every connection notification calls `uv_accept` into a fresh
@@ -1477,8 +1511,12 @@ function Process:wait(): ExitStatus
 function Process:kill(signal: string)
 function Process:write_stdin(data: string)
 function Process:close_stdin()
-function Process:read_stdout(max_bytes: integer): string?
-function Process:read_stderr(max_bytes: integer): string?
+function Process:read_stdout(): string?
+function Process:read_stdout_until(delimiter: string,
+                                   chop: boolean?): string?
+function Process:read_stderr(): string?
+function Process:read_stderr_until(delimiter: string,
+                                   chop: boolean?): string?
 
 function communicate(file: string, args: {string},
                      input: string?): (string, string, ExitStatus)
@@ -1500,8 +1538,18 @@ function wait_signal(name: string): string
   handle's later close callback, and every pipe request/close callback. On
   spawn failure it remains rooted through the required process close callback
   even though no exit callback will arrive.
+- After successful spawn, start continuous reads on stdout and stderr before
+  publishing the Process. If either start fails, stop an already-started
+  sibling, close all pipes, terminate and reap the child, and close its process
+  handle before reporting the original spawn failure.
+- Stdout and stderr have independent unbounded native chunk queues, retained
+  facade excess, and reader locks shared by their plain and delimiter methods.
+  Their batch, delimiter/chop, terminal-tail, cancellation, sticky EOF, and
+  sticky error semantics match `Connection`. Cancelling a waiter does not stop
+  physical reading.
 - `communicate` drains stdout and stderr concurrently while optionally writing
-  stdin, so it cannot deadlock on a full child pipe.
+  stdin, using the no-argument reads, so it cannot deadlock on a full child
+  pipe.
 - `communicate` creates its reader/writer helpers through a private observed-task
   path: register the parent/join relationship before arming each helper start
   callback. A helper failure therefore propagates to the parent, cancels/drains
@@ -2070,15 +2118,23 @@ Work:
 - Implement TCP connect, binary stream read/write, shutdown, close.
 - Implement server listen/accept and bounded accept queue.
 - Store exact `uv.uv_tcp_t` wrappers in local `Connection`/`Server` fields.
-- Implement excess buffering and one-reader policy.
-- Persist EOF/error read-terminal state before continuation drive and reject any
-  later `uv_read_start`; close unpublished connect handles on cancellation.
+- Start connected and accepted streams once during initialization, continuously
+  queue GC-owned chunks, and implement facade excess plus one-reader policy.
+- Persist sticky EOF/error state before continuation drive, detach only a
+  cancelled read waiter, and close unpublished connect handles on cancellation.
 
 Exit criteria:
 
 - Loopback-only client/server tests cover IPv4 and available IPv6.
-- Partial reads, read stop/restart, EOF, reset, failed connect, ordered writes,
-  embedded NUL, and write-buffer GC stress pass.
+- Public loopback tests cover background reads before the first waiter, byte
+  preservation across returned batches, sticky EOF, cancellation with continued
+  buffering, failed connect, ordered writes, embedded NUL, delimiter chopping
+  and terminal tails, and write-buffer GC stress.
+- Callback batching/direct delivery, zero-byte callbacks, sticky non-EOF read
+  errors, and synchronous `uv_read_start` failure cleanup are source/build-review
+  obligations because the public API has no deterministic trigger or observable
+  path identity for them; do not add production fault hooks or a copied stdlib
+  variant solely to manufacture those transitions.
 - All handles close and the loop drains after both success and failure.
 
 ### Phase 6 - OS helpers, signals, and processes

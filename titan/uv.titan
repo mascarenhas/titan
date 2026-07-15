@@ -27,6 +27,7 @@ local OWNER_CLOSED = 3
 
 local EVENT_TIMER = 0
 local EVENT_HANDLE_CLOSE = 0
+local EVENT_STREAM_ALLOC = 0
 local EVENT_STREAM_READ = 0
 local EVENT_CONNECTION = 0
 local EVENT_PROCESS_EXIT = 0
@@ -272,6 +273,7 @@ local record PipeControl
   local read_waiter: Task?
   local read_epoch: integer
   local read_bytes: Bytes?
+  local read_queue: {Bytes}
   local output_head: ProcessOperation?
   local output_tail: ProcessOperation?
   local output_current: ProcessOperation?
@@ -288,7 +290,6 @@ local record ProcessOperation
   local pipe: uv_pipe_t?
   local file: Text?
   local arguments: {Text}?
-  local maximum: integer
   local copied_bytes: Bytes?
   local prepared_buffer: Buffer?
   local owner: uv_pipe_write_t?
@@ -332,8 +333,9 @@ local record HelperGroup
 end
 
 -- Fixed six-slot owner layout consumed by titan_uv.c. Metadata roots each
--- operation/control graph; the final slot retains family-specific native I/O
--- storage only while libuv may consume it.
+-- operation/control graph; families that submit separate native I/O storage
+-- retain it in the final slot only while libuv may consume it. Stream controls
+-- instead keep their current GC-owned Bytes allocation in their metadata.
 record uv_timer_t
   local handle: *libuv.uv_timer_t
   local storage: value
@@ -376,7 +378,7 @@ local record uv_pipe_t
   local dispatcher: (uv_pipe_t, integer, integer, libuv.size_t,
                      ffi.titan_ffi_void_ptr) -> ()
   local metadata: PipeControl
-  local buffer: value
+  local buffer: nil
 end
 
 local record uv_pipe_write_t
@@ -504,7 +506,6 @@ local record NetOperation
   local backlog: integer
   local tcp: uv_tcp_t?
   local data: string
-  local maximum: integer
   local addresses: AddressList?
   local address_index: integer
   local prepared_buffer: Buffer?
@@ -545,6 +546,7 @@ local record TcpControl
   local read_waiter: Task?
   local read_epoch: integer
   local read_bytes: Bytes?
+  local read_queue: {Bytes}
   local output_head: NetOperation?
   local output_tail: NetOperation?
   local output_current: NetOperation?
@@ -613,7 +615,7 @@ record uv_tcp_t
   local dispatcher: (uv_tcp_t, integer, integer, libuv.size_t,
                      ffi.titan_ffi_void_ptr) -> ()
   local metadata: TcpControl
-  local buffer: value
+  local buffer: nil
 end
 
 -- Persistent descriptors cross into fs as one nominal wrapper.  Its scalar
@@ -807,6 +809,42 @@ local function bytes_string(bytes: Bytes, length: integer): string
   local result: value = ffi.lua_totvalue(L, -1)
   lua.lua_settop(L, top)
   return result
+end
+
+-- libuv supplies the size for stream allocations. The Titan FFI array is a
+-- full userdata when stored in value, so Bytes.storage is the only GC edge
+-- needed to keep its raw pointer valid.
+local function allocate_stream_bytes(size: libuv.size_t): Bytes
+  local length = size as integer
+  if length <= 0 or length > UV_BUF_MAX then
+    raise internal_error("stream.alloc.size")
+  end
+  local owned = ffi.titan_ffi_char.new_array(length)
+  local storage: value = owned
+  return Bytes.new(owned as *ffi.titan_ffi_char, storage, length)
+end
+
+local function queued_bytes_string(queue: {Bytes}): string
+  local chunks: {string} = {}
+  for index = 1, #queue do
+    local bytes = queue[index]
+    chunks[index] = bytes_string(bytes, bytes.length)
+  end
+  while #chunks > 1 do
+    local joined: {string} = {}
+    local index = 1
+    while index <= #chunks do
+      if index < #chunks then
+        joined[#joined + 1] = chunks[index] .. chunks[index + 1]
+      else
+        joined[#joined + 1] = chunks[index]
+      end
+      index = index + 2
+    end
+    chunks = joined
+  end
+  if #chunks == 0 then raise internal_error("stream.queue.empty") end
+  return chunks[1]
 end
 
 local function bytes_to_string(bytes: *ffi.titan_ffi_char,
@@ -1193,9 +1231,8 @@ local function unlink_process_request(control: ProcessRequestControl)
   control.next_control = nil
 end
 
-local function validate_tcp(tcp: uv_tcp_t, operation: string,
-                            require_server: boolean,
-                            allow_closing: boolean)
+local function validate_tcp_identity(tcp: uv_tcp_t, operation: string,
+                                     require_server: boolean): TcpControl
   local runtime = current_runtime()
   local control = tcp.metadata
   if control.runtime ~= runtime or
@@ -1209,6 +1246,12 @@ local function validate_tcp(tcp: uv_tcp_t, operation: string,
       raise operation .. " requires a Connection"
     end
   end
+  return control
+end
+
+local function validate_tcp_lifecycle(control: TcpControl,
+                                      operation: string,
+                                      allow_closing: boolean)
   if control.lifecycle == TCP_CLOSED then
     raise "cannot " .. operation .. " a closed TCP resource"
   end
@@ -1218,6 +1261,13 @@ local function validate_tcp(tcp: uv_tcp_t, operation: string,
   if control.close_requested and not allow_closing then
     raise "cannot " .. operation .. " a closing TCP resource"
   end
+end
+
+local function validate_tcp(tcp: uv_tcp_t, operation: string,
+                            require_server: boolean,
+                            allow_closing: boolean)
+  local control = validate_tcp_identity(tcp, operation, require_server)
+  validate_tcp_lifecycle(control, operation, allow_closing)
 end
 
 local function enqueue_output(tcp: uv_tcp_t, operation: NetOperation)
@@ -1686,6 +1736,7 @@ local function allocate_tcp_owner(runtime: Runtime):
     read_waiter = nil,
     read_epoch = 0,
     read_bytes = nil,
+    read_queue = {},
     output_head = nil,
     output_tail = nil,
     output_current = nil,
@@ -1725,7 +1776,6 @@ local function discard_tcp_storage(tcp: uv_tcp_t)
   unlink_tcp_control(control)
   tcp.handle = nil
   tcp.storage = nil
-  tcp.buffer = nil
   control.lifecycle = TCP_CLOSED
   control.owner = nil
 end
@@ -1752,7 +1802,6 @@ local function initialize_tcp(runtime: Runtime): (uv_tcp_t, integer)
     control.next_control = nil
     tcp.handle = nil
     tcp.storage = nil
-    tcp.buffer = nil
     control.lifecycle = TCP_CLOSED
     control.owner = nil
     return tcp, status as integer
@@ -1773,11 +1822,8 @@ local function start_tcp_close(tcp: uv_tcp_t)
   if control.read_active then
     shim.titan_uvshim_tcp_read_stop(tcp.handle)
     control.read_active = false
-    control.read_waiter = nil
-    control.read_epoch = 0
-    control.read_bytes = nil
-    tcp.buffer = nil
   end
+  control.read_bytes = nil
   control.lifecycle = TCP_CLOSING
   shim.titan_uvshim_tcp_close(tcp.handle)
 end
@@ -1853,6 +1899,7 @@ local function new_pipe_control(process: ProcessControl,
     read_waiter = nil,
     read_epoch = 0,
     read_bytes = nil,
+    read_queue = {},
     output_head = nil,
     output_tail = nil,
     output_current = nil,
@@ -1899,7 +1946,6 @@ local function discard_pipe_storage(pipe: uv_pipe_t)
   control.lifecycle = PIPE_CLOSED
   pipe.handle = nil
   pipe.storage = nil
-  pipe.buffer = nil
   control.owner = nil
 end
 
@@ -1910,9 +1956,8 @@ local function start_pipe_close(pipe: uv_pipe_t)
   if control.read_active then
     shim.titan_uvshim_pipe_read_stop(pipe.handle)
     control.read_active = false
-    control.read_bytes = nil
-    pipe.buffer = nil
   end
+  control.read_bytes = nil
   if control.lifecycle == PIPE_ALLOCATED then
     discard_pipe_storage(pipe)
     return
@@ -2504,7 +2549,8 @@ local function detach_net_wait(task: Task, request: Request)
   if operation.kind == NET_READ then
     if control.read_waiter == task and
         control.read_epoch == request.generation then
-      stop_tcp_read(tcp, false)
+      control.read_waiter = nil
+      control.read_epoch = 0
     end
   elseif operation.kind == NET_ACCEPT then
     if control.accept_waiter == task and
@@ -2554,14 +2600,8 @@ local function detach_process_wait(task: Task, request: Request)
       operation.kind == PROCESS_READ_STDERR then
     if pipe_control.read_waiter == task and
         pipe_control.read_epoch == request.generation then
-      if pipe_control.read_active then
-        shim.titan_uvshim_pipe_read_stop(pipe.handle)
-        pipe_control.read_active = false
-      end
       pipe_control.read_waiter = nil
       pipe_control.read_epoch = 0
-      pipe_control.read_bytes = nil
-      pipe.buffer = nil
     end
   elseif operation.kind == PROCESS_WRITE_STDIN and
          not operation.owner and operation.linked then
@@ -2700,8 +2740,7 @@ end
 local function make_net_operation(kind: integer, task: Task,
                                   request: Request, host: Text?,
                                   port: integer, backlog: integer,
-                                  tcp: uv_tcp_t?, data: string,
-                                  maximum: integer): NetOperation
+                                  tcp: uv_tcp_t?, data: string): NetOperation
   local operation: NetOperation = {
     kind = kind,
     task = task,
@@ -2711,7 +2750,6 @@ local function make_net_operation(kind: integer, task: Task,
     backlog = backlog,
     tcp = tcp,
     data = data,
-    maximum = maximum,
     addresses = nil,
     address_index = 0,
     prepared_buffer = nil,
@@ -2757,7 +2795,7 @@ end
 
 local function new_net_request(kind: integer, host: string?, port: integer,
                                backlog: integer, tcp: uv_tcp_t?, data: string,
-                               maximum: integer, cleanup: boolean): Request
+                               cleanup: boolean): Request
   local request: Request? = nil
   if cleanup then
     request = new_cleanup_request(REQUEST_NET, nil, 0)
@@ -2771,7 +2809,7 @@ local function new_net_request(kind: integer, host: string?, port: integer,
     copied_host = copy_text(host, "net.host", host)
   end
   local operation = make_net_operation(kind, request.task, request,
-      copied_host, port, backlog, tcp, data, maximum)
+      copied_host, port, backlog, tcp, data)
   request.subject = operation
   return request
 end
@@ -2780,8 +2818,7 @@ local function make_process_operation(kind: integer, task: Task,
                                       request: Request,
                                       process: uv_process_t?,
                                       pipe: uv_pipe_t?, file: Text?,
-                                      arguments: {Text}?,
-                                      maximum: integer): ProcessOperation
+                                      arguments: {Text}?): ProcessOperation
   local operation: ProcessOperation = {
     kind = kind,
     task = task,
@@ -2790,7 +2827,6 @@ local function make_process_operation(kind: integer, task: Task,
     pipe = pipe,
     file = file,
     arguments = arguments,
-    maximum = maximum,
     copied_bytes = nil,
     prepared_buffer = nil,
     owner = nil,
@@ -2802,8 +2838,7 @@ local function make_process_operation(kind: integer, task: Task,
 end
 
 local function new_process_request(kind: integer, process: uv_process_t,
-                                   pipe: uv_pipe_t?, maximum: integer,
-                                   cleanup: boolean): Request
+                                   pipe: uv_pipe_t?, cleanup: boolean): Request
   local request: Request? = nil
   if cleanup then
     request = new_cleanup_request(REQUEST_PROCESS, nil, 0)
@@ -2812,7 +2847,7 @@ local function new_process_request(kind: integer, process: uv_process_t,
   end
   local request = request
   local operation = make_process_operation(kind, request.task, request,
-      process, pipe, nil, nil, maximum)
+      process, pipe, nil, nil)
   request.subject = operation
   return request
 end
@@ -2829,7 +2864,7 @@ local function new_process_spawn_request(file: string,
         args[index], "process.spawn", args[index])
   end
   local operation = make_process_operation(PROCESS_SPAWN,
-      request.task, request, nil, nil, copied_file, copied_args, 0)
+      request.task, request, nil, nil, copied_file, copied_args)
   request.subject = operation
   return request
 end
@@ -3097,12 +3132,34 @@ local function arm_process_spawn(task: Task,
     stdin_pipe.metadata.lifecycle = PIPE_OPEN
     stdout_pipe.metadata.lifecycle = PIPE_OPEN
     stderr_pipe.metadata.lifecycle = PIPE_OPEN
-    process_control.spawn_operation = nil
-    operation.process = nil
-    operation.file = nil
-    operation.arguments = nil
-    task.current_request = nil
-    return DriveControl.new(DRIVE_RESUME, process, "", nil)
+    local read_status = start_pipe_read(stdout_pipe)
+    local read_operation = "process.stdout.read.start"
+    if read_status >= 0 then
+      read_status = start_pipe_read(stderr_pipe)
+      read_operation = "process.stderr.read.start"
+    end
+    if read_status >= 0 then
+      process_control.spawn_operation = nil
+      operation.process = nil
+      operation.file = nil
+      operation.arguments = nil
+      task.current_request = nil
+      return DriveControl.new(DRIVE_RESUME, process, "", nil)
+    end
+
+    -- A child exists, so a read-start rejection is not reportable until all
+    -- pipe owners are closed and the child has been terminated and reaped.
+    process_control.pending_failure = make_error(
+        read_status, read_operation, file.source)
+    process_close_all_pipes(process_control)
+    local shutdown_status = begin_one_process_shutdown(process_control)
+    if shutdown_status < 0 then
+      promote_fatal(runtime,
+          make_error(shutdown_status, "process.shutdown", file.source), "")
+    end
+    task.operation = process
+    task.state = TASK_WAITING
+    return nil
   end
 
   process_control.pending_failure = make_error(
@@ -3162,28 +3219,8 @@ local function arm_process_request(task: Task,
   local pipe_control = pipe.metadata
   if operation.kind == PROCESS_READ_STDOUT or
       operation.kind == PROCESS_READ_STDERR then
-    local bytes = allocate_bytes(operation.maximum)
     pipe_control.read_waiter = task
     pipe_control.read_epoch = request.generation
-    pipe_control.read_bytes = bytes
-    pipe.buffer = bytes.storage
-    local status = shim.titan_uvshim_pipe_read_start(pipe.handle)
-    if (status as integer) < 0 then
-      pipe_control.read_waiter = nil
-      pipe_control.read_epoch = 0
-      pipe_control.read_bytes = nil
-      pipe.buffer = nil
-      pipe_control.read_terminal = TCP_READ_ERROR
-      pipe_control.read_error = make_error(
-          status as integer,
-          operation.kind == PROCESS_READ_STDOUT and
-              "process.stdout.read" or "process.stderr.read", nil)
-      start_pipe_close(pipe)
-      task.current_request = nil
-      return DriveControl.new(DRIVE_ERROR,
-                              pipe_control.read_error, "", nil)
-    end
-    pipe_control.read_active = true
     task.operation = pipe
     task.state = TASK_WAITING
     return nil
@@ -3685,28 +3722,26 @@ local function advance_tcp_output(tcp: uv_tcp_t,
   return nil
 end
 
-local function stop_tcp_read(tcp: uv_tcp_t, deliver_eof: boolean)
+local function start_tcp_read(tcp: uv_tcp_t): integer
+  local status = shim.titan_uvshim_tcp_read_start(tcp.handle)
+  if (status as integer) >= 0 then tcp.metadata.read_active = true end
+  return status as integer
+end
+
+local function start_pipe_read(pipe: uv_pipe_t): integer
+  local status = shim.titan_uvshim_pipe_read_start(pipe.handle)
+  if (status as integer) >= 0 then pipe.metadata.read_active = true end
+  return status as integer
+end
+
+local function stop_tcp_read(tcp: uv_tcp_t, discard_queue: boolean)
   local control = tcp.metadata
   if control.read_active then
     shim.titan_uvshim_tcp_read_stop(tcp.handle)
     control.read_active = false
   end
-  local waiter? = control.read_waiter
-  local epoch = control.read_epoch
-  control.read_waiter = nil
-  control.read_epoch = 0
   control.read_bytes = nil
-  tcp.buffer = nil
-  if deliver_eof and control.read_terminal == TCP_READ_OPEN then
-    control.read_terminal = TCP_READ_EOF
-  end
-  if deliver_eof and waiter then
-    local task = waiter
-    if task.state == TASK_WAITING and not task.cancel_requested and
-        task.epoch == epoch then
-      schedule_task_drive(task, epoch, DRIVE_RESUME, nil, "", nil)
-    end
-  end
+  if discard_queue then control.read_queue = {} end
 end
 
 local function close_accepted_queue(server: uv_tcp_t)
@@ -3741,7 +3776,19 @@ local function request_tcp_close(tcp: uv_tcp_t)
   if control.server then
     stop_server_accept(tcp)
   else
-    stop_tcp_read(tcp, true)
+    stop_tcp_read(tcp, false)
+    local waiter? = control.read_waiter
+    local epoch = control.read_epoch
+    control.read_waiter = nil
+    control.read_epoch = 0
+    if waiter then
+      local task = waiter
+      if task.state == TASK_WAITING and not task.cancel_requested and
+          task.epoch == epoch then
+        schedule_task_drive(task, epoch, DRIVE_ERROR,
+                            "cannot read from a closed Connection", "", nil)
+      end
+    end
   end
   if not control.output_current and not control.output_head and
       not control.connect_pending then
@@ -3786,22 +3833,8 @@ local function arm_net_request(task: Task, request: Request): Error?
   local tcp = operation.tcp
   local control = tcp.metadata
   if operation.kind == NET_READ then
-    local bytes = allocate_bytes(operation.maximum)
     control.read_waiter = task
     control.read_epoch = request.generation
-    control.read_bytes = bytes
-    tcp.buffer = bytes.storage
-    local status = shim.titan_uvshim_tcp_read_start(tcp.handle)
-    if (status as integer) < 0 then
-      control.read_waiter = nil
-      control.read_epoch = 0
-      control.read_bytes = nil
-      tcp.buffer = nil
-      task.current_request = nil
-      return make_error(status as integer, "net.read",
-                        net_operation_subject(operation))
-    end
-    control.read_active = true
     task.operation = tcp
     task.state = TASK_WAITING
     return nil
@@ -4106,6 +4139,15 @@ local function connect_dispatch_body(owner: uv_connect_t, result: integer)
   local operation = control.operation
   local tcp = operation.tcp
   if result >= 0 and net_operation_deliverable(operation) then
+    local read_status = start_tcp_read(tcp)
+    if read_status < 0 then
+      operation.last_error = make_error(
+          read_status, "net.read.start", net_operation_subject(operation))
+      operation.address_index = operation.addresses.count
+      start_tcp_close(tcp)
+      retire_net_control(control)
+      return
+    end
     tcp.metadata.lifecycle = TCP_CONNECTION
     tcp.metadata.server = false
     tcp.metadata.setup_operation = nil
@@ -4209,38 +4251,76 @@ catch
   return
 end
 
+local function tcp_alloc_dispatch(tcp: uv_tcp_t, size: libuv.size_t,
+                                  pointer: ffi.titan_ffi_void_ptr)
+  local control = tcp.metadata
+  if control.read_bytes then raise internal_error("net.read.alloc.pending") end
+  local bytes = allocate_stream_bytes(size)
+  control.read_bytes = bytes
+  shim.titan_uvshim_buf_init(pointer, bytes.data, size)
+end
+
 local function tcp_read_dispatch(tcp: uv_tcp_t, result: integer)
   local control = tcp.metadata
-  if result == 0 then return end
+  if result == 0 then
+    control.read_bytes = nil
+    return
+  end
   local waiter? = control.read_waiter
   local epoch = control.read_epoch
   local bytes? = control.read_bytes
-  control.read_waiter = nil
-  control.read_epoch = 0
-  local payload: string? = nil
-  local failure: Error? = nil
   if result < 0 then
-    if result ~= UV_EOF then
-      failure = make_error(result, "net.read", "connection")
-      control.read_error = failure
+    if control.read_active then
+      shim.titan_uvshim_tcp_read_stop(tcp.handle)
+      control.read_active = false
     end
-  else
-    -- Keep both the control and native owner buffer roots through conversion.
-    payload = bytes_string(bytes, result)
-  end
-  control.read_bytes = nil
-  tcp.buffer = nil
-  if waiter then
-    local task = waiter
-    if task.state == TASK_WAITING and not task.cancel_requested and
-        task.epoch == epoch then
-      if failure then
-        drive_task(task, DRIVE_ERROR, failure, "")
-      else
-        drive_task(task, DRIVE_RESUME, payload, "")
+    control.read_bytes = nil
+    control.read_waiter = nil
+    control.read_epoch = 0
+    if result == UV_EOF then
+      control.read_terminal = TCP_READ_EOF
+      if waiter then
+        local task = waiter
+        if task.state == TASK_WAITING and not task.cancel_requested and
+            task.epoch == epoch then
+          drive_task(task, DRIVE_RESUME, nil, "")
+        end
+      end
+    else
+      control.read_terminal = TCP_READ_ERROR
+      local failure = make_error(result, "net.read", "connection")
+      control.read_error = failure
+      start_tcp_close(tcp)
+      if waiter then
+        local task = waiter
+        if task.state == TASK_WAITING and not task.cancel_requested and
+            task.epoch == epoch then
+          drive_task(task, DRIVE_ERROR, failure, "")
+        end
       end
     end
+    return
   end
+
+  if not bytes then raise internal_error("net.read.missing.allocation") end
+  local bytes = bytes
+  if waiter then
+    local task = waiter
+    control.read_waiter = nil
+    control.read_epoch = 0
+    if task.state == TASK_WAITING and not task.cancel_requested and
+        task.epoch == epoch then
+      local payload = bytes_string(bytes, result)
+      control.read_bytes = nil
+      drive_task(task, DRIVE_RESUME, payload, "")
+      return
+    end
+  end
+  control.read_waiter = nil
+  control.read_epoch = 0
+  bytes.length = result
+  control.read_queue[#control.read_queue + 1] = bytes
+  control.read_bytes = nil
 end
 
 local function server_callback_failure(server: uv_tcp_t, failure: Error)
@@ -4286,26 +4366,48 @@ local function tcp_connection_dispatch(server: uv_tcp_t, result: integer)
   local control = server.metadata
   local waiter? = control.accept_waiter
   local epoch = control.accept_epoch
+  local recipient: Task? = nil
   if waiter then
     local task = waiter
-    control.accept_waiter = nil
-    control.accept_epoch = 0
     if task.state == TASK_WAITING and not task.cancel_requested and
         task.epoch == epoch then
-      drive_task(task, DRIVE_RESUME, client, "")
-      return
+      recipient = task
+    else
+      control.accept_waiter = nil
+      control.accept_epoch = 0
     end
   end
-  if not enqueue_accepted(server, client) then
+  if not recipient and control.accept_count >= control.accept_capacity then
     start_tcp_close(client)
+    return
+  end
+  local read_status = start_tcp_read(client)
+  if read_status < 0 then
+    start_tcp_close(client)
+    server_callback_failure(server,
+        make_error(read_status, "net.accept.read.start", "server"))
+    return
+  end
+  if recipient then
+    control.accept_waiter = nil
+    control.accept_epoch = 0
+    drive_task(recipient, DRIVE_RESUME, client, "")
+  elseif not enqueue_accepted(server, client) then
+    -- Capacity was checked before initialization and callbacks are serial, so
+    -- reaching this branch indicates an internal queue invariant failure.
+    start_tcp_close(client)
+    raise internal_error("net.accept.queue")
   end
 end
 
 local function tcp_dispatch_body(owner: uv_tcp_t, event_kind: integer,
-                                 result: integer)
+                                 result: integer, size: libuv.size_t,
+                                 pointer: ffi.titan_ffi_void_ptr)
   local control = owner.metadata
   if event_kind == EVENT_HANDLE_CLOSE then
     finish_closed_tcp(owner)
+  elseif event_kind == EVENT_STREAM_ALLOC then
+    tcp_alloc_dispatch(owner, size, pointer)
   elseif event_kind == EVENT_STREAM_READ then
     tcp_read_dispatch(owner, result)
   elseif event_kind == EVENT_CONNECTION then
@@ -4318,25 +4420,22 @@ local function tcp_dispatch_body(owner: uv_tcp_t, event_kind: integer,
 end
 
 local function tcp_dispatch(owner: uv_tcp_t, event_kind: integer,
-                            result: integer, _size: libuv.size_t,
-                            _pointer: ffi.titan_ffi_void_ptr)
+                            result: integer, size: libuv.size_t,
+                            pointer: ffi.titan_ffi_void_ptr)
   if event_kind == EVENT_HANDLE_CLOSE then
     owner.metadata.lifecycle = TCP_CLOSED
-  elseif event_kind == EVENT_STREAM_READ and result ~= 0 then
-    if owner.metadata.read_active then
-      shim.titan_uvshim_tcp_read_stop(owner.handle)
-      owner.metadata.read_active = false
-    end
-    if result < 0 then
-      if result == UV_EOF then
-        owner.metadata.read_terminal = TCP_READ_EOF
-      else
-        owner.metadata.read_terminal = TCP_READ_ERROR
-      end
-    end
   end
-  tcp_dispatch_body(owner, event_kind, result)
+  tcp_dispatch_body(owner, event_kind, result, size, pointer)
 catch
+  -- A failed alloc callback returns the shim's NULL/zero descriptor. libuv's
+  -- Unix stream path must then issue UV_ENOBUFS through read_cb; stopping here
+  -- would clear that callback before libuv calls it.
+  if event_kind ~= EVENT_STREAM_ALLOC and
+      owner.metadata.read_active and owner.handle ~= nil then
+    shim.titan_uvshim_tcp_read_stop(owner.handle)
+    owner.metadata.read_active = false
+  end
+  owner.metadata.read_bytes = nil
   if not owner.metadata.runtime.fatal then
     owner.metadata.runtime.fatal = true
     owner.metadata.runtime.closing = true
@@ -4365,7 +4464,7 @@ end
 
 local function finish_process_control(control: ProcessControl)
   if not control.linked or not process_all_native_closed(control) then return end
-  if not control.exit_seen then
+  if control.spawn_operation then
     local operation? = control.spawn_operation
     local failure = control.pending_failure
     retire_unpublished_process(control)
@@ -4462,41 +4561,83 @@ catch
   return
 end
 
-local function pipe_read_dispatch(pipe: uv_pipe_t, result: integer)
-  if result == 0 then return end
+local function pipe_alloc_dispatch(pipe: uv_pipe_t, size: libuv.size_t,
+                                   pointer: ffi.titan_ffi_void_ptr)
   local control = pipe.metadata
+  if control.read_bytes then
+    raise internal_error("process.read.alloc.pending")
+  end
+  local bytes = allocate_stream_bytes(size)
+  control.read_bytes = bytes
+  shim.titan_uvshim_buf_init(pointer, bytes.data, size)
+end
+
+local function pipe_read_dispatch(pipe: uv_pipe_t, result: integer)
+  local control = pipe.metadata
+  if result == 0 then
+    control.read_bytes = nil
+    return
+  end
   local waiter? = control.read_waiter
   local epoch = control.read_epoch
   local bytes? = control.read_bytes
-  if not waiter and not bytes then return end
-  control.read_waiter = nil
-  control.read_epoch = 0
-  local payload: string? = nil
-  local failure: Error? = nil
   if result < 0 then
-    if result ~= UV_EOF then
+    if control.read_active then
+      shim.titan_uvshim_pipe_read_stop(pipe.handle)
+      control.read_active = false
+    end
+    control.read_bytes = nil
+    control.read_waiter = nil
+    control.read_epoch = 0
+    if result == UV_EOF then
+      control.read_terminal = TCP_READ_EOF
+      start_pipe_close(pipe)
+      if waiter then
+        local task = waiter
+        if task.state == TASK_WAITING and not task.cancel_requested and
+            task.epoch == epoch then
+          drive_task(task, DRIVE_RESUME, nil, "")
+        end
+      end
+    else
+      control.read_terminal = TCP_READ_ERROR
       local operation = control.kind == PIPE_STDOUT and
                         "process.stdout.read" or "process.stderr.read"
-      failure = make_error(result, operation, nil)
+      local failure = make_error(result, operation, nil)
       control.read_error = failure
-    end
-  else
-    payload = bytes_string(bytes, result)
-  end
-  control.read_bytes = nil
-  pipe.buffer = nil
-  if result < 0 then start_pipe_close(pipe) end
-  if waiter then
-    local task = waiter
-    if task.state == TASK_WAITING and not task.cancel_requested and
-        task.epoch == epoch then
-      if failure then
-        drive_task(task, DRIVE_ERROR, failure, "")
-      else
-        drive_task(task, DRIVE_RESUME, payload, "")
+      start_pipe_close(pipe)
+      if waiter then
+        local task = waiter
+        if task.state == TASK_WAITING and not task.cancel_requested and
+            task.epoch == epoch then
+          drive_task(task, DRIVE_ERROR, failure, "")
+        end
       end
     end
+    return
   end
+
+  if not bytes then
+    raise internal_error("process.read.missing.allocation")
+  end
+  local bytes = bytes
+  if waiter then
+    local task = waiter
+    control.read_waiter = nil
+    control.read_epoch = 0
+    if task.state == TASK_WAITING and not task.cancel_requested and
+        task.epoch == epoch then
+      local payload = bytes_string(bytes, result)
+      control.read_bytes = nil
+      drive_task(task, DRIVE_RESUME, payload, "")
+      return
+    end
+  end
+  control.read_waiter = nil
+  control.read_epoch = 0
+  bytes.length = result
+  control.read_queue[#control.read_queue + 1] = bytes
+  control.read_bytes = nil
 end
 
 local function finish_pipe_close(pipe: uv_pipe_t)
@@ -4516,7 +4657,6 @@ local function finish_pipe_close(pipe: uv_pipe_t)
   end
   pipe.handle = nil
   pipe.storage = nil
-  pipe.buffer = nil
   control.owner = nil
   control.callback_aborted = false
   finish_process_control(control.process)
@@ -4531,36 +4671,34 @@ local function finish_pipe_close(pipe: uv_pipe_t)
 end
 
 local function pipe_dispatch_body(owner: uv_pipe_t, event_kind: integer,
-                                  result: integer)
+                                  result: integer, size: libuv.size_t,
+                                  pointer: ffi.titan_ffi_void_ptr)
   if event_kind == EVENT_HANDLE_CLOSE then
     finish_pipe_close(owner)
+  elseif event_kind == EVENT_STREAM_ALLOC then
+    pipe_alloc_dispatch(owner, size, pointer)
   elseif event_kind == EVENT_STREAM_READ then
     pipe_read_dispatch(owner, result)
   end
 end
 
 local function pipe_dispatch(owner: uv_pipe_t, event_kind: integer,
-                             result: integer, _size: libuv.size_t,
-                             _pointer: ffi.titan_ffi_void_ptr)
+                             result: integer, size: libuv.size_t,
+                             pointer: ffi.titan_ffi_void_ptr)
   if event_kind == EVENT_HANDLE_CLOSE then
     owner.metadata.lifecycle = PIPE_CLOSED
-  elseif event_kind == EVENT_STREAM_READ and result ~= 0 and
-         owner.metadata.read_waiter then
-    if owner.metadata.read_active then
-      shim.titan_uvshim_pipe_read_stop(owner.handle)
-      owner.metadata.read_active = false
-    end
-    if result < 0 then
-      if result == UV_EOF then
-        owner.metadata.read_terminal = TCP_READ_EOF
-      else
-        owner.metadata.read_terminal = TCP_READ_ERROR
-      end
-    end
   end
-  pipe_dispatch_body(owner, event_kind, result)
+  pipe_dispatch_body(owner, event_kind, result, size, pointer)
 catch
   owner.metadata.callback_aborted = true
+  -- Preserve read_cb after an alloc failure so libuv can report UV_ENOBUFS
+  -- for the shim's NULL/zero descriptor before the read side is stopped.
+  if event_kind ~= EVENT_STREAM_ALLOC and
+      owner.metadata.read_active and owner.handle ~= nil then
+    shim.titan_uvshim_pipe_read_stop(owner.handle)
+    owner.metadata.read_active = false
+  end
+  owner.metadata.read_bytes = nil
   if not owner.metadata.runtime.fatal then
     owner.metadata.runtime.fatal = true
     owner.metadata.runtime.closing = true
@@ -5036,7 +5174,7 @@ function _net_connect(host: string, port: integer): uv_tcp_t
     raise "TCP port must be between 0 and 65535"
   end
   local request = new_net_request(NET_CONNECT, host, port, 0,
-                                  nil, "", 0, false)
+                                  nil, "", false)
   return coroutine.yield(request, UV_TAG)
 end
 
@@ -5050,26 +5188,43 @@ function _net_listen(host: string, port: integer,
     raise "TCP listen backlog is not representable by libuv"
   end
   local request = new_net_request(NET_LISTEN, host, port, backlog,
-                                  nil, "", 0, false)
+                                  nil, "", false)
   return coroutine.yield(request, UV_TAG)
 end
 
-function _net_read(tcp: uv_tcp_t, max_bytes: integer): string?
-  ordinary_task()
-  if max_bytes <= 0 then raise "TCP read size must be positive" end
-  if max_bytes > UV_BUF_MAX then
-    raise "TCP read size exceeds the portable libuv buffer limit"
-  end
-  validate_tcp(tcp, "read from", false, false)
+function _net_read(tcp: uv_tcp_t): string?
+  local task = ordinary_task()
   local control = tcp.metadata
+  if control.runtime ~= task.runtime or
+      control.generation ~= task.runtime.generation then
+    raise "TCP resource belongs to a stale libuv Runtime"
+  end
+  if control.server then raise "read from requires a Connection" end
+  if #control.read_queue > 0 then
+    local payload = queued_bytes_string(control.read_queue)
+    control.read_queue = {}
+    return payload
+  end
   if control.read_terminal == TCP_READ_EOF then return nil end
   if control.read_terminal == TCP_READ_ERROR then raise control.read_error end
+  if control.close_requested or control.lifecycle == TCP_CLOSING or
+      control.lifecycle == TCP_CLOSED then
+    raise "cannot read from a closed Connection"
+  end
   if control.read_waiter then
     raise "Connection already has a waiting reader"
   end
   local request = new_net_request(NET_READ, nil, 0, 0,
-                                  tcp, "", max_bytes, false)
+                                  tcp, "", false)
   return coroutine.yield(request, UV_TAG)
+end
+
+function _net_read_error_is(tcp: uv_tcp_t, candidate: value): boolean
+  local control = tcp.metadata
+  if control.read_terminal ~= TCP_READ_ERROR or not control.read_error then
+    return false
+  end
+  return candidate == control.read_error
 end
 
 function _net_write(tcp: uv_tcp_t, data: string)
@@ -5083,7 +5238,7 @@ function _net_write(tcp: uv_tcp_t, data: string)
     raise "TCP write data exceeds the portable libuv buffer limit"
   end
   local request = new_net_request(NET_WRITE, nil, 0, 0,
-                                  tcp, data, 0, false)
+                                  tcp, data, false)
   coroutine.yield(request, UV_TAG)
 end
 
@@ -5097,7 +5252,7 @@ function _net_shutdown(tcp: uv_tcp_t)
     -- shutdown flag. Once visible, cancellation cannot detach the physical
     -- FIFO work and is delivered only after uv_shutdown completes.
     local request = new_net_request(NET_SHUTDOWN, nil, 0, 0,
-                                    tcp, "", 0, true)
+                                    tcp, "", true)
     tcp.metadata.shutdown_requested = true
     coroutine.yield(request, UV_TAG)
   finally
@@ -5107,9 +5262,9 @@ end
 
 function _net_accept(server: uv_tcp_t): uv_tcp_t
   ordinary_task()
-  validate_tcp(server, "accept on", true, false)
-  local control = server.metadata
+  local control = validate_tcp_identity(server, "accept on", true)
   if control.accept_error then raise control.accept_error end
+  validate_tcp_lifecycle(control, "accept on", false)
   if control.accept_count > 0 then
     local client = dequeue_accepted(server)
     return client
@@ -5118,7 +5273,7 @@ function _net_accept(server: uv_tcp_t): uv_tcp_t
     raise "Server already has a waiting accept Task"
   end
   local request = new_net_request(NET_ACCEPT, nil, 0, 0,
-                                  server, "", 0, false)
+                                  server, "", false)
   return coroutine.yield(request, UV_TAG)
 end
 
@@ -5130,7 +5285,7 @@ function _net_close(tcp: uv_tcp_t)
     local kind = NET_CLOSE
     if tcp.metadata.close_requested then kind = NET_CLOSE_WAIT end
     local request = new_net_request(kind, nil, 0, 0,
-                                    tcp, "", 0, true)
+                                    tcp, "", true)
     coroutine.yield(request, UV_TAG)
   finally
     cleanup_end()
@@ -5141,16 +5296,16 @@ function _net_is_closed(tcp: uv_tcp_t): boolean
   return tcp.metadata.lifecycle == TCP_CLOSED
 end
 
-function _net_find(haystack: string, needle: string): integer
+function _bytes_find(haystack: string, needle: string): integer
   return shim.titan_uvshim_bytes_find(
       haystack, #haystack, needle, #needle) as integer
 end
 
-function _net_slice(data: string, offset: integer,
-                    length: integer): string
+function _bytes_slice(data: string, offset: integer,
+                      length: integer): string
   if offset < 0 or length < 0 or offset > #data or
       length > #data - offset then
-    raise "network byte slice is out of range"
+    raise "byte slice is out of range"
   end
   local bytes = allocate_bytes(length)
   shim.titan_uvshim_bytes_slice_copy(bytes.data, data, offset, length)
@@ -5352,8 +5507,7 @@ function _os_process_wait(process: uv_process_t): (integer, integer)
   if control.wait_task then
     raise "Process already has a waiting Task"
   end
-  local request = new_process_request(PROCESS_WAIT, process, nil,
-                                      0, false)
+  local request = new_process_request(PROCESS_WAIT, process, nil, false)
   local result: ProcessExitResult = coroutine.yield(request, UV_TAG)
   return result.code, result.signal_number
 end
@@ -5391,7 +5545,7 @@ function _os_process_write_stdin(process: uv_process_t, data: string)
   -- can detach a Task without invalidating submitted native storage.
   local bytes = copy_bytes(data)
   local request = new_process_request(PROCESS_WRITE_STDIN,
-      process, pipe, 0, false)
+      process, pipe, false)
   local operation: ProcessOperation = request.subject
   operation.copied_bytes = bytes
   coroutine.yield(request, UV_TAG)
@@ -5410,7 +5564,7 @@ function _os_process_close_stdin(process: uv_process_t)
     -- Construct the cleanup Request before publishing the monotonic flag.
     -- Once visible, cancellation cannot revoke the ordered pipe close.
     local request = new_process_request(PROCESS_CLOSE_STDIN,
-        process, pipe, 0, true)
+        process, pipe, true)
     control.shutdown_requested = true
     coroutine.yield(request, UV_TAG)
   finally
@@ -5418,35 +5572,47 @@ function _os_process_close_stdin(process: uv_process_t)
   end
 end
 
-local function process_read(process: uv_process_t, kind: integer,
-                            maximum: integer): string?
+local function process_read(process: uv_process_t, kind: integer): string?
   ordinary_task()
   validate_process(process, "read from", true)
-  if maximum <= 0 then raise "process read size must be positive" end
-  if maximum > UV_BUF_MAX then
-    raise "process read size exceeds the portable libuv buffer limit"
-  end
   local pipe = process_pipe(process,
       kind == PROCESS_READ_STDOUT and PIPE_STDOUT or PIPE_STDERR)
   local control = pipe.metadata
+  if #control.read_queue > 0 then
+    local payload = queued_bytes_string(control.read_queue)
+    control.read_queue = {}
+    return payload
+  end
   if control.read_terminal == TCP_READ_EOF then return nil end
   if control.read_terminal == TCP_READ_ERROR then raise control.read_error end
+  if control.lifecycle == PIPE_CLOSING or
+      control.lifecycle == PIPE_CLOSED then
+    raise "cannot read from a closed Process pipe"
+  end
   if control.read_waiter then
     raise "process pipe already has a waiting reader"
   end
-  local request = new_process_request(kind, process, pipe,
-                                      maximum, false)
+  local request = new_process_request(kind, process, pipe, false)
   return coroutine.yield(request, UV_TAG)
 end
 
-function _os_process_read_stdout(process: uv_process_t,
-                                 maximum: integer): string?
-  return process_read(process, PROCESS_READ_STDOUT, maximum)
+function _os_process_read_stdout(process: uv_process_t): string?
+  return process_read(process, PROCESS_READ_STDOUT)
 end
 
-function _os_process_read_stderr(process: uv_process_t,
-                                 maximum: integer): string?
-  return process_read(process, PROCESS_READ_STDERR, maximum)
+function _os_process_read_stderr(process: uv_process_t): string?
+  return process_read(process, PROCESS_READ_STDERR)
+end
+
+function _os_process_read_error_is(process: uv_process_t,
+                                   stdout: boolean,
+                                   candidate: value): boolean
+  local pipe = process_pipe(process, stdout and PIPE_STDOUT or PIPE_STDERR)
+  local control = pipe.metadata
+  if control.read_terminal ~= TCP_READ_ERROR or not control.read_error then
+    return false
+  end
+  return candidate == control.read_error
 end
 
 local function wake_helper_group(group: HelperGroup)
@@ -5498,16 +5664,16 @@ local function read_process_output(process: uv_process_t,
   local chunks: {string} = {}
   local chunk: string? = nil
   if stdout then
-    chunk = _os_process_read_stdout(process, 65536)
+    chunk = _os_process_read_stdout(process)
   else
-    chunk = _os_process_read_stderr(process, 65536)
+    chunk = _os_process_read_stderr(process)
   end
   while chunk do
     chunks[#chunks + 1] = chunk
     if stdout then
-      chunk = _os_process_read_stdout(process, 65536)
+      chunk = _os_process_read_stdout(process)
     else
-      chunk = _os_process_read_stderr(process, 65536)
+      chunk = _os_process_read_stderr(process)
     end
   end
   -- Pairwise joining keeps total copying logarithmic in the number of chunks
@@ -5623,8 +5789,7 @@ local function cancel_helper_group(group: HelperGroup, reason: value)
 end
 
 local function dispose_process_cleanup(process: uv_process_t)
-  local request = new_process_request(PROCESS_DISPOSE, process, nil,
-                                      0, true)
+  local request = new_process_request(PROCESS_DISPOSE, process, nil, true)
   coroutine.yield(request, UV_TAG)
 end
 
@@ -5905,7 +6070,7 @@ local function begin_tcp_shutdown(runtime: Runtime)
         to_shutdown.accept_epoch = 0
         close_accepted_queue(tcp)
       else
-        stop_tcp_read(tcp, false)
+        stop_tcp_read(tcp, true)
       end
       start_tcp_close(tcp)
       if not to_shutdown.output_current then
@@ -5953,6 +6118,12 @@ end
 local function begin_process_shutdown(runtime: Runtime)
   local control? = runtime.process_head
   while control do
+    if control.stdout_pipe then
+      control.stdout_pipe.metadata.read_queue = {}
+    end
+    if control.stderr_pipe then
+      control.stderr_pipe.metadata.read_queue = {}
+    end
     if control.lifecycle == PROCESS_ALLOCATED then
       if control.owner then
         discard_process_storage(control.owner)
@@ -6333,6 +6504,7 @@ do
   UV_BUF_MAX = shim.titan_uvshim_buf_max_length() as integer
   EVENT_TIMER = shim.TITAN_UV_EVENT_TIMER as integer
   EVENT_HANDLE_CLOSE = shim.TITAN_UV_EVENT_HANDLE_CLOSE as integer
+  EVENT_STREAM_ALLOC = shim.TITAN_UV_EVENT_STREAM_ALLOC as integer
   EVENT_STREAM_READ = shim.TITAN_UV_EVENT_STREAM_READ as integer
   EVENT_CONNECTION = shim.TITAN_UV_EVENT_CONNECTION as integer
   EVENT_PROCESS_EXIT = shim.TITAN_UV_EVENT_PROCESS_EXIT as integer

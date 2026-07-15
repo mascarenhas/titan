@@ -73,6 +73,14 @@ fairness turn on this path. `timer.yield()` is the explicit way to cede one
 event-loop turn. CPU-heavy code that never performs an asynchronous operation
 blocks the loop just as CPU-heavy code in a conventional callback would.
 
+Stream reads use this direct handoff without a ready queue: a positive read
+callback clears the current waiter and resumes its yielded call with the binary
+payload, while EOF resumes it with `nil` and an error is raised in that Task.
+The resumed continuation may install the next waiter before the callback
+returns. Callbacks that wake a different Task because another Task explicitly
+closed a stream use the scheduled-drive path instead of nesting a second Task
+drive.
+
 All UV Tasks in one Lua state use one private coroutine tag. A UV yield can
 therefore cross nested Titan coroutines that use other tags and return control
 to the UV scheduler.
@@ -127,8 +135,13 @@ Networking uses the same separation. A queued write can be removed, while
 cancelling an active write is logical: its native callback still owns cleanup
 and cannot deliver the stale result. The first `Connection:shutdown()` is
 cleanup-shielded through its `uv_shutdown` callback; repeated calls are
-idempotent. Explicit close rejects new work and stops reads, but serializes the
-native handle close behind already submitted and queued FIFO output.
+idempotent. Connected and accepted streams start reading during initialization
+and retain GC-owned chunks continuously, even without a waiter. Cancelling a
+read detaches only that waiter and leaves the physical read active; explicit
+close stops the read side, rejects new output or blocking read waits, and
+serializes the native handle close behind already submitted and queued FIFO
+output. Already completed read chunks remain drainable before closed-stream
+state is reported.
 
 Child-process stdio follows the same callback-ownership rule without treating
 an anonymous pipe like a socket. Cancelling a queued stdin write removes it;
@@ -136,7 +149,9 @@ a submitted write remains rooted through its callback. `Process:close_stdin()`
 is a cleanup-shielded FIFO close behind earlier writes and uses the pipe's
 `uv_close` callback, not `uv_shutdown`. Cancelling a process wait only frees
 that waiter: it does not signal the child, and another Task can wait for the
-retained exit status.
+retained exit status. Stdout and stderr begin continuous reads after successful
+spawn, use independent reader locks and queues, and likewise detach only a
+cancelled waiter while continuing to drain the pipe.
 
 `os.communicate` owns four pre-observed helper Tasks for stdin, stdout, stderr,
 and exit. They run concurrently, so large bidirectional traffic cannot
