@@ -78,6 +78,13 @@ describe("flexible return schemas (typechecker)", function()
         assert.match("flexible return cannot have type nil", errs[1])
     end)
 
+    it("locates an unresolved nominal tail at its own annotation", function()
+        local errs = check_errs("function bad(): (...: Missing)\nend")
+        assert.same(1, #errs)
+        assert.match("^%(spec%):1:23: type error: "
+            .. "invalid type 'test%.Missing' in type declaration$", errs[1])
+    end)
+
     it("uses return-specific diagnostics for foreign and unmapped tails", function()
         with_header([[
             typedef int ffi_int;
