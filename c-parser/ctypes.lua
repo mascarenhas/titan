@@ -516,26 +516,98 @@ local function is_void(param)
     return #param.type == 1 and param.type[1] == "void"
 end
 
-local get_params = typed("TypeList, array -> array, boolean", function(lst, params_src)
+local function same_names(left, right)
+    if #left ~= #right then
+        return false
+    end
+    for i = 1, #left do
+        if left[i] ~= right[i] then
+            return false
+        end
+    end
+    return true
+end
+
+local function copy_names(names)
+    if names == false then
+        return false
+    end
+    local out = {}
+    for _, name in ipairs(names) do
+        table.insert(out, name)
+    end
+    return out
+end
+
+local function set_initial_paramnames(typ, paramnames)
+    typ.paramnames = copy_names(paramnames)
+    typ.paramnames_state = paramnames == false and "unknown" or "complete"
+end
+
+-- Parameter spellings are declaration metadata, not C type identity. Merge
+-- them only after the ordinary declaration types have compared equal. An
+-- incomplete prototype can be upgraded by a later complete one, while two
+-- different complete lists permanently poison the declaration's name API.
+local function merge_paramnames(previous, current)
+    local previous_state = previous.paramnames_state or
+        (previous.paramnames == false and "unknown" or "complete")
+    local current_state = current.paramnames_state or
+        (current.paramnames == false and "unknown" or "complete")
+
+    if previous_state == "conflicting" then
+        current.paramnames = false
+        current.paramnames_state = "conflicting"
+    elseif previous_state == "complete" then
+        if current_state == "complete"
+           and not same_names(previous.paramnames, current.paramnames) then
+            current.paramnames = false
+            current.paramnames_state = "conflicting"
+        else
+            current.paramnames = copy_names(previous.paramnames)
+            current.paramnames_state = "complete"
+        end
+    elseif current_state ~= "complete" then
+        current.paramnames = false
+        current.paramnames_state = "unknown"
+    end
+end
+
+local get_params = typed("TypeList, array, string? -> *, *, *", function(lst, params_src, paramstyle)
     local params = {}
     local vararg = false
+    local paramnames = {}
+    local seen_names = {}
+    local names_available = paramstyle ~= "oldstyle"
+        and (paramstyle == "prototype" or #params_src > 0)
 
     assert(not params_src.param)
 
     for _, param_src in ipairs(params_src) do
         if param_src == "..." then
             vararg = true
+        elseif type(param_src) == "string" then
+            return nil, "old-style function parameter lists are unsupported", false
         else
             local param, err = convert_value(lst, param_src.param)
             if not param then
-                return nil, err
+                return nil, err, false
             end
             if not is_void(param) then
                 table.insert(params, param)
+                if type(param.name) ~= "string" or param.name == ""
+                   or seen_names[param.name] then
+                    names_available = false
+                else
+                    table.insert(paramnames, param.name)
+                    seen_names[param.name] = true
+                end
             end
         end
     end
-    return params, vararg
+    if not names_available then
+        paramnames = false
+    end
+    return params, vararg, paramnames
 end)
 
 make_function_pointer_type = function(lst, name, spec, decl, pointer, idxs, ret_pointer)
@@ -543,11 +615,12 @@ make_function_pointer_type = function(lst, name, spec, decl, pointer, idxs, ret_
     if not ret_type then
         return nil, err
     end
-    local params, vararg = get_params(lst, decl.params)
+    local params, vararg, paramnames = get_params(lst, decl.params,
+        decl.paramstyle)
     if not params then
         return nil, vararg
     end
-    return typed.table("CType", {
+    local typ = typed.table("CType", {
         type = "functionptr",
         name = name,
         idxs = idxs,
@@ -558,6 +631,8 @@ make_function_pointer_type = function(lst, name, spec, decl, pointer, idxs, ret_
         vararg = vararg,
         pointer = pointer,
     })
+    set_initial_paramnames(typ, paramnames)
+    return typ
 end
 
 local register_many = function(register_item_fn, lst, ids, spec)
@@ -595,7 +670,8 @@ local register_decl_item = function(lst, id, spec)
             return false, err
         end
         if id.decl.params then
-            local params, vararg = get_params(lst, id.decl.params)
+            local params, vararg, paramnames = get_params(lst, id.decl.params,
+                id.decl.paramstyle)
             if not params then
                 return false, vararg
             end
@@ -609,6 +685,7 @@ local register_decl_item = function(lst, id, spec)
                 params = params,
                 vararg = vararg,
             })
+            set_initial_paramnames(typ, paramnames)
         else
             typ = typed.table("CType", {
                 type = ret_type,
@@ -621,6 +698,10 @@ local register_decl_item = function(lst, id, spec)
     if lst[name] then
         if not equal_declarations(lst[name], typ) then
             return false, "inconsistent declaration for " .. name .. " - " .. inspect(lst[name]) .. " VERSUS " .. inspect(typ)
+        end
+        if (typ.type == "function" or typ.type == "functionptr")
+           and (lst[name].type == "function" or lst[name].type == "functionptr") then
+            merge_paramnames(lst[name], typ)
         end
     end
     add_type(lst, name, typ)
@@ -639,6 +720,7 @@ local function register_function(lst, item)
         decl = {
             name = item.func.name,
             params = item.func.params,
+            paramstyle = item.func.paramstyle,
         }
     }
     return register_decl_item(lst, id, item.spec)

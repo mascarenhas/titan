@@ -49,6 +49,11 @@ Three layers provide it:
    `local` does not match the front of `localx`; and `lexer.NAME` is a
    match-time capture (`lpeg.Cmt`) that matches an identifier and then
    *fails* if it is a keyword — `andy`, `return17` and `_end` are NAMEs.
+   `lexer.NAMEDLABEL` is the narrow exception: it captures the same raw
+   identifier shape without the keyword rejection, but the parser references
+   it only before `=` inside a named-call list. It therefore accepts a C
+   parameter label such as `repeat` without making that spelling an ordinary
+   Titan name.
 
 2. **Symbols vs. longer symbols, generically.** A loop at the end of
    `lexer.lua` makes every symbol pattern subtract every longer symbol it is
@@ -220,9 +225,16 @@ it returns a *closure* from base expression to wrapped expression —
 `fold_suffixes` then applies the closures left to right, so `x()()[2]` builds
 `ExpVar(VarBracket(ExpCall(ExpCall(x))))` with correct nesting — left
 recursion (which PEGs cannot express) sidestepped without a rebuild loop.
-Call-argument sugar mirrors Lua's: `funcargs` accepts a parenthesized list, a
-constructor (`f {1, 2}`), or a bare string literal (`f "str"`), for both
-function and `o:m(...)` method forms.
+The four call closures preserve their delimiter and receiver choice:
+`suffix_funccall` and `suffix_methodcall` produce `ArgsFunc`/`ArgsMethod` from
+parentheses or a bare string, while `suffix_namedfunccall` and
+`suffix_namedmethodcall` produce `ArgsNamedFunc`/`ArgsNamedMethod` from
+`namedargs`. Bare braces are never `funcargs`; a positional constructor must be
+inside parentheses (`f({1, 2})`). `namedargs` accepts only
+`NAMEDLABEL '=' exp`, with constructor-style comma/semicolon separators and a
+trailing separator. The checker later normalizes a valid named node to its
+positional `Args*` counterpart; see
+[named-argument internals](named-arguments.md).
 
 ### Match-time predicates: lvalues and call statements
 

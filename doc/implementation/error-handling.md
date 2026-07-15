@@ -322,7 +322,7 @@ therefore not itself a stack-relocation hazard.
 
 ## ABI and search path
 
-The current compiled-module ABI is `0.12`. The error-handling control-flow
+The current compiled-module ABI is `0.13`. The error-handling control-flow
 machinery did not by itself require an ABI bump, but this branch also
 changed the `TitanVargX` structs from inline flexible-array backing
 objects to descriptor structs with an `args` pointer. That layout change
@@ -331,14 +331,16 @@ names stayed the same, so `0.9` and `0.10` modules must not be mixed.
 The later `0.11` ABI keeps those descriptors and additionally changes
 record-interface serialization for module-local records and record members.
 The `0.12` ABI keeps that layout and adds the public type-alias namespace to
-serialized module interfaces.
+serialized module interfaces. The `0.13` ABI adds formal-name metadata to the
+serialized module-function, method, and record-static descriptor constructors;
+the native function ABI is unchanged.
 
 The compiler and runtime therefore agree on:
 
-* `TITAN_VER "0.12"`
-* `TITAN_VER_SUFFIX "_0_12"`
-* versioned binary path variable `TITAN_PATH_0_12`
-* default binary path `.;<root>/lib/titan/0.12`, with `<root>` recovered from
+* `TITAN_VER "0.13"`
+* `TITAN_VER_SUFFIX "_0_13"`
+* versioned binary path variable `TITAN_PATH_0_13`
+* default binary path `.;<root>/lib/titan/0.13`, with `<root>` recovered from
   the Lua `PREFIX`'s `package.cpath` in the currently supported layout where
   that path also names the equal Titan `ROCKS_TREE`
 

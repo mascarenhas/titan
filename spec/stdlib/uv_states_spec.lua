@@ -65,7 +65,7 @@ describe("uv multiple Lua states", function()
             "-u", "LUA_CPATH",
             "-u", "LUA_PATH_5_5",
             "-u", "LUA_CPATH_5_5",
-            "TITAN_PATH_0_12=" ..
+            "TITAN_PATH_0_13=" ..
                 async_stdlib.module_root(async_stdlib.standard_dir()),
             "TITAN_PATH=",
             "LUA_PATH=" .. async_stdlib.repo .. "/?.lua;" ..

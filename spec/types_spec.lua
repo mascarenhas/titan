@@ -14,7 +14,7 @@ describe("Titan types", function()
 
     it("pretty-prints a method with one return type", function()
         local method = types.Method("sample.Box", "get",
-            {types.Integer()}, {types.String()}, false)
+            {types.Integer()}, {types.String()}, false, {"index"})
         assert.same("sample.Box:get(integer): string", types.tostring(method))
     end)
 
@@ -112,6 +112,59 @@ describe("Titan types", function()
         local s = types.serialize(nested)
         local rebuilt = load("return " .. s, "t", "t", types)()
         assert.truthy(types.equals(nested, rebuilt))
+    end)
+
+    it("round-trips callable declaration parameter names", function()
+        local ftype = types.Function(
+            {types.Integer(), types.String()}, {types.Boolean()}, false, false)
+        local member = types.ModuleMember(
+            "sample", "choose", ftype, {"repeat", "label"})
+        local rebuilt = load(
+            "return " .. types.serialize(member), "t", "t", types)()
+
+        assert.same({"repeat", "label"}, rebuilt.paramnames)
+        assert.truthy(types.equals(ftype, rebuilt.type))
+    end)
+
+    it("distinguishes known-empty and unavailable declaration names", function()
+        local ftype = types.Function({}, {}, false, false)
+        local known = types.ModuleMember("sample", "known", ftype, {})
+        local unavailable = types.ModuleMember(
+            "sample", "unavailable", ftype, false)
+
+        local rebuilt_known = load(
+            "return " .. types.serialize(known), "t", "t", types)()
+        local rebuilt_unavailable = load(
+            "return " .. types.serialize(unavailable), "t", "t", types)()
+
+        assert.same({}, rebuilt_known.paramnames)
+        assert.is_false(rebuilt_unavailable.paramnames)
+    end)
+
+    it("round-trips record method and static parameter names", function()
+        local int = types.Integer()
+        local method = types.Method("sample.Box", "move",
+            {int, int}, {}, false, {"dx", "dy"})
+        local static = types.StaticMethod("sample.Box", "new",
+            {int, int}, {types.Nominal("sample.Box")}, false, {"x", "y"})
+        local record = types.Record("sample.Box", {},
+            {new = static}, {move = method}, 0)
+        local rebuilt = load(
+            "return " .. types.serialize(record), "t", "t", types)()
+
+        assert.same({"dx", "dy"}, rebuilt.methods.move.paramnames)
+        assert.same({"x", "y"}, rebuilt.functions.new.paramnames)
+    end)
+
+    it("keeps declaration names out of structural function identity", function()
+        local left = types.ModuleMember("sample", "f",
+            types.Function({types.Integer()}, {}, false, false), {"left"})
+        local right = types.ModuleMember("sample", "f",
+            types.Function({types.Integer()}, {}, false, false), {"right"})
+
+        assert.truthy(types.equals(left.type, right.type))
+        assert.equal(types.serialize(left.type), types.serialize(right.type))
+        assert.equal(types.tostring(left.type), types.tostring(right.type))
     end)
 
     it("reports nested function types as garbage collected", function()
@@ -236,7 +289,8 @@ describe("Titan types", function()
         it("detects C types nested inside type trees", function()
             assert.truthy(types.is_c(types.CPointer(cint(), {})))
             assert.truthy(types.is_c(types.Option(types.CPointer(cint(), {}))))
-            assert.truthy(types.is_c(types.ModuleMember("m", "x", types.CFloat("float"))))
+            assert.truthy(types.is_c(types.ModuleMember(
+                "m", "x", types.CFloat("float"), false)))
             assert.falsy(types.is_c(types.Function({types.Integer()}, {types.String()}, false, false)))
             assert.falsy(types.is_c(types.Function({types.CPointer(cint(), {})}, {}, false, false)))
             assert.truthy(types.first_c_ffi_type(

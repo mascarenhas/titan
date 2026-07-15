@@ -55,7 +55,7 @@ local function read_unlocked(connection: Connection): string?
     connection.excess = ""
     return result
   end
-  return uv._net_read(connection.handle)
+  return uv._net_read { tcp = connection.handle }
 end
 
 local function restore_chunks(connection: Connection, chunks: {string},
@@ -68,7 +68,8 @@ end
 function connect(host: string, port: integer): Connection
   check_host(host)
   check_connect_port(port)
-  return Connection.new(uv._net_connect(host, port), "", false)
+  return Connection.new(uv._net_connect { host = host, port = port },
+                        "", false)
 end
 
 function listen(host: string, port: integer,
@@ -76,7 +77,11 @@ function listen(host: string, port: integer,
   check_host(host)
   check_listen_port(port)
   if backlog <= 0 then raise "listen backlog must be positive" end
-  return Server.new(uv._net_listen(host, port, backlog))
+  return Server.new(uv._net_listen {
+    host = host,
+    port = port,
+    backlog = backlog,
+  })
 end
 
 function Connection:read(): string?
@@ -109,7 +114,8 @@ function Connection:read_until(delimiter: string,
         maybe_chunk = read_unlocked(self)
       catch
         if total > 0 and
-            uv._net_read_error_is(self.handle, error) then
+            uv._net_read_error_is { tcp = self.handle,
+                                    candidate = error } then
           terminal_error_tail = true
         else
           raise
@@ -131,23 +137,37 @@ function Connection:read_until(delimiter: string,
         count = count + 1
         chunks[count] = chunk
         local boundary = tail .. chunk
-        local match = uv._bytes_find(boundary, delimiter)
+        local match = uv._bytes_find {
+          haystack = boundary,
+          needle = delimiter,
+        }
         total = total + #chunk
         if match >= 0 then
           local match_end = total - #boundary + match + #delimiter
           local result_end = match_end
           if chop then result_end = result_end - #delimiter end
           local all = join_chunks(chunks, 1, count)
-          local selected = uv._bytes_slice(all, 0, result_end)
-          local remaining = uv._bytes_slice(all, match_end,
-                                            #all - match_end)
+          local selected = uv._bytes_slice {
+            data = all,
+            offset = 0,
+            length = result_end,
+          }
+          local remaining = uv._bytes_slice {
+            data = all,
+            offset = match_end,
+            length = #all - match_end,
+          }
           result = selected
           self.excess = remaining .. self.excess
           finished = true
         else
           local keep = #delimiter - 1
           if keep > #boundary then keep = #boundary end
-          tail = uv._bytes_slice(boundary, #boundary - keep, keep)
+          tail = uv._bytes_slice {
+            data = boundary,
+            offset = #boundary - keep,
+            length = keep,
+          }
         end
       end
     end
@@ -161,21 +181,21 @@ function Connection:read_until(delimiter: string,
 end
 
 function Connection:write(data: string)
-  uv._net_write(self.handle, data)
+  uv._net_write { tcp = self.handle, data = data }
 end
 
 function Connection:shutdown()
-  uv._net_shutdown(self.handle)
+  uv._net_shutdown { tcp = self.handle }
 end
 
 function Connection:close()
-  uv._net_close(self.handle)
+  uv._net_close { tcp = self.handle }
 end
 
 function Server:accept(): Connection
-  return Connection.new(uv._net_accept(self.handle), "", false)
+  return Connection.new(uv._net_accept { server = self.handle }, "", false)
 end
 
 function Server:close()
-  uv._net_close(self.handle)
+  uv._net_close { tcp = self.handle }
 end

@@ -123,7 +123,9 @@ The same adjustment applies to methods, record static functions
 (including the compiler-synthesized `Rec.new` constructor), imported
 Titan functions, anonymous functions, and calls through function-typed
 values. Foreign C functions keep C-style arity: Titan does not invent
-missing C arguments.
+missing C arguments in a parenthesized positional call. A supported named
+direct-C call may omit a fixed parameter whose Titan-visible type accepts
+`nil`; see [Named arguments](named-arguments.md#matching-checking-and-omission).
 
 **Titan callers are checked at compile time.** Once missing positions
 have been filled with `nil`, each argument is coerced and checked against
@@ -157,6 +159,35 @@ print(pcall(m.fma, 2.0, 3.0, 1.0, 0.0)) --> false   calling Titan function fma w
 The adjustment rule is only for function arguments. `return`, multiple
 assignment and multiple declaration still require the exact number of
 values in fixed-arity contexts — see the next section.
+
+## Named calls
+
+A direct declaration can also be called with a brace-delimited named list:
+
+```lua
+function clamp(x: integer, lo: integer, hi: integer): integer
+    if x < lo then return lo elseif x > hi then return hi else return x end
+end
+
+local function use_clamp(): integer
+    local y = clamp { hi = 10, x = 17, lo = 0 }
+    return y
+end
+```
+
+Names are matched to formal positions, so they may be written in any order.
+An omitted formal receives the same synthesized `nil` and type check described
+above. Explicit expressions are nevertheless evaluated left to right as
+written, and each named item contributes exactly one value.
+
+Named syntax is available for direct Titan functions, record functions, and
+methods, plus direct fixed-arity C functions whose prototypes publish complete
+parameter names. It is not available through a function value, anonymous
+function, bound-method value, or C function pointer, and it is rejected for
+variadic functions. Bare braces always select this form; write
+`consume({ x = 1 })` to pass one constructor positionally. See
+[Named arguments](named-arguments.md) for the full syntax, eligibility table,
+evaluation order, FFI metadata rules, and Lua boundary.
 
 ## Multiple return values
 
@@ -294,6 +325,11 @@ record fields, stored in arrays (`{(integer) -> integer}`) and maps,
 returned, and passed across the Lua boundary in both directions. (Indexing
 an array or map of functions yields an option `T?`; calling it directly,
 `fns[i](x)`, auto-unwraps with a runtime nil-check.)
+
+Parameter names are not part of a function value's type. Named-call syntax is
+therefore available only while the callee is reached as a direct declaration;
+storing the same function in a variable keeps it callable positionally but
+does not carry its formal names with the value.
 
 **Calling a function value** has two paths, chosen automatically. When the
 value is a Titan function whose type is *exactly* the call's static type,

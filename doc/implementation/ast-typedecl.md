@@ -228,7 +228,7 @@ to use it as an expression.
 | `ExpNil` | — | |
 | `ExpBool`, `ExpInteger`, `ExpFloat`, `ExpString` | `value` | literal values, already decoded by the lexer |
 | `ExpInitList` | `fields` | `{...}` constructors: arrays, maps, records |
-| `ExpCall` | `exp`, `args` | `args` is an `ArgsFunc` or `ArgsMethod` |
+| `ExpCall` | `exp`, `args` | parser output may carry any of the four `Args*` forms below; successful named calls are normalized before codegen |
 | `ExpVar` | `var` | |
 | `ExpUnop` | `op`, `exp` | `op` ∈ `"not"`, `"#"`, `"-"`, `"~"` |
 | `ExpBinop` | `lhs`, `op`, `rhs` | `op` is the literal operator string (`"+"`, `"=="`, `"and"`, ...) |
@@ -248,7 +248,9 @@ Two of these never come from the programmer directly:
 * **`ExpExtra`** is created by the checker wherever a multi-return call
   is the last item of a list whose remaining slots it fills:
   `StatDecl`/`StatAssign` right-hand sides, `StatReturn` lists, call
-  argument lists, and array initializers. For `local a, b = f()` the
+  positional argument lists, and array initializers. A named argument is
+  always one value and never gets this trailing expansion. For
+  `local a, b = f()` the
   checker appends `ExpExtra(loc, <the ExpCall>, 2, <type of value 2>)`
   to `node.exps`. Its `_type` is a *positional constructor field* — the
   only underscore-prefixed decoration declared in `ast.lua` itself —
@@ -264,15 +266,28 @@ emits conversions **only** from `ExpCast` nodes — see
 
 ### Call arguments and constructor fields
 
-`ArgsFunc {args}` and `ArgsMethod {method, args}` (`method` is the name
-string after `:`). `Field {name, exp}` is one entry of an
-`ExpInitList`, and `name` encodes the three field forms:
+`ArgsFunc {args}` and `ArgsMethod {method, args}` (`method` is the name string
+after `:`) are positional. The parser's brace-delimited call paths produce
+`ArgsNamedFunc {fields}` and `ArgsNamedMethod {method, fields}` instead. The
+checker uses those tags to enforce declaration provenance and label matching,
+then replaces a successful named node with `ArgsFunc`/`ArgsMethod` carrying a
+dense formal-order list. See
+[named-argument internals](named-arguments.md).
+
+`Field {name, exp}` is one named-call entry or one entry of an `ExpInitList`.
+For a named call, `name` is always a raw label string. In an initializer it
+encodes three field forms:
 
 | Source form | `name` |
 | --- | --- |
 | `exp` (positional) | `false` |
 | `name = exp` | the name string |
 | `[keyexp] = exp` | the key *expression node* |
+
+At the semantic-type layer, `Type.ModuleMember`, `Type.Method`, and
+`Type.StaticMethod` carry a `paramnames` declaration-metadata field. Structural
+`Type.Function` and `Type.CFunction` deliberately do not: parameter spellings
+must not affect type equality, compatible function values, or native tags.
 
 ## Decorations: who writes what, who reads it
 
@@ -291,7 +306,10 @@ of these are declared anywhere; this table is the inventory.
 | `_self` | `TopLevelMethod` | checker (`checkmethod`) | checker, coder | a synthesized `Ast.Decl` for `self`, typed as the record's nominal type; becomes the C parameter `__self__` |
 | `_record` | `TopLevelStatic`, `TopLevelMethod` | checker pass 1 | checker (`checkmethod`, for `self`'s type) | the `Ast.TopLevelRecord` node the member belongs to |
 | `_method` | `ExpCall` (method calls) | checker | coder | the resolved `Type.Method` |
-| `_field` | `Field` (record constructors) | checker | coder | the resolved `Type.Field` descriptor; its `index` is the record `Udata` user-value slot (`uv[index].uv`) the field occupies |
+| `_paramnames` | `TopLevelFunc` | checker pass 1 | checker, module-interface builder | dense names of fixed declared parameters; kept on the declaration rather than `Type.Function` |
+| `_named_arg_order`, `_named_call_kind` | checked named `ExpCall` | checker | coder | formal indexes of explicit expressions in lexical order, plus `"titan"` or `"foreign"`; the `Args*` payload itself has already been normalized to formal order |
+| `_named_omitted` | synthesized nil fill in a named call or record constructor | checker | coder assertions for named calls; specs | distinguishes checked omissions from explicit expressions while source-order lowering runs first |
+| `_field` | `Field` (record constructors) | checker | coder | the resolved `Type.Field` descriptor; its `index` is the record `Udata` user-value slot (`uv[index].uv`) the field occupies, including synthesized omitted fields |
 | `_forcontrol` | `Decl` | checker | checker | marks numeric and generic `for` control variables as read-only assignment targets |
 | `_tuple_decls` | `StatForIn` | checker | coder | four hidden `Decl`s for iterator, state, initial control and close slots |
 | `_result_decls` | `StatForIn` | checker | coder | hidden `Decl`s for the iterator return tuple, reused by the initial and update calls |

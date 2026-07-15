@@ -6,7 +6,8 @@ and emits direct C expressions in `coder.lua`. The generated translation unit
 includes the same header, so the host C compiler sees the real prototypes; the
 Lua-side pipeline exists to typecheck Titan source before code generation.
 
-For user-facing behavior see [the C FFI](../language/ffi.md).
+For user-facing behavior see [the C FFI](../language/ffi.md) and
+[Named arguments](../language/named-arguments.md).
 
 ## Import Pipeline
 
@@ -93,6 +94,8 @@ through the same normal compiler path.
 * flexible array members are marked with `flexible_array = true`;
 * function-pointer typedefs are represented as `functionptr` CTypes;
 * header-defined `static` functions are imported like ordinary C functions;
+* function declarators preserve `paramstyle` (`prototype` versus C old-style)
+  and an eligible complete list of fixed-parameter spellings;
 * simple enum values, including typedef-enum values, are stored on the enum
   type's `values` list.
 
@@ -100,6 +103,16 @@ Array extents and enum values are constant-folded when possible. Unknown but
 syntactically present extents are preserved rather than thrown away; the checker
 treats only numeric extents as known and rejects operations that require a known
 bound.
+
+`c99.lua` distinguishes a true `(void)` prototype from `()`: both have no
+effective parameter types, but only the former establishes a known empty name
+list. `ctypes.get_params` publishes `paramnames = { ... }` only when every
+effective non-void fixed parameter is named and the names are unique;
+otherwise it publishes `false`. Compatible redeclarations merge that
+declaration metadata after ordinary type equality: unknown can upgrade to
+complete, unknown cannot erase complete, and two differing complete lists
+permanently become `conflicting`/`false`. Parameter spellings therefore do not
+participate in C type identity.
 
 The C99 grammar remains non-reentrant because it uses a module-global typedef
 table, reset at the start of each parse. The preprocessor still has the older
@@ -124,6 +137,10 @@ CTypedef     = {"name", "target"}
 COwned       = {"pointee", "count"}
 CModule      = {"name", "members"}
 ```
+
+`CFunction` deliberately has no parameter-name field. Callback/function-pointer
+types remain structural; declaration spellings stay on raw CTypes until a
+direct foreign member is built.
 
 `types.resolve_c_typedef` unwraps `CTypedef` chains. `types.is_c` detects C
 value/type shapes but deliberately excludes `CModule`, since a C module is only
@@ -185,6 +202,9 @@ does **not** make a foreign function a Titan first-class function value.
 surrounding context asks for a compatible C function pointer. The pre-existing
 `vararg` boolean on `Type.Function` remains the marker for a C variadic
 function. It is distinct from Titan variadic functions, which use `varargtype`.
+The surrounding `Type.ModuleMember` separately copies the raw function CType's
+`paramnames` table or `false`; `foreigntypes.convert` does not put those names
+in the structural signature.
 
 C function pointer typedefs are represented as `CTypedef` targets that resolve
 to `CPointer(CFunction(...))`. `CFunction` is only a C function signature inside
@@ -222,6 +242,14 @@ The checker has FFI-specific handling in a few narrow places:
 * `Ast.ExpCall` also recognizes callees whose resolved type is
   `CPointer(CFunction(...))`. It checks arguments against the C function
   signature and records `_c_pointer_call` for codegen.
+* A brace-delimited call to a direct C module function uses the member's
+  declaration-only `paramnames`. The checker rejects C variadics, unavailable
+  name lists, C function pointers, and allocation pseudo-constructors. For an
+  eligible fixed declaration, it matches/checks explicit fields in lexical
+  order and synthesizes `nil` only for omitted C parameters whose converted
+  Titan-visible type passes `nil_can_adjust_to`. The resulting dense positional
+  list carries `_named_arg_order` and `_named_call_kind = "foreign"`; see
+  [named-argument internals](named-arguments.md).
 * `Ast.ExpVar` rejects foreign functions as Titan first-class values, but allows
   a foreign function name in a context whose target is a compatible C function
   pointer type. The node records `_foreign_function_pointer` so codegen can emit
@@ -275,6 +303,14 @@ objects decay to payload pointers when the target is a C pointer, and most
 known. A target C type of `TValue` is special: Titan passes the raw `TValue`
 struct by value, for private runtime helpers that already know how to preserve
 the owning Lua state and root any collectable payloads.
+
+For a checked named direct call, `codeforeigncall` freezes converted explicit
+arguments into target-typed C temporaries in `_named_arg_order`, then freezes
+synthetic omissions. It emits those temporary names in formal order in the C
+call. This prevents C's unspecified argument-evaluation order—and the
+name-to-position mapping itself—from reordering Titan effects. The path retains
+the positional implementation's post-call `mutable_out_anchor` refreshes for
+GC-bearing `TValue` out parameters.
 
 `codeforeignvar` emits a bare C variable or macro name. Reading a C scalar into
 Titan code keeps the C value type until a cast or context converts it. C arrays

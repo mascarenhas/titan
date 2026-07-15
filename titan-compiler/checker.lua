@@ -189,9 +189,11 @@ end
 -- from the fixed list and return its (validated) element type as the second
 -- value. `params` is the AST param list; this is the single place the signature
 -- pass + lambda checker turn the parser's vararg encoding into a `varargtype`.
---   returns (ptypes, varargtype) where varargtype is a type or false.
+--   returns (ptypes, varargtype, paramnames) where varargtype is a type or
+--   false and paramnames is the dense list of fixed declaration names.
 local function param_types(params, st, errors)
     local ptypes = {}
+    local paramnames = {}
     local varargtype = false
     local n = #params
     for i, pdecl in ipairs(params) do
@@ -200,9 +202,10 @@ local function param_types(params, st, errors)
                 typefromnode(pdecl.type, st, errors), pdecl.loc, errors)
         else
             table.insert(ptypes, typefromnode(pdecl.type, st, errors))
+            table.insert(paramnames, pdecl.name)
         end
     end
-    return ptypes, varargtype
+    return ptypes, varargtype, paramnames
 end
 
 -- Resolve the in-scope `...` for a `...`/`#...`/`...[e]` use. Returns the
@@ -2017,6 +2020,142 @@ local function checkargs(ftype, args, loc, fname, st, errors, allow_missing)
     end
 end
 
+-- Return the expressions carried by either positional or named call syntax.
+-- Named calls are normalized only after eligibility and per-name checking, so
+-- every error-recovery path must understand both payload shapes.
+local function call_argument_expressions(args)
+    if args._tag == "Ast.ArgsFunc" or args._tag == "Ast.ArgsMethod" then
+        return args.args
+    end
+    assert(args._tag == "Ast.ArgsNamedFunc"
+        or args._tag == "Ast.ArgsNamedMethod")
+    local exps = {}
+    for _, field in ipairs(args.fields) do
+        table.insert(exps, field.exp)
+    end
+    return exps
+end
+
+local function check_call_argument_expressions(args, st, errors)
+    for _, exp in ipairs(call_argument_expressions(args)) do
+        checkexp(exp, st, errors)
+    end
+end
+
+-- Named syntax is deliberately declaration-only. Structural function values
+-- do not carry parameter labels, so provenance -- not merely Type.Function --
+-- decides eligibility. Returns (paramnames, lowering_kind, recognized_ffi),
+-- where lowering_kind is "titan" or "foreign" and paramnames may be false for
+-- a direct foreign declaration whose prototypes did not publish one complete,
+-- unambiguous list.
+local function named_function_metadata(node)
+    if node.exp._tag ~= "Ast.ExpVar" then
+        return nil
+    end
+    local var = node.exp.var
+    local decl = var._decl
+    if not decl then
+        return nil
+    elseif decl._tag == "Ast.TopLevelFunc" then
+        return decl._paramnames, "titan", false
+    elseif decl._tag == "Type.StaticMethod" then
+        return decl.paramnames, "titan", false
+    elseif decl._tag == "Type.ModuleMember"
+           and decl.type and decl.type._tag == "Type.Function" then
+        local foreign = var._tag == "Ast.VarDot"
+            and var.exp and var.exp._type
+            and var.exp._type._tag == "Type.CModule"
+        return decl.paramnames, foreign and "foreign" or "titan", foreign
+    end
+    return nil
+end
+
+local function named_target_error(errors, loc)
+    checker.typeerror(errors, loc,
+        "named arguments require a direct Titan module function, "
+        .. "record function, method, or fixed-arity FFI function")
+end
+
+-- Check a named list in lexical order, then produce the positional dense list
+-- consumed by the existing native/direct-C lowering. The separate order map is
+-- retained so codegen can evaluate explicit expressions in source order before
+-- assembling operands in formal order.
+local function check_named_args(ftype, paramnames, fields, loc, fname, st, errors)
+    assert(type(paramnames) == "table")
+    assert(#paramnames == #ftype.params,
+        "declaration parameter-name metadata does not match its fixed arity")
+
+    local byname = {}
+    for i, name in ipairs(paramnames) do
+        assert(type(name) == "string")
+        if byname[name] then
+            -- Duplicate parameter declarations are diagnosed while checking
+            -- the callee body, but all signatures are published first. A later
+            -- body may therefore try a named call before the invalid program is
+            -- rejected. Keep that recovery path diagnostic-only: the spelling
+            -- cannot identify one unambiguous formal position.
+            checker.typeerror(errors, loc,
+                "%s has duplicate parameter name '%s'; named arguments are unavailable",
+                fname, name)
+            for _, field in ipairs(fields) do
+                checkexp(field.exp, st, errors)
+            end
+            return nil
+        end
+        byname[name] = i
+    end
+
+    local dense = {}
+    local supplied = {}
+    local order = {}
+    for _, field in ipairs(fields) do
+        local index = byname[field.name]
+        if not index then
+            checker.typeerror(errors, field.loc,
+                "%s has no parameter named '%s'%s",
+                fname, field.name,
+                #paramnames > 0 and
+                    ("; available parameters are " .. table.concat(paramnames, ", "))
+                    or "")
+            checkexp(field.exp, st, errors)
+        else
+            local ptype = ftype.params[index]
+            checkexp(field.exp, st, errors, ptype)
+            local exp = trycoerce(field.exp, ptype, errors)
+            checkmatch("named argument '" .. field.name .. "' of " .. fname,
+                ptype, exp._type, errors, field.loc)
+            if supplied[index] then
+                checker.typeerror(errors, field.loc,
+                    "named argument '%s' is supplied more than once", field.name)
+            else
+                supplied[index] = true
+                dense[index] = exp
+                table.insert(order, index)
+            end
+        end
+    end
+
+    for i, name in ipairs(paramnames) do
+        if not supplied[i] then
+            local ptype = ftype.params[i]
+            local exp = ast.ExpNil(loc)
+            exp._type = types.Nil()
+            if nil_can_adjust_to(ptype) then
+                exp = trycoerce(exp, ptype, errors)
+                checkmatch("omitted named argument '" .. name .. "' of " .. fname,
+                    ptype, exp._type, errors, loc)
+            else
+                checker.typeerror(errors, loc,
+                    "parameter '%s' of type %s cannot be omitted because it does not accept nil",
+                    name, types.tostring(ptype))
+            end
+            exp._named_omitted = true
+            dense[i] = exp
+        end
+    end
+    return dense, order
+end
+
 -- Typechecks an expression
 --   node: Exp_* AST node
 --   st: symbol table
@@ -2219,6 +2358,7 @@ checkexp = util.make_visitor({
                     end
                     return
                 end
+                local supplied = {}
                 for _, cfield in ipairs(node.fields) do
                     local found
                     for _, rfield in ipairs(visible_fields) do
@@ -2243,19 +2383,27 @@ checkexp = util.make_visitor({
                         checkmatch("field " .. cfield.name,
                             found.type, cfield.exp._type, errors, cfield.loc)
                         cfield._field = found
+                        supplied[found.name] = true
                     end
                 end
                 for _, rfield in ipairs(visible_fields) do
-                    local found
-                    for _, cfield in ipairs(node.fields) do
-                        if rfield.name == cfield.name then
-                            found = cfield
+                    if not supplied[rfield.name] then
+                        if nil_can_adjust_to(rfield.type) then
+                            local exp = ast.ExpNil(node.loc)
+                            exp._type = types.Nil()
+                            exp = trycoerce(exp, rfield.type, errors)
+                            checkmatch("omitted field " .. rfield.name,
+                                rfield.type, exp._type, errors, node.loc)
+                            exp._named_omitted = true
+                            local cfield = ast.Field(node.loc, rfield.name, exp)
+                            cfield._field = rfield
+                            table.insert(node.fields, cfield)
+                        else
+                            checker.typeerror(errors, node.loc,
+                                "field '%s' of record '%s' cannot be omitted because its type %s does not accept nil",
+                                rfield.name, types.tostring(context),
+                                types.tostring(rfield.type))
                         end
-                    end
-                    if not found then
-                        checker.typeerror(errors, node.loc,
-                            "field '%s' from record type '%s' missing in constructor",
-                            rfield.name, types.tostring(context))
                     end
                 end
                 node._type = types.Nominal(context.fqtn)
@@ -2611,15 +2759,32 @@ checkexp = util.make_visitor({
         else
             checkexp(node.exp, st, errors)
         end
-        if node.args._tag == "Ast.ArgsFunc" then
+
+        local argtag = node.args._tag
+        local named = argtag == "Ast.ArgsNamedFunc"
+            or argtag == "Ast.ArgsNamedMethod"
+        local method = argtag == "Ast.ArgsMethod"
+            or argtag == "Ast.ArgsNamedMethod"
+        assert(argtag == "Ast.ArgsFunc" or argtag == "Ast.ArgsMethod"
+            or argtag == "Ast.ArgsNamedFunc"
+            or argtag == "Ast.ArgsNamedMethod")
+
+        if not method then
             local ftype = node.exp._type
             if ftype._tag == "Type.Invalid" then
                 node._type = ftype
+                check_call_argument_expressions(node.args, st, errors)
                 return
             end
             local fname = expname(node.exp)
             local cfunc = c_function_pointer_type(ftype)
             if cfunc then
+                if named then
+                    node._type = types.Invalid()
+                    named_target_error(errors, node.loc)
+                    check_call_argument_expressions(node.args, st, errors)
+                    return
+                end
                 local cftype = c_function_as_function_type(cfunc)
                 node._c_pointer_call = cfunc
                 checkargs(cftype, node.args.args, node.loc,
@@ -2634,61 +2799,92 @@ checkexp = util.make_visitor({
             end
             -- Auto-unwrap an option-of-function callee (e.g. an array element
             -- `arr[i]`, which has type `T?`): cast to the underlying function
-            -- type. The cast codegen inserts a runtime nil-check, so calling
-            -- through a nil option raises cleanly. Mirrors the option-receiver
-            -- unwrap for method calls below.
+            -- type. Named syntax remains unavailable because the callee is a
+            -- structural value, not a direct declaration.
             if ftype._tag == "Type.Option" and ftype.base._tag == "Type.Function" then
                 local cast = ast.ExpCast(node.exp.loc, node.exp, ftype.base)
                 cast._type = ftype.base
                 node.exp = cast
                 ftype = ftype.base
             end
-            -- A callee may be a statically-known function (top-level function,
-            -- record function, imported module function) or any function-typed
-            -- value (a local/param, a returned function, ...). The coder tells
-            -- the two apart; here we only require the callee to be a function.
             if ftype._tag ~= "Type.Function" then
                 node._type = invalid(errors, node.loc,
                     "'%s' is not a function but %s",
                     fname, types.tostring(ftype))
-                for _, arg in ipairs(node.args.args) do
-                    checkexp(arg, st, errors)
-                end
+                check_call_argument_expressions(node.args, st, errors)
                 return
             end
-            if node.exp._tag == "Ast.ExpVar"
-               and node.exp.var._decl
-               and node.exp.var._decl._tag == "Type.CPseudoNew" then
+
+            local pseudo_new = node.exp._tag == "Ast.ExpVar"
+                and node.exp.var._decl
+                and node.exp.var._decl._tag == "Type.CPseudoNew"
+            if named and pseudo_new then
+                node._type = types.Invalid()
+                named_target_error(errors, node.loc)
+                check_call_argument_expressions(node.args, st, errors)
+                return
+            elseif pseudo_new then
                 local alloc_err = c_allocation_error(node.exp.var._decl.ctype)
                 if alloc_err then
                     node._type = invalid(errors, node.loc, alloc_err)
-                    for _, arg in ipairs(node.args.args) do
-                        checkexp(arg, st, errors)
-                    end
+                    check_call_argument_expressions(node.args, st, errors)
                     return
                 end
             end
-            checkargs(ftype, node.args.args, node.loc,
-                "function '" .. fname .. "'", st, errors,
-                not (node.exp._tag == "Ast.ExpVar"
-                     and (is_foreign_function_var(node.exp.var)
-                          or (node.exp.var._decl
-                              and node.exp.var._decl._tag == "Type.CPseudoNew"))))
+
+            if named then
+                local paramnames, lowering, recognized_ffi =
+                    named_function_metadata(node)
+                if recognized_ffi and paramnames == false then
+                    node._type = invalid(errors, node.loc,
+                        "parameter names are unavailable for foreign function '%s' "
+                        .. "because its prototypes do not provide one complete unambiguous list",
+                        fname)
+                    check_call_argument_expressions(node.args, st, errors)
+                    return
+                elseif not lowering or type(paramnames) ~= "table" then
+                    node._type = types.Invalid()
+                    named_target_error(errors, node.loc)
+                    check_call_argument_expressions(node.args, st, errors)
+                    return
+                elseif ftype.vararg or ftype.varargtype then
+                    node._type = invalid(errors, node.loc,
+                        "named arguments are not supported for variadic function '%s'",
+                        fname)
+                    check_call_argument_expressions(node.args, st, errors)
+                    return
+                end
+                local dense, order = check_named_args(ftype, paramnames,
+                    node.args.fields, node.loc, "function '" .. fname .. "'",
+                    st, errors)
+                if dense then
+                    node.args = ast.ArgsFunc(node.args.loc, dense)
+                    node._named_arg_order = order
+                    node._named_call_kind = lowering
+                end
+            else
+                checkargs(ftype, node.args.args, node.loc,
+                    "function '" .. fname .. "'", st, errors,
+                    not (node.exp._tag == "Ast.ExpVar"
+                         and (is_foreign_function_var(node.exp.var)
+                              or (node.exp.var._decl
+                                  and node.exp.var._decl._tag == "Type.CPseudoNew"))))
+            end
             node._types = ftype.rettypes
-            -- A zero-return `() -> ()` callee produces no value; its result is
-            -- `Type.Void`, which is only legal in statement position or inside
-            -- an explicit `(f())` adjust (see Ast.ExpAdjust / Ast.StatCall).
             node._type = ftype.rettypes[1] or types.Void()
             if node._type._tag == "Type.Void" and not node._voidok then
                 node._type = invalid(errors, node.loc,
                     "a function returning no values cannot be used as a value")
             end
         else
-            assert(node.args._tag == "Ast.ArgsMethod")
             local otype = node.exp._type
-            -- auto-unwrap an option receiver: p:m() on a Point? unwraps to the
-            -- underlying record. The cast codegen inserts a runtime nil-check,
-            -- so calling a method through a nil option raises a clean error.
+            if otype._tag == "Type.Invalid" then
+                node._type = otype
+                check_call_argument_expressions(node.args, st, errors)
+                return
+            end
+            -- Auto-unwrap an option receiver before resolving the method. The
+            -- receiver is still generated once, before any named expressions.
             if otype._tag == "Type.Option" and otype.base._tag == "Type.Nominal" then
                 local cast = ast.ExpCast(node.exp.loc, node.exp, otype.base)
                 cast._type = otype.base
@@ -2699,35 +2895,54 @@ checkexp = util.make_visitor({
                types.registry[otype.fqtn] and
                types.registry[otype.fqtn]._tag == "Type.Record" then
                 local class = types.registry[otype.fqtn]
+                local method_name_text = node.args.method
                 if not is_record_visible_from(st, otype.fqtn) then
                     node._type = invalid(errors, node.loc,
                         "record type '%s' is local to module '%s'",
                         otype.fqtn, record_module(otype.fqtn))
-                    for _, arg in ipairs(node.args.args) do
-                        checkexp(arg, st, errors)
-                    end
+                    check_call_argument_expressions(node.args, st, errors)
                     return
-                elseif not class.methods[node.args.method] then
+                elseif not class.methods[method_name_text] then
                     node._type = invalid(errors, node.loc,
                         "method '%s' not found in record '%s'",
-                        node.args.method, types.tostring(otype))
-                    for _, arg in ipairs(node.args.args) do
-                        checkexp(arg, st, errors)
-                    end
+                        method_name_text, types.tostring(otype))
+                    check_call_argument_expressions(node.args, st, errors)
                     return
                 end
-                local ftype = class.methods[node.args.method]
+                local ftype = class.methods[method_name_text]
                 if not is_record_member_visible_from(st, ftype) then
                     node._type = invalid(errors, node.loc,
                         "method '%s:%s' is local to module '%s'",
-                        class.name, node.args.method, record_module(class.name))
-                    for _, arg in ipairs(node.args.args) do
-                        checkexp(arg, st, errors)
-                    end
+                        class.name, method_name_text, record_module(class.name))
+                    check_call_argument_expressions(node.args, st, errors)
                     return
                 end
-                checkargs(ftype, node.args.args, node.loc,
-                    "method '" .. class.name .. ":" .. node.args.method .. "'", st, errors)
+                if named then
+                    if ftype.varargtype then
+                        node._type = invalid(errors, node.loc,
+                            "named arguments are not supported for variadic method '%s:%s'",
+                            class.name, method_name_text)
+                        check_call_argument_expressions(node.args, st, errors)
+                        return
+                    elseif type(ftype.paramnames) ~= "table" then
+                        node._type = types.Invalid()
+                        named_target_error(errors, node.loc)
+                        check_call_argument_expressions(node.args, st, errors)
+                        return
+                    end
+                    local desc = "method '" .. class.name .. ":" .. method_name_text .. "'"
+                    local dense, order = check_named_args(ftype, ftype.paramnames,
+                        node.args.fields, node.loc, desc, st, errors)
+                    if dense then
+                        node.args = ast.ArgsMethod(node.args.loc, method_name_text, dense)
+                        node._named_arg_order = order
+                        node._named_call_kind = "titan"
+                    end
+                else
+                    checkargs(ftype, node.args.args, node.loc,
+                        "method '" .. class.name .. ":" .. method_name_text .. "'",
+                        st, errors)
+                end
                 node._method = ftype
                 node._types = ftype.rettypes
                 node._type = ftype.rettypes[1] or types.Void()
@@ -2749,9 +2964,7 @@ checkexp = util.make_visitor({
                         "expected record in receiver of method call but found '%s'",
                         types.tostring(types.registry[otype.fqtn]))
                 end
-                for _, arg in ipairs(node.args.args) do
-                    checkexp(arg, st, errors)
-                end
+                check_call_argument_expressions(node.args, st, errors)
                 node._type = invalid(errors, node.loc, "expected a record type")
             end
         end
@@ -3196,7 +3409,7 @@ local function isconst(node)
     elseif tag == "Ast.ExpCall" then
         if isconstructor(node.exp) then
             local const = true
-            for _, arg in ipairs(node.args.args) do
+            for _, arg in ipairs(call_argument_expressions(node.args)) do
                 const = const and isconst(arg)
             end
             return const
@@ -3338,7 +3551,10 @@ local toplevel_visitor = util.make_visitor({
                         type_members[fname] = decl
                         st:add_foreign_type(fname, decl)
                     else
-                        members[fname] = types.ModuleMember(name, fname, decl)
+                        local paramnames = ftype.type == "function"
+                            and ftype.paramnames or false
+                        members[fname] = types.ModuleMember(name, fname, decl,
+                            paramnames)
                     end
                 end
                 -- else: the member uses an unsupported C type; skip it so the
@@ -3382,12 +3598,13 @@ local toplevel_visitor = util.make_visitor({
     end,
 
     ["Ast.TopLevelFunc"] = function(node, st, errors)
-        local ptypes, varargtype = param_types(node.params, st, errors)
+        local ptypes, varargtype, paramnames = param_types(node.params, st, errors)
         local rettypes = {}
         for _, rt in ipairs(node.rettypes) do
             table.insert(rettypes, typefromnode(rt, st, errors))
         end
         node._type = types.Function(ptypes, rettypes, false, varargtype)
+        node._paramnames = paramnames
     end,
 
     ["Ast.StatBlock"] = function(node)
@@ -3461,13 +3678,13 @@ local toplevel_visitor = util.make_visitor({
             return
         end
         node._record = record
-        local ptypes, varargtype = param_types(node.params, st, errors)
+        local ptypes, varargtype, paramnames = param_types(node.params, st, errors)
         local rettypes = {}
         for _, rt in ipairs(node.rettypes) do
             table.insert(rettypes, typefromnode(rt, st, errors))
         end
         node._type = types.StaticMethod(rectype.name, node.name, ptypes, rettypes,
-            varargtype)
+            varargtype, paramnames)
         node._type.islocal = node.islocal and true or false
         rectype.functions[node.name] = node._type
     end,
@@ -3512,13 +3729,13 @@ local toplevel_visitor = util.make_visitor({
             return
         end
         node._record = record
-        local ptypes, varargtype = param_types(node.params, st, errors)
+        local ptypes, varargtype, paramnames = param_types(node.params, st, errors)
         local rettypes = {}
         for _, rt in ipairs(node.rettypes) do
             table.insert(rettypes, typefromnode(rt, st, errors))
         end
         node._type = types.Method(rectype.name, node.name, ptypes, rettypes,
-            varargtype)
+            varargtype, paramnames)
         node._type.islocal = node.islocal and true or false
         rectype.methods[node.name] = node._type
     end,
@@ -3738,8 +3955,12 @@ local function makemoduletype(modname, modast)
             local tag = tlnode._tag
             if tag == "Ast.TopLevelVar" then
                 table.insert(members, types.ModuleVariable(modname, tlnode.decl.name, tlnode._type))
-            elseif tag == "Ast.TopLevelFunc" or tag == "Ast.TopLevelRecord" then
-                table.insert(members, types.ModuleMember(modname, tlnode.name, tlnode._type))
+            elseif tag == "Ast.TopLevelFunc" then
+                table.insert(members, types.ModuleMember(modname, tlnode.name,
+                    tlnode._type, tlnode._paramnames))
+            elseif tag == "Ast.TopLevelRecord" then
+                table.insert(members, types.ModuleMember(modname, tlnode.name,
+                    tlnode._type, false))
             elseif tag == "Ast.TopLevelTypeAlias" then
                 type_members[tlnode.name] = tlnode._type
             end

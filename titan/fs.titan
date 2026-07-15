@@ -44,18 +44,21 @@ local function join_chunks(chunks: {string}, first: integer,
 end
 
 function open(path: string, mode: string): File
-  return File.new(uv._fs_open(path, validated_mode(mode)))
+  return File.new(uv._fs_open {
+    path = path,
+    mode = validated_mode(mode),
+  })
 end
 
 function File:read(max_bytes: integer): string?
   if max_bytes <= 0 then
     raise "file read size must be positive"
   end
-  return uv._fs_read(self.handle, max_bytes)
+  return uv._fs_read { file = self.handle, max_bytes = max_bytes }
 end
 
 function File:write(data: string): integer
-  local written = uv._fs_write(self.handle, data)
+  local written = uv._fs_write { file = self.handle, data = data }
   -- One uv logical write owns all of its partial native submissions, so it
   -- cannot interleave with the next FIFO operation.
   if written ~= #data then
@@ -65,16 +68,16 @@ function File:write(data: string): integer
 end
 
 function File:flush()
-  uv._fs_flush(self.handle)
+  uv._fs_flush { file = self.handle }
 end
 
 function File:close()
   -- The uv layer coalesces close waiters and cleanup-shields physical close.
-  uv._fs_close(self.handle)
+  uv._fs_close { file = self.handle }
 end
 
 function File:is_closed(): boolean
-  return uv._fs_is_closed(self.handle)
+  return uv._fs_is_closed { file = self.handle }
 end
 
 function read_file(path: string): string
@@ -107,26 +110,26 @@ end
 
 function stat(path: string): Stat
   local size, kind, mode, modified_seconds, modified_nanoseconds =
-    uv._fs_stat(path)
+    uv._fs_stat { path = path }
   return Stat.new(size, kind, mode, modified_seconds, modified_nanoseconds)
 end
 
 function mkdir(path: string)
-  uv._fs_mkdir(path)
+  uv._fs_mkdir { path = path }
 end
 
 function unlink(path: string)
-  uv._fs_unlink(path)
+  uv._fs_unlink { path = path }
 end
 
 function rmdir(path: string)
-  uv._fs_rmdir(path)
+  uv._fs_rmdir { path = path }
 end
 
 function rename(from: string, to: string)
-  uv._fs_rename(from, to)
+  uv._fs_rename { from = from, to = to }
 end
 
 function list(path: string): {string}
-  return uv._fs_list(path)
+  return uv._fs_list { path = path }
 end

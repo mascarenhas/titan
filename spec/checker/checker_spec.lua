@@ -3046,7 +3046,9 @@ describe("Titan typecheck of records", function()
                 local p: Point = { x = 1, y = 2, z = 3 }
             end
         ]])
-        assert_type_error("field 'y' from record type 'test.Point' missing", [[
+        assert_type_error(
+            "field 'y' of record 'test.Point' cannot be omitted because its type float does not accept nil",
+        [[
             record Point
                 x: float
                 y: float

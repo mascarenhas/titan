@@ -432,12 +432,16 @@ declarator <- {| pointer? directDeclarator |}
 
 directDeclarator <- {:name: IDENTIFIER :} ddRec
                   / "(" _ {:declarator: declarator :} ")" _ ddRec
+-- Keep C's old-style empty `()` distinct from a parameter-type-list
+-- prototype. The registrar needs this source-level distinction because
+-- `(void)` is a known empty name list while `()` publishes no parameter API.
 ddRec <- "[" _ {| {:idx: typeQualifier* assignmentExpression?          :} |} "]" _ ddRec
        / "[" _ {| {:idx: { "static" } _ typeQualifier* assignmentExpression :} |} "]" _ ddRec
        / "[" _ {| {:idx: typeQualifier+ { "static" } _ assignmentExpression :} |} "]" _ ddRec
        / "[" _ {| {:idx: typeQualifier* { "*" } _                           :} |} "]" _ ddRec
-       / "(" _ {:params: parameterTypeList / empty :} ")" _ ddRec
-       / "(" _ {:params: identifierList / empty :} ")" _ ddRec
+       / "(" _ {:params: parameterTypeList :} {:paramstyle: "" -> "prototype" :} ")" _ ddRec
+       / "(" _ {:params: empty :} {:paramstyle: "" -> "oldstyle" :} ")" _ ddRec
+       / "(" _ {:params: identifierList :} {:paramstyle: "" -> "oldstyle" :} ")" _ ddRec
        / ""
 
 pointer <- {| ({ "*"/"^" } _ typeQualifier*)+ |}

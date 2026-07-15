@@ -168,6 +168,110 @@ describe("C FFI ctype registration", function()
         assert.same({ "int" }, fn.params[1].type)
     end)
 
+    it("preserves complete parameter names across declaration forms", function()
+        local ftypes = parse_header([[
+            extern int ffi_named(int count, const char *path);
+            extern int (ffi_parenthesized_named)(int value);
+            static inline int ffi_static_named(int input) { return input; }
+            extern int ffi_keyword(int repeat);
+            extern int ffi_variadic(const char *format, ...);
+        ]])
+
+        assert.same({ "count", "path" }, ftypes.ffi_named.paramnames)
+        assert.equal("complete", ftypes.ffi_named.paramnames_state)
+        assert.same({ "value" },
+            ftypes.ffi_parenthesized_named.paramnames)
+        assert.same({ "input" }, ftypes.ffi_static_named.paramnames)
+        assert.same({ "repeat" }, ftypes.ffi_keyword.paramnames)
+        assert.same({ "format" }, ftypes.ffi_variadic.paramnames)
+        assert.is_true(ftypes.ffi_variadic.vararg)
+    end)
+
+    it("distinguishes old-style and true zero-parameter prototypes", function()
+        local ftypes = parse_header([[
+            extern int ffi_oldstyle();
+            extern int ffi_zero(void);
+        ]])
+
+        assert.is_false(ftypes.ffi_oldstyle.paramnames)
+        assert.equal("unknown", ftypes.ffi_oldstyle.paramnames_state)
+        assert.same({}, ftypes.ffi_zero.paramnames)
+        assert.equal("complete", ftypes.ffi_zero.paramnames_state)
+    end)
+
+    it("marks incomplete and ambiguous parameter lists unavailable", function()
+        local ftypes = parse_header([[
+            extern int ffi_unnamed(int, const char *);
+            extern int ffi_partial(int count, const char *);
+            extern int ffi_duplicate(int item, int item);
+        ]])
+
+        assert.is_false(ftypes.ffi_unnamed.paramnames)
+        assert.is_false(ftypes.ffi_partial.paramnames)
+        assert.is_false(ftypes.ffi_duplicate.paramnames)
+        assert.equal("unknown", ftypes.ffi_unnamed.paramnames_state)
+        assert.equal("unknown", ftypes.ffi_partial.paramnames_state)
+        assert.equal("unknown", ftypes.ffi_duplicate.paramnames_state)
+    end)
+
+    it("preserves names on array and callback declarators", function()
+        local ftypes = parse_header([[
+            extern int ffi_apply(
+                int values[4],
+                void (*callback)(int event));
+            extern int (*ffi_callback_value)(int event);
+            extern int ffi_abstract(int, const char *);
+        ]])
+
+        assert.same({ "values", "callback" }, ftypes.ffi_apply.paramnames)
+        assert.equal("functionptr", ftypes.ffi_apply.params[2].type)
+        assert.same({ "event" },
+            ftypes.ffi_apply.params[2].paramnames)
+        assert.same({ "event" }, ftypes.ffi_callback_value.paramnames)
+        assert.is_false(ftypes.ffi_abstract.paramnames)
+    end)
+
+    it("forms consensus without letting incomplete declarations erase names", function()
+        local ftypes = parse_header([[
+            extern int ffi_consensus(int);
+            extern int ffi_consensus(int value);
+            extern int ffi_consensus(int);
+            extern int ffi_consensus(int value);
+
+            extern int ffi_zero_consensus();
+            extern int ffi_zero_consensus(void);
+            extern int ffi_zero_consensus();
+        ]])
+
+        assert.same({ "value" }, ftypes.ffi_consensus.paramnames)
+        assert.equal("complete", ftypes.ffi_consensus.paramnames_state)
+        assert.same({}, ftypes.ffi_zero_consensus.paramnames)
+        assert.equal("complete", ftypes.ffi_zero_consensus.paramnames_state)
+    end)
+
+    it("permanently poisons conflicting complete name lists", function()
+        local ftypes = parse_header([[
+            extern int ffi_poison_xyx(int x);
+            extern int ffi_poison_xyx(int y);
+            extern int ffi_poison_xyx(int x);
+
+            extern int ffi_poison_yxx(int y);
+            extern int ffi_poison_yxx(int x);
+            extern int ffi_poison_yxx(int x);
+
+            extern int ffi_poison_xyy(int x);
+            extern int ffi_poison_xyy(int y);
+            extern int ffi_poison_xyy(int y);
+        ]])
+
+        for _, name in ipairs({
+            "ffi_poison_xyx", "ffi_poison_yxx", "ffi_poison_xyy",
+        }) do
+            assert.is_false(ftypes[name].paramnames)
+            assert.equal("conflicting", ftypes[name].paramnames_state)
+        end
+    end)
+
     it("preserves simple enum constant values", function()
         local ftypes = parse_header([[
             enum ffi_choice {

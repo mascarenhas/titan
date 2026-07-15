@@ -21,7 +21,7 @@ do not compile `titan/uv.titan`, extract `titan_uv.o`, or embed another libuv
 archive. Dependency resolution is binary-first, while the explicit
 `titanc titan.uv` build root is source-first. Installation writes exactly one
 ordinary file per standard module under
-`<root>/lib/titan/0.12/titan/`.
+`<root>/lib/titan/0.13/titan/`.
 Lua's configured C-module path and ordinary qualified Titan lookup both
 resolve those files, with no copied, symbolic-link, or hard-link aliases. Thus
 every facade reaches the same `titan/uv.so` image. `titan.async` is the public

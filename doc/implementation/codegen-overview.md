@@ -237,6 +237,26 @@ stack is used only as a **GC anchor**, under two rules:
   reserved *before* doing anything else that could allocate. The Lua
   entry wrapper plays the caller's role for Lua callers.
 
+### Named direct calls and lexical evaluation order
+
+The checker has already normalized an eligible named call to a dense
+formal-order `ArgsFunc` or `ArgsMethod`, but leaves `_named_arg_order` with the
+formal indexes of explicit expressions in lexical order. `codecall` sends that
+pair through `named_ordered_call_args`: it generates and immediately
+materializes each explicit expression in lexical order, then materializes the
+synthetic nil omissions, and finally emits the unchanged positional native
+argument list. For a method, the receiver is materialized once before this
+sequence. Immediate materialization both freezes effects before formal
+reordering and gives GC-bearing values their ordinary caller-owned stack
+anchors.
+
+Direct foreign calls use the parallel branch in `codeforeigncall`. Each named
+expression is converted and assigned to a target-typed C temporary in lexical
+order; the call prints those temporaries in formal order. Mutable GC-bearing
+out-parameter anchors are still refreshed after the C call. Neither branch
+emits a runtime name table, and a named call never reaches `codevaluecall`.
+See [named-argument internals](named-arguments.md).
+
 ### Calling function values (`codevaluecall`)
 
 Calling a first-class function value is the one Titan-to-Titan call form
@@ -443,9 +463,13 @@ records and record members: `<mangled>_types` omits local records and local
 fields/methods/record functions from the serialized public interface, while retaining
 the full record field-slot count so an imported `.so` still reads public fields
 from their original `Udata` user-value slots. A 0.10 checker would not know how
-to interpret that layout metadata. The current ABI is **0.12**. The 0.11 to
-0.12 bump adds the separately serialized `Type.Module.type_members` map for
-public type aliases; a 0.11 checker cannot rehydrate that interface shape.
+to interpret that layout metadata. The 0.11 to 0.12 bump added the separately
+serialized `Type.Module.type_members` map for public type aliases; a 0.11
+checker cannot rehydrate that interface shape. The current ABI is **0.13**.
+The 0.12 to 0.13 bump adds declaration `paramnames` to the serialized
+`Type.ModuleMember`, `Type.Method`, and `Type.StaticMethod` constructor shapes
+for named calls. Native entry signatures are unchanged, but a 0.12 checker
+cannot evaluate the new interface descriptors safely.
 
 ## The module protocol
 
@@ -549,7 +573,9 @@ The literal is `types.serialize(ast._type)`: a Lua *expression* that
 rebuilds the module's type when evaluated with `types.lua`'s constructors
 as its environment. A `Type.Module` serializes runtime `members` and public
 alias `type_members` separately; aliases therefore create no module slot or
-Lua-visible member. It returns that serialized interface as its sole result;
+Lua-visible member. Callable declaration descriptors also serialize formal
+`paramnames`, while structural `Type.Function` values do not. It returns that
+serialized interface as its sole result;
 there is no dependency-origin metadata in the module protocol.
 
 When the driver's loader finds only a compiled `.so` for an import, it first

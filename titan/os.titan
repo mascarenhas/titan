@@ -48,9 +48,9 @@ local function read_unlocked(process: Process, state: ReadState,
     return result
   end
   if stdout then
-    return uv._os_process_read_stdout(process.handle)
+    return uv._os_process_read_stdout { process = process.handle }
   end
-  return uv._os_process_read_stderr(process.handle)
+  return uv._os_process_read_stderr { process = process.handle }
 end
 
 local function restore_chunks(state: ReadState, chunks: {string},
@@ -93,7 +93,11 @@ local function read_output_until(process: Process, state: ReadState,
         maybe_chunk = read_unlocked(process, state, stdout)
       catch
         if total > 0 and
-            uv._os_process_read_error_is(process.handle, stdout, error) then
+            uv._os_process_read_error_is {
+              process = process.handle,
+              stdout = stdout,
+              candidate = error,
+            } then
           terminal_error_tail = true
         else
           raise
@@ -115,23 +119,37 @@ local function read_output_until(process: Process, state: ReadState,
         count = count + 1
         chunks[count] = chunk
         local boundary = tail .. chunk
-        local match = uv._bytes_find(boundary, delimiter)
+        local match = uv._bytes_find {
+          haystack = boundary,
+          needle = delimiter,
+        }
         total = total + #chunk
         if match >= 0 then
           local match_end = total - #boundary + match + #delimiter
           local result_end = match_end
           if chop then result_end = result_end - #delimiter end
           local all = join_chunks(chunks, 1, count)
-          local selected = uv._bytes_slice(all, 0, result_end)
-          local remaining = uv._bytes_slice(all, match_end,
-                                            #all - match_end)
+          local selected = uv._bytes_slice {
+            data = all,
+            offset = 0,
+            length = result_end,
+          }
+          local remaining = uv._bytes_slice {
+            data = all,
+            offset = match_end,
+            length = #all - match_end,
+          }
           result = selected
           state.excess = remaining .. state.excess
           finished = true
         else
           local keep = #delimiter - 1
           if keep > #boundary then keep = #boundary end
-          tail = uv._bytes_slice(boundary, #boundary - keep, keep)
+          tail = uv._bytes_slice {
+            data = boundary,
+            offset = #boundary - keep,
+            length = keep,
+          }
         end
       end
     end
@@ -145,70 +163,73 @@ local function read_output_until(process: Process, state: ReadState,
 end
 
 function getenv(name: string): string?
-  return uv._os_getenv(name)
+  return uv._os_getenv { name = name }
 end
 
 function setenv(name: string, contents: string)
-  uv._os_setenv(name, contents)
+  uv._os_setenv { name = name, contents = contents }
 end
 
 function unsetenv(name: string)
-  uv._os_unsetenv(name)
+  uv._os_unsetenv { name = name }
 end
 
 function cwd(): string
-  return uv._os_cwd()
+  return uv._os_cwd {}
 end
 
 function chdir(path: string)
-  uv._os_chdir(path)
+  uv._os_chdir { path = path }
 end
 
 function homedir(): string
-  return uv._os_homedir()
+  return uv._os_homedir {}
 end
 
 function tmpdir(): string
-  return uv._os_tmpdir()
+  return uv._os_tmpdir {}
 end
 
 function hostname(): string
-  return uv._os_hostname()
+  return uv._os_hostname {}
 end
 
 function exepath(): string
-  return uv._os_exepath()
+  return uv._os_exepath {}
 end
 
 function pid(): integer
-  return uv._os_pid()
+  return uv._os_pid {}
 end
 
 function ppid(): integer
-  return uv._os_ppid()
+  return uv._os_ppid {}
 end
 
 function spawn(file: string, args: {string}): Process
-  return Process.new(uv._os_process_spawn(file, args),
+  return Process.new(uv._os_process_spawn { file = file, args = args },
                      ReadState.new("", false), ReadState.new("", false))
 end
 
 function Process:wait(): ExitStatus
-  local code, signal_number = uv._os_process_wait(self.handle)
-  return ExitStatus.new(code, uv._os_signal_name(signal_number),
+  local code, signal_number = uv._os_process_wait { process = self.handle }
+  return ExitStatus.new(code,
+                        uv._os_signal_name {
+                          signal_number = signal_number,
+                        },
                         signal_number)
 end
 
 function Process:kill(signal: string)
-  uv._os_process_kill(self.handle, signal)
+  uv._os_process_kill { process = self.handle, signal = signal }
 end
 
 function Process:write_stdin(data: string)
-  uv._os_process_write_stdin(self.handle, data)
+  uv._os_process_write_stdin { process = self.handle, data = data }
 end
 
 function Process:close_stdin()
-  uv._os_process_close_stdin(self.handle)
+  uv._os_process_close_stdin { process = self.handle }
 end
 
 function Process:read_stdout(): string?
@@ -234,12 +255,15 @@ end
 function communicate(file: string, args: {string},
                      input: string?): (string, string, ExitStatus)
   local stdout, stderr, code, signal_number =
-    uv._os_communicate(file, args, input)
+    uv._os_communicate { file = file, args = args, input = input }
   return stdout, stderr,
-         ExitStatus.new(code, uv._os_signal_name(signal_number),
+         ExitStatus.new(code,
+                        uv._os_signal_name {
+                          signal_number = signal_number,
+                        },
                         signal_number)
 end
 
 function wait_signal(name: string): string
-  return uv._os_wait_signal(name)
+  return uv._os_wait_signal { name = name }
 end

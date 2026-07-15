@@ -1,15 +1,15 @@
 # The Titan grammar
 
 This chapter is the reference grammar of Titan as implemented by the
-0.12 prototype compiler: lexical conventions, the complete syntactic
+0.13 prototype compiler: lexical conventions, the complete syntactic
 grammar, operator precedence, and the restrictions the EBNF alone does
 not show. It replaces the old manual's stale grammar.
 
 The notation is extended BNF, as in the Lua manual: `{A}` means zero or
 more As, `[A]` an optional A, and `|` separates alternatives. Keywords
-and quoted symbols (`'('`) are terminals; **Name**, **Numeral**, and
-**LiteralString** are the lexical categories defined below. Whitespace
-and comments may appear between any two tokens. A source file must parse
+and quoted symbols (`'('`) are terminals; **Name**, **NamedLabel**,
+**Numeral**, and **LiteralString** are the lexical categories defined below.
+Whitespace and comments may appear between any two tokens. A source file must parse
 as one complete `program`; trailing text is a compile-time (syntax)
 error.
 
@@ -40,6 +40,11 @@ grammar rule — there are no labels. (`break` *is* a statement — see
 `float`, `integer`, `nil`, `string`, and `value` are reserved too, so
 they cannot name variables, functions, or fields (`local integer:
 integer = 10` is a syntax error).
+
+A **NamedLabel** has the same raw ASCII spelling as a Name but does not exclude
+reserved words. It is used only immediately before `=` in a named call's brace
+list, so `f { repeat = 1 }` is legal without making `repeat` a legal variable,
+declaration, or record-field name.
 
 ### Other tokens
 
@@ -346,15 +351,18 @@ lambdaparam ::= Name [':' type]
 lambdavarargparam ::= '...' [':' type]
 prefixexp   ::= Name | '(' exp ')'
 suffixedexp ::= prefixexp suffix {suffix}
-suffix      ::= funcargs
-             |  ':' Name [funcargs]
+suffix      ::= callargs
+             |  ':' Name [callargs]
              |  '[' exp ']'
              |  '.' Name
-functioncall ::= prefixexp {suffix} funcargs
-              |  prefixexp {suffix} ':' Name funcargs
+functioncall ::= prefixexp {suffix} callargs
+              |  prefixexp {suffix} ':' Name callargs
+callargs    ::= funcargs | namedargs
 funcargs    ::= '(' [explist] ')'
-             |  constructor
              |  LiteralString
+namedargs   ::= '{' [namedarglist] '}'
+namedarglist ::= namedarg {fieldsep namedarg} [fieldsep]
+namedarg    ::= NamedLabel '=' exp
 constructor ::= '{' [fieldlist] '}'
 fieldlist   ::= field {fieldsep field} [fieldsep]
 field       ::= exp
@@ -364,11 +372,15 @@ field       ::= exp
 fieldsep    ::= ',' | ';'
 ```
 
-Calls support the same argument sugar as Lua — `f(x)`, `f "literal"`,
-`f {1, 2}` — and the method forms `o:m(x)`, `o:m "literal"`, `o:m {}`.
-A method name used in a `suffix`/`funcargs` position is a call; a method
-name with **no** following `funcargs` — a bare `o:m` — is instead a
-[bound method reference](closures.md#bound-method-references), a function
+Parentheses and bare strings are positional call syntax: `f(x)` and
+`f "literal"`, with corresponding method forms. Bare braces are always named
+syntax, including `{}` and regardless of whitespace: `f { x = 1 }`,
+`f{x = 1}`, and `o:m{}`. A constructor passed as one positional argument must be
+parenthesized, as in `f({1, 2})`, `f({x = 1})`, or `f({})`. Named lists accept
+only `NamedLabel = exp`; positional fields, computed keys, `...`, and mixtures
+are syntax errors. A method name used in a `suffix`/`callargs` position is a
+call; a method name with **no** following `callargs` — a bare `o:m` — is
+instead a [bound method reference](closures.md#bound-method-references), a function
 value. Constructors cover arrays (positional fields), maps (`[k] = v`), and
 records (`name = v`); `,` and `;` are interchangeable and a trailing
 separator is allowed. A `funcexp` is an anonymous function: unlike a

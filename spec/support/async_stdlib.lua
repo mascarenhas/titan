@@ -39,7 +39,7 @@ local function find_standard_dir()
     local paths = {}
     local prefix = os.getenv("PREFIX")
     if prefix and prefix ~= "" then
-        paths[#paths + 1] = prefix .. "/lib/titan/0.12/titan"
+        paths[#paths + 1] = prefix .. "/lib/titan/0.13/titan"
     end
     local installed = package.searchpath("titan.coroutine", package.cpath)
     if installed then
@@ -147,7 +147,7 @@ function M.compile(workspace, modname, options)
     local environment = {
         "env -u LUA_PATH -u LUA_CPATH" ..
             " -u LUA_PATH_5_5 -u LUA_CPATH_5_5 CCACHE_DISABLE=1",
-        "TITAN_PATH_0_12=" .. quote(module_root(stdlib)),
+        "TITAN_PATH_0_13=" .. quote(module_root(stdlib)),
         "TITAN_PATH=",
     }
     if options.cppflags then
@@ -251,7 +251,7 @@ function M.run_lua_source(workspace, source, options)
     local command = {
         "env -u LUA_PATH -u LUA_CPATH" ..
             " -u LUA_PATH_5_5 -u LUA_CPATH_5_5",
-        "TITAN_PATH_0_12=" .. quote(root),
+        "TITAN_PATH_0_13=" .. quote(root),
         "TITAN_PATH=",
         "LUA_PATH=" .. quote(lua_path),
         "LUA_PATH_5_5=" .. quote(lua_path),
@@ -271,7 +271,7 @@ local function app_command(workspace, modname)
     local stdlib = find_standard_dir()
     return "env -u LUA_PATH -u LUA_CPATH" ..
         " -u LUA_PATH_5_5 -u LUA_CPATH_5_5" ..
-        " TITAN_PATH_0_12=" .. quote(module_root(stdlib)) .. " " ..
+        " TITAN_PATH_0_13=" .. quote(module_root(stdlib)) .. " " ..
         "TITAN_PATH= " .. quote(workspace .. "/" .. modname)
 end
 
