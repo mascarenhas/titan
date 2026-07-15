@@ -265,7 +265,9 @@ with a Titan library/application distribution system.
 
 # Usage
 
-        $ titanc [--print-ast] [--lua <path>] [--tree <path>] <module> [<module>]
+```sh
+$ titanc [--print-ast] [--lua <path>] [--tree <path>] <module> [<module>]
+```
 
 The compiler takes a list of module names that you want to compile. Modules
 are looked up in the source tree (defaults to the current working directory,
@@ -363,14 +365,16 @@ your compilation as a native binary:
 # Running the test suite
 
 The test suite is written using [Busted](https://lunarmodules.github.io/busted/).
-The simplest way to run it is:
+The simplest way to run it in an isolated installation is:
 
-        $ export PREFIX="/tmp/titan-$USER-test"
-        $ export PATH="$PREFIX/bin:$PATH"
-        $ make lua                   # prepare an isolated local installation
-        $ make luarocks
-        $ make libuv
-        $ make test
+```sh
+$ export PREFIX="/tmp/titan-$USER-test"
+$ export PATH="$PREFIX/bin:$PATH"
+$ make lua
+$ make luarocks
+$ make libuv
+$ make test
+```
 
 `make test` runs `luarocks make --force` followed by `luarocks test`. The forced
 build installs the current checkout — including the `titan` Lua support module
@@ -383,9 +387,11 @@ does not use `luarocks init`; avoid exporting those project-tree paths while
 working in a standalone Titan prefix. To run the iterative development steps
 yourself:
 
-        $ "$PREFIX/bin/luarocks" make --force        # rebuild/reinstall the current checkout
-        $ "$PREFIX/bin/luarocks" test                # install test deps + run the suite
-        $ bash spec/support/ci_test_groups.sh compiler # compiler/language tests with LuaCov
+```sh
+$ "$PREFIX/bin/luarocks" make --force        # rebuild/reinstall the current checkout
+$ "$PREFIX/bin/luarocks" test                # install test deps + run the suite
+$ bash spec/support/ci_test_groups.sh compiler # compiler/language tests with LuaCov
+```
 
 The grouped compiler command is the coverage entry point. Library API and
 runtime suites run without LuaCov because the hook measures the Lua compiler,
@@ -413,8 +419,10 @@ The `examples/` directory has its own `Makefile` with a target per example
 module plus an `all` target. From the repository root, `make examples` builds
 them all:
 
-        $ make examples            # or: make -C examples all
-        $ make -C examples utils   # build a single example
+```sh
+$ make examples            # or: make -C examples all
+$ make -C examples utils   # build a single example
+```
 
 `sdl_demo` depends on `sdl_quit`, and both use the C FFI against SDL2, so they
 need the SDL2 development headers installed.
@@ -430,6 +438,7 @@ when it is no longer needed.
 
 # Compiler options
 
+```
         --print-ast                       Print the AST.
         -v, --verbose                     Print safely quoted effective compiler commands.
         --lua <path>                      Path to a Lua source/build tree (source checkouts only).
@@ -437,6 +446,7 @@ when it is no longer needed.
         -l, --link <lib1,lib2>            Add libraries to the final link.
         -X, --extra-object <object...>     Add object/archive inputs to the final link.
         -h, --help                        Show this help message and exit.
+```
 
 `CC` selects the compiler. `TITAN_EXTRA_CPPFLAGS` carries append-only `-I`/`-D`
 arguments shared by C-FFI checking and generated compilation;
