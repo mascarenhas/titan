@@ -1,16 +1,33 @@
 *.o
 *.a
 *.so
+*.dSYM/
 
 # lua source trees (downloaded from lua.org)
 /lua-5.*/
+/lua-5.*.tar.gz
 
 # local lua install
 /.lua
 
 # libbacktrace source tree (cloned + built by `make libbacktrace`)
 /libbacktrace/
+
+# bundled libuv release source, CMake build tree, and downloaded archive
+/libuv-v*/
+/libuv-build/
+/libuv-v*.tar.gz
+
+# LuaRocks source release used by `make luarocks`
+/luarocks-*/
+/luarocks-*.tar.gz
+
 /luarocks
 /lua
 /lua_modules
 /.luarocks
+
+/titan/*.c
+
+# Native runtime command-line configuration stamps
+/titan-runtime/.titan-*-build-config

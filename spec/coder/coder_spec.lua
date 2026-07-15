@@ -20,7 +20,6 @@ local function clean()
 end
 
 describe("zero-return () functions (code generator)", function()
-    setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
     it("exported () function returns zero values across the Lua boundary", function()
@@ -80,7 +79,6 @@ describe("zero-return () functions (code generator)", function()
 end)
 
 describe("call sequencing regressions", function()
-    setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
     it("short-circuits boolean calls with side effects", function()
@@ -159,10 +157,6 @@ describe("call sequencing regressions", function()
 end)
 
 describe("Titan code generator", function()
-    setup(function ()
-        os.remove("titan-runtime/titan.o")
-    end)
-
     after_each(clean)
 
     it("deletes array element", function()
@@ -575,6 +569,21 @@ describe("Titan code generator", function()
             assert(test.f2i(5.0) == 5)
             assert(test.f2i(nil) == nil)
             assert(pcall(function() return test.f2i(1.5) end) == false)
+        ]])
+    end)
+
+    it("preserves nil when contextually coercing value to an option", function()
+        run_coder([[
+            local function accept(x: string?): string? return x end
+
+            function option_argument(v: value): string?
+                return accept(v)
+            end
+        ]], [[
+            assert(test.option_argument(nil) == nil)
+            assert(test.option_argument("ok") == "ok")
+            local ok, err = pcall(test.option_argument, 42)
+            assert(not ok and err:match("expected string but found number"), err)
         ]])
     end)
 
@@ -1143,9 +1152,17 @@ describe("Titan code generator", function()
     it("generates code for string literals", function()
         local code = [[
             function fn(): string
-                --return "foo\tbar\nbaz"
-                local x: string = "foo"
+                local x: string = "foo\0bar\255"
                 return x
+            end
+            function trigraphs(): string
+                return "??=??/??'??(??)??!??<??>??-"
+            end
+            function binary_direct(): string
+                return "\0\0017\255"
+            end
+            function empty(): string
+                return ""
             end
         ]]
         local ast, err = parse(code)
@@ -1154,8 +1171,47 @@ describe("Titan code generator", function()
         assert.equal(0, #err, table.concat(err, "\n"))
         local ok, err = compile("titan_test", ast)
         assert.truthy(ok, err)
-        --local ok, err = call("titan_test", "assert(titan_test.lit() == 'foo\\tbar\\nbaz')")
-        local ok, err = call("titan_test", "local x = titan_test.fn(); assert(x == 'foo')")
+        local ok, err = call("titan_test", [[
+            local x = titan_test.fn()
+            assert(#x == 8)
+            assert(x == "foo\0bar\255")
+            local t = titan_test.trigraphs()
+            assert(#t == 27)
+            assert(t == "??=??/??'??(??)??!??<??>??-")
+            local b = titan_test.binary_direct()
+            assert(#b == 4)
+            assert(string.byte(b, 1) == 0)
+            assert(string.byte(b, 2) == 1)
+            assert(string.byte(b, 3) == string.byte("7"))
+            assert(string.byte(b, 4) == 255)
+            assert(titan_test.empty() == "")
+        ]])
+        assert.truthy(ok, err)
+    end)
+
+    it("preserves every byte in a direct string literal", function()
+        local escapes = {}
+        for byte = 0, 255 do
+            escapes[#escapes + 1] = string.format("\\%03d", byte)
+        end
+        local code = string.format([[
+            function bytes(): string
+                return "%s"
+            end
+        ]], table.concat(escapes))
+        local ast, err = parse(code)
+        assert.truthy(ast, err)
+        local _, err = checker.check("test", ast, code, "test.titan")
+        assert.equal(0, #err, table.concat(err, "\n"))
+        local ok, err = compile("titan_test", ast)
+        assert.truthy(ok, err)
+        local ok, err = call("titan_test", [[
+            local expected = {}
+            for byte = 0, 255 do
+                expected[#expected + 1] = string.char(byte)
+            end
+            assert(titan_test.bytes() == table.concat(expected))
+        ]])
         assert.truthy(ok, err)
     end)
 
@@ -2655,6 +2711,31 @@ describe("Titan code generator", function()
         ]])
     end)
 
+    it("calls and binds functions on records with underscored names", function ()
+        run_coder([[
+            record native_handle
+                n: integer
+            end
+
+            function native_handle.make(n: integer): native_handle
+                return native_handle.new(n)
+            end
+
+            function native_handle:bump(delta: integer): integer
+                self.n = self.n + delta
+                return self.n
+            end
+
+            function exercise(): integer
+                local handle = native_handle.make(10)
+                local bound: (integer) -> integer = handle:bump
+                return handle:bump(2) + bound(3)
+            end
+        ]], [[
+            assert(test.exercise() == 12 + 15)
+        ]])
+    end)
+
     it("initializes a record using new", function ()
         run_coder([[
             record Point
@@ -3266,7 +3347,6 @@ describe("Titan code generator", function()
 end)
 
 describe("single-Udata representation (GC stress)", function()
-    setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
     -- 1. Record field (GC-able) mutated in a hot loop, GC forced between writes.

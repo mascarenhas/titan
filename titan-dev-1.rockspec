@@ -31,11 +31,40 @@ test = {
    type = "busted"
 }
 hooks = {
-   post_install = "make stdlib CC=\"$(CC)\" && mkdir -p $(LIBDIR) $(PREFIX)/../../../../lua/$(LUA_VERSION) && cp coro.so $(LIBDIR)/coro.so && cp coro.so $(PREFIX)/../../../../lua/$(LUA_VERSION)/coro.so"
+   post_install = [[set -e
+      unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5
+      rocks_tree="$(SCRIPTS_DIR)/.."
+      rocks_tree="$(CDPATH= cd "$rocks_tree" && pwd -P)"
+      $(MAKE) rock-post-install \
+         PREFIX="$(LUA_DIR)" \
+         ROCKS_TREE="$rocks_tree" \
+         ROCK_TITANC="$(SCRIPTS_DIR)/titanc" \
+         CC="$(CC)"]]
 }
 build = {
-   type = "builtin",
-   modules = {
+   type = "make",
+   -- This remains a source-only installation flow. The target builds the C
+   -- runtime and, because ROCKS_TREE is set here, stages the compiler SDK
+   -- before LuaRocks deploys the compiler modules. The stdlib is deliberately
+   -- deferred to post_install so it is compiled by the deployed titanc.
+   build_target = "titan",
+   install_pass = false,
+   build_variables = {
+      PREFIX = "$(LUA_DIR)",
+      ROCKS_TREE = "$(SCRIPTS_DIR)/..",
+      AR = "$(AR)",
+      RANLIB = "$(RANLIB)",
+      ROCK_LUA_INCDIR = "$(LUA_INCDIR)",
+      ROCK_CFLAGS = "$(CFLAGS)",
+      ROCK_LD = "$(LD)",
+      ROCK_LIBFLAG = "$(LIBFLAG)"
+   },
+   copy_directories = {
+      "doc",
+      "LICENSES"
+   },
+   install = {
+      lua = {
       ["titan-compiler.ast"] = "titan-compiler/ast.lua",
       ["titan-compiler.checker"] = "titan-compiler/checker.lua",
       ["titan-compiler.coder"] = "titan-compiler/coder.lua",
@@ -55,12 +84,16 @@ build = {
       ["c-parser.cdriver"] = "c-parser/cdriver.lua",
       ["c-parser.cpp"] = "c-parser/cpp.lua",
       ["c-parser.ctypes"] = "c-parser/ctypes.lua",
-      ["c-parser.cdefines"] = "c-parser/cdefines.lua",
-      ["titan"] = "titan-runtime/titanlib.c"
-  },
-   install = {
+      ["c-parser.cdefines"] = "c-parser/cdefines.lua"
+      },
+      lib = {
+         ["titan"] = "titan.so"
+      },
       bin = {
          "titanc"
+      },
+      conf = {
+         "THIRD_PARTY_NOTICES.md"
       }
    }
 }

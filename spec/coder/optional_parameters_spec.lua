@@ -3,8 +3,6 @@ local h = require 'spec.support.helpers'
 local run_coder = h.run_coder
 
 describe("optional function parameter code generation", function()
-    setup(function () os.remove("titan-runtime/titan.o") end)
-
     it("pads direct function and method calls with nil", function()
         run_coder([[
             record Box

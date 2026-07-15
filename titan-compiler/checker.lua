@@ -8,6 +8,18 @@ local util = require "titan-compiler.util"
 local foreigntypes = require "titan-compiler.foreigntypes"
 local cdriver = require("c-parser.cdriver")
 
+-- The compiler driver installs the exact C toolchain configuration used for
+-- generated code. Keeping this small hook in the checker makes every foreign
+-- import use the same compiler, language mode, and already parsed CPP flags,
+-- while checker-only embeddings retain cdriver's environment-based defaults.
+local foreign_c_options = {}
+local foreign_c_config_error
+
+function checker.configure_foreign_c(options, config_error)
+    foreign_c_options = options or {}
+    foreign_c_config_error = config_error
+end
+
 
 -- The typechecker works in two passes, the first one just
 -- collects type information for top-level functions and variables
@@ -516,11 +528,13 @@ local function trycoerce(source, target, errors)
             inner._type = source._type.base
             n = trycoerce(inner, target, errors)
         elseif target._tag == "Type.Option" then
-            if source._type._tag == "Type.Nil" then
-                -- nil -> T?: emit the cast directly so the coder's Nil->Option
-                -- path runs (setnilvalue). Recursing through target.base would
-                -- coerce nil to the base first (e.g. nil -> boolean = false),
-                -- destroying the nil/false distinction that is the point of T?.
+            if source._type._tag == "Type.Nil"
+               or source._type._tag == "Type.Value" then
+                -- nil/value -> T?: emit the cast directly so nil remains nil.
+                -- Recursing through target.base would first coerce nil (or a
+                -- value holding nil) to the non-option base, either changing
+                -- its meaning (nil -> boolean = false) or raising before the
+                -- option has a chance to preserve it.
                 n = ast.ExpCast(source.loc, source, target)
             else
                 n = ast.ExpCast(source.loc, trycoerce(source, target.base, errors), target)
@@ -3086,10 +3100,17 @@ local function checkbodies(ast, st, errors)
 end
 
 local function isconstructor(node)
-    return node.var and node.var._decl and node.var._decl._tag == "Type.StaticMethod"
-        and #node.var._decl.rettypes == 1
-        and node.var._decl.rettypes[1]._tag == "Type.Nominal"
-        and node.var._decl.rettypes[1].fqtn == node.var._decl.fqtn
+    local decl = node.var and node.var._decl
+    if not decl then
+        return false
+    end
+    if decl._tag == "Type.CPseudoNew" then
+        return true
+    end
+    return decl._tag == "Type.StaticMethod"
+        and #decl.rettypes == 1
+        and decl.rettypes[1]._tag == "Type.Nominal"
+        and decl.rettypes[1].fqtn == decl.fqtn
 end
 
 -- Verify if an expression is constant
@@ -3105,6 +3126,9 @@ local function isconst(node)
     elseif tag == "Ast.ExpInitList" then
         local const = true
         for _, field in ipairs(node.fields) do
+            if type(field.name) == "table" then
+                const = const and isconst(field.name)
+            end
             const = const and isconst(field.exp)
         end
         return const
@@ -3112,7 +3136,7 @@ local function isconst(node)
     elseif tag == "Ast.ExpCall" then
         if isconstructor(node.exp) then
             local const = true
-            for _, arg in ipairs(node.args) do
+            for _, arg in ipairs(node.args.args) do
                 const = const and isconst(arg)
             end
             return const
@@ -3137,6 +3161,12 @@ local function isconst(node)
         return isconst(node.lhs) and isconst(node.rhs)
 
     elseif tag == "Ast.ExpCast" then
+        return isconst(node.exp)
+
+    elseif tag == "Ast.ExpAdjust" then
+        -- Parenthesizing a call adds an adjustment node that keeps only its
+        -- first result. It does not change whether evaluating the expression
+        -- reads module state during initialization.
         return isconst(node.exp)
 
     elseif tag == "Ast.ExpFunction" then
@@ -3202,9 +3232,19 @@ local toplevel_visitor = util.make_visitor({
 
     ["Ast.TopLevelForeignImport"] = function(node, st, errors)
         local name = node.headername
-        local ftypes, err, include = cdriver.process_file(name, {
-            source_dir = st.source_dir
-        })
+        local options = {
+            source_dir = st.source_dir,
+            compiler = foreign_c_options.compiler,
+            language_mode = foreign_c_options.language_mode,
+            cppflags = foreign_c_options.cppflags,
+            compiler_include_dirs = foreign_c_options.compiler_include_dirs,
+        }
+        local ftypes, err, include
+        if foreign_c_config_error then
+            err = foreign_c_config_error
+        else
+            ftypes, err, include = cdriver.process_file(name, options)
+        end
         if ftypes then
             node._include = include
             local members = {}

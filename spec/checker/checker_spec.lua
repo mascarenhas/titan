@@ -606,6 +606,21 @@ describe("Titan type checker", function()
         assert.same("Type.Nil", init.exp._type._tag)
     end)
 
+    it("coerces value to an option return with one nil-preserving cast", function ()
+        local ok, err, ast = run_checker([[
+            function f(v: value): string?
+                return v
+            end
+        ]])
+        assert.truthy(ok, err)
+        local returned = ast[1].block.stats[1].exps[1]
+        assert.same("Ast.ExpCast", returned._tag)
+        assert.same("Type.Option", returned.target._tag)
+        assert.same("Type.String", returned.target.base._tag)
+        assert.same("Ast.ExpVar", returned.exp._tag)
+        assert.same("Type.Value", returned.exp._type._tag)
+    end)
+
     it("rejects coercing an option to a non-coercible base", function ()
         local ok, err = run_checker([[
             function f(b: boolean?): integer return b end
@@ -1059,6 +1074,7 @@ describe("Titan type checker", function()
                 local v: value = 1
                 local of_v = of or v
                 local v_f = v or f
+                local inferred_boolean = b or f
             end
         ]]
         local ok, err, ast = run_checker(code)
@@ -1074,6 +1090,7 @@ describe("Titan type checker", function()
         assert.same(types.Float(), ast[1].block.stats[12].exps[1]._type)
         assert.same(types.Value(), ast[1].block.stats[14].exps[1]._type)
         assert.same(types.Value(), ast[1].block.stats[15].exps[1]._type)
+        assert.same(types.Boolean(), ast[1].block.stats[16].exps[1]._type)
     end)
 
     for _, op in ipairs({"|", "&", "<<", ">>"}) do

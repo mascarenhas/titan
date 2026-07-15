@@ -220,7 +220,7 @@ synthetic Lua bootstrap used to call `main` is not shown. A successful
 
 ## `titan.backtrace()`
 
-The optional Lua module `titan` exposes the last uncaught or re-propagated
+The Lua support module `titan` exposes the last uncaught or re-propagated
 Titan traceback for the current Lua state:
 
 ```lua

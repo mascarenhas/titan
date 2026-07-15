@@ -53,66 +53,273 @@ local function is_sequence(xs)
 end
 --]]
 
-local gcc_default_defines
-do
-    local default_defines
+-- The real C compiler is the authority for both include search and predefined
+-- macros. Keep all shell handling here: callers pass parsed flag arrays, while
+-- CC may be either an argv array or the conventional shell-word string.
 
-    local function shallow_copy(t)
-        local u = {}
-        for k,v in pairs(t) do
-            u[k] = v
-        end
-        return u
+function cpp.split_shell_words(input)
+    if type(input) ~= "string" then
+        return nil, "shell words must be a string"
+    end
+    if input:find("\0", 1, true) then
+        return nil, "shell words contain a NUL byte"
     end
 
-    gcc_default_defines = function()
-        if default_defines then
-            return shallow_copy(default_defines)
+    local words = {}
+    local word = {}
+    local started = false
+    local mode = "plain"
+    local i = 1
+    while i <= #input do
+        local ch = input:sub(i, i)
+        if mode == "plain" then
+            if ch:match("%s") then
+                if started then
+                    table.insert(words, table.concat(word))
+                    word = {}
+                    started = false
+                end
+            elseif ch == "'" then
+                mode = "single"
+                started = true
+            elseif ch == '"' then
+                mode = "double"
+                started = true
+            elseif ch == "\\" then
+                i = i + 1
+                if i > #input then
+                    return nil, "trailing backslash in shell words"
+                end
+                table.insert(word, input:sub(i, i))
+                started = true
+            else
+                table.insert(word, ch)
+                started = true
+            end
+        elseif mode == "single" then
+            if ch == "'" then
+                mode = "plain"
+            else
+                table.insert(word, ch)
+            end
+        else
+            if ch == '"' then
+                mode = "plain"
+            elseif ch == "\\" then
+                local nextch = input:sub(i + 1, i + 1)
+                if nextch == "" then
+                    return nil, "trailing backslash in double-quoted shell word"
+                end
+                if nextch == "$" or nextch == "`" or nextch == '"'
+                or nextch == "\\" or nextch == "\n" then
+                    i = i + 1
+                    if nextch ~= "\n" then
+                        table.insert(word, nextch)
+                    end
+                else
+                    table.insert(word, ch)
+                end
+            else
+                table.insert(word, ch)
+            end
         end
+        i = i + 1
+    end
 
-        -- The FFI grammar (c99.lua) targets C99/C11; ask for predefined macros
-        -- in gnu11 mode so a C23-default toolchain doesn't set __STDC_VERSION__
-        -- to 202311L, which would pull in C23-only constructs from system
-        -- headers (e.g. `typedef __typeof__(nullptr) nullptr_t;` in <stddef.h>)
-        -- that the grammar cannot parse.
-        local pd = io.popen("LANG=C gcc -std=gnu11 -dM -E - < /dev/null")
-        if not pd then
-            return {}
+    if mode == "single" then
+        return nil, "unterminated single quote in shell words"
+    elseif mode == "double" then
+        return nil, "unterminated double quote in shell words"
+    end
+    if started then
+        table.insert(words, table.concat(word))
+    end
+    return words
+end
+
+function cpp.shell_quote(word)
+    if type(word) ~= "string" then
+        return nil, "shell argument must be a string"
+    end
+    if word:find("\0", 1, true) then
+        return nil, "shell argument contains a NUL byte"
+    end
+    return "'" .. word:gsub("'", "'\\''") .. "'"
+end
+
+local function copy_map(t)
+    local u = {}
+    for k, v in pairs(t) do
+        u[k] = v
+    end
+    return u
+end
+
+local function copy_incdirs(incdirs)
+    local copy = { quote = {}, system = {} }
+    for _, mode in ipairs({ "quote", "system" }) do
+        for _, dir in ipairs(incdirs[mode] or {}) do
+            table.insert(copy[mode], dir)
         end
-        local blank_ctx = {
-            incdirs = {},
-            defines = {},
-            ifmode = { true },
-            output = {},
-            current_dir = {},
-        }
-        typed.set_type(blank_ctx, "Ctx")
-        local ctx = cpp.parse_file("-", pd, blank_ctx)
+    end
+    return copy
+end
 
-        ctx.defines["__builtin_va_list"] = { "char", "*" }
-        ctx.defines["__extension__"] = {}
-        ctx.defines["__attribute__"] = { args = { "arg" }, repl = {} }
-        ctx.defines["__restrict__"] = { "restrict" }
-        ctx.defines["__restrict"] = { "restrict" }
-        ctx.defines["__inline__"] = { "inline" }
-        ctx.defines["__inline"] = { "inline" }
+local function normalize_argv(value, name, string_is_shell_words)
+    if value == nil then
+        return {}
+    end
+    if type(value) == "string" then
+        if not string_is_shell_words then
+            return nil, name .. " must be a parsed argument array"
+        end
+        local argv, err = cpp.split_shell_words(value)
+        if not argv then
+            return nil, "invalid " .. name .. ": " .. err
+        end
+        value = argv
+    end
+    if type(value) ~= "table" then
+        return nil, name .. " must be an argument array"
+    end
 
-        default_defines = ctx.defines
-        return shallow_copy(ctx.defines)
+    local argv = {}
+    for i = 1, #value do
+        local arg = value[i]
+        if type(arg) ~= "string" then
+            return nil, name .. " argument " .. i .. " must be a string"
+        end
+        if arg:find("\0", 1, true) then
+            return nil, name .. " argument " .. i .. " contains a NUL byte"
+        end
+        argv[i] = arg
+    end
+    for k in pairs(value) do
+        if type(k) ~= "number" or k < 1 or k > #value
+        or k % 1 ~= 0 then
+            return nil, name .. " must be a dense argument array"
+        end
+    end
+    return argv
+end
+
+local function normalize_toolchain(options)
+    options = options or {}
+    if type(options) ~= "table" then
+        return nil, "preprocessor options must be a table"
+    end
+
+    local compiler, err = normalize_argv(
+        options.compiler or os.getenv("CC") or "cc", "compiler", true)
+    if not compiler then
+        return nil, err
+    elseif #compiler == 0 then
+        return nil, "compiler command is empty"
+    end
+
+    local cppflags
+    cppflags, err = normalize_argv(options.cppflags, "cppflags", false)
+    if not cppflags then
+        return nil, err
+    end
+
+    local fixed_include_dirs
+    fixed_include_dirs, err = normalize_argv(
+        options.fixed_include_dirs, "fixed include dirs", false)
+    if not fixed_include_dirs then
+        return nil, err
+    end
+
+    local language_mode = options.language_mode or "c99"
+    if type(language_mode) ~= "string"
+    or not language_mode:match("^[%w%+_.-]+$") then
+        return nil, "invalid C language mode"
+    end
+
+    return {
+        compiler = compiler,
+        language_mode = language_mode,
+        cppflags = cppflags,
+        fixed_include_dirs = fixed_include_dirs,
+    }
+end
+
+local function append_argv(dst, src)
+    for _, arg in ipairs(src) do
+        table.insert(dst, arg)
     end
 end
 
-local function cpp_include_paths()
-    local pd = io.popen("LANG=C cpp -v /dev/null -o /dev/null 2>&1")
-    if not pd then
-        return { quote = {}, system = { "/usr/include"} }
+local function shell_command(argv)
+    local quoted = {}
+    for i, arg in ipairs(argv) do
+        local q, err = cpp.shell_quote(arg)
+        if not q then
+            return nil, err
+        end
+        quoted[i] = q
     end
-    local res = {
-        quote = {},
-        system = {},
-    }
-    local mode = nil
-    for line in pd:lines() do
+    return table.concat(quoted, " ")
+end
+
+local function run_command(argv, stderr_to_stdout)
+    local command, err = shell_command(argv)
+    if not command then
+        return nil, err
+    end
+    command = "env LANG=C LC_ALL=C " .. command
+    if stderr_to_stdout then
+        command = command .. " 2>&1"
+    end
+    local pipe
+    pipe, err = io.popen(command, "r")
+    if not pipe then
+        return nil, err
+    end
+    local output = pipe:read("*a")
+    local ok, why, status = pipe:close()
+    if not ok then
+        return nil, ("command failed (%s %s): %s"):format(
+            tostring(why), tostring(status), output)
+    end
+    return output
+end
+
+local function config_argv(config)
+    local argv = {}
+    append_argv(argv, config.compiler)
+    append_argv(argv, config.cppflags)
+    -- Match generated/runtime compilation: user CPP flags precede Titan's
+    -- fixed language/default flags, so the fixed C99 mode wins if a caller
+    -- accidentally supplies another -std option in the CPP channel.
+    table.insert(argv, "-std=" .. config.language_mode)
+    for _, dir in ipairs(config.fixed_include_dirs) do
+        append_argv(argv, { "-I", dir })
+    end
+    return argv
+end
+
+local function key_argv(argv)
+    local parts = {}
+    for _, arg in ipairs(argv) do
+        table.insert(parts, #arg .. ":" .. arg)
+    end
+    return table.concat(parts, "|")
+end
+
+local probe_cache = {}
+
+local function probe_include_paths(config)
+    local argv = config_argv(config)
+    append_argv(argv, { "-E", "-v", "-x", "c", "/dev/null", "-o", "/dev/null" })
+    local output, err = run_command(argv, true)
+    if not output then
+        return nil, "failed probing C include search: " .. err
+    end
+
+    local paths = { quote = {}, system = {} }
+    local mode
+    for line in (output .. "\n"):gmatch("(.-)\n") do
         if line:find([[#include "..." search starts here]], 1, true) then
             mode = "quote"
         elseif line:find([[#include <...> search starts here]], 1, true) then
@@ -120,14 +327,93 @@ local function cpp_include_paths()
         elseif line:find([[End of search list]], 1, true) then
             mode = nil
         elseif mode then
-            table.insert(res[mode], line:sub(2))
+            local path = line:gsub("^%s+", "")
+                :gsub("%s+%(framework directory%)$", "")
+            if path ~= "" then
+                table.insert(paths[mode], path)
+            end
         end
     end
-    pd:close()
-    return res
+    return paths
 end
 
--- TODO default defines: `gcc -dM -E - < /dev/null`
+local function probe_default_defines(config)
+    local argv = config_argv(config)
+    append_argv(argv, { "-dM", "-E", "-x", "c", "/dev/null" })
+    local output, err = run_command(argv, false)
+    if not output then
+        return nil, "failed probing predefined C macros: " .. err
+    end
+
+    local fd
+    fd, err = io.tmpfile()
+    if not fd then
+        return nil, "failed creating temporary macro probe file: " .. err
+    end
+    fd:write(output)
+    fd:seek("set", 0)
+    local blank_ctx = {
+        incdirs = {},
+        defines = {},
+        ifmode = { true },
+        output = {},
+        current_dir = {},
+    }
+    typed.set_type(blank_ctx, "Ctx")
+    local ctx
+    ctx, err = cpp.parse_file("-", fd, blank_ctx)
+    if not ctx then
+        return nil, "failed parsing predefined C macros: " .. err
+    end
+
+    ctx.defines["__builtin_va_list"] = { "char", "*" }
+    ctx.defines["__extension__"] = {}
+    ctx.defines["__attribute__"] = { args = { "arg" }, repl = {} }
+    ctx.defines["__restrict__"] = { "restrict" }
+    ctx.defines["__restrict"] = { "restrict" }
+    ctx.defines["__inline__"] = { "inline" }
+    ctx.defines["__inline"] = { "inline" }
+    return ctx.defines
+end
+
+function cpp.new_context(options)
+    local config, err = normalize_toolchain(options)
+    if not config then
+        return nil, err
+    end
+
+    local key = key_argv(config_argv(config))
+    local probed = probe_cache[key]
+    if not probed then
+        local incdirs
+        incdirs, err = probe_include_paths(config)
+        if not incdirs then
+            return nil, err
+        end
+        local defines
+        defines, err = probe_default_defines(config)
+        if not defines then
+            return nil, err
+        end
+        probed = { incdirs = incdirs, defines = defines }
+        probe_cache[key] = probed
+    end
+
+    local ctx = {
+        incdirs = copy_incdirs(probed.incdirs),
+        defines = copy_map(probed.defines),
+        ifmode = { true },
+        output = {},
+        current_dir = {},
+    }
+    typed.set_type(ctx, "Ctx")
+    return ctx
+end
+
+-- Test and embedding hook: cached probe results are otherwise process-lifetime.
+function cpp.clear_probe_cache()
+    probe_cache = {}
+end
 
 -- Not supported:
 -- * character set conversion
@@ -673,14 +959,11 @@ end)
 
 cpp.parse_file = typed("string, FILE*?, Ctx? -> Ctx?, string?", function(filename, fd, ctx)
     if not ctx then
-        ctx = {
-            incdirs = cpp_include_paths(),
-            defines = gcc_default_defines(),
-            ifmode = { true },
-            output = {},
-            current_dir = {}
-        }
-        typed.set_type(ctx, "Ctx")
+        local err
+        ctx, err = cpp.new_context()
+        if not ctx then
+            return nil, err
+        end
         -- if not absolute path
         if not filename:match("^/") then
             local found_name, found_fd = find_file(ctx, filename, "system")
@@ -704,6 +987,7 @@ cpp.parse_file = typed("string, FILE*?, Ctx? -> Ctx?, string?", function(filenam
     if not fd then
         fd, err = io.open(filename, "rb")
         if not fd then
+            table.remove(ctx.current_dir)
             return nil, err
         end
     end
@@ -723,6 +1007,7 @@ cpp.parse_file = typed("string, FILE*?, Ctx? -> Ctx?, string?", function(filenam
         debug(filename, cur, ifmode[#ifmode], #ifmode, line)
 
         if #ifmode == 1 and (tk.directive == "elif" or tk.directive == "else" or tk.directive == "endif") then
+            table.remove(ctx.current_dir)
             return nil, "unexpected directive " .. tk.directive
         end
 
@@ -765,9 +1050,14 @@ cpp.parse_file = typed("string, FILE*?, Ctx? -> Ctx?, string?", function(filenam
                     inc_filename, inc_fd, err = find_file(ctx, name, "system", is_next)
                 end
                 if not inc_filename then
+                    table.remove(ctx.current_dir)
                     return nil, name..":"..err
                 end
-                cpp.parse_file(inc_filename, inc_fd, ctx)
+                local ok, include_err = cpp.parse_file(inc_filename, inc_fd, ctx)
+                if not ok then
+                    table.remove(ctx.current_dir)
+                    return nil, name .. ":" .. include_err
+                end
             else
                 macro_expand(ctx, tk, linelist, cur, false)
                 table.insert(ctx.output, table.concat(tk, " "))

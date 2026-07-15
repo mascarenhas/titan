@@ -8,7 +8,6 @@ local function clean()
 end
 
 describe("Lua-stack relocation safety", function()
-    setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
     it("keeps reassigned GC locals rooted across calls and every loop form", function()

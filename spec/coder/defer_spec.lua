@@ -9,7 +9,6 @@ local function clean()
 end
 
 describe("defer statement (code generator)", function()
-    setup(function() os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
     it("runs a deferred statement when the surrounding block falls through", function()

@@ -41,8 +41,9 @@ Header lookup mirrors C include intent:
 * A relative path that exists beside the Titan source file is emitted as
   `#include "header.h"`, so the C compiler applies the normal quoted-include
   search from that source directory.
-* The compiler-provided header `titan/ffi.h` is found under `titan-runtime` and
-  emitted as `#include <titan/ffi.h>`.
+* The compiler-provided header `titan/ffi.h` is found under the active Titan
+  SDK's `include` directory (or `titan-runtime` in checkout developer mode)
+  and emitted as `#include <titan/ffi.h>`.
 * Other relative names are treated as system headers and emitted as
   `#include <...>`.
 
@@ -53,10 +54,10 @@ code: `titan_ffi_void`, `titan_ffi_bool`, `titan_ffi_char`,
 `titan_ffi_long`, `titan_ffi_unsigned_long`, `titan_ffi_long_long`,
 `titan_ffi_unsigned_long_long`, `titan_ffi_float`, `titan_ffi_double`, and the
 opaque Lua state type `lua_State`. It also exposes Lua's internal `TValue`
-type as a real C type for private runtime helpers; Titan `value` and C
+type and `Udata` object type for private runtime helpers; Titan `value` and C
 `TValue` are distinct types with explicit FFI coercions between them. A local,
-temporary, or parameter whose C type is `TValue` is treated as GC-bearing, like
-Titan `value`.
+temporary, or parameter whose C type is `TValue` or `Udata *` is treated as
+GC-bearing, like Titan `value`.
 
 ## Imported Members
 
@@ -195,6 +196,9 @@ Allowed conversions include:
   `value`, with the same run-time checks used at the Lua boundary.
 * Titan `value` to C `TValue` by value, and C `TValue` back to Titan `value`,
   for private runtime helper APIs that include `<titan/ffi.h>`.
+* Lua-internal `Udata *` to the same full-userdata `value` and back. NULL maps
+  to nil; unlike an ordinary C pointer, a non-NULL `Udata *` does not become
+  lightuserdata, and converting back rejects lightuserdata.
 
 By-value C structs and unions cannot cross through `value` in v1. C function
 pointers are callable and nullable, but they are not C object pointers: they
@@ -391,6 +395,20 @@ zeroed adjacent objects and records the count through the userdata payload size.
 The returned value is an owned C userdata whose lifetime belongs to Titan's Lua
 GC. No finalizer is installed.
 
+These pseudo-constructor calls are also valid module-variable initializers when
+their arguments are constant:
+
+```lua
+local ffi = foreign import "titan/ffi.h"
+
+local counter = ffi.titan_ffi_int.new()
+local samples = ffi.titan_ffi_float.new_array(16)
+```
+
+Each module instance performs the allocation once and keeps the owned userdata
+in its GC-traced module state. A `new_array` count that reads another module
+variable is not a constant initializer and is rejected.
+
 Passing an owned C object or owned C array to a C function expecting `T *`
 passes a pointer to the userdata payload:
 
@@ -418,10 +436,84 @@ library that implements them with `titanc -l`:
 titanc examples.sdl_demo -lSDL2
 ```
 
-The compile-time FFI depends on a POSIX-like C toolchain: Titan shells out to
-`gcc -dM -E` for predefined macros and `cpp -v` for include paths, and then
-parses the preprocessed header with its own C99 grammar. Headers using
-unsupported compiler extensions may fail with a compile-time parse error.
+The compile-time FFI depends on a POSIX-like C toolchain. Titan asks the
+configured `CC` (default `cc`) for predefined macros and include paths in C99
+mode, using the same parsed `TITAN_EXTRA_CPPFLAGS` that precede the defaults
+when generated C is compiled. This is the supported way to provide `-I` and
+`-D` options, including quoted paths containing spaces. Titan then parses the
+preprocessed header with its own C99 grammar. Headers using unsupported
+compiler extensions may fail with a compile-time parse error.
+
+### Direct libuv extensions
+
+Bundled Titan gives libuv a single complete native owner: the canonical
+`titan/uv.so`. Its SDK installs `uv.h` and the `uv/` headers, but not the
+private static archive used to build that provider. A Titan extension DSO that
+calls functions declared by `uv.h` must import `titan.uv` (normally through its
+short spelling) in addition to importing the header:
+
+```titan
+local runtime = import "uv"
+local uv = foreign import "uv.h"
+```
+
+Build that extension without `-luv` and without a `libuv.a` linker input. Its
+`uv_*` references remain unresolved in the DSO. The bundled archive used to
+build `titan/uv.so` is private and is not installed as part of the Titan SDK.
+Titan uses the same `RTLD_LAZY | RTLD_GLOBAL` runtime loader for this extension
+as for every compiled dependency. Lazy binding lets the extension map with
+unresolved libuv function calls. Its generated initializer then loads the
+explicit `uv` import globally before Titan code can make one of those calls.
+`RTLD_NOW` would fail while mapping the extension, before the initializer could
+load the provider, while a provider loaded `RTLD_LOCAL` would not be visible to
+the extension's lazy bindings. No special interface marker, compiler
+classification, or provider-specific Titan loader is involved. The compiler's
+separate interface-inspection loader remains
+`RTLD_LAZY | RTLD_LOCAL`.
+
+This bundled Titan path supports ordinary function calls through lazy binding.
+It does not support native constructors, imported libuv data, or taken function
+addresses that create eager relocations: those are needed while the extension
+is being mapped, before its generated initializer can load `uv`. Use the system
+mode below or arrange for the embedding process to preload the provider when
+one of those forms is required.
+
+Lua code that requires the extension directly must establish the provider
+first:
+
+```lua
+local uv = require "titan.uv"
+local extension = require "my.libuv_extension"
+```
+
+The installed `titan/uv.lua` loader resolves canonical `titan/uv.so` through
+`package.cpath`, calls `package.loadlib(path, "*")` to make its symbols global,
+and then invokes `luaopen_titan_uv` from the same handle. All other Lua C
+modules retain ordinary local loading. This uses stock Lua's public package
+API, not a `loadlib.c` patch or a self-loading/self-promoting provider, and
+works on both Linux and macOS. A stock Lua 5.5 host can use the bundled
+direct-extension contract when its `LUA_PATH_5_5` finds the loader and its
+`LUA_CPATH_5_5` finds the canonical DSO (see
+[Running with a stock Lua](modules.md#running-with-a-stock-lua)).
+Because Lua performs this explicit global load before mapping the extension,
+this route also supports its eager relocations and native constructors. The
+global symbols can resolve a Lua-only extension even if it omitted the Titan
+`uv` import, but the import remains mandatory for a Titan module that must also
+work through Titan's runtime loader.
+
+With `LIBUV_MODE=system`, an extension may instead consume the same shared
+library selected for Titan by passing the complete pkg-config output through
+the normal flag channels:
+
+```sh
+TITAN_EXTRA_CPPFLAGS="$(pkg-config --cflags libuv)" \
+TITAN_EXTRA_LDFLAGS="$(pkg-config --libs libuv)" \
+titanc my.libuv_extension
+```
+
+Do not statically embed Titan's bundled archive in an extension. Even an
+identical archive version would create another libuv instance with separate
+process-global state.
 
 ## Current Limitations
 

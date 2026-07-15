@@ -15,7 +15,6 @@ local generate_modules = h.generate_modules
 local call = h.call
 
 describe("first-class function values (end-to-end)", function()
-    setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(function ()
         os.execute("rm -rf *.o *.so *.dSYM")
         if not h.verbose then os.execute("rm -f *.c") end
@@ -443,7 +442,6 @@ end)
 -- arg and rebuilds the struct. The type tag folds in `varargtype` (via
 -- function_sig + types.tostring), so the two element types get different tags.
 describe("variadic function values (end-to-end)", function()
-    setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(function ()
         os.execute("rm -rf *.o *.so *.dSYM")
         if not h.verbose then os.execute("rm -f *.c") end

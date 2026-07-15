@@ -1,0 +1,7 @@
+local flags = foreign import "driver_flags_config.h"
+local collision = foreign import "titan/ffi.h"
+
+function selected_branch(): integer
+    return (flags.titan_driver_selected_branch() as integer)
+        + (collision.titan_driver_collision_value() as integer)
+end

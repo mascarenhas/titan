@@ -39,8 +39,9 @@ Two facts shape everything downstream of the checker:
   headers (`lobject.h`, `ltable.h`, `lvm.h`, …) and manipulates values,
   tables and the stack directly. That is where Titan's speed comes from,
   and it ties each compiler version to one specific Lua version —
-  currently **Lua 5.5.0**, expected as a built source tree in
-  `./lua-5.5.0` (see the migration reports below).
+  currently **Lua 5.5.0**. Installed compilers use the matching internal
+  source tree staged in the Titan SDK at `<root>/src/lua-5.5.0`; repository checkout mode uses
+  `./lua-5.5.0/src` (see the migration reports below).
 * **Titan data is Lua data.** Every Titan value is representable as a
   Lua value, every allocation is a Lua-GC allocation, and the generated
   code maintains the invariants Lua's (now generational) collector
@@ -60,7 +61,9 @@ Two facts shape everything downstream of the checker:
 | [Variadic parameters](variadic-parameters.md) | The `...: t` feature end to end: the `: type`/last-only grammar (with untyped-lambda-vararg context inference) and the `ExpDots`/`ExpDotsIndex`/`ExpDotsLen` nodes; the checker's `varargtype` slot, depth-stamped `$vararg` scope rule, and adjust-up vs. whole-tail explist handling; the seven `TitanVarg*` structs, the `_varargs` + `_start` native ABI, the `genluaentry` build and first-class tag dispatch; and the untraced-payload GC discipline. |
 | [Error handling](error-handling.md) | Unified Titan/Lua tracebacks via libbacktrace, `#line` source attribution, trace pinning, `raise`/`catch`/`finally` frontend rules, inline Lua longjmp boundaries, pending finally actions, stack relocation, and ABI/search-path notes. |
 | [Defer](defer.md) | The parser-only `defer` marker and recursive `simpleblock` lowering into nested `Ast.StatTry` nodes, relying on existing checker/codegen `finally` machinery. |
-| [Coroutines](coroutines.md) | The `coro` standard module's Titan-owned transfer policy with a minimal C shim; the `TValue` FFI boundary; tagged minicoro, suspended matching handlers with stacked inner coroutines, traceback handoff, and coroutine stack sizing. |
+| [Coroutines](coroutines.md) | The `titan/coroutine.titan` module's Titan-owned transfer policy with a minimal C shim; its qualified `titan.coroutine` identity; the `TValue` FFI boundary; tagged minicoro, suspended matching handlers with stacked inner coroutines, traceback handoff, and coroutine stack sizing. |
+| [Libuv continuation runtime](libuv-runtime.md) | Canonical `uv`/`timer`/`fs`/`net`/`os` images, GC-owned exact native wrappers, the shared-tag continuation pump, direct native callbacks with a Titan trailing catch, filesystem/network/process ownership, portable OS/signal helpers, process stdio FIFOs, pre-observed `communicate` helpers, cancellation, bootstrap, and deterministic TERM/grace/KILL shutdown. |
+| [Libuv DNS and TCP implementation](libuv-networking.md) | The `net` facade, opaque GC-owned address and TCP storage, DNS ownership, stream callbacks, per-Connection FIFO and close state, cancellation, and portable shim boundary. |
 | [Lua interop internals](lua-interop-internals.md) | The boundary machinery: Lua entry wrappers and per-type checks, record metatables and metatable-based type identity, the module `Udata`'s member metatable, dynamic module loading, the error handler, the standalone entrypoint, and the safety argument. |
 | [FFI internals](ffi-internals.md) | The pure-Lua C toolchain under `foreign import` (preprocessor, C99 grammar, type extraction) and how foreign declarations become Titan types and direct C calls. |
 | [Lua C API FFI follow-up](ffi-lua-api-followup.md) | Preliminary notes for a later design pass on calling the Lua C API through the C FFI. This is not part of FFI v1. |
@@ -94,8 +97,8 @@ in; follow the link for the full discussion.
 | [Values and the GC](values-and-gc.md#gc-discipline-the-invariants) | Under the generational collector a missing barrier or unanchored fresh object is a reliably reproducible use-after-free, not a rare race — the discipline the whole chapter exists to enforce. `types.is_gc` [tests a `Type.Interface` tag](values-and-gc.md#conversion-helpers) for which no constructor exists. |
 | [Error handling](error-handling.md) | `finally` deliberately forbids `return` and escaping `break`; a `raise` from cleanup is the sole override path. Error chaining is not modeled: a new error replaces the in-flight value and trace. The inline boundary relies on the vendored Lua 5.5 `lua_longjmp` layout staying in sync with the linked Lua build. |
 | [Lua interop internals](lua-interop-internals.md#safety-summary) | Known soft spots, all verified: `boolean` parameters accept anything by truthiness (inconsistent with strict variable/field writes); container contents are not checked at the boundary (aliasing); forged/undersized userdata from C can defeat the tag check. Also: the [reserved error slot is dead groundwork](lua-interop-internals.md#the-lua-entry-wrapper-genluaentry); `checkandset`'s float case emits a [dead second `luaL_error`](lua-interop-internals.md#checkandset-the-tvalue-destination-twin). |
-| [FFI internals](ffi-internals.md#platform-constraints-and-failure-modes) | Compile-time POSIX dependency (`gcc -dM -E`, `cpp -v`); imported C types are local-only and rejected from serialized module interfaces; bare and typedef'd enum constants import as C integer members with simple numeric values preserved, static functions are imported, function-like macros are invisible, and all imports share [one flat C namespace](ffi-internals.md#calls-and-variables) with no C-symbol namespacing. Owned allocation is intentionally limited (no `void`, incomplete aggregates, C array typedefs, or flexible-array-member structs). The [C99 grammar remains non-reentrant](ffi-internals.md#typelist-extraction). Some preprocessor failures still escape as raw Lua errors rather than diagnostics. `typed.lua` ships [disabled](ffi-internals.md#typedlua). |
-| [Driver and toolchain](driver.md#compiling-one-module-drivercompile) | Commands run through `os.execute` with **no shell escaping**; compile-time module path walking [ignores `;;`](driver.md#module-names-and-the-search-paths) (only the run-time loader honors it). [Link-step return values are dropped](driver.md#the-titanc-command-line), so a failed link still exits 0. |
+| [FFI internals](ffi-internals.md#platform-constraints-and-failure-modes) | Compile-time POSIX dependency (the configured `CC` probes `/dev/null` for defines and include paths); imported C types are local-only and rejected from serialized module interfaces; bare and typedef'd enum constants import as C integer members with simple numeric values preserved, static functions are imported, function-like macros are invisible, and all imports share [one flat C namespace](ffi-internals.md#calls-and-variables) with no C-symbol namespacing. Owned allocation is intentionally limited (no `void`, incomplete aggregates, C array typedefs, or flexible-array-member structs). The [C99 grammar remains non-reentrant](ffi-internals.md#typelist-extraction). Some preprocessor failures still escape as raw Lua errors rather than diagnostics. `typed.lua` ships [disabled](ffi-internals.md#typedlua). |
+| [Driver and toolchain](driver.md#module-names-and-the-search-paths) | Compile-time module path walking ignores `;;` expansion (only the ordinary run-time loader expands it). Configurable compiler and flag strings use a deliberately small shell-word parser rather than full shell expansion. |
 
 Some of these also surface in the [language reference](../language/index.md)
 as user-visible behavior (e.g. integer overflow, container aliasing); the
@@ -109,14 +112,20 @@ cause.
 | `titanc` | The compiler CLI. |
 | `titan-compiler/` | The compiler proper: `lexer`, `parser`, `syntax_errors`, `ast`, `typedecl`, `checker`, `types`, `symtab`, `coder`, `pretty`, `driver`, `foreigntypes`, `location`, `util`. |
 | `c-parser/` | The pure-Lua C preprocessor and C99 parser behind `foreign import`. |
-| `titan-runtime/` | `titan.h`/`titan.c`, compiled into every module (dynamic loader, error handler); `titanlib.c`, the optional `titan` Lua module (`titan.backtrace()`); `titan_coro.c` and vendored `minicoro.h` for the `coro` standard module. |
+| `titan/` | Titan standard-library sources. They are ordinary qualified `titan.*` modules, built explicitly from source and installed below the matching qualified directory. |
+| `titan-runtime/` | `titan.h`/`titan.c` (`RTLD_LAZY` + `RTLD_GLOBAL` generated-import loader and error handler), `titan_coro.c`, and `titan_uv.c`, whose three objects are the exact members of `libtitan.a`; separate vendored `libbacktrace.a`; `titanlib.c`, built separately as `titan.so` (`backtrace`, internal `pin`/`clear`, and the compiler-only `RTLD_LAZY` + `RTLD_LOCAL` interface loader `_loadlib`); `minicoro.h`, `titan_longjmp.h`, and the namespaced `titan/{ffi,coro,uv}.h` SDK headers. |
 | `spec/` | The busted test suite; `coder_spec.lua` is end-to-end (generates, compiles and runs C). |
 | `examples/`, `testfiles/` | Manual benchmark/demo material (not used by the suite). |
 | `doc/` | This documentation, the [language reference](../language/index.md), and the migration reports. |
 
 Development workflow, prerequisites and test commands are in the
 repository's [CLAUDE.md](../../CLAUDE.md) and [README](../../README.md);
-the short version is: build Lua 5.5.0 in-tree with `-fPIC`, install the
-rock (`luarocks make`), and run `busted` from the repository root —
-remembering that busted loads the *installed* rock, so re-run
-`luarocks make` after editing compiler sources.
+the short version is: choose an absolute local `PREFIX`, put its `bin` on
+`PATH`, run `make lua`, `make luarocks`, and `make libuv`, then install the
+rock with `$PREFIX/bin/luarocks make` and run Busted from the repository root.
+`PREFIX` owns Lua/LuaRocks; `ROCKS_TREE` owns the Titan rock, SDK, and stdlib.
+The supported workflow currently configures them to the same path, without
+making that equality an inherent invariant.
+Busted loads the *installed* rock, so re-run that `luarocks make` after editing
+compiler sources. Use distinct `/tmp` prefixes for isolated or parallel
+verification rather than checkout-local `.lua`/`lua_modules` trees.

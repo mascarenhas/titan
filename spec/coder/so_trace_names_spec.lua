@@ -15,7 +15,6 @@ local h = require 'spec.support.helpers'
 local build_so_chain, call = h.build_so_chain, h.call
 
 describe(".so-only cross-module trace names", function()
-    setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(function ()
         os.execute("rm -rf *.o *.so *.dSYM")
         os.execute("rm -f *.c")
@@ -126,7 +125,8 @@ describe(".so-only cross-module trace names", function()
             -- Lua's own require dlopens btplugin after bthost's runtime has
             -- already snapshotted libbacktrace. The subsequent error is raised by
             -- btplugin's native function, but under bthost.apply's Titan entry
-            -- handler, so bthost's titan.o must notice the shared invalidation.
+            -- handler, so bthost's runtime archive must notice the shared
+            -- invalidation.
             local plugin = require 'btplugin'
             local ok2, err2 = pcall(bthost.apply, plugin.boom)
             assert(not ok2 and err2 == "plugin")

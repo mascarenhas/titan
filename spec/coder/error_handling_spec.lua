@@ -23,7 +23,6 @@ local function clean()
 end
 
 describe("raise <exp>", function()
-    setup(function() os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
     it("raises a string error caught by a Lua pcall", function()
@@ -190,7 +189,6 @@ describe("raise <exp>", function()
 end)
 
 describe("standalone uncaught errors", function()
-    setup(function() os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
     it("prints the raised error and a backtrace before exiting non-zero", function()
@@ -234,7 +232,6 @@ describe("standalone uncaught errors", function()
 end)
 
 describe("finally", function()
-    setup(function() os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
     it("runs the finally on normal completion", function()
@@ -825,7 +822,6 @@ describe("finally", function()
 end)
 
 describe("catch", function()
-    setup(function() os.remove("titan-runtime/titan.o") end)
     after_each(clean)
 
     it("catches a body error and continues after the try", function()
@@ -1216,6 +1212,31 @@ describe("catch", function()
         assert.not_match("_spill_local_m_1", csrc)
         assert.not_match("volatile%s+lua_Integer%s+_param_n", csrc)
         assert.not_match("volatile%s+lua_Integer%s+_local_m_1", csrc)
+    end)
+
+    it("installs a trailing catch target before allocating in a native entry",
+    function()
+        local csrc = compile_and_read_c([[
+            local function native_callback()
+                local values = { 1 }
+                if #values == 0 then raise "unreachable" end
+            catch
+                return
+            end
+
+            function call_callback()
+                native_callback()
+            end
+        ]])
+        local _, prototype = assert(csrc:find(
+            "native_callback_titan", 1, true))
+        local definition = assert(csrc:find(
+            "native_callback_titan", prototype + 1, true))
+        local next_function = assert(csrc:find("\nstatic ", definition, true))
+        local body = csrc:sub(definition, next_function - 1)
+        local setjmp = assert(body:find("TITAN_SETJMP", 1, true))
+        local first_gc = assert(body:find("luaC_checkGC", 1, true))
+        assert.is_true(setjmp < first_gc)
     end)
 
     it("a GC local mutated in the body reads correctly after a handled error", function()

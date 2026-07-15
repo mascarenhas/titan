@@ -20,6 +20,21 @@ local M = {}
 M.verbose = false
 local function verbose() return M.verbose end
 
+local function file_exists(path)
+    local file = io.open(path, "rb")
+    if not file then return false end
+    file:close()
+    return true
+end
+
+-- Prefer an explicitly configured standalone prefix and otherwise use the
+-- working Lua from PATH.
+local configured_prefix = os.getenv("PREFIX")
+local configured_lua = configured_prefix and
+    (configured_prefix .. "/bin/lua") or nil
+local LUA = configured_lua and file_exists(configured_lua) and configured_lua
+    or "lua"
+
 -- Reset the process-global compiler state shared through `require` so one test
 -- never leaks types or import caches into the next.
 local function reset(imports)
@@ -57,7 +72,7 @@ function M.call(modname, code)
     sf:write(string.format("print(pcall(function () %s end))\n", code))
     sf:close()
     local cmd = string.format(
-        "./lua -l %s %s", modname, script)
+        "%s -l %s %s", LUA, modname, script)
     local f = io.popen(cmd)
     if not f then
         os.remove(script); return false, "popen failed"
@@ -126,7 +141,7 @@ function M.compile_and_run(titan_code, lua_test, modname)
     local sf = assert(io.open(script, "w"))
     sf:write(lua_test)
     sf:close()
-    local f = assert(io.popen("./lua -l " .. modname .. " " .. script))
+    local f = assert(io.popen(LUA .. " -l " .. modname .. " " .. script))
     local out = f:read("*a")
     f:close()
     os.remove(script)
@@ -170,6 +185,10 @@ function M.compile_and_run_app(titan_code, modname)
     f:close()
     local status = tonumber(out:match("EXIT:(%d+)%s*$"))
     out = out:gsub("EXIT:%d+%s*$", "")
+    if not verbose() then
+        os.remove(execname)
+        os.execute("rm -rf " .. execname .. ".dSYM")
+    end
     return status, out
 end
 

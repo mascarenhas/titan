@@ -2,12 +2,14 @@ local mco = foreign import "minicoro.h"
 local lua = foreign import "lua.h"
 local lual = foreign import "lauxlib.h"
 local ffi = foreign import "titan/ffi.h"
-local coro = foreign import "titan/coro.h"
+local coro_native = foreign import "titan/coro.h"
 
 local STACK_SIZE = 2 * 1024 * 1024
+local runtime = mco.mco_runtime.new()
 
 record Coro
-  local handle: value
+  local udata: value -- just for GC rooting
+  local handle: *mco.mco_coro
   local default_tag: value
 end
 
@@ -16,7 +18,7 @@ local function missing_tag()
 end
 
 local function missing_yield_tag()
-  raise "must provide non-nil tag argument to coro.yield"
+  raise "must provide non-nil tag argument to coroutine.yield"
 end
 
 local function effective_tag(default_tag: value, explicit_tag: value): value
@@ -139,17 +141,9 @@ local function yield_result_or_raise(co: *mco.mco_coro, tag: value): value
   return pop_transfer_or_raise(co, false)
 end
 
-local function handle_to_coro(handle: value): *mco.mco_coro
-  local top = lua.lua_gettop(L)
-  ffi.lua_pushtvalue(L, handle)
-  local co = (lua.lua_touserdata(L, -1) as **mco.mco_coro)[0]
-  lua.lua_settop(L, top)
-  return co
-end
-
 function Coro:resume(arg: value, tag: value): value
   local effective = effective_tag(self.default_tag, tag)
-  local co = handle_to_coro(self.handle)
+  local co = self.handle
   local source = transfer_source(co)
   push_transfer(source, 1, arg)
   return resume_result_or_raise(co, source, effective)
@@ -157,14 +151,14 @@ end
 
 function Coro:error(err: value, tag: value): value
   local effective = effective_tag(self.default_tag, tag)
-  local co = handle_to_coro(self.handle)
+  local co = self.handle
   local source = transfer_source(co)
   push_transfer(source, 0, err)
   return resume_result_or_raise(co, source, effective)
 end
 
 function Coro:status(): string
-  local status = mco.mco_status(handle_to_coro(self.handle))
+  local status = mco.mco_status(self.handle)
   if (status as integer) == (mco.MCO_SUSPENDED as integer) then
     return "suspended"
   end
@@ -184,7 +178,7 @@ function yield(arg: value, tag: value): value
   if tag == nil then
     missing_yield_tag()
   end
-  local co = mco.mco_running()
+  local co = runtime.current_co
   push_transfer(co, 1, arg)
   return yield_result_or_raise(co, tag)
 end
@@ -194,11 +188,13 @@ function is_yieldable(tag: value): boolean
     missing_yield_tag()
   end
   local ctag: ffi.TValue = tag
-  return (mco.mco_is_yieldable(mco.mco_running(), ctag) as integer) ~= 0
+  return (mco.mco_is_yieldable(runtime.current_co, ctag) as integer) ~= 0
 end
 
 local function coro_gc(handle: value)
-  mco.mco_destroy(handle_to_coro(handle))
+  ffi.lua_pushtvalue(L, handle)
+  local co = (lua.lua_touserdata(L, -1) as **mco.mco_coro)[0]
+  mco.mco_destroy(co)
 end
 
 local function coro_entry(func: (value) -> value, co: *mco.mco_coro)
@@ -220,10 +216,11 @@ function create(func: (value) -> value, default_tag: value): Coro
   lua.lua_setiuservalue(L, -2, 3)
   ffi.lua_pushtvalue(L, func)
   lua.lua_setiuservalue(L, -2, 4)
-  lual.luaL_setmetatable(L, "titan.coro")
+  lual.luaL_setmetatable(L, "titan.coroutine")
 
   local desc = mco.mco_desc_init(nil, STACK_SIZE)
-  desc.func = coro.titan_coro_entry
+  desc.runtime = runtime
+  desc.func = coro_native.titan_coro_entry
   desc.user_data = ffi.lua_togco(L, -1)
 
   local res = mco.mco_create(slot, desc)
@@ -231,14 +228,13 @@ function create(func: (value) -> value, default_tag: value): Coro
     raise "could not create coroutine: " .. (mco.mco_result_description(res) as string)
   end
 
-  return Coro.new(ffi.lua_totvalue(L, -1), default_tag)
+  return Coro.new(ffi.lua_totvalue(L, -1), slot[0], default_tag)
 end
 
 do
-  local res = lual.luaL_newmetatable(L, "titan.coro")
+  local res = lual.luaL_newmetatable(L, "titan.coroutine")
   if res as integer == 1 then
     ffi.lua_pushtvalue(L, coro_gc)
     lua.lua_setfield(L, -2, "__gc")
   end
-  mco.mco_set_tag_comparator(coro.titan_coro_tag_equal)
 end

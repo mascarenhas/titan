@@ -10,7 +10,7 @@ local p = argparse('titan', 'Titan compiler')
 p:argument('module', 'Names of the modules to compile.'):args("+")
 p:flag('--print-ast', 'Print the AST.')
 p:flag('-v --verbose', 'Be verbose about compiler invocations.')
-p:option('-u --lua', 'Path to Lua source tree (to find Lua headers, defaults to "lua-5.5.0/src").')
+p:option('-u --lua', 'Path to Lua source tree (source checkouts only; installed compilers use their matching Lua SDK).')
 p:option('-t --tree', 'Root of the source tree, used for looking for source modules (defaults to ".").')
 p:option('-l --link', 'Comma-separated list of additional libraries to link into module.')
 p:option('-X --extra-object', 'Additional object file to link into the output.'):args("*")
@@ -22,26 +22,39 @@ local function exit(msg)
     os.exit(1)
 end
 
+if driver.TOOLCHAIN_ERROR then exit(driver.TOOLCHAIN_ERROR) end
+
 local function link_failed(kind, modname, term, code)
     return string.format("failed to link %s '%s' (%s%s)",
         kind, modname, tostring(term), code and (", " .. tostring(code)) or "")
 end
 
+if args.lua and driver.INSTALLED then
+    exit("--lua is only available in a source checkout; the installed " ..
+        "compiler must use its matching Lua SDK")
+end
+
 driver.TITAN_SOURCE_PATH = args.tree or driver.TITAN_SOURCE_PATH
 driver.LUA_SOURCE_PATH = args.lua or driver.LUA_SOURCE_PATH
+driver.configure_foreign_c()
 
 local errors = {}
 local main_module = nil
 
 local modules = {}
+local requested_roots = {}
+for _, modname in ipairs(args.module) do
+    requested_roots[modname] = true
+end
 
 for _, modname in ipairs(args.module) do
     local static_deps = {}
-    local ok, errs = checker.checkimport(modname, driver.defaultloader(static_deps))
-    modules[modname] = static_deps
+    local ok, errs = checker.checkimport(modname,
+        driver.defaultloader(static_deps, { source_roots = requested_roots }))
     if not ok then 
         table.insert(errors, errs)
     else
+        modules[modname] = driver.dependency_closure(modname)
         if #errs > 0 then table.insert(errors, table.concat(errs, "\n")) end
         local ast = driver.imported[modname].ast
         if ast and checker.has_main(ast) then
@@ -62,7 +75,8 @@ if #errors > 0 then exit(table.concat(errors, "\n")) end
 local libnames = {}
 
 for name, mod in pairs(driver.imported) do
-    local ok, err, libname = driver.compile_module(name, mod, modules[name], args.verbose)
+    local ok, err, libname = driver.compile_module(
+        name, mod, modules[name] or mod.deps or {}, args.verbose)
     if not ok then
         table.insert(errors, err)
     else
@@ -83,8 +97,10 @@ if main_module then
 else
     for modname, depset in pairs(modules) do
         local ofiles = {}
-        for modname, _ in pairs(depset) do
-            table.insert(ofiles, libnames[modname])
+        for depname, origin in pairs(depset) do
+            if origin == true then
+                table.insert(ofiles, libnames[depname])
+            end
         end
         local ok, term, code = driver.compile_library(modname, ofiles, args.link,
             args.verbose, args.extra_object)

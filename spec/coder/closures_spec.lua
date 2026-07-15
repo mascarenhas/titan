@@ -11,7 +11,6 @@ local h = require 'spec.support.helpers'
 local run_coder = h.run_coder
 
 describe("closures (end-to-end)", function()
-    setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(function ()
         os.execute("rm -rf *.o *.so *.dSYM")
         if not h.verbose then os.execute("rm -f *.c") end
@@ -750,7 +749,6 @@ describe("closures (end-to-end)", function()
 end)
 
 describe("closures inside methods (end-to-end)", function()
-    setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(function ()
         os.execute("rm -rf *.o *.so *.dSYM")
         if not h.verbose then os.execute("rm -f *.c") end
@@ -810,7 +808,6 @@ describe("closures inside methods (end-to-end)", function()
 end)
 
 describe("closures across modules (end-to-end)", function()
-    setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(function ()
         os.execute("rm -rf *.o *.so *.dSYM")
         if not h.verbose then os.execute("rm -f *.c") end
@@ -848,7 +845,6 @@ end)
 -- sizeudata(0, sizeof(ctype)), nuvalue = 0, raw getudatamem, no barrier). These
 -- require the C FFI toolchain (cc/cpp/gcc), like the other foreign-import specs.
 describe("closures over foreign-typed boxes (end-to-end)", function()
-    setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(function ()
         os.execute("rm -rf *.o *.so *.dSYM")
         if not h.verbose then os.execute("rm -f *.c") end

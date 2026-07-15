@@ -12,11 +12,13 @@ local render = util.render
 -- Functions for C literals
 --
 
--- Technically, we only need to escape the quote and backslash
--- But quoting some extra things helps readability...
+-- Preserve arbitrary Titan string bytes while keeping generated C source
+-- textual and readable.
 local some_c_escape_sequences = {
     ["\\"] = "\\\\",
     ["\""] = "\\\"",
+    ["?"] = "\\077",
+    ["\0"] = "\\000",
     ["\a"] = "\\a",
     ["\b"] = "\\b",
     ["\f"] = "\\f",
@@ -27,7 +29,26 @@ local some_c_escape_sequences = {
 }
 
 local function c_string_literal(s)
-    return '"' .. (s:gsub('.', some_c_escape_sequences)) .. '"'
+    local out = { '"' }
+    for i = 1, #s do
+        local c = s:sub(i, i)
+        local escaped = some_c_escape_sequences[c]
+        if escaped then
+            out[#out + 1] = escaped
+        else
+            local byte = string.byte(c)
+            -- Keep generated C source textual and encoding-independent. Three
+            -- octal digits cannot consume a following digit as part of the
+            -- escape.
+            if byte < 32 or byte == 127 or byte >= 128 then
+                out[#out + 1] = string.format("\\%03o", byte)
+            else
+                out[#out + 1] = c
+            end
+        end
+    end
+    out[#out + 1] = '"'
+    return table.concat(out)
 end
 
 local function c_integer_literal(n)
@@ -94,6 +115,9 @@ local function getslot(typ --[[:table]], dst --[[:string?]], src --[[:string]])
     elseif typ._tag == "Type.CFloat" or
            (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CFloat") then
         tmpl = "$DST (($CT)fltvalue($SRC))"
+        ct = foreignctype(typ)
+    elseif types.is_c_udata_pointer(typ) then
+        tmpl = "$DST (ttisnil($SRC) ? NULL : (($CT)uvalue($SRC)))"
         ct = foreignctype(typ)
     elseif typ._tag == "Type.CPointer" or typ._tag == "Type.CArray" or
            (typ._tag == "Type.CTypedef"
@@ -406,6 +430,24 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
             COL = c_integer_literal(loc.col),
             THROW = codethrow(loc, "%s:%d:%d: type error, expected float but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($EXP))" })
         })
+    elseif types.is_c_udata_pointer(typ) then
+        return render([[
+            if (TITAN_LIKELY(ttisfulluserdata($EXP))) {
+                $VAR = ($CT)uvalue($EXP);
+            } else if (ttisnil($EXP)) {
+                $VAR = NULL;
+            } else {
+                $THROW
+            }
+        ]], {
+            EXP = exp,
+            VAR = cvar,
+            CT = foreignctype(typ),
+            FILE = c_string_literal(loc.filename),
+            LINE = c_integer_literal(loc.line),
+            COL = c_integer_literal(loc.col),
+            THROW = codethrow(loc, "%s:%d:%d: type error, expected C userdata pointer but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($EXP))" })
+        })
     elseif typ._tag == "Type.CPointer" or
            (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CPointer") then
         return render([[
@@ -667,6 +709,12 @@ local function setslot(typ --[[:table]], dst --[[:string]], src --[[:string]])
     elseif typ._tag == "Type.CFloat" or
            (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CFloat") then
         tmpl = "setfltvalue($DST, ((lua_Number)$SRC));"
+    elseif types.is_c_udata_pointer(typ) then
+        tmpl = [[do {
+            Udata *_titan_u = (Udata *)($SRC);
+            if (_titan_u == NULL) setnilvalue($DST);
+            else setuvalue(L, $DST, _titan_u);
+        } while (0);]]
     elseif typ._tag == "Type.CPointer" or
            (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CPointer") then
         tmpl = "setpvalue($DST, ((void*)$SRC));"
@@ -1520,14 +1568,15 @@ end
 -- and does not affect the cross-module ABI (no TITAN_VER bump).
 --
 -- Two representations, chosen by `is_rawbox` (= `not types.is_gc(typ)`):
---   (N) any non-gc type (integer/float/boolean/Nil/foreign pointer/scalar
---       typedef, plus an Option of a non-gc base whose TValue is only ever
---       nil-or-scalar): a 0-uservalue userdata (`Udata0`) with the raw,
---       non-collectable C value stored inline (`getudatamem`). No TValue
+--   (N) any non-gc type (integer/float/boolean/Nil/ordinary foreign
+--       pointer/scalar typedef, plus an Option of a non-gc base whose TValue is
+--       only ever nil-or-scalar): a 0-uservalue userdata (`Udata0`) with the
+--       raw, non-collectable C value stored inline (`getudatamem`). No TValue
 --       tagging and no barrier — ever.
---   (G) every gc type (TValue-stored: String/Array/Map/record/Function/Value
---       and an Option of a gc base): a 1-uservalue userdata holding a TValue in
---       `uv[0].uv`, written with the BACK barrier.
+--   (G) every gc type (TValue-stored: String/Array/Map/record/Function/Value,
+--       COwned, C TValue, Lua-internal Udata*, and an Option of a gc base): a
+--       1-uservalue userdata holding a TValue in `uv[0].uv`, written with the
+--       BACK barrier.
 
 -- A box uses the raw (N) representation iff its value can never hold a GC
 -- pointer, i.e. `not types.is_gc(typ)`. `is_gc` is exactly the predicate that
@@ -1536,8 +1585,8 @@ end
 -- box_read / box_write derive the storage type and size from ctype(typ) /
 -- sizeof(ctype(typ)), any non-gc type works with no enumeration: integer, float,
 -- boolean, Nil (a dummy int), an Option of a non-gc base (a TValue that is only
--- ever nil-or-scalar), foreign pointers, and scalar typedefs all route here
--- automatically. Everything that may hold a GC object uses (G).
+-- ever nil-or-scalar), ordinary foreign pointers, and scalar typedefs all route
+-- here automatically. Everything that may hold a GC object uses (G).
 local function is_rawbox(typ --[[:table]])
     return not types.is_gc(typ)
 end
@@ -2274,10 +2323,18 @@ local function codemultiassignment(ctx, node)
     return table.concat(stats, "\n")
 end
 
-local function makestring(ctx, cexp, target)
-    local cstr = render("luaS_new(L, $VALUE)", {
-        VALUE = cexp
-    })
+local function makestring(ctx, cexp, target, length)
+    local cstr
+    if length then
+        cstr = render("luaS_newlstr(L, $VALUE, $LENGTH)", {
+            VALUE = cexp,
+            LENGTH = length,
+        })
+    else
+        cstr = render("luaS_new(L, $VALUE)", {
+            VALUE = cexp,
+        })
+    end
     if target then
         return "", cstr
     else
@@ -3094,7 +3151,7 @@ local function codecall(ctx, node)
                 return codeforeigncall(ctx, node)
             elseif fnode._decl._tag == "Type.StaticMethod" then
                 fname = static_name(fnode._decl)
-                local mod, record = fnode._decl.fqtn:match("^(.*)%.(%a+)$")
+                local mod, record = fnode._decl.fqtn:match("^(.*)%.([^.]+)$")
                 if mod ~= ctx.module then
                     assert(fnode.exp.var._tag == "Ast.VarDot")
                     ctx.functions[fnode._decl.fqtn .. "." .. fnode._decl.name] = {
@@ -3131,7 +3188,7 @@ local function codecall(ctx, node)
         assert(node.args._tag == "Ast.ArgsMethod")
         local mtype = node._method
         fname = method_name(mtype)
-        local mod, record = mtype.fqtn:match("^(.*)%.(%a+)$")
+        local mod, record = mtype.fqtn:match("^(.*)%.([^.]+)$")
         if mod ~= ctx.module then
             ctx.functions[mtype.fqtn .. ":" .. mtype.name] = {
                 module = mod,
@@ -3782,7 +3839,8 @@ local function boundary_recover_open(ctx, tag, d_err, d_tb)
             L->errfunc = _olderrfunc_$T;
             _lj_$T.status = luaD_closeprotected(L, _oldtop_$T, _lj_$T.status);
             luaD_seterrorobj(L, _lj_$T.status, restorestack(L, _oldtop_$T));
-            lua_checkstack(L, 4);
+            if (TITAN_UNLIKELY(!lua_checkstack(L, 4)))
+                luaD_throw(L, LUA_ERRMEM);
             /* a value-call or another stack-growing operation inside the protected
             ** region may have reallocated the stack; recompute _base before
             ** touching any reserved slot */
@@ -3897,6 +3955,19 @@ local function codetry(ctx, node)
     local cbody = node.block._defer_tail
         and codetransparentblock(ctx, node.block)
         or codestat(ctx, node.block)
+    if ctx.entry_try == node then
+        -- A function-scope catch is also the safety boundary for a trusted
+        -- native entry (for example the coroutine and libuv dispatchers).
+        -- Install its jump target before the entry GC step: an emergency-GC
+        -- allocation failure must land in the Titan catch, never unwind across
+        -- the native caller's stack. Callback domains reserve LUA_MINSTACK
+        -- before entry, so the non-raising stack reservation preamble remains
+        -- safe outside this boundary.
+        cbody = [[
+            luaC_checkGC(L);
+            _base = restorestack(L, _base_off);
+        ]] .. cbody
+    end
     pop_boundary(ctx)
     ctx.try_depth = ctx.try_depth - 1
 
@@ -4628,7 +4699,8 @@ local function codevalue(ctx, node, target)
     elseif tag == "Ast.ExpFloat" then
         return "", c_float_literal(node.value)
     elseif tag == "Ast.ExpString" then
-        return makestring(ctx, c_string_literal(node.value), target)
+        return makestring(ctx, c_string_literal(node.value), target,
+            tostring(#node.value))
     else
         error("invalid tag for a literal value: " .. tag)
     end
@@ -6516,6 +6588,8 @@ local function codefuncdec(tlcontext, node)
     -- Detect a `StatTry` in this function's body up front. Nested
     -- function/lambda bodies have their own contexts and are not scanned.
     ctx.has_try = stat_contains_try(node.block)
+    ctx.entry_try = node.block._tag == "Ast.StatTry" and
+        node.block.catchblock and node.block or nil
     if ctx.has_try then analyze_try_spills(node.block) end
     -- The declared return types, so a `return` routed through a finally
     -- (codetry/codereturn) can size + fill the per-try saved-return temps.
@@ -6592,12 +6666,13 @@ local function codefuncdec(tlcontext, node)
             .. "\n        l_uint32 _entry_nC = L->nCcalls;" or ""
     if nslots > 0 then
         table.insert(stats, 1, render([[
-        luaC_checkGC(L);
+        $ENTRYGC
         /* function preamble: reserve needed stack space */
         if (L->stack_last.p - L->top.p > $NSLOTS) {
             if (L->ci->top.p < L->top.p + $NSLOTS) L->ci->top.p = L->top.p + $NSLOTS;
         } else {
-            lua_checkstack(L, $NSLOTS);
+            if (TITAN_UNLIKELY(!lua_checkstack(L, $NSLOTS)))
+                luaD_throw(L, LUA_ERRMEM);
         }
         StkId _base = L->top.p;
         L->top.p += $NSLOTS;
@@ -6606,6 +6681,7 @@ local function codefuncdec(tlcontext, node)
         }$BASEOFF$ENTRYSAVE
         ]], {
             NSLOTS = c_integer_literal(nslots),
+            ENTRYGC = ctx.entry_try and "" or "luaC_checkGC(L);",
             BASEOFF = baseoff,
             ENTRYSAVE = entrysave,
         }))
@@ -6657,6 +6733,8 @@ local function codeinitializerdec(tlcontext, node)
     local stats = {}
     local fname = module_initializer_name(tlcontext)
     ctx.has_try = stat_contains_try(node)
+    ctx.entry_try = node._tag == "Ast.StatTry" and
+        node.catchblock and node or nil
     if ctx.has_try then analyze_try_spills(node) end
     ctx.rettypes = {}
 
@@ -6670,12 +6748,13 @@ local function codeinitializerdec(tlcontext, node)
             .. "\n        l_uint32 _entry_nC = L->nCcalls;" or ""
     if nslots > 0 then
         table.insert(stats, 1, render([[
-        luaC_checkGC(L);
+        $ENTRYGC
         /* function preamble: reserve needed stack space */
         if (L->stack_last.p - L->top.p > $NSLOTS) {
             if (L->ci->top.p < L->top.p + $NSLOTS) L->ci->top.p = L->top.p + $NSLOTS;
         } else {
-            lua_checkstack(L, $NSLOTS);
+            if (TITAN_UNLIKELY(!lua_checkstack(L, $NSLOTS)))
+                luaD_throw(L, LUA_ERRMEM);
         }
         StkId _base = L->top.p;
         L->top.p += $NSLOTS;
@@ -6684,6 +6763,7 @@ local function codeinitializerdec(tlcontext, node)
         }$BASEOFF$ENTRYSAVE
         ]], {
             NSLOTS = c_integer_literal(nslots),
+            ENTRYGC = ctx.entry_try and "" or "luaC_checkGC(L);",
             BASEOFF = baseoff,
             ENTRYSAVE = entrysave,
         }))
@@ -6938,7 +7018,7 @@ function codemethodref(ctx, node)
     local ftype = node._type      -- Type.Function (self removed)
     local nativename = bound_method_name(mtype)
     local luaname = bound_method_luaname(mtype)
-    local mod, record = mtype.fqtn:match("^(.*)%.(%a+)$")
+    local mod, record = mtype.fqtn:match("^(.*)%.([^.]+)$")
 
     -- The bound closure's upvalue[0] must be the defining module's closure: `_mod`
     -- for a same-module method, or the imported module's closure recovered from
@@ -7023,6 +7103,8 @@ function codelambdadec(tlcontext, node)
     -- A try inside this lambda's own body gets its own spill analysis and entry
     -- errorjmp-save (an enclosing function's try does not affect this context).
     ctx.has_try = stat_contains_try(node.block)
+    ctx.entry_try = node.block._tag == "Ast.StatTry" and
+        node.block.catchblock and node.block or nil
     if ctx.has_try then analyze_try_spills(node.block) end
     -- The lambda's own return types (sizes finally saved-return temps).
     ctx.rettypes = node._type.rettypes
@@ -7082,12 +7164,13 @@ function codelambdadec(tlcontext, node)
             .. "\n        l_uint32 _entry_nC = L->nCcalls;" or ""
     if nslots > 0 then
         table.insert(stats, 1, render([[
-        luaC_checkGC(L);
+        $ENTRYGC
         /* function preamble: reserve needed stack space */
         if (L->stack_last.p - L->top.p > $NSLOTS) {
             if (L->ci->top.p < L->top.p + $NSLOTS) L->ci->top.p = L->top.p + $NSLOTS;
         } else {
-            lua_checkstack(L, $NSLOTS);
+            if (TITAN_UNLIKELY(!lua_checkstack(L, $NSLOTS)))
+                luaD_throw(L, LUA_ERRMEM);
         }
         StkId _base = L->top.p;
         L->top.p += $NSLOTS;
@@ -7096,6 +7179,7 @@ function codelambdadec(tlcontext, node)
         }$BASEOFF$ENTRYSAVE
         ]], {
             NSLOTS = c_integer_literal(nslots),
+            ENTRYGC = ctx.entry_try and "" or "luaC_checkGC(L);",
             BASEOFF = baseoff,
             ENTRYSAVE = entrysave,
         }))
@@ -7293,7 +7377,8 @@ int $TYPESNAME(lua_State* L) {
 
 -- Generates the code for importing the module, and storing it
 -- in the corresponding local state slot
-local function import_module(loadmods, initmods, sigs, mprefixes, dynamic, node)
+local function import_module(loadmods, initmods, sigs, mprefixes,
+                             dynamic, node)
     local modname = node.modname
     local upvalue = node._upvalue
     local mprefix = mangle_qn(modname) .. "_"
@@ -7349,13 +7434,14 @@ local function import_module(loadmods, initmods, sigs, mprefixes, dynamic, node)
     end
 end
 
-local function init_data_from_other_modules(tlcontext, includes, loadmods, initmetas, mprefixes, static_deps)
+local function init_data_from_other_modules(tlcontext, includes, loadmods,
+                                            initmetas, mprefixes, static_deps)
     -- When linking dynamically, we need to make 'static' variables and load the values
     -- from the other module's dynamic library
     -- When linking statically, we only need to make 'extern' forward declarations.
 
     for _, func in pairs(tlcontext.functions) do
-        local is_dynamic = not static_deps[func.module]
+        local is_dynamic = static_deps[func.module] ~= true
         local storage_class = is_dynamic and "static" or "extern"
         local fname = func.mangled
         table.insert(includes, storage_class .. " " .. function_sig(fname, func.type, is_dynamic) .. ";")
@@ -7386,7 +7472,7 @@ local function init_data_from_other_modules(tlcontext, includes, loadmods, initm
     -- module handle was already opened by the function loop above, since a bound
     -- ref always also registers the native trampoline in tlcontext.functions).
     for luaname, info in pairs(tlcontext.bound_luas) do
-        local is_dynamic = not static_deps[info.module]
+        local is_dynamic = static_deps[info.module] ~= true
         if is_dynamic then
             local mprefix = mprefixes[info.module]
             table.insert(includes,
@@ -7438,27 +7524,27 @@ local function coderecorddec(ctx, code, initrecs, node)
                 NAME = c_string_literal(field.name),
                 INDEX = c_integer_literal(field.index)
             }))
+            table.insert(getswitch, render([[
+                case $INDEX: {
+                    $SETWRAPPED
+                    break;
+                }
+            ]], {
+                INDEX = c_integer_literal(field.index),
+                -- The field value (for any type, including a nominal whose
+                -- value is itself a udata) is held directly at _slot.
+                SETWRAPPED = "setobj2s(L, L->top.p - 1, _slot);"
+            }))
+            table.insert(setswitch, render([[
+                case $INDEX: {
+                    $CHECKANDSET;
+                    break;
+                }
+            ]], {
+                INDEX = c_integer_literal(field.index),
+                CHECKANDSET = checkandset(ctx, field.type, "_dst", "_src", node.loc)
+            }))
         end
-        table.insert(getswitch, render([[
-            case $INDEX: {
-                $SETWRAPPED
-                break;
-            }
-        ]], {
-            INDEX = c_integer_literal(field.index),
-            -- The field value (for any type, including a nominal whose value is
-            -- itself a udata) is held directly at _slot.
-            SETWRAPPED = "setobj2s(L, L->top.p - 1, _slot);"
-        }))
-        table.insert(setswitch, render([[
-            case $INDEX: {
-                $CHECKANDSET;
-                break;
-            }
-        ]], {
-            INDEX = c_integer_literal(field.index),
-            CHECKANDSET = checkandset(ctx, field.type, "_dst", "_src", node.loc)
-        }))
     end
     for name, method in pairs(node._type.methods) do
         if not method.islocal then
@@ -7492,6 +7578,7 @@ local function coderecorddec(ctx, code, initrecs, node)
                         setobj2s(L, L->top.p - 1, _fieldidx);
                     } else {
                         TValue *_slot = &_rec->uv[ivalue(_fieldidx)].uv;
+                        (void)_slot; /* records with only local fields have no cases */
                         switch(ivalue(_fieldidx)) {
                             $GETCASES
                         }
@@ -7514,6 +7601,7 @@ local function coderecorddec(ctx, code, initrecs, node)
                 if(TITAN_LIKELY(!tagisempty(_fieldtag) && ttisinteger(&_fieldidxv))) {
                     TValue* _dst = &(_rec->uv[ivalue(&_fieldidxv)].uv);
                     TValue* _src = s2v(L->ci->func.p + 3);
+                    (void)_src; /* records with only local fields have no cases */
                     switch(ivalue(&_fieldidxv)) {
                         $SETCASES
                     }
@@ -7718,7 +7806,8 @@ function coder.generate(modname, ast, static_deps)
         if not node._ignore then
             local tag = node._tag
             if tag == "Ast.TopLevelImport" then
-                import_module(loadmods, initmods, sigs, mprefixes, not static_deps[node.modname], node)
+                import_module(loadmods, initmods, sigs, mprefixes,
+                    static_deps[node.modname] ~= true, node)
             elseif tag == "Ast.TopLevelForeignImport" then
                 local include
                 local include_name = node.headername
@@ -8005,7 +8094,7 @@ function coder.generate(modname, ast, static_deps)
 
     table.insert(code, render(modtypes, {
         TYPESNAME = tlcontext.prefix .. "types",
-        TYPES = string.format("%q", types.serialize(ast._type))
+        TYPES = string.format("%q", types.serialize(ast._type)),
     }))
 
     table.insert(code, render(modabi, {

@@ -54,6 +54,47 @@ end
 
 describe("c preprocessor (cpp)", function()
 
+    describe("shell argument handling", function()
+        it("splits quoted and escaped paths without losing argument boundaries", function()
+            local words = assert(cpp.split_shell_words(
+                [[-I'/tmp/include path' -DNAME="two words" plain\ value '' ]]))
+            assert.same({
+                "-I/tmp/include path",
+                "-DNAME=two words",
+                "plain value",
+                "",
+            }, words)
+        end)
+
+        it("quotes arbitrary paths for a lossless shell round trip", function()
+            local values = {
+                "",
+                "plain",
+                "/tmp/a path/header.h",
+                "single'quote and spaces",
+                "dollar$backtick`semicolon;",
+            }
+            for _, value in ipairs(values) do
+                local quoted = assert(cpp.shell_quote(value))
+                assert.same({ value }, assert(cpp.split_shell_words(quoted)))
+            end
+        end)
+
+        it("rejects malformed shell strings instead of guessing", function()
+            local words, err = cpp.split_shell_words("-I'unfinished")
+            assert.is_nil(words)
+            assert.matches("unterminated single quote", err)
+
+            words, err = cpp.split_shell_words('-DNAME="unfinished')
+            assert.is_nil(words)
+            assert.matches("unterminated double quote", err)
+
+            words, err = cpp.split_shell_words("-I/tmp/path\\")
+            assert.is_nil(words)
+            assert.matches("trailing backslash", err)
+        end)
+    end)
+
     describe("object-like macros", function()
         it("substitutes a simple value", function()
             assert.equal("42", expand("#define N 42\nN\n"))

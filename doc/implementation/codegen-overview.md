@@ -8,9 +8,12 @@ coder.generate(modname, ast, static_deps)  --> string (one C translation unit)
 
 where `modname` is the dot-separated module name, `ast` is the module's
 AST *after* `checker.check` has decorated and rewritten it, and
-`static_deps` is a set (module name → `true`) of the imports whose Titan
-source was available, maintained by the driver's loader. The return value
-is the complete text of one C translation unit; the driver
+`static_deps` is the driver's origin map: source imports are `true` and binary
+imports are absent. `titanc` uses
+the recorded direct map for a non-root source dependency and the full recursive
+`driver.dependency_closure` for an explicit root, so it includes source objects
+statically linked into that root. The return
+value is the complete text of one C translation unit; the driver
 (`driver.compile`) runs it through `pretty.reindent_c`, writes the `.c`
 file next to the `.titan` source, and invokes the system C compiler
 ([driver and toolchain](driver.md)). One consequence of the checker's
@@ -444,9 +447,10 @@ to interpret that layout metadata.
 
 ## The module protocol
 
-All per-Lua-state module state lives in one `Udata` (`_mod`) created by
-`_init`: the module table's slot is gone entirely, and member slots are
-0-based with no reserved user value. The user values hold module
+All semantic module state lives in the Lua registry or GC-traced Lua objects,
+never in shared C globals. In particular, per-Lua-state module state lives in
+one `Udata` (`_mod`) created by `_init`: the module table's slot is gone
+entirely, and member slots are 0-based with no reserved user value. The user values hold module
 variables, imported modules' `Udata`s, exported-function canonical
 closures, cached record metatables and per-record static-namespace tables
 (allocation order below). Every generated function receives this `Udata` as its
@@ -486,17 +490,14 @@ Idempotency works at two independent levels:
   under `"Titan module <modname>"`; a second `require`, or a dependent
   module calling `_init` again, finds it and returns it untouched. A
   second Lua *state* in the same process misses the registry and gets a
-  fresh `Udata` and metatables — there is no per-state C global state, so
+  fresh `Udata` and metatables — there is no semantic per-state C global, so
   one compiled module serves many states.
-* **Per process / translation unit**: the C `static int _initialized`
-  guards the genuinely process-global pieces — the dlsym'd function
-  pointers. This branch matters when the *same module's code* is present
-  twice in a process (e.g. linked into an executable and also dlopened as
-  someone else's dependency): the registry says the module exists, but
-  this copy of the code still needs its function pointers stitched from
-  the shared libraries. (Record type identity is the metatable, a
-  per-Lua-state object cached in a `_mod` user value rather than a C
-  static, so this branch no longer re-fetches any tag cache.)
+* **Per translation unit**: the C `static int _initialized` guards only
+  nonsemantic native wiring and caches — here, the dlsym'd function pointers.
+  The standard library installs one canonical DSO per module, shared by Titan
+  imports and Lua requires. Record type identity is the metatable, a
+  per-Lua-state object cached in a `_mod` user value rather than a C static, so
+  this branch no longer re-fetches any tag cache.
 
 *Detail:* the re-initialization branch substitutes `$LOADMODULES2` only
 when the dynamic-load list has more than one entry (`#loadmods > 1` in
@@ -508,11 +509,16 @@ to re-stitch, and skipping it just avoids declaring an unused handle.
 (The converse is not exact: two dynamic deps with no functions called
 would still re-emit their handles.)
 
-### `luaopen_<prefix>`, `<prefix>_abi`, and `<prefix>_types`
+### Lua entries, `<prefix>_abi`, and `<prefix>_types`
 
-`luaopen_<mangled-modname>` is what `require` finds: it calls `_init` and
-pushes the module `Udata` itself — so **`require` returns a userdata**,
-not a table, with **no separate module table at all**. Its members —
+`luaopen_<mangled-modname>` is what `require` finds. Standard-library short
+imports are desugared before module resolution, so Titan `import "os"` compiles
+as an import of `titan.os`; its ordinary qualified module name naturally emits
+`luaopen_titan_os`, the same entry used by Lua `require "titan.os"`, without
+defining `luaopen_os` or replacing Lua's own `os` library. The Lua entry calls
+`_init` and pushes
+the module `Udata` itself — so **`require` returns a userdata**, not a table,
+with **no separate module table at all**. Its members —
 exported functions, exported variables, and one static-namespace table
 per record (carrying its public record functions) — are all served by a metatable on the
 `Udata` ([Lua interop internals](lua-interop-internals.md)).
@@ -535,14 +541,18 @@ int counter_types(lua_State* L) {
 
 The literal is `types.serialize(ast._type)`: a Lua *expression* that
 rebuilds the module's type when evaluated with `types.lua`'s constructors
-as its environment. When the driver's loader finds only a compiled `.so`
-for an import, it first loads and calls `<prefix>_abi`, rejects missing or
-mismatched markers, then loads `<prefix>_types` and `load`s
-`"return " .. serialized` to recover the interface — letting the checker
-type the importing module against a dependency whose source is gone. The
-policy is static linkage when the source is present and dynamic linkage
-otherwise, and the tests' in-memory `tableloader` exercises the same
-serialization round-trip. See
+as its environment. It returns that serialized interface as its sole result;
+there is no dependency-origin metadata in the module protocol.
+
+When the driver's loader finds only a compiled `.so` for an import, it first
+loads and calls `<prefix>_abi`, rejects missing or mismatched markers, then
+loads `<prefix>_types` and `load`s `"return " .. serialized` to recover the
+interface — letting the checker type the importing module against a dependency
+whose source is gone. Libuv does not add another result or a special binary
+classification. Dependencies use dynamic linkage when a binary wins lookup and static
+linkage when no binary exists and source is selected. Explicit command-line
+roots are the source-first exception. The tests'
+in-memory `tableloader` exercises the same serialization round-trip. See
 [driver and toolchain](driver.md).
 
 ## Static vs dynamic dependency wiring
@@ -560,10 +570,10 @@ extern Udata *dep_init(lua_State *L);
 /* in _init: */ { Udata *_m = dep_init(L); setuvalue(L, &_mod->uv[1].uv, _m); }
 ```
 
-**Dynamic** (`.so`-only dep): each imported function is declared in
+**Ordinary dynamic** (`.so`-only dep): each imported function is declared in
 `$INCLUDES` as a `static` function *pointer*; the generated `_init`
 dlopens the library and stitches the pointers by symbol name with the
-runtime's `loadlib`/`loadsym` (`titan-runtime/titan.c`: Titan-path
+runtime's lazy/global `loadlib` and `loadsym` (`titan-runtime/titan.c`: Titan-path
 search, registry-cached handles, Lua error on failure):
 
 ```c
@@ -573,6 +583,16 @@ void *dep_handle = loadlib(L, "dep.so");
 dep_mk_titan = titan_cast_func(Udata* (*)(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer),
                                loadsym(L, dep_handle, "dep_mk_titan"));
 ```
+
+A direct-libuv DSO follows this exact regime. Its explicit `import "uv"` is
+ordinary generated import wiring inside that DSO: lazy mapping leaves normal
+`uv_*` function calls unresolved long enough for the DSO's initializer to load
+`titan/uv.so` globally before those calls bind. `RTLD_NOW` would reject the DSO
+before its initializer ran, while a provider loaded `RTLD_LOCAL` later would
+not satisfy those bindings. The coder emits no provider marker or alternate
+loader call. Eager libuv relocations and constructors cannot rely on this
+initializer ordering. Compiler interface inspection is a separate
+`RTLD_LAZY | RTLD_LOCAL` operation.
 
 The dep's `_init` is fetched and called the same way inside
 `$INITMODULES`. In both regimes the *call sites are identical* C calls —

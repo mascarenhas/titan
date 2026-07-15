@@ -12,7 +12,6 @@ local h = require 'spec.support.helpers'
 local run_coder = h.run_coder
 
 describe("bound methods (end-to-end)", function()
-    setup(function () os.remove("titan-runtime/titan.o") end)
     after_each(function ()
         os.execute("rm -rf *.o *.so *.dSYM")
         if not h.verbose then os.execute("rm -f *.c") end

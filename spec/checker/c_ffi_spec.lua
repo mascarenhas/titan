@@ -505,6 +505,33 @@ describe("C FFI type checking", function()
         assert.truthy(ok, err)
     end)
 
+    it("allows owned C allocation in sound top-level initializers", function()
+        local ok, err = run_checker([[
+            local ffi = foreign import "titan/ffi.h"
+
+            local one = ffi.titan_ffi_int.new()
+            local many = ffi.titan_ffi_int.new_array(8)
+            local parenthesized_one = (ffi.titan_ffi_int.new())
+            local parenthesized_many = (ffi.titan_ffi_int.new_array(4))
+
+            function count(): integer
+                return #many + #parenthesized_many
+            end
+        ]])
+        assert.truthy(ok, err)
+    end)
+
+    it("rejects top-level C allocation counts that read module state", function()
+        local ok, err = run_checker([[
+            local ffi = foreign import "titan/ffi.h"
+
+            count = 8
+            local many = ffi.titan_ffi_int.new_array(count)
+        ]])
+        assert.falsy(ok)
+        assert.match("top level variable initialization must be constant", err)
+    end)
+
     it("offers sizeof and alignof pseudo-members on C types", function()
         local ok, err = run_checker([[
             local ffi = foreign import "titan/ffi.h"
@@ -881,6 +908,37 @@ describe("C FFI type checking", function()
         end)
     end)
 
+    it("matches decimal and hexadecimal C limit macro ranks", function()
+        with_header([[
+            #define FFI_LONG_MAX 0x7fffffffffffffffL
+            #define FFI_LONG_MIN (-0x7fffffffffffffffL - 1)
+            #define FFI_LLONG_MAX 0x7fffffffffffffffLL
+            #define FFI_LLONG_MIN (-0x7fffffffffffffffLL - 1)
+            #define FFI_ULONG_MAX 0xffffffffffffffffUL
+            #define FFI_ULLONG_MAX 0xffffffffffffffffULL
+        ]], function(header1)
+            with_header([[
+                #define FFI_LONG_MAX 9223372036854775807L
+                #define FFI_LONG_MIN (-9223372036854775807L - 1)
+                #define FFI_LLONG_MAX 9223372036854775807LL
+                #define FFI_LLONG_MIN (-9223372036854775807LL - 1)
+                #define FFI_ULONG_MAX 18446744073709551615UL
+                #define FFI_ULLONG_MAX 18446744073709551615ULL
+            ]], function(header2)
+                local ok, err = run_checker([[
+                    local c1 = foreign import "]] .. header1 .. [["
+                    local c2 = foreign import "]] .. header2 .. [["
+
+                    local function limits(): integer
+                        return (c1.FFI_LONG_MAX as integer) +
+                               (c2.FFI_LLONG_MIN as integer)
+                    end
+                ]])
+                assert.truthy(ok, err)
+            end)
+        end)
+    end)
+
     it("rejects C arrays crossing through value", function()
         with_header([[
             typedef int ffi_arr[2];
@@ -995,6 +1053,23 @@ describe("C FFI type checking", function()
             ]])
             assert.falsy(ok)
             assert.match("cannot export C FFI type 'ffi_count'", err)
+        end)
+    end)
+
+    it("allows C FFI types in local record fields", function()
+        with_header("typedef struct ffi_handle ffi_handle;\n", function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                record Handle
+                    local pointer: *c.ffi_handle
+                end
+
+                local function use(pointer: *c.ffi_handle): Handle
+                    return Handle.new(pointer)
+                end
+            ]])
+            assert.truthy(ok, err)
         end)
     end)
 

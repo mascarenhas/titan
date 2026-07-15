@@ -54,7 +54,12 @@ Start with the [design philosophy](philosophy.md) if you want to know
 | [Modules](modules.md) | Module files, `import`, visibility, module variables, and the compilation model (shared libraries, executables, search paths). |
 | [Lua interoperability](lua-interop.md) | Using Titan from Lua and Lua values in Titan: what crosses the boundary, what each type looks like on the other side, and where the run-time checks happen. |
 | [Error handling](error-handling.md) | The run-time error model: what raises errors, error messages, `pcall`, `titan.backtrace()`, and the option-type idiom for recoverable failures. |
-| [Coroutines](coroutines.md) | The `coro` standard module: stackful asymmetric coroutines, tagged nested yield, error injection, status, and Lua interop. |
+| [Coroutines](coroutines.md) | The `coroutine` standard module (`import "coroutine"` from Titan, `require "titan.coroutine"` from Lua): stackful asymmetric coroutines, tagged nested yield, error injection, status, and Lua interop. |
+| [Asynchronous I/O and tasks](async-io.md) | The `uv` Task scheduler, nonblocking `run`, explicit/automatic loop driving, direct callback continuation model, errors, joins, cancellation, and resource/process shutdown. |
+| [Timer standard library](standard-library-timer.md) | Task delays, cooperative `yield`, recurring `Ticker` handles, dropped ticks, and explicit close. |
+| [Filesystem standard library](standard-library-fs.md) | Binary file reads and writes, per-File FIFO ordering and close, whole-file helpers, metadata, and path operations. |
+| [TCP networking standard library](standard-library-net.md) | Asynchronous DNS and TCP clients/servers, binary stream reads and FIFO writes, shutdown, close, and cancellation. |
+| [Operating-system standard library](standard-library-os.md) | Portable environment, directory, identity, executable-path, one-shot signals, child processes with binary stdio, and deadlock-free `communicate`. |
 | [The C FFI](ffi.md) | `foreign import`: binding C headers, supported types, calling C functions, limitations. |
 | [Grammar](grammar.md) | The complete lexical and syntactic grammar. |
 
@@ -132,9 +137,12 @@ with a clean error; each links to the chapter that documents it in full.
   out-of-band traceback: there is no exception class hierarchy and no
   chaining/cause mechanism. A new error in a catch or finally replaces the
   previous one ([error handling](error-handling.md)).
-* **Only a small standard library so far.** Titan includes the low-level
-  `coro` module for stackful coroutines, but most library functionality
-  still comes from the FFI, imported Titan modules, or the Lua host.
+* **Only a small standard library so far.** Titan includes stackful
+  `coroutine`, the libuv-backed `uv` Task runtime, `timer`, asynchronous `fs`
+  and `net`, and portable `os` helpers with one-shot signal waits, direct child
+  processes, binary stdio pipes, and concurrent `communicate`. Qualified Lua
+  names such as `titan.coroutine`, `titan.timer`, `titan.fs`, `titan.net`, and
+  `titan.os` leave Lua's standard modules unchanged.
 
 The [README roadmap](../../README.md) lists where the language is headed;
 the [philosophy chapter](philosophy.md) explains the principles that order

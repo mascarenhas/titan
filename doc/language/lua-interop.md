@@ -59,6 +59,31 @@ print(counter.bump(1))    --> 101
 The module value's metatable is protected: `getmetatable` on it returns
 the string `"Titan module counter"`, and `setmetatable` on it fails.
 
+### Qualified standard-library names
+
+Titan's standard modules have qualified `titan.*` identities. The parser
+desugars their convenient short Titan imports to those qualified names, while
+Lua requires the qualified names directly. For example:
+
+```lua
+local lua_os = require "os"          -- Lua's standard table
+local titan_os = require "titan.os"  -- Titan module userdata
+
+assert(type(lua_os) == "table")
+assert(type(titan_os) == "userdata")
+assert(require "os" == lua_os)
+```
+
+The same rule applies to `titan.coroutine`, `titan.uv`, `titan.timer`,
+`titan.fs`, and `titan.net`. In an installed Titan 0.11 tree these qualified
+names resolve to qualified standard-module files under
+`<root>/lib/titan/0.11/titan/`. Titan's installed Lua has
+`<root>/lib/titan/0.11/?.so` before its ordinary `lib/lua` entries in the
+default `package.cpath`, and standalone Titan programs ensure the same template
+is present. A Lua require and a desugared Titan short-name import therefore
+open the same DSO. The installation does not create parent-level or `lib/lua`
+copies, symbolic links, or hard links.
+
 ## How values map between the two languages
 
 Titan values *are* Lua values; nothing is converted on the way out of
@@ -423,7 +448,7 @@ print(err)  --> test.titan:...: type error, expected integer but found string
 In addition, whenever an error is raised inside a Titan call, a single
 **unified, intermingled traceback** — pure-Lua and Titan frames in call
 order, innermost first — is recorded and can be retrieved afterwards with
-`titan.backtrace()` from the optional `titan` Lua module. The error value
+`titan.backtrace()` from the `titan` Lua support module. The error value
 seen by `pcall` is unchanged. See
 [Error handling](error-handling.md) for the full error model and the
 option-type idiom for recoverable failures.

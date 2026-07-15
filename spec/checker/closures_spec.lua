@@ -326,6 +326,32 @@ describe("closures (top-level lambda initializer is sound)", function()
             a = b
         ]])
     end)
+
+    it("rejects record constructors whose arguments read module state", function()
+        assert_type_error("top level variable initialization must be constant", [[
+            record R
+                x: integer
+            end
+            source = 1
+            local r = R.new(source)
+        ]])
+    end)
+
+    it("accepts a parenthesized constant record constructor", function()
+        assert_type_check([[
+            record R
+                x: integer
+            end
+            local r = (R.new(1))
+        ]])
+    end)
+
+    it("rejects map initializers whose keys read module state", function()
+        assert_type_error("top level variable initialization must be constant", [[
+            key = 1
+            local m = { [key] = 42 }
+        ]])
+    end)
 end)
 
 describe("closures (still-an-error cases)", function()

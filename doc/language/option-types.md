@@ -194,6 +194,14 @@ one can still fail at run time on a present value — converting a `float?`
 that holds a non-integral or out-of-range number to `integer?` raises the
 usual "no integer representation" error, while `nil` is unaffected.
 
+A `value` coerced to `T?` is likewise checked against the whole option type:
+`nil` remains `nil`, while a present value must successfully convert to `T`.
+This direct, nil-preserving conversion applies in every implicit coercion
+context, including declarations, assignments, arguments, and returns; it does
+not first coerce the dynamic value to non-option `T`, which would incorrectly
+reject nil or turn it into a present base value (notably `false` for
+`boolean`).
+
 ### Explicit `as` casts
 
 The *explicit* cast from an option to its base type unwraps it with a
