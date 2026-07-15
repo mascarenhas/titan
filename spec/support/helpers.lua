@@ -27,13 +27,13 @@ local function file_exists(path)
     return true
 end
 
--- Keep the legacy checkout-wrapper fallback for older developer trees while
--- making the standalone prefix interpreter the primary test host.
+-- Prefer an explicitly configured standalone prefix and otherwise use the
+-- working Lua from PATH.
 local configured_prefix = os.getenv("PREFIX")
 local configured_lua = configured_prefix and
     (configured_prefix .. "/bin/lua") or nil
 local LUA = configured_lua and file_exists(configured_lua) and configured_lua
-    or (file_exists(".lua/bin/lua") and ".lua/bin/lua" or "./lua")
+    or "lua"
 
 -- Reset the process-global compiler state shared through `require` so one test
 -- never leaks types or import caches into the next.

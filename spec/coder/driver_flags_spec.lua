@@ -17,7 +17,7 @@ end
 local prefix_lua = os.getenv("PREFIX") and
     (os.getenv("PREFIX") .. "/bin/lua") or nil
 local LUA = prefix_lua and file_exists(prefix_lua) and prefix_lua
-    or (file_exists(".lua/bin/lua") and ".lua/bin/lua" or "./lua")
+    or "lua"
 
 local function shell_command(argv)
     local quoted = {}

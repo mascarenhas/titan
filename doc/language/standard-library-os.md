@@ -120,7 +120,10 @@ binary strings and preserve embedded NUL. Nonempty `write_stdin` operations
 are FIFO across Tasks and return only after their native write callback; an
 empty write is a checked no-op. Cancelling a queued write removes it;
 cancelling a submitted write consumes its eventual callback without killing
-the child.
+the child. On Unix, loading `titan.uv` changes a default `SIGPIPE` disposition
+to ignored so a child that closes stdin produces the ordinary libuv write
+error instead of terminating the parent process. An already ignored signal or
+an application-installed handler is preserved.
 
 `close_stdin` is idempotent and ordered after earlier writes. Its first call
 immediately rejects later writes, then cleanup-shields the physical pipe close.

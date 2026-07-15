@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <errno.h>
 #include <limits.h>
 #include <signal.h>
 #include <stddef.h>
@@ -509,6 +510,21 @@ const char *titan_uvshim_signal_name(int signum) {
   if (signum == SIGUSR2)
     return "usr2";
   return NULL;
+}
+
+int titan_uvshim_ignore_sigpipe_if_default(void) {
+  struct sigaction current;
+  struct sigaction ignore;
+  if (sigaction(SIGPIPE, NULL, &current) != 0)
+    return uv_translate_sys_error(errno);
+  if (current.sa_handler != SIG_DFL)
+    return 0;
+  memset(&ignore, 0, sizeof(ignore));
+  ignore.sa_handler = SIG_IGN;
+  if (sigemptyset(&ignore.sa_mask) != 0 ||
+      sigaction(SIGPIPE, &ignore, NULL) != 0)
+    return uv_translate_sys_error(errno);
+  return 0;
 }
 
 int titan_uvshim_signal_init(uv_loop_t *loop,

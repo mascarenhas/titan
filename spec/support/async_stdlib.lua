@@ -26,10 +26,7 @@ local function host_lua()
     if prefix and exists(prefix .. "/bin/lua") then
         return prefix .. "/bin/lua"
     end
-    if exists(REPO .. "/.lua/bin/lua") then
-        return REPO .. "/.lua/bin/lua"
-    end
-    return REPO .. "/lua"
+    return "lua"
 end
 
 local function fresh_workspace_path(label)
@@ -39,11 +36,16 @@ local function fresh_workspace_path(label)
 end
 
 local function find_standard_dir()
-    local paths = { REPO .. "/titan" }
+    local paths = {}
     local prefix = os.getenv("PREFIX")
     if prefix and prefix ~= "" then
         paths[#paths + 1] = prefix .. "/lib/titan/0.11/titan"
     end
+    local installed = package.searchpath("titan.coroutine", package.cpath)
+    if installed then
+        paths[#paths + 1] = assert(installed:match("^(.*)/[^/]+$"))
+    end
+    paths[#paths + 1] = REPO .. "/titan"
     for _, path in ipairs(paths) do
         if exists(path .. "/coroutine.so") and exists(path .. "/uv.so") and
                 exists(path .. "/timer.so") then
@@ -235,7 +237,7 @@ function M.run_lua_source(workspace, source, options)
     local cpath = workspace .. "/?.so;" .. root .. "/?.so;;"
     local lua_path = REPO .. "/?.lua;" .. REPO .. "/?/init.lua;;"
     local lua = host_lua()
-    local command = table.concat({
+    local command = {
         "env -u LUA_PATH -u LUA_CPATH" ..
             " -u LUA_PATH_5_5 -u LUA_CPATH_5_5",
         "TITAN_PATH_0_11=" .. quote(root),
@@ -244,9 +246,14 @@ function M.run_lua_source(workspace, source, options)
         "LUA_PATH_5_5=" .. quote(lua_path),
         "LUA_CPATH=" .. quote(cpath),
         "LUA_CPATH_5_5=" .. quote(cpath),
-        quote(lua), "-e", quote(source),
-    }, " ")
-    return run(command, options.cwd or workspace)
+    }
+    for _, argument in ipairs(options.exec_prefix or {}) do
+        command[#command + 1] = quote(argument)
+    end
+    command[#command + 1] = quote(lua)
+    command[#command + 1] = "-e"
+    command[#command + 1] = quote(source)
+    return run(table.concat(command, " "), options.cwd or workspace)
 end
 
 local function app_command(workspace, modname)

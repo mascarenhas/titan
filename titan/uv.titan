@@ -6508,6 +6508,11 @@ do
   EVENT_STREAM_READ = shim.TITAN_UV_EVENT_STREAM_READ as integer
   EVENT_CONNECTION = shim.TITAN_UV_EVENT_CONNECTION as integer
   EVENT_PROCESS_EXIT = shim.TITAN_UV_EVENT_PROCESS_EXIT as integer
+  local sigpipe_status =
+    shim.titan_uvshim_ignore_sigpipe_if_default() as integer
+  if sigpipe_status < 0 then
+    raise make_error(sigpipe_status, "runtime.sigpipe", nil)
+  end
   main_thread = main_thread_value()
   check_alignment()
   program_args_ready = setup_program_args()

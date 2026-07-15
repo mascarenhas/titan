@@ -574,9 +574,13 @@ describe("os child processes", function()
             "\nlocal workspace = " .. string.format("%q", workspace) .. "\n"
     end
 
-    local function run_lua(source)
+    local function run_lua(source, default_sigpipe)
+        local options
+        if default_sigpipe then
+            options = { exec_prefix = { child, "exec-default-sigpipe" } }
+        end
         local ok, status, output = os_support.run_lua_source(
-            workspace, source_preamble() .. source)
+            workspace, source_preamble() .. source, options)
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
         assert.equals(0, status, output)
     end
@@ -658,7 +662,7 @@ local cancellation =
     assert(cases.schedule_communicate_cancellation(child))
 uv.loop()
 assert(cancellation:join() == "communicate-cancellation-ok")
-]==])
+]==], true)
     end)
 
     it("terminates, reaps, and closes a leaked TERM-resistant child",

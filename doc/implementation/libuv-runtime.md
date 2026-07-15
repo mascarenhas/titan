@@ -301,6 +301,14 @@ close, but queued bytes and the sticky error remain logically readable in
 order. Process exit does not synthesize pipe EOF, so output continues to drain
 through the real stream callback sequence.
 
+Libuv implements Unix stream writes with `write`/`writev`, which can deliver
+`SIGPIPE` before the write callback can report `UV_EPIPE`. During `titan.uv`
+initialization, the native shim uses `sigaction` to change `SIGPIPE` from
+`SIG_DFL` to `SIG_IGN`. It leaves an inherited `SIG_IGN` or application-owned
+handler unchanged. This narrow POSIX initialization is necessary because
+libuv has no equivalent configuration API; all pipe creation, I/O, and close
+operations continue to use public libuv APIs.
+
 `os.communicate` creates a private HelperGroup with four child Tasks: stdout
 reader, stderr reader, stdin writer/closer, and process waiter. Every helper is
 linked to the group and marked permanently observed before its start timer is

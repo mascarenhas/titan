@@ -23,7 +23,7 @@ end
 local prefix_lua = os.getenv("PREFIX") and
     (os.getenv("PREFIX") .. "/bin/lua") or nil
 local LUA = prefix_lua and file_exists(prefix_lua) and prefix_lua
-    or (file_exists(".lua/bin/lua") and ".lua/bin/lua" or "./lua")
+    or "lua"
 local TITANC = LUA ..
     [[ -e 'package.path="./?.lua;./?/init.lua;" .. package.path' ./titanc]]
 local TEST_ENV = "env CCACHE_DISABLE=1 TITAN_PATH_0_11=. " ..

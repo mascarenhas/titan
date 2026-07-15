@@ -108,6 +108,14 @@ int titan_uvshim_error_esrch(void);
 int titan_uvshim_signal_number(const char *name);
 const char *titan_uvshim_signal_name(int signum);
 
+/*
+ * Libuv's Unix stream writes use write/writev, so a closed pipe can deliver
+ * SIGPIPE before libuv reports UV_EPIPE. Ignore the signal only when the host
+ * left its disposition at SIG_DFL; an embedding application's explicit
+ * SIG_IGN or custom handler remains untouched.
+ */
+int titan_uvshim_ignore_sigpipe_if_default(void);
+
 /* Concrete one-shot signal wrappers around public libuv handle APIs. */
 int titan_uvshim_signal_init(uv_loop_t *loop,
                              uv_signal_t *signal,

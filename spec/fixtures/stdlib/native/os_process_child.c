@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <uv.h>
 
@@ -213,6 +214,19 @@ static int close_stdin_early(void) {
   return 0;
 }
 
+static int exec_default_sigpipe(int argc, char **argv) {
+  struct sigaction action;
+  if (argc < 3)
+    return 64;
+  memset(&action, 0, sizeof(action));
+  action.sa_handler = SIG_DFL;
+  if (sigemptyset(&action.sa_mask) != 0 ||
+      sigaction(SIGPIPE, &action, NULL) != 0)
+    return 70;
+  execvp(argv[2], &argv[2]);
+  return 71;
+}
+
 int main(int argc, char **argv) {
   size_t length;
   int code;
@@ -260,5 +274,7 @@ int main(int argc, char **argv) {
   }
   if (strcmp(argv[1], "close-stdin-early") == 0)
     return close_stdin_early();
+  if (strcmp(argv[1], "exec-default-sigpipe") == 0)
+    return exec_default_sigpipe(argc, argv);
   return 69;
 }

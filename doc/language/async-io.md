@@ -11,6 +11,12 @@ Lua code loads the same canonical module identity with
 `require "titan.uv"`. The qualified Lua name avoids collisions with Lua
 libraries. The module currently supports Linux and macOS.
 
+On Unix, loading the module changes a default `SIGPIPE` disposition to ignored
+so a closed stream produces a `uv.Error` instead of terminating the process.
+An inherited ignored disposition or application-installed handler is left
+unchanged. Embedders must serialize module initialization with their own
+process-wide signal-handler changes.
+
 ## Scheduling and driving tasks
 
 ```titan

@@ -401,6 +401,12 @@ modules from that *installed* rock, not from your checkout. Re-run
 `$PREFIX/bin/luarocks make` after editing compiler sources so tests see the
 changes.
 
+With a working Titan installation's `bin` directory already on `PATH`, the
+equivalent `luarocks make --force` and `luarocks test` commands work from the
+repository root without setting `PREFIX` or `ROCKS_TREE`. The tests discover
+the active installation from Lua's configured module paths and use the `lua`
+on `PATH` for child interpreters.
+
 # Building the examples
 
 The `examples/` directory has its own `Makefile` with a target per example

@@ -148,6 +148,7 @@ make libuv                                          # build pinned static PIC li
 "$PREFIX/bin/luarocks" make                        # build/install Titan runtime, compiler, and stdlib
 make stdlib                                         # checkout-only standard build: coroutine -> uv -> timer/fs/net/os
 make test                                           # `luarocks make` + `luarocks test`: (re)install the rock, then run the full suite
+luarocks test                                       # test an already current install; with its bin on PATH, PREFIX/ROCKS_TREE are not required
 luarocks make && bash spec/support/ci_test_groups.sh compiler  # CI's covered compiler/language group
 bash spec/support/ci_test_groups.sh libraries       # CI's complete uncovered library group
 make clean                                           # remove generated artifacts; `make distclean` also removes downloaded Lua/LuaRocks/libbacktrace/libuv trees
@@ -265,6 +266,11 @@ parser, symtab, types, util); `spec/checker/`, `spec/coder/`, and
 `spec/stdlib/` need the full setup.
 
 **Gotcha — the installed rock shadows the working tree under busted.** The Busted launcher uses `luarocks.loader`, so once `$PREFIX/bin/luarocks make` has installed the `titan` rock, `require "titan-compiler.X"` inside specs resolves to the *installed snapshot* in `ROCKS_TREE` (currently the same directory as `PREFIX`), not your edited source files — edits silently do not take effect. Re-run `$PREFIX/bin/luarocks make` after changing compiler sources, before running Busted. (`make test` re-runs `luarocks make` for you each time, so it always tests current sources; `luarocks test` on its own does **not** rebuild the rock.) A bare `busted` without a preceding `luarocks make` can silently load a stale installed snapshot and pass or fail misleadingly.
+
+When the active installation's `bin` directory is on `PATH`, plain
+`luarocks test` needs neither `PREFIX` nor `ROCKS_TREE`: child interpreters use
+`lua` from `PATH`, and async stdlib helpers discover the canonical installed
+modules from `package.cpath`.
 
 **Gotcha — do not inherit `luarocks init` paths.** The standalone-prefix flow
 does not use `luarocks init`. Ambient `LUA_PATH`, `LUA_CPATH`, or their Lua-5.5
