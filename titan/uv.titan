@@ -2289,12 +2289,8 @@ local function submit_fs_operation(operation: FsOperation):
   operation.owner = owner
   local status: ffi.titan_ffi_int = 0 as ffi.titan_ffi_int
   if kind == FS.stat then
-    status = libuv.uv_fs_stat {
-      loop = loop_handle,
-      req = owner.handle,
-      path = path_data,
-      cb = shim.titan_uvshim_fs_cb,
-    }
+    status = libuv.uv_fs_stat(loop_handle, owner.handle, path_data,
+                             shim.titan_uvshim_fs_cb)
   elseif kind == FS.open then
     status = libuv.uv_fs_open {
       loop = loop_handle,
@@ -2325,19 +2321,11 @@ local function submit_fs_operation(operation: FsOperation):
       cb = shim.titan_uvshim_fs_cb,
     }
   elseif kind == FS.flush then
-    status = libuv.uv_fs_fsync {
-      loop = loop_handle,
-      req = owner.handle,
-      file = file_handle,
-      cb = shim.titan_uvshim_fs_cb,
-    }
+    status = libuv.uv_fs_fsync(loop_handle, owner.handle, file_handle,
+                              shim.titan_uvshim_fs_cb)
   elseif kind == FS.close or kind == FS.internal_close then
-    status = libuv.uv_fs_close {
-      loop = loop_handle,
-      req = owner.handle,
-      file = file_handle,
-      cb = shim.titan_uvshim_fs_cb,
-    }
+    status = libuv.uv_fs_close(loop_handle, owner.handle, file_handle,
+                              shim.titan_uvshim_fs_cb)
   elseif kind == FS.mkdir then
     status = libuv.uv_fs_mkdir {
       loop = loop_handle,
@@ -2347,27 +2335,14 @@ local function submit_fs_operation(operation: FsOperation):
       cb = shim.titan_uvshim_fs_cb,
     }
   elseif kind == FS.unlink then
-    status = libuv.uv_fs_unlink {
-      loop = loop_handle,
-      req = owner.handle,
-      path = path_data,
-      cb = shim.titan_uvshim_fs_cb,
-    }
+    status = libuv.uv_fs_unlink(loop_handle, owner.handle, path_data,
+                               shim.titan_uvshim_fs_cb)
   elseif kind == FS.rmdir then
-    status = libuv.uv_fs_rmdir {
-      loop = loop_handle,
-      req = owner.handle,
-      path = path_data,
-      cb = shim.titan_uvshim_fs_cb,
-    }
+    status = libuv.uv_fs_rmdir(loop_handle, owner.handle, path_data,
+                              shim.titan_uvshim_fs_cb)
   elseif kind == FS.rename then
-    status = libuv.uv_fs_rename {
-      loop = loop_handle,
-      req = owner.handle,
-      path = path_data,
-      new_path = second_path_data,
-      cb = shim.titan_uvshim_fs_cb,
-    }
+    status = libuv.uv_fs_rename(loop_handle, owner.handle, path_data,
+        second_path_data, shim.titan_uvshim_fs_cb)
   else
     status = libuv.uv_fs_scandir {
       loop = loop_handle,
@@ -3219,14 +3194,8 @@ local function advance_pipe_output(pipe: uv_pipe_t,
           task.current_request = nil
           return DriveControl.new(DRIVE_ERROR, failure, "", nil)
         elseif process_operation_deliverable(operation) then
-          schedule_task_drive {
-            task = task,
-            epoch = request.generation,
-            mode = DRIVE_ERROR,
-            payload = failure,
-            trace = "",
-            cleanup_request = nil,
-          }
+          schedule_task_drive(task, request.generation, DRIVE_ERROR,
+                              failure, "", nil)
         end
       else
         promote_fatal(control.runtime, failure, "")
@@ -3274,28 +3243,19 @@ local function arm_process_spawn(task: Task,
   end
   argv[argument_count] = nil
 
-  local status = shim.titan_uvshim_pipe_init {
-    loop = runtime.loop.handle,
-    pipe = stdin_pipe.handle,
-    data = stdin_pointer,
-  }
+  local status = shim.titan_uvshim_pipe_init(runtime.loop.handle,
+      stdin_pipe.handle, stdin_pointer)
   local failed_operation = "process.stdin.init"
   if (status as integer) >= 0 then
     stdin_pipe.metadata.lifecycle = PIPE_INITIALIZED
-    status = shim.titan_uvshim_pipe_init {
-      loop = runtime.loop.handle,
-      pipe = stdout_pipe.handle,
-      data = stdout_pointer,
-    }
+    status = shim.titan_uvshim_pipe_init(runtime.loop.handle,
+        stdout_pipe.handle, stdout_pointer)
     failed_operation = "process.stdout.init"
   end
   if (status as integer) >= 0 then
     stdout_pipe.metadata.lifecycle = PIPE_INITIALIZED
-    status = shim.titan_uvshim_pipe_init {
-      loop = runtime.loop.handle,
-      pipe = stderr_pipe.handle,
-      data = stderr_pointer,
-    }
+    status = shim.titan_uvshim_pipe_init(runtime.loop.handle,
+        stderr_pipe.handle, stderr_pointer)
     failed_operation = "process.stderr.init"
   end
   if (status as integer) >= 0 then
@@ -3678,14 +3638,8 @@ local function submit_file_head(file: uv_file, inline_task: Task?): Error?
         if request.cleanup then epoch = task.epoch end
         local cleanup_request: Request? = nil
         if request.cleanup then cleanup_request = request end
-        local scheduled = schedule_task_drive {
-          task = task,
-          epoch = epoch,
-          mode = DRIVE_ERROR,
-          payload = failure,
-          trace = "",
-          cleanup_request = cleanup_request,
-        }
+        local scheduled = schedule_task_drive(task, epoch, DRIVE_ERROR,
+            failure, "", cleanup_request)
         if request.cleanup and not scheduled then
           operation.kind = FS.close_wait
           enqueue_close_waiter(file, operation)
@@ -3828,16 +3782,12 @@ local function continue_net_setup(operation: NetOperation)
         start_tcp_close(tcp)
         return
       else
-        local status = shim.titan_uvshim_tcp_bind {
-          tcp = tcp.handle,
-          address_storage = addresses.data as ffi.titan_ffi_void_ptr,
-          index = operation.address_index - 1,
-        }
+        local status = shim.titan_uvshim_tcp_bind(
+            tcp.handle, addresses.data as ffi.titan_ffi_void_ptr,
+            operation.address_index - 1)
         if (status as integer) >= 0 then
-          status = shim.titan_uvshim_tcp_listen {
-            tcp = tcp.handle,
-            backlog = operation.backlog,
-          }
+          status = shim.titan_uvshim_tcp_listen(tcp.handle,
+                                                operation.backlog)
         end
         if (status as integer) >= 0 then
           tcp.metadata.lifecycle = TCP_SERVER
@@ -3906,11 +3856,8 @@ local function advance_tcp_output(tcp: uv_tcp_t,
                                                      operation)
       operation.owner = owner
       control.output_current = operation
-      status = shim.titan_uvshim_tcp_shutdown_start {
-        req = owner.handle,
-        tcp = tcp_handle,
-        data = pointer,
-      }
+      status = shim.titan_uvshim_tcp_shutdown_start(
+          owner.handle, tcp_handle, pointer)
       if (status as integer) >= 0 then
         owner.metadata.lifecycle = NET_OWNER_SUBMITTED
         return nil
@@ -3932,14 +3879,8 @@ local function advance_tcp_output(tcp: uv_tcp_t,
         task.current_request = nil
         return failure
       elseif net_operation_deliverable(operation) then
-        schedule_task_drive {
-          task = task,
-          epoch = request.generation,
-          mode = DRIVE_ERROR,
-          payload = failure,
-          trace = "",
-          cleanup_request = nil,
-        }
+        schedule_task_drive(task, request.generation, DRIVE_ERROR,
+                            failure, "", nil)
       end
     else
       promote_fatal(control.runtime, failure, "")
@@ -3995,14 +3936,7 @@ local function stop_server_accept(server: uv_tcp_t)
         task.epoch == epoch then
       local failure = make_error(UV_ECANCELED,
                                  "net.accept", "server closed")
-      schedule_task_drive {
-        task = task,
-        epoch = epoch,
-        mode = DRIVE_ERROR,
-        payload = failure,
-        trace = "",
-        cleanup_request = nil,
-      }
+      schedule_task_drive(task, epoch, DRIVE_ERROR, failure, "", nil)
     end
   end
 end
@@ -4023,14 +3957,8 @@ local function request_tcp_close(tcp: uv_tcp_t)
       local task = waiter
       if task.state == TASK_WAITING and not task.cancel_requested and
           task.epoch == epoch then
-        schedule_task_drive {
-          task = task,
-          epoch = epoch,
-          mode = DRIVE_ERROR,
-          payload = "cannot read from a closed Connection",
-          trace = "",
-          cleanup_request = nil,
-        }
+        schedule_task_drive(task, epoch, DRIVE_ERROR,
+                            "cannot read from a closed Connection", "", nil)
       end
     end
   end
@@ -4051,14 +3979,8 @@ local function wake_tcp_close_waiters(tcp: uv_tcp_t)
       local request = operation.request
       local epoch = task.epoch
       if not request.cleanup then epoch = request.generation end
-      if not schedule_task_drive {
-        task = task,
-        epoch = epoch,
-        mode = DRIVE_RESUME,
-        payload = nil,
-        trace = "",
-        cleanup_request = request,
-      } then
+      if not schedule_task_drive(task, epoch, DRIVE_RESUME,
+                                 nil, "", request) then
         return
       end
       remove_tcp_close_waiter(tcp, operation)
@@ -4138,23 +4060,11 @@ local function wake_close_waiters(file: uv_file, failure: Error?)
       if request.cleanup then epoch = task.epoch end
       local scheduled = false
       if not failure then
-        scheduled = schedule_task_drive {
-          task = task,
-          epoch = epoch,
-          mode = DRIVE_RESUME,
-          payload = nil,
-          trace = "",
-          cleanup_request = request,
-        }
+        scheduled = schedule_task_drive(task, epoch, DRIVE_RESUME,
+                                        nil, "", request)
       else
-        scheduled = schedule_task_drive {
-          task = task,
-          epoch = epoch,
-          mode = DRIVE_ERROR,
-          payload = failure,
-          trace = "",
-          cleanup_request = request,
-        }
+        scheduled = schedule_task_drive(task, epoch, DRIVE_ERROR,
+                                        failure, "", request)
       end
       if not scheduled then
         -- The Runtime is fatal now. Keep this exact cleanup waiter linked so
@@ -5961,14 +5871,8 @@ local function wake_helper_group(group: HelperGroup)
   group.wake_scheduled = true
   local cleanup_request: Request? = nil
   if request.cleanup then cleanup_request = request end
-  if not schedule_task_drive {
-    task = task,
-    epoch = epoch,
-    mode = DRIVE_RESUME,
-    payload = group,
-    trace = "",
-    cleanup_request = cleanup_request,
-  } then
+  if not schedule_task_drive(task, epoch, DRIVE_RESUME, group, "",
+                             cleanup_request) then
     return
   end
 end
@@ -6840,7 +6744,7 @@ local function bootstrap(main_callable: ({string}) -> integer,
 end
 
 function _version(): string
-  return libuv.uv_version_string{} as string
+  return libuv.uv_version_string() as string
 end
 
 -- A generated Titan entrypoint publishes its original argc/argv before it

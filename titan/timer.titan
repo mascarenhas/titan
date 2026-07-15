@@ -5,21 +5,21 @@ record Ticker
 end
 
 function sleep(milliseconds: integer)
-  uv._sleep { milliseconds = milliseconds }
+  uv._sleep(milliseconds)
 end
 
 function yield()
-  uv._yield {}
+  uv._yield()
 end
 
 function ticker(milliseconds: integer): Ticker
-  return Ticker.new(uv._ticker { milliseconds = milliseconds })
+  return Ticker.new(uv._ticker(milliseconds))
 end
 
 function Ticker:tick(): boolean
-  return uv._ticker_tick { owner = self.handle }
+  return uv._ticker_tick(self.handle)
 end
 
 function Ticker:close()
-  uv._ticker_close { owner = self.handle }
+  uv._ticker_close(self.handle)
 end

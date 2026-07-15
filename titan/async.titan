@@ -5,13 +5,13 @@ type Cancelled = uv.Cancelled
 type Task = uv.Task
 
 function run(func: () -> value): Task
-  return uv._run { func = func }
+  return uv._run(func)
 end
 
 function loop()
-  uv._loop{}
+  uv._loop()
 end
 
 function version(): string
-  return uv._version {}
+  return uv._version()
 end

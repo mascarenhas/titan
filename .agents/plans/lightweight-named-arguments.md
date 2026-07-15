@@ -870,12 +870,14 @@ focused named-argument specs are green under the current installed compiler.
    - `start_owner` (seven parameters; declaration near `uv.titan:2301`);
    - `make_fs_operation` (eight; near `uv.titan:2732`);
    - `new_net_request` (seven; near `uv.titan:2796`);
-   - `make_process_operation` (seven; near `uv.titan:2817`);
-   - `schedule_task_drive` (six; near `uv.titan:3418`).
+   - `make_process_operation` (seven; near `uv.titan:2817`).
 
    Preserve each old operand's lexical evaluation order in the rewritten named
    list. Use a different order only in focused compiler fixtures designed to
-   prove reordering semantics.
+   prove reordering semantics. Keep `schedule_task_drive` positional: its
+   `DRIVE_*` constant identifies the only compatible integer role, and the
+   fixed `(payload, trace, cleanup_request)` tail is clearer without a repeated
+   six-line named block.
 
 4. Convert the largest record statics/constructors, including
    `FsConstants.new` (16 fields), `uv_file.new` (13), `TimerControl.new` (8),
@@ -885,24 +887,21 @@ focused named-argument specs are green under the current installed compiler.
    `FsOperation` are deliberate proofs that local fields are fillable inside the
    declaring module; do not add any outside-module construction of them.
 
-5. In all five immediate facade consumers—`async.titan`, `timer.titan`,
-   `fs.titan`, `net.titan`, and `os.titan`—convert their direct `uv._*` calls to
-   named form. This finite boundary is currently about 60 calls and exercises
-   formal names rehydrated from the already-built `titan/uv.so`. Strong
-   multi-parameter cases include `_net_listen`/`_bytes_slice` in `net.titan`,
-   `_os_process_read_error_is`/`_bytes_slice`/`_os_communicate` in `os.titan`, and
-   the filesystem bridge calls in `fs.titan`.
+5. Use named form selectively in the five immediate facade consumers—
+   `async.titan`, `timer.titan`, `fs.titan`, `net.titan`, and `os.titan`—rather
+   than converting every `uv._*` bridge call. Zero- and one-parameter calls are
+   positional. Short calls with distinct types, conventional ordering, or
+   self-describing operands are positional too, including slice
+   `(data, offset, length)` calls. The retained `_bytes_find { haystack = ...,
+   needle = ... }` calls in `net.titan` and `os.titan` provide a bounded
+   production proof of names rehydrated from the already-built `titan/uv.so`:
+   both operands are strings and search APIs do not expose one universal
+   positional surface.
 
-6. Include two intentional no-space sentinels:
-
-   ```lua
-   uv._loop{}
-   libuv.uv_version_string{}
-   ```
-
-   The first proves zero-parameter named calls through compiled Titan module
-   metadata. The second proves both a zero-parameter direct FFI call and the
-   whitespace-free spelling.
+6. Do not add empty named calls as production sentinels. `f{}` and the
+   zero-parameter direct-FFI form are syntax/codegen cases covered by focused
+   specs; spelling `uv._loop{}` or `libuv.uv_version_string{}` in the standard
+   library adds noise without protecting a caller from an argument mix-up.
 
 7. Review `spec/support/make_delayed_fs_callback_variant.lua` for textual anchors
    into `uv.titan`, then run `spec/stdlib/uv_late_fs_callbacks_spec.lua` even if
