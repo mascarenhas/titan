@@ -2,7 +2,7 @@
 
 A running record of how the language reference (`doc/language/`) and the
 implementation documentation (`doc/implementation/`) were produced, kept
-outside the Claude Code session as requested. Newest entries last.
+outside the Agent session as requested. Newest entries last.
 Companion document: [documentation-questions.md](documentation-questions.md)
 records the questions that came up, the assumption taken for each, and
 space for inline answers.
@@ -405,7 +405,7 @@ Documented the anonymous-functions / closures feature (branch
 `titan-compiler/{parser,checker,coder}.lua` and the new specs
 (`spec/checker/closures_spec.lua`, `spec/coder/closures_spec.lua`,
 `spec/coder/bound_methods_spec.lua`). Design source:
-`.claude/plans/anonymous-functions.md`.
+`.agents/plans/anonymous-functions.md`.
 
 * **Language feature shipped.** A `function (...) ... end` expression is a
   fresh function value that closes over the enclosing function's locals —

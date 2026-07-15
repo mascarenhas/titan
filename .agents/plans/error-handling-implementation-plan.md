@@ -1,7 +1,7 @@
 # Titan error handling — implementation plan
 
 **Date:** 2026-06-20 (rev. 2 — incorporates review feedback on the boundary, finally, and ABI)
-**Depends on:** `.claude/plans/error-handling-traceback-research.md` (option analysis) + the libbacktrace spike (validated 2026-06-20, GCC 16.1.1 / DWARF5).
+**Depends on:** `.agents/plans/error-handling-traceback-research.md` (option analysis) + the libbacktrace spike (validated 2026-06-20, GCC 16.1.1 / DWARF5).
 **Scope:** (A) unified Titan+Lua stack traces via libbacktrace + `#line` (error-path-only), and (B) the `catch`/`finally`/`raise` language feature with faithful `finally` semantics.
 
 Two loosely-coupled deliverables. **A is lower-risk, high-value, and lands first** (an incremental upgrade of the existing `errorhandler`); B builds on it.

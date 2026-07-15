@@ -134,7 +134,7 @@ All templates that touch the Lua stack were rewritten for
 > instead of the forward barrier. (As of the 0.8 ABI the record type
 > identity is the metatable pointer — there is no raw tag payload in
 > `getudatamem` at all.) See the
-> [records/modules single-Udata plan](../.claude/plans/records-modules-udata-simplification.md)
+> [records/modules single-Udata plan](../.agents/plans/records-modules-udata-simplification.md)
 > and the current [values and GC](implementation/values-and-gc.md)
 > chapter; this section is retained as migration history.
 

@@ -28,7 +28,7 @@ Required outcomes from the prompt:
 10. `CAdopted` and owned allocation for structs with flexible array members are
     parked out of v1.
 
-Related follow-up note: `.claude/plans/c-ffi-lua-api-followup.md` sketches why
+Related follow-up note: `.agents/plans/c-ffi-lua-api-followup.md` sketches why
 "strong enough to call Lua API functions" should be handled after this v1
 redesign instead of being bundled into it.
 
@@ -79,14 +79,14 @@ and leave Titan-to-C callback adaptation out of v1.
 
 ## Local experiments
 
-Experiment source: `.claude/plans/c-ffi-redesign-experiments/ffi_probe.c`
+Experiment source: `.agents/plans/c-ffi-redesign-experiments/ffi_probe.c`
 
 Build command:
 
 ```sh
 cc -I lua-5.5.0/src -Wall -Wextra -Werror \
   -o /tmp/titan_ffi_probe \
-  .claude/plans/c-ffi-redesign-experiments/ffi_probe.c \
+  .agents/plans/c-ffi-redesign-experiments/ffi_probe.c \
   lua-5.5.0/src/liblua.a -lm -ldl
 ```
 
