@@ -197,7 +197,7 @@ TITAN_LUA ?= $(LUA_BIN)
 # keeps developer stdlib rebuilds on the edits that triggered them, while Lua's
 # configured default paths still find third-party dependencies under PREFIX.
 TITANC    ?= $(TITAN_LUA) -e 'package.path="./?.lua;./?/init.lua;" .. package.path' ./titanc
-TITAN_COMPILER_LUA := $(wildcard titan-compiler/*.lua c-parser/*.lua) typed.lua
+TITAN_COMPILER_LUA := $(wildcard titan-compiler/*.lua c-parser/*.lua)
 
 # Standard modules have one installed pathname. PREFIX owns Lua; ROCKS_TREE
 # owns these Titan artifacts when it is supplied. Today's supported setup

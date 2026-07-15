@@ -3,7 +3,7 @@ local cdefines = {}
 
 local c99 = require("c-parser.c99")
 local cpp = require("c-parser.cpp")
-local typed = require("typed")
+local typed = require("c-parser.typed")
 
 local function add_type(lst, name, typ)
     lst[name] = typ

@@ -3,7 +3,7 @@ local ctypes = {}
 
 local util = require("titan-compiler.util")
 local inspect = require("inspect")
-local typed = require("typed")
+local typed = require("c-parser.typed")
 
 local equal_declarations
 local calculate_or_original
