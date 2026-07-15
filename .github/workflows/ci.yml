@@ -418,9 +418,9 @@ jobs:
 
       - name: Run sanitized net/OS production smokes
         run: |
-          env TITAN_PATH_0_12="$PWD" LUA_CPATH="$PWD/?.so;;" \
+          env TITAN_PATH_0_13="$PWD" LUA_CPATH="$PWD/?.so;;" \
             .lua/bin/lua spec/fixtures/libuv/net_production_smoke.lua \
               sanitizer
-          env TITAN_PATH_0_12="$PWD" LUA_CPATH="$PWD/?.so;;" \
+          env TITAN_PATH_0_13="$PWD" LUA_CPATH="$PWD/?.so;;" \
             .lua/bin/lua spec/fixtures/libuv/os_production_smoke.lua \
               sanitizer "$TITAN_PROCESS_SMOKE_CHILD"

@@ -1523,6 +1523,40 @@ local function ordered_call_args(ctx, args, n)
     return stats, exps
 end
 
+-- A checked named call carries a dense formal-order argument list plus the
+-- formal indexes of explicitly written expressions in lexical order. Freeze
+-- each explicit expression immediately in that lexical order, then generate
+-- the synthetic nil omissions. The returned expressions remain indexed by
+-- formal position for the unchanged native ABI.
+local function named_ordered_call_args(ctx, args, order)
+    local stats = {}
+    local exps = {}
+    local seen = {}
+    for _, index in ipairs(order) do
+        assert(index >= 1 and index <= #args)
+        assert(not seen[index], "duplicate formal index in named call order")
+        assert(not args[index]._named_omitted)
+        seen[index] = true
+        local cstats, cexp = codeexp(ctx, args[index])
+        local mstats, mexp = materialize_code(ctx, args[index]._type,
+            cstats, cexp)
+        table.insert(stats, mstats)
+        exps[index] = mexp
+    end
+    for index, arg in ipairs(args) do
+        if not seen[index] then
+            assert(arg._named_omitted,
+                "named call order omitted an explicit argument")
+            local cstats, cexp = codeexp(ctx, arg)
+            local mstats, mexp = materialize_code(ctx, arg._type,
+                cstats, cexp)
+            table.insert(stats, mstats)
+            exps[index] = mexp
+        end
+    end
+    return stats, exps
+end
+
 local function newforeigntmp(ctx --[[:table]], typ --[[:table]])
     local tmp = ctx.tmp
     ctx.tmp = ctx.tmp + 1
@@ -2580,13 +2614,53 @@ local function codeforeigncall(ctx, node)
     local caexps = {}
     local castats = {}
     local poststats = {}
-    for i, arg in ipairs(node.args.args) do
-        local cstat, cexp = codeforeignexp(ctx, arg, ftype.params[i])
-        table.insert(castats, cstat)
-        table.insert(caexps, cexp)
-        local anchor = mutable_out_anchor(ctx, arg, ftype.params[i])
-        if anchor then
-            table.insert(poststats, anchor)
+    if node._named_arg_order then
+        assert(node._named_call_kind == "foreign")
+        assert(not ftype.vararg)
+        assert(#node.args.args == #ftype.params)
+        local actuals = {}
+        local seen = {}
+        local postbyindex = {}
+        local function freeze(index)
+            assert(index >= 1 and index <= #ftype.params)
+            assert(not seen[index], "duplicate formal index in named FFI call")
+            seen[index] = true
+            local arg = node.args.args[index]
+            local target = ftype.params[index]
+            local cstat, cexp = codeforeignexp(ctx, arg, target)
+            local cdecl, cname = newforeigntmp(ctx, target)
+            table.insert(castats, cstat)
+            table.insert(castats, cdecl)
+            table.insert(castats, cname .. " = " .. cexp .. ";")
+            actuals[index] = cname
+            postbyindex[index] = mutable_out_anchor(ctx, arg, target)
+        end
+        for _, index in ipairs(node._named_arg_order) do
+            assert(not node.args.args[index]._named_omitted)
+            freeze(index)
+        end
+        for index, arg in ipairs(node.args.args) do
+            if not seen[index] then
+                assert(arg._named_omitted,
+                    "named FFI order omitted an explicit argument")
+                freeze(index)
+            end
+        end
+        for index = 1, #ftype.params do
+            caexps[index] = assert(actuals[index])
+            if postbyindex[index] then
+                table.insert(poststats, postbyindex[index])
+            end
+        end
+    else
+        for i, arg in ipairs(node.args.args) do
+            local cstat, cexp = codeforeignexp(ctx, arg, ftype.params[i])
+            table.insert(castats, cstat)
+            table.insert(caexps, cexp)
+            local anchor = mutable_out_anchor(ctx, arg, ftype.params[i])
+            if anchor then
+                table.insert(poststats, anchor)
+            end
         end
     end
     local cstats = table.concat(castats, "\n")
@@ -2598,6 +2672,7 @@ local function codeforeigncall(ctx, node)
 end
 
 local function codecfunctionptrcall(ctx, node)
+    assert(not node._named_arg_order)
     local cfunc = node._c_pointer_call
     local fstats, fexp = codeexp(ctx, node.exp)
     local fdecl, fname = newforeigntmp(ctx, node.exp._type)
@@ -2916,6 +2991,7 @@ end
 -- savestack/restorestack offsets for everything that must survive the call and
 -- recompute `_base` from `_base_off` afterwards (see codefuncdec).
 local function codevaluecall(ctx, node)
+    assert(not node._named_arg_order)
     ctx.uses_base_off = true
     local ftype = node.exp._type     -- Type.Function: the callee's static type
     local nresults = #node._types
@@ -3136,6 +3212,9 @@ local function codevaluecall(ctx, node)
 end
 
 local function codecall(ctx, node)
+    if node._named_arg_order then
+        assert(node._named_call_kind == "titan")
+    end
     if not is_static_callee(node) then
         return codevaluecall(ctx, node)
     end
@@ -3223,6 +3302,10 @@ local function codecall(ctx, node)
         callee_ftype = fnode._type
     end
     local callee_vararg = callee_ftype and callee_ftype.varargtype
+    if node._named_arg_order then
+        assert(callee_ftype)
+        assert(not callee_vararg and not callee_ftype.vararg)
+    end
     -- Any native Titan call can reallocate the Lua stack (directly or while
     -- servicing a collection). Keep `_base` as an offset and materialize the
     -- call so `_base` can be restored before result anchoring or later slot use.
@@ -3234,19 +3317,32 @@ local function codecall(ctx, node)
     -- variadic callee; §5.7). The static-prefix args are args[1..nargs-1]; the
     -- marker itself never reaches codeexp.
     local dots_tail = nargs > 0 and args[nargs]._tag == "Ast.ExpDots"
+    if node._named_arg_order then assert(not dots_tail) end
     local nstatic = dots_tail and (nargs - 1) or nargs
     local nfixed = callee_vararg and #callee_ftype.params or nargs
     local vargexps = {} -- surplus static args destined for the backing struct
-    local argstats, argexps = ordered_call_args(ctx, args, nstatic)
-    for i = 1, nstatic do
-        local cexp = argexps[i]
-        table.insert(castats, argstats[i])
-        if callee_vararg and i > nfixed then
-            -- a surplus static arg -> a backing-struct element (already coerced
-            -- to the element type by the checker)
-            table.insert(vargexps, cexp)
-        else
-            table.insert(caexps, cexp)
+    if node._named_arg_order then
+        assert(nstatic == #callee_ftype.params)
+        local argstats, argexps = named_ordered_call_args(ctx, args,
+            node._named_arg_order)
+        for _, stat in ipairs(argstats) do
+            table.insert(castats, stat)
+        end
+        for i = 1, nstatic do
+            table.insert(caexps, assert(argexps[i]))
+        end
+    else
+        local argstats, argexps = ordered_call_args(ctx, args, nstatic)
+        for i = 1, nstatic do
+            local cexp = argexps[i]
+            table.insert(castats, argstats[i])
+            if callee_vararg and i > nfixed then
+                -- a surplus static arg -> a backing-struct element (already coerced
+                -- to the element type by the checker)
+                table.insert(vargexps, cexp)
+            else
+                table.insert(caexps, cexp)
+            end
         end
     end
     -- Build + append the backing struct (`_varargs`, `_start`) for a variadic
@@ -5711,6 +5807,7 @@ local function codeindexc(ctx, node)
 end
 
 local function codecpseudonew(ctx, node)
+    assert(not node._named_arg_order)
     local decl = node.exp.var._decl
     local ctyp = decl.ctype
     local ret = node._type

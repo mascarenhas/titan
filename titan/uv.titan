@@ -145,8 +145,24 @@ local record FsConstants
   local file_closed: integer
 end
 
-local FS = FsConstants.new(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
-                           13, 1, 2, 3)
+local FS = FsConstants.new {
+  stat = 1,
+  open = 2,
+  read = 3,
+  write = 4,
+  flush = 5,
+  close = 6,
+  mkdir = 7,
+  unlink = 8,
+  rmdir = 9,
+  rename = 10,
+  list = 11,
+  internal_close = 12,
+  close_wait = 13,
+  file_open = 1,
+  file_closing = 2,
+  file_closed = 3,
+}
 
 local FS_OWNER_ALLOCATED = 0
 local FS_OWNER_SUBMITTED = 1
@@ -1371,8 +1387,14 @@ end
 
 local function create_file(runtime: Runtime, handle: libuv.uv_file,
                            subject: string): uv_file
-  local file = uv_file.new(handle, runtime, runtime.generation, FS.file_open,
-      subject, nil, nil, nil, nil, nil, nil, nil, false)
+  local file = uv_file.new {
+    handle = handle,
+    runtime = runtime,
+    generation = runtime.generation,
+    state = FS.file_open,
+    subject = subject,
+    close_enqueued = false,
+  }
   link_file(runtime, file)
   return file
 end
@@ -1517,8 +1539,14 @@ local function allocate_owner(runtime: Runtime, kind: integer, task: Task?,
   local top = lua.lua_gettop(L)
   local memory = lua.lua_newuserdatauv(L, libuv.uv_timer_t.sizeof, 0)
   local storage = ffi.lua_totvalue(L, -1)
-  local metadata = TimerControl.new(runtime, OWNER_ALLOCATED, kind, task,
-                                    peer, epoch, nil, nil)
+  local metadata = TimerControl.new {
+    runtime = runtime,
+    lifecycle = OWNER_ALLOCATED,
+    kind = kind,
+    task = task,
+    peer = peer,
+    epoch = epoch,
+  }
   local owner: uv_timer_t = {
     handle = memory as *libuv.uv_timer_t,
     storage = storage,
@@ -2087,8 +2115,12 @@ local function start_process_grace(control: ProcessControl): integer
     return status as integer
   end
   shim.titan_uvshim_timer_set_data(owner.handle, pointer)
-  status = libuv.uv_timer_start(owner.handle, shim.titan_uvshim_timer_cb,
-                               PROCESS_GRACE_MILLISECONDS, 0)
+  status = libuv.uv_timer_start {
+    handle = owner.handle,
+    cb = shim.titan_uvshim_timer_cb,
+    timeout = PROCESS_GRACE_MILLISECONDS,
+    repeat = 0,
+  }
   if (status as integer) < 0 then
     shim.titan_uvshim_timer_close(owner.handle)
   end
@@ -2260,15 +2292,34 @@ local function submit_fs_operation(operation: FsOperation):
     status = libuv.uv_fs_stat(loop_handle, owner.handle, path_data,
                              shim.titan_uvshim_fs_cb)
   elseif kind == FS.open then
-    status = libuv.uv_fs_open(loop_handle, owner.handle, path_data,
-        open_flags as ffi.titan_ffi_int,
-        438 as ffi.titan_ffi_int, shim.titan_uvshim_fs_cb)
+    status = libuv.uv_fs_open {
+      loop = loop_handle,
+      req = owner.handle,
+      path = path_data,
+      flags = open_flags as ffi.titan_ffi_int,
+      mode = 438 as ffi.titan_ffi_int,
+      cb = shim.titan_uvshim_fs_cb,
+    }
   elseif kind == FS.read then
-    status = libuv.uv_fs_read(loop_handle, owner.handle, file_handle,
-        buffer_handle, 1, -1, shim.titan_uvshim_fs_cb)
+    status = libuv.uv_fs_read {
+      loop = loop_handle,
+      req = owner.handle,
+      file = file_handle,
+      bufs = buffer_handle,
+      nbufs = 1,
+      offset = -1,
+      cb = shim.titan_uvshim_fs_cb,
+    }
   elseif kind == FS.write then
-    status = libuv.uv_fs_write(loop_handle, owner.handle, file_handle,
-        buffer_handle, 1, -1, shim.titan_uvshim_fs_cb)
+    status = libuv.uv_fs_write {
+      loop = loop_handle,
+      req = owner.handle,
+      file = file_handle,
+      bufs = buffer_handle,
+      nbufs = 1,
+      offset = -1,
+      cb = shim.titan_uvshim_fs_cb,
+    }
   elseif kind == FS.flush then
     status = libuv.uv_fs_fsync(loop_handle, owner.handle, file_handle,
                               shim.titan_uvshim_fs_cb)
@@ -2276,9 +2327,13 @@ local function submit_fs_operation(operation: FsOperation):
     status = libuv.uv_fs_close(loop_handle, owner.handle, file_handle,
                               shim.titan_uvshim_fs_cb)
   elseif kind == FS.mkdir then
-    status = libuv.uv_fs_mkdir(loop_handle, owner.handle, path_data,
-        511 as ffi.titan_ffi_int,
-        shim.titan_uvshim_fs_cb)
+    status = libuv.uv_fs_mkdir {
+      loop = loop_handle,
+      req = owner.handle,
+      path = path_data,
+      mode = 511 as ffi.titan_ffi_int,
+      cb = shim.titan_uvshim_fs_cb,
+    }
   elseif kind == FS.unlink then
     status = libuv.uv_fs_unlink(loop_handle, owner.handle, path_data,
                                shim.titan_uvshim_fs_cb)
@@ -2289,8 +2344,13 @@ local function submit_fs_operation(operation: FsOperation):
     status = libuv.uv_fs_rename(loop_handle, owner.handle, path_data,
         second_path_data, shim.titan_uvshim_fs_cb)
   else
-    status = libuv.uv_fs_scandir(loop_handle, owner.handle, path_data, 0,
-                                shim.titan_uvshim_fs_cb)
+    status = libuv.uv_fs_scandir {
+      loop = loop_handle,
+      req = owner.handle,
+      path = path_data,
+      flags = 0,
+      cb = shim.titan_uvshim_fs_cb,
+    }
   end
   if (status as integer) < 0 then
     clean_fs_owner(owner)
@@ -2327,8 +2387,12 @@ local function start_owner(runtime: Runtime, kind: integer, task: Task?,
   end
   owner.metadata.lifecycle = OWNER_ACTIVE
   shim.titan_uvshim_timer_set_data(owner.handle, pointer)
-  status = libuv.uv_timer_start(owner.handle, shim.titan_uvshim_timer_cb,
-                               timeout, repeat_time)
+  status = libuv.uv_timer_start {
+    handle = owner.handle,
+    cb = shim.titan_uvshim_timer_cb,
+    timeout = timeout,
+    repeat = repeat_time,
+  }
   if (status as integer) < 0 then
     -- As above, do not cross a fresh Titan function prologue after libuv owns
     -- an initialized handle. The Ticker caller rolls back its public `open`
@@ -2435,8 +2499,15 @@ end
 local function schedule_observation(task: Task)
   local runtime = task.runtime
   runtime.pending_observations = runtime.pending_observations + 1
-  local owner, status = start_owner(runtime, OWNER_OBSERVE, task, nil,
-                                    task.epoch, 0, 0)
+  local owner, status = start_owner {
+    runtime = runtime,
+    kind = OWNER_OBSERVE,
+    task = task,
+    peer = nil,
+    epoch = task.epoch,
+    timeout = 0,
+    repeat_time = 0,
+  }
   if status < 0 then
     if owner.metadata.lifecycle == OWNER_CLOSED then
       runtime.pending_observations = runtime.pending_observations - 1
@@ -2448,8 +2519,15 @@ end
 local function wake_joiners(task: Task)
   local joiner? = task.joiner_head
   while joiner do
-    local owner, status = start_owner(task.runtime, OWNER_JOIN_WAKE,
-                                      joiner, task, joiner.epoch, 0, 0)
+    local owner, status = start_owner {
+      runtime = task.runtime,
+      kind = OWNER_JOIN_WAKE,
+      task = joiner,
+      peer = task,
+      epoch = joiner.epoch,
+      timeout = 0,
+      repeat_time = 0,
+    }
     if status < 0 then
       promote_fatal(task.runtime,
                     make_error(status, "task.join.wake", nil), "")
@@ -2686,8 +2764,15 @@ local function request_cancel(task: Task, reason: value)
   if task.state ~= TASK_RUNNING then
     detach_wait(task)
   end
-  local owner, status = start_owner(runtime, OWNER_CANCEL, task, nil,
-                                    task.epoch, 0, 0)
+  local owner, status = start_owner {
+    runtime = runtime,
+    kind = OWNER_CANCEL,
+    task = task,
+    peer = nil,
+    epoch = task.epoch,
+    timeout = 0,
+    repeat_time = 0,
+  }
   if status < 0 then
     task.cancel_fallback = true
     promote_fatal(runtime, make_error(status, "task.cancel", nil), "")
@@ -2719,22 +2804,47 @@ local function new_request(kind: integer, subject: value,
                            milliseconds: integer): Request
   local task = ordinary_task()
   task.epoch = task.epoch + 1
-  return Request.new(kind, task.epoch, task, subject, milliseconds, false)
+  return Request.new {
+    kind = kind,
+    generation = task.epoch,
+    task = task,
+    subject = subject,
+    milliseconds = milliseconds,
+    cleanup = false,
+  }
 end
 
 local function new_cleanup_request(kind: integer, subject: value,
                                    milliseconds: integer): Request
   local task = running_task()
   task.epoch = task.epoch + 1
-  return Request.new(kind, task.epoch, task, subject, milliseconds, true)
+  return Request.new {
+    kind = kind,
+    generation = task.epoch,
+    task = task,
+    subject = subject,
+    milliseconds = milliseconds,
+    cleanup = true,
+  }
 end
 
 local function make_fs_operation(kind: integer, task: Task?,
                                  request: Request?, path: Text?,
                                  second_path: Text?, file: uv_file?,
                                  data: string, maximum: integer): FsOperation
-  return FsOperation.new(kind, task, request, path, second_path, file,
-      data, maximum, 0, nil, nil, nil, nil, nil, false, false)
+  return FsOperation.new {
+    kind = kind,
+    task = task,
+    request = request,
+    path = path,
+    second_path = second_path,
+    file = file,
+    data = data,
+    maximum = maximum,
+    write_offset = 0,
+    linked = false,
+    close_waiter = false,
+  }
 end
 
 local function make_net_operation(kind: integer, task: Task,
@@ -2771,8 +2881,16 @@ local function new_fs_request(kind: integer, path: string,
     local path = second_path
     copied_second = copy_text(path, "fs.path", path)
   end
-  local operation = make_fs_operation(kind, request.task, request,
-      copy_text(path, "fs.path", path), copied_second, nil, data, 0)
+  local operation = make_fs_operation {
+    kind = kind,
+    task = request.task,
+    request = request,
+    path = copy_text(path, "fs.path", path),
+    second_path = copied_second,
+    file = nil,
+    data = data,
+    maximum = 0,
+  }
   request.subject = operation
   return request
 end
@@ -2787,8 +2905,16 @@ local function new_file_request(kind: integer, file: uv_file, data: string,
     request = new_request(REQUEST_FS, nil, 0)
   end
   local request = request
-  local operation = make_fs_operation(kind, request.task, request,
-      nil, nil, file, data, maximum)
+  local operation = make_fs_operation {
+    kind = kind,
+    task = request.task,
+    request = request,
+    path = nil,
+    second_path = nil,
+    file = file,
+    data = data,
+    maximum = maximum,
+  }
   request.subject = operation
   return request
 end
@@ -2846,8 +2972,15 @@ local function new_process_request(kind: integer, process: uv_process_t,
     request = new_request(REQUEST_PROCESS, nil, 0)
   end
   local request = request
-  local operation = make_process_operation(kind, request.task, request,
-      process, pipe, nil, nil)
+  local operation = make_process_operation {
+    kind = kind,
+    task = request.task,
+    request = request,
+    process = process,
+    pipe = pipe,
+    file = nil,
+    arguments = nil,
+  }
   request.subject = operation
   return request
 end
@@ -2863,8 +2996,15 @@ local function new_process_spawn_request(file: string,
     copied_args[index] = copy_text(
         args[index], "process.spawn", args[index])
   end
-  local operation = make_process_operation(PROCESS_SPAWN,
-      request.task, request, nil, nil, copied_file, copied_args)
+  local operation = make_process_operation {
+    kind = PROCESS_SPAWN,
+    task = request.task,
+    request = request,
+    process = nil,
+    pipe = nil,
+    file = copied_file,
+    arguments = copied_args,
+  }
   request.subject = operation
   return request
 end
@@ -3120,9 +3260,15 @@ local function arm_process_spawn(task: Task,
   end
   if (status as integer) >= 0 then
     stderr_pipe.metadata.lifecycle = PIPE_INITIALIZED
-    status = shim.titan_uvshim_process_spawn(runtime.loop.handle,
-        process.handle, process_pointer, argv, stdin_pipe.handle,
-        stdout_pipe.handle, stderr_pipe.handle)
+    status = shim.titan_uvshim_process_spawn {
+      loop = runtime.loop.handle,
+      process = process.handle,
+      data = process_pointer,
+      argv = argv,
+      stdin_pipe = stdin_pipe.handle,
+      stdout_pipe = stdout_pipe.handle,
+      stderr_pipe = stderr_pipe.handle,
+    }
     failed_operation = "process.spawn"
     process_control.lifecycle = PROCESS_SPAWNED
   end
@@ -3257,9 +3403,15 @@ local function arm_request(task: Task, request: Request): DriveControl?
   local runtime = task.runtime
   task.current_request = request
   if request.kind == REQUEST_SLEEP then
-    local owner, status = start_owner(runtime, OWNER_SLEEP, task, request,
-                                      request.generation,
-                                      request.milliseconds, 0)
+    local owner, status = start_owner {
+      runtime = runtime,
+      kind = OWNER_SLEEP,
+      task = task,
+      peer = request,
+      epoch = request.generation,
+      timeout = request.milliseconds,
+      repeat_time = 0,
+    }
     if status < 0 then
       task.current_request = nil
       return DriveControl.new(DRIVE_ERROR,
@@ -3419,8 +3571,15 @@ local function schedule_task_drive(task: Task, epoch: integer, mode: integer,
                                    payload: value, trace: string,
                                    cleanup_request: Request?): boolean
   local control = DriveControl.new(mode, payload, trace, cleanup_request)
-  local owner, status = start_owner(task.runtime, OWNER_TASK_DRIVE,
-                                    task, control, epoch, 0, 0)
+  local owner, status = start_owner {
+    runtime = task.runtime,
+    kind = OWNER_TASK_DRIVE,
+    task = task,
+    peer = control,
+    epoch = epoch,
+    timeout = 0,
+    repeat_time = 0,
+  }
   if status < 0 then
     promote_fatal(task.runtime,
                   make_error(status, "task.drive.schedule", nil), "")
@@ -3544,8 +3703,13 @@ local function start_dns(operation: NetOperation):
   local port = operation.port as ffi.titan_ffi_int
   local owner, pointer = allocate_dns_owner(runtime, operation)
   operation.owner = owner
-  local status = shim.titan_uvshim_getaddrinfo_start(
-      loop_handle, owner.handle, pointer, node, port)
+  local status = shim.titan_uvshim_getaddrinfo_start {
+    loop = loop_handle,
+    req = owner.handle,
+    data = pointer,
+    node = node,
+    port = port,
+  }
   if (status as integer) >= 0 then
     owner.metadata.lifecycle = NET_OWNER_SUBMITTED
   else
@@ -3600,9 +3764,13 @@ local function continue_net_setup(operation: NetOperation)
         local owner, pointer = allocate_connect_owner(runtime, operation)
         operation.owner = owner
         tcp.metadata.connect_pending = true
-        local status = shim.titan_uvshim_tcp_connect_start(
-            owner.handle, tcp_handle, pointer, address_data,
-            address_index)
+        local status = shim.titan_uvshim_tcp_connect_start {
+          req = owner.handle,
+          tcp = tcp_handle,
+          data = pointer,
+          address_storage = address_data,
+          index = address_index,
+        }
         if (status as integer) >= 0 then
           owner.metadata.lifecycle = NET_OWNER_SUBMITTED
           return
@@ -3670,8 +3838,12 @@ local function advance_tcp_output(tcp: uv_tcp_t,
       local owner, pointer = allocate_write_owner(control.runtime, operation)
       operation.owner = owner
       control.output_current = operation
-      status = shim.titan_uvshim_tcp_write_start(
-          owner.handle, tcp_handle, pointer, buffer_handle)
+      status = shim.titan_uvshim_tcp_write_start {
+        req = owner.handle,
+        tcp = tcp_handle,
+        data = pointer,
+        buffer = buffer_handle,
+      }
       if (status as integer) >= 0 then
         owner.metadata.lifecycle = NET_OWNER_SUBMITTED
         operation.prepared_buffer = nil
@@ -3862,8 +4034,16 @@ end
 local function queue_internal_close(file: uv_file)
   if file.state == FS.file_closed or file.close_enqueued then return end
   file.state = FS.file_closing
-  local operation = make_fs_operation(FS.internal_close, nil, nil,
-      nil, nil, file, "", 0)
+  local operation = make_fs_operation {
+    kind = FS.internal_close,
+    task = nil,
+    request = nil,
+    path = nil,
+    second_path = nil,
+    file = file,
+    data = "",
+    maximum = 0,
+  }
   enqueue_file_operation(file, operation)
   advance_file(file)
 end
@@ -3912,9 +4092,14 @@ local function extract_fs_stat(owner: uv_fs_t): FsStatResult
   local modified_nanoseconds: libuv.int64_t = 0 as libuv.int64_t
   local kind: ffi.titan_ffi_int = 0 as ffi.titan_ffi_int
   local statbuf = libuv.uv_fs_get_statbuf(owner.handle)
-  shim.titan_uvshim_stat_extract(
-      statbuf as ffi.titan_ffi_void_ptr, size, mode,
-      modified_seconds, modified_nanoseconds, kind)
+  shim.titan_uvshim_stat_extract {
+    statbuf = statbuf as ffi.titan_ffi_void_ptr,
+    size = size,
+    mode = mode,
+    modified_seconds = modified_seconds,
+    modified_nanoseconds = modified_nanoseconds,
+    kind = kind,
+  }
   return FsStatResult.new(size as integer, fs_stat_kind(kind as integer),
       mode as integer, modified_seconds as integer,
       modified_nanoseconds as integer)
@@ -5005,7 +5190,15 @@ local function run_internal(func: () -> value, is_main: boolean): Task
   }
   link_task(runtime, task)
 
-  local owner, status = start_owner(runtime, OWNER_START, task, nil, 0, 0, 0)
+  local owner, status = start_owner {
+    runtime = runtime,
+    kind = OWNER_START,
+    task = task,
+    peer = nil,
+    epoch = 0,
+    timeout = 0,
+    repeat_time = 0,
+  }
   task.operation = owner
   if status < 0 then
     finish_task(task, TASK_FAILED, nil,
@@ -5173,8 +5366,15 @@ function _net_connect(host: string, port: integer): uv_tcp_t
   if port < 0 or port > 65535 then
     raise "TCP port must be between 0 and 65535"
   end
-  local request = new_net_request(NET_CONNECT, host, port, 0,
-                                  nil, "", false)
+  local request = new_net_request {
+    kind = NET_CONNECT,
+    host = host,
+    port = port,
+    backlog = 0,
+    tcp = nil,
+    data = "",
+    cleanup = false,
+  }
   return coroutine.yield(request, UV_TAG)
 end
 
@@ -5187,8 +5387,15 @@ function _net_listen(host: string, port: integer,
   if backlog > 2147483647 then
     raise "TCP listen backlog is not representable by libuv"
   end
-  local request = new_net_request(NET_LISTEN, host, port, backlog,
-                                  nil, "", false)
+  local request = new_net_request {
+    kind = NET_LISTEN,
+    host = host,
+    port = port,
+    backlog = backlog,
+    tcp = nil,
+    data = "",
+    cleanup = false,
+  }
   return coroutine.yield(request, UV_TAG)
 end
 
@@ -5214,8 +5421,15 @@ function _net_read(tcp: uv_tcp_t): string?
   if control.read_waiter then
     raise "Connection already has a waiting reader"
   end
-  local request = new_net_request(NET_READ, nil, 0, 0,
-                                  tcp, "", false)
+  local request = new_net_request {
+    kind = NET_READ,
+    host = nil,
+    port = 0,
+    backlog = 0,
+    tcp = tcp,
+    data = "",
+    cleanup = false,
+  }
   return coroutine.yield(request, UV_TAG)
 end
 
@@ -5237,8 +5451,15 @@ function _net_write(tcp: uv_tcp_t, data: string)
   if #data > UV_BUF_MAX then
     raise "TCP write data exceeds the portable libuv buffer limit"
   end
-  local request = new_net_request(NET_WRITE, nil, 0, 0,
-                                  tcp, data, false)
+  local request = new_net_request {
+    kind = NET_WRITE,
+    host = nil,
+    port = 0,
+    backlog = 0,
+    tcp = tcp,
+    data = data,
+    cleanup = false,
+  }
   coroutine.yield(request, UV_TAG)
 end
 
@@ -5251,8 +5472,15 @@ function _net_shutdown(tcp: uv_tcp_t)
     -- Construct the complete shielded Request before publishing the monotonic
     -- shutdown flag. Once visible, cancellation cannot detach the physical
     -- FIFO work and is delivered only after uv_shutdown completes.
-    local request = new_net_request(NET_SHUTDOWN, nil, 0, 0,
-                                    tcp, "", true)
+    local request = new_net_request {
+      kind = NET_SHUTDOWN,
+      host = nil,
+      port = 0,
+      backlog = 0,
+      tcp = tcp,
+      data = "",
+      cleanup = true,
+    }
     tcp.metadata.shutdown_requested = true
     coroutine.yield(request, UV_TAG)
   finally
@@ -5272,8 +5500,15 @@ function _net_accept(server: uv_tcp_t): uv_tcp_t
   if control.accept_waiter then
     raise "Server already has a waiting accept Task"
   end
-  local request = new_net_request(NET_ACCEPT, nil, 0, 0,
-                                  server, "", false)
+  local request = new_net_request {
+    kind = NET_ACCEPT,
+    host = nil,
+    port = 0,
+    backlog = 0,
+    tcp = server,
+    data = "",
+    cleanup = false,
+  }
   return coroutine.yield(request, UV_TAG)
 end
 
@@ -5284,8 +5519,15 @@ function _net_close(tcp: uv_tcp_t)
   do
     local kind = NET_CLOSE
     if tcp.metadata.close_requested then kind = NET_CLOSE_WAIT end
-    local request = new_net_request(kind, nil, 0, 0,
-                                    tcp, "", true)
+    local request = new_net_request {
+      kind = kind,
+      host = nil,
+      port = 0,
+      backlog = 0,
+      tcp = tcp,
+      data = "",
+      cleanup = true,
+    }
     coroutine.yield(request, UV_TAG)
   finally
     cleanup_end()
@@ -5761,8 +6003,15 @@ local function start_helper(group: HelperGroup, kind: integer)
   -- the parent group before any observation callback can run.
   group.helpers[kind] = task
   link_task(group.runtime, task)
-  local owner, status = start_owner(group.runtime, OWNER_START,
-                                    task, nil, 0, 0, 0)
+  local owner, status = start_owner {
+    runtime = group.runtime,
+    kind = OWNER_START,
+    task = task,
+    peer = nil,
+    epoch = 0,
+    timeout = 0,
+    repeat_time = 0,
+  }
   task.operation = owner
   if status < 0 then
     finish_task(task, TASK_FAILED, nil,
@@ -5821,9 +6070,22 @@ function _os_communicate(file: string, args: {string},
                          (string, string, integer, integer)
   local parent = ordinary_task()
   local process = _os_process_spawn(file, args)
-  local group = HelperGroup.new(parent.runtime, parent.generation,
-      process, input, {}, {}, 4, nil, 0, false, false,
-      nil, "", "", "", nil, false)
+  local group = HelperGroup.new {
+    runtime = parent.runtime,
+    generation = parent.generation,
+    process = process,
+    input = input,
+    helpers = {},
+    completed = {},
+    pending = 4,
+    waiter_epoch = 0,
+    waiter_all = false,
+    wake_scheduled = false,
+    first_traceback = "",
+    stdout = "",
+    stderr = "",
+    canceling = false,
+  }
   for index = 1, 4 do group.completed[index] = false end
   start_helper(group, HELPER_STDOUT)
   start_helper(group, HELPER_STDERR)
@@ -5882,8 +6144,15 @@ function _ticker(milliseconds: integer): uv_timer_t
     waiter = nil,
     waiter_epoch = 0,
   }
-  local owner, status = start_owner(runtime, OWNER_TICKER, nil, state, 0,
-                                    milliseconds, milliseconds)
+  local owner, status = start_owner {
+    runtime = runtime,
+    kind = OWNER_TICKER,
+    task = nil,
+    peer = state,
+    epoch = 0,
+    timeout = milliseconds,
+    repeat_time = milliseconds,
+  }
   state.owner = owner
   if status < 0 then
     state.open = false
@@ -5922,8 +6191,15 @@ function _ticker_close(owner: uv_timer_t)
     local epoch = state.waiter_epoch
     state.waiter = nil
     state.waiter_epoch = 0
-    local wake, status = start_owner(state.runtime,
-        OWNER_TICKER_CLOSE_WAKE, task, owner, epoch, 0, 0)
+    local wake, status = start_owner {
+      runtime = state.runtime,
+      kind = OWNER_TICKER_CLOSE_WAKE,
+      task = task,
+      peer = owner,
+      epoch = epoch,
+      timeout = 0,
+      repeat_time = 0,
+    }
     if status < 0 then
       promote_fatal(state.runtime,
                     make_error(status, "ticker.close.wake", nil), "")

@@ -163,7 +163,9 @@ lexer.COMMENT = long_comment + short_comment
 -- Keywords and names
 --
 
-local idrest  = P("_") + R("AZ", "az", "09")
+local idstart = P("_") + R("AZ", "az")
+local idrest  = idstart + R("09")
+local identifier = idstart * idrest^0
 
 local keywords = {
     "and", "break", "defer", "do", "else", "elseif", "end", "for", "false",
@@ -194,6 +196,12 @@ lexer.NAME = Cmt(P(true), function(s, pos)
     end
     return endpos + 1, name
 end)
+
+-- Named-call labels are source API spellings and may come from C prototypes,
+-- where a parameter name can be a Titan keyword (for example, `repeat`). Keep
+-- this raw identifier primitive separate from NAME so keywords remain illegal
+-- in every ordinary Titan name position.
+lexer.NAMEDLABEL = C(identifier)
 
 --
 -- Symbolic tokens

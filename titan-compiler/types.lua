@@ -16,10 +16,10 @@ local types = typedecl("Type", {
         Record      = {"name", "fields", "functions", "methods", "nfields"},
         Nominal     = {"fqtn"},
         Field       = {"fqtn", "name", "type", "index"},
-        Method      = {"fqtn", "name", "params", "rettypes", "varargtype"},
-        ModuleMember = {"modname", "name", "type"},
+        Method      = {"fqtn", "name", "params", "rettypes", "varargtype", "paramnames"},
+        ModuleMember = {"modname", "name", "type", "paramnames"},
         ModuleVariable = {"modname", "name", "type"},
-        StaticMethod = {"fqtn", "name", "params", "rettypes", "varargtype"},
+        StaticMethod = {"fqtn", "name", "params", "rettypes", "varargtype", "paramnames"},
         Option       = {"base"},
         CVoid        = {},
         CInteger     = {"spelling", "signed", "rank", "bits"},
@@ -868,6 +868,17 @@ local function c_display_name(name)
     return name
 end
 
+local function serialize_names(names)
+    if names == false then
+        return "false"
+    end
+    local out = {}
+    for _, name in ipairs(names) do
+        table.insert(out, string.format("%q", name))
+    end
+    return "{" .. table.concat(out, ",") .. "}"
+end
+
 function types.tostring(t)
     local tag = t._tag
     if     tag == "Type.Integer"     then return "integer"
@@ -1007,7 +1018,8 @@ function types.serialize(t)
         return "Map(" .. types.serialize(t.keys) .. ", " .. types.serialize(t.values) .. ")"
     elseif tag == "Type.ModuleMember" then
         return "ModuleMember('" .. t.modname .. "', '" ..
-            t.name .. "', " .. types.serialize(t.type) .. ")"
+            t.name .. "', " .. types.serialize(t.type) .. ", " ..
+            serialize_names(t.paramnames) .. ")"
     elseif tag == "Type.ModuleVariable" then
         return "ModuleVariable('" .. t.modname .. "', '" ..
             t.name .. "', " .. types.serialize(t.type) .. ")"
@@ -1061,7 +1073,8 @@ function types.serialize(t)
             t.fqtn .. "', '" .. t.name .. "'," ..
             "{" .. table.concat(ptypes, ",") .. "}" .. "," ..
             "{" .. table.concat(rettypes, ",") .. "}," ..
-            (t.varargtype and types.serialize(t.varargtype) or "false") .. ")"
+            (t.varargtype and types.serialize(t.varargtype) or "false") .. "," ..
+            serialize_names(t.paramnames) .. ")"
     elseif tag == "Type.Record" then
         local functions, fields, methods = {}, {}, {}
         for _, field in ipairs(t.fields) do

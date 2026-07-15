@@ -83,6 +83,8 @@ return typedecl("Ast", {
     Args = {
         ArgsFunc        = {"loc", "args"},
         ArgsMethod      = {"loc", "method", "args"},
+        ArgsNamedFunc   = {"loc", "fields"},
+        ArgsNamedMethod = {"loc", "method", "fields"},
     },
 
     Field = {

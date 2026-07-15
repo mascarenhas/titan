@@ -5,6 +5,11 @@ local function table_extend(t1, t2)
     table.move(t2, 1, #t2, #t1+1, t1)
 end
 
+-- The parser uses NAMEDLABEL only in the contextual `label = exp` position.
+-- It deliberately overlaps both NAME and keyword patterns, so it is not one
+-- of the mutually-exclusive top-level tokens exercised by run_lexer.
+local contextual_patterns = { NAMEDLABEL = true }
+
 -- Find out how the lexer lexes a given string.
 -- Produces an error message if the string cannot be lexed or if there
 -- are multiple ways to lex it.
@@ -20,24 +25,26 @@ local function run_lexer(source)
         local found_j = nil
 
         for tokname, tokpat in pairs(lexer) do
-            local a, b = lpeg.match(lpeg.Ct(tokpat) * lpeg.Cp(), source, i)
-            if a then
-                local captures, j = a, b
-                if i == j then
-                    return string.format(
-                        "error: token %s matched the empty string",
-                        tokname)
-                elseif found_token then
-                    return string.format(
-                        "error: multiple matching tokens: %s %s",
-                         found_token, tokname)
-                else
-                    found_token = tokname
-                    found_captures = captures
-                    found_j = j
+            if not contextual_patterns[tokname] then
+                local a, b = lpeg.match(lpeg.Ct(tokpat) * lpeg.Cp(), source, i)
+                if a then
+                    local captures, j = a, b
+                    if i == j then
+                        return string.format(
+                            "error: token %s matched the empty string",
+                            tokname)
+                    elseif found_token then
+                        return string.format(
+                            "error: multiple matching tokens: %s %s",
+                             found_token, tokname)
+                    else
+                        found_token = tokname
+                        found_captures = captures
+                        found_j = j
+                    end
+                elseif b and b ~= 'fail' then
+                    return { err = b }
                 end
-            elseif b and b ~= 'fail' then
-                return { err = b }
             end
         end
 
@@ -66,6 +73,12 @@ local function assert_error(source, expected_error )
 end
 
 describe("Titan lexer", function()
+
+    it("captures ordinary and keyword spellings as contextual named labels",
+    function()
+        assert.equal("label", lpeg.match(lexer.NAMEDLABEL, "label"))
+        assert.equal("repeat", lpeg.match(lexer.NAMEDLABEL, "repeat"))
+    end)
 
     it("can lex some keywords", function()
         assert_lex("and", {"AND"}, {})

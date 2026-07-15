@@ -284,6 +284,10 @@ a multi-return declaration, just as on the head: `local a, b? = f()` makes
 `b` an option (`optionize(exp._type)`), while a marker-less tail variable is
 forced like any inferred local.
 
+Named-call fields are the exception among call arguments: each field owns
+exactly one formal slot, so even the last field consumes only the first result
+of its expression and never receives `ExpExtra` expansion.
+
 ### Call argument adjustment
 
 `checkargs` owns the upward adjustment of Titan function calls. After the
@@ -297,15 +301,38 @@ a compile-time type error, while omitting an `integer?`, `value` or
 call has too many arguments, `checkargs` still reports the arity error and
 does not drop anything.
 
-The missing-argument rule is deliberately limited to Titan function calls.
-Foreign C function calls and C pseudo-constructors pass `allow_missing=false`
-to `checkargs`, preserving C-style arity. A trailing `...` into a
+The positional missing-argument rule is deliberately limited to Titan function
+calls. Parenthesized foreign C calls and C pseudo-constructors pass
+`allow_missing=false` to `checkargs`, preserving C-style arity. A supported
+named direct-C call has its own per-name omission path described below. A
+trailing `...` into a
 non-variadic Titan call is still expanded with `ExpDotsIndex` nodes; for
 call argument slots that can accept nil, the synthesized indexed read uses
 the nil-fill mode so an under-supplied runtime variadic tail behaves like
 the same short call written without `...`. The variadic-callee start-adjust
 path applies the same present-element coercion and nil-fill decision when
 it borrows fixed parameters from a forwarded `...`.
+
+### Named-call elaboration
+
+The parser preserves brace calls as `ArgsNamedFunc` or `ArgsNamedMethod` until
+the `Ast.ExpCall` checker has resolved the callee. `named_function_metadata`
+uses that declaration provenance—not merely a `Type.Function`—to accept direct
+top-level/module functions, record statics, methods, and fixed direct C members.
+Function values, lambdas, bound-method values, C function pointers, C pseudo
+constructors, and every variadic declaration are rejected. A direct C member
+whose prototype did not preserve one complete unambiguous name list gets a
+separate unavailable-metadata diagnostic.
+
+`check_named_args` visits written fields in lexical order, maps each name to a
+formal index, checks/coerces the expression in that formal's context, and
+reports unknown or repeated names. For every unsupplied formal it synthesizes
+an `ExpNil`, requires `nil_can_adjust_to`, applies `trycoerce`, and marks the
+result `_named_omitted`. It returns a dense formal-order list plus the lexical
+sequence of explicit formal indexes. The checker replaces the temporary named
+payload with `ArgsFunc`/`ArgsMethod` and writes `_named_arg_order` and
+`_named_call_kind` on the call for codegen. The full metadata and lowering
+contract is in [Named arguments](named-arguments.md).
 
 ### Default `for` step
 
@@ -537,6 +564,12 @@ with `_type = node._type`, the surrounding context applies its usual
   (bracketed keys → map, named fields → record error, otherwise array; an
   empty `{}` defaults to `{integer}`). A Boolean context also switches
   `and`/`or` into plain boolean mode.
+* **Record constructor omissions.** In a Nominal record context, explicit
+  visible fields are checked in source order. Each absent field then gets the
+  same `nil_can_adjust_to` test as an omitted named formal; an accepted field is
+  appended as a coerced `ExpNil` marked `_named_omitted` with its `Type.Field`
+  in `_field`. A record with any local field remains wholly unconstructible by
+  `{...}` outside its defining module, before per-field omission is considered.
 * **First-class functions, closures, and bound methods.** These are now
   *implemented*, so the points that historically rejected them are acceptance
   points. Referencing a name whose type is `Type.Function` as a value
@@ -642,7 +675,9 @@ Two real loaders exist in `driver.lua`:
   `Field.index`, so public fields keep their real `Udata` slot even when local
   fields were skipped. `Type.Module.type_members` is serialized as a separate,
   deterministically ordered map, so aliases rehydrate without becoming runtime
-  members.
+  members. Exported `ModuleMember`, `Method`, and `StaticMethod` descriptors
+  likewise serialize their formal `paramnames`; names remain absent from
+  structural `Type.Function` values.
 * `driver.tableloader` is the in-memory variant for tests; it deliberately
   serializes and re-loads every module type, so the round-trip is exercised
   by every import test in the suite.

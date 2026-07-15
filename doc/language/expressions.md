@@ -475,19 +475,24 @@ so is calling a function value. The callable things are module-level
 functions (local or imported), record methods (`r:move(...)`), record
 functions (`Point.new(...)`, `Point.origin(...)`), and any function value held in a
 variable, parameter, field, or container slot.
-Arity is strict at compile time: the wrong number of arguments is the
-compile-time error `function 'f' called with N arguments but expects M`
-— no Lua-style padding with nil, no dropping of extras. (Calls coming
-*from* Lua are checked at run time instead; see
-[Lua interoperability](lua-interop.md).)
+For Titan functions, too few positional arguments are padded with `nil` and
+then type-checked against the missing formals; too many arguments are rejected.
+Direct C calls made with parentheses keep strict C arity. Calls coming *from*
+Lua are adjusted and checked at run time instead; see
+[Functions](functions.md#argument-adjustment) and
+[Lua interoperability](lua-interop.md).
 
-Lua's call sugar works — a single string or constructor argument needs
-no parentheses:
+A bare string retains Lua-style one-argument call sugar:
 
 ```lua
 function greet(name: string): string return "hello " .. name end
 function sugar(): string return greet "world" end
 ```
+
+Bare braces instead select Titan's [named-argument](named-arguments.md) form:
+`move { dy = 2, dx = 1 }` maps labels to a direct declaration. To pass a
+constructor as one positional argument, enclose it in the call parentheses:
+`consume({ x = 1 })`, `consume({ 1, 2 })`, or `consume({})`.
 
 A call used as an operand contributes its **first** return value. A
 multiple-return call in the *last* position of an argument list, array

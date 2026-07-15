@@ -245,11 +245,43 @@ function write(buf: string): integer
 end
 ```
 
+A direct fixed-arity foreign function can use
+[named-call syntax](named-arguments.md) when its effective C prototype provides
+one complete, unambiguous list of unique parameter names:
+
+```lua
+local api = foreign import "api.h"
+-- int clamp_int(int value, int low, int high);
+
+function clamp(n: integer): integer
+    return api.clamp_int {
+        high = 100,
+        value = n,
+        low = 0,
+    } as integer
+end
+```
+
+The names are the exact spellings in the active header, not Titan aliases.
+They may include a Titan keyword because labels are contextual; for example a
+C parameter named `repeat` is written `repeat = interval` inside the named
+list. A `(void)` prototype publishes a known empty list and accepts `f{}`.
+Old-style `f()`, unnamed or partially named parameter lists, duplicate names,
+and conflicting complete names across compatible redeclarations do not publish
+named-call metadata. Named syntax then gets a specific unavailable-prototype
+diagnostic, while the positional call remains available.
+
+Parenthesized direct C calls retain strict C arity. In a named call, every
+omitted fixed parameter is treated as `nil` and accepted only if its
+Titan-visible type accepts or can coerce nil. An omitted pointer can therefore
+become `NULL`, but a required C integer cannot be omitted.
+
 Fixed parameters are checked against the C prototype. For C variadic functions,
 the fixed prefix is checked and explicit extra arguments are converted using
 their own static types. This is enough to call functions such as `printf` and
 `snprintf`, but Titan does not validate format strings. Titan variadic `...`
-cannot be forwarded into a C variadic call in v1.
+cannot be forwarded into a C variadic call in v1. Named syntax is rejected for
+every C variadic function, even when all fixed-prefix arguments are present.
 
 Foreign functions are not Titan first-class function values. `stdio.printf` can
 be called by name, but it cannot be stored, passed, or returned as a Titan
@@ -271,7 +303,9 @@ end
 
 C function pointer values are callable with the same call syntax. The call is a
 C call through the pointer, not a Titan function-value call, and raises a
-run-time error if the pointer is `NULL`:
+run-time error if the pointer is `NULL`. It remains named-ineligible even if
+the pointer's typedef happened to spell parameter names, because it is a value
+rather than a direct declaration member:
 
 ```lua
 local c = foreign import "callbacks.h"

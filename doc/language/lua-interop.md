@@ -76,10 +76,10 @@ assert(require "os" == lua_os)
 
 The same rule applies to `titan.coroutine`, `titan.async`, `titan.timer`,
 `titan.fs`, `titan.net`, and `titan.os`. The private `titan.uv` plumbing module
-uses the same canonical identity. In an installed Titan 0.12 tree these qualified
+uses the same canonical identity. In an installed Titan 0.13 tree these qualified
 names resolve to qualified standard-module files under
-`<root>/lib/titan/0.12/titan/`. Titan's installed Lua has
-`<root>/lib/titan/0.12/?.so` before its ordinary `lib/lua` entries in the
+`<root>/lib/titan/0.13/titan/`. Titan's installed Lua has
+`<root>/lib/titan/0.13/?.so` before its ordinary `lib/lua` entries in the
 default `package.cpath`, and standalone Titan programs ensure the same template
 is present. A Lua require and a desugared Titan short-name import therefore
 open the same DSO. The installation does not create parent-level or `lib/lua`
@@ -212,6 +212,13 @@ error. Extra Lua arguments are not dropped; they raise an arity error:
 ```
 calling Titan function f with 2 arguments, but expected at most 1
 ```
+
+Lua calls remain positional-only. In Lua, `test.f { x = 1 }` is exactly
+`test.f({ x = 1 })`: one ordinary table argument. It does not carry the syntax
+marker used by Titan's [named calls](named-arguments.md), and the generated
+entry wrapper does not inspect keys or infer a mapping from the table's shape.
+Exported parameter names are a compile-time API for Titan callers, not a new
+Lua calling convention.
 
 Multiple return values work exactly as in Lua — a Titan function declared
 with several return types returns that many values to Lua:

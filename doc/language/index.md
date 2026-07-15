@@ -26,7 +26,7 @@ local m = require "sum"
 print(m.sum_list({1, 2, 3, 4})) --> 10
 ```
 
-This is the reference for the language as implemented by the Titan 0.12
+This is the reference for the language as implemented by the Titan 0.13
 prototype compiler in this repository. It replaces the old single-file
 manual. For how the compiler itself works — including how each construct
 is translated to C — see the
@@ -48,6 +48,7 @@ Start with the [design philosophy](philosophy.md) if you want to know
 | [Statements](statements.md) | Declarations and inference, assignment and multiple assignment, control flow, the numeric `for`, `defer`, `return`. |
 | [Defer](defer.md) | `defer <statement>` cleanup, its block transformation model, scoping, LIFO order, and interaction with return, break, raise, catch, and finally. |
 | [Functions](functions.md) | Declarations, argument adjustment, multiple return values, visibility, functions as values, and the `main` convention for standalone programs. |
+| [Named arguments](named-arguments.md) | Declaration-based `f { name = value }` and method-call syntax, omissions, evaluation order, record construction, direct C prototype names, and Lua's positional-only boundary. |
 | [Anonymous functions and closures](closures.md) | Lambda expressions, parameter/return type inference, lexical capture of enclosing locals, fresh-value-per-evaluation semantics, and bound method references `obj:method`. |
 | [Variadic parameters](variadic-parameters.md) | The trailing `...: t` parameter, `#...`, the raising `...[e]` index, spreading `...` into calls/returns/arrays, slot-driven adjust-up, variadic functions as values, and the limits and bans. |
 | [Records](records.md) | Nominal record types, constructors, fields, methods, record functions, and records as seen from Lua. |
@@ -66,7 +67,7 @@ Start with the [design philosophy](philosophy.md) if you want to know
 
 ## Status and limitations
 
-Titan is a working prototype, version 0.12. The language documented here is
+Titan is a working prototype, version 0.13. The language documented here is
 implemented and covered by the compiler's test suite. Its boundaries are
 mostly missing features, plus a handful of constructs the compiler rejects
 with a clean error; each links to the chapter that documents it in full.

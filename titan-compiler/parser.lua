@@ -285,9 +285,22 @@ function defs.suffix_funccall(pos, args)
     end
 end
 
+function defs.suffix_namedfunccall(pos, fields)
+    return function(exp)
+        return ast.ExpCall(pos, exp, ast.ArgsNamedFunc(pos, fields))
+    end
+end
+
 function defs.suffix_methodcall(pos, name, args)
     return function(exp)
         return ast.ExpCall(pos, exp, ast.ArgsMethod(pos, name, args))
+    end
+end
+
+function defs.suffix_namedmethodcall(pos, name, fields)
+    return function(exp)
+        return ast.ExpCall(pos, exp,
+            ast.ArgsNamedMethod(pos, name, fields))
     end
 end
 
@@ -716,9 +729,16 @@ local grammar = re.compile([[
 
     suffixedexp     <- (prefixexp {| expsuffix+ |})              -> fold_suffixes
 
+    -- Parentheses and bare strings are positional call suffixes. Bare braces
+    -- are always named calls; passing one constructor positionally therefore
+    -- requires parentheses (`f({ ... })`). Keeping the paths distinct here
+    -- preserves the delimiter choice in the Args node for checker lowering.
     expsuffix       <- (P  funcargs)                             -> suffix_funccall
+                     / (P  namedargs)                           -> suffix_namedfunccall
                      / (P  COLON NAME^NameColonExpSuf
                                  funcargs)                       -> suffix_methodcall
+                     / (P  COLON NAME^NameColonExpSuf
+                                 namedargs)                      -> suffix_namedmethodcall
                      / (P  COLON NAME^NameColonExpSuf)           -> suffix_methodref
                      / (P  LBRACKET exp^ExpExpSuf
                                 RBRACKET^RBracketExpSuf)         -> suffix_bracket
@@ -751,8 +771,24 @@ local grammar = re.compile([[
     varlist         <- {| var (COMMA var^ExpVarList)* |}            -- produces {Var}
 
     funcargs        <- (LPAREN (explist? -> listopt) RPAREN^RParFuncArgs)      -- produces {Exp}
-                     / {| initlist |}                            -- produces {Exp}
                      / {| (P  STRINGLIT) -> ExpString |}         -- produces {Exp}
+
+    -- Named calls accept only `identifier = expression` fields. NAMEDLABEL is
+    -- deliberately keyword-inclusive, but is reachable only before `=` in
+    -- this production. The !RCURLY guards preserve empty lists and trailing
+    -- separators without weakening errors for positional/computed items.
+    namedargs       <- (LCURLY
+                         {| (!RCURLY namedarglist^NameNamedArg)? |}
+                         RCURLY^RCurlyNamedArgs)                 -- produces {Field}
+
+    namedarglist    <- (namedarg
+                        (fieldsep
+                         (!RCURLY &. namedarg^NameNamedArg))*
+                        fieldsep?)                              -- produces Field...
+
+    namedarg        <- (P  NAMEDLABEL
+                           ASSIGN^AssignNamedArg
+                           exp^ExpNamedArg)                     -> Field
 
     -- A trailing `...` spread is allowed as the last item of an explist (call
     -- args, return, assignment/decl RHS). A bare `...` is a one-element list;
@@ -879,6 +915,7 @@ local grammar = re.compile([[
     NUMBER          <- %NUMBER SKIP*
     STRINGLIT       <- %STRINGLIT SKIP*
     NAME            <- %NAME SKIP*
+    NAMEDLABEL      <- %NAMEDLABEL SKIP*
 
     -- Synonyms
 

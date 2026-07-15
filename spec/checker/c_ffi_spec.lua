@@ -19,6 +19,27 @@ local function with_header(contents, fn)
 end
 
 describe("C FFI type checking", function()
+    it("publishes complete, empty, and unavailable parameter-name metadata",
+    function()
+        with_header([[
+            extern int ffi_named(int count, const char *path);
+            extern int ffi_zero(void);
+            extern int ffi_oldstyle();
+        ]], function(header)
+            local ok, err, ast = run_checker([[
+                local c = foreign import "]] .. header .. [["
+            ]])
+            assert.truthy(ok, err)
+
+            local cmod = ast[1]._type
+            assert.equal("Type.CModule", cmod._tag)
+            assert.same({ "count", "path" },
+                cmod.members.ffi_named.paramnames)
+            assert.same({}, cmod.members.ffi_zero.paramnames)
+            assert.is_false(cmod.members.ffi_oldstyle.paramnames)
+        end)
+    end)
+
     it("imports the compiler-provided C primitive header", function()
         local ok, err = run_checker([[
             local ffi = foreign import "titan/ffi.h"

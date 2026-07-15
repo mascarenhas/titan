@@ -131,7 +131,10 @@ function Connection:read_until(delimiter: string,
         count = count + 1
         chunks[count] = chunk
         local boundary = tail .. chunk
-        local match = uv._bytes_find(boundary, delimiter)
+        local match = uv._bytes_find {
+          haystack = boundary,
+          needle = delimiter,
+        }
         total = total + #chunk
         if match >= 0 then
           local match_end = total - #boundary + match + #delimiter

@@ -165,6 +165,14 @@ local errors = {
 
     FuncArgsExpSuf = "Expected a list of arguments.",
 
+    NameNamedArg = "Expected a named argument of the form 'name = expression'.",
+
+    AssignNamedArg = "Expected '=' after named argument name.",
+
+    ExpNamedArg = "Expected an expression after '=' in named argument.",
+
+    RCurlyNamedArgs = "Expected '}' to close named argument list.",
+
     ExpExpSuf = "Expected an expression after '['.",
 
     RBracketExpSuf = "Expected ']' to match '['.",

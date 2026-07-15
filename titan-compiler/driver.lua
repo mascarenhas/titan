@@ -12,8 +12,8 @@ local driver = {}
 
 driver.imported = {}
 
-driver.TITAN_VER = "0.12"
-driver.TITAN_VER_SUFFIX = "_0_12"
+driver.TITAN_VER = "0.13"
+driver.TITAN_VER_SUFFIX = "_0_13"
 driver.LUA_VERSION = "5.5"
 
 local LUA_CPATH_SUFFIX = "/lib/lua/" .. driver.LUA_VERSION .. "/?.so"

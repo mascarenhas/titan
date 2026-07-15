@@ -1120,7 +1120,7 @@ describe("Titan parser", function()
                                     var = { _tag = "Ast.VarName", name = "x" }}}}}}}})
     end)
 
-    it("can parse function calls without the optional parenthesis", function()
+    it("keeps parenthesized and bare-string function calls positional", function()
         assert_expression_ast([[ f() ]],
             { _tag = "Ast.ExpCall", args = {
                 _tag = "Ast.ArgsFunc", args = { } } })
@@ -1129,14 +1129,62 @@ describe("Titan parser", function()
             { _tag = "Ast.ExpCall", args = {
                 _tag = "Ast.ArgsFunc", args = {
                     { _tag = "Ast.ExpString", value = "qwe" } } } })
-
-        assert_expression_ast([[ f {} ]],
-            { _tag = "Ast.ExpCall", args = {
-                _tag = "Ast.ArgsFunc", args = {
-                    { _tag = "Ast.ExpInitList" } } } })
     end)
 
-    it("can parse method calls without the optional parenthesis", function()
+    it("parses spaced, adjacent, and empty named function calls", function()
+        local one_field = { _tag = "Ast.ExpCall", args = {
+            _tag = "Ast.ArgsNamedFunc", fields = {
+                { _tag = "Ast.Field", name = "x",
+                  exp = { _tag = "Ast.ExpInteger", value = 1 } } } } }
+
+        assert_expression_ast([[ f { x = 1 } ]], one_field)
+        assert_expression_ast([[ f{x = 1} ]], one_field)
+
+        local empty = { _tag = "Ast.ExpCall", args = {
+            _tag = "Ast.ArgsNamedFunc", fields = { } } }
+        assert_expression_ast([[ f {} ]], empty)
+        assert_expression_ast([[ f{} ]], empty)
+
+        assert_expression_ast([[ m.f{} ]], {
+            _tag = "Ast.ExpCall",
+            exp = { _tag = "Ast.ExpVar", var = {
+                _tag = "Ast.VarDot", name = "f" } },
+            args = { _tag = "Ast.ArgsNamedFunc", fields = { } },
+        })
+    end)
+
+    it("retains named function arguments in source order", function()
+        assert_expression_ast([[
+            f { second = mark(2); first = mark(1), third = 3, }
+        ]], {
+            _tag = "Ast.ExpCall",
+            args = { _tag = "Ast.ArgsNamedFunc", fields = {
+                { name = "second", exp = {
+                    _tag = "Ast.ExpCall", args = { args = {
+                        { _tag = "Ast.ExpInteger", value = 2 } } } } },
+                { name = "first", exp = {
+                    _tag = "Ast.ExpCall", args = { args = {
+                        { _tag = "Ast.ExpInteger", value = 1 } } } } },
+                { name = "third", exp = {
+                    _tag = "Ast.ExpInteger", value = 3 } },
+            } },
+        })
+    end)
+
+    it("allows Titan keywords only as named argument labels", function()
+        assert_expression_ast([[ f{ repeat = 1 } ]], {
+            _tag = "Ast.ExpCall",
+            args = { _tag = "Ast.ArgsNamedFunc", fields = {
+                { name = "repeat", exp = { value = 1 } },
+            } },
+        })
+
+        assert_program_syntax_error([[
+            function repeat(): nil end
+        ]], "NameFunc")
+    end)
+
+    it("keeps parenthesized and bare-string method calls positional", function()
         assert_expression_ast([[ o:m () ]],
             { _tag = "Ast.ExpCall", args = {
                 _tag = "Ast.ArgsMethod", args = { } } })
@@ -1145,11 +1193,73 @@ describe("Titan parser", function()
             { _tag = "Ast.ExpCall", args = {
                 _tag = "Ast.ArgsMethod", args = {
                     { _tag = "Ast.ExpString", value = "asd" } } } })
+    end)
 
-        assert_expression_ast([[ o:m {} ]],
-            { _tag = "Ast.ExpCall", args = {
-                _tag = "Ast.ArgsMethod", args = {
-                    { _tag = "Ast.ExpInitList" } } } })
+    it("parses spaced, adjacent, empty, and reordered named method calls",
+    function()
+        local nonempty = { _tag = "Ast.ExpCall", args = {
+            _tag = "Ast.ArgsNamedMethod", method = "m", fields = {
+                { name = "dy", exp = { value = 20 } },
+                { name = "dx", exp = { value = 10 } },
+            } } }
+        assert_expression_ast([[ o:m { dy = 20, dx = 10 } ]], nonempty)
+        assert_expression_ast([[ o:m{dy = 20; dx = 10;} ]], nonempty)
+
+        local empty = { _tag = "Ast.ExpCall", args = {
+            _tag = "Ast.ArgsNamedMethod", method = "m", fields = { } } }
+        assert_expression_ast([[ o:m {} ]], empty)
+        assert_expression_ast([[ o:m{} ]], empty)
+    end)
+
+    it("keeps constructor arguments positional when parenthesized", function()
+        local function positional_constructor(fields)
+            return { _tag = "Ast.ExpCall", args = {
+                _tag = "Ast.ArgsFunc", args = {
+                    { _tag = "Ast.ExpInitList", fields = fields } } } }
+        end
+
+        assert_expression_ast([[ f({}) ]], positional_constructor({}))
+        assert_expression_ast([[ f({ x = 1 }) ]], positional_constructor({
+            { name = "x", exp = { value = 1 } },
+        }))
+        assert_expression_ast([[ f({ 1, 2 }) ]], positional_constructor({
+            { name = false, exp = { value = 1 } },
+            { name = false, exp = { value = 2 } },
+        }))
+        assert_expression_ast([[ f({ [k] = v }) ]], positional_constructor({
+            { name = { var = { name = "k" } },
+              exp = { var = { name = "v" } } },
+        }))
+    end)
+
+    it("rejects non-named and mixed entries in bare brace calls", function()
+        assert_expression_syntax_error([[ f { 1 } ]], "NameNamedArg")
+        assert_expression_syntax_error([[ f { [k] = v } ]], "NameNamedArg")
+        assert_expression_syntax_error([[ f { ... } ]], "NameNamedArg")
+        assert_expression_syntax_error([[ f { x = 1, 2 } ]], "NameNamedArg")
+        assert_expression_syntax_error(
+            [[ f { x = 1; [k] = v } ]], "NameNamedArg")
+    end)
+
+    it("reports named-call-specific punctuation errors", function()
+        assert_expression_syntax_error([[ f { = 1 } ]], "NameNamedArg")
+        assert_expression_syntax_error([[ f { x } ]], "AssignNamedArg")
+        assert_expression_syntax_error([[ f { x = } ]], "ExpNamedArg")
+        assert_expression_syntax_error([[ f { x = 1,, } ]], "NameNamedArg")
+        assert_expression_syntax_error([[ f { x = 1 ]], "RCurlyNamedArgs")
+        assert_program_syntax_error([[
+            function unfinished()
+                f { x = 1,
+        ]], "RCurlyNamedArgs")
+    end)
+
+    it("continues folding suffixes after a named call", function()
+        assert_expression_ast([[ f{x = 1}.field ]], {
+            _tag = "Ast.ExpVar",
+            var = { _tag = "Ast.VarDot", name = "field",
+                exp = { _tag = "Ast.ExpCall",
+                    args = { _tag = "Ast.ArgsNamedFunc" } } },
+        })
     end)
 
     it("parses a bound method reference (obj:m with no argument list)", function()
@@ -1737,9 +1847,9 @@ describe("Titan parser", function()
 
         assert_expression_syntax_error([[ f(42,) ]], "ExpExpList")
 
-        assert_expression_syntax_error([[ y{42 ]], "RCurlyInitList")
+        assert_expression_syntax_error([[ y({42) ]], "RCurlyInitList")
 
-        assert_expression_syntax_error([[ y{42,,} ]], "ExpFieldList")
+        assert_expression_syntax_error([[ y({42,,}) ]], "ExpFieldList")
 
         assert_expression_syntax_error([[ foo as ]], "CastMissingType")
     end)

@@ -36,6 +36,62 @@ describe(".so-only cross-module imports", function()
         assert.truthy(rok, out)
     end)
 
+    it("lowers named calls through a .so-only interface to the positional ABI",
+    function ()
+        local ok, err = build_so_chain({
+            { name = "namedsofoo", src = [[
+                record Empty end
+
+                record Pair
+                    first: integer
+                    second: integer
+                end
+
+                function Pair.make(first: integer, second: integer): Pair
+                    return Pair.new(first, second)
+                end
+
+                function Pair:encode(scale: integer, offset: integer): integer
+                    return self.first * scale + self.second * offset
+                end
+
+                function combine(left: integer, right: integer): integer
+                    return left * 100 + right
+                end
+
+                function zero(): integer
+                    return 9
+                end
+            ]] },
+            { name = "namedsobar", src = [[
+                local foo = import "namedsofoo"
+
+                function named(): integer
+                    local empty: foo.Empty = foo.Empty.new {}
+                    local pair = foo.Pair.make { second = 7, first = 5 }
+                    local direct = foo.Pair.new { second = 3, first = 2 }
+                    return foo.combine { right = 2, left = 4 }
+                        + pair:encode { offset = 1, scale = 10 }
+                        + direct:encode { offset = 2, scale = 3 }
+                        + foo.zero {}
+                end
+
+                function positional(): integer
+                    return foo.combine(6, 7)
+                end
+            ]] },
+        })
+        assert.truthy(ok, err)
+
+        local rok, out = call("namedsobar", [[
+            assert(namedsobar.named() == 402 + 57 + 12 + 9)
+            assert(namedsobar.positional() == 607)
+            local foo = require "namedsofoo"
+            assert(foo.combine(8, 9) == 809)
+        ]])
+        assert.truthy(rok, out)
+    end)
+
     it("reads and writes a variable in a .so-only module", function ()
         local ok, err = build_so_chain({
             { name = "vfoo", src = [[ a: integer = 1 ]] },

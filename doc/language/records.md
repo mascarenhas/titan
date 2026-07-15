@@ -127,6 +127,7 @@ parameter per field, in declaration order:
 
 ```lua
 local p = Point.new(2.0, 3.0)   -- p: Point, with x = 2.0 and y = 3.0
+local q = Point.new { y = 4.0, x = 1.0 }
 ```
 
 Like any Titan function call, `Point.new` pads omitted arguments with
@@ -136,18 +137,20 @@ accept `nil`; for a required `float` field it is a compile-time type
 error (`expected float but found nil`). Extra arguments are still
 rejected. Each argument gets the usual implicit coercions of a function
 argument, so `Point.new(2, 3)` fills the `float` fields with `2.0` and
-`3.0`.
+`3.0`. As a record static declaration, `new` also supports
+[named-call syntax](named-arguments.md): fields may be written in any order,
+and any omitted parameter receives the same checked `nil` fill.
 
 `new` is not magic: the compiler synthesizes it as a record function
 whose body is a record constructor expression over its parameters. For a local
 record, `new` is local too. For an exported record with any local field, `new`
 is also local, because exposing it would let outside code supply private field
-values positionally.
+values through its parameters.
 
 ### Constructor expressions
 
-A record can also be built with a constructor expression listing every
-field by name:
+A record can also be built with a constructor expression listing fields by
+name:
 
 ```lua
 local p: Point = { x = 2.0, y = 3.0 }
@@ -169,21 +172,42 @@ particular, assigning one as the right-hand side of a single-assignment
 record field (`o.i = { ... }`), or a local — behaves exactly like the
 initializer form, just as `RecName.new(...)` does.
 
-The field list is checked strictly, all at compile time:
+The field list is checked at compile time:
 
 * every entry must name a field — `{ x = 1.0, z = 2.0 }` gives
   `field 'z' not found in record type 'test.Point'`;
-* every field must be present — omitting `y` gives
-  `field 'y' from record type 'test.Point' missing in constructor`;
+* an omitted field is filled with `nil` only when its type accepts or can
+  coerce `nil` (for example `T?`, `value`, `boolean`, or a nullable pointer);
+  otherwise the compiler reports that the field cannot be omitted because its
+  type does not accept nil;
 * entries must be named, never positional — `{ 1.0, 2.0 }` gives
   `missing field in initializer for record type 'test.Point'`;
 * each value must match (or coerce to) the field's type, with the usual
-  `expected float but found string` style of message.
+  `expected float but found string` style of message;
+* if an explicit field is repeated, both values are evaluated and stored in
+  source order, so the final entry wins. Named *calls*, by contrast, reject a
+  repeated argument name.
+
+This makes partial and empty constructors useful when all omitted slots are
+nil-compatible:
+
+```lua
+record Config
+    label: string?
+    enabled: boolean
+    payload: value
+end
+
+local defaults: Config = {}
+local labelled: Config = { label = "test" }
+```
 
 Outside the defining module, constructor expressions are rejected for records
 that have local fields. The compiler cannot safely fill private slots from a
-partial public field list, so use an exported factory function from the defining
-module instead.
+public field list, so this record-level ban applies even to `{}` and even when
+every private field could accept `nil`. Inside the defining module, public and
+local fields use the same omission rule. Outside, use an exported factory
+function from the defining module instead.
 
 ### Records in module variables
 

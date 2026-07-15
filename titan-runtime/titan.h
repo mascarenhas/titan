@@ -60,9 +60,13 @@
    type_members namespace for transparent exported type aliases. Generated
    code can also resolve record entry points provided transitively by an
    RTLD_GLOBAL dependency through loadglobalsym. Older checkers cannot read
-   the new interface shape, and older runtimes do not provide that helper. */
-#define TITAN_VER "0.12"
-#define TITAN_VER_SUFFIX "_0_12"
+   the new interface shape, and older runtimes do not provide that helper.
+   0.12 -> 0.13: declaration descriptors in the serialized <mangled>_types
+   interface gained fixed-parameter name lists for compile-time named calls.
+   Native call frames are unchanged, but older constructor environments cannot
+   safely interpret the new descriptor shape. */
+#define TITAN_VER "0.13"
+#define TITAN_VER_SUFFIX "_0_13"
 #define TITAN_PATH_VAR "TITAN_PATH"
 #define TITAN_PATH_SEP "/"
 #define TITAN_ROOT_DEFAULT "/usr/local"

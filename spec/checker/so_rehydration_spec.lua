@@ -59,6 +59,65 @@ describe("typechecker rehydration of .so-only imports", function()
         assert.match("expected integer but found string", table.concat(badty, "\n"))
     end)
 
+    it("rehydrates declaration names for named calls", function ()
+        local dep = { name = "namedrhfoo", src = [[
+            record Empty end
+
+            record Box
+                primary: integer
+                extra: integer?
+            end
+
+            function Box.make(primary: integer, extra: integer?): Box
+                return Box.new(primary, extra)
+            end
+
+            function Box:shift(delta: integer, spare: integer?): integer
+                return self.primary + delta
+            end
+
+            function choose(left: integer, right: integer): integer
+                return left * 100 + right
+            end
+
+            function zero(): integer
+                return 9
+            end
+        ]] }
+
+        local good = so_check({ dep }, "namedrhbar", [[
+            local f = import "namedrhfoo"
+
+            function run(): integer
+                local empty: f.Empty = f.Empty.new {}
+                local box = f.Box.make { extra = 2, primary = 3 }
+                local direct = f.Box.new { primary = 4 }
+                return f.choose { right = 2, left = 4 }
+                    + box:shift { delta = 5 }
+                    + direct:shift { delta = 6 }
+                    + f.zero {}
+            end
+        ]])
+        assert.equal(0, #good, table.concat(good, "\n"))
+
+        local box = assert(types.registry["namedrhfoo.Box"])
+        assert.same({ "primary", "extra" }, box.functions.new.paramnames)
+        assert.same({ "primary", "extra" }, box.functions.make.paramnames)
+        assert.same({ "delta", "spare" }, box.methods.shift.paramnames)
+        local empty = assert(types.registry["namedrhfoo.Empty"])
+        assert.same({}, empty.functions.new.paramnames)
+
+        local bad = so_check({ dep }, "namedrhbar", [[
+            local f = import "namedrhfoo"
+            function run(): integer
+                return f.choose { left = 1, unknown = 2 }
+            end
+        ]])
+        assert.truthy(#bad >= 1)
+        assert.match("function 'f%.choose' has no parameter named 'unknown'",
+            table.concat(bad, "\n"))
+    end)
+
     it("rehydrates a higher-order / first-class function signature", function ()
         local dep = { name = "hofoo", src = [[
             function inc(x: integer): integer return x + 1 end
