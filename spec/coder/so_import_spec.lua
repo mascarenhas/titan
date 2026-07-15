@@ -193,8 +193,70 @@ describe(".so-only cross-module imports", function()
             ]] },
         })
         assert.truthy(ok, err)
+        local f = assert(io.open("tbar.c", "r"))
+        local generated = f:read("*a")
+        f:close()
+        assert.match('loadlib%(L, "tbaz%.so"%)', generated)
+        assert.not_match('loadlib%(L, "tfoo%.so"%)', generated)
+        assert.match('loadglobalsym%(L, "tfoo_Point_move_titanmethod"%)',
+            generated)
         local rok, out = call("tbar",
             "local x,y = tbar.bar(); assert(x == 4.0 and y == 6.0)")
+        assert.truthy(rok, out)
+    end)
+
+    it("uses methods through a re-exported record alias without reopening its owner",
+       function ()
+        local ok, err = build_so_chain({
+            { name = "alias_provider", src = [[
+                record Foo
+                    n: integer
+                end
+                function Foo:plus(delta: integer): integer
+                    return self.n + delta
+                end
+            ]] },
+            { name = "alias_facade", src = [[
+                local provider = import "alias_provider"
+                type Foo = provider.Foo
+                function make(n: integer): Foo
+                    return provider.Foo.new(n)
+                end
+            ]] },
+            { name = "alias_consumer", src = [[
+                local facade = import "alias_facade"
+                function run(): integer
+                    local foo: facade.Foo = facade.make(40)
+                    local plus: (integer) -> integer = foo:plus
+                    return foo:plus(1) + plus(2)
+                end
+            ]] },
+        })
+        assert.truthy(ok, err)
+
+        local bf = assert(io.open("alias_facade.c", "r"))
+        local facade_c = bf:read("*a")
+        bf:close()
+        assert.match('loadlib%(L, "alias_provider%.so"%)', facade_c)
+
+        local cf = assert(io.open("alias_consumer.c", "r"))
+        local consumer_c = cf:read("*a")
+        cf:close()
+        assert.match('loadlib%(L, "alias_facade%.so"%)', consumer_c)
+        assert.not_match('loadlib%(L, "alias_provider%.so"%)', consumer_c)
+        assert.not_match("alias_provider_handle", consumer_c)
+        assert.match(
+            'loadglobalsym%(L, "alias_provider_Foo_plus_titanmethod"%)',
+            consumer_c)
+        assert.match(
+            'loadglobalsym%(L, "alias_provider_Foo_plus_boundmethod"%)',
+            consumer_c)
+        assert.match(
+            'loadglobalsym%(L, "alias_provider_Foo_plus_titanentry_boundlua"%)',
+            consumer_c)
+
+        local rok, out = call("alias_consumer",
+            "assert(alias_consumer.run() == 83)")
         assert.truthy(rok, out)
     end)
 

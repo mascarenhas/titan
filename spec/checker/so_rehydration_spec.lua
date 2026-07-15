@@ -270,6 +270,28 @@ describe("typechecker rehydration of .so-only imports", function()
             "recpoint.Point should be registered through the option type")
     end)
 
+    it("rehydrates a record referenced only through an exported type alias", function ()
+        local good = so_check({
+            { name = "aliasrecord", src = [[
+                record Error
+                  code: integer
+                end
+            ]] },
+            { name = "aliasfacade", src = [[
+                local source = import "aliasrecord"
+                type Error = source.Error
+            ]] },
+        }, "aliastop", [[
+            local facade = import "aliasfacade"
+            function code(error: facade.Error): integer
+                return error.code
+            end
+        ]])
+        assert.equal(0, #good, table.concat(good, "\n"))
+        assert.truthy(types.registry["aliasrecord.Error"],
+            "aliasrecord.Error should be registered through the alias table")
+    end)
+
     it("recovers a record referenced ONLY as a vararg element type through a .so chain", function ()
         -- vrec defines Box; vrecwrap (a .so) exports a function whose ONLY
         -- reference to Box is as the `...` element type (`...: vrec.Box`), and does

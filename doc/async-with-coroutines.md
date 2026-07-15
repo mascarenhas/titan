@@ -600,8 +600,8 @@ Build `titan/coroutine.titan` as the ordinary qualified Titan module
 `titan.coroutine`. Its binary exports `titan_coroutine_init`,
 `titan_coroutine_abi`, `titan_coroutine_types`, and
 `luaopen_titan_coroutine`. Install the binary exactly once as
-`<root>/lib/titan/0.11/titan/coroutine.so`. Titan's configured Lua C-module path
-contains `<root>/lib/titan/0.11/?.so`; the parser desugars
+`<root>/lib/titan/0.12/titan/coroutine.so`. Titan's configured Lua C-module path
+contains `<root>/lib/titan/0.12/?.so`; the parser desugars
 `import "coroutine"` to that qualified identity, and
 `require "titan.coroutine"` loads the same file. Do not install an alias or copy as
 `coro.so`, a parent-level `coroutine.so`, or a `lib/lua` DSO, and do not export

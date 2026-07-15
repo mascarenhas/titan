@@ -69,9 +69,9 @@ into the same automatic retry behavior.
 function wait_signal(name: string): string
 ```
 
-`wait_signal` is an asynchronous cancellation point and must run inside a UV
-Task. It installs a one-shot watcher and returns the canonical lowercase name
-when the signal fires. Supported names on Linux and macOS are `"hup"`,
+`wait_signal` is an asynchronous cancellation point and must run inside an
+async Task. It installs a one-shot watcher and returns the canonical lowercase
+name when the signal fires. Supported names on Linux and macOS are `"hup"`,
 `"int"`, `"quit"`, `"term"`, `"usr1"`, and `"usr2"`.
 
 Unknown names are rejected before a watcher is initialized. `"kill"` is also
@@ -105,10 +105,10 @@ function Process:read_stderr_until(delimiter: string,
                                    chop: boolean?): string?
 ```
 
-Process operations are asynchronous and must run inside a UV Task. A Titan
+Process operations are asynchronous and must run inside an async Task. A Titan
 standalone program that imports `os` gets the automatic async bootstrap; a Lua
-host should call them from a function passed to `uv.run`, then drive that Task
-with `uv.loop`.
+host should call them from a function passed to `async.run`, then drive that Task
+with `async.loop` after loading `require "titan.async"`.
 
 `spawn` starts `file` directly, without a shell. `args` contains the arguments
 after `argv[0]`; the library supplies `file` as `argv[0]`. The child inherits
@@ -144,7 +144,7 @@ first. Otherwise they return all native chunks already queued when the
 low-level call is serviced, or wait for the next positive callback. A positive
 batch is nonempty, binary, and timing-dependent. EOF returns `nil` permanently.
 A read error closes that output pipe; after completed chunks have drained, the
-same or an equivalent `uv.Error` is raised on every later read.
+same or an equivalent `async.Error` is raised on every later read.
 
 `read_stdout_until(delimiter, chop)` and
 `read_stderr_until(delimiter, chop)` reject an empty delimiter and consume
@@ -211,7 +211,7 @@ desired shell explicitly and pass its arguments as an array.
 
 ## Errors
 
-Libuv failures raise [`uv.Error`](async-io.md#results-errors-and-cancellation)
+Libuv failures raise [`async.Error`](async-io.md#results-errors-and-cancellation)
 with an operation name identifying the failed helper. A platform
 `UV_ENOSYS` result is exposed as that error; the library does not silently
 fall back to a POSIX-specific implementation.

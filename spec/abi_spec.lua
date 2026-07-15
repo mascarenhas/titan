@@ -20,8 +20,8 @@ describe("compiled-module ABI version", function()
         assert.equal(driver.TITAN_VER_SUFFIX, runtime_suffix)
         assert.equal("_" .. driver.TITAN_VER:gsub("%.", "_"),
                      driver.TITAN_VER_SUFFIX)
-        assert.equal("0.11", driver.TITAN_VER)
-        assert.equal("_0_11", driver.TITAN_VER_SUFFIX)
+        assert.equal("0.12", driver.TITAN_VER)
+        assert.equal("_0_12", driver.TITAN_VER_SUFFIX)
     end)
 
     it("rejects a compiled module that lacks the current ABI marker", function()

@@ -5,6 +5,7 @@ symtab.__index = symtab
 function symtab.new(modname)
     local self = {
         blocks = { {} },
+        type_aliases = {},
         foreign_types = {},
         foreign_names = {},
         modname = modname
@@ -42,6 +43,17 @@ function symtab:find_symbol(name)
         end
     end
     return decl
+end
+
+-- Titan type aliases live in a distinct, module-wide type namespace. They are
+-- intentionally absent from `blocks`: an alias is not a run-time value and
+-- must never resolve through VarName/VarDot or reach code generation.
+function symtab:add_type_alias(name, decl)
+    self.type_aliases[name] = decl
+end
+
+function symtab:find_type_alias(name)
+    return self.type_aliases[name]
 end
 
 function symtab:add_foreign_type(name, decl)

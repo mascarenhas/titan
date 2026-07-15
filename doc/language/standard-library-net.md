@@ -13,8 +13,8 @@ Lua loads the same canonical module identity with:
 local net = require "titan.net"
 ```
 
-Network operations must run inside a Task started by `uv.run`, or inside a
-standalone program whose imports installed the automatic UV bootstrap. They
+Network operations must run inside a Task started by `async.run`, or inside a
+standalone program whose imports installed the automatic async bootstrap. They
 suspend only the current Task. Callbacks and continuations run serially on the
 loop thread; CPU-bound code still blocks other I/O until it yields.
 
@@ -72,7 +72,7 @@ or waits for the next positive callback and returns that callback's nonempty
 binary string. Batch boundaries are therefore timing-dependent. It returns
 `nil` only at EOF. EOF is sticky: every later read also returns `nil`. A reset
 or other read error is sticky as well; after already completed chunks have
-been drained, every later read raises the same or an equivalent `uv.Error`.
+been drained, every later read raises the same or an equivalent `async.Error`.
 A non-EOF read error also initiates physical Connection close.
 
 `read_until(delimiter, chop)` requires a nonempty delimiter. It consumes
@@ -119,7 +119,8 @@ session.
 Cancellation is logical first. A cancelled queued write is removed before
 submission. Cancelling an active write does not close a potentially shared
 Connection; its eventual callback only cleans storage and the Task receives
-`uv.Cancelled`. Close and the first shutdown are shielded through their
+the provider-owned cancellation record whose type-only facade name is
+`async.Cancelled`. Close and the first shutdown are shielded through their
 terminal native callbacks before sticky cancellation is delivered.
 
 ## Accepting
@@ -135,17 +136,11 @@ an accept waiter with an error.
 
 ## Errors
 
-Immediate and asynchronous libuv failures raise the same `uv.Error` record:
-
-```titan
-record Error
-  code: integer
-  name: string
-  message: string
-  operation: string
-  subject: string?
-end
-```
+Immediate and asynchronous libuv failures raise the same provider-owned error
+record, re-exported under the type-only facade name `async.Error`. Its fields
+are `code: integer`, `name: string`, `message: string`, `operation: string`,
+and `subject: string?`; the alias is not a constructible `async.Error` runtime
+namespace.
 
 DNS errors use libuv's `EAI_*` names. EOF is normal for both `read` and
 `read_until`; an unterminated final batch is returned before sticky EOF.
@@ -154,7 +149,7 @@ DNS errors use libuv's `EAI_*` names. EOF is normal for both `read` and
 
 ```titan
 local net = import "net"
-local uv = import "uv"
+local async = import "async"
 
 function client(): value
   local connection = net.connect("127.0.0.1", 8080)
@@ -165,7 +160,7 @@ function client(): value
 end
 
 function main(args: {string}): integer
-  local task = uv.run(client)
+  local task = async.run(client)
   task:join()
   return 0
 end
@@ -193,7 +188,7 @@ Typical packages are `libuv1-dev pkg-config` on Debian/Ubuntu,
 Homebrew on macOS. Applications importing the installed binary `net` module do
 not need libuv headers at compile time; all libuv and callback-shim linkage
 remains in the qualified
-`$ROCKS_TREE/lib/titan/0.11/titan/uv.so`. The supported installation currently
+`$ROCKS_TREE/lib/titan/0.12/titan/uv.so`. The supported installation currently
 sets `ROCKS_TREE == PREFIX`; the former owns Titan's SDK/stdlib while the latter
 owns Lua and LuaRocks. Repository contributors can still use
 `make stdlib` for an in-checkout standard-library build.

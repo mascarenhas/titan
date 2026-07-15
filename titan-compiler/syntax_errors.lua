@@ -48,6 +48,12 @@ local errors = {
 
    ExpVarDec = "Expected an expression to initialize variable.",
 
+   NameTypeAlias = "Expected a name after 'type'.",
+
+   AssignTypeAlias = "Expected '=' after type alias name.",
+
+   TypeTypeAlias = "Expected a type after '=' in type alias declaration.",
+
    NameRecord = "Expected a record name after 'record'.",
 
    EndRecord = "Expected 'end' to close the record.",

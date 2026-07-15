@@ -1,7 +1,7 @@
 local async_stdlib = require "spec.support.async_stdlib"
 
 local TASK_CASES = [[
-    local uv = import "uv"
+    local async = import "async"
     local timer = import "timer"
     local coroutine = import "coroutine"
 
@@ -14,7 +14,7 @@ local TASK_CASES = [[
       return nil
     end
 
-    local function join_propagation(child: uv.Task): value
+    local function join_propagation(child: async.Task): value
       do
         child:join()
       catch
@@ -41,29 +41,29 @@ local TASK_CASES = [[
       return nested_child_started
     end
 
-    function schedule_nonblocking(): uv.Task
-      return uv.run(function (): value
+    function schedule_nonblocking(): async.Task
+      return async.run(function (): value
         nonblocking_started = true
         return "nonblocking-ok"
       end)
     end
 
-    function schedule_nested_run(): uv.Task
-      return uv.run(function (): value
-        local child = uv.run(function (): value
+    function schedule_nested_run(): async.Task
+      return async.run(function (): value
+        local child = async.run(function (): value
           nested_child_started = true
           timer.yield()
           return "nested-child-ok"
         end)
         if nested_child_started then
-          raise "nested uv.run resumed its child inline"
+          raise "nested async.run resumed its child inline"
         end
         return child:join()
       end)
     end
 
-    function schedule_shared_tag(): uv.Task
-      return uv.run(function (): value
+    function schedule_shared_tag(): async.Task
+      return async.run(function (): value
         local nested = coroutine.create(other_tag_body, OTHER_TAG)
         local result = nested:resume(nil, OTHER_TAG)
         if nested:status() ~= "dead" then
@@ -73,8 +73,8 @@ local TASK_CASES = [[
       end)
     end
 
-    function schedule_callback_chain(): uv.Task
-      return uv.run(function (): value
+    function schedule_callback_chain(): async.Task
+      return async.run(function (): value
         local trace = "A"
         timer.yield()
         trace = trace .. "B"
@@ -82,15 +82,15 @@ local TASK_CASES = [[
       end)
     end
 
-    function schedule_out_of_order(): uv.Task
-      return uv.run(function (): value
+    function schedule_out_of_order(): async.Task
+      return async.run(function (): value
         local order: {integer} = {}
-        local slow = uv.run(function (): value
+        local slow = async.run(function (): value
           timer.sleep(20)
           order[#order + 1] = 1
           return 1
         end)
-        local fast = uv.run(function (): value
+        local fast = async.run(function (): value
           timer.sleep(0)
           order[#order + 1] = 2
           return 2
@@ -105,16 +105,16 @@ local TASK_CASES = [[
       end)
     end
 
-    function schedule_observed_trace(): uv.Task
-      local child = uv.run(fail_origin)
-      return uv.run(function (): value
+    function schedule_observed_trace(): async.Task
+      local child = async.run(fail_origin)
+      return async.run(function (): value
         return join_propagation(child)
       end)
     end
 
-    function schedule_next_turn_observer(): uv.Task
-      local child = uv.run(fail_origin)
-      return uv.run(function (): value
+    function schedule_next_turn_observer(): async.Task
+      local child = async.run(fail_origin)
+      return async.run(function (): value
         do
           child:join()
         catch
@@ -128,25 +128,25 @@ local TASK_CASES = [[
       end)
     end
 
-    function schedule_loop_rejection(): uv.Task
-      return uv.run(function (): value
+    function schedule_loop_rejection(): async.Task
+      return async.run(function (): value
         do
-          uv.loop()
+          async.loop()
         catch
-          local child = uv.run(function (): value
+          local child = async.run(function (): value
             return "nested-run-on-child-state"
           end)
           return child:join()
         end
-        raise "uv.loop accepted a UV child-state caller"
+        raise "async.loop accepted a UV child-state caller"
         return nil
       end)
     end
 
-    function schedule_self_join(): uv.Task
-      local self_task: uv.Task? = nil
-      self_task = uv.run(function (): value
-        local task = self_task as uv.Task
+    function schedule_self_join(): async.Task
+      local self_task: async.Task? = nil
+      self_task = async.run(function (): value
+        local task = self_task as async.Task
         do
           task:join()
         catch
@@ -158,26 +158,26 @@ local TASK_CASES = [[
         raise "a Task joined itself"
         return nil
       end)
-      return self_task as uv.Task
+      return self_task as async.Task
     end
 
-    function schedule_multiple_joiners(): uv.Task
+    function schedule_multiple_joiners(): async.Task
       local deliveries = 0
-      local target = uv.run(function (): value
+      local target = async.run(function (): value
         timer.sleep(5)
         return 17
       end)
-      local first = uv.run(function (): value
+      local first = async.run(function (): value
         local result = target:join() as integer
         deliveries = deliveries + 1
         return result
       end)
-      local second = uv.run(function (): value
+      local second = async.run(function (): value
         local result = target:join() as integer
         deliveries = deliveries + 1
         return result + 1
       end)
-      return uv.run(function (): value
+      return async.run(function (): value
         if (first:join() as integer) ~= 17 or
             (second:join() as integer) ~= 18 or deliveries ~= 2 then
           raise "multiple Task joiners were not each resumed exactly once"
@@ -186,16 +186,17 @@ local TASK_CASES = [[
       end)
     end
 
-    function schedule_lookalike_cancelled(): uv.Task
-      local target = uv.run(function (): value
-        raise uv.Cancelled.new("not-requested")
+    function schedule_lookalike_cancelled(): async.Task
+      local target = async.run(function (): value
+        local lookalike: async.Cancelled = { reason = "not-requested" }
+        raise lookalike
         return nil
       end)
-      return uv.run(function (): value
+      return async.run(function (): value
         do
           target:join()
         catch
-          local lookalike = error as uv.Cancelled
+          local lookalike = error as async.Cancelled
           if lookalike.reason ~= "not-requested" or
               target:status() ~= "failed" then
             raise "unrequested Cancelled value was not an ordinary failure"
@@ -208,13 +209,13 @@ local TASK_CASES = [[
     end
 
     function schedule_join_cycle()
-      local first: uv.Task? = nil
-      local second: uv.Task? = nil
-      first = uv.run(function (): value
-        return (second as uv.Task):join()
+      local first: async.Task? = nil
+      local second: async.Task? = nil
+      first = async.run(function (): value
+        return (second as async.Task):join()
       end)
-      second = uv.run(function (): value
-        return (first as uv.Task):join()
+      second = async.run(function (): value
+        return (first as async.Task):join()
       end)
     end
 
@@ -224,13 +225,13 @@ local TASK_CASES = [[
       return sticky_catches
     end
 
-    function schedule_sticky(): uv.Task
+    function schedule_sticky(): async.Task
       sticky_catches = 0
-      local target = uv.run(function (): value
+      local target = async.run(function (): value
         do
           timer.sleep(1000)
         catch
-          local cancelled = error as uv.Cancelled
+          local cancelled = error as async.Cancelled
           if cancelled.reason ~= "first-reason" then
             raise "first cancellation reason changed"
           end
@@ -239,7 +240,7 @@ local TASK_CASES = [[
         do
           timer.yield()
         catch
-          local cancelled = error as uv.Cancelled
+          local cancelled = error as async.Cancelled
           if cancelled.reason ~= "first-reason" then
             raise "sticky cancellation reason changed"
           end
@@ -248,18 +249,18 @@ local TASK_CASES = [[
         return "must-not-win-over-cancellation"
       end)
 
-      uv.run(function (): value
+      async.run(function (): value
         timer.yield()
         target:cancel("first-reason")
         target:cancel("second-reason")
         return nil
       end)
 
-      return uv.run(function (): value
+      return async.run(function (): value
         do
           target:join()
         catch
-          local cancelled = error as uv.Cancelled
+          local cancelled = error as async.Cancelled
           if cancelled.reason ~= "first-reason" then
             raise "terminal cancellation reason changed"
           end
@@ -273,18 +274,18 @@ local TASK_CASES = [[
       end)
     end
 
-    function schedule_cancel_before_start(): uv.Task
+    function schedule_cancel_before_start(): async.Task
       local entered = false
-      local target = uv.run(function (): value
+      local target = async.run(function (): value
         entered = true
         return nil
       end)
       target:cancel("before-start")
-      return uv.run(function (): value
+      return async.run(function (): value
         do
           target:join()
         catch
-          local cancelled = error as uv.Cancelled
+          local cancelled = error as async.Cancelled
           if entered then
             raise "cancel-before-start entered the Task body"
           end
@@ -296,7 +297,7 @@ local TASK_CASES = [[
     end
 ]]
 
-describe("uv Task scheduling and lifecycle", function()
+describe("async Task scheduling and lifecycle", function()
     local workspace
 
     setup(function()
@@ -317,19 +318,19 @@ describe("uv Task scheduling and lifecycle", function()
     function()
         run([[
             local lua_coroutine = require "coroutine"
-            local uv = require "titan.uv"
+            local async = require "titan.async"
             local behavior = require "uv_task_cases"
             assert(require "coroutine" == lua_coroutine)
 
             local before_runtime = lua_coroutine.create(function()
-                return pcall(uv.loop)
+                return pcall(async.loop)
             end)
             local resumed, loop_ok, loop_err =
                 lua_coroutine.resume(before_runtime)
             assert(resumed and not loop_ok)
             assert(tostring(loop_err):find("main thread", 1, true),
                 tostring(loop_err))
-            assert(uv.loop() == nil)
+            assert(async.loop() == nil)
 
             behavior.reset()
             local nonblocking = behavior.schedule_nonblocking()
@@ -337,13 +338,13 @@ describe("uv Task scheduling and lifecycle", function()
             assert(nonblocking:status() == "ready")
 
             local ordinary = lua_coroutine.create(function()
-                return pcall(uv.loop)
+                return pcall(async.loop)
             end)
             resumed, loop_ok, loop_err = lua_coroutine.resume(ordinary)
             assert(resumed and not loop_ok)
             assert(tostring(loop_err):find("main thread", 1, true))
 
-            uv.loop()
+            async.loop()
             assert(nonblocking:join() == "nonblocking-ok")
             assert(behavior.did_start())
         ]])
@@ -351,13 +352,13 @@ describe("uv Task scheduling and lifecycle", function()
 
     it("supports nested runs, tagged nesting, and callback handoff", function()
         run([[
-            local uv = require "titan.uv"
+            local async = require "titan.async"
             local behavior = require "uv_task_cases"
             behavior.reset()
             local nested = behavior.schedule_nested_run()
             local tagged = behavior.schedule_shared_tag()
             local chain = behavior.schedule_callback_chain()
-            uv.loop()
+            async.loop()
             assert(nested:join() == "nested-child-ok")
             assert(behavior.nested_did_start())
             assert(tagged:join() == "crossed-and-restored")
@@ -367,10 +368,10 @@ describe("uv Task scheduling and lifecycle", function()
 
     it("resumes out-of-order timer completions on the right Tasks", function()
         run([[
-            local uv = require "titan.uv"
+            local async = require "titan.async"
             local behavior = require "uv_task_cases"
             local ordered = behavior.schedule_out_of_order()
-            uv.loop()
+            async.loop()
             assert(ordered:join() == "out-of-order-ok")
         ]])
     end)
@@ -378,11 +379,11 @@ describe("uv Task scheduling and lifecycle", function()
     it("observes failures before promotion and preserves propagation traces",
     function()
         run([[
-            local uv = require "titan.uv"
+            local async = require "titan.async"
             local behavior = require "uv_task_cases"
             local traced = behavior.schedule_observed_trace()
             local observed = behavior.schedule_next_turn_observer()
-            uv.loop()
+            async.loop()
             assert(observed:join() == "observed-before-promotion")
             local trace = traced:join()
             assert(type(trace) == "string" and #trace > 0)
@@ -396,22 +397,22 @@ describe("uv Task scheduling and lifecycle", function()
 
     it("rejects loop driving from a Task but permits a nested run", function()
         run([[
-            local uv = require "titan.uv"
+            local async = require "titan.async"
             local behavior = require "uv_task_cases"
             local task = behavior.schedule_loop_rejection()
-            uv.loop()
+            async.loop()
             assert(task:join() == "nested-run-on-child-state")
         ]])
     end)
 
     it("handles self-join, multiple joiners, and Cancelled lookalikes", function()
         run([[
-            local uv = require "titan.uv"
+            local async = require "titan.async"
             local behavior = require "uv_task_cases"
             local self_join = behavior.schedule_self_join()
             local multiple_joiners = behavior.schedule_multiple_joiners()
             local lookalike = behavior.schedule_lookalike_cancelled()
-            uv.loop()
+            async.loop()
             assert(self_join:join() == "self-join-rejected")
             assert(multiple_joiners:join() == "multiple-joiners-ok")
             assert(lookalike:join() == "lookalike-cancelled-failed")
@@ -420,11 +421,11 @@ describe("uv Task scheduling and lifecycle", function()
 
     it("keeps the first cancellation reason and cancels before entry", function()
         run([[
-            local uv = require "titan.uv"
+            local async = require "titan.async"
             local cancellation = require "uv_task_cases"
             local sticky = cancellation.schedule_sticky()
             local before = cancellation.schedule_cancel_before_start()
-            uv.loop()
+            async.loop()
             local cancelled = sticky:join()
             assert(cancelled.reason == "first-reason")
             assert(cancellation.catches() == 2)
@@ -436,10 +437,10 @@ describe("uv Task scheduling and lifecycle", function()
 
     it("reports cyclic Task joins as an idle-loop deadlock", function()
         local ok, status, output = async_stdlib.run_lua_source(workspace, [[
-            local uv = require "titan.uv"
+            local async = require "titan.async"
             local behavior = require "uv_task_cases"
             behavior.schedule_join_cycle()
-            uv.loop()
+            async.loop()
             error("cyclic Task joins unexpectedly completed")
         ]])
         assert.falsy(ok, output)
@@ -450,7 +451,7 @@ describe("uv Task scheduling and lifecycle", function()
 
     it("roots dropped Tasks through GC and closes sequential sessions", function()
         run([[
-            local uv = require "titan.uv"
+            local async = require "titan.async"
             local timer = require "titan.timer"
             collectgarbage("collect")
             collectgarbage("generational")
@@ -458,7 +459,7 @@ describe("uv Task scheduling and lifecycle", function()
             local sentinel = { marker = "pending-root" }
             weak.sentinel = sentinel
             local function schedule_with_capture(captured)
-                return uv.run(function()
+                return async.run(function()
                     timer.yield()
                     assert(weak.sentinel and
                         weak.sentinel.marker == "pending-root")
@@ -471,7 +472,7 @@ describe("uv Task scheduling and lifecycle", function()
             task = nil
             collectgarbage("collect")
             assert(weak.task ~= nil and weak.sentinel ~= nil)
-            uv.loop()
+            async.loop()
 
             for _ = 1, 4 do collectgarbage("collect") end
             assert(weak.task == nil, "completed Task retained after loop close")
@@ -479,23 +480,23 @@ describe("uv Task scheduling and lifecycle", function()
                 "captured result retained after loop close")
 
             local old_ticker
-            local first = uv.run(function()
+            local first = async.run(function()
                 old_ticker = timer.ticker(1)
                 assert(old_ticker:tick())
                 return 11
             end)
-            uv.loop()
+            async.loop()
             assert(first:join() == 11)
             assert(old_ticker:tick() == false)
 
             local second_started = false
-            local second = uv.run(function()
+            local second = async.run(function()
                 second_started = true
                 timer.yield()
                 return 23
             end)
             assert(not second_started and second:status() == "ready")
-            uv.loop()
+            async.loop()
             assert(second_started and second:join() == 23)
         ]])
     end)

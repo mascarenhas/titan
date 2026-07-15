@@ -28,7 +28,7 @@
 local c99 = {}
 
 local re = require("relabel")
-local typed = require("typed")
+local typed = require("c-parser.typed")
 
 local defs = {}
 

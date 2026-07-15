@@ -39,7 +39,7 @@ local function find_standard_dir()
     local paths = {}
     local prefix = os.getenv("PREFIX")
     if prefix and prefix ~= "" then
-        paths[#paths + 1] = prefix .. "/lib/titan/0.11/titan"
+        paths[#paths + 1] = prefix .. "/lib/titan/0.12/titan"
     end
     local installed = package.searchpath("titan.coroutine", package.cpath)
     if installed then
@@ -48,12 +48,13 @@ local function find_standard_dir()
     paths[#paths + 1] = REPO .. "/titan"
     for _, path in ipairs(paths) do
         if exists(path .. "/coroutine.so") and exists(path .. "/uv.so") and
+                exists(path .. "/async.so") and
                 exists(path .. "/timer.so") then
             return path
         end
     end
-    error("async stdlib specs require prebuilt coroutine.so, uv.so, and " ..
-          "timer.so; " ..
+    error("async stdlib specs require prebuilt coroutine.so, uv.so, " ..
+          "async.so, and timer.so; " ..
           "run the focused Makefile stdlib target first", 0)
 end
 M.standard_dir = find_standard_dir
@@ -146,7 +147,7 @@ function M.compile(workspace, modname, options)
     local environment = {
         "env -u LUA_PATH -u LUA_CPATH" ..
             " -u LUA_PATH_5_5 -u LUA_CPATH_5_5 CCACHE_DISABLE=1",
-        "TITAN_PATH_0_11=" .. quote(module_root(stdlib)),
+        "TITAN_PATH_0_12=" .. quote(module_root(stdlib)),
         "TITAN_PATH=",
     }
     if options.cppflags then
@@ -200,6 +201,8 @@ local function build_variant_workspace(transformer)
     assert.truthy(ok, output)
     copy_file(REPO .. "/titan/timer.titan",
         workspace .. "/src/titan/timer.titan")
+    copy_file(REPO .. "/titan/async.titan",
+        workspace .. "/src/titan/async.titan")
     copy_file(REPO .. "/titan/coroutine.titan",
         workspace .. "/src/titan/coroutine.titan")
 
@@ -218,6 +221,14 @@ local function build_variant_workspace(transformer)
         cppflags = cppflags,
         cflags = "-fno-strict-aliasing",
         ldflags = ldflags,
+    })
+    -- Build the public facade against this private uv image. Its imported uv
+    -- module is loaded globally by the ordinary generated dependency loader,
+    -- so alias-owned Task methods resolve transitively without another import
+    -- in each consumer.
+    M.compile(workspace, "titan.async", {
+        stdlib = variant_stdlib,
+        cppflags = "",
     })
     M.compile(workspace, "titan.timer", {
         stdlib = variant_stdlib,
@@ -240,7 +251,7 @@ function M.run_lua_source(workspace, source, options)
     local command = {
         "env -u LUA_PATH -u LUA_CPATH" ..
             " -u LUA_PATH_5_5 -u LUA_CPATH_5_5",
-        "TITAN_PATH_0_11=" .. quote(root),
+        "TITAN_PATH_0_12=" .. quote(root),
         "TITAN_PATH=",
         "LUA_PATH=" .. quote(lua_path),
         "LUA_PATH_5_5=" .. quote(lua_path),
@@ -260,7 +271,7 @@ local function app_command(workspace, modname)
     local stdlib = find_standard_dir()
     return "env -u LUA_PATH -u LUA_CPATH" ..
         " -u LUA_PATH_5_5 -u LUA_CPATH_5_5" ..
-        " TITAN_PATH_0_11=" .. quote(module_root(stdlib)) .. " " ..
+        " TITAN_PATH_0_12=" .. quote(module_root(stdlib)) .. " " ..
         "TITAN_PATH= " .. quote(workspace .. "/" .. modname)
 end
 

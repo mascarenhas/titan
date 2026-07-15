@@ -1,11 +1,11 @@
 local async_stdlib = require "spec.support.async_stdlib"
 
 local TIMER_CASES = [[
-    local uv = import "uv"
+    local async = import "async"
     local timer = import "timer"
 
-    function schedule_four_ticks(): uv.Task
-      return uv.run(function (): value
+    function schedule_four_ticks(): async.Task
+      return async.run(function (): value
         local ticker = timer.ticker(1)
         local count = 0
         for i = 1, 4 do
@@ -22,10 +22,10 @@ local TIMER_CASES = [[
       end)
     end
 
-    function schedule_close_waiter(): uv.Task
-      return uv.run(function (): value
+    function schedule_close_waiter(): async.Task
+      return async.run(function (): value
         local ticker = timer.ticker(1000)
-        local waiter = uv.run(function (): value
+        local waiter = async.run(function (): value
           return ticker:tick()
         end)
         timer.yield()
@@ -35,19 +35,19 @@ local TIMER_CASES = [[
       end)
     end
 
-    function schedule_dropped_ticks(): uv.Task
-      return uv.run(function (): value
+    function schedule_dropped_ticks(): async.Task
+      return async.run(function (): value
         local ticker = timer.ticker(1)
         -- Let several callbacks fire with no waiter. Empty ticks must be dropped.
         timer.sleep(12)
         local phase = 0
-        local target = uv.run(function (): value
+        local target = async.run(function (): value
           phase = 1
           local got = ticker:tick()
           phase = 3
           return got
         end)
-        local observer = uv.run(function (): value
+        local observer = async.run(function (): value
           while phase == 0 do
             timer.yield()
           end
@@ -67,10 +67,10 @@ local TIMER_CASES = [[
       end)
     end
 
-    function schedule_zero_turns(): uv.Task
-      return uv.run(function (): value
+    function schedule_zero_turns(): async.Task
+      return async.run(function (): value
         local phase = 0
-        local sleep_task = uv.run(function (): value
+        local sleep_task = async.run(function (): value
           phase = 1
           timer.sleep(0)
           if phase ~= 2 then
@@ -79,7 +79,7 @@ local TIMER_CASES = [[
           phase = 3
           return nil
         end)
-        local observer = uv.run(function (): value
+        local observer = async.run(function (): value
           while phase == 0 do timer.yield() end
           phase = 2
           timer.yield()
@@ -94,10 +94,10 @@ local TIMER_CASES = [[
       end)
     end
 
-    function schedule_second_waiter_rejected(): uv.Task
-      return uv.run(function (): value
+    function schedule_second_waiter_rejected(): async.Task
+      return async.run(function (): value
         local ticker = timer.ticker(10000)
-        local first = uv.run(function (): value
+        local first = async.run(function (): value
           return ticker:tick()
         end)
         while first:status() == "ready" do
@@ -107,7 +107,7 @@ local TIMER_CASES = [[
           raise "first Ticker waiter did not suspend"
         end
 
-        local second = uv.run(function (): value
+        local second = async.run(function (): value
           return ticker:tick()
         end)
         local rejected = false
@@ -148,53 +148,53 @@ describe("timer recurring handles", function()
 
     it("cycles four times and makes close immediate and idempotent", function()
         run([[
-            local uv = require "titan.uv"
+            local async = require "titan.async"
             local cases = require "timer_recurring_cases"
             local task = cases.schedule_four_ticks()
-            uv.loop()
+            async.loop()
             assert(task:join() == 4)
         ]])
     end)
 
     it("closes a pending tick waiter with false", function()
         run([[
-            local uv = require "titan.uv"
+            local async = require "titan.async"
             local cases = require "timer_recurring_cases"
             local task = cases.schedule_close_waiter()
-            uv.loop()
+            async.loop()
             assert(task:join() == false)
         ]])
     end)
 
     it("drops ticks that fire without a waiter", function()
         run([[
-            local uv = require "titan.uv"
+            local async = require "titan.async"
             local cases = require "timer_recurring_cases"
             local task = cases.schedule_dropped_ticks()
-            uv.loop()
+            async.loop()
             assert(task:join() == "dropped-empty-ticks")
         ]])
     end)
 
     it("cedes a turn for sleep(0) and yield()", function()
         run([[
-            local uv = require "titan.uv"
+            local async = require "titan.async"
             local cases = require "timer_recurring_cases"
             local task = cases.schedule_zero_turns()
-            uv.loop()
+            async.loop()
             assert(task:join() == "zero-turns-ok")
         ]])
     end)
 
     it("rejects nonpositive periods and a second tick waiter", function()
         run([[
-            local uv = require "titan.uv"
+            local async = require "titan.async"
             local timer = require "titan.timer"
             local cases = require "timer_recurring_cases"
             local ok, err = pcall(timer.ticker, 0)
             assert(not ok and tostring(err):find("positive", 1, true))
             local task = cases.schedule_second_waiter_rejected()
-            uv.loop()
+            async.loop()
             assert(task:join() == "second-waiter-rejected")
         ]])
     end)

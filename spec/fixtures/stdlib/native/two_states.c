@@ -32,9 +32,9 @@ int main(void) {
     static const char setup_first[] =
         "state_token = 101\n"
         "state_started = false\n"
-        "state_uv = require 'titan.uv'\n"
+        "state_async = require 'titan.async'\n"
         "state_timer = require 'titan.timer'\n"
-        "state_task = state_uv.run(function()\n"
+        "state_task = state_async.run(function()\n"
         "  state_started = true\n"
         "  state_timer.yield()\n"
         "  return state_token\n"
@@ -44,9 +44,9 @@ int main(void) {
     static const char setup_second[] =
         "state_token = 202\n"
         "state_started = false\n"
-        "state_uv = require 'titan.uv'\n"
+        "state_async = require 'titan.async'\n"
         "state_timer = require 'titan.timer'\n"
-        "state_task = state_uv.run(function()\n"
+        "state_task = state_async.run(function()\n"
         "  state_started = true\n"
         "  state_timer.yield()\n"
         "  return state_token\n"
@@ -55,21 +55,21 @@ int main(void) {
         "assert(state_task:status() == 'ready')\n";
     static const char drive_second[] =
         "assert(not state_started)\n"
-        "state_uv.loop()\n"
+        "state_async.loop()\n"
         "assert(state_started)\n"
         "assert(state_task:join() == 202)\n";
     static const char first_still_pending[] =
         "assert(not state_started)\n"
         "assert(state_task:status() == 'ready')\n";
     static const char drive_first[] =
-        "state_uv.loop()\n"
+        "state_async.loop()\n"
         "assert(state_started)\n"
         "assert(state_task:join() == 101)\n"
-        "local again = state_uv.run(function()\n"
+        "local again = state_async.run(function()\n"
         "  state_timer.yield()\n"
         "  return 303\n"
         "end)\n"
-        "state_uv.loop()\n"
+        "state_async.loop()\n"
         "assert(again:join() == 303)\n";
     lua_State *first = new_state("first state");
     lua_State *second = new_state("second state");

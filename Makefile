@@ -169,12 +169,13 @@ TITAN_SDK_NAMESPACED_HEADERS := titan-runtime/titan/ffi.h \
 	titan-runtime/titan/coro.h titan-runtime/titan/uv.h
 COROUTINE_SO := coroutine.so
 UV_SO        := uv.so
+ASYNC_SO     := async.so
 TIMER_SO     := timer.so
 FS_SO        := fs.so
 NET_SO       := net.so
 OS_SO        := os.so
 UV_CONFIG_STAMP := titan-runtime/.titan-uv-build-config
-STDLIB_MODULES := coroutine uv timer fs net os
+STDLIB_MODULES := coroutine uv async timer fs net os
 STDLIB_SOS     := $(addsuffix .so,$(STDLIB_MODULES))
 STDLIB_QUALIFIED_SOS := $(addprefix titan/,$(STDLIB_SOS))
 ROCK_RUNTIME_SO := titan.so
@@ -196,14 +197,14 @@ TITAN_LUA ?= $(LUA_BIN)
 # keeps developer stdlib rebuilds on the edits that triggered them, while Lua's
 # configured default paths still find third-party dependencies under PREFIX.
 TITANC    ?= $(TITAN_LUA) -e 'package.path="./?.lua;./?/init.lua;" .. package.path' ./titanc
-TITAN_COMPILER_LUA := $(wildcard titan-compiler/*.lua c-parser/*.lua) typed.lua
+TITAN_COMPILER_LUA := $(wildcard titan-compiler/*.lua c-parser/*.lua)
 
 # Standard modules have one installed pathname. PREFIX owns Lua; ROCKS_TREE
 # owns these Titan artifacts when it is supplied. Today's supported setup
 # makes them the same directory, while this fallback keeps
 # `make install-stdlib PREFIX=...` useful on its own.
 TITAN_INSTALL_TREE         := $(if $(strip $(ROCKS_TREE)),$(ROCKS_TREE),$(PREFIX))
-TITAN_ABI_VERSION          := 0.11
+TITAN_ABI_VERSION          := 0.12
 TITAN_STDLIB_ABI_DIR       ?= $(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_ABI_VERSION)
 TITAN_STDLIB_DIR           ?= $(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_ABI_VERSION)/titan
 TITAN_STDLIB_LUA_DIR       ?= $(TITAN_INSTALL_TREE)/share/lua/$(LUA_ABI_VERSION)/titan
@@ -877,7 +878,7 @@ titan/$(COROUTINE_SO): titan/coroutine.titan $(STDLIB_CORO_RUNTIME_PREREQS) tita
 		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
 		$(STDLIB_TOOL_PREREQS)
 	CC=$(call make_shell_quote,$(CC)) \
-		TITAN_PATH_0_11=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
+		TITAN_PATH_0_12=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 		TITAN_RUNTIME_PREBUILT=1 \
 		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
 		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CFLAGS)) \
@@ -892,12 +893,26 @@ titan/$(UV_SO): titan/uv.titan titan/$(COROUTINE_SO) $(STDLIB_UV_RUNTIME_PREREQS
 		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_TOOL_PREREQS) \
 		$(STDLIB_PLATFORM_PREREQS) $(STDLIB_RUNTIME_ARCHIVE_PREREQ)
 	CC=$(call make_shell_quote,$(CC)) \
-		TITAN_PATH_0_11=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
+		TITAN_PATH_0_12=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 		TITAN_RUNTIME_PREBUILT=1 \
 		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))) \
 		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CFLAGS) $(STDLIB_UV_CFLAGS))) \
 		TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_LDFLAGS) $(STDLIB_UV_LDFLAGS))) \
 		$(TITANC) titan.uv
+
+# The public async facade re-exports uv-owned nominal records through type
+# aliases and forwards only the scheduler entry points. Building it against the
+# already-compiled uv image preserves one Runtime and one libuv provider.
+titan/$(ASYNC_SO): titan/async.titan titan/$(UV_SO) $(STDLIB_COMMON_RUNTIME_PREREQS) titanc \
+		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
+		$(STDLIB_TOOL_PREREQS)
+	CC=$(call make_shell_quote,$(CC)) \
+		TITAN_PATH_0_12=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
+		TITAN_RUNTIME_PREBUILT=1 \
+		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
+		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CFLAGS)) \
+		TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_LDFLAGS)) \
+		$(TITANC) titan.async
 
 # Higher-level standard modules import the already-built canonical uv image.
 # They neither compile the uv source again nor link a second copy of libuv.
@@ -905,7 +920,7 @@ titan/$(TIMER_SO): titan/timer.titan titan/$(UV_SO) $(STDLIB_COMMON_RUNTIME_PRER
 		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
 		$(STDLIB_TOOL_PREREQS)
 	CC=$(call make_shell_quote,$(CC)) \
-		TITAN_PATH_0_11=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
+		TITAN_PATH_0_12=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 		TITAN_RUNTIME_PREBUILT=1 \
 		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
 		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CFLAGS)) \
@@ -918,7 +933,7 @@ titan/$(FS_SO): titan/fs.titan titan/$(UV_SO) $(STDLIB_COMMON_RUNTIME_PREREQS) t
 		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
 		$(STDLIB_TOOL_PREREQS)
 	CC=$(call make_shell_quote,$(CC)) \
-		TITAN_PATH_0_11=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
+		TITAN_PATH_0_12=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 		TITAN_RUNTIME_PREBUILT=1 \
 		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
 		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CFLAGS)) \
@@ -931,7 +946,7 @@ titan/$(NET_SO): titan/net.titan titan/$(UV_SO) $(STDLIB_COMMON_RUNTIME_PREREQS)
 		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
 		$(STDLIB_TOOL_PREREQS)
 	CC=$(call make_shell_quote,$(CC)) \
-		TITAN_PATH_0_11=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
+		TITAN_PATH_0_12=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 		TITAN_RUNTIME_PREBUILT=1 \
 		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
 		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CFLAGS)) \
@@ -944,7 +959,7 @@ titan/$(OS_SO): titan/os.titan titan/$(UV_SO) $(STDLIB_COMMON_RUNTIME_PREREQS) t
 		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
 		$(STDLIB_TOOL_PREREQS)
 	CC=$(call make_shell_quote,$(CC)) \
-		TITAN_PATH_0_11=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
+		TITAN_PATH_0_12=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 		TITAN_RUNTIME_PREBUILT=1 \
 		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
 		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CFLAGS)) \
@@ -977,7 +992,7 @@ install-stdlib: stdlib titan/uv.lua ## Install the canonical qualified standard 
 	cp LICENSES/libuv-LICENSE "$(TITAN_SHARE_DIR)/LICENSES/libuv-LICENSE"
 
 # LuaRocks invokes this only after it has deployed titanc and its Lua compiler
-# modules. Force all six standard modules through that installed compiler,
+# modules. Force all seven standard modules through that installed compiler,
 # then install each canonical qualified DSO at its one supported pathname.
 rock-post-install:
 	@test -n "$(strip $(ROCKS_TREE))" || { \

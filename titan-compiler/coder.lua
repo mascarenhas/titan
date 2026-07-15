@@ -7346,6 +7346,7 @@ Udata *$INITNAME(lua_State *L) {
         lua_setfield(L, LUA_REGISTRYINDEX, $MODNAMESTR);
         $LOADMODULES1
         $INITMODULES
+        $LOADGLOBALS
         $INITRECORDS
         $INITVARS
         $INITFUNCTAGS
@@ -7361,6 +7362,7 @@ Udata *$INITNAME(lua_State *L) {
             _initialized = 1;
             /* set up function-type tags and functions from shared libraries */
             $LOADMODULES2
+            $LOADGLOBALS
             $INITFUNCTAGS
         }
         return _mod;
@@ -7435,7 +7437,8 @@ local function import_module(loadmods, initmods, sigs, mprefixes,
 end
 
 local function init_data_from_other_modules(tlcontext, includes, loadmods,
-                                            initmetas, mprefixes, static_deps)
+                                            loadglobals, initmetas, mprefixes,
+                                            static_deps)
     -- When linking dynamically, we need to make 'static' variables and load the values
     -- from the other module's dynamic library
     -- When linking statically, we only need to make 'extern' forward declarations.
@@ -7447,39 +7450,43 @@ local function init_data_from_other_modules(tlcontext, includes, loadmods,
         table.insert(includes, storage_class .. " " .. function_sig(fname, func.type, is_dynamic) .. ";")
         if is_dynamic then
             local mprefix = mprefixes[func.module]
-            if not mprefix then
-                mprefix = mangle_qn(func.module) .. "_"
-                mprefixes[func.module] = mprefix
-                local file = func.module:gsub("[.]", "/") .. ".so"
+            if mprefix then
                 table.insert(loadmods, render([[
-                    void *$HANDLE = loadlib(L, "$FILE");
-                    titan_check_abi(L, $HANDLE, "$ABI", "$FILE");
-                ]], {
-                    HANDLE = mprefix .. "handle",
-                    FILE = file,
-                    ABI = mprefix .. "abi",
-                }))
+                    $NAME = titan_cast_func($TYPE, loadsym(L, $HANDLE, "$NAME"));
+                ]], { NAME = fname, TYPE = function_sig("", func.type, true), HANDLE = mprefix .. "handle" }))
+            else
+                -- The defining module is present only through another module's
+                -- exported interface (for example, a re-exported record alias).
+                -- Initialize the explicit imports first: their RTLD_GLOBAL loads
+                -- publish this entry point, so this module need not dlopen the
+                -- defining DSO itself.
+                table.insert(loadglobals, render([[
+                    $NAME = titan_cast_func($TYPE, loadglobalsym(L, "$NAME"));
+                ]], { NAME = fname, TYPE = function_sig("", func.type, true) }))
             end
-            table.insert(loadmods, render([[
-                $NAME = titan_cast_func($TYPE, loadsym(L, $HANDLE, "$NAME"));
-            ]], { NAME = fname, TYPE = function_sig("", func.type, true), HANDLE = mprefix .. "handle" }))
         end
     end
 
     -- Bound-method Lua trampolines we reference for cross-module `obj:m`: each is
     -- the closure's lua_CFunction. Statically-linked deps just need an `extern`
-    -- prototype; `.so`-only deps dlsym it into a `static` function pointer (the
-    -- module handle was already opened by the function loop above, since a bound
-    -- ref always also registers the native trampoline in tlcontext.functions).
+    -- prototype. Direct `.so` imports use the checked handle opened by the
+    -- function loop above; transitive providers have no local handle and resolve
+    -- the trampoline from the RTLD_GLOBAL namespace with the native entry point.
     for luaname, info in pairs(tlcontext.bound_luas) do
         local is_dynamic = static_deps[info.module] ~= true
         if is_dynamic then
             local mprefix = mprefixes[info.module]
             table.insert(includes,
                 "static int (*" .. luaname .. ")(lua_State *L);")
-            table.insert(loadmods, render([[
-                $NAME = titan_cast_func(int (*)(lua_State *L), loadsym(L, $HANDLE, "$NAME"));
-            ]], { NAME = luaname, HANDLE = mprefix .. "handle" }))
+            if mprefix then
+                table.insert(loadmods, render([[
+                    $NAME = titan_cast_func(int (*)(lua_State *L), loadsym(L, $HANDLE, "$NAME"));
+                ]], { NAME = luaname, HANDLE = mprefix .. "handle" }))
+            else
+                table.insert(loadglobals, render([[
+                    $NAME = titan_cast_func(int (*)(lua_State *L), loadglobalsym(L, "$NAME"));
+                ]], { NAME = luaname }))
+            end
         else
             table.insert(includes, "extern int " .. luaname .. "(lua_State *L);")
         end
@@ -7759,6 +7766,7 @@ function coder.generate(modname, ast, static_deps)
     local foreignimports = {}
     local initmods = {}
     local loadmods = {}
+    local loadglobals = {}
     local mprefixes = {}
     local initrecs = {}
     local code = {}
@@ -8101,7 +8109,8 @@ function coder.generate(modname, ast, static_deps)
         ABINAME = tlcontext.prefix .. "abi",
     }))
 
-    init_data_from_other_modules(tlcontext, includes, loadmods, initrecs, mprefixes, static_deps)
+    init_data_from_other_modules(tlcontext, includes, loadmods, loadglobals,
+        initrecs, mprefixes, static_deps)
 
     for _, entry in pairs(tlcontext.owned_c_metatables) do
         table.insert(initrecs, render([[
@@ -8182,6 +8191,7 @@ function coder.generate(modname, ast, static_deps)
         INITMODULES = table.concat(initmods, "\n"),
         LOADMODULES1 = table.concat(loadmods, "\n"),
         LOADMODULES2 = #loadmods > 1 and table.concat(loadmods, "\n") or "",
+        LOADGLOBALS = table.concat(loadglobals, "\n"),
         INITFUNCTAGS = table.concat(initfunctags, "\n"),
         INITVARS = table.concat(initvars, "\n"),
         INITRECORDS = table.concat(initrecs, "\n"),

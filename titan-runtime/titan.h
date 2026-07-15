@@ -55,9 +55,14 @@
    0.10 -> 0.11: records can have module-local declarations and members. The
    serialized <mangled>_types interface omits local records and local record
    members while preserving record field-slot counts, so 0.10 and 0.11 .so
-   modules disagree about what a compiled record interface means. */
-#define TITAN_VER "0.11"
-#define TITAN_VER_SUFFIX "_0_11"
+   modules disagree about what a compiled record interface means.
+   0.11 -> 0.12: Type.Module's serialized interface gained a separate
+   type_members namespace for transparent exported type aliases. Generated
+   code can also resolve record entry points provided transitively by an
+   RTLD_GLOBAL dependency through loadglobalsym. Older checkers cannot read
+   the new interface shape, and older runtimes do not provide that helper. */
+#define TITAN_VER "0.12"
+#define TITAN_VER_SUFFIX "_0_12"
 #define TITAN_PATH_VAR "TITAN_PATH"
 #define TITAN_PATH_SEP "/"
 #define TITAN_ROOT_DEFAULT "/usr/local"
@@ -274,6 +279,7 @@ inline static TString *_float2str(lua_State *L, lua_Number f) {
 
 LUAI_FUNC void *loadlib(lua_State *L, const char *file);
 LUAI_FUNC void *loadsym(lua_State *L, void *lib, const char *sym);
+LUAI_FUNC void *loadglobalsym(lua_State *L, const char *sym);
 LUAI_FUNC void titan_check_abi(lua_State *L, void *lib, const char *sym,
                                const char *file);
 LUAI_FUNC void titan_invalidate_backtrace_state(lua_State *L);

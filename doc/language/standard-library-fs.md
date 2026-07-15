@@ -29,10 +29,10 @@ function rename(from: string, to: string)
 function list(path: string): {string}
 ```
 
-Operations that can wait must run inside a [UV Task](async-io.md). Importing
+Operations that can wait must run inside an [async Task](async-io.md). Importing
 `fs` transitively installs the standalone async bootstrap, so a Titan `main`
-may call these functions directly. A Lua host schedules a Task with `uv.run`
-and drives it with `uv.loop`.
+may call these functions directly. A Lua host schedules a Task with `async.run`
+and drives it with `async.loop` after loading `require "titan.async"`.
 
 ## Opening and using files
 
@@ -159,7 +159,7 @@ truncating it. File contents remain unrestricted binary strings.
 
 ## Errors and current scope
 
-Libuv failures raise [`uv.Error`](async-io.md#results-errors-and-cancellation).
+Libuv failures raise [`async.Error`](async-io.md#results-errors-and-cancellation).
 Its `operation` identifies the failing action (for example, `fs.open` or
 `fs.rename`) and `subject` identifies the relevant path or File. The library
 does not print errors.

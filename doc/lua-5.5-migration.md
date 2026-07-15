@@ -23,7 +23,7 @@ the control variable with a regular local:
 * `titan-compiler/pretty.lua` (`reindent_c`): the gmatch control variable
   `line` was reassigned with its trimmed value; same shadowing fix.
 
-Everything else in `titan-compiler/`, `c-parser/`, `typed.lua`, `titanc`
+Everything else in `titan-compiler/`, `c-parser/`, `titanc`
 and `spec/` was audited against the official 5.3→5.4→5.5 incompatibility
 lists and loads/runs unchanged on 5.5 (the pure specs passed before any
 codegen work started).

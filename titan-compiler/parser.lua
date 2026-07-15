@@ -44,6 +44,7 @@ end
 local standard_imports = {
     coroutine = "titan.coroutine",
     uv = "titan.uv",
+    async = "titan.async",
     timer = "titan.timer",
     fs = "titan.fs",
     net = "titan.net",
@@ -472,6 +473,7 @@ local grammar = re.compile([[
                         (P (( method
                               / static
                               / toplevelfunc
+                              / topleveltype
                               / toplevelvar
                               / toplevelrecord
                               / import
@@ -489,6 +491,10 @@ local grammar = re.compile([[
     toplevelfunc    <- (P  localopt FUNCTION NAME^NameFunc
                            LPAREN^LParPList paramlist RPAREN^RParPList
                            rettypeopt block END^EndFunc)         -> TopLevelFunc
+
+    topleveltype    <- (P  localopt TYPE NAME^NameTypeAlias
+                           ASSIGN^AssignTypeAlias
+                           type^TypeTypeAlias)                   -> TopLevelTypeAlias
 
     toplevelvar     <- (P localopt decl ASSIGN^AssignVar
                            !(IMPORT / FOREIGN)
@@ -816,6 +822,7 @@ local grammar = re.compile([[
     REPEAT          <- %REPEAT SKIP*
     RETURN          <- %RETURN SKIP*
     THEN            <- %THEN SKIP*
+    TYPE            <- %TYPE SKIP*
     TRUE            <- %TRUE SKIP*
     UNTIL           <- %UNTIL SKIP*
     WHILE           <- %WHILE SKIP*

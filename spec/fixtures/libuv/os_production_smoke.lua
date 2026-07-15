@@ -41,11 +41,11 @@ assert(system.pid() > 0)
 assert(system.ppid() > 0)
 
 if process_child then
-    local uv = require "titan.uv"
+    local async = require "titan.async"
     local payload = mode .. "\0titan.os.process"
     for _ = 1, 14 do payload = payload .. payload end
 
-    local main = uv.run(function()
+    local main = async.run(function()
         local output, diagnostics, status =
             system.communicate(process_child, { "echo" }, payload)
         assert(output == payload)
@@ -65,7 +65,7 @@ if process_child then
         return output
     end)
 
-    uv.loop()
+    async.loop()
     assert(main:join() == payload)
     assert(require "os" == builtin)
     assert(package.loaded.os == builtin)

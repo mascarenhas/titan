@@ -26,7 +26,7 @@ local m = require "sum"
 print(m.sum_list({1, 2, 3, 4})) --> 10
 ```
 
-This is the reference for the language as implemented by the Titan 0.11
+This is the reference for the language as implemented by the Titan 0.12
 prototype compiler in this repository. It replaces the old single-file
 manual. For how the compiler itself works — including how each construct
 is translated to C — see the
@@ -42,6 +42,7 @@ Start with the [design philosophy](philosophy.md) if you want to know
 | --- | --- |
 | [Design philosophy and history](philosophy.md) | Why Titan exists, its core commitments, the project's history and design principles. |
 | [The type system](types.md) | All Titan types; type equality, compatibility and implicit coercions; type inference; the dynamic `value` type. |
+| [Type aliases](type-aliases.md) | Transparent compile-time type names, type-only namespaces, visibility, record re-exports, and alias cycles. |
 | [Option types](option-types.md) | `T?`: nil-tolerant types — syntax, semantics, defaulting with `or`, and how `nil` flows through arrays, maps, and the Lua boundary. |
 | [Expressions](expressions.md) | Literals and escapes, operators and precedence, Lua-faithful arithmetic, concatenation, `and`/`or`, explicit casts with `as`, constructors, calls. |
 | [Statements](statements.md) | Declarations and inference, assignment and multiple assignment, control flow, the numeric `for`, `defer`, `return`. |
@@ -55,7 +56,7 @@ Start with the [design philosophy](philosophy.md) if you want to know
 | [Lua interoperability](lua-interop.md) | Using Titan from Lua and Lua values in Titan: what crosses the boundary, what each type looks like on the other side, and where the run-time checks happen. |
 | [Error handling](error-handling.md) | The run-time error model: what raises errors, error messages, `pcall`, `titan.backtrace()`, and the option-type idiom for recoverable failures. |
 | [Coroutines](coroutines.md) | The `coroutine` standard module (`import "coroutine"` from Titan, `require "titan.coroutine"` from Lua): stackful asymmetric coroutines, tagged nested yield, error injection, status, and Lua interop. |
-| [Asynchronous I/O and tasks](async-io.md) | The `uv` Task scheduler, nonblocking `run`, explicit/automatic loop driving, direct callback continuation model, errors, joins, cancellation, and resource/process shutdown. |
+| [Asynchronous I/O and tasks](async-io.md) | The `async` Task scheduler, nonblocking `run`, explicit/automatic loop driving, direct callback continuation model, errors, joins, cancellation, and resource/process shutdown. |
 | [Timer standard library](standard-library-timer.md) | Task delays, cooperative `yield`, recurring `Ticker` handles, dropped ticks, and explicit close. |
 | [Filesystem standard library](standard-library-fs.md) | Binary file reads and writes, per-File FIFO ordering and close, whole-file helpers, metadata, and path operations. |
 | [TCP networking standard library](standard-library-net.md) | Asynchronous DNS and TCP clients/servers, binary stream reads and FIFO writes, shutdown, close, and cancellation. |
@@ -65,7 +66,7 @@ Start with the [design philosophy](philosophy.md) if you want to know
 
 ## Status and limitations
 
-Titan is a working prototype, version 0.11. The language documented here is
+Titan is a working prototype, version 0.12. The language documented here is
 implemented and covered by the compiler's test suite. Its boundaries are
 mostly missing features, plus a handful of constructs the compiler rejects
 with a clean error; each links to the chapter that documents it in full.
@@ -138,11 +139,11 @@ with a clean error; each links to the chapter that documents it in full.
   chaining/cause mechanism. A new error in a catch or finally replaces the
   previous one ([error handling](error-handling.md)).
 * **Only a small standard library so far.** Titan includes stackful
-  `coroutine`, the libuv-backed `uv` Task runtime, `timer`, asynchronous `fs`
+  `coroutine`, the libuv-backed `async` Task facade, `timer`, asynchronous `fs`
   and `net`, and portable `os` helpers with one-shot signal waits, direct child
   processes, binary stdio pipes, and concurrent `communicate`. Qualified Lua
-  names such as `titan.coroutine`, `titan.timer`, `titan.fs`, `titan.net`, and
-  `titan.os` leave Lua's standard modules unchanged.
+  names such as `titan.coroutine`, `titan.async`, `titan.timer`, `titan.fs`,
+  `titan.net`, and `titan.os` leave Lua's standard modules unchanged.
 
 The [README roadmap](../../README.md) lists where the language is headed;
 the [philosophy chapter](philosophy.md) explains the principles that order

@@ -1,7 +1,7 @@
 
 local cpp = {}
 
-local typed = require("typed")
+local typed = require("c-parser.typed")
 local c99 = require("c-parser.c99")
 
 local SEP = package.config:sub(1,1)

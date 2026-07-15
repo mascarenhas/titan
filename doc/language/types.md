@@ -22,6 +22,7 @@ which raise ordinary Lua errors when they fail (see
 | arrays | `{ t }` | [Arrays and maps](arrays-maps.md) |
 | maps | `{ k : v }` | [Arrays and maps](arrays-maps.md) |
 | records | `Point`, `mod.Point` | [Records](records.md) |
+| aliases | `type Name = t` | [Type aliases](type-aliases.md) |
 | option types | `t?` | [Option types](option-types.md) |
 | function types | `(t1, t2) -> t3` | below |
 | foreign types | from C headers | [The C FFI](ffi.md) |
@@ -96,6 +97,10 @@ record Point
     y: float
 end
 ```
+
+An existing type can be given a transparent compile-time name with a
+[type alias](type-aliases.md). In particular, `type P = Point` still denotes
+this exact nominal record; it does not declare a second record type.
 
 ### Option types
 

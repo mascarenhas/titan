@@ -2,7 +2,9 @@ local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
 local lfs = require "lfs"
 
-local STDLIB_MODULES = { "coroutine", "uv", "timer", "fs", "net", "os" }
+local STDLIB_MODULES = {
+    "coroutine", "uv", "async", "timer", "fs", "net", "os",
+}
 local LUA_CPATH_SUFFIX = "/lib/lua/5.5/?.so"
 
 local function quote(word)
@@ -77,7 +79,7 @@ assert.truthy(PREFIX:sub(1, 1) == "/",
 local LUA = PREFIX .. "/bin/lua"
 local LUAROCKS = PREFIX .. "/bin/luarocks"
 local TITANC = PREFIX .. "/bin/titanc"
-local TITAN_LIBDIR = PREFIX .. "/lib/titan/0.11"
+local TITAN_LIBDIR = PREFIX .. "/lib/titan/0.12"
 local STDLIB_DIR = TITAN_LIBDIR .. "/titan"
 local LUA_LIBDIR = PREFIX .. "/lib/lua/5.5"
 local LUA_SHAREDIR = PREFIX .. "/share/lua/5.5"
@@ -93,7 +95,7 @@ local function clean_environment(argv)
         "-u", "LUAROCKS_CONFIG",
         "-u", "LUAROCKS_CONFIG_5_5",
         "-u", "LUAROCKS_SYSCONFDIR",
-        "-u", "TITAN_PATH_0_11",
+        "-u", "TITAN_PATH_0_12",
         "-u", "TITAN_PATH",
         "-u", "TITAN_ROCKS_ROOT",
         "PATH=" .. PREFIX .. "/bin:" ..
@@ -132,7 +134,7 @@ local function assert_canonical_module(module)
     local canonical = STDLIB_DIR .. "/" .. module .. ".so"
     local compatibility = TITAN_LIBDIR .. "/" .. module .. ".so"
     local lua_module = LUA_LIBDIR .. "/titan/" .. module .. ".so"
-    local legacy = LUA_LIBDIR .. "/titan/stdlib_0_11/" .. module .. ".so"
+    local legacy = LUA_LIBDIR .. "/titan/stdlib_0_12/" .. module .. ".so"
     assert.equal("file", lfs.symlinkattributes(canonical, "mode"), canonical)
     assert.falsy(lfs.symlinkattributes(compatibility), compatibility)
     assert.falsy(lfs.symlinkattributes(lua_module), lua_module)
@@ -208,7 +210,7 @@ describe("standalone-prefix source installation", function()
         assert.truthy(public_config:find(
             '#define LUA_ROOT "' .. PREFIX .. '/"', 1, true), public_config)
         assert.truthy(public_config:find(
-            '#define LUA_TITAN_CDIR%s+LUA_ROOT "lib/titan/0.11/"'),
+            '#define LUA_TITAN_CDIR%s+LUA_ROOT "lib/titan/0.12/"'),
             public_config)
         local _, titan_cdir_definitions = public_config:gsub(
             "#define LUA_TITAN_CDIR", "")
@@ -271,13 +273,13 @@ describe("standalone-prefix source installation", function()
         workspace = temporary_directory("stdlib-layout-migration")
 
         local canonical = workspace ..
-            "/lib/titan/0.11/titan/coroutine.so"
+            "/lib/titan/0.12/titan/coroutine.so"
         local stale = {
-            workspace .. "/lib/titan/0.11/coroutine.so",
+            workspace .. "/lib/titan/0.12/coroutine.so",
             workspace .. "/lib/lua/5.5/coro.so",
             workspace .. "/lib/lua/5.5/titan/coroutine.so",
             workspace ..
-                "/lib/lua/5.5/titan/stdlib_0_11/coroutine.so",
+                "/lib/lua/5.5/titan/stdlib_0_12/coroutine.so",
         }
 
         local function seed_layout()
@@ -370,8 +372,19 @@ describe("standalone-prefix source installation", function()
             local builtin_os = require "os"
             local titan = require "titan"
             local coroutine = require "titan.coroutine"
-            local uv = require "titan.uv"
+            local async = require "titan.async"
             local timer = require "titan.timer"
+            -- Requiring only the public facade must initialize uv globally.
+            -- The returned uv-owned Task resolves its methods transitively;
+            -- consumers do not import or require uv just to call them.
+            local transitive = async.run(function()
+                timer.yield()
+                return "transitive"
+            end)
+            async.loop()
+            assert(transitive:join() == "transitive")
+
+            local uv = require "titan.uv"
             local fs = require "titan.fs"
             local net = require "titan.net"
             local system = require "titan.os"
@@ -385,6 +398,7 @@ describe("standalone-prefix source installation", function()
                 uv_loader_path)
             assert(type(coroutine) == "userdata")
             assert(type(uv) == "userdata")
+            assert(type(async) == "userdata")
             assert(type(timer) == "userdata")
             assert(type(fs) == "userdata")
             assert(type(net) == "userdata")
@@ -392,6 +406,7 @@ describe("standalone-prefix source installation", function()
             for name, module in pairs({
                 coroutine = coroutine,
                 uv = uv,
+                async = async,
                 timer = timer,
                 fs = fs,
                 net = net,
@@ -408,21 +423,21 @@ describe("standalone-prefix source installation", function()
             assert(require "coroutine" == builtin_coroutine)
             assert(require "os" == builtin_os)
             assert(system.pid() > 0)
-            local task = uv.run(function()
+            local task = async.run(function()
                 local inner = coroutine.create(function()
                     timer.yield()
                     return "installed"
                 end, {})
                 return inner:resume(nil, nil)
             end)
-            uv.loop()
+            async.loop()
             assert(task:join() == "installed")
 
-            local direct = uv.run(function()
+            local direct = async.run(function()
                 timer.yield()
                 return "direct"
             end)
-            uv.loop()
+            async.loop()
             assert(direct:join() == "direct")
         ]], STDLIB_DIR, LUA_LIBDIR .. "/titan.so", UV_LOADER)
         ok, output, why, code = run(clean_environment({
@@ -499,7 +514,7 @@ local uv = import "uv"
 
 function check(): boolean
   return (probe.titan_uv_provider_probe() as integer) == 0 and
-         #uv.version() > 0
+         #uv._version() > 0
 end
 ]])
         write_file(workspace .. "/lua_direct_uv.titan", [[
@@ -586,7 +601,7 @@ assert(package.searchpath("titan.uv", package.cpath) == %q)
 local uv = require "titan.uv"
 local direct_uv = require "lua_direct_uv"
 assert(direct_uv.check())
-assert(type(uv.version()) == "string")
+assert(type(uv._version()) == "string")
 ]], UV_LOADER, STDLIB_DIR .. "/uv.so")
         local lua_path = table.concat({
             LUA_SHAREDIR .. "/?.lua",

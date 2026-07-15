@@ -1186,7 +1186,7 @@ describe("Titan parser", function()
 
     it("desugars standard-library short imports to qualified modules",
        function()
-        local names = { "coroutine", "uv", "timer", "fs", "net", "os" }
+        local names = { "coroutine", "uv", "async", "timer", "fs", "net", "os" }
         for _, name in ipairs(names) do
             assert_program_ast(
                 'local library = import "' .. name .. '"', {
@@ -1298,6 +1298,33 @@ describe("Titan parser", function()
         })
     end)
 
+    it("can parse public and local type aliases", function()
+        assert_program_ast([[
+            type Count = integer
+            local type Errors = { uv.Error }
+        ]], {
+            {
+                _tag = "Ast.TopLevelTypeAlias",
+                islocal = false,
+                name = "Count",
+                type = { _tag = "Ast.TypeInteger" },
+            },
+            {
+                _tag = "Ast.TopLevelTypeAlias",
+                islocal = true,
+                name = "Errors",
+                type = {
+                    _tag = "Ast.TypeArray",
+                    subtype = {
+                        _tag = "Ast.TypeQualName",
+                        module = "uv",
+                        name = "Error",
+                    },
+                },
+            },
+        })
+    end)
+
     it("can parse the record field optional separator", function()
         local ast = {{ fields = { { name = "x" }, { name = "y" } } }}
 
@@ -1405,6 +1432,11 @@ describe("Titan parser", function()
                 local integer: integer = 10
             end
         ]], "DeclLocal")
+
+        assert_program_syntax_error([[
+            function type()
+            end
+        ]], "NameFunc")
     end)
 
     it("doesn't allow using a primitive type as a record", function()
@@ -1457,6 +1489,18 @@ describe("Titan parser", function()
         assert_program_syntax_error([[
             x =
         ]], "ExpVarDec")
+
+        assert_program_syntax_error([[
+            type = integer
+        ]], "NameTypeAlias")
+
+        assert_program_syntax_error([[
+            type Count integer
+        ]], "AssignTypeAlias")
+
+        assert_program_syntax_error([[
+            type Count =
+        ]], "TypeTypeAlias")
 
         assert_program_syntax_error([[
             record
