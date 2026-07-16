@@ -35,7 +35,7 @@ describe("generic for loops (typechecker)", function()
         local loop = ast[2].block.stats[1]
         assert.same("Ast.StatForIn", loop._tag)
         assert.same(types.Function({ types.Nil() },
-            { types.Option(types.String()) }, false, false),
+            { types.Option(types.String()) }, false, false, false),
             loop._tuple_decls[1]._type)
         assert.same(types.Nil(), loop._tuple_decls[2]._type)
         assert.same(types.Nil(), loop._tuple_decls[3]._type)
@@ -80,6 +80,122 @@ describe("generic for loops (typechecker)", function()
         assert.truthy(ok, err)
     end)
 
+    it("projects a flex-only iterator result for the control variable", function()
+        local ok, err, tree = run_checker([[
+            function step(): (...: integer)
+            end
+
+            function run(): nil
+                for n: integer in step do
+                end
+                return nil
+            end
+        ]])
+        assert.truthy(ok, err)
+        local loop = tree[2].block.stats[1]
+        assert.same(types.Option(types.Integer()),
+            loop._result_decls[1]._type)
+        assert.same({}, loop._init_call._types)
+        assert.same({ types.Option(types.Integer()) },
+            loop._init_call._visible_types)
+        assert.same(1, loop._init_call._flex_result_demand)
+        assert.same("flex", loop._init_call._result_sources[1].kind)
+    end)
+
+    it("uses fixed results before finite flexible projections", function()
+        local ok, err, tree = run_checker([[
+            function step(): (integer?, ...: string)
+                return nil
+            end
+
+            function run(): nil
+                for n: integer, a: string?, b: string in step do
+                end
+                return nil
+            end
+        ]])
+        assert.truthy(ok, err)
+        local loop = tree[2].block.stats[1]
+        assert.same(types.Option(types.Integer()),
+            loop._result_decls[1]._type)
+        assert.same(types.Option(types.String()),
+            loop._result_decls[2]._type)
+        assert.same(types.Option(types.String()),
+            loop._result_decls[3]._type)
+        assert.same(2, loop._next_call._flex_result_demand)
+        assert.same("fixed", loop._next_call._result_sources[1].kind)
+        assert.same("flex", loop._next_call._result_sources[2].kind)
+    end)
+
+    it("truncates surplus iterator-tuple values but retains their expressions", function()
+        local ok, err, tree = run_checker([[
+            function step(): integer?
+                return nil
+            end
+
+            function run(): nil
+                for n: integer in step, nil, nil, nil, 99 do
+                end
+                return nil
+            end
+        ]])
+        assert.truthy(ok, err)
+        local loop = tree[2].block.stats[1]
+        assert.same(5, #loop._tuple_adjustment.exps)
+        assert.same(1, #loop._tuple_adjustment.discards)
+        assert.truthy(loop._tuple_adjustment.exps[5]._discard_results)
+        assert.same(4, #loop.exps)
+    end)
+
+    it("discards every close-call result", function()
+        local ok, err, tree = run_checker([[
+            function step(): integer?
+                return nil
+            end
+
+            function close(): (integer, ...: string)
+                return 1
+            end
+
+            function run(): nil
+                for n: integer in step, nil, nil, close do
+                end
+                return nil
+            end
+        ]])
+        assert.truthy(ok, err)
+        local closecall = tree[3].block.stats[1]._close_call
+        assert.same({ types.Integer() }, closecall._types)
+        assert.same({}, closecall._visible_types)
+        assert.same(0, closecall._flex_result_demand)
+        assert.falsy(closecall._open_results)
+    end)
+
+    it("accepts 200 projected flex results and rejects 201 once", function()
+        local function source(n)
+            local decls = {}
+            for i = 1, n do
+                decls[i] = "n" .. i
+            end
+            return [[
+                function step(): (...: integer)
+                end
+                function run(): nil
+                    for ]] .. table.concat(decls, ", ") .. [[ in step do
+                    end
+                    return nil
+                end
+            ]]
+        end
+
+        local ok, err = run_checker(source(200))
+        assert.truthy(ok, err)
+        local errs = h.check_errs(source(201))
+        assert.same(1, #errs)
+        assert.match("finite flexible%-result demand is 201 value%(s%), maximum is 200",
+            errs[1])
+    end)
+
     it("coerces value iterator and close slots to synthesized function types", function()
         local ok, err, ast = run_checker([[
             function run(nextv: value, closev: value): nil
@@ -92,10 +208,40 @@ describe("generic for loops (typechecker)", function()
 
         local loop = ast[1].block.stats[1]
         assert.same(types.Function({},
-            { types.Option(types.Integer()), types.String() }, false, false),
+            { types.Option(types.Integer()), types.String() }, false, false,
+            false),
             loop._tuple_decls[1]._type)
-        assert.same(types.Function({}, {}, false, false),
+        assert.same(types.Function({}, {}, false, false, false),
             loop._tuple_decls[4]._type)
+        assert.is_true(loop._runtime_optional_close)
+        assert.is_true(loop._has_close)
+    end)
+
+    it("contextualizes a value factory and preserves its optional close slot",
+    function()
+        local ok, err, ast = run_checker([[
+            function run(factory: value): nil
+                for n: integer, label: string? in factory(7, "ctx") do
+                end
+                return nil
+            end
+        ]])
+        assert.truthy(ok, err)
+
+        local loop = ast[1].block.stats[1]
+        local factory_call = loop._tuple_adjustment.exps[1].exp
+        assert.same("Ast.ExpCall", factory_call._tag)
+        assert.same(types.Function(
+            { types.Integer(), types.String() },
+            { types.Value(), types.Value(), types.Value(), types.Value() },
+            false, false, false), factory_call._contextual_function_type)
+        assert.same(types.Function({ types.Value(), types.Value() },
+            { types.Option(types.Integer()), types.Option(types.String()) },
+            false, false, false), loop._tuple_decls[1]._type)
+        assert.same(types.Function({ types.Value() }, {}, false, false, false),
+            loop._tuple_decls[4]._type)
+        assert.is_true(loop._runtime_optional_close)
+        assert.is_true(loop._has_close)
     end)
 
     it("coerces value iterators using state and initial control types", function()
@@ -110,7 +256,7 @@ describe("generic for loops (typechecker)", function()
 
         local loop = ast[1].block.stats[1]
         assert.same(types.Function({ types.String(), types.Integer() },
-            { types.Option(types.Integer()) }, false, false),
+            { types.Option(types.Integer()) }, false, false, false),
             loop._tuple_decls[1]._type)
     end)
 
@@ -135,7 +281,7 @@ describe("generic for loops (typechecker)", function()
     end)
 
     it("accepts a trailing variadic spread in the iterator tuple", function()
-        local ok, err = run_checker([[
+        local ok, err, tree = run_checker([[
             function step(limit: value, n: value): value
                 return nil
             end
@@ -147,6 +293,39 @@ describe("generic for loops (typechecker)", function()
             end
         ]])
         assert.truthy(ok, err)
+        local loop = tree[2].block.stats[1]
+        assert.same("Ast.ExpDotsIndex", loop.exps[2]._tag)
+        assert.same(1, loop.exps[2]._dots_index)
+        assert.is_true(loop.exps[2]._nilfill)
+        assert.same("Ast.ExpDotsIndex", loop.exps[3]._tag)
+        assert.same(2, loop.exps[3]._dots_index)
+        assert.is_true(loop.exps[3]._nilfill)
+        assert.same("Ast.ExpNil", loop.exps[4]._tag)
+    end)
+
+    it("can project a typed close callable from a trailing spread", function()
+        local ok, err, tree = run_checker([[
+            function step(_: nil, n: integer): integer?
+                return nil
+            end
+
+            function close(_: nil): nil
+                return nil
+            end
+
+            function run(...: (nil) -> nil): nil
+                for x: integer in step, nil, 0, ... do
+                end
+                return nil
+            end
+        ]])
+        assert.truthy(ok, err)
+        local loop = tree[3].block.stats[1]
+        assert.same("Ast.ExpDotsIndex", loop.exps[4]._tag)
+        assert.is_false(loop.exps[4]._nilfill)
+        assert.same("Type.Function", loop.exps[4]._type._tag)
+        assert.is_truthy(loop._has_close)
+        assert.is_false(loop._runtime_optional_close)
     end)
 
     it("rejects a non-function iterator", function()
@@ -306,5 +485,41 @@ describe("generic for loops (typechecker)", function()
         ]])
         assert.falsy(ok)
         assert.match("cannot assign to 'for' control variable 'x'", err)
+    end)
+
+    it("bounds synthetic iterator calls at Lua's 250-result limit", function()
+        local function source(n)
+            local nfixed = n - 200
+            local rettypes, returns, decls = {}, {}, {}
+            for i = 1, nfixed do
+                rettypes[i] = "integer?"
+                returns[i] = "nil"
+            end
+            for i = 1, n do
+                decls[i] = "v" .. i .. ": integer?"
+            end
+            return [[
+                function step(): (]] .. table.concat(rettypes, ", ")
+                    .. [[, ...: integer?)
+                    return ]] .. table.concat(returns, ", ") .. [[
+                end
+
+                function run(): nil
+                    for ]] .. table.concat(decls, ", ") .. [[ in step do
+                        break
+                    end
+                    return nil
+                end
+            ]]
+        end
+
+        local ok, err = run_checker(source(250))
+        assert.truthy(ok, err)
+
+        local errs = h.check_errs(source(251))
+        assert.same(1, #errs)
+        assert.match("function%-value call can require 251 finite VM results",
+            errs[1])
+        assert.match("Lua 5%.5 supports at most 250", errs[1])
     end)
 end)

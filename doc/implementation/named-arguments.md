@@ -47,8 +47,8 @@ Formal names are attached only to descriptors for declarations:
 
 ```text
 Type.ModuleMember(..., type, paramnames)
-Type.Method(..., varargtype, paramnames)
-Type.StaticMethod(..., varargtype, paramnames)
+Type.Method(..., varargtype, flexrettype, paramnames)
+Type.StaticMethod(..., varargtype, flexrettype, paramnames)
 ```
 
 `TopLevelFunc` keeps its dense fixed-parameter name list in `_paramnames`.
@@ -76,6 +76,11 @@ advanced from **0.12 to 0.13**. The native function signature and call ABI did
 not change. Loader code checks `<mangled>_abi` before it evaluates
 `<mangled>_types`, so an old 0.12 DSO is rejected as an ABI mismatch instead of
 being interpreted with the new descriptor constructors.
+
+Callable types now also carry `flexrettype`, and Method/StaticMethod constructor
+expressions serialize it before `paramnames`. That is a separate interface
+shape and native-signature change, shipped under ABI 0.14 rather than teaching
+0.13 to accept both schemas.
 
 ## C prototype metadata
 
@@ -120,15 +125,20 @@ direct foreign `Type.ModuleMember` copies the raw C function declaration's
 * a record method uses `Type.Method.paramnames`, with `self` already excluded.
 
 All structural function-value paths, C function-pointer calls, C pseudo
-constructors, and variadic Titan or C declarations are rejected before
-lowering. A direct foreign declaration with `paramnames = false` gets the
+constructors, input-variadic Titan declarations, and C variadic declarations
+are rejected before lowering. A declaration with a flexible *result* tail is
+still eligible because result shape does not make the label-to-fixed-parameter
+mapping ambiguous. A direct foreign declaration with `paramnames = false` gets the
 specific unavailable-prototype diagnostic rather than a series of unknown-name
 errors.
 
 `check_named_args` builds a name-to-formal-index map, then visits explicit
 fields in lexical order. Each expression is checked with its matched formal as
-context, passed through `trycoerce`, and consumed as exactly one value. Unknown
-and duplicate names are reported at their fields. The helper returns:
+context, passed through `trycoerce`, and consumed under a finite one-result
+demand. If that slot reaches a flexible tail, the projection is `T?` (then
+follows the ordinary coercion/unwrap rules); a declared fixed first result
+keeps its fixed type. The expression never expands into later named fields.
+Unknown and duplicate names are reported at their fields. The helper returns:
 
 1. a dense array indexed in formal order; and
 2. an `order` array containing the formal index of each accepted explicit
@@ -188,8 +198,10 @@ slots appear fillable.
 ## The Lua entry boundary is unchanged
 
 `genluaentry` still consumes Lua stack slots positionally, pads missing Lua
-arguments under the existing Titan-function rule, rejects extras, and performs
-the usual boundary checks. A Lua table carries no marker distinguishing a named
-bundle from an intended table or `value`, so no key inspection or arity
-heuristic was added. Named arguments are completely resolved by Titan's checker
-before C generation.
+arguments under the existing Titan-function rule, ignores extras for a fixed
+function (or collects them for an input-variadic one), and performs the usual
+boundary checks. Flexible results follow the caller's requested Lua result
+count exactly as they do for positional calls. A Lua table carries no marker
+distinguishing a named bundle from an intended table or `value`, so no key
+inspection or arity heuristic was added. Named arguments are completely
+resolved by Titan's checker before C generation.

@@ -35,6 +35,15 @@ declaration syntax, the three things you can do with `...`
 fixed-arity context, variadic functions as values, the Lua boundary, and
 the limits and bans.
 
+An input variadic tail is independent of a
+[flexible result tail](flexible-returns.md). A function may declare both:
+
+```lua
+function transform(...: integer): (...: string)
+    -- input and output runs have separate element types and counts
+end
+```
+
 ## Declaring a variadic parameter
 
 A variadic parameter is written `...: t` — the literal three dots, a colon, and
@@ -273,14 +282,14 @@ converts each element to float, while an `...: integer` run filling a
 integer?` — a representation mismatch is caught, never silently
 reinterpreted.
 
-Supplying *more* static values than the fixed arity has slots is the
-ordinary over-supply error. `return 1, 2, ...` into a one-value return, or
-`local a, b = 2, 3, 5, ...`, reports that the list `already supplies` enough
-values:
+Supplying more static values than a finite Titan sink has slots is allowed.
+Every surplus expression is still evaluated, while its value is discarded;
+if the surplus is the trailing `...`, no element is read because the sink
+requests none of the run:
 
 ```lua
 function over(...: integer): integer
-    return 1, 2, ...           -- error: list already supplies the one return slot
+    return 1, 2, ...           -- returns 1; the explicit 2 is evaluated then discarded
 end
 ```
 
@@ -288,7 +297,9 @@ end
 not a run-time-sized spread — `function pair(...: integer): (integer, integer)
 return ... end` returns `...[1], ...[2]` (and raises if fewer than two were
 supplied). A `return ...` from a function that returns no values (`: ()`) is
-the error `cannot use '...' to return from a function that returns no values`.
+legal and requests no elements. If the function instead declares a compatible
+flexible result tail, `return ...` is open and forwards the complete run-time
+input run into that output tail.
 
 ### Forwarding `...` to another variadic function
 
@@ -309,6 +320,11 @@ function forward(...: integer): integer
     return sum(0, ...)         -- forward the run; element types must match
 end
 ```
+
+A trailing call with a flexible result tail is another open producer for this
+same sink. `sink(produce())` forwards every result actually produced after
+filling `sink`'s fixed parameters; the result element type must be compatible
+with the callee's variadic element type.
 
 `integer` and `value` forward both ways (the gradual `value` relationship),
 so an `...: integer` run forwards into a `...: value` callee and vice versa. A
@@ -347,10 +363,15 @@ a plain Lua function), goes through the generic Lua-stack path, which checks
 and converts each variadic argument at the boundary.
 
 `(...: integer) -> integer` and `(...: value) -> integer` are mutually
-**compatible** (gradually, through `value`), so a variadic function flows
-into either; but a variadic function type is **never** compatible with a
-non-variadic one — `local f: (integer) -> integer = sum` where `sum` is
-variadic is a type error.
+**compatible** (gradually, through `value`). Compatibility with fixed-only
+function types is directional. A fixed actual function may inhabit a slot
+whose type has a variadic tail and ignore that tail. A variadic actual may
+inhabit a compatible fixed-only slot when callers of that slot expose no
+hidden required parameters; it simply receives whatever fixed arguments the
+slot promises. The reverse direction is rejected whenever it would hide a
+required fixed parameter or feed an incompatible value to an observed tail.
+See [Flexible returns](flexible-returns.md#function-compatibility-is-directional)
+for the combined input/output compatibility rules.
 
 ## Using a variadic function from Lua
 
@@ -401,7 +422,8 @@ result arrives in Lua as a plain table.
   run-time error `too many variadic arguments`. The cap is intentional —
   it keeps the run small and stack-allocatable; a function that genuinely
   needs an unbounded homogeneous run should take an explicit array
-  parameter `{t}` instead.
+  parameter `{t}` instead. Flexible result tails use the same 200-element
+  bound for the same reason.
 * **`...` does not escape its function.** As covered above, `...` cannot be
   captured by an inner lambda, stored in a variable, or referenced as a
   value. Spread it, index it, or take its length — but to keep the run

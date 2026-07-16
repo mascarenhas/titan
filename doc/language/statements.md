@@ -98,14 +98,14 @@ local x, y = 10, 20
 local q, r = divmod(17, 5)   -- a multi-return call in last position
 ```
 
-The arities must match exactly: a call in the *last* right-hand-side
-position contributes all of its return values, any other call contributes
-exactly one, and after that expansion the number of values must equal the
-number of names, or the declaration is rejected at compile time with
-`left-hand side expects N value(s) but right-hand side produces M
-value(s)`. Wrapping a call in parentheses truncates it to one value (see
-[Functions](functions.md)); a parenthesized call that leaves a multi-name
-declaration short (`local a, b = (f())`) gets that same clean arity error.
+A call in the *last* right-hand-side position may expand to fill the remaining
+names; any earlier call is scalar. Producer surplus is ignored, while a
+fixed-only deficit is rejected at compile time with `left-hand side expects N
+value(s) but the expression list produces M`. A declared flexible result tail
+can fill finite positions with projected option values instead. Wrapping a call
+in parentheses requests one value (see [Functions](functions.md)); a
+parenthesized call that leaves a multi-name declaration short
+(`local a, b = (f())`) gets the same clean deficit error.
 
 The declared names only enter scope after the whole statement, so the
 initializers see the *outer* bindings:
@@ -161,13 +161,13 @@ stores performed, left to right. This is what makes the swap idiom work.
 (Any expressions inside the *targets* — the table and index of `t[k]`, the
 receiver of `r.f` — are evaluated in the second phase, with the stores.)
 
-Arity is strict and checked at compile time, with the same rules and the
-same error message as multi-declarations: a multi-return call expands only
-in the last right-hand-side position, every other call counts as one
-value, and `(f())` truncates to one value. There is no Lua-style silent
-padding with `nil` or dropping of extras. To discard a value, assign it to
-a variable you never read (conventionally `_`); as described above, unused
-variables cost nothing.
+The same finite-demand rules as multi-declarations apply: a trailing call may
+fill the remaining targets, earlier calls are scalar, and `(f())` requests one
+value. Producer surplus is ignored; an ordinary fixed-only deficit remains an
+error. The conventional `_` name is useful when code wants to document a
+discarded position explicitly, but it is not required merely to hide trailing
+results. A flexible producer projects `T?` into positions reached beyond its
+fixed prefix; see [Flexible returns](flexible-returns.md).
 
 ## `if`
 
@@ -330,10 +330,12 @@ evaluated once before the loop and adjusted to a four-slot iterator tuple:
 | 3 | initial control value |
 | 4 | close function |
 
-Missing slots are filled with `nil`; producing more than four values is a
-compile-time error. A trailing multi-return expression or trailing `...` in
-a variadic function can fill the tuple, so a helper may return
-`(next, state, init, close)` directly.
+Missing slots are filled with `nil`; values beyond the four tuple slots are
+evaluated and ignored. A trailing multi-return expression, flexible result
+run, or trailing `...` in a variadic function can fill the tuple, so a helper
+may return `(next, state, init, close)` directly. Finite positions projected
+from a flexible result are optional; the required iterator slot is forced
+before it is resolved as callable.
 
 The iterator slot may be a function, a `value` that is coerced to a
 synthesized function type, or a compatible C function pointer/foreign
@@ -377,10 +379,17 @@ The close slot is `nil`, a function, a `value` that is coerced to a
 synthesized close function type, or a compatible C function pointer/foreign
 function. A close function may accept zero or one fixed parameter; when it
 accepts one, the state value must be coercible to that parameter type. Close
-return values are discarded. When present, the close function runs after
-normal exhaustion, `break`, `return`, and errors from the initial iterator
-call, body, or update iterator call. If close itself raises, that new error
-replaces the pending action.
+return values are discarded. When a `value` supplies the close slot, a run-time
+`nil` means that the optional close function is absent and no call is made.
+Every non-`nil` value follows the ordinary callable rules: callable values,
+including values with `__call`, run, while a non-callable value raises. This
+also means that a call through `value` may return only the iterator, state, and
+initial control; Lua's missing-result `nil` padding leaves the close slot
+absent.
+
+When present, the close function runs after normal exhaustion, `break`,
+`return`, and errors from the initial iterator call, body, or update iterator
+call. If close itself raises, that new error replaces the pending action.
 
 This helper returns the whole tuple, including a close function that receives
 the file state:
@@ -424,8 +433,8 @@ end
 
 ## Function calls as statements
 
-A function or method call may stand alone as a statement; its results are
-discarded:
+A function or method call may stand alone as a statement; all of its fixed and
+flexible results are discarded:
 
 ```lua
 xs_push(xs, 10)
@@ -479,9 +488,9 @@ end
 
 The deferred statement runs on normal fallthrough, `return`, `break`, or
 a propagating error. If the deferred statement raises, that new error
-overrides the pending action exactly like a `finally` raise. Return values
-are evaluated before the deferred statement runs, so cleanup side effects
-do not change already-saved return values.
+overrides the pending action exactly like a `finally` raise. Fixed return
+values and any run-time flexible tail are evaluated and saved before the
+deferred statement runs, so cleanup side effects do not change them.
 
 Multiple defers in the same block run in last-in-first-out order:
 
@@ -537,45 +546,48 @@ to the finally block's own statements; a nested anonymous function defined
 inside a finally has its own body and may return normally from that nested
 function.
 
-Arity is strict at compile time: the number of returned values must equal
-the number of declared return types, or the checker reports
-`returned N value(s) but function expected M`. Each value is implicitly
-coerced to the corresponding declared type where the coercion rules allow;
-mismatches are reported per position (`types in return do not match,
-expected integer but found string`). A multi-return call expands in the
-last position, and `return (f())` truncates to a single value — see
-[Functions](functions.md) for the full multiple-return story.
+Every fixed declared return position must be filled, or the checker reports
+`returned N value(s) but function expected M`. Each delivered value is
+implicitly coerced to the corresponding declared type where the coercion rules
+allow; mismatches are reported per position (`types in return do not match,
+expected integer but found string`). Surplus expressions are still evaluated
+but their values are discarded. A trailing call expands only as far as the
+finite return prefix requires, unless the function declares a flexible tail,
+which consumes the complete compatible run. `return (f())` always requests one
+value. See [Functions](functions.md) and
+[Flexible returns](flexible-returns.md).
 
 A function declared without a return annotation returns **zero** values
 (its type is `() -> ()`), matching Lua — not one `nil`. Such functions need
 no `return` at all, and falling off the end is allowed.
 
-In a zero-return function a completely bare `return` (zero expressions) is
-the **only** legal return. Returning any value — `return nil` included — is
-a compile-time error (`returned 1 value(s) but function expected 0`):
+In a zero-return function a completely bare `return` is the clearest spelling,
+but expressions are also permitted: they are evaluated for their effects and
+their values are discarded. The function still exposes zero results:
 
 ```lua
 local count: integer = 0
 
 function bump(n: integer)    -- no annotation: returns zero values
     if n <= 0 then
-        return               -- bare return: the only legal return here
+        return               -- bare return: no values
     end
     count = count + n
 end
 ```
 
-`return` and `return nil` are therefore **not** equivalent. In a
-zero-return function, a bare `return` returns no values. In an explicit
-`: nil` function, the checker accepts a bare `return` as the one `nil`
-return. In option- or `value`-returning functions, write `return nil`
-explicitly. The explicit `: nil` annotation is how you ask for a function
-that returns a single `nil`.
+`return` and `return nil` still describe different expression lists, but a
+zero-return function discards the latter's `nil` and exposes no values. In an
+explicit `: nil` function, either spelling supplies the one `nil` return. In
+option- or `value`-returning functions, write `return nil` explicitly. The
+explicit `: nil` annotation is how you ask for a function that returns a
+single `nil`.
 
-A function whose return type carries one or more values must provably
-return on every control path; otherwise the compiler rejects it. (A
-nil-returning function, like a zero-return one, may instead fall off the
-end.) The analysis understands `if`/`elseif`/`else` chains where every arm
+A function whose first fixed return exists and is not `nil` must provably
+return on every control path; otherwise the compiler rejects it. A
+nil-returning function, a zero-return function, and a function with only a
+flexible tail may instead fall off the end; the last case produces an empty
+run. The analysis understands `if`/`elseif`/`else` chains where every arm
 returns, but it does not credit loops — a `return` inside a `while` body
 does not count as "always returns".
 

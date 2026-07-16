@@ -837,6 +837,38 @@ describe("C FFI type checking", function()
         end)
     end)
 
+    it("keeps function-pointer and pseudo-constructor positional arity strict",
+    function()
+        with_header([[
+            typedef int ffi_int;
+            typedef int (*ffi_callback)(int, int);
+        ]], function(header)
+            local errs = h.check_errs([[
+                local c = foreign import "]] .. header .. [["
+
+                local function use(cb: c.ffi_callback): nil
+                    cb(1)
+                    cb(1, 2, 3)
+                    local one = c.ffi_int.new(1)
+                    local many = c.ffi_int.new_array()
+                    local too_many = c.ffi_int.new_array(1, 2)
+                    return nil
+                end
+            ]])
+            local all = table.concat(errs, "\n")
+            assert.same(5, #errs)
+            assert.match("function pointer 'cb' called with 1 arguments but expects 2",
+                all)
+            assert.match("function pointer 'cb' called with 3 arguments but expects 2",
+                all)
+            assert.match("ffi_int%.new' called with 1 arguments but expects 0", all)
+            assert.match("ffi_int%.new_array' called with 0 arguments but expects 1",
+                all)
+            assert.match("ffi_int%.new_array' called with 2 arguments but expects 1",
+                all)
+        end)
+    end)
+
     it("rejects incompatible foreign functions as C function pointers", function()
         with_header([[
             typedef double (*ffi_callback)(double);

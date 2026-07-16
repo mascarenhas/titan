@@ -105,11 +105,11 @@ not add epicycles around what may be a misunderstood simpler design.
   source-only `post_install` hook invokes the standard-library install target,
   which deliberately uses the just-installed `titanc`. There is no
   `pre_install` hook. Each standard DSO is installed exactly once at
-  `$ROCKS_TREE/lib/titan/0.13/titan/<module>.so`; Titan imports and Lua
+  `$ROCKS_TREE/lib/titan/0.14/titan/<module>.so`; Titan imports and Lua
   `require "titan.<module>"` load that same canonical file. The stdlib also
   installs its provider loader at `$ROCKS_TREE/share/lua/5.5/titan/uv.lua`.
   The Titan-owned Lua's configured default `package.cpath` places
-  `$PREFIX/lib/titan/0.13/?.so` before its ordinary `lib/lua` templates. No
+  `$PREFIX/lib/titan/0.14/?.so` before its ordinary `lib/lua` templates. No
   symbolic links, hard links, Lua-facing copies, or parent-level compatibility
   copies are used. These direct SDK/stdlib files are
   outside the rock manifest and are not removed by `luarocks remove`;
@@ -234,11 +234,11 @@ directory separators under `--tree`, default `.`). It recovers the Titan
 SDK/rocks-tree root from the first `package.cpath` template ending in
 `/lib/lua/5.5/?.so`; that works because the supported install currently sets
 `ROCKS_TREE == PREFIX`, not because the two owners are inherently identical.
-Compiled-module lookup defaults to `.;<root>/lib/titan/0.13`, with
-`TITAN_PATH_0_13`/`TITAN_PATH` overriding that ordinary path. The standard
+Compiled-module lookup defaults to `.;<root>/lib/titan/0.14`, with
+`TITAN_PATH_0_14`/`TITAN_PATH` overriding that ordinary path. The standard
 library uses ordinary qualified module names: source files are
 `titan/<module>.titan`, installed binaries are
-`<root>/lib/titan/0.13/titan/<module>.so`, and `import "async"` is parser sugar
+`<root>/lib/titan/0.14/titan/<module>.so`, and `import "async"` is parser sugar
 for `import "titan.async"` (likewise for `coroutine`, `uv`, `timer`, `fs`,
 `net`, and `os`). A checkout build therefore invokes roots such as
 `titanc titan.uv` and
@@ -247,10 +247,13 @@ binaries before sources; modules explicitly named on the `titanc` command
 line are the generic exception and are built from source. There is no parallel
 root `stdlib/` source tree.
 
-The compiled-module ABI version is `0.13` (bumped from `0.12` when named
-arguments added formal-name metadata to the serialized `ModuleMember`,
-`Method`, and `StaticMethod` descriptors in `<mangled>_types`; the native call
-ABI is unchanged; `0.12` itself was bumped from `0.11` when exported type
+The compiled-module ABI version is `0.14` (bumped from `0.13` when flexible
+returns added `flexrettype` to serialized callable descriptors and a
+caller-owned `TitanVargX *_flexout, int _flexwant` pair to flexible-return
+native signatures; `0.13` itself was bumped from `0.12` when named arguments
+added formal-name metadata to the serialized `ModuleMember`, `Method`, and
+`StaticMethod` descriptors in `<mangled>_types` without changing the native
+call ABI; `0.12` itself was bumped from `0.11` when exported type
 aliases added a separate `type_members` namespace to `<mangled>_types`; `0.11`
 itself was bumped from `0.10` when module-local records and record
 members changed that serialization to omit local records/members while
@@ -343,7 +346,7 @@ save and restore both together.
 
 `coder.generate(modname, ast, static_deps)` produces one C translation unit as a string — no C AST, just `util.render` templates (`$VAR` substitution, recursive; error on missing keys). Key facts:
 
-- Each Titan function becomes **two** C functions: a raw native-convention one (`RETTYPE f(lua_State *L, Udata *_mod, CClosure *_fn, params..., out-params for returns 2..n)`; the **caller** anchors GC-able arguments on the Lua stack) and a Lua-stack entry wrapper that coerces arguments and installs the error handler. `_fn` is the function value's own closure (still a `CClosure`): `NULL` on fully-static top-level calls, and the callee itself on first-class/closure/value calls; for anonymous functions it carries the captured variables (this uniform parameter is what bumped the module ABI to `0.6`). `_mod` becoming `Udata*` and record instances becoming a single `Udata` (so every record-typed param/return changes C type and `<mangled>_init` returns `Udata*`) is what bumped it to `0.7`; the ABI then bumped to `0.8` when a record's type tag became its metatable pointer (no `getudatamem` payload), to `0.9` when a variadic function's native signature gained the trailing `TitanVargX *_varargs, int _start` pair (after the declared params, before the out-params) and `<mangled>_types` began encoding the `varargtype` element type, to `0.10` when the `TitanVargX` structs changed from inline flexible arrays to descriptor structs with an `args` pointer, to `0.11` when local records/members changed record interface serialization, to `0.12` when public type aliases added the serialized `type_members` namespace, and to `0.13` when named arguments added serialized declaration-only `paramnames` metadata without changing native function signatures.
+- Each Titan function becomes **two** C functions: a raw native-convention one (`RETTYPE f(lua_State *L, Udata *_mod, CClosure *_fn, params..., input-vararg pair, out-params for returns 2..n, flexible-output pair)`; the input and output pairs appear only when declared, and the **caller** owns flexible-output storage and anchors GC-able values on the Lua stack) and a Lua-stack entry wrapper that coerces arguments and installs the error handler. `_fn` is the function value's own closure (still a `CClosure`): `NULL` on fully-static top-level calls, and the callee itself on first-class/closure/value calls; for anonymous functions it carries the captured variables (this uniform parameter is what bumped the module ABI to `0.6`). `_mod` becoming `Udata*` and record instances becoming a single `Udata` (so every record-typed param/return changes C type and `<mangled>_init` returns `Udata*`) is what bumped it to `0.7`; the ABI then bumped to `0.8` when a record's type tag became its metatable pointer (no `getudatamem` payload), to `0.9` when a variadic function's native signature gained the trailing `TitanVargX *_varargs, int _start` pair (after the declared params and before the out-params) and `<mangled>_types` began encoding the `varargtype` element type, to `0.10` when the `TitanVargX` structs changed from inline flexible arrays to descriptor structs with an `args` pointer, to `0.11` when local records/members changed record interface serialization, to `0.12` when public type aliases added the serialized `type_members` namespace, to `0.13` when named arguments added serialized declaration-only `paramnames` metadata without changing native function signatures, and to `0.14` when flexible returns added serialized `flexrettype` metadata and the conditional trailing `TitanVargX *_flexout, int _flexwant` native pair.
 - A dynamically imported module is loaded with `RTLD_LAZY | RTLD_GLOBAL` before
   it is initialized. If an imported interface re-exports a nominal record type
   owned by one of its own imports, initialization of the explicit import first

@@ -46,9 +46,11 @@ userdata owner, back barrier); imported-module variables go through the
 import's `Udata` (`uvalue(&_mod->uv[MOD].uv)->uv[VAR].uv`) with the same
 barrier.
 
-**Multiple assignment is two-phase** (`codemultiassignment`): every
-right-hand side is evaluated into a fresh temporary first, then all
-assignments happen — which is what gives `x, y = y, x` swap semantics:
+**Multiple assignment is two-phase** (`codemultiassignment`):
+`_codeadjustedfixed` walks the checker's complete lexical expression list,
+materializes each delivered right-hand side, and forces every explicit
+surplus expression only for effect. Only after that pass do the assignments
+happen — which is what gives `x, y = y, x` swap semantics:
 
 ```c
 _tmp_1 = _local_y_1;
@@ -57,8 +59,8 @@ _local_x_1 = _tmp_1;
 _local_y_1 = _tmp_2;
 ```
 
-These phase-one temps get no shadow slots: the sources stay anchored at
-their original homes for the duration.
+GC-bearing phase-one temps use ordinary shadow slots, so an allocating later
+expression cannot collect an earlier delivered value before phase two.
 
 ## Control flow: `if`, `while`, `repeat`
 
@@ -149,9 +151,11 @@ form is simpler: there is no count — `_foridx += _forstep` and the loop
 breaks once `_foridx` passes `_forlimit` in the step's direction.
 
 The body tail gets the same allocation-gated `luaC_checkGC(L);` as
-`while`. `codereturn` stores returns 2..n through `*_outparam_<i>`,
-then emits `L->top.p = _base;` when the frame reserved slots, and
-returns the first value in C (see [Calls](#calls)).
+`while`. `codereturn` evaluates the checker's adjusted return list once,
+stores fixed returns 2..n through `*_outparam_<i>`, fills a requested
+flexible-output descriptor when the function has one, resets
+`L->top.p = _base`, and returns the first fixed value in C (or `void` when
+there is no fixed result). See [Calls](#calls).
 
 ## The generic `for ... in`
 
@@ -197,7 +201,12 @@ on normal exhaustion, `break`, `return`, and raised errors. The generic loop
 frame is opened outside that synthetic try, which lets `break` route through
 the same pending-action machinery as a user-written `finally`. A close raise
 therefore overrides the pending action in the same way any `finally` raise
-does.
+does. When the close slot originated as `value`, the call inside `finally` is
+guarded by an exact `ttisnil` test of the hidden close `TValue`. Nil makes the
+finalizer a no-op and preserves the pending action; every non-nil value still
+uses the ordinary function-value call path, so its call or error has the same
+precedence as any other close. Statically function-typed closers remain
+unconditional.
 
 ## Arrays
 
@@ -234,6 +243,16 @@ per store; elements are written with `setwrapped`, so records enter as
 their Lua-visible userdata. Each element temp keeps its slot for the
 whole constructor, so a collection in a later element expression cannot
 sweep an earlier one.
+
+The checker attaches `_array_adjustment` so the coder also preserves finite
+downward adjustment: explicit fields beyond the selected finite shape still
+run, but are not stored. A final open producer (`...` or a call with a
+statically flexible result tail) is lowered as a result run. `codearray`
+evaluates and anchors the scalar prefix, obtains the run's actual count,
+resizes once for prefix plus run, converts each element to the array element
+type, stores it with `obj2arr`, and emits the table back barrier when needed.
+Only this final field may expand; an ordinary fixed-result call remains one
+array element.
 
 ### Read (`codeindexarray`)
 
@@ -625,26 +644,37 @@ complete inventory of conversions:
 
 `codecall` implements the caller's half of the native calling convention
 ([overview](codegen-overview.md)). Argument marshaling is minimal: each
-argument's preliminary statements run, then the bare C expressions are
-passed — already native, already anchored at their sources; there is no
-per-call pushing. If the source call supplied too few fixed arguments,
-the checker has already appended `Ast.ExpNil` expressions and inserted
-the ordinary coercions, so code generation treats them exactly like
-written `nil` arguments. For multiple returns the caller allocates one
-temp per extra return (with a shadow slot iff GC-able) and passes its
-address; the temp names are recorded in `node._extras` so the
-checker-synthesized `Ast.ExpExtra` nodes read them directly. If *any*
-return type is GC-able, the first result also goes through a temp and
-every GC-able result is stored to its reserved slot right after the call
-— the callee never pushes results, so this re-anchoring is what makes
-them collector-visible before the next allocation. Real output for
+argument's preliminary statements run in lexical order, then only the
+checker's delivered fixed prefix and accepted input tail are passed — already
+native, already anchored at their sources; there is no per-call pushing.
+Explicit surplus arguments still run but are discarded. If the source call
+supplied too few fixed arguments, the checker has already appended
+`Ast.ExpNil` expressions and inserted the ordinary coercions, so code
+generation treats them exactly like written `nil` arguments.
+
+For fixed multiple returns the caller allocates one temp per visible extra
+return (with a shadow slot iff GC-able) and passes the ABI out-parameter
+addresses. The temp names are recorded in `node._extras` so the
+checker-synthesized `Ast.ExpExtra` nodes read them directly. The callable's
+declared ABI shape remains separate from this consumer-visible projection: a
+discarded result may still need a hidden ABI holder on an exact call, but it is
+never published as a live expression value.
+
+For a flexible producer `_flex_call_buffer` appends a typed caller-owned
+descriptor and `_flexwant` budget to the call. A finite demand gets a
+right-sized buffer; an open demand gets the bounded `TITAN_VARARG_MAX` backing
+and publishes an actual count. GC-able fixed results and open-run elements are
+stored into reserved caller stack slots before the next allocation — the
+callee never pushes native results and the raw descriptor is not a root.
+
+Real output for
 `local a, b = two()` where `two(): (integer, string)`, caller then
 callee:
 
 ```c
 TString* _tmp_1 = 0;                /* paired with _tmp_1_slot */
 lua_Integer _tmp_2 = 0;
-_tmp_2 = test_two_titan(L, _mod, &_tmp_1);
+_tmp_2 = test_two_titan(L, _mod, NULL, &_tmp_1);
 setsvalue(L, _tmp_1_slot, _tmp_1);  /* re-anchor the GC-able result */
 ```
 
@@ -656,12 +686,12 @@ L->top.p = _base;
 return 1;
 ```
 
-A call used as a statement just gets `";"` appended — results are
-simply discarded (the `((void)...)` wrapping belongs to assignments to
-unused locals, not to statement calls). Calls *from Lua* go through
-the generated entry wrappers, which reject surplus arguments, pad missing
-fixed arguments with nil, check argument types and install the error
-handler — see
+A call used as a statement has `_discard_results`/`_voidok`; its effects run
+but none of its results become consumer-visible. Calls *from Lua* go through
+the generated entry wrappers, which ignore surplus arguments for fixed
+functions (or collect them for input-variadic functions), pad missing fixed
+arguments with nil, check argument types, honor Lua's requested flexible-result
+count, and install the error handler — see
 [Lua interop internals](lua-interop-internals.md).
 
 ## Run-time errors: `codethrow` and message conventions
@@ -682,9 +712,8 @@ by `codethrow` or its callers. Two prefix conventions coexist:
   `type error at line %d, number '%f' has no integer representation`.
 
 Boolean and `value` targets never throw — every Lua value converts.
-Wrapper errors for surplus arguments use
-`calling Titan function %s with %d arguments, but expected at most %d`,
-and the module metatable raises
+Flexible input/output runs instead report their explicit
+`TITAN_VARARG_MAX` overflow errors. The module metatable raises
 `member '%s' does not exist in Titan module '%s'`. Whenever an
 error crosses a Lua entry wrapper, the runtime's `errorhandler` records
 a C-level backtrace retrievable via `titan.backtrace()`

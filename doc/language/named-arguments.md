@@ -96,6 +96,12 @@ parameter list:
 | A C function-pointer value or C pseudo-constructor such as `T.new` | No |
 | Any Titan or C variadic function | No |
 
+“Variadic” in the final row means an **input** `...: T` parameter. A
+declaration with fixed parameters and a flexible **result** tail remains
+eligible for named calls; output shape does not remove its parameter names.
+An arbitrary callable held as `value` remains ineligible because it carries no
+declaration metadata.
+
 In particular, storing a declaration in a variable loses its declaration
 provenance for named-call purposes even though the value remains callable:
 
@@ -166,10 +172,11 @@ target {
 The calls to `mark` occur in the order `1`, `2`, `3`; if the formal order is
 `first, second, third`, the callee receives `2, 3, 1`.
 
-Each named item supplies exactly one formal. A multi-return call used as a
-named expression contributes only its first return value, even in the final
-item; the trailing multi-return expansion of positional argument lists does
-not apply.
+Each named item supplies exactly one formal. Its expression is checked under a
+finite one-value demand: an ordinary multi-return call contributes its first
+result, while a flexible `...: T` result projects `T?` because that position
+may be absent. The trailing open expansion of positional argument lists does
+not apply. See [Flexible returns](flexible-returns.md).
 
 ## Record construction
 

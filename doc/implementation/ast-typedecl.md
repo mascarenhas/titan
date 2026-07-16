@@ -143,16 +143,16 @@ omitted from the field lists for brevity.
 | `TypeQualName` | `module`, `name` | `mod.Name` (both strings) |
 | `TypeArray` | `subtype` | `{T}` |
 | `TypeMap` | `keystype`, `valuestype` | `{K: V}` |
-| `TypeFunction` | `argtypes`, `rettypes` | `t -> t`, `(t, t) -> (t, t)` (both lists) |
+| `TypeFunction` | `argtypes`, `rettypes`, `varargtype`, `flexrettype` | dense fixed lists plus independent optional input/output tail element types (`false` when absent) |
 | `TypeOption` | `basetype` | the `?` suffix, `T?` |
 
 ### Top-level nodes
 
 | Constructor | Fields | Notes |
 | --- | --- | --- |
-| `TopLevelFunc` | `islocal`, `name`, `params`, `rettypes`, `block` | `params` is a list of `Decl` |
-| `TopLevelMethod` | `class`, `name`, `params`, `rettypes`, `block` | `function Class:name(...)`; parser decorates `islocal` |
-| `TopLevelStatic` | `class`, `name`, `params`, `rettypes`, `block` | `function Class.name(...)`, plus synthesized `Class.new`; parser decorates `islocal` |
+| `TopLevelFunc` | `islocal`, `name`, `params`, `rettypes`, `flexrettype`, `block` | fixed result list plus a separate optional output tail |
+| `TopLevelMethod` | `class`, `name`, `params`, `rettypes`, `flexrettype`, `block` | `function Class:name(...)`; parser decorates `islocal` |
+| `TopLevelStatic` | `class`, `name`, `params`, `rettypes`, `flexrettype`, `block` | `function Class.name(...)`, plus synthesized fixed-result `Class.new`; parser decorates `islocal` |
 | `TopLevelVar` | `islocal`, `decl`, `value` | module variable |
 | `TopLevelTypeAlias` | `islocal`, `name`, `type` | compile-time-only `[local] type Name = T` |
 | `TopLevelRecord` | `name`, `fields` | `fields` is a list of `Decl`; parser decorates `islocal` |
@@ -236,6 +236,7 @@ to use it as an expression.
 | `ExpCast` | `exp`, `target` | written `as` casts **and** every checker-materialized implicit coercion |
 | `ExpAdjust` | `exp` | synthesized by the parser only: a parenthesized *call*, truncated to its first value |
 | `ExpExtra` | `exp`, `index`, `_type` | synthesized by the checker only: the index-th (> 1) value of a multi-return call |
+| `ExpFunction` | `params`, `rettypes`, `flexrettype`, `block` | anonymous function; an absent return annotation may copy both result components from context |
 
 Two of these never come from the programmer directly:
 
@@ -245,11 +246,14 @@ Two of these never come from the programmer directly:
   propagating `exp._type` but deliberately not `_types`. Parentheses
   around anything other than a call vanish from the AST entirely
   (`((1))` is just `ExpInteger 1`).
-* **`ExpExtra`** is created by the checker wherever a multi-return call
-  is the last item of a list whose remaining slots it fills:
+* **`ExpExtra`** is created by the checker wherever a trailing call is
+  consumed under a finite demand with more than one visible slot:
   `StatDecl`/`StatAssign` right-hand sides, `StatReturn` lists, call
-  positional argument lists, and array initializers. A named argument is
-  always one value and never gets this trailing expansion. For
+  positional argument lists, and the finite prefixes of other consumers.
+  Its `_type` may be a declared fixed result or an optionized projection from
+  a flexible result tail. Open array/variadic/return tails are represented by
+  call decorations rather than an unbounded list of `ExpExtra` nodes. A named
+  argument is always one value. For
   `local a, b = f()` the
   checker appends `ExpExtra(loc, <the ExpCall>, 2, <type of value 2>)`
   to `node.exps`. Its `_type` is a *positional constructor field* — the
@@ -262,7 +266,8 @@ Two of these never come from the programmer directly:
 `x as T`, and the checker's `trycoerce`/`tryforce`/`trytostr` synthesize
 the same node for every legal implicit coercion. The code generator
 emits conversions **only** from `ExpCast` nodes — see
-[the type checker](checker.md).
+[the type checker](checker.md). Casts synthesized by `trycoerce` additionally
+carry `_implicit_coercion = true`; written `as` casts do not.
 
 ### Call arguments and constructor fields
 
@@ -284,10 +289,12 @@ encodes three field forms:
 | `name = exp` | the name string |
 | `[keyexp] = exp` | the key *expression node* |
 
-At the semantic-type layer, `Type.ModuleMember`, `Type.Method`, and
-`Type.StaticMethod` carry a `paramnames` declaration-metadata field. Structural
-`Type.Function` and `Type.CFunction` deliberately do not: parameter spellings
-must not affect type equality, compatible function values, or native tags.
+At the semantic-type layer every Titan function shape carries a separate
+`flexrettype`; the independent `Type.CFunction` shape has C's single-result
+model instead. `Type.ModuleMember`, `Type.Method`, and `Type.StaticMethod` also
+carry declaration-only `paramnames`. Structural `Type.Function` and
+`Type.CFunction` deliberately do not carry parameter spellings: names must not
+affect equality, compatible function values, or native tags.
 
 ## Decorations: who writes what, who reads it
 
@@ -297,7 +304,14 @@ of these are declared anywhere; this table is the inventory.
 | Field | On | Written by | Read by | Meaning |
 | --- | --- | --- | --- | --- |
 | `_type` | every Exp, Var, Decl, TopLevel node; the AST root | checker (on `ExpExtra` it is a positional constructor field) | checker, coder | the node's checker type (`Type.*`); on the root it is the `Type.Module` interface |
-| `_types` | `ExpCall` | checker | checker, coder | full return-type list of a call; enables `ExpExtra` expansion and multi-return out-parameters. `ExpAdjust` deliberately does not propagate it |
+| `_types`, `_flexrettype`, `_callee_type` | `ExpCall` | checker | checker, coder | declared fixed results, declared flexible element, and complete callable type; these remain the native-ABI authority even when the consumer sees fewer results |
+| `_visible_types`, `_result_sources` | `ExpCall` | checker | checker, coder | finite results exposed to this consumer and whether each came from a fixed position or a possibly absent flexible projection |
+| `_finite_flex_prefix`, `_flex_result_demand`, `_open_results` | `ExpCall` | checker | coder | finite projected tail count, finite/open demand marker, and the dynamic source/target/start description for an open sink |
+| `_result_adjustment`, `_arg_adjustment`, `_array_adjustment`, `_tuple_adjustment` | expression-list consumers | checker | coder | shared finite/open elaboration: delivered fixed/tail scalars, retained effect-only expressions, and at most one dynamic final source |
+| `_discard_results`, `_voidok` | expressions/calls | checker | checker, coder | evaluate under zero-result demand; calls may legally expose no result |
+| `_npassed_args`, `_open_args` | `ExpCall` | checker | coder | statically passed argument count and a final dynamic run feeding an input-vararg tail |
+| `_contextual_value_call`, `_contextual_function_type` | `ExpCall` | checker | coder, specs | the callee began as `value` and was checked against a function shape synthesized from argument/result demand |
+| `_implicit_coercion` | `ExpCast` synthesized by `trycoerce` | checker | coder | distinguishes a demanded sink conversion from a user-written `as`; finite flexible-return lowering may suppress only the sink conversion after its result budget is exhausted |
 | `_decl` | `VarName`, `VarDot` | checker | checker, coder | what the name resolved to: an `Ast.Decl` (local/param/`self`), a top-level AST node, a `Type.ModuleMember`/`Type.ModuleVariable`, a `Type.Field`, or a `Type.StaticMethod` |
 | `_used` | `Decl`, top-level nodes (via `_decl`) | checker, on every read: `ExpVar`, `VarDot` receivers, call callees | coder | "this variable is read somewhere"; unused locals get no C variable — their initializer is evaluated and cast to `(void)` |
 | `_assigned` | `Decl` (via `_decl`) | checker, in `StatAssign` on `VarName` targets | coder | "this variable is reassigned"; GC-able parameters and `self` get their own Lua stack slot only when set (otherwise the caller's anchoring suffices — see [values and the GC](values-and-gc.md)) |
@@ -315,7 +329,9 @@ of these are declared anywhere; this table is the inventory.
 | `_result_decls` | `StatForIn` | checker | coder | hidden `Decl`s for the iterator return tuple, reused by the initial and update calls |
 | `_init_call`, `_next_call`, `_close_call` | `StatForIn` | checker | coder | synthesized calls for the initial iterator call, update iterator call and optional close call; C function-pointer calls carry `_c_pointer_call` |
 | `_visible_stat` | `StatForIn` | checker | coder | synthesized `StatDecl` that initializes the user-written loop variables from `_result_decls` each iteration |
-| `_has_close` | `StatForIn` | checker | coder | whether the close slot statically typechecked as a close callable; drives the generated `finally` wrapper |
+| `_has_close` | `StatForIn` | checker | coder | whether a close may be present at run time; drives the generated `finally` wrapper |
+| `_runtime_optional_close` | `StatForIn` | checker | coder | the close slot originated as `value`, so an exact run-time nil skips the synthesized close call while non-nil values use the ordinary callable path |
+| `_forin_nil_guard` | `StatCall` synthesized by `codeforin` | coder | coder | the hidden close declaration whose `TValue` must be non-nil before emitting the ordinary close call inside the generated `finally` |
 | `_cvar` | `Decl` | coder | coder | name of the C local holding the value: `_local_x_1`, `_param_x`, `__self__` |
 | `_readonly` | synthesized `Decl` | checker | checker | marks compiler-built locals such as `L`; `declare` rejects shadowing them and assignment reports a read-only built-in local error |
 | `_slot` | `Decl`, `TopLevelVar` | coder | coder | the `TValue` slot anchoring a GC-able value for the collector: a Lua stack slot (`_localslot_x_2` — the per-name counter is shared with `_cvar`, so the suffix is one past the `_cvar`'s — `_paramslot_x`, `__selfslot__`) or `&_mod->uv[N].uv` for module variables |

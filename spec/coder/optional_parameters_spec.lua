@@ -148,7 +148,7 @@ describe("optional function parameter code generation", function()
         ]])
     end)
 
-    it("pads the Lua entry point and still rejects surplus Lua arguments", function()
+    it("pads the Lua entry point and ignores surplus Lua arguments", function()
         run_coder([[
             function entry(a: integer?, b: boolean): integer
                 local score = 0
@@ -170,9 +170,8 @@ describe("optional function parameter code generation", function()
             assert(test.entry() == 11)
             assert(test.entry(4) == 14)
 
-            local ok_extra, err_extra = pcall(test.entry, nil, false, nil)
-            assert(not ok_extra)
-            assert(err_extra:find("expected at most 2", 1, true), err_extra)
+            assert(test.entry(nil, false, nil) == 11)
+            assert(test.entry(4, true, 99, 100) == 4)
 
             local ok_missing, err_missing = pcall(test.need_int)
             assert(not ok_missing)

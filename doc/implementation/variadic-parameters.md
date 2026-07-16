@@ -17,10 +17,10 @@ closure, stored, or escape its declaring function, and it is invisible to inner
 lambdas — but the **function that declares it is** an ordinary first-class
 value. This chapter walks the implementation across all four layers it touches:
 the [parser](#parser-the-t-grammar) (`parser.lua`, `ast.lua`), the
-[checker](#checker-varargtype-scope-and-the-explist-loops) (`checker.lua`,
+[checker](#checker-varargtype-scope-and-shared-result-demand) (`checker.lua`,
 `types.lua`), the [code generator](#code-generator-the-seven-structs-and-the-native-abi)
 (`coder.lua`, the seven `TitanVarg*` structs in `titan-runtime/titan.h`), and
-the [GC discipline](#gc-discipline-an-untraced-payload) the descriptor and
+the [GC discipline](#gc-discipline-descriptor-pointers-and-untraced-payloads) the descriptor and
 backing storage must respect. Background on the calling convention is in the
 [code generator overview](codegen-overview.md); value representation and the
 collector invariants in [values and the GC](values-and-gc.md).
@@ -54,8 +54,10 @@ encoding an inferred lambda parameter uses (`name` set / `type == false`), but
 with `name == false` too. The `false`-name convention threads through the
 checker and coder, which detect and strip that marker. The function-type
 annotation likewise gains no node flag: the new field `varargtype` is appended
-to `Ast.TypeFunction` (`{"loc","argtypes","rettypes","varargtype"}`), `false`
-when absent.
+to `Ast.TypeFunction`
+(`{"loc","argtypes","rettypes","varargtype","flexrettype"}`), `false` when
+absent. The independent final field describes a flexible *output* tail; see
+[flexible-return internals](flexible-returns.md).
 
 ### Colon, last-only, trailing — the productions
 
@@ -89,9 +91,11 @@ The **function-type annotation** uses a parallel pair, `varargtypeann` /
 `varargtypeopt`, inside `arglist` (the arrow productions); `varargtypeann`
 requires the colon (`DOTS COLON^VarargColon type`) and defaults to `false`
 when absent; `arglist`'s fixed-type loop carries the same `!DOTS` guard. The
-bare `typelist` (a return-type list) deliberately does not accept a vararg.
-`defs.typefunc` reorders the captures `(loc, argtypes, varargtype, rettypes)` so
-the element type lands in the `Ast.TypeFunction.varargtype` slot.
+bare input `typelist` does not double as a result-tail grammar. Return lists use
+their own `...: t` carrier, so input and output tails cannot be confused.
+`defs.typefunc` combines the argument carrier and result carrier so the two
+element types land in `Ast.TypeFunction.varargtype` and `.flexrettype`
+respectively.
 
 ### Spread and `...[e]`; `#...` as a unop
 
@@ -125,7 +129,7 @@ simpleexp <- ...
 `ListTooLong`; the rest reuse `ParamSemicolon`/`TypeDecl`/`ExpExpSuf`/
 `RBracketExpSuf`.
 
-## Checker: `varargtype`, scope, and the explist loops
+## Checker: `varargtype`, scope, and shared result demand
 
 The checker carries the vararg element type on a **new `varargtype` slot** on
 the function-like types, resolves `...` uses through a depth-stamped pseudo-
@@ -135,28 +139,29 @@ symbol, and — its central job — turns every spread into either synthesized
 ### `Type.Function.varargtype` vs. the C-FFI `vararg` boolean
 
 `types.lua` adds `varargtype` to `Type.Function`
-(`{"params","rettypes","vararg","varargtype"}`) and to `Type.Method` /
-`Type.StaticMethod`. It is **distinct** from the pre-existing `vararg` boolean,
+(`{"params","rettypes","vararg","varargtype","flexrettype"}`) and to
+`Type.Method` / `Type.StaticMethod` (whose declaration descriptors also carry
+`paramnames`). It is **distinct** from the pre-existing `vararg` boolean,
 which marks a *C-FFI* variadic (`foreigntypes.lua` sets `vararg = true`,
 `varargtype = false`). A Titan variadic sets `varargtype = t`, `vararg = false`.
 Consumers test `varargtype`; the two never mix. Four relations change:
 
-* **`compatible`** (the `Type.Function` arm — only function *values* are
-  compared structurally; `Type.Method`/`Type.StaticMethod` have no
-  `compatible`/`equals` arm): after the fixed params and rettypes, the vararg
-  *presence* must match (a variadic is never compatible with a non-variadic —
-  they are structurally distinct), and when both are Titan-variadic the element
-  types must be `compatible`. Because that is gradual, `(integer, ...: integer)`
-  is compatible with `(integer, ...: value)` **both ways** (through `value`). The
-  check is `if (v1 and true) ~= (v2 and true) then return false end`, then
-  `compatible(v1, v2)`.
-* **`equals`** (the `Type.Function` arm): the same presence rule, but element
-  types compared with `equals`. So `...: integer` and `...: value` are **not** equal
-  — which is exactly what gives them different runtime type tags and makes the
-  first-class fast path fall back correctly on a gradual mismatch.
-* **`serialize`**: emits the `varargtype` for Function and Method (so `.so`
-  imports rehydrate it — part of the 0.9 ABI), keeping the C-FFI `vararg`
-  boolean serialized and disjoint.
+* **`compatible(expected, actual)`** is now directional. Parameter positions
+  are contravariant and may move between the fixed prefix and the actual input
+  tail; an actual function may ignore an expected fixed suffix, but may not
+  hide fixed parameters that expected callers are not required to provide.
+  The expected output shape then observes the actual fixed/flexible results
+  covariantly. Input-tail presence is therefore no longer a blanket equality
+  test. See [flexible returns](flexible-returns.md#strict-identity-and-directional-compatibility)
+  for the complete matrix.
+* **`equals`** remains exact structural identity: fixed positions, input-tail
+  presence/type, and output-tail presence/type must all match. Thus
+  `...: integer` and `...: value` are not equal, which gives them different
+  runtime tags even if a directional gradual conversion is legal.
+* **`serialize`** emits `varargtype` for Function, Method, and StaticMethod (the
+  historical 0.9 ABI change), alongside the independent `flexrettype` schema.
+  The latter is not accepted from compiled interfaces until the coordinated
+  flexible-return ABI transition.
 * **`tostring`**: appends `, ...: t` to the parameter list.
 
 `typefromnode`'s `Ast.TypeFunction` handler reads `node.varargtype` and sets the
@@ -171,16 +176,18 @@ errors)`: it detects the trailing `name == false` `Decl`, drops it from the fixe
 the caller passes as `varargtype` to the type constructor. The lambda checker
 (`Ast.ExpFunction`) does the same detection inline rather than calling
 `param_types` (it also needs the `nfixed` count for context-arity matching), but
-shares the same validation. Validation is `check_vararg_elem`, which enforces the
-two **bans** (applied to the inferred/explicit lambda vararg element too):
+shares the same validation. Validation is the role-aware
+`check_varg_elem(typ, loc, errors, "parameter")`, which enforces the two
+**bans** (applied to the inferred/explicit lambda vararg element too):
 
 * `...: nil` → `a variadic parameter cannot have type nil` (a typed `...: t` cannot
   hold nil, except where `t` is `value`/an option that already includes nil);
 * a foreign-C-pointer element → `a variadic parameter cannot have a foreign
   pointer type` (no `TitanVarg*` struct exists for it).
 
-Both return `types.Invalid()` so checking continues. `check_vararg_elem` also
-validates the first-class-annotation element type, in `typefromnode`.
+Both return `types.Invalid()` so checking continues. The same helper, with
+role `"return"`, validates flexible result elements; `typefromnode` uses it for
+both tails in a first-class annotation.
 
 ### Untyped lambda vararg inference {#untyped-lambda-vararg}
 
@@ -199,7 +206,7 @@ untyped-fixed-parameter path:
 * untyped `...`, **no usable context** → `cannot infer the type of '...';
   annotate it or use the lambda where its type is known`.
 
-The resolved element is then run through `check_vararg_elem` (the same `nil` /
+The resolved element is then run through `check_varg_elem` (the same `nil` /
 foreign-pointer bans). Top-level functions, methods and function-type
 annotations never reach this path — their `...: t` is mandatory at the parser.
 
@@ -249,43 +256,35 @@ resolves.
   that raise is what licenses the non-optional element type. Adjust-up synthesis
   (next) flips `_nilfill = true` / `_type = s?` for an optional target slot.
 
-### The four explist loops: adjust-up vs. whole-tail
+### Shared finite/open expression-list demand
 
-`StatDecl`, `StatAssign`, `StatReturn` and `checkargs` each detect a trailing
-`Ast.ExpDots` and dispatch. The two outcomes:
+Declarations, assignments, returns, calls, arrays, and the generic-for setup
+tuple all use `result_demand` plus `adjust_explist`; there are no longer four
+independent spread loops. The adjustment record keeps every written expression
+in lexical order, separates fixed deliveries from scalar/open tail deliveries,
+and marks surplus expressions that must still run only for effect.
 
-* **Adjust-up** (into a `local`, an assignment, a `return`, or a call to a
-  **non-variadic** callee) is *slot-driven*. With `deficit = nslots − nstatic`:
-  `deficit < 0` is an over-supply error; `deficit == 0` drops the marker (a
-  no-op); otherwise the trailing `ExpDots` is replaced by `deficit` synthesized
-  `Ast.ExpDotsIndex` reads `...[1..deficit]`, each typed by the **consuming
-  slot's** optionality — a non-optional slot gets `_nilfill = false`, `_type = t`
-  (out-of-range **raises** — `local a, b, c = ...` requires `#... >= 3` at run
-  time but type-checks), and an optional slot `s?` gets `_nilfill = true`,
-  `_type = optionize(elem)`. The synthesized read is typed as the *real element
-  wrapped*, not the slot type, so the caller's `trycoerce`/`checkmatch` inserts
-  the genuine element→base conversion (e.g. `integer? → float?`) and rejects an
-  incompatible element (e.g. `integer` into a `string?` slot). `StatDecl` and
-  `StatReturn` inline this; `StatAssign` uses the shared
-  `expand_dots_adjustup(exps, nslots, slottype, term, errors)`. `return ...`
-  is therefore **adjust-up into the function's fixed return arity** [§2.E] —
-  not a runtime-sized spread (returns 2..n lower to compile-time-indexed
-  out-params, which have no variable-count mechanism); `return ...` from a
-  zero-return function is an error.
-* **Whole-tail** (a call to a **variadic** callee, dispatched on
-  `ftype.varargtype` read before the multi-return `_types` expansion): the
-  trailing `ExpDots` is **kept** as a marker for codegen. The caller's `...`
-  element type must be `compatible` (gradual) with the callee's. Over-supplied
-  static args (beyond the callee's fixed params) are each `trycoerce`d to the
-  callee's element type. `checkargs` additionally handles the **start-adjust**
-  shape, where the static prefix is *shorter* than the callee's fixed params:
-  the missing fixed params are borrowed from the caller's own `...`; each
-  borrowed fixed-param type must accept or coerce the caller's element type
-  (`cannot borrow a '...' element of type %s for fixed parameter %d`). Codegen
-  lowers those borrowed reads with `ExpDotsIndex` plus an ordinary `ExpCast`
-  when needed, and uses nil-fill mode only for fixed parameter types that can
-  accept nil. Passing `...` into a C-FFI variadic (`ftype.vararg`) is rejected
-  (`cannot pass '...' to a foreign (C) variadic function`).
+For a **finite demand**, a trailing `Ast.ExpDots` is projected into only the
+needed synthesized `Ast.ExpDotsIndex` reads. Each read follows the consuming
+slot: an optional/nil-compatible target can nil-fill and gets an option-shaped
+source, while an ordinary non-nil fixed call argument retains the raising
+bounds check. The generic-for tuple is the deliberate exception: its
+`dots_nilfill = true` option makes missing state/control projections nil, as
+Lua's iterator setup requires. If the finite demand is already full, `...` is
+not read. Explicit surplus expressions are checked, evaluated, and discarded;
+`return ...` in a zero-result function is therefore an effect-free discard,
+not an arity error.
+
+For an **open demand**, the final marker remains the single runtime-sized
+`open_source`. Input-variadic calls receive the remaining run after any fixed
+borrows; a function with `flexrettype` can forward it from `return ...`; and a
+final positional array field appends it. Static tail scalars are coerced to the
+consumer's element type. Codegen can pass an equal-representation input run by
+descriptor/start view, or allocate and convert a fresh run when the static
+prefix or element representation changes.
+
+Passing a runtime-open Titan run into a C-FFI variadic (`ftype.vararg`) remains
+an error: the typed Titan descriptor has no C default-promotion contract.
 
 `...` is always the sole, last trailer; a list ending in both a multi-return
 call and `...` is structurally impossible (`f(g(), ...)` truncates `g()` to one
@@ -293,9 +292,9 @@ value).
 
 ### Array `{...}`: backward typing
 
-`ExpInitList`'s Array arm finds a trailing key-less `ExpDots` field
-(`find_dots_field`, which also rejects `{..., 1}`: `'...' must be the last field
-in an array constructor`). A `...` field in a map/record constructor is an
+`ExpInitList`'s Array arm recognizes a trailing key-less `ExpDots` field
+(and rejects `{..., 1}`: `'...' must be the last field in an array
+constructor`). A `...` field in a map/record constructor is an
 error (`'...' can only appear in an array constructor`). The element type is
 **seeded from the vararg element first** — `etype = econtext or
 deoptionize(dots_elem) or ...` — so `{...}` is `Array(t)`, **not** `Array(t?)`,
@@ -303,14 +302,18 @@ and a no-context `{...}` is `{t}`. The kept `ExpDots` marker carries through to
 codegen. When a context overrides `etype` (e.g. `{...: integer}` in a `{float}`
 context), the vararg element type must be `equals` or `coerceable` to `etype`,
 else `'...' element type %s is not coerceable to array element type %s`.
+The same `_array_adjustment` can name a trailing flexible-result call as its
+open source; that run uses its declared `flexrettype` and the same per-element
+coercion into `etype`.
 
 ### The coercion guarantee for codegen
 
-After checking, every element destined for a `TitanVarg*` struct has been
-`trycoerce`d to the element type, so each struct store is a plain
-`setwrapped`/`setslot` of a value already of `ctype(t)`. The one gradual
-boundary that needs a `value → t` check lives in `genluaentry` (below), not the
-struct store.
+After checking, every static element destined for a `TitanVarg*` struct has
+been `trycoerce`d to the element type, so its store uses the ordinary typed
+lowering. Runtime run-to-run conversion uses the same cast machinery per
+element. A gradual `value → t` check can therefore appear in `genluaentry`, a
+fresh forwarding copy, or a flexible result-run consumer; it is never replaced
+by a representation cast.
 
 ## Code generator: the seven structs and the native ABI
 
@@ -338,6 +341,10 @@ coder picks the struct with `varg_struct_name(elemtype)`, keyed on the
 seven typedefs); a Pointer element has no entry and would `error`, but the
 checker bans it first. Because the structs live in `titan.h` (which every
 generated unit `#include`s), the coder emits no struct definitions.
+The same family serves flexible *output* runs. Ownership distinguishes the
+directions: an input descriptor is a borrowed view of caller arguments, while
+an output descriptor points at capacity supplied by the caller and the callee
+sets `n_args` to the number actually produced.
 
 Two design points [§2.C / §2.G]:
 
@@ -376,21 +383,25 @@ For an **empty** static vararg the coder still emits a one-element C array with
 ### The native ABI: trailing `_varargs` + `_start`
 
 A variadic function's native signature gains the two items **after the declared
-params and before the out-params**:
+params and before the out-params**. If the same function also has a flexible
+result, its `_flexout`/`_flexwant` pair follows every fixed out-parameter:
 
 ```c
 lua_Integer mod_f_titan(lua_State *L, Udata *_mod, CClosure *_fn,
                         lua_Integer _param_x,
                         TitanVargInteger *_varargs, int _start,   /* trailing, before out-params */
-                        lua_Integer *_outparam_2);
+                        lua_Integer *_outparam_2,
+                        TitanVargString *_flexout, int _flexwant); /* output tail is last */
 ```
 
 They are not `ftype.params` entries; `ctype` is untouched. Instead all **four**
-signature emitters special-case `ftype.varargtype` and must agree byte-for-byte:
+signature emitters special-case `ftype.varargtype` and `ftype.flexrettype` and
+must agree byte-for-byte:
 `function_sig` (which also feeds the value-call fast-path typedef and so the
 type-tag), `codefuncdec`'s cparams, `codelambdadec`'s cparams, and
 `codemethodtrampoline` (a variadic method's bound trampoline forwards
-`_varargs` + `_start` verbatim). `fixed_params` strips the trailing
+`_varargs` + `_start` verbatim and likewise passes `_flexout` + `_flexwant`).
+`fixed_params` strips the trailing
 `name == false` marker so the per-name param loop never emits a C parameter for
 it. Each of `codefuncdec` and `codelambdadec` then threads the context:
 
@@ -406,9 +417,8 @@ function's `...` (scope rule 4 enforced a second time, in codegen).
 
 The Lua entry wrapper (`genluaentry`), reached from `require`/Lua and the
 generic value-call path, captures the incoming arg count *before* the
-error-slot/errorhandler pushes inflate `L->top.p`, relaxes the arity check to
-*at least* `nfixed` (`calling Titan function %s with %d arguments, but expected
-at least %d`), then builds the struct from the surplus args:
+error-slot/errorhandler pushes inflate `L->top.p`, pads a short fixed prefix
+with nil, then builds the struct from every argument beyond `nfixed`:
 
 1. `_vcount = _nargs − nfixed`; **cap-check** `_vcount <= TITAN_VARARG_MAX`,
    else raise; `lu_byte _nvarargs = (lu_byte)_vcount`.
@@ -449,17 +459,22 @@ is a `t?` `TValue`, mirroring the `codeindexarray` option branch.
 **`#...` (`ExpDotsLen`)** is the bare expression
 `((lua_Integer)_varargs->n_args - _start)`.
 
-**`{...}` / `{e1, ..., ...}` (`codearray`)** detects a trailing `ExpDots` field
-and switches to a runtime-sized build: the table is anchored, the static prefix
-fields are evaluated into reserved slots, the array part is sized at runtime
-from `nprefix + (n_args − _start)`, and a runtime loop stores each
+**`{...}` / `{e1, ..., ...}` (`codearray`)** receives the trailing `ExpDots` as
+the adjustment's open source and switches to a runtime-sized build: the table
+is anchored, the static prefix fields are evaluated into reserved slots, the
+array part is sized at runtime from `nprefix + (n_args − _start)`, and a runtime loop stores each
 `args[_start + j]` with `obj2arr` plus a **`luaC_barrierback`** per collectable
 element (the table traces its array part). The driving struct/stride uses the
 **real** vararg element type `va.elem` (the struct actually allocated), not the
 array's declared element type, which a context may have overridden; when they
-differ, each element is converted via a synthetic `ExpCast` before the wrapped
-store. `return ...` needs no new codegen: the checker already expanded it into
-`ExpDotsIndex` reads that lower to `*_outparam_i`.
+differ, each element is converted via the ordinary cast lowering before the
+wrapped store. A final flexible-result call uses the same result-run consumer.
+
+`return ...` uses finite `ExpDotsIndex` projections for fixed result slots and,
+when the current function has `flexrettype`, preserves the remaining input run
+as the output open source. `codereturn` copies at most the inherited
+`_flexwant`, sets `_flexout->n_args`, and leaves surplus unread when the finite
+budget has already been satisfied.
 
 ### Static call sites: three forwarding cases
 
@@ -514,6 +529,13 @@ distinguishes `...: integer` from `...: value`. So:
 
 `luaD_callnoyield` can relocate the stack, so `codevaluecall` sets
 `ctx.uses_base_off` and recomputes `_base` afterward on both paths.
+The same exact tag also folds in `flexrettype`. On a matching native path the
+caller supplies the flexible output descriptor directly. On the generic path a
+finite sink requests its exact Lua result count; an open sink for a statically
+flexible producer uses `LUA_MULTRET`, preserves the actual count, and converts
+the dynamic suffix into the shared result run before resetting the Lua stack.
+Thus input and output tails share descriptor representations without changing
+which branch owns the boundary checks.
 
 ## The ABI bumps (0.9 and 0.10)
 
@@ -532,8 +554,10 @@ flexible-array object (`lu_byte n_args; T args[]`) to a descriptor
 the struct layout did not; mixing 0.9 and 0.10 modules would misread the bytes
 after `n_args`, so they must live under different `TITAN_PATH` directories.
 
-The current ABI is newer than this variadic change. It is bumped when other
-separate-compilation surfaces change, such as record interface serialization.
+The current ABI is **0.14**, newer than this variadic change. Flexible outputs
+reuse these descriptors but add `flexrettype` to serialized callable shapes and
+`_flexout`/`_flexwant` to native signatures. They shipped as ABI 0.14 rather
+than accepting both layouts under one marker.
 
 The `.so`-only import path round-trips `varargtype` through serialize and is
 covered by `spec/coder/so_import_spec.lua` and
@@ -551,6 +575,15 @@ codegen maintains [§2.D]:
 > Every collectable element reachable through any vararg descriptor is
 > independently anchored on a live Lua-stack slot for the descriptor's lifetime;
 > an anchored `Udata0` only keeps the element buffer itself alive.
+
+For input tails those roots are the original caller argument slots or the
+ordinary anchors for a freshly copied prefix. For flexible outputs the
+descriptor backing is caller-owned C storage, so an open GC-bearing result run
+gets a parallel traced Lua-stack range; generated code publishes the actual
+live prefix there before an allocating consumer and clears it after copying.
+Finite projected results use their normal per-result shadow slots. A pending
+return crossing `finally` must save the run count and keep the saved elements
+traced until the pending action resumes or is superseded by a raise.
 
 The descriptor may be a C-stack local. That is not a moving-GC hazard: Lua's GC
 does not move objects, so a pointer to a `TString`, `Table`, `Udata`, or a

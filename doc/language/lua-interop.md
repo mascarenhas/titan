@@ -76,10 +76,10 @@ assert(require "os" == lua_os)
 
 The same rule applies to `titan.coroutine`, `titan.async`, `titan.timer`,
 `titan.fs`, `titan.net`, and `titan.os`. The private `titan.uv` plumbing module
-uses the same canonical identity. In an installed Titan 0.13 tree these qualified
+uses the same canonical identity. In an installed Titan 0.14 tree these qualified
 names resolve to qualified standard-module files under
-`<root>/lib/titan/0.13/titan/`. Titan's installed Lua has
-`<root>/lib/titan/0.13/?.so` before its ordinary `lib/lua` entries in the
+`<root>/lib/titan/0.14/titan/`. Titan's installed Lua has
+`<root>/lib/titan/0.14/?.so` before its ordinary `lib/lua` entries in the
 default `package.cpath`, and standalone Titan programs ensure the same template
 is present. A Lua require and a desugared Titan short-name import therefore
 open the same DSO. The installation does not create parent-level or `lib/lua`
@@ -183,9 +183,12 @@ And, just as importantly, where they do *not* happen:
   it — never silent misbehavior. The same applies in reverse: Lua can
   freely (and type-incorrectly) mutate a table it got from Titan, and the
   error surfaces at the next Titan read.
-* **Never between Titan functions.** A Titan-to-Titan call, including
-  across Titan modules, is a direct native call with no checks — the
-  compiler has already proven the types match.
+* **Not on exact native Titan calls.** A direct Titan-to-Titan call, including
+  across modules, needs no boundary checks because the compiler has already
+  proven the types match. The same is true for a function value whose exact
+  run-time type tag matches its static type. A merely compatible Titan
+  function, a Lua callable, or a contextual call through `value` uses the
+  generic Lua-stack path and checks arguments and requested results there.
 
 When an argument check fails, the error message is prefixed with a source
 location of the shape `file:line:col:` — note that this is the location of
@@ -202,16 +205,13 @@ are described in
 
 ## Calling Titan functions: argument counts and multiple returns
 
-Titan function calls adjust missing arguments upward with `nil` and still
-reject extra arguments (see [Functions](functions.md)). When *Lua* calls
-a Titan function, the generated Lua entry wrapper performs the same
-adjustment before it checks parameter types. If the synthesized `nil`
-does not fit the parameter type, the call raises the usual boundary type
-error. Extra Lua arguments are not dropped; they raise an arity error:
-
-```
-calling Titan function f with 2 arguments, but expected at most 1
-```
+Titan function calls adjust missing arguments upward with `nil`. A
+fixed-parameter Titan function ignores surplus arguments; an input-variadic
+one collects them (see [Functions](functions.md)). When *Lua* calls a Titan
+function, the generated Lua entry wrapper performs the same adjustment before
+it checks the arguments the callee observes. If a synthesized `nil` does not
+fit the parameter type, the call raises the usual boundary type error. Every
+collected variadic argument is checked against its declared element type.
 
 Lua calls remain positional-only. In Lua, `test.f { x = 1 }` is exactly
 `test.f({ x = 1 })`: one ordinary table argument. It does not carry the syntax
@@ -235,8 +235,15 @@ end
 local test = require "test"
 local x, y = test.f(2)
 assert(x == 4 and y == "foo")
-assert(pcall(test.f, 2, "extra") == false)  -- extra argument: run-time error
+assert(test.f(2, "extra") == 4)             -- surplus argument is ignored
 ```
+
+A flexible Titan return crosses the same boundary as ordinary Lua multiple
+results. When Lua requests a finite number of results, the wrapper supplies
+that prefix and nil-fills absent flexible positions; an open Lua call receives
+the complete run that was produced, subject to Titan's 200-value flexible-tail
+bound. Fixed results and flexible elements are checked and converted before
+they reach Lua. See [Flexible returns](flexible-returns.md).
 
 ## Sharing arrays and maps with Lua
 
@@ -377,8 +384,8 @@ all; they are private to the module (see [Modules](modules.md)).
 ## Calling Lua from Titan
 
 Calls cross the boundary **both ways**: Lua calls Titan, and Titan calls
-Lua. Titan code can now receive a Lua function in a function-typed
-parameter (or a `value`) and call it directly. There is still no `import`
+Lua. Titan code can receive a Lua function in a function-typed parameter, or
+receive it as a `value` and call it contextually. There is still no `import`
 of a Lua *module* — `import` loads Titan modules and `foreign import` binds
 C headers (see [the C FFI](ffi.md)) — but a Lua callable passed in as an
 argument is fully usable:
@@ -406,6 +413,14 @@ value of the *exact* expected type skips the Lua stack entirely and calls
 the native entry directly; everything else goes through a normal Lua
 call.) A Lua function may still also travel through Titan opaquely as a
 `value` inside a shared table and be handed back intact.
+
+For a positional call whose static callee type is `value`, Titan derives a
+temporary function type from the written arguments and from the surrounding
+result demand. A finite annotated result supplies its expected type, an
+unannotated finite result becomes `value`, and an open variadic, flexible
+return, or array sink derives a flexible result tail. Named-call syntax is not
+available through `value`, because the run-time callable carries no Titan
+declaration names.
 
 For storing, passing, returning and the two call paths in general, see
 [Functions as values](functions.md#functions-as-values).

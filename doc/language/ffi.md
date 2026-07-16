@@ -271,7 +271,11 @@ and conflicting complete names across compatible redeclarations do not publish
 named-call metadata. Named syntax then gets a specific unavailable-prototype
 diagnostic, while the positional call remains available.
 
-Parenthesized direct C calls retain strict C arity. In a named call, every
+Parenthesized direct C calls retain strict C arity. A trailing Titan call with
+several statically visible results may be truncated to fill exactly the
+remaining C formals, but explicitly written surplus arguments remain an
+arity error. A run-time-open flexible result sequence cannot cross a C call
+boundary. In a named call, every
 omitted fixed parameter is treated as `nil` and accepted only if its
 Titan-visible type accepts or can coerce nil. An omitted pointer can therefore
 become `NULL`, but a required C integer cannot be omitted.
@@ -314,6 +318,12 @@ function call_it(cb: c.callback): integer
     return cb(41) as integer
 end
 ```
+
+C function and pointer return conventions remain fixed by their prototypes.
+A Titan function type with a flexible result tail cannot be converted to a C
+function pointer, and calling a C function never creates a Titan flexible
+result run. These strict boundaries are intentionally separate from
+[Titan's flexible returns](flexible-returns.md).
 
 ## Strings And Pointers
 

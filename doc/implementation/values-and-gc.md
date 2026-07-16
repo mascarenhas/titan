@@ -52,7 +52,7 @@ for locals, parameters, return values and temporaries alike:
 | `{T}` (array) | `Table*` | raw pointer; Titan arrays *are* Lua tables |
 | `{K:V}` (map) | `Table*` | likewise |
 | `value` | `TValue` | a full boxed Lua value, held **by value** |
-| function type (`(P...) -> R`) | `TValue` | boxed callable value: exact Titan closures can fast-path, other Lua callables go through `luaD_callnoyield` |
+| function type (`(P..., ...: I) -> (R..., ...: O)`) | `TValue` | boxed callable value; input/output tails change the callable type and native entry ABI, not the boxed representation |
 | record type (`Type.Nominal`) | `Udata*` | the record value *is* this userdata (below) |
 | `T?` (option) | `TValue` | boxed: nil or the payload |
 | foreign pointer except Lua `Udata *` | per `foreignctype` | e.g. `void*`, `char*`; ordinary borrowed pointers are not GC objects ([FFI internals](ffi-internals.md)) |
@@ -72,6 +72,14 @@ machinery. `initval` gives each type its zero value — `{ {0}, 0 }` (a nil
 else — so a declared-but-unset temporary is never garbage (it
 initializes `newtmp` temporaries and the Lua entry wrappers' argument
 holders; plain locals are declared bare and assigned immediately).
+
+Flexible input and output runs use the same element-specific
+`TitanVargInteger`/`TitanVargString`/… descriptor structs: a byte-sized actual
+count and a typed `args` pointer. The descriptor itself lives in generated C
+storage and is not traced. Its backing belongs to the caller for an output
+run (and to the caller's incoming argument frame for a borrowed input run), so
+GC visibility must be supplied separately whenever the element type is
+collectable.
 
 ### Conversion helpers
 
@@ -462,7 +470,7 @@ responsible for GC-visibility on both sides of a call:
   falls out of invariants 2 and 3: an argument expression's result is
   either a local/parameter (anchored at its home) or a temporary
   (anchored in its `_tmp_N_slot`).
-* **Returns.** The callee returns its first result in C and writes
+* **Returns.** The callee returns its first fixed result in C and writes
   results 2..n through out-parameters, anchoring none of them — safe
   because merely returning from a C function cannot trigger a
   collection. The caller re-anchors: `codecall` allocates a temp (with
@@ -475,15 +483,34 @@ responsible for GC-visibility on both sides of a call:
 TValue *_tmp_1_slot = s2v(_base + 0);
 TString* _tmp_1 = 0;                    /* out-param for return 2 */
 lua_Integer _tmp_2 = 0;                 /* first return: not GC-able, no slot */
-_tmp_2 = test_two_titan(L, _mod, &_tmp_1);
+_tmp_2 = test_two_titan(L, _mod, NULL, &_tmp_1);
 setsvalue(L, _tmp_1_slot, _tmp_1);
 ```
+
+* **Flexible returns.** The caller additionally passes a typed `_flexout`
+  descriptor and `_flexwant` budget. A finite projection is copied into its
+  ordinary typed result holders. An open run uses bounded caller-owned backing;
+  if the element type is GC-bearing, generated code reserves a parallel Lua
+  stack range, copies the returned live prefix into that traced range before
+  any allocating sink work, and clears it after consumption. The C descriptor
+  and its `args` array never count as roots on their own. A generic
+  `luaD_callnoyield(..., LUA_MULTRET)` obtains the same run from live Lua stack
+  values, converts it while those values are rooted, then hands it to the same
+  consumers.
 
 The string out-parameter is live in `_tmp_1` the moment the callee
 returns and is in a stack slot before any subsequent allocation can run.
 When a Lua program is the caller, the Lua entry wrapper plays this role:
-it reserves one stack slot per result (`lua_checkstack` + bumping
-`L->top.p`) before invoking the native function and writes each result
-back with `setwrapped` — for a record that is just the record's own
-userdata, since the value and its Lua face are one object
+it reserves stack space for the fixed prefix and requested flexible capacity
+before invoking the native function, then writes each actual result back with
+`setwrapped` — for a record that is just the record's own userdata, since the
+value and its Lua face are one object
 ([Lua interop internals](lua-interop-internals.md)).
+
+A pending `return` that crosses `finally` is the difficult lifetime case: the
+saved action must retain both the flexible count and every GC-bearing element
+in traced storage while the `finally` body allocates or calls again. Normal
+completion resumes that saved run; a raise from `finally` supersedes it and
+must not leave stale live roots. This is a required invariant of the
+error-handling lowering, not permission to rely on the native descriptor as a
+root.

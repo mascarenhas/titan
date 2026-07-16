@@ -44,12 +44,16 @@ The pieces:
   values. If you want a function that returns a single `nil`, write it
   explicitly as `: nil`. A single return type is written bare
   (`: integer`); multiple return types are written as a parenthesized list
-  (`: (integer, string)`); zero return values are written `: ()`.
-* **Functions whose return type carries a value must return on every
+  (`: (integer, string)`); zero return values are written `: ()`. A
+  parenthesized list may instead end in a flexible tail, such as
+  `: (...: string)` or `: (boolean, ...: integer)`, whose run-time length is
+  chosen by each call; see [Flexible returns](flexible-returns.md).
+* **Functions whose first fixed return is not `nil` must return on every
   control path.** If some path can fall off the end of the body, the
   compiler rejects the function with the compile-time error `function can
   return nil but return type is not nil`. Zero-return (`()`) functions and
-  `nil`-returning functions may simply fall off the end. A `return`
+  `nil`-returning functions may simply fall off the end. A function with only
+  a flexible return tail may also fall off, producing an empty run. A `return`
   statement can only appear as the last statement of a block — see
   [Statements](statements.md).
 * Declaring two top-level functions (or a function and a variable) with
@@ -57,12 +61,13 @@ The pieces:
   previous one at line N`).
 
 In a zero-return (`()`) function — including any function written without
-a return annotation — the only legal `return` is a bare `return` with no
-expression. `return nil` is **not** the same thing: it tries to return one
-value and is the arity error `returned 1 value(s) but function expected 0`.
-A bare `return` and `return nil` are equivalent only inside a function
-whose declared return type is exactly `nil`. For option- or
-`value`-returning functions, write `return nil` explicitly.
+a return annotation — a bare `return` returns no values. Expressions may also
+be written: they are evaluated from left to right for their effects, but the
+zero-result function exposes none of their values. Thus `return nil` still
+returns zero values in such a function; it differs from the same statement in
+an explicitly `: nil` function, which returns one `nil`. For option- or
+`value`-returning functions, write `return nil` explicitly when that result is
+intended.
 
 ## Exported and `local` functions
 
@@ -92,12 +97,14 @@ functions look like from Lua.
 
 ## Argument adjustment
 
-Titan function calls adjust upward, but never downward. A function
-declared with *n* parameters may be called with fewer than *n* arguments;
-the missing positions are filled with `nil` and then type-checked as if
-the caller had written those `nil` arguments explicitly. Calling with
-more than *n* arguments is still a compile-time error. Titan never drops
-extra arguments.
+Positional Titan calls adjust to the callee's parameter shape in both
+directions. A function declared with *n* fixed parameters may be called with
+fewer than *n* arguments; the missing positions are filled with `nil` and then
+type-checked as if the caller had written those `nil` arguments explicitly.
+Surplus argument expressions are still evaluated from left to right, but a
+non-variadic Titan function ignores their values. A
+[variadic function](variadic-parameters.md) receives the surplus in its `...`
+run instead.
 
 This is why omitted parameters are "optional" only when their declared
 type can accept the synthesized `nil` (for example `T?`, `value`,
@@ -128,37 +135,43 @@ direct-C call may omit a fixed parameter whose Titan-visible type accepts
 `nil`; see [Named arguments](named-arguments.md#matching-checking-and-omission).
 
 **Titan callers are checked at compile time.** Once missing positions
-have been filled with `nil`, each argument is coerced and checked against
-the corresponding parameter type. Too many arguments are rejected before
-code generation, with a message that quotes the function's type:
+have been filled with `nil`, each argument used by the callee is coerced and
+checked against the corresponding parameter type. Surplus expressions do not
+need to match a parameter, but they still run for their effects:
 
 ```lua
-function too_many(): float
-    return fma(2.0, 3.0, 1.0, 0.0)   -- compile-time error
-end
-```
+local effects: integer = 0
 
-```
-test.titan:6:15: type error: function 'fma' called with 4 arguments but expects 3.
-(float, float, float) -> float
+local function record_effect(): string
+    effects = effects + 1
+    return "ignored"
+end
+
+function ignored_extra(): float
+    return fma(2.0, 3.0, 1.0, record_effect())
+    -- record_effect() runs; fma receives only 2.0, 3.0, 1.0
+end
 ```
 
 **Lua callers are adjusted and checked at run time.** Lua code is not
 compiled by the Titan compiler, so the generated entry code of each
 exported function pads missing arguments with `nil`, then runs the usual
-boundary type checks. Extra Lua arguments are rejected:
+boundary type checks. A fixed-parameter function ignores surplus Lua
+arguments; an input-variadic function collects them:
 
 ```lua
 -- Lua
 local m = require "test"
 print(m.fma(2.0, 3.0, 1.0))            --> 7.0
 print(pcall(m.fma, 2.0, 3.0))          --> false   test.titan:1:1: type error, expected float but found nil
-print(pcall(m.fma, 2.0, 3.0, 1.0, 0.0)) --> false   calling Titan function fma with 4 arguments, but expected at most 3
+print(m.fma(2.0, 3.0, 1.0, 0.0))       --> 7.0    fourth argument ignored
 ```
 
-The adjustment rule is only for function arguments. `return`, multiple
-assignment and multiple declaration still require the exact number of
-values in fixed-arity contexts — see the next section.
+The same finite-demand principle governs `return`, multiple assignment, and
+multiple declaration: surplus values are ignored, but an ordinary fixed-only
+producer that cannot fill a required position is still an error. A declared
+flexible result tail represents positions that may be absent; see the next
+section and [Flexible returns](flexible-returns.md).
 
 ## Named calls
 
@@ -199,36 +212,33 @@ function divmod(a: integer, b: integer): (integer, integer)
 end
 ```
 
-The `return` statement must supply exactly as many expressions as the
-declared return types — `returned 1 value(s) but function expected 2` is
-the compile-time error otherwise — and each expression is checked (and
-implicitly coerced, where legal) against the corresponding declared
-type.
+The `return` statement must fill every declared fixed result position —
+`returned 1 value(s) but function expected 2` remains the compile-time error
+for a deficit — and each delivered expression is checked (and implicitly
+coerced, where legal) against the corresponding declared type. Surplus
+expressions are evaluated and discarded. A declared flexible tail instead
+forms an open sink and receives every compatible trailing result that actually
+exists.
 
 ### Consuming multiple values
 
 A call to a multi-return function produces an *expression list*, and the
-contexts that consume one are the same as in Lua — but, as everywhere in
-Titan, arity is strict. In a multiple declaration or assignment the
-number of values produced on the right must equal the number of names on
-the left (compile-time error `left-hand side expects N value(s) but
-right-hand side produces M value(s)`):
+contexts that consume one are the same as in Lua. A multiple declaration or
+assignment requests one value per name. Surplus producer values are ignored;
+if an ordinary fixed-only producer supplies too few, the checker reports
+`left-hand side expects N value(s) but the expression list produces M`:
 
 ```lua
 function use(): integer
     local q, r = divmod(13, 2)       -- ok: q = 6, r = 1
-    local q2, _ = divmod(13, 2)      -- ok: '_' is an ordinary name, used here to mean "ignored"
+    local q2 = divmod(13, 2)         -- ok: remainder is ignored
     local q3 = (divmod(13, 2))       -- ok: parentheses adjust the call to one value
     return q + r + q2 + q3
 end
 
-function bad1()
-    local q = divmod(13, 2)          -- compile-time error: left-hand side expects 1 value(s)
-end                                  --                     but right-hand side produces 2 value(s)
-
-function bad2()
+function bad()
     local a, b, c = divmod(13, 2)    -- compile-time error: left-hand side expects 3 value(s)
-end                                  --                     but right-hand side produces 2 value(s)
+end                                  --                     but the expression list produces 2 value(s)
 ```
 
 Note that `_` is not special syntax — it is a regular variable name that
@@ -237,13 +247,13 @@ discard.
 
 ### Expansion in the last position
 
-Exactly as in Lua, a multi-return call appearing in the **last position**
-of an expression list expands to all of its values; in any other
-position it is truncated to its first value. The compiler materializes
-each extra value as a separate expression and type-checks (and coerces)
-it individually against the corresponding expected type — a wrongly
-typed second or third value produces the same `expected X but found Y`
-compile-time errors a written-out argument would. Expansion applies to:
+Exactly as in Lua, only a call appearing in the **last position** of an
+expression list can expand; in any other position it is scalar. How far the
+last call expands is chosen by the consumer. A finite consumer requests only
+its remaining slots and ignores producer surplus. An open sink — a variadic
+argument tail, a flexible return tail, or the final field of an array
+constructor — consumes the complete visible run. Every delivered position is
+type-checked and coerced individually. Expansion applies to:
 
 * the right-hand side of multiple declarations and assignments (above);
 * `return` expression lists;
@@ -266,9 +276,10 @@ compile-time errors a written-out argument would. Expansion applies to:
   `(next, state, init, close)` can be used directly after `in`, and a
   trailing `...` in a variadic function can fill the remaining tuple slots.
 
-Map constructors are the exception: a multi-return call as a value
-(`[k] = divmod(13, 2)`) keeps only the first value; the extras are
-dropped.
+Map and record fields, named arguments, conditions, and other scalar positions
+request one value. For example, `[k] = divmod(13, 2)` keeps only the first.
+Calls with a flexible tail project `T?` into finite positions and preserve the
+whole run only in an open sink; see [Flexible returns](flexible-returns.md).
 
 ### Adjusting to one value
 
@@ -281,8 +292,8 @@ function just_div(a: integer, b: integer): integer
     return (divmod(a, b))    -- ok: adjusted to one value
 end
 
-function too_many(a: integer, b: integer): integer
-    return divmod(a, b)      -- compile-time error: returned 2 value(s) but function expected 1
+function first_only(a: integer, b: integer): integer
+    return divmod(a, b)      -- quotient delivered; remainder ignored
 end
 ```
 
@@ -313,9 +324,11 @@ function use(): integer
 end
 ```
 
-A **function type** is written `(P1, …, Pn) -> R` for one return,
+A **function type** is written `(P1, …, Pn) -> R` for one fixed return,
 `(P…) -> (R1, …, Rm)` for several, `() -> R` for no parameters, and
-`(P…) -> ()` for zero return values. `->` is right-associative and the
+`(P…) -> ()` for zero return values. An input tail is written
+`(...: P)`, and a flexible output tail as `(...: R)` or
+`(R1, ...: R)`. `->` is right-associative and the
 single-parameter form may drop its parentheses (`integer -> integer`), so
 higher-order types nest naturally: `(integer -> integer, integer) -> integer`.
 Writing a function type in an annotation is no longer an error.
@@ -350,7 +363,19 @@ module-table entry seen from Lua.
 into a `value` implicitly, and a `value` flows into a function type
 implicitly as well — the check that it is callable is deferred to the
 moment of the call (so a `value` holding a non-callable raises only when
-you try to call it).
+you try to call it). A `value` may also be called directly without first
+storing it in a function-typed slot: Titan derives a temporary positional
+function type from the arguments and the surrounding result demand. See
+[Contextual calls through `value`](flexible-returns.md#contextual-calls-through-value).
+
+**Function compatibility is directional.** An actual function may ignore
+inputs that callers through the expected slot are allowed to supply, and the
+expected slot may hide surplus results that the actual function produces. The
+actual may not require an input or omit a fixed result that future callers rely
+on. Input and output tails participate in the same directional rule. Exact
+identity remains stricter and selects the native fast path. The full rules and
+examples are in
+[Flexible returns](flexible-returns.md#function-compatibility-is-directional).
 
 **Anonymous functions are values too.** A `function (...) ... end`
 expression evaluates to a function value of the same kind, and it can
@@ -398,7 +423,7 @@ and have no implicit `self`; the automatically provided `Point.new` is a
 record function synthesized by the parser.
 
 Methods and record functions are top-level declarations like the functions in
-this chapter and follow the same rules for parameters, return values, arity
+this chapter and follow the same rules for parameters, return values, adjustment
 (method diagnostics read `method 'test.Point:move' called with ...`) and
 multiple returns. What differs — implicit `self` for methods, name resolution
 against the record, and record-member visibility — is described in
@@ -430,9 +455,10 @@ startup, their interface recovered from the compiled module. See
 
 The rules:
 
-* **The resolved signature must match exactly**: one parameter of type
-  `{string}` and a return type of `integer`. Transparent aliases of either
-  type are accepted. A top-level function named `main` with any other
+* **The resolved signature must match exactly**: one fixed parameter of type
+  `{string}`, no input-variadic tail, one fixed return of type `integer`, and no
+  flexible return tail. Transparent aliases of either type are accepted. A
+  top-level function named `main` with any other
   signature is an ordinary function, and the module compiles to a shared
   library as usual.
 * **Only one `main` per program.** If more than one module given on the

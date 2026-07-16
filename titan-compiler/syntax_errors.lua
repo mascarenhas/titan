@@ -44,6 +44,14 @@ local errors = {
 
    VarargColon = "Expected ':' after '...' in a variadic parameter declaration.",
 
+   FlexRetColon = "Expected ':' after '...' in a flexible return declaration.",
+
+   FlexRetType = "Expected a type after ':' in a flexible return declaration.",
+
+   FlexRetLast = "A flexible return must be the last return type.",
+
+   FlexRetParens = "A flexible return must appear inside a parenthesized return list.",
+
    AssignVar = "Expected '=' after variable declaration.",
 
    ExpVarDec = "Expected an expression to initialize variable.",

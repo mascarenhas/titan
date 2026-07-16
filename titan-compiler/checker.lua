@@ -34,6 +34,8 @@ local checkstat
 local checkexp
 local checkvar
 local checkfuncbody
+local annotate_call_results
+local check_generic_result_limit
 
 -- nesting depth of enclosing loops, so `break` can be rejected outside a loop
 local loop_depth = 0
@@ -92,6 +94,9 @@ local function checktype(typ, loc, errors, seen)
         end
         if typ.varargtype then
             checktype(typ.varargtype, loc, errors, seen)
+        end
+        if typ.flexrettype then
+            checktype(typ.flexrettype, loc, errors, seen)
         end
     end
 end
@@ -166,19 +171,54 @@ local function deoptionize(t)
     end
 end
 
--- Validate a variadic parameter / function-type element type `t` (the type of
--- each `...` element). Bans a `nil` element (a typed `...: t` cannot hold nil) and
--- a foreign (C FFI) pointer element (no `TitanVarg*` struct exists for it, §2.F).
--- Returns the original type when legal, or `types.Invalid()` after reporting.
-local function check_vararg_elem(t, loc, errors)
+-- The native input-vararg and flexible-result ABIs share the seven
+-- `TitanVargX` descriptor representations. Keep the checker-side inventory
+-- explicit so unsupported source types are rejected before the coder would
+-- need to choose a descriptor.
+local function has_varg_representation(t)
+    if types.is_c_tvalue(t) then
+        -- The coder deliberately maps Lua's by-value TValue FFI spelling to
+        -- TitanVargValue, the same descriptor used by Titan `value`.
+        return true
+    end
+    local tag = t._tag
+    if tag == "Type.Invalid" then
+        return true -- avoid cascading after an earlier type error
+    elseif tag == "Type.Integer" or tag == "Type.Float"
+        or tag == "Type.Boolean" or tag == "Type.String"
+        or tag == "Type.Array" or tag == "Type.Map"
+        or tag == "Type.Value" or tag == "Type.Nominal"
+        or tag == "Type.Function" or tag == "Type.COwned" then
+        return true
+    elseif tag == "Type.Option" then
+        -- Option values use the TValue descriptor, unless their tree contains
+        -- a C FFI type that `ctype` would route through foreign C lowering.
+        return not types.is_c(t)
+    elseif tag == "Type.Typedef" then
+        return has_varg_representation(t._type)
+    end
+    return false
+end
+
+-- Validate the element type shared by an input variadic parameter and a
+-- flexible return tail. `role` is either "parameter" or "return", solely to
+-- keep diagnostics precise at the source construct.
+local function check_varg_elem(t, loc, errors, role)
+    local subject = role == "return"
+        and "a flexible return" or "a variadic parameter"
     if t._tag == "Type.Nil" then
         checker.typeerror(errors, loc,
-            "a variadic parameter cannot have type nil")
+            "%s cannot have type nil", subject)
         return types.Invalid()
     elseif t._tag == "Type.Pointer"
            or types.resolve_c_typedef(t)._tag == "Type.CPointer" then
         checker.typeerror(errors, loc,
-            "a variadic parameter cannot have a foreign pointer type")
+            "%s cannot have a foreign pointer type", subject)
+        return types.Invalid()
+    elseif not has_varg_representation(t) then
+        checker.typeerror(errors, loc,
+            "%s cannot use type %s because it has no supported variadic-value representation",
+            subject, types.tostring(t))
         return types.Invalid()
     end
     return t
@@ -198,14 +238,24 @@ local function param_types(params, st, errors)
     local n = #params
     for i, pdecl in ipairs(params) do
         if i == n and pdecl.name == false then
-            varargtype = check_vararg_elem(
-                typefromnode(pdecl.type, st, errors), pdecl.loc, errors)
+            varargtype = check_varg_elem(
+                typefromnode(pdecl.type, st, errors), pdecl.loc, errors,
+                "parameter")
         else
             table.insert(ptypes, typefromnode(pdecl.type, st, errors))
             table.insert(paramnames, pdecl.name)
         end
     end
     return ptypes, varargtype, paramnames
+end
+
+local function flexible_return_type(node, st, errors)
+    if not node.flexrettype then
+        return false
+    end
+    return check_varg_elem(
+        typefromnode(node.flexrettype, st, errors),
+        node.flexrettype.loc or node.loc, errors, "return")
 end
 
 -- Resolve the in-scope `...` for a `...`/`#...`/`...[e]` use. Returns the
@@ -278,7 +328,7 @@ end
 local function c_function_as_function_type(cfunc)
     local ret = c_resolve(cfunc.ret)
     local rettypes = ret._tag == "Type.CVoid" and {} or { cfunc.ret }
-    return types.Function(cfunc.params, rettypes, cfunc.vararg, false)
+    return types.Function(cfunc.params, rettypes, cfunc.vararg, false, false)
 end
 
 local function c_function_pointer_accepts_function(target, ftype)
@@ -298,7 +348,8 @@ local function c_pseudo_member(typ, name)
             _tag = "Type.CPseudoNew",
             ctype = typ,
             name = name,
-            type = types.Function({}, { c_owned_type(typ, false) }, false, false),
+            type = types.Function({}, { c_owned_type(typ, false) }, false,
+                false, false),
         }
     elseif name == "new_array" then
         return {
@@ -307,7 +358,7 @@ local function c_pseudo_member(typ, name)
             name = name,
             array = true,
             type = types.Function({ types.Integer() },
-                { c_owned_type(typ, true) }, false, false),
+                { c_owned_type(typ, true) }, false, false, false),
         }
     elseif name == "sizeof" or name == "alignof" then
         return {
@@ -534,10 +585,11 @@ typefromnode = util.make_visitor({
         -- its element type node on `node.varargtype` (false when absent); set
         -- the resulting Type.Function's `varargtype` slot accordingly.
         local varargtype = node.varargtype
-            and check_vararg_elem(typefromnode(node.varargtype, st, errors),
-                                  node.varargtype.loc, errors)
+            and check_varg_elem(typefromnode(node.varargtype, st, errors),
+                                node.varargtype.loc, errors, "parameter")
             or false
-        return types.Function(ptypes, rettypes, false, varargtype)
+        local flexrettype = flexible_return_type(node, st, errors)
+        return types.Function(ptypes, rettypes, false, varargtype, flexrettype)
     end,
 
     ["Ast.TypeOption"] = function(node, st, errors)
@@ -573,6 +625,7 @@ local function trycoerce(source, target, errors)
        and not types.c_address_coerceable(source._type, target) then
         mark_mutable_c_address_source(source)
         local n = ast.ExpCast(source.loc, source, target)
+        n._implicit_coercion = true
         n._type = target
         return n
     elseif types.coerceable(source._type, target) then
@@ -586,6 +639,7 @@ local function trycoerce(source, target, errors)
            target._tag ~= "Type.Boolean" and
            target._tag ~= "Type.Value" then
             local inner = ast.ExpCast(source.loc, source, source._type.base)
+            inner._implicit_coercion = true
             inner._type = source._type.base
             n = trycoerce(inner, target, errors)
         elseif target._tag == "Type.Option" then
@@ -603,6 +657,7 @@ local function trycoerce(source, target, errors)
         else
             n = ast.ExpCast(source.loc, source, target)
         end
+        n._implicit_coercion = true
         n._type = target
         return n
     else
@@ -635,73 +690,402 @@ local function trytostr(node)
     end
 end
 
--- Adjust-up expansion of a trailing `...` into a fixed-arity context (a `local`,
--- an assignment, a `return`, or a call to a NON-variadic callee). `exps` is the
--- expression list, already with the trailing `Ast.ExpDots` at its end and every
--- entry already `checkexp`'d. `nslots` is the number of target positions;
--- `slottype(i)` returns the declared type of slot `i` (or nil when a slot's type
--- is unknown — e.g. an inferred `local`, where the element type is used). The
--- trailing `...` is replaced in place by `deficit = nslots - (#exps - 1)`
--- synthesized `Ast.ExpDotsIndex` nodes reading `...[1..deficit]`, with per-element
--- out-of-range mode following the slot's optionality:
---   optional `s?`     -> _nilfill = true,  _type = s? (out-of-range nil-fills);
---   non-optional `t`  -> _nilfill = false, _type = t  (out-of-range raises).
--- The synthesized nodes carry their `_type`/`_nilfill`; the caller's existing
--- coerce/checkmatch loop then coerces each against its slot exactly like any
--- other expression. `deficit < 0` is a compile error (too many values for the
--- slots); `deficit == 0` is a legal no-op (the `...` is simply dropped). `term`
--- names the context for the over-supply diagnostic.
-local function expand_dots_adjustup(exps, nslots, slottype, term, errors, nilfill_slot)
-    local dotsnode = table.remove(exps) -- pop the trailing ExpDots
-    local elem = dotsnode._vararg_elem
-    local nstatic = #exps
-    local deficit = nslots - nstatic
-    if deficit < 0 then
-        checker.typeerror(errors, dotsnode.loc,
-            "%s expects %d value(s) but the expression list (with '...') "
-            .. "already supplies %d", term, nslots, nstatic)
-        return
-    end
-    for k = 1, deficit do
-        local slotidx = nstatic + k
-        local stype = slottype(slotidx)
-        local idxexp = ast.ExpInteger(dotsnode.loc, k)
-        idxexp._type = types.Integer()
-        local node = ast.ExpDotsIndex(dotsnode.loc, idxexp)
-        local nilfill = nilfill_slot and nilfill_slot(stype)
-            or (stype and stype._tag == "Type.Option")
-        if nilfill then
-            -- Nil-fill out-of-range. Type the read as the REAL element wrapped
-            -- (`optionize(elem)`), NOT the slot type, so the caller's
-            -- trycoerce/checkmatch inserts the genuine element->base conversion
-            -- (e.g. integer? -> float?) and rejects an incompatible element
-            -- (e.g. integer into a string? slot). Force-setting the slot type
-            -- here would make trycoerce a no-op and bit-reinterpret the element
-            -- in codegen.
-            node._nilfill = true
-            node._type = optionize(elem)
-        else
-            node._nilfill = false
-            node._type = elem
-        end
-        table.insert(exps, node)
-    end
-end
-
 local function nil_can_adjust_to(typ)
     return typ and (types.coerceable(types.Nil(), typ)
         or types.compatible(typ, types.Nil()))
 end
 
-local function append_missing_nil_args(args, nparams, loc, fname, errors, ftype)
-    for i = #args + 1, nparams do
-        local ptype = ftype.params[i]
-        local exp = ast.ExpNil(loc)
-        exp._type = types.Nil()
-        exp = trycoerce(exp, ptype, errors)
-        table.insert(args, exp)
-        checkmatch("argument " .. i .. " of call to " .. fname,
-            ptype, exp._type, errors, loc)
+-- Expression-list demand.  `fixed` is always dense: UNKNOWN_SLOT represents a
+-- position whose type is not known yet (notably an inferred local).  `tail` is
+-- false for a finite consumer, a Type.* value for an open typed consumer, or
+-- INFER_OPEN for an open consumer whose element type is inferred from its
+-- inputs.  Keeping the sentinels as real table values is important: using nil
+-- for an unknown slot would make Lua's length operator collapse the demand.
+local UNKNOWN_SLOT = {}
+local INFER_OPEN = {}
+local TITAN_VARARG_MAX = 200
+-- Lua 5.5 stores a finite VM result request in the current CallInfo's
+-- CIST_NRESULTS field.  `MAXRESULTS` is therefore an independent boundary from
+-- Titan's 200-element flexible descriptor: a finite generic function-value
+-- call may not ask the VM for more results than this. Statically open generic
+-- calls use LUA_MULTRET and do not cross the finite-result encoding boundary.
+local LUA_VM_MAX_RESULTS = 250
+
+local function result_demand(fixed, tail, opts)
+    opts = opts or {}
+    return {
+        fixed = fixed or {},
+        tail = tail or false,
+        missing = opts.missing or "error",
+        explicit_surplus = opts.explicit_surplus or "discard",
+        term = opts.term or "expression list",
+        slot_term = opts.slot_term,
+        loc = opts.loc,
+        open_term = opts.open_term,
+        return_arity = opts.return_arity,
+        open_coerce = opts.open_coerce,
+        check_expression = opts.check_expression,
+        dots_limit = opts.dots_limit,
+        dots_nilfill = opts.dots_nilfill,
+        defer_open_check = opts.defer_open_check,
+        suppress_flex_cap = opts.suppress_flex_cap,
+    }
+end
+
+local function expected_type(typ)
+    if typ == UNKNOWN_SLOT or typ == INFER_OPEN then
+        return nil
+    end
+    return typ
+end
+
+-- Build a structural function result shape from the same demand vocabulary
+-- used by expression-list adjustment. Unknown finite/open slots become
+-- `value`; a typed open slot is validated as a flexible-return descriptor at
+-- the sink location. Generic-for and ordinary calls through `value` share this
+-- constructor so their contextual function types cannot drift apart.
+local function synthesize_function_type(params, varargtype, demand, loc,
+                                        errors)
+    local rettypes = {}
+    for i, target in ipairs(demand.fixed) do
+        rettypes[i] = expected_type(target) or types.Value()
+    end
+
+    local flexrettype = false
+    if demand.tail then
+        flexrettype = expected_type(demand.tail) or types.Value()
+        flexrettype = check_varg_elem(flexrettype,
+            demand.loc or loc, errors, "return")
+    end
+
+    return types.Function(params, rettypes, false, varargtype or false,
+        flexrettype)
+end
+
+local function demand_term(demand, index)
+    if demand.slot_term then
+        return demand.slot_term(index)
+    end
+    return demand.term
+end
+
+local function mark_discarded(exp)
+    exp._discard_results = true
+    if exp._tag == "Ast.ExpCall" then
+        exp._voidok = true
+    end
+end
+
+local function coerce_demanded_value(exp, target, term, errors)
+    target = expected_type(target)
+    if not target then return exp end
+    local source = exp
+    exp = trycoerce(exp, target, errors)
+    if source._missing_value then exp._missing_value = true end
+    checkmatch(term, target, exp._type, errors, exp.loc)
+    return exp
+end
+
+local function remaining_demand(demand, first)
+    local fixed = {}
+    for i = first, #demand.fixed do
+        table.insert(fixed, demand.fixed[i])
+    end
+    return result_demand(fixed, demand.tail, {
+        missing = demand.missing,
+        explicit_surplus = demand.explicit_surplus,
+        term = demand.term,
+        slot_term = demand.slot_term and function(i)
+            return demand.slot_term(first + i - 1)
+        end or nil,
+        loc = demand.loc,
+        open_term = demand.open_term,
+        return_arity = demand.return_arity,
+        open_coerce = demand.open_coerce,
+        check_expression = demand.check_expression,
+        dots_limit = demand.dots_limit,
+        dots_nilfill = demand.dots_nilfill,
+        defer_open_check = demand.defer_open_check,
+        suppress_flex_cap = demand.suppress_flex_cap,
+    })
+end
+
+-- Return the finite values made visible by checking `exp` under its demand.
+-- Calls publish a consumer-visible projection separately from their declared
+-- ABI result list; every other expression is scalar.
+local function finite_result_expressions(exp)
+    if exp._tag ~= "Ast.ExpCall" then
+        return { exp }
+    end
+
+    local visible = exp._visible_types or exp._types or {}
+    local out = {}
+    for i, typ in ipairs(visible) do
+        local value
+        if i == 1 then
+            value = exp
+        else
+            value = ast.ExpExtra(exp.loc, exp, i, typ)
+        end
+        local source = exp._result_sources and exp._result_sources[i]
+        if source then
+            value._result_source = source
+            if source.kind == "flex" then
+                value._from_flex = true
+                value._possibly_absent = source.may_absent and true or false
+            end
+        end
+        table.insert(out, value)
+    end
+    return out
+end
+
+-- Check and elaborate one expression list under a finite/open demand.  The
+-- returned `exps` preserves every written expression in lexical order; extra
+-- fixed projections are synthesized after the trailing producer, while
+-- explicit surplus expressions remain present and are marked for effect-only
+-- lowering.  `fixed` and `tail_scalars` describe the values delivered to the
+-- sink, and `open_source` identifies the sole possible runtime-sized final run.
+local function adjust_explist(exps, demand, st, errors)
+    local adjusted = {
+        exps = {},
+        fixed = {},
+        tail_scalars = {},
+        discards = {},
+        open_source = false,
+        open_type = false,
+        open_target = false,
+        open_start = false,
+    }
+    local next_fixed = 1
+
+    local function current_target()
+        if next_fixed <= #demand.fixed then
+            return demand.fixed[next_fixed], false
+        elseif demand.tail then
+            return demand.tail, true
+        end
+        return nil, false
+    end
+
+    local function accept(exp, target, intail)
+        local index = next_fixed
+        local term = intail and demand.term or demand_term(demand, index)
+        exp = coerce_demanded_value(exp, target, term, errors)
+        if intail then
+            exp._demand_tail = true
+            table.insert(adjusted.tail_scalars, exp)
+        else
+            exp._demand_slot = index
+            adjusted.fixed[index] = exp
+            next_fixed = next_fixed + 1
+        end
+        return exp
+    end
+
+    local function discard(exp, explicit)
+        mark_discarded(exp)
+        table.insert(adjusted.discards, exp)
+        if explicit and demand.explicit_surplus == "error" then
+            adjusted.explicit_surplus = (adjusted.explicit_surplus or 0) + 1
+        end
+        return exp
+    end
+
+    local n = #exps
+    local last = exps[n]
+    local has_dots = last and last._tag == "Ast.ExpDots"
+
+    local function check_expression(exp, context, subdemand, sink_index)
+        if demand.check_expression then
+            demand.check_expression(exp, st, errors, context, subdemand,
+                sink_index)
+        else
+            checkexp(exp, st, errors, context, subdemand)
+        end
+    end
+
+    -- Every non-final expression is scalar.  Once the finite prefix is full it
+    -- contributes one tail scalar, or is retained under a zero-result demand.
+    for i = 1, math.max(n - 1, 0) do
+        local exp = exps[i]
+        local target, intail = current_target()
+        local subdemand
+        if target then
+            subdemand = result_demand({ target }, false, {
+                term = demand_term(demand, next_fixed),
+            })
+        else
+            subdemand = result_demand({}, false, { term = demand.term })
+            mark_discarded(exp)
+        end
+        check_expression(exp, expected_type(target), subdemand, next_fixed)
+        if target then
+            exp = accept(exp, target, intail)
+        else
+            exp = discard(exp, true)
+        end
+        table.insert(adjusted.exps, exp)
+    end
+
+    if has_dots then
+        check_dots_marker(last, st, errors)
+        local elem = last._vararg_elem
+        local projection = 1
+        -- Some structured finite consumers deliberately use fewer elements of
+        -- a trailing `...` than their padded storage width. Generic `for`, for
+        -- example, borrows only the iterator's state/control inputs unless the
+        -- source explicitly reaches the optional close slot; its fourth tuple
+        -- position is then synthesized as nil. The callback runs after every
+        -- written prefix expression has been checked, so it can inspect the
+        -- iterator's resolved function type without a separate checking pass.
+        local dots_limit = demand.dots_limit
+            and demand.dots_limit(exps) or #demand.fixed
+        while next_fixed <= #demand.fixed and next_fixed <= dots_limit do
+            local target = demand.fixed[next_fixed]
+            local target_type = expected_type(target)
+            local index = ast.ExpInteger(last.loc, projection)
+            index._type = types.Integer()
+            local exp = ast.ExpDotsIndex(last.loc, index)
+            local forced_nilfill = demand.dots_nilfill
+            if type(forced_nilfill) == "function" then
+                forced_nilfill = forced_nilfill(next_fixed, target_type)
+            end
+            local nilfill = forced_nilfill
+                or (target_type and nil_can_adjust_to(target_type))
+            exp._nilfill = nilfill and true or false
+            exp._type = nilfill and optionize(elem) or elem
+            exp._from_dots = true
+            exp._dots_index = projection
+            exp = accept(exp, target, false)
+            table.insert(adjusted.exps, exp)
+            projection = projection + 1
+        end
+        if demand.tail then
+            last._open_dots = {
+                source_type = elem,
+                target_type = expected_type(demand.tail) or elem,
+                start = projection,
+            }
+            adjusted.open_source = last
+            adjusted.open_type = elem
+            adjusted.open_target = expected_type(demand.tail) or elem
+            adjusted.open_start = projection
+            table.insert(adjusted.exps, last)
+        elseif projection == 1 then
+            discard(last, true)
+        end
+    elseif last then
+        local target = current_target()
+        local subdemand = remaining_demand(demand, next_fixed)
+        if not target and not demand.tail then
+            mark_discarded(last)
+        end
+        check_expression(last, expected_type(target), subdemand, next_fixed)
+        table.insert(adjusted.exps, last)
+
+        local values = finite_result_expressions(last)
+        if #values == 0 then
+            -- A flex-only producer has no finite scalar but its dynamic run is
+            -- the value consumed by an open sink. Do not simultaneously mark
+            -- that same call as effect-only/discarded. A statically zero-result
+            -- fixed producer has no open run and remains an effect-only entry.
+            if not last._open_results then
+                discard(last, target == nil and not demand.tail)
+            end
+        else
+            for i, exp in ipairs(values) do
+                local value_target, intail = current_target()
+                if value_target then
+                    exp = accept(exp, value_target, intail)
+                    if i == 1 then
+                        adjusted.exps[#adjusted.exps] = exp
+                    else
+                        table.insert(adjusted.exps, exp)
+                    end
+                elseif i == 1 then
+                    adjusted.exps[#adjusted.exps] = discard(exp, true)
+                end
+            end
+        end
+
+        if last._open_results then
+            adjusted.open_source = last
+            adjusted.open_type = last._open_results.source_type
+            adjusted.open_target = last._open_results.target_type
+            adjusted.open_start = last._open_results.start
+        end
+    end
+
+    if next_fixed <= #demand.fixed then
+        adjusted.missing = #demand.fixed - next_fixed + 1
+        if demand.missing == "nil" then
+            while next_fixed <= #demand.fixed do
+                local exp = ast.ExpNil(last and last.loc or demand.loc)
+                exp._type = types.Nil()
+                exp._missing_value = true
+                exp = accept(exp, demand.fixed[next_fixed], false)
+                table.insert(adjusted.exps, exp)
+            end
+        elseif demand.missing ~= "ignore" then
+            if demand.return_arity then
+                checker.typeerror(errors, last and last.loc or demand.loc,
+                    "returned %d value(s) but function expected %d",
+                    next_fixed - 1, #demand.fixed)
+            else
+                checker.typeerror(errors, last and last.loc or demand.loc,
+                    "%s expects %d value(s) but the expression list produces %d",
+                    demand.term, #demand.fixed, next_fixed - 1)
+            end
+        end
+    end
+
+
+    local open_compatible = adjusted.open_source
+        and (types.equals(adjusted.open_type, adjusted.open_target)
+             or types.compatible(adjusted.open_target, adjusted.open_type)
+             -- Flexible call results are converted element-wise by their sink.
+             -- Preserve the older input-`...` contract: forwarding a whole
+             -- vararg descriptor requires compatibility, not merely a scalar
+             -- coercion such as integer -> float.
+             or ((adjusted.open_source._tag ~= "Ast.ExpDots"
+                  or demand.open_coerce)
+                 and types.coerceable(adjusted.open_type,
+                                      adjusted.open_target)))
+    if adjusted.open_source and not demand.defer_open_check
+       and adjusted.open_type._tag ~= "Type.Invalid"
+       and adjusted.open_target._tag ~= "Type.Invalid"
+       and not open_compatible then
+        if adjusted.open_source._tag == "Ast.ExpDots" then
+            checker.typeerror(errors, adjusted.open_source.loc,
+                "'...' element type %s is not compatible with the '...' element type %s of %s",
+                types.tostring(adjusted.open_type),
+                types.tostring(adjusted.open_target),
+                demand.open_term or demand.term)
+        else
+            checker.typeerror(errors, adjusted.open_source.loc,
+                "open result element type %s is not compatible with %s element type %s",
+                types.tostring(adjusted.open_type), demand.term,
+                types.tostring(adjusted.open_target))
+        end
+    end
+
+    return adjusted
+end
+
+local function replace_adjusted_value(adjusted, old, new)
+    if old == new then return end
+    for i, exp in ipairs(adjusted.exps) do
+        if exp == old then
+            adjusted.exps[i] = new
+            break
+        end
+    end
+    for i, exp in pairs(adjusted.fixed) do
+        if exp == old then adjusted.fixed[i] = new end
+    end
+    for i, exp in ipairs(adjusted.tail_scalars) do
+        if exp == old then adjusted.tail_scalars[i] = new end
     end
 end
 
@@ -844,45 +1228,25 @@ local function nil_exp(loc)
     return exp
 end
 
-local function expand_trailing_multireturn(exps)
-    local lastexp = exps[#exps]
-    if lastexp and lastexp._types and #lastexp._types > 1 then
-        for i = 2, #lastexp._types do
-            table.insert(exps, ast.ExpExtra(lastexp.loc, lastexp, i, lastexp._types[i]))
-        end
-    end
-end
-
-local function forin_dots_target(exps)
+-- A trailing `...` in the generic-for setup tuple supplies the iterator plus
+-- only the fixed state/control inputs that iterator can consume. The tuple's
+-- fourth storage slot is the optional close callable; it must remain the
+-- ordinary synthesized nil unless the written prefix actually reaches it.
+-- This preserves the pre-demand-elaboration generic-for contract while still
+-- routing the projections through `adjust_explist`.
+local function forin_dots_limit(exps)
     local prefix = #exps - 1
-    local target = 4
+    local limit = 4
     local ftype = exps[1] and exps[1]._type
     local cfunc = ftype and c_function_pointer_type(ftype)
     if cfunc then
         ftype = c_function_as_function_type(cfunc)
     end
     if ftype and ftype._tag == "Type.Function" then
-        target = math.max(prefix + 1, 1 + math.min(#ftype.params, 2))
-        if target > 4 then target = 4 end
+        limit = math.max(prefix + 1, 1 + math.min(#ftype.params, 2))
+        if limit > 4 then limit = 4 end
     end
-    return target
-end
-
-local function forin_tuple_slottype(exps, i)
-    local ftype = exps[1] and exps[1]._type
-    local cfunc = ftype and c_function_pointer_type(ftype)
-    if cfunc then
-        ftype = c_function_as_function_type(cfunc)
-    end
-    if not (ftype and ftype._tag == "Type.Function") then
-        return nil
-    elseif i == 2 then
-        return ftype.params[1] or types.Nil()
-    elseif i == 3 then
-        return ftype.params[2] or types.Nil()
-    else
-        return nil
-    end
+    return limit
 end
 
 local function check_forin_decl_init(decl, exp, st, errors)
@@ -913,14 +1277,14 @@ local function forin_ftype_from_slot_type(typ)
 end
 
 local function function_type_as_c_pointer(ftype)
-    if #ftype.rettypes > 1 or ftype.varargtype then
+    if #ftype.rettypes > 1 or ftype.varargtype or ftype.flexrettype then
         return nil
     end
     local ret = ftype.rettypes[1] or types.CVoid()
     return types.CPointer(types.CFunction(ftype.params, ret, ftype.vararg, false), {})
 end
 
-local function check_forin_callable_exp(exp, st, errors)
+local function check_forin_callable_exp(exp, st, errors, context, demand)
     if exp._tag == "Ast.ExpVar" and exp.var._tag == "Ast.VarDot" then
         checkvar(exp.var, st, errors)
         if exp.var._decl then exp.var._decl._used = true end
@@ -939,7 +1303,7 @@ local function check_forin_callable_exp(exp, st, errors)
             return
         end
     end
-    checkexp(exp, st, errors)
+    checkexp(exp, st, errors, context, demand)
 end
 
 local function forin_decl_return_type(decl, index, st, errors)
@@ -971,7 +1335,8 @@ local function synthesize_forin_iterator_type(node, st, errors)
     for i, decl in ipairs(node.decls) do
         table.insert(rettypes, forin_decl_return_type(decl, i, st, errors))
     end
-    return types.Function(params, rettypes, false, false)
+    return synthesize_function_type(params, false,
+        result_demand(rettypes, false, { loc = node.loc }), node.loc, errors)
 end
 
 local function synthesize_forin_close_type(exps)
@@ -979,7 +1344,7 @@ local function synthesize_forin_close_type(exps)
     if exps[2]._type._tag ~= "Type.Nil" then
         table.insert(params, exps[2]._type)
     end
-    return types.Function(params, {}, false, false)
+    return types.Function(params, {}, false, false, false)
 end
 
 local function forin_nil_capable_control(typ)
@@ -991,50 +1356,102 @@ local function forin_nil_capable_control(typ)
         or (rtyp and rtyp._tag == "Type.CPointer")
 end
 
-local function make_forin_call(loc, iter_decl, args, rettypes, cfunc)
+local function forin_effective_results(ftype, count)
+    local results = {}
+    for i = 1, count do
+        if ftype.rettypes[i] then
+            results[i] = ftype.rettypes[i]
+        elseif ftype.flexrettype then
+            results[i] = optionize(ftype.flexrettype)
+        else
+            break
+        end
+    end
+    return results
+end
+
+local function make_forin_call(loc, iter_decl, args, ftype, nresults, cfunc,
+                               errors, report_result_limit)
     local call = ast.ExpCall(loc, hidden_exp(loc, iter_decl),
         ast.ArgsFunc(loc, args))
-    call._types = rettypes
-    call._type = rettypes[1] or types.Void()
     call._c_pointer_call = cfunc
+    local fixed = {}
+    for i = 1, nresults do fixed[i] = UNKNOWN_SLOT end
+    local demand = result_demand(fixed, false, {
+        term = "generic for iterator results",
+        loc = loc,
+        suppress_flex_cap = true,
+    })
+    annotate_call_results(call, ftype, demand, errors)
+    if not cfunc then
+        check_generic_result_limit(call, errors, report_result_limit)
+    end
+    call._arg_adjustment = {
+        exps = args,
+        fixed = args,
+        tail_scalars = {},
+        discards = {},
+        open_source = false,
+    }
+    call._npassed_args = #args
+    call._open_args = false
     return call
 end
 
 local function checkforin(node, st, errors)
-    local exps = node.exps
-    local lastexp = exps[#exps]
-    local dots = lastexp and lastexp._tag == "Ast.ExpDots"
-    for i, exp in ipairs(exps) do
-        if not (dots and i == #exps) then
-            if i == 1 or i == 4 then
-                check_forin_callable_exp(exp, st, errors)
-            else
-                checkexp(exp, st, errors)
-            end
-        end
-    end
-    if dots then
-        check_dots_marker(lastexp, st, errors)
-        expand_dots_adjustup(exps, forin_dots_target(exps),
-            function(i) return forin_tuple_slottype(exps, i) end,
-            "generic for iterator tuple", errors, nil_can_adjust_to)
-    else
-        expand_trailing_multireturn(exps)
-    end
-    if #exps > 4 then
-        checker.typeerror(errors, node.loc,
-            "generic for iterator tuple produces %d value(s) but expects at most 4",
-            #exps)
-    end
-    while #exps < 4 do
-        table.insert(exps, nil_exp(node.loc))
-    end
+    local tuple_fixed = {
+        UNKNOWN_SLOT, UNKNOWN_SLOT, UNKNOWN_SLOT, UNKNOWN_SLOT,
+    }
+    local tuple_adjustment = adjust_explist(node.exps,
+        result_demand(tuple_fixed, false, {
+            term = "generic for iterator tuple",
+            loc = node.loc,
+            missing = "nil",
+            explicit_surplus = "discard",
+            dots_limit = forin_dots_limit,
+            -- Lua's generic-for setup tuple adjusts missing state/control
+            -- values upward with nil. A close callable projected into slot 4
+            -- retains the established typed/raising `...` read: the current
+            -- lowering has a statically present close call and therefore must
+            -- not turn its type into an option merely because the backing run
+            -- can be short.
+            dots_nilfill = function(slot)
+                return slot < 4
+            end,
+            check_expression = function(exp, est, eerrors, context, demand,
+                                        sink_index)
+                if sink_index == 1 or sink_index == 4 then
+                    check_forin_callable_exp(exp, est, eerrors, context,
+                        demand)
+                else
+                    checkexp(exp, est, eerrors, context, demand)
+                end
+            end,
+        }), st, errors)
+    node._tuple_adjustment = tuple_adjustment
+    local exps = {}
+    for i = 1, 4 do exps[i] = tuple_adjustment.fixed[i] end
+    -- Keep the four lowered tuple values in the legacy field for current
+    -- generic-for codegen. Every written surplus expression remains owned by
+    -- `_tuple_adjustment.exps` with discard metadata for the demand-aware coder.
+    node.exps = exps
+
+    -- The iterator slot is required. A finite projection from a flexible tuple
+    -- is optional, so use the ordinary runtime unwrap before callable
+    -- resolution; an absent iterator fails at the same force boundary as any
+    -- other optional callable used as a value.
+    local raw_iter = exps[1]
+    exps[1] = tryforce(exps[1])
+    replace_adjusted_value(tuple_adjustment, raw_iter, exps[1])
+    node.exps[1] = exps[1]
 
     local ftype = exps[1]._type
     local iter_cfunc
     if ftype._tag == "Type.Value" then
         ftype = synthesize_forin_iterator_type(node, st, errors)
+        local old = exps[1]
         exps[1] = trycoerce(exps[1], ftype, errors)
+        replace_adjusted_value(tuple_adjustment, old, exps[1])
         ftype = exps[1]._type
     else
         ftype, iter_cfunc = forin_ftype_from_slot_type(ftype)
@@ -1043,7 +1460,7 @@ local function checkforin(node, st, errors)
         checker.typeerror(errors, exps[1].loc,
             "generic for iterator must be a function, value, or C function pointer but found %s",
             types.tostring(exps[1]._type))
-        ftype = types.Function({}, { types.Invalid() }, false, false)
+        ftype = types.Function({}, { types.Invalid() }, false, false, false)
     end
 
     if ftype.vararg or ftype.varargtype then
@@ -1055,12 +1472,24 @@ local function checkforin(node, st, errors)
             "generic for iterator expects at most 2 parameter(s) but found %d",
             #ftype.params)
     end
-    if #ftype.rettypes == 0 then
+    local effective_count = math.max(#node.decls, 1)
+    if ftype.flexrettype then
+        local flex_count = math.max(effective_count - #ftype.rettypes, 0)
+        if flex_count > TITAN_VARARG_MAX then
+            checker.typeerror(errors, exps[1].loc,
+                "finite flexible-result demand is %d value(s), maximum is %d",
+                flex_count, TITAN_VARARG_MAX)
+        end
+    end
+    local effective_results = forin_effective_results(ftype, effective_count)
+    if #effective_results == 0 then
         checker.typeerror(errors, exps[1].loc,
             "generic for iterator must return at least one value")
-        ftype = types.Function(ftype.params, { types.Invalid() }, false, false)
+        ftype = types.Function(ftype.params, { types.Invalid() }, false, false,
+            false)
+        effective_results = { types.Invalid() }
     else
-        local ctrltype = ftype.rettypes[1]
+        local ctrltype = effective_results[1]
         if ctrltype._tag == "Type.Nil" then
             checker.typeerror(errors, exps[1].loc,
                 "generic for iterator control result cannot be nil-only")
@@ -1072,12 +1501,16 @@ local function checkforin(node, st, errors)
     end
 
     if ftype.params[1] then
+        local old = exps[2]
         exps[2] = trycoerce(exps[2], ftype.params[1], errors)
+        replace_adjusted_value(tuple_adjustment, old, exps[2])
         checkmatch("generic for iterator state",
             ftype.params[1], exps[2]._type, errors, exps[2].loc)
     end
     if ftype.params[2] then
+        local old = exps[3]
         exps[3] = trycoerce(exps[3], ftype.params[2], errors)
+        replace_adjusted_value(tuple_adjustment, old, exps[3])
         checkmatch("generic for iterator initial control",
             ftype.params[2], exps[3]._type, errors, exps[3].loc)
     end
@@ -1085,12 +1518,18 @@ local function checkforin(node, st, errors)
     local close_type = exps[4]._type
     local close_ftype
     local close_cfunc
+    -- A close slot whose static type is `value` can hold nil at run time. Keep
+    -- the synthesized callable type for non-nil values, but tell codegen that
+    -- nil means the optional close slot is absent rather than a call target.
+    local runtime_optional_close = close_type._tag == "Type.Value"
     if close_type._tag == "Type.Nil" then
         node._has_close = false
     else
         if close_type._tag == "Type.Value" then
             close_ftype = synthesize_forin_close_type(exps)
+            local old = exps[4]
             exps[4] = trycoerce(exps[4], close_ftype, errors)
+            replace_adjusted_value(tuple_adjustment, old, exps[4])
             close_type = exps[4]._type
         else
             close_ftype, close_cfunc = forin_ftype_from_slot_type(close_type)
@@ -1115,6 +1554,8 @@ local function checkforin(node, st, errors)
             types.tostring(close_type))
         node._has_close = false
     end
+    node._runtime_optional_close = node._has_close
+        and runtime_optional_close or false
 
     node._tuple_decls = {
         hidden_decl(node.loc, "__forin_iter", exps[1]._type),
@@ -1123,7 +1564,7 @@ local function checkforin(node, st, errors)
         hidden_decl(node.loc, "__forin_close", exps[4]._type),
     }
     node._result_decls = {}
-    for i, rtype in ipairs(ftype.rettypes) do
+    for i, rtype in ipairs(effective_results) do
         node._result_decls[i] = hidden_decl(node.loc,
             "__forin_result_" .. i, rtype)
     end
@@ -1138,7 +1579,7 @@ local function checkforin(node, st, errors)
     if ftype.params[1] then table.insert(init_args, arg_state()) end
     if ftype.params[2] then table.insert(init_args, arg_init()) end
     node._init_call = make_forin_call(node.loc, node._tuple_decls[1],
-        init_args, ftype.rettypes, iter_cfunc)
+        init_args, ftype, #effective_results, iter_cfunc, errors, true)
 
     local next_args = {}
     if ftype.params[1] then table.insert(next_args, arg_state()) end
@@ -1151,7 +1592,7 @@ local function checkforin(node, st, errors)
         table.insert(next_args, ctrlarg)
     end
     node._next_call = make_forin_call(node.loc, node._tuple_decls[1],
-        next_args, ftype.rettypes, iter_cfunc)
+        next_args, ftype, #effective_results, iter_cfunc, errors, false)
 
     if node._has_close then
         local close_args = {}
@@ -1161,16 +1602,14 @@ local function checkforin(node, st, errors)
             table.insert(close_args, close_arg)
         end
         node._close_call = make_forin_call(node.loc, node._tuple_decls[4],
-            close_args,
-            close_ftype.rettypes,
-            close_cfunc)
+            close_args, close_ftype, 0, close_cfunc, errors, false)
         node._close_call._voidok = true
     end
 
     local visible_exps = {}
     for i, decl in ipairs(node.decls) do
         local exp
-        if ftype.rettypes[i] then
+        if effective_results[i] then
             exp = hidden_exp(node.loc, node._result_decls[i])
             if i == 1 then
                 exp = tryforce(exp)
@@ -1230,145 +1669,48 @@ end
 --   returns whether statement always returns from its function (always false for repeat/until)
 checkstat = util.make_visitor({
     ["Ast.StatDecl"] = function(node, st, errors)
-        local nlastexp = #node.exps
-        local lastexp = node.exps[nlastexp]
-        if lastexp and lastexp._tag == "Ast.ExpDots" then
-            -- `local a, b, ... = e1, ...` adjust-up: the trailing `...` fills the
-            -- remaining declarations. Resolve `$vararg` (scope/error checks),
-            -- check + coerce the static-prefix initializers, then synthesize one
-            -- `...[k]` read per remaining decl with OOB mode by the decl's
-            -- declared / option-ness, exactly like the non-dots multi-return path.
-            check_dots_marker(lastexp, st, errors)
-            local elem = lastexp._vararg_elem
-            -- Static prefix (everything before the `...`).
-            for i = 1, #node.exps - 1 do
-                local decl = node.decls[i]
-                local exp = node.exps[i]
-                if decl then
-                    if decl.type then
-                        checkdecl(decl, st, errors)
-                        checkexp(exp, st, errors, decl._type)
-                    else
-                        checkexp(exp, st, errors)
-                        if not decl.option then
-                            exp = tryforce(exp)
-                            decl._type = exp._type
-                        else
-                            decl._type = optionize(exp._type)
-                        end
-                        checkdecl(decl, st, errors)
-                    end
-                    exp = trycoerce(exp, decl._type, errors)
-                    node.exps[i] = exp
-                    checkmatch("declaration of local variable " .. decl.name,
-                        decl._type, exp._type, errors, decl.loc)
-                else
-                    checkexp(exp, st, errors)
-                end
-            end
-            local nstatic = #node.exps - 1
-            local deficit = #node.decls - nstatic
-            if deficit < 0 then
-                checker.typeerror(errors, lastexp.loc,
-                    "left-hand side expects %d value(s) but the expression list "
-                    .. "(with '...') already supplies %d", #node.decls, nstatic)
-                table.remove(node.exps)
+        local fixed = {}
+        for i, decl in ipairs(node.decls) do
+            if decl.type then
+                checkdecl(decl, st, errors)
+                fixed[i] = decl._type
             else
-                table.remove(node.exps) -- drop the ExpDots marker
-                for k = 1, deficit do
-                    local decl = node.decls[nstatic + k]
-                    local idxexp = ast.ExpInteger(lastexp.loc, k)
-                    idxexp._type = types.Integer()
-                    local exp = ast.ExpDotsIndex(lastexp.loc, idxexp)
-                    if decl.type then
-                        checkdecl(decl, st, errors)
-                        if decl._type._tag == "Type.Option" then
-                            -- Type the nil-fill read as the REAL element wrapped
-                            -- (`optionize(elem)`), not the slot type, so the
-                            -- trycoerce below inserts the genuine element->base
-                            -- conversion (e.g. integer? -> float?) and rejects an
-                            -- incompatible element (e.g. integer into string?).
-                            exp._nilfill = true
-                            exp._type = optionize(elem)
-                        else
-                            exp._nilfill = false
-                            exp._type = elem
-                        end
-                        exp = trycoerce(exp, decl._type, errors)
-                    elseif decl.option then
-                        decl._type = optionize(elem)
-                        exp._nilfill = true
-                        exp._type = decl._type
-                    else
-                        decl._type = elem
-                        exp._nilfill = false
-                        exp._type = elem
-                    end
-                    checkmatch("declaration of local variable " .. decl.name,
-                        decl._type, exp._type, errors, decl.loc)
-                    table.insert(node.exps, exp)
-                end
+                fixed[i] = UNKNOWN_SLOT
             end
-            for _, decl in ipairs(node.decls) do
-                if not decl._type then
-                    if decl.type then
-                        checkdecl(decl, st, errors)
-                    else
-                        decl._type = types.Invalid()
-                    end
-                end
-                declare(decl, st, errors)
-            end
-            return
         end
-        for i = 1, #node.exps do
-            local decl = node.decls[i]
-            local exp = node.exps[i]
-            if decl then
-                if decl.type then
-                    checkdecl(decl, st, errors)
-                    checkexp(exp, st, errors, decl._type)
+
+        local adjusted = adjust_explist(node.exps,
+            result_demand(fixed, false, {
+                term = "left-hand side",
+                loc = node.loc,
+                missing = "error",
+                explicit_surplus = "discard",
+                slot_term = function(i)
+                    local decl = node.decls[i]
+                    return decl and
+                        ("declaration of local variable " .. decl.name)
+                        or "local declaration"
+                end,
+            }), st, errors)
+        node.exps = adjusted.exps
+        node._result_adjustment = adjusted
+
+        for i, decl in ipairs(node.decls) do
+            local exp = adjusted.fixed[i]
+            if exp and not decl.type then
+                local old = exp
+                if decl.option then
+                    decl._type = optionize(exp._type)
                 else
-                    checkexp(exp, st, errors)
-                    if not decl.option then
-                        exp = tryforce(exp) -- never infer option type
-                        decl._type = exp._type
-                    else
-                        decl._type = optionize(exp._type)
-                    end
-                    checkdecl(decl, st, errors)
+                    exp = tryforce(exp) -- never infer an option type
+                    decl._type = exp._type
                 end
+                checkdecl(decl, st, errors)
                 exp = trycoerce(exp, decl._type, errors)
-                node.exps[i] = exp
                 checkmatch("declaration of local variable " .. decl.name,
                     decl._type, exp._type, errors, decl.loc)
+                replace_adjusted_value(adjusted, old, exp)
             end
-        end
-        if lastexp._types then -- multiple return values
-            for i = 2, #lastexp._types do
-                local decl = node.decls[nlastexp + i - 1]
-                local exp = ast.ExpExtra(lastexp.loc, lastexp, i, lastexp._types[i])
-                if decl then
-                    if decl.type then
-                        checkdecl(decl, st, errors)
-                        exp = trycoerce(exp, decl._type, errors)
-                    elseif decl.option then
-                        decl._type = optionize(exp._type)
-                        exp = trycoerce(exp, decl._type, errors)
-                    else
-                        exp = tryforce(exp) -- never infer option type
-                        decl._type = exp._type
-                    end
-                    checkmatch("declaration of local variable " .. decl.name,
-                        decl._type, exp._type, errors, decl.loc)
-                end
-                table.insert(node.exps, exp)
-            end
-        end
-        if #node.decls ~= #node.exps then
-            checker.typeerror(errors, node.loc, "left-hand side expects %d value(s) but right-hand side produces %d value(s)", #node.decls, #node.exps)
-        end
-        for _, decl in ipairs(node.decls) do
             if not decl._type then
                 -- no initializer reached this declaration (too few values on
                 -- the right-hand side, e.g. `local a, b = (f())`): the arity
@@ -1382,6 +1724,7 @@ checkstat = util.make_visitor({
             end
             declare(decl, st, errors)
         end
+        node.exps = adjusted.exps
     end,
 
     ["Ast.StatBlock"] = function(node, st, errors)
@@ -1530,35 +1873,33 @@ checkstat = util.make_visitor({
         for _, var in ipairs(node.vars) do
             checkvar(var, st, errors)
         end
-        local nexps = #node.exps
-        local lastexp = node.exps[nexps]
-        local dots = lastexp._tag == "Ast.ExpDots"
-        for i, exp in ipairs(node.exps) do
-            -- A trailing `...` is a marker resolved below, not a value to check
-            -- here (checking it as an expression reports the "bare `...`" error).
-            if not (dots and i == nexps) then
-                checkexp(exp, st, errors, node.vars[i] and node.vars[i]._type)
-            end
+        local fixed = {}
+        for i, var in ipairs(node.vars) do
+            -- Module values are never assignable and have no ordinary value
+            -- coercion/tostring path; preserve the dedicated diagnostic below
+            -- while still reserving their finite expression-list slot.
+            local decl = var._decl
+            local function_decl = var._type._tag == "Type.Function" and decl
+                and (decl._tag == "Ast.TopLevelFunc"
+                     or decl._tag == "Type.ModuleMember"
+                     or decl._tag == "Type.StaticMethod")
+            fixed[i] = (var._type._tag == "Type.Module" or function_decl)
+                and UNKNOWN_SLOT or var._type
         end
-        if dots then
-            -- `a, b, c = e1, ...` adjust-up into the LHS variables; OOB mode by
-            -- each target variable's optionality. The final coerce/checkmatch
-            -- loop below handles the synthesized `...[k]` reads uniformly.
-            check_dots_marker(lastexp, st, errors)
-            expand_dots_adjustup(node.exps, #node.vars,
-                function(i) return node.vars[i] and node.vars[i]._type end,
-                "assignment", errors)
-        elseif lastexp._types and #lastexp._types > 1 then
-            for i = 2, #lastexp._types do
-                table.insert(node.exps, ast.ExpExtra(lastexp.loc, lastexp, i, lastexp._types[i]))
-            end
-        end
-        if #node.vars ~= #node.exps then
-            checker.typeerror(errors, node.loc, "left-hand side expects %d value(s) but right-hand side produces %d value(s)", #node.vars, #node.exps)
-        end
-        for i, exp in ipairs(node.exps) do
-            local var = node.vars[i]
-            if var then
+        local adjusted = adjust_explist(node.exps,
+            result_demand(fixed, false, {
+                term = "left-hand side",
+                loc = node.loc,
+                missing = "error",
+                explicit_surplus = "discard",
+                slot_term = function() return "assignment" end,
+            }), st, errors)
+        node.exps = adjusted.exps
+        node._result_adjustment = adjusted
+
+        for i, var in ipairs(node.vars) do
+            local exp = adjusted.fixed[i]
+            if exp then
                 local texp = var._type
                 if texp._tag == "Type.Module" then
                     checker.typeerror(errors, var.loc, "trying to assign to a module")
@@ -1594,12 +1935,14 @@ checkstat = util.make_visitor({
                         end
                         var._decl._assigned = true
                     end
+                    local old = exp
                     exp = trycoerce(exp, var._type, errors)
-                    node.exps[i] = exp
+                    replace_adjusted_value(adjusted, old, exp)
                     checkmatch("assignment", var._type, exp._type, errors, var.loc)
                 end
             end
         end
+        node.exps = adjusted.exps
     end,
 
     ["Ast.StatCall"] = function(node, st, errors)
@@ -1619,14 +1962,6 @@ checkstat = util.make_visitor({
                 "cannot 'return' from inside a finally block")
         end
         local ftype = st:find_symbol("$function")._type
-        local nexps = #node.exps
-        local dots = nexps > 0 and node.exps[nexps]._tag == "Ast.ExpDots"
-        for i, exp in ipairs(node.exps) do
-            -- The trailing `...` is a marker, not a value to check here.
-            if not (dots and i == nexps) then
-                checkexp(exp, st, errors, ftype.rettypes[i])
-            end
-        end
         if #node.exps == 0 and #ftype.rettypes == 1
            and ftype.rettypes[1]._tag == "Type.Nil" then
             -- A bare `return` in a nil-returning function means `return nil`.
@@ -1634,36 +1969,21 @@ checkstat = util.make_visitor({
             nilexp._type = types.Nil()
             table.insert(node.exps, nilexp)
         end
-        local lastexp = node.exps[#node.exps]
-        if lastexp and lastexp._tag == "Ast.ExpDots" then
-            -- `return ...` is adjust-up into the function's FIXED return arity
-            -- (there is no runtime mechanism for a variable return count). A
-            -- function returning no values cannot use `return ...` at all.
-            check_dots_marker(lastexp, st, errors)
-            if #ftype.rettypes == 0 then
-                checker.typeerror(errors, lastexp.loc,
-                    "cannot use '...' to return from a function that returns no values")
-                table.remove(node.exps)
-            else
-                expand_dots_adjustup(node.exps, #ftype.rettypes,
-                    function(i) return ftype.rettypes[i] end, "return", errors)
-            end
-        elseif lastexp and lastexp._types and #lastexp._types > 1 then
-            for i = 2, #lastexp._types do
-                table.insert(node.exps, ast.ExpExtra(lastexp.loc, lastexp, i, lastexp._types[i]))
-            end
-        end
-        if #ftype.rettypes ~= #node.exps then
-            checker.typeerror(errors, node.loc, "returned %d value(s) but function expected %d", #node.exps, #ftype.rettypes)
-        end
-        for i, tret in ipairs(ftype.rettypes) do
-            local exp = node.exps[i]
-            if exp then
-                exp = trycoerce(exp, tret, errors)
-                node.exps[i] = exp
-                checkmatch("return", tret, exp._type, errors, exp.loc)
-            end
-        end
+
+        local fixed = {}
+        for i, typ in ipairs(ftype.rettypes) do fixed[i] = typ end
+        local adjusted = adjust_explist(node.exps,
+            result_demand(fixed, ftype.flexrettype, {
+                term = "return",
+                loc = node.loc,
+                missing = "error",
+                explicit_surplus = "discard",
+                return_arity = true,
+                open_coerce = true,
+                slot_term = function() return "return" end,
+            }), st, errors)
+        node.exps = adjusted.exps
+        node._result_adjustment = adjusted
         return true
     end,
 
@@ -1768,7 +2088,7 @@ checkvar = util.make_visitor({
                 else
                     node._decl = decl
                     node._type = types.Function(decl.params, decl.rettypes, false,
-                        decl.varargtype)
+                        decl.varargtype, decl.flexrettype)
                 end
             else
                 node._type = invalid(errors, node.loc,
@@ -1880,144 +2200,96 @@ local function expname(node)
     end
 end
 
--- Typechecks and argument list for a function or method call. When
--- `allow_missing` is true, a fixed-parameter deficit is adjusted upward by
--- synthesizing explicit nil arguments; surplus arguments are still rejected
--- below for non-variadic callees.
+-- Mirror the lowering distinction that matters to the checker: declarations
+-- with a statically named native entry never need Lua's finite-result request,
+-- while calls through locals, fields, casts, lambdas, bound methods, and other
+-- function values retain a generic VM branch.  C calls are handled before this
+-- predicate is consulted.
+local function uses_generic_callable_boundary(node)
+    if node.args._tag ~= "Ast.ArgsFunc" then return false end
+    if node.exp._tag ~= "Ast.ExpVar" then return true end
+    local decl = node.exp.var._decl
+    return not (decl and (decl._tag == "Ast.TopLevelFunc"
+        or decl._tag == "Type.ModuleMember"
+        or decl._tag == "Type.StaticMethod"))
+end
+
+check_generic_result_limit = function(node, errors, report_error)
+    if not uses_generic_callable_boundary(node) then return end
+    -- Every statically open generic producer uses LUA_MULTRET. Its actual count
+    -- is measured from the restored stack top and adjusted by Titan afterward,
+    -- so only genuinely finite calls use CallInfo's bounded result field.
+    if node._open_results then return end
+
+    local requested = #(node._visible_types or {})
+    if requested and requested > LUA_VM_MAX_RESULTS
+       and report_error ~= false then
+        checker.typeerror(errors, node.loc,
+            "function-value call can require %d finite VM results, but "
+            .. "Lua 5.5 supports at most %d; reduce the result demand or "
+            .. "use a direct Titan call",
+            requested, LUA_VM_MAX_RESULTS)
+    end
+end
+
+-- Typecheck a positional argument list through the shared expression-list
+-- demand. Titan calls nil-pad missing fixed positions and retain explicit
+-- surplus expressions for effects; strict C calls neither pad nor relax their
+-- ABI shape. `allow_missing == false` is the existing call-site signal for a C
+-- function pointer/direct FFI/pseudo-constructor.
 local function checkargs(ftype, args, loc, fname, st, errors, allow_missing)
     if allow_missing == nil then allow_missing = true end
-    local nparams = #ftype.params
-    local nargs = #args
-    local lastarg = args[nargs]
+    local strict_c = not allow_missing
+    local fixed = {}
+    for i, ptype in ipairs(ftype.params) do fixed[i] = ptype end
+    local tail = ftype.varargtype or (ftype.vararg and INFER_OPEN) or false
+    local original_count = #args
+    local adjusted = adjust_explist(args,
+        result_demand(fixed, tail, {
+            term = "call to " .. fname,
+            open_term = fname,
+            loc = loc,
+            missing = strict_c and "ignore" or "nil",
+            explicit_surplus = strict_c and "error" or "discard",
+            slot_term = function(i)
+                return "argument " .. i .. " of call to " .. fname
+            end,
+        }), st, errors)
 
-    -- A trailing `...` in the argument list. Dispatch on the CALLEE's vararg
-    -- shape (read BEFORE the multi-return `_types` expansion below):
-    --   * Titan-variadic callee (`ftype.varargtype`): WHOLE-TAIL. The `...` is
-    --     kept as a marker for codegen; the caller's `...` element type must be
-    --     `compatible` (gradual) with the callee's, and any over-supplied static
-    --     args (beyond the fixed params) are coerced to the callee's element type.
-    --   * C-FFI vararg callee (`ftype.vararg` boolean): forbidden — a Titan `...`
-    --     cannot flow into a foreign function (no struct ABI for it).
-    --   * non-variadic callee: ADJUST-UP into the fixed params.
-    if lastarg and lastarg._tag == "Ast.ExpDots" then
-        -- Check the static-prefix args (everything before the `...`).
-        for i = 1, nargs - 1 do
-            local arg = args[i]
-            local ptype = ftype.params[i]
-            checkexp(arg, st, errors, ptype)
-            ptype = ptype or arg._type
-            args[i] = trycoerce(args[i], ptype, errors)
-            checkmatch("argument " .. i .. " of call to " .. fname,
-                ptype, args[i]._type, errors, arg.loc)
-        end
-        check_dots_marker(lastarg, st, errors) -- resolve `$vararg`
-        if ftype.varargtype then
-            -- WHOLE-TAIL: keep the `...` marker; check element compatibility.
-            local nstatic = nargs - 1
-            local caller_elem = lastarg._vararg_elem
-            if nstatic < nparams then
-                -- START-ADJUST (§5.7 case 2): the static prefix fills only the
-                -- first `nstatic` fixed params; the remaining `nparams - nstatic`
-                -- fixed params are BORROWED from the caller's own `...`. Each
-                -- borrowed fixed param type must accept or coerce the caller's
-                -- `...` element type; if the runtime tail is too short, codegen
-                -- nil-fills only the fixed params whose types can accept nil.
-                if caller_elem and caller_elem._tag ~= "Type.Invalid" then
-                    for i = nstatic + 1, nparams do
-                        local ptype = ftype.params[i]
-                        if not (types.compatible(ptype, caller_elem)
-                                or types.coerceable(caller_elem, ptype)) then
-                            checker.typeerror(errors, lastarg.loc,
-                                "cannot borrow a '...' element of type %s for "
-                                .. "fixed parameter %d (type %s) of %s",
-                                types.tostring(caller_elem), i,
-                                types.tostring(ptype), fname)
-                        end
-                    end
-                end
-            else
-                -- Over-supplied static args (beyond the fixed params) are passed
-                -- as leading vararg elements; coerce each to the element type.
-                for i = nparams + 1, nstatic do
-                    args[i] = trycoerce(args[i], ftype.varargtype, errors)
-                    checkmatch("argument " .. i .. " of call to " .. fname,
-                        ftype.varargtype, args[i]._type, errors, args[i].loc)
-                end
-            end
-            if caller_elem and caller_elem._tag ~= "Type.Invalid"
-               and not types.compatible(ftype.varargtype, caller_elem) then
-                checker.typeerror(errors, lastarg.loc,
-                    "'...' element type %s is not compatible with the '...' "
-                    .. "element type %s of %s",
-                    types.tostring(caller_elem),
-                    types.tostring(ftype.varargtype), fname)
-            end
-        elseif ftype.vararg then
-            checker.typeerror(errors, lastarg.loc,
-                "cannot pass '...' to a foreign (C) variadic function")
-            table.remove(args)
-            return
-        else
-            -- ADJUST-UP into the fixed params.
-            expand_dots_adjustup(args, nparams,
-                function(i) return ftype.params[i] end,
-                "call to " .. fname, errors, nil_can_adjust_to)
-            for i = nargs, #args do
-                local ptype = ftype.params[i]
-                if ptype then
-                    args[i] = trycoerce(args[i], ptype, errors)
-                    checkmatch("argument " .. i .. " of call to " .. fname,
-                        ptype, args[i]._type, errors, args[i].loc)
-                end
-            end
-        end
-        if ftype.varargtype then
-            -- A whole-tail variadic call always satisfies the fixed-param arity
-            -- (checked above); skip the static arity check below.
-            return
-        end
-        if #args ~= nparams then
-            checker.typeerror(errors, loc,
-                "%s called with %d arguments but expects %d.\n%s",
-                fname, #args, nparams, types.tostring(ftype))
-        end
-        return
+    -- A runtime-sized Titan run has no C vararg promotion/ABI contract. Keep
+    -- ordinary explicit C varargs, but never pass `...` or a flexible-result
+    -- run through that boundary.
+    if ftype.vararg and adjusted.open_source then
+        checker.typeerror(errors, adjusted.open_source.loc,
+            "cannot pass a runtime-open Titan result sequence to a foreign (C) variadic function")
     end
 
-    for i = 1, nargs do
-        local arg = args[i]
-        -- A surplus arg (beyond the fixed params) to a Titan-variadic callee is
-        -- typed against the vararg element type, so it is coerced/checked like a
-        -- vararg element rather than left unchecked.
-        local ptype = ftype.params[i] or ftype.varargtype
-        checkexp(arg, st, errors, ptype)
-        ptype = ptype or arg._type
-        args[i] = trycoerce(args[i], ptype, errors)
-        local atype = args[i]._type
-        checkmatch("argument " .. i .. " of call to " .. fname, ptype, atype, errors, arg.loc)
-    end
-    if lastarg and lastarg._types then
-        for i = 2, #lastarg._types do
-            local pidx = nargs + i - 1
-            local ptype = ftype.params[pidx] or ftype.varargtype
-            local exp = ast.ExpExtra(lastarg.loc, lastarg, i, lastarg._types[i])
-            ptype = ptype or exp._type
-            exp = trycoerce(exp, ptype, errors)
-            table.insert(args, exp)
-            checkmatch("argument " .. pidx .. " of call to " .. fname, ptype, exp._type, errors, exp.loc)
-        end
-    end
-    if allow_missing and #args < nparams then
-        append_missing_nil_args(args, nparams, loc, fname, errors, ftype)
-    end
-    -- A Titan-variadic callee (`varargtype`) or a C-FFI variadic (`vararg`)
-    -- accepts at least `nparams` arguments; a fixed callee needs exactly that.
-    local variadic = ftype.vararg or (ftype.varargtype and true)
-    if not (#args == nparams or (variadic and #args >= nparams)) then
+    if strict_c and (adjusted.missing or adjusted.explicit_surplus) then
+        local supplied = adjusted.explicit_surplus and original_count
+            or (#ftype.params - adjusted.missing)
         checker.typeerror(errors, loc,
             "%s called with %d arguments but expects %d.\n%s",
-            fname, #args, nparams, types.tostring(ftype))
+            fname, supplied, #ftype.params, types.tostring(ftype))
     end
+
+    for i = #args, 1, -1 do args[i] = nil end
+    for _, exp in ipairs(adjusted.exps) do table.insert(args, exp) end
+    return adjusted
+end
+
+local function annotate_call_arguments(node, adjusted)
+    node._arg_adjustment = adjusted
+    node._npassed_args = 0
+    for _, _ in pairs(adjusted.fixed) do
+        node._npassed_args = node._npassed_args + 1
+    end
+    node._npassed_args = node._npassed_args + #adjusted.tail_scalars
+    node._open_args = adjusted.open_source and {
+        source = adjusted.open_source,
+        source_type = adjusted.open_type,
+        target_type = adjusted.open_target,
+        start = adjusted.open_start,
+    } or false
 end
 
 -- Return the expressions carried by either positional or named call syntax.
@@ -2040,6 +2312,124 @@ local function check_call_argument_expressions(args, st, errors)
     for _, exp in ipairs(call_argument_expressions(args)) do
         checkexp(exp, st, errors)
     end
+end
+
+local function default_call_result_demand(node, context)
+    if node._voidok then
+        return result_demand({}, false, { term = "discarded call" })
+    end
+    return result_demand({ context or UNKNOWN_SLOT }, false, {
+        term = "call expression",
+    })
+end
+
+-- Discover the complete statically visible positional input shape of a call
+-- through `value`. The discovery demand is open and untyped, so it checks each
+-- written argument exactly once, preserves all fixed results of the trailing
+-- producer, and retains at most one runtime-open final run. Those statically
+-- visible scalars then become the synthesized function's fixed parameters;
+-- only the dynamic run remains its input vararg.
+local function synthesize_value_call_inputs(args, loc, st, errors)
+    local adjusted = adjust_explist(args,
+        result_demand({}, INFER_OPEN, {
+            term = "contextual value-call arguments",
+            open_term = "contextual value call",
+            loc = loc,
+            missing = "error",
+            explicit_surplus = "discard",
+        }), st, errors)
+
+    local params = {}
+    local fixed = {}
+    for i, exp in ipairs(adjusted.tail_scalars) do
+        params[i] = exp._type
+        fixed[i] = exp
+        exp._demand_tail = nil
+        exp._demand_slot = i
+    end
+    adjusted.fixed = fixed
+    adjusted.tail_scalars = {}
+
+    for i = #args, 1, -1 do args[i] = nil end
+    for _, exp in ipairs(adjusted.exps) do
+        table.insert(args, exp)
+    end
+
+    return params, adjusted.open_source and adjusted.open_type or false,
+        adjusted
+end
+
+local function synthesize_value_call_type(node, demand, st, errors)
+    local params, varargtype, adjusted = synthesize_value_call_inputs(
+        node.args.args, node.loc, st, errors)
+
+    return synthesize_function_type(params, varargtype, demand, node.loc,
+        errors), adjusted
+end
+
+-- Record both result shapes of a checked call. `_types` remains the callable's
+-- declared fixed ABI prefix for the existing coder; `_visible_types` and
+-- `_result_sources` describe only what this consumer observes. A finite flex
+-- projection is optional because its runtime slot may be absent. An open run
+-- exists only when both the sink is open and the static callable type declares
+-- a flexible tail.
+annotate_call_results = function(node, ftype, demand, errors)
+    demand = demand or default_call_result_demand(node)
+    node._callee_type = ftype
+    node._types = ftype.rettypes
+    node._flexrettype = ftype.flexrettype or false
+    node._visible_types = {}
+    node._result_sources = {}
+    node._open_results = false
+    node._finite_flex_prefix = 0
+
+    local nfixed = #ftype.rettypes
+    local ndemand = #demand.fixed
+    local function add(typ, source)
+        table.insert(node._visible_types, typ)
+        table.insert(node._result_sources, source)
+    end
+
+    for i = 1, math.min(ndemand, nfixed) do
+        add(ftype.rettypes[i], { kind = "fixed", index = i })
+    end
+    if ftype.flexrettype and ndemand > nfixed then
+        local count = ndemand - nfixed
+        if count > TITAN_VARARG_MAX and not demand.suppress_flex_cap then
+            checker.typeerror(errors, node.loc,
+                "finite flexible-result demand is %d value(s), maximum is %d",
+                count, TITAN_VARARG_MAX)
+        end
+        node._finite_flex_prefix = count
+        for i = 1, count do
+            add(optionize(ftype.flexrettype), {
+                kind = "flex", index = i, may_absent = true,
+            })
+        end
+    end
+
+    if demand.tail then
+        for i = ndemand + 1, nfixed do
+            add(ftype.rettypes[i], { kind = "fixed", index = i })
+        end
+        if ftype.flexrettype then
+            local start = math.max(ndemand - nfixed, 0) + 1
+            local target = expected_type(demand.tail) or ftype.flexrettype
+            node._open_results = {
+                source = node,
+                source_type = ftype.flexrettype,
+                target_type = target,
+                start = start,
+            }
+            node._flex_result_demand = "open"
+        end
+    elseif ftype.flexrettype then
+        node._flex_result_demand = node._finite_flex_prefix
+    else
+        node._flex_result_demand = nil
+    end
+
+    node._type = node._visible_types[1] or types.Void()
 end
 
 -- Named syntax is deliberately declaration-only. Structural function values
@@ -2218,74 +2608,80 @@ checkexp = util.make_visitor({
 
         if expected == "Type.Array" then
             local econtext = context and context.elem
-            local etypes = {}
-            local dots_elem
-            -- Location of the `...` field, for the coerceability diagnostic below.
-            -- `dots_field` is nil when the `...` is not the last field
-            -- (`find_dots_field` reported and dropped it), but the loop still
-            -- visits that field and sets `dots_elem`, so we cannot rely on
-            -- `dots_field.loc` there — capture the field's own loc instead.
-            local dots_loc
+            local exps = {}
+            local invalid_named = false
             for _, field in ipairs(node.fields) do
                 if field.name then
+                    invalid_named = true
                     checker.typeerror(errors, field.loc,
                         "initializing field '%s' when expecting array", field.name)
                     checkexp(field.exp, st, errors)
-                elseif field.exp._tag == "Ast.ExpDots" then
-                    -- whole-tail `...`: kept as a marker for codegen; its element
-                    -- type seeds (or is checked against) the array element type.
-                    check_dots_marker(field.exp, st, errors)
-                    dots_elem = field.exp._vararg_elem
-                    dots_loc = field.loc
                 else
-                    local exp = field.exp
-                    checkexp(exp, st, errors, econtext)
-                    table.insert(etypes, exp._type)
+                    table.insert(exps, field.exp)
                 end
             end
-
-            -- adjust last entry if it's a function call that expands to multiple values
-            -- e.g. { 1, 2, f() }
-            local lastfield = node.fields[#node.fields]
-            if lastfield and not lastfield.name
-               and lastfield.exp._tag ~= "Ast.ExpDots"
-               and lastfield.exp._types and #lastfield.exp._types > 1 then
-                for i = 2, #lastfield.exp._types do
-                    table.insert(node.fields,
-                        ast.Field(lastfield.loc, nil,
-                            ast.ExpExtra(lastfield.loc, lastfield.exp,
-                                i, lastfield.exp._types[i])))
-                end
+            if invalid_named then
+                node._type = types.Array(econtext or types.Integer())
+                return
             end
 
-            -- Seed the element type from the vararg element first (`{...}` is
-            -- `{t}`, not `{t?}`), then a context, then the first static field.
+            local adjusted = adjust_explist(exps,
+                result_demand({}, econtext or INFER_OPEN, {
+                    term = "array initializer",
+                    loc = node.loc,
+                    missing = "error",
+                    explicit_surplus = "discard",
+                    open_coerce = true,
+                    defer_open_check = true,
+                }), st, errors)
             local etype = econtext
-                or (dots_elem and dots_elem._tag ~= "Type.Invalid"
-                    and deoptionize(dots_elem))
-                or (etypes[1] and deoptionize(etypes[1])) or types.Integer()
+                or (adjusted.open_type
+                    and adjusted.open_type._tag ~= "Type.Invalid"
+                    and deoptionize(adjusted.open_type))
+                or (adjusted.tail_scalars[1]
+                    and deoptionize(adjusted.tail_scalars[1]._type))
+                or types.Integer()
             node._type = types.Array(etype)
-            for i, field in ipairs(node.fields) do
-                if not field.name and field.exp._tag ~= "Ast.ExpDots" then
-                    field.exp = trycoerce(field.exp, etype, errors)
-                    local exp = field.exp
-                    checkmatch("array initializer at position " .. i, etype,
-                               exp._type, errors, exp.loc)
+
+            for i, exp in ipairs(adjusted.tail_scalars) do
+                local old = exp
+                exp = trycoerce(exp, etype, errors)
+                checkmatch("array initializer at position " .. i, etype,
+                    exp._type, errors, exp.loc)
+                replace_adjusted_value(adjusted, old, exp)
+            end
+
+            if adjusted.open_source then
+                local source = adjusted.open_type
+                if source._tag ~= "Type.Invalid"
+                   and not types.equals(source, etype)
+                   and not types.compatible(etype, source)
+                   and not types.coerceable(source, etype) then
+                    if adjusted.open_source._tag == "Ast.ExpDots" then
+                        checker.typeerror(errors, adjusted.open_source.loc,
+                            "'...' element type %s is not coerceable to array element type %s",
+                            types.tostring(source), types.tostring(etype))
+                    else
+                        checker.typeerror(errors, adjusted.open_source.loc,
+                            "open result element type %s is not coerceable to array element type %s",
+                            types.tostring(source), types.tostring(etype))
+                    end
+                end
+                adjusted.open_target = etype
+                if adjusted.open_source._tag == "Ast.ExpCall"
+                   and adjusted.open_source._open_results then
+                    adjusted.open_source._open_results.target_type = etype
+                elseif adjusted.open_source._tag == "Ast.ExpDots"
+                       and adjusted.open_source._open_dots then
+                    adjusted.open_source._open_dots.target_type = etype
                 end
             end
-            -- The whole-tail `...` element type must be coerceable to the array
-            -- element type (the context may have overridden `etype` to something
-            -- other than the vararg element, e.g. `{...integer}` in a `{float}`
-            -- context). The codegen converts each element from the real vararg
-            -- element to `etype`; reject an incompatible element here (e.g.
-            -- `{...integer}` into `{string}`) instead of bit-reinterpreting it.
-            if dots_elem and dots_elem._tag ~= "Type.Invalid"
-               and not types.equals(dots_elem, etype)
-               and not types.coerceable(dots_elem, etype) then
-                checker.typeerror(errors, dots_loc,
-                    "'...' element type %s is not coerceable to array element "
-                    .. "type %s", types.tostring(dots_elem), types.tostring(etype))
+
+            node.fields = {}
+            for _, exp in ipairs(adjusted.exps) do
+                table.insert(node.fields, ast.Field(exp.loc, nil, exp))
             end
+            node._array_adjustment = adjusted
         elseif expected == "Type.Map" then
             local kcontext = context and context.keys
             local vcontext = context and context.values
@@ -2750,7 +3146,8 @@ checkexp = util.make_visitor({
         end
     end,
 
-    ["Ast.ExpCall"] = function(node, st, errors, _)
+    ["Ast.ExpCall"] = function(node, st, errors, context, demand)
+        demand = demand or default_call_result_demand(node, context)
         if node.exp._tag == "Ast.ExpVar" then
             local var = node.exp.var
             checkvar(var, st, errors)
@@ -2787,15 +3184,41 @@ checkexp = util.make_visitor({
                 end
                 local cftype = c_function_as_function_type(cfunc)
                 node._c_pointer_call = cfunc
-                checkargs(cftype, node.args.args, node.loc,
-                    "function pointer '" .. fname .. "'", st, errors, false)
-                node._types = cftype.rettypes
-                node._type = cftype.rettypes[1] or types.Void()
-                if node._type._tag == "Type.Void" and not node._voidok then
+                annotate_call_arguments(node,
+                    checkargs(cftype, node.args.args, node.loc,
+                        "function pointer '" .. fname .. "'", st, errors,
+                        false))
+                annotate_call_results(node, cftype, demand, errors)
+                if node._type._tag == "Type.Void" and not node._voidok
+                   and not demand.tail then
                     node._type = invalid(errors, node.loc,
                         "a function returning no values cannot be used as a value")
                 end
                 return
+            end
+            local contextual_args
+            if ftype._tag == "Type.Value" then
+                if named then
+                    node._type = types.Invalid()
+                    named_target_error(errors, node.loc)
+                    check_call_argument_expressions(node.args, st, errors)
+                    return
+                end
+
+                local synthesized
+                synthesized, contextual_args = synthesize_value_call_type(
+                    node, demand, st, errors)
+                local original = node.exp
+                node.exp = trycoerce(original, synthesized, errors)
+                assert(node.exp ~= original
+                    and node.exp._tag == "Ast.ExpCast")
+                -- This cast target is already a resolved Type.Function. It is
+                -- deliberately not redispatched through the ExpCast visitor:
+                -- the callee and every argument were checked exactly once.
+                node.exp._contextual_value_cast = true
+                node._contextual_value_call = true
+                node._contextual_function_type = synthesized
+                ftype = synthesized
             end
             -- Auto-unwrap an option-of-function callee (e.g. an array element
             -- `arr[i]`, which has type `T?`): cast to the underlying function
@@ -2863,16 +3286,22 @@ checkexp = util.make_visitor({
                     node._named_call_kind = lowering
                 end
             else
-                checkargs(ftype, node.args.args, node.loc,
-                    "function '" .. fname .. "'", st, errors,
-                    not (node.exp._tag == "Ast.ExpVar"
-                         and (is_foreign_function_var(node.exp.var)
-                              or (node.exp.var._decl
-                                  and node.exp.var._decl._tag == "Type.CPseudoNew"))))
+                if contextual_args then
+                    annotate_call_arguments(node, contextual_args)
+                else
+                    annotate_call_arguments(node,
+                        checkargs(ftype, node.args.args, node.loc,
+                            "function '" .. fname .. "'", st, errors,
+                            not (node.exp._tag == "Ast.ExpVar"
+                                 and (is_foreign_function_var(node.exp.var)
+                                      or (node.exp.var._decl
+                                          and node.exp.var._decl._tag == "Type.CPseudoNew")))))
+                end
             end
-            node._types = ftype.rettypes
-            node._type = ftype.rettypes[1] or types.Void()
-            if node._type._tag == "Type.Void" and not node._voidok then
+            annotate_call_results(node, ftype, demand, errors)
+            check_generic_result_limit(node, errors)
+            if node._type._tag == "Type.Void" and not node._voidok
+               and not demand.tail then
                 node._type = invalid(errors, node.loc,
                     "a function returning no values cannot be used as a value")
             end
@@ -2939,14 +3368,15 @@ checkexp = util.make_visitor({
                         node._named_call_kind = "titan"
                     end
                 else
-                    checkargs(ftype, node.args.args, node.loc,
-                        "method '" .. class.name .. ":" .. method_name_text .. "'",
-                        st, errors)
+                    annotate_call_arguments(node,
+                        checkargs(ftype, node.args.args, node.loc,
+                            "method '" .. class.name .. ":" .. method_name_text .. "'",
+                            st, errors))
                 end
                 node._method = ftype
-                node._types = ftype.rettypes
-                node._type = ftype.rettypes[1] or types.Void()
-                if node._type._tag == "Type.Void" and not node._voidok then
+                annotate_call_results(node, ftype, demand, errors)
+                if node._type._tag == "Type.Void" and not node._voidok
+                   and not demand.tail then
                     node._type = invalid(errors, node.loc,
                         "a function returning no values cannot be used as a value")
                 end
@@ -3001,7 +3431,15 @@ checkexp = util.make_visitor({
 
     ["Ast.ExpAdjust"] = function(node, st, errors, context)
         node.exp._voidok = true
-        checkexp(node.exp, st, errors, context)
+        -- Parentheses force exactly one result even though `_voidok` permits a
+        -- genuinely zero-return call (which is adjusted upward to nil below).
+        -- Pass the demand explicitly so `_voidok` is not mistaken for a
+        -- statement/discard context.
+        checkexp(node.exp, st, errors, context,
+            result_demand({ context or UNKNOWN_SLOT }, false, {
+                term = "parenthesized expression",
+                loc = node.loc,
+            }))
         if node.exp._type._tag == "Type.Void" then
             -- `(f())` on a zero-return call adjusts up to a single `nil`,
             -- mirroring Lua's parenthesized-call adjustment.
@@ -3054,8 +3492,8 @@ checkexp = util.make_visitor({
                     "cannot infer the type of '...'; annotate it or use the "
                     .. "lambda where its type is known")
             end
-            varargtype =
-                check_vararg_elem(varargdecl._type, varargdecl.loc, errors)
+            varargtype = check_varg_elem(
+                varargdecl._type, varargdecl.loc, errors, "parameter")
         end
 
         -- Resolve fixed parameter types.
@@ -3078,22 +3516,30 @@ checkexp = util.make_visitor({
         -- only from the expected function type (`context`); it is never inferred
         -- from the body's `return`s.
         local rettypes
+        local flexrettype
         if node.rettypes then
             -- Explicit annotation, including `: ()` (an empty list).
             rettypes = {}
             for _, rt in ipairs(node.rettypes) do
                 table.insert(rettypes, typefromnode(rt, st, errors))
             end
+            flexrettype = flexible_return_type(node, st, errors)
         elseif expected then
-            -- Checking mode: take the return types from the context.
+            -- Checking mode: take both fixed and flexible results from the
+            -- context. This is deliberately distinct from an explicit `: ()`,
+            -- whose parser shape is an empty fixed list plus `flexrettype =
+            -- false` and must not inherit the context's tail.
             rettypes = expected.rettypes
+            flexrettype = expected.flexrettype
         else
             -- No annotation, no usable context: default to zero-return `()`,
             -- exactly like an unannotated top-level function.
             rettypes = {}
+            flexrettype = false
         end
 
-        node._type = types.Function(paramtypes, rettypes, false, varargtype)
+        node._type = types.Function(paramtypes, rettypes, false, varargtype,
+            flexrettype)
 
         -- Open the lambda's own block so `$function`/params do not leak into the
         -- enclosing scope (mirrors checkbodies+checkfunc). `with_block` keeps
@@ -3147,7 +3593,7 @@ checkexp = util.make_visitor({
             else
                 node._method = mtype
                 node._type = types.Function(mtype.params, mtype.rettypes, false,
-                    mtype.varargtype)
+                    mtype.varargtype, mtype.flexrettype)
             end
         elseif otype._tag ~= "Type.Nominal" then
             node._type = invalid(errors, node.loc,
@@ -3258,6 +3704,15 @@ function checkfuncbody(node, st, errors, opts)
             or node.loc
         checktype(rettype, rloc, errors)
     end
+    if node._type.flexrettype then
+        -- An explicit tail reports at its annotation; an inferred lambda tail
+        -- reports at the lambda itself because the expected Type.Function no
+        -- longer carries an AST source location.
+        local floc = (node.flexrettype and node.flexrettype.loc) or node.loc
+        checktype(node._type.flexrettype, floc, errors)
+        node._type.flexrettype = check_varg_elem(
+            node._type.flexrettype, floc, errors, "return")
+    end
     -- A lambda (Ast.ExpFunction) has no `name`; describe it generically in the
     -- duplicate-parameter diagnostic instead of printing "function 'nil'".
     local fdesc = node.name and ("declaration of function '" .. node.name .. "'")
@@ -3323,6 +3778,7 @@ local function checkinitializer(node, st, errors)
         name = "$module_initializer",
         params = {},
         rettypes = {},
+        flexrettype = false,
         block = node,
         _type = node._type,
     }
@@ -3382,6 +3838,7 @@ local function isconstructor(node)
     end
     return decl._tag == "Type.StaticMethod"
         and #decl.rettypes == 1
+        and not decl.flexrettype
         and decl.rettypes[1]._tag == "Type.Nominal"
         and decl.rettypes[1].fqtn == decl.fqtn
 end
@@ -3603,12 +4060,14 @@ local toplevel_visitor = util.make_visitor({
         for _, rt in ipairs(node.rettypes) do
             table.insert(rettypes, typefromnode(rt, st, errors))
         end
-        node._type = types.Function(ptypes, rettypes, false, varargtype)
+        local flexrettype = flexible_return_type(node, st, errors)
+        node._type = types.Function(ptypes, rettypes, false, varargtype,
+            flexrettype)
         node._paramnames = paramnames
     end,
 
     ["Ast.StatBlock"] = function(node)
-        node._type = types.Function({}, {}, false, false)
+        node._type = types.Function({}, {}, false, false, false)
     end,
 
     ["Ast.TopLevelRecord"] = function(node, st, errors)
@@ -3683,8 +4142,9 @@ local toplevel_visitor = util.make_visitor({
         for _, rt in ipairs(node.rettypes) do
             table.insert(rettypes, typefromnode(rt, st, errors))
         end
+        local flexrettype = flexible_return_type(node, st, errors)
         node._type = types.StaticMethod(rectype.name, node.name, ptypes, rettypes,
-            varargtype, paramnames)
+            varargtype, flexrettype, paramnames)
         node._type.islocal = node.islocal and true or false
         rectype.functions[node.name] = node._type
     end,
@@ -3734,8 +4194,9 @@ local toplevel_visitor = util.make_visitor({
         for _, rt in ipairs(node.rettypes) do
             table.insert(rettypes, typefromnode(rt, st, errors))
         end
+        local flexrettype = flexible_return_type(node, st, errors)
         node._type = types.Method(rectype.name, node.name, ptypes, rettypes,
-            varargtype, paramnames)
+            varargtype, flexrettype, paramnames)
         node._type.islocal = node.islocal and true or false
         rectype.methods[node.name] = node._type
     end,
@@ -3807,10 +4268,12 @@ function checker.has_main(ast)
         local name = toplevel_name(node)
         if name == "main"
            and node._tag == "Ast.TopLevelFunc"
+           and not node._type.varargtype
            and #node.params == 1
            and node.params[1]._type._tag == "Type.Array"
            and node.params[1]._type.elem._tag == "Type.String"
            and #node._type.rettypes == 1
+           and not node._type.flexrettype
            and node._type.rettypes[1]._tag == "Type.Integer" then
             return true
         end
@@ -3857,9 +4320,24 @@ local function register_referenced_records(t, loader, seen)
         if t.varargtype then
             register_referenced_records(t.varargtype, loader, seen)
         end
+        if t.flexrettype then
+            register_referenced_records(t.flexrettype, loader, seen)
+        end
     elseif tag == "Type.Record" then
         for _, f in ipairs(t.fields or {}) do
-            register_referenced_records(f.type, loader, seen)
+            if not f.islocal then
+                register_referenced_records(f.type, loader, seen)
+            end
+        end
+        for _, fn in pairs(t.functions or {}) do
+            if not fn.islocal then
+                register_referenced_records(fn, loader, seen)
+            end
+        end
+        for _, method in pairs(t.methods or {}) do
+            if not method.islocal then
+                register_referenced_records(method, loader, seen)
+            end
         end
     end
 end
@@ -3917,7 +4395,11 @@ local function first_local_record_type(typ, seen)
             if found then return found end
         end
         if typ.varargtype then
-            return first_local_record_type(typ.varargtype, seen)
+            local found = first_local_record_type(typ.varargtype, seen)
+            if found then return found end
+        end
+        if typ.flexrettype then
+            return first_local_record_type(typ.flexrettype, seen)
         end
     end
 end

@@ -1,10 +1,11 @@
 # Option types
 
-For any Titan type `T` (other than `value` and function types), there is an
+For any source-level simple Titan type `T` other than `value`, there is an
 *option type* `T?` whose values are the values of `T` plus `nil`. Option
 types are how "this value may be absent" is spelled in Titan's type system:
 reading an array or map element produces one, `nil` can only be stored where
-one is expected, and the conversions between `T` and `T?` are implicit —
+one is expected, a finite position projected from a flexible result run
+produces one, and the conversions between `T` and `T?` are implicit —
 free in one direction, checked at run time in the other.
 
 This chapter covers syntax, the conversion rules, equality, the `or`/`and`
@@ -39,6 +40,13 @@ Two consequences of that rationale shape everything below:
   immediate run-time error at the point of use, not a `nil` propagating
   through your data.
 
+A declared [flexible return](flexible-returns.md) is another source of
+may-be-absent positions. When a finite context requests a `...: T` result,
+that position is `T?`: the call may not have produced it. An unannotated local
+still follows the rule above and forces the option to `T`; use the form
+`local x? = f()` or annotate `x: T?` to keep the absence. A `...: value`
+projection stays `value`, because `value` already includes nil.
+
 ## Syntax
 
 In a type annotation, `?` is a suffix on any simple type, including array
@@ -58,6 +66,11 @@ applied to a whole function type — there is no syntax for "optional
 function" (see [Limitations](#limitations)). Writing `value?` is accepted
 but means exactly `value`: the `value` type already contains `nil`, so
 optionizing it changes nothing.
+
+Container reads and finite flexible-result projections can nevertheless
+produce a may-be-absent function value internally. Consuming it as a function
+performs the same checked unwrap as any other option; direct call syntax does
+that automatically.
 
 ### Declaration forms and option inference
 
@@ -88,6 +101,9 @@ The `?` name marker works in every position the parser accepts it,
 including on a module-level variable (`y? = 18` at the top level infers
 `integer?`) and on a declaration that receives one of the *extra* values of
 a multiple-return call (`local a, b? = f()` optionizes `b`).
+This is especially useful for a finite projection from a flexible result tail:
+`local first?, second? = produce()` retains the possibility that either
+position is absent.
 
 ## What an option value is
 

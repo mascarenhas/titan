@@ -87,8 +87,8 @@ describe("optional function parameters", function()
         assert.match("types in argument 1 of call to function 'fill' do not match, expected integer but found nil", err)
     end)
 
-    it("still rejects surplus arguments", function()
-        local ok, err = run_checker([[
+    it("retains and discards surplus Titan arguments", function()
+        local ok, err, tree = run_checker([[
             function fill(a: integer?, b: boolean): integer
                 return 1
             end
@@ -97,8 +97,10 @@ describe("optional function parameters", function()
                 return fill(nil, false, nil)
             end
         ]])
-        assert.falsy(ok)
-        assert.match("function 'fill' called with 3 arguments but expects 2", err)
+        assert.truthy(ok, err)
+        local call = tree[2].block.stats[1].exps[1]
+        assert.same(2, call._npassed_args)
+        assert.truthy(call.args.args[3]._discard_results)
     end)
 
     it("keeps foreign C calls strict", function()

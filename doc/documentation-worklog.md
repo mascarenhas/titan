@@ -473,3 +473,43 @@ callers can pass fewer arguments too.
   native calls, first-class exact and generic calls, short trailing `...`
   spreads into fixed and variadic callees, Lua entry padding, surplus Lua
   arguments, and missing required parameters at the boundary.
+
+## 2026-07-15 — flexible returns and contextual `value` calls
+
+Implemented and documented Titan's return-side analogue of typed variadic
+parameters. A callable may now declare a fixed result prefix followed by
+`...: T`; finite consumers see possibly absent tail projections as `T?`, while
+open array, variadic-argument, and flexible-return sinks preserve exactly the
+results that exist. Calls through `value` synthesize a positional function type
+from their argument list and surrounding finite/open result demand, so Lua
+multiple results remain available without weakening an already typed callable.
+
+* **Unified adjustment semantics.** The checker now elaborates declarations,
+  assignments, returns, call arguments, arrays, and generic `for` through one
+  finite/open expression-list demand. Titan surplus arguments and results are
+  evaluated once in source order and discarded when the static signature or
+  finite consumer does not observe them; foreign C calls remain ABI-strict.
+  This supersedes the 2026-07-07 entry's then-current statement that Titan
+  surplus arguments were errors; that entry remains as historical context for
+  the earlier nil-padding change.
+* **Native and Lua call paths.** Flexible native entries receive caller-owned
+  typed output backing plus a finite/open budget. Exact module, static, method,
+  bound-method, lambda, and exactly tagged first-class calls retain the native
+  path. Non-exact Titan values and Lua callables use the generic stack path;
+  statically open producers uniformly request `LUA_MULTRET`, preserve their raw
+  count on the Lua stack, and are trimmed or checked by the Titan sink.
+* **Lifetime and interface work.** Flexible result backing is paired with
+  traced roots for GC-bearing elements, including pending returns that cross
+  allocating or nested `finally` blocks. Callable serialization, compiled
+  symbols, installed module paths, and `TITAN_PATH_0_14` now use compiled-module
+  ABI 0.14; ABI 0.13 modules fail through the normal mismatch diagnostic.
+* **Manuals and tests.** Added and indexed
+  `language/flexible-returns.md` and
+  `implementation/flexible-returns.md`, reconciled the surrounding language
+  and implementation chapters, and added topical parser/type/checker/coder,
+  `.so` rehydration, ABI, open-count, GC, and error/finally coverage.
+* **Generic-for close follow-up.** A contextual `value` factory still exposes
+  the finite four-slot iterator tuple, but a nil-padded or explicit `nil`
+  fourth result now means that the optional close is absent. Non-nil values
+  retain the ordinary callable/error behavior, and the nil guard remains
+  inside the synthesized `finally` so pending actions keep their precedence.

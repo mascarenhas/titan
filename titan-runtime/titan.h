@@ -64,9 +64,14 @@
    0.12 -> 0.13: declaration descriptors in the serialized <mangled>_types
    interface gained fixed-parameter name lists for compile-time named calls.
    Native call frames are unchanged, but older constructor environments cannot
-   safely interpret the new descriptor shape. */
-#define TITAN_VER "0.13"
-#define TITAN_VER_SUFFIX "_0_13"
+   safely interpret the new descriptor shape.
+   0.13 -> 0.14: Function, Method, and StaticMethod descriptors gained a
+   flexible-return element type. Flexible-return native functions also gain a
+   caller-owned TitanVargX output descriptor and an explicit result demand.
+   Older checkers cannot decode the serialized shape, and older callers cannot
+   safely invoke the new native signature. */
+#define TITAN_VER "0.14"
+#define TITAN_VER_SUFFIX "_0_14"
 #define TITAN_PATH_VAR "TITAN_PATH"
 #define TITAN_PATH_SEP "/"
 #define TITAN_ROOT_DEFAULT "/usr/local"

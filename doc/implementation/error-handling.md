@@ -218,6 +218,12 @@ barrier. Non-GC pending return values live in internal `volatile` C
 temporaries, because they can be written before a finally runs and read
 after a longjmp out of that finally.
 
+A flexible pending return additionally needs a saved actual count, typed
+backing for the live tail, and traced slots for every GC-bearing saved element.
+The transient `_flexout` descriptor is caller-owned C memory and is not a root;
+the pending-action frame must preserve the values independently while the
+`finally` body allocates, calls, or raises.
+
 ### Pending actions for finally
 
 A try with finally has a discriminator:
@@ -246,6 +252,14 @@ Nested finally blocks chain inside-out. During a pending return/break, the
 inner dispatch can copy saved return values into an outer finally frame or
 route a break through the next enclosing finally before realizing the
 final action.
+
+For a flexible return, that inside-out copy must carry both the count and the
+live tail, respecting the inherited `_flexwant` budget. Normal completion
+reconstructs the native output descriptor and resumes the pending return; a
+raise from `finally` abandons it and overrides the action. The flexible-tail
+frame owns bounded typed backing and, for GC-bearing elements, a parallel
+traced stack range that remains live throughout the finally body and any
+inside-out frame copy.
 
 ### Boundary restoration on generated `goto`
 
@@ -322,7 +336,7 @@ therefore not itself a stack-relocation hazard.
 
 ## ABI and search path
 
-The current compiled-module ABI is `0.13`. The error-handling control-flow
+The current compiled-module ABI is `0.14`. The error-handling control-flow
 machinery did not by itself require an ABI bump, but this branch also
 changed the `TitanVargX` structs from inline flexible-array backing
 objects to descriptor structs with an `args` pointer. That layout change
@@ -335,12 +349,17 @@ serialized module interfaces. The `0.13` ABI adds formal-name metadata to the
 serialized module-function, method, and record-static descriptor constructors;
 the native function ABI is unchanged.
 
+Flexible result metadata and the trailing native `_flexout`/`_flexwant` pair
+are incompatible with the 0.13 interface/native shape. ABI 0.14 moves the
+serialized constructors, native signature, constants, and paths together and
+does not accept a mixed layout.
+
 The compiler and runtime therefore agree on:
 
-* `TITAN_VER "0.13"`
-* `TITAN_VER_SUFFIX "_0_13"`
-* versioned binary path variable `TITAN_PATH_0_13`
-* default binary path `.;<root>/lib/titan/0.13`, with `<root>` recovered from
+* `TITAN_VER "0.14"`
+* `TITAN_VER_SUFFIX "_0_14"`
+* versioned binary path variable `TITAN_PATH_0_14`
+* default binary path `.;<root>/lib/titan/0.14`, with `<root>` recovered from
   the Lua `PREFIX`'s `package.cpath` in the currently supported layout where
   that path also names the equal Titan `ROCKS_TREE`
 
@@ -367,7 +386,8 @@ The highest-value regression tests are:
   raise legality, finally transfer bans, always-returns.
 * `spec/coder/error_handling_spec.lua` — catch, fresh raise vs. re-raise,
   trace clearing, pending actions, finally override, nested finally order,
-  GC-valued pending returns, and standalone uncaught-error reporting.
+  GC-valued pending returns, including flexible tails across allocating/nested
+  finally blocks, and standalone uncaught-error reporting.
 * `spec/coder/stack_relocation_spec.lua` — stack relocation through
   protected recovery.
 * `spec/abi_spec.lua` — runtime/compiler ABI constants.

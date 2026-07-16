@@ -26,7 +26,7 @@ local m = require "sum"
 print(m.sum_list({1, 2, 3, 4})) --> 10
 ```
 
-This is the reference for the language as implemented by the Titan 0.13
+This is the reference for the language as implemented by the Titan 0.14
 prototype compiler in this repository. It replaces the old single-file
 manual. For how the compiler itself works — including how each construct
 is translated to C — see the
@@ -51,6 +51,7 @@ Start with the [design philosophy](philosophy.md) if you want to know
 | [Named arguments](named-arguments.md) | Declaration-based `f { name = value }` and method-call syntax, omissions, evaluation order, record construction, direct C prototype names, and Lua's positional-only boundary. |
 | [Anonymous functions and closures](closures.md) | Lambda expressions, parameter/return type inference, lexical capture of enclosing locals, fresh-value-per-evaluation semantics, and bound method references `obj:method`. |
 | [Variadic parameters](variadic-parameters.md) | The trailing `...: t` parameter, `#...`, the raising `...[e]` index, spreading `...` into calls/returns/arrays, slot-driven adjust-up, variadic functions as values, and the limits and bans. |
+| [Flexible returns](flexible-returns.md) | Runtime-sized homogeneous result tails, finite option projection, open sinks, contextual calls through `value`, surplus adjustment, and directional function compatibility. |
 | [Records](records.md) | Nominal record types, constructors, fields, methods, record functions, and records as seen from Lua. |
 | [Arrays and maps](arrays-maps.md) | The two table-backed container types: construction, indexing, length, deletion, key rules, performance model. |
 | [Modules](modules.md) | Module files, `import`, visibility, module variables, and the compilation model (shared libraries, executables, search paths). |
@@ -67,7 +68,7 @@ Start with the [design philosophy](philosophy.md) if you want to know
 
 ## Status and limitations
 
-Titan is a working prototype, version 0.13. The language documented here is
+Titan is a working prototype, version 0.14. The language documented here is
 implemented and covered by the compiler's test suite. Its boundaries are
 mostly missing features, plus a handful of constructs the compiler rejects
 with a clean error; each links to the chapter that documents it in full.
@@ -90,9 +91,10 @@ with a clean error; each links to the chapter that documents it in full.
 * **Anonymous functions and closures.** A `function (...) ... end`
   expression evaluates to a fresh function value, and it **closes over**
   the enclosing function's locals and parameters — reading them, and
-  mutating them through a shared box when it assigns to them. Lambda
-  parameter and return types are *inferred* (from the expected type and
-  from the body) the same way `local x = exp` infers a local's type
+  mutating them through a shared box when it assigns to them. Omitted lambda
+  parameter types come from the expected function type. Return shape comes
+  from an explicit annotation or that same expected type — never from the
+  body — and defaults to zero results when neither is available
   ([closures](closures.md)).
 * **Bound instance methods are values too.** `obj:method` with no argument
   list is a function value that has the method's type with the implicit

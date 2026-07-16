@@ -10,6 +10,7 @@
 #include "lfunc.h"
 #include "lobject.h"
 #include "llimits.h"
+#include "lstate.h"
 #include "titan.h"
 
 static void titan_bt_addframe_lstring(luaL_Buffer *buf, int *wrote_any,

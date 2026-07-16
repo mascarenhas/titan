@@ -18,9 +18,11 @@ value is the complete text of one C translation unit; the driver
 file next to the `.titan` source, and invokes the system C compiler
 ([driver and toolchain](driver.md)). One consequence of the checker's
 rewriting matters constantly here: every implicit coercion is already an
-`Ast.ExpCast` node and every extra multiple-return value an
-`Ast.ExpExtra` node, so the coder never decides to convert anything on
-its own ([the type checker](checker.md)). This chapter covers the shape
+`Ast.ExpCast` node, every statically demanded extra result is an
+`Ast.ExpExtra` node, and finite/open expression-list demand is recorded on
+the enclosing sink. The coder therefore lowers an explicit checked result
+plan instead of inventing conversions or arity rules of its own
+([the type checker](checker.md)). This chapter covers the shape
 of the output and the protocols it implements; value-level details are in
 [values and the GC](values-and-gc.md), per-construct translations in
 [code generator: constructs](codegen-constructs.md).
@@ -182,13 +184,18 @@ The signature shape, produced by `function_sig`:
 ```c
 RETTYPE f(lua_State *L, Udata *_mod, CClosure *_fn, [Udata *self,]
           <ctype(param_1)>, ..., <ctype(param_n)>,
-          <ctype(ret_2)> *_outparam_2, ..., <ctype(ret_m)> *_outparam_m);
+          [TitanVargX *_varargs, int _start,]
+          <ctype(ret_2)> *_outparam_2, ..., <ctype(ret_m)> *_outparam_m,
+          [TitanVargY *_flexout, int _flexwant]);
 ```
 
 `RETTYPE` is `ctype(rettypes[1])` — the unboxed C type of the first
 return value (`lua_Integer`, `TString*`, `Table*`, `TValue`, `Udata*`,
 …; full map in [values and the GC](values-and-gc.md)); a function
-returning only `nil` returns `int` and ends with `return 0;`. `_mod` is
+returning only `nil` returns `int` and ends with `return 0;`; a flex-only
+function returns C `void` and writes its caller-owned descriptor. The input
+vararg pair, when present, precedes fixed result out-pointers. The flexible
+output pair, when present, comes last. `_mod` is
 the callee's **own** module `Udata`; a cross-module caller passes it from
 one of its user values. `_fn` is the **callee's own closure** — the
 `CClosure` of the function value being invoked, whose `upvalue[3..]` hold
@@ -209,6 +216,10 @@ at a call site depends on the path:
   closure's upvalue 0 is now a `Udata`, read with `uvalue`, not
   `clCvalue`).
 
+`TitanVargX` and `TitanVargY` stand for the element-specific descriptor
+types (`TitanVargInteger`, `TitanVargString`, and so on); input and output
+tails use the same descriptor family even when their element types differ.
+
 The `Udata *self` slot exists only for methods (`Type.Method`) and is
 named `__self__` in the generated body — `self` is a record, and a record
 is a `Udata`. Return values 2..m are written through out-pointers
@@ -218,6 +229,8 @@ module:
 ```c
 TString*    packtest_Point_getname_titanmethod(lua_State *L, Udata *_mod, CClosure *_fn, Udata* __self__);
 lua_Integer packtest_two_titan(lua_State *L, Udata *_mod, CClosure *_fn, TString* *_outparam_2);
+void        strings_titan(lua_State *L, Udata *_mod, CClosure *_fn,
+                          TitanVargString *_flexout, int _flexwant);
 ```
 
 A Titan-to-Titan call is therefore an ordinary C call — no Lua stack
@@ -235,7 +248,12 @@ stack is used only as a **GC anchor**, under two rules:
   returning from a C function cannot trigger a collection; the caller
   (`codecall`) stores every GC-able return value into a stack slot it
   reserved *before* doing anything else that could allocate. The Lua
-  entry wrapper plays the caller's role for Lua callers.
+  entry wrapper plays the caller's role for Lua callers. A flexible result
+  descriptor likewise points at caller-owned typed storage. For an open
+  GC-bearing run the caller reserves a parallel traced stack range, publishes
+  returned elements there before a later allocation, and clears that live
+  range after the consuming sink has copied or stored it; the descriptor and
+  raw C array are not themselves GC roots.
 
 ### Named direct calls and lexical evaluation order
 
@@ -249,6 +267,14 @@ argument list. For a method, the receiver is materialized once before this
 sequence. Immediate materialization both freezes effects before formal
 reordering and gives GC-bearing values their ordinary caller-owned stack
 anchors.
+
+Positional direct calls follow the same checked adjustment plan. Every
+explicit argument is evaluated once in lexical order; surplus expressions are
+evaluated only for effect, while only the fixed prefix and any accepted input
+tail reach the native call. On the result side `codecall` allocates fixed
+holders required by the declared ABI, publishes only the consumer-visible
+projection, and, for a flexible producer, allocates a typed caller-owned buffer
+sized to the finite demand or to the bounded open budget.
 
 Direct foreign calls use the parallel branch in `codeforeigncall`. Each named
 expression is converted and assigned to a target-typed C temporary in lexical
@@ -300,39 +326,62 @@ values.
 The **generic path** is used for everything else: non-exact Titan
 function values, Lua closures, Lua C functions, and `__call` objects.
 It pushes the boxed callee followed by the already-evaluated arguments
-onto the Lua stack with `setslot`, calls
-`luaD_callnoyield(L, restorestack(L, _vc_func), nresults)`, reads the
-results back with `checkandget`, and then resets `L->top.p` to discard
-the call frame and result slots. Since this is Lua's normal call
-machinery, it is also where non-callable values fail cleanly at runtime.
+onto the Lua stack with `setslot`. Ordinary finite calls use
+`luaD_callnoyield(L, restorestack(L, _vc_func), nresults)`. A generic producer
+that is statically open at the call site uses `LUA_MULTRET`, measures the raw
+result count, nil-fills any missing fixed prefix, converts the tail into the
+same typed descriptor used by the exact path, and caps the retained run at
+`TITAN_VARARG_MAX` (or copies only an inherited finite remainder). An open sink
+over a fixed-only static callable remains an ordinary finite call.
+
+Lua 5.5 encodes a finite VM result request in `CallInfo` with a maximum of
+250. The checker rejects generic function-value sites whose finite visible
+request exceeds that count. This is independent of Titan's 200-element
+descriptor cap; direct native calls and statically open generic producers do
+not use the finite VM field.
+
+Every statically open generic producer uses `LUA_MULTRET`, including when an
+enclosing flexible native entry has a finite `_flexwant`. The returned values
+remain rooted on the Lua stack while the generic branch measures the raw count,
+nil-pads a missing fixed prefix, converts the retained tail, and applies the
+enclosing finite/open Titan budget. It then resets `L->top.p` to discard the
+call frame and result slots. This is also where non-callable values fail
+cleanly at runtime.
 The parameter and result checks still use the Titan function type at the
 call site; if the callee is a Titan function with a different compatible
 type, its Lua entry wrapper performs the callee-side coercions before
-entering the native body.
+entering the native body. That wrapper itself received an open Lua request, so
+it owns and enforces its 200-value open-tail bound before any enclosing finite
+Titan copy budget can discard surplus results.
 
 Because the generic branch can grow and relocate the Lua stack,
 `codevaluecall` marks the enclosing function as `uses_base_off`, saves
 the callee stack slot as an offset with `savestack`, and recomputes
 `_base = restorestack(L, _base_off)` after both branches. GC-able
-arguments were already anchored when evaluated, and GC-able results are
-stored into reserved caller slots immediately after the branch joins.
+arguments were already anchored when evaluated, and GC-able fixed results are
+stored into reserved caller slots immediately after the branch joins. An open
+GC-bearing run is copied into its reserved traced range before the sink can
+allocate.
 
 ### The Lua entry wrapper
 
 For every exported function, method and static, `genluaentry` emits a
 companion `static int <name>_lua(lua_State *L)` with the standard
-`lua_CFunction` signature. It rejects surplus fixed arguments (raising
-`calling Titan function %s with %d arguments, but expected at most %d`),
-pads missing fixed arguments with nil on the Lua stack, installs the
-runtime's `errorhandler` as `L->errfunc` for the duration of the call,
+`lua_CFunction` signature. It pads missing fixed arguments with nil on the Lua
+stack, ignores surplus arguments for a fixed-parameter function, and converts
+surplus arguments into a typed input descriptor for a variadic one. It
+installs the runtime's `errorhandler` as `L->errfunc` for the duration of the call,
 recovers the called closure as `_fn = clCvalue(s2v(func))` and `_mod =
 uvalue(&_fn->upvalue[0])` from it (the module value is a `Udata`; so a
 closure entered from Lua still reaches its own captures), checks and
 converts each argument with
-`checkandget`, reserves one stack slot per return value, calls the native
-function (passing `_fn` so a closure body can read its captures), and
+`checkandget`, reserves stack space for the requested return values, calls the
+native function (passing `_fn` so a closure body can read its captures), and
 writes the results back with `setwrapped` (which hands records to Lua as
-their userdata wrapper).
+their userdata wrapper). For a flexible result shape it reads Lua's requested
+result count with `get_nresults`, derives the tail budget after the fixed
+prefix, passes a typed `_flexout` descriptor plus `_flexwant`, and returns the
+fixed count plus the number the native body actually produced.
 The full anatomy — per-type boundary checks, error-slot juggling, exact
 error messages, safety argument — is in
 [Lua interop internals](lua-interop-internals.md).
@@ -425,7 +474,8 @@ file-local and are not serialized into `.so` interfaces. The **native
 trampoline** matches the
 self-removed function type's ABI, extracts `self` from its closure's
 `upvalue[3]`, and tail-calls the method's native entry with that `self`;
-the **Lua trampoline** inserts `self` as the first stack argument and
+the trailing flexible-output descriptor and budget, when present, pass through
+unchanged. The **Lua trampoline** inserts `self` as the first stack argument and
 delegates to the method's existing Lua entry, reusing its boundary checks.
 At the bind site `obj` is evaluated once into an anchored temp, then the
 closure is built exactly like a one-capture lambda (`_mod`, the
@@ -465,11 +515,18 @@ the full record field-slot count so an imported `.so` still reads public fields
 from their original `Udata` user-value slots. A 0.10 checker would not know how
 to interpret that layout metadata. The 0.11 to 0.12 bump added the separately
 serialized `Type.Module.type_members` map for public type aliases; a 0.11
-checker cannot rehydrate that interface shape. The current ABI is **0.13**.
+checker cannot rehydrate that interface shape. ABI **0.13** introduced the
+named-argument metadata.
 The 0.12 to 0.13 bump adds declaration `paramnames` to the serialized
 `Type.ModuleMember`, `Type.Method`, and `Type.StaticMethod` constructor shapes
 for named calls. Native entry signatures are unchanged, but a 0.12 checker
 cannot evaluate the new interface descriptors safely.
+
+Flexible result types add `flexrettype` to callable interface descriptors and
+the trailing native `_flexout`/`_flexwant` pair shown above. That is an ABI and
+serialization-shape change. The current ABI is **0.14**: all compiled modules,
+marker constants, and installed paths move together rather than making 0.13
+accept both layouts.
 
 ## The module protocol
 
@@ -574,7 +631,10 @@ rebuilds the module's type when evaluated with `types.lua`'s constructors
 as its environment. A `Type.Module` serializes runtime `members` and public
 alias `type_members` separately; aliases therefore create no module slot or
 Lua-visible member. Callable declaration descriptors also serialize formal
-`paramnames`, while structural `Type.Function` values do not. It returns that
+`paramnames`, while structural `Type.Function` values do not. Callable shapes
+also carry their optional `flexrettype`; accepting that new constructor shape
+from compiled interfaces is gated on the coordinated ABI transition described
+above. It returns that
 serialized interface as its sole result;
 there is no dependency-origin metadata in the module protocol.
 

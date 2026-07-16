@@ -134,6 +134,11 @@ type. The forms are:
   list. This is distinct from `(P...) -> nil`, which returns a single
   `nil` value; the unannotated function default is the zero-return form
   (see [Functions](functions.md)).
+* **Input and output tails.** `(P1, ...: P) -> R` accepts a homogeneous
+  variadic argument run. `(P...) -> (...: R)` returns a run-time-sized
+  homogeneous result run, and `(P...) -> (R1, ...: R)` combines a fixed
+  result prefix with that flexible tail. Input and output tails are
+  independent and may coexist.
 
 `->` is right-associative — `a -> b -> c` is `a -> (b -> c)` — and
 function types nest, so a higher-order type like
@@ -162,7 +167,8 @@ Titan's types are *structural* except for records, which are *nominal*:
 * Two basic types are equal only if they are the same type.
 * `{t1}` equals `{t2}` exactly when `t1` equals `t2`; likewise maps
   compare key and value types pointwise, and function types compare
-  parameter and return lists pointwise (same arities required).
+  fixed parameter and return lists pointwise, including the presence and
+  element type of any input-variadic or flexible-result tail.
 * `t1?` equals `t2?` exactly when the base types are equal.
 * Two record types are equal only if they are *the same declaration* —
   their fully-qualified names match. Field structure is irrelevant:
@@ -200,10 +206,15 @@ comparisons, and as the precondition of explicit `as` casts. The rules:
 
 1. Equal types are compatible.
 2. `value` is compatible with **every** type.
-3. Compatibility recurses through arrays, maps and function types:
+3. Compatibility recurses through arrays and maps, and directionally through
+   function types:
    `{value}` is compatible with `{float}`, `{value: integer}` with
-   `{string: integer}`, and a `value -> integer` function type with
-   `integer -> integer`.
+   `{string: integer}`. For a function assignment, the expected slot controls
+   future calls: parameter positions are checked in the reverse direction,
+   result positions in the forward direction, and safe arity/tail adjustment
+   is allowed. An actual function may ignore inputs or results hidden by the
+   expected type, but it may not require an input or omit a fixed result that
+   callers of the expected type rely on.
 4. Record types are compatible only with themselves. The recursion of
    rule 3 does **not** look inside records: `PointV` above, whose fields
    are `value`, is still incompatible with `PointF`. Nominal means
@@ -237,6 +248,15 @@ If an element of `vs` had been a string, `caller` would still compile and
 `sum` would raise a run-time error at the `xs[i]` read. This deferred
 checking is the same mechanism that guards tables arriving from Lua — see
 [Lua interoperability](lua-interop.md).
+
+Function compatibility is therefore not generally symmetric. An actual
+`(integer) -> (integer, string)` can inhabit an expected
+`(integer, string) -> integer`: it ignores the extra input and callers ignore
+the extra result. The reverse assignment is unsafe. Flexible result positions
+project as options for finite consumers, while an expected flexible tail
+observes every compatible actual result beyond its fixed prefix. See
+[Flexible returns](flexible-returns.md#function-compatibility-is-directional)
+for the complete input and result rules.
 
 ## Implicit coercions
 
@@ -309,11 +329,11 @@ The compiler inserts coercions in exactly these syntactic contexts,
 whenever the expression's type is coercible to the expected type:
 
 1. The right-hand side of a **local variable declaration** with a type
-   annotation (including expanded multiple-return extras).
+   annotation (including finite projections of trailing call results).
 2. The right-hand side of an **assignment**.
 3. The expressions of a **`return`** statement.
-4. **Arguments** of function and method calls (including expanded
-   multiple-return tails).
+4. **Arguments** of function and method calls (including finite or open
+   trailing result runs).
 5. **Index expressions**: an array index is coerced to `integer`, a map
    index to the map's key type. A float array index gets the checked
    narrowing; an integer key into a `{float: v}` map is promoted, so
@@ -447,6 +467,12 @@ What you **can** do with a `value`, beyond converting it:
 * **Use it as an index.** An index expression of type `value` is coerced
   to the container's key type with a run-time check: `xs[v]` works when
   `v` holds `2` or `2.0`, and raises when it holds `"foo"`.
+* **Call it contextually.** Positional call syntax derives a temporary
+  function type from the written arguments and the surrounding result demand.
+  Titan then checks callability and argument/result types at run time. A
+  finite unknown result is inferred as `value`; an open array, variadic-call,
+  or flexible-return sink derives a flexible result tail. Named syntax is not
+  available because a `value` carries no declaration parameter names.
 * **Cast it explicitly** with `as` — see below.
 
 What you **cannot** do (all compile-time errors): arithmetic — every
@@ -455,12 +481,13 @@ error `... is a value instead of a number` (a `value` does not implicitly
 unbox inside operators; write `(v as integer) + 1`); relational
 comparison (`< <= > >=`, which require equal numeric or string types);
 concatenation (`cannot concatenate with value of type 'value'`); taking
-the length (`#` requires an array or string); indexing *into* it
-(`expression in indexing is not an array or map but value`); and calling
-it. This restriction to explicitly-cast, metamethod-free operations is by
-design: implicit unboxing inside operators would silently give "raw"
-semantics to code that looks like ordinary Lua arithmetic, so the
-conversions are confined to positions where a target type is named.
+the length (`#` requires an array or string); and indexing *into* it
+(`expression in indexing is not an array or map but value`). Contextual calls
+are the deliberate callable exception: the surrounding demand supplies a
+complete temporary contract, and the generic path may honor an ordinary Lua
+`__call` metamethod while checking that contract. Arithmetic and container
+operations still require an explicit cast because implicit unboxing inside
+them would silently give raw semantics to code that looks statically typed.
 
 `value` composes with the compound types: `{value}` is an array of
 anything, `{string: value}` a string-keyed map of anything, and the

@@ -354,24 +354,28 @@ describe("variadic parameters (typechecker)", function()
             assert.same(1, #ret.exps) -- the trailing `...` was dropped
         end)
 
-        it("rejects `return ...` from a ()-returning function", function()
-            local errs = check_errs([[
+        it("discards `return ...` from a ()-returning function", function()
+            local ok, err, tree = run_checker([[
                 function foo(...: integer): ()
                     return ...
                 end
             ]])
-            assert.truthy(#errs >= 1)
-            assert.match("return from a function that returns no values", errs[1])
+            assert.truthy(ok, err)
+            local ret = tree[1].block.stats[1]
+            assert.same({}, ret.exps)
+            assert.same(1, #ret._result_adjustment.discards)
         end)
 
-        it("rejects over-supplying the fixed return arity", function()
-            local errs = check_errs([[
+        it("retains and discards over-supply beyond fixed return arity", function()
+            local ok, err, tree = run_checker([[
                 function foo(...: integer): integer
                     return 1, 2, ...
                 end
             ]])
-            assert.truthy(#errs >= 1)
-            assert.match("already supplies", errs[1])
+            assert.truthy(ok, err)
+            local ret = tree[1].block.stats[1]
+            assert.same(2, #ret._result_adjustment.discards)
+            assert.truthy(ret.exps[2]._discard_results)
         end)
     end)
 
@@ -406,15 +410,17 @@ describe("variadic parameters (typechecker)", function()
             assert.truthy(node._nilfill)
         end)
 
-        it("rejects `2, 3, 5, ... = ...` over-supply into 2 slots", function()
-            local errs = check_errs([[
+        it("retains static over-supply and discards the trailing run", function()
+            local ok, err, tree = run_checker([[
                 function foo(...: integer): nil
                     local a: integer, b: integer = 2, 3, 5, ...
                     return nil
                 end
             ]])
-            assert.truthy(#errs >= 1)
-            assert.match("already supplies", errs[1])
+            assert.truthy(ok, err)
+            local stat = tree[1].block.stats[1]
+            assert.same(2, #stat._result_adjustment.discards)
+            assert.truthy(stat.exps[3]._discard_results)
         end)
 
         it("adjust-up in an assignment", function()
@@ -452,8 +458,8 @@ describe("variadic parameters (typechecker)", function()
             ]])
         end)
 
-        it("a variadic value rejects assignment to a non-variadic type", function()
-            local errs = check_errs([[
+        it("a variadic value accepts fixed inputs moved into its tail", function()
+            assert_type_check([[
                 function g(...: integer): integer
                     return 0
                 end
@@ -462,7 +468,6 @@ describe("variadic parameters (typechecker)", function()
                     return f(1)
                 end
             ]])
-            assert.truthy(#errs >= 1)
         end)
     end)
 
@@ -517,8 +522,8 @@ describe("variadic parameters (typechecker)", function()
             ]])
         end)
 
-        it("rejects passing `...` to a non-variadic callee when over-supplied", function()
-            local errs = check_errs([[
+        it("discards surplus arguments and an unused trailing `...`", function()
+            local ok, err, tree = run_checker([[
                 function g(a: integer): integer
                     return a
                 end
@@ -526,8 +531,10 @@ describe("variadic parameters (typechecker)", function()
                     return g(1, 2, ...)
                 end
             ]])
-            assert.truthy(#errs >= 1)
-            assert.match("already supplies", errs[1])
+            assert.truthy(ok, err)
+            local call = tree[2].block.stats[1].exps[1]
+            assert.same(1, call._npassed_args)
+            assert.truthy(call.args.args[2]._discard_results)
         end)
     end)
 
