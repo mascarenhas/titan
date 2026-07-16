@@ -1,3 +1,117 @@
+local record AddressList
+  local data: *shim.titan_uvshim_address
+  local storage: value
+  local count: integer
+end
+
+local record NetOperation
+  local kind: integer
+  local task: Task?
+  local request: Request?
+  local host: Text?
+  local port: integer
+  local backlog: integer
+  local tcp: uv_tcp_t?
+  local data: string
+  local addresses: AddressList?
+  local address_index: integer
+  local prepared_buffer: Buffer?
+  local owner: value
+  local next_operation: NetOperation?
+  local previous_operation: NetOperation?
+  local linked: boolean
+  local close_waiter: boolean
+  local last_error: Error?
+end
+
+local record NetRequestControl
+  local runtime: Runtime
+  local lifecycle: integer
+  local kind: integer
+  local owner: value
+  local operation: NetOperation
+  local next_control: NetRequestControl?
+  local previous_control: NetRequestControl?
+  local result_pointer: ffi.titan_ffi_void_ptr
+end
+
+local record TcpControl
+  local runtime: Runtime
+  local generation: integer
+  local lifecycle: integer
+  local server: boolean
+  local owner: uv_tcp_t?
+  local next_control: TcpControl?
+  local previous_control: TcpControl?
+  local connect_pending: boolean
+  local close_requested: boolean
+  local shutdown_requested: boolean
+  local write_shutdown: boolean
+  local read_active: boolean
+  local read_terminal: integer
+  local read_error: Error?
+  local read_waiter: Task?
+  local read_epoch: integer
+  local read_bytes: Bytes?
+  local read_queue: {Bytes}
+  local output_head: NetOperation?
+  local output_tail: NetOperation?
+  local output_current: NetOperation?
+  local close_waiter_head: NetOperation?
+  local close_waiter_tail: NetOperation?
+  local accept_waiter: Task?
+  local accept_epoch: integer
+  local accept_queue: {uv_tcp_t}
+  local accept_head: integer
+  local accept_tail: integer
+  local accept_count: integer
+  local accept_capacity: integer
+  local accept_error: Error?
+  local setup_operation: NetOperation?
+end
+
+-- DNS and stream request owners share the native trampoline's fixed six
+-- slots, but retain exact request-pointer and dispatcher types.
+local record uv_getaddrinfo_t
+  local handle: *libuv.uv_getaddrinfo_t
+  local storage: value
+  local main_thread: value
+  local dispatcher: (uv_getaddrinfo_t, integer, integer, libuv.size_t,
+                     ffi.titan_ffi_void_ptr) -> ()
+  local metadata: NetRequestControl
+  local buffer: nil
+end
+
+local record uv_connect_t
+  local handle: *libuv.uv_connect_t
+  local storage: value
+  local main_thread: value
+  local dispatcher: (uv_connect_t, integer, integer, libuv.size_t,
+                     ffi.titan_ffi_void_ptr) -> ()
+  local metadata: NetRequestControl
+  local buffer: nil
+end
+
+local record uv_write_t
+  local handle: *libuv.uv_write_t
+  local storage: value
+  local main_thread: value
+  local dispatcher: (uv_write_t, integer, integer, libuv.size_t,
+                     ffi.titan_ffi_void_ptr) -> ()
+  local metadata: NetRequestControl
+  local buffer: Buffer?
+end
+
+local record uv_shutdown_t
+  local handle: *libuv.uv_shutdown_t
+  local storage: value
+  local main_thread: value
+  local dispatcher: (uv_shutdown_t, integer, integer, libuv.size_t,
+                     ffi.titan_ffi_void_ptr) -> ()
+  local metadata: NetRequestControl
+  local buffer: nil
+end
+
 -- Persistent TCP handles cross into net through this exact nominal wrapper.
 -- Native callbacks recover this record directly; the pointer never travels
 -- through value and repeated middle-layer calls allocate no pointer box.

@@ -56,9 +56,10 @@ end
 ```
 
 Records, aliases, module variables, functions, methods, imports, and foreign
-imports have the same cross-file visibility and ordering rules. Public
-declarations from any contributor belong to `graphics.scene`; there is no
-module named `graphics.scene.geometry` merely because `geometry.titan`
+imports follow the logical module's ordinary
+[visibility rules](modules.md#declaration-order-and-visibility) across files.
+Public declarations from any contributor belong to `graphics.scene`; there is
+no module named `graphics.scene.geometry` merely because `geometry.titan`
 contributes source.
 
 Duplicate declarations are diagnosed at the later declaration and include
@@ -84,9 +85,26 @@ independent of the process locale. Thus ASCII `A.titan` sorts before
 bytes. The main source always comes first even if its basename would sort
 elsewhere.
 
-This combined order matters wherever ordinary Titan source order matters,
-including imports, module slots, and initialization. A record declaration's
-synthesized `new` record function remains beside that declaration.
+This combined order is not a general visibility order. Records, aliases,
+ordinary functions, methods, and record functions may refer across files
+regardless of relative placement. An import in a later contributor is
+available to a function signature, function body, record, or alias in the main
+source. Records and their members are likewise order-independent: a method,
+record function, `Rec.new(...)` call, or context-typed record constructor may
+precede the written record declaration, even across contributors.
+
+Module-variable declarations retain the one order-sensitive frontier. For
+each such declaration, the combined order decides which imports and earlier
+module variables are visible; records, aliases, and callable declarations are
+visible module-wide. Thus an import in a later contributor is *not* available
+to a module variable in the main source.
+
+The combined order also decides which declaration is earlier for duplicate
+diagnostics, orders serialized interface members and run-time module slots,
+fixes module-variable initialization order, and remains the code-generation
+order. A record declaration's synthesized `new` record function remains
+beside that declaration in this sequence even though it is visible throughout
+the module.
 
 ## Module initializer
 
@@ -193,20 +211,22 @@ Titan dogfoods this layout in its libuv provider:
 
 ```
 titan/uv/
-  uv.titan          # shared prelude and sole initializer
-  file.titan        # filesystem records and exported API
-  os.titan          # OS and signal exported API
-  process.titan     # process record and exported API
-  runtime.titan     # Error, loop, byte, and version exports
+  uv.titan          # shared imports/constants/state, bootstrap, initializer
+  file.titan        # filesystem records, private FS constants, exported API
+  os.titan          # OS/signal records and exported API
+  process.titan     # process/pipe records and exported API
+  runtime.titan     # runtime/byte records, Error, and version exports
   task.titan        # Task/timer records, methods, and exported API
-  tcp.titan         # TCP record and exported API
+  tcp.titan         # TCP/network records and exported API
 ```
 
-The main source does not need to own the public contract: contributor exports
-are ordinary `titan.uv` members. These files are one logical module compiled
-with `titanc titan.uv`. Both
-Titan imports and Lua `require "titan.uv"` continue to load the single
-canonical `titan/uv.so`; no contributor is a separately loadable module.
+The main source keeps the shared prelude, module state, bootstrap, and sole
+initializer. Both exported and private record declarations live with their
+semantic contributor implementations; contributor exports are ordinary
+`titan.uv` members. These files are one logical module compiled with
+`titanc titan.uv`. Both Titan imports and Lua `require "titan.uv"` continue to
+load the single canonical `titan/uv.so`; no contributor is a separately
+loadable module.
 
 See [Modules](modules.md) for imports, module state, and the general
 compilation model. The compiler-side assembly and artifact rules are detailed

@@ -60,18 +60,25 @@ x = 2   -- error: duplicate declaration for x, previous one at example.titan:1:1
 
 ## Declaration order and visibility
 
-Declarations may appear in any order. A flat module's order is its file order;
-a folder module's deterministic combined order is main declarations first,
-then contributors in numeric-byte basename order, then the main initializer
-([Folder modules](folder-modules.md#declaration-order)). The compiler uses
-separate passes for imports, records, variables, and function bodies over that
-one logical sequence. Concretely, the rules are:
+Most declarations may appear in any order. A flat module's logical order is
+its file order; a folder module's deterministic combined order is main
+declarations first, then contributors in numeric-byte basename order, then the
+main initializer
+([Folder modules](folder-modules.md#declaration-order)). Visibility is broader
+than that sequence, with one deliberate frontier for module variables:
 
-* **Function and method bodies are order-independent.** A body may
-  refer to any import, module variable, record type, or function in the
-  module, including ones declared later or in another contributor. (The compiler
-  collects all top-level signatures in a first pass and only then
-  checks bodies.)
+* **Records, type aliases, and callable declarations are order-independent.**
+  A record, ordinary function, method, or record function may be declared
+  before or after any of the others. Signatures, record fields, and alias
+  targets may use records, aliases, and imports declared later in the logical
+  order. The synthesized `Rec.new` record function is likewise available
+  throughout the module, so a record constructor or constructor expression
+  may precede the written `record` declaration.
+
+* **Function and method bodies are order-independent.** A body may refer to
+  any import, module variable, record type, ordinary function, method, or
+  record function in the module, including ones declared later or in another
+  contributor.
 
   ```lua
   -- Titan: forward references from bodies are fine
@@ -86,18 +93,35 @@ one logical sequence. Concretely, the rules are:
   end
   ```
 
-* **Top-level declarations themselves are checked in the logical source order,
-  except for
-  type aliases.** A module-variable declaration can only use ordinary imports
-  and record value namespaces that appear *before* it in that order; referring
-  to one declared later is a compile-time error (`module '...' referenced by type
-  not found`, or `record type '...' in context of record constructor does not
-  exist`). Alias names, however, are predeclared module-wide and may be used in
-  earlier signatures, annotations, and record fields. Alias chains may point
-  forward to other aliases or records. Imports remain source ordered, so an
-  import used by a qualified alias target must already have been declared when
-  that target is first resolved. In practice: put imports first, then records
-  and variables.
+* **A module-variable declaration sees only earlier imports and module
+  variables.** Imports and foreign imports are processed in logical order, but
+  their aliases are available regardless of placement to every declaration
+  other than a module variable. At each module-variable declaration, its type
+  annotation and initializer see only import aliases and module variables that
+  occur earlier in the logical order. They still see every record, type alias,
+  ordinary function, method, record function, and synthesized `new`, wherever
+  those declarations occur. This visibility does not make a non-constant
+  initializer legal; the separate [constant-expression
+  rule](#initializers-must-be-constant) still applies.
+
+  ```lua
+  -- Titan
+  origin: Point = Point.new(0.0, 0.0) -- ok: Point may be declared later
+
+  record Point
+      x: float
+      y: float
+  end
+
+  imported: geometry.Point? = nil     -- error: geometry is not visible yet
+  local geometry = import "geometry"
+  ```
+
+* **Visibility does not reorder the module.** The logical order still decides
+  which declaration is earlier in a duplicate diagnostic, orders serialized
+  interface members and run-time module slots, fixes the relative
+  initialization order of module variables, and remains the order used for
+  code generation.
 
 * **Initialization order is fixed.** When a module is loaded into a Lua
   state (the first `require` from Lua, or transitively as a dependency

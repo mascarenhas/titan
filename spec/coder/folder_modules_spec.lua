@@ -111,6 +111,7 @@ enum { FOLDER_MODULE_PROBE = 3 };
 
         main_source = [[
 local total: integer = 0
+local initial_box = Box.new(3)
 
 function bump(delta: Delta): integer
     return contributor_bump(delta)
@@ -118,6 +119,10 @@ end
 
 function read(): integer
     return total
+end
+
+function initial_box_value(): integer
+    return initial_box.n
 end
 
 function through_extra(n: integer): integer
@@ -143,10 +148,6 @@ local probe = foreign import "probe.h"
 
 local type Delta = integer
 
-record Box
-    n: integer
-end
-
 function Box.make(n: integer): Box
     return Box.new(n)
 end
@@ -163,6 +164,11 @@ end
 local function contributor_bump(delta: Delta): integer
     total = total + delta
     return total
+end
+
+
+record Box
+    n: integer
 end
 ]])
         -- This subdirectory and its Titan source must not contribute.
@@ -251,6 +257,7 @@ local folder = require "foldercase"
 local consumer = require "consumer"
 assert(type(folder) == "userdata")
 assert(folder.read() == 5)
+assert(folder.initial_box_value() == 3)
 assert(folder.bump(2) == 7)
 local box = folder.Box.make(10)
 assert(box:bump(3) == 10)

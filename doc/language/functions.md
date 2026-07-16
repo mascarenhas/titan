@@ -3,7 +3,8 @@
 Functions are the unit of Titan code. They come in two syntactic forms
 declared at the top level of a module: plain module functions (this
 chapter), and the methods of records (declared with `:` after a record
-name; see [Records](records.md)). Functions are also **first-class
+name; see [Records](records.md)). The record's written declaration may appear
+on either side of a method declaration. Functions are also **first-class
 values** — a function name can be used as a value (see
 [Functions as values](#functions-as-values)) — and there are **anonymous
 function expressions** that close over the enclosing function's locals,
@@ -394,12 +395,14 @@ stored as a Titan function value (see [the FFI chapter](ffi.md)). Assigning
 
 ## Recursion and declaration order
 
-The compiler checks a module in two passes: it first collects the
-signatures of every top-level declaration, then checks the function
-bodies. A function body therefore sees *all* top-level declarations of
-its module — functions, records, variables, imports — regardless of the
-order they appear in the file. Recursion needs no forward declarations,
-and mutual recursion just works:
+Before checking function bodies, the compiler has collected the declarations
+of the whole module. A function body therefore sees *all* top-level
+declarations of its module — functions, methods, record functions, records,
+aliases, variables, and imports — regardless of their written order. Callable
+signatures are also order-independent: they may use a later record, alias, or
+import, and a method or record function may be written before the record it
+belongs to. Recursion needs no forward declarations, and mutual recursion just
+works:
 
 ```lua
 function is_even(n: integer): boolean
@@ -411,9 +414,12 @@ function is_odd(n: integer): boolean
 end
 ```
 
-The one order-sensitive part of a module is top-level *variable*
-initializers, which must be compile-time constants and so cannot call
-functions at all — see [Modules](modules.md).
+The one visibility frontier is a top-level *module-variable declaration*: it
+sees only imports and other module variables written earlier, while seeing all
+records, aliases, and callable declarations wherever they appear. Its
+initializer must also be a compile-time constant and therefore cannot call an
+ordinary function even though that function's name is visible. See
+[Declaration order and visibility](modules.md#declaration-order-and-visibility).
 
 ## Methods and record functions
 
@@ -427,9 +433,9 @@ record function synthesized by the parser.
 Methods and record functions are top-level declarations like the functions in
 this chapter and follow the same rules for parameters, return values, adjustment
 (method diagnostics read `method 'test.Point:move' called with ...`) and
-multiple returns. What differs — implicit `self` for methods, name resolution
-against the record, and record-member visibility — is described in
-[Records](records.md).
+multiple returns. Either kind may precede the written record declaration. What
+differs — implicit `self` for methods, name resolution against the record, and
+record-member visibility — is described in [Records](records.md).
 
 ## Standalone programs: `main`
 

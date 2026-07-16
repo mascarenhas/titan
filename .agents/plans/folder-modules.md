@@ -179,10 +179,10 @@ explicit root must run before this source resolution.
 
 All declarations from all files share the same module-wide value namespace,
 type namespace, nominal-type owner, module state, and public interface. `local`
-continues to mean module-private, not file-private. A local import or local
-helper declared in one source is visible to later declarations and to every
-function body in the combined module under the existing declaration-order
-rules.
+continues to mean module-private, not file-private. Local helpers, records,
+aliases, and callable declarations are visible across every source regardless
+of relative placement; imports are likewise module-wide except at the explicit
+module-variable frontier described below.
 
 The compiler defines one deterministic conceptual source order:
 
@@ -192,23 +192,32 @@ The compiler defines one deterministic conceptual source order:
 3. the main source's optional module initializer, last.
 
 The main file is always first even if another basename sorts before it. This
-lets it serve as the module prelude for shared imports, record declarations,
-aliases, and state. Do not use plain Lua string `<`: Lua delegates string order
-to the active locale's collation. Compare `string.byte` values numerically,
+lets it serve as the module prelude for shared imports, constants, and state
+without requiring shared record declarations to remain there. Do not use plain
+Lua string `<`: Lua delegates string order to the active locale's collation.
+Compare `string.byte` values numerically,
 falling back to length when one basename is a prefix of the other. Sorting this
 way makes interface member order, module-variable initialization, generated
 code, and diagnostics independent of both `readdir` order and process locale.
 
 The ordinary Titan rules then apply to this combined order:
 
-- aliases are collected module-wide before signature checking;
-- imports and ordinary top-level declarations remain source ordered;
-- top-level variables initialize in combined declaration order;
-- function and method bodies are checked after the complete signature pass and
-  may reference declarations from any contributor;
+- ordinary duplicate winners and `_toplevel_order` follow the combined AST;
+- imports are processed in combined order but are available to aliases,
+  records, callable signatures, and bodies regardless of relative placement;
+- aliases, records and their synthesized constructors, ordinary functions,
+  methods, and record functions are collected in dependency stages and are
+  mutually order-independent;
+- each module-variable declaration/initializer sees only earlier imports and
+  earlier module variables, while seeing all other declaration kinds;
+- top-level variables initialize in combined declaration order and function
+  bodies are checked after declaration collection;
 - duplicates across files are the same errors as duplicates within one file.
 
-There is no implicit import between files and no file-local shadowing rule.
+The checker does not rearrange the list to obtain those semantics. Combined
+order still controls duplicate precedence, serialized interface/member and
+module-slot order, module-variable initialization, and code generation. There
+is no implicit import between files and no file-local shadowing rule.
 
 ### 2.4 Module initializer
 
@@ -461,23 +470,53 @@ dependency-stack cleanup. In particular:
   headers because every contributor is a sibling.
 
 Do not check files separately, merge checked ASTs, or round-trip contributor
-interfaces. One `symtab.new(modname)` and one checker pass are what make local
-names, record identity, imports, duplicates, and the module interface truly
-shared.
+interfaces. One `symtab.new(modname)` and one staged checker invocation are
+what make local names, record identity, imports, duplicates, and the module
+interface truly shared.
 
-### 4.3 Checker diagnostics
+### 4.3 Checker staging and diagnostics
 
-No checker dispatch or semantic pass needs a new node. Audit the three
-cross-reference diagnostics in `collect_type_aliases` and `checktoplevel`:
+No new AST tag is needed. The parser marks only its synthesized record
+`TopLevelStatic` with `_record_constructor`, and the checker annotates every
+root with `_toplevel_order`. Keep the dense AST unchanged while staging
+declaration collection:
+
+1. premark ordinary duplicate winners and annotate `_toplevel_order` by
+   combined AST order;
+2. precollect surviving aliases in their separate type namespace, including
+   duplicate-alias and alias/record conflict handling;
+3. reserve every surviving ordinary top-level name;
+4. visit all Titan and foreign imports in AST order;
+5. resolve aliases, then build every record, then attach every parser-marked
+   synthesized constructor;
+6. collect ordinary callable and module-initializer signatures;
+7. attach explicit methods and record functions;
+8. check module variables in AST order under `st.initializer_order`;
+9. check bodies and validate resolved record-field and alias types.
+
+The symbol table masks the current/later module variables and later
+Titan/foreign imports only during step 8. Because all foreign imports have
+already been converted, keep source-ordered `foreign_type_history` and
+`foreign_name_history` lists and recover the last declaration no later than
+the active frontier. Stamp canonical C struct/union owners with
+`_definition_order` when a definition completes them in place, and make field
+lookup/allocation treat a definition from a later import as absent/incomplete
+at an earlier frontier. All other declarations see the complete import, alias,
+record, constructor, and callable environment.
+
+Audit the three cross-reference diagnostics in `collect_type_aliases` and the
+ordinary duplicate prepass:
 
 - alias conflicts with a record;
 - duplicate aliases;
 - duplicate ordinary top-level declarations.
 
 Render the earlier declaration's complete location. Keep the current primary
-error location and existing duplicate `_ignore` behavior. Update same-file
-expected text in specs/manual examples as needed and add cross-file cases that
-prove both filenames are present.
+error location and first-declaration-wins `_ignore` behavior. A duplicate
+record must also suppress its adjacent marked constructor so it does not
+produce a secondary `new` error. Update same-file expected text in specs/manual
+examples as needed and add cross-file cases that prove both filenames are
+present.
 
 The contributor-initializer diagnostic belongs to driver assembly, not the
 parser or checker: the block is valid Titan syntax and valid in the main file,
@@ -575,16 +614,19 @@ the `Task` methods, and all exported
 related contributor. Capture the new deterministic sequence as the exact 0.15
 fixture and verify that only declaration order changed.
 
-Keep shared imports/foreign imports, top-level state, cross-cutting private
-records and constants, the bootstrap helper, and the initializer in the main
-file. Preserve imports, variables, and initializer behavior in their original
-relative order. Public and private canonical-closure/module-slot numbers may
-change consistently with deterministic contributor order; the 0.15 marker and
-paths make that incompatibility explicit. Validate initializer behavior with
-the complete uv suites in addition to pinning the new public interface. Before
-moving a helper, verify no main-file top-level variable initializer refers to
-it under Titan's source-ordered declaration rules; keep any such prerequisite
-in the shared main prelude.
+Keep shared imports/foreign imports, constants, top-level module state, the
+bootstrap helper, program-argument setup, and the initializer in the main file.
+After the staged declaration-order implementation is in place, move every
+remaining private record to the semantic contributor that owns its operations;
+move the private `FS` constants instance with `FsConstants` into `file.titan`,
+and leave no record in the main. Preserve all other import, variable, and
+initializer behavior in their original relative order. The earlier
+public-member move is the 0.15 compatibility boundary; this private relocation
+changes internal slot/initialization order but neither the exact 0.15
+`titan_uv_types` fixture nor importer-visible variable and canonical
+exported-function closure slots, so do not bump the ABI again.
+Validate initializer behavior with the complete uv suites in addition to
+comparing the public interface byte-for-byte.
 
 ### 5.2 Proposed files
 
@@ -594,13 +636,13 @@ broad line ranges through the interleaved monolith:
 
 | New file | Named landmarks | Responsibility |
 | --- | --- | --- |
-| `titan/uv/uv.titan` | shared imports, constants, private records/state; `bootstrap`, `setup_program_args`, root `do` | Shared prelude, bootstrap, and sole initializer; no exported member |
-| `titan/uv/runtime.titan` | exported `Error`, `_bytes_*`, `_loop`, `_version`; runtime helpers | Trace/storage errors, loop and Runtime ownership, shared byte helpers |
-| `titan/uv/task.titan` | exported `Cancelled`, `uv_timer_t`, `Task`, its methods, `_run`/`_sleep`/`_yield`, ticker API; task helpers | Task lifecycle, join/cancellation, coroutine/timer driving, ticker and fatal shutdown |
-| `titan/uv/file.titan` | exported `uv_file` and `_fs_*`; filesystem helpers | File ownership/FIFO, FS requests/callbacks, shutdown repair |
-| `titan/uv/tcp.titan` | exported `uv_tcp_t`, `_net_*`, `_net_eof_error`; TCP helpers | TCP/DNS ownership, queues, callbacks, network shutdown |
-| `titan/uv/process.titan` | exported `uv_process_t`, `_os_process_*`, `_os_communicate`; process helpers | Process/pipe ownership, callbacks, child helpers, forced shutdown |
-| `titan/uv/os.titan` | exported non-process `_os_*`; signal/OS helpers | One-shot signal ownership/callbacks, portable OS operations, signal teardown |
+| `titan/uv/uv.titan` | shared imports, constants/state; `bootstrap`, `setup_program_args`, root `do` | Shared prelude, bootstrap, and sole initializer; no record or exported member |
+| `titan/uv/runtime.titan` | exported `Error`, `_bytes_*`, `_loop`, `_version`; loop/Runtime and byte/text/buffer records; runtime helpers | Trace/storage errors, loop and Runtime ownership, shared byte helpers |
+| `titan/uv/task.titan` | exported `Cancelled`, `uv_timer_t`, `Task`, its methods, `_run`/`_sleep`/`_yield`, ticker API; private timer/drive/request/ticker records; task helpers | Task lifecycle, join/cancellation, coroutine/timer driving, ticker and fatal shutdown |
+| `titan/uv/file.titan` | exported `uv_file` and `_fs_*`; private FS constant/operation/control/request records; filesystem helpers | File ownership/FIFO, FS requests/callbacks, shutdown repair |
+| `titan/uv/tcp.titan` | exported `uv_tcp_t`, `_net_*`, `_net_eof_error`; private address/network request/control/owner records; TCP helpers | TCP/DNS ownership, queues, callbacks, network shutdown |
+| `titan/uv/process.titan` | exported `uv_process_t`, `_os_process_*`, `_os_communicate`; private process/pipe/request/helper records; process helpers | Process/pipe ownership, callbacks, child helpers, forced shutdown |
+| `titan/uv/os.titan` | exported non-process `_os_*`; private signal spec/control/owner records; signal/OS helpers | One-shot signal ownership/callbacks, portable OS operations, signal teardown |
 
 Before moving code, generate a temporary inventory of every root AST node with
 its tag, name, visibility, and original line, and assign each entry to exactly
@@ -612,8 +654,8 @@ caught close to the move.
 
 This layout deliberately exercises the feature:
 
-- every contributor relies on imports, records, constants, and state declared
-  in the main source;
+- every contributor relies on imports, constants, and state declared in the
+  main source and on record types owned by other contributors;
 - public records, methods, and API bodies are declared by contributors while
   retaining the single logical `titan.uv` namespace;
 - local implementations and native callbacks call one another cyclically
@@ -782,6 +824,34 @@ Exit: production `titan.uv` itself cannot build unless cross-file declarations,
 callbacks, initialization, locations, Make dependencies, and packaging all
 work.
 
+### Phase E2 — Generalize declaration order and finish record ownership
+
+Files: `titan-compiler/parser.lua`, `titan-compiler/checker.lua`,
+`titan-compiler/symtab.lua`, topical checker/coder/build specs, and the seven uv
+sources.
+
+- Mark parser-synthesized record `new` declarations with
+  `_record_constructor`; use the marker rather than spelling alone.
+- Implement the staged checker sequence from section 4.3 while retaining the
+  combined AST unchanged for all downstream order-sensitive consumers.
+- Add `initializer_order` masking for current/later module variables and later
+  Titan/foreign imports, including source-ordered C type/name histories.
+- Prove records, synthesized constructors, ordinary functions, methods, record
+  functions, and aliases may precede one another, including across folder
+  contributors; prove later imports remain unavailable only to earlier module
+  variables.
+- Move all private uv records out of `uv.titan` into the contributor owning
+  their subsystem, move `FS` beside `FsConstants` in `file.titan`, and leave
+  shared imports/constants/module state/bootstrap and the sole initializer in
+  the main.
+- Compare the exact `titan_uv_types` fixture byte-for-byte before and after the
+  private ownership move. Keep ABI 0.15 because neither its public interface
+  nor native signatures change despite the private slot/initialization reorder.
+
+Exit: imports and module variables are the only mutually source-ordered
+declaration families; semantic uv contributors own every record without
+changing the pinned public ABI 0.15 interface.
+
 ### Phase F — Complete both manuals and repository guidance
 
 Files: new `doc/language/folder-modules.md`, new
@@ -789,10 +859,11 @@ Files: new `doc/language/folder-modules.md`, new
 cross-references listed in section 8.
 
 - Document user-visible layout, ordering, privacy/blocking, initializer,
-  artifacts, binary precedence, and examples.
+  artifacts, binary precedence, declaration staging/frontiers, and examples.
 - Document resolver/assembly/cache/codegen internals, why folder assembly adds
   no AST/native/schema change, and why the uv member relocation still advances
-  the compatibility marker to ABI 0.15.
+  the compatibility marker to ABI 0.15 while the later private ownership move
+  does not advance it again.
 - Update all one-file module claims and `titan.uv` paths.
 - Update `README.md` and `AGENTS.md` so future compiler/stdlib work uses the new
   source layout and build prerequisites.
@@ -856,6 +927,15 @@ not only helper-level candidate selection.
   is accepted;
 - main initializer may call a contributor helper and runs once;
 - local imports/helpers/types/records/functions cross file boundaries;
+- methods, record functions, `Rec.new`, context-typed constructors, and module
+  variables may precede the owning record across files;
+- callable signatures and aliases may use a later Titan/foreign import, while
+  an earlier module variable cannot;
+- a module variable cannot see itself or a later module variable, but does see
+  every alias, record, synthesized constructor, and callable;
+- duplicate records suppress their synthesized constructors, explicit `new`
+  still conflicts with the synthesized one, and method/field conflicts are
+  independent of relative placement;
 - a contributor import enters the logical module's dependency closure;
 - duplicates across main/contributors name both locations;
 - public interface contains every contributor export in deterministic order;
@@ -892,6 +972,9 @@ not only helper-level candidate selection.
 - after keyed-interface sorting, before/after `titan_uv_types` descriptors
   match by name and type and differ only in the intended member order; the
   exact new deterministic serialization matches the ABI 0.15 fixture;
+- moving all remaining private records and the private `FS` constants instance
+  to contributors leaves that exact ABI 0.15 fixture byte-for-byte unchanged,
+  leaves no record in `uv.titan`, and keeps `FS` adjacent to `FsConstants.new`;
 - `make clean` removes `titan/uv/uv.c` and `titan/uv/uv.o`.
 
 Keep folder-module compiler tests in the compiler/language group. Keep uv/fs/
@@ -936,6 +1019,9 @@ Create `doc/implementation/folder-modules.md` and link it from
 - independent parser calls and plain-node concatenation;
 - initializer extraction/validation;
 - singular checker invocation/source directory;
+- parser `_record_constructor`, checker `_toplevel_order`, staged declaration
+  collection, and module-variable `initializer_order` masking;
+- source-ordered foreign type/name histories used at that frontier;
 - cache/dependency/cycle identity;
 - deterministic `ipairs` codegen walks;
 - per-node `#line` behavior;
@@ -949,13 +1035,15 @@ Update:
 - `doc/implementation/driver.md` for discovery, cache fields, parsing, compile
   paths, executable paths, and source-root reference table;
 - `doc/implementation/checker.md` where the duplicate-declaration example
-  quotes the old line-only secondary location;
+  quotes the old line-only secondary location, plus its staged declaration and
+  symbol-frontier model;
 - `doc/implementation/lexer-parser.md` for independently parsed contributor
   filenames and the unchanged non-reentrant parser contract;
 - `doc/implementation/codegen-overview.md` for one combined AST/translation
-  unit and mixed-file `#line` attribution;
-- `doc/implementation/libuv-runtime.md` for the new source ensemble while
-  retaining one provider image;
+  unit, unchanged source order after checker staging, and mixed-file `#line`
+  attribution;
+- `doc/implementation/libuv-runtime.md` for contributor-owned public/private
+  records while retaining one provider image and the exact ABI 0.15 interface;
 - `README.md` for lookup/build examples;
 - `AGENTS.md` for standard-source layout, Make dependencies, generated nested
   artifacts, and `titan.uv` explicit-root examples.
@@ -979,6 +1067,7 @@ export CCACHE_DISABLE=1
 busted spec/util_spec.lua
 busted spec/types_spec.lua
 busted spec/driver_spec.lua
+busted spec/checker/declaration_order_spec.lua
 busted spec/coder/folder_modules_spec.lua
 busted spec/coder/backtrace_spec.lua
 busted spec/libuv_build_spec.lua
@@ -1046,11 +1135,13 @@ and wait for the manual macOS suite before merge.
     external `--tree`, and leaves flat artifact paths unchanged.
 13. No AST/Type schema, native call convention, or runtime DSO lookup rule
     changes. The compiled-module ABI advances to 0.15 solely to segregate the
-    deliberately reordered `titan.uv` member slots from 0.14 artifacts.
+    deliberately reordered `titan.uv` public member slots from 0.14 artifacts;
+    later checker staging and private record/`FS` relocation keep ABI 0.15.
 14. `titan.uv` is split into the documented folder, contributor files own their
-    related exports, `titanc titan.uv` pins the exact deterministic 0.15
-    interface, and bundled/system modes each produce exactly one canonical
-    `titan/uv.so`.
+    related exports and every public/private record, `uv.titan` retains only
+    shared imports/constants/state/bootstrap/initializer concerns,
+    `titanc titan.uv` pins the exact deterministic 0.15 interface, and
+    bundled/system modes each produce exactly one canonical `titan/uv.so`.
 15. `UV_TITAN_SOURCES` exactly matches the discovered uv ensemble, touching
     any member rebuilds that one DSO, and cleanup, source install, packaging,
     and the delayed-FS variant understand the ensemble.
@@ -1058,6 +1149,11 @@ and wait for the manual macOS suite before merge.
     `README.md`, and `AGENTS.md` describe the implemented layout accurately.
 17. Focused tests, grouped compiler/library suites, and `make test` pass; Linux
     and manually dispatched macOS CI are green before merge when published.
+18. Records, aliases, functions, methods, record functions, and imports used by
+    non-module-variable declarations are placement-independent. Only imports
+    and module variables retain their mutual combined-order frontier, and the
+    checker achieves this without reordering the AST consumed by interfaces or
+    code generation.
 
 ## 11. Principal risks and review traps
 
@@ -1071,6 +1167,9 @@ and wait for the manual macOS suite before merge.
   boundaries affect lexing, and defeats the brief's per-file diagnostics.
 - **Depending on directory order or `pairs(ast)`.** That makes initialization
   and importer-visible slots nondeterministic.
+- **Reordering the AST to implement forward declarations.** Checker visitation
+  may be staged, but physical order remains the interface/slot/init/codegen
+  contract; mutate the sequence and the ABI fixture can drift silently.
 - **Leaving the main initializer in the middle or accepting contributor
   initializers.** The former loses the combined parser invariant; the latter
   emits duplicate fixed C symbols.

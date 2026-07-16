@@ -102,7 +102,7 @@ error. The checker has five such visitors (`checker.lua`):
 | `checkstat` | `Ast.Stat*` | boolean "this statement always returns", used by the return-path analysis |
 | `checkvar` | `Ast.Var*` lvalues | nothing (annotates the node) |
 | `checkexp` | `Ast.Exp*` | nothing (annotates the node) |
-| `toplevel_visitor` | `Ast.TopLevel*` | nothing (pass 1 of the checker) |
+| `toplevel_visitor` | `Ast.TopLevel*` | nothing (called by the staged declaration collector) |
 
 The code generator does not use `make_visitor`: `coder.lua` dispatches
 with hand-written `if tag == ... elseif ...` chains (`codestat`,
@@ -152,7 +152,7 @@ omitted from the field lists for brevity.
 | --- | --- | --- |
 | `TopLevelFunc` | `islocal`, `name`, `params`, `rettypes`, `flexrettype`, `block` | fixed result list plus a separate optional output tail |
 | `TopLevelMethod` | `class`, `name`, `params`, `rettypes`, `flexrettype`, `block` | `function Class:name(...)`; parser decorates `islocal` |
-| `TopLevelStatic` | `class`, `name`, `params`, `rettypes`, `flexrettype`, `block` | `function Class.name(...)`, plus synthesized fixed-result `Class.new`; parser decorates `islocal` |
+| `TopLevelStatic` | `class`, `name`, `params`, `rettypes`, `flexrettype`, `block` | `function Class.name(...)`, plus synthesized fixed-result `Class.new`; parser decorates `islocal` and marks only the synthesized form with `_record_constructor` |
 | `TopLevelVar` | `islocal`, `decl`, `value` | module variable |
 | `TopLevelTypeAlias` | `islocal`, `name`, `type` | compile-time-only `[local] type Name = T` |
 | `TopLevelRecord` | `name`, `fields` | `fields` is a list of `Decl`; parser decorates `islocal` |
@@ -165,7 +165,9 @@ omitted from the field lists for brevity.
 top-level nodes — the `TopLevelRecord` plus a synthesized `new` record function
 with one parameter per field, in field order. The parser copies `local record`
 to both the record and `new`, and also makes `new` local when any field is
-local:
+local. It sets `new._record_constructor = true`, which lets the checker
+distinguish this adjacent desugaring from an explicit `function Class.new`
+while collecting every record namespace before ordinary record members:
 
 ```lua
 record Point
@@ -315,12 +317,14 @@ of these are declared anywhere; this table is the inventory.
 | `_decl` | `VarName`, `VarDot` | checker | checker, coder | what the name resolved to: an `Ast.Decl` (local/param/`self`), a top-level AST node, a `Type.ModuleMember`/`Type.ModuleVariable`, a `Type.Field`, or a `Type.StaticMethod` |
 | `_used` | `Decl`, top-level nodes (via `_decl`) | checker, on every read: `ExpVar`, `VarDot` receivers, call callees | coder | "this variable is read somewhere"; unused locals get no C variable — their initializer is evaluated and cast to `(void)` |
 | `_assigned` | `Decl` (via `_decl`) | checker, in `StatAssign` on `VarName` targets | coder | "this variable is reassigned"; GC-able parameters and `self` get their own Lua stack slot only when set (otherwise the caller's anchoring suffices — see [values and the GC](values-and-gc.md)) |
-| `_ignore` | top-level nodes | checker pass 1: duplicate declarations, and record functions/methods whose declaration fails (missing record, name clash, redeclaration) | checker pass 2, `makemoduletype`, coder (`generate`, `allocate_upvalues`) | "pretend this node does not exist"; every later traversal must skip it |
+| `_record_constructor` | synthesized `TopLevelStatic` | parser record desugaring | checker | identifies the adjacent synthesized `Rec.new`; explicit record functions, including an explicit `Rec.new`, do not carry it |
+| `_toplevel_order` | every AST root node | checker duplicate prepass | checker, symbol table | 1-based position in the unchanged flat/combined AST; drives duplicate winners and the module-variable import/variable visibility frontier |
+| `_ignore` | top-level nodes | checker declaration stages: duplicate declarations, a duplicate record's synthesized constructor, and record functions/methods whose declaration fails (missing record, name clash, redeclaration) | body checker, `makemoduletype`, coder (`generate`, `allocate_upvalues`) | "pretend this node does not exist"; every later traversal must skip it |
 | `_alias_state` | `TopLevelTypeAlias` | checker alias resolver | checker | `resolving`/`resolved` state used for lazy forward resolution and cycle detection; `_type` is the resolved RHS type itself |
 | `_self` | `TopLevelMethod` | checker (`checkmethod`) | checker, coder | a synthesized `Ast.Decl` for `self`, typed as the record's nominal type; becomes the C parameter `__self__` |
-| `_record` | `TopLevelStatic`, `TopLevelMethod` | checker pass 1 | checker (`checkmethod`, for `self`'s type) | the `Ast.TopLevelRecord` node the member belongs to |
+| `_record` | `TopLevelStatic`, `TopLevelMethod` | checker record-member declaration stages | checker (`checkmethod`, for `self`'s type) | the `Ast.TopLevelRecord` node the member belongs to |
 | `_method` | `ExpCall` (method calls) | checker | coder | the resolved `Type.Method` |
-| `_paramnames` | `TopLevelFunc` | checker pass 1 | checker, module-interface builder | dense names of fixed declared parameters; kept on the declaration rather than `Type.Function` |
+| `_paramnames` | `TopLevelFunc` | checker callable-signature stage | checker, module-interface builder | dense names of fixed declared parameters; kept on the declaration rather than `Type.Function` |
 | `_named_arg_order`, `_named_call_kind` | checked named `ExpCall` | checker | coder | formal indexes of explicit expressions in lexical order, plus `"titan"` or `"foreign"`; the `Args*` payload itself has already been normalized to formal order |
 | `_named_omitted` | synthesized nil fill in a named call or record constructor | checker | coder assertions for named calls; specs | distinguishes checked omissions from explicit expressions while source-order lowering runs first |
 | `_field` | `Field` (record constructors) | checker | coder | the resolved `Type.Field` descriptor; its `index` is the record `Udata` user-value slot (`uv[index].uv`) the field occupies, including synthesized omitted fields |
@@ -370,9 +374,10 @@ change. This is the checklist.
 3. **`checker.lua`** — add a handler to every `make_visitor` table the
    node can reach: `checkstat` (returning the correct "always returns"
    boolean), `checkexp`, `checkvar`, `typefromnode`, or
-   `toplevel_visitor` (remember the pass-1/pass-2 split, and that
-   handlers must skip `_ignore`d nodes). The visitors *assert* a
-   handler exists, so a miss is a crash.
+   `toplevel_visitor`. A new top-level kind must also be placed in the correct
+   declaration stage and body-validation path, with `_ignore` handling in
+   every later traversal. The visitors *assert* a handler exists, so a miss is
+   a crash.
 4. **`coder.lua`** — extend the relevant `if`/`elseif` chains
    (`codestat`, `codeexp`/`codevalue`, the lvalue cases of
    `codeassignment` — shared by single and multiple assignment —,

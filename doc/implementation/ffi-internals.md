@@ -24,6 +24,13 @@ gets:
 * no error;
 * an include descriptor stored on `node._include`.
 
+Top-level declaration collection invokes every foreign import in AST order
+before aliases, records, and callable signatures. `visit_toplevel` exposes the
+node's `_toplevel_order` as `st.current_toplevel_order` while its declarations
+are converted. Thus non-module-variable declarations see the complete C
+environment regardless of relative placement without changing include order
+or the combined AST.
+
 The include descriptor is later used by the coder. It records the original
 header name, the resolved parse path, an `include_kind` (`"quote"` or
 `"angle"`), and the include name to write in generated C. A relative header
@@ -53,6 +60,16 @@ a type member:
   the C type namespace (`modtype.type_members`). Tag-only aggregates are kept
   under internal keys such as `struct@P`; users need a typedef name to write
   `c.T` in Titan source.
+
+Each accepted C type is also appended to `foreign_type_history` with the
+foreign-import node's top-level order; accepted ordinary identifiers use the
+parallel `foreign_name_history`. These histories are distinct from the final
+namespace maps because module-variable declarations must recover the last C
+declaration visible at their source frontier after all headers have already
+been processed. A canonical C struct/union may instead be forward-declared by
+one header and completed in place by another; completion stamps that owner with
+`_definition_order` so its later fields do not leak backward through the shared
+object.
 
 The final module type is `Type.CModule`, not the older `Type.ForeignModule`.
 `Type.CModule` is a namespace and is rejected as a first-class value.
@@ -192,7 +209,9 @@ Pointer and array suffixes are applied in declaration order. Typedefs become
 `CTypedef(name, target)`. Structs and unions become `CStruct`/`CUnion` objects
 with a named field table and array part; the converter registers a composite
 owner in `symtab.foreign_types` before walking fields so recursive pointer
-fields reuse the same owner.
+fields reuse the same owner. When a definition completes that canonical owner,
+`populate_struct_or_union` records the active foreign import's order in
+`owner._definition_order`.
 
 Foreign function declarations are stored in the C module's value namespace with
 a `Type.Function`-shaped signature whose params and returns are C types. That
@@ -218,7 +237,9 @@ The checker has FFI-specific handling in a few narrow places:
 
 * `Ast.TypeQualName` accepts `c.T` when `c` is a `CModule` and source-nameable
   `T` is in its `type_members`. This lifts the prototype restriction that C
-  types could only be inferred.
+  types could only be inferred. A non-module-variable declaration may use a
+  later `foreign import`; while checking a module variable,
+  `symtab.find_symbol` masks a later C-module alias by `initializer_order`.
 * `Ast.TypeCPointer` accepts `*c.T` and `const *c.T`, producing `CPointer`
   values over imported C pointees and rejecting non-C pointees.
 * `Ast.VarDot` on a `CModule` first consults `type_members`; a type member
@@ -227,13 +248,16 @@ The checker has FFI-specific handling in a few narrow places:
   pseudo-declarations that codegen emits as `sizeof(T)` and `_Alignof(T)`.
   Value members still come from `mod.members`.
 * `Ast.VarDot` on a C struct/union, pointer-to-aggregate, or owned aggregate
-  resolves a `Type.CField`.
+  resolves a `Type.CField`. At a module-variable frontier it does so only when
+  `symtab.foreign_definition_visible` says the aggregate's defining import is
+  already visible.
 * `Ast.VarBracket` accepts C pointers, C arrays with known static length, and
   counted owned C arrays. C indexing is 0-based.
 * `#exp` accepts C arrays with known static length and counted owned C arrays.
 * `Ast.ExpCall` validates C allocation pseudo-functions, rejecting `void`,
   incomplete aggregates, C array typedefs, and structs with flexible array
-  members.
+  members. A struct/union completed only by a later foreign import is treated
+  as incomplete while checking an earlier module variable.
 * Top-level initializer validation recognizes `Type.CPseudoNew` as a sound
   constructor. `T.new()` and `T.new_array(count)` are accepted when their
   actual argument list is constant; a count that reads module state is
@@ -277,7 +301,10 @@ The checker has FFI-specific handling in a few narrow places:
 * `checkfuncbody` synthesizes the read-only local `L` for every function-like
   body. `lua_state_pointer_type` gives it type `CPointer(CTypedef("lua_State",
   ...))`, reusing an imported `lua_State` type when one is already present in
-  the module's C type namespace.
+  the visible C type namespace. Ordinary callable bodies see the completed
+  module environment; a lambda inside a module-variable initializer retains
+  that initializer's frontier and therefore cannot reuse a `lua_State`
+  declaration from a later foreign import.
 
 Export checks use `types.contains_c_ffi_type`: any public function signature,
 public variable, or public record member that mentions a C type is rejected.
@@ -286,11 +313,17 @@ private C-typed record slot can remain module-internal. `CModule` itself is
 rejected as a first-class value in the same `ExpVar` path as ordinary Titan
 modules.
 
-The checker keeps a per-module `symtab.foreign_names` table for ordinary C
-identifiers imported so far. If a later foreign import declares the same ordinary
-name with an incompatible type, Titan reports the conflict before generating C.
-Duplicate declarations from the same header are ignored here because system
-headers can expose implementation-specific aliases during preprocessing.
+The checker keeps a per-module `symtab.foreign_names` table for the final
+ordinary C identifier environment and a source-ordered history for frontier
+lookup. If a later foreign import declares the same ordinary name with an
+incompatible type, Titan reports the conflict before generating C. Duplicate
+declarations from the same header are ignored here because system headers can
+expose implementation-specific aliases during preprocessing. During a module
+variable, `find_foreign_name` and `find_foreign_type` scan their histories
+backward and return the last declaration whose order is no later than
+`initializer_order`; outside that pass they use the final maps directly.
+`foreign_definition_visible` performs the analogous check for canonical
+struct/union objects that a later import completed in place.
 
 ## Code Generation
 

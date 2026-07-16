@@ -287,6 +287,16 @@ deeper folder `P/child/child.titan` remains legal. See
 [Folder modules](doc/language/folder-modules.md) for ordering, initialization,
 lookup privacy, and artifacts.
 
+Within either source form, records, type aliases, ordinary functions, methods,
+and record functions are order-independent; a method, record function, or
+record construction may precede its written record declaration. Imports are
+available regardless of placement to those declarations and their bodies. A
+module-variable declaration is the exception: it sees only earlier imports
+and earlier module variables, while still seeing every record, alias, and
+callable declaration. Logical source order continues to determine duplicate
+precedence, interface/member and module-slot ordering, module-variable
+initialization, and code generation.
+
 The standard-library short names (`coroutine`, `uv`, `async`, `timer`, `fs`,
 `net`, and `os`) are parser sugar for the corresponding `titan.*` module
 names. Module resolution checks binary dependencies before source, so an ordinary
@@ -313,10 +323,12 @@ the qualified Lua entry points in dependency order.
 Its source is the reviewed folder ensemble rooted at `titan/uv/uv.titan`, with
 `file.titan`, `os.titan`, `process.titan`, `runtime.titan`, `task.titan`, and
 `tcp.titan` as contributors. The main file is the shared prelude and sole
-initializer; public records and functions live with their related contributor
-implementations. That deliberate member reorder is the compatibility boundary
-for compiled-module ABI 0.15. The files still compile to exactly one
-`titan/uv.so`, never one image per contributor.
+initializer, retaining the common imports, shared constants, module state, and
+bootstrap. Exported declarations, all private records, and the private `FS`
+constants instance live with their related contributor implementations. That
+deliberate member reorder is the
+compatibility boundary for compiled-module ABI 0.15. The files still compile
+to exactly one `titan/uv.so`, never one image per contributor.
 
 From Titan, importing `timer` is enough to enable the standalone async
 bootstrap:
@@ -509,6 +521,8 @@ they are in the roadmap:
 * early-bound modules
 * folder modules: one logical namespace and artifact assembled
   deterministically from a canonical main plus immediate contributors
+* order-independent records, aliases, functions, methods, and record functions,
+  with source-ordered import/module-variable initialization frontiers
 * multiple assignment/multiple returns
 * FFI with C (C primitive types, pointers, arrays, structs/unions, owned
   buffers, explicit C varargs, and C function calls)

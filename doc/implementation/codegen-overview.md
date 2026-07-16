@@ -16,7 +16,10 @@ statically linked into that root. The return
 value is the complete text of one C translation unit. For a
 [folder module](folder-modules.md), `ast` is the same dense root list as for a
 flat module, assembled from independently parsed files and checked once; the
-coder has no source-unit node or contributor context. The driver
+checker may visit declarations in dependency stages, but it never rearranges
+this list. The coder therefore still observes the logical source order that
+defines interface members, module slots, module-variable initialization, and
+emission; it has no source-unit node or contributor context. The driver
 (`driver.compile`) runs the result through `pretty.reindent_c`, writes the
 `.c` file next to the canonical flat source or folder main, and invokes the
 system C compiler
@@ -60,12 +63,12 @@ generated code is a deliberate feature, so treat the contract as binding.
 
 ## Anatomy of a generated translation unit
 
-`coder.generate` assembles the unit from a fixed preamble template plus
-a `code` list filled in two passes over the toplevels (imports, variables
-and records first; functions second). Whole-root-list allocation and emission
-walks use `ipairs`, preserving the dense main/contributor order; maps whose
-order has no semantic effect may still use `pairs`. The pieces appear in this
-order:
+`coder.generate` assembles the unit from a fixed preamble template plus a
+`code` list filled by kind-filtered passes over the top levels (imports,
+variables and records first; functions second). Each whole-root-list allocation
+and emission walk uses `ipairs`, preserving relative dense
+main/contributor order within those categories; maps whose order has no
+semantic effect may still use `pairs`. The pieces appear in this order:
 
 1. **Preamble includes**: `<stdlib.h>`, `<string.h>`, `<math.h>`, then
    Lua's **internal** headers (`lobject.h`, `ltable.h`, `lvm.h`, `lgc.h`,
@@ -546,7 +549,12 @@ the trailing native `_flexout`/`_flexwant` pair shown above. That ABI and
 serialization-shape change shipped as 0.14 rather than making 0.13 accept both
 layouts. The current ABI is **0.15**: `titan.uv` now orders exported module
 members by semantic contributor, so marker constants and installed paths move
-together rather than letting 0.14 importers reconstruct the changed slots.
+together rather than letting 0.14 importers reconstruct the changed slots. The
+later checker staging, relocation of private uv records, and move of the
+private `FS` constants instance alter private slot/initialization order but add
+no serialized descriptor field, native parameter, or importer-visible slot
+change: the exact `titan_uv_types` interface remains unchanged and the ABI
+stays 0.15.
 
 ## The module protocol
 
@@ -677,6 +685,9 @@ nominal names, registry keys, `luaopen_*`, and the serialized module identity
 remain derived solely from logical `modname`; there is no contributor ABI.
 The repository's 0.15 transition is instead a compatibility boundary for the
 intentional `titan.uv` public-member reorder caused by semantic ownership.
+Moving local record declarations and the private `FS` constants instance among
+contributors after that boundary changes private initialization layout but
+does not alter the serialized interface.
 
 ## Static vs dynamic dependency wiring
 
@@ -722,10 +733,10 @@ The dep's `_init` is fetched and called the same way inside
 only the storage class of the callee name differs — and the caller passes
 the callee's module `Udata` read from its own user value and `NULL` for
 the direct-call `_fn`: `dep_mk_titan(L, uvalue(&_mod->uv[1].uv), NULL, 7)`.
-Record tags and
-metatables of imported records are not wired through symbols at all: they
-synchronize through the Lua registry at init time (`"Titan record <fqtn>
-tag"` / `"... metatable"`; [Lua interop internals](lua-interop-internals.md)).
+Imported record metatables are not wired through symbols at all: they are
+recovered through the Lua registry at init time under
+`"Titan record <fqtn> metatable"`. The metatable pointer itself is the record's
+type identity; see [Lua interop internals](lua-interop-internals.md).
 
 A record type re-exported through an alias keeps its original defining module.
 If C imports only re-exporter B but calls a method owned by A, B's initializer
@@ -742,15 +753,17 @@ and record metatable are then recovered from the Lua registry. See
 generated. `nextupvalue` hands out slots 0-based with no reserved slot
 (the now-removed module table no longer takes slot 0), so `NUPVALS`
 equals the number of slots. First come **exported (non-`local`) module
-variables, in declaration order** (slots 0..n-1); then local module
-variables, imports and
-exported-function canonical closures, in declaration order; and finally,
-lazily during codegen, record metatables (`type2metatable`), per-record
-static-namespace tables, and the module `Udata`s needed only for
-cross-module *method* calls (`ctx.modules`), all filled in by
-`init_data_from_other_modules`. The late-group record-namespace slots
-come *after* the importer-visible variable and function slots, so adding
-them does not perturb the ABI slot math.
+variables, in declaration order** (slots 0..n-1), followed by a canonical
+closure slot for every exported ordinary function, also in declaration order.
+Those are the two importer-visible groups. Local module variables and imports
+come next. A final AST-order allocation pass assigns slots to referenced local
+ordinary-function closures, every record-function closure, and every record's
+static-namespace table. Record metatables (`type2metatable`), owned-C
+metatables, and the transitive module `Udata` caches needed by cross-module
+method calls (`ctx.modules`) are then allocated on first use during codegen and
+filled in by `init_data_from_other_modules` or the module initializer. Thus all
+private groups come *after* the importer-visible variable and exported-function
+slots, so moving or adding them does not perturb the ABI slot math.
 
 Exported variables come first because their slot numbers are part of the
 module's ABI: an importing module never sees this module's AST — in
@@ -761,10 +774,10 @@ slot read, `uvalue(&_mod->uv[MOD].uv)->uv[VAR].uv`, with no name lookup;
 if local variables or imports could claim earlier slots, the importer's
 numbering would diverge from reality. (The module metatable's name→slot
 member map, serving the same variables to Lua, bakes in the same
-indices.) Record *tags*, by contrast, live in plain C statics because
-their value is identical across all instances of the module in a state,
-while record *metatables* are per-Lua-state objects and must live in
-upvalues — see the comment above `allocate_upvalues` in `coder.lua`.
+indices.) A record's type identity is its per-Lua-state metatable pointer, so
+record metatables must live in module user values and are recovered through the
+Lua registry for imported records. Function-type tags use a separate
+registry-published C-static mechanism.
 
 ## Per-function code-generation contexts
 

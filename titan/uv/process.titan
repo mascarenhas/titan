@@ -1,3 +1,137 @@
+-- Process, pipe, and request controls are deliberately separate from their
+-- TCP counterparts.  They share callback shapes, not resource semantics.
+local record ProcessControl
+  local runtime: Runtime
+  local generation: integer
+  local lifecycle: integer
+  local owner: uv_process_t?
+  local linked: boolean
+  local next_control: ProcessControl?
+  local previous_control: ProcessControl?
+  local stdin_pipe: uv_pipe_t?
+  local stdout_pipe: uv_pipe_t?
+  local stderr_pipe: uv_pipe_t?
+  local spawn_operation: ProcessOperation?
+  local pending_failure: Error?
+  local wait_task: Task?
+  local wait_epoch: integer
+  local dispose_task: Task?
+  local dispose_epoch: integer
+  local exit_seen: boolean
+  local exit_status: integer
+  local term_signal: integer
+  local callback_aborted: boolean
+  local shutdown_started: boolean
+  local kill_sent: boolean
+  local grace_owner: uv_process_grace_t?
+  local grace_fired: boolean
+  local grace_callback_aborted: boolean
+end
+
+local record PipeControl
+  local runtime: Runtime
+  local lifecycle: integer
+  local kind: integer
+  local owner: uv_pipe_t?
+  local process: ProcessControl
+  local callback_aborted: boolean
+  local read_active: boolean
+  local read_terminal: integer
+  local read_error: Error?
+  local read_waiter: Task?
+  local read_epoch: integer
+  local read_bytes: Bytes?
+  local read_queue: {Bytes}
+  local output_head: ProcessOperation?
+  local output_tail: ProcessOperation?
+  local output_current: ProcessOperation?
+  local close_waiter: ProcessOperation?
+  local shutdown_requested: boolean
+  local write_shutdown: boolean
+end
+
+local record ProcessOperation
+  local kind: integer
+  local task: Task?
+  local request: Request?
+  local process: uv_process_t?
+  local pipe: uv_pipe_t?
+  local file: Text?
+  local arguments: {Text}?
+  local copied_bytes: Bytes?
+  local prepared_buffer: Buffer?
+  local owner: uv_pipe_write_t?
+  local next_operation: ProcessOperation?
+  local previous_operation: ProcessOperation?
+  local linked: boolean
+end
+
+local record ProcessRequestControl
+  local runtime: Runtime
+  local lifecycle: integer
+  local owner: uv_pipe_write_t?
+  local operation: ProcessOperation
+  local next_control: ProcessRequestControl?
+  local previous_control: ProcessRequestControl?
+end
+
+local record ProcessExitResult
+  local code: integer
+  local signal_number: integer
+end
+
+local record HelperGroup
+  local runtime: Runtime
+  local generation: integer
+  local process: uv_process_t
+  local input: string?
+  local helpers: {Task}
+  local completed: {boolean}
+  local pending: integer
+  local waiter: Task?
+  local waiter_epoch: integer
+  local waiter_all: boolean
+  local wake_scheduled: boolean
+  local first_error: value
+  local first_traceback: string
+  local stdout: string
+  local stderr: string
+  local exit_result: ProcessExitResult?
+  local canceling: boolean
+end
+
+local record uv_pipe_t
+  local handle: *libuv.uv_pipe_t
+  local storage: value
+  local main_thread: value
+  local dispatcher: (uv_pipe_t, integer, integer, libuv.size_t,
+                     ffi.titan_ffi_void_ptr) -> ()
+  local metadata: PipeControl
+  local buffer: nil
+end
+
+local record uv_pipe_write_t
+  local handle: *libuv.uv_write_t
+  local storage: value
+  local main_thread: value
+  local dispatcher: (uv_pipe_write_t, integer, integer, libuv.size_t,
+                     ffi.titan_ffi_void_ptr) -> ()
+  local metadata: ProcessRequestControl
+  local buffer: Buffer?
+end
+
+-- The process grace timer is intentionally not a generic Runtime timer.  It
+-- is owned by one ProcessControl and is drained only by process shutdown.
+local record uv_process_grace_t
+  local handle: *libuv.uv_timer_t
+  local storage: value
+  local main_thread: value
+  local dispatcher: (uv_process_grace_t, integer, integer, libuv.size_t,
+                     ffi.titan_ffi_void_ptr) -> ()
+  local metadata: ProcessControl
+  local buffer: nil
+end
+
 -- Persistent process handles are the only process resource that crosses the
 -- private os/uv bridge.  All native callback owners keep the same exact six
 -- slots consumed by titan_uv.c.

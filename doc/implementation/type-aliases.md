@@ -19,6 +19,15 @@ while a second visit to a resolving alias reports a cycle and substitutes
 `Type.Invalid` for recovery. Recursive records remain valid because the cycle
 is through the nominal record declaration rather than through alias expansion.
 
+Top-level collection visits every Titan and foreign import in AST order before
+the alias-resolution stage. A qualified alias target may consequently name an
+import written later; the checker has loaded that module and reserved its alias
+without reordering the AST. Aliases remain visible module-wide when module
+variables are checked. The module-variable frontier is enforced by ordinary
+symbol lookup instead: a direct qualified reference to a later import is
+masked under `st.initializer_order` even though alias resolution and other
+non-variable declarations see the complete import environment.
+
 An unqualified `Ast.TypeName` checks the alias table before falling back to a
 nominal record name. For `m.Name`, `Ast.TypeQualName` checks the imported Titan
 module's `type_members` before its exported record members. Expression lookup

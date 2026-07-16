@@ -103,9 +103,11 @@ not add epicycles around what may be a misunderstood simpler design.
   folder ensemble rooted at `titan/uv/uv.titan`, with `file.titan`,
   `os.titan`, `process.titan`, `runtime.titan`, `task.titan`, and `tcp.titan`
   named explicitly alongside it by `UV_TITAN_SOURCES`; every member is a
-  prerequisite of that one DSO. The main source owns the shared prelude and
-  sole initializer; related contributors own all exported records, methods,
-  and functions. Generated output belongs only to the main stem
+  prerequisite of that one DSO. The main source owns shared imports, shared
+  constants, module state, bootstrap, and the sole initializer; related
+  contributors own all exported declarations, all public/private records, and
+  the filesystem contributor's private `FS` constants instance. Generated output
+  belongs only to the main stem
   (`titan/uv/uv.c`, `titan/uv/uv.o`), and no contributor DSO is built or
   installed. A direct developer
   `make titan` only builds. After
@@ -272,6 +274,18 @@ binaries before sources; modules explicitly named on the `titanc` command
 line are the generic exception and are built from source. There is no parallel
 root `stdlib/` source tree.
 
+The checker never reorders that combined AST. It premarks ordinary duplicate
+winners and annotates `_toplevel_order`, precollects aliases, reserves names,
+then visits all imports in AST order, resolves aliases, builds records and
+synthesized constructors, collects ordinary callable/initializer signatures
+and explicit methods/record functions, and finally checks module variables in
+AST order before bodies. Records, aliases, callables, and imports used
+outside module-variable declarations are therefore placement-independent. A
+module-variable declaration/initializer sees only earlier imports and earlier
+module variables, while seeing every other declaration kind. Combined source
+order remains authoritative for duplicate precedence, serialized member/slot
+order, module-variable initialization, and code generation.
+
 The canonical main controls generated C/object placement, while logical `M`
 controls the DSO and entrypoint. Thus folder `foo.bar` writes
 `foo/bar/bar.c` and `.o`, links `foo/bar.so`, retains
@@ -346,17 +360,26 @@ AST nodes (`ast.lua`) and types (`types.lua`) are plain tables created by `typed
 
 ### Frontend (`lexer.lua`, `parser.lua`, `syntax_errors.lua`)
 
-Lexing and parsing are fused in one LPegLabel/relabel grammar; `lexer.lua` exports raw LPeg patterns referenced as `%TOKEN` terminals (no token stream). Every AST constructor is auto-injected into the grammar's defs table, so grammar actions like `-> TopLevelFunc` call constructors directly. Every error label used in the grammar (`^Label`, `%{Label}`) or lexer (`lpeg.T`) **must** have an entry in `syntax_errors.errors` or error formatting breaks. The parser is not reentrant (module-global `THIS_FILENAME`, asserted nil on entry). `record` declarations are desugared at parse time into a `TopLevelRecord` plus a synthesized `new` static function. `[local] type Name = T` produces a compile-time-only `TopLevelTypeAlias`. Short standard-library imports are also parser sugar: `coroutine`, `uv`, `async`, `timer`, `fs`, `net`, and `os` become the ordinary qualified module names under `titan.*` before module resolution.
+Lexing and parsing are fused in one LPegLabel/relabel grammar; `lexer.lua` exports raw LPeg patterns referenced as `%TOKEN` terminals (no token stream). Every AST constructor is auto-injected into the grammar's defs table, so grammar actions like `-> TopLevelFunc` call constructors directly. Every error label used in the grammar (`^Label`, `%{Label}`) or lexer (`lpeg.T`) **must** have an entry in `syntax_errors.errors` or error formatting breaks. The parser is not reentrant (module-global `THIS_FILENAME`, asserted nil on entry). `record` declarations are desugared at parse time into a `TopLevelRecord` plus an adjacent synthesized `new` static function marked `_record_constructor`; explicit record functions do not carry that marker. `[local] type Name = T` produces a compile-time-only `TopLevelTypeAlias`. Short standard-library imports are also parser sugar: `coroutine`, `uv`, `async`, `timer`, `fs`, `net`, and `os` become the ordinary qualified module names under `titan.*` before module resolution.
 
 ### Checker (`checker.lua`, `types.lua`, `symtab.lua`)
 
-`checker.check(modname, ast, subject, filename, loader) -> moduletype, errors`; callers test `#errors == 0` (the doc comment claiming a boolean return is stale). Two passes over toplevels: signatures first (duplicates get `node._ignore = true` — later passes must skip these), then bodies. The checker both annotates (`_type`, `_types` for multi-return calls, `_decl` on variable uses, `_used`/`_assigned`) and **mutates** the AST:
+`checker.check(modname, ast, subject, filename, loader) -> moduletype, errors`; callers test `#errors == 0`. Without reordering the AST, it marks ordinary duplicate winners and `_toplevel_order`, precollects aliases, then stages name reservation; imports in AST order; alias resolution; records; parser-marked synthesized constructors; ordinary callable/module-initializer signatures; methods and record functions; module variables in AST order; and finally bodies. It annotates `_ignore` on rejected duplicates. The checker also annotates (`_type`, `_types` for multi-return calls, `_decl` on variable uses, `_used`/`_assigned`) and **mutates** the AST:
 
 For a folder source the driver calls the checker exactly once with the
 combined AST, logical module name, and canonical main filename/source
 directory. Duplicate declarations, aliases, and alias/record conflicts use
 the later node's normal error prefix and print the earlier declaration's full
 `filename:line:col`; do not regress those to line-only messages.
+
+During each `TopLevelVar`, `symtab.initializer_order` hides the current/later
+module variables and later Titan/foreign imports; foreign type/name histories
+recover the last C declaration visible at that frontier, while
+`foreign_definition_visible` uses a canonical struct/union owner's
+`_definition_order` to hide completion performed by a later header. Every other
+declaration kind sees all imports, records, aliases, and callables regardless
+of relative placement. Body checking and the coder still traverse the unchanged
+AST order, as does `makemoduletype`.
 
 - Every legal implicit coercion is materialized as a synthesized `Ast.ExpCast` node (`trycoerce`) **before** `checkmatch` — the coder generates conversions only from ExpCast, and `checkmatch` reports an error if a still-coerceable mismatch reaches it.
 - Extra multiple-return values become synthesized `Ast.ExpExtra` nodes appended to `exps`/`args` lists; for-loops get a default step synthesized into `node.inc`.
@@ -374,8 +397,10 @@ the later node's normal error prefix and print the earlier declaration's full
 Titan aliases occupy a module-wide type-only namespace in `symtab`, resolve
 transparently to their RHS `Type.*` value, and never create a run-time member.
 Public aliases are serialized separately as `Type.Module.type_members`; local
-aliases are omitted. Alias names may be forward referenced, but imports remain
-source ordered and must exist when a qualified target is first resolved.
+aliases are omitted. Alias names may be forward referenced, and the import
+stage precedes alias resolution, so a qualified alias target may use an import
+written later. Only a module-variable declaration is prevented from directly
+using a later import alias.
 
 `driver.defaultloader` obtains those two Lua C functions through the internal
 `titan._loadlib` helper, which maps every compiled interface with
@@ -403,7 +428,10 @@ save and restore both together.
   and initializer is derived once from logical `modname`. The mechanism itself
   does not require an ABI change, but the `titan.uv` dogfood deliberately moves
   public declarations into contributors and changes their ordered slots; ABI
-  0.15 segregates those DSOs from 0.14 importers.
+  0.15 segregates those DSOs from 0.14 importers. The later checker staging,
+  relocation of private uv records, and move of the private `FS` constants
+  instance change private slot/initialization order but neither the exact
+  serialized public interface nor native signatures, so it remains ABI 0.15.
 
 - Each Titan function becomes **two** C functions: a raw native-convention one (`RETTYPE f(lua_State *L, Udata *_mod, CClosure *_fn, params..., input-vararg pair, out-params for returns 2..n, flexible-output pair)`; the input and output pairs appear only when declared, and the **caller** owns flexible-output storage and anchors GC-able values on the Lua stack) and a Lua-stack entry wrapper that coerces arguments and installs the error handler. `_fn` is the function value's own closure (still a `CClosure`): `NULL` on fully-static top-level calls, and the callee itself on first-class/closure/value calls; for anonymous functions it carries the captured variables (this uniform parameter is what bumped the module ABI to `0.6`). `_mod` becoming `Udata*` and record instances becoming a single `Udata` (so every record-typed param/return changes C type and `<mangled>_init` returns `Udata*`) is what bumped it to `0.7`; the ABI then bumped to `0.8` when a record's type tag became its metatable pointer (no `getudatamem` payload), to `0.9` when a variadic function's native signature gained the trailing `TitanVargX *_varargs, int _start` pair (after the declared params and before the out-params) and `<mangled>_types` began encoding the `varargtype` element type, to `0.10` when the `TitanVargX` structs changed from inline flexible arrays to descriptor structs with an `args` pointer, to `0.11` when local records/members changed record interface serialization, to `0.12` when public type aliases added the serialized `type_members` namespace, to `0.13` when named arguments added serialized declaration-only `paramnames` metadata without changing native function signatures, and to `0.14` when flexible returns added serialized `flexrettype` metadata and the conditional trailing `TitanVargX *_flexout, int _flexwant` native pair.
 - A dynamically imported module is loaded with `RTLD_LAZY | RTLD_GLOBAL` before

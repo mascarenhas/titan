@@ -1,3 +1,96 @@
+local record FsConstants
+  local stat: integer
+  local open: integer
+  local read: integer
+  local write: integer
+  local flush: integer
+  local close: integer
+  local mkdir: integer
+  local unlink: integer
+  local rmdir: integer
+  local rename: integer
+  local list: integer
+  local internal_close: integer
+  local close_wait: integer
+  local file_open: integer
+  local file_closing: integer
+  local file_closed: integer
+end
+
+local FS = FsConstants.new {
+  stat = 1,
+  open = 2,
+  read = 3,
+  write = 4,
+  flush = 5,
+  close = 6,
+  mkdir = 7,
+  unlink = 8,
+  rmdir = 9,
+  rename = 10,
+  list = 11,
+  internal_close = 12,
+  close_wait = 13,
+  file_open = 1,
+  file_closing = 2,
+  file_closed = 3,
+}
+
+local record Dirent
+  local handle: *libuv.uv_dirent_t
+  local storage: value
+end
+
+local record FsStatResult
+  local size: integer
+  local kind: string
+  local mode: integer
+  local modified_seconds: integer
+  local modified_nanoseconds: integer
+end
+
+local record FsOperation
+  local kind: integer
+  local task: Task?
+  local request: Request?
+  local path: Text?
+  local second_path: Text?
+  local file: uv_file?
+  local data: string
+  local maximum: integer
+  local write_offset: integer
+  local write_bytes: Bytes?
+  local prepared_buffer: Buffer?
+  local owner: uv_fs_t?
+  local next_operation: FsOperation?
+  local previous_operation: FsOperation?
+  local linked: boolean
+  local close_waiter: boolean
+end
+
+local record FsControl
+  local runtime: Runtime
+  local lifecycle: integer
+  local callback_aborted: boolean
+  local operation: FsOperation
+  local next_owner: uv_fs_t?
+  local previous_owner: uv_fs_t?
+  local acquired_file: libuv.uv_file
+end
+
+-- Filesystem requests stay private to uv.  The fixed six fields have the
+-- same native callback layout as uv_timer_t while retaining their exact Titan
+-- types and GC roots.
+local record uv_fs_t
+  local handle: *libuv.uv_fs_t
+  local storage: value
+  local main_thread: value
+  local dispatcher: (uv_fs_t, integer, integer, libuv.size_t,
+                     ffi.titan_ffi_void_ptr) -> ()
+  local metadata: FsControl
+  local buffer: Buffer?
+end
+
 -- Persistent descriptors cross into fs as one nominal wrapper.  Its scalar
 -- libuv handle never travels through value; every queue/resource link remains
 -- local to uv and is omitted from the binary interface.

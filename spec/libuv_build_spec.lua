@@ -75,6 +75,18 @@ local function public_declarations(path)
     return declarations
 end
 
+local function local_record_declarations(path)
+    local ast, err = parser.parse(path, read_file(path))
+    assert.truthy(ast, err and err.label)
+    local records = {}
+    for _, node in ipairs(ast) do
+        if node._tag == "Ast.TopLevelRecord" and node.islocal then
+            records[#records + 1] = node.name
+        end
+    end
+    return records
+end
+
 local function makefile_words(name)
     local values = {}
     local collecting = false
@@ -285,6 +297,64 @@ describe("libuv Makefile configuration", function()
             "_net_accept", "_net_close", "_net_is_closed",
             "_net_eof_error",
         }, public_declarations("titan/uv/tcp.titan"))
+    end)
+
+    it("keeps every private uv record with its semantic contributor",
+       function()
+        assert.same({}, local_record_declarations(UV_MAIN_SOURCE))
+        assert.same({
+            "FsConstants", "Dirent", "FsStatResult", "FsOperation",
+            "FsControl", "uv_fs_t",
+        }, local_record_declarations("titan/uv/file.titan"))
+        assert.same({
+            "SignalSpec", "SignalControl", "uv_signal_t",
+        }, local_record_declarations("titan/uv/os.titan"))
+        assert.same({
+            "ProcessControl", "PipeControl", "ProcessOperation",
+            "ProcessRequestControl", "ProcessExitResult", "HelperGroup",
+            "uv_pipe_t", "uv_pipe_write_t", "uv_process_grace_t",
+        }, local_record_declarations("titan/uv/process.titan"))
+        assert.same({
+            "Loop", "Runtime", "Bytes", "SizedBytes", "Text", "Buffer",
+        }, local_record_declarations("titan/uv/runtime.titan"))
+        assert.same({
+            "TimerControl", "DriveControl", "Request", "TickerState",
+        }, local_record_declarations("titan/uv/task.titan"))
+        assert.same({
+            "AddressList", "NetOperation", "NetRequestControl",
+            "TcpControl", "uv_getaddrinfo_t", "uv_connect_t", "uv_write_t",
+            "uv_shutdown_t",
+        }, local_record_declarations("titan/uv/tcp.titan"))
+    end)
+
+    it("keeps the private FS constants instance beside its record", function()
+        local main_ast = assert(parser.parse(UV_MAIN_SOURCE,
+            read_file(UV_MAIN_SOURCE)))
+        for _, node in ipairs(main_ast) do
+            assert.falsy(node._tag == "Ast.TopLevelVar" and
+                node.decl.name == "FS")
+        end
+
+        local file_ast = assert(parser.parse("titan/uv/file.titan",
+            read_file("titan/uv/file.titan")))
+        local record_index, fs_index
+        for index, node in ipairs(file_ast) do
+            if node._tag == "Ast.TopLevelRecord" and
+               node.name == "FsConstants" then
+                record_index = index
+            elseif node._tag == "Ast.TopLevelVar" and
+                   node.decl.name == "FS" then
+                fs_index = index
+                assert.is_true(node.islocal)
+            end
+        end
+        assert.truthy(record_index)
+        assert.equal(record_index + 2, fs_index)
+        local constructor = file_ast[record_index + 1]
+        assert.equal("Ast.TopLevelStatic", constructor._tag)
+        assert.equal("FsConstants", constructor.class)
+        assert.equal("new", constructor.name)
+        assert.is_true(constructor._record_constructor)
     end)
 
     it("keeps LuaRocks on the native toolchain that prepared its prefix",

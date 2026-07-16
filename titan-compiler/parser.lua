@@ -404,6 +404,7 @@ function defs.recorddecl(pos, islocal, name, fields)
     local new = ast.TopLevelStatic(pos, name, "new", params,
         { ast.TypeName(pos, name) }, false, body)
     new.islocal = islocal or has_local_field(fields)
+    new._record_constructor = true
     return record, new
 end
 

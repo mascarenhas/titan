@@ -89,7 +89,8 @@ guessing from the statement tag, to extract the main initializer and reject an
 initializer from a contributor at its `do` location. Nested block statements
 are ordinary descendants and remain legal. Parser desugarings such as a
 record's synthesized `new` static function stay in their original per-file
-order.
+order; that static carries `_record_constructor = true` so later checker
+staging can recognize it without relying only on its spelling.
 
 The numeric-byte comparator compares `string.byte` values and shorter
 prefixes, not locale collation. It is also used for keyed interface maps whose
@@ -133,12 +134,28 @@ filenames survive on each node's existing `loc` value. Duplicate-declaration
 diagnostics use those locations for both the later declaration and the full
 `filename:line:column` location of the earlier one.
 
+The checker annotates this unchanged list with `_toplevel_order` and premarks
+ordinary duplicate winners in combined order. It then precollects aliases
+before reserving surviving ordinary names and visiting imports, alias targets,
+records and their synthesized constructors, callable signatures, and record
+members in dependency order. Module variables and bodies follow. This
+visitation schedule makes records, aliases, functions, methods, and record
+functions visible across file boundaries regardless of placement. For each
+module variable, `initializer_order` temporarily masks imports and module
+variables at or beyond the applicable combined-order frontier. Thus folder
+composition supplies the order but does not create a new visibility mechanism.
+
 ## One code-generation pass
 
 `coder.generate(M, combined_ast, static_deps)` still receives the same AST
 shape and emits one translation unit. Whole-root-list allocation and emission
 passes use `ipairs`, making the declared composition order explicit. Internal
 maps and sets whose order is immaterial may continue to use `pairs`.
+
+Checker declaration staging never rearranges this list. Consequently duplicate
+precedence, ordered interface members, module slots, module-variable
+initialization, and code emission continue to follow main/contributor source
+order even though declaration visibility is broader.
 
 The generated module name, mangled symbols, nominal type names, Lua registry
 key, `_init`, `luaopen_*`, ABI marker, and serialized interface all derive
@@ -202,12 +219,15 @@ slots.
 The `titan.uv` dogfood intentionally uses that rule rather than hiding public
 declarations in the main source. Its exported records and functions live in
 the semantic contributors, so their member order follows the contributor
-sequence `file`, `os`, `process`, `runtime`, `task`, `tcp`. That is cleaner
-source ownership but differs from the old monolithic member order. The release
-therefore advances the compiled-module ABI to **0.15**, and the exact
-`titan_uv_types` fixture pins the new deterministic interface. ABI 0.14
-importers cannot load 0.15 DSOs and reconstruct canonical closure slots with
-the old order.
+sequence `file`, `os`, `process`, `runtime`, `task`, `tcp`. That initial public
+move differed from the old monolithic member order, so the release advanced
+the compiled-module ABI to **0.15** and the exact `titan_uv_types` fixture pins
+the resulting deterministic interface. The subsequent declaration-order pass
+moves the remaining private records to their semantic contributors and moves
+the private `FS` constants instance beside `FsConstants` in `file.titan`.
+Private slot and initialization order change, but no serialized public member,
+importer-visible variable slot, canonical exported-function closure slot, or
+fixture does. It therefore remains ABI 0.15.
 
 Runtime imports still load one DSO for `M`, publish one `_mod` `Udata` in the
 registry, and invoke its initializer once per Lua state. No runtime component
@@ -218,9 +238,11 @@ knows whether that DSO came from a flat or folder source representation.
 The production `titan.uv` source is the folder ensemble
 `titan/uv/uv.titan`, `file.titan`, `os.titan`, `process.titan`,
 `runtime.titan`, `task.titan`, and `tcp.titan`. The main file owns shared
-imports, private cross-cutting declarations and state, bootstrap setup, and the
-sole initializer. Each contributor owns its public records and API alongside
-the related implementation; the main file exports no member. The Makefile
+imports, shared constants, module state, bootstrap setup, program-argument
+setup, and the sole initializer. Each contributor owns its public API and both
+public and private records alongside the related implementation; `file.titan`
+also owns the private `FS` constants instance. The main file exports no member
+and declares no record. The Makefile
 declares this set explicitly as `UV_TITAN_SOURCES`; it does not use a
 wildcard, so adding a production source changes the reviewed build graph.
 Every listed source is a prerequisite of the one `titan/uv.so` target. The

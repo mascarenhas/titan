@@ -71,20 +71,29 @@ state, and one DSO:
 
 | Source | Ownership |
 | --- | --- |
-| `titan/uv/uv.titan` | shared imports, constants, private cross-cutting records/state, bootstrap, program-argument setup, and the sole root initializer; no public member |
-| `file.titan` | public `uv_file` and `_fs_*` API plus File FIFO/ownership, FS request construction and submission, callbacks, dispatch, and shutdown repair |
-| `os.titan` | public non-process `_os_*` API plus one-shot signal ownership/callbacks/retirement and portable OS helpers |
-| `process.titan` | public `uv_process_t`, `_os_process_*`, and `_os_communicate` API plus process/pipe ownership, child/helper requests, stdio callbacks, and forced shutdown |
-| `runtime.titan` | public `Error`, `_bytes_*`, `_loop`, and `_version` API plus trace preservation, byte/text/buffer allocation, loop/Runtime construction, and ownership helpers |
-| `task.titan` | public `Cancelled`, `uv_timer_t`, `Task`, Task methods, `_run`/`_sleep`/`_yield`, and ticker API plus task/request lifecycle and coroutine/timer driving |
-| `tcp.titan` | public `uv_tcp_t`, `_net_*`, and `_net_eof_error` API plus DNS/TCP ownership and queues, request allocation, callbacks, and network teardown |
+| `titan/uv/uv.titan` | shared imports, constants, module state, bootstrap, program-argument setup, and the sole root initializer; no record or public member |
+| `file.titan` | public `uv_file` and `_fs_*` API plus private FS constants, operations, controls, requests, File FIFO/ownership, callbacks, dispatch, and shutdown repair |
+| `os.titan` | public non-process `_os_*` API plus private signal specifications/controls/owners, one-shot callback retirement, and portable OS helpers |
+| `process.titan` | public `uv_process_t`, `_os_process_*`, and `_os_communicate` API plus private process/pipe controls, operations, requests, helper groups, child stdio callbacks, and forced shutdown |
+| `runtime.titan` | public `Error`, `_bytes_*`, `_loop`, and `_version` API plus private loop/Runtime and byte/text/buffer records, trace preservation, allocation, and ownership helpers |
+| `task.titan` | public `Cancelled`, `uv_timer_t`, `Task`, Task methods, `_run`/`_sleep`/`_yield`, and ticker API plus private timer/drive/request/ticker records and coroutine driving |
+| `tcp.titan` | public `uv_tcp_t`, `_net_*`, and `_net_eof_error` API plus private address/operation/request/control/owner records, DNS/TCP queues, callbacks, and network teardown |
 
-Every contributor uses the main source's imports, private cross-cutting
-records, constants, and module state; contributor bodies and callbacks cross
-file boundaries. Top-level `local` remains module-private, not file-private.
+Every contributor uses the main source's imports, constants, and module state;
+record types shared across subsystems are referenced directly from whichever
+semantic contributor owns them. Contributor bodies and callbacks cross file
+boundaries because top-level `local` remains module-private, not file-private.
 `titanc titan.uv` emits `titan/uv/uv.c` and `titan/uv/uv.o`, then
 links the logical `titan/uv.so`; no source basename enters a symbol, registry
 key, or artifact name.
+
+The exported declarations had already established the deterministic ABI 0.15
+interface when the folder split was introduced. The follow-up relocates the
+remaining private records and moves the private `FS` constants instance beside
+`FsConstants` in `file.titan`. That changes private slot/initialization order,
+but not `titan_uv_types`, importer-visible variable slots, canonical
+exported-function closure slots, or native signatures, so the exact interface
+fixture remains unchanged and no further ABI bump is required.
 
 The Makefile's explicit `UV_TITAN_SOURCES` list names all seven files and is a
 normal prerequisite set for `titan/uv.so`. It intentionally does not use a

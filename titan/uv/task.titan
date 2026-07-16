@@ -2,6 +2,42 @@ record Cancelled
   reason: value
 end
 
+local record TimerControl
+  local runtime: Runtime
+  local lifecycle: integer
+  local kind: integer
+  local task: Task?
+  local peer: value
+  local epoch: integer
+  local next_owner: uv_timer_t?
+  local previous_owner: uv_timer_t?
+end
+
+local record DriveControl
+  local mode: integer
+  local payload: value
+  local trace: string
+  local cleanup_request: Request?
+end
+
+local record Request
+  local kind: integer
+  local generation: integer
+  local task: Task
+  local subject: value
+  local milliseconds: integer
+  local cleanup: boolean
+end
+
+local record TickerState
+  local runtime: Runtime
+  local generation: integer
+  local open: boolean
+  local owner: uv_timer_t?
+  local waiter: Task?
+  local waiter_epoch: integer
+end
+
 -- Fixed six-slot owner layout consumed by titan_uv.c. Metadata roots each
 -- operation/control graph; families that submit separate native I/O storage
 -- retain it in the final slot only while libuv may consume it. Stream controls

@@ -1,3 +1,30 @@
+local record SignalSpec
+  local name: string
+  local signum: integer
+end
+
+local record SignalControl
+  local runtime: Runtime
+  local lifecycle: integer
+  local task: Task?
+  local epoch: integer
+  local name: string
+  local next_owner: uv_signal_t?
+  local previous_owner: uv_signal_t?
+end
+
+-- One-shot signal watchers are private fixed-layout native callback owners.
+-- They remain rooted in their Runtime list through stop + close callback.
+local record uv_signal_t
+  local handle: *libuv.uv_signal_t
+  local storage: value
+  local main_thread: value
+  local dispatcher: (uv_signal_t, integer, integer, libuv.size_t,
+                     ffi.titan_ffi_void_ptr) -> ()
+  local metadata: SignalControl
+  local buffer: nil
+end
+
 function _os_getenv(name: string): string?
   local copied = copy_text(name, "os.getenv", name)
   local getenv_buffer = function (bytes: *ffi.titan_ffi_char,
