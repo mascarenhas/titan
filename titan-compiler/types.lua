@@ -1,4 +1,5 @@
 local typedecl = require 'titan-compiler.typedecl'
+local util = require 'titan-compiler.util'
 
 local types = typedecl("Type", {
     Types = {
@@ -1112,13 +1113,17 @@ function types.serialize(t)
         for _, member in ipairs(t.members) do
             table.insert(members, types.serialize(member))
         end
+        local type_member_names = {}
+        for name in pairs(t.type_members or {}) do
+            table.insert(type_member_names, name)
+        end
+        table.sort(type_member_names, util.bytewise_less)
         local type_members = {}
-        for name, member in pairs(t.type_members or {}) do
+        for _, name in ipairs(type_member_names) do
             table.insert(type_members,
                 "[" .. string.format("%q", name) .. "] = " ..
-                types.serialize(member))
+                types.serialize(t.type_members[name]))
         end
-        table.sort(type_members)
         return "Module(" ..
             "'" .. t.name .. "'" .. "," ..
             "{" .. table.concat(members, ",") .. "}" ..
@@ -1168,12 +1173,24 @@ function types.serialize(t)
                 table.insert(fields, types.serialize(field))
             end
         end
-        for name, method in pairs(t.methods) do
+        local method_names = {}
+        for name in pairs(t.methods) do
+            table.insert(method_names, name)
+        end
+        table.sort(method_names, util.bytewise_less)
+        for _, name in ipairs(method_names) do
+            local method = t.methods[name]
             if not method.islocal then
                 table.insert(methods, name .. " = " .. types.serialize(method))
             end
         end
-        for name, func in pairs(t.functions) do
+        local function_names = {}
+        for name in pairs(t.functions) do
+            table.insert(function_names, name)
+        end
+        table.sort(function_names, util.bytewise_less)
+        for _, name in ipairs(function_names) do
+            local func = t.functions[name]
             if not func.islocal then
                 table.insert(functions, name .. " = " .. types.serialize(func))
             end

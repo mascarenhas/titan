@@ -28,6 +28,7 @@
 /.luarocks
 
 /titan/*.c
+/titan/uv/*.c
 
 # Native runtime command-line configuration stamps
 /titan-runtime/.titan-*-build-config

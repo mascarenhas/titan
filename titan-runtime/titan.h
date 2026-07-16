@@ -69,9 +69,11 @@
    flexible-return element type. Flexible-return native functions also gain a
    caller-owned TitanVargX output descriptor and an explicit result demand.
    Older checkers cannot decode the serialized shape, and older callers cannot
-   safely invoke the new native signature. */
-#define TITAN_VER "0.14"
-#define TITAN_VER_SUFFIX "_0_14"
+   safely invoke the new native signature.
+   0.14 -> 0.15: titan.uv moved its exported members into semantic folder
+   contributors, changing its ordered module-member slots. */
+#define TITAN_VER "0.15"
+#define TITAN_VER_SUFFIX "_0_15"
 #define TITAN_PATH_VAR "TITAN_PATH"
 #define TITAN_PATH_SEP "/"
 #define TITAN_ROOT_DEFAULT "/usr/local"

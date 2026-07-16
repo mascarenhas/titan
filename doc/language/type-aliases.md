@@ -103,7 +103,16 @@ from the compiled interface. As with other exported declarations, the target
 of a public alias must itself be exportable: it cannot contain a local record
 or a C-FFI type. A local alias may name either.
 
-Imports remain source ordered. A qualified alias target is resolved at its
-earliest use, so the corresponding `import` must precede that use (and must
-precede the alias declaration when resolving the declaration itself is the
-earliest use).
+Aliases and their targets are order-independent within a module. In
+particular, a qualified alias target may use an import declared later:
+
+```titan
+type Point = geometry.Point
+local geometry = import "geometry"
+```
+
+The alias may itself be used by earlier record fields and callable signatures.
+The ordinary module-variable frontier still applies: a module-variable
+declaration can use any alias in the module, but it cannot directly use a
+qualified import alias that occurs later in the logical source order. See
+[Declaration order and visibility](modules.md#declaration-order-and-visibility).

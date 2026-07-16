@@ -1,0 +1,205 @@
+local libuv = foreign import "uv.h"
+local lua = foreign import "lua.h"
+local ffi = foreign import "titan/ffi.h"
+local shim = foreign import "titan/uv.h"
+local coroutine = import "coroutine"
+
+-- Portable libuv error values are macros hidden behind the private C shim.
+-- Resolve them once when this module image initializes; callback and error
+-- paths should not repeatedly cross the FFI boundary for constants.
+local UV_EIO = 0
+local UV_EOF = 0
+local UV_ECANCELED = 0
+local UV_EADDRNOTAVAIL = 0
+local UV_EINVAL = 0
+local UV_ENOBUFS = 0
+local UV_ENOENT = 0
+local UV_ESRCH = 0
+local UV_BUF_MAX = 0
+
+-- Private continuation runtime. Native pointers stay in exact local fields;
+-- every callback is a direct call to timer_dispatch's native Titan entry.
+
+local OWNER_ALLOCATED = 0
+local OWNER_ACTIVE = 1
+local OWNER_CLOSING = 2
+local OWNER_CLOSED = 3
+
+local EVENT_TIMER = 0
+local EVENT_HANDLE_CLOSE = 0
+local EVENT_STREAM_ALLOC = 0
+local EVENT_STREAM_READ = 0
+local EVENT_CONNECTION = 0
+local EVENT_PROCESS_EXIT = 0
+
+local TASK_NEW = 0
+local TASK_READY = 1
+local TASK_RUNNING = 2
+local TASK_WAITING = 3
+local TASK_SUCCEEDED = 4
+local TASK_FAILED = 5
+local TASK_CANCELLED = 6
+
+local OWNER_START = 1
+local OWNER_SLEEP = 2
+local OWNER_CANCEL = 3
+local OWNER_JOIN_WAKE = 4
+local OWNER_OBSERVE = 5
+local OWNER_TICKER = 6
+local OWNER_TICKER_CLOSE_WAKE = 7
+local OWNER_TASK_DRIVE = 8
+
+local REQUEST_SLEEP = 1
+local REQUEST_JOIN = 2
+local REQUEST_TICK = 3
+local REQUEST_FS = 4
+local REQUEST_NET = 5
+local REQUEST_SIGNAL = 6
+local REQUEST_PROCESS = 7
+local REQUEST_HELPER = 8
+
+local NET_CONNECT = 1
+local NET_LISTEN = 2
+local NET_READ = 3
+local NET_WRITE = 4
+local NET_SHUTDOWN = 5
+local NET_ACCEPT = 6
+local NET_CLOSE = 7
+local NET_CLOSE_WAIT = 8
+
+local NET_OWNER_DNS = 1
+local NET_OWNER_CONNECT = 2
+local NET_OWNER_WRITE = 3
+local NET_OWNER_SHUTDOWN = 4
+
+local NET_OWNER_ALLOCATED = 0
+local NET_OWNER_SUBMITTED = 1
+local NET_OWNER_CALLBACK = 2
+local NET_OWNER_RETIRED = 3
+
+local OS_BUFFER_INITIAL = 256
+
+local TCP_ALLOCATED = 0
+local TCP_INITIALIZED = 1
+local TCP_CONNECTION = 2
+local TCP_SERVER = 3
+local TCP_CLOSING = 4
+local TCP_CLOSED = 5
+
+local TCP_READ_OPEN = 0
+local TCP_READ_EOF = 1
+local TCP_READ_ERROR = 2
+
+local PROCESS_ALLOCATED = 0
+local PROCESS_SPAWNED = 1
+local PROCESS_EXITED = 2
+local PROCESS_CLOSING = 3
+local PROCESS_CLOSED = 4
+
+local PIPE_ALLOCATED = 0
+local PIPE_INITIALIZED = 1
+local PIPE_OPEN = 2
+local PIPE_CLOSING = 3
+local PIPE_CLOSED = 4
+
+local PIPE_STDIN = 1
+local PIPE_STDOUT = 2
+local PIPE_STDERR = 3
+
+local PROCESS_SPAWN = 1
+local PROCESS_WAIT = 2
+local PROCESS_WRITE_STDIN = 3
+local PROCESS_CLOSE_STDIN = 4
+local PROCESS_READ_STDOUT = 5
+local PROCESS_READ_STDERR = 6
+local PROCESS_DISPOSE = 7
+
+local PROCESS_OWNER_ALLOCATED = 0
+local PROCESS_OWNER_SUBMITTED = 1
+local PROCESS_OWNER_CALLBACK = 2
+local PROCESS_OWNER_RETIRED = 3
+
+local PROCESS_GRACE_MILLISECONDS = 5000
+
+local HELPER_STDOUT = 1
+local HELPER_STDERR = 2
+local HELPER_STDIN = 3
+local HELPER_WAIT = 4
+
+local FS_OWNER_ALLOCATED = 0
+local FS_OWNER_SUBMITTED = 1
+local FS_OWNER_CALLBACK = 2
+local FS_OWNER_CLEANED = 3
+
+local DRIVE_RESUME = 1
+local DRIVE_ERROR = 2
+
+-- A single tag identity belongs to this module instance and is shared by all
+-- tasks and by every sequential Runtime session in the Lua state.
+local UV_TAG: value = {}
+local generation = 0
+local active_runtime: Runtime? = nil
+local program_args_ready = false
+
+local main_thread: value = nil
+
+local function bootstrap(main_callable: ({string}) -> integer,
+                         args: {string}): integer
+  local task = run_internal(function (): value
+    return main_callable(args)
+  end, true)
+  _loop()
+  if task.state ~= TASK_SUCCEEDED then
+    raise_saved(task.error_value, task.error_traceback)
+  end
+  return task.result
+end
+
+-- A generated Titan entrypoint publishes its original argc/argv before it
+-- loads any module. Keep uv_setup_args in this canonical provider image and
+-- publish libuv's possibly replaced argv pointer back to the entrypoint.
+local function setup_program_args(): boolean
+  local top = lua.lua_gettop(L)
+  lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGC_KEY)
+  if (lua.lua_type(L, -1) as integer) == (lua.LUA_TNIL as integer) then
+    lua.lua_settop(L, top)
+    return false
+  end
+  local argc = lua.lua_tointegerx(L, -1, nil) as ffi.titan_ffi_int
+  lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGV_KEY)
+  local argv = lua.lua_touserdata(L, -1) as *shim.titan_uvshim_char_ptr
+  local configured = libuv.uv_setup_args(argc, argv)
+  lua.lua_pushlightuserdata(
+      L, configured as ffi.titan_ffi_void_ptr)
+  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGV_KEY)
+  lua.lua_settop(L, top)
+  return true
+end
+
+do
+  UV_EIO = shim.titan_uvshim_error_eio() as integer
+  UV_EOF = shim.titan_uvshim_error_eof() as integer
+  UV_ECANCELED = shim.titan_uvshim_error_ecanceled() as integer
+  UV_EADDRNOTAVAIL = shim.titan_uvshim_error_eaddrnotavail() as integer
+  UV_EINVAL = shim.titan_uvshim_error_einval() as integer
+  UV_ENOBUFS = shim.titan_uvshim_error_enobufs() as integer
+  UV_ENOENT = shim.titan_uvshim_error_enoent() as integer
+  UV_ESRCH = shim.titan_uvshim_error_esrch() as integer
+  UV_BUF_MAX = shim.titan_uvshim_buf_max_length() as integer
+  EVENT_TIMER = shim.TITAN_UV_EVENT_TIMER as integer
+  EVENT_HANDLE_CLOSE = shim.TITAN_UV_EVENT_HANDLE_CLOSE as integer
+  EVENT_STREAM_ALLOC = shim.TITAN_UV_EVENT_STREAM_ALLOC as integer
+  EVENT_STREAM_READ = shim.TITAN_UV_EVENT_STREAM_READ as integer
+  EVENT_CONNECTION = shim.TITAN_UV_EVENT_CONNECTION as integer
+  EVENT_PROCESS_EXIT = shim.TITAN_UV_EVENT_PROCESS_EXIT as integer
+  local sigpipe_status =
+    shim.titan_uvshim_ignore_sigpipe_if_default() as integer
+  if sigpipe_status < 0 then
+    raise make_error(sigpipe_status, "runtime.sigpipe", nil)
+  end
+  main_thread = main_thread_value()
+  check_alignment()
+  program_args_ready = setup_program_args()
+  ffi.lua_pushtvalue(L, bootstrap)
+  lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_BOOTSTRAP_KEY)
+end

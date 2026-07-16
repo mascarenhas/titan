@@ -20,4 +20,26 @@ describe("Titan utils", function()
         os.remove(filename)
 
      end)
+
+     it("orders strings by numeric bytes independent of text collation", function()
+         local original = os.setlocale(nil, "collate")
+         local locales = { "C", "C.UTF-8", "en_US.UTF-8", "pt_BR.UTF-8" }
+         local results = {}
+         for _, locale in ipairs(locales) do
+             if os.setlocale(locale, "collate") then
+                 local values = { "\195\169", "z", "aa", "a", "A" }
+                 table.sort(values, util.bytewise_less)
+                 results[#results + 1] = values
+             end
+         end
+         if original then os.setlocale(original, "collate") end
+
+         assert.is_true(#results > 0)
+         for _, values in ipairs(results) do
+             assert.same({ "A", "a", "aa", "z", "\195\169" }, values)
+         end
+         assert.is_true(util.bytewise_less("a", "aa"))
+         assert.is_false(util.bytewise_less("aa", "a"))
+         assert.is_false(util.bytewise_less("same", "same"))
+     end)
 end)

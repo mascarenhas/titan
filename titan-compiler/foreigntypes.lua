@@ -171,6 +171,7 @@ local function populate_struct_or_union(st, owner, ftype)
     local has_fam = false
     owner.fields = fields
     owner.complete = true
+    owner._definition_order = st.current_toplevel_order or 0
     for _, field in ipairs(ftype.fields) do
         if not field.anonymous and field.name then
             local ftyp, err = convert_type(st, field)

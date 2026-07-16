@@ -39,7 +39,7 @@ local function find_standard_dir()
     local paths = {}
     local prefix = os.getenv("PREFIX")
     if prefix and prefix ~= "" then
-        paths[#paths + 1] = prefix .. "/lib/titan/0.14/titan"
+        paths[#paths + 1] = prefix .. "/lib/titan/0.15/titan"
     end
     local installed = package.searchpath("titan.coroutine", package.cpath)
     if installed then
@@ -147,7 +147,7 @@ function M.compile(workspace, modname, options)
     local environment = {
         "env -u LUA_PATH -u LUA_CPATH" ..
             " -u LUA_PATH_5_5 -u LUA_CPATH_5_5 CCACHE_DISABLE=1",
-        "TITAN_PATH_0_14=" .. quote(module_root(stdlib)),
+        "TITAN_PATH_0_15=" .. quote(module_root(stdlib)),
         "TITAN_PATH=",
     }
     if options.cppflags then
@@ -195,10 +195,12 @@ local function build_variant_workspace(transformer)
     if transform:sub(1, 1) ~= "/" then transform = REPO .. "/" .. transform end
     local raw_lua = host_lua()
     local ok, _, output = run(table.concat({
-        quote(raw_lua), quote(transform), quote(REPO .. "/titan/uv.titan"),
-        quote(workspace .. "/src/titan/uv.titan"),
+        quote(raw_lua), quote(transform), quote(REPO .. "/titan/uv"),
+        quote(workspace .. "/src/titan/uv"),
     }, " "), workspace)
     assert.truthy(ok, output)
+    assert.truthy(exists(workspace .. "/src/titan/uv/uv.titan"),
+        "async stdlib variant transformer did not copy the folder main")
     copy_file(REPO .. "/titan/timer.titan",
         workspace .. "/src/titan/timer.titan")
     copy_file(REPO .. "/titan/async.titan",
@@ -251,7 +253,7 @@ function M.run_lua_source(workspace, source, options)
     local command = {
         "env -u LUA_PATH -u LUA_CPATH" ..
             " -u LUA_PATH_5_5 -u LUA_CPATH_5_5",
-        "TITAN_PATH_0_14=" .. quote(root),
+        "TITAN_PATH_0_15=" .. quote(root),
         "TITAN_PATH=",
         "LUA_PATH=" .. quote(lua_path),
         "LUA_PATH_5_5=" .. quote(lua_path),
@@ -269,10 +271,18 @@ end
 
 local function app_command(workspace, modname)
     local stdlib = find_standard_dir()
+    local module_path = modname:gsub("%.", "/")
+    local basename = modname:match("([^.]+)$")
+    local source_main = workspace .. "/src/" .. module_path .. "/" ..
+        basename .. ".titan"
+    local program_output = module_path
+    if lfs.attributes(source_main, "mode") == "file" then
+        program_output = program_output .. "__main"
+    end
     return "env -u LUA_PATH -u LUA_CPATH" ..
         " -u LUA_PATH_5_5 -u LUA_CPATH_5_5" ..
-        " TITAN_PATH_0_14=" .. quote(module_root(stdlib)) .. " " ..
-        "TITAN_PATH= " .. quote(workspace .. "/" .. modname)
+        " TITAN_PATH_0_15=" .. quote(module_root(stdlib)) .. " " ..
+        "TITAN_PATH= " .. quote(workspace .. "/" .. program_output)
 end
 
 function M.run_app(workspace, modname, ...)

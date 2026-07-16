@@ -18,13 +18,19 @@ function checker.check(modname, ast, subject, filename, loader)
 ```
 
 (`checker.lua`, `checker.check`.) It builds a fresh symbol table with
-`symtab.new(modname)`, runs the two top-level passes (below), computes the
-module's interface type with `makemoduletype`, stores it in `ast._type`, and
-returns **`ast._type, errors`** — a `Type.Module` and the error list. The doc
-comment above the function still claims a boolean return; it is stale.
-Callers test `#errors == 0` (as `spec/checker_spec.lua` does). `loader` is
+`symtab.new(modname)`, runs staged top-level declaration collection followed by
+body checking (below), computes the module's interface type with
+`makemoduletype`, stores it in `ast._type`, and returns **`ast._type, errors`**
+— a `Type.Module` and the error list. Callers test `#errors == 0` (as
+`spec/checker_spec.lua` does). `loader` is
 the import callback (see [Imports](#imports-and-the-loader-protocol)); if
 omitted, a stub that fails every import is used.
+
+For a [folder module](folder-modules.md), `driver.defaultloader` independently
+parses all source files and calls this entry point once with one dense combined
+AST, the logical module name, and the canonical main's subject/filename. The
+checker does not know or create file scopes; contributor filenames remain only
+on the existing node locations.
 
 Errors accumulate: nothing aborts on the first problem. The `errors` table is
 an array of formatted strings that also carries `subject` and `filename`
@@ -33,67 +39,119 @@ fields. Every error goes through `checker.typeerror`, which formats via
 `FILENAME:LINE:COL: type error: <message>`. When an expression cannot be
 given a type, the helper `invalid(errors, loc, ...)` logs the error and
 returns `types.Invalid()`, the error-recovery type, so checking continues.
+When a duplicate refers to an earlier node, `location.format` adds that
+node's complete `filename:line:col`; this is essential when the declarations
+come from different contributors.
 
 ## The symbol table (`symtab.lua`)
 
-`symtab.lua` is 67 lines and worth reading whole. A symbol table is a stack
-of blocks plus one flat side table:
+The symbol table is a stack of blocks plus separate side tables for Titan
+aliases and C declarations:
 
 * `blocks` starts as `{ {} }`; `open_block`/`close_block` push and pop, and
   `with_block(body, ...)` wraps a call in a scope. `add_symbol(name, decl)`
   writes into the innermost block; `find_symbol(name)` searches innermost-out.
-* `find_dup(name)` checks **only the innermost block**
-  (`return self.blocks[#self.blocks][name]`) and is used only for top-level
-  duplicate detection. Local declarations just call `add_symbol`, so
+* Ordinary top-level duplicate winners are marked by an AST-order prepass
+  before names are reserved in the outer block. `find_dup(name)` still checks
+  only the innermost block; local declarations call `add_symbol`, so
   re-declaring a name in the same inner block silently overwrites it, except
   for read-only compiler-synthesized locals such as `L`, which `declare`
   rejects before adding the new symbol.
-* `foreign_types` is a **separate namespace** for C typedef names
-  (`add_foreign_type`/`find_foreign_type`), populated when a `foreign import`
-  is checked, so C type names never collide with Titan symbols.
+* `foreign_types` and `foreign_names` are separate namespaces populated by
+  `foreign import`, so C typedef and ordinary C names never collide with Titan
+  symbols. Their `foreign_type_history` and `foreign_name_history` lists retain
+  `{order, decl}` entries for module-variable frontier lookup. Completed
+  canonical C struct/union owners also carry `_definition_order`;
+  `foreign_definition_visible` prevents an in-place completion performed by a
+  later header from exposing fields or allocation eligibility at an earlier
+  frontier.
+* During a `TopLevelVar`, `initializer_order` makes `find_symbol` hide the
+  current and later module variables and later Titan/foreign imports. The C
+  lookup helpers scan their histories backward for the last declaration whose
+  recorded order is at or before that frontier. Outside this narrow mode,
+  lookups return the final module-wide declarations collected by the staged
+  passes.
 * `st.modname` is stored at construction and used by `typefromnode` to fully
   qualify nominal type names: the written type `Point` inside module `geo`
   becomes `types.Nominal("geo.Point")`.
+
+One combined folder AST creates one such symbol table. Top-level `local`
+declarations are consequently private to the logical module but visible from
+every contributor; the checker introduces no file-private block.
 
 One pseudo-symbol uses the table as a side channel: `checkfunc` binds
 `"$function"` (not a legal identifier, so it cannot clash) to the enclosing
 function node, and the `StatReturn` handler looks it up to find the declared
 return types.
 
-## Two passes over the top level
+## Staged top-level collection and body checking
 
-`checker.check` runs `checktoplevel` and then `checkbodies`.
+`checker.check` runs `mark_toplevel_duplicates`, `collect_type_aliases`,
+`checktoplevel`, and finally `checkbodies`. The AST remains in its original
+flat or deterministic combined folder order throughout; the checker changes
+visitation order, not node order.
 
-Before pass 1, `collect_type_aliases` enters every alias in a separate,
-module-wide type namespace. This makes forward aliases available to earlier
-signatures without creating value symbols. Lazy resolution stores the exact RHS
-type on the declaration and detects cycles with a `resolving` state.
+`mark_toplevel_duplicates` assigns every root node its 1-based
+`_toplevel_order`, chooses the first ordinary declaration of each name in that
+order, reports later duplicates with the first node's full location, and marks
+them `_ignore`.
 
-**Pass 1 — signatures** (`checktoplevel`). Visits every top-level node in
-order, computing its type without looking at function bodies: `TopLevelFunc`
-gets a `types.Function` built from its written parameter/return types;
-`TopLevelRecord` builds its `Type.Field` list and registers
-`types.Record(fqtn, fields, {}, {}, nfields)` in `types.registry` under
-`modname .. "." .. name`; record functions and methods attach themselves to the
-registered record type; imports run the loader; variables check their
-initializers. Duplicate handling happens here: `toplevel_name(node)` yields
-the declared name (the local name for imports; `nil` for methods and
-record functions, which have their own clash logic against the record's existing
-fields, methods and record functions); a `st:find_dup` hit produces `duplicate
-declaration for %s, previous one at line %d` and sets `node._ignore = true`.
-Everything downstream — pass 2, `makemoduletype`, the coder — must skip
-`_ignore`d nodes; forgetting that is a classic source of crashes.
+`collect_type_aliases` enters every alias in a separate module-wide type
+namespace, chooses the first duplicate alias by AST order, and keeps a
+surviving record declaration authoritative over a same-named alias regardless
+of relative placement. This makes forward aliases available without creating
+value symbols. Lazy resolution stores the exact RHS type on the declaration
+and detects cycles with a `resolving` state.
 
-**Pass 2 — bodies** (`checkbodies`). Checks function, method and record-function
-bodies (`checkfunc`, each in a fresh scope; `checkmethod` first synthesizes a
-`self` declaration typed as the record's `Type.Nominal`), and validates
-record **field types** — deferring those to pass 2 is what makes recursive
-and mutually recursive records typecheck, since by then every record of the
-module is in the registry. `checkfuncbody` also synthesizes a read-only local
-`L` in every function-like body. Its type is `lua_State *` in the C FFI type
-family; if a `foreign import` has already introduced `lua_State`, the checker
-reuses that type identity, otherwise it creates the same opaque declaration.
-After both passes, `makemoduletype` builds the module's interface from the
+`checktoplevel` then performs these stages:
+
+1. `reserve_toplevel_names` publishes every surviving ordinary name before any
+   signature needs it.
+2. `collect_record_constructors` recognizes the parser-marked synthesized
+   `TopLevelStatic` immediately following each `TopLevelRecord`. A duplicate
+   record also suppresses its constructor, preventing a secondary `new`
+   diagnostic.
+3. All Titan and foreign imports are visited in AST order. This establishes
+   module and C type environments before non-variable declarations, while
+   `current_toplevel_order` records the origin of each C declaration in its
+   symbol-table history.
+4. Aliases are resolved, then every record is built and registered in
+   `types.registry`, then every synthesized `new` is attached to its complete
+   record namespace.
+5. Ordinary function and module-initializer signatures are collected, followed
+   by explicit methods and record functions. Because names, imports, aliases,
+   records, and synthesized constructors are already available, these
+   declarations are independent of their relative AST order.
+6. Module variables are checked in AST order. For each node the checker sets
+   `st.initializer_order` to its `_toplevel_order`; symbol lookup then exposes
+   only earlier Titan/foreign imports and earlier module variables, while all
+   other declaration kinds remain module-wide. The type annotation and RHS are
+   checked under the same frontier, followed by the ordinary constant-expression
+   validation.
+
+Methods and record functions still perform their own conflict checks against
+fields and one another. Every failed or duplicate top-level declaration is
+marked `_ignore`; everything downstream — body checking, `makemoduletype`, and
+the coder — must skip it.
+
+`checkbodies` walks the unchanged AST order. It checks ordinary function,
+method, record-function, and synthesized-constructor bodies (`checkfunc`, each
+in a fresh scope; `checkmethod` first synthesizes a `self` declaration typed as
+the record's `Type.Nominal`). It also validates resolved record field types and
+alias targets after all records have entered the registry; that is what permits
+recursive and mutually recursive records while still reporting an unresolved
+nominal. Module-variable annotations are instead resolved and validated in the
+module-variable stage, where every record is already registered but the
+import/module-variable frontier is still active. `checkfuncbody` also
+synthesizes a read-only local `L` in every function-like body. Its type is
+`lua_State *` in the C FFI type family. Ordinary top-level callable bodies see
+the complete foreign environment and reuse an imported `lua_State` identity
+regardless of the import's placement. A lambda checked inside a module-variable
+initializer retains that initializer's frontier, so it reuses only an earlier
+`lua_State` declaration and otherwise receives the same opaque fallback type.
+
+After declaration and body checking, `makemoduletype` builds the module's
+interface by traversing the original AST order from the
 non-`islocal`, non-`_ignore`, non-import top levels (`TopLevelVar` →
 `Type.ModuleVariable`; `TopLevelFunc`/`TopLevelRecord` →
 `Type.ModuleMember`). Public `TopLevelTypeAlias` nodes instead populate the
@@ -108,6 +166,9 @@ building a shared library and a standalone executable: it looks for a
 `{string}` and one return type whose checker type is `integer`. Both the input
 vararg and flexible-result tail must be absent. Resolving the fixed types before
 this test lets transparent aliases satisfy the entrypoint contract.
+Because it examines the one combined list, a valid `main` may be declared in
+the folder main or any contributor and still belongs to the same logical
+module.
 
 ## The relations in `types.lua`
 
@@ -693,6 +754,13 @@ The loader contract is:
 loader(modname)  -->  ok, moduletype_or_error, errors
 ```
 
+The staged declaration pass invokes every import in AST order before resolving
+records and callable signatures. Its alias is therefore available to every
+non-module-variable declaration even when the import node occurs later in the
+AST. This early loading does not erase the language's sequential frontier:
+while checking a module variable, `symtab.find_symbol` masks later
+`TopLevelImport` and `TopLevelForeignImport` nodes by `_toplevel_order`.
+
 On success, the import node's `_type` is the returned `Type.Module`, and
 errors found while checking the dependency propagate into this module's
 error list. `checkimport` then walks both the value `members` and alias
@@ -717,7 +785,8 @@ Two real loaders exist in `driver.lua`:
 * `driver.defaultloader` caches results in `driver.imported` and detects
   cycles by planting a `CIRCULAR_MARK` sentinel in the cache before recursing
   (a re-entry finds the mark and fails with `circular reference to module`).
-  Dependencies with `.titan` source are recursively parsed and checked.
+  Dependencies with flat or folder source are recursively parsed and checked
+  once per logical module.
   `.so`-only dependencies recover their interface by loading the compiled
   module's `<mangled>_types` symbol — a string of nested constructor calls
   produced by `types.serialize` — and evaluating it with
@@ -745,6 +814,20 @@ the C parser pipeline and converts each declaration with
 declarations become `type_members` plus entries in the symbol table's
 `foreign_types` namespace, which is what lets local annotations such as
 `c.size_t` resolve (see [FFI internals](ffi-internals.md)).
+Every converted C type and accepted ordinary C name is also recorded with the
+foreign-import node's `_toplevel_order`. Although the final foreign namespaces
+are available to later declaration stages, a module variable asks those
+histories for the last declaration at its `initializer_order`, so a later
+header cannot leak C names or types backward through early import collection.
+Because C aggregate owners are canonical objects completed in place,
+`foreigntypes` additionally stamps a completed struct/union with
+`_definition_order`; field lookup and allocation call
+`foreign_definition_visible` so that later completion is treated as absent or
+incomplete at an earlier module-variable frontier.
+The checker derives its C include `source_dir` from the canonical main
+filename. Folder contributors are immediate siblings of that main, so quoted
+headers imported from a contributor use the same directory without a
+per-file checker invocation.
 
 After the module interface is built, export validation rejects any public type
 tree, including an exported alias target, that mentions a local record type or

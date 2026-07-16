@@ -193,6 +193,17 @@ function defs.simpleblock(pos, stats)
     return ast.StatBlock(pos, lower_defers(stats))
 end
 
+-- Mark the parser-owned role explicitly: a root initializer may be either the
+-- plain StatBlock or the StatTry produced when its block has catch/finally
+-- trailers. Its diagnostic location is the `do` keyword rather than the first
+-- token in the block, so filesystem assembly can reject the construct in a
+-- contributor without guessing from the statement tag.
+function defs.moduleinit(pos, block)
+    block.loc = pos
+    block._module_initializer = true
+    return block
+end
+
 function defs.cptrtype(pos, subtype)
     return ast.TypeCPointer(pos, subtype, false)
 end
@@ -393,6 +404,7 @@ function defs.recorddecl(pos, islocal, name, fields)
     local new = ast.TopLevelStatic(pos, name, "new", params,
         { ast.TypeName(pos, name) }, false, body)
     new.islocal = islocal or has_local_field(fields)
+    new._record_constructor = true
     return record, new
 end
 
@@ -565,7 +577,7 @@ local grammar = re.compile([[
                           (LPAREN STRINGLIT^StringLParImport RPAREN^RParImport /
                            STRINGLIT^StringImport))              -> TopLevelForeignImport
 
-    moduleinit      <- doblock                                   -- produces StatBlock
+    moduleinit      <- (P DO block END^EndBlock) -> moduleinit   -- marks StatBlock/StatTry
 
     rettypeopt      <- (P  (COLON rettype^TypeFunc)?)            -> rettypeopt
 
@@ -707,7 +719,7 @@ local grammar = re.compile([[
                      / (P  BREAK)                                -> StatBreak
                      / (P  RAISE (exp? -> opt))                  -> StatRaise
                      / deferstat
-                     / doblock                                   -- produces StatBlock
+                     / doblock                                   -- produces StatBlock/StatTry
                      / (P  WHILE exp^ExpWhile DO^DoWhile
                                  block END^EndWhile)             -> StatWhile
                      / (P  REPEAT block UNTIL^UntilRepeat
@@ -752,7 +764,7 @@ local grammar = re.compile([[
 
     returnstat      <- (P  RETURN (explist? -> listopt) SEMICOLON?)      -> StatReturn
 
-    doblock         <- (DO block END^EndBlock)                   -- produces StatBlock
+    doblock         <- (DO block END^EndBlock)                   -- produces StatBlock/StatTry
 
     op1             <- ( OR -> 'or' )
     op2             <- ( AND -> 'and' )

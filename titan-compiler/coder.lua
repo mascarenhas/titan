@@ -8825,7 +8825,7 @@ local function allocate_upvalues(tlcontext, ast)
     -- Exported variables first (slots 1..V). Importers reconstruct these
     -- indices purely from the module interface, enumerating members in
     -- declaration order (see import_module), so the layout here must match.
-    for _, node in pairs(ast) do
+    for _, node in ipairs(ast) do
         if not node._ignore then
             local tag = node._tag
             if tag == "Ast.TopLevelVar" and not node.islocal then
@@ -8837,12 +8837,12 @@ local function allocate_upvalues(tlcontext, ast)
     -- V+1..V+F), exported-always: an importer may take the value even when this
     -- module never references it, and indexing the closure (rather than a hash
     -- lookup) keeps the cross-module reference O(1) and fast-path eligible.
-    for _, node in pairs(ast) do
+    for _, node in ipairs(ast) do
         if not node._ignore and node._tag == "Ast.TopLevelFunc" and not node.islocal then
             node._closure_upvalue = nextupvalue(tlcontext)
         end
     end
-    for _, node in pairs(ast) do
+    for _, node in ipairs(ast) do
         if not node._ignore then
             local tag = node._tag
             if tag == "Ast.TopLevelVar" and node.islocal then
@@ -8854,7 +8854,7 @@ local function allocate_upvalues(tlcontext, ast)
     end
     -- Referenced local functions (private, so only when used as a value) and
     -- every record function (e.g. `Rec.new`) each get a canonical-closure slot.
-    for _, node in pairs(ast) do
+    for _, node in ipairs(ast) do
         if not node._ignore then
             if node._tag == "Ast.TopLevelFunc" and node.islocal and node._valref then
                 node._closure_upvalue = nextupvalue(tlcontext)
@@ -8946,7 +8946,7 @@ function coder.generate(modname, ast, static_deps)
 
     allocate_upvalues(tlcontext, ast)
 
-    for _, node in pairs(ast) do
+    for _, node in ipairs(ast) do
         if not node._ignore then
             local tag = node._tag
             if tag == "Ast.TopLevelImport" then
@@ -8982,7 +8982,7 @@ function coder.generate(modname, ast, static_deps)
     -- store it into the record's uv slot, BEFORE statics run so a static can be
     -- installed into the namespace it belongs to. Register the namespace in the
     -- module member map under the record's short name.
-    for _, node in pairs(ast) do
+    for _, node in ipairs(ast) do
         if not node._ignore and node._tag == "Ast.TopLevelRecord" then
             local slot = tlcontext.record_namespace_slots[node._type.name]
             table.insert(funcs, render([[
@@ -8999,7 +8999,7 @@ function coder.generate(modname, ast, static_deps)
         end
     end
 
-    for _, node in pairs(ast) do
+    for _, node in ipairs(ast) do
         if not node._ignore then
             local tag = node._tag
             if tag == "Ast.TopLevelFunc" or tag == "Ast.TopLevelMethod" or tag == "Ast.TopLevelStatic" then
@@ -9106,7 +9106,7 @@ function coder.generate(modname, ast, static_deps)
                         NATIVE = static_name(node._type),
                     }))
                 end
-            elseif tag == "Ast.StatBlock" then
+            elseif node._module_initializer or tag == "Ast.StatBlock" then
                 codeinitializerdec(tlcontext, node)
                 table.insert(sigs, node._sig)
                 table.insert(code, node._body)

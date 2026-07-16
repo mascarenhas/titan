@@ -21,8 +21,8 @@ consumer annotations never replace the callee's `Type.Function` as the source
 of native ABI truth.
 
 This chapter describes the completed implementation, including the generic
-open-consumer and pending-`finally` lifetime paths. The compiled-module ABI and
-installed-module paths are version 0.14.
+open-consumer and pending-`finally` lifetime paths. Flexible returns introduced
+compiled-module ABI 0.14; current installed-module paths use ABI 0.15.
 
 ## Representation in the AST and type graph
 

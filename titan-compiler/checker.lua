@@ -21,12 +21,10 @@ function checker.configure_foreign_c(options, config_error)
 end
 
 
--- The typechecker works in two passes, the first one just
--- collects type information for top-level functions and variables
--- (and detects duplicate definitions in the top level), while the
--- second pass does the actual typechecking. All typechecked nodes
--- that have a type get a "_type" field with the type. The types
--- themselves are in "types.lua".
+-- The typechecker first collects top-level declarations in dependency order,
+-- while preserving the AST's source order for initialization and codegen, and
+-- then checks callable bodies. All typechecked nodes that have a type get a
+-- "_type" field with the type. The types themselves are in "types.lua".
 local typefromnode
 
 local checkdecl
@@ -370,7 +368,7 @@ local function c_pseudo_member(typ, name)
     end
 end
 
-local function c_field_decl(typ, name)
+local function c_field_decl(typ, name, st)
     typ = c_resolve(typ)
     if typ._tag == "Type.CPointer" then
         typ = c_resolve(typ.pointee)
@@ -378,6 +376,7 @@ local function c_field_decl(typ, name)
         typ = c_resolve(typ.pointee)
     end
     if (typ._tag == "Type.CStruct" or typ._tag == "Type.CUnion")
+       and st:foreign_definition_visible(typ)
        and typ.fields and typ.fields[name] then
         return typ.fields[name]
     end
@@ -405,15 +404,17 @@ local function has_c_length(typ)
         or (typ._tag == "Type.COwned" and typ.count)
 end
 
-local function c_allocation_error(typ)
+local function c_allocation_error(typ, st)
     local rtyp = c_resolve(typ)
     if rtyp._tag == "Type.CVoid" then
         return "cannot allocate C void type in this FFI version"
-    elseif rtyp._tag == "Type.CStruct" and not rtyp.complete then
+    elseif rtyp._tag == "Type.CStruct"
+           and not st:foreign_definition_visible(rtyp) then
         return string.format(
             "cannot allocate incomplete C struct type '%s' in this FFI version",
             types.tostring(rtyp))
-    elseif rtyp._tag == "Type.CUnion" and not rtyp.complete then
+    elseif rtyp._tag == "Type.CUnion"
+           and not st:foreign_definition_visible(rtyp) then
         return string.format(
             "cannot allocate incomplete C union type '%s' in this FFI version",
             types.tostring(rtyp))
@@ -508,7 +509,7 @@ typefromnode = util.make_visitor({
 
     ["Ast.TypeQualName"] = function(node, st, errors)
         local mod = st:find_symbol(node.module)
-        if mod and mod._type._tag == "Type.Module" then
+        if mod and mod._type and mod._type._tag == "Type.Module" then
             local alias = mod._type.type_members
                 and mod._type.type_members[node.name]
             if alias then
@@ -530,7 +531,7 @@ typefromnode = util.make_visitor({
                     node.name, mod._type.name)
             end
             return types.Nominal(fqtn)
-        elseif mod and mod._type._tag == "Type.CModule" then
+        elseif mod and mod._type and mod._type._tag == "Type.CModule" then
             local typ = mod._type.type_members and mod._type.type_members[node.name]
             if typ then
                 return typ
@@ -2132,7 +2133,7 @@ checkvar = util.make_visitor({
                         types.tostring(ltype), node.name)
                 end
             else
-                node._decl = c_field_decl(ltype, node.name)
+                node._decl = c_field_decl(ltype, node.name, st)
                 if node._decl then
                     node._type = node._decl.type
                 else
@@ -3247,7 +3248,8 @@ checkexp = util.make_visitor({
                 check_call_argument_expressions(node.args, st, errors)
                 return
             elseif pseudo_new then
-                local alloc_err = c_allocation_error(node.exp.var._decl.ctype)
+                local alloc_err = c_allocation_error(
+                    node.exp.var._decl.ctype, st)
                 if alloc_err then
                     node._type = invalid(errors, node.loc, alloc_err)
                     check_call_argument_expressions(node.args, st, errors)
@@ -3813,7 +3815,8 @@ local function checkbodies(ast, st, errors)
                 st:with_block(checkmethod, node, st, errors)
             elseif node._tag == "Ast.TopLevelStatic" then
                 st:with_block(checkfunc, node, st, errors)
-            elseif node._tag == "Ast.StatBlock" then
+            elseif node._module_initializer or
+                   node._tag == "Ast.StatBlock" then
                 checkinitializer(node, st, errors)
             elseif node._tag == "Ast.TopLevelRecord" then
                 local fields = node._type.fields
@@ -3925,6 +3928,7 @@ end
 
 -- Return the name given the toplevel node
 local function toplevel_name(node)
+    if node._module_initializer then return nil end
     local tag = node._tag
     if tag == "Ast.TopLevelImport" then
         return node.localname
@@ -4031,6 +4035,7 @@ local toplevel_visitor = util.make_visitor({
     ["Ast.TopLevelVar"] = function(node, st, errors)
         if node.decl.type then
             node._type = typefromnode(node.decl.type, st, errors)
+            checktype(node._type, node.decl.type.loc or node.loc, errors)
             checkexp(node.value, st, errors, node._type)
             node.value = trycoerce(node.value, node._type, errors)
             checkmatch("declaration of module variable " .. node.decl.name,
@@ -4067,6 +4072,11 @@ local toplevel_visitor = util.make_visitor({
     end,
 
     ["Ast.StatBlock"] = function(node)
+        node._type = types.Function({}, {}, false, false, false)
+    end,
+
+    ["Ast.StatTry"] = function(node)
+        assert(node._module_initializer)
         node._type = types.Function({}, {}, false, false, false)
     end,
 
@@ -4210,24 +4220,25 @@ local toplevel_visitor = util.make_visitor({
 local function collect_type_aliases(ast, st, errors)
     local records = {}
     for _, node in ipairs(ast) do
-        if node._tag == "Ast.TopLevelRecord" and not records[node.name] then
+        if not node._ignore and node._tag == "Ast.TopLevelRecord"
+           and not records[node.name] then
             records[node.name] = node
         end
     end
 
     for _, node in ipairs(ast) do
-        if node._tag == "Ast.TopLevelTypeAlias" then
+        if not node._ignore and node._tag == "Ast.TopLevelTypeAlias" then
             local record = records[node.name]
             local previous = st:find_type_alias(node.name)
             if record then
                 checker.typeerror(errors, node.loc,
-                    "type alias '%s' conflicts with record declared at line %d",
-                    node.name, record.loc.line)
+                    "type alias '%s' conflicts with record declared at %s",
+                    node.name, location.format(record.loc))
                 node._ignore = true
             elseif previous then
                 checker.typeerror(errors, node.loc,
-                    "duplicate type alias for %s, previous one at line %d",
-                    node.name, previous.loc.line)
+                    "duplicate type alias for %s, previous one at %s",
+                    node.name, location.format(previous.loc))
                 node._ignore = true
             else
                 st:add_type_alias(node.name, node)
@@ -4236,29 +4247,124 @@ local function collect_type_aliases(ast, st, errors)
     end
 end
 
--- Colect type information of toplevel nodes
---   ast: AST for the whole module
---   st: symbol table
---   errors: list of compile-time errors
---   annotates the top-level nodes with their types in a "_type" field
---   annotates whether a top-level declaration is duplicated with a "_ignore"
---   field
-local function checktoplevel(ast, st, errors, loader)
+-- Mark duplicate ordinary top-level declarations before signature collection.
+-- Records and all named declarations are then safe to reserve up front without
+-- changing the existing "first declaration wins" rule.
+local function mark_toplevel_duplicates(ast, errors)
+    local first = {}
+    for index, node in ipairs(ast) do
+        node._toplevel_order = index
+        local name = toplevel_name(node)
+        if name then
+            local previous = first[name]
+            if previous then
+                checker.typeerror(errors, node.loc,
+                    "duplicate declaration for %s, previous one at %s",
+                    name, location.format(previous.loc))
+                node._ignore = true
+            else
+                first[name] = node
+            end
+        end
+    end
+end
+
+local function reserve_toplevel_names(ast, st)
     for _, node in ipairs(ast) do
         if not node._ignore then
             local name = toplevel_name(node)
-            local dup = name and st:find_dup(name)
-            if dup then
-                checker.typeerror(errors, node.loc,
-                    "duplicate declaration for %s, previous one at line %d",
-                    name, dup.loc.line)
-                node._ignore = true
-            else
-                toplevel_visitor(node, st, errors, loader)
-                if name and not node._ignore then
-                    st:add_symbol(name, node)
-                end
+            if name then st:add_symbol(name, node) end
+        end
+    end
+end
+
+-- The parser emits each record's marked, synthesized `new` immediately after
+-- its record. Treat that constructor as part of the record declaration pass:
+-- an earlier module variable or explicit record member can then use the
+-- complete record namespace even when the written `record` appears later.
+local function collect_record_constructors(ast)
+    local constructors = {}
+    for index, node in ipairs(ast) do
+        if node._tag == "Ast.TopLevelRecord" then
+            local constructor = ast[index + 1]
+            if constructor and constructor._tag == "Ast.TopLevelStatic"
+               and constructor._record_constructor then
+                assert(constructor.class == node.name and
+                       constructor.name == "new")
+                if node._ignore then constructor._ignore = true end
+                constructors[#constructors + 1] = constructor
             end
+        end
+    end
+    return constructors
+end
+
+local function visit_toplevel(node, st, errors, loader)
+    st.current_toplevel_order = node._toplevel_order
+    toplevel_visitor(node, st, errors, loader)
+    st.current_toplevel_order = nil
+end
+
+-- Collect top-level declarations in dependency order while retaining the AST's
+-- logical source order for interfaces and code generation. Imports establish
+-- the type environment; records and their constructors come next; other
+-- callable signatures follow; module variables are checked last, one by one.
+-- During that last pass the symbol table hides later imports and the current or
+-- later module variables, preserving the only sequential declaration boundary.
+local function checktoplevel(ast, st, errors, loader)
+    reserve_toplevel_names(ast, st)
+    local constructors = collect_record_constructors(ast)
+
+    for _, node in ipairs(ast) do
+        if not node._ignore and
+           (node._tag == "Ast.TopLevelImport" or
+            node._tag == "Ast.TopLevelForeignImport") then
+            visit_toplevel(node, st, errors, loader)
+        end
+    end
+
+    for _, node in ipairs(ast) do
+        if not node._ignore and node._tag == "Ast.TopLevelTypeAlias" then
+            visit_toplevel(node, st, errors, loader)
+        end
+    end
+
+    for _, node in ipairs(ast) do
+        if not node._ignore and node._tag == "Ast.TopLevelRecord" then
+            visit_toplevel(node, st, errors, loader)
+        end
+    end
+
+    for _, node in ipairs(constructors) do
+        if not node._ignore then visit_toplevel(node, st, errors, loader) end
+    end
+
+    for _, node in ipairs(ast) do
+        if not node._ignore then
+            local tag = node._tag
+            if tag == "Ast.TopLevelFunc" or node._module_initializer or
+               tag == "Ast.StatBlock" or tag == "Ast.StatTry" then
+                visit_toplevel(node, st, errors, loader)
+            end
+        end
+    end
+
+    for _, node in ipairs(ast) do
+        if not node._ignore then
+            local tag = node._tag
+            if (tag == "Ast.TopLevelMethod" or
+                tag == "Ast.TopLevelStatic") and
+               not node._record_constructor then
+                visit_toplevel(node, st, errors, loader)
+            end
+        end
+    end
+
+    for _, node in ipairs(ast) do
+        if not node._ignore and node._tag == "Ast.TopLevelVar" then
+            st.initializer_order = node._toplevel_order
+            visit_toplevel(node, st, errors, loader)
+            st.initializer_order = nil
         end
     end
 end
@@ -4531,8 +4637,7 @@ end
 --   loader: the module loader, a function from module name to its AST, code,
 --   and filename or nil and an error
 --
---   returns true if typechecking succeeds, or false and a list of type errors
---   found
+--   returns the module type and a list of type errors found
 --   annotates the AST with the types of its terms in "_type" fields
 --   annotates duplicate top-level declarations with a "_ignore" boolean field
 function checker.check(modname, ast, subject, filename, loader)
@@ -4552,6 +4657,7 @@ function checker.check(modname, ast, subject, filename, loader)
         end
     end
     local errors = {subject = subject, filename = filename}
+    mark_toplevel_duplicates(ast, errors)
     collect_type_aliases(ast, st, errors)
     checktoplevel(ast, st, errors, loader)
     checkbodies(ast, st, errors)

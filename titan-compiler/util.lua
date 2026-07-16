@@ -75,6 +75,19 @@ function util.split_string(str, delim)
     return result
 end
 
+-- Compare strings by their raw numeric byte sequence. Lua's ordinary string
+-- ordering delegates to the active locale, which is unsuitable for source and
+-- interface order that must be reproducible across hosts.
+function util.bytewise_less(a, b)
+    local limit = math.min(#a, #b)
+    for index = 1, limit do
+        local abyte = string.byte(a, index)
+        local bbyte = string.byte(b, index)
+        if abyte ~= bbyte then return abyte < bbyte end
+    end
+    return #a < #b
+end
+
 --
 -- Functional
 --

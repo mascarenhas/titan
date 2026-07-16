@@ -90,7 +90,8 @@ if main_module then
         table.insert(ofiles, ofile)
     end
     local ok, term, code = driver.compile_program(main_module, ofiles,
-        args.link, args.verbose, args.extra_object)
+        args.link, args.verbose, args.extra_object,
+        driver.imported[main_module].program_output)
     if not ok then
         table.insert(errors, link_failed("program", main_module, term, code))
     end

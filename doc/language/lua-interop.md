@@ -76,10 +76,10 @@ assert(require "os" == lua_os)
 
 The same rule applies to `titan.coroutine`, `titan.async`, `titan.timer`,
 `titan.fs`, `titan.net`, and `titan.os`. The private `titan.uv` plumbing module
-uses the same canonical identity. In an installed Titan 0.14 tree these qualified
+uses the same canonical identity. In an installed Titan 0.15 tree these qualified
 names resolve to qualified standard-module files under
-`<root>/lib/titan/0.14/titan/`. Titan's installed Lua has
-`<root>/lib/titan/0.14/?.so` before its ordinary `lib/lua` entries in the
+`<root>/lib/titan/0.15/titan/`. Titan's installed Lua has
+`<root>/lib/titan/0.15/?.so` before its ordinary `lib/lua` entries in the
 default `package.cpath`, and standalone Titan programs ensure the same template
 is present. A Lua require and a desugared Titan short-name import therefore
 open the same DSO. The installation does not create parent-level or `lib/lua`

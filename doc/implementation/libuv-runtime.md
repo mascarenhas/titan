@@ -17,11 +17,11 @@ never a direct `titan.o`; static selection extracts only referenced shim
 members. `titan/async.so`, `titan/timer.so`, `titan/fs.so`, `titan/net.so`, and
 `titan/os.so` import the qualified binary `titan/uv.so` with the ordinary Titan
 loader; they
-do not compile `titan/uv.titan`, extract `titan_uv.o`, or embed another libuv
+do not compile the `titan/uv/` source folder, extract `titan_uv.o`, or embed another libuv
 archive. Dependency resolution is binary-first, while the explicit
 `titanc titan.uv` build root is source-first. Installation writes exactly one
 ordinary file per standard module under
-`<root>/lib/titan/0.14/titan/`.
+`<root>/lib/titan/0.15/titan/`.
 Lua's configured C-module path and ordinary qualified Titan lookup both
 resolve those files, with no copied, symbolic-link, or hard-link aliases. Thus
 every facade reaches the same `titan/uv.so` image. `titan.async` is the public
@@ -62,6 +62,46 @@ Runtime/Task/resource state remains in registry/GC-owned objects. These
 post-install files are outside the source rock's manifest. Bundled and system
 acquisition, including Linux and macOS packages, is documented in the
 [README](../../README.md#libuv-setup).
+
+## One provider, several source files
+
+The provider dogfoods [folder modules](folder-modules.md). These sources are
+one logical `titan.uv` module, one checker/codegen invocation, one module
+state, and one DSO:
+
+| Source | Ownership |
+| --- | --- |
+| `titan/uv/uv.titan` | shared imports, constants, module state, bootstrap, program-argument setup, and the sole root initializer; no record or public member |
+| `file.titan` | public `uv_file` and `_fs_*` API plus private FS constants, operations, controls, requests, File FIFO/ownership, callbacks, dispatch, and shutdown repair |
+| `os.titan` | public non-process `_os_*` API plus private signal specifications/controls/owners, one-shot callback retirement, and portable OS helpers |
+| `process.titan` | public `uv_process_t`, `_os_process_*`, and `_os_communicate` API plus private process/pipe controls, operations, requests, helper groups, child stdio callbacks, and forced shutdown |
+| `runtime.titan` | public `Error`, `_bytes_*`, `_loop`, and `_version` API plus private loop/Runtime and byte/text/buffer records, trace preservation, allocation, and ownership helpers |
+| `task.titan` | public `Cancelled`, `uv_timer_t`, `Task`, Task methods, `_run`/`_sleep`/`_yield`, and ticker API plus private timer/drive/request/ticker records and coroutine driving |
+| `tcp.titan` | public `uv_tcp_t`, `_net_*`, and `_net_eof_error` API plus private address/operation/request/control/owner records, DNS/TCP queues, callbacks, and network teardown |
+
+Every contributor uses the main source's imports, constants, and module state;
+record types shared across subsystems are referenced directly from whichever
+semantic contributor owns them. Contributor bodies and callbacks cross file
+boundaries because top-level `local` remains module-private, not file-private.
+`titanc titan.uv` emits `titan/uv/uv.c` and `titan/uv/uv.o`, then
+links the logical `titan/uv.so`; no source basename enters a symbol, registry
+key, or artifact name.
+
+The exported declarations had already established the deterministic ABI 0.15
+interface when the folder split was introduced. The follow-up relocates the
+remaining private records and moves the private `FS` constants instance beside
+`FsConstants` in `file.titan`. That changes private slot/initialization order,
+but not `titan_uv_types`, importer-visible variable slots, canonical
+exported-function closure slots, or native signatures, so the exact interface
+fixture remains unchanged and no further ABI bump is required.
+
+The Makefile's explicit `UV_TITAN_SOURCES` list names all seven files and is a
+normal prerequisite set for `titan/uv.so`. It intentionally does not use a
+wildcard: adding a production contributor must update the reviewed build
+graph. Build coverage compares that list with the immediate regular
+`titan/uv/*.titan` set discovered by the compiler and forces every member in a
+dry run. Bundled and system modes both rebuild the same one provider, and
+`make clean` removes the nested generated C/object without touching sources.
 
 ## GC-owned native storage
 
@@ -448,7 +488,9 @@ bundled/system libuv topology. Linux CI also rebuilds Lua, libbacktrace, libuv,
 the Titan runtime, and standard modules under ASan/UBSan, then runs
 representative timer/FS and core owner/callback suites plus production net/OS
 smokes. Regular Linux runs the complete production behavior suites; the sole
-isolated source variant delays selected FS callbacks to cover late
+isolated source variant copies the complete `titan/uv/` ensemble, patches the
+owning files through unique per-file anchors, and delays selected FS callbacks
+to cover late
 cancellation, disposal of a late successful open, and cross-generation
 Runtime/File/Task/buffer/error rooting. The sanitizer net smoke specifically
 keeps a large write pending across Task cancellation, unwind, and forced GC. Its

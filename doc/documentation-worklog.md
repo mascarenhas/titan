@@ -513,3 +513,45 @@ multiple results remain available without weakening an already typed callable.
   fourth result now means that the optional close is absent. Non-nil values
   retain the ordinary callable/error behavior, and the nil guard remains
   inside the synthesized `finally` so pending actions keep their precedence.
+
+## 2026-07-16 — folder modules and semantic `titan.uv` contributors
+
+Implemented and documented folder modules: one logical module may now combine
+a canonical main source with deterministic immediate contributor files while
+retaining one namespace, checker/codegen pass, initializer, interface, and
+artifact identity.
+
+* **Language and implementation manuals.** Added and indexed the folder-module
+  chapters, then reconciled module lookup, parsing, checking, code generation,
+  output paths, and libuv build documentation. Contributor-local diagnostics
+  and generated `#line` directives retain each physical source filename.
+* **`titan.uv` dogfood.** Replaced the monolithic source with a seven-file
+  ensemble. The main source owns the shared prelude and sole initializer;
+  filesystem, OS, process, runtime, task, and TCP contributors own their
+  exported records and API beside the related implementation.
+* **Compatibility boundary.** Moving public declarations changes ordered
+  module-member and canonical-closure slots, so compiler/runtime constants,
+  install/search paths, tests, and CI advance from ABI 0.14 to 0.15. The exact
+  deterministic 0.15 `titan_uv_types` interface is pinned as a fixture.
+* **Declaration-order follow-up.** Generalized the checker from a source-order
+  signature sweep to dependency-staged collection without rearranging the AST.
+  The parser marks synthesized record `new`; the checker records each root's
+  combined order, premarks duplicate winners, precollects aliases, reserves
+  ordinary names, then visits imports, resolves aliases, and collects
+  records/constructors, callables, and record members before checking module
+  variables under their source frontier. Only imports and module variables are
+  mutually order-sensitive; records, aliases, methods, record functions, and
+  ordinary functions may precede one another. Foreign name/type histories and
+  aggregate definition-order checks prevent the early import pass from leaking
+  a later C declaration into an earlier module-variable initializer.
+* **Private ownership.** Moved every remaining local uv record from the main
+  into its filesystem, OS, process, runtime, task, or TCP contributor, and
+  moved the private `FS` constants instance beside `FsConstants` in
+  `file.titan`. The main now retains shared imports, shared constants, module
+  state, bootstrap, program-argument setup, and the sole initializer. These changes
+  alter private slot/initialization order, but the exact `titan_uv_types`
+  fixture and importer-visible slots are unchanged and the ABI remains 0.15.
+* **Build and packaging.** `UV_TITAN_SOURCES` explicitly owns the ensemble,
+  nested generated artifacts clean correctly, the delayed-FS variant patches
+  an isolated folder copy, and bundled/system modes still produce one
+  canonical `titan/uv.so`.

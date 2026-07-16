@@ -77,6 +77,30 @@ record Branch
 end
 ```
 
+The written `record` declaration does not have to precede its uses. Records are
+known throughout their module before record functions, methods, signatures,
+and module-variable declarations are checked. Consequently a method or record
+function may appear before its record, and a module variable may use either
+`Rec.new(...)` or a context-typed constructor expression before the written
+record declaration:
+
+```lua
+origin: Point = Point.new(0.0, 0.0)
+
+function Point:is_origin(): boolean
+    return self.x == 0.0 and self.y == 0.0
+end
+
+record Point
+    x: float
+    y: float
+end
+```
+
+This module-wide visibility is independent of field order: the parameters of
+the synthesized `new` function and the record's fixed field slots still follow
+the order written inside the `record` declaration.
+
 ## Records are nominal
 
 Two record types are distinct types if they come from distinct
@@ -230,10 +254,11 @@ function recenter()
 end
 ```
 
-The record declaration must appear *before* a module variable of its
-type — a record constructor in an initializer that precedes the `record`
-declaration is a compile-time error. Function bodies and signatures have
-no such ordering requirement.
+The record declaration may appear before or after the module variable. The
+module-variable ordering restriction concerns only imports and other module
+variables: an imported record used directly by a module-variable declaration
+must come from an earlier import. See
+[Declaration order and visibility](modules.md#declaration-order-and-visibility).
 
 ## Fields
 
@@ -344,10 +369,12 @@ knows exactly which function `p:move(...)` calls.
 
 Rules and their compile-time errors:
 
-* The `record` declaration must come earlier in the file than its
-  methods (`record referenced by method declaration 'Point:getx' does
-  not exist`), and the name before the colon must actually be a record
-  (`member referenced by method declaration ... is not a record`).
+* The `record` declaration may come before or after its methods. The name
+  before the colon must name a record declared somewhere in the module; if no
+  such record exists the compiler reports `record referenced by method
+  declaration 'Point:getx' does not exist`, and if the name denotes a
+  non-record member it reports `member referenced by method declaration ...
+  is not a record`.
 * A method may not share a name with a field
   (`cannot declare method 'Foo:foo' as field 'foo' exists in record 'Foo'`)
   and may not be declared twice (`redeclaration of method 'Point:foo'`).
@@ -391,6 +418,9 @@ function Point.origin(): Point
     return Point.new(0.0, 0.0)
 end
 ```
+
+Like a method, a record function may be written before or after the record
+declaration it belongs to.
 
 Record functions are called as `RecName.func(...)`. They have no implicit
 `self` parameter; use a method (`function RecName:m(...)`) when the function

@@ -17,7 +17,7 @@ The source compiles under the qualified Titan identity `titan.coroutine`.
 Titan code uses `import "coroutine"`, which the parser desugars to that name;
 Lua uses the ordinary `luaopen_titan_coroutine` entry through
 `require "titan.coroutine"`. Both paths reach the one installed file at
-`<root>/lib/titan/0.14/titan/coroutine.so`. There is no legacy `coro` alias,
+`<root>/lib/titan/0.15/titan/coroutine.so`. There is no legacy `coro` alias,
 parent-level or `lib/lua` copy, or bare `luaopen_coroutine` entry to collide
 with Lua's standard coroutine library.
 

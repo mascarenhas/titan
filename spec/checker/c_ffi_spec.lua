@@ -732,6 +732,54 @@ describe("C FFI type checking", function()
         end)
     end)
 
+    it("keeps later C definitions behind the module-variable frontier",
+       function()
+        with_header([[
+            typedef struct ffi_split ffi_split;
+            extern ffi_split *ffi_split_ptr;
+        ]], function(forward_header)
+            with_header([[
+                struct ffi_split { int x; };
+            ]], function(definition_header)
+                local prefix = [[
+                    local forward = foreign import "]] ..
+                    forward_header .. [["
+                ]]
+                local definition = [[
+                    local definition = foreign import "]] ..
+                    definition_header .. [["
+                ]]
+
+                local ok, err = run_checker(prefix .. [[
+                    local owned = forward.ffi_split.new()
+                ]] .. definition)
+                assert.falsy(ok)
+                assert.match("cannot allocate incomplete C struct", err)
+
+                ok, err = run_checker(prefix .. [[
+                    local read = function(): integer
+                        return forward.ffi_split_ptr.x as integer
+                    end
+                ]] .. definition)
+                assert.falsy(ok)
+                assert.match("field 'x' not found in C type", err)
+
+                ok, err = run_checker(prefix .. definition .. [[
+                    local owned = forward.ffi_split.new()
+                ]])
+                assert.truthy(ok, err)
+
+                ok, err = run_checker(prefix .. [[
+                    function read(): integer
+                        local owned = forward.ffi_split.new()
+                        return owned.x as integer
+                    end
+                ]] .. definition)
+                assert.truthy(ok, err)
+            end)
+        end)
+    end)
+
     it("rejects indexing unsized C array fields", function()
         with_header([[
             typedef struct ffi_packet {

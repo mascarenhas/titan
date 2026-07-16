@@ -1,0 +1,1589 @@
+local record AddressList
+  local data: *shim.titan_uvshim_address
+  local storage: value
+  local count: integer
+end
+
+local record NetOperation
+  local kind: integer
+  local task: Task?
+  local request: Request?
+  local host: Text?
+  local port: integer
+  local backlog: integer
+  local tcp: uv_tcp_t?
+  local data: string
+  local addresses: AddressList?
+  local address_index: integer
+  local prepared_buffer: Buffer?
+  local owner: value
+  local next_operation: NetOperation?
+  local previous_operation: NetOperation?
+  local linked: boolean
+  local close_waiter: boolean
+  local last_error: Error?
+end
+
+local record NetRequestControl
+  local runtime: Runtime
+  local lifecycle: integer
+  local kind: integer
+  local owner: value
+  local operation: NetOperation
+  local next_control: NetRequestControl?
+  local previous_control: NetRequestControl?
+  local result_pointer: ffi.titan_ffi_void_ptr
+end
+
+local record TcpControl
+  local runtime: Runtime
+  local generation: integer
+  local lifecycle: integer
+  local server: boolean
+  local owner: uv_tcp_t?
+  local next_control: TcpControl?
+  local previous_control: TcpControl?
+  local connect_pending: boolean
+  local close_requested: boolean
+  local shutdown_requested: boolean
+  local write_shutdown: boolean
+  local read_active: boolean
+  local read_terminal: integer
+  local read_error: Error?
+  local read_waiter: Task?
+  local read_epoch: integer
+  local read_bytes: Bytes?
+  local read_queue: {Bytes}
+  local output_head: NetOperation?
+  local output_tail: NetOperation?
+  local output_current: NetOperation?
+  local close_waiter_head: NetOperation?
+  local close_waiter_tail: NetOperation?
+  local accept_waiter: Task?
+  local accept_epoch: integer
+  local accept_queue: {uv_tcp_t}
+  local accept_head: integer
+  local accept_tail: integer
+  local accept_count: integer
+  local accept_capacity: integer
+  local accept_error: Error?
+  local setup_operation: NetOperation?
+end
+
+-- DNS and stream request owners share the native trampoline's fixed six
+-- slots, but retain exact request-pointer and dispatcher types.
+local record uv_getaddrinfo_t
+  local handle: *libuv.uv_getaddrinfo_t
+  local storage: value
+  local main_thread: value
+  local dispatcher: (uv_getaddrinfo_t, integer, integer, libuv.size_t,
+                     ffi.titan_ffi_void_ptr) -> ()
+  local metadata: NetRequestControl
+  local buffer: nil
+end
+
+local record uv_connect_t
+  local handle: *libuv.uv_connect_t
+  local storage: value
+  local main_thread: value
+  local dispatcher: (uv_connect_t, integer, integer, libuv.size_t,
+                     ffi.titan_ffi_void_ptr) -> ()
+  local metadata: NetRequestControl
+  local buffer: nil
+end
+
+local record uv_write_t
+  local handle: *libuv.uv_write_t
+  local storage: value
+  local main_thread: value
+  local dispatcher: (uv_write_t, integer, integer, libuv.size_t,
+                     ffi.titan_ffi_void_ptr) -> ()
+  local metadata: NetRequestControl
+  local buffer: Buffer?
+end
+
+local record uv_shutdown_t
+  local handle: *libuv.uv_shutdown_t
+  local storage: value
+  local main_thread: value
+  local dispatcher: (uv_shutdown_t, integer, integer, libuv.size_t,
+                     ffi.titan_ffi_void_ptr) -> ()
+  local metadata: NetRequestControl
+  local buffer: nil
+end
+
+-- Persistent TCP handles cross into net through this exact nominal wrapper.
+-- Native callbacks recover this record directly; the pointer never travels
+-- through value and repeated middle-layer calls allocate no pointer box.
+record uv_tcp_t
+  local handle: *libuv.uv_tcp_t
+  local storage: value
+  local main_thread: value
+  local dispatcher: (uv_tcp_t, integer, integer, libuv.size_t,
+                     ffi.titan_ffi_void_ptr) -> ()
+  local metadata: TcpControl
+  local buffer: nil
+end
+
+function _net_connect(host: string, port: integer): uv_tcp_t
+  if port < 0 or port > 65535 then
+    raise "TCP port must be between 0 and 65535"
+  end
+  local request = new_net_request {
+    kind = NET_CONNECT,
+    host = host,
+    port = port,
+    backlog = 0,
+    tcp = nil,
+    data = "",
+    cleanup = false,
+  }
+  return coroutine.yield(request, UV_TAG)
+end
+
+function _net_listen(host: string, port: integer,
+                     backlog: integer): uv_tcp_t
+  if port < 0 or port > 65535 then
+    raise "TCP port must be between 0 and 65535"
+  end
+  if backlog <= 0 then raise "TCP listen backlog must be positive" end
+  if backlog > 2147483647 then
+    raise "TCP listen backlog is not representable by libuv"
+  end
+  local request = new_net_request {
+    kind = NET_LISTEN,
+    host = host,
+    port = port,
+    backlog = backlog,
+    tcp = nil,
+    data = "",
+    cleanup = false,
+  }
+  return coroutine.yield(request, UV_TAG)
+end
+
+function _net_read(tcp: uv_tcp_t): string?
+  local task = ordinary_task()
+  local control = tcp.metadata
+  if control.runtime ~= task.runtime or
+      control.generation ~= task.runtime.generation then
+    raise "TCP resource belongs to a stale libuv Runtime"
+  end
+  if control.server then raise "read from requires a Connection" end
+  if #control.read_queue > 0 then
+    local payload = queued_bytes_string(control.read_queue)
+    control.read_queue = {}
+    return payload
+  end
+  if control.read_terminal == TCP_READ_EOF then return nil end
+  if control.read_terminal == TCP_READ_ERROR then raise control.read_error end
+  if control.close_requested or control.lifecycle == TCP_CLOSING or
+      control.lifecycle == TCP_CLOSED then
+    raise "cannot read from a closed Connection"
+  end
+  if control.read_waiter then
+    raise "Connection already has a waiting reader"
+  end
+  local request = new_net_request {
+    kind = NET_READ,
+    host = nil,
+    port = 0,
+    backlog = 0,
+    tcp = tcp,
+    data = "",
+    cleanup = false,
+  }
+  return coroutine.yield(request, UV_TAG)
+end
+
+function _net_read_error_is(tcp: uv_tcp_t, candidate: value): boolean
+  local control = tcp.metadata
+  if control.read_terminal ~= TCP_READ_ERROR or not control.read_error then
+    return false
+  end
+  return candidate == control.read_error
+end
+
+function _net_write(tcp: uv_tcp_t, data: string)
+  ordinary_task()
+  validate_tcp(tcp, "write to", false, false)
+  if tcp.metadata.shutdown_requested then
+    raise "cannot write after Connection shutdown"
+  end
+  if #data == 0 then return end
+  if #data > UV_BUF_MAX then
+    raise "TCP write data exceeds the portable libuv buffer limit"
+  end
+  local request = new_net_request {
+    kind = NET_WRITE,
+    host = nil,
+    port = 0,
+    backlog = 0,
+    tcp = tcp,
+    data = data,
+    cleanup = false,
+  }
+  coroutine.yield(request, UV_TAG)
+end
+
+function _net_shutdown(tcp: uv_tcp_t)
+  ordinary_task()
+  validate_tcp(tcp, "shut down", false, false)
+  if tcp.metadata.shutdown_requested then return end
+  cleanup_begin()
+  do
+    -- Construct the complete shielded Request before publishing the monotonic
+    -- shutdown flag. Once visible, cancellation cannot detach the physical
+    -- FIFO work and is delivered only after uv_shutdown completes.
+    local request = new_net_request {
+      kind = NET_SHUTDOWN,
+      host = nil,
+      port = 0,
+      backlog = 0,
+      tcp = tcp,
+      data = "",
+      cleanup = true,
+    }
+    tcp.metadata.shutdown_requested = true
+    coroutine.yield(request, UV_TAG)
+  finally
+    cleanup_end()
+  end
+end
+
+function _net_accept(server: uv_tcp_t): uv_tcp_t
+  ordinary_task()
+  local control = validate_tcp_identity(server, "accept on", true)
+  if control.accept_error then raise control.accept_error end
+  validate_tcp_lifecycle(control, "accept on", false)
+  if control.accept_count > 0 then
+    local client = dequeue_accepted(server)
+    return client
+  end
+  if control.accept_waiter then
+    raise "Server already has a waiting accept Task"
+  end
+  local request = new_net_request {
+    kind = NET_ACCEPT,
+    host = nil,
+    port = 0,
+    backlog = 0,
+    tcp = server,
+    data = "",
+    cleanup = false,
+  }
+  return coroutine.yield(request, UV_TAG)
+end
+
+function _net_close(tcp: uv_tcp_t)
+  if tcp.metadata.lifecycle == TCP_CLOSED then return end
+  validate_tcp(tcp, "close", tcp.metadata.server, true)
+  cleanup_begin()
+  do
+    local kind = NET_CLOSE
+    if tcp.metadata.close_requested then kind = NET_CLOSE_WAIT end
+    local request = new_net_request {
+      kind = kind,
+      host = nil,
+      port = 0,
+      backlog = 0,
+      tcp = tcp,
+      data = "",
+      cleanup = true,
+    }
+    coroutine.yield(request, UV_TAG)
+  finally
+    cleanup_end()
+  end
+end
+
+function _net_is_closed(tcp: uv_tcp_t): boolean
+  return tcp.metadata.lifecycle == TCP_CLOSED
+end
+
+function _net_eof_error(operation: string, message: string,
+                        subject: string): Error
+  local code = UV_EOF
+  return Error.new(code,
+      libuv.uv_err_name(code as ffi.titan_ffi_int) as string,
+      message, operation, subject)
+end
+
+local function copy_addresses(pointer: ffi.titan_ffi_void_ptr,
+                              subject: string): AddressList
+  local count = shim.titan_uvshim_addrinfo_count(pointer) as integer
+  local cell_size = shim.titan_uvshim_address.sizeof as integer
+  local bytes = allocate_bytes(count * cell_size)
+  shim.titan_uvshim_addrinfo_copy(pointer, bytes.data)
+  return AddressList.new((bytes.data as ffi.titan_ffi_void_ptr) as
+                         *shim.titan_uvshim_address,
+                         bytes.storage, count)
+end
+
+local function validate_tcp_identity(tcp: uv_tcp_t, operation: string,
+                                     require_server: boolean): TcpControl
+  local runtime = current_runtime()
+  local control = tcp.metadata
+  if control.runtime ~= runtime or
+      control.generation ~= runtime.generation then
+    raise "TCP resource belongs to a stale libuv Runtime"
+  end
+  if require_server ~= control.server then
+    if require_server then
+      raise operation .. " requires a Server"
+    else
+      raise operation .. " requires a Connection"
+    end
+  end
+  return control
+end
+
+local function validate_tcp_lifecycle(control: TcpControl,
+                                      operation: string,
+                                      allow_closing: boolean)
+  if control.lifecycle == TCP_CLOSED then
+    raise "cannot " .. operation .. " a closed TCP resource"
+  end
+  if control.lifecycle == TCP_CLOSING and not allow_closing then
+    raise "cannot " .. operation .. " a closing TCP resource"
+  end
+  if control.close_requested and not allow_closing then
+    raise "cannot " .. operation .. " a closing TCP resource"
+  end
+end
+
+local function validate_tcp(tcp: uv_tcp_t, operation: string,
+                            require_server: boolean,
+                            allow_closing: boolean)
+  local control = validate_tcp_identity(tcp, operation, require_server)
+  validate_tcp_lifecycle(control, operation, allow_closing)
+end
+
+local function enqueue_output(tcp: uv_tcp_t, operation: NetOperation)
+  local control = tcp.metadata
+  local previous? = control.output_tail
+  operation.previous_operation = previous
+  operation.next_operation = nil
+  if previous then
+    previous.next_operation = operation
+  else
+    control.output_head = operation
+  end
+  control.output_tail = operation
+  operation.linked = true
+  operation.close_waiter = false
+end
+
+local function remove_output(tcp: uv_tcp_t, operation: NetOperation)
+  if not operation.linked or operation.close_waiter then return end
+  local control = tcp.metadata
+  local previous? = operation.previous_operation
+  local next? = operation.next_operation
+  if previous then
+    previous.next_operation = next
+  else
+    control.output_head = next
+  end
+  if next then
+    next.previous_operation = previous
+  else
+    control.output_tail = previous
+  end
+  if control.output_current == operation then
+    control.output_current = nil
+  end
+  operation.previous_operation = nil
+  operation.next_operation = nil
+  operation.owner = nil
+  operation.prepared_buffer = nil
+  operation.linked = false
+end
+
+local function enqueue_tcp_close_waiter(tcp: uv_tcp_t,
+                                        operation: NetOperation)
+  local control = tcp.metadata
+  local previous? = control.close_waiter_tail
+  operation.previous_operation = previous
+  operation.next_operation = nil
+  if previous then
+    previous.next_operation = operation
+  else
+    control.close_waiter_head = operation
+  end
+  control.close_waiter_tail = operation
+  operation.linked = true
+  operation.close_waiter = true
+end
+
+local function remove_tcp_close_waiter(tcp: uv_tcp_t,
+                                       operation: NetOperation)
+  if not operation.linked or not operation.close_waiter then return end
+  local control = tcp.metadata
+  local previous? = operation.previous_operation
+  local next? = operation.next_operation
+  if previous then
+    previous.next_operation = next
+  else
+    control.close_waiter_head = next
+  end
+  if next then
+    next.previous_operation = previous
+  else
+    control.close_waiter_tail = previous
+  end
+  operation.previous_operation = nil
+  operation.next_operation = nil
+  operation.linked = false
+  operation.close_waiter = false
+end
+
+local function enqueue_accepted(server: uv_tcp_t, client: uv_tcp_t): boolean
+  local control = server.metadata
+  if control.accept_count >= control.accept_capacity then return false end
+  control.accept_tail = control.accept_tail % control.accept_capacity + 1
+  control.accept_queue[control.accept_tail] = client
+  control.accept_count = control.accept_count + 1
+  return true
+end
+
+local function dequeue_accepted(server: uv_tcp_t): uv_tcp_t
+  local control = server.metadata
+  if control.accept_count == 0 then
+    raise "cannot dequeue from an empty Server accept queue"
+  end
+  local raw? = control.accept_queue[control.accept_head]
+  control.accept_queue[control.accept_head] = nil
+  control.accept_head = control.accept_head % control.accept_capacity + 1
+  control.accept_count = control.accept_count - 1
+  return raw
+end
+
+local function new_net_control(runtime: Runtime, kind: integer,
+                               operation: NetOperation): NetRequestControl
+  local control: NetRequestControl = {
+    runtime = runtime,
+    lifecycle = NET_OWNER_ALLOCATED,
+    kind = kind,
+    owner = nil,
+    operation = operation,
+    next_control = nil,
+    previous_control = nil,
+    result_pointer = nil,
+  }
+  return control
+end
+
+local function allocate_dns_owner(runtime: Runtime,
+                                  operation: NetOperation):
+                                  (uv_getaddrinfo_t,
+                                   ffi.titan_ffi_void_ptr)
+  local top = lua.lua_gettop(L)
+  local memory = lua.lua_newuserdatauv(L, libuv.uv_getaddrinfo_t.sizeof, 0)
+  local storage = ffi.lua_totvalue(L, -1)
+  local control = new_net_control(runtime, NET_OWNER_DNS, operation)
+  local owner: uv_getaddrinfo_t = {
+    handle = memory as *libuv.uv_getaddrinfo_t,
+    storage = storage,
+    main_thread = main_thread,
+    dispatcher = dns_dispatch,
+    metadata = control,
+    buffer = nil,
+  }
+  -- Root and derive the raw callback navigation pointer before publishing the
+  -- request control.  No allocating Titan helper runs between publication and
+  -- the one libuv submit call.
+  ffi.lua_pushtvalue(L, owner)
+  local pointer = ffi.lua_togco(L, -1)
+  control.owner = owner
+  link_net_control(runtime, control)
+  lua.lua_settop(L, top)
+  return owner, pointer
+end
+
+local function allocate_connect_owner(runtime: Runtime,
+                                      operation: NetOperation):
+                                      (uv_connect_t,
+                                       ffi.titan_ffi_void_ptr)
+  local top = lua.lua_gettop(L)
+  local memory = lua.lua_newuserdatauv(L, libuv.uv_connect_t.sizeof, 0)
+  local storage = ffi.lua_totvalue(L, -1)
+  local control = new_net_control(runtime, NET_OWNER_CONNECT, operation)
+  local owner: uv_connect_t = {
+    handle = memory as *libuv.uv_connect_t,
+    storage = storage,
+    main_thread = main_thread,
+    dispatcher = connect_dispatch,
+    metadata = control,
+    buffer = nil,
+  }
+  ffi.lua_pushtvalue(L, owner)
+  local pointer = ffi.lua_togco(L, -1)
+  control.owner = owner
+  link_net_control(runtime, control)
+  lua.lua_settop(L, top)
+  return owner, pointer
+end
+
+local function allocate_write_owner(runtime: Runtime,
+                                    operation: NetOperation):
+                                    (uv_write_t,
+                                     ffi.titan_ffi_void_ptr)
+  local top = lua.lua_gettop(L)
+  local memory = lua.lua_newuserdatauv(L, libuv.uv_write_t.sizeof, 0)
+  local storage = ffi.lua_totvalue(L, -1)
+  local control = new_net_control(runtime, NET_OWNER_WRITE, operation)
+  local owner: uv_write_t = {
+    handle = memory as *libuv.uv_write_t,
+    storage = storage,
+    main_thread = main_thread,
+    dispatcher = write_dispatch,
+    metadata = control,
+    buffer = operation.prepared_buffer,
+  }
+  ffi.lua_pushtvalue(L, owner)
+  local pointer = ffi.lua_togco(L, -1)
+  control.owner = owner
+  link_net_control(runtime, control)
+  lua.lua_settop(L, top)
+  return owner, pointer
+end
+
+local function allocate_shutdown_owner(runtime: Runtime,
+                                       operation: NetOperation):
+                                       (uv_shutdown_t,
+                                        ffi.titan_ffi_void_ptr)
+  local top = lua.lua_gettop(L)
+  local memory = lua.lua_newuserdatauv(L, libuv.uv_shutdown_t.sizeof, 0)
+  local storage = ffi.lua_totvalue(L, -1)
+  local control = new_net_control(runtime, NET_OWNER_SHUTDOWN, operation)
+  local owner: uv_shutdown_t = {
+    handle = memory as *libuv.uv_shutdown_t,
+    storage = storage,
+    main_thread = main_thread,
+    dispatcher = shutdown_dispatch,
+    metadata = control,
+    buffer = nil,
+  }
+  ffi.lua_pushtvalue(L, owner)
+  local pointer = ffi.lua_togco(L, -1)
+  control.owner = owner
+  link_net_control(runtime, control)
+  lua.lua_settop(L, top)
+  return owner, pointer
+end
+
+local function allocate_tcp_owner(runtime: Runtime):
+                                  (uv_tcp_t, ffi.titan_ffi_void_ptr)
+  local top = lua.lua_gettop(L)
+  local memory = lua.lua_newuserdatauv(L, libuv.uv_tcp_t.sizeof, 0)
+  local storage = ffi.lua_totvalue(L, -1)
+  local control: TcpControl = {
+    runtime = runtime,
+    generation = runtime.generation,
+    lifecycle = TCP_ALLOCATED,
+    server = false,
+    owner = nil,
+    next_control = nil,
+    previous_control = nil,
+    connect_pending = false,
+    close_requested = false,
+    shutdown_requested = false,
+    write_shutdown = false,
+    read_active = false,
+    read_terminal = TCP_READ_OPEN,
+    read_error = nil,
+    read_waiter = nil,
+    read_epoch = 0,
+    read_bytes = nil,
+    read_queue = {},
+    output_head = nil,
+    output_tail = nil,
+    output_current = nil,
+    close_waiter_head = nil,
+    close_waiter_tail = nil,
+    accept_waiter = nil,
+    accept_epoch = 0,
+    accept_queue = {},
+    accept_head = 1,
+    accept_tail = 0,
+    accept_count = 0,
+    accept_capacity = 0,
+    accept_error = nil,
+    setup_operation = nil,
+  }
+  local owner: uv_tcp_t = {
+    handle = memory as *libuv.uv_tcp_t,
+    storage = storage,
+    main_thread = main_thread,
+    dispatcher = tcp_dispatch,
+    metadata = control,
+    buffer = nil,
+  }
+  ffi.lua_pushtvalue(L, owner)
+  local pointer = ffi.lua_togco(L, -1)
+  control.owner = owner
+  link_tcp_control(runtime, control)
+  lua.lua_settop(L, top)
+  return owner, pointer
+end
+
+local function discard_tcp_storage(tcp: uv_tcp_t)
+  local control = tcp.metadata
+  if not control.owner then return end
+  -- Unlink while every owner field is still intact.  After unlinking,
+  -- only non-raising field clears remain in this frame.
+  unlink_tcp_control(control)
+  tcp.handle = nil
+  tcp.storage = nil
+  control.lifecycle = TCP_CLOSED
+  control.owner = nil
+end
+
+local function initialize_tcp(runtime: Runtime): (uv_tcp_t, integer)
+  local tcp, pointer = allocate_tcp_owner(runtime)
+  local status = shim.titan_uvshim_tcp_init(runtime.loop.handle, tcp.handle,
+                                            pointer)
+  if (status as integer) < 0 then
+    -- The handle was never accepted by libuv.  Inline terminal unlink so an
+    -- emergency longjmp cannot strand an owner for which no callback is owed.
+    local control = tcp.metadata
+    local previous? = control.previous_control
+    local next? = control.next_control
+    if previous then
+      previous.next_control = next
+    else
+      runtime.tcp_head = next
+    end
+    if next then
+      next.previous_control = previous
+    end
+    control.previous_control = nil
+    control.next_control = nil
+    tcp.handle = nil
+    tcp.storage = nil
+    control.lifecycle = TCP_CLOSED
+    control.owner = nil
+    return tcp, status as integer
+  end
+  tcp.metadata.lifecycle = TCP_INITIALIZED
+  return tcp, 0
+end
+
+local function start_tcp_close(tcp: uv_tcp_t)
+  local control = tcp.metadata
+  control.close_requested = true
+  if control.lifecycle == TCP_CLOSED or
+      control.lifecycle == TCP_CLOSING then return end
+  if control.lifecycle == TCP_ALLOCATED then
+    discard_tcp_storage(tcp)
+    return
+  end
+  if control.read_active then
+    shim.titan_uvshim_tcp_read_stop(tcp.handle)
+    control.read_active = false
+  end
+  control.read_bytes = nil
+  control.lifecycle = TCP_CLOSING
+  shim.titan_uvshim_tcp_close(tcp.handle)
+end
+
+local function free_dns_result(control: NetRequestControl)
+  if control.result_pointer ~= nil then
+    shim.titan_uvshim_addrinfo_free(control.result_pointer)
+    control.result_pointer = nil
+  end
+end
+
+local function retire_net_control(control: NetRequestControl)
+  if control.lifecycle == NET_OWNER_RETIRED then return end
+  free_dns_result(control)
+  local owner = control.owner
+  local operation = control.operation
+  if owner == nil then
+    unlink_net_control(control)
+  elseif control.kind == NET_OWNER_DNS then
+    local owner: uv_getaddrinfo_t = owner
+    unlink_net_control(control)
+    owner.handle = nil
+    owner.storage = nil
+  elseif control.kind == NET_OWNER_CONNECT then
+    local owner: uv_connect_t = owner
+    unlink_net_control(control)
+    owner.handle = nil
+    owner.storage = nil
+  elseif control.kind == NET_OWNER_WRITE then
+    local owner: uv_write_t = owner
+    unlink_net_control(control)
+    owner.handle = nil
+    owner.storage = nil
+    owner.buffer = nil
+  else
+    local owner: uv_shutdown_t = owner
+    unlink_net_control(control)
+    owner.handle = nil
+    owner.storage = nil
+  end
+  if operation.owner == owner then operation.owner = nil end
+  control.owner = nil
+  control.lifecycle = NET_OWNER_RETIRED
+end
+
+local function make_net_operation(kind: integer, task: Task,
+                                  request: Request, host: Text?,
+                                  port: integer, backlog: integer,
+                                  tcp: uv_tcp_t?, data: string): NetOperation
+  local operation: NetOperation = {
+    kind = kind,
+    task = task,
+    request = request,
+    host = host,
+    port = port,
+    backlog = backlog,
+    tcp = tcp,
+    data = data,
+    addresses = nil,
+    address_index = 0,
+    prepared_buffer = nil,
+    owner = nil,
+    next_operation = nil,
+    previous_operation = nil,
+    linked = false,
+    close_waiter = false,
+    last_error = nil,
+  }
+  return operation
+end
+
+local function new_net_request(kind: integer, host: string?, port: integer,
+                               backlog: integer, tcp: uv_tcp_t?, data: string,
+                               cleanup: boolean): Request
+  local request: Request? = nil
+  if cleanup then
+    request = new_cleanup_request(REQUEST_NET, nil, 0)
+  else
+    request = new_request(REQUEST_NET, nil, 0)
+  end
+  local request = request
+  local copied_host: Text? = nil
+  if host then
+    local host = host
+    copied_host = copy_text(host, "net.host", host)
+  end
+  local operation = make_net_operation(kind, request.task, request,
+      copied_host, port, backlog, tcp, data)
+  request.subject = operation
+  return request
+end
+
+local function net_operation_deliverable(operation: NetOperation): boolean
+  if not operation.task or not operation.request then return false end
+  local task = operation.task
+  local request = operation.request
+  if request.cleanup then
+    return task.state == TASK_WAITING and
+           task.current_request == request and task.cleanup_shield_depth > 0
+  end
+  return task.state == TASK_WAITING and task.current_request == request and
+         not task.cancel_requested and task.epoch == request.generation
+end
+
+local function net_operation_subject(operation: NetOperation): string?
+  if operation.host then
+    return operation.host.source
+  elseif operation.tcp then
+    local tcp = operation.tcp
+    if tcp.metadata.server then return "server" end
+    return "connection"
+  end
+  return nil
+end
+
+local function start_dns(operation: NetOperation):
+                         (uv_getaddrinfo_t, integer)
+  local task = operation.task
+  local runtime = task.runtime
+  local host = operation.host
+  local loop_handle = runtime.loop.handle
+  local node = host.bytes.data
+  local port = operation.port as ffi.titan_ffi_int
+  local owner, pointer = allocate_dns_owner(runtime, operation)
+  operation.owner = owner
+  local status = shim.titan_uvshim_getaddrinfo_start {
+    loop = loop_handle,
+    req = owner.handle,
+    data = pointer,
+    node = node,
+    port = port,
+  }
+  if (status as integer) >= 0 then
+    owner.metadata.lifecycle = NET_OWNER_SUBMITTED
+  else
+    retire_net_control(owner.metadata)
+  end
+  return owner, status as integer
+end
+
+local function finish_net_setup(operation: NetOperation, tcp: uv_tcp_t?,
+                                failure: Error?)
+  operation.addresses = nil
+  operation.owner = nil
+  operation.tcp = nil
+  if not net_operation_deliverable(operation) then
+    if tcp then start_tcp_close(tcp) end
+    return
+  end
+  local task = operation.task
+  if failure then
+    drive_task(task, DRIVE_ERROR, failure, "")
+  else
+    local resource = tcp
+    resource.metadata.setup_operation = nil
+    drive_task(task, DRIVE_RESUME, resource, "")
+  end
+end
+
+local function continue_net_setup(operation: NetOperation)
+  if not net_operation_deliverable(operation) then
+    operation.addresses = nil
+    return
+  end
+  local addresses = operation.addresses
+  while operation.address_index < addresses.count do
+    operation.address_index = operation.address_index + 1
+    local task = operation.task
+    local runtime = task.runtime
+    local tcp, init_status = initialize_tcp(runtime)
+    if init_status < 0 then
+      operation.last_error = make_error(init_status, "net.tcp.init",
+                                        net_operation_subject(operation))
+    else
+      operation.tcp = tcp
+      tcp.metadata.setup_operation = operation
+      if operation.kind == NET_CONNECT then
+        -- Cache every borrowed native argument before the request owner is
+        -- linked.  From allocation through submit, only field stores and the
+        -- non-raising C shim call are allowed.
+        local tcp_handle = tcp.handle
+        local address_data = addresses.data as ffi.titan_ffi_void_ptr
+        local address_index = operation.address_index - 1
+        local owner, pointer = allocate_connect_owner(runtime, operation)
+        operation.owner = owner
+        tcp.metadata.connect_pending = true
+        local status = shim.titan_uvshim_tcp_connect_start {
+          req = owner.handle,
+          tcp = tcp_handle,
+          data = pointer,
+          address_storage = address_data,
+          index = address_index,
+        }
+        if (status as integer) >= 0 then
+          owner.metadata.lifecycle = NET_OWNER_SUBMITTED
+          return
+        end
+        tcp.metadata.connect_pending = false
+        retire_net_control(owner.metadata)
+        operation.last_error = make_error(status as integer, "net.connect",
+                                          net_operation_subject(operation))
+        start_tcp_close(tcp)
+        return
+      else
+        local status = shim.titan_uvshim_tcp_bind(
+            tcp.handle, addresses.data as ffi.titan_ffi_void_ptr,
+            operation.address_index - 1)
+        if (status as integer) >= 0 then
+          status = shim.titan_uvshim_tcp_listen(tcp.handle,
+                                                operation.backlog)
+        end
+        if (status as integer) >= 0 then
+          tcp.metadata.lifecycle = TCP_SERVER
+          tcp.metadata.server = true
+          tcp.metadata.accept_capacity = operation.backlog
+          finish_net_setup(operation, tcp, nil)
+          return
+        end
+        operation.last_error = make_error(status as integer, "net.listen",
+                                          net_operation_subject(operation))
+        start_tcp_close(tcp)
+        return
+      end
+    end
+  end
+  local failure? = operation.last_error
+  if not failure then
+    failure = make_error(UV_EADDRNOTAVAIL,
+                         "net.resolve", net_operation_subject(operation))
+  end
+  finish_net_setup(operation, nil, failure)
+end
+
+local function advance_tcp_output(tcp: uv_tcp_t,
+                                  inline_task: Task?): Error?
+  local control = tcp.metadata
+  if control.lifecycle == TCP_CLOSING or
+      control.lifecycle == TCP_CLOSED then
+    while control.output_head do
+      remove_output(tcp, control.output_head)
+    end
+    return nil
+  end
+  while not control.output_current and control.output_head do
+    local operation = control.output_head
+    local status: ffi.titan_ffi_int = 0 as ffi.titan_ffi_int
+    if operation.kind == NET_WRITE then
+      -- Prepare and root the copied bytes/buffer before publishing current or
+      -- linking a libuv request owner.  A preparation failure therefore leaves
+      -- an ordinary queued operation that shutdown can still repair.
+      if not operation.prepared_buffer then
+        local bytes = copy_bytes(operation.data)
+        operation.prepared_buffer = make_buffer(bytes, 0, bytes.length)
+      end
+      local buffer = operation.prepared_buffer
+      local buffer_handle = buffer.handle
+      local tcp_handle = tcp.handle
+      local owner, pointer = allocate_write_owner(control.runtime, operation)
+      operation.owner = owner
+      control.output_current = operation
+      status = shim.titan_uvshim_tcp_write_start {
+        req = owner.handle,
+        tcp = tcp_handle,
+        data = pointer,
+        buffer = buffer_handle,
+      }
+      if (status as integer) >= 0 then
+        owner.metadata.lifecycle = NET_OWNER_SUBMITTED
+        operation.prepared_buffer = nil
+        return nil
+      end
+      retire_net_control(owner.metadata)
+    else
+      local tcp_handle = tcp.handle
+      local owner, pointer = allocate_shutdown_owner(control.runtime,
+                                                     operation)
+      operation.owner = owner
+      control.output_current = operation
+      status = shim.titan_uvshim_tcp_shutdown_start(
+          owner.handle, tcp_handle, pointer)
+      if (status as integer) >= 0 then
+        owner.metadata.lifecycle = NET_OWNER_SUBMITTED
+        return nil
+      end
+      retire_net_control(owner.metadata)
+    end
+
+    -- Synchronous rejection owes no callback.  Retire the native owner and
+    -- unlink/clear the FIFO publication before allocating its Error value.
+    remove_output(tcp, operation)
+    local failure = make_error(status as integer,
+        operation.kind == NET_WRITE and "net.write" or "net.shutdown",
+        net_operation_subject(operation))
+    if operation.task and operation.request then
+      local task = operation.task
+      local request = operation.request
+      if inline_task == task and task.current_request == request and
+          task.epoch == request.generation then
+        task.current_request = nil
+        return failure
+      elseif net_operation_deliverable(operation) then
+        schedule_task_drive(task, request.generation, DRIVE_ERROR,
+                            failure, "", nil)
+      end
+    else
+      promote_fatal(control.runtime, failure, "")
+      return nil
+    end
+  end
+  if not control.output_current and not control.output_head and
+      control.close_requested and not control.connect_pending then
+    start_tcp_close(tcp)
+  end
+  return nil
+end
+
+local function start_tcp_read(tcp: uv_tcp_t): integer
+  local status = shim.titan_uvshim_tcp_read_start(tcp.handle)
+  if (status as integer) >= 0 then tcp.metadata.read_active = true end
+  return status as integer
+end
+
+local function stop_tcp_read(tcp: uv_tcp_t, discard_queue: boolean)
+  local control = tcp.metadata
+  if control.read_active then
+    shim.titan_uvshim_tcp_read_stop(tcp.handle)
+    control.read_active = false
+  end
+  control.read_bytes = nil
+  if discard_queue then control.read_queue = {} end
+end
+
+local function close_accepted_queue(server: uv_tcp_t)
+  while server.metadata.accept_count > 0 do
+    local client = dequeue_accepted(server)
+    start_tcp_close(client)
+  end
+end
+
+local function stop_server_accept(server: uv_tcp_t)
+  local control = server.metadata
+  local waiter? = control.accept_waiter
+  local epoch = control.accept_epoch
+  control.accept_waiter = nil
+  control.accept_epoch = 0
+  close_accepted_queue(server)
+  if waiter then
+    local task = waiter
+    if task.state == TASK_WAITING and not task.cancel_requested and
+        task.epoch == epoch then
+      local failure = make_error(UV_ECANCELED,
+                                 "net.accept", "server closed")
+      schedule_task_drive(task, epoch, DRIVE_ERROR, failure, "", nil)
+    end
+  end
+end
+
+local function request_tcp_close(tcp: uv_tcp_t)
+  local control = tcp.metadata
+  if control.close_requested then return end
+  control.close_requested = true
+  if control.server then
+    stop_server_accept(tcp)
+  else
+    stop_tcp_read(tcp, false)
+    local waiter? = control.read_waiter
+    local epoch = control.read_epoch
+    control.read_waiter = nil
+    control.read_epoch = 0
+    if waiter then
+      local task = waiter
+      if task.state == TASK_WAITING and not task.cancel_requested and
+          task.epoch == epoch then
+        schedule_task_drive(task, epoch, DRIVE_ERROR,
+                            "cannot read from a closed Connection", "", nil)
+      end
+    end
+  end
+  if not control.output_current and not control.output_head and
+      not control.connect_pending then
+    start_tcp_close(tcp)
+  end
+end
+
+local function wake_tcp_close_waiters(tcp: uv_tcp_t)
+  local control = tcp.metadata
+  while control.close_waiter_head do
+    local operation = control.close_waiter_head
+    if not net_operation_deliverable(operation) then
+      remove_tcp_close_waiter(tcp, operation)
+    else
+      local task = operation.task
+      local request = operation.request
+      local epoch = task.epoch
+      if not request.cleanup then epoch = request.generation end
+      if not schedule_task_drive(task, epoch, DRIVE_RESUME,
+                                 nil, "", request) then
+        return
+      end
+      remove_tcp_close_waiter(tcp, operation)
+    end
+  end
+end
+
+local function arm_net_request(task: Task, request: Request): Error?
+  local operation: NetOperation = request.subject
+  if operation.kind == NET_CONNECT or operation.kind == NET_LISTEN then
+    local owner, status = start_dns(operation)
+    if status < 0 then
+      task.current_request = nil
+      return make_error(status, "net.resolve",
+                        net_operation_subject(operation))
+    end
+    task.operation = owner
+    task.state = TASK_WAITING
+    return nil
+  end
+
+  local tcp = operation.tcp
+  local control = tcp.metadata
+  if operation.kind == NET_READ then
+    control.read_waiter = task
+    control.read_epoch = request.generation
+    task.operation = tcp
+    task.state = TASK_WAITING
+    return nil
+  elseif operation.kind == NET_WRITE or
+         operation.kind == NET_SHUTDOWN then
+    enqueue_output(tcp, operation)
+    task.operation = operation
+    task.state = TASK_WAITING
+    return advance_tcp_output(tcp, task)
+  elseif operation.kind == NET_ACCEPT then
+    control.accept_waiter = task
+    control.accept_epoch = request.generation
+    task.operation = tcp
+    task.state = TASK_WAITING
+    return nil
+  else
+    enqueue_tcp_close_waiter(tcp, operation)
+    task.operation = operation
+    task.state = TASK_WAITING
+    request_tcp_close(tcp)
+    return nil
+  end
+end
+
+local function finish_closed_tcp(tcp: uv_tcp_t)
+  local control = tcp.metadata
+  if control.lifecycle ~= TCP_CLOSED or control.connect_pending or
+      control.output_current then return end
+  local setup? = control.setup_operation
+  if setup then
+    local operation = setup
+    control.setup_operation = nil
+    operation.tcp = nil
+    continue_net_setup(operation)
+    -- This is the callback tail: no allocating or user-code call follows the
+    -- final unlink/field clears in discard_tcp_storage.
+    discard_tcp_storage(tcp)
+    return
+  end
+  wake_tcp_close_waiters(tcp)
+  if not control.close_waiter_head then
+    discard_tcp_storage(tcp)
+  end
+end
+
+local function dns_dispatch_body(owner: uv_getaddrinfo_t, result: integer,
+                                 pointer: ffi.titan_ffi_void_ptr)
+  local control = owner.metadata
+  control.lifecycle = NET_OWNER_CALLBACK
+  local operation = control.operation
+  local failure: Error? = nil
+  if result < 0 then
+    free_dns_result(control)
+    failure = make_error(result, "net.resolve",
+                         net_operation_subject(operation))
+  else
+    local addresses = copy_addresses(pointer, net_operation_subject(operation))
+    -- Root the copied address array in the operation before entering another
+    -- helper or releasing the borrowed addrinfo chain.
+    operation.addresses = addresses
+    free_dns_result(control)
+    if addresses.count == 0 then
+      failure = make_error(UV_EADDRNOTAVAIL,
+                           "net.resolve", net_operation_subject(operation))
+    end
+  end
+
+  -- Keep the native request owner runtime-rooted through setup continuation
+  -- and any user Task drive.  A catch can then still dereference it safely.
+  if failure then
+    finish_net_setup(operation, nil, failure)
+  elseif net_operation_deliverable(operation) then
+    operation.address_index = 0
+    continue_net_setup(operation)
+  else
+    operation.addresses = nil
+  end
+  retire_net_control(control)
+end
+
+-- The borrowed addrinfo pointer is captured before the allocating body.  The
+-- trailing catch can therefore release it exactly once without allowing a
+-- longjmp to cross libuv.
+local function dns_dispatch(owner: uv_getaddrinfo_t, _event_kind: integer,
+                            result: integer, _size: libuv.size_t,
+                            pointer: ffi.titan_ffi_void_ptr)
+  owner.metadata.result_pointer = pointer
+  dns_dispatch_body(owner, result, pointer)
+catch
+  if owner.metadata.result_pointer ~= nil then
+    shim.titan_uvshim_addrinfo_free(owner.metadata.result_pointer)
+    owner.metadata.result_pointer = nil
+  end
+  owner.metadata.lifecycle = NET_OWNER_CALLBACK
+  if not owner.metadata.runtime.fatal then
+    owner.metadata.runtime.fatal = true
+    owner.metadata.runtime.closing = true
+    owner.metadata.runtime.fatal_error = error
+    owner.metadata.runtime.fatal_traceback = traceback
+  end
+  libuv.uv_stop(owner.metadata.runtime.loop.handle)
+  return
+end
+
+local function connect_dispatch_body(owner: uv_connect_t, result: integer)
+  local control = owner.metadata
+  control.lifecycle = NET_OWNER_CALLBACK
+  local operation = control.operation
+  local tcp = operation.tcp
+  if result >= 0 and net_operation_deliverable(operation) then
+    local read_status = start_tcp_read(tcp)
+    if read_status < 0 then
+      operation.last_error = make_error(
+          read_status, "net.read.start", net_operation_subject(operation))
+      operation.address_index = operation.addresses.count
+      start_tcp_close(tcp)
+      retire_net_control(control)
+      return
+    end
+    tcp.metadata.lifecycle = TCP_CONNECTION
+    tcp.metadata.server = false
+    tcp.metadata.setup_operation = nil
+    operation.addresses = nil
+    operation.tcp = nil
+    drive_task(operation.task, DRIVE_RESUME, tcp, "")
+    retire_net_control(control)
+    return
+  end
+
+  if result < 0 then
+    operation.last_error = make_error(result, "net.connect",
+                                      net_operation_subject(operation))
+  end
+  start_tcp_close(tcp)
+  retire_net_control(control)
+end
+
+local function connect_dispatch(owner: uv_connect_t, _event_kind: integer,
+                                result: integer, _size: libuv.size_t,
+                                _pointer: ffi.titan_ffi_void_ptr)
+  if owner.metadata.operation.tcp then
+    owner.metadata.operation.tcp.metadata.connect_pending = false
+  end
+  connect_dispatch_body(owner, result)
+catch
+  owner.metadata.lifecycle = NET_OWNER_CALLBACK
+  if not owner.metadata.runtime.fatal then
+    owner.metadata.runtime.fatal = true
+    owner.metadata.runtime.closing = true
+    owner.metadata.runtime.fatal_error = error
+    owner.metadata.runtime.fatal_traceback = traceback
+  end
+  libuv.uv_stop(owner.metadata.runtime.loop.handle)
+  return
+end
+
+local function complete_output_callback(control: NetRequestControl,
+                                        result: integer,
+                                        operation_name: string)
+  local runtime = control.runtime
+  control.lifecycle = NET_OWNER_CALLBACK
+  local operation = control.operation
+  local tcp = operation.tcp
+  local failure: Error? = nil
+  if result < 0 then
+    failure = make_error(result, operation_name,
+                         net_operation_subject(operation))
+  end
+
+  -- The completed owner remains linked and roots operation while the FIFO is
+  -- advanced and user continuation runs.  Terminal unlink is the callback
+  -- tail, preserving a valid owner for the outer catch on every earlier path.
+  remove_output(tcp, operation)
+  advance_tcp_output(tcp, nil)
+  if net_operation_deliverable(operation) then
+    if failure then
+      drive_task(operation.task, DRIVE_ERROR, failure, "")
+    else
+      drive_task(operation.task, DRIVE_RESUME, nil, "")
+    end
+  elseif failure and not operation.task then
+    promote_fatal(runtime, failure, "")
+  end
+  retire_net_control(control)
+end
+
+local function write_dispatch(owner: uv_write_t, _event_kind: integer,
+                              result: integer, _size: libuv.size_t,
+                              _pointer: ffi.titan_ffi_void_ptr)
+  complete_output_callback(owner.metadata, result, "net.write")
+catch
+  owner.metadata.lifecycle = NET_OWNER_CALLBACK
+  if not owner.metadata.runtime.fatal then
+    owner.metadata.runtime.fatal = true
+    owner.metadata.runtime.closing = true
+    owner.metadata.runtime.fatal_error = error
+    owner.metadata.runtime.fatal_traceback = traceback
+  end
+  libuv.uv_stop(owner.metadata.runtime.loop.handle)
+  return
+end
+
+local function shutdown_dispatch(owner: uv_shutdown_t,
+                                 _event_kind: integer, result: integer,
+                                 _size: libuv.size_t,
+                                 _pointer: ffi.titan_ffi_void_ptr)
+  if result >= 0 and owner.metadata.operation.tcp then
+    owner.metadata.operation.tcp.metadata.write_shutdown = true
+  end
+  complete_output_callback(owner.metadata, result, "net.shutdown")
+catch
+  owner.metadata.lifecycle = NET_OWNER_CALLBACK
+  if not owner.metadata.runtime.fatal then
+    owner.metadata.runtime.fatal = true
+    owner.metadata.runtime.closing = true
+    owner.metadata.runtime.fatal_error = error
+    owner.metadata.runtime.fatal_traceback = traceback
+  end
+  libuv.uv_stop(owner.metadata.runtime.loop.handle)
+  return
+end
+
+local function tcp_alloc_dispatch(tcp: uv_tcp_t, size: libuv.size_t,
+                                  pointer: ffi.titan_ffi_void_ptr)
+  local control = tcp.metadata
+  if control.read_bytes then raise internal_error("net.read.alloc.pending") end
+  local bytes = allocate_stream_bytes(size)
+  control.read_bytes = bytes
+  shim.titan_uvshim_buf_init(pointer, bytes.data, size)
+end
+
+local function tcp_read_dispatch(tcp: uv_tcp_t, result: integer)
+  local control = tcp.metadata
+  if result == 0 then
+    control.read_bytes = nil
+    return
+  end
+  local waiter? = control.read_waiter
+  local epoch = control.read_epoch
+  local bytes? = control.read_bytes
+  if result < 0 then
+    if control.read_active then
+      shim.titan_uvshim_tcp_read_stop(tcp.handle)
+      control.read_active = false
+    end
+    control.read_bytes = nil
+    control.read_waiter = nil
+    control.read_epoch = 0
+    if result == UV_EOF then
+      control.read_terminal = TCP_READ_EOF
+      if waiter then
+        local task = waiter
+        if task.state == TASK_WAITING and not task.cancel_requested and
+            task.epoch == epoch then
+          drive_task(task, DRIVE_RESUME, nil, "")
+        end
+      end
+    else
+      control.read_terminal = TCP_READ_ERROR
+      local failure = make_error(result, "net.read", "connection")
+      control.read_error = failure
+      start_tcp_close(tcp)
+      if waiter then
+        local task = waiter
+        if task.state == TASK_WAITING and not task.cancel_requested and
+            task.epoch == epoch then
+          drive_task(task, DRIVE_ERROR, failure, "")
+        end
+      end
+    end
+    return
+  end
+
+  if not bytes then raise internal_error("net.read.missing.allocation") end
+  local bytes = bytes
+  if waiter then
+    local task = waiter
+    control.read_waiter = nil
+    control.read_epoch = 0
+    if task.state == TASK_WAITING and not task.cancel_requested and
+        task.epoch == epoch then
+      local payload = bytes_string(bytes, result)
+      control.read_bytes = nil
+      drive_task(task, DRIVE_RESUME, payload, "")
+      return
+    end
+  end
+  control.read_waiter = nil
+  control.read_epoch = 0
+  bytes.length = result
+  control.read_queue[#control.read_queue + 1] = bytes
+  control.read_bytes = nil
+end
+
+local function server_callback_failure(server: uv_tcp_t, failure: Error)
+  local control = server.metadata
+  control.accept_error = failure
+  local waiter? = control.accept_waiter
+  local epoch = control.accept_epoch
+  control.accept_waiter = nil
+  control.accept_epoch = 0
+  close_accepted_queue(server)
+  control.close_requested = true
+  start_tcp_close(server)
+  if waiter then
+    local task = waiter
+    if task.state == TASK_WAITING and not task.cancel_requested and
+        task.epoch == epoch then
+      drive_task(task, DRIVE_ERROR, failure, "")
+    end
+  end
+end
+
+local function tcp_connection_dispatch(server: uv_tcp_t, result: integer)
+  if result < 0 then
+    server_callback_failure(server,
+        make_error(result, "net.accept", "server"))
+    return
+  end
+  local client, init_status = initialize_tcp(server.metadata.runtime)
+  if init_status < 0 then
+    server_callback_failure(server,
+        make_error(init_status, "net.accept.init", "server"))
+    return
+  end
+  local status = shim.titan_uvshim_tcp_accept(server.handle, client.handle)
+  if (status as integer) < 0 then
+    start_tcp_close(client)
+    server_callback_failure(server,
+        make_error(status as integer, "net.accept", "server"))
+    return
+  end
+  client.metadata.lifecycle = TCP_CONNECTION
+  client.metadata.server = false
+  local control = server.metadata
+  local waiter? = control.accept_waiter
+  local epoch = control.accept_epoch
+  local recipient: Task? = nil
+  if waiter then
+    local task = waiter
+    if task.state == TASK_WAITING and not task.cancel_requested and
+        task.epoch == epoch then
+      recipient = task
+    else
+      control.accept_waiter = nil
+      control.accept_epoch = 0
+    end
+  end
+  if not recipient and control.accept_count >= control.accept_capacity then
+    start_tcp_close(client)
+    return
+  end
+  local read_status = start_tcp_read(client)
+  if read_status < 0 then
+    start_tcp_close(client)
+    server_callback_failure(server,
+        make_error(read_status, "net.accept.read.start", "server"))
+    return
+  end
+  if recipient then
+    control.accept_waiter = nil
+    control.accept_epoch = 0
+    drive_task(recipient, DRIVE_RESUME, client, "")
+  elseif not enqueue_accepted(server, client) then
+    -- Capacity was checked before initialization and callbacks are serial, so
+    -- reaching this branch indicates an internal queue invariant failure.
+    start_tcp_close(client)
+    raise internal_error("net.accept.queue")
+  end
+end
+
+local function tcp_dispatch_body(owner: uv_tcp_t, event_kind: integer,
+                                 result: integer, size: libuv.size_t,
+                                 pointer: ffi.titan_ffi_void_ptr)
+  local control = owner.metadata
+  if event_kind == EVENT_HANDLE_CLOSE then
+    finish_closed_tcp(owner)
+  elseif event_kind == EVENT_STREAM_ALLOC then
+    tcp_alloc_dispatch(owner, size, pointer)
+  elseif event_kind == EVENT_STREAM_READ then
+    tcp_read_dispatch(owner, result)
+  elseif event_kind == EVENT_CONNECTION then
+    if control.lifecycle == TCP_CLOSING or
+       control.lifecycle == TCP_CLOSED then
+      return
+    end
+    tcp_connection_dispatch(owner, result)
+  end
+end
+
+local function tcp_dispatch(owner: uv_tcp_t, event_kind: integer,
+                            result: integer, size: libuv.size_t,
+                            pointer: ffi.titan_ffi_void_ptr)
+  if event_kind == EVENT_HANDLE_CLOSE then
+    owner.metadata.lifecycle = TCP_CLOSED
+  end
+  tcp_dispatch_body(owner, event_kind, result, size, pointer)
+catch
+  -- A failed alloc callback returns the shim's NULL/zero descriptor. libuv's
+  -- Unix stream path must then issue UV_ENOBUFS through read_cb; stopping here
+  -- would clear that callback before libuv calls it.
+  if event_kind ~= EVENT_STREAM_ALLOC and
+      owner.metadata.read_active and owner.handle ~= nil then
+    shim.titan_uvshim_tcp_read_stop(owner.handle)
+    owner.metadata.read_active = false
+  end
+  owner.metadata.read_bytes = nil
+  if not owner.metadata.runtime.fatal then
+    owner.metadata.runtime.fatal = true
+    owner.metadata.runtime.closing = true
+    owner.metadata.runtime.fatal_error = error
+    owner.metadata.runtime.fatal_traceback = traceback
+  end
+  libuv.uv_stop(owner.metadata.runtime.loop.handle)
+  return
+end
+
+local function retire_aborted_net_requests(runtime: Runtime)
+  local control? = runtime.net_pending_head
+  while control do
+    local to_retire = control
+    control = to_retire.next_control
+    if to_retire.lifecycle == NET_OWNER_CALLBACK or
+        to_retire.lifecycle == NET_OWNER_ALLOCATED then
+      local operation = to_retire.operation
+      if to_retire.kind == NET_OWNER_CONNECT and operation.tcp then
+        local tcp = operation.tcp
+        tcp.metadata.connect_pending = false
+        start_tcp_close(tcp)
+      elseif (to_retire.kind == NET_OWNER_WRITE or
+              to_retire.kind == NET_OWNER_SHUTDOWN) and
+             operation.tcp then
+        if operation.linked then remove_output(operation.tcp, operation) end
+      end
+      retire_net_control(to_retire)
+    end
+  end
+end
+
+local function begin_tcp_shutdown(runtime: Runtime)
+  local control? = runtime.tcp_head
+  while control do
+    local to_shutdown = control
+    control = to_shutdown.next_control
+    local owner? = to_shutdown.owner
+    if owner then
+      local tcp = owner
+      to_shutdown.close_requested = true
+      if to_shutdown.server then
+        to_shutdown.accept_waiter = nil
+        to_shutdown.accept_epoch = 0
+        close_accepted_queue(tcp)
+      else
+        stop_tcp_read(tcp, true)
+      end
+      start_tcp_close(tcp)
+      if not to_shutdown.output_current then
+        while to_shutdown.output_head do
+          remove_output(tcp, to_shutdown.output_head)
+        end
+      end
+    end
+  end
+end
+
+local function advance_tcp_shutdown(runtime: Runtime)
+  retire_aborted_net_requests(runtime)
+  local control? = runtime.tcp_head
+  while control do
+    local to_advance = control
+    control = to_advance.next_control
+    if to_advance.owner then
+      local tcp = to_advance.owner
+      if to_advance.lifecycle == TCP_CLOSED then
+        finish_closed_tcp(tcp)
+      elseif to_advance.lifecycle ~= TCP_CLOSING then
+        start_tcp_close(tcp)
+      end
+    end
+  end
+end
