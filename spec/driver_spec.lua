@@ -217,7 +217,7 @@ describe("compiler module loader", function()
         write_file(folder .. "/sample.titan", [[
             local from_main: integer = 1
             do
-                from_main = from_main + from_A()
+                from_main = from_main + from_zero()
             end
         ]])
         -- Deliberately create contributors in an order unrelated to the
@@ -226,8 +226,11 @@ describe("compiler module loader", function()
             "local from_z: integer = 1\n")
         write_file(folder .. "/a.titan",
             "local from_a: integer = 1\n")
-        write_file(folder .. "/A.titan", [[
-            function from_A(): integer
+        -- Use a digit rather than a case-only filename distinction: the
+        -- default macOS filesystem aliases A.titan and a.titan. The pure
+        -- comparator spec separately covers uppercase/lowercase byte order.
+        write_file(folder .. "/0.titan", [[
+            function from_zero(): integer
                 do
                     return 1
                 end
@@ -253,7 +256,7 @@ describe("compiler module loader", function()
         assert.equal(7, #imported.ast)
         assert.same({
             folder .. "/sample.titan",
-            folder .. "/A.titan",
+            folder .. "/0.titan",
             folder .. "/a.titan",
             folder .. "/aa.titan",
             folder .. "/z.titan",
