@@ -1,7 +1,7 @@
 # The Titan grammar
 
 This chapter is the reference grammar of Titan as implemented by the
-0.14 prototype compiler: lexical conventions, the complete syntactic
+0.15 prototype compiler: lexical conventions, the complete syntactic
 grammar, operator precedence, and the restrictions the EBNF alone does
 not show. It replaces the old manual's stale grammar.
 
@@ -136,11 +136,16 @@ local s5: string = [==[ contains ]] safely ]==]
 
 ## Modules and top-level declarations
 
-A Titan source file is a module: a sequence of top-level declarations,
-in any order, with no executable statements outside functions.
+A flat Titan source, or each independently parsed file of a
+[folder module](folder-modules.md), is a sequence of top-level declarations.
+The canonical source may end with one root `do ... end` module initializer;
+for a folder module only its main source may contain that initializer. Its
+`block` may use the ordinary optional `catch` and `finally` trailers.
 
 ```
-program  ::= {tlmethod | tlrecfunc | tlfunc | tlvar | tlrecord | tltype | tlimport | tlforeignimport}
+program  ::= {tldecl} [moduleinit]
+tldecl   ::= tlmethod | tlrecfunc | tlfunc | tlvar | tlrecord | tltype
+           | tlimport | tlforeignimport
 tlmethod ::= [local] function Name ':' Name '(' [parlist] ')' [':' rettype] block end
 tlrecfunc ::= [local] function Name '.' Name '(' [parlist] ')' [':' rettype] block end
 tlfunc   ::= [local] function Name '(' [parlist] ')' [':' rettype] block end
@@ -150,6 +155,7 @@ tltype   ::= [local] type Name '=' type
 recordfield     ::= [local] Name ':' type [';']
 tlimport        ::= local Name '=' import importname
 tlforeignimport ::= local Name '=' foreign import importname
+moduleinit     ::= do block end
 importname      ::= LiteralString | '(' LiteralString ')'
 parlist         ::= param {',' param} [',' varargparam]
                  |  varargparam
@@ -174,6 +180,9 @@ end
 function Point.origin(): Point
     return Point.new(0.0, 0.0)
 end
+do
+    origin_x = Point.origin().x        -- optional final module initializer
+end
 ```
 
 Notes on the top level:
@@ -191,6 +200,9 @@ Notes on the top level:
   [Records](records.md).
 * A module variable's initializer is a full expression; after `=`, the
   keywords `import` and `foreign import` mark an import instead.
+* The optional `moduleinit` is the sole executable root construct. It runs
+  once per Lua state after all logical-module declarations, including folder
+  contributors, and must remain last.
 
 ## Declarations and types
 

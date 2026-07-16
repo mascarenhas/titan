@@ -13,9 +13,13 @@ imports are absent. `titanc` uses
 the recorded direct map for a non-root source dependency and the full recursive
 `driver.dependency_closure` for an explicit root, so it includes source objects
 statically linked into that root. The return
-value is the complete text of one C translation unit; the driver
-(`driver.compile`) runs it through `pretty.reindent_c`, writes the `.c`
-file next to the `.titan` source, and invokes the system C compiler
+value is the complete text of one C translation unit. For a
+[folder module](folder-modules.md), `ast` is the same dense root list as for a
+flat module, assembled from independently parsed files and checked once; the
+coder has no source-unit node or contributor context. The driver
+(`driver.compile`) runs the result through `pretty.reindent_c`, writes the
+`.c` file next to the canonical flat source or folder main, and invokes the
+system C compiler
 ([driver and toolchain](driver.md)). One consequence of the checker's
 rewriting matters constantly here: every implicit coercion is already an
 `Ast.ExpCast` node, every statically demanded extra result is an
@@ -58,7 +62,10 @@ generated code is a deliberate feature, so treat the contract as binding.
 
 `coder.generate` assembles the unit from a fixed preamble template plus
 a `code` list filled in two passes over the toplevels (imports, variables
-and records first; functions second). The pieces appear in this order:
+and records first; functions second). Whole-root-list allocation and emission
+walks use `ipairs`, preserving the dense main/contributor order; maps whose
+order has no semantic effect may still use `pairs`. The pieces appear in this
+order:
 
 1. **Preamble includes**: `<stdlib.h>`, `<string.h>`, `<math.h>`, then
    Lua's **internal** headers (`lobject.h`, `ltable.h`, `lvm.h`, `lgc.h`,
@@ -97,6 +104,18 @@ and records first; functions second). The pieces appear in this order:
    `Udata`.
 8. **`<prefix>_abi`**, **`<prefix>_types`**, **`<prefix>_init`**, **`luaopen_<prefix>`**: the
    module-protocol functions, described below.
+
+### Mixed-source `#line` attribution
+
+One folder-module C file contains functions and statements originating in
+several Titan files. `emitline(node)` therefore retains its existing per-node
+design: it C-quotes `node.loc.filename` and emits `#line` at safe physical-line
+sites such as function entries, statements, calls, `raise`, and related throw
+paths. Code generation does not install one directive for the whole
+translation unit or stamp expression fragments that may be embedded mid-line.
+The directive naturally changes filenames as root nodes and nested bodies from
+different contributors are emitted, so compiler diagnostics, DWARF, and
+libbacktrace frames identify the actual source file and line.
 
 A trimmed but real example (elisions marked `...`) — this module:
 
@@ -523,10 +542,11 @@ for named calls. Native entry signatures are unchanged, but a 0.12 checker
 cannot evaluate the new interface descriptors safely.
 
 Flexible result types add `flexrettype` to callable interface descriptors and
-the trailing native `_flexout`/`_flexwant` pair shown above. That is an ABI and
-serialization-shape change. The current ABI is **0.14**: all compiled modules,
-marker constants, and installed paths move together rather than making 0.13
-accept both layouts.
+the trailing native `_flexout`/`_flexwant` pair shown above. That ABI and
+serialization-shape change shipped as 0.14 rather than making 0.13 accept both
+layouts. The current ABI is **0.15**: `titan.uv` now orders exported module
+members by semantic contributor, so marker constants and installed paths move
+together rather than letting 0.14 importers reconstruct the changed slots.
 
 ## The module protocol
 
@@ -630,7 +650,10 @@ The literal is `types.serialize(ast._type)`: a Lua *expression* that
 rebuilds the module's type when evaluated with `types.lua`'s constructors
 as its environment. A `Type.Module` serializes runtime `members` and public
 alias `type_members` separately; aliases therefore create no module slot or
-Lua-visible member. Callable declaration descriptors also serialize formal
+Lua-visible member. Keyed alias, record-method, and record-static maps are
+serialized in locale-independent numeric-byte name order so equivalent
+interfaces have reproducible text; ordered module members and record fields
+retain their established source/slot order. Callable declaration descriptors also serialize formal
 `paramnames`, while structural `Type.Function` values do not. Callable shapes
 also carry their optional `flexrettype`; accepting that new constructor shape
 from compiled interfaces is gated on the coordinated ABI transition described
@@ -648,6 +671,12 @@ linkage when no binary exists and source is selected. Explicit command-line
 roots are the source-first exception. The tests'
 in-memory `tableloader` exercises the same serialization round-trip. See
 [driver and toolchain](driver.md).
+
+Folder representation changes none of this protocol. Mangled symbols,
+nominal names, registry keys, `luaopen_*`, and the serialized module identity
+remain derived solely from logical `modname`; there is no contributor ABI.
+The repository's 0.15 transition is instead a compatibility boundary for the
+intentional `titan.uv` public-member reorder caused by semantic ownership.
 
 ## Static vs dynamic dependency wiring
 

@@ -8,9 +8,14 @@ defines one LPeg pattern per token and exports them by name, and
 `titan-compiler/parser.lua` references those patterns as terminals inside
 one `relabel` grammar that goes straight from source text to the AST
 described in [AST and typedecl](ast-typedecl.md).
-`parser.parse(filename, input)` returns the AST (a list of toplevel nodes)
+`parser.parse(filename, input)` returns the AST (a dense list of ordinary
+toplevel nodes)
 or `false, { label = <string>, loc = <location> }`. The user-facing grammar
 all of this implements is in the [language reference](../language/grammar.md).
+For a [folder module](folder-modules.md), the driver invokes this same function
+independently and sequentially for the main and every contributor, then
+concatenates their root nodes. The parser itself has no folder, source-unit,
+or per-file-namespace concept.
 
 ## One grammar, no token stream
 
@@ -313,6 +318,15 @@ The parser performs several rewrites that later passes rely on:
   The parser sets `islocal` when the declaration is written
   `local function Point.origin(...)`.
 
+* **The root module initializer keeps an explicit parser role.** The optional
+  final root `do ... end` produces the ordinary `Ast.StatBlock`, or the
+  `Ast.StatTry` already used when its block has `catch`/`finally` trailers.
+  The small `moduleinit` action sets `_module_initializer` and changes the
+  node location to the `do` keyword. Folder assembly can therefore remove the
+  main initializer and append it after all contributor roots, or report a
+  contributor initializer at the construct that is disallowed, without
+  guessing from the statement tag or adding an AST tag.
+
 * **`if`/`elseif` chains flatten to a list.** `defs.ifstat` prepends the
   initial condition/block pair to the captured `elseif` clauses, yielding one
   `Ast.StatIf` whose `thens` is a flat list of `Ast.Then` nodes (plus
@@ -432,6 +446,10 @@ index — the parser still computes a location *eagerly for every captured
 node* through `P`. `location.format_error(loc, fmt, ...)` produces the
 standard `file:line:col: ...` prefix used by both syntax and
 [checker](checker.md) errors.
+Every folder contributor is parsed with its real filename, so these existing
+locations survive plain-node concatenation. Cross-file checker diagnostics
+can use `location.format` to name the earlier declaration's complete
+`filename:line:col` as well as the primary node.
 
 ## Non-reentrancy
 
@@ -440,10 +458,12 @@ laments: "If only lpeg.re had Carg..."), so the current filename lives in the
 module-global `THIS_FILENAME`, set by `parser.parse` around `grammar:match`
 and guarded by `assert(THIS_FILENAME == nil)` on entry. The parser is
 therefore **not reentrant**: a recursive or concurrent `parser.parse` trips
-the assert. The normal pipeline never nests parses — imports are parsed by
-the [driver's loader](driver.md) from inside `checker.checkimport`, after
-the importing file's own parse has returned — but a tool parsing from inside
-another parse will hit it. `grammar:match` is also not run protected, so an
+the assert. The normal pipeline never nests parses. A folder module's files
+are parsed one after another, and all have returned before its one checker
+invocation; imported modules are then parsed by the
+[driver's loader](driver.md) from inside `checker.checkimport`. A tool parsing
+from inside another parse will still hit the guard. `grammar:match` is also not
+run protected, so an
 error raised inside a semantic action escapes `parse` without restoring
 `THIS_FILENAME`, poisoning later calls in the same process.
 
@@ -462,6 +482,10 @@ error raised inside a semantic action escapes `parse` without restoring
   about (`_tag` plus the relevant children); new node fields and decorations
   then never break old tests. Error tests assert labels, via
   `assert_program_syntax_error`.
+* **Folder assembly is driver behavior.** Filesystem ordering, main-only
+  initializers, privacy blocks, and cross-file locations belong in
+  `spec/driver_spec.lua`; the parser specs continue to exercise one input
+  string per call and the unchanged AST vocabulary.
 * **The `TableFormatLevel` gotcha.** Failing AST comparisons print the
   table, and luassert's print depth is a *global* parameter.
   `parser_spec.lua` raises it to 100 in `setup()` and restores it in

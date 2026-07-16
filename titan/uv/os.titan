@@ -1,0 +1,306 @@
+function _os_getenv(name: string): string?
+  local copied = copy_text(name, "os.getenv", name)
+  local getenv_buffer = function (bytes: *ffi.titan_ffi_char,
+                                  sizes: *libuv.size_t): ffi.titan_ffi_int
+    return libuv.uv_os_getenv(copied.bytes.data, bytes, sizes)
+  end
+  return os_sized_buffer(getenv_buffer,
+      OS_BUFFER_INITIAL as libuv.size_t,
+      os_error_from_status("os.getenv", name))
+end
+
+function _os_setenv(name: string, contents: string)
+  local copied_name = copy_text(name, "os.setenv", name)
+  -- Never retain or echo the environment value in an Error subject.
+  local copied_value = copy_text(contents, "os.setenv", name)
+  local status = libuv.uv_os_setenv(copied_name.bytes.data,
+                                    copied_value.bytes.data)
+  if (status as integer) < 0 then
+    raise make_error(status as integer, "os.setenv", name)
+  end
+end
+
+function _os_unsetenv(name: string)
+  local copied = copy_text(name, "os.unsetenv", name)
+  local status = libuv.uv_os_unsetenv(copied.bytes.data)
+  if (status as integer) < 0 then
+    raise make_error(status as integer, "os.unsetenv", name)
+  end
+end
+
+function _os_cwd(): string
+  return os_sized_buffer(os_cwd_buffer,
+      OS_BUFFER_INITIAL as libuv.size_t,
+      os_error_from_status("os.cwd", nil))
+end
+
+function _os_chdir(path: string)
+  local copied = copy_text(path, "os.chdir", path)
+  local status = libuv.uv_chdir(copied.bytes.data)
+  if (status as integer) < 0 then
+    raise make_error(status as integer, "os.chdir", path)
+  end
+end
+
+function _os_homedir(): string
+  return os_sized_buffer(os_homedir_buffer,
+      OS_BUFFER_INITIAL as libuv.size_t,
+      os_error_from_status("os.homedir", nil))
+end
+
+function _os_tmpdir(): string
+  return os_sized_buffer(os_tmpdir_buffer,
+      OS_BUFFER_INITIAL as libuv.size_t,
+      os_error_from_status("os.tmpdir", nil))
+end
+
+function _os_hostname(): string
+  return os_sized_buffer(os_hostname_buffer,
+      OS_BUFFER_INITIAL as libuv.size_t,
+      os_error_from_status("os.hostname", nil))
+end
+
+function _os_exepath(): string
+  if not program_args_ready then
+    raise "os.exepath is only available in a compiled Titan program"
+  end
+  return os_sized_buffer(os_exepath_buffer,
+      OS_BUFFER_INITIAL as libuv.size_t,
+      os_error_from_status("os.exepath", nil))
+end
+
+function _os_pid(): integer
+  return libuv.uv_os_getpid() as integer
+end
+
+function _os_ppid(): integer
+  return libuv.uv_os_getppid() as integer
+end
+
+function _os_wait_signal(name: string): string
+  local copied = copy_text(name, "signal.name", name)
+  local signum = shim.titan_uvshim_signal_number(
+      copied.bytes.data) as integer
+  if signum <= 0 or name == "kill" then
+    raise "unsupported waitable signal name '" .. name .. "'"
+  end
+  local canonical = shim.titan_uvshim_signal_name(
+      signum as ffi.titan_ffi_int) as string
+  local request = new_request(REQUEST_SIGNAL,
+      SignalSpec.new(canonical, signum), 0)
+  return coroutine.yield(request, UV_TAG)
+end
+
+function _os_signal_name(signal_number: integer): string?
+  if signal_number <= 0 then return nil end
+  local name = shim.titan_uvshim_signal_name(
+      signal_number as ffi.titan_ffi_int)
+  if not name then return nil end
+  return name as string
+end
+
+local function os_sized_buffer(
+    uv_buffer_func: (*ffi.titan_ffi_char, *libuv.size_t) ->
+                    ffi.titan_ffi_int,
+    capacity: libuv.size_t,
+    error_from_status: (ffi.titan_ffi_int) -> Error): string?
+  local sizes = libuv.size_t.new_array(1)
+  local bytes = allocate_sized_bytes(capacity)
+  sizes[0] = capacity
+  local status = uv_buffer_func(bytes.data, sizes)
+  if (status as integer) >= 0 then
+    return bytes_to_string(bytes.data, sizes[0])
+  elseif (status as integer) == UV_ENOBUFS then
+    return os_sized_buffer(uv_buffer_func, sizes[0], error_from_status)
+  elseif (status as integer) == UV_ENOENT then
+    return nil
+  else
+    raise error_from_status(status)
+  end
+end
+
+local function close_signal_owner(owner: uv_signal_t)
+  if owner.metadata.lifecycle == OWNER_ACTIVE then
+    libuv.uv_signal_stop(owner.handle)
+    owner.metadata.lifecycle = OWNER_CLOSING
+    shim.titan_uvshim_signal_close(owner.handle)
+  end
+end
+
+local function close_all_signal_owners(runtime: Runtime)
+  local owner? = runtime.signal_owner_head
+  while owner do
+    close_signal_owner(owner)
+    owner = owner.metadata.next_owner
+  end
+end
+
+local function allocate_signal_owner(runtime: Runtime, task: Task,
+                                     spec: SignalSpec, epoch: integer):
+                                     (uv_signal_t,
+                                      ffi.titan_ffi_void_ptr)
+  local top = lua.lua_gettop(L)
+  local memory = lua.lua_newuserdatauv(L, libuv.uv_signal_t.sizeof, 0)
+  local storage = ffi.lua_totvalue(L, -1)
+  local metadata: SignalControl = {
+    runtime = runtime,
+    lifecycle = OWNER_ALLOCATED,
+    task = task,
+    epoch = epoch,
+    name = spec.name,
+    next_owner = nil,
+    previous_owner = nil,
+  }
+  local owner: uv_signal_t = {
+    handle = memory as *libuv.uv_signal_t,
+    storage = storage,
+    main_thread = main_thread,
+    dispatcher = signal_dispatch,
+    metadata = metadata,
+    buffer = nil,
+  }
+  ffi.lua_pushtvalue(L, owner)
+  local pointer = ffi.lua_togco(L, -1)
+  link_signal_owner(runtime, owner)
+  lua.lua_settop(L, top)
+  return owner, pointer
+end
+
+local function start_signal_owner(runtime: Runtime, task: Task,
+                                  spec: SignalSpec, epoch: integer):
+                                  (uv_signal_t, integer)
+  local owner, pointer = allocate_signal_owner(runtime, task, spec, epoch)
+  local status = shim.titan_uvshim_signal_init(runtime.loop.handle,
+                                               owner.handle, pointer)
+  if (status as integer) < 0 then
+    -- This is the same callback-less init-failure boundary as timer init.
+    -- Unlink inline in the already-reserved frame; do not enter a fresh Titan
+    -- function after publishing the owner and before clearing its GC roots.
+    local previous? = owner.metadata.previous_owner
+    local next? = owner.metadata.next_owner
+    if previous then
+      previous.metadata.next_owner = next
+    else
+      runtime.signal_owner_head = next
+    end
+    if next then
+      next.metadata.previous_owner = previous
+    end
+    owner.metadata.previous_owner = nil
+    owner.metadata.next_owner = nil
+    owner.metadata.lifecycle = OWNER_CLOSED
+    owner.handle = nil
+    owner.storage = nil
+    return owner, status as integer
+  end
+  owner.metadata.lifecycle = OWNER_ACTIVE
+  status = shim.titan_uvshim_signal_start_oneshot(
+      owner.handle, spec.signum as ffi.titan_ffi_int)
+  if (status as integer) < 0 then
+    libuv.uv_signal_stop(owner.handle)
+    owner.metadata.lifecycle = OWNER_CLOSING
+    shim.titan_uvshim_signal_close(owner.handle)
+  end
+  return owner, status as integer
+end
+
+-- Trusted one-shot signal dispatcher.  Stop + close state is published before
+-- a signal can resume arbitrary Titan code; the trailing catch never unwinds
+-- through libuv's native callback frame.
+local function signal_dispatch(owner: uv_signal_t, event_kind: integer,
+                               _result: integer, _size: libuv.size_t,
+                               _pointer: ffi.titan_ffi_void_ptr)
+  local runtime = owner.metadata.runtime
+
+  if event_kind == EVENT_HANDLE_CLOSE then
+    owner.metadata.lifecycle = OWNER_CLOSED
+    maybe_finish_session(runtime)
+    owner.handle = nil
+    owner.storage = nil
+    unlink_signal_owner(owner)
+    return
+  end
+
+  local task? = owner.metadata.task
+  local epoch = owner.metadata.epoch
+  local name = owner.metadata.name
+  owner.metadata.task = nil
+  owner.metadata.epoch = 0
+  close_signal_owner(owner)
+
+  if task then
+    local task = task
+    if task.state == TASK_WAITING and not task.cancel_requested and
+        task.epoch == epoch then
+      drive_task(task, DRIVE_RESUME, name, "")
+    end
+  end
+catch
+  if not owner.metadata.runtime.fatal then
+    owner.metadata.runtime.fatal = true
+    owner.metadata.runtime.closing = true
+    owner.metadata.runtime.fatal_error = error
+    owner.metadata.runtime.fatal_traceback = traceback
+  end
+  libuv.uv_stop(owner.metadata.runtime.loop.handle)
+  return
+end
+
+local function os_error_from_status(operation: string,
+                                    subject: string?):
+                                    (ffi.titan_ffi_int) -> Error
+  return function (status: ffi.titan_ffi_int): Error
+    return make_error(status as integer, operation, subject)
+  end
+end
+
+-- Foreign C functions are not Titan closure values, so these tiny adapters
+-- give the generic sized-buffer helper one uniform callable type.
+local function os_cwd_buffer(bytes: *ffi.titan_ffi_char,
+                             sizes: *libuv.size_t): ffi.titan_ffi_int
+  return libuv.uv_cwd(bytes, sizes)
+end
+
+local function os_homedir_buffer(bytes: *ffi.titan_ffi_char,
+                                 sizes: *libuv.size_t): ffi.titan_ffi_int
+  return libuv.uv_os_homedir(bytes, sizes)
+end
+
+local function os_tmpdir_buffer(bytes: *ffi.titan_ffi_char,
+                                sizes: *libuv.size_t): ffi.titan_ffi_int
+  return libuv.uv_os_tmpdir(bytes, sizes)
+end
+
+local function os_hostname_buffer(bytes: *ffi.titan_ffi_char,
+                                  sizes: *libuv.size_t): ffi.titan_ffi_int
+  return libuv.uv_os_gethostname(bytes, sizes)
+end
+
+local function os_exepath_buffer(bytes: *ffi.titan_ffi_char,
+                                 sizes: *libuv.size_t): ffi.titan_ffi_int
+  local capacity = sizes[0]
+  local status = libuv.uv_exepath(bytes, sizes)
+  -- Linux and macOS report a truncated path as a saturated success rather
+  -- than UV_ENOBUFS. Translate only that public-API result into the generic
+  -- recursive retry contract.
+  local supplied = capacity as integer
+  if (status as integer) >= 0 and
+      (sizes[0] as integer) == supplied - 1 then
+    sizes[0] = (supplied * 2) as libuv.size_t
+    return UV_ENOBUFS as ffi.titan_ffi_int
+  end
+  return status
+end
+
+local function retire_closed_signal_owners(runtime: Runtime)
+  local owner? = runtime.signal_owner_head
+  while owner do
+    local to_retire = owner
+    owner = to_retire.metadata.next_owner
+    if to_retire.metadata.lifecycle == OWNER_CLOSED then
+      to_retire.handle = nil
+      to_retire.storage = nil
+      unlink_signal_owner(to_retire)
+    end
+  end
+end

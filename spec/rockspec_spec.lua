@@ -79,7 +79,7 @@ assert.truthy(PREFIX:sub(1, 1) == "/",
 local LUA = PREFIX .. "/bin/lua"
 local LUAROCKS = PREFIX .. "/bin/luarocks"
 local TITANC = PREFIX .. "/bin/titanc"
-local TITAN_LIBDIR = PREFIX .. "/lib/titan/0.14"
+local TITAN_LIBDIR = PREFIX .. "/lib/titan/0.15"
 local STDLIB_DIR = TITAN_LIBDIR .. "/titan"
 local LUA_LIBDIR = PREFIX .. "/lib/lua/5.5"
 local LUA_SHAREDIR = PREFIX .. "/share/lua/5.5"
@@ -95,6 +95,7 @@ local function clean_environment(argv)
         "-u", "LUAROCKS_CONFIG",
         "-u", "LUAROCKS_CONFIG_5_5",
         "-u", "LUAROCKS_SYSCONFDIR",
+        "-u", "TITAN_PATH_0_15",
         "-u", "TITAN_PATH_0_14",
         "-u", "TITAN_PATH_0_13",
         "-u", "TITAN_PATH",
@@ -135,7 +136,7 @@ local function assert_canonical_module(module)
     local canonical = STDLIB_DIR .. "/" .. module .. ".so"
     local compatibility = TITAN_LIBDIR .. "/" .. module .. ".so"
     local lua_module = LUA_LIBDIR .. "/titan/" .. module .. ".so"
-    local legacy = LUA_LIBDIR .. "/titan/stdlib_0_14/" .. module .. ".so"
+    local legacy = LUA_LIBDIR .. "/titan/stdlib_0_15/" .. module .. ".so"
     assert.equal("file", lfs.symlinkattributes(canonical, "mode"), canonical)
     assert.falsy(lfs.symlinkattributes(compatibility), compatibility)
     assert.falsy(lfs.symlinkattributes(lua_module), lua_module)
@@ -211,7 +212,7 @@ describe("standalone-prefix source installation", function()
         assert.truthy(public_config:find(
             '#define LUA_ROOT "' .. PREFIX .. '/"', 1, true), public_config)
         assert.truthy(public_config:find(
-            '#define LUA_TITAN_CDIR%s+LUA_ROOT "lib/titan/0.14/"'),
+            '#define LUA_TITAN_CDIR%s+LUA_ROOT "lib/titan/0.15/"'),
             public_config)
         local _, titan_cdir_definitions = public_config:gsub(
             "#define LUA_TITAN_CDIR", "")
@@ -274,13 +275,13 @@ describe("standalone-prefix source installation", function()
         workspace = temporary_directory("stdlib-layout-migration")
 
         local canonical = workspace ..
-            "/lib/titan/0.14/titan/coroutine.so"
+            "/lib/titan/0.15/titan/coroutine.so"
         local stale = {
-            workspace .. "/lib/titan/0.14/coroutine.so",
+            workspace .. "/lib/titan/0.15/coroutine.so",
             workspace .. "/lib/lua/5.5/coro.so",
             workspace .. "/lib/lua/5.5/titan/coroutine.so",
             workspace ..
-                "/lib/lua/5.5/titan/stdlib_0_14/coroutine.so",
+                "/lib/lua/5.5/titan/stdlib_0_15/coroutine.so",
         }
 
         local function seed_layout()

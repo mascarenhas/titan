@@ -1,7 +1,7 @@
 # Driver and toolchain
 
-This chapter covers everything between "a typed AST exists" and "a `.so`
-or executable exists": `titan-compiler/driver.lua` (module lookup, the
+This chapter covers everything from resolving source/compiled modules through
+producing a `.so` or executable: `titan-compiler/driver.lua` (module lookup, the
 import loader, C compilation and linking), the `titanc` command-line
 front end, the two small utility modules the whole compiler leans on
 (`pretty.lua` and `util.lua`), and the C runtime-support library in
@@ -11,10 +11,10 @@ default path and flag closes the chapter.
 ## Module names and the search paths
 
 Module lookup deals in dot-separated **module names**, never file paths.
-`findmodule` (`driver.lua`) maps a name to a relative path by replacing
-dots with slashes and appending an extension, then tries that path under
-each `;`-separated entry of a search-path string, returning the
-full filename of the first hit:
+Binary lookup still uses `findmodule` (`driver.lua`): it maps a name to a
+relative path by replacing dots with slashes and appending `.so`, then tries
+that path under each `;`-separated entry of a search-path string, returning
+the full filename of the first hit:
 
 ```lua
 local function findmodule(paths, modname, extension)
@@ -27,16 +27,36 @@ local function findmodule(paths, modname, extension)
 end
 ```
 
+Source lookup has a separate tagged resolver because a logical module may be
+flat or a [folder module](folder-modules.md). For logical name `M`, slash path
+`P`, and final component `B`, each source root is tested in this order:
+
+1. folder main `P/B.titan`; if it is a regular file, enumerate its directory,
+   collect immediate regular `.titan` siblings, and return the main followed
+   by contributors in `util.bytewise_less` basename order;
+2. flat source `P.titan`;
+3. before accepting a nested flat source, reject it as `blocked` when that
+   exact file is a constituent of an immediate parent folder module.
+
+The resolver distinguishes `flat`, `folder`, and `blocked` results; `nil` is
+only a clean miss. An error enumerating a selected folder is a separate hard
+failure. A selected or blocked result never falls through to another source
+form or later source root. Testing the requested folder first still permits a
+genuine deeper folder module even when its same-named sibling file contributes
+to the parent. A parent marker without the requested flat constituent does not
+reserve the missing child name.
+
 All modules, including the standard library, use the same two path strings:
 
 * **`driver.TITAN_SOURCE_PATH`** — where `.titan` sources live. Default
   `"."`; `titanc --tree <root>` overrides it.
 * **`driver.TITAN_BIN_PATH`** — where compiled `.so` modules live.
-  `TITAN_PATH_0_14` wins over `TITAN_PATH`; with neither set, installed mode
-  uses `".;" .. root .. "/lib/titan/0.14"`.
+  `TITAN_PATH_0_15` wins over `TITAN_PATH`; with neither set, installed mode
+  uses `".;" .. root .. "/lib/titan/0.15"`.
 
-So `import foo.bar` looks for `foo/bar.titan` under the source path and
-`foo/bar.so` under the bin path. Note that the compile-time path walk
+So `import foo.bar` looks for `foo/bar.so` on the bin path and, if source is
+needed, `foo/bar/bar.titan` before `foo/bar.titan` in each source root. Note
+that the compile-time path walk
 skips empty entries (`[^;]+`) and does **not** implement the `;;`
 "insert the default path here" convention; the run-time loader in
 `titan.c` does (see [pushpath](#titanc-the-dynamic-loader) below).
@@ -63,9 +83,11 @@ compiler/toolchain use instead of silently mixing installations.
 
 The standard library consists of ordinary qualified Titan modules:
 `titan.coroutine`, `titan.uv`, `titan.async`, `titan.timer`, `titan.fs`,
-`titan.net`, and `titan.os`. Their checkout sources are `titan/<name>.titan`, their checkout
-build products are `titan/<name>.so`, and installation copies those products
-to `<root>/lib/titan/0.14/titan/<name>.so`. The search-path entry is therefore
+`titan.net`, and `titan.os`. Most checkout sources are
+`titan/<name>.titan`; `titan.uv` is the folder ensemble rooted at
+`titan/uv/uv.titan`. Their checkout build products are still
+`titan/<name>.so`, and installation copies those products
+to `<root>/lib/titan/0.15/titan/<name>.so`. The search-path entry is therefore
 the parent of the `titan/` directory, just as it is for any other qualified
 module.
 
@@ -90,10 +112,18 @@ Lua's bare `coroutine` and `os` libraries remain unrelated.
 Dependency resolution is unconditionally **binary first**: if a matching `.so`
 exists anywhere on `TITAN_BIN_PATH`, the driver recovers its interface and does
 not inspect source timestamps. Only when no binary exists does it parse the
-first matching source. This applies equally to qualified standard-library
+first flat or folder source match. Source roots are walked left to right; the
+folder-before-flat rule applies within each root, rather than comparing one
+representation across all roots. This applies equally to qualified standard-library
 modules and application dependencies. In particular, a stray
-`./titan/uv.titan` does not capture `import "uv"` while an installed
+`./titan/uv/uv.titan` folder does not capture `import "uv"` while an installed
 `titan/uv.so` remains visible on the binary path.
+
+Source privacy is evaluated only after that exact binary miss. A requested
+nested flat file that is an immediate constituent of its parent folder module
+returns `blocked` and stops source-root traversal; it cannot be exposed by a
+later root. An exact child binary still wins before this check, and a genuine
+deeper child folder wins before the constituent flat candidate.
 
 An explicitly requested `titanc` root is the one exception because naming a
 root is a request to build it. `titanc` passes the complete requested-root set
@@ -103,7 +133,8 @@ If its source is absent, compilation fails rather than treating an existing
 binary as an empty build root. Imports reached from that root remain binary
 first. This is why the standard library can be built in dependency order with
 ordinary commands such as `titanc titan.uv`: the root comes from
-`titan/uv.titan`, while its already built `titan.coroutine` dependency is
+`titan/uv/uv.titan` plus its contributors, while its already built
+`titan.coroutine` dependency is
 recovered from `titan/coroutine.so`.
 
 The compiled branch uses the internal lazy/local `titan._loadlib` helper to
@@ -128,6 +159,12 @@ coordinated ABI 0.14 transition. The constants, paths, fixtures, and installed
 images move together; the loader rejects—not reinterprets—a 0.13 compiled
 interface.
 
+ABI 0.15 keeps those descriptor and native-call shapes. It advances the
+compatibility marker because `titan.uv` now declares exported members in
+semantic folder contributors, changing their ordered module slots. The new
+versioned path prevents a 0.14 importer from applying the monolithic order to
+the reordered provider.
+
 ## The loader protocol
 
 The checker does not know how to find modules. `checker.checkimport`
@@ -148,7 +185,7 @@ is a message. See [the type checker](checker.md) for the consumer side.
 `defaultloader` uses three pieces of process state:
 
 * **`driver.imported`** — a process-global cache, module name → the full
-  `{ ast, type, filename, deps }` for source modules, the smaller
+  `{ ast, type, filename, program_output, deps }` for source modules, the smaller
   `{ type, compiled = true, filename }` for binary modules. Tests and long-lived
   tools must reset the cache (`driver.imported = {}`), together with
   `types.registry`.
@@ -166,8 +203,22 @@ The closure proceeds in this order:
    history.
 3. An explicit root with no source fails. Every other lookup looks for a binary
    on `TITAN_BIN_PATH` before looking for source on `TITAN_SOURCE_PATH`.
-4. A source hit is parsed, marked with `CIRCULAR_MARK`, recursively checked
-   with the same loader, cached, and recorded as a static dependency.
+4. A source hit is a tagged flat/folder descriptor. Every listed file is read
+   and parsed independently with its real filename. The main initializer is
+   saved, contributor roots are appended in descriptor order, contributor
+   initializers are rejected, and the saved initializer is appended once.
+5. The logical module is marked with `CIRCULAR_MARK`; the resulting dense AST
+   is recursively checked
+   exactly once under the logical module name, cached, and recorded as a
+   static dependency. The canonical main becomes `filename`; executable
+   naming from the descriptor becomes `program_output`.
+
+The folder descriptor is temporary loader input, not AST metadata. One cache
+entry, circularity sentinel, module type, direct-dependency set, and
+initializer remain keyed by `modname`. Node locations are the only retained
+per-contributor information. The checker receives the main filename as its
+source directory; because contributors are immediate siblings, quoted foreign
+headers from any file resolve under that same directory.
 
 For a binary hit, `load_compiled_interface` uses the internal
 `titan._loadlib(path, symbol)` helper to map the image with
@@ -182,7 +233,8 @@ Lua expression over `types.lua` constructors (see
 [the module protocol](codegen-overview.md)).
 
 Dependency origin has two related views. Each source cache entry's `deps`
-stores that translation unit's direct source imports as `true`; compiled
+stores that logical translation unit's direct source imports as `true`, no
+matter which contributor declared the import; compiled
 imports have no entry. `titanc` passes that direct map when
 generating a non-root source dependency. For every explicit root,
 `driver.dependency_closure(root)` recursively merges origins reachable through
@@ -197,7 +249,8 @@ to the dependency's `_init` only for `true`; every compiled module uses the
 same `loadlib`/`loadsym` sequence. Generated `_types` functions return only the
 serialized module interface ([static vs dynamic
 wiring](codegen-overview.md)). The only current filesystem-loader option is
-the generic `source_roots` set.
+the generic `source_roots` set. Folder layout does not add an option or a
+different loader protocol.
 
 ### `driver.tableloader(modtable, imported, deps)`
 
@@ -210,11 +263,17 @@ module type through `types.serialize` and `load`, exactly like the
 That round trip already exposes constructor-schema drift such as
 `flexrettype`; it does not by itself authorize loading that schema under the
 current compiled-module ABI marker.
+It deliberately remains a flat one-string-per-module loader. Source folders,
+privacy blocks, and contributor enumeration belong only to
+`defaultloader`; neither tests nor embeddings acquire a synthetic source-unit
+AST shape.
 
 ## Compiling one module: `driver.compile`
 
 `driver.compile(modname, ast, sourcef, static_deps, verbose)`
-turns a checked AST into an object file:
+turns one checked logical-module AST into an object file. For a folder module,
+`sourcef` is its canonical main and `ast` is the combined dense list; there is
+still one call:
 
 1. **Select the runtime SDK.** Installed mode is read-only: it uses headers
    from `<root>/include` and the already-built `<root>/lib/libtitan.a`.
@@ -233,10 +292,11 @@ turns a checked AST into an object file:
    as a string; `pretty.reindent_c` reformats it. The qualified `modname`
    controls the native prefix, registry identity, `_init`, `_abi`, `_types`,
    and `luaopen_*` symbols consistently.
-3. The `.c` file is written **next to the `.titan` source**:
+3. The `.c` file is written **next to the flat source or folder main**:
    `sourcef:gsub("[.]titan$", "") .. ".c"` (if `sourcef` is not given it
    defaults to the dots-to-slashes path). Any previous `.c`/`.o` for the
-   module is `os.remove`d first.
+   module is `os.remove`d first. Contributors never receive generated C or
+   object files.
 4. The object is compiled with the parsed `driver.CC`, then
    `TITAN_EXTRA_CPPFLAGS`, Titan's fixed `driver.CFLAGS`, and
    `TITAN_EXTRA_CFLAGS`, in that order:
@@ -362,10 +422,18 @@ required for the Titan runtime route.
 
 ## Linking a standalone program: `driver.compile_program`
 
-`driver.compile_program(modname, libnames, link, verbose, extra_objects)` produces an
-executable named `modname:gsub("[.]", "/")` (no extension, again
-relative to the working directory). It first
-writes `<mod>__entrypoint.c` from `entrypoint_template` — a small
+`driver.compile_program(modname, libnames, link, verbose, extra_objects,
+program_output)` produces an executable at the optional `program_output`
+path, relative to the working directory. Omitting it preserves the original
+`modname:gsub("[.]", "/")` default for programmatic callers and
+`tableloader`. Filesystem source descriptors cache:
+
+| Form for `foo.bar` | `program_output` |
+| --- | --- |
+| flat | `foo/bar` |
+| folder | `foo/bar__main` |
+
+It first writes `<mod>__entrypoint.c` from `entrypoint_template` — a small
 srlua-derived C `main` — compiles it with the normal extra compile flags,
 and then links its object with the same object set as a library:
 
@@ -380,6 +448,15 @@ cc --std=c99 -O2 -Wall -fPIC -g -fno-optimize-sibling-calls -o foo/bar \
    <root>/lib/liblua.a [-ldl] -lm [TITAN_EXTRA_LDFLAGS...]
 ```
 
+The command above shows the flat default. A folder program changes only the
+link output after `-o` to `foo/bar__main`. The entrypoint C/object path,
+`$MODNAME`, `$LUAOPEN_FN`, `$PROGNAME`, registry identity, and compiled module
+symbols remain derived from logical `foo.bar`. The suffix avoids colliding
+with the source directory and works when `--tree` names an external tree.
+Library and program compilation create the logical output parent when a
+dotted external source tree has not already created it in the current working
+directory.
+
 The generated entrypoint, walked through (template substitutions:
 `$MODNAME` = the dotted module name, `$LUAOPEN_FN` =
 `luaopen_<mangled>`, `$PROGNAME` = the last dotted component, used in
@@ -389,7 +466,7 @@ error alerts):
   calls `titan_init_paths`. That parses the inherited `package.cpath` for the
   first `/lib/lua/5.5/?.so` template, initializes the root and Titan module
   path in the registry, and
-  ensures `<root>/lib/titan/0.14/?.so` is in `package.cpath`; the configured
+  ensures `<root>/lib/titan/0.15/?.so` is in `package.cpath`; the configured
   Titan-owned Lua already places it before the `lib/lua` templates. It then
   registers the main module for
   `require` *without* loading it:
@@ -486,7 +563,23 @@ make titan/uv.so                       # pinned bundled libuv
 LIBUV_MODE=system make titan/uv.so     # pkg-config-selected system libuv
 ```
 
-Both commands compile the ordinary root `titan.uv`. In bundled mode this image
+Both commands compile the ordinary logical root `titan.uv`. Its production
+source graph is reviewed explicitly rather than discovered by a Make wildcard:
+
+```make
+UV_TITAN_SOURCES = titan/uv/uv.titan titan/uv/file.titan \
+                   titan/uv/os.titan titan/uv/process.titan \
+                   titan/uv/runtime.titan titan/uv/task.titan \
+                   titan/uv/tcp.titan
+```
+
+Every member is a normal prerequisite of the one `titan/uv.so` target, while
+`titanc titan.uv` independently verifies the folder contents during source
+resolution. Compilation writes only `titan/uv/uv.c` and `titan/uv/uv.o`;
+`make clean` removes those nested artifacts. No `runtime.so`, `file.so`, or
+other contributor image exists.
+
+In bundled mode this image
 is the process's sole complete libuv provider. An extension DSO that imports
 `titan.uv` may make ordinary libuv function calls directly without linking it:
 the generic lazy/global runtime loader maps the extension, whose initializer
@@ -536,13 +629,16 @@ The qualified root itself consistently determines every exported name:
 `timer`, `fs`, `net`, and `os`. In
 particular, `titan.os` does not export `luaopen_os`, so Lua's built-in OS
 library remains distinct. The Makefile installs one ordinary file per module
-under `<root>/lib/titan/0.14/titan`. Titan-owned Lua's default
-`package.cpath` includes `<root>/lib/titan/0.14/?.so`, so
+under `<root>/lib/titan/0.15/titan`. Titan-owned Lua's default
+`package.cpath` includes `<root>/lib/titan/0.15/?.so`, so
 `require "titan.os"` reaches that same DSO without a copied, symbolic-link, or
 hard-link alias. The stdlib install additionally writes
 `<root>/share/lua/5.5/titan/uv.lua`; Lua's normal search order selects that
 loader for `require "titan.uv"`, and it opens the canonical DSO from the same
 Titan C-module path.
+The uv folder ensemble is packaged as source, but installation and the rock
+manifest still expose only the canonical compiled `titan/uv.so`; contributor
+DSOs and legacy copies are neither built nor installed.
 
 The source rock deliberately has an unusual two-stage deployment. Its
 `build_target = "titan"` disables the separate Make install pass and passes a
@@ -576,7 +672,8 @@ Its flow:
 1. **Typecheck everything first.** Each requested module gets a fresh loader
    configured with the complete `source_roots` set and goes through
    `checker.checkimport`; requested roots are source-first, imports are checked
-   recursively with binary-first resolution,
+   recursively with binary-first resolution, each selected folder is parsed
+   into one dense AST and checked under its logical name,
    each source module records its own direct origin map, and the requested
    root receives a recomputed `driver.dependency_closure` for code generation
    and final linking.
@@ -599,7 +696,9 @@ Its flow:
    end (the final `exit` at the bottom of the script).
 4. **Link.** If a `main` module was found, *all* compiled objects are
    linked into a single executable with `driver.compile_program` —
-   standalone programs always bundle every module statically. Otherwise
+   passing the main cache entry's `program_output`, so a folder root uses
+   `P__main` while a flat root retains `P`. Standalone programs always bundle
+   every module statically. Otherwise
    each requested module is linked into its own `.so` with
    `driver.compile_library`, passing exactly the objects whose
    `static_deps` value is `true` (the module itself and its transitive
@@ -654,6 +753,10 @@ generated code readable for the humans debugging it.
 * **`util.get_file_contents(filename)`** / **`set_file_contents`** —
   whole-file read/write returning `false, err` on failure; the driver
   uses them for sources and generated `.c` files.
+* **`util.bytewise_less(a, b)`** — locale-independent lexicographic ordering
+  by numeric string bytes, with shorter prefixes first. Folder-source
+  discovery uses it for contributor basenames, and `types.serialize` uses it
+  for keyed interface maps whose text must be reproducible.
 * **`util.split_string(str, delim)`** — plain-pattern split; used to
   turn the `-l` comma list into linker flags.
 * **`util.to_set`**, **`util.curry`**, **`util.any`** — small
@@ -679,7 +782,7 @@ be tested before reinstalling.
 * **`TITAN_LIKELY(x)` / `TITAN_UNLIKELY(x)`** — `__builtin_expect`
   wrappers (plain parentheses off GCC/Clang); used on the hot/cold
   sides of generated type checks.
-* **Constants** — `TITAN_VER "0.14"`, `TITAN_VER_SUFFIX "_0_14"`,
+* **Constants** — `TITAN_VER "0.15"`, `TITAN_VER_SUFFIX "_0_15"`,
   `TITAN_PATH_VAR "TITAN_PATH"`, `TITAN_PATH_SEP "/"`,
   `TITAN_ROOT_DEFAULT "/usr/local"`,
   `TITAN_LUA_CPATH_SUFFIX "/lib/lua/5.5/?.so"`, and UUID
@@ -723,16 +826,16 @@ It also declares the dynamic-loading and error functions exported by
   executable scans the inherited
   `package.cpath` for the first entry ending in `/lib/lua/5.5/?.so`, falling
   back to `/usr/local` only when no such entry exists. `titan_init_paths` also
-  ensures the exact `<root>/lib/titan/0.14/?.so` template is in
+  ensures the exact `<root>/lib/titan/0.15/?.so` template is in
   `package.cpath` and eagerly initializes the Titan loader path. The configured
   Titan-owned Lua already places that template before the ordinary `lib/lua`
   templates, so Lua and standalone programs resolve the same qualified module
   DSOs.
 * **`pushpath(L)`** resolves the run-time module search path once per
   Lua state and caches it in the registry under `TITAN_PATH_KEY`. The
-  order is: `getenv("TITAN_PATH_0_14")` (the versioned variable,
+  order is: `getenv("TITAN_PATH_0_15")` (the versioned variable,
   `TITAN_PATH_VAR TITAN_VER_SUFFIX`), then `getenv("TITAN_PATH")`,
-  then `".;<root>/lib/titan/0.14"`, where `<root>` is recovered from
+  then `".;<root>/lib/titan/0.15"`, where `<root>` is recovered from
   the first literal `package.cpath` template ending in
   `/lib/lua/5.5/?.so` (or `/usr/local` as the legacy fallback). A `;;` in
   the environment value is replaced by that default path (two
@@ -832,15 +935,15 @@ running the module initializer.
 | --- | --- | --- | --- |
 | `PREFIX` | Makefile / rockspec build input | `/usr/local` for direct Make; an absolute per-project path in the supported workflow | Owns the prefix-configured Lua installation plus the LuaRocks executable and configuration. |
 | `ROCKS_TREE` | Makefile / rockspec build input | empty for a direct build; LuaRocks' `$(SCRIPTS_DIR)/..` for a source install | Owns the installed Titan rock, SDK, and stdlib. The supported workflow currently sets it equal to `PREFIX`, but they are separate ownership concepts. |
-| `TITAN_PATH_0_14` | `driver.lua` (compile time), `titan.c` `pushpath` (run time) | unset | Versioned module search path; wins over `TITAN_PATH`. |
+| `TITAN_PATH_0_15` | `driver.lua` (compile time), `titan.c` `pushpath` (run time) | unset | Versioned module search path; wins over `TITAN_PATH`. |
 | `TITAN_PATH` | same | unset | Module search path; `;;` expands to the default at run time only. |
 | `TITAN_ROCKS_ROOT` | `driver.lua`, source-rock post-install Make invocation | unset | Internal normalized `ROCKS_TREE` override used while the just-deployed compiler builds the standard modules; not a public deployment setting. |
 | `driver.TITAN_ROOT` | `driver.lua` | internal override, otherwise first `package.cpath` entry ending `/lib/lua/5.5/?.so` | Normalized Titan SDK/rocks-tree root. Package-path discovery relies on the currently supported `ROCKS_TREE == PREFIX` layout. |
 | `driver.SOURCE_CHECKOUT` / `driver.INSTALLED` | `driver.lua` | detected from checkout files unless the internal root is set | Select the writable checkout SDK/archive inputs or read-only installed SDK inputs. |
 | `driver.INSTALL_PATHS` | `driver.installed_paths` | paths below `driver.TITAN_ROOT` | Holds `lua_source`, `include`, `lib`, `libtitan`, `libbacktrace`, `liblua`, `titan_bin`, and `lua_cpath`; bundled `libuv.a` is deliberately not an installed SDK path. |
-| `driver.TITAN_BIN_PATH` | `driver.lua` | `TITAN_PATH_0_14`, `TITAN_PATH`, or `.;<root>/lib/titan/0.14` in installed mode | Where compiled `.so` modules are searched at compile time; checkout mode retains the legacy `/usr/local` fallback. |
-| `driver.TITAN_SOURCE_PATH` | `driver.lua` | `"."` (overridden by `titanc --tree`) | Where `.titan` sources are searched. |
-| `options.source_roots` | `titanc` / `driver.defaultloader` | every CLI module name | Requires explicit build roots to come from source while all dependencies remain binary-first. |
+| `driver.TITAN_BIN_PATH` | `driver.lua` | `TITAN_PATH_0_15`, `TITAN_PATH`, or `.;<root>/lib/titan/0.15` in installed mode | Where compiled `.so` modules are searched at compile time; checkout mode retains the legacy `/usr/local` fallback. |
+| `driver.TITAN_SOURCE_PATH` | `driver.lua` | `"."` (overridden by `titanc --tree`) | Semicolon-separated roots searched for folder `P/B.titan` before flat `P.titan`, including contributor privacy checks. |
+| `options.source_roots` | `titanc` / `driver.defaultloader` | every CLI module name | Requires explicit build roots to come from flat/folder source while all dependencies remain binary-first; selected source descriptors also provide `program_output`. |
 | `titan._loadlib` | `titanlib.c` / `driver.lua` | internal `RTLD_LAZY` + `RTLD_LOCAL` loader | Maps compiled dependencies lazily for ABI/type interface recovery without initializing them or globalizing their symbols. |
 | `driver.LUA_SOURCE_PATH` | `driver.lua` | `<root>/src/lua-5.5.0` installed; `lua-5.5.0/src` in checkout mode; checkout-only override by `titanc --lua` | Lua internal source/header tree used at compile time. Installed mode rejects the override because `INSTALL_PATHS` supplies its matching `liblua.a` and `libtitan.a`. |
 | `driver.INCLUDE_PATH` | `driver.lua` | `<root>/include` in installed mode | Titan SDK and bundled-libuv headers used by generated C and foreign imports; the non-Lua set is `minicoro.h`, `titan.h`, `titan_longjmp.h`, and `titan/{ffi,coro,uv}.h`. |
@@ -854,7 +957,7 @@ running the module initializer.
 | installed link set | `driver.installed_link_inputs` / `append_runtime_libraries` | installed `libtitan.a` + separate `libbacktrace.a` + `liblua.a` + platform libraries | Used by both modules and programs; Linux adds `-ldl`, and all platforms add `-lm`. The `titan/uv.so` build alone receives the private bundled archive; direct bundled-mode extension DSOs leave `uv_*` unresolved, while system mode may use explicit pkg-config link flags. |
 | checkout link set | `driver.source_link_inputs` / `append_runtime_libraries` | local `libtitan.a` + separate local `libbacktrace.a` + local `liblua.a` + `-ldl -lm` | Preserves the writable source-development path while using the same archive contract; it never links `titan.o` directly. |
 | `TITAN_ROOT_DEFAULT` / `TITAN_LUA_CPATH_SUFFIX` | `titan.h`/`titan.c` | `/usr/local` / `/lib/lua/5.5/?.so` | Legacy run-time root fallback and exact template suffix used for root discovery. |
-| `titan_init_paths` | generated standalone entrypoint / `titan.c` | root parsed from inherited `package.cpath` | Caches the root and Titan module path and ensures `<root>/lib/titan/0.14/?.so` is in `package.cpath`; prefix-configured Titan-owned Lua has it first by default. |
+| `titan_init_paths` | generated standalone entrypoint / `titan.c` | root parsed from inherited `package.cpath` | Caches the root and Titan module path and ensures `<root>/lib/titan/0.15/?.so` is in `package.cpath`; prefix-configured Titan-owned Lua has it first by default. |
 | registry keys | `titan.h` | `TITAN_ROOT_KEY`, `TITAN_PATH_KEY`, `TITAN_LIBS_KEY`, `TITAN_MAIN_BOOTSTRAP_KEY`, `TITAN_MAIN_ARGC_KEY`, `TITAN_MAIN_ARGV_KEY`, `TITAN_BT_STATE_KEY`, `TITAN_BACKTRACE_KEY`, `TITAN_NAMES_KEY`, `TITAN_TRACE_PINNED`, `TITAN_TRACE_APPEND_KEY` (UUID strings) | Per-state caches and hooks: Titan SDK/rocks-tree root, module path, dlopen handles, optional standalone bootstrap, original process arguments and libuv's possibly replaced `argv`, registry-owned libbacktrace state, last raw backtrace, native-frame display names, re-raise traceback pin, and coroutine traceback append handoff. |
 | generated ABI symbol | `coder.lua` | `<mangled>_abi` returning `TITAN_VER` | Checked before `.so` type rehydration and before run-time dynamic-import `dlsym`; markerless modules are treated as incompatible. |
 

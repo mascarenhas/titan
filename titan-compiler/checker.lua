@@ -3813,7 +3813,8 @@ local function checkbodies(ast, st, errors)
                 st:with_block(checkmethod, node, st, errors)
             elseif node._tag == "Ast.TopLevelStatic" then
                 st:with_block(checkfunc, node, st, errors)
-            elseif node._tag == "Ast.StatBlock" then
+            elseif node._module_initializer or
+                   node._tag == "Ast.StatBlock" then
                 checkinitializer(node, st, errors)
             elseif node._tag == "Ast.TopLevelRecord" then
                 local fields = node._type.fields
@@ -3925,6 +3926,7 @@ end
 
 -- Return the name given the toplevel node
 local function toplevel_name(node)
+    if node._module_initializer then return nil end
     local tag = node._tag
     if tag == "Ast.TopLevelImport" then
         return node.localname
@@ -4067,6 +4069,11 @@ local toplevel_visitor = util.make_visitor({
     end,
 
     ["Ast.StatBlock"] = function(node)
+        node._type = types.Function({}, {}, false, false, false)
+    end,
+
+    ["Ast.StatTry"] = function(node)
+        assert(node._module_initializer)
         node._type = types.Function({}, {}, false, false, false)
     end,
 
@@ -4221,13 +4228,13 @@ local function collect_type_aliases(ast, st, errors)
             local previous = st:find_type_alias(node.name)
             if record then
                 checker.typeerror(errors, node.loc,
-                    "type alias '%s' conflicts with record declared at line %d",
-                    node.name, record.loc.line)
+                    "type alias '%s' conflicts with record declared at %s",
+                    node.name, location.format(record.loc))
                 node._ignore = true
             elseif previous then
                 checker.typeerror(errors, node.loc,
-                    "duplicate type alias for %s, previous one at line %d",
-                    node.name, previous.loc.line)
+                    "duplicate type alias for %s, previous one at %s",
+                    node.name, location.format(previous.loc))
                 node._ignore = true
             else
                 st:add_type_alias(node.name, node)
@@ -4250,8 +4257,8 @@ local function checktoplevel(ast, st, errors, loader)
             local dup = name and st:find_dup(name)
             if dup then
                 checker.typeerror(errors, node.loc,
-                    "duplicate declaration for %s, previous one at line %d",
-                    name, dup.loc.line)
+                    "duplicate declaration for %s, previous one at %s",
+                    name, location.format(dup.loc))
                 node._ignore = true
             else
                 toplevel_visitor(node, st, errors, loader)

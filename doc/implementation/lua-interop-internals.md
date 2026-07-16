@@ -519,8 +519,8 @@ Udata* (*some_dep_init)(lua_State *L) =
 
 `loadlib(L, file)` first consults the handle cache under
 `TITAN_LIBS_KEY`; on a miss it walks the Titan path — environment
-variable `TITAN_PATH_0_14`, then `TITAN_PATH`, then the default
-`".;<root>/lib/titan/0.14"`, with `<root>` recovered from the first
+variable `TITAN_PATH_0_15`, then `TITAN_PATH`, then the default
+`".;<root>/lib/titan/0.15"`, with `<root>` recovered from the first
 literal `package.cpath` entry ending in `/lib/lua/5.5/?.so` and `;;` in
 an env value splicing that default in — trying
 `dlopen(dir "/" file, RTLD_LAZY | RTLD_GLOBAL)` per `;`-separated directory.
@@ -550,7 +550,7 @@ it neither initializes the module nor publishes its symbols globally.
 
 Standard-library dependencies use the same loader and cache under their
 ordinary qualified filenames, such as `titan/timer.so`. The Titan-owned Lua
-default puts `<root>/lib/titan/0.14/?.so` before its ordinary `lib/lua`
+default puts `<root>/lib/titan/0.15/?.so` before its ordinary `lib/lua`
 templates, so Titan's dynamic import and Lua `require "titan.<module>"` open
 the same DSO. Post-install writes only that qualified file; there are no
 copied, symbolic-link, or hard-link aliases. `titan/uv.so` is consequently the
@@ -671,7 +671,7 @@ bundled-mode extension DSOs leave their `uv_*` calls unresolved:
   state and runs `luaL_openlibs`. `titan_init_paths` then parses the inherited
   `package.cpath` for the first `/lib/lua/5.5/?.so` entry, initializes the
   Titan module-path default from that root, and ensures
-  `<root>/lib/titan/0.14/?.so` is present in `package.cpath`. The
+  `<root>/lib/titan/0.15/?.so` is present in `package.cpath`. The
   prefix-configured Titan-owned Lua already places that template before its
   `lib/lua` entries. It then
   registers the module's `luaopen_` function in

@@ -4,6 +4,7 @@ local checker = require "titan-compiler.checker"
 local coder = require "titan-compiler.coder"
 local pretty = require "titan-compiler.pretty"
 local types = require "titan-compiler.types"
+local location = require "titan-compiler.location"
 local cdriver = require "c-parser.cdriver"
 
 local lfs = require "lfs"
@@ -12,8 +13,8 @@ local driver = {}
 
 driver.imported = {}
 
-driver.TITAN_VER = "0.14"
-driver.TITAN_VER_SUFFIX = "_0_14"
+driver.TITAN_VER = "0.15"
+driver.TITAN_VER_SUFFIX = "_0_15"
 driver.LUA_VERSION = "5.5"
 
 local LUA_CPATH_SUFFIX = "/lib/lua/" .. driver.LUA_VERSION .. "/?.so"
@@ -247,6 +248,96 @@ local function findmodule(paths, modname, extension)
     return nil
 end
 
+local function regular_file(filename)
+    return lfs.attributes(filename, "mode") == "file"
+end
+
+local function source_resolution_in_root(root, modname)
+    local module_path = modname:gsub("[.]", "/")
+    local basename = modname:match("([^.]+)$")
+    if not basename then return nil end
+    local folder = root .. "/" .. module_path
+    local folder_main = folder .. "/" .. basename .. ".titan"
+
+    if regular_file(folder_main) then
+        local opened, iterator, state = pcall(lfs.dir, folder)
+        if not opened or type(iterator) ~= "function" then
+            local detail = opened and state or iterator
+            return nil, "cannot enumerate folder module '" .. modname ..
+                "' at '" .. folder_main .. "': " .. tostring(detail)
+        end
+
+        local contributors = {}
+        local enumerated, enumeration_error = pcall(function()
+            for name in iterator, state do
+                if name ~= basename .. ".titan" and
+                   name:sub(-6) == ".titan" and
+                   regular_file(folder .. "/" .. name) then
+                    table.insert(contributors, name)
+                end
+            end
+        end)
+        if not enumerated then
+            return nil, "cannot enumerate folder module '" .. modname ..
+                "' at '" .. folder_main .. "': " ..
+                tostring(enumeration_error)
+        end
+        table.sort(contributors, util.bytewise_less)
+
+        local files = { folder_main }
+        for _, name in ipairs(contributors) do
+            table.insert(files, folder .. "/" .. name)
+        end
+        return {
+            kind = "folder",
+            main = folder_main,
+            files = files,
+            program_output = module_path .. "__main",
+        }
+    end
+
+    local flat = root .. "/" .. module_path .. ".titan"
+    if not regular_file(flat) then return nil end
+
+    local owner = modname:match("^(.*)[.][^.]+$")
+    if owner then
+        local owner_path = owner:gsub("[.]", "/")
+        local owner_basename = owner:match("([^.]+)$")
+        if not owner_basename then return nil end
+        local owner_main = root .. "/" .. owner_path .. "/" ..
+            owner_basename .. ".titan"
+        if regular_file(owner_main) then
+            return {
+                kind = "blocked",
+                owner = owner,
+                main = owner_main,
+                contributor = flat,
+            }
+        end
+    end
+
+    return {
+        kind = "flat",
+        main = flat,
+        files = { flat },
+        program_output = module_path,
+    }
+end
+
+local function resolve_source(paths, modname)
+    for root in paths:gmatch("[^;]+") do
+        local source, err = source_resolution_in_root(root, modname)
+        if source or err then return source, err end
+    end
+    return nil
+end
+
+local function blocked_source_error(modname, source)
+    return "source module '" .. modname .. "' cannot be loaded directly: " ..
+        "constituent '" .. source.contributor .. "' belongs to folder module '" ..
+        source.owner .. "' whose main source is '" .. source.main .. "'"
+end
+
 local function load_compiled_interface(modname, binf)
     local prefix = modname:gsub("[%-.]", "_")
     local loadlib = require("titan")._loadlib
@@ -304,20 +395,50 @@ function driver.defaultloader(static_deps, options)
         end
     end
 
-    local function parse_source(modname, srcf, loader)
-        local input, err = util.get_file_contents(srcf)
-        if not input then return false, err end
-        local ast, perr = parser.parse(srcf, input)
-        if not ast then return false, parser.error_to_string(perr, srcf) end
+    local function parse_source(modname, source, loader)
+        local ast = {}
+        local main_input
+        local main_initializer
+
+        for index, filename in ipairs(source.files) do
+            local input, err = util.get_file_contents(filename)
+            if not input then return false, err end
+            local nodes, perr = parser.parse(filename, input)
+            if not nodes then
+                return false, parser.error_to_string(perr, filename)
+            end
+
+            if index == 1 then
+                main_input = input
+                if nodes[#nodes] and
+                   nodes[#nodes]._module_initializer then
+                    main_initializer = table.remove(nodes)
+                end
+            else
+                for _, node in ipairs(nodes) do
+                    if node._module_initializer then
+                        return false, location.format_error(node.loc,
+                            "module initializer is only allowed in the " ..
+                            "folder main source '%s'", source.main)
+                    end
+                end
+            end
+
+            for _, node in ipairs(nodes) do table.insert(ast, node) end
+        end
+        if main_initializer then table.insert(ast, main_initializer) end
+
         driver.imported[modname] = CIRCULAR_MARK
         local direct_deps = {}
         table.insert(dependency_stack, direct_deps)
-        local modt, errors = checker.check(modname, ast, input, srcf, loader)
+        local modt, errors = checker.check(
+            modname, ast, main_input, source.main, loader)
         table.remove(dependency_stack)
         driver.imported[modname] = {
             ast = ast,
             type = modt,
-            filename = srcf,
+            filename = source.main,
+            program_output = source.program_output,
             deps = direct_deps,
         }
         static_deps[modname] = true
@@ -326,7 +447,6 @@ function driver.defaultloader(static_deps, options)
 
     local function loader(modname)
         if driver.imported[modname] == CIRCULAR_MARK then
-            driver.imported[modname] = nil
             return false, "circular reference to module"
         end
         if source_roots[modname] and driver.imported[modname] and
@@ -343,14 +463,18 @@ function driver.defaultloader(static_deps, options)
             return true, mod.type, {}
         end
 
-        local srcf
+        local source, source_err
         if source_roots[modname] then
-            srcf = findmodule(
-                driver.TITAN_SOURCE_PATH, modname, ".titan")
-            if not srcf then
+            source, source_err = resolve_source(
+                driver.TITAN_SOURCE_PATH, modname)
+            if source_err then return false, source_err end
+            if not source then
                 return false, "source module '" .. modname .. "' not found"
             end
-            local ok, modt, errors = parse_source(modname, srcf, loader)
+            if source.kind == "blocked" then
+                return false, blocked_source_error(modname, source)
+            end
+            local ok, modt, errors = parse_source(modname, source, loader)
             if ok then remember_direct_dependency(modname) end
             return ok, modt, errors
         end
@@ -367,9 +491,13 @@ function driver.defaultloader(static_deps, options)
             remember_direct_dependency(modname)
             return true, modt_or_err, {}
         end
-        srcf = findmodule(driver.TITAN_SOURCE_PATH, modname, ".titan")
-        if not srcf then return false, "module '" .. modname .. "' not found" end
-        local ok, modt, errors = parse_source(modname, srcf, loader)
+        source, source_err = resolve_source(driver.TITAN_SOURCE_PATH, modname)
+        if source_err then return false, source_err end
+        if not source then return false, "module '" .. modname .. "' not found" end
+        if source.kind == "blocked" then
+            return false, blocked_source_error(modname, source)
+        end
+        local ok, modt, errors = parse_source(modname, source, loader)
         if ok then remember_direct_dependency(modname) end
         return ok, modt, errors
     end
@@ -831,10 +959,34 @@ local function write_entrypoint(modname)
     return entrypoint_c
 end
 
+local function ensure_directory(path)
+    local mode = lfs.attributes(path, "mode")
+    if mode == "directory" then return true end
+    if mode then return nil, "output path '" .. path .. "' is not a directory" end
+
+    local parent = path:match("^(.*)/[^/]+$")
+    if parent and parent ~= "" and parent ~= path then
+        local ok, err = ensure_directory(parent)
+        if not ok then return nil, err end
+    end
+
+    local ok, err = lfs.mkdir(path)
+    if ok or lfs.attributes(path, "mode") == "directory" then return true end
+    return nil, err
+end
+
+local function ensure_output_parent(filename)
+    local parent = filename:match("^(.*)/[^/]+$")
+    if not parent or parent == "" then return true end
+    return ensure_directory(parent)
+end
+
 function driver.compile_library(modname, libnames, link, verbose, extra_objects)
     local runtime_ok, runtime_err = check_runtime(verbose)
     if not runtime_ok then return nil, runtime_err end
     local soname = modname:gsub("[.]", "/") .. ".so"
+    local output_ok, output_err = ensure_output_parent(soname)
+    if not output_ok then return nil, output_err end
     os.remove(soname)
 
     local args, err = compiler_argv(false)
@@ -863,10 +1015,16 @@ function driver.compile_library(modname, libnames, link, verbose, extra_objects)
     return ok, term, code
 end
 
-function driver.compile_program(modname, libnames, link, verbose, extra_objects)
+function driver.compile_program(modname, libnames, link, verbose, extra_objects,
+                                program_output)
     local runtime_ok, runtime_err = check_runtime(verbose)
     if not runtime_ok then return nil, runtime_err end
-    local execname = modname:gsub("[.]", "/")
+    local execname = program_output or modname:gsub("[.]", "/")
+    local output_ok, output_err = ensure_output_parent(execname)
+    if not output_ok then return nil, output_err end
+    local entrypoint_name = modname:gsub("[.]", "/") .. "__entrypoint.c"
+    output_ok, output_err = ensure_output_parent(entrypoint_name)
+    if not output_ok then return nil, output_err end
     os.remove(execname)
 
     local entrypoint_c, err = write_entrypoint(modname)

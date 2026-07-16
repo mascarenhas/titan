@@ -250,6 +250,37 @@ describe("Titan parser", function()
                     { _tag = "Ast.StatReturn", exps = {} },
                 } },
         })
+
+        local positioned = assert(parser.parse("initializer.titan",
+            "local x = 1\n\ndo\n    x = 2\nend\n"))
+        assert.same({
+            filename = "initializer.titan",
+            line = 3,
+            col = 1,
+        }, positioned[#positioned].loc)
+        assert.is_true(positioned[#positioned]._module_initializer)
+
+        local protected = assert(parser.parse("protected-initializer.titan", [[
+do
+    raise "expected"
+catch
+    local caught: value = error
+finally
+    local cleaned: boolean = true
+end
+]]))
+        assert.equal("Ast.StatTry", protected[#protected]._tag)
+        assert.is_true(protected[#protected]._module_initializer)
+        assert.same({
+            filename = "protected-initializer.titan",
+            line = 1,
+            col = 1,
+        }, protected[#protected].loc)
+
+        assert_program_syntax_error([[
+            do
+                local unfinished = 1
+        ]], "EndBlock")
     end)
 
     it("can parse toplevel var declarations", function()

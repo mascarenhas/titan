@@ -26,6 +26,12 @@ Callers test `#errors == 0` (as `spec/checker_spec.lua` does). `loader` is
 the import callback (see [Imports](#imports-and-the-loader-protocol)); if
 omitted, a stub that fails every import is used.
 
+For a [folder module](folder-modules.md), `driver.defaultloader` independently
+parses all source files and calls this entry point once with one dense combined
+AST, the logical module name, and the canonical main's subject/filename. The
+checker does not know or create file scopes; contributor filenames remain only
+on the existing node locations.
+
 Errors accumulate: nothing aborts on the first problem. The `errors` table is
 an array of formatted strings that also carries `subject` and `filename`
 fields. Every error goes through `checker.typeerror`, which formats via
@@ -33,6 +39,9 @@ fields. Every error goes through `checker.typeerror`, which formats via
 `FILENAME:LINE:COL: type error: <message>`. When an expression cannot be
 given a type, the helper `invalid(errors, loc, ...)` logs the error and
 returns `types.Invalid()`, the error-recovery type, so checking continues.
+When a duplicate refers to an earlier node, `location.format` adds that
+node's complete `filename:line:col`; this is essential when the declarations
+come from different contributors.
 
 ## The symbol table (`symtab.lua`)
 
@@ -55,6 +64,10 @@ of blocks plus one flat side table:
   qualify nominal type names: the written type `Point` inside module `geo`
   becomes `types.Nominal("geo.Point")`.
 
+One combined folder AST creates one such symbol table. Top-level `local`
+declarations are consequently private to the logical module but visible from
+every contributor; the checker introduces no file-private block.
+
 One pseudo-symbol uses the table as a side channel: `checkfunc` binds
 `"$function"` (not a legal identifier, so it cannot clash) to the enclosing
 function node, and the `StatReturn` handler looks it up to find the declared
@@ -69,8 +82,8 @@ module-wide type namespace. This makes forward aliases available to earlier
 signatures without creating value symbols. Lazy resolution stores the exact RHS
 type on the declaration and detects cycles with a `resolving` state.
 
-**Pass 1 — signatures** (`checktoplevel`). Visits every top-level node in
-order, computing its type without looking at function bodies: `TopLevelFunc`
+**Pass 1 — signatures** (`checktoplevel`). Visits every top-level node in the
+deterministic combined order, computing its type without looking at function bodies: `TopLevelFunc`
 gets a `types.Function` built from its written parameter/return types;
 `TopLevelRecord` builds its `Type.Field` list and registers
 `types.Record(fqtn, fields, {}, {}, nfields)` in `types.registry` under
@@ -80,7 +93,9 @@ initializers. Duplicate handling happens here: `toplevel_name(node)` yields
 the declared name (the local name for imports; `nil` for methods and
 record functions, which have their own clash logic against the record's existing
 fields, methods and record functions); a `st:find_dup` hit produces `duplicate
-declaration for %s, previous one at line %d` and sets `node._ignore = true`.
+declaration for %s, previous one at <filename>:<line>:<col>` and sets
+`node._ignore = true`. Duplicate aliases and alias/record conflicts use the
+same full earlier location.
 Everything downstream — pass 2, `makemoduletype`, the coder — must skip
 `_ignore`d nodes; forgetting that is a classic source of crashes.
 
@@ -108,6 +123,9 @@ building a shared library and a standalone executable: it looks for a
 `{string}` and one return type whose checker type is `integer`. Both the input
 vararg and flexible-result tail must be absent. Resolving the fixed types before
 this test lets transparent aliases satisfy the entrypoint contract.
+Because it examines the one combined list, a valid `main` may be declared in
+the folder main or any contributor and still belongs to the same logical
+module.
 
 ## The relations in `types.lua`
 
@@ -717,7 +735,8 @@ Two real loaders exist in `driver.lua`:
 * `driver.defaultloader` caches results in `driver.imported` and detects
   cycles by planting a `CIRCULAR_MARK` sentinel in the cache before recursing
   (a re-entry finds the mark and fails with `circular reference to module`).
-  Dependencies with `.titan` source are recursively parsed and checked.
+  Dependencies with flat or folder source are recursively parsed and checked
+  once per logical module.
   `.so`-only dependencies recover their interface by loading the compiled
   module's `<mangled>_types` symbol — a string of nested constructor calls
   produced by `types.serialize` — and evaluating it with
@@ -745,6 +764,10 @@ the C parser pipeline and converts each declaration with
 declarations become `type_members` plus entries in the symbol table's
 `foreign_types` namespace, which is what lets local annotations such as
 `c.size_t` resolve (see [FFI internals](ffi-internals.md)).
+The checker derives its C include `source_dir` from the canonical main
+filename. Folder contributors are immediate siblings of that main, so quoted
+headers imported from a contributor use the same directory without a
+per-file checker invocation.
 
 After the module interface is built, export validation rejects any public type
 tree, including an exported alias target, that mentions a local record type or

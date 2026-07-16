@@ -58,7 +58,9 @@ The pieces:
   [Statements](statements.md).
 * Declaring two top-level functions (or a function and a variable) with
   the same name is a compile-time error (`duplicate declaration for f,
-  previous one at line N`).
+  previous one at path/to/source.titan:N:C`). Folder modules use the same
+  rule across contributors, so the earlier declaration's full location is
+  unambiguous.
 
 In a zero-return (`()`) function — including any function written without
 a return annotation — a bare `return` returns no values. Expressions may also
@@ -441,9 +443,12 @@ function main(args: {string}): integer
 
 When `titanc` is given a set of modules and exactly one of them has such
 a `main`, it produces a standalone executable instead of shared
-libraries. The executable is named after the module (dots in the module
-name become directory separators) and statically embeds all the
-requested modules plus every imported module whose source is available;
+libraries. A flat module's executable is named after the module (dots in the
+module name become directory separators). A
+[folder module](folder-modules.md#generated-artifacts) adds `__main` to that
+path so the executable cannot collide with the source directory. Both forms
+statically embed all the requested modules plus every imported module whose
+source is available;
 imports available only as compiled `.so` files are loaded dynamically at
 startup, their interface recovered from the compiled module. See
 [Modules](modules.md) for the compilation model.

@@ -336,7 +336,7 @@ therefore not itself a stack-relocation hazard.
 
 ## ABI and search path
 
-The current compiled-module ABI is `0.14`. The error-handling control-flow
+The current compiled-module ABI is `0.15`. The error-handling control-flow
 machinery did not by itself require an ABI bump, but this branch also
 changed the `TitanVargX` structs from inline flexible-array backing
 objects to descriptor structs with an `args` pointer. That layout change
@@ -354,12 +354,17 @@ are incompatible with the 0.13 interface/native shape. ABI 0.14 moves the
 serialized constructors, native signature, constants, and paths together and
 does not accept a mixed layout.
 
+ABI 0.15 keeps that callable shape but deliberately reorders the exported
+members of `titan.uv` as its public declarations move into semantic folder
+contributors. Separating 0.15 paths prevents 0.14 importers from reconstructing
+those canonical closure slots with the old order.
+
 The compiler and runtime therefore agree on:
 
-* `TITAN_VER "0.14"`
-* `TITAN_VER_SUFFIX "_0_14"`
-* versioned binary path variable `TITAN_PATH_0_14`
-* default binary path `.;<root>/lib/titan/0.14`, with `<root>` recovered from
+* `TITAN_VER "0.15"`
+* `TITAN_VER_SUFFIX "_0_15"`
+* versioned binary path variable `TITAN_PATH_0_15`
+* default binary path `.;<root>/lib/titan/0.15`, with `<root>` recovered from
   the Lua `PREFIX`'s `package.cpath` in the currently supported layout where
   that path also names the equal Titan `ROCKS_TREE`
 

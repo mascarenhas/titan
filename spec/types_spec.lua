@@ -2,6 +2,83 @@ local types = require "titan-compiler.types"
 
 describe("Titan types", function()
 
+    it("serializes keyed interface members in numeric-byte order", function()
+        local function make_record(reverse)
+            local methods = {}
+            local functions = {}
+            local names = reverse and { "\195\169", "z", "A" }
+                or { "A", "z", "\195\169" }
+            for _, name in ipairs(names) do
+                methods[name] = types.Method("sample.Box", name, {}, {},
+                    false, false, {})
+                functions[name] = types.StaticMethod("sample.Box", name,
+                    {}, {}, false, false, {})
+            end
+            return types.Record("sample.Box", {}, functions, methods, 0)
+        end
+
+        local first = types.Module("sample", {}, {
+            ["\195\169"] = make_record(false),
+            z = make_record(true),
+            A = make_record(false),
+        })
+        local second_members = {}
+        second_members.A = make_record(true)
+        second_members.z = make_record(false)
+        second_members["\195\169"] = make_record(true)
+        local second = types.Module("sample", {}, second_members)
+
+        local serialized = types.serialize(first)
+        assert.equal(serialized, types.serialize(second))
+        local original_locale = os.setlocale(nil, "collate")
+        local locale_results = {}
+        for _, locale in ipairs({
+            "C", "C.UTF-8", "en_US.UTF-8", "pt_BR.UTF-8",
+        }) do
+            if os.setlocale(locale, "collate") then
+                locale_results[#locale_results + 1] =
+                    types.serialize(first)
+                locale_results[#locale_results + 1] =
+                    types.serialize(second)
+            end
+        end
+        if original_locale then os.setlocale(original_locale, "collate") end
+        assert.is_true(#locale_results > 0)
+        for _, result in ipairs(locale_results) do
+            assert.equal(serialized, result)
+        end
+        local apos = assert(serialized:find('["A"]', 1, true))
+        local zpos = assert(serialized:find('["z"]', 1, true))
+        local utf8pos = assert(serialized:find('["\195\169"]', 1, true))
+        assert.is_true(apos < zpos and zpos < utf8pos)
+        assert.is_true(serialized:find("A = Method", 1, true) <
+            serialized:find("z = Method", 1, true))
+        assert.is_true(serialized:find("z = Method", 1, true) <
+            serialized:find("\195\169 = Method", 1, true))
+        assert.is_true(serialized:find("A = StaticMethod", 1, true) <
+            serialized:find("z = StaticMethod", 1, true))
+        assert.is_true(serialized:find("z = StaticMethod", 1, true) <
+            serialized:find("\195\169 = StaticMethod", 1, true))
+    end)
+
+    it("preserves declaration order for module members and record fields",
+       function()
+        local record = types.Record("sample.Box", {
+            types.Field("sample.Box", "z", types.Integer(), 0),
+            types.Field("sample.Box", "A", types.Integer(), 1),
+        }, {}, {}, 2)
+        local module = types.Module("sample", {
+            types.ModuleMember("sample", "z", types.Integer(), false),
+            types.ModuleMember("sample", "A", types.Integer(), false),
+        }, { Box = record })
+
+        local serialized = types.serialize(module)
+        assert.is_true(serialized:find("ModuleMember('sample', 'z'", 1,
+            true) < serialized:find("ModuleMember('sample', 'A'", 1, true))
+        assert.is_true(serialized:find("Field('sample.Box', 'z'", 1, true) <
+            serialized:find("Field('sample.Box', 'A'", 1, true))
+    end)
+
     it("pretty-prints types", function()
         assert.same("{ integer }", types.tostring(types.Array(types.Integer())))
     end)

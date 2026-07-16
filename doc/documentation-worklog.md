@@ -513,3 +513,27 @@ multiple results remain available without weakening an already typed callable.
   fourth result now means that the optional close is absent. Non-nil values
   retain the ordinary callable/error behavior, and the nil guard remains
   inside the synthesized `finally` so pending actions keep their precedence.
+
+## 2026-07-16 — folder modules and semantic `titan.uv` contributors
+
+Implemented and documented folder modules: one logical module may now combine
+a canonical main source with deterministic immediate contributor files while
+retaining one namespace, checker/codegen pass, initializer, interface, and
+artifact identity.
+
+* **Language and implementation manuals.** Added and indexed the folder-module
+  chapters, then reconciled module lookup, parsing, checking, code generation,
+  output paths, and libuv build documentation. Contributor-local diagnostics
+  and generated `#line` directives retain each physical source filename.
+* **`titan.uv` dogfood.** Replaced the monolithic source with a seven-file
+  ensemble. The main source owns the shared prelude and sole initializer;
+  filesystem, OS, process, runtime, task, and TCP contributors own their
+  exported records and API beside the related implementation.
+* **Compatibility boundary.** Moving public declarations changes ordered
+  module-member and canonical-closure slots, so compiler/runtime constants,
+  install/search paths, tests, and CI advance from ABI 0.14 to 0.15. The exact
+  deterministic 0.15 `titan_uv_types` interface is pinned as a fixture.
+* **Build and packaging.** `UV_TITAN_SOURCES` explicitly owns the ensemble,
+  nested generated artifacts clean correctly, the delayed-FS variant patches
+  an isolated folder copy, and bundled/system modes still produce one
+  canonical `titan/uv.so`.

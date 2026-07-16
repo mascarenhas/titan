@@ -1,8 +1,11 @@
 local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
 local lfs = require "lfs"
+local parser = require "titan-compiler.parser"
 
 local PKG_CONFIG = "sh spec/fixtures/libuv/fake-pkg-config.sh"
+local UV_MAIN_SOURCE = "titan/uv/uv.titan"
+local UV_TYPES_BASELINE = "spec/fixtures/libuv/titan_uv_types.lua"
 
 local function quote(word)
     local quoted = assert(cdriver.shell_quote(word))
@@ -45,6 +48,69 @@ local function read_file(path)
     local contents = assert(file:read("*a"))
     assert.truthy(file:close())
     return contents
+end
+
+local function public_declarations(path)
+    local ast, err = parser.parse(path, read_file(path))
+    assert.truthy(ast, err and err.label)
+    local declarations = {}
+    for _, node in ipairs(ast) do
+        if not node.islocal then
+            local tag = node._tag
+            local name
+            if tag == "Ast.TopLevelRecord" or tag == "Ast.TopLevelFunc" then
+                name = node.name
+            elseif tag == "Ast.TopLevelVar" then
+                name = node.decl.name
+            elseif tag == "Ast.TopLevelTypeAlias" then
+                name = node.name
+            elseif tag == "Ast.TopLevelMethod" then
+                name = node.class .. ":" .. node.name
+            elseif tag == "Ast.TopLevelStatic" then
+                name = node.class .. "." .. node.name
+            end
+            if name then declarations[#declarations + 1] = name end
+        end
+    end
+    return declarations
+end
+
+local function makefile_words(name)
+    local values = {}
+    local collecting = false
+    local found = false
+    for line in (read_file("Makefile") .. "\n"):gmatch("(.-)\n") do
+        local value
+        if collecting then
+            value = line
+        else
+            value = line:match("^" .. name .. "%s*:=%s*(.*)$")
+            if value then found = true end
+        end
+        if value then
+            local continued = value:match("\\%s*$") ~= nil
+            value = value:gsub("\\%s*$", "")
+            for word in value:gmatch("%S+") do values[#values + 1] = word end
+            collecting = continued
+            if not collecting then break end
+        end
+    end
+    assert.truthy(found, "missing Makefile variable " .. name)
+    assert.falsy(collecting, "unterminated Makefile variable " .. name)
+    return values
+end
+
+local function discovered_uv_sources()
+    local sources = {}
+    for entry in lfs.dir("titan/uv") do
+        local path = "titan/uv/" .. entry
+        if entry:match("%.titan$") and
+                lfs.attributes(path, "mode") == "file" then
+            sources[#sources + 1] = path
+        end
+    end
+    table.sort(sources)
+    return sources
 end
 
 local function file_exists(path)
@@ -123,10 +189,10 @@ local function run_make(host, environment)
     return ok == true, output, why, code
 end
 
-local function run_uv_dry_run(mode, host)
+local function run_uv_dry_run(mode, host, source)
     local argv = {
         "make", "--no-print-directory", "-n",
-        "-W", "titan/uv.titan",
+        "-W", source or UV_MAIN_SOURCE,
         "LIBUV_MODE=" .. mode,
         "HOST_OS=" .. (host or "Linux"),
         "LIBUV_PKG_CONFIG=" .. PKG_CONFIG,
@@ -156,6 +222,71 @@ local function run_facade_dry_run(mode, module)
 end
 
 describe("libuv Makefile configuration", function()
+    it("keeps the reviewed uv source list equal to the folder ensemble",
+       function()
+        local listed = makefile_words("UV_TITAN_SOURCES")
+        assert.equal(UV_MAIN_SOURCE, listed[1])
+        local normalized = {}
+        local seen = {}
+        for _, source in ipairs(listed) do
+            assert.falsy(seen[source], "duplicate UV_TITAN_SOURCES member " ..
+                source)
+            seen[source] = true
+            normalized[#normalized + 1] = source
+        end
+        table.sort(normalized)
+        assert.same(discovered_uv_sources(), normalized)
+    end)
+
+    it("pins the exact deterministic ABI 0.15 uv interface", function()
+        local expected = assert(loadfile(UV_TYPES_BASELINE))()
+        assert.equal(7875, #expected)
+
+        local types_function, load_error =
+            require("titan")._loadlib("titan/uv.so", "titan_uv_types")
+        assert.truthy(types_function, load_error)
+        local actual = assert(types_function())
+
+        assert.equal(expected, actual)
+    end)
+
+    it("keeps every uv export with its semantic contributor", function()
+        assert.same({}, public_declarations(UV_MAIN_SOURCE))
+        assert.same({
+            "uv_file", "_fs_open", "_fs_read", "_fs_write", "_fs_flush",
+            "_fs_is_closed", "_fs_close", "_fs_stat", "_fs_mkdir",
+            "_fs_unlink", "_fs_rmdir", "_fs_rename", "_fs_list",
+        }, public_declarations("titan/uv/file.titan"))
+        assert.same({
+            "_os_getenv", "_os_setenv", "_os_unsetenv", "_os_cwd",
+            "_os_chdir", "_os_homedir", "_os_tmpdir", "_os_hostname",
+            "_os_exepath", "_os_pid", "_os_ppid", "_os_wait_signal",
+            "_os_signal_name",
+        }, public_declarations("titan/uv/os.titan"))
+        assert.same({
+            "uv_process_t", "_os_process_spawn", "_os_process_wait",
+            "_os_process_kill", "_os_process_write_stdin",
+            "_os_process_close_stdin", "_os_process_read_stdout",
+            "_os_process_read_stderr", "_os_process_read_error_is",
+            "_os_communicate",
+        }, public_declarations("titan/uv/process.titan"))
+        assert.same({
+            "Error", "Error.new", "_bytes_find", "_bytes_slice", "_loop",
+            "_version",
+        }, public_declarations("titan/uv/runtime.titan"))
+        assert.same({
+            "Cancelled", "Cancelled.new", "uv_timer_t", "Task", "_run",
+            "Task:status", "Task:cancel", "Task:join", "_sleep", "_yield",
+            "_ticker", "_ticker_tick", "_ticker_close",
+        }, public_declarations("titan/uv/task.titan"))
+        assert.same({
+            "uv_tcp_t", "_net_connect", "_net_listen", "_net_read",
+            "_net_read_error_is", "_net_write", "_net_shutdown",
+            "_net_accept", "_net_close", "_net_is_closed",
+            "_net_eof_error",
+        }, public_declarations("titan/uv/tcp.titan"))
+    end)
+
     it("keeps LuaRocks on the native toolchain that prepared its prefix",
        function()
         local file = assert(io.open("Makefile", "rb"))
@@ -557,6 +688,27 @@ exit 64
         assert.truthy(normalized:find(
             [[TITAN_EXTRA_LDFLAGS='-Wl,user-link -Wl,-force_load,libuv-build/libuv.a -lpthread']],
             1, true), normalized)
+    end)
+
+    it("rebuilds the one provider when any uv source changes", function()
+        for _, source in ipairs(makefile_words("UV_TITAN_SOURCES")) do
+            local ok, output, why, code =
+                run_uv_dry_run("bundled", "Linux", source)
+            assert.truthy(ok, source .. ": " .. output .. "\n(" ..
+                tostring(why) .. ", " .. tostring(code) .. ")")
+            local normalized = output:gsub("%s+", " ")
+            local _, builds = normalized:gsub("titanc titan%.uv", "")
+            assert.equal(1, builds, source .. ": " .. normalized)
+            assert.truthy(normalized:find(
+                "-Wl,--whole-archive libuv-build/libuv.a " ..
+                "-Wl,--no-whole-archive", 1, true), normalized)
+            -- A stale coroutine prerequisite may be rebuilt first; changing a
+            -- uv source must never fan out into one of uv's dependent facades.
+            for _, facade in ipairs({ "async", "timer", "fs", "net", "os" }) do
+                assert.falsy(normalized:find("titanc titan." .. facade,
+                    1, true), source .. ": " .. normalized)
+            end
+        end
     end)
 
     it("builds facade modules from binary uv without another libuv input",

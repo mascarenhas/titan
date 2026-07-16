@@ -1,18 +1,28 @@
--- Generate an isolated callback-timing uv.titan from the production source.
--- Usage: lua make_delayed_fs_callback_variant.lua INPUT OUTPUT
-local input_path, output_path = assert(arg[1]), assert(arg[2])
+-- Generate an isolated callback-timing titan.uv folder from production.
+-- Usage: lua make_delayed_fs_callback_variant.lua INPUT_DIR OUTPUT_DIR
+local lfs = require "lfs"
+
+local input_dir, output_dir = assert(arg[1]), assert(arg[2])
+assert(lfs.attributes(input_dir, "mode") == "directory",
+    "delayed-FS input is not a directory: " .. input_dir)
+if not lfs.attributes(output_dir, "mode") then
+    assert(lfs.mkdir(output_dir), "could not create " .. output_dir)
+else
+    assert(lfs.attributes(output_dir, "mode") == "directory",
+        "delayed-FS output is not a directory: " .. output_dir)
+end
 
 local function read(path)
     local file = assert(io.open(path, "rb"))
-    local contents = file:read("*a")
-    file:close()
+    local contents = assert(file:read("*a"))
+    assert(file:close())
     return contents
 end
 
 local function write(path, contents)
     local file = assert(io.open(path, "wb"))
-    file:write(contents)
-    file:close()
+    assert(file:write(contents))
+    assert(file:close())
 end
 
 local function replace_once(source, needle, replacement, label)
@@ -24,9 +34,27 @@ local function replace_once(source, needle, replacement, label)
            source:sub(first + #needle)
 end
 
-local source = read(input_path)
+local sources = {}
+local filenames = {}
+for entry in lfs.dir(input_dir) do
+    local path = input_dir .. "/" .. entry
+    if entry:match("%.titan$") and
+            lfs.attributes(path, "mode") == "file" then
+        sources[entry] = read(path)
+        filenames[#filenames + 1] = entry
+    end
+end
+table.sort(filenames)
+for _, required in ipairs({ "uv.titan", "file.titan", "task.titan" }) do
+    assert(sources[required], "missing delayed-FS source " .. required)
+end
 
-source = replace_once(source, [==[
+local function patch(filename, needle, replacement, label)
+    sources[filename] = replace_once(sources[filename], needle, replacement,
+        filename .. ": " .. label)
+end
+
+patch("uv.titan", [==[
 local OWNER_TASK_DRIVE = 8
 ]==], [==[
 local OWNER_TASK_DRIVE = 8
@@ -35,7 +63,7 @@ local OWNER_TASK_DRIVE = 8
 local OWNER_DELAYED_FS_CALLBACK = 100
 ]==], "delayed FS owner kind")
 
-source = replace_once(source, [==[
+patch("uv.titan", [==[
 local active_runtime: Runtime? = nil
 ]==], [==[
 local active_runtime: Runtime? = nil
@@ -46,7 +74,7 @@ local test_fs_callback_delayed = false
 local test_fs_delayed_result = 0
 ]==], "callback-control state")
 
-source = replace_once(source, [==[
+patch("file.titan", [==[
   if result >= 0 and owner.metadata.operation.kind == FS.open then
     owner.metadata.acquired_file = result as libuv.uv_file
   end
@@ -70,7 +98,7 @@ source = replace_once(source, [==[
   fs_dispatch_body(owner, result)
 ]==], "physical FS callback deferral")
 
-source = replace_once(source, [==[
+patch("task.titan", [==[
   elseif kind == OWNER_TASK_DRIVE then
     local task = owner.metadata.task
 ]==], [==[
@@ -95,7 +123,7 @@ function __test_fs_callback_is_delayed(): boolean
 end
 ]==]
 
-source = replace_once(source, [==[
+patch("uv.titan", [==[
 do
   UV_EIO = shim.titan_uvshim_error_eio() as integer
 ]==], hook_api .. [==[
@@ -104,4 +132,8 @@ do
   UV_EIO = shim.titan_uvshim_error_eio() as integer
 ]==], "module initializer")
 
-write(output_path, source)
+for _, filename in ipairs(filenames) do
+    local output = output_dir .. "/" .. filename
+    assert(not lfs.attributes(output), "refusing to overwrite " .. output)
+    write(output, sources[filename])
+end

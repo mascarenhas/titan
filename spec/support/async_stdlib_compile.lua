@@ -35,7 +35,7 @@ end
 
 if checker.has_main(driver.imported[modname].ast) then
     local ok, err = driver.compile_program(modname, objects, nil, false,
-        extra_objects)
+        extra_objects, driver.imported[modname].program_output)
     if not ok then error(err, 0) end
 else
     local ok, err = driver.compile_library(modname, objects, nil, false,

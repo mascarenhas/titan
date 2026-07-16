@@ -1,17 +1,19 @@
 # Modules
 
-A Titan source file with the `.titan` extension is a *Titan module* —
-the unit of compilation, of namespacing, and of distribution. A module
-compiles to a native shared library that Lua programs load with
-`require` and other Titan modules use with `import`; a module that
-defines a [`main` function](functions.md) becomes a standalone
-executable instead. This chapter describes what goes inside a module
-file, how modules reference each other, and what the compiler produces.
+A *Titan module* is the unit of compilation, namespacing, and distribution.
+Its source may be one flat `.titan` file or a canonical main plus immediate
+`.titan` contributors in a [folder module](folder-modules.md). Both forms
+compile as one logical module to a native shared library that Lua programs
+load with `require` and other Titan modules use with `import`; a module that
+defines a [`main` function](functions.md) becomes a standalone executable
+instead. This chapter describes what goes inside a logical module, how modules
+reference each other, and what the compiler produces.
 
 ## What a module is made of
 
-The top level of a module is a sequence of *declarations* — there are
-no top-level statements. A declaration is one of:
+The top level of a module is a sequence of *declarations*, optionally followed
+by one root `do ... end` [module initialization block](#module-initialization-block).
+A declaration is one of:
 
 * an **import**: `local m = import "modname"`;
 * a **foreign import**: `local h = foreign import "header.h"` (see
@@ -53,19 +55,21 @@ declarations, but not with another alias or a record.
 ```lua
 -- Titan
 x = 1
-x = 2   -- error: duplicate declaration for x, previous one at line 1
+x = 2   -- error: duplicate declaration for x, previous one at example.titan:1:1
 ```
 
 ## Declaration order and visibility
 
-Declarations may appear in any order, and the compiler conceptually
-reorders them: imports come first (in the order written), then records,
-then module variables (in the order written), then functions.
-Concretely, the rules are:
+Declarations may appear in any order. A flat module's order is its file order;
+a folder module's deterministic combined order is main declarations first,
+then contributors in numeric-byte basename order, then the main initializer
+([Folder modules](folder-modules.md#declaration-order)). The compiler uses
+separate passes for imports, records, variables, and function bodies over that
+one logical sequence. Concretely, the rules are:
 
 * **Function and method bodies are order-independent.** A body may
   refer to any import, module variable, record type, or function in the
-  module, including ones declared further down the file. (The compiler
+  module, including ones declared later or in another contributor. (The compiler
   collects all top-level signatures in a first pass and only then
   checks bodies.)
 
@@ -82,10 +86,11 @@ Concretely, the rules are:
   end
   ```
 
-* **Top-level declarations themselves are checked in source order, except for
+* **Top-level declarations themselves are checked in the logical source order,
+  except for
   type aliases.** A module-variable declaration can only use ordinary imports
-  and record value namespaces that appear *above* it in the file; referring to
-  one declared below is a compile-time error (`module '...' referenced by type
+  and record value namespaces that appear *before* it in that order; referring
+  to one declared later is a compile-time error (`module '...' referenced by type
   not found`, or `record type '...' in context of record constructor does not
   exist`). Alias names, however, are predeclared module-wide and may be used in
   earlier signatures, annotations, and record fields. Alias chains may point
@@ -98,8 +103,35 @@ Concretely, the rules are:
   state (the first `require` from Lua, or transitively as a dependency
   of another module), its imported modules are initialized first, then
   its record types, then its module variables in declaration order, and
-  finally its exported functions are published. A module initializes at
-  most once per Lua state; subsequent loads return the same module.
+  finally its exported functions are published and its optional initialization
+  block runs. A module initializes at most once per Lua state; subsequent loads
+  return the same module.
+
+## Module initialization block
+
+After its declarations, a module may have one root `do ... end` block for
+computed initialization that cannot be expressed by constant module-variable
+initializers:
+
+```lua
+local ready: boolean = false
+
+local function prepare()
+    -- ...
+end
+
+do
+    prepare()
+    ready = true
+end
+```
+
+This block must be the final root construct and runs once per Lua state, after
+the module's declarations have been initialized. In a folder module it may
+appear only in the canonical main source; the compiler places it after every
+contributor declaration. It may call contributor-local functions because all
+files share one module scope. Ordinary nested `do` statements remain legal in
+every source file.
 
 ## Module variables
 
@@ -178,9 +210,9 @@ is no way to reach module `c` through `b` from `a` (`a.b.c`-style
 nesting does not exist).
 
 A module name is a dot-separated name like `foo`, `foo.bar`, or
-`foo.bar.baz`, mapped to a file path by turning dots into directory
-separators: module `foo.bar` lives in `foo/bar.titan` (source) or
-`foo/bar.so` (compiled) — see
+`foo.bar.baz`, mapped to a path by turning dots into directory separators.
+Module `foo.bar` lives in flat source `foo/bar.titan`, folder source with main
+`foo/bar/bar.titan`, or compiled `foo/bar.so` — see
 [Where modules are found](#where-modules-are-found) below.
 
 Through the alias, the importing module can use everything the imported
@@ -289,7 +321,9 @@ titanc [--print-ast] [-v] [--lua <luasrc>] [--tree <srcroot>] [-l lib1,lib2] <mo
 ```
 
 * `--tree <srcroot>` sets the source tree root (default `.`); module
-  `foo.bar` is looked up at `<srcroot>/foo/bar.titan`.
+  `foo.bar` is looked up first at the folder main
+  `<srcroot>/foo/bar/bar.titan`, then at flat source
+  `<srcroot>/foo/bar.titan`.
 * `--lua <luasrc>` points a source-checkout compiler at a complete Lua
   source/build tree. Checkout developer mode otherwise uses
   `lua-5.5.0/src`. An installed compiler rejects this override and always
@@ -304,24 +338,21 @@ dependency, reports *all* errors, and exits with status 1 before
 generating any code if any module failed. Only when everything checks
 does it compile and link.
 
-Compilation goes through C: each module becomes one C translation unit,
-written next to its source, and the system C compiler (`cc`, with
-`--std=c99 -O2 -Wall -fPIC`) does the rest. For module `foo.bar` the
-generated artifacts are:
+Compilation goes through C: each logical module becomes one C translation
+unit, written beside its canonical source, and the system C compiler (`cc`,
+with `--std=c99 -O2 -Wall -fPIC`) does the rest.
 
-| Artifact | What it is |
-| --- | --- |
-| `foo/bar.c` | the generated C, next to the source |
-| `foo/bar.o` | the compiled object file |
-| `foo/bar.so` | the shared library (when there is no `main`) |
-| `foo/bar` | the executable (when `foo.bar` defines `main`) |
-| `foo/bar__entrypoint.c` | the generated C `main` for executables |
+| Source form for `foo.bar` | Generated C/object | Shared library | Entrypoint | Executable |
+| --- | --- | --- | --- | --- |
+| flat `foo/bar.titan` | `foo/bar.c`, `foo/bar.o` | `foo/bar.so` | `foo/bar__entrypoint.c` | `foo/bar` |
+| folder `foo/bar/bar.titan` | `foo/bar/bar.c`, `foo/bar/bar.o` | `foo/bar.so` | `foo/bar__entrypoint.c` | `foo/bar__main` |
 
-The `.c` and `.o` are written next to the `.titan` source; the linked
-`.so`, the executable, and the entrypoint `.c` are written to the
-`foo/bar` path relative to the directory `titanc` runs in — the same
-place only when compiling from the root of the source tree (the
-`--tree` default).
+The shared library, executable, and entrypoint paths are relative to the
+directory `titanc` runs in. Generated C and objects are beside the flat source
+or folder main, even when `--tree` points elsewhere. A folder contributor
+never produces a separate C file, object, DSO, or executable. The folder
+program's `__main` suffix avoids colliding with its source directory; the
+logical module name and entrypoint path remain unchanged.
 
 An installed compiler links `<root>/lib/libtitan.a`; compiler development
 directly from the repository lazily rebuilds and links
@@ -339,14 +370,20 @@ the structure of the generated C is in
 ## Where modules are found
 
 * **Source modules** are looked up in the *source tree* — the directory
-  given by `--tree`, defaulting to the current directory. Generated
+  given by `--tree`, defaulting to the current directory. In each source root,
+  the folder main `P/B.titan` wins over flat `P.titan`; a selected folder's
+  immediate regular `.titan` siblings are assembled as contributors.
+  Constituents are not directly importable as flat child modules, although a
+  genuine deeper folder module remains legal. See
+  [Folder modules](folder-modules.md#lookup-and-precedence) for the complete
+  precedence and privacy rules. Generated
   `.c`/`.o` files are always written next to the source; the linked
   `.so` lands relative to the compiler's working directory, as
   described above.
 * **Compiled modules** are looked up along the *binary search path*: a
   semicolon-separated list of plain directories taken from
-  `TITAN_PATH_0_14`, or `TITAN_PATH` if that is unset. Otherwise the default
-  is `.;<root>/lib/titan/0.14`. An installed `titanc` recovers `<root>` from
+  `TITAN_PATH_0_15`, or `TITAN_PATH` if that is unset. Otherwise the default
+  is `.;<root>/lib/titan/0.15`. An installed `titanc` recovers `<root>` from
   the first literal `package.cpath` entry ending in
   `/lib/lua/5.5/?.so`. The same path is used at run time by compiled modules
   that load dependencies dynamically; a `;;` in the run-time environment
@@ -374,11 +411,11 @@ direct-libuv extension contract below.
 Lua's `require`, for its part, finds the `.so` through Lua's ordinary
 `package.cpath` — a compiled Titan module is a regular Lua C module
 (see [Requiring a Titan module](lua-interop.md#requiring-a-titan-module)).
-Titan's installed Lua default puts `<root>/lib/titan/0.14/?.so` before the
+Titan's installed Lua default puts `<root>/lib/titan/0.15/?.so` before the
 ordinary `lib/lua` templates, and each standalone program ensures that same
 entry is present. A qualified standard name such as `titan.os`
 therefore resolves the single canonical file
-`<root>/lib/titan/0.14/titan/os.so`. Titan imports resolve that same file by its
+`<root>/lib/titan/0.15/titan/os.so`. Titan imports resolve that same file by its
 qualified name. Installation creates no parent-level or `lib/lua` copy and
 requires no symbolic- or hard-link alias.
 
@@ -392,12 +429,13 @@ Module dependencies are resolved *binary first*:
   generated code **dlopens** the dependency at run time, finding it on
   the binary search path. The binary wins even when source with the same module
   name is visible under `--tree`.
-* If there is no binary, but the imported module's `.titan` source is found, it
-  is compiled and **statically linked** into the artifact being built.
+* If there is no binary, but a flat or folder source representation is found,
+  it is compiled and **statically linked** into the artifact being built.
   Cross-module calls are then direct C calls.
 * A module named explicitly on the `titanc` command line is a build root, so
   its source is selected before any same-named binary. This is why
-  `titanc titan.uv` rebuilds `titan/uv.titan` while that module's own imports
+  `titanc titan.uv` rebuilds the `titan/uv/uv.titan` folder module while that
+  module's own imports
   still resolve binary first.
 
 This ordinary ordering is enough to keep the installed standard-library
@@ -448,7 +486,9 @@ the exact signature
 function main(args: {string}): integer
 ```
 
-the output is a standalone executable instead of shared libraries. The
+the output is a standalone executable instead of shared libraries. A flat
+module `foo.bar` produces `foo/bar`; a folder module produces the collision-free
+`foo/bar__main` beside the unchanged `foo/bar__entrypoint.c`. The
 signature is exact: neither an input-variadic parameter nor a flexible result
 tail is allowed (the fixed parameter and return types may be spelled through
 transparent aliases). All
@@ -458,7 +498,7 @@ Qualified standard-library dependencies are normally found as installed
 binaries first and therefore remain dynamic, just like other binary modules.
 After `luaL_openlibs`, the executable parses the
 inherited `package.cpath` for its `/lib/lua/5.5/?.so` entry, adds
-`<root>/lib/titan/0.14/?.so` if it is absent, and initializes the Titan module
+`<root>/lib/titan/0.15/?.so` if it is absent, and initializes the Titan module
 path from that same root. Deploy those standard DSOs as described under
 [where modules are found](#where-modules-are-found). `args` is
 Lua-style: `args[0]` is the program name and `args[1]` onward are the
@@ -523,11 +563,11 @@ paths with:
 
 ```sh
 export LUA_PATH_5_5="$ROCKS_TREE/share/lua/5.5/?.lua;$ROCKS_TREE/share/lua/5.5/?/init.lua;;"
-export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.14/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
+export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.15/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
 ```
 
 The ordinary `/lib/lua/5.5/?.so` template is Titan's root-discovery anchor. If
 it is omitted, also set
-`TITAN_PATH_0_14="$ROCKS_TREE/lib/titan/0.14"`. Titan still targets the exact
+`TITAN_PATH_0_15="$ROCKS_TREE/lib/titan/0.15"`. Titan still targets the exact
 Lua 5.5 runtime ABI and internals; removing the loader patch does not make a
 module compatible with another Lua version or configuration.

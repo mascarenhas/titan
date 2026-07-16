@@ -10,10 +10,12 @@ compiler. For the language itself, see the
 ## The pipeline at a glance
 
 ```
-source.titan
-   │  parser.parse            (lexer.lua + parser.lua, one LPegLabel grammar)
+flat P.titan or folder P/B.titan + immediate contributors
+   │  driver source resolution; parser.parse once per real source file
+   │                           (lexer.lua + parser.lua, one LPegLabel grammar)
    ▼
-AST                            (plain tables, ast.lua / typedecl.lua)
+one dense AST                  (plain tables, ast.lua / typedecl.lua; no
+   │                            source-unit wrapper or per-file namespace)
    │  checker.check            (checker.lua + types.lua + symtab.lua)
    ▼
 typed & elaborated AST         (decorated with _type/_decl…, coercions made
@@ -23,8 +25,9 @@ typed & elaborated AST         (decorated with _type/_decl…, coercions made
    ▼
 one C translation unit
    │  pretty.reindent_c        (pretty.lua — heuristic reindenter)
-   │  driver.compile           (driver.lua — writes .c next to the source,
-   ▼                            invokes the system C compiler)
+   │  driver.compile           (driver.lua — writes .c next to the canonical
+   │                            flat source or folder main and invokes cc)
+   ▼
 object file ──► driver.compile_library  → module.so   (require-able from Lua)
             └─► driver.compile_program  → executable  (when a main() exists)
 ```
@@ -72,6 +75,7 @@ Two facts shape everything downstream of the checker:
 | [FFI internals](ffi-internals.md) | The pure-Lua C toolchain under `foreign import` (preprocessor, C99 grammar, type extraction) and how foreign declarations become Titan types and direct C calls. |
 | [Lua C API FFI follow-up](ffi-lua-api-followup.md) | Preliminary notes for a later design pass on calling the Lua C API through the C FFI. This is not part of FFI v1. |
 | [Driver and toolchain](driver.md) | `driver.lua`, `titanc`, the runtime support library (`titan-runtime/`), `pretty.lua`, `util.lua`, and every default path and flag. |
+| [Folder modules](folder-modules.md) | Tagged flat/folder source resolution, independent parsing into one dense AST, shared checking/codegen identity, deterministic ordering, artifacts, and the `titan.uv` source ensemble. |
 
 ## Lua-version migration reports
 
@@ -116,7 +120,7 @@ cause.
 | `titanc` | The compiler CLI. |
 | `titan-compiler/` | The compiler proper: `lexer`, `parser`, `syntax_errors`, `ast`, `typedecl`, `checker`, `types`, `symtab`, `coder`, `pretty`, `driver`, `foreigntypes`, `location`, `util`. |
 | `c-parser/` | The pure-Lua C preprocessor and C99 parser behind `foreign import`. |
-| `titan/` | Titan standard-library sources. They are ordinary qualified `titan.*` modules, built explicitly from source and installed below the matching qualified directory. |
+| `titan/` | Titan standard-library sources. They are ordinary qualified `titan.*` modules, built explicitly from source and installed below the matching qualified directory. Most are flat; `titan.uv` dogfoods the folder ensemble rooted at `titan/uv/uv.titan` while still producing one canonical DSO. |
 | `titan-runtime/` | `titan.h`/`titan.c` (`RTLD_LAZY` + `RTLD_GLOBAL` generated-import loader and error handler), `titan_coro.c`, and `titan_uv.c`, whose three objects are the exact members of `libtitan.a`; separate vendored `libbacktrace.a`; `titanlib.c`, built separately as `titan.so` (`backtrace`, internal `pin`/`clear`, and the compiler-only `RTLD_LAZY` + `RTLD_LOCAL` interface loader `_loadlib`); `minicoro.h`, `titan_longjmp.h`, and the namespaced `titan/{ffi,coro,uv}.h` SDK headers. |
 | `spec/` | The busted test suite; `coder_spec.lua` is end-to-end (generates, compiles and runs C). |
 | `examples/`, `testfiles/` | Manual benchmark/demo material (not used by the suite). |
