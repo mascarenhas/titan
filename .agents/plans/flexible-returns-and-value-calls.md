@@ -698,7 +698,11 @@ its tail.
    flex-only and mixed fixed/flexible iterators, validates the effective first
    control type, and builds `_result_decls`, calls, and visible initializers
    from that projection rather than only `ftype.rettypes`. Iterator close calls
-   always use zero flexible-result demand and discard all returns.
+   always use zero flexible-result demand and discard all returns. When the
+   finite tuple's sole producer is a contextual `value` call, its fourth fixed
+   `value` result is a run-time-optional close: exact nil skips the call inside
+   the synthesized `finally`, while every non-nil value uses the ordinary
+   callable path.
 6. Remove or reduce `expand_trailing_multireturn` and other duplicated paths
    once every consumer uses the common helper.
 7. Keep `expand_dots_adjustup` behavior as the input-tail implementation, but
@@ -894,7 +898,9 @@ they become large enough to justify a separate topical suite.
   value, scalar/parenthesized, and generic-for truncation.
 - Flex-only and mixed fixed/flexible generic-for iterators: projected optional
   control, visible declaration initialization, repeated next calls, surplus
-  truncation, and zero-demand close results.
+  truncation, and zero-demand close results. Cover contextual `value` factories
+  with a missing, explicit-nil, callable, and non-callable fourth result, plus
+  pending `break`, `return`, and error actions under the nil guard.
 - Fixed functions returning surplus expressions: all side effects occur once
   and left to right.
 - Zero-return calls in discarded argument/RHS/return positions, proving the
@@ -1036,6 +1042,9 @@ The feature is complete when all of the following are true:
   fixed static type never exposes hidden runtime results.
 - Calls through `value` synthesize their complete positional function type from
   arguments and result demand and transparently preserve Lua multiple results.
+- A contextual `value` factory for generic `for` synthesizes four finite
+  results; a run-time nil close is absent, while every non-nil close retains
+  ordinary callable and error behavior inside the loop's `finally`.
 - Surplus Titan arguments/results are evaluated once in order and ignored;
   fixed C ABI calls remain strict.
 - Directional function compatibility admits shorter actual input arity and

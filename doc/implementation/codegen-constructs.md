@@ -201,7 +201,12 @@ on normal exhaustion, `break`, `return`, and raised errors. The generic loop
 frame is opened outside that synthetic try, which lets `break` route through
 the same pending-action machinery as a user-written `finally`. A close raise
 therefore overrides the pending action in the same way any `finally` raise
-does.
+does. When the close slot originated as `value`, the call inside `finally` is
+guarded by an exact `ttisnil` test of the hidden close `TValue`. Nil makes the
+finalizer a no-op and preserves the pending action; every non-nil value still
+uses the ordinary function-value call path, so its call or error has the same
+precedence as any other close. Statically function-typed closers remain
+unconditional.
 
 ## Arrays
 

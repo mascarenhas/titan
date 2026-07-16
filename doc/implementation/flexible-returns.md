@@ -218,9 +218,13 @@ Generic `for` uses a finite demand for its at-most-four iterator tuple. Extra
 results truncate, and missing positions can be supplied by optionized
 flexible projections. Its tuple demand also sets `dots_nilfill = true`, so a
 trailing input vararg follows Lua's nil-adjustment for missing state/control;
-ordinary fixed call borrowing does not inherit that exception. Its synthesized iterator type uses the same function
-result-shape constructor as contextual calls, preventing a separate dynamic
-call rule from drifting away from ordinary expression-list semantics.
+ordinary fixed call borrowing does not inherit that exception. Its synthesized
+iterator type uses the same function result-shape constructor as contextual
+calls, preventing a separate dynamic call rule from drifting away from
+ordinary expression-list semantics. If a sole call through `value` produces
+the tuple, that finite demand synthesizes four fixed `value` results: iterator,
+state, initial control, and close. A missing fourth result is therefore a
+nil-padded, run-time-absent close rather than an open result tail.
 
 ## Contextual calls through `value`
 

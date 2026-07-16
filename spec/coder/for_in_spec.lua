@@ -359,6 +359,142 @@ describe("generic for loops", function()
         ]])
     end)
 
+    it("treats a nil close from a contextual value factory as absent", function()
+        h.run_coder([[
+            function sum(factory: value): integer
+                local total = 0
+                for x: integer in factory() do
+                    total = total + x
+                end
+                return total
+            end
+
+            function first(factory: value): integer
+                for x: integer in factory() do
+                    return x
+                end
+                return -1
+            end
+
+            function break_after_one(factory: value): integer
+                local first = -1
+                for x: integer in factory() do
+                    first = x
+                    break
+                end
+                return first + 100
+            end
+
+            function raise_in_body(factory: value): nil
+                for x: integer in factory() do
+                    raise "body"
+                end
+                return nil
+            end
+
+            function strict(step: value, closev: value): nil
+                local typed: () -> () = closev
+                for x: integer in step, nil, nil, typed do
+                end
+                return nil
+            end
+        ]], [[
+            local function one_result_factory()
+                local i = 0
+                return function(_, _)
+                    i = i + 1
+                    if i <= 3 then return i end
+                    return nil
+                end
+            end
+
+            local function stateful_factory(explicit_nil)
+                local state = { limit = 3 }
+                local function step(s, previous)
+                    assert(s == state)
+                    if previous >= s.limit then return nil end
+                    return previous + 1
+                end
+                if explicit_nil then
+                    return step, state, 0, nil
+                else
+                    return step, state, 0
+                end
+            end
+
+            local nil_calls = 0
+            local old_nil_mt = debug.getmetatable(nil)
+            debug.setmetatable(nil, {
+                __call = function()
+                    nil_calls = nil_calls + 1
+                end,
+            })
+            local ok, sum = pcall(test.sum, one_result_factory)
+            local rok, first = pcall(test.first, one_result_factory)
+            local bok, after_break = pcall(test.break_after_one,
+                one_result_factory)
+            local eok, body_err = pcall(test.raise_in_body,
+                one_result_factory)
+            local dynamic_nil_calls = nil_calls
+            local typed_ok = pcall(test.strict, function() return nil end, nil)
+            debug.setmetatable(nil, old_nil_mt)
+            assert(ok and sum == 6)
+            assert(rok and first == 1)
+            assert(bok and after_break == 101)
+            assert(not eok and tostring(body_err):match("body"))
+            assert(dynamic_nil_calls == 0)
+            assert(typed_ok and nil_calls == 1)
+
+            assert(test.sum(function()
+                return stateful_factory(false)
+            end) == 6)
+            assert(test.sum(function()
+                return stateful_factory(true)
+            end) == 6)
+
+            local closed = 0
+            local close_state
+            assert(test.sum(function()
+                local step, state, initial = stateful_factory(false)
+                return step, state, initial, function(s)
+                    closed = closed + 1
+                    close_state = s
+                end
+            end) == 6)
+            assert(closed == 1 and close_state.limit == 3)
+
+            local break_closed = 0
+            assert(test.break_after_one(function()
+                local step, state, initial = stateful_factory(false)
+                return step, state, initial, function(s)
+                    assert(s == state)
+                    break_closed = break_closed + 1
+                end
+            end) == 101)
+            assert(break_closed == 1)
+
+            local override_ok, override_err = pcall(test.first, function()
+                local step, state, initial = stateful_factory(false)
+                return step, state, initial, function()
+                    error("closed")
+                end
+            end)
+            assert(not override_ok and tostring(override_err):match("closed"))
+
+            local bad, bad_err = pcall(test.sum, function()
+                local step, state, initial = stateful_factory(false)
+                return step, state, initial, false
+            end)
+            assert(not bad and tostring(bad_err):find(
+                "attempt to call a boolean value", 1, true), bad_err)
+
+            local empty_step = function() return nil end
+            local strict, strict_err = pcall(test.strict, empty_step, nil)
+            assert(not strict and tostring(strict_err):find(
+                "attempt to call a nil value", 1, true), strict_err)
+        ]])
+    end)
+
     it("coerces value iterators using state and initial control values", function()
         h.run_coder([[
             function sum(step: value): integer

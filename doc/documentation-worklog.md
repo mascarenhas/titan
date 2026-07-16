@@ -508,3 +508,8 @@ multiple results remain available without weakening an already typed callable.
   `implementation/flexible-returns.md`, reconciled the surrounding language
   and implementation chapters, and added topical parser/type/checker/coder,
   `.so` rehydration, ABI, open-count, GC, and error/finally coverage.
+* **Generic-for close follow-up.** A contextual `value` factory still exposes
+  the finite four-slot iterator tuple, but a nil-padded or explicit `nil`
+  fourth result now means that the optional close is absent. Non-nil values
+  retain the ordinary callable/error behavior, and the nil guard remains
+  inside the synthesized `finally` so pending actions keep their precedence.

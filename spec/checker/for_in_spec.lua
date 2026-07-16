@@ -213,6 +213,35 @@ describe("generic for loops (typechecker)", function()
             loop._tuple_decls[1]._type)
         assert.same(types.Function({}, {}, false, false, false),
             loop._tuple_decls[4]._type)
+        assert.is_true(loop._runtime_optional_close)
+        assert.is_true(loop._has_close)
+    end)
+
+    it("contextualizes a value factory and preserves its optional close slot",
+    function()
+        local ok, err, ast = run_checker([[
+            function run(factory: value): nil
+                for n: integer, label: string? in factory(7, "ctx") do
+                end
+                return nil
+            end
+        ]])
+        assert.truthy(ok, err)
+
+        local loop = ast[1].block.stats[1]
+        local factory_call = loop._tuple_adjustment.exps[1].exp
+        assert.same("Ast.ExpCall", factory_call._tag)
+        assert.same(types.Function(
+            { types.Integer(), types.String() },
+            { types.Value(), types.Value(), types.Value(), types.Value() },
+            false, false, false), factory_call._contextual_function_type)
+        assert.same(types.Function({ types.Value(), types.Value() },
+            { types.Option(types.Integer()), types.Option(types.String()) },
+            false, false, false), loop._tuple_decls[1]._type)
+        assert.same(types.Function({ types.Value() }, {}, false, false, false),
+            loop._tuple_decls[4]._type)
+        assert.is_true(loop._runtime_optional_close)
+        assert.is_true(loop._has_close)
     end)
 
     it("coerces value iterators using state and initial control types", function()
@@ -296,6 +325,7 @@ describe("generic for loops (typechecker)", function()
         assert.is_false(loop.exps[4]._nilfill)
         assert.same("Type.Function", loop.exps[4]._type._tag)
         assert.is_truthy(loop._has_close)
+        assert.is_false(loop._runtime_optional_close)
     end)
 
     it("rejects a non-function iterator", function()

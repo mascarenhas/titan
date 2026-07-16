@@ -394,6 +394,9 @@ It checks the written expressions under a finite four-slot demand, adjusts a
 trailing call or `...` through the shared machinery, discards values beyond
 four, and pads missing slots with typed `Ast.ExpNil` nodes.
 The four slots are iterator, state, initial control, and close.
+Consequently, when a sole call through `value` supplies the tuple, it receives
+the contextual result type `(value, value, value, value)` before the individual
+slots are elaborated.
 
 For `iter, ...`, the vararg spread is adjusted only through the tuple slots
 the iterator needs (state and initial control), then the remaining tuple
@@ -425,7 +428,11 @@ parameter when the state is not statically `nil`, otherwise to a zero-arg
 close type; the synthesized close has no returns. Statically typed close
 functions and C function pointers may accept zero or one parameter. If they
 accept one, the state value must coerce to it. Any close returns are
-accepted but discarded.
+accepted but discarded. Before coercion, the checker remembers whether the
+slot originated as `value`. Such a slot is a potential close, so `_has_close`
+remains true, while `_runtime_optional_close` tells codegen that run-time
+`nil` is the absent-close sentinel. A statically function-typed close does not
+receive that sentinel rule.
 
 The checker then synthesizes:
 

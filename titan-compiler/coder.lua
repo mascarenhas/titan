@@ -5271,6 +5271,13 @@ local function codeforin(ctx, node)
     local runnode = { _tag = "Ast.StatForInRun", loc = node.loc, forin = node }
     local loopcode
     if node._has_close then
+        local closestat = {
+            _tag = "Ast.StatCall",
+            loc = node.loc,
+            callexp = node._close_call,
+            _forin_nil_guard = node._runtime_optional_close
+                and node._tuple_decls[4] or false,
+        }
         local trynode = {
             _tag = "Ast.StatTry",
             loc = node.loc,
@@ -5283,10 +5290,7 @@ local function codeforin(ctx, node)
             finallyblock = {
                 _tag = "Ast.StatBlock",
                 loc = node.loc,
-                stats = {
-                    { _tag = "Ast.StatCall", loc = node.loc,
-                      callexp = node._close_call },
-                },
+                stats = { closestat },
             },
         }
         loopcode = codestat(ctx, trynode)
@@ -5426,17 +5430,31 @@ local function codestat_dispatch(ctx, node)
         end
     elseif tag == "Ast.StatCall" then
         local callee = node.callexp.exp
+        local callcode
         if node.callexp._c_pointer_call then
             local fstats, fexp = codecfunctionptrcall(ctx, node.callexp)
-            return fstats .. "\n    ((void)(" .. fexp .. "));"
+            callcode = fstats .. "\n    ((void)(" .. fexp .. "));"
         elseif callee.var and callee.var._tag == "Ast.VarDot"
            and callee.var.exp._type._tag == "Type.CModule" then
             local fstats, fexp = codeforeigncall(ctx, node.callexp)
-            return fstats .. "\n    ((void)(" .. fexp .. "));"
+            callcode = fstats .. "\n    ((void)(" .. fexp .. "));"
         else
             local cstats, cexp = codecall(ctx, node.callexp)
-            return cstats .. "\n    ((void)(" .. cexp .. "));"
+            callcode = cstats .. "\n    ((void)(" .. cexp .. "));"
         end
+        if node._forin_nil_guard then
+            local decl = node._forin_nil_guard
+            assert(decl._type._tag == "Type.Function" and decl._cvar)
+            return render([[
+                if (!ttisnil(&$CLOSE)) {
+                    $CALL
+                }
+            ]], {
+                CLOSE = decl._cvar,
+                CALL = callcode,
+            })
+        end
+        return callcode
     elseif tag == "Ast.StatReturn" then
         return codereturn(ctx, node)
     elseif tag == "Ast.StatBreak" then

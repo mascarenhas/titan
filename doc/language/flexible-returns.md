@@ -205,7 +205,23 @@ end
 function call_for_effect(f: value): ()
     f()                        -- zero-result demand
 end
+
+function sum_iterator(factory: value): integer
+    local total = 0
+    for n: integer in factory() do
+        total = total + n
+    end
+    return total
+end
 ```
+
+The generic `for` call temporarily treats `factory` as
+`() -> (value, value, value, value)`, for the iterator, state, initial control,
+and optional close slots. Missing results are padded with `nil`; in particular,
+a missing or explicit `nil` close from a `value` factory means that no close
+call is made. The iterator and any non-`nil` close value are then checked
+against the function shapes synthesized from the state, control, and visible
+loop declarations.
 
 The synthesized parameter types come from the positional argument expression
 list. A known finite result position contributes its expected type; an

@@ -1518,6 +1518,10 @@ local function checkforin(node, st, errors)
     local close_type = exps[4]._type
     local close_ftype
     local close_cfunc
+    -- A close slot whose static type is `value` can hold nil at run time. Keep
+    -- the synthesized callable type for non-nil values, but tell codegen that
+    -- nil means the optional close slot is absent rather than a call target.
+    local runtime_optional_close = close_type._tag == "Type.Value"
     if close_type._tag == "Type.Nil" then
         node._has_close = false
     else
@@ -1550,6 +1554,8 @@ local function checkforin(node, st, errors)
             types.tostring(close_type))
         node._has_close = false
     end
+    node._runtime_optional_close = node._has_close
+        and runtime_optional_close or false
 
     node._tuple_decls = {
         hidden_decl(node.loc, "__forin_iter", exps[1]._type),

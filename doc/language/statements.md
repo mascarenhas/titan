@@ -379,10 +379,17 @@ The close slot is `nil`, a function, a `value` that is coerced to a
 synthesized close function type, or a compatible C function pointer/foreign
 function. A close function may accept zero or one fixed parameter; when it
 accepts one, the state value must be coercible to that parameter type. Close
-return values are discarded. When present, the close function runs after
-normal exhaustion, `break`, `return`, and errors from the initial iterator
-call, body, or update iterator call. If close itself raises, that new error
-replaces the pending action.
+return values are discarded. When a `value` supplies the close slot, a run-time
+`nil` means that the optional close function is absent and no call is made.
+Every non-`nil` value follows the ordinary callable rules: callable values,
+including values with `__call`, run, while a non-callable value raises. This
+also means that a call through `value` may return only the iterator, state, and
+initial control; Lua's missing-result `nil` padding leaves the close slot
+absent.
+
+When present, the close function runs after normal exhaustion, `break`,
+`return`, and errors from the initial iterator call, body, or update iterator
+call. If close itself raises, that new error replaces the pending action.
 
 This helper returns the whole tuple, including a close function that receives
 the file state:

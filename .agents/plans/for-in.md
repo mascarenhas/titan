@@ -48,14 +48,17 @@ first return is rejected because it has no base value from which to type the
 first visible loop declaration.
 
 The close slot may be statically `nil` or one of the same callable shapes. A
-statically `nil` close slot emits no cleanup code. A non-nil close function is
-called once after the iterator tuple has been created and the protected loop
-region is entered. The call uses zero arguments when the close type has no
-parameters, otherwise it passes the state/context argument. That protected
-region includes the initial iterator call, all body executions, and update
-iterator calls, so close runs on initial-call failure, update-call failure,
-normal exhaustion, `break`, `return`, and `raise`. If close itself raises, that
-raise replaces the pending action just like an explicit `finally` raise.
+statically `nil` close slot emits no cleanup code. For a close slot that
+originated as `value`, run-time nil means that no close was supplied and skips
+the call; every non-nil value uses the ordinary callable path. A non-nil close
+function is called once after the iterator tuple has been created and the
+protected loop region is entered. The call uses zero arguments when the close
+type has no parameters, otherwise it passes the state/context argument. That
+protected region includes the initial iterator call, all body executions, and
+update iterator calls, so close runs on initial-call failure, update-call
+failure, normal exhaustion, `break`, `return`, and `raise`. If close itself
+raises, that raise replaces the pending action just like an explicit `finally`
+raise.
 
 ### Iterator calls
 
@@ -214,8 +217,9 @@ as the sentinel.
 - If `close` is statically nil, emit no cleanup wrapper. If close is present,
   run the loop body inside the existing `StatTry`/finally machinery or an
   equivalent code path that preserves the same `return`/`break`/`raise`
-  semantics. The close call must execute once on all exits and must not execute
-  before the iterator tuple is fully initialized.
+  semantics. A non-nil close call must execute once on all exits and must not
+  execute before the iterator tuple is fully initialized; a `value` close is
+  guarded against exact nil inside that implicit finally.
 - Add GC polling after loop iterations when the loop body or iterator calls
   allocate, matching `while` and numeric `for`.
 
@@ -256,6 +260,10 @@ Coder/runtime:
 - close runs on `raise` before the error propagates;
 - close raise overrides pending `break`, `return`, and body/iterator raises;
 - statically nil close emits no runtime close call;
+- a missing or explicit nil `value` close skips the call without replacing a
+  pending `break`, `return`, or raise;
+- a non-nil `value` close retains ordinary callable checks and error override
+  behavior;
 - zero-parameter close functions work;
 - exact Titan function-value iterators and generic Lua-callable iterators both
   work where existing call machinery supports them;
