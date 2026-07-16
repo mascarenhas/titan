@@ -175,14 +175,15 @@ local LATE_FS_CASES = [[
 describe("uv late filesystem callbacks", function()
     local workspace
     local root
+    local layout
 
     setup(function()
-        workspace, root = fs_support.variant_workspace(
+        workspace, root, layout = fs_support.variant_workspace(
             "spec/support/make_delayed_fs_callback_variant.lua")
         fs_support.write_source(workspace, "uv_late_fs_callback_cases",
             LATE_FS_CASES)
         fs_support.compile(workspace, "uv_late_fs_callback_cases", {
-            stdlib = workspace .. "/titan",
+            layout = layout,
         })
     end)
 
@@ -190,7 +191,7 @@ describe("uv late filesystem callbacks", function()
 
     local function run(source)
         local ok, status, output = fs_support.run_lua_source(workspace, source, {
-            stdlib = workspace .. "/titan",
+            layout = layout,
         })
         assert.truthy(ok, "exit " .. tostring(status) .. "\n" .. output)
         assert.equals(0, status, output)

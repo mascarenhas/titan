@@ -26,7 +26,8 @@ jobs:
       - uses: actions/checkout@v6
 
       # Cache only the LuaRocks-managed portion of the standalone prefix. Lua,
-      # native SDK archives, and standard DSOs are rebuilt from this checkout;
+      # native SDK archives, and the standard container/shims are rebuilt from
+      # this checkout;
       # dependency rocks and their launchers can be reused safely.
       - name: Cache standalone-prefix LuaRocks dependencies
         uses: actions/cache@v5
@@ -90,8 +91,8 @@ jobs:
         run: luarocks test --prepare
 
       # Archive the pristine bundled build before the mode smoke replaces its
-      # titan/uv.so. Upload remains after the smoke, so a portability failure still
-      # prevents downstream runner spend.
+      # combined titan.so. Upload remains after the smoke, so a portability
+      # failure still prevents downstream runner spend.
       # A tar layer preserves the complete checkout's source/output mtimes,
       # hidden .lua tree, executable bits, and standard-library images. Direct
       # artifact upload avoids wrapping it in another archive.
@@ -113,9 +114,9 @@ jobs:
           bash spec/support/ci_test_groups.sh library-serial
           bash spec/support/ci_test_groups.sh library-net-os
 
-      # Restore the exact prepared runtime and standard DSOs after legacy
-      # compiler specs clean root module outputs and before the production
-      # smoke.
+      # Restore the exact prepared checkout runtime plus canonical installed
+      # standard container and shims after compiler-only groups and before the
+      # production smoke.
       - name: Run compiler and language tests with coverage
         run: |
           snapshot="$RUNNER_TEMP/titan-stdlib-before-compiler.tar"
@@ -299,8 +300,9 @@ jobs:
             .lua/bin/lua -e 'require("spec.support.os_test_support").process_child(assert(os.getenv("TITAN_PROCESS_SMOKE_DIR")))'
           echo "TITAN_PROCESS_SMOKE_CHILD=$process_smoke_dir/process_child" >> "$GITHUB_ENV"
 
-      # Keep either compiler path's legacy root output cleanup local to its
-      # tests, preserving the prepared stdlib image for the production smoke.
+      # Keep either compiler path's output cleanup local to its tests,
+      # preserving the prepared installed stdlib image for the production
+      # smoke.
       - name: Run complete macOS tests without coverage
         run: |
           bash spec/support/ci_test_groups.sh libraries
@@ -310,8 +312,9 @@ jobs:
           bash spec/support/ci_stdlib_snapshot.sh restore "$snapshot"
 
       # Run this after the bundled test suite. The smoke first exercises the
-      # existing self-contained image, then rebuilds only titan/uv.so against the
-      # platform package; the job can end in system mode without another build.
+      # existing self-contained image, then rebuilds the one combined titan.so
+      # against the platform package; the job can end in system mode without
+      # another build.
       - name: Smoke-test bundled and system libuv modes
         run: bash spec/support/ci_libuv_mode_smoke.sh
 
@@ -339,7 +342,7 @@ jobs:
       LIBUV_BUILD_CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       TITAN_EXTRA_CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       TITAN_EXTRA_LDFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
-      # Every Titan DSO intentionally embeds the vendored static Lua archive;
+      # Every Titan image intentionally embeds the vendored static Lua archive;
       # disable only ASan's cross-image ODR diagnostic for those duplicate Lua
       # globals. Address, bounds, lifetime, and leak checks remain enabled.
       ASAN_OPTIONS: "detect_odr_violation=0:detect_leaks=1:detect_stack_use_after_return=1:halt_on_error=1:abort_on_error=1"
@@ -370,17 +373,18 @@ jobs:
       - name: Build sanitizer-enabled Titan artifacts
         run: |
           luarocks make --force
+          provider="$PREFIX/lib/titan/0.16/titan.so"
+          test -f "$provider"
+          for module in coroutine uv async timer fs net os; do
+            test -f "$PREFIX/share/lua/5.5/titan/$module.lua"
+          done
           readelf -Ws .lua/bin/lua | grep __asan_
           readelf -Ws .lua/bin/lua | grep __ubsan_
-          readelf -Ws titan/uv.so | grep __asan_
-          readelf -Ws titan/uv.so | grep __ubsan_
-          # titanlib is small enough that UBSan may emit no handler reference;
-          # an ASan registration symbol proves this separate C module used the
-          # threaded native instrumentation flags.
-          readelf -Ws titan.so | grep __asan_
+          readelf -Ws "$provider" | grep __asan_
+          readelf -Ws "$provider" | grep __ubsan_
 
       # Sanitized generated-C compilation benefits materially from the
-      # compiler and filesystem state warmed by the root sanitizer build.
+      # compiler and filesystem state warmed by the source-rock build.
       - name: Run native async sanitizer gate (timer-fs)
         env:
           TITAN_TEST_EXTRA_CFLAGS: ${{ env.SANITIZER_FLAGS }}
@@ -418,9 +422,15 @@ jobs:
 
       - name: Run sanitized net/OS production smokes
         run: |
-          env TITAN_PATH_0_15="$PWD" LUA_CPATH="$PWD/?.so;;" \
+          env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
+            TITAN_PATH_0_16="$PREFIX/lib/titan/0.16" \
+            LUA_PATH="$PREFIX/share/lua/5.5/?.lua;$PREFIX/share/lua/5.5/?/init.lua;;" \
+            LUA_CPATH="$PREFIX/lib/titan/0.16/?.so;$PREFIX/lib/lua/5.5/?.so;;" \
             .lua/bin/lua spec/fixtures/libuv/net_production_smoke.lua \
               sanitizer
-          env TITAN_PATH_0_15="$PWD" LUA_CPATH="$PWD/?.so;;" \
+          env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
+            TITAN_PATH_0_16="$PREFIX/lib/titan/0.16" \
+            LUA_PATH="$PREFIX/share/lua/5.5/?.lua;$PREFIX/share/lua/5.5/?/init.lua;;" \
+            LUA_CPATH="$PREFIX/lib/titan/0.16/?.so;$PREFIX/lib/lua/5.5/?.so;;" \
             .lua/bin/lua spec/fixtures/libuv/os_production_smoke.lua \
               sanitizer "$TITAN_PROCESS_SMOKE_CHILD"

@@ -59,23 +59,24 @@ describe("uv multiple Lua states", function()
 
     it("runs and closes co-resident states without Runtime or main-L bleed",
     function()
+        local layout = async_stdlib.standard_layout()
         local argv = {
             "env",
             "-u", "LUA_PATH",
             "-u", "LUA_CPATH",
             "-u", "LUA_PATH_5_5",
             "-u", "LUA_CPATH_5_5",
-            "TITAN_PATH_0_15=" ..
-                async_stdlib.module_root(async_stdlib.standard_dir()),
+            "TITAN_PATH_0_16=" .. layout.abi_root,
             "TITAN_PATH=",
-            "LUA_PATH=" .. async_stdlib.repo .. "/?.lua;" ..
+            "LUA_PATH=" .. async_stdlib.canonical_lua_path(layout) .. ";" ..
+                async_stdlib.repo .. "/?.lua;" ..
                 async_stdlib.repo .. "/?/init.lua;;",
-            "LUA_PATH_5_5=" .. async_stdlib.repo .. "/?.lua;" ..
+            "LUA_PATH_5_5=" ..
+                async_stdlib.canonical_lua_path(layout) .. ";" ..
+                async_stdlib.repo .. "/?.lua;" ..
                 async_stdlib.repo .. "/?/init.lua;;",
-            "LUA_CPATH=" ..
-                async_stdlib.canonical_cpath(async_stdlib.standard_dir()) .. ";;",
-            "LUA_CPATH_5_5=" ..
-                async_stdlib.canonical_cpath(async_stdlib.standard_dir()) .. ";;",
+            "LUA_CPATH=" .. async_stdlib.canonical_cpath(layout) .. ";;",
+            "LUA_CPATH_5_5=" .. async_stdlib.canonical_cpath(layout) .. ";;",
             executable,
         }
         local ok, status, output = async_stdlib.run(shell_command(argv), workspace)

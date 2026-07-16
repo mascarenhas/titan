@@ -6,6 +6,28 @@ local parser = require "titan-compiler.parser"
 local PKG_CONFIG = "sh spec/fixtures/libuv/fake-pkg-config.sh"
 local UV_MAIN_SOURCE = "titan/uv/uv.titan"
 local UV_TYPES_BASELINE = "spec/fixtures/libuv/titan_uv_types.lua"
+local STDLIB_ROOTS = {
+    "titan.coroutine", "titan.uv", "titan.async", "titan.timer",
+    "titan.fs", "titan.net", "titan.os",
+}
+local STDLIB_SHIMS = {
+    "titan/coroutine.lua", "titan/uv.lua", "titan/async.lua",
+    "titan/timer.lua", "titan/fs.lua", "titan/net.lua", "titan/os.lua",
+}
+local STDLIB_CONTAINER = "titan.so"
+
+local function prefix_from_cpath(cpath)
+    for template in (cpath .. ";"):gmatch("(.-);") do
+        local root = template:match("^(.*)/lib/lua/5%.5/%?%.so$")
+        if root then return root end
+    end
+end
+
+local function installed_stdlib_container()
+    local prefix = assert(prefix_from_cpath(package.cpath),
+        "cannot find the active Lua prefix in package.cpath")
+    return prefix .. "/lib/titan/0.16/" .. STDLIB_CONTAINER
+end
 
 local function quote(word)
     local quoted = assert(cdriver.shell_quote(word))
@@ -167,10 +189,9 @@ local function run_stdlib_dry_make(argv)
     for _, variable in ipairs({
         "STDLIB_TOOL_PREREQS",
         "STDLIB_PLATFORM_PREREQS",
-        "STDLIB_COMMON_RUNTIME_PREREQS",
-        "STDLIB_CORO_RUNTIME_PREREQS",
-        "STDLIB_UV_RUNTIME_PREREQS",
+        "STDLIB_NATIVE_PREREQS",
         "STDLIB_RUNTIME_ARCHIVE_PREREQ",
+        "STDLIB_BOOTSTRAP_PREREQ",
     }) do
         table.insert(argv, variable .. "=" .. prepared)
     end
@@ -212,25 +233,30 @@ local function run_uv_dry_run(mode, host, source)
         "TITAN_EXTRA_CPPFLAGS=-DUSER_CPP=1",
         "TITAN_EXTRA_CFLAGS=-DUSER_C=1",
         "TITAN_EXTRA_LDFLAGS=-Wl,user-link",
-        "titan/uv.so",
+        "stdlib",
     }
     return run_stdlib_dry_make(argv)
 end
 
-local function run_facade_dry_run(mode, module)
-    local argv = {
-        "make", "--no-print-directory", "-n",
-        "-W", "titan/" .. module .. ".titan",
-        "LIBUV_MODE=" .. mode,
-        "HOST_OS=Linux",
-        "LIBUV_PKG_CONFIG=" .. PKG_CONFIG,
-        "CC=ccache cc",
-        "TITAN_EXTRA_CPPFLAGS=-DUSER_CPP=1",
-        "TITAN_EXTRA_CFLAGS=-DUSER_C=1",
-        "TITAN_EXTRA_LDFLAGS=-Wl,user-link",
-        "titan/" .. module .. ".so",
-    }
-    return run_stdlib_dry_make(argv)
+local function count_plain(haystack, needle)
+    local count = 0
+    local position = 1
+    while true do
+        local first, last = haystack:find(needle, position, true)
+        if not first then return count end
+        count = count + 1
+        position = last + 1
+    end
+end
+
+local function stdlib_command(output)
+    local normalized = output:gsub("\\\r\n", " "):gsub("\\\n", " ")
+        :gsub("%s+", " ")
+    local first = assert(normalized:find(
+        "CC='ccache cc' TITAN_PATH_0_16=", 1, true), normalized)
+    local last = assert(normalized:find("; for output in", first, true),
+        normalized)
+    return normalized:sub(first, last - 1), normalized
 end
 
 describe("libuv Makefile configuration", function()
@@ -250,12 +276,42 @@ describe("libuv Makefile configuration", function()
         assert.same(discovered_uv_sources(), normalized)
     end)
 
-    it("pins the exact deterministic ABI 0.15 uv interface", function()
+    it("keeps the reviewed standard-library roots, sources, and shims exact",
+       function()
+        assert.same(STDLIB_ROOTS, makefile_words("STDLIB_ROOTS"))
+        assert.same(STDLIB_SHIMS, makefile_words("STDLIB_SHIMS"))
+        assert.same({ STDLIB_CONTAINER },
+            makefile_words("STDLIB_CONTAINER"))
+
+        local sources = makefile_words("STDLIB_TITAN_SOURCES")
+        local expanded = {}
+        for _, source in ipairs(sources) do
+            if source == "$(UV_TITAN_SOURCES)" then
+                for _, uv_source in ipairs(makefile_words("UV_TITAN_SOURCES")) do
+                    expanded[#expanded + 1] = uv_source
+                end
+            else
+                expanded[#expanded + 1] = source
+            end
+        end
+        assert.same({
+            "titan/coroutine.titan",
+            "titan/uv/uv.titan", "titan/uv/file.titan",
+            "titan/uv/os.titan", "titan/uv/process.titan",
+            "titan/uv/runtime.titan", "titan/uv/task.titan",
+            "titan/uv/tcp.titan", "titan/async.titan",
+            "titan/timer.titan", "titan/fs.titan", "titan/net.titan",
+            "titan/os.titan",
+        }, expanded)
+    end)
+
+    it("preserves the exact uv interface inside the combined image", function()
         local expected = assert(loadfile(UV_TYPES_BASELINE))()
         assert.equal(7875, #expected)
 
         local types_function, load_error =
-            require("titan")._loadlib("titan/uv.so", "titan_uv_types")
+            require("titan")._loadlib(installed_stdlib_container(),
+                "titan_uv_types")
         assert.truthy(types_function, load_error)
         local actual = assert(types_function())
 
@@ -384,15 +440,21 @@ describe("libuv Makefile configuration", function()
         end
     end)
 
-    it("reextracts pristine Lua and installs the public uv loader",
+    it("reextracts pristine Lua and gives titanc exact shim ownership",
        function()
         local makefile = read_file("Makefile")
         for _, contract in ipairs({
             "LUA_EXTRACTED    := $(LUA_DIR)/.titan-extracted-v2",
             'rm -rf "$(LUA_DIR)"',
-            'install -m 0644 titan/uv.lua',
+            "STDLIB_SHIMS := titan/coroutine.lua titan/uv.lua",
+            'package.cpath="./titan-runtime/bootstrap/?.so;" .. package.cpath',
+            "rm -f $(STDLIB_SHIMS)",
         }) do
             assert.truthy(makefile:find(contract, 1, true), contract)
+        end
+        local ignore = read_file(".gitignore")
+        for _, shim in ipairs(STDLIB_SHIMS) do
+            assert.truthy(ignore:find("/" .. shim, 1, true), shim)
         end
         assert.falsy(makefile:find(
             'strcmp(sym, "luaopen_titan_uv")', 1, true), makefile)
@@ -415,13 +477,15 @@ describe("libuv Makefile configuration", function()
             "LIBUV_PROVIDER_LDFLAGS=$(LIBUV_PROVIDER_LDFLAGS)",
             "MEMBERS=$(notdir $(TITAN_RUNTIME_OBJECTS))",
             "UV_CONFIG_STAMP := titan-runtime/.titan-uv-build-config",
-            "STDLIB_CORO_RUNTIME_PREREQS := $(RUNTIME_O) $(CORO_O)",
-            "STDLIB_UV_RUNTIME_PREREQS := " ..
-                "$(RUNTIME_O) $(UV_O) $(LIBUV_EXTRA_OBJECTS)",
-            "STDLIB_COMMON_RUNTIME_PREREQS := $(RUNTIME_O)",
+            "STDLIB_NATIVE_PREREQS := $(TITAN_RUNTIME_OBJECTS)",
+            "$(LIBUV_EXTRA_OBJECTS) $(TITANLIB_O)",
             "STDLIB_RUNTIME_ARCHIVE_PREREQ := $(TITAN_RUNTIME_LIB)",
-            "rm -f $(STDLIB_SOS) coro.so",
-            "rm -rf $(addsuffix .dSYM,$(STDLIB_SOS)) coro.so.dSYM",
+            "STDLIB_CONFIG_STAMP := " ..
+                "titan-runtime/.titan-stdlib-build-config",
+            "STDLIB_COMPLETION_STAMP := " ..
+                "titan-runtime/.titan-stdlib-complete",
+            "rm -f $(STDLIB_CONTAINER) $(STDLIB_QUALIFIED_SOS) " ..
+                "$(STDLIB_SOS)",
         }) do
             assert.truthy(makefile:find(contract, 1, true), contract)
         end
@@ -429,7 +493,9 @@ describe("libuv Makefile configuration", function()
             "UV_CONFIG_STAMP := $(LIBUV_BUILD_DIR)/", 1, true), makefile)
         local _, prepared_count = makefile:gsub(
             "TITAN_RUNTIME_PREBUILT=1", "")
-        assert.equal(7, prepared_count, makefile)
+        -- One checkout build and one private source-rock staging build use the
+        -- already prepared runtime; neither rebuilds it per logical module.
+        assert.equal(2, prepared_count, makefile)
 
         file = assert(io.open("titan-compiler/driver.lua", "rb"))
         local driver_source = file:read("*a")
@@ -442,18 +508,19 @@ describe("libuv Makefile configuration", function()
         assert.is_true(include_count >= 3, tostring(include_count))
     end)
 
-    it("keeps the Lua titan module separate from the Titan runtime archive",
+    it("keeps the private Lua bootstrap separate from the runtime archive",
        function()
         local file = assert(io.open("Makefile", "rb"))
         local makefile = file:read("*a")
         file:close()
         local first = assert(makefile:find(
-            "$(ROCK_RUNTIME_SO): $(TITANLIB_O)", 1, true))
-        local last = assert(makefile:find("\n\n# LuaRocks", first, true))
+            "$(TITAN_BOOTSTRAP_SO): $(TITANLIB_O)", 1, true))
+        local last = assert(makefile:find(
+            "\n\n# The active ABI path", first, true))
         local rule = makefile:sub(first, last - 1)
         assert.truthy(rule:find(
-            '$(ROCK_LD) $(ROCK_LIBFLAG) -o "$@" "$<" ' ..
-            '$(TITAN_EXTRA_LDFLAGS)', 1, true), rule)
+            "$(ROCK_LD) $(ROCK_LIBFLAG) -o \"$$tmp\" \"$<\"",
+            1, true), rule)
         for _, forbidden in ipairs({
             "$(TITAN_RUNTIME_LIB)", "$(LIBBT_LIB)", "$(RUNTIME_O)",
             "$(CORO_O)", "$(UV_O)",
@@ -463,20 +530,22 @@ describe("libuv Makefile configuration", function()
         end
     end)
 
-    it("uses a loadable Lua bundle for the direct macOS titan target",
+    it("uses a loadable Lua bundle for the private macOS bootstrap",
        function()
         local ok, output, why, code = run_argv({
             "make", "--no-print-directory", "-Bn",
-            "HOST_OS=Darwin", "titan.so",
+            "HOST_OS=Darwin", "TITAN_EXTRA_LDFLAGS=",
+            "titan-runtime/bootstrap/titan.so",
         })
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
         local normalized = output:gsub("%s+", " ")
         assert.truthy(normalized:find(
-            'cc -bundle -undefined dynamic_lookup -o "titan.so" ' ..
-            '"titan-runtime/titanlib.o"', 1, true), normalized)
+            '-bundle -undefined dynamic_lookup -o ' ..
+            '"$tmp" "titan-runtime/titanlib.o"', 1, true), normalized)
         assert.falsy(normalized:find(
-            'cc -shared -o "titan.so"', 1, true), normalized)
+            '-shared -o "$tmp" "titan-runtime/titanlib.o"',
+            1, true), normalized)
     end)
 
     it("repairs a newer runtime archive with an extra member", function()
@@ -714,110 +783,99 @@ exit 64
             output)
     end)
 
-    it("builds uv with the runtime archive, one libuv input, and merged flags",
+    it("builds one image with all roots, native support, and libuv once",
        function()
         local ok, output, why, code = run_uv_dry_run("bundled")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
-        local normalized = output:gsub("%s+", " ")
-        assert.truthy(normalized:find("titanc titan.uv", 1, true), normalized)
-        assert.falsy(normalized:find("-X", 1, true), normalized)
-        assert.falsy(normalized:find("titan_uv.o", 1, true), normalized)
-        assert.truthy(normalized:find([[CC='ccache cc']], 1, true), normalized)
-        assert.truthy(normalized:find(
+        local command, normalized = stdlib_command(output)
+        assert.truthy(command:find(
+            "./titanc " .. table.concat(STDLIB_ROOTS, " "), 1, true),
+            command)
+        assert.equal(1, count_plain(command,
+            "-X titan-runtime/titanlib.o"), command)
+        assert.falsy(command:find("titan_uv.o", 1, true), command)
+        assert.truthy(command:find([[CC='ccache cc']], 1, true), command)
+        assert.truthy(command:find(
             [[TITAN_EXTRA_CPPFLAGS='-DUSER_CPP=1 -Ilibuv-v1.52.1/include -D_GNU_SOURCE']],
-            1, true), normalized)
-        assert.truthy(normalized:find(
+            1, true), command)
+        assert.truthy(command:find(
             [[TITAN_EXTRA_CFLAGS='-DUSER_C=1 -fno-strict-aliasing']],
-            1, true), normalized)
-        assert.truthy(normalized:find(
-            [[TITAN_EXTRA_LDFLAGS='-Wl,user-link -Wl,--whole-archive libuv-build/libuv.a -Wl,--no-whole-archive -lpthread -ldl -lrt']],
-            1, true), normalized)
+            1, true), command)
+        local bundled_flags =
+            [[TITAN_EXTRA_LDFLAGS='-Wl,user-link -Wl,--whole-archive libuv-build/libuv.a -Wl,--no-whole-archive -lpthread -ldl -lrt']]
+        assert.equal(1, count_plain(command, bundled_flags), command)
+        assert.equal(1, count_plain(command, "libuv-build/libuv.a"), command)
 
         ok, output, why, code = run_uv_dry_run("system")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
-        normalized = output:gsub("%s+", " ")
-        assert.truthy(normalized:find("titanc titan.uv", 1, true), normalized)
-        command_tail = normalized
-        assert.falsy(command_tail:find("-X", 1, true), command_tail)
-        assert.falsy(command_tail:find("titan_uv.o", 1, true), command_tail)
-        assert.falsy(command_tail:find("libuv-build/libuv.a", 1, true),
-            command_tail)
-        assert.truthy(normalized:find(
+        command, normalized = stdlib_command(output)
+        assert.truthy(command:find(
+            "./titanc " .. table.concat(STDLIB_ROOTS, " "), 1, true),
+            command)
+        assert.equal(1, count_plain(command,
+            "-X titan-runtime/titanlib.o"), command)
+        assert.falsy(command:find("titan_uv.o", 1, true), command)
+        assert.falsy(command:find("libuv-build/libuv.a", 1, true), command)
+        assert.truthy(command:find(
             [[TITAN_EXTRA_CPPFLAGS='-DUSER_CPP=1 -I/opt/libuv/include -DUV_FAKE_PKG=1 -D_GNU_SOURCE']],
-            1, true), normalized)
-        assert.truthy(normalized:find(
-            [[TITAN_EXTRA_LDFLAGS='-Wl,user-link -L/opt/libuv/lib -luv -pthread -ldl -lrt']],
-            1, true), normalized)
+            1, true), command)
+        local system_flags =
+            [[TITAN_EXTRA_LDFLAGS='-Wl,user-link -L/opt/libuv/lib -luv -pthread -ldl -lrt']]
+        assert.equal(1, count_plain(command, system_flags), command)
+        assert.equal(1, count_plain(command, " -luv "), command)
 
         ok, output, why, code = run_uv_dry_run("bundled", "Darwin")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
-        normalized = output:gsub("%s+", " ")
-        assert.truthy(normalized:find(
-            [[TITAN_EXTRA_LDFLAGS='-Wl,user-link -Wl,-force_load,libuv-build/libuv.a -lpthread']],
-            1, true), normalized)
+        command = stdlib_command(output)
+        assert.equal(1, count_plain(command,
+            [[TITAN_EXTRA_LDFLAGS='-Wl,user-link -Wl,-force_load,libuv-build/libuv.a -lpthread']]),
+            command)
     end)
 
-    it("rebuilds the one provider when any uv source changes", function()
+    it("rebuilds the same single image when any reviewed source changes",
+       function()
+        local sources = {
+            "titan/coroutine.titan", "titan/async.titan",
+            "titan/timer.titan", "titan/fs.titan", "titan/net.titan",
+            "titan/os.titan",
+        }
         for _, source in ipairs(makefile_words("UV_TITAN_SOURCES")) do
+            sources[#sources + 1] = source
+        end
+        for _, source in ipairs(sources) do
             local ok, output, why, code =
                 run_uv_dry_run("bundled", "Linux", source)
             assert.truthy(ok, source .. ": " .. output .. "\n(" ..
                 tostring(why) .. ", " .. tostring(code) .. ")")
-            local normalized = output:gsub("%s+", " ")
-            local _, builds = normalized:gsub("titanc titan%.uv", "")
-            assert.equal(1, builds, source .. ": " .. normalized)
-            assert.truthy(normalized:find(
+            local command, normalized = stdlib_command(output)
+            assert.equal(1, count_plain(command,
+                "./titanc " .. table.concat(STDLIB_ROOTS, " ")), command)
+            assert.truthy(command:find(
                 "-Wl,--whole-archive libuv-build/libuv.a " ..
-                "-Wl,--no-whole-archive", 1, true), normalized)
-            -- A stale coroutine prerequisite may be rebuilt first; changing a
-            -- uv source must never fan out into one of uv's dependent facades.
-            for _, facade in ipairs({ "async", "timer", "fs", "net", "os" }) do
-                assert.falsy(normalized:find("titanc titan." .. facade,
-                    1, true), source .. ": " .. normalized)
-            end
+                "-Wl,--no-whole-archive", 1, true), command)
+            assert.falsy(normalized:find("titan/coroutine.so:", 1, true),
+                source .. ": " .. normalized)
         end
     end)
 
-    it("builds facade modules from binary uv without another libuv input",
+    it("uses one completeness/config stamp and cleans only the exact shims",
        function()
-        for _, module in ipairs({ "async", "timer", "fs", "net", "os" }) do
-            for _, mode in ipairs({ "bundled", "system" }) do
-                local ok, output, why, code =
-                    run_facade_dry_run(mode, module)
-                assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                    tostring(code) .. ")")
-                local normalized = output:gsub("%s+", " ")
-                local marker = "titanc titan." .. module
-                local marker_start = assert(normalized:find(marker, 1, true),
-                    normalized)
-                local prefix = normalized:sub(1, marker_start)
-                local command_start = assert(prefix:match(".*()CC="),
-                    normalized)
-                local command = normalized:sub(command_start,
-                    marker_start + #marker - 1)
-
-                assert.truthy(command:find([[CC='ccache cc']], 1, true),
-                    command)
-                assert.truthy(command:find(
-                    [[TITAN_EXTRA_CPPFLAGS='-DUSER_CPP=1']], 1, true),
-                    command)
-                assert.truthy(command:find(
-                    [[TITAN_EXTRA_CFLAGS='-DUSER_C=1']], 1, true), command)
-                assert.truthy(command:find(
-                    [[TITAN_EXTRA_LDFLAGS='-Wl,user-link']], 1, true),
-                    command)
-                assert.falsy(command:find("titan_uv.o", 1, true), command)
-                assert.falsy(command:find("libuv-build/libuv.a", 1, true),
-                    command)
-                assert.falsy(command:find("-luv", 1, true), command)
-                assert.falsy(command:find("-D_GNU_SOURCE", 1, true),
-                    command)
-                assert.falsy(command:find("-fno-strict-aliasing", 1, true),
-                    command)
-            end
+        local makefile = read_file("Makefile")
+        for _, contract in ipairs({
+            "$(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES)",
+            "$(STDLIB_CONFIG_STAMP): FORCE",
+            "for output in $(STDLIB_CONTAINER) $(STDLIB_SHIMS)",
+            "STDLIB_UV_LDFLAGS=$(STDLIB_UV_LDFLAGS)",
+            "rm -f $(STDLIB_SHIMS)",
+            "rm -rf $(STDLIB_CONTAINER).dSYM",
+        }) do
+            assert.truthy(makefile:find(contract, 1, true), contract)
         end
+        assert.falsy(makefile:find("rm -f titan/*.lua", 1, true), makefile)
+        assert.falsy(makefile:find("rm -f titan/uv/*.lua", 1, true),
+            makefile)
     end)
 end)

@@ -216,9 +216,11 @@ end
 
 -- ===== multi-module (source-linked) code generation =====
 
--- Check + compile a set of in-memory `modules` (source-linked) and produce
--- either a shared library per module or, with `forapp`, an executable for
--- `main`. Returns (true) or (nil, message).
+-- Check + compile a set of in-memory `modules` (source-linked). This legacy
+-- test helper intentionally emits exact per-module DSOs so older checker and
+-- coder fixtures can address each artifact directly; public `titanc` container
+-- grouping is exercised by its dedicated filesystem specs. With `forapp`, it
+-- emits an executable for `main`. Returns (true) or (nil, message).
 function M.generate_modules(modules, main, forapp)
     reset(true)
     local imported, deps = {}, {}

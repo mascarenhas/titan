@@ -34,6 +34,11 @@ of the output and the protocols it implements; value-level details are in
 [values and the GC](values-and-gc.md), per-construct translations in
 [code generator: constructs](codegen-constructs.md).
 
+One no-`main` CLI invocation may link several such translation units into a
+single [multi-module provider](multi-module-libraries.md). The coder still runs
+once per logical module; it never sees a provider AST or emits aggregate
+metadata.
+
 ## No C AST: templates, `util.render`, and `pretty.lua`
 
 The coder builds no intermediate representation of the C program. Each
@@ -106,7 +111,8 @@ semantic effect may still use `pairs`. The pieces appear in this order:
    and public record namespaces — through the metatable installed on the module
    `Udata`.
 8. **`<prefix>_abi`**, **`<prefix>_types`**, **`<prefix>_init`**, **`luaopen_<prefix>`**: the
-   module-protocol functions, described below.
+   module-protocol functions, described below. One final DSO may contain this
+   complete set for several translation units; every set remains independent.
 
 ### Mixed-source `#line` attribution
 
@@ -175,6 +181,12 @@ Symbol names come from `mangle_qn` (`coder.lua`), which replaces `.` and
 `foo_bar_f_titanentry_lua`; methods and record functions use
 `<mangled-fqtn>_<name>_titanmethod` / `_titanentry_luamethod` and
 `_titanstatic` / `_titanentry_luastatic`.
+
+`coder.external_symbols` inventories the non-file-local subset of these names
+plus each module protocol. Library-mode orchestration compares that exact set
+before code generation, including collisions that cross a flattened
+module/member boundary; it does not wait for the linker to diagnose duplicate
+definitions.
 
 ## Two C functions per Titan function
 
@@ -547,14 +559,19 @@ cannot evaluate the new interface descriptors safely.
 Flexible result types add `flexrettype` to callable interface descriptors and
 the trailing native `_flexout`/`_flexwant` pair shown above. That ABI and
 serialization-shape change shipped as 0.14 rather than making 0.13 accept both
-layouts. The current ABI is **0.15**: `titan.uv` now orders exported module
+layouts. ABI **0.15** made `titan.uv` order exported module
 members by semantic contributor, so marker constants and installed paths move
 together rather than letting 0.14 importers reconstruct the changed slots. The
 later checker staging, relocation of private uv records, and move of the
 private `FS` constants instance alter private slot/initialization order but add
 no serialized descriptor field, native parameter, or importer-visible slot
-change: the exact `titan_uv_types` interface remains unchanged and the ABI
-stays 0.15.
+change: the exact `titan_uv_types` interface remained unchanged.
+
+The current ABI is **0.16**. Per-module descriptor and native-call shapes stay
+the same, but the generated/imported physical-provider contract changes from
+an exact logical DSO to a compiler-selected prefix container. A 0.15 runtime
+cannot discover the combined standard `titan.so`, so this layout change is an
+ABI boundary even without a C-signature change.
 
 ## The module protocol
 
@@ -607,8 +624,10 @@ Idempotency works at two independent levels:
   one compiled module serves many states.
 * **Per translation unit**: the C `static int _initialized` guards only
   nonsemantic native wiring and caches — here, the dlsym'd function pointers.
-  The standard library installs one canonical DSO per module, shared by Titan
-  imports and Lua requires. Record type identity is the metatable, a
+  Several translation units may share a physical provider, but each retains
+  this separate flag and module protocol. The standard library installs one
+  combined `titan.so`, shared by Titan imports and Lua requires. Record type
+  identity is the metatable, a
   per-Lua-state object cached in a `_mod` user value rather than a C static, so
   this branch no longer re-fetches any tag cache.
 
@@ -668,26 +687,30 @@ from compiled interfaces is gated on the coordinated ABI transition described
 above. It returns that
 serialized interface as its sole result;
 there is no dependency-origin metadata in the module protocol.
+`Type.Module.file` is likewise omitted. It defaults to the exact logical path
+when the expression is evaluated and the importing driver overwrites it with
+the relative provider selected by the current prefix search.
 
-When the driver's loader finds only a compiled `.so` for an import, it first
-loads and calls `<prefix>_abi`, rejects missing or mismatched markers, then
-loads `<prefix>_types` and `load`s `"return " .. serialized` to recover the
-interface — letting the checker type the importing module against a dependency
-whose source is gone. Libuv does not add another result or a special binary
-classification. Dependencies use dynamic linkage when a binary wins lookup and static
+When the driver's loader finds a compiled provider for an import, it probes
+the requested `<prefix>_abi`/`<prefix>_types` pair, rejects partial or invalid
+claims, and `load`s `"return " .. serialized` to recover the interface —
+letting the checker type the importing module against a dependency whose
+source is gone. Libuv does not add another result or a special binary
+classification. Dependencies use dynamic linkage when a provider wins lookup and static
 linkage when no binary exists and source is selected. Explicit command-line
 roots are the source-first exception. The tests'
 in-memory `tableloader` exercises the same serialization round-trip. See
 [driver and toolchain](driver.md).
 
-Folder representation changes none of this protocol. Mangled symbols,
+Folder and provider representation change none of this logical protocol. Mangled symbols,
 nominal names, registry keys, `luaopen_*`, and the serialized module identity
 remain derived solely from logical `modname`; there is no contributor ABI.
-The repository's 0.15 transition is instead a compatibility boundary for the
+The repository's historical 0.15 transition is a compatibility boundary for the
 intentional `titan.uv` public-member reorder caused by semantic ownership.
 Moving local record declarations and the private `FS` constants instance among
 contributors after that boundary changes private initialization layout but
-does not alter the serialized interface.
+does not alter the serialized interface. ABI 0.16 then changes only how the
+physical provider is found and recorded transiently.
 
 ## Static vs dynamic dependency wiring
 
@@ -704,7 +727,7 @@ extern Udata *dep_init(lua_State *L);
 /* in _init: */ { Udata *_m = dep_init(L); setuvalue(L, &_mod->uv[1].uv, _m); }
 ```
 
-**Ordinary dynamic** (`.so`-only dep): each imported function is declared in
+**Ordinary dynamic** (compiled-provider dep): each imported function is declared in
 `$INCLUDES` as a `static` function *pointer*; the generated `_init`
 dlopens the library and stitches the pointers by symbol name with the
 runtime's lazy/global `loadlib` and `loadsym` (`titan-runtime/titan.c`: Titan-path
@@ -713,7 +736,7 @@ search, registry-cached handles, Lua error on failure):
 ```c
 static Udata* (*dep_mk_titan)(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer);
 /* in _init ($LOADMODULES1), at first init in the process: */
-void *dep_handle = loadlib(L, "dep.so");
+void *dep_handle = loadlib(L, "selected/provider.so");
 dep_mk_titan = titan_cast_func(Udata* (*)(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer),
                                loadsym(L, dep_handle, "dep_mk_titan"));
 ```
@@ -721,7 +744,7 @@ dep_mk_titan = titan_cast_func(Udata* (*)(lua_State *L, Udata *_mod, CClosure *_
 A direct-libuv DSO follows this exact regime. Its explicit `import "uv"` is
 ordinary generated import wiring inside that DSO: lazy mapping leaves normal
 `uv_*` function calls unresolved long enough for the DSO's initializer to load
-`titan/uv.so` globally before those calls bind. `RTLD_NOW` would reject the DSO
+the combined `titan.so` globally before those calls bind. `RTLD_NOW` would reject the DSO
 before its initializer ran, while a provider loaded `RTLD_LOCAL` later would
 not satisfy those bindings. The coder emits no provider marker or alternate
 loader call. Eager libuv relocations and constructors cannot rely on this

@@ -1,7 +1,7 @@
 # The Titan grammar
 
 This chapter is the reference grammar of Titan as implemented by the
-0.15 prototype compiler: lexical conventions, the complete syntactic
+0.16 prototype compiler: lexical conventions, the complete syntactic
 grammar, operator precedence, and the restrictions the EBNF alone does
 not show. It replaces the old manual's stale grammar.
 

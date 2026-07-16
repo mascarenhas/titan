@@ -490,11 +490,12 @@ compiler extensions may fail with a compile-time parse error.
 
 ### Direct libuv extensions
 
-Bundled Titan gives libuv a single complete native owner: the canonical
-`titan/uv.so`. Its SDK installs `uv.h` and the `uv/` headers, but not the
-private static archive used to build that provider. A Titan extension DSO that
-calls functions declared by `uv.h` must import `titan.uv` (normally through its
-short spelling) in addition to importing the header:
+Bundled Titan gives libuv a single complete native owner: the combined
+standard-library provider `titan.so`. Its SDK installs `uv.h` and the `uv/`
+headers, but not the private static archive used to build that provider. A
+Titan extension DSO that calls functions declared by `uv.h` must import
+`titan.uv` (normally through its short spelling) in addition to importing the
+header:
 
 ```titan
 local runtime = import "uv"
@@ -503,7 +504,7 @@ local uv = foreign import "uv.h"
 
 Build that extension without `-luv` and without a `libuv.a` linker input. Its
 `uv_*` references remain unresolved in the DSO. The bundled archive used to
-build `titan/uv.so` is private and is not installed as part of the Titan SDK.
+build `titan.so` is private and is not installed as part of the Titan SDK.
 Titan uses the same `RTLD_LAZY | RTLD_GLOBAL` runtime loader for this extension
 as for every compiled dependency. Lazy binding lets the extension map with
 unresolved libuv function calls. Its generated initializer then loads the
@@ -530,14 +531,16 @@ local uv = require "titan.uv"
 local extension = require "my.libuv_extension"
 ```
 
-The installed `titan/uv.lua` loader resolves canonical `titan/uv.so` through
-`package.cpath`, calls `package.loadlib(path, "*")` to make its symbols global,
-and then invokes `luaopen_titan_uv` from the same handle. All other Lua C
-modules retain ordinary local loading. This uses stock Lua's public package
-API, not a `loadlib.c` patch or a self-loading/self-promoting provider, and
-works on both Linux and macOS. A stock Lua 5.5 host can use the bundled
-direct-extension contract when its `LUA_PATH_5_5` finds the loader and its
-`LUA_CPATH_5_5` finds the canonical DSO (see
+The generated `titan/uv.lua` loader resolves the physical provider name
+`titan` through `package.cpath`, obtains the native support table with
+`require "titan"`, and asks that table's internal loader to reopen/promote the
+canonical `titan.so` with `RTLD_LAZY | RTLD_GLOBAL` before invoking
+`luaopen_titan_uv`. The support load itself uses Lua's ordinary C searcher and
+is eager/local; the separate global handle cache deliberately performs the
+promotion. This works with stock Lua 5.5 on both Linux and macOS without a
+`loadlib.c` patch or self-loading provider. A stock host can use the bundled
+direct-extension contract when its `LUA_PATH_5_5` finds the generated loader
+and its `LUA_CPATH_5_5` finds the canonical DSO (see
 [Running with a stock Lua](modules.md#running-with-a-stock-lua)).
 Because Lua performs this explicit global load before mapping the extension,
 this route also supports its eager relocations and native constructors. The

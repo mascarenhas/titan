@@ -140,13 +140,14 @@ folder main is selected, an error while reading, enumerating, parsing, or
 checking that folder is an error in that module; the compiler does not fall
 back to the flat file or a later source root.
 
-Ordinary dependency lookup remains binary-first. If an exact compiled module
-is present on the binary path, it is used before either source form. Modules
+Ordinary dependency lookup remains binary-first. If a compiled provider claims
+the logical module on the binary path, it is used before either source form.
+The provider may be an ancestor container or the exact module path. Modules
 named explicitly on the `titanc` command line are source roots: they must have
 source, and the folder-before-flat rule applies. This is why
 `titanc titan.uv` rebuilds the source folder even when an installed
-`titan/uv.so` exists, while an ordinary `import "uv"` may use that compiled
-module.
+`titan.so` provider contains it, while an ordinary `import "uv"` may use that
+compiled module.
 
 ### Contributors are not directly importable
 
@@ -182,32 +183,40 @@ Here `import "pkg.service.worker"` selects
 `pkg/service/worker/worker.titan`; the sibling `worker.titan` still belongs
 only to `pkg.service`. A parent folder marker by itself does not reserve every
 possible child name: if the requested immediate `.titan` constituent is
-absent, normal lookup may continue to another source root. Exact compiled
-modules are also unaffected because binary lookup happens before source
-privacy is considered.
+absent, normal lookup may continue to another source root. Compiled providers
+are also unaffected because binary lookup happens before source privacy is
+considered.
 
 ## Generated artifacts
 
 The canonical main source controls where generated C and object files go.
-The logical module name controls the shared-library and entrypoint paths.
+The logical module name controls its generated Lua loader and program
+entrypoint paths. In a single-root library build it is also the provider name;
+with several roots, their common provider prefix controls the one shared
+library path.
 
-| Form for `foo.bar` | Generated C/object | Shared library | Entrypoint | Executable |
-| --- | --- | --- | --- | --- |
-| flat `foo/bar.titan` | `foo/bar.c`, `foo/bar.o` | `foo/bar.so` | `foo/bar__entrypoint.c` | `foo/bar` |
-| folder `foo/bar/bar.titan` | `foo/bar/bar.c`, `foo/bar/bar.o` | `foo/bar.so` | `foo/bar__entrypoint.c` | `foo/bar__main` |
+| Form for `foo.bar` | Generated C/object | Lua loader | Single-root provider | Entrypoint | Executable |
+| --- | --- | --- | --- | --- | --- |
+| flat `foo/bar.titan` | `foo/bar.c`, `foo/bar.o` | `foo/bar.lua` | `foo/bar.so` | `foo/bar__entrypoint.c` | `foo/bar` |
+| folder `foo/bar/bar.titan` | `foo/bar/bar.c`, `foo/bar/bar.o` | `foo/bar.lua` | `foo/bar.so` | `foo/bar__entrypoint.c` | `foo/bar__main` |
 
-The entrypoint and executable columns apply when the module declares Titan's
-ordinary `main(args: {string}): integer`; that function may be declared in the
-main source or a contributor. The `__main` suffix prevents the
+The loader and provider columns apply in library mode. The entrypoint and
+executable columns apply when the module declares Titan's ordinary
+`main(args: {string}): integer`; that function may be declared in the main
+source or a contributor. The `__main` suffix prevents the
 folder program from colliding with its `foo/bar/` source directory and also
 works when `--tree` points outside the current directory. Contributor files
-never receive generated `.c`, `.o`, `.so`, or executable artifacts. For a
+never receive generated `.c`, `.o`, `.lua`, `.so`, or executable artifacts.
+A folder contributes exactly one object and one generated loader for its
+logical module, even when a multi-root invocation links that object into a
+shallower provider. The loader belongs to `foo.bar`, not to any source
+basename, and points at the provider selected for the whole invocation. For a
 dotted module built from an external tree, the compiler creates the logical
 output parent (such as `foo/`) in the current directory before linking.
 
 ## The standard `titan.uv` module
 
-Titan dogfoods this layout in its libuv provider:
+Titan dogfoods this layout in its private libuv plumbing module:
 
 ```
 titan/uv/
@@ -223,10 +232,12 @@ titan/uv/
 The main source keeps the shared prelude, module state, bootstrap, and sole
 initializer. Both exported and private record declarations live with their
 semantic contributor implementations; contributor exports are ordinary
-`titan.uv` members. These files are one logical module compiled with
-`titanc titan.uv`. Both Titan imports and Lua `require "titan.uv"` continue to
-load the single canonical `titan/uv.so`; no contributor is a separately
-loadable module.
+`titan.uv` members. These files are one logical module and therefore produce
+one object and one `titan/uv.lua` loader, never one artifact per contributor.
+The production standard-library invocation links that object with the other
+six `titan.*` roots into the canonical `titan.so` provider. Both Titan imports
+and Lua `require "titan.uv"` select the independent `titan.uv` logical module
+inside that image; no contributor is a separately loadable module.
 
 See [Modules](modules.md) for imports, module state, and the general
 compilation model. The compiler-side assembly and artifact rules are detailed

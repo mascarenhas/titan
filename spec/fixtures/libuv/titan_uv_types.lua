@@ -1,4 +1,4 @@
--- Exact ABI 0.15 `titan_uv_types` string captured from the semantic
+-- Exact ABI 0.16 `titan_uv_types` string captured from the semantic
 -- `titan/uv/` contributor ensemble.
 -- 7875 bytes; SHA-256:
 -- 81a4442375840f20778645f2e76ab84bc6e9fab471294232e4fb70103fceb7d4

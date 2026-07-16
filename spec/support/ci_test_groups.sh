@@ -33,6 +33,8 @@ while IFS= read -r test_file; do
             compiler_unit_tests+=("$test_file")
             ;;
         spec/stdlib/coroutine_spec.lua | \
+        spec/stdlib/loadlibglobal_spec.lua | \
+        spec/stdlib_installer_spec.lua | \
         spec/libuv_build_spec.lua | \
         spec/minicoro_spec.lua | \
         spec/rockspec_spec.lua)

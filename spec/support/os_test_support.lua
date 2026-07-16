@@ -54,9 +54,11 @@ local function build_process_child(workspace)
 end
 
 function M.workspace(label)
-    local standard = async_stdlib.standard_dir()
-    assert.truthy(lfs.attributes(standard .. "/os.so"),
-        "os specs require prebuilt os.so; run make stdlib first")
+    local standard = async_stdlib.standard_layout()
+    assert.truthy(lfs.attributes(standard.container),
+        "os specs require prebuilt titan.so; run make stdlib first")
+    assert.truthy(lfs.attributes(standard.shim_root .. "/titan/os.lua"),
+        "os specs require the generated titan/os.lua shim")
     return async_stdlib.workspace("os-" .. (label or "runtime"))
 end
 
@@ -67,9 +69,13 @@ function M.process_child(workspace)
 end
 
 function M.compile(workspace, modname, options)
-    local standard = async_stdlib.standard_dir()
-    assert.truthy(lfs.attributes(standard .. "/os.so"),
-        "os specs require prebuilt os.so; run make stdlib first")
+    local standard = async_stdlib.standard_layout()
+    assert.truthy(lfs.attributes(standard.container),
+        "os specs require prebuilt titan.so; run make stdlib first")
+    assert.truthy(lfs.attributes(standard.shim_root .. "/titan/os.lua"),
+        "os specs require the generated titan/os.lua shim")
+    options = options or {}
+    options.layout = options.layout or standard
     return async_stdlib.compile(workspace, modname, options)
 end
 

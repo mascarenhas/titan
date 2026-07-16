@@ -29,7 +29,7 @@ end
 describe("compiler installation discovery", function()
     it("uses the first literal Lua 5.5 C-module prefix", function()
         local cpath = table.concat({
-            "/first prefix/lib/titan/0.15/?.so",
+            "/first prefix/lib/titan/0.16/?.so",
             "/wrong/lib/lua/5.4/?.so",
             "/also-wrong/lib/lua/5.5/?.dylib",
             "/first prefix/lib/lua/5.5/?.so",
@@ -67,8 +67,8 @@ describe("compiler installation discovery", function()
             libtitan = "/opt/titan/lib/libtitan.a",
             libbacktrace = "/opt/titan/lib/libbacktrace.a",
             liblua = "/opt/titan/lib/liblua.a",
-            titan_bin = "/opt/titan/lib/titan/0.15",
-            lua_cpath = "/opt/titan/lib/titan/0.15/?.so",
+            titan_bin = "/opt/titan/lib/titan/0.16",
+            lua_cpath = "/opt/titan/lib/titan/0.16/?.so",
         }, paths)
 
         assert.same({
@@ -119,6 +119,82 @@ describe("compiler installation discovery", function()
             "lua-5.5.0/src/liblua.a",
             "-ldl", "-lm",
         }, driver.source_link_inputs("lua-5.5.0/src"))
+    end)
+end)
+
+describe("compiled-container path contracts", function()
+    it("deduplicates roots and derives a component-wise provider", function()
+        local provider, roots = driver.common_module_provider({
+            "foo.bar.left", "foo.bar.left", "foo.bar.right",
+        })
+        assert.equal("foo.bar", provider)
+        assert.same({ "foo.bar.left", "foo.bar.right" }, roots)
+
+        assert.equal("foo", driver.common_module_provider({
+            "foo", "foo.bar",
+        }))
+        local none, _, left, right = driver.common_module_provider({
+            "foo.bar", "foobar.baz",
+        })
+        assert.is_nil(none)
+        assert.equal("foo.bar", left)
+        assert.equal("foobar.baz", right)
+    end)
+
+    it("derives one shallow-to-exact candidate per component", function()
+        local cases = {
+            { "a", { "a.so" } },
+            { "a.b", { "a.so", "a/b.so" } },
+            { "a.b.c", { "a.so", "a/b.so", "a/b/c.so" } },
+            {
+                "a.b.c.d",
+                { "a.so", "a/b.so", "a/b/c.so", "a/b/c/d.so" },
+            },
+        }
+        for _, case in ipairs(cases) do
+            assert.same(case[2], driver.module_binary_candidates(case[1]))
+        end
+        assert.same({}, driver.module_binary_candidates("a..b"))
+    end)
+
+    it("expands explicit double separators with the runtime default", function()
+        assert.equal("R1;D1;D2;R2",
+            driver.expand_titan_bin_path("R1;;R2", "D1;D2"))
+        assert.same({ "R1", "D1", "D2", "R2" },
+            driver.titan_bin_path_entries("R1;;R2", "D1;D2"))
+        assert.same({ "D1", "D2" },
+            driver.titan_bin_path_entries(nil, "D1;D2"))
+    end)
+
+    it("preserves literal percent signs while inserting defaults", function()
+        local explicit = "/tmp/100%/first;;/tmp/50%/last"
+        local defaults = "/tmp/default%root;/tmp/other%root"
+        assert.equal(table.concat({
+            "/tmp/100%/first",
+            "/tmp/default%root",
+            "/tmp/other%root",
+            "/tmp/50%/last",
+        }, ";"), driver.expand_titan_bin_path(explicit, defaults))
+        assert.same({
+            "/tmp/100%/first",
+            "/tmp/default%root",
+            "/tmp/other%root",
+            "/tmp/50%/last",
+        }, driver.titan_bin_path_entries(explicit, defaults))
+    end)
+
+    it("stages an atomic library under its final basename", function()
+        local workspace = os.tmpname()
+        assert.truthy(os.remove(workspace))
+        assert.truthy(lfs.mkdir(workspace))
+        local public = workspace .. "/nested/provider.so"
+        local staged, directory = driver.staged_library_output(public)
+        assert.truthy(staged, directory)
+        assert.equal("provider.so", staged:match("([^/]+)$"))
+        assert.equal(workspace .. "/nested",
+            assert(directory:match("^(.*)/[^/]+$")))
+        assert.equal(directory .. "/provider.so", staged)
+        remove_tree(workspace)
     end)
 end)
 
@@ -206,6 +282,352 @@ describe("compiler module loader", function()
             driver.imported["titan.timer"].filename)
         assert.equal("titan/timer__main",
             driver.imported["titan.timer"].program_output)
+    end)
+
+    it("keeps root precedence ahead of candidate shallowness", function()
+        local first = root .. "/first"
+        local second = root .. "/second"
+        assert(lfs.mkdir(first))
+        assert(lfs.mkdir(second))
+        assert(lfs.mkdir(first .. "/a"))
+        assert(lfs.mkdir(first .. "/a/b"))
+        write_file(first .. "/a/b/c.so", "earlier exact\n")
+        write_file(second .. "/a.so", "later shallow\n")
+        driver.TITAN_BIN_PATH = first .. ";" .. second
+
+        titan._loadlib = function(filename, symbol)
+            assert.equal(first .. "/a/b/c.so", filename)
+            if symbol == "a_b_c_abi" then
+                return function() return driver.TITAN_VER end
+            elseif symbol == "a_b_c_types" then
+                return function() return "Module('a.b.c',{})" end
+            end
+            return nil, "undefined symbol: " .. symbol, "init"
+        end
+
+        local ok, modtype, errors = driver.defaultloader({})("a.b.c")
+        assert.truthy(ok)
+        assert.equal(0, #errors)
+        assert.equal("a/b/c.so", modtype.file)
+        assert.equal(first .. "/a/b/c.so",
+            driver.imported["a.b.c"].filename)
+    end)
+
+    it("shadows an occupied relative candidate in later roots", function()
+        local first = root .. "/first"
+        local second = root .. "/second"
+        assert(lfs.mkdir(first))
+        assert(lfs.mkdir(second))
+        assert(lfs.mkdir(second .. "/a"))
+        write_file(first .. "/a.so", "earlier nonclaim\n")
+        write_file(second .. "/a.so", "later claim must be shadowed\n")
+        write_file(second .. "/a/b.so", "later unshadowed claim\n")
+        driver.TITAN_BIN_PATH = first .. ";" .. second
+
+        local inspected = {}
+        titan._loadlib = function(filename, symbol)
+            inspected[filename] = true
+            if filename == first .. "/a.so" then
+                return nil, "undefined symbol: " .. symbol, "init"
+            end
+            assert.equal(second .. "/a/b.so", filename)
+            if symbol == "a_b_c_abi" then
+                return function() return driver.TITAN_VER end
+            elseif symbol == "a_b_c_types" then
+                return function() return "Module('a.b.c',{})" end
+            end
+            return nil, "undefined symbol: " .. symbol, "init"
+        end
+
+        local ok, modtype, errors = driver.defaultloader({})("a.b.c")
+        assert.truthy(ok)
+        assert.equal(0, #errors)
+        assert.equal("a/b.so", modtype.file)
+        assert.equal(second .. "/a/b.so",
+            driver.imported["a.b.c"].filename)
+        assert.is_nil(inspected[second .. "/a.so"])
+    end)
+
+    it("treats half metadata as a terminal container claim", function()
+        write_file(binary .. "/titan.so", "partial shallow claim\n")
+        write_file(binary .. "/titan/timer.so", "valid exact claim\n")
+        local exact_probed = false
+        titan._loadlib = function(filename, symbol)
+            if filename == binary .. "/titan/timer.so" then
+                exact_probed = true
+                error("a deeper candidate must not hide a partial claim")
+            end
+            assert.equal(binary .. "/titan.so", filename)
+            if symbol == "titan_timer_abi" then
+                return function() return driver.TITAN_VER end
+            end
+            return nil, "undefined symbol: " .. symbol, "init"
+        end
+
+        local ok, message = driver.defaultloader({})("titan.timer")
+        assert.falsy(ok)
+        assert.match("claims module 'titan.timer'", message, 1, true)
+        assert.match("titan_timer_types", message, 1, true)
+        assert.is_false(exact_probed)
+    end)
+
+    it("treats types-only metadata as a terminal container claim", function()
+        write_file(binary .. "/titan.so", "partial shallow claim\n")
+        write_file(binary .. "/titan/timer.so", "valid exact claim\n")
+        local exact_probed = false
+        titan._loadlib = function(filename, symbol)
+            if filename == binary .. "/titan/timer.so" then
+                exact_probed = true
+                error("a deeper candidate must not hide a partial claim")
+            end
+            assert.equal(binary .. "/titan.so", filename)
+            if symbol == "titan_timer_types" then
+                return function() return "Module('titan.timer',{})" end
+            end
+            return nil, "undefined symbol: " .. symbol, "init"
+        end
+
+        local ok, message = driver.defaultloader({})("titan.timer")
+        assert.falsy(ok)
+        assert.match("claims module 'titan.timer'", message, 1, true)
+        assert.match("titan_timer_abi", message, 1, true)
+        assert.is_false(exact_probed)
+    end)
+
+    it("rejects a wrong ABI before executing types metadata", function()
+        write_file(binary .. "/titan.so", "stale shallow claim\n")
+        write_file(binary .. "/titan/timer.so", "valid exact claim\n")
+        local types_executed = false
+        local exact_probed = false
+        titan._loadlib = function(filename, symbol)
+            if filename == binary .. "/titan/timer.so" then
+                exact_probed = true
+                error("a deeper candidate must not hide a stale claim")
+            end
+            assert.equal(binary .. "/titan.so", filename)
+            if symbol == "titan_timer_abi" then
+                return function() return "stale" end
+            elseif symbol == "titan_timer_types" then
+                return function()
+                    types_executed = true
+                    return "Module('titan.timer',{})"
+                end
+            end
+            error("unexpected metadata symbol " .. symbol)
+        end
+
+        local ok, message = driver.defaultloader({})("titan.timer")
+        assert.falsy(ok)
+        assert.match("ABI mismatch", message, 1, true)
+        assert.match("but found stale", message, 1, true)
+        assert.is_false(types_executed)
+        assert.is_false(exact_probed)
+    end)
+
+    it("rejects invalid metadata results without falling through", function()
+        write_file(binary .. "/meta.so", "invalid metadata claims\n")
+
+        local cases = {
+            {
+                name = "meta.malformed",
+                abi = function() return driver.TITAN_VER end,
+                metadata = function() return "@" end,
+                expected = "unexpected symbol near '@'",
+            },
+            {
+                name = "meta.call_error",
+                abi = function() return driver.TITAN_VER end,
+                metadata = function() error("types metadata exploded") end,
+                expected = "types metadata exploded",
+            },
+            {
+                name = "meta.arity",
+                abi = function() return driver.TITAN_VER, "extra" end,
+                metadata = function()
+                    error("types metadata must not execute")
+                end,
+                expected = "compiled module ABI marker 'meta_arity_abi' " ..
+                    "must return exactly one string",
+            },
+            {
+                name = "meta.non_string",
+                abi = function() return driver.TITAN_VER end,
+                metadata = function() return 42 end,
+                expected = "compiled module type metadata " ..
+                    "'meta_non_string_types' must return exactly one string",
+            },
+            {
+                name = "meta.noncanonical",
+                abi = function() return driver.TITAN_VER end,
+                metadata = function()
+                    return [[{ _tag = "Type.Module",
+                        name = "meta.noncanonical", members = {} }]]
+                end,
+                expected = "did not construct a canonical Type.Module",
+            },
+            {
+                name = "meta.member_schema",
+                abi = function() return driver.TITAN_VER end,
+                metadata = function()
+                    return [[Module("meta.member_schema", {
+                        ModuleMember("meta.member_schema", "bad",
+                            { _tag = "Type.Unknown" }, false)
+                    })]]
+                end,
+                expected = "module interface is not serializable",
+            },
+        }
+
+        for _, case in ipairs(cases) do
+            titan._loadlib = function(filename, symbol)
+                assert.equal(binary .. "/meta.so", filename)
+                if symbol == driver.mangle_module_name(case.name) .. "_abi" then
+                    return case.abi
+                elseif symbol == driver.mangle_module_name(case.name) ..
+                                  "_types" then
+                    return case.metadata
+                end
+                error("unexpected metadata symbol " .. symbol)
+            end
+
+            local ok, message = driver.defaultloader({})(case.name)
+            assert.falsy(ok)
+            assert.match(case.expected, message, 1, true)
+            assert.is_nil(driver.imported[case.name])
+        end
+    end)
+
+    it("rejects metadata for a different logical module", function()
+        write_file(binary .. "/titan.so", "mismatched shallow claim\n")
+        write_file(binary .. "/titan/timer.so", "valid exact claim\n")
+        local exact_probed = false
+        titan._loadlib = function(filename, symbol)
+            if filename == binary .. "/titan/timer.so" then
+                exact_probed = true
+                error("a deeper candidate must not hide mismatched metadata")
+            end
+            assert.equal(binary .. "/titan.so", filename)
+            if symbol == "titan_timer_abi" then
+                return function() return driver.TITAN_VER end
+            elseif symbol == "titan_timer_types" then
+                return function() return "Module('titan.other',{})" end
+            end
+            error("unexpected metadata symbol " .. symbol)
+        end
+
+        local ok, message = driver.defaultloader({})("titan.timer")
+        assert.falsy(ok)
+        assert.match("returned type metadata for 'titan.other'", message,
+            1, true)
+        assert.match("while loading module 'titan.timer'", message, 1, true)
+        assert.is_false(exact_probed)
+    end)
+
+    it("treats a candidate open failure as a terminal error", function()
+        write_file(binary .. "/titan.so", "broken shallow image\n")
+        write_file(binary .. "/titan/timer.so", "valid exact claim\n")
+        local symbols = {}
+        titan._loadlib = function(filename, symbol)
+            assert.equal(binary .. "/titan.so", filename)
+            table.insert(symbols, symbol)
+            return nil, "broken image", "open"
+        end
+
+        local ok, message = driver.defaultloader({})("titan.timer")
+        assert.falsy(ok)
+        assert.match("cannot inspect compiled module 'titan.timer'", message,
+            1, true)
+        assert.match("broken image", message, 1, true)
+        assert.same({ "titan_timer_abi" }, symbols)
+    end)
+
+    it("uses the first valid claim without probing a duplicate", function()
+        assert(lfs.mkdir(binary .. "/dup"))
+        write_file(binary .. "/dup.so", "shallow claim\n")
+        write_file(binary .. "/dup/item.so", "duplicate exact claim\n")
+        local symbols = {}
+        titan._loadlib = function(filename, symbol)
+            assert.equal(binary .. "/dup.so", filename)
+            table.insert(symbols, symbol)
+            if symbol == "dup_item_abi" then
+                return function() return driver.TITAN_VER end
+            elseif symbol == "dup_item_types" then
+                return function() return "Module('dup.item',{})" end
+            end
+            error("unexpected metadata symbol " .. symbol)
+        end
+
+        local ok, modtype, errors = driver.defaultloader({})("dup.item")
+        assert.truthy(ok)
+        assert.equal(0, #errors)
+        assert.equal("dup.so", modtype.file)
+        assert.equal(binary .. "/dup.so",
+            driver.imported["dup.item"].filename)
+        assert.same({ "dup_item_abi", "dup_item_types" }, symbols)
+    end)
+
+    it("caches two logical interfaces from one physical container separately",
+       function()
+        write_file(binary .. "/bundle.so", "two logical interfaces\n")
+        local functions = {
+            bundle_left_abi = function() return driver.TITAN_VER end,
+            bundle_left_types = function()
+                return "Module('bundle.left',{})"
+            end,
+            bundle_right_abi = function() return driver.TITAN_VER end,
+            bundle_right_types = function()
+                return "Module('bundle.right',{})"
+            end,
+        }
+        local symbols = {}
+        titan._loadlib = function(filename, symbol)
+            assert.equal(binary .. "/bundle.so", filename)
+            table.insert(symbols, symbol)
+            return assert(functions[symbol], "unexpected metadata symbol")
+        end
+
+        local loader = driver.defaultloader({})
+        local left_ok, left, left_errors = loader("bundle.left")
+        local right_ok, right, right_errors = loader("bundle.right")
+        assert.truthy(left_ok)
+        assert.truthy(right_ok)
+        assert.equal(0, #left_errors)
+        assert.equal(0, #right_errors)
+        assert.not_equal(left, right)
+        assert.not_equal(driver.imported["bundle.left"],
+            driver.imported["bundle.right"])
+        assert.equal("bundle.so", left.file)
+        assert.equal("bundle.so", right.file)
+        assert.equal(binary .. "/bundle.so",
+            driver.imported["bundle.left"].filename)
+        assert.equal(binary .. "/bundle.so",
+            driver.imported["bundle.right"].filename)
+        assert.same({
+            "bundle_left_abi", "bundle_left_types",
+            "bundle_right_abi", "bundle_right_types",
+        }, symbols)
+        local call_count = #symbols
+        local cached_ok, cached_left, cached_errors = loader("bundle.left")
+        assert.truthy(cached_ok)
+        assert.equal(left, cached_left)
+        assert.equal(0, #cached_errors)
+        assert.equal(call_count, #symbols)
+    end)
+
+    it("falls back to source after clean ancestor nonclaims", function()
+        write_file(binary .. "/titan.so", "unrelated extension\n")
+        write_file(source .. "/titan/fallback.titan", [[
+            function marker(): integer return 17 end
+        ]])
+        titan._loadlib = function(_, symbol)
+            return nil, "undefined symbol: " .. symbol, "init"
+        end
+
+        local ok, modtype, errors = driver.defaultloader({})("titan.fallback")
+        assert.truthy(ok)
+        assert.equal("titan.fallback", modtype.name)
+        assert.equal(0, #errors)
+        assert.is_table(driver.imported["titan.fallback"].ast)
     end)
 
     it("assembles a folder module in deterministic source order", function()
@@ -772,18 +1194,17 @@ end
 
     it("reports a missing ABI entry from the internal loader", function()
         write_file(binary .. "/extension.so", "mock image\n")
-        local calls = 0
+        local symbols = {}
         titan._loadlib = function(filename, symbol)
-            calls = calls + 1
             assert.equal(binary .. "/extension.so", filename)
-            assert.equal("extension_abi", symbol)
-            return nil, "undefined symbol: extension_abi", "init"
+            table.insert(symbols, symbol)
+            return nil, "undefined symbol: " .. symbol, "init"
         end
 
         local ok, message = driver.defaultloader({})("extension")
         assert.falsy(ok)
         assert.match("has no compatible Titan ABI marker", message)
-        assert.equal(1, calls)
+        assert.same({ "extension_abi", "extension_types" }, symbols)
     end)
 
     it("records a cached table-loader import as a dependency", function()

@@ -231,6 +231,47 @@ local function module_initializer_name(tlcontext)
     return tlcontext.prefix .. TITAN_ENTRY_TAG .. "_module_initializer"
 end
 
+-- Return the externally visible C symbols this source module will define.
+-- Library-mode preflight uses the coder's own naming helpers so collisions are
+-- rejected before code generation instead of being discovered by the linker.
+-- File-local Lua wrappers, lambdas, module initializers, and local declarations
+-- deliberately do not participate.
+function coder.external_symbols(modname, ast)
+    local mangled = mangle_qn(modname)
+    local symbols = {
+        { symbol = mangled .. "_abi", owner = "module ABI entry" },
+        { symbol = mangled .. "_types", owner = "module type entry" },
+        { symbol = mangled .. "_init", owner = "module initializer entry" },
+        { symbol = "luaopen_" .. mangled, owner = "module Lua entry" },
+    }
+
+    local function add(symbol, owner)
+        symbols[#symbols + 1] = { symbol = symbol, owner = owner }
+    end
+
+    for _, node in ipairs(ast) do
+        if not node._ignore and not node.islocal then
+            if node._tag == "Ast.TopLevelFunc" then
+                add(func_name(modname, node.name),
+                    "function '" .. modname .. "." .. node.name .. "'")
+            elseif node._tag == "Ast.TopLevelStatic" then
+                add(static_name(node._type),
+                    "record function '" .. node._type.fqtn .. "." ..
+                        node._type.name .. "'")
+            elseif node._tag == "Ast.TopLevelMethod" then
+                local owner = "method '" .. node._type.fqtn .. ":" ..
+                    node._type.name .. "'"
+                add(method_name(node._type), owner)
+                add(bound_method_name(node._type), owner .. " bound entry")
+                add(bound_method_luaname(node._type),
+                    owner .. " bound Lua entry")
+            end
+        end
+    end
+
+    return symbols
+end
+
 -- Record the mapping from a native function's mangled C symbol to its qualified
 -- Titan source name, for the trace name table emitted in _init (deliverable 2).
 -- The runtime (errorhandler) looks each native frame's DWARF symbol up here and
@@ -8522,13 +8563,16 @@ local function import_module(loadmods, initmods, sigs, mprefixes,
     local mprefix = mangle_qn(modname) .. "_"
     mprefixes[modname] = mprefix
     if dynamic then
-        local file = modname:gsub("[.]", "/") .. ".so"
+        -- The checker may have rehydrated this logical module from an ancestor
+        -- container. Its transient file field records that physical provider;
+        -- logical symbol names remain derived from modname below.
+        local file = node._type.file
         table.insert(loadmods, render([[
-            void *$HANDLE = loadlib(L, "$FILE");
-            titan_check_abi(L, $HANDLE, "$ABI", "$FILE");
+            void *$HANDLE = loadlib(L, $FILE);
+            titan_check_abi(L, $HANDLE, "$ABI", $FILE);
         ]], {
             HANDLE = mprefix .. "handle",
-            FILE = file,
+            FILE = c_string_literal(file),
             ABI = mprefix .. "abi",
         }))
         table.insert(initmods, render([[

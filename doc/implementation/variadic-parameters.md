@@ -554,7 +554,7 @@ flexible-array object (`lu_byte n_args; T args[]`) to a descriptor
 the struct layout did not; mixing 0.9 and 0.10 modules would misread the bytes
 after `n_args`, so they must live under different `TITAN_PATH` directories.
 
-The current ABI is **0.15**, newer than this variadic change. Flexible outputs
+The current ABI is **0.16**, newer than this variadic change. Flexible outputs
 reuse these descriptors but add `flexrettype` to serialized callable shapes and
 `_flexout`/`_flexwant` to native signatures. They shipped as ABI 0.14 rather
 than accepting both layouts under one marker.
