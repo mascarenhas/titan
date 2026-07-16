@@ -309,6 +309,57 @@ describe("flexible returns through finally", function()
         ]])
     end)
 
+    it("roots generic open results before an allocating finally", function()
+        run_coder([[
+            function survive(f: () -> (...: value),
+                             force: () -> ()): (...: value)
+                do
+                    return f()
+                finally
+                    force()
+                end
+            end
+        ]], [[
+            collectgarbage("generational")
+            local seen = setmetatable({}, { __mode = "k" })
+            local function produce()
+                local first = { label = "first" }
+                local second = { label = "second" }
+                local closure = function() return "third" end
+                seen[first] = "first"
+                seen[second] = "second"
+                seen[closure] = "closure"
+                return first, second, closure
+            end
+            local function force()
+                local function grow(n)
+                    if n == 0 then
+                        collectgarbage("collect")
+                        return
+                    end
+                    return grow(n - 1)
+                end
+                grow(80)
+
+                -- `seen` owns only weak keys. At this point the producer's
+                -- locals are gone and the outer Lua receiver does not exist;
+                -- the pending generic result run must be the sole strong root.
+                local alive = {}
+                for object, label in pairs(seen) do
+                    alive[label] = object
+                end
+                assert(alive.first and alive.second and alive.closure)
+            end
+
+            local got = table.pack(test.survive(produce, force))
+            assert(got.n == 3)
+            assert(got[1].label == "first" and seen[got[1] ] == "first")
+            assert(got[2].label == "second" and seen[got[2] ] == "second")
+            assert(type(got[3]) == "function" and got[3]() == "third")
+            assert(seen[got[3] ] == "closure")
+        ]])
+    end)
+
     it("lets a raising finally replace populated flexible returns from body and catch", function()
         run_coder([[
             record R

@@ -311,7 +311,6 @@ of these are declared anywhere; this table is the inventory.
 | `_discard_results`, `_voidok` | expressions/calls | checker | checker, coder | evaluate under zero-result demand; calls may legally expose no result |
 | `_npassed_args`, `_open_args` | `ExpCall` | checker | coder | statically passed argument count and a final dynamic run feeding an input-vararg tail |
 | `_contextual_value_call`, `_contextual_function_type` | `ExpCall` | checker | coder, specs | the callee began as `value` and was checked against a function shape synthesized from argument/result demand |
-| `_generic_callable_boundary`, `_maximum_finite_vm_results` | `ExpCall` | checker | coder, specs | the call retains a generic Lua-VM branch and, when finite, the largest result request admitted under Lua 5.5's 250-result limit |
 | `_implicit_coercion` | `ExpCast` synthesized by `trycoerce` | checker | coder | distinguishes a demanded sink conversion from a user-written `as`; finite flexible-return lowering may suppress only the sink conversion after its result budget is exhausted |
 | `_decl` | `VarName`, `VarDot` | checker | checker, coder | what the name resolved to: an `Ast.Decl` (local/param/`self`), a top-level AST node, a `Type.ModuleMember`/`Type.ModuleVariable`, a `Type.Field`, or a `Type.StaticMethod` |
 | `_used` | `Decl`, top-level nodes (via `_decl`) | checker, on every read: `ExpVar`, `VarDot` receivers, call callees | coder | "this variable is read somewhere"; unused locals get no C variable — their initializer is evaluated and cast to `(void)` |

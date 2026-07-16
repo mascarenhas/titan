@@ -734,11 +734,14 @@ through an exactly tagged Titan closure use the native convention and trust
 the checker. A non-exact function value, Lua closure/C function, or `__call`
 object deliberately crosses the Lua stack through Lua's internal call
 machinery; its arguments and finite or flexible results are converted against
-the contextual Titan function type. Most calls use `luaD_callnoyield`
-directly. The finite inherited-open case for a direct C closure/light C
-function uses `titan_call_cfunction_counted`, a source-matched wrapper around
-Lua 5.5.0's C-call setup that preserves the raw C return count without hidden
-state while `luaD_poscall` still performs the requested finite adjustment.
+the contextual Titan function type. Finite calls use a concrete result request;
+every statically open generic producer uses
+`luaD_callnoyield(..., LUA_MULTRET)` and keeps the complete run rooted on the
+Lua stack. On normal return, the outer Titan caller then measures, trims,
+validates, and copies it. A compatible-but-non-exact Titan closure first enters
+its own Lua wrapper under that open request, so the wrapper can reject an
+oversized flexible descriptor before control returns to the outer trimming
+step.
 See [flexible-return internals](flexible-returns.md) for the exact/generic
 result-demand split.
 

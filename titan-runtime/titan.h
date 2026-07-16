@@ -293,8 +293,6 @@ LUAI_FUNC void titan_check_abi(lua_State *L, void *lib, const char *sym,
                                const char *file);
 LUAI_FUNC void titan_invalidate_backtrace_state(lua_State *L);
 LUAI_FUNC void titan_init_paths(lua_State *L);
-LUAI_FUNC int titan_call_cfunction_counted(lua_State *L, StkId func,
-                                           int nresults);
 
 TValue lua_totvalue(lua_State *L, int idx);
 void lua_pushtvalue(lua_State *L, TValue v);

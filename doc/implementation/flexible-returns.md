@@ -403,9 +403,10 @@ remaining budget through its scalar prefix and final run. A finite budget is
 decremented by each scalar written into the tail; after it reaches zero,
 remaining expressions execute under discard demand. An exact nested flexible
 call receives that remainder, or `LUA_MULTRET` only when the inherited budget
-is open. A generic nested flexible call preserves the raw result count before
-copying only the permitted remainder, so absent results are not confused with
-Lua's finite nil padding.
+is open. A generic nested flexible call always uses `LUA_MULTRET`, preserves
+the raw result count on the Lua stack, and copies only the permitted remainder.
+The inherited `_flexwant` is a Titan copy budget; it is not encoded as the Lua
+call's requested result count.
 
 The checker marks every coercion it synthesizes. For an explicit tail scalar,
 return lowering evaluates and stabilizes the source carrier unconditionally,
@@ -415,11 +416,13 @@ guard. This preserves effects and lexical order without letting a discarded
 remains part of source evaluation, so its failure is still observable even
 when the caller does not retain that result.
 
-The 200-element cap applies to every materialized output descriptor. A finite
-consumer requesting more than 200 flexible positions is rejected by the
-checker; a runtime requested count over 200 is rejected by a Lua wrapper. An
-open producer that actually exceeds 200 raises. A smaller finite inherited
-budget truncates without spuriously applying the open overflow rule.
+The 200-element cap applies to every typed output descriptor that Titan
+materializes. A finite consumer requesting more than 200 flexible positions is
+rejected by the checker; a runtime requested count over 200 is rejected by a
+Lua wrapper. When a Titan boundary materializes an effectively open descriptor,
+more than 200 actual tail values raise. A smaller finite inherited copy budget
+materializes only the requested prefix and ignores surplus raw Lua results
+without spuriously applying the open overflow rule.
 
 ## Exact and generic calls
 
@@ -477,35 +480,24 @@ prefix, capped at 200 for an effectively open consumer.
 
 A trailing generic flexible call inside a flexible return is still a
 statically open producer even when the outer native caller supplied a finite
-`_flexwant`. For a direct C closure or light C function, generated code uses
-`titan_call_cfunction_counted` with the finite fixed-plus-tail request. The
-Lua-5.5.0-source-matched helper reserves the complete result area, performs
-the same non-yieldable C-call setup and `luaD_poscall` adjustment as Lua, and
-returns the raw C result count before finite padding/truncation destroys it.
-It uses no global, registry, closure-upvalue, or sentinel protocol. A Lua
-closure or `__call` object cannot expose that pre-adjustment count, so it is
-called with `LUA_MULTRET` and trimmed locally. Both forms copy at most the
-remaining finite budget and discard the rest; only an inherited open budget
-applies the 200-value overflow error.
+`_flexwant`. Generated code calls every such producer with `LUA_MULTRET`,
+regardless of whether the runtime callable is a Titan closure, Lua closure, Lua
+C function, or `__call` object. The Lua stack owns and roots the complete result
+run. Titan measures its raw count after `luaD_callnoyield`, copies at most the
+remaining finite budget, and applies the 200-value overflow error only when the
+enclosing sink is effectively open.
+
+No finite `_flexwant` is smuggled through `CallInfo` at a generic boundary. A
+compatible-but-non-exact Titan closure therefore enters its Lua wrapper with
+`LUA_MULTRET`; the wrapper treats its own native call as open and enforces its
+own 200-value descriptor bound before returning.
 
 Lua 5.5's finite result count is encoded in `CallInfo.callstatus` and is
-bounded by `MAXRESULTS` (250). That creates a second, independent bound at a
-generic function-value boundary. The checker annotates such calls and rejects
-either:
-
-* an ordinary finite visible request above 250; or
-* a flexible-return forwarding site where
-  `max(callee_fixed, remaining_outer_fixed + remaining_inherited_flex_budget)`
-  can exceed 250.
-
-The inherited budget begins at `TITAN_VARARG_MAX` and is reduced by explicit
-tail scalars already evaluated before the final producer. Direct/static Titan
-calls are exempt because they use typed native out-parameters and a flexible
-descriptor, not a finite VM request. Ordinary unconditionally open sinks are
-also exempt because their statically flexible producer uses `LUA_MULTRET`.
-`codevaluecall` asserts the checker annotation before emitting its finite
-`luaD_callnoyield`/counted-helper path, and the counted helper retains a
-defensive generated `MAXRESULTS` check.
+bounded by `MAXRESULTS` (250). That creates a second, independent bound only
+for an ordinary finite generic function-value call. The checker rejects a
+finite visible request above 250. Direct/static Titan calls are exempt because
+they use typed native out-parameters, and statically open generic producers are
+exempt because they use `LUA_MULTRET` rather than the finite VM field.
 
 The generic branch keeps the installed Titan error handler active and stores
 stack positions as offsets across `luaD_callnoyield`, because the call can

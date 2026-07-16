@@ -564,49 +564,23 @@ describe("flexible return expression-list demand (typechecker)", function()
         assert.match("Lua 5%.5 supports at most 250", errs[1])
     end)
 
-    it("bounds an inherited finite budget only at generic call boundaries",
+    it("does not apply the finite VM limit to an open generic call",
     function()
         local function shape(n)
-            local types_out, values = {}, {}
+            local types_out = {}
             for i = 1, n do
-                types_out[i], values[i] = "integer", "1"
+                types_out[i] = "integer"
             end
-            return table.concat(types_out, ", "),
-                table.concat(values, ", ")
+            return table.concat(types_out, ", ")
         end
 
-        local fixed50, values50 = shape(50)
-        local ok, err, tree = run_checker([[
-            function relay(f: () -> (]] .. fixed50
-                .. [[, ...: integer)): (]] .. fixed50 .. [[, ...: integer)
-                return f()
-            end
-        ]])
-        assert.truthy(ok, err)
-        local call = find_function(tree, "relay").block.stats[1].exps[1]
-        assert.truthy(call._generic_callable_boundary)
-        assert.same(250, call._maximum_finite_vm_results)
-
-        local fixed51, values51 = shape(51)
-        ok, err = run_checker([[
-            function producer(): (]] .. fixed51 .. [[, ...: integer)
-                return ]] .. values51 .. [[
-            end
-
-            function direct(): (]] .. fixed51 .. [[, ...: integer)
-                return producer()
-            end
-        ]])
-        assert.truthy(ok, err)
-
-        local errs = h.check_errs([[
+        local fixed51 = shape(51)
+        local ok, err = run_checker([[
             function relay(f: () -> (]] .. fixed51
                 .. [[, ...: integer)): (]] .. fixed51 .. [[, ...: integer)
                 return f()
             end
         ]])
-        assert.same(1, #errs)
-        assert.match("function%-value call can require 251 finite VM results",
-            errs[1])
+        assert.truthy(ok, err)
     end)
 end)

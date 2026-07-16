@@ -237,15 +237,18 @@ path. This distinction does not change the result-list rules above: the
 derived static type still determines which results are visible.
 
 Lua 5.5 can encode at most 250 results in a finite VM call request. Titan
-therefore rejects a call through a function value when its finite visible
-result demand can exceed 250. This limit is separate from the 200-element
-flexible-tail limit: for example, forwarding the full possible tail of a
-function value with 51 fixed results would require 251 finite VM results and
-is rejected. A statically named direct Titan call uses the native ABI and is
-not subject to this VM boundary. An unconditionally open array or argument
-sink uses Lua's open-result mode and is likewise unaffected; the restriction
-also accounts for the possible finite budget inherited when one flexible
-Titan function forwards a generic flexible producer.
+therefore rejects a generic callable call when its finite visible result demand
+can exceed 250. This limit is separate from the 200-element flexible-tail
+limit: for example, a finite projection of 51 fixed results plus 200 flexible
+positions would require 251 VM results and is rejected. A statically named
+direct Titan call uses the native ABI and is not subject to this VM boundary.
+A function-value site remains subject even when its run-time callee happens to
+take Titan's exact native fast path, because the site must also be encodable for
+the generic fallback. A generic call whose static result type has a flexible
+tail and is expanded into an open return, array, or argument sink uses Lua's
+open-result mode and is likewise unaffected. An open sink consuming a
+fixed-only static callable still makes a finite request for that callable's
+declared results and remains subject to the 250-result VM boundary.
 
 ## Surplus arguments and results
 
@@ -373,16 +376,29 @@ sink. See [The type system](types.md#function-types) and
 
 ## The 200-value bound
 
-A flexible tail contains at most 200 values. An open call that actually tries
-to produce more raises a run-time error instead of silently truncating the
-run. A statically known finite context that requests more than 200 projected
-tail positions is rejected at compile time; a dynamic Lua caller making the
-same finite request receives the corresponding run-time error.
+A flexible tail contains at most 200 values. When a Titan boundary materializes
+an open flexible tail, more than 200 actual tail values raise a run-time error
+instead of being silently truncated. A statically known finite context that
+requests more than 200 projected tail positions is rejected at compile time; a
+dynamic Lua caller making the same finite request receives the corresponding
+run-time error.
 
 A smaller finite consumer is not an open overflow: it receives only the
 positions it requested and ignores the rest. The bound is shared with
 variadic input runs and keeps these homogeneous runs small. Code that needs an
 unbounded collection should return an explicit array `{T}` instead.
+
+A statically open generic flexible forwarding call crosses the Lua boundary in
+open-result mode, even when a later outer consumer will retain only a finite
+prefix. Titan measures the raw results and that outer consumer copies only its
+requested prefix, so discarded surplus Lua results do not by themselves
+trigger the 200-value bound. If the run-time target is a
+compatible-but-non-exact Titan closure, however, that closure first enters
+through its own Lua wrapper with an open request. The wrapper materializes and
+caps its own open flexible tail before the later finite outer consumer can trim
+the run. No inherited finite flexible-result budget is passed through that
+statically open generic Lua-call boundary; ordinary statically finite generic
+calls still request their concrete result count.
 
 Flexible returns cross the [Lua boundary](lua-interop.md) as ordinary Lua
 multiple results. Lua's requested result count determines whether it receives

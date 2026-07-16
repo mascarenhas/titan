@@ -172,7 +172,7 @@ describe("flexible return code generation", function()
         ]])
     end)
 
-    it("honors Lua's 250-result generic boundary and exact-call exemption", function()
+    it("uses Lua's finite 250-result boundary only for finite generic calls", function()
         local function typelist(n)
             local out = {}
             for i = 1, n do out[i] = "integer?" end
@@ -190,15 +190,14 @@ describe("flexible return code generation", function()
                 return ]] .. table.concat(nils51, ", ") .. [[
             end
 
-            function relay(f: () -> (]] .. fixed50
-                .. [[, ...: integer?)): (]] .. fixed50 .. [[, ...: integer?)
+            function finite250(f: () -> (]] .. fixed50
+                .. [[, ...: integer?)): (]] .. finite250 .. [[)
                 return f()
             end
 
-            function finite250(): (]] .. finite250 .. [[)
-                local v: value = actual
-                local f: () -> (]] .. fixed50 .. [[, ...: integer?) = v
-                return relay(f)
+            function open251(f: () -> (]] .. fixed51
+                .. [[, ...: integer?)): (]] .. fixed51 .. [[, ...: integer?)
+                return f()
             end
 
             function direct251(): (]] .. finite251 .. [[)
@@ -207,19 +206,26 @@ describe("flexible return code generation", function()
         ]]
 
         local csrc = generate(source)
-        assert.match("int _vc_nresults = 50 %+ _vc_request;", csrc)
-        assert.match("titan_call_cfunction_counted%(L,%s+restorestack%(L, _vc_func%), _vc_nresults%)", csrc)
+        assert.match("luaD_callnoyield%(L, restorestack%(L, _vc_func%), 250%);",
+            csrc)
+        assert.match("luaD_callnoyield%(L, restorestack%(L, _vc_func%), LUA_MULTRET%);%s+if %(L%->ci%->top%.p < L%->top%.p%) L%->ci%->top%.p = L%->top%.p;",
+            csrc)
 
-        -- `finite250` drives relay's generic C-closure branch with a finite
-        -- inherited request of 50 fixed plus 200 flexible results.  The
-        -- compatible-but-non-exact `actual` closure reaches the counted helper
-        -- at exactly MAXRESULTS.  The direct native call remains legal with a
-        -- 251-slot fixed sink because it does not encode a finite VM request.
+        -- The ordinary function-value call uses the largest encodable finite
+        -- request. The direct native call remains legal with a 251-slot fixed
+        -- sink because it does not encode a finite VM request.
         run_coder(source, [[
-            local ok, first = pcall(test.finite250)
+            local ok, first = pcall(test.finite250, function() end)
             assert(ok and first == nil)
             ok, first = pcall(test.direct251)
             assert(ok and first == nil)
+
+            local values = {}
+            for i = 1, 251 do values[i] = i end
+            local got = table.pack(test.open251(function()
+                return table.unpack(values, 1, 251)
+            end))
+            assert(got.n == 251 and got[1] == 1 and got[251] == 251)
         ]])
     end)
 
@@ -497,7 +503,7 @@ describe("flexible return code generation", function()
         ]])
     end)
 
-    it("unwinds a failing counted light-C call before the next call", function()
+    it("unwinds a failing open light-C call before the next call", function()
         run_coder([[
             function forward(f: () -> (...: value)): (...: value)
                 do
@@ -510,6 +516,33 @@ describe("flexible return code generation", function()
             assert(test.forward(error) == "caught")
             assert(test.forward(function() return "after" end) == "after")
             assert(test.forward(error) == "caught")
+        ]])
+    end)
+
+    it("recovers after open result conversion and cap failures", function()
+        run_coder([[
+            function recover(f: () -> (...: integer)): (...: integer)
+                do
+                    return f()
+                catch
+                    return 77
+                end
+            end
+        ]], [[
+            assert(test.recover(function() return nil end) == 77)
+            local a, b = test.recover(function() return 4, 5 end)
+            assert(a == 4 and b == 5)
+
+            local values = {}
+            for i = 1, 201 do values[i] = i end
+            local function many()
+                return table.unpack(values, 1, 201)
+            end
+            local caught = table.pack(test.recover(many))
+            assert(caught.n == 1 and caught[1] == 77)
+
+            a, b = test.recover(function() return 8, 9 end)
+            assert(a == 8 and b == 9)
         ]])
     end)
 
@@ -585,7 +618,7 @@ describe("flexible return code generation", function()
         ]])
     end)
 
-    it("truncates a non-exact Titan producer before the open boundary cap", function()
+    it("keeps exact finite truncation separate from generic open forwarding", function()
         -- Keep each written expression list within Titan's independent
         -- 100-element parser limit while avoiding the 200-deep native recursion
         -- that collides with Lua's C-call guard in this boundary test.
@@ -595,6 +628,22 @@ describe("flexible return code generation", function()
             typedef struct lua_State lua_State;
 
             static int flex_request_anchor(void) { return 0; }
+
+            int flex_return_zero(lua_State *L) {
+                (void)L;
+                return 0;
+            }
+
+            int flex_return_nil(lua_State *L) {
+                lua_pushnil(L);
+                return 1;
+            }
+
+            int flex_return_201(lua_State *L) {
+                luaL_checkstack(L, 201, "flex_return_201");
+                for (int i = 1; i <= 201; i++) lua_pushinteger(L, i);
+                return 201;
+            }
 
             static int flex_request_results(lua_State *L) {
                 int nresults = (int)lua_tointeger(L, 2);
@@ -668,6 +717,10 @@ describe("flexible return code generation", function()
                 local f: (boolean) -> (...: integer) = boxed
                 return f(present)
             end
+
+            function c_forward(f: () -> (...: value)): (...: value)
+                return f()
+            end
         ]], [[
             local exact_ok, exact_count = pcall(function()
                 return select("#", test.exact200())
@@ -686,21 +739,39 @@ describe("flexible return code generation", function()
             local finite_nonexact_ok, finite_nonexact_err = pcall(function()
                 a, b = test.nonexact()
             end)
-            assert(finite_nonexact_ok,
-                "finite nonexact: " .. tostring(finite_nonexact_err))
-            assert(a == 1 and b == 1)
-            assert(test.finite() == 2)
+            assert(not finite_nonexact_ok)
+            assert(tostring(finite_nonexact_err):find(
+                "too many flexible return values", 1, true),
+                tostring(finite_nonexact_err))
+            assert(not pcall(test.finite))
             assert(test.request_anchor() == 0)
             local request_results = assert(package.loadlib(
                 "./test.so", "luaopen_flex_request"))()
-            assert(request_results(test.nonexact, 200))
             local request_ok, request_err = pcall(
+                request_results, test.nonexact, 200)
+            assert(not request_ok)
+            assert(tostring(request_err):find(
+                "too many flexible return values", 1, true),
+                tostring(request_err))
+            request_ok, request_err = pcall(
                 request_results, test.nonexact, 201)
             assert(not request_ok)
             assert(tostring(request_err):find(
                 "too many flexible results requested from Titan function nonexact (201, max 200)",
                 1, true), tostring(request_err))
             assert(not pcall(function() return test.nonexact() end))
+
+            local c_zero = assert(package.loadlib(
+                "./test.so", "flex_return_zero"))
+            local c_nil = assert(package.loadlib(
+                "./test.so", "flex_return_nil"))
+            local c_many = assert(package.loadlib(
+                "./test.so", "flex_return_201"))
+            assert(select("#", test.c_forward(c_zero)) == 0)
+            assert(select("#", test.c_forward(c_nil)) == 1)
+            local c_first, c_second = test.c_forward(c_many)
+            assert(c_first == 1 and c_second == 2)
+            assert(not pcall(function() return test.c_forward(c_many) end))
 
             local absent = test.typed_maybe_nil(false)
             assert(absent == nil)

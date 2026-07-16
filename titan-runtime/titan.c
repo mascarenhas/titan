@@ -6,83 +6,12 @@
 #include "lua.h"
 #include "lauxlib.h"
 #include "lapi.h"
-#include "ldebug.h"
 #include "ldo.h"
 #include "lfunc.h"
 #include "lobject.h"
 #include "llimits.h"
 #include "lstate.h"
 #include "titan.h"
-
-/*
-** Call a direct C closure/light C function with a finite Lua result request,
-** while retaining the callee's raw return count before Lua truncates or
-** nil-pads it. This is a source-matched extraction of Lua 5.5.0's `ccall` +
-** `precallC`; keep it in lockstep with lua-5.5.0/src/ldo.c.
-**
-** Titan needs this narrow primitive for compatible-but-not-exact function
-** values under an inherited finite flexible-result budget. Ordinary Lua
-** closures, __call dispatch, and genuinely open calls continue through
-** luaD_callnoyield. No count is stored in global/registry/closure state.
-*/
-int titan_call_cfunction_counted(lua_State *L, StkId func, int nresults) {
-    unsigned status = cast_uint(nresults + 1);
-    CallInfo *caller = L->ci;
-    lua_CFunction f;
-    CallInfo *ci;
-    int reserve;
-    int n;
-
-    lua_assert(nresults >= 0);
-    lua_assert(status <= MAXRESULTS + 1);
-    lua_assert(ttisCclosure(s2v(func)) || ttislcf(s2v(func)));
-    f = ttisCclosure(s2v(func))
-        ? clCvalue(s2v(func))->f
-        : fvalue(s2v(func));
-
-    /* `ccall`: make the call non-yieldable and enforce Lua's C-stack limit. */
-    L->nCcalls += nyci;
-    if (l_unlikely(getCcalls(L) >= LUAI_MAXCCALLS)) {
-        checkstackp(L, 0, func);
-        luaE_checkcstack(L);
-    }
-
-    /* `lua_callk` requires the caller to reserve its finite result area before
-    ** entering `luaD_call`. This internal helper owns that obligation: a C
-    ** function may return fewer values than requested, and `luaD_poscall`
-    ** must still have room to nil-pad through `func + nresults`. Preserve the
-    ** ordinary LUA_MINSTACK guarantee for the callee at the same time. */
-    reserve = nresults - cast_int(L->top.p - func);
-    if (reserve < LUA_MINSTACK) reserve = LUA_MINSTACK;
-    checkstackp(L, reserve, func);
-    if (caller->top.p < func + nresults)
-        caller->top.p = func + nresults;
-
-    /* `precallC`: install the direct C function's CallInfo. */
-    ci = L->ci = (L->ci->next != NULL)
-        ? L->ci->next : luaE_extendCI(L);
-    ci->func.p = func;
-    ci->callstatus = status | CIST_C;
-    ci->top.p = L->top.p + LUA_MINSTACK;
-    lua_assert(ci->top.p <= L->stack_last.p);
-
-    /* Match `precallC`'s call-hook transfer before entering user C code. */
-    if (l_unlikely(L->hookmask & LUA_MASKCALL)) {
-        int narg = cast_int(L->top.p - func) - 1;
-        luaD_hook(L, LUA_HOOKCALL, -1, 1, narg);
-    }
-
-    lua_unlock(L);
-    n = (*f)(L);
-    lua_lock(L);
-    api_checknelems(L, n);
-
-    /* `precallC`/`ccall`: move the finite results, unwind the CallInfo and C
-    ** depth, but return the raw count captured before `luaD_poscall`. */
-    luaD_poscall(L, ci, n);
-    L->nCcalls -= nyci;
-    return n;
-}
 
 static void titan_bt_addframe_lstring(luaL_Buffer *buf, int *wrote_any,
                                       const char *text, size_t len) {

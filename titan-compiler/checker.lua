@@ -706,9 +706,9 @@ local INFER_OPEN = {}
 local TITAN_VARARG_MAX = 200
 -- Lua 5.5 stores a finite VM result request in the current CallInfo's
 -- CIST_NRESULTS field.  `MAXRESULTS` is therefore an independent boundary from
--- Titan's 200-element flexible descriptor: a generic function-value call may
--- not ask the VM for more fixed-plus-flexible results than this.  Exact native
--- calls do not cross that boundary.
+-- Titan's 200-element flexible descriptor: a finite generic function-value
+-- call may not ask the VM for more results than this. Statically open generic
+-- calls use LUA_MULTRET and do not cross the finite-result encoding boundary.
 local LUA_VM_MAX_RESULTS = 250
 
 local function result_demand(fixed, tail, opts)
@@ -729,11 +729,6 @@ local function result_demand(fixed, tail, opts)
         dots_nilfill = opts.dots_nilfill,
         defer_open_check = opts.defer_open_check,
         suppress_flex_cap = opts.suppress_flex_cap,
-        -- Maximum inherited finite flexible budget at this point in a return
-        -- expression list.  This is set only for a flexible function's return;
-        -- ordinary open arrays/argument lists always use LUA_MULTRET and do not
-        -- have Lua's finite-result encoding limit.
-        inherited_flex_budget = opts.inherited_flex_budget,
     }
 end
 
@@ -791,15 +786,10 @@ local function coerce_demanded_value(exp, target, term, errors)
     return exp
 end
 
-local function remaining_demand(demand, first, consumed_tail)
+local function remaining_demand(demand, first)
     local fixed = {}
     for i = first, #demand.fixed do
         table.insert(fixed, demand.fixed[i])
-    end
-    local inherited_flex_budget = demand.inherited_flex_budget
-    if inherited_flex_budget then
-        inherited_flex_budget = math.max(
-            inherited_flex_budget - (consumed_tail or 0), 0)
     end
     return result_demand(fixed, demand.tail, {
         missing = demand.missing,
@@ -817,7 +807,6 @@ local function remaining_demand(demand, first, consumed_tail)
         dots_nilfill = demand.dots_nilfill,
         defer_open_check = demand.defer_open_check,
         suppress_flex_cap = demand.suppress_flex_cap,
-        inherited_flex_budget = inherited_flex_budget,
     })
 end
 
@@ -988,8 +977,7 @@ local function adjust_explist(exps, demand, st, errors)
         end
     elseif last then
         local target = current_target()
-        local subdemand = remaining_demand(demand, next_fixed,
-            #adjusted.tail_scalars)
+        local subdemand = remaining_demand(demand, next_fixed)
         if not target and not demand.tail then
             mark_discarded(last)
         end
@@ -1396,8 +1384,7 @@ local function make_forin_call(loc, iter_decl, args, ftype, nresults, cfunc,
     })
     annotate_call_results(call, ftype, demand, errors)
     if not cfunc then
-        check_generic_result_limit(call, ftype, demand, errors,
-            report_result_limit)
+        check_generic_result_limit(call, errors, report_result_limit)
     end
     call._arg_adjustment = {
         exps = args,
@@ -1987,13 +1974,6 @@ checkstat = util.make_visitor({
                 explicit_surplus = "discard",
                 return_arity = true,
                 open_coerce = true,
-                -- A flexible native entry can be invoked by Lua with any
-                -- finite tail request through Titan's 200-value limit.  A
-                -- trailing function-value producer must therefore be safe for
-                -- that entire inherited range, not only for the statically
-                -- open form of this return statement.
-                inherited_flex_budget = ftype.flexrettype
-                    and TITAN_VARARG_MAX or nil,
                 slot_term = function() return "return" end,
             }), st, errors)
         node.exps = adjusted.exps
@@ -2228,29 +2208,14 @@ local function uses_generic_callable_boundary(node)
         or decl._tag == "Type.StaticMethod"))
 end
 
-check_generic_result_limit = function(node, ftype, demand, errors,
-                                      report_error)
+check_generic_result_limit = function(node, errors, report_error)
     if not uses_generic_callable_boundary(node) then return end
-    node._generic_callable_boundary = true
+    -- Every statically open generic producer uses LUA_MULTRET. Its actual count
+    -- is measured from the restored stack top and adjusted by Titan afterward,
+    -- so only genuinely finite calls use CallInfo's bounded result field.
+    if node._open_results then return end
 
-    local requested
-    if node._open_results then
-        if demand.inherited_flex_budget then
-            -- Under a flexible return, the statically open call can receive a
-            -- finite budget from the outer Lua caller.  If the callee has more
-            -- fixed results than that consumer needs, those fixed slots still
-            -- belong to its VM call; otherwise the request is the remaining
-            -- fixed prefix plus the inherited flexible budget.
-            requested = math.max(#ftype.rettypes,
-                #demand.fixed + demand.inherited_flex_budget)
-        end
-        -- Arrays, argument runs, and other unconditionally open consumers use
-        -- LUA_MULTRET and do not encode a finite count in CallInfo.
-    else
-        requested = #(node._visible_types or {})
-    end
-
-    node._maximum_finite_vm_results = requested or false
+    local requested = #(node._visible_types or {})
     if requested and requested > LUA_VM_MAX_RESULTS
        and report_error ~= false then
         checker.typeerror(errors, node.loc,
@@ -3328,7 +3293,7 @@ checkexp = util.make_visitor({
                 end
             end
             annotate_call_results(node, ftype, demand, errors)
-            check_generic_result_limit(node, ftype, demand, errors)
+            check_generic_result_limit(node, errors)
             if node._type._tag == "Type.Void" and not node._voidok
                and not demand.tail then
                 node._type = invalid(errors, node.loc,

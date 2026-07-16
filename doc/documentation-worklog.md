@@ -495,9 +495,9 @@ multiple results remain available without weakening an already typed callable.
 * **Native and Lua call paths.** Flexible native entries receive caller-owned
   typed output backing plus a finite/open budget. Exact module, static, method,
   bound-method, lambda, and exactly tagged first-class calls retain the native
-  path. Non-exact Titan values and Lua callables use the generic stack path,
-  including the narrow counted direct-C helper needed to preserve an actual
-  result count across finite Lua adjustment without global or registry state.
+  path. Non-exact Titan values and Lua callables use the generic stack path;
+  statically open producers uniformly request `LUA_MULTRET`, preserve their raw
+  count on the Lua stack, and are trimmed or checked by the Titan sink.
 * **Lifetime and interface work.** Flexible result backing is paired with
   traced roots for GC-bearing elements, including pending returns that cross
   allocating or nested `finally` blocks. Callable serialization, compiled

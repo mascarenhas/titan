@@ -327,36 +327,32 @@ The **generic path** is used for everything else: non-exact Titan
 function values, Lua closures, Lua C functions, and `__call` objects.
 It pushes the boxed callee followed by the already-evaluated arguments
 onto the Lua stack with `setslot`. Ordinary finite calls use
-`luaD_callnoyield(L, restorestack(L, _vc_func), nresults)`. An open flexible
-consumer uses `LUA_MULTRET`, measures the raw result count, nil-fills any
-missing fixed prefix, converts the tail into the same typed descriptor used by
-the exact path, and caps the retained run at `TITAN_VARARG_MAX` (or at an
-inherited finite remainder).
+`luaD_callnoyield(L, restorestack(L, _vc_func), nresults)`. A generic producer
+that is statically open at the call site uses `LUA_MULTRET`, measures the raw
+result count, nil-fills any missing fixed prefix, converts the tail into the
+same typed descriptor used by the exact path, and caps the retained run at
+`TITAN_VARARG_MAX` (or copies only an inherited finite remainder). An open sink
+over a fixed-only static callable remains an ordinary finite call.
 
 Lua 5.5 encodes a finite VM result request in `CallInfo` with a maximum of
 250. The checker rejects generic function-value sites whose finite visible
-request, or whose possible inherited fixed-plus-flexible return budget, can
-exceed that count. This is independent of Titan's 200-element descriptor cap;
-direct native calls and unconditional `LUA_MULTRET` sinks do not use the
-finite VM field.
+request exceeds that count. This is independent of Titan's 200-element
+descriptor cap; direct native calls and statically open generic producers do
+not use the finite VM field.
 
-One narrow case needs both a finite VM request and the callee's raw C return
-count: a statically flexible, direct C closure/light C function feeding an
-open sink whose inherited `_flexwant` is finite. The runtime helper
-`titan_call_cfunction_counted` is a Lua-5.5.0-source-matched extraction of
-`ccall`/`precallC`. It reserves both the callee's `LUA_MINSTACK` area and the
-caller's complete finite result area, performs the direct non-yieldable C
-call, lets `luaD_poscall` truncate or nil-pad normally, and returns the raw
-`n` reported by the C function. It stores no count in global, registry, or
-closure state. Lua closures and `__call` values remain opaque and use
-`LUA_MULTRET` when their actual open count is required. After either form the
-generic branch reads results with `checkandget` and resets `L->top.p` to
-discard the call frame and result slots. This is also where non-callable
-values fail cleanly at runtime.
+Every statically open generic producer uses `LUA_MULTRET`, including when an
+enclosing flexible native entry has a finite `_flexwant`. The returned values
+remain rooted on the Lua stack while the generic branch measures the raw count,
+nil-pads a missing fixed prefix, converts the retained tail, and applies the
+enclosing finite/open Titan budget. It then resets `L->top.p` to discard the
+call frame and result slots. This is also where non-callable values fail
+cleanly at runtime.
 The parameter and result checks still use the Titan function type at the
 call site; if the callee is a Titan function with a different compatible
 type, its Lua entry wrapper performs the callee-side coercions before
-entering the native body.
+entering the native body. That wrapper itself received an open Lua request, so
+it owns and enforces its 200-value open-tail bound before any enclosing finite
+Titan copy budget can discard surplus results.
 
 Because the generic branch can grow and relocate the Lua stack,
 `codevaluecall` marks the enclosing function as `uses_base_off`, saves

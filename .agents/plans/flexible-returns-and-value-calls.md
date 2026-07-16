@@ -1,18 +1,16 @@
 # Flexible returns and contextual `value` calls — implementation plan
 
-Status: implemented and locally verified (2026-07-15)
+Status: implemented and locally verified (2026-07-16)
 
 Primary feature brief: `/home/mascarenhas/.codex/attachments/57647ba4-d653-4f73-9b92-f2f076248975/pasted-text-1.txt`
 
 Implementation note: source-matched Lua 5.5 lowering exposed a second bound
 independent of the 200-element Titan descriptor limit: finite generic
 function-value requests are encoded in `CallInfo.callstatus` and may contain at
-most `MAXRESULTS = 250` results. The implementation therefore checks that
-boundary only where a generic finite VM request can occur. For a non-exact C
-closure under an inherited finite flexible budget, generated code uses
-`titan_call_cfunction_counted` to preserve the raw C result count before Lua's
-finite padding/truncation; opaque Lua closures and `__call` values still use
-`LUA_MULTRET` and are trimmed locally. Direct native Titan calls are exempt.
+most `MAXRESULTS = 250` results. The implementation checks that boundary only
+for genuinely finite generic calls. Every statically open generic producer uses
+`LUA_MULTRET`, preserves its raw count on the Lua stack, and is trimmed or
+checked by the Titan sink afterward. Direct native Titan calls are exempt.
 
 ## 1. Outcome and scope
 
@@ -521,19 +519,17 @@ remaining tail budget through `codereturn`:
   under discard demand but produce no stored tail values.
 - An exact nested flexible producer receives the computed finite remainder;
   it receives `LUA_MULTRET` only when the inherited budget is open.
-- For a generic nested flexible producer, preserve the actual returned count
-  before deciding its descriptor count. Lua’s finite result adjustment erases
-  the difference between an absent result and an explicit trailing nil, so the
-  existing `LUA_MULTRET` permission for a trailing flexible return may be
-  required to recover that raw count. Even then, copy only the finite remaining
-  budget and discard the rest; apply the 200-value overflow error only when the
-  inherited budget itself is open. If lowering gains a way to recover raw
-  count under a finite VM request, use the finite request instead.
+- A generic nested flexible producer always receives `LUA_MULTRET`, even when
+  the enclosing native entry has a finite `_flexwant`. Preserve its raw stack
+  count, copy only the finite remaining budget, and apply the 200-value
+  overflow check only when that enclosing budget is open.
 
-This runtime refinement prevents `local x = outer()` from spuriously
-materializing/overflowing an open 200-value run when `outer(): (...: T)` merely
-forwards a much wider `inner()` result, while preserving actual absence for
-the output descriptor.
+No inherited finite `_flexwant` crosses a statically open generic Lua-call
+boundary. (An ordinary statically finite generic call still passes its concrete
+result count to Lua.) In particular, a compatible-but-non-exact Titan closure
+in a statically open call enters through its Lua wrapper with an open result
+request; that wrapper applies its own open flexible-result bound before
+returning to the outer caller.
 
 ### 4.3 Exact native calls
 
@@ -568,7 +564,9 @@ static type:
   count. Lua then truncates surplus results and pads absent results with nil.
 - Use `LUA_MULTRET` only when the demand is open *and* the statically visible
   callee type has a flexible result tail: a variadic call-argument tail,
-  flexible return tail, or expanding array tail consuming that producer.
+  flexible return tail, or expanding array tail consuming that producer. An
+  enclosing native `_flexwant` limits the later copy; it does not turn this
+  generic Lua call into a finite request.
 - An open sink consuming a fixed-only static function type requests exactly
   that type’s remaining fixed result count. A wider compatible runtime closure
   may not expose hidden extra results.
@@ -784,8 +782,10 @@ leaking results hidden by a narrower static type.
    body/catch returns surviving allocating nested finally blocks, a finally
    raise overriding the pending return, and errors during result conversion.
 4. Add boundary tests for zero, 200, and 201 open tail values; finite demand
-   over a larger producer must truncate safely, while a finite demand of 201
-   is rejected statically (or at a Lua entry when known only at runtime).
+   over a larger exact or ordinary Lua producer must truncate safely, while a
+   finite demand of 201 is rejected statically (or at a Lua entry when known
+   only at runtime). A non-exact Titan closure entered through its open Lua
+   wrapper enforces that wrapper's own open cap before outer truncation.
 5. Run an adversarial generated-C review focused on unrooted intervals,
    barriers, descriptor lifetime, stack-top restoration, and error unwinding.
 
@@ -915,9 +915,10 @@ they become large enough to justify a separate topical suite.
   non-option fixed slot.
 - Zero, 200, and 201 actual open values; finite truncation of a producer with
   more than 200 possible values; and finite requested counts of 200/201.
-- A flexible `outer()` forwarding a 201-result `inner()`: a small inherited
-  finite demand truncates without overflow, while an inherited open demand
-  reports the limit cleanly.
+- A flexible `outer()` forwarding a 201-result Lua producer: a small inherited
+  finite copy budget truncates after the `LUA_MULTRET` call, while an inherited
+  open budget reports the limit cleanly. A non-exact Titan closure crosses its
+  own open Lua wrapper and therefore enforces that wrapper's open bound first.
 
 ### Contextual `value` calls
 
@@ -1045,8 +1046,8 @@ The feature is complete when all of the following are true:
 - Flexible native results reuse caller-owned `TitanVargX` storage, enforce the
   200-value descriptor/demand bound, and keep all collectable values rooted
   across calls, errors, and `finally`.
-- Finite generic function-value requests respect Lua 5.5's independent
-  250-result VM bound, while direct native Titan calls remain exempt.
+- Ordinary finite generic function-value requests respect Lua 5.5's independent
+  250-result VM bound; open generic and direct native Titan calls remain exempt.
 - Compiled-module ABI 0.14 round-trips the new callable metadata and rejects
   older modules cleanly.
 - Checker/coder/runtime/GC/ABI suites pass, the full test suite passes, and both

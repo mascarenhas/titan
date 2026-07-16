@@ -4,9 +4,10 @@ local util  = require "titan-compiler.util"
 local coder = {}
 
 -- Lua 5.5's CallInfo encodes finite result requests only through MAXRESULTS.
--- The checker rejects wider generic function-value calls; keep the same value
--- here as an internal assertion so hand-built or stale ASTs cannot emit an
--- invalid luaD_callnoyield request.
+-- The checker rejects wider finite generic function-value calls; keep the same
+-- value here as an internal assertion so hand-built or stale ASTs cannot emit
+-- an invalid finite luaD_callnoyield request. Statically open generic calls use
+-- LUA_MULTRET.
 local LUA_VM_MAX_RESULTS = 250
 
 local codeexp, codestat, codeforeignexp, codelambda, codelambdadec, codemethodref
@@ -3051,11 +3052,11 @@ end
 -- bounded 200-element backing.  Open GC-bearing runs also reserve a parallel,
 -- traced Lua-stack range.  The native descriptor is never itself a root.
 --
--- `_coder_open_want` is installed transiently by an open sink.  It is either
--- `LUA_MULTRET` or a C expression for an inherited finite remainder. Opaque
--- generic Lua closures and `__call` values use LUA_MULTRET to preserve the raw
--- count; a direct C closure/light C function under a finite inherited budget
--- uses the counted runtime helper. Both copy at most this budget into the run.
+-- `_coder_open_want` is installed transiently by an open sink. It is either
+-- `LUA_MULTRET` or a C expression for an inherited finite copy budget. Exact
+-- native calls receive that budget directly. Generic calls in this statically
+-- open mode always use LUA_MULTRET, recover the raw count from the Lua stack,
+-- and copy at most this budget into the run.
 function coder._flex_call_buffer(ctx, node, ftype, stats, callargs)
     if not ftype.flexrettype then return nil end
     local demand = node._coder_open_want or node._flex_result_demand or 0
@@ -3370,10 +3371,6 @@ local function codevaluecall(ctx, node)
         assert(nresults <= LUA_VM_MAX_RESULTS,
             "checker admitted an oversized finite generic result request")
     end
-    if node._maximum_finite_vm_results then
-        assert(node._maximum_finite_vm_results <= LUA_VM_MAX_RESULTS,
-            "checker admitted an oversized inherited generic result request")
-    end
     local stats = {}
 
     -- 1. evaluate the callee into an anchored TValue
@@ -3684,39 +3681,15 @@ local function codevaluecall(ctx, node)
     local npushfixed = 1 + pushfixed
         + (inputrun and 0 or #vargexps) + nresults
     if flexrun and flexrun.isopen then
-        -- A direct C function exposes its raw `return n` through Titan's
-        -- counted noyield helper, so a finite inherited budget can reach a
-        -- non-exact Titan wrapper without losing absence-vs-nil information.
-        -- Lua closures and __call objects remain opaque: call them with
-        -- LUA_MULTRET and trim here. In particular, if opaque Lua code itself
-        -- invokes an open Titan producer, no hidden budget crosses that Lua
-        -- boundary and the producer's ordinary open-run cap still applies.
-        slowcall = render([[
-            int _vc_request = $WANT;
-            int _vc_raw;
-            if (_vc_request != LUA_MULTRET
-                && (ttisCclosure(s2v(restorestack(L, _vc_func)))
-                    || ttislcf(s2v(restorestack(L, _vc_func))))) {
-                int _vc_nresults = $NFIXED + _vc_request;
-                if (TITAN_UNLIKELY(_vc_nresults > MAXRESULTS)) {
-                    luaL_error(L,
-                        "%s:%d:%d: finite generic result request is %d, maximum is %d",
-                        $FILE, $LINE, $COL, _vc_nresults, (int)MAXRESULTS);
-                }
-                _vc_raw = titan_call_cfunction_counted(L,
-                    restorestack(L, _vc_func), _vc_nresults);
-            } else {
-                luaD_callnoyield(L, restorestack(L, _vc_func), LUA_MULTRET);
-                if (L->ci->top.p < L->top.p) L->ci->top.p = L->top.p;
-                _vc_raw = (int)(L->top.p - restorestack(L, _vc_func));
-            }
-        ]], {
-            WANT = flexrun.call_demand,
-            NFIXED = c_integer_literal(abi_nresults),
-            FILE = c_string_literal(node.loc.filename),
-            LINE = c_integer_literal(node.loc.line),
-            COL = c_integer_literal(node.loc.col),
-        })
+        -- A statically open generic producer always uses LUA_MULTRET. Its
+        -- results remain rooted on the Lua stack while Titan measures the raw
+        -- count, applies the static fixed/flexible shape, and copies only the
+        -- enclosing sink's finite/open budget into typed backing.
+        slowcall = [[
+            luaD_callnoyield(L, restorestack(L, _vc_func), LUA_MULTRET);
+            if (L->ci->top.p < L->top.p) L->ci->top.p = L->top.p;
+            int _vc_raw = (int)(L->top.p - restorestack(L, _vc_func));
+        ]]
         slowpre = render([[
             while (L->top.p < restorestack(L, _vc_func) + $NVISIBLE) {
                 setnilvalue(s2v(L->top.p));
