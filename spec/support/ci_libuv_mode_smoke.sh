@@ -72,8 +72,6 @@ check_canonical_container() {
     done
     test ! -e "$PREFIX/lib/lua/5.5/titan.so"
     test ! -e "$PREFIX/lib/lua/5.5/titan.so.dSYM"
-    test ! -e "$PREFIX/lib/lua/5.5/coro.so"
-    test ! -e "$PREFIX/lib/lua/5.5/coro.so.dSYM"
 }
 
 inspect_dependencies() {

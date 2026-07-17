@@ -1,6 +1,8 @@
 local assert = require "luassert"
 local lfs = require "lfs"
-local installer = require "titan-compiler.stdlib_installer"
+local INSTALLER_SCRIPT =
+    lfs.currentdir() .. "/scripts/stdlib_installer.lua"
+local installer = assert(loadfile(INSTALLER_SCRIPT))()
 
 local function make_directory(path)
     if lfs.symlinkattributes(path, "mode") == "directory" then return end
@@ -83,8 +85,6 @@ local function assert_no_active_compatibility_copies(root)
     for _, path in ipairs({
         lua_cdir .. "/titan.so",
         lua_cdir .. "/titan.so.dSYM",
-        lua_cdir .. "/coro.so",
-        lua_cdir .. "/coro.so.dSYM",
     }) do
         assert.is_nil(lfs.symlinkattributes(path), path)
     end
@@ -197,10 +197,10 @@ describe("recoverable standard-library publication", function()
     local function inject_script()
         local script = workspace .. "/inject.lua"
         write_file(script, [[
-package.path = ... .. "/?.lua;" .. ... .. "/?/init.lua;" .. package.path
-local installer = require "titan-compiler.stdlib_installer"
+local installer_script, stage, root = ...
+local installer = assert(loadfile(installer_script))()
 local ok, err = installer.publish({
-    stage = select(2, ...), root = select(3, ...), platform = "Darwin",
+    stage = stage, root = root, platform = "Darwin",
     image_validator = function() return true end,
 })
 if ok then os.exit(2) end
@@ -217,7 +217,6 @@ os.exit(1)
         local script = inject_script()
         local lua = os.getenv("PREFIX") and
             (os.getenv("PREFIX") .. "/bin/lua") or "lua"
-        local repo = lfs.currentdir()
         for _, position in ipairs({ "before", "after" }) do
             for _, label in ipairs(COMMIT_LABELS) do
                 remove_tree(root)
@@ -225,7 +224,7 @@ os.exit(1)
                 local failpoint = position .. ":" .. label
                 local command = string.format(
                     "TITAN_INSTALL_FAIL_AT=%q %q %q %q %q %q",
-                    failpoint, lua, script, repo, stage, root)
+                    failpoint, lua, script, INSTALLER_SCRIPT, stage, root)
                 local succeeded, why, code = os.execute(command)
                 assert.falsy(succeeded, failpoint)
                 assert.equal("exit", why, failpoint)

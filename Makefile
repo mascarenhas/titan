@@ -168,13 +168,6 @@ TITAN_SDK_ROOT_HEADERS := titan-runtime/minicoro.h titan-runtime/titan.h \
 	titan-runtime/titan_longjmp.h
 TITAN_SDK_NAMESPACED_HEADERS := titan-runtime/titan/ffi.h \
 	titan-runtime/titan/coro.h titan-runtime/titan/uv.h
-COROUTINE_SO := coroutine.so
-UV_SO        := uv.so
-ASYNC_SO     := async.so
-TIMER_SO     := timer.so
-FS_SO        := fs.so
-NET_SO       := net.so
-OS_SO        := os.so
 UV_TITAN_SOURCES := \
 	titan/uv/uv.titan \
 	titan/uv/file.titan \
@@ -219,9 +212,9 @@ TITANC    ?= $(TITAN_LUA) -E -e 'package.path="./?.lua;./?/init.lua;" .. package
 TITAN_COMPILER_LUA := $(wildcard titan-compiler/*.lua c-parser/*.lua)
 
 # Standard modules have one installed pathname. PREFIX owns Lua; ROCKS_TREE
-# owns these Titan artifacts when it is supplied. Today's supported setup
-# makes them the same directory, while this fallback keeps
-# `make install-stdlib PREFIX=...` useful on its own.
+# owns these Titan artifacts when it is supplied. The source-tree
+# install-stdlib target can publish to PREFIX when ROCKS_TREE is omitted;
+# it is not part of an installed Titan tree.
 TITAN_INSTALL_TREE         := $(if $(strip $(ROCKS_TREE)),$(ROCKS_TREE),$(PREFIX))
 TITAN_ABI_VERSION          := 0.16
 TITAN_STDLIB_ABI_DIR       ?= $(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_ABI_VERSION)
@@ -999,9 +992,9 @@ $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES) titanc \
 	fi; \
 	if test "$$stale" = 1; then \
 	  rm -f "$@"; \
-	  rm -f $(STDLIB_SOS) $(STDLIB_QUALIFIED_SOS) coro.so; \
+	  rm -f $(STDLIB_SOS) $(STDLIB_QUALIFIED_SOS); \
 	  rm -rf $(addsuffix .dSYM,$(STDLIB_SOS)) \
-		$(addsuffix .dSYM,$(STDLIB_QUALIFIED_SOS)) coro.so.dSYM; \
+		$(addsuffix .dSYM,$(STDLIB_QUALIFIED_SOS)); \
 	  unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
 	  CC=$(call make_shell_quote,$(CC)) \
 	    TITAN_PATH_0_16=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
@@ -1022,11 +1015,11 @@ $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES) titanc \
 	  fi; \
 	  tmp="$@.tmp"; : > "$$tmp"; mv -f "$$tmp" "$@"; \
 	fi; \
-	rm -f $(STDLIB_SOS) $(STDLIB_QUALIFIED_SOS) coro.so; \
+	rm -f $(STDLIB_SOS) $(STDLIB_QUALIFIED_SOS); \
 	rm -rf $(addsuffix .dSYM,$(STDLIB_SOS)) \
-		$(addsuffix .dSYM,$(STDLIB_QUALIFIED_SOS)) coro.so.dSYM
+		$(addsuffix .dSYM,$(STDLIB_QUALIFIED_SOS))
 
-install-stdlib: stdlib ## Transactionally install the combined standard library
+install-stdlib: stdlib scripts/stdlib_installer.lua ## Install the combined standard library from this source tree
 	@set -e; \
 	mkdir -p "$(TITAN_INSTALL_TREE)" "$(TITAN_SHARE_DIR)/LICENSES"; \
 	install -m 0644 THIRD_PARTY_NOTICES.md \
@@ -1035,9 +1028,8 @@ install-stdlib: stdlib ## Transactionally install the combined standard library
 	  "$(TITAN_SHARE_DIR)/LICENSES/libuv-LICENSE"; \
 	root=$$(CDPATH= cd "$(TITAN_INSTALL_TREE)" && pwd -P); \
 	stage=$(call make_shell_quote,$(CURDIR)); \
-	TITAN_STDLIB_STAGE="$$stage" TITAN_STDLIB_ROOT="$$root" \
-	  "$(TITAN_LUA)" -E -e \
-	  'local stage = assert(os.getenv("TITAN_STDLIB_STAGE")); local root = assert(os.getenv("TITAN_STDLIB_ROOT")); package.path = stage .. "/?.lua;" .. stage .. "/?/init.lua;" .. package.path; package.cpath = stage .. "/?.so;" .. package.cpath; local publish = require("titan-compiler.stdlib_installer").publish; local ok, err = publish({ stage = stage, root = root }); if not ok then error(err, 0) end'
+	"$(TITAN_LUA)" -E "$(CURDIR)/scripts/stdlib_installer.lua" \
+	  "$$stage" "$$root"
 
 # Convert the private bundled archive to an absolute stage-safe link input.
 # System mode has no LIBUV_LIB and retains pkg-config's ordered output verbatim.
@@ -1048,7 +1040,7 @@ STDLIB_STAGED_UV_LDFLAGS = $(if $(strip $(LIBUV_LIB)),$(subst $(LIBUV_LIB),$(abs
 # destination filesystem. The Lua publisher validates the complete protocol,
 # commits seven shims (and the one macOS dSYM), and renames titan.so last; any
 # earlier failure restores the prior full image or first-install bootstrap.
-rock-post-install:
+rock-post-install: scripts/stdlib_installer.lua
 	@test -n "$(strip $(ROCKS_TREE))" || { \
 	  echo "ERROR: rock-post-install requires ROCKS_TREE" >&2; exit 1; \
 	}
@@ -1076,9 +1068,8 @@ rock-post-install:
 	    $(call make_shell_quote,$(ROCK_TITANC)) --tree \
 	      $(call make_shell_quote,$(CURDIR)) $(STDLIB_ROOTS) \
 	      -X $(call make_shell_quote,$(abspath $(TITANLIB_O))) ); \
-	TITAN_STDLIB_STAGE="$$stage" TITAN_STDLIB_ROOT="$$rocks_tree" \
-	  "$(ROCK_LUA)" -E -e \
-	  'local stage = assert(os.getenv("TITAN_STDLIB_STAGE")); local root = assert(os.getenv("TITAN_STDLIB_ROOT")); package.path = root .. "/share/lua/5.5/?.lua;" .. root .. "/share/lua/5.5/?/init.lua;" .. package.path; package.cpath = root .. "/lib/titan/0.16/?.so;" .. root .. "/lib/lua/5.5/?.so;" .. package.cpath; local publish = require("titan-compiler.stdlib_installer").publish; local ok, err = publish({ stage = stage, root = root }); if not ok then error(err, 0) end'; \
+	"$(ROCK_LUA)" -E "$(CURDIR)/scripts/stdlib_installer.lua" \
+	  "$$stage" "$$rocks_tree"; \
 	trap - EXIT HUP INT TERM; \
 	rm -rf "$$stage"
 

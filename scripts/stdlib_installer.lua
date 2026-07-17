@@ -1,3 +1,23 @@
+local cli_stage, cli_root = ...
+local script_path = arg and arg[0] or ""
+local source_root =
+    script_path:match("^(.*)/scripts/stdlib_installer%.lua$")
+if script_path == "scripts/stdlib_installer.lua" then source_root = "." end
+local direct = source_root ~= nil
+if direct then
+    if select("#", ...) ~= 2 or type(cli_stage) ~= "string" or
+            type(cli_root) ~= "string" then
+        io.stderr:write(
+            "usage: lua scripts/stdlib_installer.lua STAGE ROOT\n")
+        os.exit(2)
+    end
+    package.path = source_root .. "/?.lua;" ..
+        source_root .. "/?/init.lua;" .. package.path
+    package.cpath = cli_stage .. "/?.so;" ..
+        cli_root .. "/lib/titan/0.16/?.so;" ..
+        cli_root .. "/lib/lua/5.5/?.so;" .. package.cpath
+end
+
 local lfs = require "lfs"
 local types = require "titan-compiler.types"
 
@@ -310,8 +330,6 @@ function installer.publish(options)
     end
     stale[#stale + 1] = join(lua_cdir, "titan.so")
     stale[#stale + 1] = join(lua_cdir, "titan.so.dSYM")
-    stale[#stale + 1] = join(lua_cdir, "coro.so")
-    stale[#stale + 1] = join(lua_cdir, "coro.so.dSYM")
     for index, path in ipairs(stale) do
         add_entry(entries, seen, path, nil, nil, "stale-" .. index)
     end
@@ -392,5 +410,14 @@ end
 installer.MODULES = MODULES
 installer.BANNER = BANNER
 installer.validate_image = validate_image
+
+if direct then
+    local ok, err =
+        installer.publish({ stage = cli_stage, root = cli_root })
+    if not ok then
+        io.stderr:write(tostring(err), "\n")
+        os.exit(1)
+    end
+end
 
 return installer

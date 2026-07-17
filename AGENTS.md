@@ -145,12 +145,13 @@ not add epicycles around what may be a misunderstood simpler design.
 
   The hook builds in a private destination-filesystem stage, validates eight
   `luaopen_*` entries, seven ABI/types pairs, seven generated shims, and the
-  macOS dSYM, then uses `titan-compiler.stdlib_installer` for recoverable
-  publication. It backs up the current active-0.16 DSO/dSYM/shims and stale
-  active-layout copies, commits shims and dSYM, and renames the DSO last; a
-  failure restores the previous full image or first-install bootstrap. The
-  canonical artifacts are `$ROCKS_TREE/lib/titan/0.16/titan.so`, its macOS
-  dSYM, and generated
+  macOS dSYM, then runs the source-only `scripts/stdlib_installer.lua`
+  directly with the installed Lua for recoverable publication. The script is
+  not part of the installed compiler modules. It backs up the current
+  active-0.16 DSO/dSYM/shims and stale active-layout copies, commits shims and
+  dSYM, and renames the DSO last; a failure restores the previous full image
+  or first-install bootstrap. The canonical artifacts are
+  `$ROCKS_TREE/lib/titan/0.16/titan.so`, its macOS dSYM, and generated
   `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,fs,net,os}.lua`.
   No symbolic links, hard links, child DSOs, or `lib/lua` compatibility copies
   are used, and a separately versioned 0.15 tree is not purged. These direct

@@ -291,13 +291,10 @@ describe("standalone-prefix source installation", function()
             assert_file(PREFIX .. "/include/uv/version.h")
         end
 
-        assert.falsy(lfs.symlinkattributes(LUA_LIBDIR .. "/coro.so"))
-        assert.falsy(lfs.symlinkattributes(LUA_LIBDIR .. "/coro.so.dSYM"))
-
         local manifest = read_file(PREFIX ..
             "/lib/luarocks/rocks-5.5/titan/dev-1/rock_manifest")
         assert.falsy(manifest:find("titan.so", 1, true), manifest)
-        assert.truthy(manifest:find("stdlib_installer.lua", 1, true), manifest)
+        assert.falsy(manifest:find("stdlib_installer.lua", 1, true), manifest)
         for _, module in ipairs(STDLIB_MODULES) do
             assert.falsy(manifest:find(module .. ".so", 1, true), manifest)
             assert.falsy(manifest:find(
@@ -332,7 +329,6 @@ describe("standalone-prefix source installation", function()
             end
             for _, path in ipairs({
                 workspace .. "/lib/lua/5.5/titan.so",
-                workspace .. "/lib/lua/5.5/coro.so",
             }) do
                 make_directory(assert(path:match("^(.+)/[^/]+$")))
                 write_file(path, "obsolete layout\n")
@@ -365,8 +361,6 @@ describe("standalone-prefix source installation", function()
             end
             assert_absent(workspace .. "/lib/lua/5.5/titan.so")
             assert_absent(workspace .. "/lib/lua/5.5/titan.so.dSYM")
-            assert_absent(workspace .. "/lib/lua/5.5/coro.so")
-            assert_absent(workspace .. "/lib/lua/5.5/coro.so.dSYM")
             assert.equal("preserved 0.15 image\n", read_file(preserved))
             assert.equal("directory",
                 lfs.symlinkattributes(preserved .. ".dSYM", "mode"))

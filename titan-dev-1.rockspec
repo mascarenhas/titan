@@ -85,7 +85,6 @@ build = {
       ["titan-compiler.syntax_errors"] = "titan-compiler/syntax_errors.lua",
       ["titan-compiler.types"] = "titan-compiler/types.lua",
       ["titan-compiler.util"] = "titan-compiler/util.lua",
-      ["titan-compiler.stdlib_installer"] = "titan-compiler/stdlib_installer.lua",
       ["c-parser.typed"] = "c-parser/typed.lua",
       ["c-parser.c99"] = "c-parser/c99.lua",
       ["c-parser.cdriver"] = "c-parser/cdriver.lua",

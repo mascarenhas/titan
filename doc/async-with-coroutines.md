@@ -606,8 +606,8 @@ contains `<root>/lib/titan/0.16`; the parser desugars `import "coroutine"` to
 that qualified identity and prefix lookup claims it from `titan.so`.
 `require "titan.coroutine"` uses the shim to promote/map that provider and
 invoke the exact logical entry. Do not install a child DSO or alias/copy as
-`coro.so`, a parent-level `coroutine.so`, or a `lib/lua` DSO, and do not export
-`luaopen_coro` or `luaopen_coroutine`.
+a parent-level `coroutine.so` or a `lib/lua` DSO, and do not export a bare
+`luaopen_coroutine`.
 
 Titan code reaches this binary with `import "coroutine"`, while Lua code
 uses `require "titan.coroutine"`. The bare Lua name `coroutine` remains
@@ -630,7 +630,7 @@ the two TSan fiber fields likewise exist only in TSan builds. Ordinary builds
 carry none of that sanitizer-only storage. All translation units that share
 these public minicoro layouts use the same sanitizer flags.
 `mco_coro->user_data` is only a non-rooting raw back-pointer to that owner.
-Titan and Lua enter the one canonical `coroutine.so`; that DSO is the sole
+Titan and Lua enter the combined canonical `titan.so`; that DSO is the sole
 native owner, while each Lua state retains its own module-local runtime.
 
 Titan's vendored minicoro should not include the Binaryen

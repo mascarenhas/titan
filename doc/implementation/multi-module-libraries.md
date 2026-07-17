@@ -266,12 +266,14 @@ preserved, so a repeated build never replaces a full library with the smaller
 bootstrap. An incompatible existing image is an error and is not overwritten.
 
 After LuaRocks deploys `titanc`, the post-install hook builds all roots once in
-a private directory on the destination filesystem. The publisher validates
-the eight Lua entries, seven ABI/types pairs, seven shim banners/provider
-entries, and the macOS dSYM. It backs up the existing active-0.16 DSO, dSYM,
-shims, and stale active-layout copies, leaving those stale public paths vacant;
-commits the shims and platform dSYM; and renames `titan.so` last as the commit
-point. Injected failures restore the previous full image or the first-install
+a private directory on the destination filesystem. It then executes the
+source-only `scripts/stdlib_installer.lua` directly with the installed Lua;
+the publisher is not an installed compiler module. The script validates the
+eight Lua entries, seven ABI/types pairs, seven shim banners/provider entries,
+and the macOS dSYM. It backs up the existing active-0.16 DSO, dSYM, shims, and
+stale active-layout copies, leaving those stale public paths vacant; commits
+the shims and platform dSYM; and renames `titan.so` last as the commit point.
+Injected failures restore the previous full image or the first-install
 bootstrap and shim set. After that commit, backup cleanup is best effort and
 cannot turn the coherent install into a reported hook failure. Separately
 versioned 0.15 artifacts are not purged.
