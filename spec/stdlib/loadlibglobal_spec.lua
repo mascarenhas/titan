@@ -28,6 +28,14 @@ local function run(argv, cwd)
     return ok == true, output, why, code
 end
 
+local function canonical_directory(path)
+    local previous = lfs.currentdir()
+    assert.truthy(lfs.chdir(path))
+    local canonical = lfs.currentdir()
+    assert.truthy(lfs.chdir(previous))
+    return canonical
+end
+
 local function write_file(path, contents)
     local file = assert(io.open(path, "wb"))
     assert.truthy(file:write(contents))
@@ -239,6 +247,7 @@ int luaopen_present(lua_State *L) { lua_pushboolean(L, 1); return 1; }
 ]])
         local ok, output = compile_shared(workspace, "empty.c", "empty.so")
         assert.truthy(ok, output)
+        local canonical_empty = canonical_directory(workspace) .. "/empty.so"
 
         local script = string.format([[
 local titan = require "titan"
@@ -267,7 +276,7 @@ for path, handle in pairs(cache) do
     assert(type(handle) == "userdata")
 end
 assert(entries == 1)
-]], workspace .. "/empty.so", workspace .. "/empty.so")
+]], workspace .. "/empty.so", canonical_empty)
         ok, output = run_lua(workspace, script)
         assert.truthy(ok, output)
     end)
