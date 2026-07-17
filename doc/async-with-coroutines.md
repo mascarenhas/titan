@@ -596,25 +596,28 @@ coroutine transfer.
 
 ## Build and packaging
 
-Build `titan/coroutine.titan` as the ordinary qualified Titan module
-`titan.coroutine`. Its binary exports `titan_coroutine_init`,
+Build `titan/coroutine.titan` as the ordinary qualified logical Titan module
+`titan.coroutine`. The combined standard binary exports `titan_coroutine_init`,
 `titan_coroutine_abi`, `titan_coroutine_types`, and
-`luaopen_titan_coroutine`. Install the binary exactly once as
-`<root>/lib/titan/0.15/titan/coroutine.so`. Titan's configured Lua C-module path
-contains `<root>/lib/titan/0.15/?.so`; the parser desugars
-`import "coroutine"` to that qualified identity, and
-`require "titan.coroutine"` loads the same file. Do not install an alias or copy as
-`coro.so`, a parent-level `coroutine.so`, or a `lib/lua` DSO, and do not export
-`luaopen_coro` or `luaopen_coroutine`.
+`luaopen_titan_coroutine`. Install the one physical standard provider as
+`<root>/lib/titan/0.16/titan.so` and the generated logical shim as
+`<root>/share/lua/5.5/titan/coroutine.lua`. Titan's configured module path
+contains `<root>/lib/titan/0.16`; the parser desugars `import "coroutine"` to
+that qualified identity and prefix lookup claims it from `titan.so`.
+`require "titan.coroutine"` uses the shim to promote/map that provider and
+invoke the exact logical entry. Do not install a child DSO or alias/copy as
+a parent-level `coroutine.so` or a `lib/lua` DSO, and do not export a bare
+`luaopen_coroutine`.
 
 Titan code reaches this binary with `import "coroutine"`, while Lua code
 uses `require "titan.coroutine"`. The bare Lua name `coroutine` remains
 owned by Lua's standard library.
 
-The rockspec and Makefile make `luarocks make` and `make test` build the
-coroutine module and the shared runtime archive containing its helper C object
-and vendored minicoro implementation. Static archive selection extracts
-`titan_coro.o` only for a module that references it.
+The rockspec and Makefile make `luarocks make` and `make test` build all seven
+logical standard modules in one `titan.so` plus generated shims, together with
+the shared runtime archive containing the coroutine helper C object and
+vendored minicoro implementation. Static archive selection extracts
+`titan_coro.o` into that image because `titan.coroutine` references it.
 
 Avoid semantic mutable process-global state in runtime or generated code. The
 fixed Titan tag comparator is a compile-time constant, while current-coroutine
@@ -627,7 +630,7 @@ the two TSan fiber fields likewise exist only in TSan builds. Ordinary builds
 carry none of that sanitizer-only storage. All translation units that share
 these public minicoro layouts use the same sanitizer flags.
 `mco_coro->user_data` is only a non-rooting raw back-pointer to that owner.
-Titan and Lua enter the one canonical `coroutine.so`; that DSO is the sole
+Titan and Lua enter the combined canonical `titan.so`; that DSO is the sole
 native owner, while each Lua state retains its own module-local runtime.
 
 Titan's vendored minicoro should not include the Binaryen
@@ -686,12 +689,12 @@ Add Titan runtime/coder coverage for:
 * an installed Lua/Titan chain proving that a coroutine created through
   `require "titan.coroutine"` yields through canonical `timer`/`uv` code while
   nested, including the same chain under ASan so every main-stack switch pair
-  uses the shared runtime bookkeeping and each standard module resolves to its
-  one canonical DSO;
+  uses the shared runtime bookkeeping and each logical standard module resolves
+  its independent protocol inside the one canonical physical `titan.so`;
 * GC stress in incremental and generational modes, including old
   coroutine owner userdata rooting young Lua threads, callback closures,
   default tags, record/table payloads, and function-valued payloads;
-* `.so`-only import of `titan.coroutine` (via the short import) from another Titan module and use from a
+* compiled-provider import of `titan.coroutine` (via the short import) from another Titan module and use from a
   standalone executable.
 
 ## Feasibility evidence

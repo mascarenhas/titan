@@ -177,17 +177,20 @@ actual contributor filename and line.
 `driver.compile` already derives its `.c` and `.o` paths from the cached
 source filename, so storing the canonical main gives the required output:
 
-| Form for `foo.bar` | Cached filename | C/object | Library |
-| --- | --- | --- | --- |
-| flat | `foo/bar.titan` | `foo/bar.c`, `foo/bar.o` | `foo/bar.so` |
-| folder | `foo/bar/bar.titan` | `foo/bar/bar.c`, `foo/bar/bar.o` | `foo/bar.so` |
+| Form for `foo.bar` | Cached filename | C/object |
+| --- | --- | --- |
+| flat | `foo/bar.titan` | `foo/bar.c`, `foo/bar.o` |
+| folder | `foo/bar/bar.titan` | `foo/bar/bar.c`, `foo/bar/bar.o` |
 
 Only one compile call is made, so contributors produce no standalone C,
-object, or shared-library artifacts. `compile_library` continues to derive
-the DSO from logical `modname`. The library and program link paths ensure their
-logical output parent directories exist, so a dotted module under an external
-`--tree` does not depend on source-shaped directories already existing in the
-current working directory.
+object, shared-library, or Lua-shim artifacts. In library mode the logical
+module's object joins the invocation-wide source union. A single `foo.bar`
+root derives exact provider `foo/bar.so`; several compatible roots may derive a
+shallower common provider. Either way exactly one generated shim represents
+logical `foo.bar`. The provider and program link paths ensure their output
+parent directories exist, so a dotted module under an external `--tree` does
+not depend on source-shaped directories already existing in the working
+directory.
 
 Standalone entrypoint generation also remains logical-name based:
 `write_entrypoint("foo.bar")` writes `foo/bar__entrypoint.c` and embeds the
@@ -227,11 +230,15 @@ moves the remaining private records to their semantic contributors and moves
 the private `FS` constants instance beside `FsConstants` in `file.titan`.
 Private slot and initialization order change, but no serialized public member,
 importer-visible variable slot, canonical exported-function closure slot, or
-fixture does. It therefore remains ABI 0.15.
+fixture does. It therefore remained ABI 0.15 until the later provider-layout
+transition.
 
-Runtime imports still load one DSO for `M`, publish one `_mod` `Udata` in the
-registry, and invoke its initializer once per Lua state. No runtime component
-knows whether that DSO came from a flat or folder source representation.
+ABI 0.16 leaves this logical interface unchanged but permits `M`'s symbols to
+reside in a shared prefix container. Runtime imports load the selected
+`Type.Module.file`, publish one `_mod` `Udata` for `M` in the registry, and
+invoke only `M`'s initializer once per Lua state. No runtime component knows
+whether its object came from a flat or folder source representation, and the
+container does not gain a contributor protocol.
 
 ## `titan.uv` dogfooding
 
@@ -245,25 +252,32 @@ also owns the private `FS` constants instance. The main file exports no member
 and declares no record. The Makefile
 declares this set explicitly as `UV_TITAN_SOURCES`; it does not use a
 wildcard, so adding a production source changes the reviewed build graph.
-Every listed source is a prerequisite of the one `titan/uv.so` target. The
-compiler still runs as:
+Every listed source is a prerequisite of the one combined standard-library
+completion target. The production compiler invocation names all seven logical
+roots:
 
 ```sh
-titanc titan.uv
+titanc titan.coroutine titan.uv titan.async titan.timer titan.fs titan.net titan.os \
+  -X titan-runtime/titanlib.o
 ```
 
 Generated `titan/uv/uv.c` and `titan/uv/uv.o` are build artifacts and are
-removed by `make clean`. No contributor DSO is built, installed, or recorded
-in the rock manifest. Bundled mode still produces the sole complete
-statically linked libuv provider; system mode still produces the same one
-logical provider with the configured dynamic dependency. Higher
-`async`/`timer`/`fs`/`net`/`os` facades continue to import the canonical
-compiled `titan.uv` module without receiving libuv link inputs themselves.
+removed by `make clean`. No contributor DSO or contributor shim is built or
+installed. The one logical `titan.uv` object, its one generated `titan/uv.lua`
+shim, and the other six logical standard modules reside in physical
+`titan.so`. Bundled mode makes that image the sole complete statically linked
+libuv provider; system mode records the configured dynamic dependency on the
+same image. Higher `async`/`timer`/`fs`/`net`/`os` modules still import the
+independent logical `titan.uv` protocol, but their calls are direct because all
+seven source roots are linked together.
 
-The late-filesystem-callback test variant mirrors production layout: its
-support code copies the complete folder ensemble to an isolated workspace and
-patches the owning contributors by unique per-file anchors before compiling
-`titan.uv`. It does not reconstruct or concatenate a monolithic source.
+The late-filesystem-callback test variant reuses the production folder-source
+ensemble but deliberately not its provider layout. Its support code copies the
+complete ensemble to an isolated workspace, patches the owning contributors by
+unique per-file anchors, and compiles an exact `titan.uv` provider. Its private
+root intentionally has no shallow `titan.so`, so prefix lookup reaches
+`titan/uv.so`. It does not reconstruct or concatenate a monolithic source and
+is not a production layout.
 
 See [Driver and toolchain](driver.md) for the complete search/build flow,
 [Lexer and parser](lexer-parser.md) for locations and non-reentrancy,

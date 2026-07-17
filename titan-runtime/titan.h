@@ -71,9 +71,14 @@
    Older checkers cannot decode the serialized shape, and older callers cannot
    safely invoke the new native signature.
    0.14 -> 0.15: titan.uv moved its exported members into semantic folder
-   contributors, changing its ordered module-member slots. */
-#define TITAN_VER "0.15"
-#define TITAN_VER_SUFFIX "_0_15"
+   contributors, changing its ordered module-member slots.
+   0.15 -> 0.16: compiled-module lookup and generated imports can select a
+   shared physical DSO provider for several logical modules. The serialized
+   type schema and native call convention are unchanged, but 0.15-generated
+   imports hard-code exact logical-module DSOs that the 0.16 standard-library
+   layout no longer installs. */
+#define TITAN_VER "0.16"
+#define TITAN_VER_SUFFIX "_0_16"
 #define TITAN_PATH_VAR "TITAN_PATH"
 #define TITAN_PATH_SEP "/"
 #define TITAN_ROOT_DEFAULT "/usr/local"

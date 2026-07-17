@@ -1,62 +1,48 @@
 # Libuv continuation runtime
 
-The asynchronous standard library has one low-level owner:
+The asynchronous standard library has one low-level logical owner inside one
+physical standard provider:
 
 ```text
-titan/coroutine.so -> titan/uv.so
-                         |-> titan/async.so
-                         |-> titan/timer.so
-                         |-> titan/fs.so
-                         |-> titan/net.so
-                         `-> titan/os.so
+titan.so
+  |-- titan.coroutine --> titan.uv
+  |                         |--> titan.async
+  |                         |--> titan.timer
+  |                         |--> titan.fs
+  |                         |--> titan.net
+  |                         `--> titan.os
+  `-- luaopen_titan (native support)
 ```
 
-`titan/uv.so` extracts `titan_uv.o` from `libtitan.a` and links the selected libuv
-exactly once. Both checkout and installed driver modes link the runtime archive,
-never a direct `titan.o`; static selection extracts only referenced shim
-members. `titan/async.so`, `titan/timer.so`, `titan/fs.so`, `titan/net.so`, and
-`titan/os.so` import the qualified binary `titan/uv.so` with the ordinary Titan
-loader; they
-do not compile the `titan/uv/` source folder, extract `titan_uv.o`, or embed another libuv
-archive. Dependency resolution is binary-first, while the explicit
-`titanc titan.uv` build root is source-first. Installation writes exactly one
-ordinary file per standard module under
-`<root>/lib/titan/0.15/titan/`.
-Lua's configured C-module path and ordinary qualified Titan lookup both
-resolve those files, with no copied, symbolic-link, or hard-link aliases. Thus
-every facade reaches the same `titan/uv.so` image. `titan.async` is the public
-scheduler facade: its `Error`, `Cancelled`, and `Task` exports are transparent
-aliases of the uv-owned records, while `run`, `loop`, and `version` forward to
-the provider's private `_run`, `_loop`, and `_version` functions. It allocates
-no second Runtime and exposes no alias as a runtime module member. In the normal
-bundled build, `titan/uv.so` is the process's sole complete libuv provider; its
-private static archive is consumed only for that link and is not installed in
-the Titan SDK, while the headers remain available under the installed include
-directory. An ordinary extension DSO may call libuv directly without embedding
-or linking it: it must import `uv` (desugared to `titan.uv`) as well as
-foreign-import `uv.h`, leaving its ordinary `uv_*` function calls unresolved.
-Titan's generic runtime loader maps every compiled runtime dependency with
-`RTLD_LAZY | RTLD_GLOBAL`. Lazy binding lets the extension map before the
-provider is available; the extension's generated initializer then loads its
-explicit `uv` import globally before Titan code can make one of those calls.
-`RTLD_NOW` would fail while mapping the extension, before its initializer could
-load the provider, while a provider loaded `RTLD_LOCAL` later would not satisfy
-the extension's lazy bindings. Compiler interface inspection remains
-`RTLD_LAZY | RTLD_LOCAL`; neither path has libuv-specific metadata,
-classification, or a provider-specific loader helper. The runtime path cannot
-satisfy native constructors, imported data, or function-address relocations
-that need libuv while the extension itself is being mapped. A Lua caller must
-`require "titan.uv"` before requiring that extension directly. The installed
-`titan/uv.lua` loader resolves the DSO with `package.searchpath`, maps it with
-`package.loadlib(path, "*")`, and invokes its `luaopen_titan_uv` entry. Other
-Lua C modules remain local. This public Lua package path works with stock Lua
-5.5 on Linux and macOS, and `titan/uv.so` has no
-self-dlopen/promotion helper. System mode may instead link the extension and
-canonical `titan/uv.so` against the same shared libuv selected by pkg-config.
-Statically embedding the bundled archive again would create a second native
-instance. Lua's explicit global preload occurs before the extension is mapped,
-so that route also supports eager libuv relocations and native constructors;
-the normal Titan runtime route deliberately supports only lazy function calls.
+All seven logical standard modules are explicit source roots in one compiler
+invocation. Their imports are source/static, so each keeps an independent
+module state and ABI/types/init/Lua protocol while inter-module calls become
+direct `extern` calls inside `titan.so`. The link selects `titan_uv.o` from
+`libtitan.a`, includes `titanlib.o` once, and supplies the selected libuv once.
+Bundled mode force-loads the private archive into this image so it is the
+complete provider; the archive is not installed in the SDK. System mode puts
+the pkg-config-selected shared dependency on the same `titan.so`.
+
+Installation publishes the one image at `<root>/lib/titan/0.16/titan.so` and
+seven generated shims below `<root>/share/lua/5.5/titan/`. Titan prefix lookup
+claims `titan.uv` through the image's `titan_uv_abi`/`titan_uv_types`; Lua
+`require "titan.uv"` reaches `titan/uv.lua`, which selects provider `titan`,
+requires its support entry, promotes/maps it through `_loadlibglobal`, and
+invokes `luaopen_titan_uv`. `titan.async` remains the public scheduler facade:
+its `Error`, `Cancelled`, and `Task` exports are transparent aliases of the
+uv-owned records, while `run`, `loop`, and `version` forward to uv's private
+functions. It allocates no second Runtime.
+
+An ordinary extension may call libuv directly without linking or embedding it:
+it imports `uv` and foreign-imports `uv.h`, leaving ordinary `uv_*` calls
+unresolved. Compiler inspection maps the extension lazy/local. Titan runtime
+loading maps it lazy/global and its initializer loads the selected combined
+`titan.so` before the calls bind. A Lua caller first requires `titan.uv`; the
+generated shim globalizes the provider before the extension is mapped. That
+Lua-first route can satisfy eager relocations and constructors, whereas
+initializer ordering supports only lazy function calls. Neither path has
+libuv-specific metadata or a special runtime loader. Linking the bundled
+archive into a second DSO would create another native instance.
 
 Runtime/Task/resource state remains in registry/GC-owned objects. These
 post-install files are outside the source rock's manifest. Bundled and system
@@ -66,8 +52,8 @@ acquisition, including Linux and macOS packages, is documented in the
 ## One provider, several source files
 
 The provider dogfoods [folder modules](folder-modules.md). These sources are
-one logical `titan.uv` module, one checker/codegen invocation, one module
-state, and one DSO:
+one logical `titan.uv` module, one checker/codegen invocation, one object, and
+one module state inside the combined DSO:
 
 | Source | Ownership |
 | --- | --- |
@@ -83,25 +69,27 @@ Every contributor uses the main source's imports, constants, and module state;
 record types shared across subsystems are referenced directly from whichever
 semantic contributor owns them. Contributor bodies and callbacks cross file
 boundaries because top-level `local` remains module-private, not file-private.
-`titanc titan.uv` emits `titan/uv/uv.c` and `titan/uv/uv.o`, then
-links the logical `titan/uv.so`; no source basename enters a symbol, registry
-key, or artifact name.
+The production all-roots invocation emits `titan/uv/uv.c` and
+`titan/uv/uv.o`, then links that object into `titan.so` and emits exactly one
+logical `titan/uv.lua` shim; no source basename enters a symbol, registry key,
+or artifact name.
 
-The exported declarations had already established the deterministic ABI 0.15
+The exported declarations established the deterministic ABI 0.15
 interface when the folder split was introduced. The follow-up relocates the
 remaining private records and moves the private `FS` constants instance beside
 `FsConstants` in `file.titan`. That changes private slot/initialization order,
 but not `titan_uv_types`, importer-visible variable slots, canonical
 exported-function closure slots, or native signatures, so the exact interface
-fixture remains unchanged and no further ABI bump is required.
+fixture remained unchanged. ABI 0.16 later changes only physical provider
+discovery and the standard-library layout; the `titan_uv_types` shape and
+native entries stay unchanged.
 
-The Makefile's explicit `UV_TITAN_SOURCES` list names all seven files and is a
-normal prerequisite set for `titan/uv.so`. It intentionally does not use a
-wildcard: adding a production contributor must update the reviewed build
-graph. Build coverage compares that list with the immediate regular
-`titan/uv/*.titan` set discovered by the compiler and forces every member in a
-dry run. Bundled and system modes both rebuild the same one provider, and
-`make clean` removes the nested generated C/object without touching sources.
+The Makefile's explicit `UV_TITAN_SOURCES` list names all seven files inside
+the reviewed `STDLIB_TITAN_SOURCES` prerequisite set. It intentionally does
+not use a wildcard: adding a production contributor must update the reviewed
+build graph. Bundled and system modes both rebuild the complete `titan.so`,
+and `make clean` removes nested generated C/object and the known generated
+logical shim without touching sources.
 
 ## GC-owned native storage
 
@@ -260,9 +248,10 @@ POSIX `open`, `read`, `write`, or `close` fallback.
 
 ## Portable OS helpers and signals
 
-The `os.so` facade contains no foreign import. Its `_os_*` calls cross the
-binary-only boundary into canonical `titan/uv.so`, which invokes public `uv_os_*`,
-`uv_cwd`/`uv_chdir`, and `uv_exepath` APIs. Variable-size text results use
+The logical `titan.os` facade contains no foreign import. Its `_os_*` calls
+cross the module boundary into logical `titan.uv` (a direct static call in the
+combined standard image), which invokes public `uv_os_*`, `uv_cwd`/`uv_chdir`,
+and `uv_exepath` APIs. Variable-size text results use
 Titan-owned byte storage. A generic helper accepts the libuv buffer function
 and an error-construction closure, keeps both the capacity and returned length
 as `size_t`, and starts with a 256-byte GC-owned buffer. `UV_ENOBUFS` recurses
@@ -483,13 +472,18 @@ sticky EOF and stream terminal tails, replaceable wait/read cancellation,
 deadlock-free `communicate`, TERM-resistant shutdown, FIFO/close state
 machines, path operations, failed-spawn and exit-before-close ordering,
 observed helper failure, trace propagation, GC, sequential sessions,
-standalone bootstrap, canonical installed DSOs, source-rock deployment, and
-bundled/system libuv topology. Linux CI also rebuilds Lua, libbacktrace, libuv,
+standalone bootstrap, the canonical installed `titan.so` and generated shims,
+recoverable source-rock publication, and bundled/system libuv topology. Linux
+CI also rebuilds Lua, libbacktrace, libuv,
 the Titan runtime, and standard modules under ASan/UBSan, then runs
 representative timer/FS and core owner/callback suites plus production net/OS
-smokes. Regular Linux runs the complete production behavior suites; the sole
-isolated source variant copies the complete `titan/uv/` ensemble, patches the
-owning files through unique per-file anchors, and delays selected FS callbacks
+smokes. Regular Linux runs the complete production behavior suites. CI
+snapshots and restores the combined image, conditional dSYM, and generated
+shims around compiler groups and mode changes. The sole isolated source
+variant copies the complete `titan/uv/` ensemble, builds exact
+coroutine/uv/async/timer providers under a private root with no shallow
+`titan.so`, patches the owning files through unique per-file anchors, and
+delays selected FS callbacks
 to cover late
 cancellation, disposal of a late successful open, and cross-generation
 Runtime/File/Task/buffer/error rooting. The sanitizer net smoke specifically

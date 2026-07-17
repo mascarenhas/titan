@@ -10,26 +10,26 @@ compiler. For the language itself, see the
 ## The pipeline at a glance
 
 ```
-flat P.titan or folder P/B.titan + immediate contributors
+each flat P.titan or folder P/B.titan + immediate contributors
    │  driver source resolution; parser.parse once per real source file
    │                           (lexer.lua + parser.lua, one LPegLabel grammar)
    ▼
-one dense AST                  (plain tables, ast.lua / typedecl.lua; no
+one dense AST per module       (plain tables, ast.lua / typedecl.lua; no
    │                            source-unit wrapper or per-file namespace)
    │  checker.check            (checker.lua + types.lua + symtab.lua)
    ▼
-typed & elaborated AST         (decorated with _type/_decl…, coercions made
+typed & elaborated ASTs        (decorated with _type/_decl…, coercions made
    │                            explicit as ExpCast, finite call projections as
    │                            ExpExtra, finite/open demand recorded on sinks)
    │  coder.generate           (coder.lua — C-source templates)
    ▼
-one C translation unit
+one C translation unit per logical module
    │  pretty.reindent_c        (pretty.lua — heuristic reindenter)
    │  driver.compile           (driver.lua — writes .c next to the canonical
    │                            flat source or folder main and invokes cc)
    ▼
-object file ──► driver.compile_library  → module.so   (require-able from Lua)
-            └─► driver.compile_program  → executable  (when a main() exists)
+object files ──► one common-prefix provider.so + generated Lua shims
+             └─► driver.compile_program → executable (when a main() exists)
 ```
 
 `titanc` orchestrates the pipeline: it type-checks every requested module
@@ -69,13 +69,14 @@ Two facts shape everything downstream of the checker:
 | [Error handling](error-handling.md) | Unified Titan/Lua tracebacks via libbacktrace, `#line` source attribution, trace pinning, `raise`/`catch`/`finally` frontend rules, inline Lua longjmp boundaries, pending finally actions, stack relocation, and ABI/search-path notes. |
 | [Defer](defer.md) | The parser-only `defer` marker and recursive `simpleblock` lowering into nested `Ast.StatTry` nodes, relying on existing checker/codegen `finally` machinery. |
 | [Coroutines](coroutines.md) | The `titan/coroutine.titan` module's Titan-owned transfer policy with a minimal C shim; its qualified `titan.coroutine` identity; the `TValue` FFI boundary; tagged minicoro, suspended matching handlers with stacked inner coroutines, traceback handoff, and coroutine stack sizing. |
-| [Libuv continuation runtime](libuv-runtime.md) | The private canonical `uv` provider, public `async` scheduler facade, `timer`/`fs`/`net`/`os` consumers, GC-owned exact native wrappers, the shared-tag continuation pump, direct native callbacks with a Titan trailing catch, filesystem/network/process ownership, cancellation, bootstrap, and deterministic TERM/grace/KILL shutdown. |
+| [Libuv continuation runtime](libuv-runtime.md) | The private logical `uv` owner inside the combined standard provider, public `async` scheduler facade, `timer`/`fs`/`net`/`os` consumers, GC-owned exact native wrappers, the shared-tag continuation pump, direct native callbacks with a Titan trailing catch, filesystem/network/process ownership, cancellation, bootstrap, and deterministic TERM/grace/KILL shutdown. |
 | [Libuv DNS and TCP implementation](libuv-networking.md) | The `net` facade, opaque GC-owned address and TCP storage, DNS ownership, stream callbacks, per-Connection FIFO and close state, cancellation, and portable shim boundary. |
 | [Lua interop internals](lua-interop-internals.md) | The boundary machinery: Lua entry wrappers and per-type checks, record metatables and metatable-based type identity, the module `Udata`'s member metatable, dynamic module loading, the error handler, the standalone entrypoint, and the safety argument. |
 | [FFI internals](ffi-internals.md) | The pure-Lua C toolchain under `foreign import` (preprocessor, C99 grammar, type extraction) and how foreign declarations become Titan types and direct C calls. |
 | [Lua C API FFI follow-up](ffi-lua-api-followup.md) | Preliminary notes for a later design pass on calling the Lua C API through the C FFI. This is not part of FFI v1. |
 | [Driver and toolchain](driver.md) | `driver.lua`, `titanc`, the runtime support library (`titan-runtime/`), `pretty.lua`, `util.lua`, and every default path and flag. |
 | [Folder modules](folder-modules.md) | Tagged flat/folder source resolution, independent parsing into one dense AST, shared checking/codegen identity, deterministic ordering, artifacts, and the `titan.uv` source ensemble. |
+| [Multi-module shared libraries](multi-module-libraries.md) | Prefix-container discovery, strict ABI/types membership claims, transient `Type.Module.file`, one-object-per-module linking, generated Lua shims, the lazy/global support helper, and combined-standard-library publication. |
 
 ## Lua-version migration reports
 
@@ -106,7 +107,7 @@ in; follow the link for the full discussion.
 | [Error handling](error-handling.md) | `finally` deliberately forbids `return` and escaping `break`; a `raise` from cleanup is the sole override path. Error chaining is not modeled: a new error replaces the in-flight value and trace. The inline boundary relies on the vendored Lua 5.5 `lua_longjmp` layout staying in sync with the linked Lua build. |
 | [Lua interop internals](lua-interop-internals.md#safety-summary) | Known soft spots, all verified: `boolean` parameters accept anything by truthiness (inconsistent with strict variable/field writes); container contents are not checked at the boundary (aliasing); forged/undersized userdata from C can defeat the tag check. Also: the [reserved error slot is dead groundwork](lua-interop-internals.md#the-lua-entry-wrapper-genluaentry); `checkandset`'s float case emits a [dead second `luaL_error`](lua-interop-internals.md#checkandset-the-tvalue-destination-twin). |
 | [FFI internals](ffi-internals.md#platform-constraints-and-failure-modes) | Compile-time POSIX dependency (the configured `CC` probes `/dev/null` for defines and include paths); imported C types are local-only and rejected from serialized module interfaces; bare and typedef'd enum constants import as C integer members with simple numeric values preserved, static functions are imported, function-like macros are invisible, and all imports share [one flat C namespace](ffi-internals.md#calls-and-variables) with no C-symbol namespacing. Owned allocation is intentionally limited (no `void`, incomplete aggregates, C array typedefs, or flexible-array-member structs). The [C99 grammar remains non-reentrant](ffi-internals.md#typelist-extraction). Some preprocessor failures still escape as raw Lua errors rather than diagnostics. `c-parser/typed.lua` ships [disabled](ffi-internals.md#typedlua). |
-| [Driver and toolchain](driver.md#module-names-and-the-search-paths) | Compile-time module path walking ignores `;;` expansion (only the ordinary run-time loader expands it). Configurable compiler and flag strings use a deliberately small shell-word parser rather than full shell expansion. |
+| [Driver and toolchain](driver.md#module-names-and-the-search-paths) | Compile-time and run-time Titan paths share `;;` default insertion, but generated Lua shims intentionally use the independent `package.cpath` template order. Configurable compiler and flag strings use a deliberately small shell-word parser rather than full shell expansion. |
 
 Some of these also surface in the [language reference](../language/index.md)
 as user-visible behavior (e.g. integer overflow, container aliasing); the
@@ -120,8 +121,8 @@ cause.
 | `titanc` | The compiler CLI. |
 | `titan-compiler/` | The compiler proper: `lexer`, `parser`, `syntax_errors`, `ast`, `typedecl`, `checker`, `types`, `symtab`, `coder`, `pretty`, `driver`, `foreigntypes`, `location`, `util`. |
 | `c-parser/` | The pure-Lua C preprocessor and C99 parser behind `foreign import`. |
-| `titan/` | Titan standard-library sources. They are ordinary qualified `titan.*` modules, built explicitly from source and installed below the matching qualified directory. Most are flat; `titan.uv` dogfoods the folder ensemble rooted at `titan/uv/uv.titan` while still producing one canonical DSO. |
-| `titan-runtime/` | `titan.h`/`titan.c` (`RTLD_LAZY` + `RTLD_GLOBAL` generated-import loader and error handler), `titan_coro.c`, and `titan_uv.c`, whose three objects are the exact members of `libtitan.a`; separate vendored `libbacktrace.a`; `titanlib.c`, built separately as `titan.so` (`backtrace`, internal `pin`/`clear`, and the compiler-only `RTLD_LAZY` + `RTLD_LOCAL` interface loader `_loadlib`); `minicoro.h`, `titan_longjmp.h`, and the namespaced `titan/{ffi,coro,uv}.h` SDK headers. |
+| `titan/` | Titan standard-library sources. They are seven independent qualified `titan.*` modules linked together into the physical `titan.so`; `titan.uv` dogfoods the folder ensemble rooted at `titan/uv/uv.titan`. The generated `titan/*.lua` files are logical-module shims, not sources. |
+| `titan-runtime/` | `titan.h`/`titan.c` (`RTLD_LAZY` + `RTLD_GLOBAL` generated-import loader and error handler), `titan_coro.c`, and `titan_uv.c`, whose three objects are the exact members of `libtitan.a`; separate vendored `libbacktrace.a`; `titanlib.c`, linked into the full standard `titan.so` and separately into the private bootstrap, exposing `backtrace`, internal `pin`/`clear`, compiler-local `_loadlib`, and shim-facing `_loadlibglobal`; `minicoro.h`, `titan_longjmp.h`, and the namespaced `titan/{ffi,coro,uv}.h` SDK headers. |
 | `spec/` | The busted test suite; `coder_spec.lua` is end-to-end (generates, compiles and runs C). |
 | `examples/`, `testfiles/` | Manual benchmark/demo material (not used by the suite). |
 | `doc/` | This documentation, the [language reference](../language/index.md), and the migration reports. |

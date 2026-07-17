@@ -2,6 +2,18 @@ local types = require "titan-compiler.types"
 
 describe("Titan types", function()
 
+    it("keeps a module's selected physical provider out of its interface",
+       function()
+        local module = types.Module("pkg.child", {})
+        local exact = types.serialize(module)
+        module.file = "pkg.so"
+        assert.equal(exact, types.serialize(module))
+
+        local rehydrated = assert(load(
+            "return " .. exact, "pkg.child", "t", types))()
+        assert.equal("pkg/child.so", rehydrated.file)
+    end)
+
     it("serializes keyed interface members in numeric-byte order", function()
         local function make_record(reverse)
             local methods = {}

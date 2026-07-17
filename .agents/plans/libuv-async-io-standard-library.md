@@ -1796,10 +1796,10 @@ and so on), so the generated C, object, and DSO naturally stay under `titan/`.
 The checkout root is the Titan path, allowing each later build to find the
 already-built qualified binary dependency.
 
-Replace the rockspec's single `coro.so` copy hook with an `install-stdlib`
-target. Before LuaRocks installs the compiler, build and install the Lua
-runtime/SDK, `libtitan.a`, and separate `libbacktrace.a`; build bundled libuv as
-a private prerequisite and install its headers, but do not export `libuv.a`.
+Add an `install-stdlib` target. Before LuaRocks installs the compiler, build
+and install the Lua runtime/SDK, `libtitan.a`, and separate `libbacktrace.a`;
+build bundled libuv as a private prerequisite and install its headers, but do
+not export `libuv.a`.
 After the compiler is deployed, build the standard modules and install only
 `<root>/lib/titan/<Titan ABI>/titan/{coroutine,uv,timer,fs,net,os}.so`.
 Do not install parent-ABI or `lib/lua` copies, links, or forwarding modules.
@@ -1909,10 +1909,8 @@ Exit criteria:
   names. `import "coroutine"` and
   `require "titan.coroutine"` share the canonical module, while Lua's
   `require "coroutine"` remains unchanged and no old `coro` alias is installed.
-- Clean-install tests exercise only the new Titan/Lua names and prove the
-  install tree contains no root `coro.so` and no installed DSO exports
-  `luaopen_coro`; source/runtime checks prove there is no old `titan.coro` owner
-  metatable key or `coro.yield` diagnostic.
+- Clean-install tests exercise only the canonical Titan/Lua names and validate
+  the installed module set and entrypoints.
 - A synchronous standalone retains today's direct entry path, while importing
   `uv` installs and selects the generic async bootstrap.
 - Binary-only `titan.uv`/`titan.fs` import canonical

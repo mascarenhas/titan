@@ -30,5 +30,16 @@
 /titan/*.c
 /titan/uv/*.c
 
+# Generated logical-module shims for the combined standard-library image
+/titan/coroutine.lua
+/titan/uv.lua
+/titan/async.lua
+/titan/timer.lua
+/titan/fs.lua
+/titan/net.lua
+/titan/os.lua
+
 # Native runtime command-line configuration stamps
 /titan-runtime/.titan-*-build-config
+/titan-runtime/.titan-stdlib-complete
+/titan-runtime/bootstrap/

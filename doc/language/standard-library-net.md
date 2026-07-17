@@ -187,8 +187,8 @@ Typical packages are `libuv1-dev pkg-config` on Debian/Ubuntu,
 `libuv-devel pkgconf-pkg-config` on Fedora, and `libuv pkgconf` through
 Homebrew on macOS. Applications importing the installed binary `net` module do
 not need libuv headers at compile time; all libuv and callback-shim linkage
-remains in the qualified
-`$ROCKS_TREE/lib/titan/0.15/titan/uv.so`. The supported installation currently
+remains in the combined standard-library provider
+`$ROCKS_TREE/lib/titan/0.16/titan.so`. The supported installation currently
 sets `ROCKS_TREE == PREFIX`; the former owns Titan's SDK/stdlib while the latter
 owns Lua and LuaRocks. Repository contributors can still use
 `make stdlib` for an in-checkout standard-library build.

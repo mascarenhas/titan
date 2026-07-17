@@ -4,8 +4,11 @@ local lfs = require 'lfs'
 local ROOT_ARTIFACTS = {
     "titan-runtime/libtitan.a",
     "titan-runtime/.titan-runtime-archive-build-config",
+    "titan.so",
+    "titan.so.dSYM",
     "titan/coroutine.so",
     "titan/coroutine.so.dSYM",
+    "titan/coroutine.lua",
     "titan/coroutine.c",
     "titan/coroutine.o",
 }
@@ -26,12 +29,24 @@ local LUA = prefix_lua and file_exists(prefix_lua) and prefix_lua
     or "lua"
 local TITANC = LUA ..
     [[ -e 'package.path="./?.lua;./?/init.lua;" .. package.path' ./titanc]]
-local TEST_ENV = "env CCACHE_DISABLE=1 TITAN_PATH_0_15=. " ..
-    "LUA_CPATH='./?.so;;' "
+local COROUTINE_VARIANT_ROOT = os.tmpname() .. "-titan-coroutine-exact"
+os.remove(COROUTINE_VARIANT_ROOT)
+local COROUTINE_VARIANT_SO =
+    COROUTINE_VARIANT_ROOT .. "/titan/coroutine.so"
+local function quote(word)
+    return "'" .. tostring(word):gsub("'", "'\\''") .. "'"
+end
+local TEST_ENV = "env -u LUA_PATH -u LUA_CPATH " ..
+    "-u LUA_PATH_5_5 -u LUA_CPATH_5_5 CCACHE_DISABLE=1 " ..
+    "TITAN_PATH_0_16=" .. quote(COROUTINE_VARIANT_ROOT) .. " " ..
+    "LUA_PATH=" .. quote(COROUTINE_VARIANT_ROOT .. "/?.lua;./?.lua;;") ..
+    " LUA_CPATH=" ..
+    quote(COROUTINE_VARIANT_ROOT .. "/?.so;./?.so;;") .. " " ..
+    "TITAN_COROUTINE_TEST_SO=" .. quote(COROUTINE_VARIANT_SO) .. " "
 
 local function clean_test_artifacts()
     os.execute("rm -rf test.o test.so test.c test.titan " ..
-        "test__entrypoint.c test test.dSYM coroutine_standalone app " ..
+        "test.lua test__entrypoint.c test test.dSYM coroutine_standalone app " ..
         "app__entrypoint.c app.dSYM")
 end
 
@@ -101,18 +116,34 @@ local function read_file(path)
 end
 
 local function build_coroutine()
+    assert.truthy(exec_ok("rm -rf " .. quote(COROUTINE_VARIANT_ROOT)))
+    assert.truthy(exec_ok(
+        "mkdir -p " .. quote(COROUTINE_VARIANT_ROOT .. "/titan")))
     os.remove("titan/coroutine.so")
     assert.truthy(exec_ok("rm -rf titan/coroutine.so.dSYM"))
     assert.truthy(exec_ok(
         TEST_ENV .. "TITAN_PATH= " ..
         TITANC .. " --tree . titan.coroutine"))
+    assert.truthy(exec_ok("cp -p " .. quote("titan/coroutine.so") .. " " ..
+        quote(COROUTINE_VARIANT_SO)))
+    os.remove("titan/coroutine.so")
+    assert.truthy(exec_ok("cp -p " .. quote("titan/coroutine.lua") .. " " ..
+        quote(COROUTINE_VARIANT_ROOT .. "/titan/coroutine.lua")))
+    os.remove("titan/coroutine.lua")
+    if lfs.attributes("titan/coroutine.so.dSYM", "mode") == "directory" then
+        assert.truthy(exec_ok("cp -Rp " .. quote("titan/coroutine.so.dSYM") ..
+            " " .. quote(COROUTINE_VARIANT_SO .. ".dSYM")))
+        assert.truthy(exec_ok("rm -rf titan/coroutine.so.dSYM"))
+    end
 end
 
 local function clean_coroutine_artifacts()
     os.remove("titan/coroutine.so")
     exec_ok("rm -rf titan/coroutine.so.dSYM")
+    os.remove("titan/coroutine.lua")
     os.remove("titan/coroutine.c")
     os.remove("titan/coroutine.o")
+    exec_ok("rm -rf " .. quote(COROUTINE_VARIANT_ROOT))
 end
 
 local function compile_and_run(titan_code, lua_code)
@@ -210,6 +241,10 @@ describe("coroutine standard module", function()
     setup(function()
         preserve_root_artifacts()
         os.remove("titan-runtime/libtitan.a")
+        -- This suite deliberately exercises an exact child image. Hide the
+        -- production shallow container from the suite's Titan path by putting
+        -- the temporary exact DSO/shim in a private root. The production
+        -- titan.so stays on Lua's C path only to provide bare support APIs.
         build_coroutine()
     end)
 
@@ -280,13 +315,15 @@ describe("coroutine standard module", function()
             assert(debug.getregistry()["titan.coroutine"] ~= nil)
             assert(debug.getregistry()["titan.coro"] == nil)
             assert(debug.getregistry()["Titan coroutine runtime 0.11"] == nil)
-            local open = assert(package.loadlib(
-                "./titan/coroutine.so", "luaopen_titan_coroutine"))
+            local open = assert(package.loadlib(assert(os.getenv(
+                "TITAN_COROUTINE_TEST_SO")), "luaopen_titan_coroutine"))
             assert(open() == titan_coroutine)
             assert(package.loadlib(
-                "./titan/coroutine.so", "luaopen_coroutine") == nil)
+                assert(os.getenv("TITAN_COROUTINE_TEST_SO")),
+                "luaopen_coroutine") == nil)
             assert(package.loadlib(
-                "./titan/coroutine.so", "luaopen_coro") == nil)
+                assert(os.getenv("TITAN_COROUTINE_TEST_SO")),
+                "luaopen_coro") == nil)
             print("OK")
         ]==])
         assert.match("OK", out)
@@ -317,8 +354,8 @@ describe("coroutine standard module", function()
             assert(package.loaded.coroutine == lua_coroutine)
             assert(debug.getmetatable(from_titan) ==
                    debug.getmetatable(from_lua))
-            local open = assert(package.loadlib(
-                "./titan/coroutine.so", "luaopen_titan_coroutine"))
+            local open = assert(package.loadlib(assert(os.getenv(
+                "TITAN_COROUTINE_TEST_SO")), "luaopen_titan_coroutine"))
             assert(open() == titan_coroutine)
             print("OK")
         ]==])

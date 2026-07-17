@@ -3,8 +3,10 @@
 local argparse = require 'argparse'
 
 local checker = require 'titan-compiler.checker'
+local coder = require 'titan-compiler.coder'
 local parser = require 'titan-compiler.parser'
 local driver = require 'titan-compiler.driver'
+local util = require 'titan-compiler.util'
 
 local p = argparse('titan', 'Titan compiler')
 p:argument('module', 'Names of the modules to compile.'):args("+")
@@ -43,11 +45,12 @@ local main_module = nil
 
 local modules = {}
 local requested_roots = {}
-for _, modname in ipairs(args.module) do
+local requested_modules = driver.deduplicate_module_names(args.module)
+for _, modname in ipairs(requested_modules) do
     requested_roots[modname] = true
 end
 
-for _, modname in ipairs(args.module) do
+for _, modname in ipairs(requested_modules) do
     local static_deps = {}
     local ok, errs = checker.checkimport(modname,
         driver.defaultloader(static_deps, { source_roots = requested_roots }))
@@ -72,11 +75,79 @@ end
 
 if #errors > 0 then exit(table.concat(errors, "\n")) end
 
-local libnames = {}
+local provider
+local provider_output
+local shim_plans
+local linked_names = {}
+local linked_set = {}
 
 for name, mod in pairs(driver.imported) do
+    if mod.ast then table.insert(linked_names, name) end
+end
+table.sort(linked_names, util.bytewise_less)
+for _, name in ipairs(linked_names) do linked_set[name] = true end
+
+if not main_module then
+    local _unique_roots, left, right
+    provider, _unique_roots, left, right =
+        driver.common_module_provider(requested_modules)
+    if not provider then
+        exit("cannot link modules into one shared library: '" ..
+            tostring(left) .. "' and '" .. tostring(right) ..
+            "' have no common module prefix")
+    end
+
+    local mangled_owners = {}
+    local symbol_owners = {}
+    for _, name in ipairs(linked_names) do
+        if name == "titan" then
+            table.insert(errors, "logical module 'titan' is reserved by " ..
+                "Titan's native Lua support module in library mode")
+        end
+        local mangled = driver.mangle_module_name(name)
+        local previous = mangled_owners[mangled]
+        if previous and previous ~= name then
+            table.insert(errors, "cannot link logical modules '" .. previous ..
+                "' and '" .. name .. "': both use C symbol prefix '" ..
+                mangled .. "'")
+        else
+            mangled_owners[mangled] = name
+            for _, entry in ipairs(coder.external_symbols(
+                name, driver.imported[name].ast)) do
+                local symbol_previous = symbol_owners[entry.symbol]
+                if symbol_previous then
+                    table.insert(errors, "cannot link C symbol '" ..
+                        entry.symbol .. "': " .. symbol_previous.owner ..
+                        " in logical module '" .. symbol_previous.module ..
+                        "' conflicts with " .. entry.owner ..
+                        " in logical module '" .. name .. "'")
+                else
+                    symbol_owners[entry.symbol] = {
+                        module = name,
+                        owner = entry.owner,
+                    }
+                end
+            end
+        end
+    end
+
+    if #errors == 0 then
+        shim_plans, provider_output =
+            driver.plan_module_shims(provider, linked_names)
+        if not shim_plans then table.insert(errors, provider_output) end
+    end
+end
+
+if #errors > 0 then exit(table.concat(errors, "\n")) end
+
+local libnames = {}
+
+for _, name in ipairs(linked_names) do
+    local mod = driver.imported[name]
+    local static_deps = not main_module and linked_set or
+        (modules[name] or mod.deps or {})
     local ok, err, libname = driver.compile_module(
-        name, mod, modules[name] or mod.deps or {}, args.verbose)
+        name, mod, static_deps, args.verbose)
     if not ok then
         table.insert(errors, err)
     else
@@ -84,10 +155,12 @@ for name, mod in pairs(driver.imported) do
     end
 end
 
+if #errors > 0 then exit(table.concat(errors, "\n")) end
+
 if main_module then
     local ofiles = {}
-    for _, ofile in pairs(libnames) do
-        table.insert(ofiles, ofile)
+    for _, name in ipairs(linked_names) do
+        table.insert(ofiles, libnames[name])
     end
     local ok, term, code = driver.compile_program(main_module, ofiles,
         args.link, args.verbose, args.extra_object,
@@ -96,17 +169,52 @@ if main_module then
         table.insert(errors, link_failed("program", main_module, term, code))
     end
 else
-    for modname, depset in pairs(modules) do
-        local ofiles = {}
-        for depname, origin in pairs(depset) do
-            if origin == true then
-                table.insert(ofiles, libnames[depname])
-            end
+    local ofiles = {}
+    for _, name in ipairs(linked_names) do
+        table.insert(ofiles, libnames[name])
+    end
+
+    local temporary, temporary_directory =
+        driver.staged_library_output(provider_output)
+    if not temporary then
+        table.insert(errors, "failed to stage library '" .. provider ..
+            "': " .. tostring(temporary_directory))
+    end
+    if #errors > 0 then exit(table.concat(errors, "\n")) end
+    local ok, term, code = driver.compile_library_output(
+        temporary, ofiles, args.link, args.verbose, args.extra_object)
+    if not ok then
+        driver.remove_path(temporary)
+        driver.remove_path(temporary .. ".dSYM")
+        driver.remove_path(temporary_directory)
+        table.insert(errors, link_failed("library", provider, term, code))
+    else
+        local valid, validation_err =
+            driver.validate_library_image(temporary, linked_names)
+        if valid and provider == "titan" then
+            valid, validation_err =
+                driver.validate_titan_support(temporary, args.verbose)
         end
-        local ok, term, code = driver.compile_library(modname, ofiles, args.link,
-            args.verbose, args.extra_object)
-        if not ok then
-            table.insert(errors, link_failed("library", modname, term, code))
+        if not valid then
+            driver.remove_path(temporary)
+            driver.remove_path(temporary .. ".dSYM")
+            driver.remove_path(temporary_directory)
+            table.insert(errors, validation_err)
+        else
+            local published, publish_err =
+                driver.publish_library(temporary, provider_output)
+            if not published then
+                driver.remove_path(temporary)
+                driver.remove_path(temporary .. ".dSYM")
+                driver.remove_path(temporary_directory)
+                table.insert(errors, "failed to publish library '" ..
+                    provider .. "': " .. tostring(publish_err))
+            else
+                driver.remove_path(temporary_directory)
+                local wrote, shim_err =
+                    driver.write_module_shims(shim_plans)
+                if not wrote then table.insert(errors, shim_err) end
+            end
         end
     end
 end

@@ -500,93 +500,106 @@ inventory:
 | `TITAN_TRACE_APPEND_KEY` (`"4f895b66-bae0-4e97-afb3-83a31f2f9e96"`) | temporary coroutine trace handoff slot used before appending resume/error propagation frames |
 | `TITAN_NAMES_KEY` (`"a7c4e2f0-1d6b-4e3a-9c5f-8b2d7e0a4f16"`) | the native-symbol display-name table used by unified trace formatting |
 | `TITAN_TRACE_PINNED` (`"5b3f0f7e-4b1a-4d2e-9a8c-2f6d4c1e7a90"`) | the one-shot flag that preserves an existing traceback for bare re-raise |
+| `TITAN_LAZY_LIBS_KEY` (private to `titanlib.c`) | compiler `_loadlib`'s per-state lazy/local handle cache |
+| `TITAN_LAZY_GLOBAL_LIBS_KEY` (private to `titanlib.c`) | generated-shim `_loadlibglobal`'s per-state canonical-path lazy/global handle cache |
 | `"Titan function type <serialized type> tag"` | a shared light-userdata identity tag for each first-class function type |
 
 The UUID-string constants are defined in `titan-runtime/titan.h`.
 
-## Dynamic loading: `loadlib` and `loadsym`
+## Four shared-library loading paths
 
-When a dependency exists only as a compiled `.so`, the importer's
-`_init` loads it at run time with two helpers from
+The 0.16 layout has four deliberately separate paths. They share the ordinary
+per-logical-module symbols but differ in selection, flags, cache, and whether
+module initialization runs.
+
+### 1. Lua's eager/local support bootstrap
+
+The first `require "titan"` uses Lua's ordinary C searcher. It finds
+`titan.so`, maps it with Lua's eager/local policy, calls `luaopen_titan`, and
+returns only the native support table. The private source-install bootstrap
+and the full combined standard image both satisfy that entry. Bare support
+loading does not call a `titan.*_init`, create a standard module `Udata`, or
+install the async program hook.
+
+### 2. Compiler lazy/local interface inspection
+
+`driver.find_compiled_interface` searches shallow-to-exact providers and uses
+`titan._loadlib(path, symbol)` to inspect each existing candidate with
+`RTLD_LAZY | RTLD_LOCAL`. It probes the requested `<mangled>_abi` and
+`<mangled>_types` pair, calls only those metadata functions, and never runs
+`_init` or globalizes the image. Handles live in an internal per-state cache.
+The selected relative provider is attached transiently as `Type.Module.file`;
+it is not serialized.
+
+### 3. Titan runtime lazy/global imports
+
+Generated code loads that exact selected provider through
 `titan-runtime/titan.c`:
 
 ```c
-void *some_dep_handle = loadlib(L, "some/dep.so");
-titan_check_abi(L, some_dep_handle, "some_dep_abi", "some/dep.so");
+void *some_dep_handle = loadlib(L, "some/provider.so");
+titan_check_abi(L, some_dep_handle, "some_dep_abi", "some/provider.so");
 Udata* (*some_dep_init)(lua_State *L) =
-    titan_cast_func(Udata* (*)(lua_State*), loadsym(L, some_dep_handle, "some_dep_init"));
+    titan_cast_func(Udata* (*)(lua_State*),
+        loadsym(L, some_dep_handle, "some_dep_init"));
 ```
 
-`loadlib(L, file)` first consults the handle cache under
-`TITAN_LIBS_KEY`; on a miss it walks the Titan path — environment
-variable `TITAN_PATH_0_15`, then `TITAN_PATH`, then the default
-`".;<root>/lib/titan/0.15"`, with `<root>` recovered from the first
-literal `package.cpath` entry ending in `/lib/lua/5.5/?.so` and `;;` in
-an env value splicing that default in — trying
-`dlopen(dir "/" file, RTLD_LAZY | RTLD_GLOBAL)` per `;`-separated directory.
-There are no module-name exceptions: all generated Titan dynamic imports use
-this same runtime loader. Lazy binding is required because an imported image
-can use its generated initializer to load a provider for its own unresolved
-function calls; `RTLD_NOW` would reject the image before that initializer ran.
-Global visibility is required because a provider loaded later with
-`RTLD_LOCAL` would not satisfy the image's lazy bindings. Successes are
-cached for the Lua-state lifetime and the underlying DSOs remain mapped for the
-process lifetime. Titan does not
-`dlclose` this manually wired dependency graph: no fixed insertion order is
-safe for every root/dependency load order, and finalizable Lua objects can
-still retain native entry pointers while a state is closing. Total failure raises
-`luaL_error(L, dlerror())`. After `loadlib`, generated dynamic-import
-code calls `titan_check_abi(L, handle, "<mangled>_abi", file)`, rejecting
-missing or mismatched ABI markers before any native entry point is used.
-`loadsym` is `dlsym` plus the same `dlerror()` raise on a missing symbol.
-`loadglobalsym` performs the corresponding `dlsym(RTLD_DEFAULT, ...)` lookup
-after explicit imports have initialized; generated code uses it for method
-entries owned by a dependency reached through a re-exported record alias.
+`loadlib` consults `TITAN_LIBS_KEY`, then walks `TITAN_PATH_0_16`,
+`TITAN_PATH`, or `".;<root>/lib/titan/0.16"`, with `;;` splicing the
+ordinary default. It maps `dir/file` with `RTLD_LAZY | RTLD_GLOBAL`, caches
+the handle by relative provider for the state, invalidates native backtrace
+state, and never calls `dlclose`. Two logical modules in one image reuse the
+handle and resolve different mangled entries. `titan_check_abi` validates the
+logical marker before native use; `loadsym` resolves handle-local symbols;
+`loadglobalsym` uses `RTLD_DEFAULT` only after explicit providers initialize,
+for entries owned through re-exported record aliases.
 
-Compiler interface recovery does not use this runtime loader. The internal
-`titan._loadlib` helper in `titan.so` maps a candidate DSO with
-`RTLD_LAZY | RTLD_LOCAL` only to call its ABI and serialized-type entry points;
-it neither initializes the module nor publishes its symbols globally.
+Lazy binding permits an imported extension to initialize a provider before
+its ordinary unresolved function calls bind. Global visibility lets that
+provider satisfy the calls. Native constructors, imported data, and taken
+function-address relocations are eager and remain outside this ordering
+contract.
 
-Standard-library dependencies use the same loader and cache under their
-ordinary qualified filenames, such as `titan/timer.so`. The Titan-owned Lua
-default puts `<root>/lib/titan/0.15/?.so` before its ordinary `lib/lua`
-templates, so Titan's dynamic import and Lua `require "titan.<module>"` open
-the same DSO. Post-install writes only that qualified file; there are no
-copied, symbolic-link, or hard-link aliases. `titan/uv.so` is consequently the
-sole complete bundled-libuv provider. A direct-libuv extension must explicitly
-import `uv` as well as foreign-import `uv.h`. Lazy loading lets its ordinary
-unresolved libuv function calls survive the extension's initial mapping. Its
-generated initializer then calls the same global runtime `loadlib` for
-`titan/uv.so`, making the provider visible before Titan code can make one of
-those calls. `<mangled>_types` remains the ordinary one-result serialized
-interface; neither the compiler nor generated code assigns libuv-specific
-origins or invokes a provider-specific loader. Native constructors, imported
-data, and taken-function-address relocations are eager and therefore outside
-this Titan runtime contract. A Lua caller loading the extension directly must
-`require "titan.uv"` first. The installed `titan/uv.lua` module resolves the
-canonical DSO through `package.cpath`, uses `package.loadlib(path, "*")` for
-global visibility, and then invokes its exact `luaopen_titan_uv` entry. Other
-Lua C-module entries keep ordinary local visibility. This stock-Lua path is
-portable across macOS and Linux: the provider does not locate, reopen, or
-promote itself. Because the global load precedes the extension, this explicit
-Lua route can also satisfy its eager relocations and native constructors, even
-for a Lua-only extension that omitted the Titan import. Binary-first qualified
-module resolution prevents a visible source file from accidentally replacing
-the installed provider.
+### 4. Generated-shim lazy/global loading and promotion
+
+Every linked source module has a generated `<logical/path>.lua` shim. It uses
+`package.searchpath(provider, package.cpath)`, requires the bare support table,
+and calls `titan._loadlibglobal(path, "luaopen_<logical>")`. That helper
+canonicalizes the path with `realpath`, keeps a separate per-state canonical
+handle cache, performs `dlopen(canonical, RTLD_LAZY | RTLD_GLOBAL)` on its
+first request in that cache, and resolves the exact Lua entry. It returns
+`nil, message, stage` rather than raising directly and preserves the requested
+pathname in errors.
+
+The helper deliberately does not consult Lua's C-library cache or
+`_loadlib`'s local cache. For an unrelated provider this is its first
+lazy/global mapping. For the combined standard library, Lua's support bootstrap
+has just mapped the same `titan.so` eager/local; the second `dlopen` promotes
+that process image globally before the shim invokes `luaopen_titan_uv` (or
+another logical entry). It cannot undo eager relocations already performed by
+Lua, so both the private bootstrap and full `titan.so` are link-complete under
+eager load. A second Lua state repeats its own cache insertion and promotion
+request while the operating-system loader may reuse the mapped image.
+
+The installed standard layout has one provider at
+`<root>/lib/titan/0.16/titan.so` and seven generated shims below
+`<root>/share/lua/5.5/titan/`. A direct-libuv extension explicitly imports
+`uv` and foreign-imports `uv.h`; Titan runtime initialization loads the
+combined provider before lazy function calls bind. A Lua caller loads
+`titan.uv` first through its generated shim. The shim route globalizes the
+provider before the extension is mapped and can therefore also satisfy eager
+relocations and constructors. Neither path has libuv-specific metadata or a
+provider-specific runtime loader.
 
 Every cross-module function called from a dynamic dependency is declared as a
-`static` C *function pointer* and stitched
-by symbol name in
-`_init` (`<sym> = titan_cast_func(<type>, loadsym(L, <handle>,
-"<sym>"));`); static dependencies use plain `extern` declarations and
-direct calls. The full wiring — including the re-initialization branch
-that re-stitches pointers when the same module's code is present twice
-in a process, and its `#loadmods > 1` quirk that can leave that branch
-empty — is in the
-[code generator overview](codegen-overview.md#static-vs-dynamic-dependency-wiring);
-the binary-first dependency and source-first explicit-root rules are covered in
-[driver and toolchain](driver.md#source-vs-so-the-selection-logic).
+`static` C function pointer and stitched by symbol name in `_init`; static
+dependencies use plain `extern` declarations and direct calls. This includes
+the reinitialization branch that re-stitches pointers when the same module code
+is present twice in a process, and its `#loadmods > 1` quirk that can leave that
+branch empty. The complete wiring is in the [code generator
+overview](codegen-overview.md#static-vs-dynamic-dependency-wiring), and the
+provider claim/search rules are in [Multi-module shared
+libraries](multi-module-libraries.md#compiled-module-candidate-search).
 
 ## The error handler and `titan.backtrace()`
 
@@ -638,9 +651,10 @@ trace remains a single innermost→outer section. When libbacktrace is
 unavailable (`TITAN_NO_LIBBACKTRACE`, e.g. musl/Alpine) it falls back to
 raw Lua traceback lines plus raw `execinfo` C frames.
 
-The retrieval side is the separate `titan` Lua support module: Make compiles
-`titan-runtime/titanlib.c` into `titanlib.o`, links that object alone into
-`titan.so`, and the rockspec installs it. `titan.backtrace()` rawgets that
+The retrieval side is the bare `titan` Lua support entry: Make compiles
+`titan-runtime/titanlib.c` into `titanlib.o`, links that object alone into the
+private bootstrap and once into the full standard `titan.so`.
+`titan.backtrace()` rawgets that
 registry key. The same test-support module exposes internal `pin` and `clear`
 helpers; none of these functions is part of `libtitan.a`.
 Regeneration follows the **pin discipline**
@@ -662,16 +676,16 @@ objects and the active runtime SDK. Installed mode uses `libtitan.a`, the
 separate `libbacktrace.a`, and the matching `liblua.a` from the Titan
 SDK/rocks-tree root; checkout mode uses the same archive contract with local
 `libtitan.a`, separate local `libbacktrace.a`, and local `liblua.a`. Generic
-module and program links do not receive libuv; the canonical `titan/uv.so` build
-alone receives the private bundled archive (or system libuv through ordered
-pkg-config link flags). The bundled archive is not installed in the SDK;
+module and program links do not receive libuv; the combined standard
+`titan.so` build alone receives the private bundled archive (or system libuv
+through ordered pkg-config link flags). The bundled archive is not installed in the SDK;
 bundled-mode extension DSOs leave their `uv_*` calls unresolved:
 
 * **Preload registration, not eager loading.** The C `main` creates a
   state and runs `luaL_openlibs`. `titan_init_paths` then parses the inherited
   `package.cpath` for the first `/lib/lua/5.5/?.so` entry, initializes the
   Titan module-path default from that root, and ensures
-  `<root>/lib/titan/0.15/?.so` is present in `package.cpath`. The
+  `<root>/lib/titan/0.16/?.so` is present in `package.cpath`. The
   prefix-configured Titan-owned Lua already places that template before its
   `lib/lua` entries. It then
   registers the module's `luaopen_` function in

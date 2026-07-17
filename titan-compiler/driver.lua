@@ -13,8 +13,8 @@ local driver = {}
 
 driver.imported = {}
 
-driver.TITAN_VER = "0.15"
-driver.TITAN_VER_SUFFIX = "_0_15"
+driver.TITAN_VER = "0.16"
+driver.TITAN_VER_SUFFIX = "_0_16"
 driver.LUA_VERSION = "5.5"
 
 local LUA_CPATH_SUFFIX = "/lib/lua/" .. driver.LUA_VERSION .. "/?.so"
@@ -108,6 +108,7 @@ if driver.INSTALL_PATHS then
 else
     default_titan_bin_path = ".;/usr/local/lib/titan/" .. driver.TITAN_VER
 end
+driver.DEFAULT_TITAN_BIN_PATH = default_titan_bin_path
 
 driver.TITAN_BIN_PATH = os.getenv("TITAN_PATH" .. driver.TITAN_VER_SUFFIX)
     or os.getenv("TITAN_PATH")
@@ -235,17 +236,99 @@ driver.UNAME = shell("uname")
 driver.IS_DARWIN = string.match(driver.UNAME, "Darwin") ~= nil
 
 local function run_dsymutil(output, verbose)
-    if not driver.IS_DARWIN then return end
-    run_argv({ "dsymutil", output }, verbose)
+    if not driver.IS_DARWIN then return true end
+    return run_argv({ "dsymutil", output }, verbose)
 end
 
-local function findmodule(paths, modname, extension)
-    local modf = modname:gsub("[.]", "/") .. extension
-    for path in paths:gmatch("[^;]+") do
-        local filename = path .. "/" .. modf
-        if lfs.attributes(filename, "mode") then return filename end
+-- Expand an explicit Titan binary path with the same `;;` default insertion
+-- used by the native runtime's pushpath(). Empty path entries are separators,
+-- not directories; callers split the expanded result with path_entries().
+function driver.expand_titan_bin_path(path, default_path)
+    default_path = default_path or driver.DEFAULT_TITAN_BIN_PATH
+    if path == nil then return default_path end
+    return (path:gsub(";;", function()
+        return ";" .. default_path .. ";"
+    end))
+end
+
+function driver.titan_bin_path_entries(path, default_path)
+    local entries = {}
+    local expanded = driver.expand_titan_bin_path(path, default_path)
+    for entry in expanded:gmatch("[^;]+") do
+        table.insert(entries, entry)
     end
-    return nil
+    return entries
+end
+
+local function module_components(modname)
+    if type(modname) ~= "string" or modname == "" then return {} end
+    local components = {}
+    for component in modname:gmatch("[^.]+") do
+        table.insert(components, component)
+    end
+    if #components == 0 or table.concat(components, ".") ~= modname then
+        return {}
+    end
+    return components
+end
+
+function driver.deduplicate_module_names(names)
+    local unique = {}
+    local seen = {}
+    for _, name in ipairs(names or {}) do
+        if not seen[name] then
+            seen[name] = true
+            table.insert(unique, name)
+        end
+    end
+    return unique
+end
+
+-- Derive the physical provider for a no-main invocation from the longest
+-- common sequence of complete dotted components. The returned root list is
+-- deduplicated while retaining the CLI's first-occurrence order.
+function driver.common_module_provider(names)
+    local unique = driver.deduplicate_module_names(names)
+    if #unique == 0 then return nil, unique end
+    local prefix = module_components(unique[1])
+    if #prefix == 0 then return nil, unique, unique[1], unique[1] end
+
+    local prefix_length = #prefix
+    for index = 2, #unique do
+        local components = module_components(unique[index])
+        local limit = math.min(prefix_length, #components)
+        local shared = 0
+        while shared < limit and
+              prefix[shared + 1] == components[shared + 1] do
+            shared = shared + 1
+        end
+        prefix_length = shared
+        if prefix_length == 0 then
+            return nil, unique, unique[1], unique[index]
+        end
+    end
+
+    local provider = table.concat(prefix, ".", 1, prefix_length)
+    return provider, unique
+end
+
+function driver.mangle_module_name(modname)
+    return modname:gsub("[%-.]", "_")
+end
+
+-- Return shallowest-to-exact physical container candidates for one logical
+-- module. Component boundaries are significant: a.b and a.bc share only a.
+function driver.module_binary_candidates(modname)
+    local components = module_components(modname)
+    if #components == 0 then return {} end
+
+    local candidates = {}
+    local path = ""
+    for index, component in ipairs(components) do
+        path = index == 1 and component or (path .. "/" .. component)
+        table.insert(candidates, path .. ".so")
+    end
+    return candidates
 end
 
 local function regular_file(filename)
@@ -338,31 +421,191 @@ local function blocked_source_error(modname, source)
         source.owner .. "' whose main source is '" .. source.main .. "'"
 end
 
-local function load_compiled_interface(modname, binf)
-    local prefix = modname:gsub("[%-.]", "_")
-    local loadlib = require("titan")._loadlib
-    local abif, err = loadlib(binf, prefix .. "_abi")
-    if not abif then
-        return nil, "compiled module '" .. modname
-            .. "' has no compatible Titan ABI marker (expected "
-            .. driver.TITAN_VER .. "): " .. tostring(err)
+local function one_metadata_result(fn, label)
+    local results = table.pack(pcall(fn))
+    if not results[1] then return nil, tostring(results[2]) end
+    if results.n ~= 2 or type(results[2]) ~= "string" then
+        return nil, label .. " must return exactly one string"
     end
-    local ok, abi_or_err = pcall(abif)
-    if not ok then return nil, abi_or_err end
+    return results[2]
+end
+
+local function validate_module_interface(modtype, modname)
+    if type(modtype) ~= "table" or modtype._tag ~= "Type.Module" then
+        return nil, "metadata did not deserialize to a Type.Module"
+    end
+    if modtype.name ~= modname then
+        return nil, "returned type metadata for '" .. tostring(modtype.name) ..
+            "' while loading module '" .. modname .. "'"
+    end
+
+    local expected_prefix = driver.mangle_module_name(modname) .. "_"
+    local expected_file = modname:gsub("[.]", "/") .. ".so"
+    if modtype.prefix ~= expected_prefix or modtype.file ~= expected_file or
+       type(modtype.members) ~= "table" or
+       type(modtype.type_members) ~= "table" then
+        return nil, "metadata did not construct a canonical Type.Module"
+    end
+
+    local numeric_count, maximum_index = 0, 0
+    for key in pairs(modtype.members) do
+        if type(key) == "number" then
+            if key < 1 or key % 1 ~= 0 then
+                return nil, "module member list has an invalid index"
+            end
+            numeric_count = numeric_count + 1
+            maximum_index = math.max(maximum_index, key)
+        elseif type(key) ~= "string" then
+            return nil, "module member table has an invalid key"
+        end
+    end
+    if numeric_count ~= maximum_index then
+        return nil, "module member list is not dense"
+    end
+
+    local names = {}
+    for index = 1, maximum_index do
+        local member = modtype.members[index]
+        if type(member) ~= "table" or
+           (member._tag ~= "Type.ModuleMember" and
+            member._tag ~= "Type.ModuleVariable") or
+           member.modname ~= modname or type(member.name) ~= "string" or
+           member.name == "" or type(member.type) ~= "table" or
+           type(member.type._tag) ~= "string" then
+            return nil, "module member " .. index .. " has an invalid schema"
+        end
+        if names[member.name] then
+            return nil, "module interface contains duplicate member '" ..
+                member.name .. "'"
+        end
+        names[member.name] = member
+        if modtype.members[member.name] ~= member then
+            return nil, "module member map does not match member '" ..
+                member.name .. "'"
+        end
+    end
+    for key, member in pairs(modtype.members) do
+        if type(key) == "string" and names[key] ~= member then
+            return nil, "module member map contains an invalid entry '" ..
+                key .. "'"
+        end
+    end
+    for name, member in pairs(modtype.type_members) do
+        if type(name) ~= "string" or name == "" or type(member) ~= "table" or
+           type(member._tag) ~= "string" then
+            return nil, "module type-member table has an invalid schema"
+        end
+    end
+
+    -- This is also the canonical recursive schema walk for all serializable
+    -- member types. It catches unknown tags and missing nested fields now,
+    -- while this candidate's metadata claim is still the diagnostic subject.
+    local serialized_ok, serialized_or_err = pcall(types.serialize, modtype)
+    if not serialized_ok then
+        return nil, "module interface is not serializable: " ..
+            tostring(serialized_or_err)
+    end
+    return true
+end
+
+-- Probe one existing container for a logical module. A missing dlsym entry is
+-- a membership absence; an open failure is terminal. Callers decide whether a
+-- clean nonclaim is skippable (ancestor) or an error (exact candidate).
+local function probe_compiled_interface(modname, binf)
+    local prefix = driver.mangle_module_name(modname)
+    local loadlib = require("titan")._loadlib
+    local abiname = prefix .. "_abi"
+    local typesname = prefix .. "_types"
+    local abif, abierr, abistage = loadlib(binf, abiname)
+    if not abif and abistage ~= nil and abistage ~= "init" then
+        return "error", "cannot inspect compiled module '" .. modname ..
+            "' in '" .. binf .. "': " .. tostring(abierr)
+    end
+    local typesf, typeserr, typesstage = loadlib(binf, typesname)
+    if not typesf and typesstage ~= nil and typesstage ~= "init" then
+        return "error", "cannot inspect compiled module '" .. modname ..
+            "' in '" .. binf .. "': " .. tostring(typeserr)
+    end
+
+    if not abif and not typesf then
+        return "nonclaim", {
+            abi = abierr,
+            types = typeserr,
+        }
+    elseif not abif or not typesf then
+        local missing = not abif and abiname or typesname
+        return "error", "compiled container '" .. binf .. "' claims module '" ..
+            modname .. "' but is missing metadata symbol '" .. missing .. "'"
+    end
+
+    local abi_or_err, abi_call_err = one_metadata_result(
+        abif, "compiled module ABI marker '" .. abiname .. "'")
+    if not abi_or_err then return "error", abi_call_err end
     if abi_or_err ~= driver.TITAN_VER then
-        return nil, "compiled module '" .. modname
+        return "error", "compiled module '" .. modname
             .. "' ABI mismatch: expected " .. driver.TITAN_VER
             .. " but found " .. tostring(abi_or_err)
     end
-    local typesf, terr = loadlib(binf, prefix .. "_types")
-    if not typesf then return nil, terr end
-    local tok, types_or_err = pcall(typesf)
-    if not tok then return nil, types_or_err end
+
+    local types_or_err, types_call_err = one_metadata_result(
+        typesf, "compiled module type metadata '" .. typesname .. "'")
+    if not types_or_err then return "error", types_call_err end
     local modtf, lerr = load("return " .. types_or_err, modname, "t", types)
-    if not modtf then return nil, lerr end
+    if not modtf then return "error", lerr end
     local mok, modt_or_err = pcall(modtf)
-    if not mok then return nil, modt_or_err end
-    return modt_or_err
+    if not mok then return "error", modt_or_err end
+    local valid, validation_err =
+        validate_module_interface(modt_or_err, modname)
+    if not valid then
+        return "error", "compiled container '" .. binf ..
+            "' has invalid metadata for module '" .. modname .. "': " ..
+            validation_err
+    end
+    return "valid", modt_or_err
+end
+
+local function join_path(root, relative)
+    if root:sub(-1) == "/" then return root .. relative end
+    return root .. "/" .. relative
+end
+
+-- Locate a compiled logical module inside shallow-to-exact containers. Search
+-- is root-major so an earlier local exact module wins over a later installed
+-- shallow bundle. Once a relative candidate exists in one root it shadows the
+-- same relative pathname in all later roots, even when it is a clean nonclaim.
+function driver.find_compiled_interface(paths, modname)
+    local candidates = driver.module_binary_candidates(modname)
+    if #candidates == 0 then return nil end
+    local occupied = {}
+
+    for _, root in ipairs(driver.titan_bin_path_entries(paths)) do
+        local absolute_root = assert(normalize_root(root))
+        for index, relative in ipairs(candidates) do
+            if not occupied[relative] then
+                local filename = join_path(absolute_root, relative)
+                -- lstat semantics are intentional: a broken symlink or other
+                -- occupied pathname is a broken selected candidate, not an
+                -- invitation to fall through to a later Titan path root.
+                if lfs.symlinkattributes(filename, "mode") then
+                    occupied[relative] = true
+                    local status, value =
+                        probe_compiled_interface(modname, filename)
+                    if status == "valid" then
+                        value.file = relative
+                        return value, filename, relative
+                    elseif status == "error" then
+                        return nil, value
+                    elseif index == #candidates then
+                        return nil, "compiled module '" .. modname ..
+                            "' has no compatible Titan ABI marker (expected " ..
+                            driver.TITAN_VER .. "): " ..
+                            tostring(value and value.abi)
+                    end
+                end
+            end
+        end
+    end
+    return nil
 end
 
 function driver.defaultloader(static_deps, options)
@@ -479,17 +722,18 @@ function driver.defaultloader(static_deps, options)
             return ok, modt, errors
         end
 
-        local binf = findmodule(driver.TITAN_BIN_PATH, modname, ".so")
-        if binf then
-            local modt_or_err, err = load_compiled_interface(modname, binf)
-            if not modt_or_err then return false, err end
+        local modt_or_err, binf_or_err =
+            driver.find_compiled_interface(driver.TITAN_BIN_PATH, modname)
+        if modt_or_err then
             driver.imported[modname] = {
                 type = modt_or_err,
                 compiled = true,
-                filename = binf,
+                filename = binf_or_err,
             }
             remember_direct_dependency(modname)
             return true, modt_or_err, {}
+        elseif binf_or_err then
+            return false, binf_or_err
         end
         source, source_err = resolve_source(driver.TITAN_SOURCE_PATH, modname)
         if source_err then return false, source_err end
@@ -981,13 +1225,53 @@ local function ensure_output_parent(filename)
     return ensure_directory(parent)
 end
 
-function driver.compile_library(modname, libnames, link, verbose, extra_objects)
+function driver.sibling_temporary_path(filename)
+    local unique = os.tmpname()
+    os.remove(unique)
+    unique = unique:match("([^/]+)$") or unique:gsub("[^%w]", "_")
+    return filename .. ".tmp." .. unique
+end
+
+-- Keep the linked image's basename identical to its eventual public basename.
+-- This matters on macOS: dsymutil names the inner DWARF payload after the input
+-- file, and libbacktrace later looks it up using the loaded DSO basename. The
+-- random component therefore belongs in a sibling directory, not in the DSO.
+function driver.staged_library_output(publicname)
+    local parent_ok, parent_err = ensure_output_parent(publicname)
+    if not parent_ok then return nil, parent_err end
+    local basename = publicname:match("([^/]+)$")
+    if not basename then return nil, "invalid library output path" end
+    local directory = driver.sibling_temporary_path(publicname .. ".stage")
+    local made, make_err = lfs.mkdir(directory)
+    if not made then return nil, make_err end
+    return directory .. "/" .. basename, directory
+end
+
+local function remove_path(path)
+    local mode = lfs.symlinkattributes(path, "mode")
+    if mode == "directory" then
+        for name in lfs.dir(path) do
+            if name ~= "." and name ~= ".." then
+                local ok, err = remove_path(path .. "/" .. name)
+                if not ok then return nil, err end
+            end
+        end
+        return lfs.rmdir(path)
+    elseif mode then
+        return os.remove(path)
+    end
+    return true
+end
+driver.remove_path = remove_path
+
+function driver.compile_library_output(soname, libnames, link, verbose,
+                                       extra_objects)
     local runtime_ok, runtime_err = check_runtime(verbose)
     if not runtime_ok then return nil, runtime_err end
-    local soname = modname:gsub("[.]", "/") .. ".so"
     local output_ok, output_err = ensure_output_parent(soname)
     if not output_ok then return nil, output_err end
     os.remove(soname)
+    remove_path(soname .. ".dSYM")
 
     local args, err = compiler_argv(false)
     if not args then return nil, err end
@@ -1011,8 +1295,278 @@ function driver.compile_library(modname, libnames, link, verbose, extra_objects)
     append_argv(args, driver.EXTRA_LDFLAGS)
 
     local ok, term, code = run_argv(args, verbose)
-    if ok then run_dsymutil(soname, verbose) end
+    if ok then
+        local dsym_ok, dsym_term, dsym_code = run_dsymutil(soname, verbose)
+        if not dsym_ok then
+            os.remove(soname)
+            remove_path(soname .. ".dSYM")
+            return nil, dsym_term, dsym_code
+        end
+    end
     return ok, term, code
+end
+
+function driver.compile_library(modname, libnames, link, verbose, extra_objects)
+    local soname = modname:gsub("[.]", "/") .. ".so"
+    return driver.compile_library_output(
+        soname, libnames, link, verbose, extra_objects)
+end
+
+-- Publish a successfully validated sibling temporary DSO. On Darwin the
+-- matching dSYM is staged first and restored if the final atomic DSO rename
+-- fails; the public DSO pathname is the commit point.
+function driver.publish_library(tempname, publicname)
+    local dsym_backup
+    local temp_dsym = tempname .. ".dSYM"
+    local public_dsym = publicname .. ".dSYM"
+
+    if driver.IS_DARWIN then
+        if lfs.attributes(temp_dsym, "mode") ~= "directory" then
+            return nil, "linked library '" .. tempname ..
+                "' has no companion dSYM"
+        end
+        if lfs.attributes(public_dsym, "mode") then
+            dsym_backup = driver.sibling_temporary_path(public_dsym .. ".old")
+            local backed_up, backup_err = os.rename(public_dsym, dsym_backup)
+            if not backed_up then return nil, backup_err end
+        end
+        local moved, move_err = os.rename(temp_dsym, public_dsym)
+        if not moved then
+            if dsym_backup then os.rename(dsym_backup, public_dsym) end
+            return nil, move_err
+        end
+    end
+
+    local published, publish_err = os.rename(tempname, publicname)
+    if not published then
+        if driver.IS_DARWIN then
+            os.rename(public_dsym, temp_dsym)
+            if dsym_backup then os.rename(dsym_backup, public_dsym) end
+        end
+        return nil, publish_err
+    end
+
+    if dsym_backup then remove_path(dsym_backup) end
+    if not driver.IS_DARWIN then remove_path(public_dsym) end
+    return true
+end
+
+local function absolute_filename(filename)
+    if filename:sub(1, 1) == "/" then return filename end
+    return lfs.currentdir() .. "/" .. filename
+end
+
+-- Verify every logical protocol exported by a newly linked container before
+-- its public pathname is changed. Metadata functions are executed and decoded;
+-- init/Lua entry points are resolved but deliberately not called.
+function driver.validate_library_image(filename, module_names)
+    filename = absolute_filename(filename)
+    local loadlib = require("titan")._loadlib
+    for _, modname in ipairs(module_names) do
+        local status, value = probe_compiled_interface(modname, filename)
+        if status ~= "valid" then
+            if status == "nonclaim" then
+                return nil, "linked container '" .. filename ..
+                    "' does not contain metadata for module '" .. modname .. "'"
+            end
+            return nil, value
+        end
+
+        local prefix = driver.mangle_module_name(modname)
+        for _, symbol in ipairs({
+            prefix .. "_init",
+            "luaopen_" .. prefix,
+        }) do
+            local fn, err = loadlib(filename, symbol)
+            if not fn then
+                return nil, "linked container '" .. filename ..
+                    "' is missing entry '" .. symbol .. "': " .. tostring(err)
+            end
+        end
+    end
+    return true
+end
+
+local support_validation_script = [[
+local image, result = ...
+
+local function finish(ok, message)
+    local out = assert(io.open(result, "wb"))
+    out:write(message)
+    out:close()
+    os.exit(ok and 0 or 1)
+end
+
+local open, load_error = package.loadlib(image, "luaopen_titan")
+if not open then
+    finish(false, "cannot load luaopen_titan: " .. tostring(load_error))
+end
+
+local values = table.pack(pcall(open))
+if not values[1] then
+    finish(false, "luaopen_titan failed: " .. tostring(values[2]))
+end
+if values.n ~= 2 or type(values[2]) ~= "table" then
+    finish(false, "luaopen_titan must return exactly one support table")
+end
+if type(values[2]._loadlib) ~= "function" or
+   type(values[2]._loadlibglobal) ~= "function" then
+    finish(false, "luaopen_titan support table must expose _loadlib and _loadlibglobal")
+end
+finish(true, "ok")
+]]
+
+local function current_lua_executable()
+    if driver.INSTALL_PATHS then
+        return root_join(driver.INSTALL_PATHS.root, "bin/lua")
+    end
+    local source_lua = driver.LUA_SOURCE_PATH .. "/lua"
+    if lfs.attributes(source_lua, "mode") == "file" then return source_lua end
+    if type(arg) == "table" and type(arg[-1]) == "string" and
+       lfs.attributes(arg[-1], "mode") == "file" then
+        return arg[-1]
+    end
+    return "lua"
+end
+
+-- Provider `titan` owns Lua's bare native support API. Validate its entry in a
+-- fresh process so package.loaded or a compiler-side support table cannot make
+-- an unrelated/stub luaopen_titan appear valid.
+function driver.validate_titan_support(filename, verbose)
+    local script = os.tmpname()
+    local result = os.tmpname()
+    local ok, err = util.set_file_contents(script, support_validation_script)
+    if not ok then
+        os.remove(script)
+        os.remove(result)
+        return nil, err
+    end
+
+    local ran, term, code = run_argv({
+        current_lua_executable(), "-E", script,
+        absolute_filename(filename), result,
+    }, verbose)
+    local message = util.get_file_contents(result)
+    os.remove(script)
+    os.remove(result)
+    if not ran then
+        return nil, "linked provider 'titan' has an invalid native support " ..
+            "entry: " .. tostring(message or term) ..
+            (code and (" (exit " .. tostring(code) .. ")") or "")
+    end
+    if message ~= "ok" then
+        return nil, "linked provider 'titan' support validation returned " ..
+            tostring(message)
+    end
+    return true
+end
+
+driver.GENERATED_SHIM_BANNER = "-- Generated by titanc; do not edit.\n"
+
+local function safe_module_output_path(modname, extension)
+    local components = module_components(modname)
+    if #components == 0 then return nil end
+    for _, component in ipairs(components) do
+        if component == "." or component == ".." or
+           component:find("[/\\%z]") then
+            return nil
+        end
+    end
+    return table.concat(components, "/") .. extension
+end
+
+local function validate_output_ancestors(filename)
+    local current = ""
+    for component in filename:gmatch("([^/]+)/") do
+        current = current == "" and component or (current .. "/" .. component)
+        local attr = lfs.symlinkattributes(current)
+        if attr and attr.mode ~= "directory" then
+            return nil, "output parent '" .. current .. "' is not a directory"
+        end
+    end
+    return true
+end
+
+local shim_template = [[local path, search_error = package.searchpath($PROVIDER, package.cpath)
+if not path then error(search_error, 0) end
+
+local titan = require "titan"
+local open, open_error = titan._loadlibglobal(path, $ENTRY)
+if not open then error(open_error, 0) end
+
+return open()
+]]
+
+-- Validate the complete shim set before code generation. Only files carrying
+-- Titan's exact generated banner are owned and replaceable.
+function driver.plan_module_shims(provider, module_names)
+    local provider_path = safe_module_output_path(provider, ".so")
+    if not provider_path then
+        return nil, "invalid library provider name '" .. tostring(provider) .. "'"
+    end
+
+    local plans = {}
+    local seen = {}
+    for _, modname in ipairs(module_names) do
+        local filename = safe_module_output_path(modname, ".lua")
+        if not filename then
+            return nil, "module '" .. tostring(modname) ..
+                "' has no safe generated Lua shim path"
+        end
+        if seen[filename] then
+            return nil, "multiple modules would generate Lua shim '" ..
+                filename .. "'"
+        end
+        seen[filename] = true
+
+        local parents_ok, parents_err = validate_output_ancestors(filename)
+        if not parents_ok then return nil, parents_err end
+        local attr = lfs.symlinkattributes(filename)
+        if attr then
+            if attr.mode ~= "file" then
+                return nil, "refusing to replace non-file Lua shim path '" ..
+                    filename .. "'"
+            end
+            local input, read_err = util.get_file_contents(filename)
+            if not input then return nil, read_err end
+            if input:sub(1, #driver.GENERATED_SHIM_BANNER) ~=
+               driver.GENERATED_SHIM_BANNER then
+                return nil, "refusing to overwrite unrecognized Lua file '" ..
+                    filename .. "'"
+            end
+        end
+
+        local entry = "luaopen_" .. driver.mangle_module_name(modname)
+        table.insert(plans, {
+            modname = modname,
+            filename = filename,
+            contents = driver.GENERATED_SHIM_BANNER .. util.render(
+                shim_template, {
+                    PROVIDER = string.format("%q", provider),
+                    ENTRY = string.format("%q", entry),
+                }),
+        })
+    end
+    return plans, provider_path
+end
+
+function driver.write_module_shims(plans)
+    for _, plan in ipairs(plans) do
+        local output_ok, output_err = ensure_output_parent(plan.filename)
+        if not output_ok then return nil, output_err end
+        local tempname = driver.sibling_temporary_path(plan.filename)
+        local wrote, write_err = util.set_file_contents(tempname, plan.contents)
+        if not wrote then
+            os.remove(tempname)
+            return nil, write_err
+        end
+        local moved, move_err = os.rename(tempname, plan.filename)
+        if not moved then
+            os.remove(tempname)
+            return nil, move_err
+        end
+    end
+    return true
 end
 
 function driver.compile_program(modname, libnames, link, verbose, extra_objects,

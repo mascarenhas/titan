@@ -3,6 +3,9 @@ local assert = require "luassert"
 
 local M = {}
 local REPO = lfs.currentdir()
+local STANDARD_MODULES = {
+    "coroutine", "uv", "async", "timer", "fs", "net", "os",
+}
 
 local function quote(word)
     return "'" .. tostring(word):gsub("'", "'\\''") .. "'"
@@ -35,42 +38,115 @@ local function fresh_workspace_path(label)
     return path
 end
 
-local function find_standard_dir()
-    local paths = {}
-    local prefix = os.getenv("PREFIX")
-    if prefix and prefix ~= "" then
-        paths[#paths + 1] = prefix .. "/lib/titan/0.15/titan"
-    end
-    local installed = package.searchpath("titan.coroutine", package.cpath)
-    if installed then
-        paths[#paths + 1] = assert(installed:match("^(.*)/[^/]+$"))
-    end
-    paths[#paths + 1] = REPO .. "/titan"
-    for _, path in ipairs(paths) do
-        if exists(path .. "/coroutine.so") and exists(path .. "/uv.so") and
-                exists(path .. "/async.so") and
-                exists(path .. "/timer.so") then
-            return path
+local function production_layout(abi_root, shim_root)
+    return {
+        kind = "container",
+        abi_root = abi_root,
+        shim_root = shim_root,
+        container = abi_root .. "/titan.so",
+    }
+end
+
+local function valid_production_layout(layout)
+    if not exists(layout.container) then return false end
+    for _, module in ipairs(STANDARD_MODULES) do
+        if not exists(layout.shim_root .. "/titan/" .. module .. ".lua") then
+            return false
         end
     end
-    error("async stdlib specs require prebuilt coroutine.so, uv.so, " ..
-          "async.so, and timer.so; " ..
-          "run the focused Makefile stdlib target first", 0)
+    return true
 end
-M.standard_dir = find_standard_dir
 
-local function module_root(stdlib)
-    local parent = stdlib:match("^(.*)/titan$")
-    assert.truthy(parent,
-        "canonical standard directory must end in /titan: " .. stdlib)
-    return parent
+local function find_standard_layout()
+    local layouts = {}
+    local prefix = os.getenv("PREFIX")
+    if prefix and prefix ~= "" then
+        layouts[#layouts + 1] = production_layout(
+            prefix .. "/lib/titan/0.16", prefix .. "/share/lua/5.5")
+    end
+
+    -- Discover the two owners independently. The supported installation puts
+    -- both under one rocks tree today, but PREFIX/ROCKS_TREE equality is
+    -- deployment policy rather than a helper invariant.
+    local installed_container = package.searchpath("titan", package.cpath)
+    local installed_shim = package.searchpath(
+        "titan.coroutine", package.path)
+    local installed_abi_root = installed_container and
+        installed_container:match("^(.*)/lib/titan/0%.16/titan%.so$")
+    local installed_shim_root = installed_shim and
+        installed_shim:match("^(.*)/titan/coroutine%.lua$")
+    if installed_abi_root and installed_shim_root then
+        layouts[#layouts + 1] = production_layout(
+            installed_abi_root .. "/lib/titan/0.16", installed_shim_root)
+    end
+
+    layouts[#layouts + 1] = production_layout(REPO, REPO)
+    for _, layout in ipairs(layouts) do
+        if valid_production_layout(layout) then return layout end
+    end
+    error("async stdlib specs require the combined titan.so and all seven " ..
+          "generated titan/*.lua shims; run make stdlib first", 0)
 end
-M.module_root = module_root
+M.standard_layout = find_standard_layout
 
-local function canonical_cpath(stdlib)
-    return module_root(stdlib) .. "/?.so"
+local function exact_layout(root)
+    assert.truthy(type(root) == "string" and root ~= "",
+        "exact standard-library root must be a nonempty path")
+    assert.falsy(exists(root .. "/titan.so"),
+        "exact standard-library variant must not contain shallow titan.so: " ..
+            root)
+    return {
+        kind = "exact",
+        abi_root = root,
+        shim_root = root,
+        providers = {},
+    }
+end
+M.exact_layout = exact_layout
+
+local function assert_layout(layout)
+    assert.truthy(type(layout) == "table", "stdlib layout must be a table")
+    assert.truthy(layout.kind == "container" or layout.kind == "exact",
+        "unknown stdlib layout kind: " .. tostring(layout.kind))
+    assert.truthy(type(layout.abi_root) == "string",
+        "stdlib layout is missing abi_root")
+    assert.truthy(type(layout.shim_root) == "string",
+        "stdlib layout is missing shim_root")
+    if layout.kind == "container" then
+        assert.equals(layout.abi_root .. "/titan.so", layout.container)
+    else
+        assert.falsy(exists(layout.abi_root .. "/titan.so"),
+            "exact standard-library variant must not contain shallow titan.so")
+    end
+    return layout
+end
+
+local function register_exact_provider(layout, modname)
+    assert.equals("exact", assert_layout(layout).kind)
+    local relative = modname:gsub("%.", "/")
+    local provider = layout.abi_root .. "/" .. relative .. ".so"
+    local shim = layout.shim_root .. "/" .. relative .. ".lua"
+    assert.truthy(exists(provider),
+        "exact variant is missing provider " .. provider)
+    assert.truthy(exists(shim), "exact variant is missing shim " .. shim)
+    local contents = M.read(shim)
+    assert.truthy(contents:find(
+        "package.searchpath(" .. string.format("%q", modname) ..
+            ", package.cpath)", 1, true),
+        "exact variant shim does not select provider " .. modname)
+    layout.providers[modname] = { provider = provider, shim = shim }
+end
+M.register_exact_provider = register_exact_provider
+
+local function canonical_cpath(layout)
+    return assert_layout(layout).abi_root .. "/?.so"
 end
 M.canonical_cpath = canonical_cpath
+
+local function canonical_lua_path(layout)
+    return assert_layout(layout).shim_root .. "/?.lua"
+end
+M.canonical_lua_path = canonical_lua_path
 
 local function host_libuv_config()
     local makefile = M.read and M.read("Makefile") or nil
@@ -142,12 +218,12 @@ end
 
 function M.compile(workspace, modname, options)
     options = options or {}
-    local stdlib = options.stdlib or find_standard_dir()
+    local layout = assert_layout(options.layout or find_standard_layout())
     local lua = host_lua()
     local environment = {
         "env -u LUA_PATH -u LUA_CPATH" ..
             " -u LUA_PATH_5_5 -u LUA_CPATH_5_5 CCACHE_DISABLE=1",
-        "TITAN_PATH_0_15=" .. quote(module_root(stdlib)),
+        "TITAN_PATH_0_16=" .. quote(layout.abi_root),
         "TITAN_PATH=",
     }
     if options.cppflags then
@@ -210,33 +286,37 @@ local function build_variant_workspace(transformer)
 
     assert.truthy(exists(workspace .. "/titan-runtime/libtitan.a"),
         "async stdlib variant requires make runtime's libtitan.a")
-    local variant_stdlib = workspace .. "/titan"
+    local variant_layout = exact_layout(workspace)
     M.compile(workspace, "titan.coroutine", {
-        stdlib = variant_stdlib,
+        layout = variant_layout,
         cppflags = "",
     })
+    register_exact_provider(variant_layout, "titan.coroutine")
 
     local cppflags, ldflags, archive = host_libuv_config()
     ldflags = archive .. " " .. ldflags
     M.compile(workspace, "titan.uv", {
-        stdlib = variant_stdlib,
+        layout = variant_layout,
         cppflags = cppflags,
         cflags = "-fno-strict-aliasing",
         ldflags = ldflags,
     })
+    register_exact_provider(variant_layout, "titan.uv")
     -- Build the public facade against this private uv image. Its imported uv
     -- module is loaded globally by the ordinary generated dependency loader,
     -- so alias-owned Task methods resolve transitively without another import
     -- in each consumer.
     M.compile(workspace, "titan.async", {
-        stdlib = variant_stdlib,
+        layout = variant_layout,
         cppflags = "",
     })
+    register_exact_provider(variant_layout, "titan.async")
     M.compile(workspace, "titan.timer", {
-        stdlib = variant_stdlib,
+        layout = variant_layout,
         cppflags = "",
     })
-    return workspace
+    register_exact_provider(variant_layout, "titan.timer")
+    return workspace, variant_layout
 end
 
 function M.variant_workspace(transformer)
@@ -245,15 +325,21 @@ end
 
 function M.run_lua_source(workspace, source, options)
     options = options or {}
-    local stdlib = options.stdlib or find_standard_dir()
-    local root = module_root(stdlib)
-    local cpath = workspace .. "/?.so;" .. root .. "/?.so;;"
-    local lua_path = REPO .. "/?.lua;" .. REPO .. "/?/init.lua;;"
+    local layout = assert_layout(options.layout or find_standard_layout())
+    local support_layout = find_standard_layout()
+    local cpath = workspace .. "/?.so;" .. canonical_cpath(layout)
+    if support_layout.abi_root ~= layout.abi_root then
+        cpath = cpath .. ";" .. canonical_cpath(support_layout)
+    end
+    cpath = cpath .. ";;"
+    local lua_path = workspace .. "/?.lua;" ..
+        canonical_lua_path(layout) .. ";" .. REPO .. "/?.lua;" ..
+        REPO .. "/?/init.lua;;"
     local lua = host_lua()
     local command = {
         "env -u LUA_PATH -u LUA_CPATH" ..
             " -u LUA_PATH_5_5 -u LUA_CPATH_5_5",
-        "TITAN_PATH_0_15=" .. quote(root),
+        "TITAN_PATH_0_16=" .. quote(layout.abi_root),
         "TITAN_PATH=",
         "LUA_PATH=" .. quote(lua_path),
         "LUA_PATH_5_5=" .. quote(lua_path),
@@ -270,7 +356,7 @@ function M.run_lua_source(workspace, source, options)
 end
 
 local function app_command(workspace, modname)
-    local stdlib = find_standard_dir()
+    local layout = find_standard_layout()
     local module_path = modname:gsub("%.", "/")
     local basename = modname:match("([^.]+)$")
     local source_main = workspace .. "/src/" .. module_path .. "/" ..
@@ -281,7 +367,7 @@ local function app_command(workspace, modname)
     end
     return "env -u LUA_PATH -u LUA_CPATH" ..
         " -u LUA_PATH_5_5 -u LUA_CPATH_5_5" ..
-        " TITAN_PATH_0_15=" .. quote(module_root(stdlib)) .. " " ..
+        " TITAN_PATH_0_16=" .. quote(layout.abi_root) .. " " ..
         "TITAN_PATH= " .. quote(workspace .. "/" .. program_output)
 end
 

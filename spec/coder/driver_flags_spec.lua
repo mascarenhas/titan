@@ -71,6 +71,7 @@ end
 
 local ARTIFACTS = {
     MODULE .. ".so",
+    MODULE .. ".lua",
     APPLICATION .. "/" .. MODULE .. ".c",
     APPLICATION .. "/" .. MODULE .. ".o",
 }

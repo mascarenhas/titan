@@ -439,17 +439,18 @@ record-member visibility — is described in [Records](records.md).
 
 ## Standalone programs: `main`
 
-A Titan module is normally compiled to a shared library that Lua (or
-another Titan module) loads. A module that declares a function with this
-exact signature instead marks the program entry point:
+A Titan module is normally compiled into a shared-library provider that Lua
+(or another Titan module) loads through the module's logical entry. A module
+that declares a function with this exact signature instead marks the program
+entry point:
 
 ```lua
 function main(args: {string}): integer
 ```
 
 When `titanc` is given a set of modules and exactly one of them has such
-a `main`, it produces a standalone executable instead of shared
-libraries. A flat module's executable is named after the module (dots in the
+a `main`, it produces a standalone executable instead of a shared-library
+provider. A flat module's executable is named after the module (dots in the
 module name become directory separators). A
 [folder module](folder-modules.md#generated-artifacts) adds `__main` to that
 path so the executable cannot collide with the source directory. Both forms
@@ -461,8 +462,13 @@ startup, their interface recovered from the compiled module. See
 
 ```sh
 ./titanc answer        # answer.titan declares main -> executable ./answer
-./titanc foo bar       # neither has main -> foo.so and bar.so
+./titanc pkg.foo pkg.bar # neither has main -> pkg.so plus two Lua loaders
 ```
+
+Library roots must share at least one dotted component; use separate compiler
+invocations for unrelated providers. Executable roots need no common prefix,
+because program mode keeps its existing one-executable link. See
+[Multi-module libraries](multi-module-libraries.md).
 
 The rules:
 

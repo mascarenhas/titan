@@ -35,8 +35,8 @@ make libuv
 `make lua` fetches the
 [Lua 5.5.0 sources](http://www.lua.org/ftp/lua-5.5.0.tar.gz) and configures
 `lua-5.5.0/src/luaconf.h` so `LUA_ROOT` is this `PREFIX`. Lua's `loadlib.c`
-remains unmodified; the installed `titan/uv.lua` loader uses the standard
-`package.loadlib` global-link operation for the libuv provider. The build then
+remains unmodified; generated logical-module loaders use Titan's native
+lazy/global helper to map or promote their physical provider. The build then
 compiles Lua with `MYCFLAGS=-fPIC` and
 installs it under the prefix. It also installs the Lua `.c` and `.h` sources
 under `$PREFIX/src/lua-5.5.0/`. Consequently the
@@ -80,20 +80,19 @@ The installed files used to compile Titan code include:
 | `$ROCKS_TREE/src/lua-5.5.0/`, `$ROCKS_TREE/lib/liblua.a` | Matching Lua source and archive copies staged as part of the Titan compiler SDK |
 | `$ROCKS_TREE/lib/libtitan.a` | Exactly `titan.o`, `titan_coro.o`, and `titan_uv.o`: generated-code loader/error support plus the coroutine and libuv callback shims |
 | `$ROCKS_TREE/lib/libbacktrace.a` | The separate vendored native unwinder/symbolizer archive |
-| `$ROCKS_TREE/lib/lua/5.5/titan.so` | The separate Lua support module built only from `titan-runtime/titanlib.c`, including the compiler's internal `RTLD_LAZY` + `RTLD_LOCAL` interface loader; it is not a member of `libtitan.a` |
 | `$ROCKS_TREE/include/minicoro.h`, `titan.h`, `titan_longjmp.h` | Non-Lua top-level SDK headers |
 | `$ROCKS_TREE/include/titan/{ffi,coro,uv}.h` | Namespaced portable FFI, coroutine, and libuv shim headers |
-| `$ROCKS_TREE/lib/titan/0.15/titan/*.so` | The single canonical files for the `coroutine`, `uv`, `async`, `timer`, `fs`, `net`, and `os` standard modules, used by both Titan imports and `require "titan.*"` |
-| `$ROCKS_TREE/share/lua/5.5/titan/uv.lua` | The Lua loader that maps canonical `titan/uv.so` globally before invoking `luaopen_titan_uv` |
+| `$ROCKS_TREE/lib/titan/0.16/titan.so` | The one standard-library provider: native `require "titan"` support plus the independent `coroutine`, `uv`, `async`, `timer`, `fs`, `net`, and `os` logical modules |
+| `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,fs,net,os}.lua` | Generated logical-module loader shims that map the canonical provider globally and invoke their exact `luaopen_titan_*` entries |
 
 Bundled-libuv installs also contain `$ROCKS_TREE/include/uv.h` and
 `$ROCKS_TREE/include/uv/`. The bundled `libuv.a` is a private build artifact:
-it is consumed only while linking the canonical `titan/uv.so` and is not
+it is consumed only while linking the canonical `titan.so` and is not
 installed or exported as part of the Titan SDK. System mode uses the selected
-system libuv instead. Each standard module is one ordinary installed file at
-the qualified path; installation does not create aliases with symbolic links,
-hard links, or copied DSOs. Consequently Titan and Lua load the same native
-image, and `titan/uv.so` supplies the process's one complete libuv provider.
+system libuv instead. The standard logical modules have independent state and
+entries inside that one image; installation does not create child DSO aliases,
+symbolic links, hard links, or copied DSOs. The combined `titan.so` supplies
+the process's one complete libuv provider.
 
 ## Libuv setup
 
@@ -140,8 +139,8 @@ lists the related targets and setup hints. The Makefile records the effective
 mode, compiler, and flags, so switching between bundled and system mode
 rebuilds the libuv-facing objects without requiring a manual clean.
 
-In bundled mode, `titan/uv.so` is the sole complete libuv provider. A compiled
-Titan extension DSO that directly `foreign import`s `uv.h` must also import the
+In bundled mode, the combined `titan.so` is the sole complete libuv provider.
+A compiled Titan extension DSO that directly `foreign import`s `uv.h` must also import the
 `titan.uv` module (normally written `import "uv"`) and leave its `uv_*`
 function references unresolved; do not link it with `-luv` or the private
 bundled archive. Titan maps every compiled runtime dependency with its ordinary
@@ -177,13 +176,14 @@ local uv = require "titan.uv"
 local extension = require "my.libuv_extension"
 ```
 
-The `titan/uv.lua` loader resolves the canonical DSO with
-`package.searchpath("titan.uv", package.cpath)`, calls
-`package.loadlib(path, "*")` to make its symbols global, and then invokes the
-exact `luaopen_titan_uv` entry from the same handle. Thus the first `require`
-above establishes the same provider on stock Lua 5.5 on Linux and macOS while
-every other C module keeps Lua's ordinary local-loading behavior.
-`titan/uv.so` does not reopen or promote itself.
+The generated `titan/uv.lua` loader resolves the physical provider name
+`titan` with `package.searchpath("titan", package.cpath)`, obtains the native
+support table through bare `require "titan"`, then uses its separate
+`RTLD_LAZY | RTLD_GLOBAL` cache to promote the same canonical `titan.so` and
+invoke `luaopen_titan_uv`. Thus the first qualified `require` above establishes
+the provider on stock Lua 5.5 on Linux and macOS. The bare support load uses
+Lua's ordinary eager/local C searcher; the generated loader performs the
+explicit promotion without a patched `loadlib.c` or a self-loading provider.
 
 Because this explicit Lua preload happens before the extension is mapped, it
 also supports its eager libuv relocations and native constructors. It can make
@@ -191,7 +191,7 @@ the native symbols available even to a Lua-only extension that omitted the
 Titan `uv` import, but such a module does not satisfy the Titan-side contract.
 
 System mode may instead link the extension against the same
-pkg-config-selected shared libuv used by `titan/uv.so`. In either mode, never
+pkg-config-selected shared libuv used by `titan.so`. In either mode, never
 embed the bundled `libuv.a` in another DSO: it is private to the standard
 provider and a second static embedding would create a second native libuv
 instance.
@@ -202,26 +202,26 @@ compiler; select unusual CMake toolchain executables explicitly through
 own runtime archive.
 
 The Titan-owned Lua's configured default `package.cpath` contains
-`$PREFIX/lib/titan/0.15/?.so` before `$PREFIX/lib/lua/5.5/?.so`. The first
-template lets `require "titan.*"` reach the canonical standard modules (with
-`titan.uv` passing through its Lua loader first); the second remains the
-root-discovery anchor. The default `package.path` likewise finds
-`$PREFIX/share/lua/5.5/titan/uv.lua`. In the currently supported layout
+`$PREFIX/lib/titan/0.16/?.so` before `$PREFIX/lib/lua/5.5/?.so`. The first
+template lets the generated `titan.*` loaders find the canonical provider; the
+second remains the root-discovery anchor. The default `package.path` finds all
+seven loaders under `$PREFIX/share/lua/5.5/titan/`. In the currently supported
+layout
 `ROCKS_TREE == PREFIX`, so `titanc` can use the first entry ending in
 `/lib/lua/5.5/?.so` to recover its Titan SDK/rocks root.
 During the source rock's post-install build, the internal `TITAN_ROCKS_ROOT`
 override identifies `ROCKS_TREE` directly. The recovered Titan root supplies
-the staged Lua sources and archives and compiled modules under
-`$ROCKS_TREE/lib/titan/0.15/`; the standard library's qualified `titan.*`
-modules consequently live below its `titan/` subdirectory. This discovery
-rule implements the supported equal-root layout; it does not redefine the
+the staged Lua sources and archives and compiled provider under
+`$ROCKS_TREE/lib/titan/0.16/`; the standard library's qualified `titan.*`
+modules consequently live as independent entries inside `titan.so`. This
+discovery rule implements the supported equal-root layout; it does not redefine the
 separately owned `PREFIX` and `ROCKS_TREE` as one concept.
 
 At startup a compiled executable inherits Lua's default `package.cpath` and
-ensures `$ROCKS_TREE/lib/titan/0.15/?.so` is present. Both it and the installed
-Lua therefore resolve `titan.<name>` to the same canonical file at
-`$ROCKS_TREE/lib/titan/0.15/titan/<name>.so`; there are no Lua-facing or
-parent-level compatibility copies.
+ensures `$ROCKS_TREE/lib/titan/0.16/?.so` is present. Both it and the installed
+Lua therefore resolve `titan.<name>` through a generated loader to the same
+canonical file at `$ROCKS_TREE/lib/titan/0.16/titan.so`; there are no child,
+Lua-facing, or parent-level compatibility copies.
 
 An unmodified Lua 5.5 can reproduce those search paths with versioned
 environment variables. Include the ordinary Lua C-module template because it
@@ -229,17 +229,17 @@ is also Titan's installation-root anchor:
 
 ```sh
 export LUA_PATH_5_5="$ROCKS_TREE/share/lua/5.5/?.lua;$ROCKS_TREE/share/lua/5.5/?/init.lua;;"
-export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.15/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
+export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.16/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
 ```
 
 If that root-anchor template is deliberately omitted, set
-`TITAN_PATH_0_15="$ROCKS_TREE/lib/titan/0.15"` as well.
+`TITAN_PATH_0_16="$ROCKS_TREE/lib/titan/0.16"` as well.
 
-`TITAN_PATH_0_15` (or the unversioned `TITAN_PATH`) overrides the Titan binary
+`TITAN_PATH_0_16` (or the unversioned `TITAN_PATH`) overrides the Titan binary
 search path. A short standard-library import is desugared before resolution
 (`import "timer"` becomes `import "titan.timer"`), so ordinary qualified
-lookup below `$ROCKS_TREE/lib/titan/0.15` reaches the canonical file. In a source
-checkout, `--lua` can select another complete Lua source/build tree for an
+lookup below `$ROCKS_TREE/lib/titan/0.16` reaches the canonical provider. In a
+source checkout, `--lua` can select another complete Lua source/build tree for an
 individual compiler invocation. An installed compiler rejects `--lua` because
 its headers, `liblua.a`, and `libtitan.a` are one matched SDK. These overrides
 are mainly useful for testing and nonstandard source builds; a normal
@@ -249,19 +249,20 @@ This is not yet Titan's story for packaging or distributing Titan libraries
 and applications: give a project its own standalone absolute `PREFIX` and use
 the currently equal system-style `ROCKS_TREE` and installed `titanc`. The
 current Titan rock is likewise a **source-install** package. Its
-`build_target = "titan"` builds the runtime and copies the native archives,
-headers, and Lua sources directly into `ROCKS_TREE`; after LuaRocks deploys the
-compiler, a source-only `post_install` hook uses that installed `titanc` to
-build and install each standard module once at its canonical qualified path.
-There is no
-separate Make install pass or
-pre-install hook. The rockspec's C-module list contains only `titan.so`; the
-seven standard DSOs are deliberately absent. LuaRocks cannot
-express these SDK and Titan-module destinations as normal Lua modules, so the
-directly copied files are outside the rock manifest and
-`luarocks remove titan` does not remove them. Titan does not provide binary
-rocks yet; packaging and uninstall ownership for these files will be revisited
-with a Titan library/application distribution system.
+`build_target = "titan"` builds the runtime, a private support-only bootstrap,
+and the SDK archives/headers/Lua sources. When the canonical 0.16 provider is
+absent, the build atomically stages that bootstrap at
+`$ROCKS_TREE/lib/titan/0.16/titan.so` so the just-installed compiler can load
+its native support table; a repeated install preserves an already valid full
+image. After LuaRocks deploys the compiler, the source-only `post_install` hook
+invokes that `titanc` once for all seven standard roots, stages the combined
+image and generated loaders privately, validates them, and publishes them with
+rollback, committing `titan.so` last. There is no separate Make install pass
+or pre-install hook. The provider, generated loaders, and SDK files remain
+direct artifacts outside the rock manifest, so `luarocks remove titan` does
+not remove them. Titan does not provide binary rocks yet; packaging and
+uninstall ownership for these files will be revisited with a Titan
+library/application distribution system.
 
 # Usage
 
@@ -273,17 +274,27 @@ The compiler takes a list of module names that you want to compile. Modules
 are looked up in the source tree (defaults to the current working directory,
 but you can override this with the `--tree` option), as well as in the Titan
 binary path, a semicolon-separated list of paths. By default this is the
-current directory plus `<root>/lib/titan/0.15`, where `<root>` is recovered
-from `package.cpath`; override it with `TITAN_PATH_0_15` or `TITAN_PATH`.
+current directory plus `<root>/lib/titan/0.16`, where `<root>` is recovered
+from `package.cpath`; override it with `TITAN_PATH_0_16` or `TITAN_PATH`.
+
+Compiled dependency lookup probes component-prefix providers. For logical
+`a.b.c`, each binary root is checked at `a.so`, `a/b.so`, and exact
+`a/b/c.so`; the first candidate with valid `a_b_c_abi` and `a_b_c_types`
+metadata wins. An earlier root's existing relative pathname shadows the same
+candidate in later roots. Modules named explicitly on the command line remain
+source-first, while ordinary dependencies remain binary-first. See
+[Multi-module libraries](doc/language/multi-module-libraries.md) for the
+provider, metadata-claim, and generated-loader rules.
 
 A logical module may be one flat source or a folder of immediate
 contributors. For module `M`, let `P` be its dotted name with slashes and `B`
 its last component: each source root checks folder main `P/B.titan` before
 flat `P.titan`. A selected folder contributes every immediate regular
 `.titan` sibling in deterministic numeric-byte basename order; all files share
-one module namespace, checker/codegen pass, state, and output DSO. Contributors
-are not directly importable as apparent flat child modules, although a genuine
-deeper folder `P/child/child.titan` remains legal. See
+one module namespace, checker/codegen pass, state, generated object, and
+logical loader. The final provider may also contain other logical modules.
+Contributors are not directly importable as apparent flat child modules,
+although a genuine deeper folder `P/child/child.titan` remains legal. See
 [Folder modules](doc/language/folder-modules.md) for ordering, initialization,
 lookup privacy, and artifacts.
 
@@ -299,36 +310,38 @@ initialization, and code generation.
 
 The standard-library short names (`coroutine`, `uv`, `async`, `timer`, `fs`,
 `net`, and `os`) are parser sugar for the corresponding `titan.*` module
-names. Module resolution checks binary dependencies before source, so an ordinary
-`./titan/uv/uv.titan` folder cannot displace the installed `titan/uv.so`;
-someone who
-explicitly changes `TITAN_PATH` to hide that binary is choosing a different
-module installation. Modules explicitly named on the `titanc` command line
-must come from source and use the folder-before-flat rule. Titan code uses the
+names. Module resolution checks binary dependencies before source, so an
+ordinary `./titan/uv/uv.titan` folder cannot displace the installed `titan.so` provider;
+someone who explicitly changes `TITAN_PATH` to hide that provider is choosing
+a different module installation. Modules explicitly named on the `titanc`
+command line must come from source and use the folder-before-flat rule. Titan code uses the
 short imports, while Lua uses the
 qualified names `require "titan.coroutine"`, `require "titan.async"`,
 `require "titan.timer"`, `require "titan.fs"`, `require "titan.net"`, and
-`require "titan.os"`. The private `titan.uv` provider remains available for
-runtime plumbing and direct-libuv extensions. Lua's own `coroutine` and `os`
-modules remain unchanged.
+`require "titan.os"`. The private `titan.uv` logical module remains available
+for runtime plumbing and direct-libuv extensions. Lua's own `coroutine` and
+`os` modules remain unchanged.
 
-The currently implemented async chain is `titan/coroutine.so -> titan/uv.so ->
-titan/async.so`, with `titan/{timer.so, fs.so, net.so, os.so}` also built on
-the private `titan/uv.so` plumbing. Only the canonical `titan/uv.so`
-consumes libuv directly: bundled mode links its private archive there, while
-system mode links the pkg-config-selected shared library. The higher modules
-dynamically import that qualified image instead of linking libuv themselves.
-The standard build runs ordinary commands such as `titanc titan.uv`, producing
-the qualified Lua entry points in dependency order.
+The logical async chain remains `titan.coroutine -> titan.uv -> titan.async`,
+with `titan.timer`, `titan.fs`, `titan.net`, and `titan.os` built on the same
+private plumbing. Production builds pass all seven roots to one `titanc`
+invocation, so their source imports are statically resolved inside
+`titan.so`. That one provider consumes libuv directly: bundled mode links its
+private archive once, while system mode links the pkg-config-selected shared
+library once. Seven generated Lua loaders expose the qualified logical entries.
 Its source is the reviewed folder ensemble rooted at `titan/uv/uv.titan`, with
 `file.titan`, `os.titan`, `process.titan`, `runtime.titan`, `task.titan`, and
 `tcp.titan` as contributors. The main file is the shared prelude and sole
 initializer, retaining the common imports, shared constants, module state, and
 bootstrap. Exported declarations, all private records, and the private `FS`
 constants instance live with their related contributor implementations. That
-deliberate member reorder is the
-compatibility boundary for compiled-module ABI 0.15. The files still compile
-to exactly one `titan/uv.so`, never one image per contributor.
+deliberate member reorder is the compatibility boundary recorded for
+compiled-module ABI 0.15: at that historical boundary the files compiled to
+one `titan/uv.so`, never one image per contributor. ABI 0.16 keeps that folder
+as one logical object and loader, then links it with the other standard objects
+inside the combined `titan.so` provider. The generated import-resolution and
+installed-layout change is the 0.16 compatibility boundary even though the
+per-module type schema and native call convention are unchanged.
 
 From Titan, importing `timer` is enough to enable the standalone async
 bootstrap:
@@ -391,24 +404,30 @@ your compilation as a native binary:
   given in the command-line, along with every dependency that module resolution
   selected from source, as a stand-alone executable program. Dependencies
   selected from compiled modules remain dynamically loaded.
-* Otherwise, it will compile each module into a shared library that you
-  can `import` from Titan as well as `require` from Lua, and call any
-  exported functions/access exported variables. The generated `.c` and
-  `.o` files are written next to the flat source or canonical folder main;
-  linked `.so` files
-  are written relative to the directory where `titanc` runs. For each
-  generated module, any transitive import selected from source is statically
-  linked; dependencies selected from shared libraries are dynamically loaded.
+* Otherwise, it compiles one C/object pair per logical source module and links
+  their union into one shared-library provider named by the requested roots'
+  longest common dotted-component prefix. It also emits one generated Lua
+  loader per linked logical module, including source dependencies. The
+  generated `.c` and `.o` files are written next to the flat source or
+  canonical folder main; the provider and loaders are written relative to the
+  directory where `titanc` runs. Dependencies selected from compiled providers
+  remain dynamically loaded. Requested roots with no common component must be
+  built in separate invocations.
 
 For example, flat `foo.bar` uses source `foo/bar.titan`, generated
-`foo/bar.c` and `.o`, shared library `foo/bar.so`, and executable `foo/bar`.
+`foo/bar.c` and `.o`, loader `foo/bar.lua`, shared library `foo/bar.so`, and
+executable `foo/bar`.
 A folder `foo.bar` uses main `foo/bar/bar.titan`, generated
-`foo/bar/bar.c` and `.o`, the same logical `foo/bar.so`, and executable
+`foo/bar/bar.c` and `.o`, the same loader/provider paths, and executable
 `foo/bar__main`. Both program forms retain entrypoint
 `foo/bar__entrypoint.c`; the folder suffix prevents a collision with its
 source directory, including with an external `--tree`. For dotted external
 sources, Titan creates the logical output parent in the current directory
-before linking. Contributors never produce separate artifacts.
+before linking. Contributors never produce separate artifacts. A multi-root
+`titanc foo.left foo.right` build instead emits `foo.so`, `foo/left.lua`, and
+`foo/right.lua`, with no child DSOs. The logical modules remain independent
+inside that image; see
+[Multi-module libraries](doc/language/multi-module-libraries.md).
 
 # Running the test suite
 
@@ -425,8 +444,8 @@ $ make test
 ```
 
 `make test` runs `luarocks make --force` followed by `luarocks test`. The forced
-build installs the current checkout — including the `titan` Lua support module
-that a couple of tests need — and `luarocks test` installs the test dependencies
+build installs the current checkout — including the combined `titan.so`
+support/standard-library provider — and `luarocks test` installs the test dependencies
 (Busted and cluacov, declared in the rockspec) and runs the suite from the
 repository root. It clears ambient `LUA_PATH`/`LUA_CPATH` overrides for both
 commands, so a shell left over from an old `luarocks init` project cannot make
@@ -441,16 +460,18 @@ $ "$PREFIX/bin/luarocks" test                # install test deps + run the suite
 $ bash spec/support/ci_test_groups.sh compiler # compiler/language tests with LuaCov
 ```
 
-The grouped compiler command is the coverage entry point. Library API and
-runtime suites run without LuaCov because the hook measures the Lua compiler,
-not the generated Titan or native library implementation; use
+The grouped `compiler` command is the complete local coverage entry point. CI
+partitions that same set into `compiler-core` and `compiler-heavy` across its
+two warmed Linux jobs. Library API and runtime suites run without LuaCov
+because the hook measures the Lua compiler, not the generated Titan or native
+library implementation; use
 `bash spec/support/ci_test_groups.sh libraries` for that complete group.
 
 Note that `luarocks test` does **not** build the rock-under-test, only its
 dependencies, so always `luarocks make` first (that is what `make test` does).
 If you drive Busted directly, use the `busted` installed in `$PREFIX/bin`; the
-prefix-configured Lua paths then find the `titan` Lua support module installed by
-`luarocks make`. Once the Titan rock is installed, Busted loads compiler
+prefix-configured Lua paths then find the native support entry installed in
+the canonical provider by `luarocks make`. Once the Titan rock is installed, Busted loads compiler
 modules from that *installed* rock, not from your checkout. Re-run
 `$PREFIX/bin/luarocks make` after editing compiler sources so tests see the
 changes.
@@ -479,7 +500,8 @@ need the SDL2 development headers installed.
 
 `make clean` removes generated build and test artifacts (object files, generated
 C, compiled modules, coverage data), including nested `titan/uv/uv.c` and
-`titan/uv/uv.o`, while keeping source files and downloaded dependency trees.
+`titan/uv/uv.o` plus the seven known generated standard-library loaders, while
+keeping source files and downloaded dependency trees.
 `make distclean` additionally removes the downloaded Lua, LuaRocks,
 libbacktrace, and libuv source/build trees and release tarballs. Neither target
 removes an installed `PREFIX`; delete a throwaway `/tmp` prefix separately

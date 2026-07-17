@@ -16,10 +16,14 @@ The `coroutine` standard module is split deliberately:
 The source compiles under the qualified Titan identity `titan.coroutine`.
 Titan code uses `import "coroutine"`, which the parser desugars to that name;
 Lua uses the ordinary `luaopen_titan_coroutine` entry through
-`require "titan.coroutine"`. Both paths reach the one installed file at
-`<root>/lib/titan/0.15/titan/coroutine.so`. There is no legacy `coro` alias,
-parent-level or `lib/lua` copy, or bare `luaopen_coroutine` entry to collide
-with Lua's standard coroutine library.
+`require "titan.coroutine"`. Titan prefix lookup claims that logical module
+from `<root>/lib/titan/0.16/titan.so`; Lua finds the generated
+`<root>/share/lua/5.5/titan/coroutine.lua` shim, promotes/maps the same provider
+through `titan._loadlibglobal`, and invokes `luaopen_titan_coroutine`. The
+module keeps its own state and initializer beside the other logical standard
+modules in that image. There is no legacy `coro` alias, child DSO, parent-level
+or `lib/lua` copy, or bare `luaopen_coroutine` entry to collide with Lua's
+standard coroutine library.
 
 ## Public Wrapper
 
@@ -283,6 +287,13 @@ runtime contains only raw execution bookkeeping; coroutine owners still
 provide all GC reachability for the coroutines and their values. Titan imports
 and Lua requires enter the same canonical DSO, which is the sole native owner,
 while every Lua state gets its own module instance and runtime object.
+
+The serial coroutine test that must rebuild its native backend uses an
+isolated exact `titan/coroutine.so` layout, or preserves and restores the full
+production `titan.so`, conditional dSYM, and generated coroutine shim. Its
+private Titan path contains no shallow production container, so prefix lookup
+can reach the exact terminal candidate. This is a test-only variant, not an
+installed layout.
 
 When a coroutine yields to a non-immediate outer tag, the coroutine whose
 `mco_resume` is returning becomes `MCO_SUSPENDED`. The coroutines between

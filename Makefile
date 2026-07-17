@@ -22,8 +22,9 @@ LUA_DIR          := lua-$(LUA_VERSION)
 LUA_TARBALL      := $(LUA_DIR).tar.gz
 LUA_URL          := https://www.lua.org/ftp/$(LUA_TARBALL)
 # Version the extraction stamp when Titan's policy for the downloaded source
-# tree changes.  v2 deliberately restores upstream loadlib.c: global provider
-# visibility now comes from the installed titan/uv.lua loader, not a Lua patch.
+# tree changes. v2 deliberately restores upstream loadlib.c: global provider
+# visibility now comes from generated logical-module shims and Titan's native
+# lazy/global helper, not a Lua patch.
 LUA_EXTRACTED    := $(LUA_DIR)/.titan-extracted-v2
 LUA_BUILD_CONFIG := $(LUA_DIR)/src/.titan-build-config
 LUA_LIB          := $(LUA_DIR)/src/liblua.a
@@ -74,10 +75,10 @@ LIBUV_BUILD_CFLAGS ?=
 HOST_OS   := $(shell uname -s)
 HOST_ARCH := $(shell uname -m)
 
-# These are the complete inputs consumed by the later standard-module rules.
+# These are the complete inputs consumed by the later standard-library rule.
 # In bundled mode libuv's archive is a private input used to construct the one
-# canonical titan/uv.so provider; in system mode pkg-config's ordered linker output
-# must stay intact.
+# canonical titan.so provider; in system mode pkg-config's ordered linker
+# output must stay intact.
 ifeq ($(LIBUV_MODE),bundled)
   LIBUV_LIB           := $(LIBUV_BUNDLED_LIB)
   LIBUV_INCLUDE_DIR   := $(LIBUV_SRC_DIR)/include
@@ -167,13 +168,6 @@ TITAN_SDK_ROOT_HEADERS := titan-runtime/minicoro.h titan-runtime/titan.h \
 	titan-runtime/titan_longjmp.h
 TITAN_SDK_NAMESPACED_HEADERS := titan-runtime/titan/ffi.h \
 	titan-runtime/titan/coro.h titan-runtime/titan/uv.h
-COROUTINE_SO := coroutine.so
-UV_SO        := uv.so
-ASYNC_SO     := async.so
-TIMER_SO     := timer.so
-FS_SO        := fs.so
-NET_SO       := net.so
-OS_SO        := os.so
 UV_TITAN_SOURCES := \
 	titan/uv/uv.titan \
 	titan/uv/file.titan \
@@ -186,7 +180,16 @@ UV_CONFIG_STAMP := titan-runtime/.titan-uv-build-config
 STDLIB_MODULES := coroutine uv async timer fs net os
 STDLIB_SOS     := $(addsuffix .so,$(STDLIB_MODULES))
 STDLIB_QUALIFIED_SOS := $(addprefix titan/,$(STDLIB_SOS))
-ROCK_RUNTIME_SO := titan.so
+STDLIB_ROOTS := titan.coroutine titan.uv titan.async titan.timer \
+	titan.fs titan.net titan.os
+STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
+	titan/async.titan titan/timer.titan titan/fs.titan titan/net.titan \
+	titan/os.titan
+STDLIB_SHIMS := titan/coroutine.lua titan/uv.lua titan/async.lua \
+	titan/timer.lua titan/fs.lua titan/net.lua titan/os.lua
+STDLIB_CONTAINER := titan.so
+TITAN_BOOTSTRAP_SO := titan-runtime/bootstrap/titan.so
+STDLIB_BOOTSTRAP_PREREQ := $(TITAN_BOOTSTRAP_SO)
 ROCK_LUA_INCDIR ?= $(PREFIX)/include
 ROCK_CFLAGS     ?= -O2 -fPIC
 ROCK_LD         ?= $(CC)
@@ -197,23 +200,25 @@ else
 endif
 ROCKS_TREE      ?=
 ROCK_TITANC     ?=
+ROCK_LUA        ?= $(LUA_BIN)
 STDLIB_USE_INSTALLED_RUNTIME ?= 0
 TITAN_ROCKS_ROOT ?=
 export TITAN_ROCKS_ROOT
-TITAN_LUA ?= $(LUA_BIN)
+TITAN_LUA ?= $(ROCK_LUA)
 # Run the checkout's compiler sources with PREFIX's Lua. Prepending the checkout
 # keeps developer stdlib rebuilds on the edits that triggered them, while Lua's
 # configured default paths still find third-party dependencies under PREFIX.
-TITANC    ?= $(TITAN_LUA) -e 'package.path="./?.lua;./?/init.lua;" .. package.path' ./titanc
+TITANC    ?= $(TITAN_LUA) -E -e 'package.path="./?.lua;./?/init.lua;" .. package.path; package.cpath="./titan-runtime/bootstrap/?.so;" .. package.cpath' ./titanc
 TITAN_COMPILER_LUA := $(wildcard titan-compiler/*.lua c-parser/*.lua)
 
 # Standard modules have one installed pathname. PREFIX owns Lua; ROCKS_TREE
-# owns these Titan artifacts when it is supplied. Today's supported setup
-# makes them the same directory, while this fallback keeps
-# `make install-stdlib PREFIX=...` useful on its own.
+# owns these Titan artifacts when it is supplied. The source-tree
+# install-stdlib target can publish to PREFIX when ROCKS_TREE is omitted;
+# it is not part of an installed Titan tree.
 TITAN_INSTALL_TREE         := $(if $(strip $(ROCKS_TREE)),$(ROCKS_TREE),$(PREFIX))
-TITAN_ABI_VERSION          := 0.15
+TITAN_ABI_VERSION          := 0.16
 TITAN_STDLIB_ABI_DIR       ?= $(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_ABI_VERSION)
+TITAN_CANONICAL_SUPPORT_SO ?= $(TITAN_STDLIB_ABI_DIR)/titan.so
 TITAN_STDLIB_DIR           ?= $(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_ABI_VERSION)/titan
 TITAN_STDLIB_LUA_DIR       ?= $(TITAN_INSTALL_TREE)/share/lua/$(LUA_ABI_VERSION)/titan
 LUA_LIBDIR                 ?= $(TITAN_INSTALL_TREE)/lib/lua/$(LUA_ABI_VERSION)
@@ -231,10 +236,13 @@ LIBBT_BUILD_CONFIG := $(LIBBT_DIR)/.titan-build-config
 RUNTIME_BUILD_CONFIG := titan-runtime/.titan-runtime-build-config
 RUNTIME_ARCHIVE_CONFIG := titan-runtime/.titan-runtime-archive-build-config
 TITANLIB_BUILD_CONFIG := titan-runtime/.titan-titanlib-build-config
+STDLIB_CONFIG_STAMP := titan-runtime/.titan-stdlib-build-config
+STDLIB_COMPLETION_STAMP := titan-runtime/.titan-stdlib-complete
 
 .PHONY: all help lua luarocks libbacktrace libuv libuv-config \
 	check-libuv-tools check-system-libuv invalid-libuv-mode runtime titan \
-	install-titan-sdk stdlib install-stdlib rock-post-install test rock-build \
+	stage-titan-bootstrap install-titan-sdk stdlib install-stdlib \
+	rock-post-install test rock-build \
 	examples clean clean-lua clean-luarocks clean-libbacktrace clean-libuv \
 	distclean FORCE
 
@@ -694,9 +702,9 @@ $(TITANLIB_BUILD_CONFIG): FORCE
 
 # Make does not otherwise notice command-line variable changes.  Recompute a
 # small stamp on every invocation, but update its mtime only when an effective
-# uv compile/link input changes.  Switching bundled/system mode, compiler, or
-# flags then rebuilds titan_uv.o and consequently relinks titan/uv.so without asking
-# the user to clean first.
+# uv compile/link input changes. Switching bundled/system mode, compiler, or
+# flags rebuilds titan_uv.o and consequently relinks the combined titan.so
+# without asking the user to clean first.
 $(UV_CONFIG_STAMP): FORCE
 	@mkdir -p "$(@D)"
 	@tmp="$@.tmp"; \
@@ -788,23 +796,71 @@ $(TITANLIB_O): titan-runtime/titanlib.c $(TITANLIB_BUILD_CONFIG)
 	$(CC) $(ROCK_CFLAGS) $(TITAN_EXTRA_CFLAGS) \
 		-I"$(ROCK_LUA_INCDIR)" -c "$<" -o "$@"
 
-$(ROCK_RUNTIME_SO): $(TITANLIB_O)
-	$(ROCK_LD) $(ROCK_LIBFLAG) -o "$@" "$<" $(TITAN_EXTRA_LDFLAGS)
+$(TITAN_BOOTSTRAP_SO): $(TITANLIB_O)
+	@mkdir -p "$(@D)"
+	@set -e; tmp="$@.tmp"; rm -f "$$tmp"; \
+	if $(ROCK_LD) $(ROCK_LIBFLAG) -o "$$tmp" "$<" \
+		$(TITAN_EXTRA_LDFLAGS); then \
+		mv -f "$$tmp" "$@"; \
+	else \
+		status=$$?; rm -f "$$tmp"; exit $$status; \
+	fi
+
+# The active ABI path initially needs only Titan's bare Lua support entry. A
+# valid support/full image already at that path is deliberately preserved: a
+# repeated source build must never shrink a complete stdlib back to bootstrap.
+stage-titan-bootstrap: $(TITAN_BOOTSTRAP_SO)
+	@test -n "$(strip $(ROCKS_TREE))" || { \
+	  echo "ERROR: stage-titan-bootstrap requires ROCKS_TREE" >&2; exit 1; \
+	}
+	@set -e; \
+	canonical="$(TITAN_CANONICAL_SUPPORT_SO)"; \
+	validate_support() { \
+	  TITAN_SUPPORT_IMAGE="$$1" "$(TITAN_LUA)" -E -e \
+	    'local image = assert(os.getenv("TITAN_SUPPORT_IMAGE")); local open, err = package.loadlib(image, "luaopen_titan"); if not open then io.stderr:write(tostring(err), "\n"); os.exit(1) end; local values = table.pack(pcall(open)); if not values[1] or values.n ~= 2 or type(values[2]) ~= "table" or type(values[2]._loadlib) ~= "function" or type(values[2]._loadlibglobal) ~= "function" then io.stderr:write("luaopen_titan did not return the required support table\n"); os.exit(1) end'; \
+	}; \
+	mkdir -p "$$(dirname "$$canonical")"; \
+	if test -e "$$canonical" || test -L "$$canonical"; then \
+	  if ! validate_support "$$canonical"; then \
+	    echo "ERROR: existing Titan $(TITAN_ABI_VERSION) image is not a usable support provider: $$canonical" >&2; \
+	    exit 1; \
+	  fi; \
+	else \
+	  tmp="$$canonical.tmp.$$$$"; \
+	  trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	  install -m 0755 "$(TITAN_BOOTSTRAP_SO)" "$$tmp"; \
+	  validate_support "$$tmp" || { \
+	    echo "ERROR: private Titan bootstrap is not a usable support provider" >&2; \
+	    exit 1; \
+	  }; \
+	  if test -e "$$canonical" || test -L "$$canonical"; then \
+	    validate_support "$$canonical" || { \
+	      echo "ERROR: concurrently staged Titan image is incompatible: $$canonical" >&2; \
+	      exit 1; \
+	    }; \
+	  else \
+	    mv -f "$$tmp" "$$canonical"; \
+	  fi; \
+	  trap - EXIT HUP INT TERM; \
+	  rm -f "$$tmp"; \
+	fi
 
 # LuaRocks passes ROCKS_TREE only for its source build. A direct `make titan`
-# therefore stops after producing the runtime archive and Lua module, while the
-# rock build also stages the SDK inputs needed by the just-installed compiler.
-# No Titan stdlib module is built before LuaRocks deploys titanc.
-titan: libbacktrace libuv $(TITAN_RUNTIME_LIB) $(ROCK_RUNTIME_SO) ## Build Titan's native runtime and Lua module
+# therefore stops after producing the runtime archive and the private support
+# bootstrap, while the rock build also stages the SDK inputs needed by the
+# just-installed compiler. No Titan stdlib source is compiled before LuaRocks
+# deploys titanc, and the private bootstrap never shares a timestamp with the
+# final combined standard-library image.
+titan: libbacktrace libuv $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) ## Build Titan's native runtime and Lua bootstrap
 	@if test -n "$(strip $(ROCKS_TREE))"; then \
 	  $(MAKE) --no-print-directory install-titan-sdk \
 		ROCKS_TREE=$(call make_shell_quote,$(ROCKS_TREE)) \
 		LIBUV_MODE=$(call make_shell_quote,$(LIBUV_MODE)); \
 	fi
 
-install-titan-sdk: $(TITAN_RUNTIME_LIB) $(ROCK_RUNTIME_SO) $(LUA_LIB) \
+install-titan-sdk: $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) $(LUA_LIB) \
 		$(LIBBT_LIB) $(LIBUV_LIB) $(TITAN_SDK_ROOT_HEADERS) \
-		$(TITAN_SDK_NAMESPACED_HEADERS)
+		$(TITAN_SDK_NAMESPACED_HEADERS) stage-titan-bootstrap
 	@test -n "$(strip $(ROCKS_TREE))" || { \
 	  echo "ERROR: install-titan-sdk requires ROCKS_TREE" >&2; exit 1; \
 	}
@@ -831,18 +887,16 @@ install-titan-sdk: $(TITAN_RUNTIME_LIB) $(ROCK_RUNTIME_SO) $(LUA_LIB) \
 	fi; \
 	rm -f "$$rocks_tree/lib/libuv.a"
 
-# The real bundled libuv archive is private to uv.so. The install recipe above
+# The real bundled libuv archive is private to the combined titan.so. The install recipe above
 # removes copies left by older SDKs so extensions cannot create a second native
 # instance. The post-install build consumes the installed Titan runtime archive
 # rather than smuggling source-tree runtime objects into standard modules. System
 # libuv still needs pkg-config's flags; bundled mode gets headers from the
 # staged SDK but consumes the source build's private archive only while linking
-# the canonical titan/uv.so provider.
+# the canonical standard-library provider.
 ifeq ($(STDLIB_USE_INSTALLED_RUNTIME),1)
   STDLIB_PLATFORM_PREREQS :=
-  STDLIB_COMMON_RUNTIME_PREREQS :=
-  STDLIB_CORO_RUNTIME_PREREQS :=
-  STDLIB_UV_RUNTIME_PREREQS :=
+  STDLIB_NATIVE_PREREQS := $(TITANLIB_O)
   STDLIB_RUNTIME_ARCHIVE_PREREQ :=
   STDLIB_TOOL_PREREQS :=
   ifeq ($(LIBUV_MODE),system)
@@ -855,13 +909,11 @@ ifeq ($(STDLIB_USE_INSTALLED_RUNTIME),1)
   STDLIB_UV_CFLAGS := $(LIBUV_CFLAGS)
 else
   STDLIB_PLATFORM_PREREQS := libuv
-  # Each image is stale only when an archive member it can actually extract is
-  # stale. Keep the unified archive order-only so it is assembled and validated
-  # before every link without making a libuv-only member update relink coroutine
-  # or the facades.
-  STDLIB_COMMON_RUNTIME_PREREQS := $(RUNTIME_O)
-  STDLIB_CORO_RUNTIME_PREREQS := $(RUNTIME_O) $(CORO_O)
-  STDLIB_UV_RUNTIME_PREREQS := $(RUNTIME_O) $(UV_O) $(LIBUV_EXTRA_OBJECTS)
+  # The single image may extract every runtime member. Keep the archive itself
+  # order-only so its exact-membership repair runs before the compiler without
+  # turning a no-op archive validation into a relink.
+  STDLIB_NATIVE_PREREQS := $(TITAN_RUNTIME_OBJECTS) \
+	$(LIBUV_EXTRA_OBJECTS) $(TITANLIB_O)
   STDLIB_RUNTIME_ARCHIVE_PREREQ := $(TITAN_RUNTIME_LIB)
   # A standalone PREFIX is prepared with `make lua` before stdlib. Depending
   # on its prefix-local stamp keeps native source builds ordered without
@@ -870,182 +922,156 @@ else
   STDLIB_UV_CPPFLAGS := $(LIBUV_CPPFLAGS)
   STDLIB_UV_CFLAGS := $(LIBUV_CFLAGS)
   # Put bundled libuv in the final-link flags, after libtitan.a has extracted
-  # titan_uv.o. Whole-archive/force-load makes uv.so a complete provider even
+  # titan_uv.o. Whole-archive/force-load makes titan.so a complete provider even
   # for public APIs the standard module itself does not call.
   STDLIB_UV_LDFLAGS := $(strip $(LIBUV_PROVIDER_LDFLAGS))
 endif
 
-stdlib: $(STDLIB_PLATFORM_PREREQS) $(STDLIB_QUALIFIED_SOS) ## Build standard modules and their bundled dependencies
-	rm -f $(STDLIB_SOS) coro.so
-	rm -rf $(addsuffix .dSYM,$(STDLIB_SOS)) coro.so.dSYM
+stdlib: $(STDLIB_CONTAINER) $(STDLIB_SHIMS) ## Build one combined standard-library image
 
-# Standard-library sources use their ordinary qualified module names. Explicit
-# titanc roots are built from source; their imports remain binary-first and find
-# the already-built qualified modules through this checkout's Titan path.
-titan/$(COROUTINE_SO): titan/coroutine.titan $(STDLIB_CORO_RUNTIME_PREREQS) titanc \
-		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
-		$(STDLIB_TOOL_PREREQS)
-	CC=$(call make_shell_quote,$(CC)) \
-		TITAN_PATH_0_15=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
-		TITAN_RUNTIME_PREBUILT=1 \
-		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
-		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CFLAGS)) \
-		TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_LDFLAGS)) \
-		$(TITANC) titan.coroutine
+$(STDLIB_CONTAINER) $(STDLIB_SHIMS): $(STDLIB_COMPLETION_STAMP)
+	@test -f "$@" || { \
+	  echo "ERROR: completed stdlib image is missing $@" >&2; exit 1; \
+	}
 
-# uv imports the already-built canonical coroutine image. Both checkout and
-# installed builds extract the uv shim from libtitan.a. Bundled mode force-loads
-# one private static libuv archive into this provider image; system mode supplies
-# pkg-config's ordered output only through the final-link flags.
-titan/$(UV_SO): $(UV_TITAN_SOURCES) titan/$(COROUTINE_SO) $(STDLIB_UV_RUNTIME_PREREQS) titanc \
-		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_TOOL_PREREQS) \
-		$(STDLIB_PLATFORM_PREREQS) $(STDLIB_RUNTIME_ARCHIVE_PREREQ)
-	CC=$(call make_shell_quote,$(CC)) \
-		TITAN_PATH_0_15=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
-		TITAN_RUNTIME_PREBUILT=1 \
-		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))) \
-		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CFLAGS) $(STDLIB_UV_CFLAGS))) \
-		TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_LDFLAGS) $(STDLIB_UV_LDFLAGS))) \
-		$(TITANC) titan.uv
+# Record every effective native and compiler input that can change the one
+# standard-library image. Preserve mtime when the configuration is unchanged so
+# a valid warm image does not oscillate between bootstrap and full forms.
+$(STDLIB_CONFIG_STAMP): FORCE
+	@tmp="$@.tmp"; \
+	{ printf '%s\n' \
+		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
+		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
+		$(call make_shell_quote,TITAN_ABI_VERSION=$(TITAN_ABI_VERSION)) \
+		$(call make_shell_quote,CC=$(CC)) \
+		$(call make_shell_quote,AR=$(AR)) \
+		$(call make_shell_quote,RANLIB=$(RANLIB)) \
+		$(call make_shell_quote,TITANC=$(TITANC)) \
+		$(call make_shell_quote,TITAN_LUA=$(TITAN_LUA)) \
+		$(call make_shell_quote,STDLIB_USE_INSTALLED_RUNTIME=$(STDLIB_USE_INSTALLED_RUNTIME)) \
+		$(call make_shell_quote,STDLIB_ROOTS=$(STDLIB_ROOTS)) \
+		$(call make_shell_quote,STDLIB_TITAN_SOURCES=$(STDLIB_TITAN_SOURCES)) \
+		$(call make_shell_quote,STDLIB_SHIMS=$(STDLIB_SHIMS)) \
+		$(call make_shell_quote,STDLIB_CONTAINER=$(STDLIB_CONTAINER)) \
+		$(call make_shell_quote,TITAN_EXTRA_CPPFLAGS=$(TITAN_EXTRA_CPPFLAGS)) \
+		$(call make_shell_quote,TITAN_EXTRA_CFLAGS=$(TITAN_EXTRA_CFLAGS)) \
+		$(call make_shell_quote,TITAN_EXTRA_LDFLAGS=$(TITAN_EXTRA_LDFLAGS)) \
+		$(call make_shell_quote,LIBUV_MODE=$(LIBUV_MODE)) \
+		$(call make_shell_quote,LIBUV_VERSION=$(LIBUV_VERSION)) \
+		$(call make_shell_quote,STDLIB_UV_CPPFLAGS=$(STDLIB_UV_CPPFLAGS)) \
+		$(call make_shell_quote,STDLIB_UV_CFLAGS=$(STDLIB_UV_CFLAGS)) \
+		$(call make_shell_quote,STDLIB_UV_LDFLAGS=$(STDLIB_UV_LDFLAGS)); } \
+		> "$$tmp"; \
+	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
+		rm -f "$$tmp"; \
+	else \
+		mv -f "$$tmp" "$@"; \
+	fi
 
-# The public async facade re-exports uv-owned nominal records through type
-# aliases and forwards only the scheduler entry points. Building it against the
-# already-compiled uv image preserves one Runtime and one libuv provider.
-titan/$(ASYNC_SO): titan/async.titan titan/$(UV_SO) $(STDLIB_COMMON_RUNTIME_PREREQS) titanc \
-		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
-		$(STDLIB_TOOL_PREREQS)
-	CC=$(call make_shell_quote,$(CC)) \
-		TITAN_PATH_0_15=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
-		TITAN_RUNTIME_PREBUILT=1 \
-		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
-		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CFLAGS)) \
-		TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_LDFLAGS)) \
-		$(TITANC) titan.async
+# FORCE runs the inexpensive completeness check on every invocation. The
+# compiler itself runs only when an input is newer, configuration changed, or
+# one public output is absent. All seven roots are explicit source roots in one
+# process, so their internal imports are linked statically into titan.so.
+$(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES) titanc \
+		$(TITAN_COMPILER_LUA) Makefile $(STDLIB_CONFIG_STAMP) \
+		$(STDLIB_NATIVE_PREREQS) $(STDLIB_BOOTSTRAP_PREREQ) \
+		$(STDLIB_TOOL_PREREQS) | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
+		$(STDLIB_PLATFORM_PREREQS)
+	@set -e; \
+	stale=0; \
+	newer=$(call make_shell_quote,$(filter-out FORCE,$?)); \
+	test -z "$$newer" || stale=1; \
+	test -f "$@" || stale=1; \
+	for output in $(STDLIB_CONTAINER) $(STDLIB_SHIMS); do \
+	  test -f "$$output" || stale=1; \
+	done; \
+	if test "$(HOST_OS)" = Darwin; then \
+	  test -d "$(STDLIB_CONTAINER).dSYM" || stale=1; \
+	else \
+	  rm -rf "$(STDLIB_CONTAINER).dSYM"; \
+	fi; \
+	if test "$$stale" = 1; then \
+	  rm -f "$@"; \
+	  rm -f $(STDLIB_SOS) $(STDLIB_QUALIFIED_SOS); \
+	  rm -rf $(addsuffix .dSYM,$(STDLIB_SOS)) \
+		$(addsuffix .dSYM,$(STDLIB_QUALIFIED_SOS)); \
+	  unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
+	  CC=$(call make_shell_quote,$(CC)) \
+	    TITAN_PATH_0_16=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
+	    TITAN_RUNTIME_PREBUILT=1 \
+	    TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))) \
+	    TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CFLAGS) $(STDLIB_UV_CFLAGS))) \
+	    TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_LDFLAGS) $(STDLIB_UV_LDFLAGS))) \
+	    $(TITANC) $(STDLIB_ROOTS) -X $(TITANLIB_O); \
+	  for output in $(STDLIB_CONTAINER) $(STDLIB_SHIMS); do \
+	    test -f "$$output" || { \
+	      echo "ERROR: stdlib build did not produce $$output" >&2; exit 1; \
+	    }; \
+	  done; \
+	  if test "$(HOST_OS)" = Darwin; then \
+	    test -d "$(STDLIB_CONTAINER).dSYM" || { \
+	      echo "ERROR: stdlib build did not produce $(STDLIB_CONTAINER).dSYM" >&2; exit 1; \
+	    }; \
+	  fi; \
+	  tmp="$@.tmp"; : > "$$tmp"; mv -f "$$tmp" "$@"; \
+	fi; \
+	rm -f $(STDLIB_SOS) $(STDLIB_QUALIFIED_SOS); \
+	rm -rf $(addsuffix .dSYM,$(STDLIB_SOS)) \
+		$(addsuffix .dSYM,$(STDLIB_QUALIFIED_SOS))
 
-# Higher-level standard modules import the already-built canonical uv image.
-# They neither compile the uv source again nor link a second copy of libuv.
-titan/$(TIMER_SO): titan/timer.titan titan/$(UV_SO) $(STDLIB_COMMON_RUNTIME_PREREQS) titanc \
-		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
-		$(STDLIB_TOOL_PREREQS)
-	CC=$(call make_shell_quote,$(CC)) \
-		TITAN_PATH_0_15=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
-		TITAN_RUNTIME_PREBUILT=1 \
-		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
-		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CFLAGS)) \
-		TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_LDFLAGS)) \
-		$(TITANC) titan.timer
+install-stdlib: stdlib scripts/stdlib_installer.lua ## Install the combined standard library from this source tree
+	@set -e; \
+	mkdir -p "$(TITAN_INSTALL_TREE)" "$(TITAN_SHARE_DIR)/LICENSES"; \
+	install -m 0644 THIRD_PARTY_NOTICES.md \
+	  "$(TITAN_SHARE_DIR)/THIRD_PARTY_NOTICES.md"; \
+	install -m 0644 LICENSES/libuv-LICENSE \
+	  "$(TITAN_SHARE_DIR)/LICENSES/libuv-LICENSE"; \
+	root=$$(CDPATH= cd "$(TITAN_INSTALL_TREE)" && pwd -P); \
+	stage=$(call make_shell_quote,$(CURDIR)); \
+	"$(TITAN_LUA)" -E "$(CURDIR)/scripts/stdlib_installer.lua" \
+	  "$$stage" "$$root"
 
-# The filesystem facade imports the canonical uv image and keeps all native
-# libuv types, shim symbols, and link inputs confined to uv.so.
-titan/$(FS_SO): titan/fs.titan titan/$(UV_SO) $(STDLIB_COMMON_RUNTIME_PREREQS) titanc \
-		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
-		$(STDLIB_TOOL_PREREQS)
-	CC=$(call make_shell_quote,$(CC)) \
-		TITAN_PATH_0_15=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
-		TITAN_RUNTIME_PREBUILT=1 \
-		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
-		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CFLAGS)) \
-		TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_LDFLAGS)) \
-		$(TITANC) titan.fs
+# Convert the private bundled archive to an absolute stage-safe link input.
+# System mode has no LIBUV_LIB and retains pkg-config's ordered output verbatim.
+STDLIB_STAGED_UV_LDFLAGS = $(if $(strip $(LIBUV_LIB)),$(subst $(LIBUV_LIB),$(abspath $(LIBUV_LIB)),$(STDLIB_UV_LDFLAGS)),$(STDLIB_UV_LDFLAGS))
 
-# The networking facade has the same binary-only boundary as fs: native TCP,
-# DNS, and libuv ownership remain implemented by the canonical uv image.
-titan/$(NET_SO): titan/net.titan titan/$(UV_SO) $(STDLIB_COMMON_RUNTIME_PREREQS) titanc \
-		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
-		$(STDLIB_TOOL_PREREQS)
-	CC=$(call make_shell_quote,$(CC)) \
-		TITAN_PATH_0_15=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
-		TITAN_RUNTIME_PREBUILT=1 \
-		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
-		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CFLAGS)) \
-		TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_LDFLAGS)) \
-		$(TITANC) titan.net
-
-# The portable OS facade also imports only the canonical uv image. All native
-# libuv implementation details stay in uv.so.
-titan/$(OS_SO): titan/os.titan titan/$(UV_SO) $(STDLIB_COMMON_RUNTIME_PREREQS) titanc \
-		$(TITAN_COMPILER_LUA) Makefile | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
-		$(STDLIB_TOOL_PREREQS)
-	CC=$(call make_shell_quote,$(CC)) \
-		TITAN_PATH_0_15=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
-		TITAN_RUNTIME_PREBUILT=1 \
-		TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CPPFLAGS)) \
-		TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_CFLAGS)) \
-		TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(TITAN_EXTRA_LDFLAGS)) \
-		$(TITANC) titan.os
-
-install-stdlib: stdlib titan/uv.lua ## Install the canonical qualified standard modules
-	mkdir -p "$(TITAN_STDLIB_DIR)" "$(TITAN_STDLIB_LUA_DIR)" \
-		"$(TITAN_SHARE_DIR)/LICENSES"
-	install -m 0644 titan/uv.lua "$(TITAN_STDLIB_LUA_DIR)/uv.lua"
-	@set -e; for module in $(STDLIB_MODULES); do \
-		rm -f "$(TITAN_STDLIB_DIR)/$$module.so"; \
-		install -m 0755 "titan/$$module.so" \
-			"$(TITAN_STDLIB_DIR)/$$module.so"; \
-		rm -rf "$(TITAN_STDLIB_DIR)/$$module.so.dSYM"; \
-		if test -d "titan/$$module.so.dSYM"; then \
-			cp -R "titan/$$module.so.dSYM" \
-				"$(TITAN_STDLIB_DIR)/$$module.so.dSYM"; \
-		fi; \
-		rm -f "$(TITAN_STDLIB_ABI_DIR)/$$module.so"; \
-		rm -rf "$(TITAN_STDLIB_ABI_DIR)/$$module.so.dSYM"; \
-		rm -f "$(LUA_LIBDIR)/titan/$$module.so"; \
-		rm -rf "$(LUA_LIBDIR)/titan/$$module.so.dSYM"; \
-		rm -f "$(TITAN_STDLIB_LEGACY_DIR)/$$module.so"; \
-		rm -rf "$(TITAN_STDLIB_LEGACY_DIR)/$$module.so.dSYM"; \
-	done
-	rm -f "$(LUA_LIBDIR)/coro.so"
-	rm -rf "$(LUA_LIBDIR)/coro.so.dSYM"
-	cp THIRD_PARTY_NOTICES.md "$(TITAN_SHARE_DIR)/THIRD_PARTY_NOTICES.md"
-	cp LICENSES/libuv-LICENSE "$(TITAN_SHARE_DIR)/LICENSES/libuv-LICENSE"
-
-# LuaRocks invokes this only after it has deployed titanc and its Lua compiler
-# modules. Force all seven standard modules through that installed compiler,
-# then install each canonical qualified DSO at its one supported pathname.
-rock-post-install:
+# LuaRocks invokes this only after deploying titanc and its Lua compiler
+# modules. Build all seven source roots once in a private directory on the
+# destination filesystem. The Lua publisher validates the complete protocol,
+# commits seven shims (and the one macOS dSYM), and renames titan.so last; any
+# earlier failure restores the prior full image or first-install bootstrap.
+rock-post-install: scripts/stdlib_installer.lua
 	@test -n "$(strip $(ROCKS_TREE))" || { \
 	  echo "ERROR: rock-post-install requires ROCKS_TREE" >&2; exit 1; \
 	}
 	@test -n "$(strip $(ROCK_TITANC))" && test -x "$(ROCK_TITANC)" || { \
 	  echo "ERROR: rock-post-install requires deployed ROCK_TITANC" >&2; exit 1; \
 	}
-	@mkdir -p "$(ROCKS_TREE)"
-	@echo "==> Building Titan stdlib with $(ROCK_TITANC)"
-	@if test -d "$(ROCKS_TREE)"; then \
-	  rocks_tree=$$(CDPATH= cd "$(ROCKS_TREE)" && pwd -P); \
-	  TITAN_ROCKS_ROOT="$$rocks_tree" \
-	    $(MAKE) --no-print-directory -B $(STDLIB_QUALIFIED_SOS) \
-		  TITAN_ROCKS_ROOT="$$rocks_tree" \
-		  STDLIB_USE_INSTALLED_RUNTIME=1 \
-		  TITANC=$(call make_shell_quote,$(ROCK_TITANC)) \
-		  LIBUV_MODE=$(call make_shell_quote,$(LIBUV_MODE)); \
-	fi
+	@test -n "$(strip $(ROCK_LUA))" && test -x "$(ROCK_LUA)" || { \
+	  echo "ERROR: rock-post-install requires ROCK_LUA" >&2; exit 1; \
+	}
 	@set -e; \
+	mkdir -p "$(ROCKS_TREE)/lib/titan/$(TITAN_ABI_VERSION)"; \
 	rocks_tree=$$(CDPATH= cd "$(ROCKS_TREE)" && pwd -P); \
-	stdlib_abi_dir="$$rocks_tree/lib/titan/$(TITAN_ABI_VERSION)"; \
-	stdlib_dir="$$stdlib_abi_dir/titan"; \
-	stdlib_lua_dir="$$rocks_tree/share/lua/$(LUA_ABI_VERSION)/titan"; \
-	lua_cdir="$$rocks_tree/lib/lua/$(LUA_ABI_VERSION)"; \
-	lua_module_dir="$$lua_cdir/titan"; \
-	legacy_stdlib_dir="$$lua_module_dir/stdlib_$(subst .,_,$(TITAN_ABI_VERSION))"; \
-	mkdir -p "$$stdlib_dir" "$$stdlib_lua_dir"; \
-	install -m 0644 titan/uv.lua "$$stdlib_lua_dir/uv.lua"; \
-	for module in $(STDLIB_MODULES); do \
-	  rm -f "$$stdlib_dir/$$module.so"; \
-	  install -m 0755 "titan/$$module.so" "$$stdlib_dir/$$module.so"; \
-	  rm -rf "$$stdlib_dir/$$module.so.dSYM"; \
-	  if test -d "titan/$$module.so.dSYM"; then \
-	    cp -R "titan/$$module.so.dSYM" "$$stdlib_dir/$$module.so.dSYM"; \
-	  fi; \
-	  rm -f "$$stdlib_abi_dir/$$module.so"; \
-	  rm -rf "$$stdlib_abi_dir/$$module.so.dSYM"; \
-	  rm -f "$$lua_module_dir/$$module.so"; \
-	  rm -rf "$$lua_module_dir/$$module.so.dSYM"; \
-	  rm -f "$$legacy_stdlib_dir/$$module.so"; \
-	  rm -rf "$$legacy_stdlib_dir/$$module.so.dSYM"; \
-	done; \
-	rm -f "$$lua_cdir/coro.so"; \
-	rm -rf "$$lua_cdir/coro.so.dSYM"
+	abi_dir="$$rocks_tree/lib/titan/$(TITAN_ABI_VERSION)"; \
+	stage=$$(mktemp -d "$$abi_dir/.titan-stdlib-stage.XXXXXX"); \
+	trap 'rm -rf "$$stage"' EXIT HUP INT TERM; \
+	echo "==> Building one Titan stdlib image with $(ROCK_TITANC)"; \
+	( cd "$$stage"; \
+	  env -u LUA_PATH -u LUA_CPATH -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
+	    TITAN_ROCKS_ROOT="$$rocks_tree" \
+	    TITAN_PATH_0_16="$$abi_dir" TITAN_PATH= \
+	    TITAN_RUNTIME_PREBUILT=1 CC=$(call make_shell_quote,$(CC)) \
+	    TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))) \
+	    TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CFLAGS) $(STDLIB_UV_CFLAGS))) \
+	    TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_LDFLAGS) $(STDLIB_STAGED_UV_LDFLAGS))) \
+	    $(call make_shell_quote,$(ROCK_TITANC)) --tree \
+	      $(call make_shell_quote,$(CURDIR)) $(STDLIB_ROOTS) \
+	      -X $(call make_shell_quote,$(abspath $(TITANLIB_O))) ); \
+	"$(ROCK_LUA)" -E "$(CURDIR)/scripts/stdlib_installer.lua" \
+	  "$$stage" "$$rocks_tree"; \
+	trap - EXIT HUP INT TERM; \
+	rm -rf "$$stage"
 
 # Compatibility name for callers of the former rockspec build target.  It no
 # longer builds stdlib before LuaRocks has deployed the compiler.
@@ -1065,10 +1091,16 @@ examples: lua ## Compile the example Titan modules (SDL examples need SDL2 heade
 clean: ## Remove generated build/test artifacts (keeps the Lua tree)
 	rm -f $(RUNTIME_O) titan-runtime/*.o $(TITAN_RUNTIME_LIB)
 	rm -f $(RUNTIME_BUILD_CONFIG) $(RUNTIME_ARCHIVE_CONFIG) \
-		$(TITANLIB_BUILD_CONFIG) $(UV_CONFIG_STAMP)
+		$(TITANLIB_BUILD_CONFIG) $(UV_CONFIG_STAMP) \
+		$(STDLIB_CONFIG_STAMP) $(STDLIB_COMPLETION_STAMP)
+	rm -f $(TITAN_BOOTSTRAP_SO)
+	rm -rf $(TITAN_BOOTSTRAP_SO).dSYM
+	rmdir titan-runtime/bootstrap 2>/dev/null || true
 	rm -f titan/*.c titan/*.o
 	rm -f titan/uv/*.c titan/uv/*.o
-	rm -f titan/*.so
+	rm -f $(STDLIB_CONTAINER) $(STDLIB_QUALIFIED_SOS) $(STDLIB_SOS)
+	rm -f $(STDLIB_SHIMS)
+	rm -rf $(STDLIB_CONTAINER).dSYM
 	rm -rf $(addsuffix .dSYM,$(STDLIB_SOS)) \
 		$(addsuffix .dSYM,$(STDLIB_QUALIFIED_SOS))
 	rm -f examples/*.c examples/*.o examples/*.so examples/sdl_demo

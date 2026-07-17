@@ -17,6 +17,8 @@ if [[ -z ${BUSTED:-} ]]; then
 fi
 group=${1:-}
 compiler_tests=()
+compiler_core_tests=()
+compiler_heavy_tests=()
 compiler_unit_tests=()
 library_serial_tests=()
 library_uv_fs_tests=()
@@ -33,6 +35,8 @@ while IFS= read -r test_file; do
             compiler_unit_tests+=("$test_file")
             ;;
         spec/stdlib/coroutine_spec.lua | \
+        spec/stdlib/loadlibglobal_spec.lua | \
+        spec/stdlib_installer_spec.lua | \
         spec/libuv_build_spec.lua | \
         spec/minicoro_spec.lua | \
         spec/rockspec_spec.lua)
@@ -49,8 +53,17 @@ while IFS= read -r test_file; do
         spec/stdlib/os*_spec.lua)
             library_net_os_tests+=("$test_file")
             ;;
+        spec/coder/coder_spec.lua | \
+        spec/coder/flexible_returns_spec.lua)
+            # These two end-to-end files account for more than half of the
+            # covered compiler runtime. Keep their fixed CI shard explicit so
+            # runner variance cannot push the producer past its time limit.
+            compiler_tests+=("$test_file")
+            compiler_heavy_tests+=("$test_file")
+            ;;
         *)
             compiler_tests+=("$test_file")
+            compiler_core_tests+=("$test_file")
             ;;
     esac
 done < <(find spec -type f -name '*_spec.lua' -print | LC_ALL=C sort)
@@ -71,6 +84,28 @@ case "$group" in
                 >&2
             exit 1
         fi
+        ;;
+    compiler-core)
+        compiler_count=$((${#compiler_core_tests[@]} +
+            ${#compiler_unit_tests[@]}))
+        echo "Running $compiler_count core compiler/language spec files" \
+            "with LuaCov"
+        compiler_status=0
+        "$BUSTED" -c -o gtest -v "${compiler_core_tests[@]}" ||
+            compiler_status=$?
+        unit_status=0
+        "$BUSTED" -c -o gtest -v "${compiler_unit_tests[@]}" ||
+            unit_status=$?
+        if (( compiler_status != 0 || unit_status != 0 )); then
+            echo "compiler core test status: main=$compiler_status " \
+                "unit=$unit_status" >&2
+            exit 1
+        fi
+        ;;
+    compiler-heavy)
+        echo "Running ${#compiler_heavy_tests[@]} heavy compiler/language" \
+            "spec files with LuaCov"
+        "$BUSTED" -c -o gtest -v "${compiler_heavy_tests[@]}"
         ;;
     compiler-uncovered)
         compiler_count=$((${#compiler_tests[@]} +
@@ -143,8 +178,9 @@ case "$group" in
         fi
         ;;
     *)
-        echo "usage: $0 {compiler|compiler-uncovered|libraries|" \
-            "library-serial|library-uv-fs|library-net-os}" >&2
+        echo "usage: $0 {compiler|compiler-core|compiler-heavy|" \
+            "compiler-uncovered|libraries|library-serial|library-uv-fs|" \
+            "library-net-os}" >&2
         exit 2
         ;;
 esac

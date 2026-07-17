@@ -26,7 +26,7 @@ local m = require "sum"
 print(m.sum_list({1, 2, 3, 4})) --> 10
 ```
 
-This is the reference for the language as implemented by the Titan 0.15
+This is the reference for the language as implemented by the Titan 0.16
 prototype compiler in this repository. It replaces the old single-file
 manual. For how the compiler itself works — including how each construct
 is translated to C — see the
@@ -55,6 +55,7 @@ Start with the [design philosophy](philosophy.md) if you want to know
 | [Records](records.md) | Nominal record types, constructors, fields, methods, record functions, and records as seen from Lua. |
 | [Arrays and maps](arrays-maps.md) | The two table-backed container types: construction, indexing, length, deletion, key rules, performance model. |
 | [Modules](modules.md) | Logical modules, `import`, visibility, module variables, initialization, and the compilation model (shared libraries, executables, search paths). |
+| [Multi-module libraries](multi-module-libraries.md) | Separating logical modules from physical providers: common-prefix library output, prefix lookup, generated Lua loaders, and the combined standard library. |
 | [Folder modules](folder-modules.md) | Splitting one logical module across a canonical main and immediate contributors: shared scope, deterministic order, lookup privacy, initialization, and artifacts. |
 | [Lua interoperability](lua-interop.md) | Using Titan from Lua and Lua values in Titan: what crosses the boundary, what each type looks like on the other side, and where the run-time checks happen. |
 | [Error handling](error-handling.md) | The run-time error model: what raises errors, error messages, `pcall`, `titan.backtrace()`, and the option-type idiom for recoverable failures. |
@@ -69,7 +70,7 @@ Start with the [design philosophy](philosophy.md) if you want to know
 
 ## Status and limitations
 
-Titan is a working prototype, version 0.15. The language documented here is
+Titan is a working prototype, version 0.16. The language documented here is
 implemented and covered by the compiler's test suite. Its boundaries are
 mostly missing features, plus a handful of constructs the compiler rejects
 with a clean error; each links to the chapter that documents it in full.

@@ -39,7 +39,13 @@ hooks = {
          PREFIX="$(LUA_DIR)" \
          ROCKS_TREE="$rocks_tree" \
          ROCK_TITANC="$(SCRIPTS_DIR)/titanc" \
-         CC="$(CC)"]]
+         ROCK_LUA="$(LUA_DIR)/bin/lua" \
+         ROCK_LUA_INCDIR="$(LUA_INCDIR)" \
+         ROCK_CFLAGS="$(CFLAGS)" \
+         ROCK_LD="$(LD)" \
+         ROCK_LIBFLAG="$(LIBFLAG)" \
+         STDLIB_USE_INSTALLED_RUNTIME=1 \
+         CC="$(CC)" AR="$(AR)" RANLIB="$(RANLIB)"]]
 }
 build = {
    type = "make",
@@ -85,9 +91,6 @@ build = {
       ["c-parser.cpp"] = "c-parser/cpp.lua",
       ["c-parser.ctypes"] = "c-parser/ctypes.lua",
       ["c-parser.cdefines"] = "c-parser/cdefines.lua"
-      },
-      lib = {
-         ["titan"] = "titan.so"
       },
       bin = {
          "titanc"
