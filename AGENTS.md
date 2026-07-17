@@ -67,7 +67,10 @@ not add epicycles around what may be a misunderstood simpler design.
   full-tree tar artifact for one consumer. That consumer runs uv/timer/fs
   first, then the fixed heavy coverage shard (`coder_spec.lua` and
   `flexible_returns_spec.lua`). The complete local `compiler` group remains
-  the union of both coverage shards. The sanitizer job keeps its build
+  the union of both coverage shards. Each shard uploads its explicit report
+  through Codecov's GitHub OIDC flow with job-local `id-token: write`; upload
+  errors fail the job so coverage publication cannot be silently skipped. The
+  sanitizer job keeps its build
   and focused native-memory gate on one warm runner: representative timer/fs
   suites, core owner/callback proofs, and production net/OS smokes. Keep full
   library behavior suites in regular Linux unless they exercise a

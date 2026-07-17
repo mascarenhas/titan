@@ -16,6 +16,9 @@ jobs:
     name: regular (ubuntu-slim, build+compiler-core+net-os)
     if: github.event_name == 'push'
     runs-on: ubuntu-slim
+    permissions:
+      contents: read
+      id-token: write
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       PREFIX: ${{ github.workspace }}/.lua
@@ -134,9 +137,10 @@ jobs:
         uses: codecov/codecov-action@v7
         with:
           disable_search: true
-          fail_ci_if_error: false
+          fail_ci_if_error: true
           files: ./luacov.report.out
           name: compiler-core
+          use_oidc: true
 
       - name: Build child-process smoke fixture
         run: |
@@ -176,6 +180,9 @@ jobs:
     needs: prepare-linux
     if: github.event_name == 'push'
     runs-on: ubuntu-slim
+    permissions:
+      contents: read
+      id-token: write
 
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -218,9 +225,10 @@ jobs:
         uses: codecov/codecov-action@v7
         with:
           disable_search: true
-          fail_ci_if_error: false
+          fail_ci_if_error: true
           files: ./luacov.report.out
           name: compiler-heavy
+          use_oidc: true
 
   # macOS runners are expensive, so keep the complete cross-platform gate on
   # explicit manual dispatch. It remains independent of Linux preparation: a
