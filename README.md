@@ -460,9 +460,11 @@ $ "$PREFIX/bin/luarocks" test                # install test deps + run the suite
 $ bash spec/support/ci_test_groups.sh compiler # compiler/language tests with LuaCov
 ```
 
-The grouped compiler command is the coverage entry point. Library API and
-runtime suites run without LuaCov because the hook measures the Lua compiler,
-not the generated Titan or native library implementation; use
+The grouped `compiler` command is the complete local coverage entry point. CI
+partitions that same set into `compiler-core` and `compiler-heavy` across its
+two warmed Linux jobs. Library API and runtime suites run without LuaCov
+because the hook measures the Lua compiler, not the generated Titan or native
+library implementation; use
 `bash spec/support/ci_test_groups.sh libraries` for that complete group.
 
 Note that `luarocks test` does **not** build the rock-under-test, only its

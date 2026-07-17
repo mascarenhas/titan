@@ -9,10 +9,11 @@ on:
 
 jobs:
   # Build and install the regular Linux tree once per workflow. Keep the
-  # compiler and net/OS groups on this warm 1-core runner; the isolated uv/fs
-  # consumer restores the pristine tree instead of rebuilding dependencies.
+  # compiler core and net/OS groups on this warm 1-core runner; the isolated
+  # uv/fs consumer restores the pristine tree and runs the two slow compiler
+  # specs instead of rebuilding dependencies.
   prepare-linux:
-    name: regular (ubuntu-slim, build+compiler+net-os)
+    name: regular (ubuntu-slim, build+compiler-core+net-os)
     if: github.event_name == 'push'
     runs-on: ubuntu-slim
     env:
@@ -117,22 +118,25 @@ jobs:
       # Restore the exact prepared checkout runtime plus canonical installed
       # standard container and shims after compiler-only groups and before the
       # production smoke.
-      - name: Run compiler and language tests with coverage
+      - name: Run core compiler and language tests with coverage
         run: |
           snapshot="$RUNNER_TEMP/titan-stdlib-before-compiler.tar"
           bash spec/support/ci_stdlib_snapshot.sh save "$snapshot"
-          bash spec/support/ci_test_groups.sh compiler
+          bash spec/support/ci_test_groups.sh compiler-core
           bash spec/support/ci_stdlib_snapshot.sh restore "$snapshot"
 
-      - name: Generate coverage report
+      - name: Generate core compiler coverage report
         run: |
           luacov "titan%-compiler" "/spec/[^/]+.lua" "titanc"
           grep "Summary" -B1 -A1000 luacov.report.out
 
-      - name: Upload coverage to Codecov
+      - name: Upload core compiler coverage to Codecov
         uses: codecov/codecov-action@v7
         with:
+          disable_search: true
           fail_ci_if_error: false
+          files: ./luacov.report.out
+          name: compiler-core
 
       - name: Build child-process smoke fixture
         run: |
@@ -168,7 +172,7 @@ jobs:
           overwrite: true
 
   test-linux:
-    name: test (ubuntu-slim, library-uv-fs)
+    name: test (ubuntu-slim, library-uv-fs+compiler-heavy)
     needs: prepare-linux
     if: github.event_name == 'push'
     runs-on: ubuntu-slim
@@ -197,6 +201,26 @@ jobs:
       # Titan/C library implementations.
       - name: Run uv/timer/fs library tests without coverage
         run: bash spec/support/ci_test_groups.sh library-uv-fs
+
+      # Run the two slow covered specs after the library suite: legacy
+      # compiler cleanup may mutate root artifacts, but no production image is
+      # consumed after this point. Codecov merges this same-commit report with
+      # the producer's core report.
+      - name: Run heavy compiler and language tests with coverage
+        run: bash spec/support/ci_test_groups.sh compiler-heavy
+
+      - name: Generate heavy compiler coverage report
+        run: |
+          luacov "titan%-compiler" "/spec/[^/]+.lua" "titanc"
+          grep "Summary" -B1 -A1000 luacov.report.out
+
+      - name: Upload heavy compiler coverage to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          disable_search: true
+          fail_ci_if_error: false
+          files: ./luacov.report.out
+          name: compiler-heavy
 
   # macOS runners are expensive, so keep the complete cross-platform gate on
   # explicit manual dispatch. It remains independent of Linux preparation: a

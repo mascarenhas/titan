@@ -62,9 +62,12 @@ not add epicycles around what may be a misunderstood simpler design.
   `gh workflow run ci.yml --ref <branch>`. Linux jobs are push-only and are not
   repeated by that macOS dispatch. The regular Linux flow
   uses two 1-core `ubuntu-slim` jobs designed to remain below that runner's
-  15-minute limit. The regular build job runs compiler/language plus
-  serial and net/OS tests on its warm tree, and uploads a same-run, full-tree
-  tar artifact for one uv/timer/fs consumer. The sanitizer job keeps its build
+  15-minute limit. The regular build job runs the core compiler/language shard
+  plus serial and net/OS tests on its warm tree, and uploads a same-run,
+  full-tree tar artifact for one consumer. That consumer runs uv/timer/fs
+  first, then the fixed heavy coverage shard (`coder_spec.lua` and
+  `flexible_returns_spec.lua`). The complete local `compiler` group remains
+  the union of both coverage shards. The sanitizer job keeps its build
   and focused native-memory gate on one warm runner: representative timer/fs
   suites, core owner/callback proofs, and production net/OS smokes. Keep full
   library behavior suites in regular Linux unless they exercise a
@@ -81,15 +84,17 @@ not add epicycles around what may be a misunderstood simpler design.
   partial output archives lose source/output timestamp ordering and trigger
   Make rebuilds; it also preserves the prepared Lua installation, executable
   bits, and standard-library images. Run the serial and net/OS library groups
-  before compiler coverage in that producer. Legacy compiler specs still
+  before core compiler coverage in that producer. Legacy compiler specs still
   clean root-generated module outputs; running the packaging gate first avoids
   rebuilding the complete standard library without exercising a new
   configuration. The complete macOS flow likewise runs the library
   group before its uncovered compiler group. CI snapshots and restores the
   prepared runtime artifacts, canonical installed `titan.so`, conditional
-  dSYM, and all seven generated shims around
-  compiler-only groups so root output cleanup cannot stale or remove the
-  production image before the mode smoke. Compiler and language specs must not
+  dSYM, and all seven generated shims around the producer's compiler-only
+  group so root output cleanup cannot stale or remove the production image
+  before the mode smoke. The consumer deliberately runs its compiler shard
+  after its final library group, so no later production image needs restoring.
+  Compiler and language specs must not
   delete the shared checkout runtime archive merely to force recompilation;
   Make owns that dependency state. The serial coroutine suite is the isolated
   exception described below.
