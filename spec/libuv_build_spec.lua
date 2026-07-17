@@ -5,7 +5,8 @@ local parser = require "titan-compiler.parser"
 
 local PKG_CONFIG = "sh spec/fixtures/libuv/fake-pkg-config.sh"
 local UV_MAIN_SOURCE = "titan/uv/uv.titan"
-local UV_TYPES_BASELINE = "spec/fixtures/libuv/titan_uv_types.lua"
+local STDLIB_TYPES_BASELINE =
+    "spec/fixtures/stdlib/titan_stdlib_types.lua"
 local STDLIB_ROOTS = {
     "titan.coroutine", "titan.uv", "titan.async", "titan.timer",
     "titan.fs", "titan.net", "titan.os",
@@ -305,17 +306,20 @@ describe("libuv Makefile configuration", function()
         }, expanded)
     end)
 
-    it("preserves the exact uv interface inside the combined image", function()
-        local expected = assert(loadfile(UV_TYPES_BASELINE))()
-        assert.equal(7875, #expected)
+    it("preserves all seven pre-bundle interfaces inside the combined image",
+       function()
+        local expected = assert(loadfile(STDLIB_TYPES_BASELINE))()
+        assert.equal(7875, #expected.uv)
 
-        local types_function, load_error =
-            require("titan")._loadlib(installed_stdlib_container(),
-                "titan_uv_types")
-        assert.truthy(types_function, load_error)
-        local actual = assert(types_function())
-
-        assert.equal(expected, actual)
+        local support = require "titan"
+        local container = installed_stdlib_container()
+        for _, root in ipairs(STDLIB_ROOTS) do
+            local name = assert(root:match("^titan%.(.+)$"))
+            local types_function, load_error = support._loadlib(
+                container, "titan_" .. name .. "_types")
+            assert.truthy(types_function, load_error)
+            assert.equal(expected[name], assert(types_function()), root)
+        end
     end)
 
     it("keeps every uv export with its semantic contributor", function()

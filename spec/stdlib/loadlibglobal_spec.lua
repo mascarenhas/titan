@@ -4,11 +4,10 @@ local cdriver = require "c-parser.cdriver"
 local lfs = require "lfs"
 
 local REPO = lfs.currentdir()
-local PREFIX = os.getenv("PREFIX") or os.getenv("TITAN_TEST_PREFIX")
-local LUA = PREFIX and PREFIX .. "/bin/lua" or "lua"
-local INCLUDE = PREFIX and PREFIX .. "/include" or "lua-5.5.0/src"
-local LUA_LIB = PREFIX and PREFIX .. "/lib/liblua.a" or
-    "lua-5.5.0/src/liblua.a"
+local PREFIX = require("spec.support.installed_prefix").active()
+local LUA = PREFIX .. "/bin/lua"
+local INCLUDE = PREFIX .. "/include"
+local LUA_LIB = PREFIX .. "/lib/liblua.a"
 
 local function quote_argv(argv)
     local quoted = {}

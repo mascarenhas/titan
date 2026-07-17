@@ -3,10 +3,9 @@ local cdriver = require "c-parser.cdriver"
 local lfs = require "lfs"
 
 local REPO = lfs.currentdir()
-local PREFIX = os.getenv("PREFIX") or os.getenv("TITAN_TEST_PREFIX")
-local LUA = PREFIX and (PREFIX .. "/bin/lua") or "lua"
-local LUA_INCLUDE = PREFIX and (PREFIX .. "/include") or
-    (REPO .. "/lua-5.5.0/src")
+local PREFIX = require("spec.support.installed_prefix").active()
+local LUA = PREFIX .. "/bin/lua"
+local LUA_INCLUDE = PREFIX .. "/include"
 
 local function exists(path)
     return lfs.attributes(path, "mode") ~= nil
@@ -269,6 +268,84 @@ end
         ok, output = run_lua(workspace, [[
 local consumer = require "consumer"
 assert(consumer.run() == 1224)
+]])
+        assert.truthy(ok, output)
+    end)
+end)
+
+describe("native trace names across one multi-module image", function()
+    local workspace
+    local source_root
+
+    before_each(function()
+        workspace = os.tmpname()
+        assert.truthy(os.remove(workspace))
+        assert.truthy(lfs.mkdir(workspace))
+        source_root = workspace .. "/source"
+
+        write_file(source_root .. "/warmup.titan", [[
+function boom(): integer
+    raise "warmup"
+    return 0
+end
+]])
+        write_file(source_root .. "/trace/right.titan", [[
+function boom(): integer
+    raise "combined"
+    return 0
+end
+]])
+        write_file(source_root .. "/trace/left.titan", [[
+local right = import "trace.right"
+
+function relay(): integer
+    return right.boom()
+end
+]])
+    end)
+
+    after_each(function()
+        if workspace then remove_tree(workspace) end
+    end)
+
+    it("refreshes libbacktrace and symbolizes frames from separate objects",
+       function()
+        local ok, output, why, code =
+            compile(workspace, source_root, "warmup")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+
+        ok, output, why, code = compile(
+            workspace, source_root, "trace.left", "trace.right")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        assert.equal("file", lfs.attributes(workspace .. "/trace.so", "mode"))
+        assert.is_nil(lfs.attributes(workspace .. "/trace/left.so", "mode"))
+        assert.is_nil(lfs.attributes(workspace .. "/trace/right.so", "mode"))
+
+        ok, output = run_lua(workspace, [[
+local titan = require "titan"
+local warmup = require "warmup"
+local warm_ok, warm_err = pcall(warmup.boom)
+assert(not warm_ok and warm_err == "warmup")
+local warm_trace = titan.backtrace()
+assert(warm_trace:find("in warmup.boom", 1, true), warm_trace)
+
+-- Loading trace.so after the first trace must invalidate libbacktrace's
+-- snapshot. The next trace crosses the left.c and right.c objects linked into
+-- that one provider, and each object contributes its own logical name table.
+local left = require "trace.left"
+local combined_ok, combined_err = pcall(left.relay)
+assert(not combined_ok and combined_err == "combined")
+local combined_trace = titan.backtrace()
+assert(combined_trace:find("in trace.right.boom", 1, true), combined_trace)
+assert(combined_trace:find("in trace.left.relay", 1, true), combined_trace)
+assert(combined_trace:find(
+    "right%.titan:%d+: in trace%.right%.boom"), combined_trace)
+assert(combined_trace:find(
+    "left%.titan:%d+: in trace%.left%.relay"), combined_trace)
+assert(not combined_trace:find("in warmup.boom", 1, true), combined_trace)
+assert(not combined_trace:find("titanentry", 1, true), combined_trace)
 ]])
         assert.truthy(ok, output)
     end)

@@ -3,8 +3,8 @@ local cdriver = require "c-parser.cdriver"
 local lfs = require "lfs"
 
 local REPO = lfs.currentdir()
-local PREFIX = os.getenv("PREFIX") or os.getenv("TITAN_TEST_PREFIX")
-local LUA = PREFIX and (PREFIX .. "/bin/lua") or "lua"
+local PREFIX = require("spec.support.installed_prefix").active()
+local LUA = PREFIX .. "/bin/lua"
 
 local function exists(path)
     return lfs.attributes(path, "mode") ~= nil

@@ -70,6 +70,9 @@ not add epicycles around what may be a misunderstood simpler design.
   the union of both coverage shards. Each shard uploads its explicit report
   through Codecov's GitHub OIDC flow with job-local `id-token: write`; upload
   errors fail the job so coverage publication cannot be silently skipped. The
+  regular producer first configures its disposable prefix for ABI 0.15, then
+  runs the supported `make lua`/`make luarocks` migration to 0.16 and proves
+  bare `require "titan"` after the first 0.16 rock install. The
   sanitizer job keeps its build
   and focused native-memory gate on one warm runner: representative timer/fs
   suites, core owner/callback proofs, and production net/OS smokes. Keep full

@@ -139,12 +139,17 @@ local function assert_file(path)
     assert.equal("file", lfs.attributes(path, "mode"), path)
 end
 
+local function assert_unique_regular_file(path)
+    assert.equal("file", lfs.symlinkattributes(path, "mode"), path)
+    assert.equal(1, lfs.attributes(path, "nlink"), path)
+end
+
 local function assert_absent(path)
     assert.falsy(lfs.symlinkattributes(path), path)
 end
 
 local function assert_generated_shim(path, module)
-    assert_file(path)
+    assert_unique_regular_file(path)
     local contents = read_file(path)
     assert.equal(GENERATED_SHIM_BANNER,
         contents:sub(1, #GENERATED_SHIM_BANNER), path)
@@ -197,7 +202,7 @@ describe("standalone-prefix source installation", function()
         assert_file(LUA)
         assert_file(LUAROCKS)
         assert_file(TITANC)
-        assert_file(STDLIB_PROVIDER)
+        assert_unique_regular_file(STDLIB_PROVIDER)
         assert_absent(LUA_LIBDIR .. "/titan.so")
         assert_absent(LUA_SHAREDIR .. "/titan.lua")
         local host_ok, host_output = run({ "uname", "-s" })
@@ -341,6 +346,7 @@ describe("standalone-prefix source installation", function()
         end
 
         local function assert_migrated()
+            assert_unique_regular_file(canonical)
             local same, comparison, comparison_why, comparison_code = run({
                 "cmp", "-s", "titan.so", canonical,
             })

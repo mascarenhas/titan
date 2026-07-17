@@ -65,17 +65,14 @@ jobs:
       - name: Install regular build dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake curl libreadline-dev libuv1-dev pkg-config
 
-      - name: Build the bundled Lua 5.5 source tree
-        run: make lua LUA_PLATFORM=linux
+      - name: Migrate an ABI-0.15 configured prefix to ABI 0.16
+        run: bash spec/support/ci_abi_migration_smoke.sh prepare linux
 
       - name: Build the bundled libbacktrace
         run: make libbacktrace
 
       - name: Build the pinned bundled libuv
         run: make libuv
-
-      - name: Install LuaRocks into the Titan prefix
-        run: make luarocks
 
       - name: Activate the standalone Titan prefix
         run: |
@@ -87,6 +84,9 @@ jobs:
         # The dependency cache may contain the preceding commit's installed
         # titan dev-1. Force this checkout through both source-install phases.
         run: luarocks make --force
+
+      - name: Verify bare support loading after configured-path migration
+        run: bash spec/support/ci_abi_migration_smoke.sh verify
 
       - name: Verify titanc shebang environment
         run: titanc --help
