@@ -18,7 +18,6 @@ jobs:
     runs-on: ubuntu-slim
     permissions:
       contents: read
-      id-token: write
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       PREFIX: ${{ github.workspace }}/.lua
@@ -140,7 +139,7 @@ jobs:
           fail_ci_if_error: true
           files: ./luacov.report.out
           name: compiler-core
-          use_oidc: true
+          token: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Build child-process smoke fixture
         run: |
@@ -182,7 +181,6 @@ jobs:
     runs-on: ubuntu-slim
     permissions:
       contents: read
-      id-token: write
 
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -228,7 +226,7 @@ jobs:
           fail_ci_if_error: true
           files: ./luacov.report.out
           name: compiler-heavy
-          use_oidc: true
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   # macOS runners are expensive, so keep the complete cross-platform gate on
   # explicit manual dispatch. It remains independent of Linux preparation: a
