@@ -3,6 +3,7 @@ local assert = require "luassert"
 
 local checker = require "titan-compiler.checker"
 local driver = require "titan-compiler.driver"
+local parser = require "titan-compiler.parser"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local types = require "titan-compiler.types"
 local util = require "titan-compiler.util"
@@ -188,6 +189,90 @@ describe("static compiled-module checker provenance", function()
         assert.same({ provider }, context.selected_static_providers)
     end)
 
+    it("typechecks a rich exported surface from archive metadata",
+       function()
+        local provider_source = [[
+counter: integer = 7
+
+record Box
+    n: integer
+end
+
+function Box.make(n: integer): Box
+    return Box.new(n)
+end
+
+function Box:add(delta: integer): integer
+    return self.n + delta
+end
+
+type Alias = Box
+
+function combine(left: integer, right: integer): integer
+    return left * 10 + right
+end
+
+function sum(...: integer): integer
+    local total: integer = 0
+    for i = 1, #... do
+        total = total + ...[i]
+    end
+    return total
+end
+
+function labels(): (...: string)
+    return "left", "right"
+end
+]]
+        local provider_filename = source .. "/rich/api.titan"
+        local provider_ast, parse_error =
+            parser.parse(provider_filename, provider_source)
+        assert.truthy(provider_ast, parse_error)
+        local provider_type, provider_errors = checker.check(
+            "rich.api", provider_ast, provider_source, provider_filename)
+        assert.equal(0, #provider_errors, table.concat(provider_errors, "\n"))
+
+        -- The consumer must recover every shape from the serialized archive
+        -- interface, not from the source checker's registry or imported cache.
+        driver.imported = {}
+        types.registry = {}
+        local context =
+            driver.new_resolver_context({ prefer_static = true })
+        local provider = cache_provider(context, "rich.a", {
+            ["rich.api"] = provider_type,
+        })
+        local loader = driver.defaultloader({}, { context = context })
+        local consumer_source = [[
+local api = import "rich.api"
+
+function use_everything(): integer
+    local before: integer = api.counter
+    api.counter = before + 1
+    local encoded = api.combine { right = 2, left = 4 }
+    local box: api.Alias = api.Box.make { n = encoded }
+    local first: string?, second: string? = api.labels()
+    local count = api.sum(1, 2, 3)
+    return box:add { delta = count }
+end
+]]
+        local consumer_filename = source .. "/rich/consumer.titan"
+        local consumer_ast, consumer_parse_error =
+            parser.parse(consumer_filename, consumer_source)
+        assert.truthy(consumer_ast, consumer_parse_error)
+        local _, consumer_errors = checker.check(
+            "rich.consumer", consumer_ast, consumer_source,
+            consumer_filename, loader)
+        assert.equal(0, #consumer_errors,
+            table.concat(consumer_errors, "\n"))
+        assert.equal("static", driver.imported["rich.api"].kind)
+        assert.equal(provider.archive,
+            driver.imported["rich.api"].static_archive)
+        assert.truthy(types.registry["rich.api.Box"])
+        assert.equal(
+            types.serialize(provider_type),
+            types.serialize(driver.imported["rich.api"].type))
+    end)
+
     it("preserves the exposing provider through recursive nominal recovery",
        function()
         local owner = owner_interface("right.owner", "Box")
@@ -355,6 +440,64 @@ describe("static compiled-module checker provenance", function()
         assert.is_nil(context.native_static_names["dyn.owner"])
         assert.equal(owner_provider,
             context.provider_cache[owner_provider.archive])
+    end)
+
+    it("rejects an independently resolved DSO owner required dynamically by an archive",
+       function()
+        local owner = owner_interface("identity.owner", "Box")
+        local facade = facade_interface(
+            "identity.facade", "Box", "identity.owner.Box")
+        local context =
+            driver.new_resolver_context({ prefer_static = true })
+        local facade_provider = cache_provider(
+            context, "identity/facade.a", {
+                ["identity.facade"] = facade,
+            })
+        local owner_dso = binary .. "/identity/owner.so"
+        ensure_directory(binary .. "/identity")
+        write_file(owner_dso, "mock independently selected owner DSO\n")
+        local serialized_owner = types.serialize(owner)
+        titan._loadlib = function(filename, symbol)
+            assert.equal(owner_dso, filename)
+            if symbol == "identity_owner_abi" then
+                return function() return driver.TITAN_VER end
+            elseif symbol == "identity_owner_types" then
+                return function() return serialized_owner end
+            end
+            return nil, "undefined symbol: " .. symbol, "init"
+        end
+
+        local loader = driver.defaultloader({}, { context = context })
+        local facade_type, facade_errors =
+            checker.checkimport("identity.facade", loader)
+        assert.truthy(facade_type)
+        assert.equal(0, #facade_errors)
+        assert.is_nil(driver.imported["identity.owner"])
+        assert.same({
+            {
+                binding = "dynamic-global",
+                provider = facade_provider.archive,
+                exposer = "identity.facade",
+            },
+        }, constraints(context, "identity.owner"))
+
+        local owner_type, owner_errors =
+            checker.checkimport("identity.owner", loader)
+        assert.truthy(owner_type)
+        assert.equal(0, #owner_errors)
+        assert.equal("dynamic", driver.imported["identity.owner"].kind)
+        assert.equal(owner_dso, driver.imported["identity.owner"].filename)
+
+        local finalized, final_errors =
+            driver.finalize_resolver_context(context)
+        assert.is_nil(finalized)
+        local message = table.concat(final_errors, "\n")
+        assert.match(
+            "logical owner 'identity.owner' resolved independently as dynamic",
+            message, 1, true)
+        assert.match(facade_provider.archive, message, 1, true)
+        assert.match("requires its producer-chosen dynamic identity",
+            message, 1, true)
     end)
 
     it("rejects a source owner against an archive facade's dynamic identity",

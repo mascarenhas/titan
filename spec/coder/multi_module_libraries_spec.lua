@@ -859,7 +859,7 @@ end
             "module 'base.owner' not found", 1, true), output)
     end)
 
-    it("selects and repackages a real macOS universal provider",
+    it("rejects raw members and repackages real macOS metadata objects",
        function()
         if not driver.IS_DARWIN then return end
 
@@ -898,14 +898,48 @@ end
             return object
         end
 
+        local x86_object = compile_arch("x86_64")
+        local arm_object = compile_arch("arm64")
         local x86_archive = make_archive(
-            workspace, "fat-api-x86_64.a", {
-                compile_arch("x86_64"),
-            })
+            workspace, "fat-api-x86_64.a", { x86_object })
         local arm_archive = make_archive(
-            workspace, "fat-api-arm64.a", {
-                compile_arch("arm64"),
-            })
+            workspace, "fat-api-arm64.a", { arm_object })
+
+        local raw = workspace .. "/raw-metadata.txt"
+        write_file(raw, "titan metadata is not a Mach-O object\n")
+        local raw_archive = workspace .. "/raw-member.a"
+        local raw_ar = configured_words(driver.AR)
+        raw_ar[#raw_ar + 1] = "q"
+        raw_ar[#raw_ar + 1] = raw_archive
+        raw_ar[#raw_ar + 1] = raw
+        local archived, archive_output = run(raw_ar, workspace)
+        assert.truthy(archived, archive_output)
+        assert.truthy(read_file(raw_archive):find(
+            "titan metadata is not a Mach-O object", 1, true))
+
+        local raw_libtool = workspace .. "/raw-libtool.a"
+        local accepted, rejection_output = run({
+            "/usr/bin/libtool", "-static", "-o", raw_libtool,
+            raw_archive,
+        }, workspace)
+        assert.falsy(accepted, rejection_output)
+        assert.truthy(
+            rejection_output:find("raw-member.a", 1, true) or
+            rejection_output:find("raw-metadata.txt", 1, true),
+            rejection_output)
+
+        local raw_universal = workspace .. "/raw-universal.a"
+        accepted, rejection_output = run({
+            "/usr/bin/lipo", "-create",
+            x86_archive, raw_archive,
+            "-output", raw_universal,
+        }, workspace)
+        assert.falsy(accepted, rejection_output)
+        assert.truthy(
+            rejection_output:find("raw-member.a", 1, true) or
+            rejection_output:find("raw-metadata.txt", 1, true),
+            rejection_output)
+
         local universal = workspace .. "/fat/api.a"
         assert.truthy(os.remove(universal))
         ok, output = run({

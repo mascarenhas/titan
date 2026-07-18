@@ -415,16 +415,18 @@ your compilation as a native binary:
   `function({string}):integer`, then `titanc` will bundle all modules
   given in the command-line, along with every dependency that module resolution
   selected from source, as a stand-alone executable program. Dependencies
-  selected from compiled modules remain dynamically loaded.
+  selected from DSOs remain dynamically loaded, while dependencies selected
+  from static providers are linked directly into the executable.
 * Otherwise, it compiles one C/object pair per logical source module and
   publishes matching shared and static providers named by the requested
   roots' longest common dotted-component prefix. It also emits one generated Lua
   loader per linked logical module, including source dependencies. The
   generated `.c` and `.o` files are written next to the flat source or
   canonical folder main; the provider and loaders are written relative to the
-  directory where `titanc` runs. Dependencies selected from compiled providers
-  remain dynamically loaded. Requested roots with no common component must be
-  built in separate invocations.
+  directory where `titanc` runs. Dependencies selected from DSOs remain
+  dynamically loaded; dependencies selected from static providers are carried
+  into both new provider forms and use direct native symbols. Requested roots
+  with no common component must be built in separate invocations.
 
 For example, flat `foo.bar` uses source `foo/bar.titan`, generated
 `foo/bar.c` and `.o`, loader `foo/bar.lua`, providers `foo/bar.so` and

@@ -65,6 +65,8 @@ while IFS= read -r test_file; do
         spec/checker/static_compiled_modules_spec.lua | \
         spec/coder/multi_module_libraries_spec.lua | \
         spec/coder/static_compiled_modules_spec.lua | \
+        spec/coder/static_dynamic_facade_spec.lua | \
+        spec/coder/static_protocol_mismatch_spec.lua | \
         spec/staticmetadata_spec.lua)
             # Busted's file insulation reloads compiler modules between specs,
             # while LuaCov keeps only the last loaded prototype's line table

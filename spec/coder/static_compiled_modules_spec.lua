@@ -326,6 +326,69 @@ describe("static compiled-module native containers", function()
         end
     end)
 
+    it("rejects raw GNU/ELF whole-archive members and retains metadata objects",
+       function()
+        if driver.IS_DARWIN or target.format ~= "elf" then return end
+
+        local linker_version = configured_words(driver.CC)
+        linker_version[#linker_version + 1] = "-Wl,--version"
+        local version_ok, version_output = run(linker_version)
+        -- mold advertises itself as "compatible with GNU ld", but its
+        -- diagnostics are intentionally different. Gate only on GNU BFD
+        -- ld's own version line.
+        if not version_ok or
+           not ("\n" .. version_output):find("\nGNU ld ", 1, true) then
+            return
+        end
+
+        local raw = workspace .. "/raw metadata.txt"
+        write_file(raw, "titan metadata is not an object file\n")
+        local raw_archive = workspace .. "/raw member.a"
+        local archived, archive_output =
+            run(tool_command(driver.AR, "q", raw_archive, raw))
+        assert.truthy(archived, archive_output)
+        assert.truthy(read_file(raw_archive):find(
+            "titan metadata is not an object file", 1, true))
+
+        local function whole_archive(input, output)
+            local argv = configured_words(driver.CC)
+            for _, argument in ipairs({
+                "-r",
+                "-Wl,--whole-archive",
+                input,
+                "-Wl,--no-whole-archive",
+                "-o",
+                output,
+            }) do
+                argv[#argv + 1] = argument
+            end
+            return run(argv)
+        end
+
+        local raw_output = workspace .. "/raw linked.o"
+        local linked, link_output =
+            whole_archive(raw_archive, raw_output)
+        assert.falsy(linked, link_output)
+        assert.truthy(
+            link_output:find("is not an object", 1, true) or
+            link_output:find("file format not recognized", 1, true),
+            link_output)
+
+        local object_archive = workspace .. "/metadata object.a"
+        make_archive(object_archive, { target_object })
+        local object_output = workspace .. "/metadata linked.o"
+        linked, link_output =
+            whole_archive(object_archive, object_output)
+        assert.truthy(linked, link_output)
+
+        local fingerprint, parsed = driver.derive_target_fingerprint(
+            object_output, "fixture.target")
+        assert.truthy(fingerprint, parsed)
+        assert.same(target, fingerprint)
+        assert.equal("fixture.target", parsed.metadata.module)
+        assert.equal(driver.TITAN_VER, parsed.metadata.abi)
+    end)
+
     it("renders platform force-load arguments without losing awkward paths",
        function()
         assert.same({

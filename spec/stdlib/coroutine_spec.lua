@@ -6,6 +6,7 @@ local ROOT_ARTIFACTS = {
     "titan-runtime/.titan-runtime-archive-build-config",
     "titan.so",
     "titan.so.dSYM",
+    "titan/coroutine.a",
     "titan/coroutine.so",
     "titan/coroutine.so.dSYM",
     "titan/coroutine.lua",
@@ -45,7 +46,7 @@ local TEST_ENV = "env -u LUA_PATH -u LUA_CPATH " ..
     "TITAN_COROUTINE_TEST_SO=" .. quote(COROUTINE_VARIANT_SO) .. " "
 
 local function clean_test_artifacts()
-    os.execute("rm -rf test.o test.so test.c test.titan " ..
+    os.execute("rm -rf test.o test.so test.a test.c test.titan " ..
         "test.lua test__entrypoint.c test test.dSYM coroutine_standalone app " ..
         "app__entrypoint.c app.dSYM")
 end
@@ -119,6 +120,7 @@ local function build_coroutine()
     assert.truthy(exec_ok("rm -rf " .. quote(COROUTINE_VARIANT_ROOT)))
     assert.truthy(exec_ok(
         "mkdir -p " .. quote(COROUTINE_VARIANT_ROOT .. "/titan")))
+    os.remove("titan/coroutine.a")
     os.remove("titan/coroutine.so")
     assert.truthy(exec_ok("rm -rf titan/coroutine.so.dSYM"))
     assert.truthy(exec_ok(
@@ -126,6 +128,7 @@ local function build_coroutine()
         TITANC .. " --tree . titan.coroutine"))
     assert.truthy(exec_ok("cp -p " .. quote("titan/coroutine.so") .. " " ..
         quote(COROUTINE_VARIANT_SO)))
+    os.remove("titan/coroutine.a")
     os.remove("titan/coroutine.so")
     assert.truthy(exec_ok("cp -p " .. quote("titan/coroutine.lua") .. " " ..
         quote(COROUTINE_VARIANT_ROOT .. "/titan/coroutine.lua")))
@@ -138,6 +141,7 @@ local function build_coroutine()
 end
 
 local function clean_coroutine_artifacts()
+    os.remove("titan/coroutine.a")
     os.remove("titan/coroutine.so")
     exec_ok("rm -rf titan/coroutine.so.dSYM")
     os.remove("titan/coroutine.lua")
