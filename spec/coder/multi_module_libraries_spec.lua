@@ -418,7 +418,8 @@ end
         assert.truthy(archive_validation_link, verbose_output)
         if driver.IS_DARWIN then
             assert.truthy(provider_link:find(
-                "'-Xlinker' '-install_name' '-Xlinker' 'pkg.so'",
+                "'-Xlinker' '-reproducible' '-Xlinker' " ..
+                "'-install_name' '-Xlinker' 'pkg.so'",
                 1, true), provider_link)
         end
         local left_at = assert(provider_link:find(
@@ -1511,7 +1512,8 @@ end
             output)
         if driver.IS_DARWIN then
             assert.truthy(dso_link:find(
-                "'-Xlinker' '-install_name' '-Xlinker' 'payload/item.so'",
+                "'-Xlinker' '-reproducible' '-Xlinker' " ..
+                "'-install_name' '-Xlinker' 'payload/item.so'",
                 1, true), dso_link)
         end
         local direct_at = assert(dso_link:find(direct, 1, true), dso_link)

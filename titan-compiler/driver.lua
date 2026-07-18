@@ -2530,11 +2530,14 @@ function driver.compile_library_output(soname, libnames, link, verbose,
     local args, err = compiler_argv(false)
     if not args then return nil, err end
     append_argv(args, shared_flag())
-    -- Darwin otherwise derives LC_ID_DYLIB from the unique staged `-o` path.
-    -- Use the eventual public path so unchanged transactional relinks remain
-    -- byte-identical and can preserve the published provider pair's mtimes.
+    -- Darwin otherwise derives LC_ID_DYLIB from the unique staged `-o` path,
+    -- while its debug map records volatile input-object modification times.
+    -- Use the eventual public identity and reproducible-link mode so unchanged
+    -- transactional relinks remain byte-identical and can preserve the
+    -- published provider pair's mtimes.
     if driver.IS_DARWIN and install_name then
         append_argv(args, {
+            "-Xlinker", "-reproducible",
             "-Xlinker", "-install_name",
             "-Xlinker", install_name,
         })
