@@ -380,6 +380,14 @@ module type or automatically import every other logical key carried by that
 archive. Modules explicitly named on the `titanc` command line remain source
 roots regardless of either compiled format.
 
+Standalone ELF links search selected providers once before ordered `-X`
+payload, then group `libtitan.a` with those providers at the runtime position.
+This ordinary second search resolves runtime references to metadata-free
+payload flattened into a provider (notably bundled libuv in `titan.a`) without
+force-loading modules or broadly rescanning `-X`; Darwin keeps its continual
+archive search. The executable-context protocol probe and the real program
+must use the same shared argument builder for this order.
+
 The standard library uses ordinary qualified module names: most source files
 are `titan/<module>.titan`, while `titan.uv` uses main
 `titan/uv/uv.titan` plus its six contributors. Production invokes all seven

@@ -1517,6 +1517,40 @@ local function runtime_link_inputs()
     return driver.source_link_inputs(driver.LUA_SOURCE_PATH)
 end
 
+-- Standalone links keep ordinary -X inputs outside ELF archive groups, but
+-- libtitan may itself reference metadata-free payload carried by a selected
+-- provider (the bundled libuv objects in titan.a are the canonical case).
+-- Search providers once before -X so their unresolved references can select
+-- ordinary -X members, then search libtitan and the providers together after
+-- -X so either direction reaches a fixed point. Nothing is force-loaded.
+function driver.standalone_native_link_inputs(
+        static_archives, extra_objects, runtime, is_darwin)
+    static_archives = static_archives or {}
+    extra_objects = extra_objects or {}
+    runtime = runtime or {}
+    is_darwin = is_darwin == nil and driver.IS_DARWIN or is_darwin
+    local args = {}
+    if #static_archives ~= 0 and not is_darwin then
+        assert(runtime[1], "standalone link has no Titan runtime archive")
+        table.insert(args, "-Wl,--start-group")
+        append_argv(args, static_archives)
+        table.insert(args, "-Wl,--end-group")
+        append_argv(args, extra_objects)
+        table.insert(args, "-Wl,--start-group")
+        table.insert(args, runtime[1])
+        append_argv(args, static_archives)
+        table.insert(args, "-Wl,--end-group")
+        for index = 2, #runtime do
+            table.insert(args, runtime[index])
+        end
+    else
+        append_argv(args, static_archives)
+        append_argv(args, extra_objects)
+        append_argv(args, runtime)
+    end
+    return args
+end
+
 local function archive_input_path(archive)
     if type(archive) == "table" then
         return archive.path or archive.archive or archive.filename
@@ -3335,16 +3369,8 @@ function driver.run_standalone_archive_probe(
     append_argv(args, { "-o", executable, object })
     append_argv(args, libnames or {})
     local runtime = runtime_link_inputs()
-    static_archives = static_archives or {}
-    if #static_archives ~= 0 and not driver.IS_DARWIN then
-        table.insert(args, "-Wl,--start-group")
-        append_argv(args, static_archives)
-        table.insert(args, "-Wl,--end-group")
-    else
-        append_argv(args, static_archives)
-    end
-    append_argv(args, extra_objects or {})
-    append_argv(args, runtime)
+    append_argv(args, driver.standalone_native_link_inputs(
+        static_archives, extra_objects, runtime))
     if link then
         for _, lib in ipairs(util.split_string(link, ",")) do
             table.insert(args, "-l" .. lib)
@@ -3401,17 +3427,9 @@ function driver.compile_program(modname, libnames, link, verbose, extra_objects,
     for _, libname in ipairs(libnames) do
         table.insert(args, libname)
     end
-    static_archives = static_archives or {}
     local runtime = runtime_link_inputs()
-    if #static_archives ~= 0 and not driver.IS_DARWIN then
-        table.insert(args, "-Wl,--start-group")
-        append_argv(args, static_archives)
-        table.insert(args, "-Wl,--end-group")
-    else
-        append_argv(args, static_archives)
-    end
-    append_argv(args, extra_objects or {})
-    append_argv(args, runtime)
+    append_argv(args, driver.standalone_native_link_inputs(
+        static_archives, extra_objects, runtime))
     if link then
         local libs = util.split_string(link, ",")
         for _, lib in ipairs(libs) do

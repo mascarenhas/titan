@@ -230,13 +230,15 @@ a runtime archive reader.
 
 Final link order is source objects, selected Titan archives, user `-X`
 payload, Titan runtime/backtrace/Lua inputs, `-l` inputs, platform libraries,
-and final flags. ELF groups selected providers with each other for rescans,
-then leaves ordinary `-X` inputs outside that group in their original CLI
-order before `libtitan.a`. The supported runtime archive has no reverse
-references into generated/provider modules, so this resolves provider and
-payload references without changing ordinary `-X` extraction. Darwin uses its
-continual archive search. `--static` never becomes a system `-static` linker
-option.
+and final flags. ELF first groups selected providers with each other, leaves
+ordinary `-X` inputs outside that group in their original CLI order, then
+groups `libtitan.a` with the selected providers at the runtime position.
+Selected archives therefore receive an ordinary second search after runtime
+members introduce references to metadata-free provider payload, such as
+bundled libuv, while `-X` archives are never broadly rescanned or force-loaded.
+Backtrace, Lua, `-l`, platform, and final-flag inputs remain outside both
+groups. Darwin uses its continual archive search. `--static` never becomes a
+system `-static` linker option.
 
 Library-mode DSO construction force-loads selected-provider and `-X` archives.
 The paired static archive flattens the identical logical/native payload:

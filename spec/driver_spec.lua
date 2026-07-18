@@ -123,6 +123,47 @@ describe("compiler installation discovery", function()
             "-ldl", "-lm",
         }, driver.source_link_inputs("lua-5.5.0/src"))
     end)
+
+    it("rescans selected ELF payload after the Titan runtime", function()
+        assert.same({
+            "-Wl,--start-group",
+            "/providers/one.a", "/providers/two.a",
+            "-Wl,--end-group",
+            "/payload/first.o", "/payload/second.a",
+            "-Wl,--start-group",
+            "/sdk/libtitan.a",
+            "/providers/one.a", "/providers/two.a",
+            "-Wl,--end-group",
+            "/sdk/libbacktrace.a", "/sdk/liblua.a", "-ldl", "-lm",
+        }, driver.standalone_native_link_inputs(
+            { "/providers/one.a", "/providers/two.a" },
+            { "/payload/first.o", "/payload/second.a" },
+            {
+                "/sdk/libtitan.a",
+                "/sdk/libbacktrace.a",
+                "/sdk/liblua.a",
+                "-ldl", "-lm",
+            },
+            false))
+    end)
+
+    it("retains continual Darwin standalone archive order", function()
+        assert.same({
+            "/providers/one.a",
+            "/payload/first.o", "/payload/second.a",
+            "/sdk/libtitan.a", "/sdk/libbacktrace.a",
+            "/sdk/liblua.a", "-lm",
+        }, driver.standalone_native_link_inputs(
+            { "/providers/one.a" },
+            { "/payload/first.o", "/payload/second.a" },
+            {
+                "/sdk/libtitan.a",
+                "/sdk/libbacktrace.a",
+                "/sdk/liblua.a",
+                "-lm",
+            },
+            true))
+    end)
 end)
 
 describe("compiled-container path contracts", function()

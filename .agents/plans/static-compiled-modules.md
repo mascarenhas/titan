@@ -825,23 +825,29 @@ platform runtime libraries
 TITAN_EXTRA_LDFLAGS
 ```
 
-On ELF, rescan selected providers with each other, keep ordinary `-X`
-objects/archives outside that group in their CLI order, and then supply the
-Titan runtime:
+On ELF, first rescan selected providers with each other, keep ordinary `-X`
+objects/archives outside that group in their CLI order, and then rescan the
+Titan runtime with the selected providers:
 
 ```text
 -Wl,--start-group
     <selected provider archives>
 -Wl,--end-group
 <ordinary -X objects/archives>
-libtitan.a
+-Wl,--start-group
+    libtitan.a
+    <selected provider archives>
+-Wl,--end-group
 ```
 
 The runtime archive's supported three-member contract has no reverse
-references into generated/provider modules. Keeping it after `-X` therefore
-resolves provider-to-runtime and `-X`-to-runtime references without changing
-ordinary `-X` archive extraction; the provider-only group retains
-provider-to-provider rescanning.
+references into generated Titan module protocols, but it may reference
+metadata-free provider payload: `titan_uv.o` depends on the bundled libuv
+objects flattened into `titan.a`. The second ordinary archive group closes
+that runtime-to-payload edge without force-loading providers. Keeping
+ordinary `-X` outside both groups preserves its CLI order and extraction
+semantics; the first provider-only group retains provider-to-provider
+rescanning and exposes provider references before `-X` is searched.
 
 Keep backtrace/Lua and ordered user flags outside. On Darwin rely on the
 documented continual static-library search; do not emit GNU group options.
