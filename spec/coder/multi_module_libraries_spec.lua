@@ -183,6 +183,30 @@ local function make_archive(workspace, name, objects)
     return archive
 end
 
+local function archive_field(value, width)
+    local text = tostring(value)
+    assert.is_true(#text <= width)
+    return text .. string.rep(" ", width - #text)
+end
+
+local function regular_archive_bytes(members)
+    local records = { "!<arch>\n" }
+    for _, member in ipairs(members) do
+        local data = member.data
+        records[#records + 1] =
+            archive_field(member.name, 16) ..
+            archive_field(0, 12) ..
+            archive_field(0, 6) ..
+            archive_field(0, 6) ..
+            archive_field(100644, 8) ..
+            archive_field(#data, 10) ..
+            "`\n" ..
+            data ..
+            (#data % 2 == 1 and "\n" or "")
+    end
+    return table.concat(records)
+end
+
 local function native_symbols(workspace, filename)
     local ok, output = run({ "nm", "-g", filename }, workspace)
     assert.truthy(ok, output)
@@ -905,15 +929,15 @@ end
         local arm_archive = make_archive(
             workspace, "fat-api-arm64.a", { arm_object })
 
-        local raw = workspace .. "/raw-metadata.txt"
+        local raw = workspace .. "/raw.txt"
         write_file(raw, "titan metadata is not a Mach-O object\n")
         local raw_archive = workspace .. "/raw-member.a"
-        local raw_ar = configured_words(driver.AR)
-        raw_ar[#raw_ar + 1] = "q"
-        raw_ar[#raw_ar + 1] = raw_archive
-        raw_ar[#raw_ar + 1] = raw
-        local archived, archive_output = run(raw_ar, workspace)
-        assert.truthy(archived, archive_output)
+        -- Current Darwin ar may report success while discarding a non-Mach-O
+        -- input. Construct the regular archive directly so both Apple tools
+        -- receive the malformed member this test intends to exercise.
+        write_file(raw_archive, regular_archive_bytes({
+            { name = "raw.txt/", data = read_file(raw) },
+        }))
         assert.truthy(read_file(raw_archive):find(
             "titan metadata is not a Mach-O object", 1, true))
 
@@ -925,7 +949,7 @@ end
         assert.falsy(accepted, rejection_output)
         assert.truthy(
             rejection_output:find("raw-member.a", 1, true) or
-            rejection_output:find("raw-metadata.txt", 1, true),
+            rejection_output:find("raw.txt", 1, true),
             rejection_output)
 
         local raw_universal = workspace .. "/raw-universal.a"
@@ -937,7 +961,7 @@ end
         assert.falsy(accepted, rejection_output)
         assert.truthy(
             rejection_output:find("raw-member.a", 1, true) or
-            rejection_output:find("raw-metadata.txt", 1, true),
+            rejection_output:find("raw.txt", 1, true),
             rejection_output)
 
         local universal = workspace .. "/fat/api.a"

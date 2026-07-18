@@ -1103,5 +1103,36 @@ printf 'build\n' >> %s
             "--name='standalone-prefix source installation loads direct " ..
                 "libuv calls lazily for Titan and explicitly for Lua'",
             1, true), workflow)
+        local prepare_job = assert(workflow:match(
+            "\n  prepare%-linux:(.-)\n  test%-linux:"))
+        local heavy_job = assert(workflow:match(
+            "\n  test%-linux:(.-)\n  test%-macos:"))
+        local function count_literal(text, needle)
+            local count = 0
+            local offset = 1
+            while true do
+                local start = text:find(needle, offset, true)
+                if not start then return count end
+                count = count + 1
+                offset = start + #needle
+            end
+        end
+        local function assert_codecov_job(job, upload_name)
+            assert.equal(1, count_literal(job, "contents: read"), job)
+            assert.equal(1, count_literal(job, "id-token: write"), job)
+            assert.equal(1,
+                count_literal(job, "codecov/codecov-action@v7"), job)
+            assert.equal(1,
+                count_literal(job, "fail_ci_if_error: true"), job)
+            assert.equal(1,
+                count_literal(job, "files: ./luacov.report.out"), job)
+            assert.equal(1,
+                count_literal(job, "name: " .. upload_name), job)
+            assert.equal(1, count_literal(job, "use_oidc: true"), job)
+            assert.falsy(job:find("\n%s+token:", 1), job)
+        end
+        assert_codecov_job(prepare_job, "compiler-core")
+        assert_codecov_job(heavy_job, "compiler-heavy")
+        assert.falsy(workflow:find("CODECOV_TOKEN", 1, true), workflow)
     end)
 end)

@@ -302,6 +302,8 @@ describe("static compiled-module native containers", function()
         local thin_archive = workspace .. "/thin payload.a"
         local thin_ok = run(
             tool_command(driver.AR, "crT", thin_archive, plain_object))
+        local thin_magic = thin_ok and
+            read_file(thin_archive):sub(1, 8) == "!<thin>\n"
 
         local wrong_target = workspace .. "/wrong target.o"
         write_file(wrong_target,
@@ -315,7 +317,10 @@ describe("static compiled-module native containers", function()
             { nested_archive, "nested archive" },
             { wrong_target, "target mismatch" },
         }
-        if thin_ok then
+        -- GNU ar uses T for a thin archive; Darwin ar uses it to truncate
+        -- member names and emits an ordinary archive. Exercise this real-tool
+        -- case only when the output itself proves GNU thin semantics.
+        if thin_magic then
             cases[#cases + 1] = { thin_archive, "thin archives" }
         end
         for _, case in ipairs(cases) do
