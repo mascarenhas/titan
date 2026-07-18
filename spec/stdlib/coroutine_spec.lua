@@ -47,8 +47,9 @@ local TEST_ENV = "env -u LUA_PATH -u LUA_CPATH " ..
 
 local function clean_test_artifacts()
     os.execute("rm -rf test.o test.so test.a test.c test.titan " ..
-        "test.lua test__entrypoint.c test test.dSYM coroutine_standalone app " ..
-        "app__entrypoint.c app.dSYM")
+        "test.lua test__entrypoint.c test__entrypoint.o test test.dSYM " ..
+        "coroutine_standalone app app__entrypoint.c app__entrypoint.o " ..
+        "app.dSYM")
 end
 
 local function exec_ok(cmd)
