@@ -169,7 +169,20 @@ LUA
 
 inspect_dependencies() {
     if [[ $platform == macos ]]; then
-        otool -L "$1" | sed -n '/^[[:space:]]/p'
+        # `otool -L` mixes actual loads with filename/architecture headers and
+        # a shared library's own LC_ID_DYLIB. Parse the load commands so a
+        # staged output pathname is never mistaken for one of its dependencies.
+        otool -l "$1" | awk '
+            $1 == "cmd" {
+                dependency = ($2 ~ /^LC_.*DYLIB$/ &&
+                    $2 != "LC_ID_DYLIB")
+                next
+            }
+            dependency && $1 == "name" {
+                print
+                dependency = 0
+            }
+        '
     else
         readelf -d "$1"
     fi
