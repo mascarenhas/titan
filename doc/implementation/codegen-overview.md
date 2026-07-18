@@ -8,11 +8,12 @@ coder.generate(modname, ast, static_deps)  --> string (one C translation unit)
 
 where `modname` is the dot-separated module name, `ast` is the module's
 AST *after* `checker.check` has decorated and rewritten it, and
-`static_deps` is the driver's origin map: source imports are `true` and binary
-imports are absent. `titanc` uses
-the recorded direct map for a non-root source dependency and the full recursive
-`driver.dependency_closure` for an explicit root, so it includes source objects
-statically linked into that root. The return
+`static_deps` is the driver's finalized direct-native name set. It contains
+every source module compiled into the invocation plus every logical module
+physically carried by a selected static provider; imports selected from DSOs
+are absent. `titanc` passes the resolver context's
+`native_static_names`, after provenance and producer-binding constraints have
+been finalized, to every source module's code-generation pass. The return
 value is the complete text of one C translation unit. For a
 [folder module](folder-modules.md), `ast` is the same dense root list as for a
 flat module, assembled from independently parsed files and checked once; the
@@ -625,8 +626,9 @@ Idempotency works at two independent levels:
 * **Per translation unit**: the C `static int _initialized` guards only
   nonsemantic native wiring and caches — here, the dlsym'd function pointers.
   Several translation units may share a physical provider, but each retains
-  this separate flag and module protocol. The standard library installs one
-  combined `titan.so`, shared by Titan imports and Lua requires. Record type
+  this separate flag and module protocol. The standard library installs a
+  paired `titan.so`/`titan.a` provider; dynamic Titan imports and Lua requires
+  share the DSO form, while static selection uses the archive. Record type
   identity is the metatable, a
   per-Lua-state object cached in a `_mod` user value rather than a C static, so
   this branch no longer re-fetches any tag cache.
@@ -657,9 +659,11 @@ exported functions, exported variables, and one static-namespace table
 per record (carrying its public record functions) — are all served by a metatable on the
 `Udata` ([Lua interop internals](lua-interop-internals.md)).
 `<prefix>_abi` is a tiny marker function that returns the current
-`TITAN_VER`; both the compile-time `.so` loader and generated dynamic
-imports check it before trusting any other symbol. `<prefix>_types` is
-the separate-compilation interface:
+`TITAN_VER`; both the compile-time DSO loader and generated dynamic imports
+check it before trusting any other callable symbol. Static providers embed
+the same ABI and serialized interface in each logical object, and archive
+validation compares those bytes with the callable protocol before
+publication. `<prefix>_types` is the separate-compilation interface:
 
 ```c
 int counter_abi(lua_State* L) {
@@ -688,19 +692,22 @@ above. It returns that
 serialized interface as its sole result;
 there is no dependency-origin metadata in the module protocol.
 `Type.Module.file` is likewise omitted. It defaults to the exact logical path
-when the expression is evaluated and the importing driver overwrites it with
-the relative provider selected by the current prefix search.
+when the expression is evaluated; only a successful DSO claim overwrites it
+with the selected relative shared-provider path. Static archive paths never
+enter the serialized type or this transient field.
 
-When the driver's loader finds a compiled provider for an import, it probes
-the requested `<prefix>_abi`/`<prefix>_types` pair, rejects partial or invalid
-claims, and `load`s `"return " .. serialized` to recover the interface —
+When the driver's loader finds a compiled provider for an import, it recovers
+the requested ABI/types from either the DSO's callable pair or the selected
+archive object's canonical metadata section, rejects partial or invalid
+claims, and evaluates the serialized expression to recover the interface —
 letting the checker type the importing module against a dependency whose
 source is gone. Libuv does not add another result or a special binary
-classification. Dependencies use dynamic linkage when a provider wins lookup and static
-linkage when no binary exists and source is selected. Explicit command-line
-roots are the source-first exception. The tests'
-in-memory `tableloader` exercises the same serialization round-trip. See
-[driver and toolchain](driver.md).
+classification. Dependencies selected from a DSO use dynamic handle-scoped
+wiring; dependencies selected from source or a static provider use direct
+native wiring. Explicit command-line roots are the source-first exception.
+The tests' in-memory `tableloader` exercises the same serialization
+round-trip. See [driver and toolchain](driver.md) and [Static compiled
+modules](static-compiled-modules.md).
 
 Folder and provider representation change none of this logical protocol. Mangled symbols,
 nominal names, registry keys, `luaopen_*`, and the serialized module identity
@@ -717,21 +724,23 @@ physical provider is found and recorded transiently.
 `coder.generate` decides per import, by `static_deps[modname]`
 (`import_module` and `init_data_from_other_modules`).
 
-**Static** (the dep's `.titan` source was compiled in and its objects are
-linked into the same artifact): plain `extern` declarations and direct
-calls — each cross-module function used gets an `extern` prototype in
-`$INCLUDES`, and the dep's init is declared and called directly:
+**Direct/static** (the dependency's source object is compiled in, or its
+logical module is physically carried by a selected static provider): plain
+`extern` declarations and direct calls — each cross-module function used gets
+an `extern` prototype in `$INCLUDES`, and the dependency's initializer is
+declared and called directly:
 
 ```c
 extern Udata *dep_init(lua_State *L);
 /* in _init: */ { Udata *_m = dep_init(L); setuvalue(L, &_mod->uv[1].uv, _m); }
 ```
 
-**Ordinary dynamic** (compiled-provider dep): each imported function is declared in
-`$INCLUDES` as a `static` function *pointer*; the generated `_init`
-dlopens the library and stitches the pointers by symbol name with the
-runtime's lazy/global `loadlib` and `loadsym` (`titan-runtime/titan.c`: Titan-path
-search, registry-cached handles, Lua error on failure):
+**Ordinary dynamic** (shared-provider dependency): each imported function is
+declared in `$INCLUDES` as a `static` function *pointer*; the generated
+`_init` dlopens the exact selected DSO and stitches the pointers by symbol
+name with the runtime's lazy/global `loadlib` and handle-scoped `loadsym`
+(`titan-runtime/titan.c`: Titan-path search, registry-cached handles, Lua
+error on failure):
 
 ```c
 static Udata* (*dep_mk_titan)(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer);
@@ -761,13 +770,16 @@ recovered through the Lua registry at init time under
 `"Titan record <fqtn> metatable"`. The metatable pointer itself is the record's
 type identity; see [Lua interop internals](lua-interop-internals.md).
 
-A record type re-exported through an alias keeps its original defining module.
-If C imports only re-exporter B but calls a method owned by A, B's initializer
-has already loaded A with `RTLD_GLOBAL`. C therefore does not `loadlib` A:
-after `$INITMODULES` initializes B, `$LOADGLOBALS` resolves A's native method
-entry (and any bound-method Lua trampoline) with
+A third, **global/dynamic**, path handles a nominal record owner re-exported
+through another compiled interface when that producer selected the owner
+dynamically. If C imports only re-exporter B but calls a method owned by A,
+B's initializer has already loaded A with `RTLD_GLOBAL`. C therefore does not
+`loadlib` A: after `$INITMODULES` initializes B, `$LOADGLOBALS` resolves A's
+native method entry (and any bound-method Lua trampoline) with
 `loadglobalsym`/`dlsym(RTLD_DEFAULT, ...)`. The corresponding module userdata
-and record metatable are then recovered from the Lua registry. See
+and record metatable are then recovered from the Lua registry. Resolver
+finalization rejects an independently selected A that could violate this
+producer-chosen native identity. See
 [Type aliases](type-aliases.md).
 
 ## User-value allocation

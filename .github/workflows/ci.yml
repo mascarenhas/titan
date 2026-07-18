@@ -18,6 +18,7 @@ jobs:
     runs-on: ubuntu-slim
     permissions:
       contents: read
+      id-token: write
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       PREFIX: ${{ github.workspace }}/.lua
@@ -82,7 +83,12 @@ jobs:
       - name: Build and install the rock
         # The dependency cache may contain the preceding commit's installed
         # titan dev-1. Force this checkout through both source-install phases.
-        run: luarocks make --force
+        run: |
+          luarocks make --force
+          provider="$PREFIX/lib/titan/0.16/titan.so"
+          static_archive="${provider%.so}.a"
+          test -f "$provider" && test ! -L "$provider"
+          test -f "$static_archive" && test ! -L "$static_archive"
 
       - name: Verify bare support loading after configured-path migration
         run: bash spec/support/ci_abi_migration_smoke.sh verify
@@ -94,8 +100,8 @@ jobs:
         run: luarocks test --prepare
 
       # Archive the pristine bundled build before the mode smoke replaces its
-      # combined titan.so. Upload remains after the smoke, so a portability
-      # failure still prevents downstream runner spend.
+      # paired titan.so/titan.a provider. Upload remains after the smoke, so a
+      # portability failure still prevents downstream runner spend.
       # A tar layer preserves the complete checkout's source/output mtimes,
       # hidden .lua tree, executable bits, and standard-library images. Direct
       # artifact upload avoids wrapping it in another archive.
@@ -139,7 +145,7 @@ jobs:
           fail_ci_if_error: true
           files: ./luacov.report.out
           name: compiler-core
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
 
       - name: Build child-process smoke fixture
         run: |
@@ -157,12 +163,19 @@ jobs:
       # The prepared artifact was packed before the source-mode smoke, so this
       # can mutate the producer's live prefix without changing the bundled tree
       # restored by test-linux. Exercise only the installed system-mode boundary
-      # here; the complete library suite already ran against the bundled image.
+      # here; the complete library and packaging suites already ran against the
+      # bundled image. The two focused rockspec cases own the mode-dependent
+      # SDK layout and external-DSO promotion boundaries; the production smoke
+      # owns the complete installed runtime behavior.
       - name: Canary source-rock installation with system libuv
         run: |
           LIBUV_MODE=system luarocks make --force
           TITAN_EXPECT_LIBUV_MODE=system \
-            "$PREFIX/bin/busted" -o gtest -v spec/rockspec_spec.lua
+            "$PREFIX/bin/busted" -o gtest -v spec/rockspec_spec.lua \
+              --name='standalone-prefix source installation installs one matching Lua and Titan SDK before the standard images' \
+              --name='standalone-prefix source installation loads direct libuv calls lazily for Titan and explicitly for Lua'
+          TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE="$GITHUB_WORKSPACE/libuv-build/libuv.a" \
+            bash spec/support/ci_libuv_mode_smoke.sh system
 
       - name: Upload prepared Linux tree
         uses: actions/upload-artifact@v7
@@ -181,6 +194,7 @@ jobs:
     runs-on: ubuntu-slim
     permissions:
       contents: read
+      id-token: write
 
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -226,7 +240,7 @@ jobs:
           fail_ci_if_error: true
           files: ./luacov.report.out
           name: compiler-heavy
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
 
   # macOS runners are expensive, so keep the complete cross-platform gate on
   # explicit manual dispatch. It remains independent of Linux preparation: a
@@ -308,7 +322,12 @@ jobs:
       # required by one coder spec via `require 'titan'`) is on the Lua path.
       # `luarocks test` does not build the rock-under-test, only its dependencies.
       - name: Build and install the rock
-        run: luarocks make --force
+        run: |
+          luarocks make --force
+          provider="$PREFIX/lib/titan/0.16/titan.so"
+          static_archive="${provider%.so}.a"
+          test -f "$provider" && test ! -L "$provider"
+          test -f "$static_archive" && test ! -L "$static_archive"
 
       # Exercise titanc through its real /usr/bin/env shebang. CI must provide
       # the prefix's Lua and installed compiler dependencies through PATH.
@@ -342,11 +361,13 @@ jobs:
           bash spec/support/ci_stdlib_snapshot.sh restore "$snapshot"
 
       # Run this after the bundled test suite. The smoke first exercises the
-      # existing self-contained image, then rebuilds the one combined titan.so
+      # existing self-contained provider pair, then rebuilds titan.so/titan.a
       # against the platform package; the job can end in system mode without
       # another build.
       - name: Smoke-test bundled and system libuv modes
-        run: bash spec/support/ci_libuv_mode_smoke.sh
+        run: |
+          TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE="$GITHUB_WORKSPACE/libuv-build/libuv.a" \
+            bash spec/support/ci_libuv_mode_smoke.sh
 
   # Keep the focused native-memory release gate on one warm 1-core runner.
   # Full library behavior suites belong to regular Linux: recompiling them
@@ -404,7 +425,9 @@ jobs:
         run: |
           luarocks make --force
           provider="$PREFIX/lib/titan/0.16/titan.so"
-          test -f "$provider"
+          static_archive="${provider%.so}.a"
+          test -f "$provider" && test ! -L "$provider"
+          test -f "$static_archive" && test ! -L "$static_archive"
           for module in coroutine uv async timer fs net os; do
             test -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done

@@ -167,6 +167,8 @@ end
         assert.equal("file", lfs.attributes(
             workspace .. "/single/item.so", "mode"))
         assert.equal("file", lfs.attributes(
+            workspace .. "/single/item.a", "mode"))
+        assert.equal("file", lfs.attributes(
             workspace .. "/single/item.lua", "mode"))
         assert.is_nil(lfs.attributes(workspace .. "/single.so", "mode"))
 
@@ -188,7 +190,9 @@ end
             end
         end
         assert.equal(1, compile_lines, output)
-        assert.equal(1, link_lines, output)
+        -- The public DSO and the private archive-validation image each link
+        -- once; duplicate CLI roots must not add another compile or link.
+        assert.equal(2, link_lines, output)
 
         ok, output = run_lua(workspace, [[
 local item = require "single.item"

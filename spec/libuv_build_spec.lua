@@ -2,6 +2,7 @@ local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
 local lfs = require "lfs"
 local parser = require "titan-compiler.parser"
+local staticmetadata = require "titan-compiler.staticmetadata"
 
 local PKG_CONFIG = "sh spec/fixtures/libuv/fake-pkg-config.sh"
 local UV_MAIN_SOURCE = "titan/uv/uv.titan"
@@ -16,6 +17,7 @@ local STDLIB_SHIMS = {
     "titan/timer.lua", "titan/fs.lua", "titan/net.lua", "titan/os.lua",
 }
 local STDLIB_CONTAINER = "titan.so"
+local STDLIB_STATIC_ARCHIVE = "titan.a"
 
 local function prefix_from_cpath(cpath)
     for template in (cpath .. ";"):gmatch("(.-);") do
@@ -175,6 +177,20 @@ local function make_temp_dir()
     return path
 end
 
+local function remove_tree(path)
+    local mode = lfs.symlinkattributes(path, "mode")
+    if mode == "directory" then
+        for entry in lfs.dir(path) do
+            if entry ~= "." and entry ~= ".." then
+                remove_tree(path .. "/" .. entry)
+            end
+        end
+        assert.truthy(lfs.rmdir(path))
+    elseif mode then
+        assert.truthy(os.remove(path))
+    end
+end
+
 -- GNU Make executes recipe lines containing $(MAKE) even under -n. Keep these
 -- command-contract tests independent of the checkout's prepared state by
 -- replacing every stdlib build prerequisite class with one isolated file.
@@ -231,6 +247,8 @@ local function run_uv_dry_run(mode, host, source)
         "HOST_OS=" .. (host or "Linux"),
         "LIBUV_PKG_CONFIG=" .. PKG_CONFIG,
         "CC=ccache cc",
+        "AR=review-ar",
+        "RANLIB=review-ranlib",
         "TITAN_EXTRA_CPPFLAGS=-DUSER_CPP=1",
         "TITAN_EXTRA_CFLAGS=-DUSER_C=1",
         "TITAN_EXTRA_LDFLAGS=-Wl,user-link",
@@ -253,8 +271,8 @@ end
 local function stdlib_command(output)
     local normalized = output:gsub("\\\r\n", " "):gsub("\\\n", " ")
         :gsub("%s+", " ")
-    local first = assert(normalized:find(
-        "CC='ccache cc' TITAN_PATH_0_16=", 1, true), normalized)
+    local first = assert(normalized:find("CC='ccache cc'", 1, true),
+        normalized)
     local last = assert(normalized:find("; for output in", first, true),
         normalized)
     return normalized:sub(first, last - 1), normalized
@@ -428,6 +446,8 @@ describe("libuv Makefile configuration", function()
             "TITAN_CONFIG_AR=$(call make_shell_quote,$(AR))",
             "TITAN_CONFIG_RANLIB=$(call make_shell_quote,$(RANLIB))",
             "unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5",
+            "export AR=$(call make_shell_quote,$(AR))",
+            "export RANLIB=$(call make_shell_quote,$(RANLIB))",
         }) do
             assert.truthy(makefile:find(contract, 1, true), contract)
         end
@@ -488,7 +508,7 @@ describe("libuv Makefile configuration", function()
                 "titan-runtime/.titan-stdlib-build-config",
             "STDLIB_COMPLETION_STAMP := " ..
                 "titan-runtime/.titan-stdlib-complete",
-            "rm -f $(STDLIB_CONTAINER) $(STDLIB_QUALIFIED_SOS) " ..
+            "rm -f $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_QUALIFIED_SOS) " ..
                 "$(STDLIB_SOS)",
         }) do
             assert.truthy(makefile:find(contract, 1, true), contract)
@@ -497,9 +517,9 @@ describe("libuv Makefile configuration", function()
             "UV_CONFIG_STAMP := $(LIBUV_BUILD_DIR)/", 1, true), makefile)
         local _, prepared_count = makefile:gsub(
             "TITAN_RUNTIME_PREBUILT=1", "")
-        -- One checkout build and one private source-rock staging build use the
-        -- already prepared runtime; neither rebuilds it per logical module.
-        assert.equal(2, prepared_count, makefile)
+        -- The checkout compiler, source installer validator, and private
+        -- source-rock build all consume the already prepared runtime.
+        assert.equal(3, prepared_count, makefile)
 
         file = assert(io.open("titan-compiler/driver.lua", "rb"))
         local driver_source = file:read("*a")
@@ -787,7 +807,7 @@ exit 64
             output)
     end)
 
-    it("builds one image with all roots, native support, and libuv once",
+    it("builds one provider pair with native support and one libuv policy",
        function()
         local ok, output, why, code = run_uv_dry_run("bundled")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
@@ -797,9 +817,12 @@ exit 64
             "./titanc " .. table.concat(STDLIB_ROOTS, " "), 1, true),
             command)
         assert.equal(1, count_plain(command,
-            "-X titan-runtime/titanlib.o"), command)
+            "-X titan-runtime/titanlib.o libuv-build/libuv.a"), command)
         assert.falsy(command:find("titan_uv.o", 1, true), command)
         assert.truthy(command:find([[CC='ccache cc']], 1, true), command)
+        assert.truthy(command:find([[AR='review-ar']], 1, true), command)
+        assert.truthy(command:find([[RANLIB='review-ranlib']], 1, true),
+            command)
         assert.truthy(command:find(
             [[TITAN_EXTRA_CPPFLAGS='-DUSER_CPP=1 -Ilibuv-v1.52.1/include -D_GNU_SOURCE']],
             1, true), command)
@@ -807,7 +830,7 @@ exit 64
             [[TITAN_EXTRA_CFLAGS='-DUSER_C=1 -fno-strict-aliasing']],
             1, true), command)
         local bundled_flags =
-            [[TITAN_EXTRA_LDFLAGS='-Wl,user-link -Wl,--whole-archive libuv-build/libuv.a -Wl,--no-whole-archive -lpthread -ldl -lrt']]
+            [[TITAN_EXTRA_LDFLAGS='-Wl,user-link -lpthread -lrt']]
         assert.equal(1, count_plain(command, bundled_flags), command)
         assert.equal(1, count_plain(command, "libuv-build/libuv.a"), command)
 
@@ -835,11 +858,14 @@ exit 64
             tostring(code) .. ")")
         command = stdlib_command(output)
         assert.equal(1, count_plain(command,
-            [[TITAN_EXTRA_LDFLAGS='-Wl,user-link -Wl,-force_load,libuv-build/libuv.a -lpthread']]),
+            [[-X titan-runtime/titanlib.o libuv-build/libuv.a]]),
+            command)
+        assert.equal(1, count_plain(command,
+            [[TITAN_EXTRA_LDFLAGS='-Wl,user-link -lpthread']]),
             command)
     end)
 
-    it("rebuilds the same single image when any reviewed source changes",
+    it("rebuilds the same provider pair when any reviewed source changes",
        function()
         local sources = {
             "titan/coroutine.titan", "titan/async.titan",
@@ -858,28 +884,287 @@ exit 64
             assert.equal(1, count_plain(command,
                 "./titanc " .. table.concat(STDLIB_ROOTS, " ")), command)
             assert.truthy(command:find(
-                "-Wl,--whole-archive libuv-build/libuv.a " ..
-                "-Wl,--no-whole-archive", 1, true), command)
+                "-X titan-runtime/titanlib.o libuv-build/libuv.a",
+                1, true), command)
             assert.falsy(normalized:find("titan/coroutine.so:", 1, true),
                 source .. ": " .. normalized)
         end
     end)
 
-    it("uses one completeness/config stamp and cleans only the exact shims",
+    it("keeps a valid warm pair and repairs missing or corrupt outputs",
+       function()
+        local root = make_temp_dir()
+        local source = root .. "/metadata.c"
+        local object = root .. "/metadata.o"
+        local fixture_archive = root .. "/fixture.a"
+        local fixture_provider = root .. "/fixture.so"
+        local fixture_shim = root .. "/fixture.lua"
+        local provider = root .. "/provider.so"
+        local static_archive = root .. "/provider.a"
+        local shim = root .. "/fixture-module.lua"
+        local config = root .. "/stdlib.config"
+        local completion = root .. "/stdlib.complete"
+        local prepared = root .. "/prepared"
+        local fake_titanc = root .. "/fake-titanc"
+        local build_log = root .. "/build.log"
+
+        local payload = assert(staticmetadata.render(
+            "fixture.module", "0.16", "{}"))
+        local initializer = assert(staticmetadata.c_initializer(payload))
+        write_file(source, string.format([[
+#if defined(__APPLE__)
+#define TITAN_META_SECTION \
+    __attribute__((used, aligned(1), section("__TEXT,__titanmeta")))
+#else
+#define TITAN_META_SECTION \
+    __attribute__((used, aligned(1), section(".titan.meta")))
+#endif
+TITAN_META_SECTION
+static const unsigned char fixture_metadata[] = %s;
+int fixture_native_payload(void) { return 1; }
+]], initializer))
+
+        local compile = { "env", "CCACHE_DISABLE=1" }
+        for _, word in ipairs(compiler_argv("-c", source, "-o", object)) do
+            compile[#compile + 1] = word
+        end
+        local ok, output, why, code = run_argv(compile)
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        ok, output, why, code =
+            run_argv({ "ar", "rcs", fixture_archive, object })
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+
+        write_file(fixture_provider, "fixture provider\n")
+        write_file(fixture_shim, "fixture shim\n")
+        write_file(prepared, "prepared\n")
+        write_file(build_log, "")
+        write_file(fake_titanc, string.format([[#!/bin/sh
+set -eu
+cp %s %s
+cp %s %s
+cp %s %s
+printf 'build\n' >> %s
+]], quote(fixture_provider), quote(provider),
+            quote(fixture_archive), quote(static_archive),
+            quote(fixture_shim), quote(shim), quote(build_log)))
+        ok, output, why, code = run_argv({ "chmod", "+x", fake_titanc })
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+
+        local prefix = assert(prefix_from_cpath(package.cpath))
+        local function run_fixture_make(ar)
+            return run_argv({
+                "make", "--no-print-directory", "-s",
+                "HOST_OS=Linux",
+                "LIBUV_MODE=system",
+                "LIBUV_PKG_CONFIG=" .. PKG_CONFIG,
+                "PREFIX=" .. root,
+                "TITAN_LUA=" .. prefix .. "/bin/lua",
+                "TITANC=" .. fake_titanc,
+                "AR=" .. ar,
+                "RANLIB=review-ranlib",
+                "STDLIB_ROOTS=fixture.module",
+                "STDLIB_TITAN_SOURCES=" .. prepared,
+                "STDLIB_SHIMS=" .. shim,
+                "STDLIB_CONTAINER=" .. provider,
+                "STDLIB_STATIC_ARCHIVE=" .. static_archive,
+                "STDLIB_CONFIG_STAMP=" .. config,
+                "STDLIB_COMPLETION_STAMP=" .. completion,
+                "STDLIB_EXTRA_OBJECTS=",
+                "STDLIB_SOS=",
+                "STDLIB_QUALIFIED_SOS=",
+                "TITAN_COMPILER_LUA=",
+                "STDLIB_TOOL_PREREQS=" .. prepared,
+                "STDLIB_PLATFORM_PREREQS=" .. prepared,
+                "STDLIB_NATIVE_PREREQS=" .. prepared,
+                "STDLIB_RUNTIME_ARCHIVE_PREREQ=" .. prepared,
+                "STDLIB_BOOTSTRAP_PREREQ=" .. prepared,
+                "stdlib",
+            })
+        end
+
+        local tested, test_error = pcall(function()
+            ok, output, why, code = run_fixture_make("review-ar-a")
+            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+                tostring(code) .. ")")
+            assert.equal("build\n", read_file(build_log))
+            local provider_mtime =
+                assert(lfs.attributes(provider, "modification"))
+            local archive_mtime =
+                assert(lfs.attributes(static_archive, "modification"))
+
+            ok, output, why, code = run_fixture_make("review-ar-a")
+            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+                tostring(code) .. ")")
+            assert.equal("build\n", read_file(build_log))
+            assert.equal(provider_mtime,
+                lfs.attributes(provider, "modification"))
+            assert.equal(archive_mtime,
+                lfs.attributes(static_archive, "modification"))
+
+            ok, output, why, code = run_fixture_make("review-ar-b")
+            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+                tostring(code) .. ")")
+            assert.equal("build\nbuild\n", read_file(build_log))
+
+            write_file(static_archive, "corrupt archive\n")
+            ok, output, why, code = run_fixture_make("review-ar-b")
+            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+                tostring(code) .. ")")
+            assert.equal("build\nbuild\nbuild\n", read_file(build_log))
+            assert.truthy(staticmetadata.scan_archive(static_archive, {
+                expected_abi = "0.16",
+            }))
+
+            assert.truthy(os.remove(provider))
+            ok, output, why, code = run_fixture_make("review-ar-b")
+            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+                tostring(code) .. ")")
+            assert.equal("build\nbuild\nbuild\nbuild\n",
+                read_file(build_log))
+            assert.equal("file", lfs.symlinkattributes(provider, "mode"))
+            assert.equal("file",
+                lfs.symlinkattributes(static_archive, "mode"))
+        end)
+
+        remove_tree(root)
+        if not tested then error(test_error, 0) end
+    end)
+
+    it("owns the provider pair through one stamp and exact cleanup",
        function()
         local makefile = read_file("Makefile")
         for _, contract in ipairs({
+            "STDLIB_STATIC_ARCHIVE := " .. STDLIB_STATIC_ARCHIVE,
+            "STDLIB_PROVIDER_OUTPUTS := $(STDLIB_CONTAINER) " ..
+                "$(STDLIB_STATIC_ARCHIVE)",
+            "STDLIB_EXTRA_OBJECTS := $(TITANLIB_O) " ..
+                "$(LIBUV_EXTRA_OBJECTS)",
             "$(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES)",
             "$(STDLIB_CONFIG_STAMP): FORCE",
-            "for output in $(STDLIB_CONTAINER) $(STDLIB_SHIMS)",
+            'rm -f "$(STDLIB_COMPLETION_STAMP)"',
+            "STDLIB_STATIC_ARCHIVE=$(STDLIB_STATIC_ARCHIVE)",
+            "STDLIB_EXTRA_OBJECTS=$(STDLIB_EXTRA_OBJECTS)",
+            "STDLIB_EMBEDDED_FORMAT_INPUTS=" ..
+                "$(STDLIB_EMBEDDED_FORMAT_INPUTS)",
+            "AR=$(call make_shell_quote,$(AR))",
+            "RANLIB=$(call make_shell_quote,$(RANLIB))",
+            "for output in $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_SHIMS)",
             "STDLIB_UV_LDFLAGS=$(STDLIB_UV_LDFLAGS)",
+            "validate_archive()",
+            "rm -f $(STDLIB_PROVIDER_OUTPUTS)",
             "rm -f $(STDLIB_SHIMS)",
             "rm -rf $(STDLIB_CONTAINER).dSYM",
+            "examples/utils.a examples/artisanal.a examples/sdl_quit.a",
+            "testfiles/selection_sort.a testfiles/sieve.a",
         }) do
             assert.truthy(makefile:find(contract, 1, true), contract)
         end
+        assert.falsy(makefile:find("-Wl,--whole-archive", 1, true), makefile)
+        assert.falsy(makefile:find("-Wl,-force_load", 1, true), makefile)
+        assert.falsy(makefile:find("rm -f *.a", 1, true), makefile)
+        assert.falsy(makefile:find("examples/*.a", 1, true), makefile)
+        assert.falsy(makefile:find("testfiles/*.a", 1, true), makefile)
         assert.falsy(makefile:find("rm -f titan/*.lua", 1, true), makefile)
         assert.falsy(makefile:find("rm -f titan/uv/*.lua", 1, true),
             makefile)
+
+        local examples_makefile = read_file("examples/Makefile")
+        assert.truthy(examples_makefile:find(
+            "utils.so and utils.a", 1, true), examples_makefile)
+        assert.truthy(examples_makefile:find(
+            "rm -f *.c *.o *.so utils.a artisanal.a sdl_quit.a sdl_demo",
+            1, true), examples_makefile)
+        assert.falsy(examples_makefile:find("*.a", 1, true),
+            examples_makefile)
+
+        local snapshot = read_file("spec/support/ci_stdlib_snapshot.sh")
+        for _, contract in ipairs({
+            'static_archive=${provider%.so}.a',
+            '"$static_archive"',
+            'rm -f "$static_archive"',
+            'write_manifest "$manifest" "${artifacts[@]}"',
+            'cmp -s "$manifest" "$restored_manifest"',
+        }) do
+            assert.truthy(snapshot:find(contract, 1, true), contract)
+        end
+
+        local mode_smoke =
+            read_file("spec/support/ci_libuv_mode_smoke.sh")
+        for _, contract in ipairs({
+            'local async = import "async"',
+            'local timer = import "timer"',
+            'local fs = import "fs"',
+            'local net = import "net"',
+            'local system = import "os"',
+            "local peer = async.run(",
+            "timer.sleep(0)",
+            "fs.write_file(marker,",
+            'net.connect("127.0.0.1", port)',
+            "system.exepath()",
+            '"$LIBUV_PKG_CONFIG" --static --libs libuv',
+            '"$libdir/libuv.a" "$libdir/libuv_a.a"',
+            "TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE",
+            "must name an absolute regular nonlink file",
+            "driver.compile_archive_validation_image(",
+            "build_static_system_provider_image",
+            'if ! defines_uv_version "$static_provider"',
+            'if defines_uv_version "$STATIC_ARCHIVE"',
+            "build_and_run_static_titan system-static",
+            'if ! defines_uv_version "$executable"',
+            'if defines_uv_version "$STATIC_ARCHIVE"',
+        }) do
+            assert.truthy(mode_smoke:find(contract, 1, true), contract)
+        end
+
+        local workflow = read_file(".github/workflows/ci.yml")
+        assert.truthy(workflow:find(
+            'static_archive="${provider%.so}.a"', 1, true), workflow)
+        assert.truthy(workflow:find(
+            "ci_libuv_mode_smoke.sh system", 1, true), workflow)
+        assert.equal(2, select(2, workflow:gsub(
+            'TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE=' ..
+            '"%$GITHUB_WORKSPACE/libuv%-build/libuv[.]a"', "")))
+        assert.truthy(workflow:find(
+            "--name='standalone-prefix source installation installs one " ..
+                "matching Lua and Titan SDK before the standard images'",
+            1, true), workflow)
+        assert.truthy(workflow:find(
+            "--name='standalone-prefix source installation loads direct " ..
+                "libuv calls lazily for Titan and explicitly for Lua'",
+            1, true), workflow)
+        local prepare_job = assert(workflow:match(
+            "\n  prepare%-linux:(.-)\n  test%-linux:"))
+        local heavy_job = assert(workflow:match(
+            "\n  test%-linux:(.-)\n  test%-macos:"))
+        local function count_literal(text, needle)
+            local count = 0
+            local offset = 1
+            while true do
+                local start = text:find(needle, offset, true)
+                if not start then return count end
+                count = count + 1
+                offset = start + #needle
+            end
+        end
+        local function assert_codecov_job(job, upload_name)
+            assert.equal(1, count_literal(job, "contents: read"), job)
+            assert.equal(1, count_literal(job, "id-token: write"), job)
+            assert.equal(1,
+                count_literal(job, "codecov/codecov-action@v7"), job)
+            assert.equal(1,
+                count_literal(job, "fail_ci_if_error: true"), job)
+            assert.equal(1,
+                count_literal(job, "files: ./luacov.report.out"), job)
+            assert.equal(1,
+                count_literal(job, "name: " .. upload_name), job)
+            assert.equal(1, count_literal(job, "use_oidc: true"), job)
+            assert.falsy(job:find("\n%s+token:", 1), job)
+        end
+        assert_codecov_job(prepare_job, "compiler-core")
+        assert_codecov_job(heavy_job, "compiler-heavy")
+        assert.falsy(workflow:find("CODECOV_TOKEN", 1, true), workflow)
     end)
 end)

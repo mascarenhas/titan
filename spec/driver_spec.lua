@@ -55,6 +55,39 @@ describe("compiler installation discovery", function()
             "/lua/prefix/lib/lua/5.5/?.so", "/post-install/tree/"))
         assert.equal("/lua/prefix", driver.resolve_installation_root(
             "/lua/prefix/lib/lua/5.5/?.so", ""))
+        assert.equal(lfs.currentdir() .. "/normalized",
+            driver.resolve_installation_root(
+                nil, "./discarded/../normalized//"))
+    end)
+
+    it("preserves ordinary root spelling but resolves symlink parent traversal",
+       function()
+        local workspace = os.tmpname()
+        assert(os.remove(workspace))
+        assert(lfs.mkdir(workspace))
+        local physical = workspace .. "/physical"
+        local nested = physical .. "/nested"
+        assert(lfs.mkdir(physical))
+        assert(lfs.mkdir(nested))
+        local alias = workspace .. "/alias"
+        local command = table.concat({
+            "ln", "-s",
+            assert(driver.shell_quote(nested)),
+            assert(driver.shell_quote(alias)),
+        }, " ")
+        assert(os.execute(command))
+
+        assert.equal(alias, driver.resolve_installation_root(nil, alias))
+
+        local previous = lfs.currentdir()
+        assert(lfs.chdir(physical))
+        local expected_parent = lfs.currentdir()
+        assert(lfs.chdir(previous))
+        assert.equal(expected_parent,
+            driver.resolve_installation_root(nil, alias .. "/.."))
+
+        assert(os.remove(alias))
+        remove_tree(workspace)
     end)
 
     it("derives all installed compiler paths from one root", function()
@@ -120,6 +153,47 @@ describe("compiler installation discovery", function()
             "-ldl", "-lm",
         }, driver.source_link_inputs("lua-5.5.0/src"))
     end)
+
+    it("rescans selected ELF payload after the Titan runtime", function()
+        assert.same({
+            "-Wl,--start-group",
+            "/providers/one.a", "/providers/two.a",
+            "-Wl,--end-group",
+            "/payload/first.o", "/payload/second.a",
+            "-Wl,--start-group",
+            "/sdk/libtitan.a",
+            "/providers/one.a", "/providers/two.a",
+            "-Wl,--end-group",
+            "/sdk/libbacktrace.a", "/sdk/liblua.a", "-ldl", "-lm",
+        }, driver.standalone_native_link_inputs(
+            { "/providers/one.a", "/providers/two.a" },
+            { "/payload/first.o", "/payload/second.a" },
+            {
+                "/sdk/libtitan.a",
+                "/sdk/libbacktrace.a",
+                "/sdk/liblua.a",
+                "-ldl", "-lm",
+            },
+            false))
+    end)
+
+    it("retains continual Darwin standalone archive order", function()
+        assert.same({
+            "/providers/one.a",
+            "/payload/first.o", "/payload/second.a",
+            "/sdk/libtitan.a", "/sdk/libbacktrace.a",
+            "/sdk/liblua.a", "-lm",
+        }, driver.standalone_native_link_inputs(
+            { "/providers/one.a" },
+            { "/payload/first.o", "/payload/second.a" },
+            {
+                "/sdk/libtitan.a",
+                "/sdk/libbacktrace.a",
+                "/sdk/liblua.a",
+                "-lm",
+            },
+            true))
+    end)
 end)
 
 describe("compiled-container path contracts", function()
@@ -154,7 +228,11 @@ describe("compiled-container path contracts", function()
         for _, case in ipairs(cases) do
             assert.same(case[2], driver.module_binary_candidates(case[1]))
         end
+        assert.same({ "a.a", "a/b.a", "a/b/c.a" },
+            driver.module_compiled_candidates("a.b.c", ".a"))
         assert.same({}, driver.module_binary_candidates("a..b"))
+        assert.same({},
+            driver.module_compiled_candidates("a..b", ".a"))
     end)
 
     it("expands explicit double separators with the runtime default", function()
@@ -203,6 +281,26 @@ describe("compiler module loader", function()
     local source
     local binary
     local previous
+
+    local function cache_static_provider(context, filename, module_types)
+        write_file(filename, "mock static provider\n")
+        local provider = {
+            archive = filename,
+            entries = {},
+            key_order = {},
+        }
+        for name, modtype in pairs(module_types) do
+            provider.entries[name] = {
+                type = modtype,
+                types = types.serialize(modtype),
+                origin = filename .. ":" .. name,
+            }
+            provider.key_order[#provider.key_order + 1] = name
+        end
+        table.sort(provider.key_order, util.bytewise_less)
+        context.provider_cache[filename] = provider
+        return provider
+    end
 
     before_each(function()
         root = os.tmpname()
@@ -311,6 +409,219 @@ describe("compiler module loader", function()
         assert.equal("a/b/c.so", modtype.file)
         assert.equal(first .. "/a/b/c.so",
             driver.imported["a.b.c"].filename)
+    end)
+
+    it("applies the selected format preference globally across path roots",
+       function()
+        local first = root .. "/first"
+        local second = root .. "/second"
+        assert(lfs.mkdir(first))
+        assert(lfs.mkdir(second))
+        local archive = first .. "/choice.a"
+        local dynamic = second .. "/choice.so"
+        write_file(dynamic, "later dynamic provider\n")
+        driver.TITAN_BIN_PATH = first .. ";" .. second
+
+        local static_context =
+            driver.new_resolver_context({ prefer_static = true })
+        cache_static_provider(static_context, archive, {
+            choice = types.Module("choice", {}),
+        })
+        titan._loadlib = function(filename, symbol)
+            assert.equal(dynamic, filename)
+            if symbol == "choice_abi" then
+                return function() return driver.TITAN_VER end
+            elseif symbol == "choice_types" then
+                return function() return "Module('choice',{})" end
+            end
+            error("unexpected metadata symbol " .. symbol)
+        end
+
+        local dynamic_context = driver.new_resolver_context()
+        -- Seed the otherwise independent context too: the existing archive
+        -- must be inspectable if the dynamic format pass fails.
+        dynamic_context.provider_cache[archive] =
+            static_context.provider_cache[archive]
+        local ok, modtype, errors = driver.defaultloader({}, {
+            context = dynamic_context,
+        })("choice")
+        assert.truthy(ok)
+        assert.equal(0, #errors)
+        assert.equal("dynamic", driver.imported.choice.kind)
+        assert.equal("choice.so", modtype.file)
+        assert.equal(dynamic, driver.imported.choice.filename)
+
+        driver.imported = {}
+        ok, modtype, errors = driver.defaultloader({}, {
+            context = static_context,
+        })("choice")
+        assert.truthy(ok)
+        assert.equal(0, #errors)
+        assert.equal("static", driver.imported.choice.kind)
+        assert.equal("choice.so", modtype.file)
+        assert.equal(archive, driver.imported.choice.static_archive)
+    end)
+
+    it("keeps root precedence ahead of archive candidate shallowness",
+       function()
+        local first = root .. "/first-static"
+        local second = root .. "/second-static"
+        assert(lfs.mkdir(first))
+        assert(lfs.mkdir(second))
+        assert(lfs.mkdir(first .. "/a"))
+        assert(lfs.mkdir(first .. "/a/b"))
+        local earlier_exact = first .. "/a/b/c.a"
+        local later_shallow = second .. "/a.a"
+        driver.TITAN_BIN_PATH = first .. ";" .. second
+
+        local context =
+            driver.new_resolver_context({ prefer_static = true })
+        cache_static_provider(context, earlier_exact, {
+            ["a.b.c"] = types.Module("a.b.c", {}),
+        })
+        cache_static_provider(context, later_shallow, {
+            ["a.b.c"] = types.Module("a.b.c", {}),
+        })
+
+        local ok, modtype, errors = driver.defaultloader({}, {
+            context = context,
+        })("a.b.c")
+        assert.truthy(ok)
+        assert.equal(0, #errors)
+        assert.equal("a/b/c.so", modtype.file)
+        assert.equal(earlier_exact,
+            driver.imported["a.b.c"].static_archive)
+        assert.equal("a/b/c.a", driver.imported["a.b.c"].relative)
+    end)
+
+    it("tracks occupied archive candidates independently and continues deeper",
+       function()
+        local first = root .. "/occupied-static"
+        local second = root .. "/later-static"
+        assert(lfs.mkdir(first))
+        assert(lfs.mkdir(second))
+        assert(lfs.mkdir(second .. "/a"))
+        local earlier_nonclaim = first .. "/a.a"
+        local shadowed_claim = second .. "/a.a"
+        local unshadowed_claim = second .. "/a/b.a"
+        driver.TITAN_BIN_PATH = first .. ";" .. second
+
+        local context =
+            driver.new_resolver_context({ prefer_static = true })
+        cache_static_provider(context, earlier_nonclaim, {})
+        cache_static_provider(context, shadowed_claim, {
+            ["a.b"] = types.Module("a.b", {}),
+        })
+        cache_static_provider(context, unshadowed_claim, {
+            ["a.b"] = types.Module("a.b", {}),
+        })
+
+        local ok, modtype, errors = driver.defaultloader({}, {
+            context = context,
+        })("a.b")
+        assert.truthy(ok)
+        assert.equal(0, #errors)
+        assert.equal("a/b.so", modtype.file)
+        assert.equal(unshadowed_claim,
+            driver.imported["a.b"].static_archive)
+        assert.equal("a/b.a", driver.imported["a.b"].relative)
+    end)
+
+    it("does not let an occupied DSO pathname shadow an archive pathname",
+       function()
+        local first = root .. "/dynamic-occupancy"
+        local second = root .. "/static-occupancy"
+        assert(lfs.mkdir(first))
+        assert(lfs.mkdir(second))
+        local dynamic_nonclaim = first .. "/mixed.so"
+        local archive = second .. "/mixed.a"
+        write_file(dynamic_nonclaim, "unrelated dynamic provider\n")
+        driver.TITAN_BIN_PATH = first .. ";" .. second
+
+        local context = driver.new_resolver_context()
+        cache_static_provider(context, archive, {
+            ["mixed.child"] = types.Module("mixed.child", {}),
+        })
+        titan._loadlib = function(filename, symbol)
+            assert.equal(dynamic_nonclaim, filename)
+            return nil, "undefined symbol: " .. symbol, "init"
+        end
+
+        local ok, modtype, errors = driver.defaultloader({}, {
+            context = context,
+        })("mixed.child")
+        assert.truthy(ok)
+        assert.equal(0, #errors)
+        assert.equal("static", driver.imported["mixed.child"].kind)
+        assert.equal(archive,
+            driver.imported["mixed.child"].static_archive)
+        assert.equal("mixed/child.so", modtype.file)
+    end)
+
+    it("treats an exact archive nonclaim as terminal", function()
+        local archive = binary .. "/empty.a"
+        local dynamic = binary .. "/empty.so"
+        write_file(dynamic, "must not be inspected\n")
+        local context =
+            driver.new_resolver_context({ prefer_static = true })
+        cache_static_provider(context, archive, {})
+        titan._loadlib = function()
+            error("an exact static nonclaim must not fall through")
+        end
+
+        local ok, message = driver.defaultloader({}, {
+            context = context,
+        })("empty")
+        assert.falsy(ok)
+        assert.match("exact static provider '" .. archive ..
+            "' contains no metadata for module 'empty'", message, 1, true)
+        assert.is_nil(driver.imported.empty)
+    end)
+
+    it("rejects an occupied nonregular static candidate without opening it",
+       function()
+        local candidate = binary .. "/blocked.a"
+        assert(lfs.mkdir(candidate))
+        driver.TITAN_BIN_PATH = binary
+
+        local ok, message = driver.defaultloader({}, {
+            context =
+                driver.new_resolver_context({ prefer_static = true }),
+        })("blocked")
+        assert.falsy(ok)
+        assert.match("static provider candidate '" .. candidate ..
+            "' for module 'blocked' is not a readable regular file",
+            message, 1, true)
+    end)
+
+    it("selects one archive key without importing carried siblings", function()
+        local archive = binary .. "/bundle.a"
+        local left = types.Module("bundle.left", {})
+        local right = types.Module("bundle.right", {})
+        local context =
+            driver.new_resolver_context({ prefer_static = true })
+        cache_static_provider(context, archive, {
+            ["bundle.left"] = left,
+            ["bundle.right"] = right,
+        })
+
+        local ok, modtype, errors = driver.defaultloader({}, {
+            context = context,
+        })("bundle.left")
+        assert.truthy(ok)
+        assert.equal(0, #errors)
+        assert.equal("static", driver.imported["bundle.left"].kind)
+        assert.is_nil(driver.imported["bundle.right"])
+        assert.equal("bundle/left.so", modtype.file)
+        assert.is_nil(types.serialize(modtype):find(archive, 1, true))
+
+        local finalized, final_errors =
+            driver.finalize_resolver_context(context)
+        assert.truthy(finalized,
+            final_errors and table.concat(final_errors, "\n"))
+        assert.is_nil(driver.imported["bundle.right"])
+        assert.equal("direct",
+            context.native_bindings["bundle.right"])
     end)
 
     it("shadows an occupied relative candidate in later roots", function()

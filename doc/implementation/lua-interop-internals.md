@@ -581,9 +581,10 @@ Lua, so both the private bootstrap and full `titan.so` are link-complete under
 eager load. A second Lua state repeats its own cache insertion and promotion
 request while the operating-system loader may reuse the mapped image.
 
-The installed standard layout has one provider at
-`<root>/lib/titan/0.16/titan.so` and seven generated shims below
-`<root>/share/lua/5.5/titan/`. A direct-libuv extension explicitly imports
+The installed standard layout has paired providers at
+`<root>/lib/titan/0.16/{titan.so,titan.a}` and seven generated shims below
+`<root>/share/lua/5.5/titan/`; the shims use the DSO form. A direct-libuv
+extension explicitly imports
 `uv` and foreign-imports `uv.h`; Titan runtime initialization loads the
 combined provider before lazy function calls bind. A Lua caller loads
 `titan.uv` first through its generated shim. The shim route globalizes the
@@ -598,7 +599,7 @@ the reinitialization branch that re-stitches pointers when the same module code
 is present twice in a process, and its `#loadmods > 1` quirk that can leave that
 branch empty. The complete wiring is in the [code generator
 overview](codegen-overview.md#static-vs-dynamic-dependency-wiring), and the
-provider claim/search rules are in [Multi-module shared
+provider claim/search rules are in [Multi-module
 libraries](multi-module-libraries.md#compiled-module-candidate-search).
 
 ## The error handler and `titan.backtrace()`
@@ -653,7 +654,8 @@ raw Lua traceback lines plus raw `execinfo` C frames.
 
 The retrieval side is the bare `titan` Lua support entry: Make compiles
 `titan-runtime/titanlib.c` into `titanlib.o`, links that object alone into the
-private bootstrap and once into the full standard `titan.so`.
+private bootstrap, and carries it once into each form of the full standard
+`titan.so`/`titan.a` provider pair.
 `titan.backtrace()` rawgets that
 registry key. The same test-support module exposes internal `pin` and `clear`
 helpers; none of these functions is part of `libtitan.a`.
@@ -672,13 +674,16 @@ chapter](../language/error-handling.md).
 When exactly one requested module defines `main(args: {string}):
 integer`, `driver.compile_program` emits a srlua-derived C entrypoint
 (`entrypoint_template` in `driver.lua`) and links it with all source module
-objects and the active runtime SDK. Installed mode uses `libtitan.a`, the
-separate `libbacktrace.a`, and the matching `liblua.a` from the Titan
-SDK/rocks-tree root; checkout mode uses the same archive contract with local
-`libtitan.a`, separate local `libbacktrace.a`, and local `liblua.a`. Generic
-module and program links do not receive libuv; the combined standard
-`titan.so` build alone receives the private bundled archive (or system libuv
-through ordered pkg-config link flags). The bundled archive is not installed in the SDK;
+objects, selected static providers, caller `-X` inputs, and the active runtime
+SDK. Installed mode uses `libtitan.a`, the separate `libbacktrace.a`, and the
+matching `liblua.a` from the Titan SDK/rocks-tree root; checkout mode uses the
+same archive contract with local `libtitan.a`, separate local
+`libbacktrace.a`, and local `liblua.a`. Generic links do not receive libuv
+merely from the SDK, but selecting bundled standard `titan.a` carries its
+private libuv payload into an executable. The combined standard build receives
+that private archive as payload in both `titan.so` and `titan.a`; system mode
+instead repeats ordered pkg-config link flags at final link and never copies
+them into `titan.a`. The private bundled archive is not installed in the SDK;
 bundled-mode extension DSOs leave their `uv_*` calls unresolved:
 
 * **Preload registration, not eager loading.** The C `main` creates a

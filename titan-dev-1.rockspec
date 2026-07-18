@@ -51,8 +51,9 @@ build = {
    type = "make",
    -- This remains a source-only installation flow. The target builds the C
    -- runtime and, because ROCKS_TREE is set here, stages the compiler SDK
-   -- before LuaRocks deploys the compiler modules. The stdlib is deliberately
-   -- deferred to post_install so it is compiled by the deployed titanc.
+   -- before LuaRocks deploys the compiler modules. The paired stdlib provider
+   -- is deliberately deferred to post_install so it is compiled by the
+   -- deployed titanc.
    build_target = "titan",
    install_pass = false,
    build_variables = {
@@ -81,6 +82,7 @@ build = {
       ["titan-compiler.typedecl"] = "titan-compiler/typedecl.lua",
       ["titan-compiler.parser"] = "titan-compiler/parser.lua",
       ["titan-compiler.pretty"] = "titan-compiler/pretty.lua",
+      ["titan-compiler.staticmetadata"] = "titan-compiler/staticmetadata.lua",
       ["titan-compiler.symtab"] = "titan-compiler/symtab.lua",
       ["titan-compiler.syntax_errors"] = "titan-compiler/syntax_errors.lua",
       ["titan-compiler.types"] = "titan-compiler/types.lua",

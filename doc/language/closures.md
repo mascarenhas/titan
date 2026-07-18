@@ -324,6 +324,6 @@ Two restrictions, both clean compile-time errors:
 * a **foreign (C) method** cannot be bound:
   `a foreign (C) method cannot be used as a first[-class value]`.
 
-Bound method references work across modules, including against a
-dependency available only as a compiled `.so`. See
+Bound method references work across modules, including against a dependency
+available only through a compiled `.so` or `.a` provider. See
 [Records](records.md#methods) for method declaration rules.

@@ -4,13 +4,14 @@ A *Titan module* is the unit of compilation, namespacing, and distribution.
 Its source may be one flat `.titan` file or a canonical main plus immediate
 `.titan` contributors in a [folder module](folder-modules.md). Both forms
 compile as one logical module. In library mode, one or more related logical
-modules are linked into a physical provider DSO and receive generated Lua
-loaders; Lua programs use `require` and other Titan modules use `import`
-without exposing that physical grouping. A module that defines a [`main`
-function](functions.md) becomes a standalone executable instead. This chapter
-describes what goes inside a logical module, how modules reference each other,
-and what the compiler produces. See [Multi-module
-libraries](multi-module-libraries.md) for the provider and loader rules.
+modules are linked into a physical provider DSO/archive pair and receive
+generated Lua loaders; Lua programs use `require` and other Titan modules use
+`import` without exposing that physical grouping. A module that defines a
+[`main` function](functions.md) becomes a standalone executable instead. This
+chapter describes what goes inside a logical module, how modules reference
+each other, and what the compiler produces. See
+[Multi-module libraries](multi-module-libraries.md) for the provider and
+loader rules.
 
 ## What a module is made of
 
@@ -344,7 +345,8 @@ The compiler driver is invoked with dot-separated *module names*, not
 file paths:
 
 ```sh
-titanc [--print-ast] [-v] [--lua <luasrc>] [--tree <srcroot>] [-l lib1,lib2] <module>...
+titanc [--print-ast] [-v] [--static] [--lua <luasrc>] \
+  [--tree <srcroot>] [-l lib1,lib2] [-X object...] <module>...
 ```
 
 * `--tree <srcroot>` sets the source tree root (default `.`); module
@@ -357,6 +359,11 @@ titanc [--print-ast] [-v] [--lua <luasrc>] [--tree <srcroot>] [-l lib1,lib2] <mo
   uses its matched `<root>/src/lua-5.5.0` headers, `liblua.a`, and
   `libtitan.a`.
 * `-l/--link` adds extra C libraries to the link line (FFI use).
+* `--static` prefers self-describing Titan `.a` providers over `.so`
+  providers for ordinary dependencies. It still permits DSO/source fallback
+  and does not request a fully static system executable.
+* `-X/--extra-object` adds native object/archive payload. Library mode carries
+  it into both provider forms; executable mode uses it at final link.
 * `-v/--verbose` prints the C compiler command lines; `--print-ast`
   dumps the parsed AST.
 
@@ -370,26 +377,28 @@ unit, written beside its canonical source, and the system C compiler (`cc`,
 with `--std=c99 -O2 -Wall -fPIC`) does the rest. A single-root library build
 uses that root as its physical provider:
 
-| Source form for `foo.bar` | Generated C/object | Lua loader | Shared library | Entrypoint | Executable |
+| Source form for `foo.bar` | Generated C/object | Lua loader | Provider pair | Entrypoint | Executable |
 | --- | --- | --- | --- | --- | --- |
-| flat `foo/bar.titan` | `foo/bar.c`, `foo/bar.o` | `foo/bar.lua` | `foo/bar.so` | `foo/bar__entrypoint.c` | `foo/bar` |
-| folder `foo/bar/bar.titan` | `foo/bar/bar.c`, `foo/bar/bar.o` | `foo/bar.lua` | `foo/bar.so` | `foo/bar__entrypoint.c` | `foo/bar__main` |
+| flat `foo/bar.titan` | `foo/bar.c`, `foo/bar.o` | `foo/bar.lua` | `foo/bar.so`, `foo/bar.a` | `foo/bar__entrypoint.c` | `foo/bar` |
+| folder `foo/bar/bar.titan` | `foo/bar/bar.c`, `foo/bar/bar.o` | `foo/bar.lua` | `foo/bar.so`, `foo/bar.a` | `foo/bar__entrypoint.c` | `foo/bar__main` |
 
-The Lua-loader and shared-library columns apply in library mode; the
+The Lua-loader and provider columns apply in library mode; the
 entrypoint and executable columns apply in `main` program mode.
 
-With several no-`main` roots, Titan links one library at their longest common
+With several no-`main` roots, Titan publishes one paired provider at their longest common
 dotted-component prefix. For example, `titanc foo.left foo.right` produces
-`foo.so`, plus `foo/left.lua` and `foo/right.lua`; it does not produce child
-DSOs. Roots without a common component are rejected. Every source dependency
+`foo.so` and `foo.a`, plus `foo/left.lua` and `foo/right.lua`; it does not
+produce child providers. Roots without a common component are rejected. Every source dependency
 linked into the provider also receives one logical Lua loader. The complete
 grouping, lookup, ownership, and reserved-name rules are in
-[Multi-module libraries](multi-module-libraries.md).
+[Multi-module libraries](multi-module-libraries.md); archive precedence,
+metadata, linking, and `--static` are in [Static compiled
+modules](static-compiled-modules.md).
 
-The shared library, generated Lua loaders, executable, and entrypoint paths are
+The provider pair, generated Lua loaders, executable, and entrypoint paths are
 relative to the directory `titanc` runs in. Generated C and objects are beside
 the flat source or folder main, even when `--tree` points elsewhere. A folder
-contributor never produces a separate C file, object, loader, DSO, or
+contributor never produces a separate C file, object, loader, DSO, archive, or
 executable. The folder program's `__main` suffix avoids colliding with its
 source directory; the logical module name and entrypoint path remain
 unchanged.
@@ -401,8 +410,8 @@ directly from the repository lazily rebuilds and links
 directly. Vendored `libbacktrace.a` and the matching `liblua.a` remain separate
 link inputs. The native Lua support entry is compiled from `titanlib.c`: a
 private support-only bootstrap enables installation, while the canonical
-installed `titan.so` links that entry together with the standard logical
-modules.
+installed provider pair carries that entry together with the standard logical
+modules. Generated Lua loaders use its DSO form.
 
 *Implementation note:* the driver and the exact compiler invocations
 are described in [the driver documentation](../implementation/driver.md);
@@ -420,22 +429,25 @@ the structure of the generated C is in
   [Folder modules](folder-modules.md#lookup-and-precedence) for the complete
   precedence and privacy rules. Generated
   `.c`/`.o` files are always written next to the source; the linked
-  `.so` lands relative to the compiler's working directory, as
-  described above.
+  `.so`/`.a` provider pair lands relative to the compiler's working
+  directory, as described above.
 * **Compiled modules** are looked up along the *binary search path*: a
   semicolon-separated list of plain directories taken from
   `TITAN_PATH_0_16`, or `TITAN_PATH` if that is unset. Otherwise the default
   is `.;<root>/lib/titan/0.16`. An installed `titanc` recovers `<root>` from
   the first literal `package.cpath` entry ending in
-  `/lib/lua/5.5/?.so`. For logical `a.b.c`, each root is probed at `a.so`,
-  `a/b.so`, then exact `a/b/c.so`; the first candidate whose ABI/type metadata
-  validates `a.b.c` wins. A file in an earlier root shadows the same relative
-  candidate in later roots, while an unrelated ancestor container can advance
-  to a deeper candidate. The same path is used at run time by compiled modules
-  that load dependencies dynamically; a `;;` in an environment override
-  inserts the default path. See [Finding a compiled module in a
+  `/lib/lua/5.5/?.so`. For logical `a.b.c`, the default performs a complete
+  pass over `a.so`, `a/b.so`, and exact `a/b/c.so`, then a complete pass over
+  the corresponding `.a` paths; `--static` swaps those passes. A file in an
+  earlier root shadows the same relative candidate in later roots within its
+  format, while an unrelated ancestor container can advance to a deeper
+  candidate. The same path is used at run time by dependencies selected from
+  DSOs; a `;;` in an environment override inserts the default path. See
+  [Finding a compiled module in a
   provider](multi-module-libraries.md#finding-a-compiled-module-in-a-provider)
-  for the complete claim and error rules.
+  for DSO claims and [Static compiled
+  modules](static-compiled-modules.md#dependency-search) for archive
+  precedence and metadata.
 
 Here `<root>` is the Titan SDK/rocks-tree root. `PREFIX` owns Lua and LuaRocks,
 while `ROCKS_TREE` owns the Titan SDK and standard modules. The supported
@@ -463,21 +475,23 @@ Lua's `require`, for its part, finds a generated logical loader through
 module](lua-interop.md#requiring-a-titan-module)). Titan's installed Lua
 default includes `<root>/lib/titan/0.16/?.so` and the standard loader root.
 A qualified standard name such as `titan.os` therefore runs
-`<root>/share/lua/5.5/titan/os.lua`, which opens the one canonical provider
-`<root>/lib/titan/0.16/titan.so`. Titan imports select that same physical file
-by validating the `titan.os` metadata within it. Installation creates no child
+`<root>/share/lua/5.5/titan/os.lua`, which opens the canonical DSO
+`<root>/lib/titan/0.16/titan.so`. Default Titan imports select that same
+physical file by validating the `titan.os` callable metadata; `--static`
+prefers the paired self-describing `titan.a`. Installation creates no child
 DSOs, parent-level or `lib/lua` copies, symbolic links, or hard links.
 
 ## Static and dynamic linking
 
-Module dependencies are resolved *binary first*:
+Module dependencies are resolved *compiled first*:
 
-* If an imported module is found in a compiled provider on the binary path, the
-  compiler recovers the module's
-  interface from type information embedded in the library, and the
-  generated code **dlopens** the dependency at run time, finding it on
-  the binary search path. The binary wins even when source with the same module
-  name is visible under `--tree`.
+* If an imported module is found in a shared provider, the compiler recovers
+  its callable type metadata and generated code **dlopens** that selected
+  provider at run time.
+* If it is found in a self-describing static provider, the compiler recovers
+  the equivalent metadata from the archive and links that archive into the
+  result; cross-module calls are direct C calls. The default prefers the DSO
+  pass, while `--static` prefers the archive pass.
 * If there is no binary, but a flat or folder source representation is found,
   it is compiled and **statically linked** into the artifact being built.
   Cross-module calls are then direct C calls.
@@ -485,7 +499,12 @@ Module dependencies are resolved *binary first*:
   its source is selected before any same-named binary. This is why
   `titanc titan.uv` rebuilds the `titan/uv/uv.titan` folder module while that
   module's own imports
-  still resolve binary first.
+  still resolve through the selected compiled-format order first.
+
+`--static` is a preference rather than a static-only mode: a missing archive
+can fall back to a DSO and then source, and the system linker is not passed
+`-static`. See [Static compiled modules](static-compiled-modules.md) for the
+full composition and transitive-owner rules.
 
 This ordinary ordering is enough to keep the installed standard-library
 provider from being displaced accidentally by source files in `./titan`.
@@ -546,10 +565,10 @@ module `foo.bar` produces `foo/bar`; a folder module produces the collision-free
 signature is exact: neither an input-variadic parameter nor a flexible result
 tail is allowed (the fixed parameter and return types may be spelled through
 transparent aliases). All
-requested modules and dependencies selected from source are statically bundled
-into the binary.
-Qualified standard-library dependencies are normally found in the installed
-provider first and therefore remain dynamic, just like other compiled modules.
+requested modules and dependencies selected from source or static providers
+are linked directly into the binary. Dependencies selected from DSOs remain
+dynamic. Qualified standard-library dependencies therefore use the installed
+`titan.so` by default, while `--static` prefers `titan.a`.
 After `luaL_openlibs`, the executable parses the
 inherited `package.cpath` for its `/lib/lua/5.5/?.so` entry, adds
 `<root>/lib/titan/0.16/?.so` if it is absent, and initializes the Titan module
@@ -594,8 +613,10 @@ with `<module>: multiple main functions found (already declared in
 
 Compiled Titan modules and executables run against an unmodified Lua loader —
 no `loadlib.c` patch and no custom build flags beyond compiling the Lua
-sources with `-fPIC`. Each physical provider and executable links the matched
-`liblua.a`; several logical modules in one provider share that native image.
+sources with `-fPIC`. Each DSO and executable links the matched `liblua.a`;
+a produced static provider deliberately omits that common final input, so its
+consumer supplies the matching Lua archive once. Several logical modules in
+one final native image share that Lua instance.
 This is why the compiler needs a built Lua source tree and not just an
 installed interpreter. This was a deliberate packaging decision (pull request
 #231), together with the removal of semantic

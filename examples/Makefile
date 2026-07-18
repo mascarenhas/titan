@@ -18,17 +18,17 @@ TITANC := ./titanc
 
 all: utils artisanal sdl_quit sdl_demo
 
-# Pure Titan, no dependencies -> utils.so
+# Pure Titan, no dependencies -> utils.so and utils.a
 utils:
 	cd .. && $(TITANC) examples.utils
 
-# Imports examples.utils -> artisanal.so
+# Imports examples.utils -> artisanal.so and artisanal.a
 artisanal: utils
 	cd .. && $(TITANC) examples.artisanal
 
-# foreign import "SDL2/SDL.h" (needs SDL2 headers) -> sdl_quit.so. Links SDL2 so
-# the .so is self-contained (the driver dlopens it to read its interface when
-# another module imports it).
+# foreign import "SDL2/SDL.h" (needs SDL2 headers) -> sdl_quit.so and
+# sdl_quit.a. Links SDL2 so the DSO is self-contained (the driver dlopens it to
+# read its interface when another module imports it).
 sdl_quit:
 	cd .. && $(TITANC) examples.sdl_quit -l SDL2
 
@@ -38,4 +38,4 @@ sdl_demo: sdl_quit
 	cd .. && $(TITANC) examples.sdl_demo -l SDL2
 
 clean:
-	rm -f *.c *.o *.so sdl_demo
+	rm -f *.c *.o *.so utils.a artisanal.a sdl_quit.a sdl_demo

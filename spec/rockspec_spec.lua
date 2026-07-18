@@ -81,6 +81,7 @@ local LUAROCKS = PREFIX .. "/bin/luarocks"
 local TITANC = PREFIX .. "/bin/titanc"
 local TITAN_LIBDIR = PREFIX .. "/lib/titan/0.16"
 local STDLIB_PROVIDER = TITAN_LIBDIR .. "/titan.so"
+local STDLIB_STATIC_ARCHIVE = TITAN_LIBDIR .. "/titan.a"
 local LUA_LIBDIR = PREFIX .. "/lib/lua/5.5"
 local LUA_SHAREDIR = PREFIX .. "/share/lua/5.5"
 local STDLIB_SHIMDIR = LUA_SHAREDIR .. "/titan"
@@ -203,6 +204,9 @@ describe("standalone-prefix source installation", function()
         assert_file(LUAROCKS)
         assert_file(TITANC)
         assert_unique_regular_file(STDLIB_PROVIDER)
+        assert_unique_regular_file(STDLIB_STATIC_ARCHIVE)
+        assert_file(PREFIX ..
+            "/share/lua/5.5/titan-compiler/staticmetadata.lua")
         assert_absent(LUA_LIBDIR .. "/titan.so")
         assert_absent(LUA_SHAREDIR .. "/titan.lua")
         local host_ok, host_output = run({ "uname", "-s" })
@@ -294,7 +298,10 @@ describe("standalone-prefix source installation", function()
         local manifest = read_file(PREFIX ..
             "/lib/luarocks/rocks-5.5/titan/dev-1/rock_manifest")
         assert.falsy(manifest:find("titan.so", 1, true), manifest)
+        assert.falsy(manifest:find('["titan.a"]', 1, true), manifest)
         assert.falsy(manifest:find("stdlib_installer.lua", 1, true), manifest)
+        assert.truthy(manifest:find(
+            '["staticmetadata.lua"]', 1, true), manifest)
         for _, module in ipairs(STDLIB_MODULES) do
             assert.falsy(manifest:find(module .. ".so", 1, true), manifest)
             assert.falsy(manifest:find(
@@ -307,6 +314,7 @@ describe("standalone-prefix source installation", function()
         workspace = temporary_directory("stdlib-layout-migration")
 
         local canonical = workspace .. "/lib/titan/0.16/titan.so"
+        local canonical_archive = workspace .. "/lib/titan/0.16/titan.a"
         local preserved = workspace .. "/lib/titan/0.15/titan/uv.so"
 
         local function seed_layout()
@@ -343,8 +351,15 @@ describe("standalone-prefix source installation", function()
 
         local function assert_migrated()
             assert_unique_regular_file(canonical)
+            assert_unique_regular_file(canonical_archive)
             local same, comparison, comparison_why, comparison_code = run({
                 "cmp", "-s", "titan.so", canonical,
+            })
+            assert.truthy(same, comparison .. "\n(" ..
+                tostring(comparison_why) .. ", " ..
+                tostring(comparison_code) .. ")")
+            same, comparison, comparison_why, comparison_code = run({
+                "cmp", "-s", "titan.a", canonical_archive,
             })
             assert.truthy(same, comparison .. "\n(" ..
                 tostring(comparison_why) .. ", " ..
@@ -369,6 +384,7 @@ describe("standalone-prefix source installation", function()
         seed_layout()
         assert.equal("file", lfs.attributes(canonical, "mode"),
             "canonical before installation")
+        assert_absent(canonical_archive)
         local install = {
             "make", "--no-print-directory", "-s",
             "PREFIX=" .. PREFIX,
@@ -381,11 +397,14 @@ describe("standalone-prefix source installation", function()
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
         assert_file("titan.so")
+        assert_file("titan.a")
         for _, module in ipairs(STDLIB_MODULES) do
             assert_generated_shim("titan/" .. module .. ".lua", module)
         end
         assert.equal("file", lfs.attributes(canonical, "mode"),
             "canonical after installation")
+        assert.equal("file", lfs.attributes(canonical_archive, "mode"),
+            "canonical archive after installation")
         assert_migrated()
 
         -- A repeated source installation republishes the same complete set;
@@ -395,6 +414,8 @@ describe("standalone-prefix source installation", function()
             tostring(code) .. ")")
         assert.equal("file", lfs.attributes(canonical, "mode"),
             "canonical after repeated installation")
+        assert.equal("file", lfs.attributes(canonical_archive, "mode"),
+            "canonical archive after repeated installation")
         assert_migrated()
     end)
 
@@ -402,8 +423,10 @@ describe("standalone-prefix source installation", function()
     function()
         assert_file("titan-runtime/bootstrap/titan.so")
         assert_file(STDLIB_PROVIDER)
+        assert_file(STDLIB_STATIC_ARCHIVE)
         workspace = temporary_directory("stdlib-bootstrap")
         local canonical = workspace .. "/lib/titan/0.16/titan.so"
+        local canonical_archive = workspace .. "/lib/titan/0.16/titan.a"
         local stage = {
             "make", "--no-print-directory", "-s",
             "PREFIX=" .. PREFIX,
@@ -418,16 +441,20 @@ describe("standalone-prefix source installation", function()
             tostring(code) .. ")")
         assert.equal(read_file("titan-runtime/bootstrap/titan.so"),
             read_file(canonical))
+        assert_absent(canonical_archive)
 
         -- Simulate the state after post_install. Re-running the source rock's
-        -- build target must recognize this support-capable full image and
-        -- leave all logical module entries in place.
+        -- build target must recognize this support-capable full pair and leave
+        -- all logical module entries in place.
         write_file(canonical, read_file(STDLIB_PROVIDER))
+        write_file(canonical_archive, read_file(STDLIB_STATIC_ARCHIVE))
         local full = read_file(canonical)
+        local full_archive = read_file(canonical_archive)
         ok, output, why, code = run(stage)
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
         assert.equal(full, read_file(canonical))
+        assert.equal(full_archive, read_file(canonical_archive))
 
         local probe = string.format([[
 local support = assert(package.loadlib(%q, "luaopen_titan"))()

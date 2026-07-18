@@ -1,7 +1,8 @@
 # Libuv continuation runtime
 
 The asynchronous standard library has one low-level logical owner inside one
-physical standard provider:
+paired physical provider. The diagram shows the runtime DSO; the installed
+`titan.a` carries the same logical objects:
 
 ```text
 titan.so
@@ -17,14 +18,16 @@ titan.so
 All seven logical standard modules are explicit source roots in one compiler
 invocation. Their imports are source/static, so each keeps an independent
 module state and ABI/types/init/Lua protocol while inter-module calls become
-direct `extern` calls inside `titan.so`. The link selects `titan_uv.o` from
-`libtitan.a`, includes `titanlib.o` once, and supplies the selected libuv once.
-Bundled mode force-loads the private archive into this image so it is the
-complete provider; the archive is not installed in the SDK. System mode puts
-the pkg-config-selected shared dependency on the same `titan.so`.
+direct `extern` calls in both provider forms. The build selects `titan_uv.o`
+from `libtitan.a`, includes `titanlib.o` once, and supplies the selected libuv
+policy once. Bundled mode carries the private archive's objects into both
+`titan.so` and `titan.a`; the libuv archive itself is not installed in the
+SDK. System mode keeps the pkg-config-selected dependency as a final-link
+setting and does not copy it into `titan.a`.
 
-Installation publishes the one image at `<root>/lib/titan/0.16/titan.so` and
-seven generated shims below `<root>/share/lua/5.5/titan/`. Titan prefix lookup
+Installation publishes `<root>/lib/titan/0.16/titan.so` and
+`<root>/lib/titan/0.16/titan.a`, plus seven generated shims below
+`<root>/share/lua/5.5/titan/`. Titan prefix lookup
 claims `titan.uv` through the image's `titan_uv_abi`/`titan_uv_types`; Lua
 `require "titan.uv"` reaches `titan/uv.lua`, which selects provider `titan`,
 requires its support entry, promotes/maps it through `_loadlibglobal`, and
@@ -43,6 +46,10 @@ Lua-first route can satisfy eager relocations and constructors, whereas
 initializer ordering supports only lazy function calls. Neither path has
 libuv-specific metadata or a special runtime loader. Linking the bundled
 archive into a second DSO would create another native instance.
+
+The archive metadata, `--static` selection, paired validation, and
+bundled/system payload distinction are specified in [Static compiled
+modules](static-compiled-modules.md).
 
 Runtime/Task/resource state remains in registry/GC-owned objects. These
 post-install files are outside the source rock's manifest. Bundled and system
@@ -70,9 +77,10 @@ record types shared across subsystems are referenced directly from whichever
 semantic contributor owns them. Contributor bodies and callbacks cross file
 boundaries because top-level `local` remains module-private, not file-private.
 The production all-roots invocation emits `titan/uv/uv.c` and
-`titan/uv/uv.o`, then links that object into `titan.so` and emits exactly one
-logical `titan/uv.lua` shim; no source basename enters a symbol, registry key,
-or artifact name.
+`titan/uv/uv.o`, then links and archives that object into the paired
+`titan.so`/`titan.a` provider and emits exactly one logical `titan/uv.lua`
+shim; no source basename enters a symbol, registry key, metadata key, or
+artifact name.
 
 The exported declarations established the deterministic ABI 0.15
 interface when the folder split was introduced. The follow-up relocates the
@@ -87,9 +95,10 @@ native entries stay unchanged.
 The Makefile's explicit `UV_TITAN_SOURCES` list names all seven files inside
 the reviewed `STDLIB_TITAN_SOURCES` prerequisite set. It intentionally does
 not use a wildcard: adding a production contributor must update the reviewed
-build graph. Bundled and system modes both rebuild the complete `titan.so`,
-and `make clean` removes nested generated C/object and the known generated
-logical shim without touching sources.
+build graph. Bundled and system modes both rebuild the complete
+`titan.so`/`titan.a` pair, and `make clean` removes nested generated C/object,
+both provider forms, and the known generated logical shim without touching
+sources.
 
 ## GC-owned native storage
 
@@ -472,14 +481,15 @@ sticky EOF and stream terminal tails, replaceable wait/read cancellation,
 deadlock-free `communicate`, TERM-resistant shutdown, FIFO/close state
 machines, path operations, failed-spawn and exit-before-close ordering,
 observed helper failure, trace propagation, GC, sequential sessions,
-standalone bootstrap, the canonical installed `titan.so` and generated shims,
-recoverable source-rock publication, and bundled/system libuv topology. Linux
+standalone bootstrap, the canonical installed `titan.so`/`titan.a` pair and
+generated shims, recoverable source-rock publication, and bundled/system libuv
+topology. Linux
 CI also rebuilds Lua, libbacktrace, libuv,
 the Titan runtime, and standard modules under ASan/UBSan, then runs
 representative timer/FS and core owner/callback suites plus production net/OS
 smokes. Regular Linux runs the complete production behavior suites. CI
-snapshots and restores the combined image, conditional dSYM, and generated
-shims around compiler groups and mode changes. The sole isolated source
+snapshots and restores the combined provider pair, conditional dSYM, and
+generated shims around compiler groups and mode changes. The sole isolated source
 variant copies the complete `titan/uv/` ensemble, builds exact
 coroutine/uv/async/timer providers under a private root with no shallow
 `titan.so`, patches the owning files through unique per-file anchors, and

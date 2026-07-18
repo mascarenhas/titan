@@ -404,8 +404,8 @@ end
 ```
 
 The receiver is captured by reference, so a bound method that mutates the
-record is visible through it. Bound references work across modules,
-including a dependency available only as a compiled `.so`. The full rules,
+record is visible through it. Bound references work across modules, including
+dependencies recovered from compiled `.so` or `.a` providers. The full rules,
 errors and examples are in
 [anonymous functions and closures](closures.md#bound-method-references).
 

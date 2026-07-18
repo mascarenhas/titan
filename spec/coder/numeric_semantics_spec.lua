@@ -11,6 +11,7 @@
 -- Runs from the repo root (driver/artifact paths are relative to CWD). Flip
 -- `h.verbose` in spec/support/helpers.lua to keep the generated `.c`.
 local checker = require 'titan-compiler.checker'
+local driver = require 'titan-compiler.driver'
 local h = require 'spec.support.helpers'
 
 local run_coder = h.run_coder
@@ -148,7 +149,7 @@ describe("numeric operator semantics (Lua 5.5 parity)", function()
         local ast = parse(code)
         local _, errs = checker.check("test", ast, code, "test.titan")
         assert.equal(0, #errs, table.concat(errs, "\n"))
-        local c = coder.generate("test", ast, {})
+        local c = coder.generate("test", ast, {}, driver.TITAN_VER)
         assert.truthy(c:find("LUA_MININTEGER", 1, true),
             "expected LUA_MININTEGER in the generated C")
         assert.falsy(c:find("9223372036854775808", 1, true),

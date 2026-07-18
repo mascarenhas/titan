@@ -13,10 +13,11 @@ does and does not work in each direction.
 
 ## Requiring a Titan module
 
-Compiling a library produces a physical provider DSO plus one generated Lua
-loader per linked logical module. A stock Lua interpreter loads the logical
-module with `require`; the generated loader finds the provider, loads it
-globally, and invokes that module's exact `luaopen_*` entry (see
+Compiling a library produces paired physical DSO/archive providers plus one
+generated Lua loader per physical logical module. A stock Lua interpreter
+uses the DSO form: `require` runs the generated loader, which finds the
+provider, loads it globally, and invokes that module's exact `luaopen_*` entry
+(see
 [Multi-module libraries](multi-module-libraries.md)). `require` returns a
 **userdata** — the module
 value — whose members you access exactly like table fields (`m.f`, `m.v`,
@@ -47,7 +48,7 @@ end
 ```
 
 ```sh
-./titanc counter          # produces counter.so and counter.lua
+./titanc counter          # produces counter.so, counter.a, and counter.lua
 ```
 
 ```lua
@@ -63,7 +64,7 @@ The module value's metatable is protected: `getmetatable` on it returns
 the string `"Titan module counter"`, and `setmetatable` on it fails.
 
 One provider may export several logical Lua entries. For example,
-`titanc pkg.left pkg.right` produces `pkg.so`, `pkg/left.lua`, and
+`titanc pkg.left pkg.right` produces `pkg.so`, `pkg.a`, `pkg/left.lua`, and
 `pkg/right.lua`. `require "pkg.left"` and `require "pkg.right"` map the same
 DSO but call `luaopen_pkg_left` and `luaopen_pkg_right`, respectively. They
 return distinct logical module values, initialize independently, and retain
@@ -94,11 +95,11 @@ assert(require "os" == lua_os)
 The same rule applies to `titan.coroutine`, `titan.async`, `titan.timer`,
 `titan.fs`, `titan.net`, and `titan.os`. The private `titan.uv` plumbing module
 uses the same canonical identity. In an installed Titan 0.16 tree, generated
-loaders under `<root>/share/lua/5.5/titan/` all open the one physical provider
+loaders under `<root>/share/lua/5.5/titan/` all open the DSO form
 `<root>/lib/titan/0.16/titan.so` and invoke their own exact Lua entries. Titan
-imports validate the same logical-module metadata inside that provider. The
-installation does not create child DSOs, parent-level or `lib/lua` copies,
-symbolic links, or hard links.
+imports may instead select the paired self-describing `titan.a`; both forms
+expose the same logical-module ABI/types. The installation does not create
+child DSOs, parent-level or `lib/lua` copies, symbolic links, or hard links.
 
 ## How values map between the two languages
 

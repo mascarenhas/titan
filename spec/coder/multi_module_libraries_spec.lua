@@ -1,11 +1,15 @@
 local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
+local driver = require "titan-compiler.driver"
 local lfs = require "lfs"
+local staticmetadata = require "titan-compiler.staticmetadata"
 
 local REPO = lfs.currentdir()
 local PREFIX = require("spec.support.installed_prefix").active()
 local LUA = PREFIX .. "/bin/lua"
 local LUA_INCLUDE = PREFIX .. "/include"
+local USE_CHECKOUT_COMPILER =
+    os.getenv("TITAN_TEST_USE_CHECKOUT_COMPILER") == "1"
 
 local function exists(path)
     return lfs.attributes(path, "mode") ~= nil
@@ -51,6 +55,37 @@ local function read_file(path)
     return contents
 end
 
+local function single_dsym_relocation_map(dsym)
+    local root = dsym .. "/Contents/Resources/Relocations"
+    local maps = {}
+    for architecture in lfs.dir(root) do
+        if architecture ~= "." and architecture ~= ".." then
+            local architecture_root = root .. "/" .. architecture
+            if lfs.attributes(architecture_root, "mode") == "directory" then
+                for filename in lfs.dir(architecture_root) do
+                    if filename:match("[.]yml$") then
+                        maps[#maps + 1] =
+                            architecture_root .. "/" .. filename
+                    end
+                end
+            end
+        end
+    end
+    table.sort(maps)
+    assert.equal(1, #maps)
+    return read_file(maps[1])
+end
+
+local function final_archive_command_uses(output, argument)
+    for line in output:gmatch("[^\r\n]+") do
+        if line:find("'" .. argument .. "'", 1, true) and
+           line:find("/output.a'", 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
 local function remove_tree(path)
     local mode = lfs.symlinkattributes(path, "mode")
     if mode == "directory" then
@@ -78,7 +113,11 @@ local function compiler_argv(workspace, source_root, ...)
         table.insert(argv, "PATH=" .. PREFIX .. "/bin:/usr/bin:/bin")
     end
 
-    local installed = PREFIX and exists(PREFIX .. "/bin/titanc")
+    -- The opt-in is only for testing an in-progress checkout before the
+    -- prefix's next `luarocks make`; normal `luarocks test` continues to prove
+    -- the installed compiler snapshot.
+    local installed = not USE_CHECKOUT_COMPILER and
+        PREFIX and exists(PREFIX .. "/bin/titanc")
     if installed then
         table.insert(argv, PREFIX .. "/bin/titanc")
     else
@@ -104,6 +143,29 @@ local function compile(workspace, source_root, ...)
     return run(compiler_argv(workspace, source_root, ...), workspace)
 end
 
+local function compile_with_environment(
+        workspace, source_root, environment, ...)
+    local argv = compiler_argv(workspace, source_root, ...)
+    local command_index
+    local installed_titanc = PREFIX and (PREFIX .. "/bin/titanc")
+    for index, argument in ipairs(argv) do
+        if argument == installed_titanc or argument == LUA then
+            command_index = index
+            break
+        end
+    end
+    assert.truthy(command_index, "cannot locate compiler command")
+
+    local names = {}
+    for name in pairs(environment) do names[#names + 1] = name end
+    table.sort(names)
+    for offset, name in ipairs(names) do
+        table.insert(argv, command_index + offset - 1,
+            name .. "=" .. environment[name])
+    end
+    return run(argv, workspace)
+end
+
 local function run_lua(workspace, code)
     return run({
         "env",
@@ -126,6 +188,151 @@ local function count_plain(text, needle)
         count = count + 1
         start = at + #needle
     end
+end
+
+local function copy_file(source, destination)
+    write_file(destination, read_file(source))
+end
+
+local function configured_words(command)
+    return assert(cdriver.split_shell_words(command))
+end
+
+local function compile_c_object(workspace, stem, body)
+    local source = workspace .. "/" .. stem .. ".c"
+    local object = workspace .. "/" .. stem .. ".o"
+    write_file(source, body)
+    local argv = { "env", "CCACHE_DISABLE=1" }
+    for _, word in ipairs(configured_words(driver.CC)) do
+        argv[#argv + 1] = word
+    end
+    for _, word in ipairs({
+        "-std=c99", "-fPIC", "-c", source, "-o", object,
+    }) do
+        argv[#argv + 1] = word
+    end
+    local ok, output = run(argv, workspace)
+    assert.truthy(ok, output)
+    return object
+end
+
+local function make_archive(workspace, name, objects)
+    local archive = workspace .. "/" .. name
+    local argv = configured_words(driver.AR)
+    argv[#argv + 1] = "rcs"
+    argv[#argv + 1] = archive
+    for _, object in ipairs(objects) do argv[#argv + 1] = object end
+    local ok, output = run(argv, workspace)
+    assert.truthy(ok, output)
+    return archive
+end
+
+local function archive_field(value, width)
+    local text = tostring(value)
+    assert.is_true(#text <= width)
+    return text .. string.rep(" ", width - #text)
+end
+
+local function regular_archive_bytes(members)
+    local records = { "!<arch>\n" }
+    for _, member in ipairs(members) do
+        local data = member.data
+        records[#records + 1] =
+            archive_field(member.name, 16) ..
+            archive_field(0, 12) ..
+            archive_field(0, 6) ..
+            archive_field(0, 6) ..
+            archive_field(100644, 8) ..
+            archive_field(#data, 10) ..
+            "`\n" ..
+            data ..
+            (#data % 2 == 1 and "\n" or "")
+    end
+    return table.concat(records)
+end
+
+local function normalize_regular_archive_header_noise(bytes)
+    assert.equal("!<arch>\n", bytes:sub(1, 8))
+    local records = { "!<arch>\n" }
+    local position = 9
+    while position <= #bytes do
+        local header = bytes:sub(position, position + 59)
+        assert.equal(60, #header)
+        assert.equal("`\n", header:sub(59, 60))
+        local size = assert(tonumber(
+            assert(header:sub(49, 58):match("^ *(%d+) *$"))))
+        local record_size = 60 + size + (size % 2)
+        local record_end = position + record_size - 1
+        assert.is_true(record_end <= #bytes)
+        records[#records + 1] =
+            header:sub(1, 16) .. string.rep(" ", 32) ..
+            header:sub(49, 60)
+        records[#records + 1] =
+            bytes:sub(position + 60, record_end)
+        position = record_end + 1
+    end
+    assert.equal(#bytes + 1, position)
+    return table.concat(records)
+end
+
+local function native_symbols(workspace, filename)
+    local ok, output = run({ "nm", "-g", filename }, workspace)
+    assert.truthy(ok, output)
+    return output
+end
+
+local function run_program(workspace, relative)
+    return run({ workspace .. "/" .. relative }, workspace)
+end
+
+local function metadata_options()
+    return {
+        expected_abi = driver.TITAN_VER,
+        validate_types = function(name, serialized, origin)
+            return driver.decode_module_interface(serialized, name, origin)
+        end,
+    }
+end
+
+local function assert_provider_pair(workspace, provider, module_names,
+                                    validate_archive_protocols)
+    local dso = workspace .. "/" .. provider .. ".so"
+    local archive_path = workspace .. "/" .. provider .. ".a"
+    assert.equal("file", lfs.attributes(dso, "mode"))
+    assert.equal("file", lfs.attributes(archive_path, "mode"))
+
+    local archive, archive_err =
+        staticmetadata.scan_archive(archive_path, metadata_options())
+    assert.truthy(archive, archive_err)
+    local callable, callable_err =
+        driver.library_interface_entries(dso, module_names)
+    assert.truthy(callable, callable_err)
+    local equal, equality_err = driver.compare_archive_entries(
+        archive.entries, callable, "published provider pair")
+    assert.truthy(equal, equality_err)
+    assert.truthy(driver.validate_library_image(dso, module_names))
+
+    if validate_archive_protocols then
+        local image = workspace .. "/archive-protocol-validation.so"
+        local linked, link_term, link_code =
+            driver.compile_archive_validation_image(
+                image, archive_path, nil, false)
+        assert.truthy(linked, table.concat({
+            tostring(link_term), tostring(link_code),
+        }, ", "))
+        local valid, validation_err =
+            driver.validate_library_image(image, module_names)
+        assert.truthy(valid, validation_err)
+        local archive_equal, archive_equality_err =
+            driver.validate_archive_library_equality(
+                archive, image, module_names)
+        assert.truthy(archive_equal, archive_equality_err)
+        os.remove(image)
+        if lfs.attributes(image .. ".dSYM", "mode") then
+            remove_tree(image .. ".dSYM")
+        end
+    end
+    return archive
 end
 
 describe("multiple logical modules through one public shared library", function()
@@ -174,7 +381,8 @@ end
 ]])
 
         local ok, output, why, code = compile(
-            workspace, source_root, "-v", "pkg.left", "pkg.right")
+            workspace, source_root, "-v",
+            "pkg.left", "pkg.right", "pkg.shared")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
         verbose_output = output
@@ -184,9 +392,14 @@ end
         if workspace then remove_tree(workspace) end
     end)
 
-    it("links one deterministic provider and emits one shim per logical source module",
+    it("publishes one paired provider and emits one shim per logical source module",
        function()
-        assert.equal("file", lfs.attributes(workspace .. "/pkg.so", "mode"))
+        local archive = assert_provider_pair(workspace, "pkg", {
+            "pkg.left", "pkg.right", "pkg.shared",
+        }, true)
+        assert.same({
+            "pkg.left", "pkg.right", "pkg.shared",
+        }, archive.key_order)
         for _, name in ipairs({ "left", "right", "shared" }) do
             assert.equal("file", lfs.attributes(
                 source_root .. "/pkg/" .. name .. ".c", "mode"))
@@ -212,20 +425,409 @@ end
                 table.insert(link_lines, line)
             end
         end
-        assert.equal(1, #link_lines, verbose_output)
-        local left_at = assert(link_lines[1]:find(
-            "/pkg/left.o'", 1, true), link_lines[1])
-        local right_at = assert(link_lines[1]:find(
-            "/pkg/right.o'", 1, true), link_lines[1])
-        local shared_at = assert(link_lines[1]:find(
-            "/pkg/shared.o'", 1, true), link_lines[1])
+        assert.equal(2, #link_lines, verbose_output)
+        local provider_link
+        local archive_validation_link
+        for _, line in ipairs(link_lines) do
+            if line:find("/pkg/left.o'", 1, true) then
+                provider_link = line
+            elseif line:find("archive%-validation%.so") then
+                archive_validation_link = line
+            end
+        end
+        assert.truthy(provider_link, verbose_output)
+        assert.truthy(archive_validation_link, verbose_output)
+        if driver.IS_DARWIN then
+            assert.truthy(provider_link:find(
+                "'-Xlinker' '-reproducible' '-Xlinker' " ..
+                "'-install_name' '-Xlinker' 'pkg.so'",
+                1, true), provider_link)
+            assert.truthy(verbose_output:find(
+                "'dsymutil' 'pkg.so'", 1, true), verbose_output)
+            local relocation_map =
+                single_dsym_relocation_map(workspace .. "/pkg.so.dSYM")
+            assert.falsy(relocation_map:find(
+                ".stage.tmp.", 1, true), relocation_map)
+            assert.truthy(relocation_map:match(
+                "binary%-path:%s+['\"]?pkg%.so['\"]?%s*\n"),
+                relocation_map)
+        end
+        local left_at = assert(provider_link:find(
+            "/pkg/left.o'", 1, true), provider_link)
+        local right_at = assert(provider_link:find(
+            "/pkg/right.o'", 1, true), provider_link)
+        local shared_at = assert(provider_link:find(
+            "/pkg/shared.o'", 1, true), provider_link)
         assert.is_true(left_at < right_at and right_at < shared_at,
-            link_lines[1])
+            provider_link)
+        if driver.IS_DARWIN then
+            assert.truthy(archive_validation_link:find(
+                "'-force_load'", 1, true), archive_validation_link)
+        else
+            assert.truthy(archive_validation_link:find(
+                "'-Wl,--whole-archive'", 1, true), archive_validation_link)
+            assert.truthy(archive_validation_link:find(
+                "'-Wl,--no-whole-archive'", 1, true),
+                archive_validation_link)
+        end
 
         local left_c = read_file(source_root .. "/pkg/left.c")
         assert.falsy(left_c:find("loadlib(L,", 1, true), left_c)
         assert.truthy(left_c:find("extern Udata *pkg_shared_init", 1, true),
             left_c)
+    end)
+
+    it("rebuilds deterministic archive bytes when configured tools support D",
+       function()
+        local before = read_file(workspace .. "/pkg.a")
+        local ok, output, why, code = compile(
+            workspace, source_root, "-v",
+            "pkg.left", "pkg.right", "pkg.shared")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        assert_provider_pair(workspace, "pkg", {
+            "pkg.left", "pkg.right", "pkg.shared",
+        })
+        -- Verbose output includes capability probes even when they fail.
+        -- Inspect only the real staged output command, never tool-probe.a.
+        if final_archive_command_uses(output, "qD") and
+           final_archive_command_uses(output, "-D") then
+            assert.equal(before, read_file(workspace .. "/pkg.a"))
+        end
+    end)
+
+    it("preserves both provider mtimes on an unchanged warm rerun", function()
+        local dso = workspace .. "/pkg.so"
+        local archive = workspace .. "/pkg.a"
+        local dso_bytes = read_file(dso)
+        local archive_bytes = read_file(archive)
+        local dso_mtime = assert(lfs.attributes(dso, "modification"))
+        local archive_mtime = assert(lfs.attributes(archive, "modification"))
+        local waited, wait_output = run({ "sleep", "2" }, workspace)
+        assert.truthy(waited, wait_output)
+
+        local ok, output, why, code = compile(
+            workspace, source_root,
+            "pkg.left", "pkg.right", "pkg.shared")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        assert.equal(dso_bytes, read_file(dso))
+        assert.equal(archive_bytes, read_file(archive))
+        assert.same({
+            dso = dso_mtime,
+            archive = archive_mtime,
+        }, {
+            dso = lfs.attributes(dso, "modification"),
+            archive = lfs.attributes(archive, "modification"),
+        })
+    end)
+
+    it("preserves a nondeterministic ordinary archive on a warm rerun",
+       function()
+        local dso = workspace .. "/pkg.so"
+        local archive = workspace .. "/pkg.a"
+        local counter = workspace .. "/ordinary-ranlib-count"
+        local ar_log = workspace .. "/ordinary-ar-log"
+        local ranlib_log = workspace .. "/ordinary-ranlib-log"
+        local snapshots = workspace .. "/ordinary-archive-snapshots"
+        local patcher = workspace .. "/vary-archive-headers.lua"
+        local ar_wrapper = workspace .. "/ordinary-ar"
+        local ranlib_wrapper = workspace .. "/ordinary-ranlib"
+        make_directory(snapshots)
+
+        write_file(patcher, [[
+local archive, count_text, snapshots = ...
+local count = assert(tonumber(count_text))
+local input = assert(io.open(archive, "rb"))
+local bytes = assert(input:read("*a"))
+assert(input:close())
+assert(bytes:sub(1, 8) == "!<arch>\n")
+
+local function field(value, width)
+    local text = tostring(value)
+    assert(#text <= width)
+    return text .. string.rep(" ", width - #text)
+end
+
+local modes = { "100640", "100641", "100642", "100643",
+                "100644", "100645", "100646", "100647" }
+local records = { "!<arch>\n" }
+local position = 9
+while position <= #bytes do
+    local header = bytes:sub(position, position + 59)
+    assert(#header == 60 and header:sub(59, 60) == "`\n")
+    local size = assert(tonumber(
+        assert(header:sub(49, 58):match("^ *(%d+) *$"))))
+    local record_size = 60 + size + (size % 2)
+    local record_end = position + record_size - 1
+    assert(record_end <= #bytes)
+    records[#records + 1] =
+        header:sub(1, 16) ..
+        field(1000000000 + count, 12) ..
+        field(1000 + count, 6) ..
+        field(2000 + count, 6) ..
+        field(modes[count % #modes + 1], 8) ..
+        header:sub(49, 60)
+    records[#records + 1] = bytes:sub(position + 60, record_end)
+    position = record_end + 1
+end
+assert(position == #bytes + 1)
+local output = table.concat(records)
+
+local function write(path)
+    local file = assert(io.open(path, "wb"))
+    assert(file:write(output))
+    assert(file:close())
+end
+
+write(archive)
+if archive:match("/output[.]a$") then
+    write(snapshots .. "/staged-" .. tostring(count) .. ".a")
+end
+]])
+        write_file(ar_wrapper, string.format([[#!/bin/sh
+case ${1-} in
+    *D*)
+        printf 'reject-D\n' >> %s
+        exit 71
+        ;;
+esac
+%s "$@"
+status=$?
+if [ "$status" -ne 0 ]; then exit "$status"; fi
+printf 'ordinary-success\n' >> %s
+exit 0
+]], assert(cdriver.shell_quote(ar_log)),
+            quote_argv(configured_words(driver.AR)),
+            assert(cdriver.shell_quote(ar_log))))
+        write_file(ranlib_wrapper, string.format([[#!/bin/sh
+if [ "${1-}" = "-D" ]; then
+    printf 'reject-D\n' >> %s
+    exit 72
+fi
+%s "$@"
+status=$?
+if [ "$status" -ne 0 ]; then exit "$status"; fi
+printf 'ordinary-success\n' >> %s
+count=0
+if [ -f %s ]; then
+    IFS= read -r count < %s || exit 73
+fi
+count=$((count + 1))
+printf '%%s\n' "$count" > %s
+%s %s "$1" "$count" %s
+]], assert(cdriver.shell_quote(ranlib_log)),
+            quote_argv(configured_words(driver.RANLIB)),
+            assert(cdriver.shell_quote(ranlib_log)),
+            assert(cdriver.shell_quote(counter)),
+            assert(cdriver.shell_quote(counter)),
+            assert(cdriver.shell_quote(counter)),
+            assert(cdriver.shell_quote(LUA)),
+            assert(cdriver.shell_quote(patcher)),
+            assert(cdriver.shell_quote(snapshots))))
+        local executable, chmod_output = run({
+            "chmod", "u+x", ar_wrapper, ranlib_wrapper,
+        }, workspace)
+        assert.truthy(executable, chmod_output)
+
+        assert.truthy(os.remove(dso))
+        assert.truthy(os.remove(archive))
+        if exists(dso .. ".dSYM") then remove_tree(dso .. ".dSYM") end
+        local environment = {
+            AR = ar_wrapper,
+            RANLIB = ranlib_wrapper,
+        }
+        local ok, output, why, code = compile_with_environment(
+            workspace, source_root, environment, "-v",
+            "pkg.left", "pkg.right", "pkg.shared")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        assert.equal("2\n", read_file(counter))
+        local first_staged =
+            read_file(snapshots .. "/staged-2.a")
+        local dso_bytes = read_file(dso)
+        local archive_bytes = read_file(archive)
+        assert.equal(first_staged, archive_bytes)
+        assert.equal(archive_field(1000000002, 12),
+            archive_bytes:sub(25, 36))
+        local dso_mtime = assert(lfs.attributes(dso, "modification"))
+        local archive_mtime = assert(lfs.attributes(archive, "modification"))
+        local waited, wait_output = run({ "sleep", "2" }, workspace)
+        assert.truthy(waited, wait_output)
+
+        ok, output, why, code = compile_with_environment(
+            workspace, source_root, environment, "-v",
+            "pkg.left", "pkg.right", "pkg.shared")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        assert.equal("4\n", read_file(counter))
+        local second_staged =
+            read_file(snapshots .. "/staged-4.a")
+        assert.not_equal(first_staged, second_staged)
+        assert.equal(
+            normalize_regular_archive_header_noise(first_staged),
+            normalize_regular_archive_header_noise(second_staged))
+        assert.equal(dso_bytes, read_file(dso))
+        assert.equal(archive_bytes, read_file(archive))
+        assert.same({
+            dso = dso_mtime,
+            archive = archive_mtime,
+        }, {
+            dso = lfs.attributes(dso, "modification"),
+            archive = lfs.attributes(archive, "modification"),
+        })
+        assert.equal(2, count_plain(read_file(ar_log), "reject-D\n"))
+        assert.equal(4,
+            count_plain(read_file(ar_log), "ordinary-success\n"))
+        assert.equal(2, count_plain(read_file(ranlib_log), "reject-D\n"))
+        assert.equal(4,
+            count_plain(read_file(ranlib_log), "ordinary-success\n"))
+        assert_provider_pair(workspace, "pkg", {
+            "pkg.left", "pkg.right", "pkg.shared",
+        })
+    end)
+
+    it("keeps the published pair when configured RANLIB always fails",
+       function()
+        local dso = workspace .. "/pkg.so"
+        local archive = workspace .. "/pkg.a"
+        local dso_bytes = read_file(dso)
+        local archive_bytes = read_file(archive)
+        local dso_mtime = assert(lfs.attributes(dso, "modification"))
+        local archive_mtime = assert(lfs.attributes(archive, "modification"))
+        local waited, wait_output = run({ "sleep", "2" }, workspace)
+        assert.truthy(waited, wait_output)
+        local failing_ranlib = workspace .. "/failing-ranlib"
+        write_file(failing_ranlib, "#!/bin/sh\nexit 73\n")
+        local executable, chmod_output =
+            run({ "chmod", "u+x", failing_ranlib }, workspace)
+        assert.truthy(executable, chmod_output)
+
+        local ok, output = compile_with_environment(
+            workspace, source_root, {
+                RANLIB = failing_ranlib,
+            }, "pkg.left", "pkg.right", "pkg.shared")
+        assert.falsy(ok, output)
+        assert.truthy(output:find(
+            "configured RANLIB supports neither -D nor ordinary mode",
+            1, true), output)
+        assert.equal(dso_bytes, read_file(dso))
+        assert.equal(archive_bytes, read_file(archive))
+        assert.equal(dso_mtime, lfs.attributes(dso, "modification"))
+        assert.equal(archive_mtime,
+            lfs.attributes(archive, "modification"))
+    end)
+
+    it("derives active-target mismatch from TITAN_EXTRA_CFLAGS alone",
+       function()
+        local patcher = workspace .. "/patch-target.lua"
+        write_file(patcher, [[
+local path = assert(arg[1])
+local input = assert(io.open(path, "rb"))
+local bytes = assert(input:read("*a"))
+assert(input:close())
+
+local magic = bytes:sub(1, 4)
+local offset
+local endian
+if magic == "\127ELF" then
+    local class = bytes:byte(5)
+    local encoding = bytes:byte(6)
+    offset = assert(class == 1 and 36 or class == 2 and 48 or nil)
+    endian = assert(encoding == 1 and "little" or
+        encoding == 2 and "big" or nil)
+elseif magic == "\206\250\237\254" or
+       magic == "\207\250\237\254" then
+    offset = 8
+    endian = "little"
+elseif magic == "\254\237\250\206" or
+       magic == "\254\237\250\207" then
+    offset = 8
+    endian = "big"
+else
+    error("unsupported generated object magic")
+end
+
+local position = offset + (endian == "little" and 1 or 4)
+bytes = bytes:sub(1, position - 1) ..
+    string.char(bytes:byte(position) ~ 1) ..
+    bytes:sub(position + 1)
+local output = assert(io.open(path, "wb"))
+assert(output:write(bytes))
+assert(output:close())
+]])
+        local marker = workspace .. "/patched-targets"
+        local wrapper = workspace .. "/target-selecting-cc"
+        write_file(wrapper, string.format([[#!/bin/sh
+marked=no
+compile=no
+next_output=no
+output=
+for argument in "$@"; do
+    if [ "$next_output" = yes ]; then
+        output=$argument
+        next_output=no
+    elif [ "$argument" = "-o" ]; then
+        next_output=yes
+    elif [ "$argument" = "-c" ]; then
+        compile=yes
+    elif [ "$argument" = "-DTITAN_TEST_ALTERNATE_TARGET=1" ]; then
+        marked=yes
+    fi
+done
+%s "$@"
+status=$?
+if [ "$status" -ne 0 ]; then exit "$status"; fi
+if [ "$marked" = yes ] && [ "$compile" = yes ] && [ -n "$output" ]; then
+    %s %s "$output" || exit $?
+    printf '%%s\n' "$output" >> %s
+fi
+exit 0
+]], quote_argv(configured_words(driver.CC)),
+            assert(cdriver.shell_quote(LUA)),
+            assert(cdriver.shell_quote(patcher)),
+            assert(cdriver.shell_quote(marker))))
+        local executable, chmod_output =
+            run({ "chmod", "u+x", wrapper }, workspace)
+        assert.truthy(executable, chmod_output)
+
+        write_file(source_root .. "/targetcheck.titan", [[
+local left = import "pkg.left"
+
+function read(): integer
+    return left.read()
+end
+]])
+        local environment = {
+            CC = wrapper,
+            TITAN_EXTRA_CFLAGS = "",
+        }
+        local ok, output, why, code = compile_with_environment(
+            workspace, source_root, environment,
+            "--static", "targetcheck")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        assert.is_nil(lfs.attributes(marker, "mode"))
+
+        environment.TITAN_EXTRA_CFLAGS =
+            "-DTITAN_TEST_ALTERNATE_TARGET=1"
+        ok, output = compile_with_environment(
+            workspace, source_root, environment,
+            "--static", "targetcheck")
+        assert.falsy(ok, output)
+        assert.truthy(output:find("target mismatch", 1, true), output)
+        assert.truthy(read_file(marker):find(
+            source_root .. "/targetcheck.o", 1, true))
+
+        local active, active_err = driver.derive_target_fingerprint(
+            source_root .. "/targetcheck.o", "targetcheck")
+        assert.truthy(active, active_err)
+        local provider, provider_err = staticmetadata.scan_archive(
+            workspace .. "/pkg.a", metadata_options())
+        assert.truthy(provider, provider_err)
+        local matches = staticmetadata.fingerprint_matches(
+            provider.members[1].fingerprint, active)
+        assert.is_false(matches)
     end)
 
     it("keeps logical module state independent while reusing the provider",
@@ -255,6 +857,7 @@ end
             compile(workspace, source_root, "consumer")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
+        assert_provider_pair(workspace, "consumer", { "consumer" })
 
         local generated = read_file(source_root .. "/consumer.c")
         -- The module protocol renders the import setup in its two initialization
@@ -314,14 +917,19 @@ end
             compile(workspace, source_root, "warmup")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
+        assert_provider_pair(workspace, "warmup", { "warmup" })
 
         ok, output, why, code = compile(
             workspace, source_root, "trace.left", "trace.right")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
-        assert.equal("file", lfs.attributes(workspace .. "/trace.so", "mode"))
+        assert_provider_pair(workspace, "trace", {
+            "trace.left", "trace.right",
+        })
         assert.is_nil(lfs.attributes(workspace .. "/trace/left.so", "mode"))
+        assert.is_nil(lfs.attributes(workspace .. "/trace/left.a", "mode"))
         assert.is_nil(lfs.attributes(workspace .. "/trace/right.so", "mode"))
+        assert.is_nil(lfs.attributes(workspace .. "/trace/right.a", "mode"))
 
         ok, output = run_lua(workspace, [[
 local titan = require "titan"
@@ -414,11 +1022,17 @@ end
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
 
-        assert.equal("file", lfs.attributes(workspace .. "/shape.so", "mode"))
+        assert_provider_pair(workspace, "shape", {
+            "shape.facade", "shape.provider",
+        })
         assert.is_nil(lfs.attributes(
             workspace .. "/shape/provider.so", "mode"))
         assert.is_nil(lfs.attributes(
+            workspace .. "/shape/provider.a", "mode"))
+        assert.is_nil(lfs.attributes(
             workspace .. "/shape/facade.so", "mode"))
+        assert.is_nil(lfs.attributes(
+            workspace .. "/shape/facade.a", "mode"))
 
         write_file(source_root .. "/consumer.titan", [[
 local facade = import "shape.facade"
@@ -432,6 +1046,7 @@ end
         ok, output, why, code = compile(workspace, source_root, "consumer")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
+        assert_provider_pair(workspace, "consumer", { "consumer" })
 
         local generated = read_file(source_root .. "/consumer.c")
         assert.truthy(generated:find('loadlib(L, "shape.so")', 1, true),
@@ -451,6 +1066,545 @@ assert(facade.make(7):plus(8) == 15)
 assert(provider.Foo.make(9):plus(1) == 10)
 ]])
         assert.truthy(ok, output)
+    end)
+end)
+
+describe("public static-provider composition", function()
+    local workspace
+    local source_root
+
+    before_each(function()
+        workspace = os.tmpname()
+        assert.truthy(os.remove(workspace))
+        assert.truthy(lfs.mkdir(workspace))
+        source_root = workspace .. "/source"
+        make_directory(source_root)
+    end)
+
+    after_each(function()
+        if workspace then remove_tree(workspace) end
+    end)
+
+    local function write_app(name, dependency, expected)
+        write_file(source_root .. "/apps/" .. name .. ".titan",
+            string.format([[
+local dependency = import %q
+
+function main(args: {string}): integer
+    if dependency.get() == %d then
+        return 0
+    else
+        return 1
+    end
+end
+]], dependency, expected))
+    end
+
+    it("honors default/static preference, both fallbacks, and hidden-DSO execution",
+       function()
+        local dynamic_build = workspace .. "/dynamic"
+        local static_build = workspace .. "/static"
+        local dynamic_source = dynamic_build .. "/source"
+        local static_source = static_build .. "/source"
+        make_directory(dynamic_source)
+        make_directory(static_source)
+        write_file(dynamic_source .. "/choice/api.titan", [[
+function get(): integer
+    return 11
+end
+]])
+        write_file(static_source .. "/choice/api.titan", [[
+function get(): integer
+    return 22
+end
+]])
+
+        local ok, output, why, code =
+            compile(dynamic_build, dynamic_source, "choice.api")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        ok, output, why, code =
+            compile(static_build, static_source, "choice.api")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+
+        local dynamic_dso = dynamic_build .. "/choice/api.so"
+        local static_archive = static_build .. "/choice/api.a"
+        local selected_dso = workspace .. "/choice/api.so"
+        local selected_archive = workspace .. "/choice/api.a"
+        copy_file(dynamic_dso, selected_dso)
+        copy_file(static_archive, selected_archive)
+        local dso_bytes = read_file(selected_dso)
+        local archive_bytes = read_file(selected_archive)
+
+        write_app("default_choice", "choice.api", 11)
+        ok, output, why, code =
+            compile(workspace, source_root, "apps.default_choice")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        ok, output, why, code =
+            run_program(workspace, "apps/default_choice")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+
+        write_app("static_choice", "choice.api", 22)
+        ok, output, why, code = compile(
+            workspace, source_root, "--static", "apps.static_choice")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        assert.truthy(os.remove(selected_dso))
+        ok, output, why, code =
+            run_program(workspace, "apps/static_choice")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+
+        -- `--static` is a preference: without the archive it uses the DSO.
+        write_file(selected_dso, dso_bytes)
+        assert.truthy(os.remove(selected_archive))
+        write_app("static_dso_fallback", "choice.api", 11)
+        ok, output, why, code = compile(
+            workspace, source_root, "--static",
+            "apps.static_dso_fallback")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        ok, output, why, code =
+            run_program(workspace, "apps/static_dso_fallback")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+
+        -- Default mode likewise falls through from DSO to archive.
+        write_file(selected_archive, archive_bytes)
+        assert.truthy(os.remove(selected_dso))
+        write_app("default_archive_fallback", "choice.api", 22)
+        ok, output, why, code = compile(
+            workspace, source_root, "apps.default_archive_fallback")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        ok, output, why, code =
+            run_program(workspace, "apps/default_archive_fallback")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+
+        -- Source remains the final dependency fallback after both native
+        -- format passes.
+        assert.truthy(os.remove(selected_archive))
+        write_file(source_root .. "/choice/api.titan", [[
+function get(): integer
+    return 33
+end
+]])
+        write_app("source_fallback", "choice.api", 33)
+        ok, output, why, code =
+            compile(workspace, source_root, "apps.source_fallback")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        ok, output, why, code =
+            run_program(workspace, "apps/source_fallback")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+    end)
+
+    it("repackages complete provider membership and consumes it statically",
+       function()
+        local provider_a = workspace .. "/provider-a"
+        local provider_b = workspace .. "/provider-b"
+        local source_a = provider_a .. "/source"
+        local source_b = provider_b .. "/source"
+        make_directory(source_a)
+        make_directory(source_b)
+        write_file(source_a .. "/base/owner.titan", [[
+record Box
+    n: integer
+end
+
+function make(n: integer): Box
+    return Box.new(n)
+end
+]])
+        write_file(source_a .. "/base/facade.titan", [[
+local owner = import "base.owner"
+type Box = owner.Box
+
+function get(): integer
+    return owner.make(40).n
+end
+]])
+        local ok, output, why, code = compile(
+            provider_a, source_a, "base.owner", "base.facade")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        copy_file(provider_a .. "/base.so", provider_b .. "/base.so")
+        copy_file(provider_a .. "/base.a", provider_b .. "/base.a")
+
+        write_file(source_b .. "/bundle/api.titan", [[
+local facade = import "base.facade"
+
+function get(): integer
+    return facade.get() + 2
+end
+]])
+        ok, output, why, code = compile(
+            provider_b, source_b, "--static", "bundle.api")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        local bundle = assert_provider_pair(
+            provider_b, "bundle/api", {
+                "base.facade", "base.owner", "bundle.api",
+            }, true)
+        assert.same({
+            "base.facade", "base.owner", "bundle.api",
+        }, bundle.key_order)
+        assert.equal("file", lfs.attributes(
+            provider_b .. "/base/facade.lua", "mode"))
+        assert.equal("file", lfs.attributes(
+            provider_b .. "/base/owner.lua", "mode"))
+
+        -- The selected provider has been flattened into B. Remove A entirely
+        -- before compiling and running the static consumer.
+        assert.truthy(os.remove(provider_b .. "/base.so"))
+        assert.truthy(os.remove(provider_b .. "/base.a"))
+        write_file(source_b .. "/app.titan", [[
+local api = import "bundle.api"
+
+function main(args: {string}): integer
+    if api.get() == 42 then
+        return 0
+    else
+        return 1
+    end
+end
+]])
+        ok, output, why, code =
+            compile(provider_b, source_b, "--static", "app")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        assert.truthy(os.remove(provider_b .. "/bundle/api.so"))
+        os.remove(provider_b .. "/bundle/api.lua")
+        ok, output, why, code = run_program(provider_b, "app")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+
+        -- Carried physical membership remains unavailable through an
+        -- unrelated ordinary lookup: bundle/api.a is not a candidate for
+        -- base.owner.
+        write_file(source_b .. "/negative.titan", [[
+local owner = import "base.owner"
+
+function probe(): integer
+    return owner.make(1).n
+end
+]])
+        ok, output = compile(provider_b, source_b, "--static", "negative")
+        assert.falsy(ok)
+        assert.truthy(output:find(
+            "module 'base.owner' not found", 1, true), output)
+    end)
+
+    it("rejects raw members and repackages real macOS metadata objects",
+       function()
+        if not driver.IS_DARWIN then return end
+
+        write_file(source_root .. "/fat/api.titan", [[
+function get(): integer
+    return 42
+end
+]])
+        local ok, output, why, code =
+            compile(workspace, source_root, "fat.api")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+
+        local generated = source_root .. "/fat/api.c"
+        local function compile_arch(arch)
+            local object = workspace .. "/fat-api-" .. arch .. ".o"
+            local argv = { "env", "CCACHE_DISABLE=1" }
+            for _, word in ipairs(configured_words(driver.CC)) do
+                argv[#argv + 1] = word
+            end
+            argv[#argv + 1] = "-arch"
+            argv[#argv + 1] = arch
+            for _, word in ipairs(configured_words(driver.CFLAGS)) do
+                argv[#argv + 1] = word
+            end
+            for _, word in ipairs({
+                "-c", generated,
+                "-I", assert(driver.INCLUDE_PATH),
+                "-I", assert(driver.LUA_SOURCE_PATH),
+                "-o", object,
+            }) do
+                argv[#argv + 1] = word
+            end
+            local compiled, compile_output = run(argv, workspace)
+            assert.truthy(compiled, compile_output)
+            return object
+        end
+
+        local x86_object = compile_arch("x86_64")
+        local arm_object = compile_arch("arm64")
+        local x86_archive = make_archive(
+            workspace, "fat-api-x86_64.a", { x86_object })
+        local arm_archive = make_archive(
+            workspace, "fat-api-arm64.a", { arm_object })
+
+        local raw = workspace .. "/raw.txt"
+        write_file(raw, "titan metadata is not a Mach-O object\n")
+        local raw_archive = workspace .. "/raw-member.a"
+        -- Current Darwin ar may report success while discarding a non-Mach-O
+        -- input. Construct the regular archive directly so both Apple tools
+        -- receive the malformed member this test intends to exercise.
+        write_file(raw_archive, regular_archive_bytes({
+            { name = "raw.txt/", data = read_file(raw) },
+        }))
+        assert.truthy(read_file(raw_archive):find(
+            "titan metadata is not a Mach-O object", 1, true))
+        local rejected, raw_err =
+            staticmetadata.scan_archive(raw_archive, metadata_options())
+        assert.falsy(rejected)
+        assert.match("unsupported native object", raw_err, 1, true)
+
+        local raw_libtool = workspace .. "/raw-libtool.a"
+        local accepted, rejection_output = run({
+            "/usr/bin/libtool", "-static", "-o", raw_libtool,
+            raw_archive,
+        }, workspace)
+        if accepted then
+            local filtered, filtered_err =
+                staticmetadata.scan_archive(
+                    raw_libtool, metadata_options())
+            assert.truthy(filtered, filtered_err)
+            assert.equal("archive", filtered.kind)
+            assert.equal(0, #filtered.members)
+            assert.same({}, filtered.key_order)
+        else
+            assert.truthy(
+                rejection_output:find("raw-member.a", 1, true) or
+                rejection_output:find("raw.txt", 1, true),
+                rejection_output)
+        end
+
+        local raw_universal = workspace .. "/raw-universal.a"
+        accepted, rejection_output = run({
+            "/usr/bin/lipo", "-create",
+            x86_archive, raw_archive,
+            "-output", raw_universal,
+        }, workspace)
+        assert.falsy(accepted, rejection_output)
+        assert.truthy(
+            rejection_output:find("raw-member.a", 1, true) or
+            rejection_output:find("raw.txt", 1, true),
+            rejection_output)
+
+        local universal = workspace .. "/fat/api.a"
+        assert.truthy(os.remove(universal))
+        ok, output = run({
+            "/usr/bin/lipo", "-create",
+            x86_archive, arm_archive,
+            "-output", universal,
+        }, workspace)
+        assert.truthy(ok, output)
+        assert.truthy(os.remove(workspace .. "/fat/api.so"))
+
+        local fat, fat_err = staticmetadata.scan_archive(
+            universal, metadata_options())
+        assert.truthy(fat, fat_err)
+        assert.equal("fat_archive", fat.kind)
+        assert.same({ "fat.api" }, fat.key_order)
+        assert.equal(2, #fat.slices)
+
+        write_file(source_root .. "/bundle/api.titan", [[
+local fat = import "fat.api"
+
+function get(): integer
+    return fat.get()
+end
+]])
+        ok, output, why, code = compile(
+            workspace, source_root, "--static", "bundle.api")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        local bundle = assert_provider_pair(
+            workspace, "bundle/api", {
+                "bundle.api", "fat.api",
+            }, true)
+        assert.equal("archive", bundle.kind)
+        assert.same({ "bundle.api", "fat.api" }, bundle.key_order)
+
+        local libtool_archive = workspace .. "/bundle-libtool.a"
+        ok, output = run({
+            "/usr/bin/libtool", "-static", "-o", libtool_archive,
+            workspace .. "/bundle/api.a",
+        }, workspace)
+        assert.truthy(ok, output)
+        local libtool_result, libtool_err = staticmetadata.scan_archive(
+            libtool_archive, metadata_options())
+        assert.truthy(libtool_result, libtool_err)
+        assert.equal("archive", libtool_result.kind)
+        assert.same(bundle.key_order, libtool_result.key_order)
+
+        assert.truthy(os.remove(universal))
+        assert.truthy(os.remove(workspace .. "/bundle/api.so"))
+        write_file(source_root .. "/universal_app.titan", [[
+local api = import "bundle.api"
+
+function main(args: {string}): integer
+    if api.get() == 42 then return 0 else return 1 end
+end
+]])
+        ok, output, why, code = compile(
+            workspace, source_root, "--static", "universal_app")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        ok, output, why, code =
+            run_program(workspace, "universal_app")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+    end)
+
+    it("keeps unused archive members unextracted and resolves later -X runtime references",
+       function()
+        local missing_header = source_root .. "/never_available.h"
+        write_file(missing_header,
+            "int titan_test_never_available(void);\n")
+        write_file(source_root .. "/bundle/api.titan", [[
+function get(): integer
+    return 42
+end
+]])
+        write_file(source_root .. "/bundle/unused.titan",
+            string.format([[
+local private = foreign import %q
+
+function get(): integer
+    return private.titan_test_never_available() as integer
+end
+]], missing_header))
+        local definition = compile_c_object(
+            workspace, "never-available-definition", [[
+int titan_test_never_available(void) { return 9; }
+]])
+        local ok, output, why, code = compile(
+            workspace, source_root, "bundle.api", "bundle.unused",
+            "-X", definition)
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+
+        -- Rebuild the candidate archive from only the two Titan objects. The
+        -- unused module now has an intentionally unresolved private native
+        -- dependency which must remain inert under ordinary extraction.
+        local lean_archive = make_archive(
+            workspace, "lean-bundle.a", {
+                source_root .. "/bundle/api.o",
+                source_root .. "/bundle/unused.o",
+            })
+        copy_file(lean_archive, workspace .. "/bundle.a")
+
+        local support = compile_c_object(
+            workspace, "support-needs-titan-runtime", [[
+typedef struct lua_State lua_State;
+extern void titan_invalidate_backtrace_state(lua_State *L);
+void support_needs_titan_runtime(void) {
+    titan_invalidate_backtrace_state((lua_State *)0);
+}
+]])
+        write_file(source_root .. "/app.titan", [[
+local api = import "bundle.api"
+
+function main(args: {string}): integer
+    if api.get() == 42 then return 0 else return 1 end
+end
+]])
+        ok, output, why, code = compile(
+            workspace, source_root, "--static", "app", "-X", support)
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        assert.truthy(os.remove(workspace .. "/bundle.so"))
+        os.remove(workspace .. "/bundle/api.lua")
+        os.remove(workspace .. "/bundle/unused.lua")
+        ok, output, why, code = run_program(workspace, "app")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+    end)
+
+    it("carries object/archive -X payload into both forms and rejects metadata",
+       function()
+        local direct = compile_c_object(workspace, "direct-payload",
+            "int direct_payload(void) { return 17; }\n")
+        local archived_object = compile_c_object(
+            workspace, "archived-payload",
+            "int archived_payload(void) { return 19; }\n")
+        local payload_archive = make_archive(
+            workspace, "native-payload.a", { archived_object })
+        local leading_dash = compile_c_object(
+            workspace, "-leading-payload",
+            "int leading_dash_payload(void) { return 23; }\n")
+        local leading_dash_relative =
+            assert(leading_dash:match("([^/]+)$"))
+        write_file(source_root .. "/payload/item.titan", [[
+function get(): integer
+    return 7
+end
+]])
+
+        local ok, output, why, code = compile(
+            workspace, source_root, "-v", "payload.item",
+            "--extra-object=" .. leading_dash_relative,
+            direct, payload_archive)
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        local dso_link = assert(output:match("[^\n]*'%-shared'[^\n]*"),
+            output)
+        if driver.IS_DARWIN then
+            assert.truthy(dso_link:find(
+                "'-Xlinker' '-reproducible' '-Xlinker' " ..
+                "'-install_name' '-Xlinker' 'payload/item.so'",
+                1, true), dso_link)
+            assert.truthy(output:find(
+                "'dsymutil' 'item.so'", 1, true), output)
+            local relocation_map = single_dsym_relocation_map(
+                workspace .. "/payload/item.so.dSYM")
+            assert.falsy(relocation_map:find(
+                ".stage.tmp.", 1, true), relocation_map)
+            assert.truthy(relocation_map:match(
+                "binary%-path:%s+['\"]?item%.so['\"]?%s*\n"),
+                relocation_map)
+        end
+        local direct_at = assert(dso_link:find(direct, 1, true), dso_link)
+        local archive_at =
+            assert(dso_link:find(payload_archive, 1, true), dso_link)
+        local leading_dash_at =
+            assert(dso_link:find(leading_dash, 1, true), dso_link)
+        assert.is_true(
+            leading_dash_at < direct_at and direct_at < archive_at,
+            dso_link)
+        local provider = assert_provider_pair(
+            workspace, "payload/item", { "payload.item" }, true)
+        assert.equal(4, #provider.members)
+        for _, output_path in ipairs({
+            workspace .. "/payload/item.so",
+            workspace .. "/payload/item.a",
+        }) do
+            local symbols = native_symbols(workspace, output_path)
+            assert.truthy(symbols:find("direct_payload", 1, true), symbols)
+            assert.truthy(symbols:find("archived_payload", 1, true), symbols)
+            assert.truthy(symbols:find(
+                "leading_dash_payload", 1, true), symbols)
+        end
+
+        write_file(source_root .. "/bad/item.titan", [[
+function get(): integer
+    return 9
+end
+]])
+        ok, output = compile(
+            workspace, source_root, "bad.item",
+            "-X", source_root .. "/payload/item.o")
+        assert.falsy(ok)
+        assert.truthy(output:find(
+            "contains Titan module metadata", 1, true), output)
+        assert.is_nil(lfs.attributes(
+            workspace .. "/bad/item.so", "mode"))
+        assert.is_nil(lfs.attributes(
+            workspace .. "/bad/item.a", "mode"))
     end)
 end)
 
@@ -484,11 +1638,45 @@ describe("multi-module library preflight and native support contracts", function
         for _, path in ipairs({
             source_root .. "/alpha.c", source_root .. "/alpha.o",
             source_root .. "/beta.c", source_root .. "/beta.o",
-            workspace .. "/alpha.so", workspace .. "/alpha.lua",
-            workspace .. "/beta.so", workspace .. "/beta.lua",
+            workspace .. "/alpha.so", workspace .. "/alpha.a",
+            workspace .. "/alpha.lua",
+            workspace .. "/beta.so", workspace .. "/beta.a",
+            workspace .. "/beta.lua",
         }) do
             assert.is_nil(lfs.attributes(path, "mode"), path)
         end
+    end)
+
+    it("rejects replacing a selected dynamic input provider before code generation",
+       function()
+        write_file(source_root .. "/foo/dep.titan",
+            "function get(): integer return 1 end\n")
+        write_file(source_root .. "/foo/seed.titan",
+            "function get(): integer return 2 end\n")
+        local ok, output, why, code = compile(
+            workspace, source_root, "foo.dep", "foo.seed")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        local old_provider = read_file(workspace .. "/foo.so")
+
+        write_file(source_root .. "/foo/left.titan", [[
+local dep = import "foo.dep"
+function get(): integer return dep.get() end
+]])
+        write_file(source_root .. "/foo/right.titan", [[
+local dep = import "foo.dep"
+function get(): integer return dep.get() + 1 end
+]])
+        ok, output = compile(
+            workspace, source_root, "foo.left", "foo.right")
+        assert.falsy(ok)
+        assert.truthy(output:find("native provider output", 1, true), output)
+        assert.truthy(output:find("aliases input", 1, true), output)
+        assert.equal(old_provider, read_file(workspace .. "/foo.so"))
+        assert.is_nil(lfs.attributes(
+            source_root .. "/foo/left.c", "mode"))
+        assert.is_nil(lfs.attributes(
+            source_root .. "/foo/right.c", "mode"))
     end)
 
     it("rejects mangled symbol collisions before code generation", function()
@@ -504,12 +1692,16 @@ describe("multi-module library preflight and native support contracts", function
             true), output)
         assert.is_nil(lfs.attributes(source_root .. "/clash/a-b.c", "mode"))
         assert.is_nil(lfs.attributes(source_root .. "/clash/a/b.c", "mode"))
+        assert.is_nil(lfs.attributes(workspace .. "/clash.so", "mode"))
+        assert.is_nil(lfs.attributes(workspace .. "/clash.a", "mode"))
     end)
 
     it("rejects module/member boundary symbol collisions before code generation",
        function()
-        write_file(source_root .. "/boundary/root.titan",
-            "function child_leaf(): integer return 1 end\n")
+        write_file(source_root .. "/boundary/root.titan", [[
+function child_leaf(): integer return 1 end
+function main(args: {string}): integer return 0 end
+]])
         write_file(source_root .. "/boundary/root/child.titan",
             "function leaf(): integer return 2 end\n")
 
@@ -529,11 +1721,61 @@ describe("multi-module library preflight and native support contracts", function
             source_root .. "/boundary/root/child.c",
             source_root .. "/boundary/root/child.o",
             workspace .. "/boundary/root.so",
+            workspace .. "/boundary/root.a",
             workspace .. "/boundary/root.lua",
             workspace .. "/boundary/root/child.lua",
+            workspace .. "/boundary/root",
         }) do
             assert.is_nil(lfs.attributes(path, "mode"), path)
         end
+    end)
+
+    it("preflights symbols from producer-dynamic contextual owners",
+       function()
+        write_file(source_root .. "/a.titan", [[
+record R
+    n: integer
+end
+
+function b_c(): integer
+    return 1
+end
+]])
+        local ok, output, why, code =
+            compile(workspace, source_root, "a")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+
+        write_file(source_root .. "/facade/api.titan", [[
+local owner = import "a"
+type R = owner.R
+]])
+        ok, output, why, code =
+            compile(workspace, source_root, "facade.api")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+
+        write_file(source_root .. "/a_b.titan",
+            "function c(): integer return 2 end\n")
+        write_file(source_root .. "/app.titan", [[
+local facade = import "facade.api"
+
+function main(args: {string}): integer
+    return 0
+end
+]])
+        ok, output = compile(
+            workspace, source_root, "--static", "app", "a_b")
+        assert.falsy(ok)
+        assert.truthy(output:find(
+            "cannot link C symbol 'a_b_c_titan'", 1, true), output)
+        assert.truthy(output:find(
+            "function 'a.b_c'", 1, true), output)
+        assert.truthy(output:find(
+            "function 'a_b.c'", 1, true), output)
+        assert.is_nil(lfs.attributes(source_root .. "/app.c", "mode"))
+        assert.is_nil(lfs.attributes(source_root .. "/a_b.c", "mode"))
+        assert.is_nil(lfs.attributes(workspace .. "/app", "mode"))
     end)
 
     it("preflights record-function and bound-method symbols", function()
@@ -572,6 +1814,10 @@ end
             source_root .. "/record_boundary/root.c", "mode"))
         assert.is_nil(lfs.attributes(
             source_root .. "/record_boundary/root/child.c", "mode"))
+        assert.is_nil(lfs.attributes(
+            workspace .. "/record_boundary/root.so", "mode"))
+        assert.is_nil(lfs.attributes(
+            workspace .. "/record_boundary/root.a", "mode"))
     end)
 
     it("preflights cross-family protocol symbols from source dependencies",
@@ -596,6 +1842,8 @@ function probe(): integer return other.probe() end
         assert.is_nil(lfs.attributes(source_root .. "/bundle/left.c", "mode"))
         assert.is_nil(lfs.attributes(
             source_root .. "/luaopen/bundle/foo.c", "mode"))
+        assert.is_nil(lfs.attributes(workspace .. "/bundle.so", "mode"))
+        assert.is_nil(lfs.attributes(workspace .. "/bundle.a", "mode"))
     end)
 
     it("refuses an unrecognized Lua shim before changing C output", function()
@@ -611,6 +1859,8 @@ function probe(): integer return other.probe() end
         assert.equal("return 'user file'\n",
             read_file(workspace .. "/owned/item.lua"))
         assert.is_nil(lfs.attributes(source_root .. "/owned/item.c", "mode"))
+        assert.is_nil(lfs.attributes(workspace .. "/owned/item.so", "mode"))
+        assert.is_nil(lfs.attributes(workspace .. "/owned/item.a", "mode"))
     end)
 
     it("requires semantic native support in a physical titan provider", function()
@@ -626,6 +1876,7 @@ function probe(): integer return other.probe() end
             "linked provider 'titan' has an invalid native support entry", 1,
             true), output)
         assert.is_nil(lfs.attributes(workspace .. "/titan.so", "mode"))
+        assert.is_nil(lfs.attributes(workspace .. "/titan.a", "mode"))
         assert.is_nil(lfs.attributes(workspace .. "/titan/one.lua", "mode"))
         assert.is_nil(lfs.attributes(workspace .. "/titan/two.lua", "mode"))
     end)
@@ -651,11 +1902,19 @@ int luaopen_probe_registry(lua_State *L) {
     return 1;
 }
 ]])
-        local compiled, compile_output = run({
-            "env", "CCACHE_DISABLE=1", "cc", "-std=c99", "-fPIC",
-            "-I", LUA_INCLUDE,
+        local compiler = {
+            "env", "CCACHE_DISABLE=1",
+        }
+        for _, word in ipairs(configured_words(driver.CC)) do
+            compiler[#compiler + 1] = word
+        end
+        for _, word in ipairs({
+            "-std=c99", "-fPIC", "-I", LUA_INCLUDE,
             "-c", "registry-probe.c", "-o", "registry-probe.o",
-        }, workspace)
+        }) do
+            compiler[#compiler + 1] = word
+        end
+        local compiled, compile_output = run(compiler, workspace)
         assert.truthy(compiled, compile_output)
 
         local ok, output, why, code = compile(
@@ -664,6 +1923,9 @@ int luaopen_probe_registry(lua_State *L) {
             workspace .. "/registry-probe.o")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
+        assert_provider_pair(workspace, "titan", {
+            "titan.one", "titan.two",
+        })
 
         ok, output = run_lua(workspace, [[
 local support = require "titan"
@@ -707,5 +1969,27 @@ assert(valid, validation_error)
         validate_argv[#validate_argv + 1] = workspace .. "/titan.so"
         ok, output = run(validate_argv, workspace)
         assert.truthy(ok, output)
+
+        -- A shallow titan.a selected by a standalone owns the bare native
+        -- support entry as well as logical titan.* protocols. Rebuild it from
+        -- only the logical module objects to prove the executable gate catches
+        -- a missing luaopen_titan before publishing the program.
+        local no_support = make_archive(
+            workspace, "titan-without-support.a", {
+                source_root .. "/titan/one.o",
+                source_root .. "/titan/two.o",
+            })
+        copy_file(no_support, workspace .. "/titan.a")
+        write_file(source_root .. "/support_app.titan", [[
+local one = import "titan.one"
+function main(args: {string}): integer return one.probe() end
+]])
+        ok, output = compile(
+            workspace, source_root, "--static", "support_app")
+        assert.falsy(ok)
+        assert.truthy(output:find(
+            "selected static provider failed executable-context protocol linking",
+            1, true), output)
+        assert.is_nil(lfs.attributes(workspace .. "/support_app", "mode"))
     end)
 end)
