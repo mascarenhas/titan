@@ -169,7 +169,7 @@ LUA
 
 inspect_dependencies() {
     if [[ $platform == macos ]]; then
-        otool -L "$1"
+        otool -L "$1" | sed -n '/^[[:space:]]/p'
     else
         readelf -d "$1"
     fi
