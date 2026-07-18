@@ -52,14 +52,17 @@ local function normalize_root(root)
     if root:sub(1, 1) ~= "/" then
         root = lfs.currentdir() .. "/" .. root
     end
-    -- Existing search roots can contain symlinks followed by `..`; let the
-    -- filesystem resolve those before caching provider paths. For a missing
-    -- root, retain deterministic lexical normalization.
-    local previous = lfs.currentdir()
-    if lfs.chdir(root) then
-        local resolved = lfs.currentdir()
-        assert(lfs.chdir(previous))
-        return resolved
+    -- A literal `..` after a symlink must be resolved by the filesystem:
+    -- lexical normalization would name a different directory. Ordinary roots
+    -- keep their normalized pathname spelling (notably macOS /tmp rather than
+    -- /private/tmp), preserving the existing loader-path contract.
+    if ("/" .. root .. "/"):find("/../", 1, true) then
+        local previous = lfs.currentdir()
+        if lfs.chdir(root) then
+            local resolved = lfs.currentdir()
+            assert(lfs.chdir(previous))
+            return resolved
+        end
     end
     return normalize_absolute_path(root)
 end

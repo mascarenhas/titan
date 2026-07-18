@@ -60,6 +60,36 @@ describe("compiler installation discovery", function()
                 nil, "./discarded/../normalized//"))
     end)
 
+    it("preserves ordinary root spelling but resolves symlink parent traversal",
+       function()
+        local workspace = os.tmpname()
+        assert(os.remove(workspace))
+        assert(lfs.mkdir(workspace))
+        local physical = workspace .. "/physical"
+        local nested = physical .. "/nested"
+        assert(lfs.mkdir(physical))
+        assert(lfs.mkdir(nested))
+        local alias = workspace .. "/alias"
+        local command = table.concat({
+            "ln", "-s",
+            assert(driver.shell_quote(nested)),
+            assert(driver.shell_quote(alias)),
+        }, " ")
+        assert(os.execute(command))
+
+        assert.equal(alias, driver.resolve_installation_root(nil, alias))
+
+        local previous = lfs.currentdir()
+        assert(lfs.chdir(physical))
+        local expected_parent = lfs.currentdir()
+        assert(lfs.chdir(previous))
+        assert.equal(expected_parent,
+            driver.resolve_installation_root(nil, alias .. "/.."))
+
+        assert(os.remove(alias))
+        remove_tree(workspace)
+    end)
+
     it("derives all installed compiler paths from one root", function()
         local paths = assert(driver.installed_paths("/opt/titan/"))
         assert.same({

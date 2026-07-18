@@ -125,6 +125,30 @@ local function make_archive(path, inputs)
     assert.truthy(indexed, index_output)
 end
 
+local function ar_field(value, width)
+    local text = tostring(value)
+    assert.is_true(#text <= width)
+    return text .. string.rep(" ", width - #text)
+end
+
+local function archive_bytes(members)
+    local records = { "!<arch>\n" }
+    for _, member in ipairs(members) do
+        local data = member.data
+        records[#records + 1] =
+            ar_field(member.name, 16) ..
+            ar_field(0, 12) ..
+            ar_field(0, 6) ..
+            ar_field(0, 6) ..
+            ar_field(100644, 8) ..
+            ar_field(#data, 10) ..
+            "`\n" ..
+            data ..
+            (#data % 2 == 1 and "\n" or "")
+    end
+    return table.concat(records)
+end
+
 local function encode_u32(value, endian)
     local encoded = {}
     for _ = 1, 4 do
@@ -263,10 +287,17 @@ describe("static compiled-module native containers", function()
             "int shared_payload(void) { return 3; }\n", true)
 
         local raw_archive = workspace .. "/raw payload.a"
-        make_archive(raw_archive, { raw })
+        -- Darwin ranlib may discard a non-object archive member and leave a
+        -- valid empty archive. Write the malformed fixtures directly so this
+        -- test exercises Titan's classifier rather than host-tool filtering.
+        write_file(raw_archive, archive_bytes({
+            { name = "raw.txt/", data = read_file(raw) },
+        }))
 
         local nested_archive = workspace .. "/nested payload.a"
-        make_archive(nested_archive, { input_archive })
+        write_file(nested_archive, archive_bytes({
+            { name = "nested.a/", data = read_file(input_archive) },
+        }))
 
         local thin_archive = workspace .. "/thin payload.a"
         local thin_ok = run(

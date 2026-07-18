@@ -55,6 +55,16 @@ local function read_file(path)
     return contents
 end
 
+local function final_archive_command_uses(output, argument)
+    for line in output:gmatch("[^\r\n]+") do
+        if line:find("'" .. argument .. "'", 1, true) and
+           line:find("/output.a'", 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
 local function remove_tree(path)
     local mode = lfs.symlinkattributes(path, "mode")
     if mode == "directory" then
@@ -371,8 +381,10 @@ end
         assert_provider_pair(workspace, "pkg", {
             "pkg.left", "pkg.right", "pkg.shared",
         })
-        if output:find("'qD'", 1, true) and
-           output:find("'-D'", 1, true) then
+        -- Verbose output includes capability probes even when they fail.
+        -- Inspect only the real staged output command, never tool-probe.a.
+        if final_archive_command_uses(output, "qD") and
+           final_archive_command_uses(output, "-D") then
             assert.equal(before, read_file(workspace .. "/pkg.a"))
         end
     end)
