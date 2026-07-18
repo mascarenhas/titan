@@ -290,9 +290,34 @@ driver.UNAME = shell("uname")
 -- the binary and dsymutil may be absent, so it must be a no-op there.
 driver.IS_DARWIN = string.match(driver.UNAME, "Darwin") ~= nil
 
-local function run_dsymutil(output, verbose)
+local function run_dsymutil(output, verbose, stable_input_basename)
     if not driver.IS_DARWIN then return true end
-    return run_argv({ "dsymutil", output }, verbose)
+    if not stable_input_basename then
+        return run_argv({ "dsymutil", output }, verbose)
+    end
+
+    -- A bundled dSYM records dsymutil's input spelling in
+    -- Resources/Relocations/<arch>/<basename>.yml. Public providers link in a
+    -- unique sibling stage, so passing the complete staged pathname would make
+    -- an otherwise identical dSYM differ on every transaction. Run only these
+    -- staged-provider invocations from the output directory and pass the
+    -- stable leaf name. Darwin ld records absolute N_OSO object paths, so
+    -- changing dsymutil's working directory does not change object discovery.
+    local directory, basename = output:match("^(.*)/([^/]+)$")
+    if not directory or directory == "" then
+        return run_argv({ "dsymutil", output }, verbose)
+    end
+    local previous, current_err = lfs.currentdir()
+    if not previous then return nil, current_err end
+    local changed, change_err = lfs.chdir(directory)
+    if not changed then return nil, change_err end
+    local ok, term, code = run_argv({ "dsymutil", basename }, verbose)
+    local restored, restore_err = lfs.chdir(previous)
+    if not restored then
+        return nil, "could not restore working directory after dsymutil: " ..
+            tostring(restore_err)
+    end
+    return ok, term, code
 end
 
 -- Expand an explicit Titan binary path with the same `;;` default insertion
@@ -2575,7 +2600,8 @@ function driver.compile_library_output(soname, libnames, link, verbose,
 
     local ok, term, code = run_argv(args, verbose)
     if ok then
-        local dsym_ok, dsym_term, dsym_code = run_dsymutil(soname, verbose)
+        local dsym_ok, dsym_term, dsym_code =
+            run_dsymutil(soname, verbose, install_name ~= nil)
         if not dsym_ok then
             os.remove(soname)
             remove_path(soname .. ".dSYM")

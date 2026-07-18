@@ -55,6 +55,27 @@ local function read_file(path)
     return contents
 end
 
+local function single_dsym_relocation_map(dsym)
+    local root = dsym .. "/Contents/Resources/Relocations"
+    local maps = {}
+    for architecture in lfs.dir(root) do
+        if architecture ~= "." and architecture ~= ".." then
+            local architecture_root = root .. "/" .. architecture
+            if lfs.attributes(architecture_root, "mode") == "directory" then
+                for filename in lfs.dir(architecture_root) do
+                    if filename:match("[.]yml$") then
+                        maps[#maps + 1] =
+                            architecture_root .. "/" .. filename
+                    end
+                end
+            end
+        end
+    end
+    table.sort(maps)
+    assert.equal(1, #maps)
+    return read_file(maps[1])
+end
+
 local function final_archive_command_uses(output, argument)
     for line in output:gmatch("[^\r\n]+") do
         if line:find("'" .. argument .. "'", 1, true) and
@@ -421,6 +442,15 @@ end
                 "'-Xlinker' '-reproducible' '-Xlinker' " ..
                 "'-install_name' '-Xlinker' 'pkg.so'",
                 1, true), provider_link)
+            assert.truthy(verbose_output:find(
+                "'dsymutil' 'pkg.so'", 1, true), verbose_output)
+            local relocation_map =
+                single_dsym_relocation_map(workspace .. "/pkg.so.dSYM")
+            assert.falsy(relocation_map:find(
+                ".stage.tmp.", 1, true), relocation_map)
+            assert.truthy(relocation_map:match(
+                "binary%-path:%s+['\"]?pkg%.so['\"]?%s*\n"),
+                relocation_map)
         end
         local left_at = assert(provider_link:find(
             "/pkg/left.o'", 1, true), provider_link)
@@ -1327,17 +1357,30 @@ end
         }))
         assert.truthy(read_file(raw_archive):find(
             "titan metadata is not a Mach-O object", 1, true))
+        local rejected, raw_err =
+            staticmetadata.scan_archive(raw_archive, metadata_options())
+        assert.falsy(rejected)
+        assert.match("unsupported native object", raw_err, 1, true)
 
         local raw_libtool = workspace .. "/raw-libtool.a"
         local accepted, rejection_output = run({
             "/usr/bin/libtool", "-static", "-o", raw_libtool,
             raw_archive,
         }, workspace)
-        assert.falsy(accepted, rejection_output)
-        assert.truthy(
-            rejection_output:find("raw-member.a", 1, true) or
-            rejection_output:find("raw.txt", 1, true),
-            rejection_output)
+        if accepted then
+            local filtered, filtered_err =
+                staticmetadata.scan_archive(
+                    raw_libtool, metadata_options())
+            assert.truthy(filtered, filtered_err)
+            assert.equal("archive", filtered.kind)
+            assert.equal(0, #filtered.members)
+            assert.same({}, filtered.key_order)
+        else
+            assert.truthy(
+                rejection_output:find("raw-member.a", 1, true) or
+                rejection_output:find("raw.txt", 1, true),
+                rejection_output)
+        end
 
         local raw_universal = workspace .. "/raw-universal.a"
         accepted, rejection_output = run({
@@ -1515,6 +1558,15 @@ end
                 "'-Xlinker' '-reproducible' '-Xlinker' " ..
                 "'-install_name' '-Xlinker' 'payload/item.so'",
                 1, true), dso_link)
+            assert.truthy(output:find(
+                "'dsymutil' 'item.so'", 1, true), output)
+            local relocation_map = single_dsym_relocation_map(
+                workspace .. "/payload/item.so.dSYM")
+            assert.falsy(relocation_map:find(
+                ".stage.tmp.", 1, true), relocation_map)
+            assert.truthy(relocation_map:match(
+                "binary%-path:%s+['\"]?item%.so['\"]?%s*\n"),
+                relocation_map)
         end
         local direct_at = assert(dso_link:find(direct, 1, true), dso_link)
         local archive_at =

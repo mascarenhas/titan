@@ -426,11 +426,14 @@ public provider path as `install_name`; the driver forwards it as the
 `LC_ID_DYLIB` value instead of allowing Darwin's linker to derive that identity
 from the unique staging path. That public-provider link also uses Darwin's
 reproducible mode so its debug map does not encode volatile input-object
-properties. An unchanged relink can therefore retain byte-identical DSO, UUID,
-and dSYM contents. `publish_provider_bundle` then commits generated shims and
-dSYM, the archive, and finally the DSO as the dynamic-path commit point; caught
-failures restore the prior owned set. After building and validating the staged
-artifacts, the equivalence check described in [Static compiled
+properties. For this staged-provider case, the driver runs `dsymutil` from the
+unique stage directory with only the stable DSO leaf name; this keeps the
+dSYM's relocation-map `binary-path` metadata independent of the transaction's
+random directory. An unchanged relink can therefore retain byte-identical DSO,
+UUID, and dSYM contents. `publish_provider_bundle` then commits generated shims
+and dSYM, the archive, and finally the DSO as the dynamic-path commit point;
+caught failures restore the prior owned set. After building and validating the
+staged artifacts, the equivalence check described in [Static compiled
 modules](static-compiled-modules.md#publication-and-installation) discards an
 unchanged staged bundle and preserves public mtimes. The older `publish_library`
 helper remains DSO-only for programmatic/test callers and is not the `titanc`
