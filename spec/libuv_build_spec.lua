@@ -1044,6 +1044,7 @@ printf 'build\n' >> %s
                 "$(LIBUV_EXTRA_OBJECTS)",
             "$(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES)",
             "$(STDLIB_CONFIG_STAMP): FORCE",
+            'rm -f "$(STDLIB_COMPLETION_STAMP)"',
             "STDLIB_STATIC_ARCHIVE=$(STDLIB_STATIC_ARCHIVE)",
             "STDLIB_EXTRA_OBJECTS=$(STDLIB_EXTRA_OBJECTS)",
             "STDLIB_EMBEDDED_FORMAT_INPUTS=" ..

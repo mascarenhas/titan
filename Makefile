@@ -940,7 +940,9 @@ $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_SHIMS): $(STDLIB_COMPLETION_STAMP)
 # Record every effective native and compiler input that can change the
 # standard-library provider pair. Preserve mtimes when the configuration is
 # unchanged so a valid warm pair does not oscillate between bootstrap and full
-# forms.
+# forms. When content changes, explicitly invalidate the completion stamp so
+# rebuild correctness does not depend on filesystem timestamp granularity or
+# Make's prerequisite re-stat behavior.
 $(STDLIB_CONFIG_STAMP): FORCE
 	@tmp="$@.tmp"; \
 	{ printf '%s\n' \
@@ -973,6 +975,7 @@ $(STDLIB_CONFIG_STAMP): FORCE
 	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
 		rm -f "$$tmp"; \
 	else \
+		rm -f "$(STDLIB_COMPLETION_STAMP)" && \
 		mv -f "$$tmp" "$@"; \
 	fi
 
