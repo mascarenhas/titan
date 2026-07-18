@@ -1095,5 +1095,13 @@ printf 'build\n' >> %s
             'static_archive="${provider%.so}.a"', 1, true), workflow)
         assert.truthy(workflow:find(
             "ci_libuv_mode_smoke.sh system", 1, true), workflow)
+        assert.truthy(workflow:find(
+            "--name='standalone-prefix source installation installs one " ..
+                "matching Lua and Titan SDK before the standard images'",
+            1, true), workflow)
+        assert.truthy(workflow:find(
+            "--name='standalone-prefix source installation loads direct " ..
+                "libuv calls lazily for Titan and explicitly for Lua'",
+            1, true), workflow)
     end)
 end)

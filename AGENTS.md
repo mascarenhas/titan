@@ -82,9 +82,15 @@ not add epicycles around what may be a misunderstood simpler design.
   Linux dependency build in the job that consumes its warmed tree, and keep
   the Linux production mode smokes in the regular producer: rebuilding them
   in a consumer wastes aggregate billed runner time even when the workflow's
-  wall-clock critical path is unchanged. Pack the regular artifact before the
-  mode smoke replaces the bundled `titan.so`/`titan.a` pair, but upload it only
-  after both modes pass; repacking the system-linked tree changes every
+  wall-clock critical path is unchanged. After the system-mode source-rock
+  reinstall, rerun only the mode-dependent SDK-layout and external-DSO
+  promotion cases from `rockspec_spec.lua`; the complete bundled packaging
+  gate has already run, and repeating it would consume the producer's
+  remaining 15-minute budget without adding system-policy coverage. The full
+  system production smoke still follows those focused assertions. Pack the
+  regular artifact before the mode smoke replaces the bundled
+  `titan.so`/`titan.a` pair, but upload it only after both modes pass; repacking
+  the system-linked tree changes every
   logical standard module at once and shifts
   recompilation into a consumer. The full-tree archive is intentional because
   partial output archives lose source/output timestamp ordering and trigger

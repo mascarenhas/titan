@@ -162,12 +162,17 @@ jobs:
       # The prepared artifact was packed before the source-mode smoke, so this
       # can mutate the producer's live prefix without changing the bundled tree
       # restored by test-linux. Exercise only the installed system-mode boundary
-      # here; the complete library suite already ran against the bundled image.
+      # here; the complete library and packaging suites already ran against the
+      # bundled image. The two focused rockspec cases own the mode-dependent
+      # SDK layout and external-DSO promotion boundaries; the production smoke
+      # owns the complete installed runtime behavior.
       - name: Canary source-rock installation with system libuv
         run: |
           LIBUV_MODE=system luarocks make --force
           TITAN_EXPECT_LIBUV_MODE=system \
-            "$PREFIX/bin/busted" -o gtest -v spec/rockspec_spec.lua
+            "$PREFIX/bin/busted" -o gtest -v spec/rockspec_spec.lua \
+              --name='standalone-prefix source installation installs one matching Lua and Titan SDK before the standard images' \
+              --name='standalone-prefix source installation loads direct libuv calls lazily for Titan and explicitly for Lua'
           bash spec/support/ci_libuv_mode_smoke.sh system
 
       - name: Upload prepared Linux tree
