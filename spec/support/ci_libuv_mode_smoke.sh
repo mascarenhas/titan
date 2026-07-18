@@ -2,8 +2,10 @@
 
 # Exercise both installed standard-library provider forms under the bundled
 # and system libuv policies. Besides the ordinary Lua/API smokes, this proves
-# that titan.a matches titan.so and can run a compiled Titan application while
-# the dynamic provider and generated shims are out of search reach.
+# that titan.a matches titan.so and can run async/timer/fs/net/os behavior in a
+# compiled Titan application while the dynamic provider and generated shims
+# are out of search reach. System mode additionally exercises both the host's
+# ordinary pkg-config setting and an explicit static archive selection.
 
 set -euo pipefail
 
@@ -102,8 +104,10 @@ check_canonical_container() {
 }
 
 compare_archive_and_dso_metadata() {
+    local archive=${1:-$STATIC_ARCHIVE}
+    local dso=${2:-$PROVIDER}
     TITAN_ROCKS_ROOT="$PREFIX" "$LUA" -E - \
-        "$STATIC_ARCHIVE" "$PROVIDER" <<'LUA'
+        "$archive" "$dso" <<'LUA'
 local archive, dso = ...
 local driver = require "titan-compiler.driver"
 local metadata = require "titan-compiler.staticmetadata"
@@ -186,8 +190,52 @@ defines_uv_version() {
 }
 
 system_libuv_flags() {
+    local linkage=${1:-ordinary}
+    local candidate libdir static_archive pkg_static_flags
+
     system_cppflags=$("$LIBUV_PKG_CONFIG" --cflags libuv)
-    system_ldflags=$("$LIBUV_PKG_CONFIG" --libs libuv)
+    if [[ $linkage == ordinary ]]; then
+        system_ldflags=$("$LIBUV_PKG_CONFIG" --libs libuv)
+    elif [[ $linkage == static ]]; then
+        # `pkg-config --static` adds private dependencies but an ordinary
+        # `-luv` still lets the linker prefer a DSO. Select the development
+        # package's archive explicitly so this is a deliberately static
+        # system setting rather than an assumption about linker defaults.
+        libdir=$("$LIBUV_PKG_CONFIG" --variable=libdir libuv)
+        static_archive=
+        for candidate in "$libdir/libuv.a" "$libdir/libuv_a.a"; do
+            if [[ -f $candidate && ! -L $candidate ]]; then
+                static_archive=$candidate
+                break
+            fi
+        done
+        if [[ -z $static_archive ]]; then
+            echo "system libuv development package has no regular static archive in $libdir" >&2
+            exit 1
+        fi
+
+        pkg_static_flags=$("$LIBUV_PKG_CONFIG" --static --libs libuv)
+        system_ldflags=$("$LUA" -E - \
+            "$static_archive" "$pkg_static_flags" <<'LUA'
+local archive, flags = ...
+local cdriver = require "c-parser.cdriver"
+local words, split_error = cdriver.split_shell_words(flags)
+assert(words, split_error)
+local quoted = { assert(cdriver.shell_quote(archive)) }
+for _, word in ipairs(words) do
+    -- The explicit archive replaces the public -luv selection; retain its -L
+    -- and every private/platform dependency in their original order.
+    if word ~= "-luv" then
+        quoted[#quoted + 1] = assert(cdriver.shell_quote(word))
+    end
+end
+io.write(table.concat(quoted, " "))
+LUA
+        )
+    else
+        echo "unsupported system libuv linkage setting: $linkage" >&2
+        exit 2
+    fi
     if [[ $platform == linux ]]; then
         system_cppflags="${system_cppflags:+$system_cppflags }-D_GNU_SOURCE"
     fi
@@ -224,6 +272,45 @@ build_process_child() {
         spec/fixtures/stdlib/native/os_process_child.c \
         "${ld_words[@]}" -o "$TITAN_PROCESS_SMOKE_CHILD"
     export TITAN_PROCESS_SMOKE_CHILD
+}
+
+build_static_system_provider_image() {
+    local mode_dir="$SMOKE_TMP/system-static-provider"
+    local static_provider="$mode_dir/titan.so"
+    mkdir -p "$mode_dir"
+    system_libuv_flags static
+
+    # Reuse the production archive-backed validation path: it force-loads the
+    # exact published Titan member set through the provider DSO link policy.
+    # Supplying the explicit system archive here proves the provider side of
+    # the same final-link setting later repeated by the standalone consumer.
+    env -u LUA_PATH -u LUA_CPATH -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
+        TITAN_ROCKS_ROOT="$PREFIX" TITAN_RUNTIME_PREBUILT=1 \
+        TITAN_EXTRA_LDFLAGS="$system_ldflags" \
+        "$LUA" -E - "$STATIC_ARCHIVE" "$static_provider" <<'LUA'
+local archive, output = ...
+local driver = require "titan-compiler.driver"
+local linked, term, code =
+    driver.compile_archive_validation_image(output, archive, nil, false)
+if not linked then
+    error("cannot link static-system provider image: " ..
+        tostring(term) .. " (" .. tostring(code) .. ")", 0)
+end
+LUA
+
+    compare_archive_and_dso_metadata "$STATIC_ARCHIVE" "$static_provider"
+    if has_libuv_dependency "$static_provider"; then
+        echo "static system-libuv provider depends on a libuv DSO" >&2
+        exit 1
+    fi
+    if ! defines_uv_version "$static_provider"; then
+        echo "static system-libuv provider did not absorb reachable libuv objects" >&2
+        exit 1
+    fi
+    if defines_uv_version "$STATIC_ARCHIVE"; then
+        echo "static system-libuv provider link copied libuv into installed titan.a" >&2
+        exit 1
+    fi
 }
 
 run_mode_smoke() {
@@ -263,27 +350,96 @@ build_and_run_static_titan() {
     local cppflags ldflags
     mkdir -p "$mode_dir"
     cat >"$mode_dir/static_uv_smoke.titan" <<'TITAN'
+local async = import "async"
 local timer = import "timer"
 local fs = import "fs"
+local net = import "net"
+local system = import "os"
+
+local function check(condition: boolean, message: string)
+  if not condition then raise message end
+end
+
+local function listen_available(): (net.Server, integer)
+  local port = 20000 + system.pid() % 30000
+  local attempts = 0
+  while attempts < 1024 do
+    do
+      return net.listen("127.0.0.1", port, 8), port
+    catch
+      local failure = error as async.Error
+      if failure.name ~= "EADDRINUSE" then raise error end
+    end
+    attempts = attempts + 1
+    port = port + 1
+    if port > 60999 then port = 20000 end
+  end
+  raise "could not find an available static-smoke loopback port"
+end
 
 function main(args: {string}): integer
-  local path = args[1]
-  timer.sleep(0)
-  fs.write_file(path, "static-titan-libuv")
-  local payload = fs.read_file(path)
-  fs.unlink(path)
-  if payload == "static-titan-libuv" then return 0 end
-  return 1
+  local marker = args[1]
+  local envname = "TITAN_STATIC_LIBUV_MODE_SMOKE"
+  local original: string? = system.getenv(envname)
+  do
+    system.setenv(envname, "os-ready")
+    check(system.getenv(envname) == "os-ready",
+          "static os environment behavior failed")
+    check(system.pid() > 0 and #system.cwd() > 0 and
+          #system.exepath() > 0,
+          "static os identity behavior failed")
+
+    local server, port = listen_available()
+    local peer = async.run(function (): value
+      local connection = server:accept()
+      check(connection:read_until("\n") == "ping\n",
+            "static net peer received the wrong payload")
+      connection:write("pong\n")
+      connection:shutdown()
+      connection:close()
+      return "peer-ready"
+    end)
+
+    local connection = net.connect("127.0.0.1", port)
+    connection:write("ping\n")
+    connection:shutdown()
+    check(connection:read_until("\n") == "pong\n",
+          "static net client received the wrong payload")
+    connection:close()
+    check(peer:join() == "peer-ready",
+          "static async peer returned the wrong result")
+    server:close()
+
+    timer.sleep(0)
+    fs.write_file(marker, "static-titan-libuv")
+    check(fs.read_file(marker) == "static-titan-libuv",
+          "static fs round trip changed the payload")
+    fs.unlink(marker)
+  finally
+    if original then
+      system.setenv(envname, original as string)
+    else
+      system.unsetenv(envname)
+    end
+  end
+  return 0
 end
 TITAN
 
     if [[ $mode == bundled ]]; then
         cppflags=$bundled_cppflags
         ldflags=$bundled_ldflags
-    else
-        system_libuv_flags
+    elif [[ $mode == system ]]; then
+        system_libuv_flags ordinary
         cppflags=$system_cppflags
         ldflags=$system_ldflags
+    elif [[ $mode == system-static ]]; then
+        system_libuv_flags static
+        cppflags=$system_cppflags
+        ldflags=$system_ldflags
+    else
+        echo "unsupported static Titan smoke mode: $mode" >&2
+        exit 2
     fi
 
     (
@@ -311,9 +467,22 @@ TITAN
             echo "bundled static Titan executable depends on a libuv DSO" >&2
             exit 1
         fi
-    elif [[ ${SYSTEM_LIBUV_SHARED:-0} == 1 ]]; then
+    elif [[ $mode == system && ${SYSTEM_LIBUV_SHARED:-0} == 1 ]]; then
         if ! has_libuv_dependency "$executable"; then
             echo "system shared-libuv executable has no libuv dependency" >&2
+            exit 1
+        fi
+    elif [[ $mode == system-static ]]; then
+        if has_libuv_dependency "$executable"; then
+            echo "static system-libuv executable depends on a libuv DSO" >&2
+            exit 1
+        fi
+        if ! defines_uv_version "$executable"; then
+            echo "static system-libuv executable did not absorb reachable libuv objects" >&2
+            exit 1
+        fi
+        if defines_uv_version "$STATIC_ARCHIVE"; then
+            echo "static system-libuv setting copied libuv into installed titan.a" >&2
             exit 1
         fi
     fi
@@ -351,6 +520,8 @@ check_system_mode() {
     build_process_child system
     run_mode_smoke system
     build_and_run_static_titan system
+    build_static_system_provider_image
+    build_and_run_static_titan system-static
 }
 
 case "$scope" in

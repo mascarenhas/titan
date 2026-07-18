@@ -694,7 +694,8 @@ Add Titan runtime/coder coverage for:
   `require "titan.coroutine"` yields through canonical `timer`/`uv` code while
   nested, including the same chain under ASan so every main-stack switch pair
   uses the shared runtime bookkeeping and each logical standard module resolves
-  its independent protocol inside the one canonical physical `titan.so`;
+  its independent protocol inside the canonical physical provider pair (using
+  `titan.so` on this dynamic Lua route);
 * GC stress in incremental and generational modes, including old
   coroutine owner userdata rooting young Lua threads, callback closures,
   default tags, record/table payloads, and function-valued payloads;

@@ -77,9 +77,10 @@ record types shared across subsystems are referenced directly from whichever
 semantic contributor owns them. Contributor bodies and callbacks cross file
 boundaries because top-level `local` remains module-private, not file-private.
 The production all-roots invocation emits `titan/uv/uv.c` and
-`titan/uv/uv.o`, then links that object into `titan.so` and emits exactly one
-logical `titan/uv.lua` shim; no source basename enters a symbol, registry key,
-or artifact name.
+`titan/uv/uv.o`, then links and archives that object into the paired
+`titan.so`/`titan.a` provider and emits exactly one logical `titan/uv.lua`
+shim; no source basename enters a symbol, registry key, metadata key, or
+artifact name.
 
 The exported declarations established the deterministic ABI 0.15
 interface when the folder split was introduced. The follow-up relocates the
@@ -94,9 +95,10 @@ native entries stay unchanged.
 The Makefile's explicit `UV_TITAN_SOURCES` list names all seven files inside
 the reviewed `STDLIB_TITAN_SOURCES` prerequisite set. It intentionally does
 not use a wildcard: adding a production contributor must update the reviewed
-build graph. Bundled and system modes both rebuild the complete `titan.so`,
-and `make clean` removes nested generated C/object and the known generated
-logical shim without touching sources.
+build graph. Bundled and system modes both rebuild the complete
+`titan.so`/`titan.a` pair, and `make clean` removes nested generated C/object,
+both provider forms, and the known generated logical shim without touching
+sources.
 
 ## GC-owned native storage
 

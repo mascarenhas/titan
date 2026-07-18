@@ -2911,6 +2911,162 @@ local function same_existing_file(left, right)
         left_attr.dev == right_attr.dev and left_attr.ino == right_attr.ino
 end
 
+local function same_file_contents(left, right)
+    local left_attr = lfs.symlinkattributes(left)
+    local right_attr = lfs.symlinkattributes(right)
+    if not left_attr or not right_attr or
+       left_attr.mode ~= "file" or right_attr.mode ~= "file" or
+       left_attr.permissions ~= right_attr.permissions or
+       left_attr.size ~= right_attr.size then
+        return false
+    end
+
+    local left_file = io.open(left, "rb")
+    if not left_file then return false end
+    local right_file = io.open(right, "rb")
+    if not right_file then
+        left_file:close()
+        return false
+    end
+    while true do
+        local left_chunk, left_err = left_file:read(64 * 1024)
+        local right_chunk, right_err = right_file:read(64 * 1024)
+        if left_err or right_err or left_chunk ~= right_chunk then
+            left_file:close()
+            right_file:close()
+            return false
+        end
+        if not left_chunk then
+            left_file:close()
+            right_file:close()
+            return true
+        end
+    end
+end
+
+-- A supported archiver without deterministic `D` may vary the ownership,
+-- mode, and timestamp fields in otherwise identical regular-archive records.
+-- Compare every structural field and every record byte, including indexes and
+-- long-name tables, while ignoring only those four fixed-width header fields.
+local function same_regular_archive_contents(left, right)
+    if same_file_contents(left, right) then return true end
+
+    local left_attr = lfs.symlinkattributes(left)
+    local right_attr = lfs.symlinkattributes(right)
+    if not left_attr or not right_attr or
+       left_attr.mode ~= "file" or right_attr.mode ~= "file" or
+       left_attr.permissions ~= right_attr.permissions or
+       left_attr.size ~= right_attr.size then
+        return false
+    end
+    local left_file = io.open(left, "rb")
+    if not left_file then return false end
+    local right_file = io.open(right, "rb")
+    if not right_file then
+        left_file:close()
+        return false
+    end
+    local function finish(result)
+        left_file:close()
+        right_file:close()
+        return result
+    end
+
+    local left_magic, left_magic_err = left_file:read(8)
+    local right_magic, right_magic_err = right_file:read(8)
+    if left_magic_err or right_magic_err or
+       left_magic ~= "!<arch>\n" or right_magic ~= left_magic then
+        return finish(false)
+    end
+
+    local remaining = left_attr.size - 8
+    while remaining ~= 0 do
+        if remaining < 60 then return finish(false) end
+        local left_header, left_header_err = left_file:read(60)
+        local right_header, right_header_err = right_file:read(60)
+        if left_header_err or right_header_err or
+           not left_header or not right_header or
+           left_header:sub(1, 16) ~= right_header:sub(1, 16) or
+           left_header:sub(49, 60) ~= right_header:sub(49, 60) then
+            return finish(false)
+        end
+        local size_digits =
+            left_header:sub(49, 58):match("^ *(%d+) *$")
+        local member_size = size_digits and tonumber(size_digits)
+        local padding = member_size and (member_size % 2) or 0
+        local record_size =
+            member_size and (60 + member_size + padding) or nil
+        if not record_size or record_size > remaining then
+            return finish(false)
+        end
+
+        local unread = member_size
+        while unread ~= 0 do
+            local amount = math.min(64 * 1024, unread)
+            local left_chunk, left_err = left_file:read(amount)
+            local right_chunk, right_err = right_file:read(amount)
+            if left_err or right_err or left_chunk ~= right_chunk or
+               not left_chunk or #left_chunk ~= amount then
+                return finish(false)
+            end
+            unread = unread - amount
+        end
+        if padding ~= 0 then
+            local left_padding, left_padding_err = left_file:read(1)
+            local right_padding, right_padding_err = right_file:read(1)
+            if left_padding_err or right_padding_err or
+               left_padding ~= "\n" or right_padding ~= left_padding then
+                return finish(false)
+            end
+        end
+        remaining = remaining - record_size
+    end
+    return finish(true)
+end
+
+local function directory_entries(path)
+    local opened, iterator, state = pcall(lfs.dir, path)
+    if not opened or type(iterator) ~= "function" then return nil end
+    local entries = {}
+    for name in iterator, state do
+        if name ~= "." and name ~= ".." then
+            entries[#entries + 1] = name
+        end
+    end
+    table.sort(entries, util.bytewise_less)
+    return entries
+end
+
+local function same_file_tree(left, right)
+    local left_attr = lfs.symlinkattributes(left)
+    local right_attr = lfs.symlinkattributes(right)
+    if not left_attr or not right_attr or
+       left_attr.mode ~= right_attr.mode or
+       left_attr.permissions ~= right_attr.permissions then
+        return false
+    end
+    if left_attr.mode == "file" then
+        return same_file_contents(left, right)
+    elseif left_attr.mode ~= "directory" then
+        return false
+    end
+
+    local left_entries = directory_entries(left)
+    local right_entries = directory_entries(right)
+    if not left_entries or not right_entries or
+       #left_entries ~= #right_entries then
+        return false
+    end
+    for index, name in ipairs(left_entries) do
+        if right_entries[index] ~= name or
+           not same_file_tree(
+               join_path(left, name), join_path(right, name)) then
+            return false
+        end
+    end
+    return true
+end
+
 function driver.validate_provider_output_paths(public_dso, native_inputs)
     local public_archive = public_dso:gsub("[.]so$", ".a")
     if public_archive == public_dso then
@@ -3145,6 +3301,32 @@ function driver.publish_provider_bundle(
             end
             table.sort(stale_shims, util.bytewise_less)
         end
+    end
+
+    local unchanged = #stale_shims == 0 and
+        same_file_contents(staged_dso, public_dso) and
+        same_regular_archive_contents(staged_archive, public_archive)
+    if unchanged then
+        for _, item in ipairs(staged_shims) do
+            if not same_file_contents(item.path, item.public) then
+                unchanged = false
+                break
+            end
+        end
+    end
+    if unchanged then
+        if driver.IS_DARWIN then
+            unchanged = same_file_tree(staged_dsym, public_dsym)
+        else
+            unchanged = not lfs.symlinkattributes(public_dsym)
+        end
+    end
+    if unchanged then
+        remove_path(staged_dso)
+        remove_path(staged_archive)
+        remove_path(staged_dsym)
+        cleanup_staged_shims()
+        return true, public_archive
     end
 
     local backups = {}

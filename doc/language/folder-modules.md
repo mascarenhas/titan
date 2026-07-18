@@ -192,13 +192,13 @@ considered.
 The canonical main source controls where generated C and object files go.
 The logical module name controls its generated Lua loader and program
 entrypoint paths. In a single-root library build it is also the provider name;
-with several roots, their common provider prefix controls the one shared
-library path.
+with several roots, their common provider prefix controls the one paired
+shared/static provider base.
 
-| Form for `foo.bar` | Generated C/object | Lua loader | Single-root provider | Entrypoint | Executable |
+| Form for `foo.bar` | Generated C/object | Lua loader | Single-root provider pair | Entrypoint | Executable |
 | --- | --- | --- | --- | --- | --- |
-| flat `foo/bar.titan` | `foo/bar.c`, `foo/bar.o` | `foo/bar.lua` | `foo/bar.so` | `foo/bar__entrypoint.c` | `foo/bar` |
-| folder `foo/bar/bar.titan` | `foo/bar/bar.c`, `foo/bar/bar.o` | `foo/bar.lua` | `foo/bar.so` | `foo/bar__entrypoint.c` | `foo/bar__main` |
+| flat `foo/bar.titan` | `foo/bar.c`, `foo/bar.o` | `foo/bar.lua` | `foo/bar.so`, `foo/bar.a` | `foo/bar__entrypoint.c` | `foo/bar` |
+| folder `foo/bar/bar.titan` | `foo/bar/bar.c`, `foo/bar/bar.o` | `foo/bar.lua` | `foo/bar.so`, `foo/bar.a` | `foo/bar__entrypoint.c` | `foo/bar__main` |
 
 The loader and provider columns apply in library mode. The entrypoint and
 executable columns apply when the module declares Titan's ordinary
@@ -206,13 +206,16 @@ executable columns apply when the module declares Titan's ordinary
 source or a contributor. The `__main` suffix prevents the
 folder program from colliding with its `foo/bar/` source directory and also
 works when `--tree` points outside the current directory. Contributor files
-never receive generated `.c`, `.o`, `.lua`, `.so`, or executable artifacts.
+never receive generated `.c`, `.o`, `.lua`, `.so`, `.a`, or executable
+artifacts.
 A folder contributes exactly one object and one generated loader for its
 logical module, even when a multi-root invocation links that object into a
 shallower provider. The loader belongs to `foo.bar`, not to any source
 basename, and points at the provider selected for the whole invocation. For a
 dotted module built from an external tree, the compiler creates the logical
 output parent (such as `foo/`) in the current directory before linking.
+See [Static compiled modules](static-compiled-modules.md) for paired provider
+publication and archive resolution.
 
 ## The standard `titan.uv` module
 

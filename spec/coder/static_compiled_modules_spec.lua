@@ -622,6 +622,74 @@ exec %s "$@"
         end
     end)
 
+    it("preserves an identical recursive Darwin dSYM tree", function()
+        local original_is_darwin = driver.IS_DARWIN
+        local checked = table.pack(pcall(function()
+            driver.IS_DARWIN = true
+            local public_dso = workspace .. "/darwin-provider.so"
+            local public_archive = workspace .. "/darwin-provider.a"
+            local staged_dso = workspace .. "/darwin-staged.so"
+            local staged_archive = workspace .. "/darwin-staged.a"
+            local public_shim = workspace .. "/same/module.lua"
+            local shim_contents = driver.GENERATED_SHIM_BANNER ..
+                "return 'same'\n"
+            local dso_contents = "identical provider DSO"
+            local archive_contents = read_file(input_archive)
+            write_file(public_dso, dso_contents)
+            write_file(staged_dso, dso_contents)
+            write_file(public_archive, archive_contents)
+            write_file(staged_archive, archive_contents)
+            write_file(public_shim, shim_contents)
+
+            local relative_marker =
+                ".dSYM/Contents/Resources/DWARF/provider"
+            write_file(public_dso .. relative_marker, "identical symbols")
+            write_file(staged_dso .. relative_marker, "identical symbols")
+            write_file(public_dso .. ".dSYM/Contents/Info.plist",
+                "identical metadata")
+            write_file(staged_dso .. ".dSYM/Contents/Info.plist",
+                "identical metadata")
+
+            local preserved_mtime = os.time() + 60
+            for _, path in ipairs({
+                public_dso,
+                public_archive,
+                public_shim,
+                public_dso .. relative_marker,
+            }) do
+                assert.truthy(lfs.touch(
+                    path, preserved_mtime, preserved_mtime))
+            end
+
+            local published, public_static =
+                driver.publish_provider_bundle(
+                    staged_dso, staged_archive, public_dso, {
+                        {
+                            filename = public_shim,
+                            contents = shim_contents,
+                        },
+                    }, {}, {
+                        public_archive = public_archive,
+                        provider = "darwin-provider",
+                    })
+            assert.truthy(published, public_static)
+            assert.equal(public_archive, public_static)
+            assert.is_nil(lfs.symlinkattributes(staged_dso))
+            assert.is_nil(lfs.symlinkattributes(staged_archive))
+            assert.is_nil(lfs.symlinkattributes(staged_dso .. ".dSYM"))
+            assert.equal(preserved_mtime,
+                lfs.attributes(public_dso, "modification"))
+            assert.equal(preserved_mtime,
+                lfs.attributes(public_archive, "modification"))
+            assert.equal(preserved_mtime,
+                lfs.attributes(public_shim, "modification"))
+            assert.equal(preserved_mtime, lfs.attributes(
+                public_dso .. relative_marker, "modification"))
+        end))
+        driver.IS_DARWIN = original_is_darwin
+        if not checked[1] then error(checked[2], 0) end
+    end)
+
     it("retires only exact old-provider stale shims on successful publication",
        function()
         local seed = workspace .. "/old-provider-seed.a"

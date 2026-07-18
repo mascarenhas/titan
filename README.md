@@ -141,7 +141,9 @@ lists the related targets and setup hints. The Makefile records the effective
 mode, compiler, and flags, so switching between bundled and system mode
 rebuilds the libuv-facing objects without requiring a manual clean.
 
-In bundled mode, the combined `titan.so` is the sole complete libuv provider.
+In bundled mode, the combined `titan.so` is the sole complete dynamic libuv
+provider, while `titan.a` carries the same bundled libuv objects for static
+Titan consumers.
 A compiled Titan extension DSO that directly `foreign import`s `uv.h` must also import the
 `titan.uv` module (normally written `import "uv"`) and leave its `uv_*`
 function references unresolved; do not link it with `-luv` or the private
@@ -527,15 +529,21 @@ when it is no longer needed.
 ```
         --print-ast                       Print the AST.
         -v, --verbose                     Print safely quoted effective compiler commands.
+        --static                          Prefer static Titan archive providers.
         --lua <path>                      Path to a Lua source/build tree (source checkouts only).
         --tree <path>                     Path to the source tree for Titan modules (default '.').
         -l, --link <lib1,lib2>            Add libraries to the final link.
-        -X, --extra-object <object...>     Add object/archive inputs to the final link.
+        -X, --extra-object <object...>     Add native payload; library mode carries it into both providers.
         -h, --help                        Show this help message and exit.
 ```
 
-`CC` selects the compiler. `TITAN_EXTRA_CPPFLAGS` carries append-only `-I`/`-D`
-arguments shared by C-FFI checking and generated compilation;
+`--static` prefers self-describing `.a` providers over `.so` providers for
+ordinary dependencies; it does not request a system-linker static build and
+still permits DSO/source fallback. In library mode, `-X` object/archive
+payload enters both the shared and static output; in executable mode it keeps
+its established final-link role. `CC` selects the compiler.
+`TITAN_EXTRA_CPPFLAGS` carries append-only `-I`/`-D` arguments shared by
+C-FFI checking and generated compilation;
 `TITAN_EXTRA_CFLAGS` is compile-only; and ordered `TITAN_EXTRA_LDFLAGS` is
 final-link-only. Shell quoting in these environment strings is parsed once, so
 paths containing spaces stay one argument and malformed quoting is rejected.

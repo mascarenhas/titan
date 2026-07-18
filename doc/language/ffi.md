@@ -490,10 +490,12 @@ compiler extensions may fail with a compile-time parse error.
 
 ### Direct libuv extensions
 
-Bundled Titan gives libuv a single complete native owner: the combined
-standard-library provider `titan.so`. Its SDK installs `uv.h` and the `uv/`
-headers, but not the private static archive used to build that provider. A
-Titan extension DSO that calls functions declared by `uv.h` must import
+Bundled Titan gives libuv one complete dynamic process owner: the combined
+standard-library provider `titan.so`; the paired `titan.a` carries the same
+libuv objects for static Titan consumers. Its SDK installs `uv.h` and the
+`uv/` headers, but not the private libuv archive used as payload for that
+provider pair. A Titan extension DSO that calls functions declared by `uv.h`
+must import
 `titan.uv` (normally through its short spelling) in addition to importing the
 header:
 
@@ -503,8 +505,9 @@ local uv = foreign import "uv.h"
 ```
 
 Build that extension without `-luv` and without a `libuv.a` linker input. Its
-`uv_*` references remain unresolved in the DSO. The bundled archive used to
-build `titan.so` is private and is not installed as part of the Titan SDK.
+`uv_*` references remain unresolved in the DSO. The bundled archive carried
+into the standard provider pair is private and is not installed as part of the
+Titan SDK.
 Titan uses the same `RTLD_LAZY | RTLD_GLOBAL` runtime loader for this extension
 as for every compiled dependency. Lazy binding lets the extension map with
 unresolved libuv function calls. Its generated initializer then loads the

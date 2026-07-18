@@ -4,13 +4,14 @@ A *Titan module* is the unit of compilation, namespacing, and distribution.
 Its source may be one flat `.titan` file or a canonical main plus immediate
 `.titan` contributors in a [folder module](folder-modules.md). Both forms
 compile as one logical module. In library mode, one or more related logical
-modules are linked into a physical provider DSO and receive generated Lua
-loaders; Lua programs use `require` and other Titan modules use `import`
-without exposing that physical grouping. A module that defines a [`main`
-function](functions.md) becomes a standalone executable instead. This chapter
-describes what goes inside a logical module, how modules reference each other,
-and what the compiler produces. See [Multi-module
-libraries](multi-module-libraries.md) for the provider and loader rules.
+modules are linked into a physical provider DSO/archive pair and receive
+generated Lua loaders; Lua programs use `require` and other Titan modules use
+`import` without exposing that physical grouping. A module that defines a
+[`main` function](functions.md) becomes a standalone executable instead. This
+chapter describes what goes inside a logical module, how modules reference
+each other, and what the compiler produces. See
+[Multi-module libraries](multi-module-libraries.md) for the provider and
+loader rules.
 
 ## What a module is made of
 
@@ -344,7 +345,8 @@ The compiler driver is invoked with dot-separated *module names*, not
 file paths:
 
 ```sh
-titanc [--print-ast] [-v] [--lua <luasrc>] [--tree <srcroot>] [-l lib1,lib2] <module>...
+titanc [--print-ast] [-v] [--static] [--lua <luasrc>] \
+  [--tree <srcroot>] [-l lib1,lib2] [-X object...] <module>...
 ```
 
 * `--tree <srcroot>` sets the source tree root (default `.`); module
@@ -360,6 +362,8 @@ titanc [--print-ast] [-v] [--lua <luasrc>] [--tree <srcroot>] [-l lib1,lib2] <mo
 * `--static` prefers self-describing Titan `.a` providers over `.so`
   providers for ordinary dependencies. It still permits DSO/source fallback
   and does not request a fully static system executable.
+* `-X/--extra-object` adds native object/archive payload. Library mode carries
+  it into both provider forms; executable mode uses it at final link.
 * `-v/--verbose` prints the C compiler command lines; `--print-ast`
   dumps the parsed AST.
 
@@ -406,8 +410,8 @@ directly from the repository lazily rebuilds and links
 directly. Vendored `libbacktrace.a` and the matching `liblua.a` remain separate
 link inputs. The native Lua support entry is compiled from `titanlib.c`: a
 private support-only bootstrap enables installation, while the canonical
-installed `titan.so` links that entry together with the standard logical
-modules.
+installed provider pair carries that entry together with the standard logical
+modules. Generated Lua loaders use its DSO form.
 
 *Implementation note:* the driver and the exact compiler invocations
 are described in [the driver documentation](../implementation/driver.md);
@@ -425,8 +429,8 @@ the structure of the generated C is in
   [Folder modules](folder-modules.md#lookup-and-precedence) for the complete
   precedence and privacy rules. Generated
   `.c`/`.o` files are always written next to the source; the linked
-  `.so` lands relative to the compiler's working directory, as
-  described above.
+  `.so`/`.a` provider pair lands relative to the compiler's working
+  directory, as described above.
 * **Compiled modules** are looked up along the *binary search path*: a
   semicolon-separated list of plain directories taken from
   `TITAN_PATH_0_16`, or `TITAN_PATH` if that is unset. Otherwise the default

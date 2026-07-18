@@ -195,6 +195,21 @@ local function replace_argument(argv, old, new)
     return copy
 end
 
+local function insert_argument_before(argv, marker, argument)
+    local inserted = 0
+    local copy = {}
+    for _, current in ipairs(argv) do
+        if current == marker then
+            copy[#copy + 1] = argument
+            inserted = inserted + 1
+        end
+        copy[#copy + 1] = current
+    end
+    assert.equal(1, inserted,
+        "expected one command argument matching " .. marker)
+    return copy
+end
+
 local function assert_absent(path)
     assert.is_nil(lfs.symlinkattributes(path),
         "unexpected public output " .. path)
@@ -361,5 +376,109 @@ end
             "protocol validation", 1, true), output)
         assert.truthy(output:find("exit 24", 1, true), output)
         assert_absent(workspace .. "/app")
+    end)
+
+    it("rejects every missing selected-archive protocol before publication",
+       function()
+        local modname = "protocol.api"
+        local provider = workspace .. "/provider"
+        local provider_source = provider .. "/source"
+        local provider_titan =
+            provider_source .. "/protocol/api.titan"
+        write_file(provider_titan, [[
+function stable(n: integer): integer
+    return n
+end
+]])
+
+        local ok, output, why, code =
+            compile(provider, provider_source, "-v", modname)
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        local provider_verbose = output
+        local provider_c = provider_titan:gsub("[.]titan$", ".c")
+        local provider_o = provider_titan:gsub("[.]titan$", ".o")
+        local provider_archive = scan_archive(
+            provider .. "/protocol/api.a")
+        local provider_entry = assert(provider_archive.entries[modname])
+
+        local consumer_source = workspace .. "/source"
+        write_file(consumer_source .. "/consumer/lib.titan", [[
+local api = import "protocol.api"
+
+function read(): integer
+    return api.stable(42)
+end
+]])
+        write_file(consumer_source .. "/app.titan", [[
+local api = import "protocol.api"
+
+function main(args: {string}): integer
+    return api.stable(0)
+end
+]])
+
+        local prefix = driver.mangle_module_name(modname)
+        local protocols = {
+            { name = "ABI", symbol = prefix .. "_abi" },
+            { name = "types", symbol = prefix .. "_types" },
+            { name = "initializer", symbol = prefix .. "_init" },
+            { name = "Lua open", symbol = "luaopen_" .. prefix },
+        }
+        local compile_template =
+            compile_command(provider_verbose, provider_c)
+        local forged_directory = workspace .. "/forged"
+        local forged_o = forged_directory .. "/protocol_api.o"
+        local selected_archive = workspace .. "/protocol/api.a"
+        make_directory(forged_directory)
+        make_directory(workspace .. "/protocol")
+
+        for _, protocol in ipairs(protocols) do
+            local argv = replace_argument(
+                compile_template, provider_o, forged_o)
+            argv = insert_argument_before(
+                argv, provider_c,
+                "-D" .. protocol.symbol .. "=" ..
+                    protocol.symbol .. "_missing")
+            ok, output, why, code = run(argv, workspace)
+            assert.truthy(ok, protocol.name .. " forge failed:\n" ..
+                output .. "\n(" .. tostring(why) .. ", " ..
+                tostring(code) .. ")")
+
+            os.remove(selected_archive)
+            make_archive(selected_archive, forged_o)
+            local forged_archive = scan_archive(selected_archive)
+            local forged_entry =
+                assert(forged_archive.entries[modname])
+            assert.equal(provider_entry.abi, forged_entry.abi)
+            assert.equal(provider_entry.types, forged_entry.types)
+
+            ok, output = compile(
+                workspace, consumer_source, "-v", "--static",
+                "consumer.lib")
+            assert.falsy(ok, protocol.name ..
+                " omission unexpectedly published a library pair:\n" ..
+                output)
+            assert.truthy(output:find(protocol.symbol, 1, true),
+                protocol.name .. " library diagnostic:\n" .. output)
+            assert_absent(workspace .. "/consumer/lib.so")
+            assert_absent(workspace .. "/consumer/lib.a")
+            assert_absent(workspace .. "/consumer/lib.lua")
+            assert_absent(workspace .. "/protocol/api.so")
+            assert_absent(workspace .. "/protocol/api.lua")
+
+            ok, output = compile(
+                workspace, consumer_source, "-v", "--static", "app")
+            assert.falsy(ok, protocol.name ..
+                " omission unexpectedly published an executable:\n" ..
+                output)
+            assert.truthy(output:find(
+                "selected static provider failed executable-context " ..
+                    "protocol linking", 1, true),
+                protocol.name .. " executable diagnostic:\n" .. output)
+            assert.truthy(output:find(protocol.symbol, 1, true),
+                protocol.name .. " executable diagnostic:\n" .. output)
+            assert_absent(workspace .. "/app")
+        end
     end)
 end)

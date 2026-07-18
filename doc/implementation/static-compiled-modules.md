@@ -229,14 +229,14 @@ a runtime archive reader.
 ## Native composition
 
 Final link order is source objects, selected Titan archives, user `-X`
-payload, Titan runtime/backtrace/Lua inputs, `-l` inputs, platform libraries,
+payload, Titan runtime/backtrace/Lua inputs, platform libraries, `-l` inputs,
 and final flags. ELF first groups selected providers with each other, leaves
 ordinary `-X` inputs outside that group in their original CLI order, then
 groups `libtitan.a` with the selected providers at the runtime position.
 Selected archives therefore receive an ordinary second search after runtime
 members introduce references to metadata-free provider payload, such as
 bundled libuv, while `-X` archives are never broadly rescanned or force-loaded.
-Backtrace, Lua, `-l`, platform, and final-flag inputs remain outside both
+Backtrace, Lua, platform, `-l`, and final-flag inputs remain outside both
 groups. Darwin uses its continual archive search. `--static` never becomes a
 system `-static` linker option.
 
@@ -304,6 +304,17 @@ owned paths, installs shims/dSYM, publishes the archive, and renames the DSO
 last as the default dynamic-path commit point. Caught and injected failures
 restore all backups. This is recoverable process-level publication, not a
 claim of crash, power-loss, or asynchronous-signal atomicity.
+
+Before replacing an existing bundle, publication compares the staged DSO,
+archive, generated shims, and Darwin dSYM tree with their public counterparts.
+The DSO, shims, and dSYM files must be byte-identical with matching modes. A
+regular archive must have the same record names/order/sizes, index and
+long-name bytes, member bytes, padding, and file mode; only the fixed-width
+archive-header timestamp/uid/gid/mode fields are ignored by the equivalence
+comparison, accommodating configured tools that lack deterministic `D`. When
+that complete owned set is unchanged and no stale shim needs retiring, Titan
+removes the staged artifacts and preserves the public bundle and its mtimes.
+Any changed or missing member takes the ordinary transactional path.
 
 When replacing a valid prior self-describing archive with fewer keys, its old
 key set enumerates the exact stale generated shims eligible for transactional

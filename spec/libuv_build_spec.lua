@@ -1090,6 +1090,32 @@ printf 'build\n' >> %s
             assert.truthy(snapshot:find(contract, 1, true), contract)
         end
 
+        local mode_smoke =
+            read_file("spec/support/ci_libuv_mode_smoke.sh")
+        for _, contract in ipairs({
+            'local async = import "async"',
+            'local timer = import "timer"',
+            'local fs = import "fs"',
+            'local net = import "net"',
+            'local system = import "os"',
+            "local peer = async.run(",
+            "timer.sleep(0)",
+            "fs.write_file(marker,",
+            'net.connect("127.0.0.1", port)',
+            "system.exepath()",
+            '"$LIBUV_PKG_CONFIG" --static --libs libuv',
+            '"$libdir/libuv.a" "$libdir/libuv_a.a"',
+            "driver.compile_archive_validation_image(",
+            "build_static_system_provider_image",
+            'if ! defines_uv_version "$static_provider"',
+            'if defines_uv_version "$STATIC_ARCHIVE"',
+            "build_and_run_static_titan system-static",
+            'if ! defines_uv_version "$executable"',
+            'if defines_uv_version "$STATIC_ARCHIVE"',
+        }) do
+            assert.truthy(mode_smoke:find(contract, 1, true), contract)
+        end
+
         local workflow = read_file(".github/workflows/ci.yml")
         assert.truthy(workflow:find(
             'static_archive="${provider%.so}.a"', 1, true), workflow)

@@ -122,6 +122,29 @@ local function compile(workspace, source_root, ...)
     return run(compiler_argv(workspace, source_root, ...), workspace)
 end
 
+local function compile_with_environment(
+        workspace, source_root, environment, ...)
+    local argv = compiler_argv(workspace, source_root, ...)
+    local command_index
+    local installed_titanc = PREFIX and (PREFIX .. "/bin/titanc")
+    for index, argument in ipairs(argv) do
+        if argument == installed_titanc or argument == LUA then
+            command_index = index
+            break
+        end
+    end
+    assert.truthy(command_index, "cannot locate compiler command")
+
+    local names = {}
+    for name in pairs(environment) do names[#names + 1] = name end
+    table.sort(names)
+    for offset, name in ipairs(names) do
+        table.insert(argv, command_index + offset - 1,
+            name .. "=" .. environment[name])
+    end
+    return run(argv, workspace)
+end
+
 local function run_lua(workspace, code)
     return run({
         "env",
@@ -204,6 +227,30 @@ local function regular_archive_bytes(members)
             data ..
             (#data % 2 == 1 and "\n" or "")
     end
+    return table.concat(records)
+end
+
+local function normalize_regular_archive_header_noise(bytes)
+    assert.equal("!<arch>\n", bytes:sub(1, 8))
+    local records = { "!<arch>\n" }
+    local position = 9
+    while position <= #bytes do
+        local header = bytes:sub(position, position + 59)
+        assert.equal(60, #header)
+        assert.equal("`\n", header:sub(59, 60))
+        local size = assert(tonumber(
+            assert(header:sub(49, 58):match("^ *(%d+) *$"))))
+        local record_size = 60 + size + (size % 2)
+        local record_end = position + record_size - 1
+        assert.is_true(record_end <= #bytes)
+        records[#records + 1] =
+            header:sub(1, 16) .. string.rep(" ", 32) ..
+            header:sub(49, 60)
+        records[#records + 1] =
+            bytes:sub(position + 60, record_end)
+        position = record_end + 1
+    end
+    assert.equal(#bytes + 1, position)
     return table.concat(records)
 end
 
@@ -411,6 +458,340 @@ end
            final_archive_command_uses(output, "-D") then
             assert.equal(before, read_file(workspace .. "/pkg.a"))
         end
+    end)
+
+    it("preserves both provider mtimes on an unchanged warm rerun", function()
+        local dso = workspace .. "/pkg.so"
+        local archive = workspace .. "/pkg.a"
+        local dso_bytes = read_file(dso)
+        local archive_bytes = read_file(archive)
+        local dso_mtime = assert(lfs.attributes(dso, "modification"))
+        local archive_mtime = assert(lfs.attributes(archive, "modification"))
+        local waited, wait_output = run({ "sleep", "2" }, workspace)
+        assert.truthy(waited, wait_output)
+
+        local ok, output, why, code = compile(
+            workspace, source_root,
+            "pkg.left", "pkg.right", "pkg.shared")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        assert.equal(dso_bytes, read_file(dso))
+        assert.equal(archive_bytes, read_file(archive))
+        assert.same({
+            dso = dso_mtime,
+            archive = archive_mtime,
+        }, {
+            dso = lfs.attributes(dso, "modification"),
+            archive = lfs.attributes(archive, "modification"),
+        })
+    end)
+
+    it("preserves a nondeterministic ordinary archive on a warm rerun",
+       function()
+        local dso = workspace .. "/pkg.so"
+        local archive = workspace .. "/pkg.a"
+        local counter = workspace .. "/ordinary-ranlib-count"
+        local ar_log = workspace .. "/ordinary-ar-log"
+        local ranlib_log = workspace .. "/ordinary-ranlib-log"
+        local snapshots = workspace .. "/ordinary-archive-snapshots"
+        local patcher = workspace .. "/vary-archive-headers.lua"
+        local ar_wrapper = workspace .. "/ordinary-ar"
+        local ranlib_wrapper = workspace .. "/ordinary-ranlib"
+        make_directory(snapshots)
+
+        write_file(patcher, [[
+local archive, count_text, snapshots = ...
+local count = assert(tonumber(count_text))
+local input = assert(io.open(archive, "rb"))
+local bytes = assert(input:read("*a"))
+assert(input:close())
+assert(bytes:sub(1, 8) == "!<arch>\n")
+
+local function field(value, width)
+    local text = tostring(value)
+    assert(#text <= width)
+    return text .. string.rep(" ", width - #text)
+end
+
+local modes = { "100640", "100641", "100642", "100643",
+                "100644", "100645", "100646", "100647" }
+local records = { "!<arch>\n" }
+local position = 9
+while position <= #bytes do
+    local header = bytes:sub(position, position + 59)
+    assert(#header == 60 and header:sub(59, 60) == "`\n")
+    local size = assert(tonumber(
+        assert(header:sub(49, 58):match("^ *(%d+) *$"))))
+    local record_size = 60 + size + (size % 2)
+    local record_end = position + record_size - 1
+    assert(record_end <= #bytes)
+    records[#records + 1] =
+        header:sub(1, 16) ..
+        field(1000000000 + count, 12) ..
+        field(1000 + count, 6) ..
+        field(2000 + count, 6) ..
+        field(modes[count % #modes + 1], 8) ..
+        header:sub(49, 60)
+    records[#records + 1] = bytes:sub(position + 60, record_end)
+    position = record_end + 1
+end
+assert(position == #bytes + 1)
+local output = table.concat(records)
+
+local function write(path)
+    local file = assert(io.open(path, "wb"))
+    assert(file:write(output))
+    assert(file:close())
+end
+
+write(archive)
+if archive:match("/output[.]a$") then
+    write(snapshots .. "/staged-" .. tostring(count) .. ".a")
+end
+]])
+        write_file(ar_wrapper, string.format([[#!/bin/sh
+case ${1-} in
+    *D*)
+        printf 'reject-D\n' >> %s
+        exit 71
+        ;;
+esac
+%s "$@"
+status=$?
+if [ "$status" -ne 0 ]; then exit "$status"; fi
+printf 'ordinary-success\n' >> %s
+exit 0
+]], assert(cdriver.shell_quote(ar_log)),
+            quote_argv(configured_words(driver.AR)),
+            assert(cdriver.shell_quote(ar_log))))
+        write_file(ranlib_wrapper, string.format([[#!/bin/sh
+if [ "${1-}" = "-D" ]; then
+    printf 'reject-D\n' >> %s
+    exit 72
+fi
+%s "$@"
+status=$?
+if [ "$status" -ne 0 ]; then exit "$status"; fi
+printf 'ordinary-success\n' >> %s
+count=0
+if [ -f %s ]; then
+    IFS= read -r count < %s || exit 73
+fi
+count=$((count + 1))
+printf '%%s\n' "$count" > %s
+%s %s "$1" "$count" %s
+]], assert(cdriver.shell_quote(ranlib_log)),
+            quote_argv(configured_words(driver.RANLIB)),
+            assert(cdriver.shell_quote(ranlib_log)),
+            assert(cdriver.shell_quote(counter)),
+            assert(cdriver.shell_quote(counter)),
+            assert(cdriver.shell_quote(counter)),
+            assert(cdriver.shell_quote(LUA)),
+            assert(cdriver.shell_quote(patcher)),
+            assert(cdriver.shell_quote(snapshots))))
+        local executable, chmod_output = run({
+            "chmod", "u+x", ar_wrapper, ranlib_wrapper,
+        }, workspace)
+        assert.truthy(executable, chmod_output)
+
+        assert.truthy(os.remove(dso))
+        assert.truthy(os.remove(archive))
+        if exists(dso .. ".dSYM") then remove_tree(dso .. ".dSYM") end
+        local environment = {
+            AR = ar_wrapper,
+            RANLIB = ranlib_wrapper,
+        }
+        local ok, output, why, code = compile_with_environment(
+            workspace, source_root, environment, "-v",
+            "pkg.left", "pkg.right", "pkg.shared")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        assert.equal("2\n", read_file(counter))
+        local first_staged =
+            read_file(snapshots .. "/staged-2.a")
+        local dso_bytes = read_file(dso)
+        local archive_bytes = read_file(archive)
+        assert.equal(first_staged, archive_bytes)
+        assert.equal(archive_field(1000000002, 12),
+            archive_bytes:sub(25, 36))
+        local dso_mtime = assert(lfs.attributes(dso, "modification"))
+        local archive_mtime = assert(lfs.attributes(archive, "modification"))
+        local waited, wait_output = run({ "sleep", "2" }, workspace)
+        assert.truthy(waited, wait_output)
+
+        ok, output, why, code = compile_with_environment(
+            workspace, source_root, environment, "-v",
+            "pkg.left", "pkg.right", "pkg.shared")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        assert.equal("4\n", read_file(counter))
+        local second_staged =
+            read_file(snapshots .. "/staged-4.a")
+        assert.not_equal(first_staged, second_staged)
+        assert.equal(
+            normalize_regular_archive_header_noise(first_staged),
+            normalize_regular_archive_header_noise(second_staged))
+        assert.equal(dso_bytes, read_file(dso))
+        assert.equal(archive_bytes, read_file(archive))
+        assert.same({
+            dso = dso_mtime,
+            archive = archive_mtime,
+        }, {
+            dso = lfs.attributes(dso, "modification"),
+            archive = lfs.attributes(archive, "modification"),
+        })
+        assert.equal(2, count_plain(read_file(ar_log), "reject-D\n"))
+        assert.equal(4,
+            count_plain(read_file(ar_log), "ordinary-success\n"))
+        assert.equal(2, count_plain(read_file(ranlib_log), "reject-D\n"))
+        assert.equal(4,
+            count_plain(read_file(ranlib_log), "ordinary-success\n"))
+        assert_provider_pair(workspace, "pkg", {
+            "pkg.left", "pkg.right", "pkg.shared",
+        })
+    end)
+
+    it("keeps the published pair when configured RANLIB always fails",
+       function()
+        local dso = workspace .. "/pkg.so"
+        local archive = workspace .. "/pkg.a"
+        local dso_bytes = read_file(dso)
+        local archive_bytes = read_file(archive)
+        local dso_mtime = assert(lfs.attributes(dso, "modification"))
+        local archive_mtime = assert(lfs.attributes(archive, "modification"))
+        local waited, wait_output = run({ "sleep", "2" }, workspace)
+        assert.truthy(waited, wait_output)
+        local failing_ranlib = workspace .. "/failing-ranlib"
+        write_file(failing_ranlib, "#!/bin/sh\nexit 73\n")
+        local executable, chmod_output =
+            run({ "chmod", "u+x", failing_ranlib }, workspace)
+        assert.truthy(executable, chmod_output)
+
+        local ok, output = compile_with_environment(
+            workspace, source_root, {
+                RANLIB = failing_ranlib,
+            }, "pkg.left", "pkg.right", "pkg.shared")
+        assert.falsy(ok, output)
+        assert.truthy(output:find(
+            "configured RANLIB supports neither -D nor ordinary mode",
+            1, true), output)
+        assert.equal(dso_bytes, read_file(dso))
+        assert.equal(archive_bytes, read_file(archive))
+        assert.equal(dso_mtime, lfs.attributes(dso, "modification"))
+        assert.equal(archive_mtime,
+            lfs.attributes(archive, "modification"))
+    end)
+
+    it("derives active-target mismatch from TITAN_EXTRA_CFLAGS alone",
+       function()
+        local patcher = workspace .. "/patch-target.lua"
+        write_file(patcher, [[
+local path = assert(arg[1])
+local input = assert(io.open(path, "rb"))
+local bytes = assert(input:read("*a"))
+assert(input:close())
+
+local magic = bytes:sub(1, 4)
+local offset
+local endian
+if magic == "\127ELF" then
+    local class = bytes:byte(5)
+    local encoding = bytes:byte(6)
+    offset = assert(class == 1 and 36 or class == 2 and 48 or nil)
+    endian = assert(encoding == 1 and "little" or
+        encoding == 2 and "big" or nil)
+elseif magic == "\206\250\237\254" or
+       magic == "\207\250\237\254" then
+    offset = 8
+    endian = "little"
+elseif magic == "\254\237\250\206" or
+       magic == "\254\237\250\207" then
+    offset = 8
+    endian = "big"
+else
+    error("unsupported generated object magic")
+end
+
+local position = offset + (endian == "little" and 1 or 4)
+bytes = bytes:sub(1, position - 1) ..
+    string.char(bytes:byte(position) ~ 1) ..
+    bytes:sub(position + 1)
+local output = assert(io.open(path, "wb"))
+assert(output:write(bytes))
+assert(output:close())
+]])
+        local marker = workspace .. "/patched-targets"
+        local wrapper = workspace .. "/target-selecting-cc"
+        write_file(wrapper, string.format([[#!/bin/sh
+marked=no
+compile=no
+next_output=no
+output=
+for argument in "$@"; do
+    if [ "$next_output" = yes ]; then
+        output=$argument
+        next_output=no
+    elif [ "$argument" = "-o" ]; then
+        next_output=yes
+    elif [ "$argument" = "-c" ]; then
+        compile=yes
+    elif [ "$argument" = "-DTITAN_TEST_ALTERNATE_TARGET=1" ]; then
+        marked=yes
+    fi
+done
+%s "$@"
+status=$?
+if [ "$status" -ne 0 ]; then exit "$status"; fi
+if [ "$marked" = yes ] && [ "$compile" = yes ] && [ -n "$output" ]; then
+    %s %s "$output" || exit $?
+    printf '%%s\n' "$output" >> %s
+fi
+exit 0
+]], quote_argv(configured_words(driver.CC)),
+            assert(cdriver.shell_quote(LUA)),
+            assert(cdriver.shell_quote(patcher)),
+            assert(cdriver.shell_quote(marker))))
+        local executable, chmod_output =
+            run({ "chmod", "u+x", wrapper }, workspace)
+        assert.truthy(executable, chmod_output)
+
+        write_file(source_root .. "/targetcheck.titan", [[
+local left = import "pkg.left"
+
+function read(): integer
+    return left.read()
+end
+]])
+        local environment = {
+            CC = wrapper,
+            TITAN_EXTRA_CFLAGS = "",
+        }
+        local ok, output, why, code = compile_with_environment(
+            workspace, source_root, environment,
+            "--static", "targetcheck")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        assert.is_nil(lfs.attributes(marker, "mode"))
+
+        environment.TITAN_EXTRA_CFLAGS =
+            "-DTITAN_TEST_ALTERNATE_TARGET=1"
+        ok, output = compile_with_environment(
+            workspace, source_root, environment,
+            "--static", "targetcheck")
+        assert.falsy(ok, output)
+        assert.truthy(output:find("target mismatch", 1, true), output)
+        assert.truthy(read_file(marker):find(
+            source_root .. "/targetcheck.o", 1, true))
+
+        local active, active_err = driver.derive_target_fingerprint(
+            source_root .. "/targetcheck.o", "targetcheck")
+        assert.truthy(active, active_err)
+        local provider, provider_err = staticmetadata.scan_archive(
+            workspace .. "/pkg.a", metadata_options())
+        assert.truthy(provider, provider_err)
+        local matches = staticmetadata.fingerprint_matches(
+            provider.members[1].fingerprint, active)
+        assert.is_false(matches)
     end)
 
     it("keeps logical module state independent while reusing the provider",

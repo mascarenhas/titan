@@ -183,14 +183,16 @@ source filename, so storing the canonical main gives the required output:
 | folder | `foo/bar/bar.titan` | `foo/bar/bar.c`, `foo/bar/bar.o` |
 
 Only one compile call is made, so contributors produce no standalone C,
-object, shared-library, or Lua-shim artifacts. In library mode the logical
-module's object joins the invocation-wide source union. A single `foo.bar`
-root derives exact provider `foo/bar.so`; several compatible roots may derive a
-shallower common provider. Either way exactly one generated shim represents
-logical `foo.bar`. The provider and program link paths ensure their output
-parent directories exist, so a dotted module under an external `--tree` does
-not depend on source-shaped directories already existing in the working
-directory.
+object, provider, or Lua-shim artifacts. In library mode the logical module's
+object joins the invocation-wide source union. A single `foo.bar` root derives
+the exact provider pair `foo/bar.so` and `foo/bar.a`; several compatible roots
+may derive a shallower common pair. Either way exactly one generated shim
+represents logical `foo.bar`. The provider and program link paths ensure their
+output parent directories exist, so a dotted module under an external
+`--tree` does not depend on source-shaped directories already existing in the
+working directory. Archive metadata still belongs to the one logical module
+object, never to its contributors; see [Static compiled
+modules](static-compiled-modules.md).
 
 Standalone entrypoint generation also remains logical-name based:
 `write_entrypoint("foo.bar")` writes `foo/bar__entrypoint.c` and embeds the
@@ -200,7 +202,8 @@ value is the cached executable path:
 - flat source: `foo/bar`;
 - folder source: `foo/bar__main`.
 
-`driver.compile_program` accepts that path as an optional final argument and
+`driver.compile_program` accepts that path as the optional `program_output`
+argument immediately before the trailing selected-static-archive list, and
 defaults to the old dotted-name mapping for existing callers and
 `tableloader`. `titanc` and filesystem-based child compilers pass the cached
 `program_output`. The `__main` sibling avoids colliding with the folder
@@ -258,18 +261,21 @@ roots:
 
 ```sh
 titanc titan.coroutine titan.uv titan.async titan.timer titan.fs titan.net titan.os \
-  -X titan-runtime/titanlib.o
+  -X titan-runtime/titanlib.o libuv-build/libuv.a  # bundled mode
 ```
 
 Generated `titan/uv/uv.c` and `titan/uv/uv.o` are build artifacts and are
-removed by `make clean`. No contributor DSO or contributor shim is built or
-installed. The one logical `titan.uv` object, its one generated `titan/uv.lua`
-shim, and the other six logical standard modules reside in physical
-`titan.so`. Bundled mode makes that image the sole complete statically linked
-libuv provider; system mode records the configured dynamic dependency on the
-same image. Higher `async`/`timer`/`fs`/`net`/`os` modules still import the
-independent logical `titan.uv` protocol, but their calls are direct because all
-seven source roots are linked together.
+removed by `make clean`. No contributor DSO, archive, or contributor shim is
+built or installed. The one logical `titan.uv` object, its one generated
+`titan/uv.lua` shim, and the other six logical standard modules reside in the
+physical `titan.so`/`titan.a` pair. Bundled mode supplies the private libuv
+archive as shared `-X` payload, so its members enter both provider forms;
+system mode repeats the configured final-link setting for the DSO and does not
+copy it into `titan.a` (and omits `libuv-build/libuv.a` from the command).
+That setting may itself select a shared or static system library. Higher
+`async`/`timer`/`fs`/`net`/`os` modules still import
+the independent logical `titan.uv` protocol, but their calls are direct
+because all seven source roots are linked together.
 
 The late-filesystem-callback test variant reuses the production folder-source
 ensemble but deliberately not its provider layout. Its support code copies the

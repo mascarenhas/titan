@@ -654,7 +654,8 @@ raw Lua traceback lines plus raw `execinfo` C frames.
 
 The retrieval side is the bare `titan` Lua support entry: Make compiles
 `titan-runtime/titanlib.c` into `titanlib.o`, links that object alone into the
-private bootstrap and once into the full standard `titan.so`.
+private bootstrap, and carries it once into each form of the full standard
+`titan.so`/`titan.a` provider pair.
 `titan.backtrace()` rawgets that
 registry key. The same test-support module exposes internal `pin` and `clear`
 helpers; none of these functions is part of `libtitan.a`.
@@ -673,13 +674,16 @@ chapter](../language/error-handling.md).
 When exactly one requested module defines `main(args: {string}):
 integer`, `driver.compile_program` emits a srlua-derived C entrypoint
 (`entrypoint_template` in `driver.lua`) and links it with all source module
-objects and the active runtime SDK. Installed mode uses `libtitan.a`, the
-separate `libbacktrace.a`, and the matching `liblua.a` from the Titan
-SDK/rocks-tree root; checkout mode uses the same archive contract with local
-`libtitan.a`, separate local `libbacktrace.a`, and local `liblua.a`. Generic
-module and program links do not receive libuv; the combined standard
-`titan.so` build alone receives the private bundled archive (or system libuv
-through ordered pkg-config link flags). The bundled archive is not installed in the SDK;
+objects, selected static providers, caller `-X` inputs, and the active runtime
+SDK. Installed mode uses `libtitan.a`, the separate `libbacktrace.a`, and the
+matching `liblua.a` from the Titan SDK/rocks-tree root; checkout mode uses the
+same archive contract with local `libtitan.a`, separate local
+`libbacktrace.a`, and local `liblua.a`. Generic links do not receive libuv
+merely from the SDK, but selecting bundled standard `titan.a` carries its
+private libuv payload into an executable. The combined standard build receives
+that private archive as payload in both `titan.so` and `titan.a`; system mode
+instead repeats ordered pkg-config link flags at final link and never copies
+them into `titan.a`. The private bundled archive is not installed in the SDK;
 bundled-mode extension DSOs leave their `uv_*` calls unresolved:
 
 * **Preload registration, not eager loading.** The C `main` creates a
