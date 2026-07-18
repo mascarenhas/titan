@@ -174,7 +174,8 @@ jobs:
             "$PREFIX/bin/busted" -o gtest -v spec/rockspec_spec.lua \
               --name='standalone-prefix source installation installs one matching Lua and Titan SDK before the standard images' \
               --name='standalone-prefix source installation loads direct libuv calls lazily for Titan and explicitly for Lua'
-          bash spec/support/ci_libuv_mode_smoke.sh system
+          TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE="$GITHUB_WORKSPACE/libuv-build/libuv.a" \
+            bash spec/support/ci_libuv_mode_smoke.sh system
 
       - name: Upload prepared Linux tree
         uses: actions/upload-artifact@v7
@@ -364,7 +365,9 @@ jobs:
       # against the platform package; the job can end in system mode without
       # another build.
       - name: Smoke-test bundled and system libuv modes
-        run: bash spec/support/ci_libuv_mode_smoke.sh
+        run: |
+          TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE="$GITHUB_WORKSPACE/libuv-build/libuv.a" \
+            bash spec/support/ci_libuv_mode_smoke.sh
 
   # Keep the focused native-memory release gate on one warm 1-core runner.
   # Full library behavior suites belong to regular Linux: recompiling them

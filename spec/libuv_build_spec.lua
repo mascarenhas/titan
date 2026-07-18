@@ -1105,6 +1105,8 @@ printf 'build\n' >> %s
             "system.exepath()",
             '"$LIBUV_PKG_CONFIG" --static --libs libuv',
             '"$libdir/libuv.a" "$libdir/libuv_a.a"',
+            "TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE",
+            "must name an absolute regular nonlink file",
             "driver.compile_archive_validation_image(",
             "build_static_system_provider_image",
             'if ! defines_uv_version "$static_provider"',
@@ -1121,6 +1123,9 @@ printf 'build\n' >> %s
             'static_archive="${provider%.so}.a"', 1, true), workflow)
         assert.truthy(workflow:find(
             "ci_libuv_mode_smoke.sh system", 1, true), workflow)
+        assert.equal(2, select(2, workflow:gsub(
+            'TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE=' ..
+            '"%$GITHUB_WORKSPACE/libuv%-build/libuv[.]a"', "")))
         assert.truthy(workflow:find(
             "--name='standalone-prefix source installation installs one " ..
                 "matching Lua and Titan SDK before the standard images'",

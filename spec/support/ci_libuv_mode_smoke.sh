@@ -29,6 +29,16 @@ PROVIDER="$ABI_ROOT/titan.so"
 STATIC_ARCHIVE="$ABI_ROOT/titan.a"
 PROCESS_CHILD_SUPPLIED=${TITAN_PROCESS_SMOKE_CHILD:+1}
 LIBUV_PKG_CONFIG=${LIBUV_PKG_CONFIG:-pkg-config}
+STATIC_SYSTEM_LIBUV_ARCHIVE=${TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE:-}
+
+if [[ -n $STATIC_SYSTEM_LIBUV_ARCHIVE ]]; then
+    if [[ $STATIC_SYSTEM_LIBUV_ARCHIVE != /* ||
+          ! -f $STATIC_SYSTEM_LIBUV_ARCHIVE ||
+          -L $STATIC_SYSTEM_LIBUV_ARCHIVE ]]; then
+        echo "TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE must name an absolute regular nonlink file" >&2
+        exit 2
+    fi
+fi
 
 test -x "$LUA"
 test -x "$TITANC"
@@ -198,19 +208,23 @@ system_libuv_flags() {
         system_ldflags=$("$LIBUV_PKG_CONFIG" --libs libuv)
     elif [[ $linkage == static ]]; then
         # `pkg-config --static` adds private dependencies but an ordinary
-        # `-luv` still lets the linker prefer a DSO. Select the development
-        # package's archive explicitly so this is a deliberately static
-        # system setting rather than an assumption about linker defaults.
-        libdir=$("$LIBUV_PKG_CONFIG" --variable=libdir libuv)
-        static_archive=
-        for candidate in "$libdir/libuv.a" "$libdir/libuv_a.a"; do
-            if [[ -f $candidate && ! -L $candidate ]]; then
-                static_archive=$candidate
-                break
-            fi
-        done
+        # `-luv` still lets the linker prefer a DSO. Select an explicit
+        # archive while retaining the package's private dependencies. Official
+        # CI supplies a known-PIC archive for the provider-DSO proof; a clean
+        # installed-prefix invocation needs only its host archive for the
+        # executable proof and has no checkout-local dependency.
+        static_archive=$STATIC_SYSTEM_LIBUV_ARCHIVE
         if [[ -z $static_archive ]]; then
-            echo "system libuv development package has no regular static archive in $libdir" >&2
+            libdir=$("$LIBUV_PKG_CONFIG" --variable=libdir libuv)
+            for candidate in "$libdir/libuv.a" "$libdir/libuv_a.a"; do
+                if [[ -f $candidate && ! -L $candidate ]]; then
+                    static_archive=$candidate
+                    break
+                fi
+            done
+        fi
+        if [[ -z $static_archive ]]; then
+            echo "no regular static libuv archive is available for the explicit system-mode setting" >&2
             exit 1
         fi
 
@@ -277,6 +291,10 @@ build_process_child() {
 build_static_system_provider_image() {
     local mode_dir="$SMOKE_TMP/system-static-provider"
     local static_provider="$mode_dir/titan.so"
+    if [[ -z $STATIC_SYSTEM_LIBUV_ARCHIVE ]]; then
+        echo "RESULT static system provider smoke skipped (no explicit PIC archive)"
+        return
+    fi
     mkdir -p "$mode_dir"
     system_libuv_flags static
 
