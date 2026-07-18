@@ -4388,61 +4388,90 @@ function checker.has_main(ast)
 end
 
 -- Walk a recovered interface type and, for every Nominal that names a record of
--- *another* module which is not yet registered, recover that module so its
--- record definition registers too. This makes record types resolve transitively
--- across `.so`-only imports (a module's interface may return/accept a record
--- defined in a module it imported but that this importer does not import
--- directly). `seen` guards against revisiting a type and against cycles; the
--- registry itself is the cross-call memo. Load failures are ignored — the
--- nominal simply stays unresolved, exactly as before this pass existed.
-local function register_referenced_records(t, loader, seen)
+-- *another* module, recover that module so its record definition and its own
+-- referenced records register too. This makes record types resolve
+-- transitively across compiled-only imports (a module's interface may
+-- return/accept a record defined in a module it imported but that this
+-- importer does not import directly). `seen` guards one interface's type
+-- graph; `interface_seen` guards the recursive module graph while preserving
+-- the original physical exposer. Load failures are ignored — the nominal
+-- simply stays unresolved, exactly as before this pass existed.
+local function register_referenced_records(
+        t, loader, seen, exposing_module, interface_seen)
     if type(t) ~= "table" or not t._tag or seen[t] then return end
     seen[t] = true
     local tag = t._tag
     if tag == "Type.Nominal" then
-        if not types.registry[t.fqtn] then
-            local mod = t.fqtn:match("^(.*)%.[^.]+$")
-            if mod and mod ~= "" then
-                pcall(checker.checkimport, mod, loader)
+        local mod = t.fqtn:match("^(.*)%.[^.]+$")
+        if mod and mod ~= "" then
+            -- One recovered interface can mention several distinct records
+            -- from the same owner. Native provenance is an owner/exposer
+            -- relation, so recovering it more than once only repeats loader
+            -- work and can produce duplicate observable loads for callers.
+            local owner_key = "\0nominal-owner:" .. mod
+            if not seen[owner_key] then
+                seen[owner_key] = true
+                local request = {
+                    kind = "nominal-owner",
+                    exposer = exposing_module,
+                    interface_seen = interface_seen,
+                }
+                -- A previously registered nominal still needs its complete
+                -- interface replayed for this exposer. `interface_seen`
+                -- terminates cyclic nominal graphs without dropping nested
+                -- native-provenance edges.
+                pcall(checker.checkimport, mod, loader, request)
             end
         end
     elseif tag == "Type.Array" then
-        register_referenced_records(t.elem, loader, seen)
+        register_referenced_records(
+            t.elem, loader, seen, exposing_module, interface_seen)
     elseif tag == "Type.Map" then
-        register_referenced_records(t.keys, loader, seen)
-        register_referenced_records(t.values, loader, seen)
+        register_referenced_records(
+            t.keys, loader, seen, exposing_module, interface_seen)
+        register_referenced_records(
+            t.values, loader, seen, exposing_module, interface_seen)
     elseif tag == "Type.Option" then
-        register_referenced_records(t.base, loader, seen)
+        register_referenced_records(
+            t.base, loader, seen, exposing_module, interface_seen)
     elseif tag == "Type.ModuleMember" or tag == "Type.ModuleVariable" then
-        register_referenced_records(t.type, loader, seen)
+        register_referenced_records(
+            t.type, loader, seen, exposing_module, interface_seen)
     elseif tag == "Type.Function" or tag == "Type.Method"
            or tag == "Type.StaticMethod" then
         for _, p in ipairs(t.params or {}) do
-            register_referenced_records(p, loader, seen)
+            register_referenced_records(
+                p, loader, seen, exposing_module, interface_seen)
         end
         for _, r in ipairs(t.rettypes or {}) do
-            register_referenced_records(r, loader, seen)
+            register_referenced_records(
+                r, loader, seen, exposing_module, interface_seen)
         end
         if t.varargtype then
-            register_referenced_records(t.varargtype, loader, seen)
+            register_referenced_records(
+                t.varargtype, loader, seen, exposing_module, interface_seen)
         end
         if t.flexrettype then
-            register_referenced_records(t.flexrettype, loader, seen)
+            register_referenced_records(
+                t.flexrettype, loader, seen, exposing_module, interface_seen)
         end
     elseif tag == "Type.Record" then
         for _, f in ipairs(t.fields or {}) do
             if not f.islocal then
-                register_referenced_records(f.type, loader, seen)
+                register_referenced_records(
+                    f.type, loader, seen, exposing_module, interface_seen)
             end
         end
         for _, fn in pairs(t.functions or {}) do
             if not fn.islocal then
-                register_referenced_records(fn, loader, seen)
+                register_referenced_records(
+                    fn, loader, seen, exposing_module, interface_seen)
             end
         end
         for _, method in pairs(t.methods or {}) do
             if not method.islocal then
-                register_referenced_records(method, loader, seen)
+                register_referenced_records(
+                    method, loader, seen, exposing_module, interface_seen)
             end
         end
     end
@@ -4510,9 +4539,21 @@ local function first_local_record_type(typ, seen)
     end
 end
 
-function checker.checkimport(modname, loader)
-    local ok, type_or_error, errors = loader(modname)
-    if not ok then return nil, type_or_error end
+function checker.register_module_interface(
+        modname, type_or_error, loader, exposer, interface_seen)
+    exposer = exposer or modname
+    interface_seen = interface_seen or {}
+    local exposer_key
+    if type(exposer) == "table" then
+        exposer_key = exposer.static_archive or exposer.filename or
+            exposer.name or tostring(exposer)
+    else
+        exposer_key = tostring(exposer)
+    end
+    local interface_key = exposer_key .. "\0" .. modname
+    if interface_seen[interface_key] then return end
+    interface_seen[interface_key] = true
+
     for _, member in ipairs(type_or_error.members) do
         -- Exported records arrive wrapped in a Type.ModuleMember; unwrap so
         -- the record's nominal type is registered for `.so`-only imports too
@@ -4524,11 +4565,21 @@ function checker.checkimport(modname, loader)
     end
     local seen = {}
     for _, member in ipairs(type_or_error.members) do
-        register_referenced_records(member.type or member, loader, seen)
+        register_referenced_records(
+            member.type or member, loader, seen, exposer, interface_seen)
     end
     for _, member in pairs(type_or_error.type_members or {}) do
-        register_referenced_records(member, loader, seen)
+        register_referenced_records(
+            member, loader, seen, exposer, interface_seen)
     end
+end
+
+function checker.checkimport(modname, loader, request)
+    local ok, type_or_error, errors = loader(modname, request)
+    if not ok then return nil, type_or_error end
+    checker.register_module_interface(
+        modname, type_or_error, loader, request and request.exposer,
+        request and request.interface_seen)
     return type_or_error, errors
 end
 

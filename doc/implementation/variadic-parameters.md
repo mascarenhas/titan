@@ -559,10 +559,12 @@ reuse these descriptors but add `flexrettype` to serialized callable shapes and
 `_flexout`/`_flexwant` to native signatures. They shipped as ABI 0.14 rather
 than accepting both layouts under one marker.
 
-The `.so`-only import path round-trips `varargtype` through serialize and is
-covered by `spec/coder/so_import_spec.lua` and
-`spec/checker/so_rehydration_spec.lua`. `spec/abi_spec.lua` pins the current
-compiler/runtime ABI constants.
+Compiled-interface import paths round-trip `varargtype` through the same
+serialization, whether recovered from DSO callables or an archive metadata
+section. The DSO path remains covered by `spec/coder/so_import_spec.lua` and
+`spec/checker/so_rehydration_spec.lua`; static compiled-module suites cover the
+archive path. `spec/abi_spec.lua` pins the current compiler/runtime ABI
+constants.
 
 ## GC discipline: descriptor pointers and untraced payloads
 

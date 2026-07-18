@@ -439,30 +439,30 @@ record-member visibility — is described in [Records](records.md).
 
 ## Standalone programs: `main`
 
-A Titan module is normally compiled into a shared-library provider that Lua
-(or another Titan module) loads through the module's logical entry. A module
-that declares a function with this exact signature instead marks the program
-entry point:
+A Titan module is normally compiled into a paired shared/static provider. Lua
+loads the DSO through the module's logical entry, while another Titan module
+may select either provider form. A module that declares a function with this
+exact signature instead marks the program entry point:
 
 ```lua
 function main(args: {string}): integer
 ```
 
 When `titanc` is given a set of modules and exactly one of them has such
-a `main`, it produces a standalone executable instead of a shared-library
-provider. A flat module's executable is named after the module (dots in the
+a `main`, it produces a standalone executable instead of a library provider
+pair. A flat module's executable is named after the module (dots in the
 module name become directory separators). A
 [folder module](folder-modules.md#generated-artifacts) adds `__main` to that
 path so the executable cannot collide with the source directory. Both forms
-statically embed all the requested modules plus every imported module whose
-source is available;
-imports available only as compiled `.so` files are loaded dynamically at
-startup, their interface recovered from the compiled module. See
+statically embed all the requested modules plus every imported module selected
+from source or a static provider. Imports selected from compiled `.so` files
+are loaded dynamically at startup; both compiled forms recover the same public
+interface metadata. See
 [Modules](modules.md) for the compilation model.
 
 ```sh
 ./titanc answer        # answer.titan declares main -> executable ./answer
-./titanc pkg.foo pkg.bar # neither has main -> pkg.so plus two Lua loaders
+./titanc pkg.foo pkg.bar # neither has main -> pkg.so/pkg.a plus two Lua loaders
 ```
 
 Library roots must share at least one dotted component; use separate compiler

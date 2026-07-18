@@ -45,10 +45,12 @@ function signatures, variables, and public record members.
 * `type_members` maps exported alias names directly to their resolved targets.
 
 The two maps are serialized independently and deterministically by
-`types.serialize`. A `.so`-only importer therefore rehydrates a transparent
-alias with the same nominal record name and structural component types, without
-inventing a run-time member. Adding this third serialized `Module` component is
-an interface ABI change, so this feature advances `TITAN_VER` to 0.12.
+`types.serialize`. A compiled-interface importer therefore rehydrates a
+transparent alias with the same nominal record name and structural component
+types, whether the interface came from DSO callables or an archive metadata
+section, without inventing a run-time member. Adding this third serialized
+`Module` component was an interface ABI change, so this feature advanced
+`TITAN_VER` to 0.12.
 
 `checker.checkimport` recursively registers records reachable through both
 namespaces. This matters when the alias is the only exported reference to a

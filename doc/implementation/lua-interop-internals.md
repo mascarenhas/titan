@@ -581,9 +581,10 @@ Lua, so both the private bootstrap and full `titan.so` are link-complete under
 eager load. A second Lua state repeats its own cache insertion and promotion
 request while the operating-system loader may reuse the mapped image.
 
-The installed standard layout has one provider at
-`<root>/lib/titan/0.16/titan.so` and seven generated shims below
-`<root>/share/lua/5.5/titan/`. A direct-libuv extension explicitly imports
+The installed standard layout has paired providers at
+`<root>/lib/titan/0.16/{titan.so,titan.a}` and seven generated shims below
+`<root>/share/lua/5.5/titan/`; the shims use the DSO form. A direct-libuv
+extension explicitly imports
 `uv` and foreign-imports `uv.h`; Titan runtime initialization loads the
 combined provider before lazy function calls bind. A Lua caller loads
 `titan.uv` first through its generated shim. The shim route globalizes the
@@ -598,7 +599,7 @@ the reinitialization branch that re-stitches pointers when the same module code
 is present twice in a process, and its `#loadmods > 1` quirk that can leave that
 branch empty. The complete wiring is in the [code generator
 overview](codegen-overview.md#static-vs-dynamic-dependency-wiring), and the
-provider claim/search rules are in [Multi-module shared
+provider claim/search rules are in [Multi-module
 libraries](multi-module-libraries.md#compiled-module-candidate-search).
 
 ## The error handler and `titan.backtrace()`

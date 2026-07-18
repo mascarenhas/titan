@@ -28,7 +28,7 @@ one C translation unit per logical module
    │  driver.compile           (driver.lua — writes .c next to the canonical
    │                            flat source or folder main and invokes cc)
    ▼
-object files ──► one common-prefix provider.so + generated Lua shims
+object files ──► one common-prefix provider.so/provider.a + generated Lua shims
              └─► driver.compile_program → executable (when a main() exists)
 ```
 
@@ -76,7 +76,8 @@ Two facts shape everything downstream of the checker:
 | [Lua C API FFI follow-up](ffi-lua-api-followup.md) | Preliminary notes for a later design pass on calling the Lua C API through the C FFI. This is not part of FFI v1. |
 | [Driver and toolchain](driver.md) | `driver.lua`, `titanc`, the runtime support library (`titan-runtime/`), `pretty.lua`, `util.lua`, and every default path and flag. |
 | [Folder modules](folder-modules.md) | Tagged flat/folder source resolution, independent parsing into one dense AST, shared checking/codegen identity, deterministic ordering, artifacts, and the `titan.uv` source ensemble. |
-| [Multi-module shared libraries](multi-module-libraries.md) | Prefix-container discovery, strict ABI/types membership claims, transient `Type.Module.file`, one-object-per-module linking, generated Lua shims, the lazy/global support helper, and combined-standard-library publication. |
+| [Multi-module libraries](multi-module-libraries.md) | Prefix-container discovery, strict DSO ABI/types membership claims, transient `Type.Module.file`, one-object-per-module linking, generated Lua shims, the lazy/global support helper, and paired standard-library publication. |
+| [Static compiled modules](static-compiled-modules.md) | Canonical object-section metadata, bounded ar/ELF/Mach-O/fat parsing, static-provider resolution and native provenance, deterministic archive flattening, three-way protocol validation, and paired publication. |
 
 ## Lua-version migration reports
 
@@ -119,9 +120,9 @@ cause.
 | Path | What it is |
 | --- | --- |
 | `titanc` | The compiler CLI. |
-| `titan-compiler/` | The compiler proper: `lexer`, `parser`, `syntax_errors`, `ast`, `typedecl`, `checker`, `types`, `symtab`, `coder`, `pretty`, `driver`, `foreigntypes`, `location`, `util`. |
+| `titan-compiler/` | The compiler proper: `lexer`, `parser`, `syntax_errors`, `ast`, `typedecl`, `checker`, `types`, `symtab`, `coder`, `pretty`, `driver`, `staticmetadata`, `foreigntypes`, `location`, `util`. |
 | `c-parser/` | The pure-Lua C preprocessor and C99 parser behind `foreign import`. |
-| `titan/` | Titan standard-library sources. They are seven independent qualified `titan.*` modules linked together into the physical `titan.so`; `titan.uv` dogfoods the folder ensemble rooted at `titan/uv/uv.titan`. The generated `titan/*.lua` files are logical-module shims, not sources. |
+| `titan/` | Titan standard-library sources. They are seven independent qualified `titan.*` modules linked together into the physical `titan.so` and `titan.a`; `titan.uv` dogfoods the folder ensemble rooted at `titan/uv/uv.titan`. The generated `titan/*.lua` files are logical-module shims, not sources. |
 | `titan-runtime/` | `titan.h`/`titan.c` (`RTLD_LAZY` + `RTLD_GLOBAL` generated-import loader and error handler), `titan_coro.c`, and `titan_uv.c`, whose three objects are the exact members of `libtitan.a`; separate vendored `libbacktrace.a`; `titanlib.c`, linked into the full standard `titan.so` and separately into the private bootstrap, exposing `backtrace`, internal `pin`/`clear`, compiler-local `_loadlib`, and shim-facing `_loadlibglobal`; `minicoro.h`, `titan_longjmp.h`, and the namespaced `titan/{ffi,coro,uv}.h` SDK headers. |
 | `spec/` | The busted test suite; `coder_spec.lua` is end-to-end (generates, compiles and runs C). |
 | `examples/`, `testfiles/` | Manual benchmark/demo material (not used by the suite). |

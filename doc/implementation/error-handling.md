@@ -361,8 +361,10 @@ those canonical closure slots with the old order.
 
 ABI 0.16 keeps the callable and serialized-type shapes again, but changes the
 physical provider contract: compiled lookup may select a prefix container and
-the standard library is one `titan.so` plus logical-module shims. A 0.15
-runtime hard-codes exact module DSOs and cannot discover that layout.
+the standard library's dynamic form is one `titan.so` plus logical-module
+shims. A 0.15 runtime hard-codes exact module DSOs and cannot discover that
+layout. The later self-describing `titan.a` repeats the same ABI/types
+protocol, so paired static providers do not require another ABI bump.
 
 The compiler and runtime therefore agree on:
 
@@ -374,11 +376,12 @@ The compiler and runtime therefore agree on:
   that path also names the equal Titan `ROCKS_TREE`
 
 Every generated module also exports `<mangled>_abi`, a Lua C function
-returning `TITAN_VER`. The compiler's `.so`-only rehydration path checks
-that marker before trusting `<mangled>_types`, and generated dynamic
-imports call `titan_check_abi` after `loadlib` and before `dlsym`ing
-native entries. Missing marker means "old module" and is rejected; this
-protects the unversioned `.` component of the default path from silently
+returning `TITAN_VER`. DSO rehydration checks that marker before trusting
+`<mangled>_types`, and generated dynamic imports call `titan_check_abi` after
+`loadlib` and before `dlsym`ing native entries. Static-provider rehydration
+checks the same ABI value in the canonical embedded metadata before decoding
+its types. A missing DSO marker or missing exact archive entry is rejected;
+this protects the unversioned `.` component of the default path from silently
 loading stale build artifacts.
 
 `spec/abi_spec.lua` pins the compiler/runtime agreement and rejection of

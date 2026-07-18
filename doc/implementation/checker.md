@@ -161,7 +161,7 @@ public interfaces.
 See [Type aliases](type-aliases.md) for the resolution and interface details.
 
 `checker.has_main(ast)` is a post-check used by `titanc` to decide between
-building a shared library and a standalone executable: it looks for a
+building a paired library provider and a standalone executable: it looks for a
 `TopLevelFunc` named `main` with exactly one parameter whose checker type is
 `{string}` and one return type whose checker type is `integer`. Both the input
 vararg and flexible-result tail must be absent. Resolving the fixed types before
@@ -768,7 +768,7 @@ error list. `checkimport` then walks both the value `members` and alias
 imported record into `types.registry`: it unwraps the `Type.ModuleMember`
 wrapper and, when the underlying type is a `Type.Record` (or
 `Type.Interface`), stores it under its fqtn. This is what makes a record
-imported from a `.so`-only dependency — one with no `.titan` source to
+imported through a compiled interface — one with no `.titan` source to
 re-check — usable by nominal type. For a dependency *with* source the same
 registration also happens as a side effect of the dependency's own
 `checker.check`, which the loader runs recursively: the `TopLevelRecord`
@@ -786,10 +786,12 @@ Two real loaders exist in `driver.lua`:
   cycles by planting a `CIRCULAR_MARK` sentinel in the cache before recursing
   (a re-entry finds the mark and fails with `circular reference to module`).
   Dependencies with flat or folder source are recursively parsed and checked
-  once per logical module.
-  `.so`-only dependencies recover their interface by loading the compiled
-  module's `<mangled>_types` symbol — a string of nested constructor calls
-  produced by `types.serialize` — and evaluating it with
+  once per logical module. Compiled dependencies run the invocation's complete
+  DSO/archive preference passes before source. A DSO recovers its interface
+  from the callable `<mangled>_types`; a static provider recovers the same
+  serialized bytes from its validated per-object metadata section. Both are
+  strings of nested constructor calls produced by `types.serialize` and are
+  evaluated with
   `load("return " .. s, modname, "t", types)`, the `types` module itself
   serving as the environment. C FFI types are *not* serializable
   (`types.serialize` raises on any type tree containing one), so imported C

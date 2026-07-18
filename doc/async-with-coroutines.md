@@ -599,11 +599,12 @@ coroutine transfer.
 Build `titan/coroutine.titan` as the ordinary qualified logical Titan module
 `titan.coroutine`. The combined standard binary exports `titan_coroutine_init`,
 `titan_coroutine_abi`, `titan_coroutine_types`, and
-`luaopen_titan_coroutine`. Install the one physical standard provider as
-`<root>/lib/titan/0.16/titan.so` and the generated logical shim as
+`luaopen_titan_coroutine`. Install the paired physical standard provider as
+`<root>/lib/titan/0.16/{titan.so,titan.a}` and the generated logical shim as
 `<root>/share/lua/5.5/titan/coroutine.lua`. Titan's configured module path
 contains `<root>/lib/titan/0.16`; the parser desugars `import "coroutine"` to
-that qualified identity and prefix lookup claims it from `titan.so`.
+that qualified identity and prefix lookup claims it from the preferred native
+form.
 `require "titan.coroutine"` uses the shim to promote/map that provider and
 invoke the exact logical entry. Do not install a child DSO or alias/copy as
 a parent-level `coroutine.so` or a `lib/lua` DSO, and do not export a bare
@@ -614,10 +615,11 @@ uses `require "titan.coroutine"`. The bare Lua name `coroutine` remains
 owned by Lua's standard library.
 
 The rockspec and Makefile make `luarocks make` and `make test` build all seven
-logical standard modules in one `titan.so` plus generated shims, together with
-the shared runtime archive containing the coroutine helper C object and
-vendored minicoro implementation. Static archive selection extracts
-`titan_coro.o` into that image because `titan.coroutine` references it.
+logical standard modules in paired `titan.so`/`titan.a` providers plus
+generated shims, together with the shared runtime archive containing the
+coroutine helper C object and vendored minicoro implementation. A final native
+link extracts `titan_coro.o` from the runtime archive because
+`titan.coroutine` references it.
 
 Avoid semantic mutable process-global state in runtime or generated code. The
 fixed Titan tag comparator is a compile-time constant, while current-coroutine
@@ -630,8 +632,10 @@ the two TSan fiber fields likewise exist only in TSan builds. Ordinary builds
 carry none of that sanitizer-only storage. All translation units that share
 these public minicoro layouts use the same sanitizer flags.
 `mco_coro->user_data` is only a non-rooting raw back-pointer to that owner.
-Titan and Lua enter the combined canonical `titan.so`; that DSO is the sole
-native owner, while each Lua state retains its own module-local runtime.
+In dynamic-provider use, Titan and Lua enter the combined canonical
+`titan.so`; that DSO is the sole native owner in the process, while each Lua
+state retains its own module-local runtime. A `--static` executable instead
+links the same logical module from `titan.a` without loading that provider DSO.
 
 Titan's vendored minicoro should not include the Binaryen
 `MCO_USE_ASYNCIFY` backend: its unwind/rewind model does not implement

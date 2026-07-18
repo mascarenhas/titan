@@ -417,10 +417,10 @@ return test_Point_getx_titanmethod(L, _mod, NULL, _param_p);
 (naming: `<mangled-fqtn>_<name>_titanmethod` / `..._titanstatic`).
 Cross-module calls are still direct C calls — the caller holds the
 target module's `Udata` in one of its own user values and passes
-`uvalue(&_mod->uv[i].uv)` as the callee's `_mod`; statically linked
-dependencies become `extern` prototypes, while `.so`-only dependencies
-become `static` **function pointers** stitched in `_init` from the
-dlopened library:
+`uvalue(&_mod->uv[i].uv)` as the callee's `_mod`; dependencies selected from
+source or a static provider become `extern` prototypes, while dependencies
+selected from a DSO become `static` **function pointers** stitched in `_init`
+from the dlopened library:
 
 ```c
 static lua_Integer (*dep_mk_titan)(lua_State *L, Udata *_mod, CClosure *_fn, lua_Integer);

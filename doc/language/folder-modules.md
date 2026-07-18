@@ -235,9 +235,10 @@ semantic contributor implementations; contributor exports are ordinary
 `titan.uv` members. These files are one logical module and therefore produce
 one object and one `titan/uv.lua` loader, never one artifact per contributor.
 The production standard-library invocation links that object with the other
-six `titan.*` roots into the canonical `titan.so` provider. Both Titan imports
-and Lua `require "titan.uv"` select the independent `titan.uv` logical module
-inside that image; no contributor is a separately loadable module.
+six `titan.*` roots into the canonical `titan.so`/`titan.a` provider pair.
+Titan imports select the preferred compiled form, while Lua
+`require "titan.uv"` selects the independent `titan.uv` logical module inside
+the DSO; no contributor is a separately loadable module.
 
 See [Modules](modules.md) for imports, module state, and the general
 compilation model. The compiler-side assembly and artifact rules are detailed

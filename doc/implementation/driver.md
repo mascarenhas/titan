@@ -1,7 +1,7 @@
 # Driver and toolchain
 
 This chapter covers everything from resolving source/compiled modules through
-producing a `.so` or executable: `titan-compiler/driver.lua` (module lookup, the
+producing a `.so`/`.a` pair or executable: `titan-compiler/driver.lua` (module lookup, the
 import loader, C compilation and linking), the `titanc` command-line
 front end, the two small utility modules the whole compiler leans on
 (`pretty.lua` and `util.lua`), and the C runtime-support library in
@@ -12,14 +12,18 @@ default path and flag closes the chapter.
 
 Module lookup deals in dot-separated **module names**, never file paths.
 Binary lookup maps a logical name to every shallow-to-exact provider
-candidate. For `a.b.c`, those are `a.so`, `a/b.so`, and `a/b/c.so`. It walks
-search roots from left to right and candidates from shallowest to exact within
-each root. Once an earlier root contains a relative candidate, that pathname
-is occupied and shadows the same relative pathname in later roots even when
-its metadata does not claim the requested module. Missing files remain
-available in later roots. See [Multi-module shared
+candidate. For `a.b.c`, those are `a.so`, `a/b.so`, and `a/b/c.so`, plus the
+corresponding `.a` names. It performs one complete format pass at a time
+(`.so` then `.a`, swapped by `--static`), walking search roots from left to
+right and candidates from shallowest to exact within a pass. Once an earlier
+root contains a relative candidate, that pathname is occupied for its format
+and shadows the same relative pathname in later roots even when its metadata
+does not claim the requested module. Missing files remain available in later
+roots. See [Multi-module shared
 libraries](multi-module-libraries.md#compiled-module-candidate-search) for
-the ABI/types claim state machine.
+the DSO ABI/types claim state machine and [Static compiled
+modules](static-compiled-modules.md) for the archive reader and shared
+invocation-wide resolver state.
 
 Source lookup has a separate tagged resolver because a logical module may be
 flat or a [folder module](folder-modules.md). For logical name `M`, slash path
@@ -44,7 +48,8 @@ All modules, including the standard library, use the same two path strings:
 
 * **`driver.TITAN_SOURCE_PATH`** — where `.titan` sources live. Default
   `"."`; `titanc --tree <root>` overrides it.
-* **`driver.TITAN_BIN_PATH`** — where compiled provider `.so` files live.
+* **`driver.TITAN_BIN_PATH`** — where compiled provider `.so` and `.a` files
+  live.
   `TITAN_PATH_0_16` wins over `TITAN_PATH`; with neither set, installed mode
   uses `".;" .. root .. "/lib/titan/0.16"`.
 
@@ -359,7 +364,16 @@ only the fixed defaults and extra linker flags. This prevents warning,
 language, and code-generation-only options from leaking into the final
 link while preserving feature macros for the generated entrypoint.
 
-## Linking a shared library: `driver.compile_library_output`
+## Linking a provider pair
+
+Library mode uses `driver.compile_library_output` for the staged DSO and the
+archive helpers described in [Static compiled
+modules](static-compiled-modules.md#native-composition) for the matching
+self-describing `.a`. Both artifacts contain the same logical source/archive
+membership; the archive additionally preserves metadata-free native `-X`
+payload byte-for-byte.
+
+### `driver.compile_library_output`
 
 `driver.compile_library_output(soname, objects, link, verbose,
 extra_objects)` links an explicitly named output from the complete logical
@@ -520,22 +534,34 @@ or more dot-separated module names. `--tree` overrides
 `liblua.a`, and `libtitan.a` remain a matched SDK. `-v` prints every `cc`
 command line, `--print-ast` dumps each module's
 AST after checking, `-l` passes extra system libraries to the linker, and
-`-X`/`--extra-object` appends one or more already-built object files to
-the final link. Runtime and callback-shim objects are not passed this way:
-both checkout and installed builds select them from `libtitan.a`. Generic
-providers do not receive libuv automatically; the one combined standard
-provider applies its selected bundled or system libuv inputs once, while all
-seven logical standard modules are wired statically inside that image.
+`-X`/`--extra-object` appends one or more already-built native payloads.
+In library mode those payloads must be supported relocatable objects or
+regular archives: archives are force-carried into the DSO and flattened into
+the paired `.a`, while mixed payload retains CLI order in both forms.
+Executable mode keeps the broader established final-link behavior. Runtime and
+callback-shim objects are not normally passed this way: both checkout and
+installed builds select them from `libtitan.a`. The standard provider's
+`titanlib.o` is the deliberate support payload. Bundled libuv joins it in
+`-X`; system libuv remains a final-link setting.
 
 Every CLI module name is placed in one `requested_roots` set and passed to the
-filesystem loader. Those roots are source first; everything they import is
-binary first. After checking, library mode derives one physical provider from
-the requested roots' longest common dotted prefix. It rejects an empty prefix,
-the reserved logical module `titan`, conflicting mangled C prefixes, and
-user-owned shim destinations before compilation. All source modules reachable
-from every root are then compiled once and linked once; compiled dependencies
-remain dynamic. [Multi-module shared libraries](multi-module-libraries.md)
-documents the complete preflight and publication sequence.
+filesystem loader. Those roots are source-first; everything they import runs
+the configured complete compiled-format passes before source (`.so`, then
+`.a` by default; swapped by `--static`). After checking, library mode derives
+one physical provider base from the requested roots' longest common dotted
+prefix. It rejects an empty prefix, the reserved logical module `titan`,
+conflicting mangled C prefixes/protocol symbols, unsafe physical overlaps,
+producer-binding identity conflicts, input/output aliases, and unowned shim
+destinations before native linking.
+
+All source modules reachable from every root are compiled once. Dynamic
+dependencies retain exact selected DSO handles. Selected static dependencies
+contribute deduplicated physical archives: their complete validated
+membership is direct native input and is repackaged into both output forms,
+without bulk-entering ordinary resolver state. [Multi-module
+libraries](multi-module-libraries.md) documents logical grouping and DSO
+loading; [Static compiled modules](static-compiled-modules.md) documents the
+archive resolver, binding constraints, composition, and paired publication.
 
 The standard library uses the same generic path with all seven qualified roots
 in one command:
@@ -545,21 +571,24 @@ titanc titan.coroutine titan.uv titan.async titan.timer titan.fs titan.net titan
   -X titan-runtime/titanlib.o
 ```
 
-The provider prefix is `titan`, so checkout output is `titan.so` plus seven
-generated `titan/*.lua` shims. Each logical module retains its own
+The provider prefix is `titan`, so checkout output is `titan.so`, `titan.a`,
+and seven generated `titan/*.lua` shims. Each logical module retains its own
 `luaopen_titan_*`, `_init`, `_abi`, `_types`, registry module state, and
 initializer; `titanlib.o` supplies the eighth entry, `luaopen_titan`, and the
-support table. The `titan.uv` folder still generates only
-`titan/uv/uv.c`/`.o`, and no contributor shim. Bundled mode force-loads the
-private libuv archive into this one final image; system mode records the
-pkg-config-selected shared dependency on it.
+support table without adding an archive metadata key. The `titan.uv` folder
+still generates only `titan/uv/uv.c`/`.o`, and no contributor shim. Bundled
+mode puts the private libuv archive in the shared `-X` payload so its objects
+enter both providers. System mode keeps the pkg-config-selected setting as a
+repeated final-link input and never copies it into `titan.a`.
 
-Make tracks every standard source explicitly, the compiler/runtime/support
-inputs, native tool identity, and libuv configuration in a completion/config
-stamp. A missing `titan.so`, generated shim, or Darwin dSYM invalidates the
-stamp. A warm valid image is a no-op. Exact child DSOs are removed as stale
-production outputs; the isolated delayed-callback and coroutine tests are the
-only supported exact-image variants.
+Make tracks every standard source explicitly, the compiler/runtime/support and
+embedded-format inputs, effective `CC`/`AR`/`RANLIB`, extra flags, and libuv
+configuration in a completion/config stamp. A missing `titan.so`, `titan.a`,
+generated shim, or Darwin dSYM invalidates the stamp. A warm invocation also
+rescans `titan.a` for the exact seven logical keys without changing pair
+mtimes. Exact child DSOs are removed as stale production outputs; the isolated
+delayed-callback and coroutine tests are the only supported exact-image
+variants.
 
 The source rock retains a two-stage bootstrap. `make titan` builds
 `libtitan.a`, the SDK, and a distinct support-only image at
@@ -570,14 +599,19 @@ incompatible image is left untouched with an error. The rock manifest then
 deploys the compiler script/Lua modules but does not own a `titan` C module.
 
 The source-only post-install hook invokes the just-deployed `titanc` once in a
-private staging directory on the destination filesystem. The transactional
-publisher validates the eight Lua entries, seven metadata pairs, seven shims,
-and Darwin dSYM; backs up the active-0.16 public set and stale active-layout
-copies; commits shims/dSYM; and renames the validated DSO last. Failure before
-that commit restores the prior full image or first-install bootstrap. The
-canonical installed artifacts are `<root>/lib/titan/0.16/titan.so`, its macOS
-dSYM, and `<root>/share/lua/5.5/titan/*.lua` shims. SDK and stdlib artifacts
-remain direct files outside the rock manifest and are not removed by
+private staging directory on the destination filesystem under the same
+effective native toolchain, extra flags, rocks root, runtime mode, and libuv
+policy. The publisher validates the eight Lua entries, seven logical
+protocols, exact seven-key archive metadata, three-way embedded/DSO/
+archive-backed ABI/types equality, seven shims, and Darwin dSYM. It backs up
+the active-0.16 public set and stale active-layout copies, commits shims/dSYM,
+then `titan.a`, and renames the validated DSO last. A caught or injected
+failure restores the prior complete pair, a legacy complete DSO/shim
+installation while leaving its archive absent, or the first-install
+bootstrap. The canonical installed artifacts are
+`<root>/lib/titan/0.16/{titan.so,titan.a}`, the DSO's macOS dSYM, and
+`<root>/share/lua/5.5/titan/*.lua` shims. SDK and stdlib artifacts remain
+direct files outside the rock manifest and are not removed by
 `luarocks remove`. Separately versioned 0.15 trees are not purged.
 
 Its flow:

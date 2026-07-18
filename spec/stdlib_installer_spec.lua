@@ -1,5 +1,6 @@
 local assert = require "luassert"
 local lfs = require "lfs"
+
 local INSTALLER_SCRIPT =
     lfs.currentdir() .. "/scripts/stdlib_installer.lua"
 local installer = assert(loadfile(INSTALLER_SCRIPT))()
@@ -39,24 +40,62 @@ local function remove_tree(path)
     end
 end
 
+local function shell_quote(word)
+    return "'" .. word:gsub("'", "'\\''") .. "'"
+end
+
 local function make_stage(path)
     write_file(path .. "/titan.so", "new combined image\n")
+    write_file(path .. "/titan.a", "new combined archive\n")
     write_file(path ..
         "/titan.so.dSYM/Contents/Resources/DWARF/titan.so",
         "new symbols\n")
     for _, module in ipairs(installer.MODULES) do
         write_file(path .. "/titan/" .. module .. ".lua",
-            installer.BANNER .. string.format([[
-local path = assert(package.searchpath("titan", package.cpath))
-local open = assert(require("titan")._loadlibglobal(
-    path, "luaopen_titan_%s"))
-return open()
-]], module))
+            installer.shim_contents("titan." .. module))
     end
+end
+
+local function fake_entries(extra)
+    local entries = {}
+    for _, name in ipairs(installer.MODULE_NAMES) do
+        entries[name] = {
+            abi = "0.16",
+            types = "types:" .. name,
+        }
+    end
+    if extra then
+        for name, entry in pairs(extra) do entries[name] = entry end
+    end
+    return entries
+end
+
+local function clone_entries(entries)
+    local clone = {}
+    for name, entry in pairs(entries) do
+        clone[name] = {
+            abi = entry.abi,
+            types = entry.types,
+        }
+    end
+    return clone
+end
+
+local function fake_prior_archive_scanner(path)
+    local contents = read_file(path)
+    local entries = fake_entries()
+    if contents == "prior archive with retired key\n" then
+        entries["titan.retired"] = {
+            abi = "0.16",
+            types = "types:titan.retired",
+        }
+    end
+    return { entries = entries }
 end
 
 local function publish(options)
     options.image_validator = function() return true end
+    options.prior_archive_scanner = fake_prior_archive_scanner
     return installer.publish(options)
 end
 
@@ -82,71 +121,126 @@ local function assert_no_active_compatibility_copies(root)
                 path .. ".dSYM")
         end
     end
-    for _, path in ipairs({
-        lua_cdir .. "/titan.so",
-        lua_cdir .. "/titan.so.dSYM",
-    }) do
-        assert.is_nil(lfs.symlinkattributes(path), path)
-    end
+    assert.is_nil(lfs.symlinkattributes(lua_cdir .. "/titan.so"))
+    assert.is_nil(lfs.symlinkattributes(lua_cdir .. "/titan.so.dSYM"))
 end
 
-local function seed_prior_full(root)
+local function seed_older_abi(root)
+    write_file(root .. "/lib/titan/0.15/titan/uv.so", "older ABI\n")
+end
+
+local function seed_active_debris(root)
+    write_file(root .. "/lib/titan/0.16/titan/uv.so", "stale child\n")
+    write_file(root .. "/lib/lua/5.5/titan.so", "old manifest support\n")
+end
+
+local function seed_bootstrap(root)
+    write_file(root .. "/lib/titan/0.16/titan.so", "bootstrap image\n")
+    seed_older_abi(root)
+end
+
+local function seed_legacy_full(root)
     write_file(root .. "/lib/titan/0.16/titan.so", "prior image\n")
     write_file(root ..
         "/lib/titan/0.16/titan.so.dSYM/Contents/Resources/DWARF/titan.so",
         "prior symbols\n")
     for _, module in ipairs(installer.MODULES) do
         write_file(root .. "/share/lua/5.5/titan/" .. module .. ".lua",
-            "prior " .. module .. "\n")
+            installer.shim_contents("titan." .. module))
     end
-    write_file(root .. "/lib/titan/0.16/titan/uv.so", "stale child\n")
-    write_file(root .. "/lib/lua/5.5/titan.so", "old manifest support\n")
-    write_file(root .. "/lib/titan/0.15/titan/uv.so", "older ABI\n")
+    seed_active_debris(root)
+    seed_older_abi(root)
 end
 
-local function assert_prior_full(root)
-    assert.equal("prior image\n",
-        read_file(root .. "/lib/titan/0.16/titan.so"))
-    for _, module in ipairs(installer.MODULES) do
-        local path = root .. "/share/lua/5.5/titan/" .. module .. ".lua"
-        assert.equal("prior " .. module .. "\n", read_file(path))
-    end
-    assert.equal("prior symbols\n", read_file(root ..
-        "/lib/titan/0.16/titan.so.dSYM/Contents/Resources/DWARF/titan.so"))
-    assert.equal("stale child\n",
-        read_file(root .. "/lib/titan/0.16/titan/uv.so"))
-    assert.equal("old manifest support\n",
-        read_file(root .. "/lib/lua/5.5/titan.so"))
+local function seed_complete_pair(root)
+    seed_legacy_full(root)
+    write_file(root .. "/lib/titan/0.16/titan.a", "prior archive\n")
+end
+
+local function assert_older_abi_untouched(root)
     assert.equal("older ABI\n",
         read_file(root .. "/lib/titan/0.15/titan/uv.so"))
 end
 
-local function seed_first_install(root)
-    write_file(root .. "/lib/titan/0.16/titan.so", "bootstrap image\n")
-    write_file(root .. "/lib/titan/0.15/titan/uv.so", "older ABI\n")
-end
-
-local function assert_first_install(root)
+local function assert_bootstrap(root)
     assert.equal("bootstrap image\n",
         read_file(root .. "/lib/titan/0.16/titan.so"))
     assert_unique_regular_file(root .. "/lib/titan/0.16/titan.so")
+    assert.is_nil(lfs.symlinkattributes(root .. "/lib/titan/0.16/titan.a"))
+    assert.is_nil(lfs.symlinkattributes(
+        root .. "/lib/titan/0.16/titan.so.dSYM"))
     for _, module in ipairs(installer.MODULES) do
         assert.is_nil(lfs.symlinkattributes(
             root .. "/share/lua/5.5/titan/" .. module .. ".lua"))
     end
-    assert.is_nil(lfs.symlinkattributes(
-        root .. "/lib/titan/0.16/titan.so.dSYM"))
     assert_no_active_compatibility_copies(root)
-    assert.equal("older ABI\n",
-        read_file(root .. "/lib/titan/0.15/titan/uv.so"))
+    assert_older_abi_untouched(root)
 end
 
-local COMMIT_LABELS = {
-    "shim-coroutine", "shim-uv", "shim-async", "shim-timer",
-    "shim-fs", "shim-net", "shim-os", "dsym", "dso",
-}
+local function assert_legacy_full(root, archive_allowed)
+    assert.equal("prior image\n",
+        read_file(root .. "/lib/titan/0.16/titan.so"))
+    if not archive_allowed then
+        assert.is_nil(lfs.symlinkattributes(root .. "/lib/titan/0.16/titan.a"))
+    end
+    assert.equal("prior symbols\n", read_file(root ..
+        "/lib/titan/0.16/titan.so.dSYM/Contents/Resources/DWARF/titan.so"))
+    for _, module in ipairs(installer.MODULES) do
+        assert.equal(installer.shim_contents("titan." .. module),
+            read_file(root ..
+                "/share/lua/5.5/titan/" .. module .. ".lua"))
+    end
+    assert.equal("stale child\n",
+        read_file(root .. "/lib/titan/0.16/titan/uv.so"))
+    assert.equal("old manifest support\n",
+        read_file(root .. "/lib/lua/5.5/titan.so"))
+    assert_older_abi_untouched(root)
+end
 
-describe("recoverable standard-library publication", function()
+local function assert_complete_pair(root)
+    assert_legacy_full(root, true)
+    assert.equal("prior archive\n",
+        read_file(root .. "/lib/titan/0.16/titan.a"))
+end
+
+local function assert_no_transaction_residue(path)
+    local mode = lfs.symlinkattributes(path, "mode")
+    if mode ~= "directory" then return end
+    for name in lfs.dir(path) do
+        if name ~= "." and name ~= ".." then
+            assert.falsy(name:find(".titan-install-", 1, true),
+                path .. "/" .. name)
+            assert_no_transaction_residue(path .. "/" .. name)
+        end
+    end
+end
+
+local function assert_new_install(root, darwin)
+    assert.equal("new combined image\n",
+        read_file(root .. "/lib/titan/0.16/titan.so"))
+    assert.equal("new combined archive\n",
+        read_file(root .. "/lib/titan/0.16/titan.a"))
+    assert_unique_regular_file(root .. "/lib/titan/0.16/titan.so")
+    assert_unique_regular_file(root .. "/lib/titan/0.16/titan.a")
+    for _, module in ipairs(installer.MODULES) do
+        local path = root .. "/share/lua/5.5/titan/" .. module .. ".lua"
+        assert.equal(installer.shim_contents("titan." .. module),
+            read_file(path))
+        assert_unique_regular_file(path)
+    end
+    local dsym = root .. "/lib/titan/0.16/titan.so.dSYM"
+    if darwin then
+        assert.equal("new symbols\n",
+            read_file(dsym .. "/Contents/Resources/DWARF/titan.so"))
+    else
+        assert.is_nil(lfs.symlinkattributes(dsym))
+    end
+    assert_no_active_compatibility_copies(root)
+    assert_older_abi_untouched(root)
+    assert_no_transaction_residue(root)
+end
+
+describe("recoverable paired standard-library publication", function()
     local workspace
     local stage
     local root
@@ -163,35 +257,92 @@ describe("recoverable standard-library publication", function()
     end)
 
     after_each(function()
-        -- Tests set the variable only in child processes below; retain this
-        -- guard for callers that arrived with an ambient injection request.
         assert.equal(old_failpoint, os.getenv("TITAN_INSTALL_FAIL_AT"))
         if workspace then remove_tree(workspace) end
     end)
 
-    it("commits seven shims before the DSO and removes only active-ABI debris",
+    for _, predecessor in ipairs({
+        { "bootstrap-only first install", seed_bootstrap },
+        { "legacy full-0.16 migration", seed_legacy_full },
+        { "complete-pair upgrade", seed_complete_pair },
+    }) do
+        it("publishes the pair over a " .. predecessor[1], function()
+            predecessor[2](root)
+            local ok, err = publish({
+                stage = stage, root = root, platform = "Linux",
+            })
+            assert.truthy(ok, err)
+            assert_new_install(root, false)
+        end)
+    end
+
+    it("publishes archive before the DSO with stable public permissions",
        function()
-        seed_prior_full(root)
+        seed_complete_pair(root)
+        local ok, err = publish({
+            stage = stage, root = root, platform = "Darwin",
+        })
+        assert.truthy(ok, err)
+        assert_new_install(root, true)
+        assert.equal("rwxr-xr-x",
+            lfs.attributes(root .. "/lib/titan/0.16/titan.so").permissions)
+        assert.equal("rw-r--r--",
+            lfs.attributes(root .. "/lib/titan/0.16/titan.a").permissions)
+        for _, module in ipairs(installer.MODULES) do
+            assert.equal("rw-r--r--", lfs.attributes(root ..
+                "/share/lua/5.5/titan/" .. module .. ".lua").permissions)
+        end
+    end)
+
+    it("retires only exact generated shims named by the old archive",
+       function()
+        seed_complete_pair(root)
+        write_file(root .. "/lib/titan/0.16/titan.a",
+            "prior archive with retired key\n")
+        write_file(root .. "/share/lua/5.5/titan/retired.lua",
+            installer.shim_contents("titan.retired"))
+        write_file(root .. "/share/lua/5.5/titan/user.lua",
+            "return 'user-owned'\n")
         local ok, err = publish({
             stage = stage, root = root, platform = "Linux",
         })
         assert.truthy(ok, err)
-        assert.equal("new combined image\n",
-            read_file(root .. "/lib/titan/0.16/titan.so"))
-        assert_unique_regular_file(root .. "/lib/titan/0.16/titan.so")
-        for _, module in ipairs(installer.MODULES) do
-            local path =
-                root .. "/share/lua/5.5/titan/" .. module .. ".lua"
-            local shim = read_file(path)
-            assert.equal(installer.BANNER,
-                shim:sub(1, #installer.BANNER))
-            assert_unique_regular_file(path)
-        end
         assert.is_nil(lfs.symlinkattributes(
-            root .. "/lib/titan/0.16/titan.so.dSYM"))
-        assert_no_active_compatibility_copies(root)
-        assert.equal("older ABI\n",
-            read_file(root .. "/lib/titan/0.15/titan/uv.so"))
+            root .. "/share/lua/5.5/titan/retired.lua"))
+        assert.equal("return 'user-owned'\n",
+            read_file(root .. "/share/lua/5.5/titan/user.lua"))
+    end)
+
+    it("does not infer stale shim ownership from a DSO-only predecessor",
+       function()
+        seed_legacy_full(root)
+        write_file(root .. "/share/lua/5.5/titan/retired.lua",
+            installer.shim_contents("titan.retired"))
+        local ok, err = publish({
+            stage = stage, root = root, platform = "Linux",
+        })
+        assert.truthy(ok, err)
+        assert.equal(installer.shim_contents("titan.retired"),
+            read_file(root .. "/share/lua/5.5/titan/retired.lua"))
+    end)
+
+    it("refuses to retire an old-key shim with a different exact template",
+       function()
+        seed_complete_pair(root)
+        write_file(root .. "/lib/titan/0.16/titan.a",
+            "prior archive with retired key\n")
+        write_file(root .. "/share/lua/5.5/titan/retired.lua",
+            installer.BANNER .. "return 'not the old generated shim'\n")
+        local ok, err = publish({
+            stage = stage, root = root, platform = "Linux",
+        })
+        assert.falsy(ok)
+        assert.truthy(tostring(err):find(
+            "refusing to overwrite unrecognized Lua file", 1, true), err)
+        assert.equal("prior image\n",
+            read_file(root .. "/lib/titan/0.16/titan.so"))
+        assert.equal("prior archive with retired key\n",
+            read_file(root .. "/lib/titan/0.16/titan.a"))
     end)
 
     local function inject_script()
@@ -199,9 +350,16 @@ describe("recoverable standard-library publication", function()
         write_file(script, [[
 local installer_script, stage, root = ...
 local installer = assert(loadfile(installer_script))()
+local entries = {}
+for _, name in ipairs(installer.MODULE_NAMES) do
+    entries[name] = { abi = "0.16", types = "types:" .. name }
+end
 local ok, err = installer.publish({
-    stage = stage, root = root, platform = "Darwin",
+    stage = stage,
+    root = root,
+    platform = "Darwin",
     image_validator = function() return true end,
+    prior_archive_scanner = function() return { entries = entries } end,
 })
 if ok then os.exit(2) end
 if not tostring(err):find(os.getenv("TITAN_INSTALL_FAIL_AT"), 1, true) then
@@ -213,58 +371,334 @@ os.exit(1)
         return script
     end
 
-    local function assert_every_commit_rolls_back(seed, check)
+    local function lua_executable()
+        if os.getenv("PREFIX") and
+           lfs.symlinkattributes(os.getenv("PREFIX") .. "/bin/lua", "mode") ==
+               "file" then
+            return os.getenv("PREFIX") .. "/bin/lua"
+        end
+        if type(arg) == "table" and type(arg[-1]) == "string" and
+           lfs.symlinkattributes(arg[-1], "mode") == "file" then
+            return arg[-1]
+        end
+        return "lua"
+    end
+
+    local function assert_native_failpoints_restore(seed, check)
         local script = inject_script()
-        local lua = os.getenv("PREFIX") and
-            (os.getenv("PREFIX") .. "/bin/lua") or "lua"
         for _, position in ipairs({ "before", "after" }) do
-            for _, label in ipairs(COMMIT_LABELS) do
+            for _, label in ipairs({ "titan.a", "titan.so" }) do
                 remove_tree(root)
                 seed(root)
                 local failpoint = position .. ":" .. label
-                local command = string.format(
-                    "TITAN_INSTALL_FAIL_AT=%q %q %q %q %q %q",
-                    failpoint, lua, script, INSTALLER_SCRIPT, stage, root)
+                local command =
+                    "TITAN_INSTALL_FAIL_AT=" .. shell_quote(failpoint) ..
+                    " " .. shell_quote(lua_executable()) ..
+                    " " .. shell_quote(script) ..
+                    " " .. shell_quote(INSTALLER_SCRIPT) ..
+                    " " .. shell_quote(stage) ..
+                    " " .. shell_quote(root)
                 local succeeded, why, code = os.execute(command)
                 assert.falsy(succeeded, failpoint)
                 assert.equal("exit", why, failpoint)
                 assert.equal(1, code, failpoint)
                 check(root)
+                assert_no_transaction_residue(root)
             end
         end
     end
 
-    it("restores a complete prior install around every public commit",
+    it("restores the exact bootstrap state at archive/DSO failpoints",
        function()
-        assert_every_commit_rolls_back(seed_prior_full, assert_prior_full)
+        assert_native_failpoints_restore(seed_bootstrap, assert_bootstrap)
     end)
 
-    it("restores the first-install bootstrap around every public commit",
+    it("restores the exact legacy DSO-only state at archive/DSO failpoints",
        function()
-        assert_every_commit_rolls_back(seed_first_install,
-            assert_first_install)
+        assert_native_failpoints_restore(
+            seed_legacy_full, assert_legacy_full)
     end)
 
-    it("rejects an incomplete staged shim set without touching public files",
+    it("restores the exact complete pair at archive/DSO failpoints",
        function()
-        seed_prior_full(root)
-        write_file(stage .. "/titan/uv.lua", "return 'not generated'\n")
+        assert_native_failpoints_restore(
+            seed_complete_pair, assert_complete_pair)
+    end)
+
+    it("rejects missing and nonregular staged archives before publication",
+       function()
+        seed_complete_pair(root)
+        remove_tree(stage .. "/titan.a")
         local ok, err = publish({
             stage = stage, root = root, platform = "Linux",
         })
         assert.falsy(ok)
-        assert.truthy(err:find("is not owned by titanc", 1, true), err)
-        assert_prior_full(root)
-    end)
+        assert.truthy(tostring(err):find("no regular titan.a", 1, true), err)
+        assert_complete_pair(root)
 
-    it("rejects an invalid staged image before touching public files",
-       function()
-        seed_prior_full(root)
-        local ok, err = installer.publish({
+        make_directory(stage .. "/titan.a")
+        ok, err = publish({
             stage = stage, root = root, platform = "Linux",
         })
         assert.falsy(ok)
-        assert.truthy(tostring(err):find("staged titan.so", 1, true), err)
-        assert_prior_full(root)
+        assert.truthy(tostring(err):find("no regular titan.a", 1, true), err)
+        assert_complete_pair(root)
+    end)
+
+    it("rejects a nonregular public archive destination", function()
+        seed_legacy_full(root)
+        make_directory(root .. "/lib/titan/0.16/titan.a")
+        local ok, err = publish({
+            stage = stage, root = root, platform = "Linux",
+        })
+        assert.falsy(ok)
+        assert.truthy(tostring(err):find(
+            "is not a regular nonlink file", 1, true), err)
+        assert_legacy_full(root, true)
+        assert.equal("directory",
+            lfs.symlinkattributes(root ..
+                "/lib/titan/0.16/titan.a", "mode"))
+    end)
+
+    it("rejects a staged shim with a nonexact provider/entry template",
+       function()
+        seed_complete_pair(root)
+        write_file(stage .. "/titan/uv.lua",
+            installer.BANNER ..
+            "return require('titan')._loadlibglobal('wrong', 'wrong')\n")
+        local ok, err = publish({
+            stage = stage, root = root, platform = "Linux",
+        })
+        assert.falsy(ok)
+        assert.truthy(tostring(err):find(
+            "does not match titanc's generated", 1, true), err)
+        assert_complete_pair(root)
+    end)
+
+    local function validation_options(configuration)
+        configuration = configuration or {}
+        local embedded = configuration.embedded or fake_entries()
+        local dso = configuration.dso or clone_entries(embedded)
+        local archive_callables =
+            configuration.archive_callables or clone_entries(embedded)
+        local validation_output
+        return {
+            native_image_inspector = function(image)
+                if configuration.inspect_error and
+                   image:sub(-#"titan.so") == "titan.so" then
+                    return nil, configuration.inspect_error
+                end
+                if validation_output and image == validation_output then
+                    if configuration.archive_inspect_error then
+                        return nil, configuration.archive_inspect_error
+                    end
+                    return archive_callables
+                end
+                return dso
+            end,
+            staged_archive_scanner = function()
+                if configuration.scan_error then
+                    return nil, configuration.scan_error
+                end
+                return { entries = embedded }
+            end,
+            archive_validation_builder =
+                function(output, archive, link, verbose)
+                    validation_output = output
+                    if configuration.builder_error then
+                        return nil, configuration.builder_error, 19
+                    end
+                    assert.equal(stage .. "/titan.a", archive)
+                    assert.is_nil(link)
+                    assert.is_false(verbose)
+                    write_file(output, "private validation image\n")
+                    write_file(output ..
+                        ".dSYM/Contents/Resources/DWARF/validation",
+                        "private symbols\n")
+                    return true
+                end,
+            validation_output = function() return validation_output end,
+        }
+    end
+
+    local function publish_with_native_configuration(configuration)
+        local injected = validation_options(configuration)
+        local ok, err = installer.publish({
+            stage = stage,
+            root = root,
+            platform = "Linux",
+            native_image_inspector = injected.native_image_inspector,
+            staged_archive_scanner = injected.staged_archive_scanner,
+            archive_validation_builder =
+                injected.archive_validation_builder,
+            prior_archive_scanner = fake_prior_archive_scanner,
+        })
+        return ok, err, injected
+    end
+
+    for _, rejection in ipairs({
+        {
+            "corrupt archive",
+            { scan_error = "malformed archive bytes" },
+            "cannot inspect staged titan.a",
+        },
+        {
+            "missing logical archive key",
+            (function()
+                local entries = fake_entries()
+                entries["titan.uv"] = nil
+                return { embedded = entries }
+            end)(),
+            "is missing logical key",
+        },
+        {
+            "extra logical archive key",
+            {
+                embedded = fake_entries({
+                    ["titan.extra"] = {
+                        abi = "0.16", types = "types:titan.extra",
+                    },
+                }),
+            },
+            "has unexpected logical key",
+        },
+        {
+            "wrong embedded ABI",
+            (function()
+                local entries = fake_entries()
+                entries["titan.uv"].abi = "0.15"
+                return { embedded = entries, dso = fake_entries() }
+            end)(),
+            "ABI for module 'titan.uv' differs",
+        },
+        {
+            "wrong embedded serialized types",
+            { scan_error = "invalid serialized types for titan.uv" },
+            "invalid serialized types",
+        },
+        {
+            "embedded/DSO metadata mismatch",
+            (function()
+                local dso = fake_entries()
+                dso["titan.fs"].types = "different DSO types"
+                return { dso = dso }
+            end)(),
+            "type metadata for module 'titan.fs' differs",
+        },
+        {
+            "embedded/archive-callable mismatch",
+            (function()
+                local callables = fake_entries()
+                callables["titan.timer"].types =
+                    "different archive callable types"
+                return { archive_callables = callables }
+            end)(),
+            "type metadata for module 'titan.timer' differs",
+        },
+        {
+            "missing logical native protocol",
+            { inspect_error = "image is missing titan_uv_init" },
+            "missing titan_uv_init",
+        },
+        {
+            "invalid luaopen_titan support",
+            {
+                inspect_error =
+                    "luaopen_titan does not return the required native support table",
+            },
+            "required native support table",
+        },
+        {
+            "archive-backed link failure",
+            { builder_error = "sentinel linker failure" },
+            "sentinel linker failure",
+        },
+        {
+            "archive-backed image inspection failure",
+            { archive_inspect_error = "missing archive callable protocol" },
+            "missing archive callable protocol",
+        },
+    }) do
+        it("rejects " .. rejection[1] .. " before touching public files",
+           function()
+            seed_complete_pair(root)
+            local ok, err, injected =
+                publish_with_native_configuration(rejection[2])
+            assert.falsy(ok)
+            assert.truthy(tostring(err):find(rejection[3], 1, true), err)
+            assert_complete_pair(root)
+            local validation_output = injected.validation_output()
+            if validation_output then
+                assert.is_nil(lfs.symlinkattributes(validation_output))
+                assert.is_nil(lfs.symlinkattributes(
+                    validation_output .. ".dSYM"))
+            end
+            assert_no_transaction_residue(stage)
+            assert_no_transaction_residue(root)
+        end)
+    end
+
+    it("preserves the compiler environment for archive-backed validation",
+       function()
+        seed_bootstrap(root)
+        local script = workspace .. "/environment.lua"
+        write_file(script, [[
+local installer_script, stage, root = ...
+local installer = assert(loadfile(installer_script))()
+local entries = {}
+for _, name in ipairs(installer.MODULE_NAMES) do
+    entries[name] = { abi = "0.16", types = "types:" .. name }
+end
+local validation_image
+local ok, err = installer.publish({
+    stage = stage,
+    root = root,
+    platform = "Linux",
+    native_image_inspector = function(image)
+        return entries
+    end,
+    staged_archive_scanner = function()
+        return { entries = entries }
+    end,
+    archive_validation_builder = function(output, archive, link, verbose)
+        assert(os.getenv("CC") == "sentinel-cc --driver")
+        assert(os.getenv("AR") == "sentinel-ar --deterministic")
+        assert(os.getenv("RANLIB") == "sentinel-ranlib --deterministic")
+        assert(os.getenv("TITAN_EXTRA_CPPFLAGS") == "-DSENTINEL_CPP=1")
+        assert(os.getenv("TITAN_EXTRA_CFLAGS") == "-DSENTINEL_C=1")
+        assert(os.getenv("TITAN_EXTRA_LDFLAGS") == "-Wl,--sentinel-link")
+        assert(os.getenv("TITAN_ROCKS_ROOT") == root)
+        assert(os.getenv("TITAN_RUNTIME_PREBUILT") == "1")
+        assert(archive == stage .. "/titan.a")
+        assert(link == nil and verbose == false)
+        validation_image = output
+        local file = assert(io.open(output, "wb"))
+        file:write("validation")
+        file:close()
+        return true
+    end,
+})
+if not ok then error(err, 0) end
+assert(validation_image and not require("lfs").symlinkattributes(validation_image))
+]])
+        local command = table.concat({
+            "CC=" .. shell_quote("sentinel-cc --driver"),
+            "AR=" .. shell_quote("sentinel-ar --deterministic"),
+            "RANLIB=" .. shell_quote("sentinel-ranlib --deterministic"),
+            "TITAN_EXTRA_CPPFLAGS=" .. shell_quote("-DSENTINEL_CPP=1"),
+            "TITAN_EXTRA_CFLAGS=" .. shell_quote("-DSENTINEL_C=1"),
+            "TITAN_EXTRA_LDFLAGS=" ..
+                shell_quote("-Wl,--sentinel-link"),
+            "TITAN_ROCKS_ROOT=" .. shell_quote(root),
+            "TITAN_RUNTIME_PREBUILT=1",
+            shell_quote(lua_executable()),
+            shell_quote(script),
+            shell_quote(INSTALLER_SCRIPT),
+            shell_quote(stage),
+            shell_quote(root),
+        }, " ")
+        local ok, why, code = os.execute(command)
+        assert.truthy(ok, tostring(why) .. ":" .. tostring(code))
+        assert_new_install(root, false)
     end)
 end)

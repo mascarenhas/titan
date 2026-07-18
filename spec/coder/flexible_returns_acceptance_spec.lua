@@ -1,6 +1,7 @@
 local h = require "spec.support.helpers"
 local checker = require "titan-compiler.checker"
 local coder = require "titan-compiler.coder"
+local driver = require "titan-compiler.driver"
 
 local function generate(source)
     h.reset(true)
@@ -8,7 +9,7 @@ local function generate(source)
     assert.truthy(ast, perr)
     local _, errors = checker.check("test", ast, source, "test.titan")
     assert.equal(0, #errors, table.concat(errors, "\n"))
-    return coder.generate("test", ast, {})
+    return coder.generate("test", ast, {}, driver.TITAN_VER)
 end
 
 local function with_header(contents, fn)

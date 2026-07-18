@@ -272,6 +272,52 @@ function coder.external_symbols(modname, ast)
     return symbols
 end
 
+-- Return the known public symbol families represented by a recovered module
+-- interface. Static-provider preflight has no AST, but it can still reject the
+-- same protocol/function/record-member collisions before invoking the linker.
+function coder.interface_external_symbols(modname, modtype)
+    local mangled = mangle_qn(modname)
+    local symbols = {
+        { symbol = mangled .. "_abi", owner = "module ABI entry" },
+        { symbol = mangled .. "_types", owner = "module type entry" },
+        { symbol = mangled .. "_init", owner = "module initializer entry" },
+        { symbol = "luaopen_" .. mangled, owner = "module Lua entry" },
+    }
+
+    local function add(symbol, owner)
+        symbols[#symbols + 1] = { symbol = symbol, owner = owner }
+    end
+
+    for _, member in ipairs(modtype.members or {}) do
+        local typ = member.type
+        if member._tag == "Type.ModuleMember" and typ then
+            if typ._tag == "Type.Function" then
+                add(func_name(modname, member.name),
+                    "function '" .. modname .. "." .. member.name .. "'")
+            elseif typ._tag == "Type.Record" then
+                for _, static in pairs(typ.functions or {}) do
+                    if not static.islocal then
+                        add(static_name(static),
+                            "record function '" .. static.fqtn .. "." ..
+                                static.name .. "'")
+                    end
+                end
+                for _, method in pairs(typ.methods or {}) do
+                    if not method.islocal then
+                        local owner = "method '" .. method.fqtn .. ":" ..
+                            method.name .. "'"
+                        add(method_name(method), owner)
+                        add(bound_method_name(method), owner .. " bound entry")
+                        add(bound_method_luaname(method),
+                            owner .. " bound Lua entry")
+                    end
+                end
+            end
+        end
+    end
+    return symbols
+end
+
 -- Record the mapping from a native function's mangled C symbol to its qualified
 -- Titan source name, for the trace name table emitted in _init (deliverable 2).
 -- The runtime (errorhandler) looks each native frame's DWARF symbol up here and
@@ -8554,6 +8600,21 @@ int $TYPESNAME(lua_State* L) {
 }
 ]]
 
+coder.modmetadata = [[
+#if defined(__APPLE__)
+#define TITAN_META_SECTION \
+    __attribute__((used, aligned(1), section("__TEXT,__titanmeta")))
+#elif defined(__ELF__)
+#define TITAN_META_SECTION \
+    __attribute__((used, aligned(1), section(".titan.meta")))
+#else
+#error unsupported object format for Titan archive metadata
+#endif
+
+TITAN_META_SECTION
+static const unsigned char $METADATANAME[] = $METADATA;
+]]
+
 -- Generates the code for importing the module, and storing it
 -- in the corresponding local state slot
 local function import_module(loadmods, initmods, sigs, mprefixes,
@@ -8918,7 +8979,10 @@ local function allocate_upvalues(tlcontext, ast)
     end
 end
 
-function coder.generate(modname, ast, static_deps)
+function coder.generate(modname, ast, static_deps, abi)
+    assert(type(abi) == "string" and abi ~= "",
+        "coder.generate requires the compiled-module ABI")
+    local staticmetadata = require "titan-compiler.staticmetadata"
     local tlcontext = {
         module = modname,
         prefix = mangle_qn(modname) .. "_",
@@ -9281,9 +9345,21 @@ function coder.generate(modname, ast, static_deps)
         table.insert(initvars, "L->top.p = _base;")
     end
 
+    local serialized_type = types.serialize(ast._type)
+    local metadata, metadata_err =
+        staticmetadata.render(modname, abi, serialized_type)
+    assert(metadata, metadata_err)
+    local initializer, initializer_err =
+        staticmetadata.c_initializer(metadata)
+    assert(initializer, initializer_err)
+    table.insert(code, render(coder.modmetadata, {
+        METADATANAME = tlcontext.prefix .. "titan_metadata",
+        METADATA = initializer,
+    }))
+
     table.insert(code, render(modtypes, {
         TYPESNAME = tlcontext.prefix .. "types",
-        TYPES = string.format("%q", types.serialize(ast._type)),
+        TYPES = string.format("%q", serialized_type),
     }))
 
     table.insert(code, render(modabi, {
@@ -9395,7 +9471,24 @@ function coder.generate(modname, ast, static_deps)
         FOREIGNIMPORTS = table.concat(foreignimports, "\n"),
     })
 
-    return preamble .. "\n\n" .. table.concat(code, "\n\n")
+    -- Report the logical modules whose direct native entry points this
+    -- generated object actually references. The standalone archive protocol
+    -- gate uses this use-site set so an exported but unused nominal type does
+    -- not force an unrelated carried object out of a selected archive.
+    local direct_native_modules = {}
+    for _, func in pairs(tlcontext.functions) do
+        if static_deps[func.module] == true then
+            direct_native_modules[func.module] = true
+        end
+    end
+    for _, info in pairs(tlcontext.bound_luas) do
+        if static_deps[info.module] == true then
+            direct_native_modules[info.module] = true
+        end
+    end
+
+    return preamble .. "\n\n" .. table.concat(code, "\n\n"),
+        direct_native_modules
 end
 
 return coder

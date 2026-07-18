@@ -71,6 +71,7 @@ end
 
 local ARTIFACTS = {
     MODULE .. ".so",
+    MODULE .. ".a",
     MODULE .. ".lua",
     APPLICATION .. "/" .. MODULE .. ".c",
     APPLICATION .. "/" .. MODULE .. ".o",
@@ -167,7 +168,7 @@ describe("Titan driver generic build flags", function()
         local compile_lines = command_lines(verbose_output, "'-c'")
         local link_lines = command_lines(verbose_output, "'-shared'")
         assert.is_true(#compile_lines >= 1, verbose_output)
-        assert.equal(1, #link_lines, verbose_output)
+        assert.equal(2, #link_lines, verbose_output)
 
         local marked_lines = command_lines(verbose_output, marker)
         assert.is_true(#marked_lines >= 1, verbose_output)
@@ -176,22 +177,23 @@ describe("Titan driver generic build flags", function()
             assert.falsy(line:find("'-shared'", 1, true), line)
         end
 
-        local link_line = link_lines[1]
-        assert.truthy(link_line:find(
-            "'titan-runtime/libtitan.a'", 1, true), link_line)
-        assert.falsy(link_line:find(
-            "'titan-runtime/titan.o'", 1, true), link_line)
-        assert.falsy(link_line:find(marker, 1, true), link_line)
-        assert.falsy(link_line:find("'-DTITAN_DRIVER_CPP_BRANCH=37'", 1,
-            true), link_line)
+        for _, link_line in ipairs(link_lines) do
+            assert.truthy(link_line:find(
+                "'titan-runtime/libtitan.a'", 1, true), link_line)
+            assert.falsy(link_line:find(
+                "'titan-runtime/titan.o'", 1, true), link_line)
+            assert.falsy(link_line:find(marker, 1, true), link_line)
+            assert.falsy(link_line:find("'-DTITAN_DRIVER_CPP_BRANCH=37'", 1,
+                true), link_line)
 
-        local first_ldflag = "'-L" .. APPLICATION .. "'"
-        local second_ldflag = "'-L" .. INCLUDE .. "'"
-        local first_at = assert(link_line:find(first_ldflag, 1, true),
-            link_line)
-        local second_at = assert(link_line:find(second_ldflag, 1, true),
-            link_line)
-        assert.is_true(first_at < second_at, link_line)
+            local first_ldflag = "'-L" .. APPLICATION .. "'"
+            local second_ldflag = "'-L" .. INCLUDE .. "'"
+            local first_at = assert(link_line:find(first_ldflag, 1, true),
+                link_line)
+            local second_at = assert(link_line:find(second_ldflag, 1, true),
+                link_line)
+            assert.is_true(first_at < second_at, link_line)
+        end
     end)
 
     it("prints the complete effective argv with shell-safe quoting", function()

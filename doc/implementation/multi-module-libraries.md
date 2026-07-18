@@ -1,23 +1,26 @@
-# Multi-module shared libraries
+# Multi-module libraries
 
-Titan keeps **logical module identity** separate from the **physical shared
-library** that provides its native symbols. A no-`main` `titanc` invocation
+Titan keeps **logical module identity** separate from the **physical native
+provider** that carries its symbols. A no-`main` `titanc` invocation
 compiles every selected source module independently and links their objects
-into one shared library. For example:
+into matching shared and static providers. For example:
 
 ```sh
 titanc app.model app.view
 ```
 
-produces `app.so`, plus generated `app/model.lua` and `app/view.lua` shims.
-The image contains both modules' ordinary `app_model_*` and `app_view_*`
-protocol symbols. It does not create a logical `app` module or a combined
-module state.
+produces `app.so` and `app.a`, plus generated `app/model.lua` and
+`app/view.lua` shims. Both native forms contain the modules' ordinary
+`app_model_*` and `app_view_*` protocol symbols. They do not create a logical
+`app` module or a combined module state.
 
-This chapter describes the provider lookup, link, shim, and publication
-protocol. Folder-source assembly remains a property of one logical module;
-see [Folder modules](folder-modules.md). The language-level packaging rules
-are in [Multi-module libraries](../language/multi-module-libraries.md).
+This chapter describes DSO provider lookup, grouping, shims, and the dynamic
+publication protocol. Archive metadata/resolution, flattening, paired
+transaction, and three-way validation are in [Static compiled
+modules](static-compiled-modules.md). Folder-source assembly remains a
+property of one logical module; see [Folder modules](folder-modules.md). The
+language-level packaging rules are in [Multi-module
+libraries](../language/multi-module-libraries.md).
 
 ## Provider selection for a library invocation
 
@@ -26,12 +29,12 @@ requested CLI roots while preserving their first occurrence and takes their
 longest common sequence of complete dotted components. That prefix is the
 physical provider name:
 
-| Requested roots | Provider | Output |
+| Requested roots | Provider | Outputs |
 | --- | --- | --- |
-| `foo` | `foo` | `foo.so` |
-| `foo.bar` | `foo.bar` | `foo/bar.so` |
-| `foo.left foo.right` | `foo` | `foo.so` |
-| `foo.bar.left foo.bar.right` | `foo.bar` | `foo/bar.so` |
+| `foo` | `foo` | `foo.so`, `foo.a` |
+| `foo.bar` | `foo.bar` | `foo/bar.so`, `foo/bar.a` |
+| `foo.left foo.right` | `foo` | `foo.so`, `foo.a` |
+| `foo.bar.left foo.bar.right` | `foo.bar` | `foo/bar.so`, `foo/bar.a` |
 
 The comparison is component-wise: `foo` and `foobar` have no common prefix.
 Unrelated roots are rejected before code generation. Transitive source
@@ -145,12 +148,22 @@ been assembled into one AST, so it naturally contributes one object.
 
 Library mode forms the union of every source module reachable from all
 requested roots, sorts logical names with `util.bytewise_less`, and links each
-object exactly once. Compiled dependencies remain dynamic and contribute no
-object. Every source module sees the complete source union as static during
-code generation, so imports between linked roots and shared source
-dependencies become ordinary `extern` calls rather than self-dlopen attempts.
-`-X`, `-l`, the Titan/Lua/backtrace archives, and ordered extra linker flags
-are applied once to the final image.
+source object exactly once. A dependency selected from a DSO remains dynamic
+and contributes no object. A dependency selected from a static provider adds
+that physical archive once; its complete validated membership is available
+for direct native binding and is carried into both produced provider forms,
+without making all of its logical keys ordinary resolver results. Every source
+module sees the complete source union and physically carried static names as
+direct during code generation, so those references become ordinary `extern`
+calls rather than self-dlopen attempts.
+
+Selected static-provider archives are ordered bytewise by normalized absolute
+path. User `-X` objects and archives retain command-line order. Library-mode
+DSO construction force-loads selected and `-X` archives, while archive
+construction flattens their object members in the same logical/native order.
+`-l`, the Titan/Lua/backtrace archives, platform libraries, and ordered extra
+linker flags are final-link inputs and are not copied into the produced
+archive.
 
 The compiler preflights the coder's complete externally visible symbol set.
 Distinct logical names that both map to one coder prefix (for example through
@@ -161,7 +174,8 @@ methods, their bound trampolines, record functions, and each module protocol,
 so every collision is reported before code generation instead of as an opaque
 duplicate-symbol linker error.
 
-The final DSO contains independent copies of every logical protocol:
+Both native provider forms contain independent copies of every logical
+protocol:
 
 * `<mangled>_abi` and `<mangled>_types`;
 * `<mangled>_init` and `luaopen_<mangled>`;
@@ -169,30 +183,48 @@ The final DSO contains independent copies of every logical protocol:
 * a distinct registry-owned module `Udata`, variables, canonical closures,
   record metatables, initializer, and nominal owners.
 
-There is no provider metadata table or provider initializer. Requiring one
-logical child initializes only that child and its imports. A container need
-not provide a logical module having the provider's own name.
+There is no provider initializer and a container need not provide a logical
+module having the provider's own name. Requiring one logical child from the
+DSO initializes only that child and its imports. Each Titan-generated object
+also carries its one-key archive metadata section; the archive's validated
+union is physical membership metadata, not a new run-time module table.
 
 ## Validated publication and generated shims
 
-The final link goes to a sibling staging directory whose contained DSO has the
-same basename as the public output. This preserves macOS dSYM basename
-agreement. Before publication, the driver calls every linked module's ABI and
-types entries and resolves its `_init` and `luaopen_*` entries. It then
-atomically renames the validated DSO to its public pathname; on macOS the
-matching `.dSYM` is staged and moved as the DSO's companion.
+Both native forms go to one sibling staging directory; the contained DSO keeps
+the public basename so its macOS dSYM agrees. Before publication, the driver:
 
-Only after DSO publication does `titanc` write one shim per linked source
-module at `<logical/path>.lua`. Source contributors do not receive shims.
-Every generated file starts with:
+1. calls every physical logical module's ABI/types entries in the staged DSO
+   and resolves its `_init` and `luaopen_*` entries;
+2. scans the complete staged archive and requires the exact intended key set;
+3. compares every embedded ABI/types value with the DSO callables;
+4. force-loads only the staged archive into a private validation DSO with the
+   same final native policy; and
+5. validates that image's protocols in a fresh child process.
+
+The archive builder separately reparses the output and compares every
+non-index object member byte-for-byte with the intended flattened sequence, so
+metadata-free native payload cannot be silently omitted or reordered.
+
+`titanc` stages one shim per physical logical module at
+`<logical/path>.lua`. Source contributors do not receive shims. Every
+generated file starts with:
 
 ```lua
 -- Generated by titanc; do not edit.
 ```
 
 Preflight accepts a missing destination or an existing file with that exact
-banner. Any other file is user-owned and aborts before code generation. Shim
-replacement uses a sibling temporary file and rename.
+banner and exact provider/entry template. Any other file is user-owned and
+aborts before code generation. If a valid prior self-describing archive
+advertises keys absent from the replacement, only their exact recognized
+generated shims are eligible for transactional retirement.
+
+Publication backs up all current owned destinations, installs the new
+shims/dSYM, publishes the archive, and renames the DSO last as the default
+dynamic-path commit point. Caught errors and injected archive/DSO failpoints
+restore the predecessor bundle. This is recoverable in-process publication,
+not crash-, power-loss-, or asynchronous-signal-atomic publication.
 
 The body selects the provider through Lua's independent `package.cpath` and
 calls the exact logical entry:
@@ -251,12 +283,15 @@ Lua process and requires exactly one support table exposing `_loadlib` and
 proof.
 
 The production standard library is the canonical example. One compiler
-invocation names all seven logical roots and links their seven objects, the
-runtime, `titanlib.o`, and the selected libuv inputs into root `titan.so`.
-Internal standard imports are static. Bundled mode force-loads the one private
-libuv archive into this image; system mode records the selected shared libuv
-dependency on it. The image exports eight Lua entries (`luaopen_titan` plus
-the seven logical entries) and seven independent ABI/types pairs.
+invocation names all seven logical roots and publishes root `titan.so` and
+`titan.a`. Internal standard imports are direct. `titanlib.o` is shared `-X`
+payload and supplies bare `luaopen_titan` without adding a logical metadata
+key. Bundled mode puts the private libuv archive in that same payload, so its
+objects are force-carried into the DSO and flattened into the archive. System
+mode keeps the pkg-config-selected libuv setting at final link and never
+copies it into `titan.a`. The DSO exports eight Lua entries
+(`luaopen_titan` plus the seven logical entries); both forms define the seven
+logical protocols, and the archive advertises exactly seven metadata keys.
 
 `make titan` builds a distinct private bootstrap at
 `titan-runtime/bootstrap/titan.so`, linked only from `titanlib.o`. During a
@@ -266,23 +301,27 @@ preserved, so a repeated build never replaces a full library with the smaller
 bootstrap. An incompatible existing image is an error and is not overwritten.
 
 After LuaRocks deploys `titanc`, the post-install hook builds all roots once in
-a private directory on the destination filesystem. It then executes the
-source-only `scripts/stdlib_installer.lua` directly with the installed Lua;
-the publisher is not an installed compiler module. The script validates the
-eight Lua entries, seven ABI/types pairs, seven shim banners/provider entries,
-and the macOS dSYM. It backs up the existing active-0.16 DSO, dSYM, shims, and
-stale active-layout copies, leaving those stale public paths vacant; commits
-the shims and platform dSYM; and renames `titan.so` last as the commit point.
-Injected failures restore the previous full image or the first-install
-bootstrap and shim set. After that commit, backup cleanup is best effort and
-cannot turn the coherent install into a reported hook failure. Separately
-versioned 0.15 artifacts are not purged.
+a private directory on the destination filesystem under the same effective
+`CC`, `AR`, `RANLIB`, Titan extra flags, runtime root, and libuv policy used by
+the installer. It then executes the source-only
+`scripts/stdlib_installer.lua` directly with the installed Lua; the publisher
+is not an installed compiler module. The script rescans `titan.a`, requires
+the exact seven-key set, compares embedded metadata with the staged DSO and a
+fresh-process archive-backed validation image, validates bare
+`luaopen_titan`, the seven exact shims, and the macOS dSYM, then publishes the
+paired bundle with the DSO last. It recognizes bootstrap-only, legacy complete
+ABI-0.16 DSO/shims-without-archive, and complete-pair predecessors. Injected
+failures restore the exact predecessor, including leaving `titan.a` absent
+when rolling back a legacy installation. After the DSO commit, backup cleanup
+is best effort and cannot turn the coherent install into a reported hook
+failure. Separately versioned 0.15 artifacts are not purged.
 
-The canonical installed files are one DSO (plus its macOS dSYM) and seven Lua
-shims:
+The canonical installed files are the provider pair (plus the DSO's macOS
+dSYM) and seven Lua shims:
 
 ```text
 <root>/lib/titan/0.16/titan.so
+<root>/lib/titan/0.16/titan.a
 <root>/lib/titan/0.16/titan.so.dSYM          # macOS only
 <root>/share/lua/5.5/titan/{coroutine,uv,async,timer,fs,net,os}.lua
 ```
@@ -291,31 +330,35 @@ These remain direct Titan artifacts outside the source-rock manifest. The
 manifest owns the compiler Lua/script files; `luarocks remove` does not claim
 to remove Titan library-package artifacts.
 
-The checkout Make graph has one full-image completion/configuration stamp: all
-seven flat/folder source sets, native inputs, tool identity, and libuv mode are
-prerequisites, and the DSO, conditional dSYM, and every shim must exist for a
-warm no-op. `make clean` removes only those known generated outputs. Production
+The checkout Make graph has one provider-pair completion/configuration stamp.
+All seven flat/folder source sets, native inputs, effective `CC`/`AR`/`RANLIB`,
+embedded-format inputs, libuv mode, and extra flags are prerequisites. The
+DSO, archive, conditional dSYM, and every shim must exist; every warm
+invocation rescans `titan.a` for the exact seven-key set without changing pair
+mtimes. `make clean` removes only exact known generated outputs. Production
 library tests treat the combined set as read-only. CI snapshots and restores
-the checkout runtime archive plus the installed DSO, dSYM, and shims around
-compiler groups; its system-libuv smoke replaces the whole combined image
-rather than one logical child, while the ordinary artifact retains the
-prepared bundled image.
+the checkout runtime archive plus the installed DSO/archive/dSYM/shims around
+compiler groups; its system-libuv smoke replaces the whole paired generation
+rather than one logical child, while the prepared artifact retains the
+bundled generation.
 
 ## ABI 0.16 and test-only exact providers
 
 ABI 0.16 changes neither per-module serialized type shapes nor Titan's native
 calling convention. It is nevertheless a mandatory compatibility boundary:
-0.15 generated imports hard-coded exact logical DSO paths, while the 0.16
-standard installation contains only a shallow combined `titan.so`. The marker,
-`TITAN_PATH_0_16`, and `lib/titan/0.16` namespace move together so an old
-consumer cannot appear compatible and then fail to locate a removed child
-DSO. Exact 0.16 DSOs remain valid because exact is the final candidate.
+0.15 generated imports hard-coded exact logical DSO paths, while ABI 0.16
+introduced the shallow combined `titan.so`; the later self-describing
+`titan.a` repeats that unchanged ABI/types protocol and therefore does not
+require another bump. The marker, `TITAN_PATH_0_16`, and
+`lib/titan/0.16` namespace move together so an old consumer cannot appear
+compatible and then fail to locate a removed child DSO. Exact 0.16 DSOs and
+archives remain valid because exact is the final candidate in each format.
 
 Production and installed tests use the combined image. The delayed-filesystem
 callback variant is deliberately different: in an isolated root with no
 shallow `titan.so`, it builds exact `titan/coroutine.so`, `titan/uv.so`,
 `titan/async.so`, and `titan/timer.so`. Prefix search reaches those terminal
 candidates. The serial coroutine suite similarly isolates its exact test
-image or preserves and restores the complete production `titan.so`, dSYM, and
-generated coroutine shim. These are fault-injection/test layouts, not an
-alternate production packaging model.
+image or preserves and restores the complete production
+`titan.so`/`titan.a` pair, dSYM, and generated coroutine shim. These are
+fault-injection/test layouts, not an alternate production packaging model.

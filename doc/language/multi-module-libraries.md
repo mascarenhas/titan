@@ -1,9 +1,13 @@
 # Multi-module libraries
 
-Titan keeps a module's *logical identity* separate from the shared library
-that physically provides its native symbols. A single `titanc` invocation can
-compile several related modules into one DSO while every module retains its
-own interface, state, initialization, and Lua entry point.
+Titan keeps a module's *logical identity* separate from the native provider
+that physically carries its symbols. A single `titanc` invocation can compile
+several related modules into one provider pair while every module retains its
+own interface, state, initialization, and Lua entry point. Library mode
+publishes matching `.so` and `.a` forms; this chapter concentrates on logical
+grouping and the runtime DSO. See [Static compiled
+modules](static-compiled-modules.md) for archive lookup, embedded metadata,
+linking, and `--static`.
 
 For example, given:
 
@@ -19,7 +23,7 @@ titanc a.b.left a.b.right
 ```
 
 produces one object and one generated Lua loader (or *shim*) for each logical
-module, but only one shared library:
+module, but only one provider pair:
 
 ```text
 a/b/left.c
@@ -29,6 +33,7 @@ a/b/right.c
 a/b/right.o
 a/b/right.lua
 a/b.so
+a/b.a
 ```
 
 There is no `a/b/left.so` or `a/b/right.so`. Both Lua loaders find the
@@ -40,9 +45,9 @@ a/b/right.lua -> a/b.so -> luaopen_a_b_right
 ```
 
 The ordinary single-module case is the smallest instance of the same model.
-`titanc foo.bar` produces `foo/bar.c`, `foo/bar.o`, `foo/bar.so`, and
-`foo/bar.lua`; the logical module and physical provider both happen to be
-`foo.bar`.
+`titanc foo.bar` produces `foo/bar.c`, `foo/bar.o`, `foo/bar.so`,
+`foo/bar.a`, and `foo/bar.lua`; the logical module and physical provider both
+happen to be `foo.bar`.
 
 ## Choosing the provider
 
@@ -51,14 +56,14 @@ When no requested module defines [`main`](functions.md#standalone-programs-main)
 deduplicates the roots, splits their names into dotted components, and takes
 their longest common sequence of complete components:
 
-| Requested roots | Provider | Shared library |
+| Requested roots | Provider | Native outputs |
 | --- | --- | --- |
-| `foo` | `foo` | `foo.so` |
-| `foo.bar` | `foo.bar` | `foo/bar.so` |
-| `foo.left foo.right` | `foo` | `foo.so` |
-| `foo.bar.left foo.bar.right` | `foo.bar` | `foo/bar.so` |
-| `foo foo.bar` | `foo` | `foo.so` |
-| all seven `titan.*` standard roots | `titan` | `titan.so` |
+| `foo` | `foo` | `foo.so`, `foo.a` |
+| `foo.bar` | `foo.bar` | `foo/bar.so`, `foo/bar.a` |
+| `foo.left foo.right` | `foo` | `foo.so`, `foo.a` |
+| `foo.bar.left foo.bar.right` | `foo.bar` | `foo/bar.so`, `foo/bar.a` |
+| `foo foo.bar` | `foo` | `foo.so`, `foo.a` |
+| all seven `titan.*` standard roots | `titan` | `titan.so`, `titan.a` |
 
 The comparison is component-based: `foo.bar` and `foo.baz` share `foo`, but
 `foo` and `foobar` share no module component. Unrelated roots are therefore an
@@ -103,6 +108,11 @@ per-state metatable for that record, not the provider prefix.
 
 ## Finding a compiled module in a provider
 
+This section specifies the callable metadata state machine for shared
+providers. Static archives use the same logical component prefixes but carry
+their metadata in object sections and run in a separate whole-format pass; see
+[Static compiled modules](static-compiled-modules.md#dependency-search).
+
 For an imported logical module, Titan probes every component prefix from
 shallowest to exact. For `a.b.c`, the relative candidates are:
 
@@ -135,21 +145,26 @@ the same candidate at run time through the Titan binary path. Two imports from
 one provider reuse its native handle but resolve their own mangled initializer
 and function symbols.
 
-Dependency selection remains binary-first. An ordinary `import` uses a valid
-compiled provider before visible flat or folder source. A module named
-explicitly on the `titanc` command line is source-first, which makes it a build
-root even when an installed provider also contains it. Source dependencies
-selected during that build are compiled and linked into the new provider;
-compiled dependencies remain dynamic.
+Dependency selection remains compiled-first. An ordinary `import` uses the
+preferred valid compiled provider before visible flat or folder source. A
+module named explicitly on the `titanc` command line is source-first, which
+makes it a build root even when an installed provider also contains it. Source
+dependencies selected during that build are compiled and linked into the new
+provider. A selected DSO remains dynamic; a selected static provider is direct
+native input and its complete physical membership is carried into both new
+provider forms. See [Static compiled
+modules](static-compiled-modules.md#direct-and-dynamic-dependencies) for the
+transitive-owner constraints.
 
 ## Generated Lua loaders and ownership
 
-Every logical source module linked into a library gets one generated `.lua`
-loader at its logical path. This includes requested roots and source
-dependencies. A [folder module](folder-modules.md) is already one logical
-module, so it gets one loader for the module, never one per contributor. With
-an external `--tree`, generated C stays beside the source while the provider
-and logical loader paths are created below the compiler's working directory.
+Every physical logical module published in a library DSO gets one generated
+`.lua` loader at its logical path. This includes requested roots, source
+dependencies, and logical modules carried from a selected static provider. A
+[folder module](folder-modules.md) is already one logical module, so it gets
+one loader for the module, never one per contributor. With an external
+`--tree`, generated C stays beside the source while the provider and logical
+loader paths are created below the compiler's working directory.
 
 Generated loaders begin with:
 
@@ -159,8 +174,9 @@ Generated loaders begin with:
 
 The compiler may replace a file with that exact generated ownership banner.
 It refuses to overwrite any other `.lua` file and checks all loader
-destinations before changing C, object, DSO, or loader output. Loader files are
-published only after the shared library has linked and validated successfully.
+destinations before changing C, object, provider, or loader output. Loader
+files are published in the same recoverable transaction as the validated
+provider pair, before the DSO commit point.
 
 At run time a loader:
 
@@ -222,10 +238,11 @@ legal in one program.
 ## The standard-library provider
 
 Titan's complete installed standard library is the production example of this
-model. One container:
+model. One paired provider:
 
 ```text
 $ROCKS_TREE/lib/titan/0.16/titan.so
+$ROCKS_TREE/lib/titan/0.16/titan.a
 ```
 
 contains the native support entry plus the independent logical modules
@@ -242,7 +259,8 @@ $ROCKS_TREE/share/lua/5.5/titan/net.lua
 $ROCKS_TREE/share/lua/5.5/titan/os.lua
 ```
 
-The image is also the installation's one complete libuv provider. There are
+The DSO is also the installation's one complete dynamic libuv provider; in
+bundled mode the archive carries the same private libuv object payload. There are
 no production child DSOs, aliases, symbolic links, hard links, or Lua-facing
 copies. `require "titan.async"` and `import "async"` still select the same
 logical module and state; only their physical provider has been combined.
