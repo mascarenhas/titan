@@ -20,6 +20,7 @@ compiler_tests=()
 compiler_core_tests=()
 compiler_heavy_tests=()
 compiler_unit_tests=()
+compiler_isolated_coverage_tests=()
 library_serial_tests=()
 library_uv_fs_tests=()
 library_net_os_tests=()
@@ -61,6 +62,16 @@ while IFS= read -r test_file; do
             compiler_tests+=("$test_file")
             compiler_heavy_tests+=("$test_file")
             ;;
+        spec/checker/static_compiled_modules_spec.lua | \
+        spec/coder/multi_module_libraries_spec.lua | \
+        spec/coder/static_compiled_modules_spec.lua | \
+        spec/staticmetadata_spec.lua)
+            # Busted's file insulation reloads compiler modules between specs,
+            # while LuaCov keeps only the last loaded prototype's line table
+            # inside one process. Preserve the direct feature coverage by
+            # running these files one process at a time after the main shard.
+            compiler_isolated_coverage_tests+=("$test_file")
+            ;;
         *)
             compiler_tests+=("$test_file")
             compiler_core_tests+=("$test_file")
@@ -68,10 +79,20 @@ while IFS= read -r test_file; do
     esac
 done < <(find spec -type f -name '*_spec.lua' -print | LC_ALL=C sort)
 
+run_isolated_compiler_coverage() {
+    local test_file
+    local status=0
+    for test_file in "${compiler_isolated_coverage_tests[@]}"; do
+        "$BUSTED" -c -o gtest -v "$test_file" || status=$?
+    done
+    return "$status"
+}
+
 case "$group" in
     compiler)
         compiler_count=$((${#compiler_tests[@]} +
-            ${#compiler_unit_tests[@]}))
+            ${#compiler_unit_tests[@]} +
+            ${#compiler_isolated_coverage_tests[@]}))
         echo "Running $compiler_count compiler/language spec files with LuaCov"
         compiler_status=0
         "$BUSTED" -c -o gtest -v "${compiler_tests[@]}" ||
@@ -79,15 +100,19 @@ case "$group" in
         unit_status=0
         "$BUSTED" -c -o gtest -v "${compiler_unit_tests[@]}" ||
             unit_status=$?
-        if (( compiler_status != 0 || unit_status != 0 )); then
-            echo "compiler test status: main=$compiler_status unit=$unit_status" \
-                >&2
+        isolated_status=0
+        run_isolated_compiler_coverage || isolated_status=$?
+        if (( compiler_status != 0 || unit_status != 0 ||
+            isolated_status != 0 )); then
+            echo "compiler test status: main=$compiler_status " \
+                "unit=$unit_status isolated=$isolated_status" >&2
             exit 1
         fi
         ;;
     compiler-core)
         compiler_count=$((${#compiler_core_tests[@]} +
-            ${#compiler_unit_tests[@]}))
+            ${#compiler_unit_tests[@]} +
+            ${#compiler_isolated_coverage_tests[@]}))
         echo "Running $compiler_count core compiler/language spec files" \
             "with LuaCov"
         compiler_status=0
@@ -96,9 +121,12 @@ case "$group" in
         unit_status=0
         "$BUSTED" -c -o gtest -v "${compiler_unit_tests[@]}" ||
             unit_status=$?
-        if (( compiler_status != 0 || unit_status != 0 )); then
+        isolated_status=0
+        run_isolated_compiler_coverage || isolated_status=$?
+        if (( compiler_status != 0 || unit_status != 0 ||
+            isolated_status != 0 )); then
             echo "compiler core test status: main=$compiler_status " \
-                "unit=$unit_status" >&2
+                "unit=$unit_status isolated=$isolated_status" >&2
             exit 1
         fi
         ;;
@@ -109,11 +137,13 @@ case "$group" in
         ;;
     compiler-uncovered)
         compiler_count=$((${#compiler_tests[@]} +
-            ${#compiler_unit_tests[@]}))
+            ${#compiler_unit_tests[@]} +
+            ${#compiler_isolated_coverage_tests[@]}))
         echo "Running $compiler_count compiler/language spec files" \
             "without LuaCov"
         "$BUSTED" -o gtest -v \
-            "${compiler_tests[@]}" "${compiler_unit_tests[@]}"
+            "${compiler_tests[@]}" "${compiler_unit_tests[@]}" \
+            "${compiler_isolated_coverage_tests[@]}"
         ;;
     library-serial)
         echo "Running ${#library_serial_tests[@]} serial library" \
