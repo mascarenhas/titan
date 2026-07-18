@@ -312,7 +312,7 @@ else
     if #errors > 0 then exit(table.concat(errors, "\n")) end
     local ok, term, code = driver.compile_library_output(
         temporary, ofiles, args.link, args.verbose, nil,
-        selected_static_archives, native_payload.inputs)
+        selected_static_archives, native_payload.inputs, provider_output)
     if not ok then
         driver.remove_path(temporary)
         driver.remove_path(temporary .. ".dSYM")

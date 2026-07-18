@@ -416,6 +416,11 @@ end
         end
         assert.truthy(provider_link, verbose_output)
         assert.truthy(archive_validation_link, verbose_output)
+        if driver.IS_DARWIN then
+            assert.truthy(provider_link:find(
+                "'-Xlinker' '-install_name' '-Xlinker' 'pkg.so'",
+                1, true), provider_link)
+        end
         local left_at = assert(provider_link:find(
             "/pkg/left.o'", 1, true), provider_link)
         local right_at = assert(provider_link:find(
@@ -1504,6 +1509,11 @@ end
             tostring(code) .. ")")
         local dso_link = assert(output:match("[^\n]*'%-shared'[^\n]*"),
             output)
+        if driver.IS_DARWIN then
+            assert.truthy(dso_link:find(
+                "'-Xlinker' '-install_name' '-Xlinker' 'payload/item.so'",
+                1, true), dso_link)
+        end
         local direct_at = assert(dso_link:find(direct, 1, true), dso_link)
         local archive_at =
             assert(dso_link:find(payload_archive, 1, true), dso_link)

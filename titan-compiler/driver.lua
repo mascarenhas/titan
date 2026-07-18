@@ -2519,7 +2519,7 @@ end
 
 function driver.compile_library_output(soname, libnames, link, verbose,
                                        extra_objects, static_archives,
-                                       ordered_payload)
+                                       ordered_payload, install_name)
     local runtime_ok, runtime_err = check_runtime(verbose)
     if not runtime_ok then return nil, runtime_err end
     local output_ok, output_err = ensure_output_parent(soname)
@@ -2530,6 +2530,15 @@ function driver.compile_library_output(soname, libnames, link, verbose,
     local args, err = compiler_argv(false)
     if not args then return nil, err end
     append_argv(args, shared_flag())
+    -- Darwin otherwise derives LC_ID_DYLIB from the unique staged `-o` path.
+    -- Use the eventual public path so unchanged transactional relinks remain
+    -- byte-identical and can preserve the published provider pair's mtimes.
+    if driver.IS_DARWIN and install_name then
+        append_argv(args, {
+            "-Xlinker", "-install_name",
+            "-Xlinker", install_name,
+        })
+    end
     append_argv(args, { "-o", soname })
     for _, libname in ipairs(libnames) do
         table.insert(args, libname)
