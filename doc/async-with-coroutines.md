@@ -600,9 +600,9 @@ Build `titan/coroutine.titan` as the ordinary qualified logical Titan module
 `titan.coroutine`. The combined standard binary exports `titan_coroutine_init`,
 `titan_coroutine_abi`, `titan_coroutine_types`, and
 `luaopen_titan_coroutine`. Install the paired physical standard provider as
-`<root>/lib/titan/0.16/{titan.so,titan.a}` and the generated logical shim as
+`<root>/lib/titan/0.17/{titan.so,titan.a}` and the generated logical shim as
 `<root>/share/lua/5.5/titan/coroutine.lua`. Titan's configured module path
-contains `<root>/lib/titan/0.16`; the parser desugars `import "coroutine"` to
+contains `<root>/lib/titan/0.17`; the parser desugars `import "coroutine"` to
 that qualified identity and prefix lookup claims it from the preferred native
 form.
 `require "titan.coroutine"` uses the shim to promote/map that provider and
@@ -613,6 +613,11 @@ a parent-level `coroutine.so` or a `lib/lua` DSO, and do not export a bare
 Titan code reaches this binary with `import "coroutine"`, while Lua code
 uses `require "titan.coroutine"`. The bare Lua name `coroutine` remains
 owned by Lua's standard library.
+
+ABI 0.17 keeps the coroutine's `TValue` transport, but a `value` containing an
+Array now carries the canonical proxy Udata rather than the private backing
+Table. Exact typed Array paths continue to use backing `Table *`. See
+[Dense Arrays](implementation/dense-arrays.md#exact-and-generic-call-paths).
 
 The rockspec and Makefile make `luarocks make` and `make test` build all seven
 logical standard modules in paired `titan.so`/`titan.a` providers plus
@@ -656,7 +661,8 @@ Add FFI coverage for the new `TValue` boundary:
   expressions implicitly coerced to `value`;
 * a C helper returning `TValue` produces a Titan `value`;
 * the conversion works for nil, booleans, numbers, strings, records,
-  arrays/maps, and function values;
+  Arrays as canonical proxy Udata, Maps as ordinary Tables, and function
+  values;
 * raw `TValue *`, `const TValue *`, and `TValue[]` interfaces import as C
   pointer/array types, and the new address coercions cover the scoped
   pointer arguments used by `titan/coroutine.titan`.
@@ -664,7 +670,7 @@ Add FFI coverage for the new `TValue` boundary:
 Add Titan runtime/coder coverage for:
 
 * create/resume/yield round trips with nil, booleans, integers, floats,
-  strings, records, arrays, maps, function values, and Lua closures;
+  strings, records, Array proxies, Maps, function values, and Lua closures;
 * `titan/coroutine.titan` resolving default tags, recording resume as success,
   recording error injection as failure, checking `mco_result`, and
   raising a returned failure payload;

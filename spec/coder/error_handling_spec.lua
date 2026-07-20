@@ -85,8 +85,10 @@ describe("raise <exp>", function()
         ]], [==[
             local ok, err = pcall(test.boom)
             assert(not ok, "expected boom to fail")
-            assert(type(err) == "table", "expected table error, got " .. type(err))
-            assert(err[2] == 2, "wrong table contents")
+            assert(type(err) == "userdata",
+                   "expected Array proxy error, got " .. type(err))
+            assert(getmetatable(err) == "Titan array metatable")
+            assert(err[2] == 2, "wrong Array contents")
             print("OK")
         ]==])
         assert.match("OK", out)

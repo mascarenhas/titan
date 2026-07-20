@@ -70,9 +70,9 @@ not add epicycles around what may be a misunderstood simpler design.
   the union of both coverage shards. Each shard uploads its explicit report
   through Codecov's GitHub OIDC flow with job-local `id-token: write`; upload
   errors fail the job so coverage publication cannot be silently skipped. The
-  regular producer first configures its disposable prefix for ABI 0.15, then
-  runs the supported `make lua`/`make luarocks` migration to 0.16 and proves
-  bare `require "titan"` after the first 0.16 rock install. The
+  regular producer first configures its disposable prefix for ABI 0.16, then
+  runs the supported `make lua`/`make luarocks` migration to 0.17 and proves
+  bare `require "titan"` after the first 0.17 rock install. The
   sanitizer job keeps its build
   and focused native-memory gate on one warm runner: representative timer/fs
   suites, core owner/callback proofs, and production net/OS smokes. Keep full
@@ -141,7 +141,7 @@ not add epicycles around what may be a misunderstood simpler design.
   private `libuv.a` is never installed.
 
   SDK staging atomically places the bootstrap at
-  `$ROCKS_TREE/lib/titan/0.16/titan.so` only when the path is absent. It
+  `$ROCKS_TREE/lib/titan/0.17/titan.so` only when the path is absent. It
   validates and preserves an existing usable bootstrap or full image, and
   refuses to clobber an incompatible file; a repeated build must never shrink
   a full image back to bootstrap form. After LuaRocks deploys the compiler, the
@@ -165,18 +165,18 @@ not add epicycles around what may be a misunderstood simpler design.
   `scripts/stdlib_installer.lua` under the same effective `CC`, `AR`, `RANLIB`,
   `TITAN_EXTRA_*`, `TITAN_ROCKS_ROOT`, and runtime-prebuilt environment for
   recoverable publication. The script is not part of the installed compiler
-  modules. It recognizes bootstrap-only, legacy complete ABI-0.16
+  modules. It recognizes bootstrap-only, legacy complete ABI-0.17
   DSO/shims-without-archive, and complete-pair predecessor states; backs up the
   exact current DSO/archive/dSYM/shims and stale active-layout copies; commits
   shims and dSYM, then `titan.a`, and renames `titan.so` last. Caught errors and
   injected archive/DSO failpoints restore the exact predecessor, including
   leaving `titan.a` absent for a legacy installation. This is not crash-,
   power-loss-, or asynchronous-signal-atomic publication. The canonical
-  artifacts are `$ROCKS_TREE/lib/titan/0.16/{titan.so,titan.a}`, the DSO's
+  artifacts are `$ROCKS_TREE/lib/titan/0.17/{titan.so,titan.a}`, the DSO's
   macOS dSYM, and generated
   `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,fs,net,os}.lua`.
   No symbolic links, hard links, child DSOs, or `lib/lua` compatibility copies
-  are used, and a separately versioned 0.15 tree is not purged. These direct
+  are used, and a separately versioned 0.16 tree is not purged. These direct
   SDK/stdlib files remain outside the rock manifest and are not removed by
   `luarocks remove`; binary-rock ownership is deferred until Titan has a
   library/application packaging story. The
@@ -352,8 +352,8 @@ genuine deeper folder child remains legal. It recovers the Titan
 SDK/rocks-tree root from the first `package.cpath` template ending in
 `/lib/lua/5.5/?.so`; that works because the supported install currently sets
 `ROCKS_TREE == PREFIX`, not because the two owners are inherently identical.
-Compiled-module lookup defaults to `.;<root>/lib/titan/0.16`, with
-`TITAN_PATH_0_16`/`TITAN_PATH` overriding it and `;;` inserting that ordinary
+Compiled-module lookup defaults to `.;<root>/lib/titan/0.17`, with
+`TITAN_PATH_0_17`/`TITAN_PATH` overriding it and `;;` inserting that ordinary
 default at compile time and run time. For logical `a.b.c`, each compiled-format
 pass checks `a.<ext>`, `a/b.<ext>`, and exact `a/b/c.<ext>` path-root-major and
 shallow-to-exact. Default lookup completes the `.so` pass across every path
@@ -398,7 +398,7 @@ The standard library uses ordinary qualified module names: most source files
 are `titan/<module>.titan`, while `titan.uv` uses main
 `titan/uv/uv.titan` plus its six contributors. Production invokes all seven
 roots in one compiler process, publishes
-`<root>/lib/titan/0.16/{titan.so,titan.a}`, and installs seven generated shims
+`<root>/lib/titan/0.17/{titan.so,titan.a}`, and installs seven generated shims
 below `<root>/share/lua/5.5/titan/`. The archive advertises exactly seven
 logical metadata keys; its metadata-free payload includes `titanlib.o` and, in
 bundled mode, the flattened libuv objects. The DSO exposes those seven
@@ -448,14 +448,20 @@ Filesystem source cache entries carry `program_output` (`P` flat,
 `driver.compile_program`. Keep the optional argument's old dotted-name default
 for `tableloader` and external callers.
 
-The compiled-module ABI version is `0.16` (bumped from `0.15` because
-generated/imported physical DSO resolution now records a selected prefix
-container and the then-new canonical standard layout was one `titan.so` plus
-shims, even though per-module serialized types and native signatures are
-unchanged; the later paired static provider remains ABI 0.16 because its
-embedded section repeats the unchanged ABI/types protocol as an artifact
-contract and supports same-ABI migration from a DSO-only 0.16 installation;
-`0.15` itself was bumped from `0.14` when the
+The compiled-module ABI version is `0.17`. Exact Array signatures remain
+`Table *`/`Table **`, and serialized Array type text is unchanged, but 0.17
+changes the Array semantic and boundary contract: key `0` is reserved for the
+canonical proxy, `lenhint` is authoritative, positive values never fall back
+to the hash, and Lua/`value`/raw-Map boundaries exchange proxies instead of
+backing Tables. ABI 0.16 code can violate each invariant, so 0.16 providers are
+incompatible. `0.16` itself was bumped from `0.15` because
+generated/imported physical DSO resolution records a selected prefix container
+and the then-new canonical standard layout was one `titan.so` plus shims, even
+though per-module serialized types and native signatures were unchanged; the
+later paired static provider remained ABI 0.16 because its embedded section
+repeated the unchanged ABI/types protocol as an artifact contract and
+supported same-ABI migration from a DSO-only 0.16 installation; `0.15` itself
+was bumped from `0.14` when the
 `titan.uv` folder split moved exported declarations into semantic contributors,
 reordering its serialized module members and canonical closure slots; `0.14`
 itself was bumped from `0.13` when flexible
@@ -504,6 +510,35 @@ LuaRocks config migration cannot safely rewrite them.
 ### Lua 5.5 internals conventions in generated C
 
 The coder targets Lua 5.5 internals; keep these idioms when touching templates: stack fields are unions (`L->top.p`, `L->ci->func.p`, `StkId` + `s2v()` to view a slot as `TValue*`); the table array part has no `TValue` slots (read via `luaH_fastgeti`/`luaH_getint` into a local `TValue` holder testing `tagisempty(tag)`, write via `obj2arr`/`luaH_setint`/`luaH_set` — `luaO_nilobject` and `luaH_newkey` no longer exist); booleans carry no payload (`ttistrue`, `titan_setbvalue` from titan.h); `ttypetag()`/`LUA_V*` are the variant tags (old `ttnov` is now `ttype`); a record value IS a `Udata` (created with `luaS_newudata(L, 0, N)`) — its fields live in `uv[0..N-1].uv` (0-based, no reserved `uv[0]`), the record's TYPE IDENTITY is its metatable pointer (a type check compares `uvalue(v)->metatable`; the udata has no raw payload), and that metatable sits on the udata's `metatable` field; `_mod` (module state) is likewise a single `Udata`. Stores of collectable values into a `CClosure` upvalue (function values; capture boxes are userdata, see below) need the **forward** `luaC_barrier(L, owner, slot)`, while record-field and module-slot stores into a `Udata` user value and table stores need the **back** `luaC_barrierback(L, obj2gco(o), v)` (genlink-safe on userdata) — the generational GC makes missing barriers near-deterministic corruption, not a rare race.
+
+Titan Arrays are a deliberate exception to ordinary Lua Table semantics.
+Their exact/internal value remains a backing `Table *`; exact
+variadic/flexible descriptors therefore remain `Table **`. The backing hash
+key `0` owns one canonical zero-payload/one-uservalue proxy Udata, and that
+proxy's user value 1 owns the backing. Positive elements live only in the
+array part, `asize` is capacity, and `lenhint` is the explicit
+highest-present-positive length (zero when `asize == 0`). Typed reads use
+`getArrTag`/`arr2obj`; typed writes use `obj2arr` plus a backward barrier on
+the backing Table. A resize must save and restore the explicit length. Reads
+below 1 return nil before conversion; writes below 1 error before mutation.
+Lua, `value`, and raw-Map storage see only the canonical proxy, while typed
+slots and exact calls see the backing. The only typed hot-path exception is
+post-load validation when an Array element is itself Array-typed. Do not
+query the registry or load a proxy/uservalue to address the outer Array.
+Both direct and `titan.uv.bootstrap` standalone paths place arguments only at
+positive indices, set the explicit length, and pass the proxy to the generated
+Lua entry wrapper, which unboxes before calling exact native `main`.
+
+Every generated module owns one private, ABI-visible user-value slot caching
+the per-state Array proxy metatable; populate it immediately after registry
+anchoring the module and before any initializer can construct or box an
+Array. Runtime construction roots both backing and proxy until both cycle
+edges and barriers exist. Specs that need capacity/hash/GC evidence belong in
+`spec/dense_array_runtime_spec.lua`; language/checker behavior belongs in the
+topical dense-Array specs. A Titan Array is table-like but not a Lua table:
+stock Lua 5.5 `table.*` accepts its proxy through raw `__index`, `__newindex`,
+and `__len`, while `rawget`, `rawset`, and `rawlen` reject it. Do not add
+caller-identity tricks or patch Lua to change that consequence.
 
 **Numeric semantics must reproduce Lua exactly, not C's** (see `doc/implementation/codegen-constructs.md` "Operators with inlined Lua semantics"): integer `+ - *`, unary `-` (`intop(-, 0, x)`) and binary `~`/xor (`intop(^, …)`) go through `intop`/`l_castS2U`/`l_castU2S` from `lvm.h` for defined two's-complement wraparound — raw signed C `+ - * -` is overflow UB (`driver.CFLAGS` has no `-fwrapv`); `//`/`%`/shifts inline `luaV_idiv`/`luaV_mod`/`luaV_shiftl`; `^` follows `luai_numpow` (exponent `2` → `x*x`); mixed `integer`/`float` comparisons inline the `titan_lt_intfloat`/`titan_le_intfloat`/`titan_lt_floatint`/`titan_le_floatint`/`titan_eq_intfloat` helpers in `titan.h` (chosen by static operand type, no `TValue` boxing) rather than promoting the integer to float; float literals are emitted with `%.17g`.
 
@@ -610,6 +645,8 @@ substitution, recursive; error on missing keys). Key facts:
   instance change private slot/initialization order but neither the exact
   serialized public interface nor native signatures. ABI 0.16 is the later
   physical-provider/layout boundary, not a folder-source schema change.
+  ABI 0.17 is the dense-Array invariant/boundary boundary; exact pointer
+  descriptors and serialized Array type text did not change.
 - Each generated logical module object contains the canonical serialized
   interface twice: callable `<mangled>_types`/`_abi` entries and one
   relocation-free, byte-aligned metadata section rendered by
@@ -620,7 +657,7 @@ substitution, recursive; error on missing keys). Key facts:
   logical key physically carried by selected static providers. Static imports
   use direct calls; DSO imports keep handle/global paths.
 
-- Each Titan function becomes **two** C functions: a raw native-convention one (`RETTYPE f(lua_State *L, Udata *_mod, CClosure *_fn, params..., input-vararg pair, out-params for returns 2..n, flexible-output pair)`; the input and output pairs appear only when declared, and the **caller** owns flexible-output storage and anchors GC-able values on the Lua stack) and a Lua-stack entry wrapper that coerces arguments and installs the error handler. `_fn` is the function value's own closure (still a `CClosure`): `NULL` on fully-static top-level calls, and the callee itself on first-class/closure/value calls; for anonymous functions it carries the captured variables (this uniform parameter is what bumped the module ABI to `0.6`). `_mod` becoming `Udata*` and record instances becoming a single `Udata` (so every record-typed param/return changes C type and `<mangled>_init` returns `Udata*`) is what bumped it to `0.7`; the ABI then bumped to `0.8` when a record's type tag became its metatable pointer (no `getudatamem` payload), to `0.9` when a variadic function's native signature gained the trailing `TitanVargX *_varargs, int _start` pair (after the declared params and before the out-params) and `<mangled>_types` began encoding the `varargtype` element type, to `0.10` when the `TitanVargX` structs changed from inline flexible arrays to descriptor structs with an `args` pointer, to `0.11` when local records/members changed record interface serialization, to `0.12` when public type aliases added the serialized `type_members` namespace, to `0.13` when named arguments added serialized declaration-only `paramnames` metadata without changing native function signatures, and to `0.14` when flexible returns added serialized `flexrettype` metadata and the conditional trailing `TitanVargX *_flexout, int _flexwant` native pair.
+- Each Titan function becomes **two** C functions: a raw native-convention one (`RETTYPE f(lua_State *L, Udata *_mod, CClosure *_fn, params..., input-vararg pair, out-params for returns 2..n, flexible-output pair)`; the input and output pairs appear only when declared, and the **caller** owns flexible-output storage and anchors GC-able values on the Lua stack) and a Lua-stack entry wrapper that coerces arguments and installs the error handler. `_fn` is the function value's own closure (still a `CClosure`): `NULL` on fully-static top-level calls, and the callee itself on first-class/closure/value calls; for anonymous functions it carries the captured variables (this uniform parameter is what bumped the module ABI to `0.6`). `_mod` becoming `Udata*` and record instances becoming a single `Udata` (so every record-typed param/return changes C type and `<mangled>_init` returns `Udata*`) is what bumped it to `0.7`; the ABI then bumped to `0.8` when a record's type tag became its metatable pointer (no `getudatamem` payload), to `0.9` when a variadic function's native signature gained the trailing `TitanVargX *_varargs, int _start` pair (after the declared params and before the out-params) and `<mangled>_types` began encoding the `varargtype` element type, to `0.10` when the `TitanVargX` structs changed from inline flexible arrays to descriptor structs with an `args` pointer, to `0.11` when local records/members changed record interface serialization, to `0.12` when public type aliases added the serialized `type_members` namespace, to `0.13` when named arguments added serialized declaration-only `paramnames` metadata without changing native function signatures, to `0.14` when flexible returns added serialized `flexrettype` metadata and the conditional trailing `TitanVargX *_flexout, int _flexwant` native pair, to `0.15` when the `titan.uv` folder split reordered public slots, to `0.16` for selected prefix-container providers and the canonical combined stdlib layout, and to `0.17` for dense-Array semantic and boundary invariants without changing `Table *`/`Table **` descriptors.
 - A dynamically imported module is loaded from its transient
   `Type.Module.file` with `RTLD_LAZY | RTLD_GLOBAL` before it is initialized.
   `file` defaults to the exact logical path, is overwritten by prefix-container
@@ -629,7 +666,7 @@ substitution, recursive; error on missing keys). Key facts:
   publishes the owner's method entry points. The importer then resolves those
   transitive symbols through `RTLD_DEFAULT`; it does not open the owner DSO a
   second time.
-- Module state is a `Udata` (`_mod`), allocated with `luaS_newudata(L, 0, NUPVALS)`: there is no reserved user value; the module's user values (0-based) hold module globals, exported-function canonical closures, imported-module `Udata`s, record metatables, and per-record static-namespace tables. There is **no** Lua-facing module table — `require` returns the module `Udata` itself (so `type(require "m")` is `"userdata"`), and all member access (functions, variables, record namespaces `m.Rec`) flows through a metatable `__index`/`__newindex` over a unified name→slot member map; functions and record namespaces are served read-only (assigning errors), variables coerce in/out, and the "not found" message is "member '%s' does not exist". A record instance is likewise a single `Udata` (fields in `uv[0..N-1]`, type identity is its metatable pointer (no raw payload), metatable on the udata).
+- Module state is a `Udata` (`_mod`), allocated with `luaS_newudata(L, 0, NUPVALS)`. Its 0-based user values hold module globals, exported-function canonical closures, imported-module `Udata`s, record metatables, per-record static-namespace tables, and one unconditional private per-state Array-metatable cache slot allocated after the importer-reconstructed public prefix; there is no distinguished `uv[0]` header. There is **no** Lua-facing module table — `require` returns the module `Udata` itself (so `type(require "m")` is `"userdata"`), and all member access (functions, variables, record namespaces `m.Rec`) flows through a metatable `__index`/`__newindex` over a unified name→slot member map; functions and record namespaces are served read-only (assigning errors), variables coerce in/out, and the "not found" message is "member '%s' does not exist". A record instance is likewise a single `Udata` (fields in `uv[0..N-1]`, type identity is its metatable pointer (no raw payload), metatable on the udata).
 - Typedef-resolved pointers to Lua's internal `Udata` are GC-bearing FFI
   values, not ordinary C pointers: boxing a non-NULL `Udata *` emits a full
   userdata `TValue` for that same object, NULL boxes as nil, and unboxing

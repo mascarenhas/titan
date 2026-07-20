@@ -91,6 +91,10 @@ All templates that touch the Lua stack were rewritten for
 
 ### Table access
 
+The Array bullets in this subsection record the original 5.5 port and are
+historical. ABI 0.17 later replaced the plain-table Array policy described
+here; Map details remain current.
+
 * **Array reads** (`codeindexarray`) use 5.5's `luaH_fastgeti` macro into
   a local `TValue` holder, setting the holder to nil when
   `tagisempty(tag)` (5.5 getters leave the holder untouched on a miss).
@@ -115,6 +119,32 @@ All templates that touch the Lua stack were rewritten for
 * `#` on arrays emits `luaH_getn(L, t)` (the function gained the
   `lua_State*` parameter).
 * `luaV_tointeger(..., 0)` became `luaV_tointeger(..., F2Ieq)`.
+
+### ABI 0.17 dense Arrays use stock `lenhint`
+
+ABI 0.17 does **not** patch Lua. Titan still builds pinned, otherwise stock
+Lua 5.5.0 and uses its installed internal headers and archive. A Titan Array's
+private ordinary `Table` uses the stock `lenhint(t)` word beside the array
+allocation as authoritative highest-present-positive length. Generated
+`#array` guards `asize == 0` and reads that word directly rather than calling
+`luaH_getn`.
+
+This use requires Titan to own every relevant mutation:
+
+* Array user entries occupy only positive array-part slots;
+* backing hash key 0 is reserved for the canonical proxy Udata;
+* generated Array assignment updates the hint after writes and scans backward
+  only when deleting the current tail;
+* `titan_array_resize` saves the logical length across
+  `luaH_resizearray`, which otherwise resets the stock hint as part of its
+  ordinary search-cache behavior; and
+* growth is bounded by Titan's exact mirror of Lua 5.5's private `MAXASIZE`
+  expression, with no hash fallback.
+
+Integer-keyed Maps remain ordinary Tables and `#map` deliberately calls
+`luaH_getn`, retaining Lua's valid-border semantics. The complete ownership,
+GC, and proxy protocol is in
+[Dense Arrays](implementation/dense-arrays.md#authoritative-lenhint-and-resizing).
 
 ### Values and type checks
 
@@ -198,13 +228,16 @@ function-value/closure upvalue stores still take the forward barrier.)
   installed `titan` rock shadows the working tree under busted, so
   `luarocks make` must be re-run before testing compiler changes).
 
-## Review findings (multi-agent audit of the migration diff)
+## Review findings (multi-agent audit of the original migration diff)
 
 The finished migration was reviewed by independent auditors over four
 dimensions (GC/barriers, 5.5 API usage, semantic regressions vs the 5.3
 codegen, host code/packaging), with every claim adversarially verified
 against the real Lua sources — several with live reproductions — before
-being accepted. Confirmed findings, all fixed:
+being accepted. Confirmed findings, all fixed in that migration baseline.
+The old large-index hash fallback and plain-table constructor behavior
+described below were intentionally superseded by ABI 0.17's positive-only,
+array-part-only protocol:
 
 1. **`errorhandler` crash** (critical, found while running the suite).
    Described above under `titan.c` — every runtime type-error path

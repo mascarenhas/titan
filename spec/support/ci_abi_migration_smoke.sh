@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 
 # Prove the supported upgrade boundary for Lua's compiled-in Titan C path.
-# The prepare phase gives one disposable prefix a genuinely ABI-0.15-configured
-# Lua and LuaRocks, then advances that same prefix through the required 0.16
+# The prepare phase gives one disposable prefix a genuinely ABI-0.16-configured
+# Lua and LuaRocks, then advances that same prefix through the required 0.17
 # `make lua` and `make luarocks` steps. The verify phase runs after the first
-# 0.16 rock install and proves that bare native support is found without path
+# 0.17 rock install and proves that bare native support is found without path
 # overrides.
 
 set -euo pipefail
@@ -71,7 +71,7 @@ case "$PREFIX" in
 esac
 
 lua="$PREFIX/bin/lua"
-provider="$PREFIX/lib/titan/0.16/titan.so"
+provider="$PREFIX/lib/titan/0.17/titan.so"
 
 clean_lua() {
     env \
@@ -84,6 +84,7 @@ clean_lua() {
         -u TITAN_PATH \
         -u TITAN_PATH_0_15 \
         -u TITAN_PATH_0_16 \
+        -u TITAN_PATH_0_17 \
         -u TITAN_ROCKS_ROOT \
         "$@"
 }
@@ -109,15 +110,15 @@ if [[ $phase == prepare ]]; then
     # Build a real old configured interpreter first. This uses the same
     # content-stamp machinery that upgrades an existing developer prefix.
     make lua PREFIX="$PREFIX" LUA_PLATFORM="$platform" \
-        TITAN_ABI_VERSION=0.15
+        TITAN_ABI_VERSION=0.16
     make luarocks PREFIX="$PREFIX" LUA_PLATFORM="$platform" \
-        TITAN_ABI_VERSION=0.15
-    assert_configured_abi 0.15 0.16
+        TITAN_ABI_VERSION=0.16
+    assert_configured_abi 0.16 0.17
 
     # The dependency cache can contain the preceding commit's registered Titan
     # rock and direct, manifest-external shims. Remove only those known
     # Titan-owned entries from this disposable prefix so the later normal rock
-    # build is genuinely its first 0.16 Titan install.
+    # build is genuinely its first 0.17 Titan install.
     if clean_lua "$PREFIX/bin/luarocks" show titan >/dev/null 2>&1; then
         clean_lua "$PREFIX/bin/luarocks" remove titan --force
     fi
@@ -134,7 +135,7 @@ if [[ $phase == prepare ]]; then
 
     make lua PREFIX="$PREFIX" LUA_PLATFORM="$platform"
     make luarocks PREFIX="$PREFIX" LUA_PLATFORM="$platform"
-    assert_configured_abi 0.16 0.15
+    assert_configured_abi 0.17 0.16
     exit 0
 fi
 

@@ -138,7 +138,8 @@ exists after their fixed prefix:
 
 * the trailing argument run of a variadic Titan call;
 * the flexible tail of a `return` statement;
-* the expanding final expression of an array constructor.
+* the expanding final expression of a positional Array or exact
+  integer-keyed Map constructor.
 
 ```lua
 function names(): (...: string)
@@ -171,14 +172,14 @@ run time.
 
 The last-position rule still applies. Scalar expressions before the final
 producer each contribute one element, while only that final producer may
-expand. Map entries, record fields, named arguments, conditions, and
+expand. Computed Map entries, record fields, named arguments, conditions, and
 parenthesized expressions are never open sinks.
 
 An open context does not reveal results hidden by a narrower static function
 type. If a callable that can return `(integer, ...: integer)` is stored in a
 slot typed `() -> integer`, calls through that slot expose one integer even in
-an array or flexible-return context. The callable's static type remains the
-contract visible to its caller.
+a positional container or flexible-return context. The callable's static type
+remains the contract visible to its caller.
 
 ## Contextual calls through `value`
 

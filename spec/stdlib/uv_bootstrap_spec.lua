@@ -79,6 +79,20 @@ local SOURCES = {
           return 0
         end
     ]],
+    bootstrap_args = [[
+        local timer = import "timer"
+
+        function main(args: {string}): integer
+          timer.sleep(0)
+          if args[0] then return 30 end
+          if args[-1] then return 31 end
+          if #args == 0 then return 0 end
+          if #args ~= 2 then return 32 end
+          if args[1] ~= "one" then return 33 end
+          if args[2] ~= "two" then return 34 end
+          return 0
+        end
+    ]],
     main_child = [[
         local fs = import "fs"
         local timer = import "timer"
@@ -155,6 +169,19 @@ describe("async standalone bootstrap", function()
             async_stdlib.run_app(workspace, "timer_only_bootstrap")
         assert.truthy(ok, output)
         assert.equals(0, status)
+    end)
+
+    it("passes only positive arguments through the bootstrap boundary",
+    function()
+        local empty_ok, empty_status, empty_output =
+            async_stdlib.run_app(workspace, "bootstrap_args")
+        assert.truthy(empty_ok, empty_output)
+        assert.equals(0, empty_status, empty_output)
+
+        local ok, status, output =
+            async_stdlib.run_app(workspace, "bootstrap_args", "one", "two")
+        assert.truthy(ok, output)
+        assert.equals(0, status, output)
     end)
 
     it("drives an independent child after standalone main returns", function()

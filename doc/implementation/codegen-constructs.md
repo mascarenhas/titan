@@ -16,8 +16,12 @@ plus, when GC-able, a paired Lua stack slot (`s2v(_base + k)`) that
 keeps it visible to the collector; code computes with the C variable and
 refreshes the slot after every store. `codeexp(ctx, node, iscondition,
 target)` also threads `target` — a `VarName` lvalue's `_decl`, letting
-constructors build directly into the lvalue's `_cvar`/`_slot` — and
-`iscondition`, which no generator currently consumes: truth conversion
+eligible constructors build directly into the lvalue's `_cvar`/`_slot`.
+Dense Array constructors deliberately ignore that optimization and first
+anchor their backing in a scanned temporary slot, because an owning module or
+record slot is not necessarily remembered until its caller emits the final
+barrier. The dispatch also threads `iscondition`, which no generator
+currently consumes: truth conversion
 happens in `codeif`, `codewhile`/`coderepeat`, and the `as boolean` cast,
 via `toboolean`.
 
@@ -46,11 +50,30 @@ userdata owner, back barrier); imported-module variables go through the
 import's `Udata` (`uvalue(&_mod->uv[MOD].uv)->uv[VAR].uv`) with the same
 barrier.
 
-**Multiple assignment is two-phase** (`codemultiassignment`):
-`_codeadjustedfixed` walks the checker's complete lexical expression list,
-materializes each delivered right-hand side, and forces every explicit
-surplus expression only for effect. Only after that pass do the assignments
-happen — which is what gives `x, y = y, x` swap semantics:
+`codesingleassignment` and `codemultiassignment` share
+`_materialize_assignment_lvalue`, so assignment lowering separates target
+preparation from right-hand evaluation and from the eventual store.
+
+**Multiple assignment is three-phase** (`codemultiassignment`):
+
+1. `_materialize_assignment_lvalue` walks the targets in lexical left-hand
+   order. Simple local and module-variable targets need no preparation.
+   Effectful record receivers, Array/Map containers and indices or keys, and C
+   field/index operands are evaluated exactly once and frozen in temporaries.
+   GC owners and boxed Map keys are retained in scanned slots. The resulting
+   descriptor identifies the eventual store but does not mutate it or perform
+   its target-specific store validation.
+2. `_codeadjustedfixed` walks the checker's complete lexical right-hand
+   expression list, materializes every delivered value, and forces every
+   explicit surplus expression only for effect. GC-bearing values use ordinary
+   shadow slots, so an allocating later expression cannot collect an earlier
+   result.
+3. `codeassignment` consumes the prepared descriptors from left to right,
+   performing each target's validation and mutation. An earlier store
+   therefore remains committed if a later Array index, C bounds check, or
+   other store condition raises.
+
+The right-hand temporaries still give `x, y = y, x` swap semantics:
 
 ```c
 _tmp_1 = _local_y_1;
@@ -59,8 +82,24 @@ _local_x_1 = _tmp_1;
 _local_y_1 = _tmp_2;
 ```
 
-GC-bearing phase-one temps use ordinary shadow slots, so an allocating later
-expression cannot collect an earlier delivered value before phase two.
+`codesingleassignment` invokes the same generic preparer for its sole target,
+then materializes the right-hand side, then calls `codeassignment`. Effectful
+record receivers, Array/Map containers and indices or keys, and C field/index
+operands therefore precede the right-hand side in both single and multiple
+assignment; final target validation and mutation follow it.
+
+C target preparation is recursive. `_prepare_c_base` freezes a loaded pointer,
+retains a `COwned` userdata in a scanned slot while using its payload pointer,
+decays an addressable C array into an element pointer plus its length, or keeps
+an addressable struct/union subobject through a synthesized pointer rather than
+copying it. `_prepare_c_storage` walks the nested field/index chain needed to
+obtain that address. The final target's NULL or bounds check remains deferred
+to `codeassignment`, but a check needed to traverse an intermediate base runs
+during target preparation: code cannot safely form the next subobject address
+without it. The narrow `_prepare_c_loaded_value` exception may copy a
+by-value aggregate temporary only to extract and freeze a pointer field or
+pointer-array element; the eventual store targets that pointer's persistent
+pointee, not the temporary aggregate.
 
 ## Control flow: `if`, `while`, `repeat`
 
@@ -210,106 +249,78 @@ unconditional.
 
 ## Arrays
 
-These paths are written against Lua 5.5's table internals, where the
-array part no longer holds full `TValue` slots: reads copy values out
-through tag-returning functions, and the old writable-slot API
-(`luaH_newkey`) is gone — the comments above `get_table_key` and
-`set_table_entry` in `coder.lua` document both.
+Array lowering operates on the internal backing `Table *`, never on the
+Lua-visible proxy. The complete representation, ownership, boxing, and
+authoritative-length protocol is in [Dense Arrays](dense-arrays.md).
 
 ### Constructor (`codearray`)
 
-`{ a, b }` allocates with `luaH_new(L)` and **immediately anchors** the
-table. The comment in `codearray` is load-bearing: "always build the
-array anchored in a stack slot; a target slot such as a module-global
-upvalue is not scanned by minor collections, so the fresh table could be
-swept while a callee in the fill loop triggers the GC". Each element is
-evaluated into its own anchored temp, the array part is pre-sized once,
-then filled with the raw `obj2arr` macro (0-based):
+`codearray` consumes the checker's `_positional_adjustment`. It evaluates
+every retained scalar and open-tail producer in lexical order, asks
+`titan_array_new` for an exact initial capacity, and fills only positive
+array-part slots. The backing and proxy are independently rooted across
+allocation; collectable element stores barrier the backing Table.
 
-```c
-_tmp_1 = luaH_new(L);
-sethvalue(L, _tmp_1_slot, _tmp_1);
-_tmp_2 = _param_a;
-setivalue(_tmp_2_slot, _tmp_2);
-_tmp_3 = _param_b;
-setivalue(_tmp_3_slot, _tmp_3);
-luaH_resizearray(L, _tmp_1, 2);
-obj2arr(_tmp_1, 0, _tmp_2_slot);
-obj2arr(_tmp_1, 1, _tmp_3_slot);
-```
-
-GC-able element types add `luaC_barrierback(L, obj2gco(_tmp_1), $SLOT);`
-per store; elements are written with `setwrapped`, so records enter as
-their Lua-visible userdata. Each element temp keeps its slot for the
-whole constructor, so a collection in a later element expression cannot
-sweep an earlier one.
-
-The checker attaches `_array_adjustment` so the coder also preserves finite
-downward adjustment: explicit fields beyond the selected finite shape still
-run, but are not stored. A final open producer (`...` or a call with a
-statically flexible result tail) is lowered as a result run. `codearray`
-evaluates and anchors the scalar prefix, obtains the run's actual count,
-resizes once for prefix plus run, converts each element to the array element
-type, stores it with `obj2arr`, and emits the table back barrier when needed.
-Only this final field may expand; an ordinary fixed-result call remains one
-array element.
+The final logical length is the highest non-nil produced position, so trailing
+nils do not inflate `#array`. A final open producer (`...`, a flexible-return
+call, or a contextual call through `value`) contributes its actual run after
+the fixed prefix. The same adjustment/lowering machinery is shared with a
+positional exact integer-keyed Map, whose destination is instead an ordinary
+Table.
 
 ### Read (`codeindexarray`)
 
 ```c
 Table *_t = _param_t;
 lua_Integer _k = _param_i;
-TValue _av;
-lu_byte _atag;
-luaH_fastgeti(_t, _k, &_av, _atag);
-if (tagisempty(_atag)) {
+TValue _av = {0};
+if (_k < 1) {
     setnilvalue(&_av);
+} else {
+    lua_Unsigned _slot = l_castS2U(_k) - 1u;
+    if (_slot < _t->asize) {
+        arr2obj(_t, cast_uint(_slot), &_av);
+        if (tagisempty(ttypetag(&_av)))
+            setnilvalue(&_av);
+    } else {
+        setnilvalue(&_av);
+    }
 }
 const TValue *_s = &_av;
 /* checkandget(elem-type, result, _s, loc) follows */
 ```
 
-`luaH_fastgeti` (an `ltable.h` macro) does the in-bounds array check
-inline and falls back to `luaH_getint`; an empty tag is normalized to
-nil in the local holder. `checkandget` then lands the holder in the
-typed result — for `{integer}` the `ttisinteger`/`ttisfloat` chain with
-the run-time errors of [the cast section](#casts-every-expcast-variant);
-option element types get a `ttisnil` shortcut yielding nil first (the
-output keeps a harmless redundant nested `ttisnil` from `checkandget`'s
-Option case). Contrast with C-API code: `lua_geti` would push the table,
-box the index, dispatch metamethods, and leave the result on the Lua
-stack; even `lua_rawgeti` keeps the stack traffic. Here a read is a
-bounds check, a copy, and a type test.
+The inline path returns nil for every index below 1, beyond capacity, or in a
+hole. It never consults the hash part. The mixed-domain converter then
+validates the element; nested Array reads additionally accept either an
+internal backing Table or a canonical proxy written by Lua.
 
 ### Write (`codeassignment`, VarBracket on an array)
 
 ```c
 TValue _vv;
-setobj2t(L, &_vv, &_tmp_1);                /* setwrapped of the value */
-lua_Unsigned _actual_i = l_castS2U(_k) - 1u;
-unsigned int _asize = _t->asize;
-if (_actual_i < _asize) {
-    obj2arr(_t, cast_uint(_actual_i), &_vv);
-} else if (_asize <= (UINT_MAX/2) && _actual_i < 2*(lua_Unsigned)_asize) {
-    luaH_resizearray(L, _t, cast_uint(2*(lua_Unsigned)_asize));
-    obj2arr(_t, cast_uint(_actual_i), &_vv);
-} else {
-    luaH_setint(L, _t, _k, &_vv);
+/* represent _tmp_1 for an internal typed Array element in _vv */
+if (_k < 1) {
+    luaL_error(L, "array index must be positive");
+}
+if (l_castS2U(_k) - 1u < _t->asize) {
+    obj2arr(_t, cast_uint(l_castS2U(_k) - 1u), &_vv);
+    /* update titan_array_length(_t), including tail backscan */
+} else if (!ttisnil(&_vv)) {
+    titan_array_resize(L, _t, titan_array_growth(L, l_castS2U(_k)));
+    obj2arr(_t, cast_uint(l_castS2U(_k) - 1u), &_vv);
+    titan_array_set_length(_t, l_castS2U(_k));
 }
 ```
 
-Three tiers: raw in-bounds store; doubling growth then store; generic
-`luaH_setint` for everything else (huge or negative indices, hash-part
-keys). The index math is deliberately **full-width** (`lua_Unsigned`
-compared against `2*(lua_Unsigned)_asize`): a 32-bit truncation would
-make an index like `(1 << 32) + 1` alias `arr[1]` — the spec "handles
-array indices beyond the unsigned int range" pins this. GC-able element
-types append `luaC_barrierback(L, obj2gco(_t), &_vv);` — `luaH_set*`
-barrier new *keys* internally, but the stored *value* is the caller's
-responsibility. Writing `nil` deletes the element. A C-API `lua_rawseti`
-pays the generic path on every store; here the common case is one
-comparison and a value copy. `#arr` compiles to `luaH_getn(L, t)`, and
-`#str` to `tsslen(s)` (`codeunaryop`).
+Writes require a positive index. An in-capacity store is direct; a non-nil
+write beyond capacity grows to the smallest power of two strictly greater
+than the logical index, while nil beyond capacity is a no-op. Unsupported
+growth raises `array index too large`; it never falls back to a hash entry.
+Every store updates the highest-present logical length, including a backward
+scan when deleting the tail, and barriers collectable elements against the
+backing Table. `#arr` reads the guarded authoritative `lenhint`; it never calls
+`luaH_getn`.
 
 ## Maps
 
@@ -345,7 +356,7 @@ run-time error, e.g. `expected integer but found string`.
 
 ### Write (`set_table_entry`) and constructor (`codemap`)
 
-Writes box the value with `setwrapped` into a local `TValue _vv`, then:
+Writes box raw-visible values with `setboxed` into a local `TValue _vv`, then:
 integer keys use `luaH_setint`; float keys normalize via
 `luaV_tointeger(..., F2Ieq)` then `luaH_setint` or `luaH_set`; all other
 keys — including strings; the read-side short-string split has no write
@@ -363,8 +374,11 @@ raw store under a string key could shadow a metamethod name, so
 caller emits `luaC_barrierback(L, obj2gco(_t), &_vv);` when the map's
 *value* type is GC-able. `codemap` builds constructors like arrays —
 `luaH_new` anchored immediately, every key and value in its own anchored
-slot, `set_table_entry` per entry plus the back barrier — but with no
-`luaH_resizearray` pre-sizing.
+slot, `set_table_entry` per entry plus the back barrier. An all-positional
+constructor is accepted only for an exact integer key type; it consumes the
+same `_positional_adjustment` as Array construction, pre-sizes the ordinary
+table's array part, and stores positions 1 through N. `#m` for such a Map uses
+`luaH_getn`, so holed Maps retain Lua's unspecified valid-border semantics.
 
 ## Records
 
@@ -430,7 +444,7 @@ dep_mk_titan = titan_cast_func(lua_Integer (*)(lua_State *L, Udata *_mod, CClosu
 ```
 
 Records cross the Lua boundary unchanged — the value Titan computes with
-*is* the Udata Lua sees (`setwrapped`); coming back, `checkandget`
+*is* the Udata Lua sees (`setboxed`); coming back, `checkandget`
 verifies the record metatable/type identity and uses the udata directly
 ([Lua interop internals](lua-interop-internals.md)).
 
@@ -609,8 +623,9 @@ complete inventory of conversions:
    name for primitives, the registry-mapped record name for foreign
    records), and for integer targets fed a fractional float,
    `%s:%d:%d: type error, number '%f' has no integer representation`.
-3. **T → `value`**: `setwrapped` into a `TValue` temp — records wrapped
-   as their Udata. No new slot: the source stays anchored where it was.
+3. **T → `value`**: `setboxed` into a `TValue` temp — records remain their
+   Udata and Arrays become their canonical proxy. No new slot: the source
+   stays anchored where it was.
 4. **integer → float**: `((lua_Number)<exp>)`.
 5. **anything → boolean**: `toboolean(type, exp)`.
 6. **float → integer**: an exactness check with `lua_Number` temps —

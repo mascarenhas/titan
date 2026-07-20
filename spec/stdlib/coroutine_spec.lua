@@ -39,7 +39,7 @@ local function quote(word)
 end
 local TEST_ENV = "env -u LUA_PATH -u LUA_CPATH " ..
     "-u LUA_PATH_5_5 -u LUA_CPATH_5_5 CCACHE_DISABLE=1 " ..
-    "TITAN_PATH_0_16=" .. quote(COROUTINE_VARIANT_ROOT) .. " " ..
+    "TITAN_PATH_0_17=" .. quote(COROUTINE_VARIANT_ROOT) .. " " ..
     "LUA_PATH=" .. quote(COROUTINE_VARIANT_ROOT .. "/?.lua;./?.lua;;") ..
     " LUA_CPATH=" ..
     quote(COROUTINE_VARIANT_ROOT .. "/?.so;./?.so;;") .. " " ..

@@ -2,7 +2,8 @@
 
 Static compiled modules extend the compiled-module loader and native-output
 pipeline without changing Titan's AST, type tags, serialized `Type.Module`,
-native calling convention, or ABI 0.16. One checked interface can now come
+or native calling convention. The static-provider feature shipped within ABI
+0.16; current artifacts carry ABI 0.17. One checked interface can now come
 from a DSO's callable metadata or from a canonical section embedded in an
 archive member.
 
@@ -54,7 +55,7 @@ feed the callable `_types` entry and:
 -- Titan archive module metadata v1
 return {
     ["pkg.left"] = {
-        abi = "0.16",
+        abi = "0.17",
         types = "Module('pkg.left', ...)",
     },
 }
@@ -322,10 +323,15 @@ removal. Titan never scans a directory and never removes an unrecognized Lua
 file.
 
 The canonical standard installation places `titan.so` and `titan.a` together
-under `lib/titan/0.16`. Bootstrap remains DSO-only; post-install recognizes
-bootstrap, legacy complete-0.16-without-archive, and complete-pair predecessor
-states. This is a same-ABI artifact migration because neither serialized types
-nor the native protocol changed.
+under `lib/titan/0.17`. Bootstrap remains DSO-only; post-install recognizes
+bootstrap, a complete active-0.17 DSO/shim set without an archive, and
+complete-pair predecessor states. A separately versioned 0.16 installation is
+preserved, not treated as an active-layout predecessor.
+
+ABI 0.17 keeps the serialized `Array(...)` text and exact `Table *` /
+`Table **` native shapes but changes the represented Array protocol, so
+embedded and callable metadata must reject 0.16 providers before linking them.
+See [Dense Arrays](dense-arrays.md#abi-017-boundary).
 
 Bundled libuv enters as shared `-X` provider payload and is present in both
 native forms. System libuv remains a repeated final-link setting and never

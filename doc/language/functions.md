@@ -272,15 +272,16 @@ type-checked and coerced individually. Expansion applies to:
   end
   ```
 
-* array constructors — `{ 10, divmod(13, 2) }` is `{ 10, 6, 1 }`, while
-  a non-final call inside the constructor contributes only its first
-  value;
+* positional Array and exact integer-keyed Map constructors —
+  `{ 10, divmod(13, 2) }` contributes `10, 6, 1`, while a non-final call
+  inside the constructor contributes only its first value;
 * generic `for ... in` iterator tuples — a helper returning
   `(next, state, init, close)` can be used directly after `in`, and a
   trailing `...` in a variadic function can fill the remaining tuple slots.
 
-Map and record fields, named arguments, conditions, and other scalar positions
-request one value. For example, `[k] = divmod(13, 2)` keeps only the first.
+Computed Map and record fields, named arguments, conditions, and other scalar
+positions request one value. For example, `[k] = divmod(13, 2)` keeps only the
+first.
 Calls with a flexible tail project `T?` into finite positions and preserve the
 whole run only in an open sink; see [Flexible returns](flexible-returns.md).
 
@@ -488,10 +489,10 @@ The rules:
   `local` function never appears, so the program fails at startup with
   `attempt to call a nil value (field 'main')`.
 
-At run time, `args` holds the command-line arguments: `args[1]` through
-the last argument, with the executable's own name at `args[0]` — the
-same layout as the `arg` table of the standalone Lua interpreter. The
-integer returned by `main` becomes the process exit status:
+At run time, `args` holds only the user-supplied command-line arguments:
+`args[1]` through the last argument. Index 0 is absent, so `args[0]` is nil;
+the executable's own name is not stored in the Array. The integer returned by
+`main` becomes the process exit status:
 
 ```lua
 -- answer.titan

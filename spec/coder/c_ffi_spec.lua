@@ -241,7 +241,9 @@ describe("C FFI code generation", function()
                 assert(test.nil_rounds() == nil)
                 assert(test.integer_rounds() == 42)
                 assert(test.string_rounds() == "titan")
-                assert(test.array_kind() == 6)
+                -- A C TValue is a boxed boundary: Arrays cross it as their
+                -- canonical full-userdata proxies, while Maps remain tables.
+                assert(test.array_kind() == 8)
                 assert(test.map_kind() == 6)
                 assert(test.record_kind() == 8)
                 assert(test.function_rounds()("ok") == "ok")
@@ -275,6 +277,339 @@ describe("C FFI code generation", function()
                 end
             ]], [[
                 assert(test.sum() == 64)
+            ]])
+        end)
+    end)
+
+    it("prepares mixed C lvalues before RHS and stores them left to right", function()
+        with_header([[
+            typedef int ffi_int;
+            typedef struct ffi_point { int x; } ffi_point;
+            typedef struct ffi_inner { int x; } ffi_inner;
+            typedef struct ffi_owner {
+                ffi_inner inner;
+                int values[2];
+            } ffi_owner;
+            typedef struct ffi_link {
+                ffi_point *next;
+            } ffi_link;
+            typedef struct ffi_outer {
+                ffi_point *ptr_field;
+            } ffi_outer;
+            typedef struct ffi_pointer_array {
+                ffi_point *items[2];
+            } ffi_pointer_array;
+            static int ffi_values[2] = { 10, 20 };
+            static ffi_point ffi_point_value = { 30 };
+            static ffi_point *ffi_point_ptr = &ffi_point_value;
+            static ffi_point *ffi_null_point = 0;
+            static ffi_link *ffi_null_link_ptr = 0;
+            static int ffi_by_value_trace = 0;
+            static void ffi_reset_by_value_trace(void) {
+                ffi_by_value_trace = 0;
+            }
+            static ffi_outer ffi_make_outer(void) {
+                ffi_by_value_trace = ffi_by_value_trace * 10 + 1;
+                ffi_outer result = { &ffi_point_value };
+                return result;
+            }
+            static int ffi_outer_rhs(void) {
+                ffi_by_value_trace = ffi_by_value_trace * 10 + 2;
+                return 818;
+            }
+            static ffi_pointer_array ffi_make_pointer_array(void) {
+                ffi_by_value_trace = ffi_by_value_trace * 10 + 1;
+                ffi_pointer_array result = {
+                    { &ffi_point_value, &ffi_point_value }
+                };
+                return result;
+            }
+            static int ffi_pointer_array_index(void) {
+                ffi_by_value_trace = ffi_by_value_trace * 10 + 2;
+                return 0;
+            }
+            static int ffi_pointer_array_rhs(void) {
+                ffi_by_value_trace = ffi_by_value_trace * 10 + 3;
+                return 828;
+            }
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                seen: integer = 0
+                local owned = c.ffi_int.new_array(2)
+                local nested_owner = c.ffi_owner.new()
+
+                local function static_index(): integer
+                    seen = seen * 10 + 1
+                    return 0
+                end
+
+                local function point(good: boolean): *c.ffi_point
+                    seen = seen * 10 + 2
+                    if good then return c.ffi_point_ptr end
+                    return c.ffi_null_point
+                end
+
+                local function owned_index(): integer
+                    seen = seen * 10 + 3
+                    return 0
+                end
+
+                local function owned_bad_index(): integer
+                    seen = seen * 10 + 3
+                    return 2
+                end
+
+                local function rhs1(v: integer): integer
+                    seen = seen * 10 + 4
+                    return v
+                end
+
+                local function rhs2(v: integer): integer
+                    seen = seen * 10 + 5
+                    return v
+                end
+
+                local function rhs3(v: integer): integer
+                    seen = seen * 10 + 6
+                    return v
+                end
+
+                local function intermediate_null_base(): *c.ffi_link
+                    seen = seen * 10 + 1
+                    return c.ffi_null_link_ptr
+                end
+
+                local function intermediate_rhs(): integer
+                    seen = seen * 10 + 2
+                    return 808
+                end
+
+                local function swap_nested_owner(f: value): integer
+                    nested_owner = c.ffi_owner.new()
+                    nested_owner.inner.x = 900
+                    nested_owner.values[0] = 901
+                    local result: integer = f()
+                    return result
+                end
+
+                function run_single_c(): integer
+                    seen = 0
+                    point(true).x = rhs1(808)
+                    return seen
+                end
+
+                function fail_intermediate_null(): nil
+                    seen = 0
+                    intermediate_null_base().next.x = intermediate_rhs()
+                    return nil
+                end
+
+                function run_by_value_outer(): integer
+                    c.ffi_reset_by_value_trace()
+                    c.ffi_make_outer().ptr_field.x = c.ffi_outer_rhs()
+                    return c.ffi_by_value_trace as integer
+                end
+
+                function run_by_value_pointer_array(): integer
+                    c.ffi_reset_by_value_trace()
+                    c.ffi_make_pointer_array().items[
+                        c.ffi_pointer_array_index()
+                    ].x = c.ffi_pointer_array_rhs()
+                    return c.ffi_by_value_trace as integer
+                end
+
+                function run_mixed(): integer
+                    seen = 0
+                    c.ffi_values[static_index()], point(true).x,
+                        owned[owned_index()] =
+                        rhs1(101), rhs2(202), rhs3(303)
+                    return seen
+                end
+
+                function fail_mixed(): nil
+                    seen = 0
+                    c.ffi_values[static_index()], point(false).x,
+                        owned[owned_index()] =
+                        rhs1(404), rhs2(505), rhs3(606)
+                    return nil
+                end
+
+                function fail_final_bounds(): nil
+                    seen = 0
+                    c.ffi_values[static_index()], point(true).x,
+                        owned[owned_bad_index()] =
+                        rhs1(414), rhs2(515), rhs3(616)
+                    return nil
+                end
+
+                function static_value(): integer
+                    return c.ffi_values[0] as integer
+                end
+
+                function point_value(): integer
+                    return c.ffi_point_ptr.x as integer
+                end
+
+                function owned_value(): integer
+                    return owned[0] as integer
+                end
+
+                function observed(): integer
+                    return seen
+                end
+
+                function reset_nested_owner(): nil
+                    nested_owner = c.ffi_owner.new()
+                    nested_owner.inner.x = 30
+                    nested_owner.values[0] = 40
+                    return nil
+                end
+
+                function nested_owner_value(): value
+                    return nested_owner
+                end
+
+                function assign_nested(f: value): nil
+                    c.ffi_values[1], nested_owner.inner.x =
+                        111, swap_nested_owner(f)
+                    return nil
+                end
+
+                function assign_nested_array(f: value): nil
+                    c.ffi_values[1], nested_owner.values[0] =
+                        112, swap_nested_owner(f)
+                    return nil
+                end
+
+                function nested_static_value(): integer
+                    return c.ffi_values[1] as integer
+                end
+
+                function current_nested_value(): integer
+                    return nested_owner.inner.x as integer
+                end
+
+                function current_nested_array_value(): integer
+                    return nested_owner.values[0] as integer
+                end
+
+                function read_nested_owner(item: value): integer
+                    local owner = c.ffi_owner.new()
+                    owner = item
+                    return owner.inner.x as integer
+                end
+
+                function read_nested_array(item: value): integer
+                    local owner = c.ffi_owner.new()
+                    owner = item
+                    return owner.values[0] as integer
+                end
+            ]], [[
+                -- Static-array index, pointer base, and owned-array index are
+                -- evaluated in lexical LHS order before every RHS expression.
+                assert(test.run_mixed() == 123456)
+                assert(test.static_value() == 101)
+                assert(test.point_value() == 202)
+                assert(test.owned_value() == 303)
+
+                local ok, err = pcall(test.fail_mixed)
+                assert(not ok)
+                assert(tostring(err):find(
+                    "NULL C pointer", 1, true), tostring(err))
+                assert(test.observed() == 123456)
+
+                -- Target validation is delayed until its left-to-right store.
+                -- The first store commits before the NULL pointer rejects the
+                -- second, while the third target remains unchanged.
+                assert(test.static_value() == 404)
+                assert(test.point_value() == 202)
+                assert(test.owned_value() == 303)
+
+                local bounds_ok, bounds_err =
+                    pcall(test.fail_final_bounds)
+                assert(not bounds_ok)
+                assert(tostring(bounds_err):find(
+                    "C index", 1, true), tostring(bounds_err))
+                assert(test.observed() == 123456)
+                -- The final owned-array bounds check occurs at its store:
+                -- both earlier stores commit after every target and RHS ran.
+                assert(test.static_value() == 414)
+                assert(test.point_value() == 515)
+                assert(test.owned_value() == 303)
+
+                -- Single C assignments prepare their complete target before
+                -- evaluating the RHS.
+                assert(test.run_single_c() == 24)
+                assert(test.point_value() == 808)
+
+                -- A NULL dereference needed to reach the final target is an
+                -- intermediate LHS read, so it fails during target
+                -- preparation and the RHS does not run.
+                local intermediate_ok, intermediate_err =
+                    pcall(test.fail_intermediate_null)
+                assert(not intermediate_ok)
+                assert(tostring(intermediate_err):find(
+                    "NULL C pointer", 1, true), tostring(intermediate_err))
+                assert(test.observed() == 1)
+
+                -- A by-value aggregate may be copied while preparing a nested
+                -- target in order to read and freeze the pointer it contains.
+                assert(test.run_by_value_outer() == 12)
+                assert(test.point_value() == 818)
+
+                -- The same rule composes through a fixed array of pointers:
+                -- aggregate creation and index evaluation both precede RHS.
+                assert(test.run_by_value_pointer_array() == 123)
+                assert(test.point_value() == 828)
+
+                -- A nested target must retain its owning COwned userdata, not
+                -- just a C expression that will be re-evaluated at store time.
+                test.reset_nested_owner()
+                local old = test.nested_owner_value()
+                local weak = setmetatable({ old }, { __mode = "v" })
+                old = nil
+                collectgarbage("collect")
+                assert(weak[1] ~= nil)
+
+                local saved
+                test.assign_nested(function()
+                    collectgarbage("collect")
+                    collectgarbage("collect")
+                    assert(weak[1] ~= nil,
+                        "prepared nested C owner was collected")
+                    saved = weak[1]
+                    return 707
+                end)
+
+                assert(test.nested_static_value() == 111)
+                assert(test.read_nested_owner(saved) == 707)
+                assert(test.current_nested_value() == 900)
+
+                -- The same owner and address freezing applies when the nested
+                -- target is a fixed CArray field rather than a struct field.
+                test.reset_nested_owner()
+                local old_array_owner = test.nested_owner_value()
+                local weak_array = setmetatable(
+                    { old_array_owner }, { __mode = "v" })
+                old_array_owner = nil
+                collectgarbage("collect")
+                assert(weak_array[1] ~= nil)
+
+                local saved_array_owner
+                test.assign_nested_array(function()
+                    collectgarbage("collect")
+                    collectgarbage("collect")
+                    assert(weak_array[1] ~= nil,
+                        "prepared nested CArray owner was collected")
+                    saved_array_owner = weak_array[1]
+                    return 717
+                end)
+
+                assert(test.nested_static_value() == 112)
+                assert(test.read_nested_array(saved_array_owner) == 717)
+                assert(test.current_nested_array_value() == 901)
             ]])
         end)
     end)

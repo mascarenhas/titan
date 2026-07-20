@@ -23,7 +23,7 @@ if [[ $PREFIX != /* ]]; then PREFIX=$PWD/$PREFIX; fi
 PREFIX=$(CDPATH= cd "$PREFIX" && pwd -P)
 LUA="$PREFIX/bin/lua"
 TITANC="$PREFIX/bin/titanc"
-ABI_ROOT="$PREFIX/lib/titan/0.16"
+ABI_ROOT="$PREFIX/lib/titan/0.17"
 SHIM_ROOT="$PREFIX/share/lua/5.5"
 PROVIDER="$ABI_ROOT/titan.so"
 STATIC_ARCHIVE="$ABI_ROOT/titan.a"
@@ -352,22 +352,22 @@ run_mode_smoke() {
 
     if [[ $mode == system ]]; then
         env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-            TITAN_PATH_0_16="$titan_path" LUA_PATH="$lua_path" \
+            TITAN_PATH_0_17="$titan_path" LUA_PATH="$lua_path" \
             LUA_CPATH="$lua_cpath" \
             "$LUA" -e 'local uv = require "titan.uv"; local async = require "titan.async"; local timer = require "titan.timer"; local fs = require "titan.fs"; local net = require "titan.net"; local path = os.tmpname(); os.remove(path); local task = async.run(function() timer.sleep(0); fs.write_file(path, "system\0uv"); assert(fs.read_file(path) == "system\0uv"); fs.unlink(path); return true end); async.loop(); assert(task:join()); assert(type(async.version()) == "string"); assert(type(uv) == "userdata"); assert(type(net) == "userdata")'
     else
         env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-            TITAN_PATH_0_16="$titan_path" LUA_PATH="$lua_path" \
+            TITAN_PATH_0_17="$titan_path" LUA_PATH="$lua_path" \
             LUA_CPATH="$lua_cpath" \
             "$LUA" -e 'local uv = require "titan.uv"; local async = require "titan.async"; local timer = require "titan.timer"; local fs = require "titan.fs"; local net = require "titan.net"; local path = os.tmpname(); os.remove(path); local task = async.run(function() timer.yield(); fs.write_file(path, "bundled"); local data = fs.read_file(path); fs.unlink(path); return data end); async.loop(); assert(task:join() == "bundled"); assert(type(uv) == "userdata"); assert(type(net) == "userdata")'
     fi
 
     env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-        TITAN_PATH_0_16="$titan_path" LUA_PATH="$lua_path" \
+        TITAN_PATH_0_17="$titan_path" LUA_PATH="$lua_path" \
         LUA_CPATH="$lua_cpath" \
         "$LUA" spec/fixtures/libuv/net_production_smoke.lua "$mode"
     env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-        TITAN_PATH_0_16="$titan_path" LUA_PATH="$lua_path" \
+        TITAN_PATH_0_17="$titan_path" LUA_PATH="$lua_path" \
         LUA_CPATH="$lua_cpath" \
         "$LUA" spec/fixtures/libuv/os_production_smoke.lua "$mode" \
         "$TITAN_PROCESS_SMOKE_CHILD"
@@ -477,7 +477,7 @@ TITAN
         cd "$mode_dir"
         env -u LUA_PATH -u LUA_CPATH -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
             TITAN_ROCKS_ROOT="$PREFIX" \
-            TITAN_PATH_0_16="$ABI_ROOT" TITAN_PATH= \
+            TITAN_PATH_0_17="$ABI_ROOT" TITAN_PATH= \
             TITAN_RUNTIME_PREBUILT=1 \
             TITAN_EXTRA_CPPFLAGS="$cppflags" \
             TITAN_EXTRA_CFLAGS="-fno-strict-aliasing" \

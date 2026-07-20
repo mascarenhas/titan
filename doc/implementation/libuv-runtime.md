@@ -25,8 +25,8 @@ policy once. Bundled mode carries the private archive's objects into both
 SDK. System mode keeps the pkg-config-selected dependency as a final-link
 setting and does not copy it into `titan.a`.
 
-Installation publishes `<root>/lib/titan/0.16/titan.so` and
-`<root>/lib/titan/0.16/titan.a`, plus seven generated shims below
+Installation publishes `<root>/lib/titan/0.17/titan.so` and
+`<root>/lib/titan/0.17/titan.a`, plus seven generated shims below
 `<root>/share/lua/5.5/titan/`. Titan prefix lookup
 claims `titan.uv` through the image's `titan_uv_abi`/`titan_uv_types`; Lua
 `require "titan.uv"` reaches `titan/uv.lua`, which selects provider `titan`,
@@ -91,6 +91,14 @@ exported-function closure slots, or native signatures, so the exact interface
 fixture remained unchanged. ABI 0.16 later changes only physical provider
 discovery and the standard-library layout; the `titan_uv_types` shape and
 native entries stay unchanged.
+
+ABI 0.17 likewise leaves `titan_uv_types` unchanged, but every standard
+module is rebuilt because generated module state now includes the Array
+metatable cache and Lua-visible Array values use proxy Udata rather than raw
+Tables. Native exact Array paths and `TitanVargArrayOrMap` retain backing
+`Table *` / `Table **`; callback-owned roots must preserve whichever internal
+or boxed domain their typed slot specifies. See
+[Dense Arrays](dense-arrays.md#internal-and-boxed-representations).
 
 The Makefile's explicit `UV_TITAN_SOURCES` list names all seven files inside
 the reviewed `STDLIB_TITAN_SOURCES` prerequisite set. It intentionally does

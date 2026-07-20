@@ -238,7 +238,7 @@ describe("flexible return expression-list demand (typechecker)", function()
         local stats = find_function(tree, "use").block.stats
         local call_adjustment = stats[1].callexp._arg_adjustment
         local array = stats[2]._result_adjustment.fixed[1]
-        local array_adjustment = array._array_adjustment
+        local array_adjustment = array._positional_adjustment
 
         assert.same(1, #call_adjustment.fixed)
         assert.same(2, #call_adjustment.tail_scalars)
@@ -392,12 +392,12 @@ describe("flexible return expression-list demand (typechecker)", function()
         ]])
         assert.truthy(ok, err)
         local array = tree[2].block.stats[1]._result_adjustment.fixed[1]
-        local call = array._array_adjustment.open_source
+        local call = array._positional_adjustment.open_source
         assert.same("Ast.ExpCall", call._tag)
         assert.same("open", call._flex_result_demand)
-        assert.same(types.String(), array._array_adjustment.open_type)
-        assert.same(types.String(), array._array_adjustment.open_target)
-        assert.same(call, array._array_adjustment.tail_scalars[1])
+        assert.same(types.String(), array._positional_adjustment.open_type)
+        assert.same(types.String(), array._positional_adjustment.open_target)
+        assert.same(call, array._positional_adjustment.tail_scalars[1])
     end)
 
     it("uses finite flex projections in record, map, and named-value slots",

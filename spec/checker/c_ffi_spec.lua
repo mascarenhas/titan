@@ -434,6 +434,96 @@ describe("C FFI type checking", function()
         end)
     end)
 
+    it("rejects C assignment receivers without persistent storage", function()
+        with_header([[
+            typedef struct ffi_inner { int x; } ffi_inner;
+            typedef union ffi_payload { int x; float y; } ffi_payload;
+            typedef struct ffi_outer {
+                ffi_inner inner;
+                int values[2];
+            } ffi_outer;
+            extern ffi_outer ffi_make_outer(void);
+            extern ffi_payload ffi_make_payload(void);
+        ]], function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                local function from_return(): integer
+                    c.ffi_make_outer().inner.x = 1
+                    return 0
+                end
+
+                local function from_cast(): integer
+                    (c.ffi_make_outer() as c.ffi_outer).inner.x = 2
+                    return 0
+                end
+
+                local function array_from_return(): integer
+                    c.ffi_make_outer().values[0] = 3
+                    return 0
+                end
+
+                local function union_from_return(): integer
+                    c.ffi_make_payload().x = 4
+                    return 0
+                end
+            ]])
+            assert.falsy(ok)
+            local _, count = err:gsub(
+                "C assignment receiver must have persistent storage", "")
+            assert.equal(4, count, err)
+            assert.match(
+                "expression of type 'ffi_outer' is a by%-value C aggregate",
+                err)
+            assert.match(
+                "expression of type 'ffi_payload' is a by%-value C aggregate",
+                err)
+        end)
+    end)
+
+    it("accepts persistent nested C assignment receivers", function()
+        with_header([[
+            typedef struct ffi_inner { int x; } ffi_inner;
+            typedef struct ffi_outer {
+                ffi_inner inner;
+                int values[2];
+                ffi_inner *pointer_field;
+                ffi_inner *pointer_array[2];
+            } ffi_outer;
+            extern ffi_outer ffi_global;
+            extern ffi_outer ffi_array[2];
+            extern ffi_outer *ffi_pointer;
+            extern ffi_outer ffi_make_outer(void);
+            extern ffi_outer *ffi_make_pointer(void);
+        ]], function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                local function update(): integer
+                    local aggregate: c.ffi_outer = c.ffi_make_outer()
+                    local owned = c.ffi_outer.new()
+
+                    c.ffi_global.inner.x = 1
+                    c.ffi_global.values[0] = 2
+                    c.ffi_array[0].inner.x = 3
+                    c.ffi_array[1].values[0] = 4
+                    c.ffi_pointer.inner.x = 5
+                    c.ffi_pointer.values[0] = 6
+                    c.ffi_make_pointer().inner.x = 7
+                    owned.inner.x = 8
+                    owned.values[0] = 9
+                    aggregate.inner.x = 10
+                    aggregate.values[0] = 11
+                    c.ffi_outer.new().inner.x = 12
+                    c.ffi_make_outer().pointer_field.x = 13
+                    c.ffi_make_outer().pointer_array[0].x = 14
+                    return 0
+                end
+            ]])
+            assert.truthy(ok, err)
+        end)
+    end)
+
     it("completes named C structs after forward typedef declarations", function()
         with_header([[
             typedef struct ffi_node ffi_node;

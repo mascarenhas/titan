@@ -14,8 +14,8 @@ local driver = {}
 
 driver.imported = {}
 
-driver.TITAN_VER = "0.16"
-driver.TITAN_VER_SUFFIX = "_0_16"
+driver.TITAN_VER = "0.17"
+driver.TITAN_VER_SUFFIX = "_0_17"
 driver.LUA_VERSION = "5.5"
 
 local LUA_CPATH_SUFFIX = "/lib/lua/" .. driver.LUA_VERSION .. "/?.so"
@@ -1767,10 +1767,27 @@ static int pmain(lua_State *L) {
     argv = lua_touserdata(L, -1);
     lua_pop(L, 1);
 
-    lua_createtable(L, argc, 0);
-    for (i = 0; i < argc; i++) {
-        lua_pushstring(L, argv[i]);
-        lua_rawseti(L, -2, i);
+    {
+        lua_Unsigned nargs = argc > 0 ? (lua_Unsigned)(argc - 1) : 0u;
+        Table *array_metatable = titan_array_metatable(L);
+        Table *arguments =
+            titan_array_new(L, array_metatable, nargs);
+        Udata *proxy =
+            titan_array_require_proxy(L, arguments, array_metatable);
+        TValue proxy_value;
+
+        /* Root the canonical proxy/backing cycle before allocating argv
+        ** strings. The program name is deliberately excluded: Titan's
+        ** positive-only argument Array is argv[1..argc-1] at indices
+        ** 1..argc-1, and index 0 remains the private owner backlink. */
+        setuvalue(L, &proxy_value, proxy);
+        lua_pushtvalue(L, proxy_value);
+        for (i = 1; i < argc; i++) {
+            lua_pushstring(L, argv[i]);
+            titan_array_set_stack(L, arguments, (lua_Integer)i, -1);
+            lua_pop(L, 1);
+        }
+        titan_array_set_length(arguments, nargs);
     }
 
     lua_getfield(L, LUA_REGISTRYINDEX, TITAN_MAIN_BOOTSTRAP_KEY);

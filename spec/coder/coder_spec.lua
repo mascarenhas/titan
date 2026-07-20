@@ -29,9 +29,18 @@ describe("zero-return () functions (code generator)", function()
             function effect(x: {integer}): ()
                 x[1] = 42
             end
+            function make_array(): {integer}
+                return { 0 }
+            end
+            function first_map(x: {integer: integer}): integer
+                return x[1]
+            end
         ]], [[
             assert(select('#', test.noop()) == 0)
-            local t = {0}
+            local ok, err = pcall(test.effect, {0})
+            assert(not ok and err:find("expected array", 1, true))
+            assert(test.first_map({10}) == 10)
+            local t = test.make_array()
             test.effect(t)
             assert(t[1] == 42)
             assert(select('#', test.effect(t)) == 0)
@@ -49,8 +58,11 @@ describe("zero-return () functions (code generator)", function()
                 helper(x)
                 return x[1]
             end
+            function make(): {integer}
+                return { 10 }
+            end
         ]], [[
-            assert(test.bump({10}) == 12)
+            assert(test.bump(test.make()) == 12)
         ]])
     end)
 
@@ -161,6 +173,9 @@ describe("Titan code generator", function()
 
     it("deletes array element", function()
         local code = [[
+            function make(): {integer}
+                return { 1, 2, 3 }
+            end
             function delete(array: {integer}, i: integer)
                 array[i] = nil
             end
@@ -171,12 +186,16 @@ describe("Titan code generator", function()
         assert.equal(0, #err, table.concat(err, "\n"))
         local ok, err = compile("titan_test", ast)
         assert.truthy(ok, err)
-        local ok, err = call("titan_test", "arr={1,2,3};titan_test.delete(arr,3);assert(#arr==2)")
+        local ok, err = call("titan_test",
+            "arr=titan_test.make();titan_test.delete(arr,3);assert(#arr==2)")
         assert.truthy(ok, err)
     end)
 
-    it("handles array indices beyond the unsigned int range", function()
+    it("rejects unsupported and negative full-width array indices", function()
         local code = [[
+            function make(): {integer}
+                return { 10, 20, 30 }
+            end
             function setget(xs: {integer}, i: integer, v: integer): integer
                 xs[i] = v
                 return xs[i]
@@ -188,24 +207,28 @@ describe("Titan code generator", function()
         assert.equal(0, #err, table.concat(err, "\n"))
         local ok, err = compile("titan_test", ast)
         assert.truthy(ok, err)
-        -- (i - 1) truncated to 32 bits lands inside the array part, so a
-        -- narrow index computation in the write path clobbers arr[1]/arr[2]
         local ok, err = call("titan_test", [[
-            local arr = {10, 20, 30}
+            local arr = titan_test.make()
             local i = (1 << 32) + 1
-            assert(titan_test.setget(arr, i, 99) == 99)
-            assert(arr[1] == 10)
-            assert(arr[i] == 99)
+            local wrote, write_err =
+                pcall(titan_test.setget, arr, i, 99)
+            assert(not wrote)
+            assert(write_err:find("array index too large", 1, true))
             local j = -((1 << 32) - 2)
-            assert(titan_test.setget(arr, j, 55) == 55)
-            assert(arr[2] == 20)
-            assert(arr[j] == 55)
+            wrote, write_err = pcall(titan_test.setget, arr, j, 55)
+            assert(not wrote)
+            assert(write_err:find("array index must be positive", 1, true))
+            assert(#arr == 3)
+            assert(arr[1] == 10 and arr[2] == 20 and arr[3] == 30)
         ]])
         assert.truthy(ok, err)
     end)
 
     it("tests nil element", function()
         local code = [[
+            function empty(): {integer}
+                return {}
+            end
             function testset(t: {integer}, i: integer, v: integer): integer
                 if t[i] then
                   return t[i]
@@ -221,12 +244,17 @@ describe("Titan code generator", function()
         assert.equal(0, #err, table.concat(err, "\n"))
         local ok, err = compile("titan_test", ast)
         assert.truthy(ok, err)
-        local ok, err = call("titan_test", "arr={};assert(titan_test.testset(arr,1,2)==2);assert(titan_test.testset(arr,1,3)==2)")
+        local ok, err = call("titan_test",
+            "arr=titan_test.empty();assert(titan_test.testset(arr,1,2)==2);" ..
+            "assert(titan_test.testset(arr,1,3)==2)")
         assert.truthy(ok, err)
     end)
 
     it("tests nil element in 'while'", function()
         local code = [[
+            function empty(): {integer}
+                return {}
+            end
             function testfill(t: {integer}, i: integer, v: integer)
                 while not t[i] and i > 0 do
                     t[i] = v
@@ -240,12 +268,17 @@ describe("Titan code generator", function()
         assert.equal(0, #err, table.concat(err, "\n"))
         local ok, err = compile("titan_test", ast)
         assert.truthy(ok, err)
-        local ok, err = call("titan_test", "arr={};titan_test.testfill(arr,5,2);assert(#arr==5)")
+        local ok, err = call("titan_test",
+            "arr=titan_test.empty();titan_test.testfill(arr,5,2);" ..
+            "assert(#arr==5)")
         assert.truthy(ok, err)
     end)
 
     it("tests nil element in 'repeat'", function()
         local code = [[
+            function empty(): {integer}
+                return {}
+            end
             function testfill(t: {integer}, i: integer, v: integer)
                 repeat
                     t[i] = v
@@ -259,12 +292,20 @@ describe("Titan code generator", function()
         assert.equal(0, #err, table.concat(err, "\n"))
         local ok, err = compile("titan_test", ast)
         assert.truthy(ok, err)
-        local ok, err = call("titan_test", "arr={};titan_test.testfill(arr,5,2);assert(#arr==5)")
+        local ok, err = call("titan_test",
+            "arr=titan_test.empty();titan_test.testfill(arr,5,2);" ..
+            "assert(#arr==5)")
         assert.truthy(ok, err)
     end)
 
     it("coerces an option-typed 'while' condition", function()
         run_coder([[
+            function values(): {integer}
+                return {10, 20, 30}
+            end
+            function empty(): {integer}
+                return {}
+            end
             function sum_until_nil(xs: {integer}): integer
                 local sum: integer = 0
                 local i: integer = 1
@@ -275,13 +316,16 @@ describe("Titan code generator", function()
                 return sum
             end
         ]], [[
-            assert(test.sum_until_nil({10, 20, 30}) == 60)
-            assert(test.sum_until_nil({}) == 0)
+            assert(test.sum_until_nil(test.values()) == 60)
+            assert(test.sum_until_nil(test.empty()) == 0)
         ]])
     end)
 
     it("coerces an option-typed 'repeat' condition", function()
         run_coder([[
+            function values(): {integer}
+                return {5, 6}
+            end
             function first_present(xs: {integer}): integer
                 local i: integer = 0
                 repeat
@@ -290,7 +334,7 @@ describe("Titan code generator", function()
                 return i
             end
         ]], [[
-            assert(test.first_present({5, 6}) == 1)
+            assert(test.first_present(test.values()) == 1)
         ]])
     end)
 
@@ -307,12 +351,15 @@ describe("Titan code generator", function()
 
     it("raises a typed error unwrapping a nil option", function()
         run_coder([[
+            function values(): {integer}
+                return {1, 2, 3}
+            end
             function unwrap_nil(xs: {integer}): integer
                 local x: integer? = xs[10]
                 return x
             end
         ]], [[
-            test.unwrap_nil({1, 2, 3})
+            test.unwrap_nil(test.values())
         ]], "expected integer but found nil")
     end)
 
@@ -427,13 +474,17 @@ describe("Titan code generator", function()
             function findor(xs: {integer}, v: integer): integer
                 return find(xs, v) or 0
             end
+            function values(): {integer}
+                return {10, 20, 30}
+            end
         ]], [[
             assert(test.tern(3, 5) == 5)
             assert(test.tern(5, 3) == 5)
             assert(test.chain(1, 2, 3) == true)
             assert(test.chain(1, 2, 4) == false)
-            assert(test.findor({10, 20, 30}, 20) == 2)
-            assert(test.findor({10, 20, 30}, 99) == 0)
+            local xs = test.values()
+            assert(test.findor(xs, 20) == 2)
+            assert(test.findor(xs, 99) == 0)
         ]])
     end)
 
@@ -492,6 +543,9 @@ describe("Titan code generator", function()
 
     it("lets the until condition see body-local variables", function()
         run_coder([[
+            function values(): {integer}
+                return {1, 2, 8, 9}
+            end
             function f(xs: {integer}): integer
                 local i: integer = 0
                 repeat
@@ -501,7 +555,7 @@ describe("Titan code generator", function()
                 return i
             end
         ]], [[
-            assert(test.f({1, 2, 8, 9}) == 3)
+            assert(test.f(test.values()) == 3)
         ]])
     end)
 
@@ -758,6 +812,9 @@ describe("Titan code generator", function()
 
     it("tests nil element in 'not'", function()
         local code = [[
+            function empty(): {integer}
+                return {}
+            end
             function testset(t: {integer}, i: integer, v: integer): integer
                 if not t[i] then
                   t[i] = v
@@ -771,12 +828,17 @@ describe("Titan code generator", function()
         assert.equal(0, #err, table.concat(err, "\n"))
         local ok, err = compile("titan_test", ast)
         assert.truthy(ok, err)
-        local ok, err = call("titan_test", "arr={};assert(titan_test.testset(arr,1,2)==2);assert(titan_test.testset(arr,1,3)==2)")
+        local ok, err = call("titan_test",
+            "arr=titan_test.empty();assert(titan_test.testset(arr,1,2)==2);" ..
+            "assert(titan_test.testset(arr,1,3)==2)")
         assert.truthy(ok, err)
     end)
 
     it("tests nil element in 'and'", function()
         local code = [[
+            function empty(): {integer}
+                return {}
+            end
             function testset(t: {integer}, i: integer, v: integer): integer
                 if t[i] and v then
                   return t[i]
@@ -792,12 +854,17 @@ describe("Titan code generator", function()
         assert.equal(0, #err, table.concat(err, "\n"))
         local ok, err = compile("titan_test", ast)
         assert.truthy(ok, err)
-        local ok, err = call("titan_test", "arr={};assert(titan_test.testset(arr,1,2)==2);assert(titan_test.testset(arr,1,3)==2)")
+        local ok, err = call("titan_test",
+            "arr=titan_test.empty();assert(titan_test.testset(arr,1,2)==2);" ..
+            "assert(titan_test.testset(arr,1,3)==2)")
         assert.truthy(ok, err)
     end)
 
     it("tests nil element in 'or'", function()
         local code = [[
+            function empty(): {integer}
+                return {}
+            end
             function testset(t: {integer}, i: integer, v: integer): integer
                 if not t[i] or not t[i] then
                   t[i] = v
@@ -811,12 +878,17 @@ describe("Titan code generator", function()
         assert.equal(0, #err, table.concat(err, "\n"))
         local ok, err = compile("titan_test", ast)
         assert.truthy(ok, err)
-        local ok, err = call("titan_test", "arr={};assert(titan_test.testset(arr,1,2)==2);assert(titan_test.testset(arr,1,3)==2)")
+        local ok, err = call("titan_test",
+            "arr=titan_test.empty();assert(titan_test.testset(arr,1,2)==2);" ..
+            "assert(titan_test.testset(arr,1,3)==2)")
         assert.truthy(ok, err)
     end)
 
     it("tests 'or' pattern", function()
         local code = [[
+            function empty(): {integer}
+                return {}
+            end
             function getor(t: {integer}, i: integer, v: integer): integer
                 return t[i] or v
             end
@@ -827,12 +899,17 @@ describe("Titan code generator", function()
         assert.equal(0, #err, table.concat(err, "\n"))
         local ok, err = compile("titan_test", ast)
         assert.truthy(ok, err)
-        local ok, err = call("titan_test", "arr={};assert(titan_test.getor(arr,1,2)==2);arr[1]=2;assert(titan_test.getor(arr,1,3)==2)")
+        local ok, err = call("titan_test",
+            "arr=titan_test.empty();assert(titan_test.getor(arr,1,2)==2);" ..
+            "arr[1]=2;assert(titan_test.getor(arr,1,3)==2)")
         assert.truthy(ok, err)
     end)
 
     it("tests 'and' pattern", function()
         local code = [[
+            function empty(): {integer}
+                return {}
+            end
             function ternary(t: {integer}, i: integer, v1: integer, v2: integer): integer
                 return t[i] and v1 or v2
             end
@@ -843,12 +920,17 @@ describe("Titan code generator", function()
         assert.equal(0, #err, table.concat(err, "\n"))
         local ok, err = compile("titan_test", ast)
         assert.truthy(ok, err)
-        local ok, err = call("titan_test", "arr={};assert(titan_test.ternary(arr,1,3,2)==2);arr[1]=2;assert(titan_test.ternary(arr,1,2,3)==2)")
+        local ok, err = call("titan_test",
+            "arr=titan_test.empty();assert(titan_test.ternary(arr,1,3,2)==2);" ..
+            "arr[1]=2;assert(titan_test.ternary(arr,1,2,3)==2)")
         assert.truthy(ok, err)
     end)
 
     it("pass integers when expecting floats in array", function()
         local code = [[
+            function values(): {float}
+                return {1, 2, 3}
+            end
             function sum(array: {float}): float
                 local res = 0.0
                 for i = 1, #array do
@@ -863,7 +945,8 @@ describe("Titan code generator", function()
         assert.equal(0, #err, table.concat(err, "\n"))
         local ok, err = compile("titan_test", ast)
         assert.truthy(ok, err)
-        local ok, err = call("titan_test", "arr={1,2,3};assert(6==titan_test.sum(arr))")
+        local ok, err = call("titan_test",
+            "arr=titan_test.values();assert(6==titan_test.sum(arr))")
         assert.truthy(ok, err)
     end)
 
@@ -1009,6 +1092,9 @@ describe("Titan code generator", function()
     it("generates code for array module-local variables", function()
         local code = [[
             local a: {integer} = {}
+            function one(): {integer}
+                return {1}
+            end
             function len(): integer
                 return #a
             end
@@ -1022,7 +1108,9 @@ describe("Titan code generator", function()
         assert.equal(0, #err, table.concat(err, "\n"))
         local ok, err = compile("titan_test", ast)
         assert.truthy(ok, err)
-        local ok, err = call("titan_test", "assert(titan_test.len() == 0);titan_test.seta({1});assert(titan_test.len() == 1)")
+        local ok, err = call("titan_test",
+            "assert(titan_test.len() == 0);titan_test.seta(titan_test.one());" ..
+            "assert(titan_test.len() == 1)")
         assert.truthy(ok, err)
     end)
 
@@ -1119,6 +1207,9 @@ describe("Titan code generator", function()
     it("generates code for exported array variables", function()
         local code = [[
             a: {integer} = {}
+            function one(): {integer}
+                return {1}
+            end
             function len(): integer
                 return #a
             end
@@ -1129,7 +1220,9 @@ describe("Titan code generator", function()
         assert.equal(0, #err, table.concat(err, "\n"))
         local ok, err = compile("titan_test", ast)
         assert.truthy(ok, err)
-        local ok, err = call("titan_test", "assert(titan_test.len() == 0);titan_test.a={1};assert(titan_test.len() == 1)")
+        local ok, err = call("titan_test",
+            "assert(titan_test.len() == 0);titan_test.a=titan_test.one();" ..
+            "assert(titan_test.len() == 1)")
         assert.truthy(ok, err)
     end)
 
@@ -1315,6 +1408,42 @@ describe("Titan code generator", function()
         assert.truthy(ok, err)
     end)
 
+    it("shares dense arrays across two source modules", function ()
+        local modules = {
+            array_source = [[
+                function make(): {value}
+                    return {10, nil, 30}
+                end
+                function set(xs: {value}, i: integer, v: value)
+                    xs[i] = v
+                end
+                function echo(xs: {value}): {value}
+                    return xs
+                end
+            ]],
+            array_consumer = [[
+                local source = import "array_source"
+                function roundtrip(): {value}
+                    local xs = source.make()
+                    source.set(xs, 5, 50)
+                    return source.echo(xs)
+                end
+            ]],
+        }
+        local ok, err = generate_modules(modules, "array_consumer")
+        assert.truthy(ok, err)
+        ok, err = call("array_consumer", [[
+            local source = require "array_source"
+            local xs = array_consumer.roundtrip()
+            assert(type(xs) == "userdata")
+            assert(#xs == 5)
+            assert(xs[1] == 10 and xs[2] == nil and xs[3] == 30)
+            assert(xs[4] == nil and xs[5] == 50)
+            assert(source.echo(xs) == xs)
+        ]])
+        assert.truthy(ok, err)
+    end)
+
     it("correctly uses module variable", function ()
         local modules = {
             foo = [[
@@ -1452,7 +1581,7 @@ describe("Titan code generator", function()
         float = "'foo'",
         string = 2,
         ["nil"] = 0,
-        table = { type = "{integer}", val = "10" }
+        array = { type = "{integer}", val = "10" }
     }
 
     for tag, val in pairs(valfailures) do
@@ -1499,6 +1628,9 @@ describe("Titan code generator", function()
 
     it("pass value type in array index", function()
         local code = [[
+            function values(): {float}
+                return {1, 2, 3}
+            end
             function read(array: {float}, i: value): float
                 return array[i]
             end
@@ -1510,7 +1642,7 @@ describe("Titan code generator", function()
         local ok, err = compile("titan_test", ast)
         assert.truthy(ok, err)
         local ok, err = call("titan_test", [[
-            arr={1,2,3}
+            arr=titan_test.values()
             assert(2==titan_test.read(arr, 2))
             assert(2==titan_test.read(arr, 2.0))
             assert(pcall(titan_test.read, arr, "foo") == false)
@@ -2951,7 +3083,11 @@ describe("Titan code generator", function()
             { t = "integer", v1 = "1984", v2 = "2112" },
             { t = "float", v1 = "2.5", v2 = "3.14" },
             { t = "string", v1 = "'hello'", v2 = "'world'" },
-            { t = "{integer}", l1 = "{10, 20}", l2 = "{}" },
+            {
+                t = "{integer}",
+                l1 = "titan_test.array_one()",
+                l2 = "titan_test.array_two()",
+            },
             { t = "{string:integer}", l1 = "{x = 10, y = 20}", l2 = "{}"  },
             { t = "Point", l1 = "titan_test.Point.new(10, 20)", l2 = "titan_test.Point.new(30, 40)" },
         }
@@ -2965,6 +3101,12 @@ describe("Titan code generator", function()
                         record Point
                             x: integer
                             y: integer
+                        end
+                        function array_one(): {integer}
+                            return {10, 20}
+                        end
+                        function array_two(): {integer}
+                            return {}
                         end
                         function new_map(k1: $TK, k2: $TK, v1: $TV, v2: $TV): $MAP
                             local m = { [$K1] = $V1, [$K2] = $V2 }
@@ -3007,6 +3149,12 @@ describe("Titan code generator", function()
                         record Point
                             x: integer
                             y: integer
+                        end
+                        function array_one(): {integer}
+                            return {10, 20}
+                        end
+                        function array_two(): {integer}
+                            return {}
                         end
                         function new_map(k1: $TK, k2: $TK, v1: $TV, v2: $TV): $MAP
                             local m: $MAP = {}
@@ -3051,6 +3199,12 @@ describe("Titan code generator", function()
                         record Point
                             x: integer
                             y: integer
+                        end
+                        function array_one(): {integer}
+                            return {10, 20}
+                        end
+                        function array_two(): {integer}
+                            return {}
                         end
                         function get_map_value(k1: $TK, k2: $TK, v1: $TV, v2: $TV): $TV
                             local m: $MAP = {}
@@ -3143,6 +3297,12 @@ describe("Titan code generator", function()
 
         it("breaks out of a while loop", function ()
             run_coder([[
+                function values(): {integer}
+                    return {-1, -2, 7, 9}
+                end
+                function negatives(): {integer}
+                    return {-1, -2}
+                end
                 function fn(xs: {integer}): integer
                     local r = 0
                     local i = 1
@@ -3156,8 +3316,8 @@ describe("Titan code generator", function()
                     return r
                 end
             ]], [[
-                assert(test.fn({-1, -2, 7, 9}) == 7)
-                assert(test.fn({-1, -2}) == 0)
+                assert(test.fn(test.values()) == 7)
+                assert(test.fn(test.negatives()) == 0)
             ]])
         end)
 
@@ -3231,34 +3391,46 @@ describe("Titan code generator", function()
 
         it("unwraps an option with an explicit 'as' cast", function ()
             run_coder([[
+                function values(): {integer}
+                    return {5, 6}
+                end
                 function fn(xs: {integer}): integer
                     local v: integer? = xs[1]
                     return v as integer
                 end
             ]], [[
-                assert(test.fn({5, 6}) == 5)
+                assert(test.fn(test.values()) == 5)
             ]])
         end)
 
         it("raises when an 'as' cast unwraps a nil option", function ()
             run_coder([[
+                function empty(): {integer}
+                    return {}
+                end
                 function fn(xs: {integer}): integer
                     local v: integer? = xs[1]
                     return v as integer
                 end
             ]], [[
-                assert(test.fn({}))
+                assert(test.fn(test.empty()))
             ]], "expected integer but found nil")
         end)
 
         it("unwraps an option array element with an 'as' cast", function ()
             run_coder([[
+                function values(): {integer?}
+                    return {5, 6}
+                end
+                function empty(): {integer?}
+                    return {}
+                end
                 function fn(xs: {integer?}): integer
                     return xs[1] as integer
                 end
             ]], [[
-                assert(test.fn({5, 6}) == 5)
-                local ok = pcall(function () return test.fn({}) end)
+                assert(test.fn(test.values()) == 5)
+                local ok = pcall(function () return test.fn(test.empty()) end)
                 assert(not ok)
             ]])
         end)
@@ -3523,11 +3695,14 @@ describe("single-Udata representation (GC stress)", function()
     end)
 
     -- 5. A GC-typed module variable mutated from Lua under GC stress. Pins the
-    -- module-slot back barrier in __newindex / codevardec: fresh arrays assigned
-    -- from Lua into the module slot must survive collection.
+    -- module-slot back barrier in __newindex / codevardec: fresh exported Array
+    -- proxies assigned from Lua into the module slot must survive collection.
     it("GC-typed module var mutated from Lua under GC", function ()
         run_coder([[
             a: {integer} = {}
+            function make(i: integer): {integer}
+                return {i, i + 1, i + 2}
+            end
             function suma(): integer
                 local s = 0
                 local i = 1
@@ -3539,7 +3714,7 @@ describe("single-Udata representation (GC stress)", function()
             end
         ]], [[
             for i = 1, 600 do
-                test.a = { i, i + 1, i + 2 }
+                test.a = test.make(i)
                 collectgarbage()
                 assert(test.suma() == 3 * i + 3)
             end

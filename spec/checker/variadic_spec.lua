@@ -129,7 +129,7 @@ describe("variadic parameters (typechecker)", function()
                 end
             ]])
             assert.truthy(#errs >= 1)
-            assert.match("'%.%.%.' can only appear in an array constructor", errs[1])
+            assert.match("cannot mix", errs[1])
         end)
 
         it("rejects `...` in a record constructor", function()
@@ -143,7 +143,7 @@ describe("variadic parameters (typechecker)", function()
                 end
             ]])
             assert.truthy(#errs >= 1)
-            assert.match("'%.%.%.' can only appear in an array constructor", errs[1])
+            assert.match("cannot mix", errs[1])
         end)
 
         it("accepts `{...: integer}` into a {float} context (coerceable)", function()

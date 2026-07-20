@@ -355,6 +355,20 @@ local function type2metatable(ctx, typ --[[:table]])
     return ctx.metatables[typ.fqtn]
 end
 
+-- Every ABI-0.17 module reserves one private uservalue slot for the canonical
+-- per-state Array proxy metatable.  Importers reconstruct only the public
+-- variable/function prefix and never need this private slot.  Array's native
+-- representation remains Table*: only boxed/Lua-facing conversions consult
+-- this cached pointer.
+function array_metatable(ctx)
+    local tlcontext = ctx.tlcontext or ctx
+    assert(tlcontext.array_metatable_upvalue,
+        "Array metatable slot was not allocated")
+    return render("hvalue(&_mod->uv[$INDEX].uv)", {
+        INDEX = c_integer_literal(tlcontext.array_metatable_upvalue),
+    })
+end
+
 local function owned_c_metatable_key(typ)
     assert(typ._tag == "Type.COwned")
     return types.tostring(typ.pointee) .. (typ.count and "[]" or "")
@@ -582,9 +596,33 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
                 "lua_typename(L, ttype($EXP))"
             })
         })
+    elseif typ._tag == "Type.Array" then
+        -- Lua/value boundaries carry the canonical Array proxy, while the
+        -- exact/native representation remains its backing Table*.  Use the
+        -- module's cached metatable pointer; never query the registry here.
+        return render([[
+            {
+                Table *_titan_array = titan_array_try_backing($EXP, $META);
+                if (TITAN_LIKELY(_titan_array != NULL)) {
+                    $VAR = _titan_array;
+                } else {
+                    $THROW
+                }
+            }
+        ]], {
+            EXP = exp,
+            META = array_metatable(ctx),
+            VAR = cvar,
+            FILE = c_string_literal(loc.filename),
+            LINE = c_integer_literal(loc.line),
+            COL = c_integer_literal(loc.col),
+            THROW = codethrow(loc,
+                "%s:%d:%d: type error, expected array but found %s",
+                { "$FILE", "$LINE", "$COL",
+                  "lua_typename(L, ttype($EXP))" }),
+        })
     elseif typ._tag == "Type.Nil" then tag = "nil"
     elseif typ._tag == "Type.String" then tag = "string"
-    elseif typ._tag == "Type.Array" then tag = "table"
     elseif typ._tag == "Type.Map" then tag = "table"
     elseif typ._tag == "Type.Value" then
         return render([[
@@ -717,10 +755,31 @@ function checkandset(ctx, typ --[[:table]], dst --[[:string]], src --[[:string]]
             COL = c_integer_literal(loc.col),
             THROW = codethrow(loc, "%s:%d:%d: type error, expected float but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($SRC))" })
         })
+    elseif typ._tag == "Type.Array" then
+        return render([[
+            {
+                Table *_titan_array = titan_array_try_backing($SRC, $META);
+                if (TITAN_LIKELY(_titan_array != NULL)) {
+                    sethvalue(L, $DST, _titan_array);
+                } else {
+                    $THROW
+                }
+            }
+        ]], {
+            SRC = src,
+            DST = dst,
+            META = array_metatable(ctx),
+            FILE = c_string_literal(loc.filename),
+            LINE = c_integer_literal(loc.line),
+            COL = c_integer_literal(loc.col),
+            THROW = codethrow(loc,
+                "%s:%d:%d: type error, expected array but found %s",
+                { "$FILE", "$LINE", "$COL",
+                  "lua_typename(L, ttype($SRC))" }),
+        })
     elseif typ._tag == "Type.Boolean" then tag = "boolean"
     elseif typ._tag == "Type.Nil" then tag = "nil"
     elseif typ._tag == "Type.String" then tag = "string"
-    elseif typ._tag == "Type.Array" then tag = "table"
     elseif typ._tag == "Type.Map" then tag = "table"
     elseif typ._tag == "Type.Value" then
         return render([[
@@ -824,8 +883,43 @@ local function setslot(typ --[[:table]], dst --[[:string]], src --[[:string]])
     return code
 end
 
-local function setwrapped(typ --[[:table]], dst --[[:string]], src --[[:string]])
-    if typ._tag == "Type.Nominal" then
+-- Store a native/internal Titan value in a Lua-visible TValue domain.  Arrays
+-- are the exceptional representation: internal storage is the backing Table,
+-- while Lua/value/raw-Map storage is the canonical proxy Udata.  Keep this
+-- helper semantically typed (rather than dispatching on ctype): Array and Map
+-- both use Table*, and Option(Array), value, and Function all use TValue.
+function setboxed(ctx, typ --[[:table]], dst --[[:string]], src --[[:string]])
+    if typ._tag == "Type.Array" then
+        return render([[
+            {
+                Udata *_titan_proxy =
+                    titan_array_require_proxy(L, $SRC, $META);
+                setuvalue(L, $DST, _titan_proxy);
+            }
+        ]], {
+            DST = dst,
+            SRC = src,
+            META = array_metatable(ctx),
+        })
+    elseif typ._tag == "Type.Option"
+           and typ.base._tag == "Type.Array" then
+        return render([[
+            do {
+                TValue _titan_v = $SRC;
+                if (ttisnil(&_titan_v)) {
+                    setnilvalue($DST);
+                } else {
+                    Udata *_titan_proxy = titan_array_require_proxy(
+                        L, hvalue(&_titan_v), $META);
+                    setuvalue(L, $DST, _titan_proxy);
+                }
+            } while (0);
+        ]], {
+            DST = dst,
+            SRC = src,
+            META = array_metatable(ctx),
+        })
+    elseif typ._tag == "Type.Nominal" then
         -- A record value IS the Udata; hand Lua the udata directly ($SRC is a
         -- Udata*).
         return render([[
@@ -854,16 +948,179 @@ local function setwrapped(typ --[[:table]], dst --[[:string]], src --[[:string]]
     end
 end
 
--- A record value is now the Udata held directly in the slot, so for every type
--- (nominal, option-of-nominal, or otherwise) the slot already holds the final
--- TValue to copy out verbatim — no type dispatch needed (unlike setwrapped).
-local function copyslotwrapped(dst, src)
+-- Publish a compiler-internal TValue slot through a Lua accessor.  This is
+-- type-aware for Array and Option(Array); every other internal slot already
+-- has its Lua-visible representation.
+function copyboxed(ctx, typ, dst, src)
+    if typ._tag == "Type.Array" then
+        return render([[
+            {
+                Udata *_titan_proxy = titan_array_require_proxy(
+                    L, hvalue($SRC), $META);
+                setuvalue(L, $DST, _titan_proxy);
+            }
+        ]], {
+            DST = dst,
+            SRC = src,
+            META = array_metatable(ctx),
+        })
+    elseif typ._tag == "Type.Option"
+           and typ.base._tag == "Type.Array" then
+        return render([[
+            if (ttisnil($SRC)) {
+                setnilvalue($DST);
+            } else {
+                Udata *_titan_proxy = titan_array_require_proxy(
+                    L, hvalue($SRC), $META);
+                setuvalue(L, $DST, _titan_proxy);
+            }
+        ]], {
+            DST = dst,
+            SRC = src,
+            META = array_metatable(ctx),
+        })
+    end
     return render([[
         setobj2t(L, $DST, $SRC);
     ]], {
         DST = dst,
-        SRC = src
+        SRC = src,
     })
+end
+
+-- Array/Map element slots can legitimately come from two storage domains:
+-- Titan writes nested Arrays as raw backing Tables, while Lua writes canonical
+-- proxies through __newindex and raw-visible Maps always store proxies.  These
+-- converters accept exactly those sanctioned forms and normalize the result to
+-- Titan's internal representation.  `value` is the dual case: a raw backing
+-- encountered in an internal slot is boxed, while an ordinary Map Table passes
+-- through unchanged.
+function checkandgetmixed(ctx, typ, cvar, exp, loc)
+    if typ._tag == "Type.Array" then
+        return render([[
+            {
+                Table *_titan_array = NULL;
+                if (ttistable($EXP)) {
+                    Table *_titan_candidate = hvalue($EXP);
+                    if (titan_array_try_proxy(_titan_candidate, $META) != NULL)
+                        _titan_array = _titan_candidate;
+                } else {
+                    _titan_array = titan_array_try_backing($EXP, $META);
+                }
+                if (TITAN_LIKELY(_titan_array != NULL)) {
+                    $VAR = _titan_array;
+                } else {
+                    $THROW
+                }
+            }
+        ]], {
+            EXP = exp,
+            META = array_metatable(ctx),
+            VAR = cvar,
+            FILE = c_string_literal(loc.filename),
+            LINE = c_integer_literal(loc.line),
+            COL = c_integer_literal(loc.col),
+            THROW = codethrow(loc,
+                "%s:%d:%d: type error, expected array but found %s",
+                { "$FILE", "$LINE", "$COL",
+                  "lua_typename(L, ttype($EXP))" }),
+        })
+    elseif typ._tag == "Type.Value" then
+        return render([[
+            if (ttistable($EXP)) {
+                Udata *_titan_proxy =
+                    titan_array_try_proxy(hvalue($EXP), $META);
+                if (_titan_proxy != NULL) {
+                    setuvalue(L, &$VAR, _titan_proxy);
+                } else {
+                    setobj2t(L, &$VAR, $EXP);
+                }
+            } else {
+                setobj2t(L, &$VAR, $EXP);
+            }
+        ]], {
+            EXP = exp,
+            META = array_metatable(ctx),
+            VAR = cvar,
+        })
+    elseif typ._tag == "Type.Option" then
+        return render([[
+            if (ttisnil($EXP)) {
+                setnilvalue(&$VAR);
+            } else {
+                $CHECK
+            }
+        ]], {
+            EXP = exp,
+            VAR = cvar,
+            CHECK = checkandsetmixed(ctx, typ.base, "&" .. cvar, exp, loc),
+        })
+    end
+    return checkandget(ctx, typ, cvar, exp, loc)
+end
+
+checkandsetmixed = function(ctx, typ, dst, src, loc)
+    if typ._tag == "Type.Array" then
+        return render([[
+            {
+                Table *_titan_array = NULL;
+                if (ttistable($SRC)) {
+                    Table *_titan_candidate = hvalue($SRC);
+                    if (titan_array_try_proxy(_titan_candidate, $META) != NULL)
+                        _titan_array = _titan_candidate;
+                } else {
+                    _titan_array = titan_array_try_backing($SRC, $META);
+                }
+                if (TITAN_LIKELY(_titan_array != NULL)) {
+                    sethvalue(L, $DST, _titan_array);
+                } else {
+                    $THROW
+                }
+            }
+        ]], {
+            SRC = src,
+            DST = dst,
+            META = array_metatable(ctx),
+            FILE = c_string_literal(loc.filename),
+            LINE = c_integer_literal(loc.line),
+            COL = c_integer_literal(loc.col),
+            THROW = codethrow(loc,
+                "%s:%d:%d: type error, expected array but found %s",
+                { "$FILE", "$LINE", "$COL",
+                  "lua_typename(L, ttype($SRC))" }),
+        })
+    elseif typ._tag == "Type.Value" then
+        return render([[
+            if (ttistable($SRC)) {
+                Udata *_titan_proxy =
+                    titan_array_try_proxy(hvalue($SRC), $META);
+                if (_titan_proxy != NULL) {
+                    setuvalue(L, $DST, _titan_proxy);
+                } else {
+                    setobj2t(L, $DST, $SRC);
+                }
+            } else {
+                setobj2t(L, $DST, $SRC);
+            }
+        ]], {
+            SRC = src,
+            DST = dst,
+            META = array_metatable(ctx),
+        })
+    elseif typ._tag == "Type.Option" then
+        return render([[
+            if (ttisnil($SRC)) {
+                setnilvalue($DST);
+            } else {
+                $CHECK
+            }
+        ]], {
+            SRC = src,
+            DST = dst,
+            CHECK = checkandsetmixed(ctx, typ.base, dst, src, loc),
+        })
+    end
+    return checkandset(ctx, typ, dst, src, loc)
 end
 
 foreignctype = function(typ --[[:table]])
@@ -2236,11 +2493,247 @@ end
 local codecfield
 local codecindex_parts
 
-local function codeassignment(ctx, var, cexp, etype)
+local function code_owned_payload(owner, pointee)
+    return render("(($CT *)getudatamem($OWNER))", {
+        CT = foreignctype(pointee),
+        OWNER = owner,
+    })
+end
+
+function coder._prepared_c_null_check(var, base)
+    local message
+    local args
+    if var._tag == "Ast.VarDot" then
+        message = "%s:%d:%d: cannot access field '%s' of a NULL C pointer"
+        args = {
+            c_string_literal(var.loc.filename),
+            c_integer_literal(var.loc.line),
+            c_integer_literal(var.loc.col),
+            c_string_literal(var.name),
+        }
+    else
+        message = "%s:%d:%d: cannot index a NULL C pointer"
+        args = {
+            c_string_literal(var.loc.filename),
+            c_integer_literal(var.loc.line),
+            c_integer_literal(var.loc.col),
+        }
+    end
+    return render([[
+        if (TITAN_UNLIKELY($BASE == NULL)) {
+            $THROW
+        }
+    ]], {
+        BASE = base,
+        THROW = codethrow(var.loc, message, args),
+    })
+end
+
+function coder._prepared_c_bounds_check(var, index, length)
+    return render([[
+        if (TITAN_UNLIKELY($INDEX < 0 || $INDEX >= $LENGTH)) {
+            luaL_error(L,
+                "%s:%d:%d: C index %I out of range [0, %d)",
+                $FILE, $LINE, $COL, (l_uacInt)$INDEX, (int)$LENGTH);
+        }
+    ]], {
+        INDEX = index,
+        LENGTH = length,
+        FILE = c_string_literal(var.loc.filename),
+        LINE = c_integer_literal(var.loc.line),
+        COL = c_integer_literal(var.loc.col),
+    }, true)
+end
+
+function coder._new_c_pointer_tmp(ctx, pointee)
+    local tmp = ctx.tmp
+    ctx.tmp = ctx.tmp + 1
+    local name = "_tmp_" .. tmp
+    return render("$TYPE *$NAME = NULL;", {
+        TYPE = foreignctype(pointee),
+        NAME = name,
+    }), name
+end
+
+function coder._materialize_c_aggregate(ctx, exp)
+    local stats, value = codeexp(ctx, exp)
+    local tmp = ctx.tmp
+    ctx.tmp = ctx.tmp + 1
+    local name = "_tmp_" .. tmp
+    return render([[
+        $STATS
+        $DECLARATION;
+        $NAME = $VALUE;
+    ]], {
+        STATS = stats,
+        DECLARATION = foreigncdecl(exp._type, name),
+        NAME = name,
+        VALUE = value,
+    }), name
+end
+
+-- Prepare an addressable C subobject without copying it. The top-level target
+-- defers its own NULL/range validation until the store; any field/index step
+-- needed to obtain that target's base is an ordinary LHS read, so its checks
+-- execute during preparation. COwned roots remain in scanned slots across the
+-- RHS, aggregate subobjects are retained by pointer, and C arrays decay to a
+-- synthesized element pointer instead of an unassignable array temporary.
+function coder._is_nested_c_storage(exp)
+    if exp._tag ~= "Ast.ExpVar" then return false end
+    local var = exp.var
+    if var._tag == "Ast.VarDot" then
+        return var._decl and var._decl._tag == "Type.CField"
+            and types.is_c(var.exp._type)
+    elseif var._tag == "Ast.VarBracket" then
+        return types.is_c(var.exp1._type)
+    end
+    return false
+end
+
+function coder._prepare_c_loaded_value(ctx, exp)
+    if coder._is_nested_c_storage(exp) then
+        -- This path reads a pointer value needed as the final target's base.
+        -- A by-value aggregate may therefore be copied to a temporary long
+        -- enough to read that pointer; unlike a final aggregate mutation, no
+        -- persistent address for the by-value object itself is required.
+        local stats, storage =
+            coder._prepare_c_storage(ctx, exp, true)
+        return materialize_code(ctx, exp._type, stats, storage)
+    end
+    return materialize(ctx, exp)
+end
+
+function coder._prepare_c_base(ctx, exp, allow_temporary)
+    local basetype = types.resolve_c_typedef(exp._type)
+    if basetype._tag == "Type.CPointer" then
+        local stats, pointer = coder._prepare_c_loaded_value(ctx, exp)
+        return stats, {
+            type = basetype,
+            base = pointer,
+        }
+    elseif basetype._tag == "Type.COwned" then
+        local stats, owner = materialize(ctx, exp)
+        local length = basetype.count and render(
+            "((lua_Integer)($OWNER->len / sizeof($TYPE)))", {
+                OWNER = owner,
+                TYPE = foreignctype(basetype.pointee),
+            }) or nil
+        return stats, {
+            type = basetype,
+            base = code_owned_payload(owner, basetype.pointee),
+            length = length,
+        }
+    elseif basetype._tag == "Type.CArray" then
+        local stats, storage =
+            coder._prepare_c_storage(ctx, exp, allow_temporary)
+        local declaration, pointer =
+            coder._new_c_pointer_tmp(ctx, basetype.elem)
+        return render([[
+            $STATS
+            $DECLARATION
+            $POINTER = $STORAGE;
+        ]], {
+            STATS = stats,
+            DECLARATION = declaration,
+            POINTER = pointer,
+            STORAGE = storage,
+        }), {
+            type = basetype,
+            base = pointer,
+            length = c_integer_literal(basetype.len),
+        }
+    elseif basetype._tag == "Type.CStruct"
+           or basetype._tag == "Type.CUnion" then
+        local stats, storage =
+            coder._prepare_c_storage(ctx, exp, allow_temporary)
+        local declaration, pointer =
+            coder._new_c_pointer_tmp(ctx, exp._type)
+        return render([[
+            $STATS
+            $DECLARATION
+            $POINTER = &($STORAGE);
+        ]], {
+            STATS = stats,
+            DECLARATION = declaration,
+            POINTER = pointer,
+            STORAGE = storage,
+        }), {
+            type = basetype,
+            base = pointer,
+        }
+    end
+    error("invalid prepared C base " .. types.tostring(exp._type))
+end
+
+function coder._prepare_c_storage(ctx, exp, allow_temporary)
+    if exp._tag ~= "Ast.ExpVar" then
+        local basetype = types.resolve_c_typedef(exp._type)
+        if allow_temporary
+           and (basetype._tag == "Type.CStruct"
+                or basetype._tag == "Type.CUnion") then
+            return coder._materialize_c_aggregate(ctx, exp)
+        end
+        error("C assignment receiver has no persistent storage")
+    end
+    local var = exp.var
+    if var._tag == "Ast.VarDot"
+       and var._decl
+       and var._decl._tag == "Type.CField"
+       and types.is_c(var.exp._type) then
+        local stats, base =
+            coder._prepare_c_base(ctx, var.exp, allow_temporary)
+        local check = base.type._tag == "Type.CPointer"
+            and coder._prepared_c_null_check(var, base.base) or ""
+        return render([[
+            $STATS
+            $CHECK
+        ]], {
+            STATS = stats,
+            CHECK = check,
+        }), render("$BASE->$FIELD", {
+            BASE = base.base,
+            FIELD = var.name,
+        })
+    elseif var._tag == "Ast.VarBracket"
+           and types.is_c(var.exp1._type) then
+        local stats, base =
+            coder._prepare_c_base(ctx, var.exp1, allow_temporary)
+        local indexstats, index = materialize(ctx, var.exp2)
+        local checks = {}
+        if base.type._tag == "Type.CPointer" then
+            table.insert(checks,
+                coder._prepared_c_null_check(var, base.base))
+        elseif base.length then
+            table.insert(checks,
+                coder._prepared_c_bounds_check(
+                    var, index, base.length))
+        end
+        return render([[
+            $STATS
+            $INDEXSTATS
+            $CHECKS
+        ]], {
+            STATS = stats,
+            INDEXSTATS = indexstats,
+            CHECKS = table.concat(checks, "\n"),
+        }), render("$BASE[$INDEX]", {
+            BASE = base.base,
+            INDEX = index,
+        })
+    end
+    return codeexp(ctx, exp)
+end
+
+local function codeassignment(ctx, var, cexp, etype, lvalue)
     local vtag = var._tag
     if vtag == "Ast.VarName" or (vtag == "Ast.VarDot" and var._decl) then
         if vtag == "Ast.VarDot" and var._decl._tag == "Type.Field" then
-            local lstats, lexp = codeexp(ctx, var.exp)
+            local lstats, lexp
+            if lvalue then
+                lstats, lexp = "", assert(lvalue.record)
+            else
+                lstats, lexp = codeexp(ctx, var.exp)
+            end
             local index = var._decl.index
             return render([[
                 $STATS
@@ -2259,7 +2752,30 @@ local function codeassignment(ctx, var, cexp, etype)
                           and "luaC_barrierback(L, obj2gco(_recobj), _fieldslot);" or ""
             })
         elseif vtag == "Ast.VarDot" and var._decl._tag == "Type.CField" then
-            local lstats, lexp = codecfield(ctx, var)
+            if lvalue and lvalue.cfield_base then
+                local basetype = assert(lvalue.cfield_type)
+                local check = basetype._tag == "Type.CPointer"
+                    and coder._prepared_c_null_check(
+                        var, lvalue.cfield_base) or ""
+                local field = render("$BASE->$FIELD", {
+                    BASE = lvalue.cfield_base,
+                    FIELD = var._decl.name,
+                })
+                return render([[
+                    $CHECK
+                    $FIELD = $CEXP;
+                ]], {
+                    CHECK = check,
+                    FIELD = field,
+                    CEXP = cexp,
+                })
+            end
+            local lstats, lexp
+            if lvalue then
+                lstats, lexp = "", assert(lvalue.cfield)
+            else
+                lstats, lexp = codecfield(ctx, var)
+            end
             return render([[
                 $STATS
                 $FIELD = $CEXP;
@@ -2332,52 +2848,111 @@ local function codeassignment(ctx, var, cexp, etype)
         if exp1type == "Type.Array" then
             local arr = var.exp1
             local idx = var.exp2
-            local castats, caexp = codeexp(ctx, arr)
-            local cistats, ciexp = codeexp(ctx, idx)
+            local castats, caexp, cistats, ciexp
+            if lvalue then
+                castats, caexp = "", assert(lvalue.array)
+                cistats, ciexp = "", assert(lvalue.index)
+            else
+                castats, caexp = codeexp(ctx, arr)
+                cistats, ciexp = codeexp(ctx, idx)
+            end
+            -- A resize can collect and relocate the Lua stack. Root both the
+            -- backing and RHS only on that slow path, save `_base` by offset,
+            -- then reload both values after the helper restores lenhint.
+            ctx.uses_base_off = true
+            local arrroot = slotat(reserveslot(ctx))
+            local valroot = slotat(reserveslot(ctx))
+            local barrier = types.is_gc(arr._type.elem)
+                and "luaC_barrierback(L, obj2gco(_t), &_vv);" or ""
             return render([[
                 {
                     $CASTATS
                     $CISTATS
                     Table *_t = $CAEXP;
                     lua_Integer _k = $CIEXP;
-                    TValue _vv;
+                    TValue _vv = {0};
                     $SETVV
-                    lua_Unsigned _actual_i = l_castS2U(_k) - 1u;
-                    unsigned int _asize = _t->asize;
-                    if (_actual_i < _asize) {
-                        obj2arr(_t, cast_uint(_actual_i), &_vv);
-                    } else if (_asize <= (UINT_MAX/2) && _actual_i < 2*(lua_Unsigned)_asize) {
-                        luaH_resizearray(L, _t, cast_uint(2*(lua_Unsigned)_asize));
-                        obj2arr(_t, cast_uint(_actual_i), &_vv);
-                    } else {
-                        luaH_setint(L, _t, _k, &_vv);
+                    if (TITAN_UNLIKELY(_k < 1)) {
+                        $BADINDEX
                     }
-                    $BARRIER
+                    lua_Unsigned _actual_i = l_castS2U(_k) - 1u;
+                    unsigned _asize = _t->asize;
+                    if (_actual_i < _asize) {
+                        unsigned _length = cast_uint(titan_array_length(_t));
+                        obj2arr(_t, cast_uint(_actual_i), &_vv);
+                        $BARRIER
+                        if (ttisnil(&_vv)) {
+                            if (l_castS2U(_k) == _length) {
+                                while (_length > 0 &&
+                                       tagisempty(*getArrTag(_t, _length - 1u)))
+                                    _length--;
+                                titan_array_set_length(_t, _length);
+                            }
+                        } else if (l_castS2U(_k) > _length) {
+                            titan_array_set_length(_t, l_castS2U(_k));
+                        }
+                    } else if (!ttisnil(&_vv)) {
+                        sethvalue(L, $ARRROOT, _t);
+                        setobj2t(L, $VALROOT, &_vv);
+                        unsigned _newasize =
+                            titan_array_growth(L, l_castS2U(_k));
+                        titan_array_resize(L, _t, _newasize);
+                        _base = restorestack(L, _base_off);
+                        _t = hvalue($ARRROOT);
+                        setobj(L, &_vv, $VALROOT);
+                        obj2arr(_t, cast_uint(_actual_i), &_vv);
+                        $BARRIER
+                        titan_array_set_length(_t, l_castS2U(_k));
+                    }
                 }
             ]], {
                 CASTATS = castats,
                 CISTATS = cistats,
                 CAEXP = caexp,
                 CIEXP = ciexp,
-                SETVV = setwrapped(etype, "&_vv", cexp),
-                BARRIER = types.is_gc(arr._type.elem)
-                          and "luaC_barrierback(L, obj2gco(_t), &_vv);" or ""
+                SETVV = setslot(etype, "&_vv", cexp),
+                ARRROOT = arrroot,
+                VALROOT = valroot,
+                BARRIER = barrier,
+                BADINDEX = codethrow(var.loc,
+                    "%s:%d:%d: array index must be positive",
+                    { c_string_literal(var.loc.filename),
+                      c_integer_literal(var.loc.line),
+                      c_integer_literal(var.loc.col) }),
             })
         elseif exp1type == "Type.Map" then
             local map = var.exp1
             local key = var.exp2
-            local cmstats, cmexp = codeexp(ctx, map)
-            local ckstats, ckexp = codeexp(ctx, key)
-            local ctmpk, tmpkname, tmpkslot = newtmp(ctx, key._type, true)
+            local cmstats, cmexp, keyprep, tmpkslot
+            if lvalue then
+                cmstats, cmexp = "", assert(lvalue.map)
+                keyprep, tmpkslot = "", assert(lvalue.keyslot)
+            else
+                cmstats, cmexp = codeexp(ctx, map)
+                local ckstats, ckexp = codeexp(ctx, key)
+                local ctmpk, tmpkname
+                ctmpk, tmpkname, tmpkslot =
+                    newtmp(ctx, key._type, true)
+                keyprep = render([[
+                    $CKSTATS
+                    $CTMPK
+                    $TMPKNAME = $CKEXP;
+                    $SETSLOTK
+                ]], {
+                    CKSTATS = ckstats,
+                    CTMPK = ctmpk,
+                    TMPKNAME = tmpkname,
+                    CKEXP = ckexp,
+                    SETSLOTK =
+                        setboxed(ctx, key._type, tmpkslot, tmpkname),
+                })
+            end
 
             return render([[
                 {
                     $CMSTATS
                     Table *_t = $CMEXP;
-                    $CKSTATS
-                    $CTMPK
-                    $TMPKNAME = $CKEXP;
-                    $SETSLOTK
+                    $KEYPREP
 
                     TValue _vv;
                     $SETVV
@@ -2387,34 +2962,57 @@ local function codeassignment(ctx, var, cexp, etype)
             ]], {
                 CMSTATS = cmstats,
                 CMEXP = cmexp,
-                CKSTATS = ckstats,
-                CTMPK = ctmpk,
-                TMPKNAME = tmpkname,
-                CKEXP = ckexp,
-                SETSLOTK = setwrapped(key._type, tmpkslot, tmpkname),
-                SETVV = setwrapped(etype, "&_vv", cexp),
+                KEYPREP = keyprep,
+                SETVV = setboxed(ctx, etype, "&_vv", cexp),
                 STORE = set_table_entry(key._type, "_t", tmpkslot, "&_vv"),
                 BARRIER = types.is_gc(map._type.values)
                           and "luaC_barrierback(L, obj2gco(_t), &_vv);" or ""
             })
         elseif types.is_c(var.exp1._type) then
-            local parts = codecindex_parts(ctx, var)
-            return render([[
-                {
-                    $BSTATS
+            local parts, indexprep
+            if lvalue then
+                local basetype = assert(lvalue.cbase_type)
+                local baseexp = assert(lvalue.cbase)
+                local checks = {}
+                if basetype._tag == "Type.CPointer" then
+                    table.insert(checks,
+                        coder._prepared_c_null_check(var, baseexp))
+                else
+                    table.insert(checks, coder._prepared_c_bounds_check(
+                        var, assert(lvalue.cindex),
+                        assert(lvalue.clength)))
+                end
+                parts = {
+                    bstats = "",
+                    idxname = assert(lvalue.cindex),
+                    baseexp = baseexp,
+                }
+                indexprep = table.concat(checks, "\n")
+            else
+                parts = codecindex_parts(ctx, var)
+                indexprep = render([[
                     $ISTATS
                     $CIDX
                     $IDX = $IEXP;
                     $BOUNDS
+                ]], {
+                    ISTATS = parts.istats,
+                    CIDX = parts.cidx,
+                    IDX = parts.idxname,
+                    IEXP = parts.iexp,
+                    BOUNDS = parts.bounds,
+                })
+            end
+            return render([[
+                {
+                    $BSTATS
+                    $INDEXPREP
                     $BASE[$IDX] = $CEXP;
                 }
             ]], {
                 BSTATS = parts.bstats,
-                ISTATS = parts.istats,
-                CIDX = parts.cidx,
+                INDEXPREP = indexprep,
                 IDX = parts.idxname,
-                IEXP = parts.iexp,
-                BOUNDS = parts.bounds,
                 BASE = parts.baseexp,
                 CEXP = cexp,
             })
@@ -2422,6 +3020,112 @@ local function codeassignment(ctx, var, cexp, etype)
     else
         error("invalid tag for lvalue of assignment: " .. vtag)
     end
+end
+
+-- Lua evaluates an indexed assignment's container and key before its RHS.
+-- Materialize the Array lvalue explicitly so the backing stays in a scanned
+-- root while the index and RHS run, then let codeassignment perform only the
+-- mutation.  (The backing is non-moving, but it may otherwise be reachable
+-- solely through a transient C local returned by a call.)
+function coder._materialize_array_lvalue(ctx, var)
+    local castats, caexp = codeexp(ctx, var.exp1)
+    local cta, taname, taslot = newtmp(ctx, var.exp1._type, true)
+    local cistats, ciexp = codeexp(ctx, var.exp2)
+    local cti, tiname = newtmp(ctx, var.exp2._type)
+    return render([[
+        $CASTATS
+        $CTA
+        $TANAME = $CAEXP;
+        $ANCHOR
+        $CISTATS
+        $CTI
+        $TINAME = $CIEXP;
+    ]], {
+        CASTATS = castats,
+        CTA = cta,
+        TANAME = taname,
+        CAEXP = caexp,
+        ANCHOR = setslot(var.exp1._type, taslot, taname),
+        CISTATS = cistats,
+        CTI = cti,
+        TINAME = tiname,
+        CIEXP = ciexp,
+    }), {
+        array = taname,
+        index = tiname,
+    }
+end
+
+-- Every assignment freezes its effectful target operands before evaluating
+-- the RHS. Multiple assignment applies the same preparation in lexical LHS
+-- order across target kinds, so an Array target cannot leapfrog a preceding
+-- record, Map, or C target. The returned descriptor retains GC owners/keys in
+-- scanned slots; codeassignment performs only final-target validation and
+-- mutation.
+function coder._materialize_assignment_lvalue(ctx, var)
+    if var._tag == "Ast.VarDot" and var._decl then
+        if var._decl._tag == "Type.Field" then
+            local stats, name = materialize(ctx, var.exp)
+            return stats, { record = name }
+        elseif var._decl._tag == "Type.CField" then
+            local stats, base = coder._prepare_c_base(ctx, var.exp)
+            return stats, {
+                cfield_base = base.base,
+                cfield_type = base.type,
+            }
+        end
+        return "", nil
+    elseif var._tag ~= "Ast.VarBracket" then
+        return "", nil
+    end
+
+    local basetype = var.exp1._type
+    if basetype._tag == "Type.Array" then
+        return coder._materialize_array_lvalue(ctx, var)
+    elseif basetype._tag == "Type.Map" then
+        local mapstats, mapexp = codeexp(ctx, var.exp1)
+        local mapdecl, mapname, mapslot =
+            newtmp(ctx, basetype, true)
+        local keystats, keyexp = codeexp(ctx, var.exp2)
+        local keydecl, keyname, keyslot =
+            newtmp(ctx, var.exp2._type, true)
+        return render([[
+            $MAPSTATS
+            $MAPDECL
+            $MAPNAME = $MAPEXP;
+            $ANCHORMAP
+            $KEYSTATS
+            $KEYDECL
+            $KEYNAME = $KEYEXP;
+            $ANCHORKEY
+        ]], {
+            MAPSTATS = mapstats,
+            MAPDECL = mapdecl,
+            MAPNAME = mapname,
+            MAPEXP = mapexp,
+            ANCHORMAP = setslot(basetype, mapslot, mapname),
+            KEYSTATS = keystats,
+            KEYDECL = keydecl,
+            KEYNAME = keyname,
+            KEYEXP = keyexp,
+            ANCHORKEY =
+                setboxed(ctx, var.exp2._type, keyslot, keyname),
+        }), {
+            map = mapname,
+            keyslot = keyslot,
+        }
+    elseif types.is_c(basetype) then
+        local basestats, base =
+            coder._prepare_c_base(ctx, var.exp1)
+        local indexstats, indexname = materialize(ctx, var.exp2)
+        return basestats .. "\n" .. indexstats, {
+            cbase = base.base,
+            cbase_type = base.type,
+            cindex = indexname,
+            clength = base.length,
+        }
+    end
+    error("invalid bracket lvalue type " .. types.tostring(basetype))
 end
 
 -- Evaluate a checker-adjusted finite expression list once in lexical order.
@@ -2475,18 +3179,34 @@ function coder._codeadjustedfixed(ctx, node)
 end
 
 local function codesingleassignment(ctx, node)
+    local var = node.vars[1]
+    local lvalue_stats, lvalue =
+        coder._materialize_assignment_lvalue(ctx, var)
     local stats, tmps, exptypes = coder._codeadjustedfixed(ctx, node)
-    table.insert(stats, codeassignment(ctx, node.vars[1],
-        assert(tmps[1]), assert(exptypes[1])))
+    table.insert(stats, 1, lvalue_stats)
+    table.insert(stats, codeassignment(ctx, var,
+        assert(tmps[1]), assert(exptypes[1]), lvalue))
     return table.concat(stats, "\n")
 end
 
 local function codemultiassignment(ctx, node)
+    local lvalue_stats = {}
+    local lvalues = {}
+    for i, var in ipairs(node.vars) do
+        local stats, lvalue =
+            coder._materialize_assignment_lvalue(ctx, var)
+        if stats ~= "" then
+            table.insert(lvalue_stats, stats)
+        end
+        lvalues[i] = lvalue
+    end
     local stats, tmps, exptypes = coder._codeadjustedfixed(ctx, node)
+    table.insert(stats, 1, table.concat(lvalue_stats, "\n"))
     for i, var in ipairs(node.vars) do
         if tmps[i] then
             table.insert(stats,
-                codeassignment(ctx, var, tmps[i], exptypes[i]))
+                codeassignment(ctx, var, tmps[i], exptypes[i],
+                    lvalues[i]))
         end
     end
     return table.concat(stats, "\n")
@@ -2597,7 +3317,7 @@ local function nativetoforeignexp(ctx, exp, cexp, target)
             $ANCHOR
         ]], {
             CTMP = ctmp,
-            SETTMP = setwrapped(exp._type, "&" .. tmpname, cexp),
+            SETTMP = setboxed(ctx, exp._type, "&" .. tmpname, cexp),
             ANCHOR = setslot(types.Value(), tmpslot, tmpname),
         }), tmpname
     end
@@ -2928,7 +3648,11 @@ local function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
         local va = assert(ctx.varargs, "forwarding '...' outside a variadic function")
         local eg = callee_vararg          -- callee element type
         local ef = va.elem                -- this function's `...` element type
-        local same_ct = ctype(ef) == ctype(eg)
+        -- C representation alone is not enough: Array and Map share Table*,
+        -- while Option(Array), Option(Map), value, and Function share TValue.
+        -- Only an equal semantic element type is representation-equivalent
+        -- across this exact descriptor edge.
+        local same_representation = types.equals(ef, eg)
         local k = nstatic                 -- static-prefix arg count
         local m = #callee_ftype.params    -- callee fixed-param count
         local tail_start = va.start
@@ -2988,7 +3712,7 @@ local function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
             (((int)$SRC->n_args < ($LOGICAL))
                 ? (int)$SRC->n_args : ($LOGICAL))
         ]], { SRC = va.cname, LOGICAL = tail_start })
-        if same_ct and k <= m then
+        if same_representation and k <= m then
             -- CASE 1 (pass-through): static prefix exactly fills the callee fixed
             -- params, or the missing fixed params were borrowed above, and the
             -- element representation matches; pass the current backing struct and
@@ -3063,7 +3787,7 @@ local function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
             -- other gradual `value` widenings) -> setwrapped into a TValue;
             -- value->integer (and similar narrowings) -> checkandget runtime check.
             local convbody
-            if same_ct then
+            if same_representation then
                 convbody = render("$VNAME->args[$NPREFIX + _vj] = $SRC;", {
                     VNAME = vname,
                     NPREFIX = c_integer_literal(nprefix),
@@ -3075,15 +3799,37 @@ local function emit_vararg_struct(ctx, node, callee_ftype, vargexps,
                     { SRC = va.cname, START = tail_start })
                 local dst = render("$VNAME->args[$NPREFIX + _vj]",
                     { VNAME = vname, NPREFIX = c_integer_literal(nprefix) })
-                if eg._tag == "Type.Value" or eg._tag == "Type.Option"
-                   or eg._tag == "Type.Function" then
-                    -- widening into a tagged TValue (e.g. integer -> value).
-                    convbody = setwrapped(ef, "&(" .. dst .. ")", src)
-                else
-                    -- narrowing out of a TValue (e.g. value -> integer): runtime
-                    -- check via checkandget (ef is the boxed source element type).
-                    convbody = checkandget(ctx, eg, dst, "&(" .. src .. ")", node.loc)
-                end
+                -- Drive conversion from the semantic Titan types, recursively
+                -- through Option/value as ordinary expression lowering does.
+                -- Descriptor C families cannot distinguish the required
+                -- internal/boxed domains.
+                local csrc, srcname = newtmp(ctx, ef)
+                local synthvar = {
+                    _tag = "Ast.VarName",
+                    _type = ef,
+                    _decl = { _cvar = srcname },
+                }
+                local synthcast = {
+                    _tag = "Ast.ExpCast",
+                    loc = node.loc,
+                    exp = synthvar,
+                    target = eg,
+                    _type = eg,
+                }
+                local convstats, convexp = codeexp(ctx, synthcast)
+                convbody = render([[
+                    $CSRC
+                    $SRCNAME = $SRC;
+                    $CONVSTATS
+                    $DST = $CONVEXP;
+                ]], {
+                    CSRC = csrc,
+                    SRCNAME = srcname,
+                    SRC = src,
+                    CONVSTATS = convstats,
+                    DST = dst,
+                    CONVEXP = convexp,
+                })
             end
             table.insert(castats, render([[
                 $PREFIX_ANCHOR
@@ -3661,7 +4407,8 @@ local function codevaluecall(ctx, node)
     for i = 1, pushfixed do
         if argnames[i] then
             table.insert(pushes,
-                setslot(argtypes[i], "s2v(L->top.p)", argnames[i]) .. " L->top.p++;")
+                setboxed(ctx, argtypes[i], "s2v(L->top.p)", argnames[i])
+                    .. " L->top.p++;")
         end
     end
     local npush_dynamic = ""
@@ -3684,7 +4431,7 @@ local function codevaluecall(ctx, node)
         }))
         for _, name in ipairs(inputtail) do
             table.insert(pushes,
-                setslot(callee_vararg, "s2v(L->top.p)", name)
+                setboxed(ctx, callee_vararg, "s2v(L->top.p)", name)
                     .. " L->top.p++;")
         end
         local pushstats, pushexp
@@ -3714,7 +4461,7 @@ local function codevaluecall(ctx, node)
         ]], {
             COUNT = inputrun.count,
             PUSHSTATS = pushstats,
-            SETSLOT = setslot(
+            SETSLOT = setboxed(ctx,
                 node._arg_adjustment.open_source._tag == "Ast.ExpDots"
                     and inputrun.elem or callee_vararg,
                 "s2v(L->top.p)", pushexp),
@@ -3722,7 +4469,8 @@ local function codevaluecall(ctx, node)
     else
         for _, vexp in ipairs(vargexps) do
             table.insert(pushes,
-                setslot(callee_vararg, "s2v(L->top.p)", vexp) .. " L->top.p++;")
+                setboxed(ctx, callee_vararg, "s2v(L->top.p)", vexp)
+                    .. " L->top.p++;")
         end
     end
     if dots_tail and not inputvarg then
@@ -3746,7 +4494,7 @@ local function codevaluecall(ctx, node)
         ]], {
             SRC = va.cname,
             START = source_start,
-            SETSLOT = setslot(va.elem, "s2v(L->top.p)",
+            SETSLOT = setboxed(ctx, va.elem, "s2v(L->top.p)",
                 render("$SRC->args[$START + _vpj]",
                     { SRC = va.cname, START = source_start })),
         }))
@@ -5593,13 +6341,6 @@ end
 -- as a string with a C expression. For trivial expressions
 -- the preliminary code is always the empty string
 
-local function code_owned_payload(owner, pointee)
-    return render("(($CT *)getudatamem($OWNER))", {
-        CT = foreignctype(pointee),
-        OWNER = owner,
-    })
-end
-
 codecindex_parts = function(ctx, node)
     local basetype = types.resolve_c_typedef(node.exp1._type)
     local bstats, bexp = codeexp(ctx, node.exp1)
@@ -5799,52 +6540,32 @@ local function codevalue(ctx, node, target)
     end
 end
 
-local function codearray(ctx, node, target)
-    local stats = {}
-    local cinit, ctmp, tmpname, tmpslot
-    if target and target._cvar then
-        ctmp, tmpname, tmpslot = "", target._cvar, target._slot
-    else
-        -- always build the array anchored in a stack slot; a target slot
-        -- such as a module-global upvalue is not scanned by minor
-        -- collections, so the fresh table could be swept while a callee
-        -- in the fill loop triggers the GC (caller stores + barriers
-        -- after we return)
-        ctmp, tmpname, tmpslot = newtmp(ctx, node._type, true)
+-- Materialize the position stream shared by dense Array and positional
+-- integer-Map constructors.  Values are evaluated and converted once in source
+-- order before either representation is allocated.  Fixed positions are held
+-- in scanned slots; a sole open producer remains as a typed result-run view
+-- whose elements the representation-specific fill loop converts in order.
+function coder._materialize_positional_inputs(ctx, node, elemtype)
+    local stats, slots, discarded = {}, {}, {}
+    local openrun
+    local adjustment = assert(
+        node._positional_adjustment or node._array_adjustment,
+        "positional constructor lacks checker adjustment")
+    for _, exp in ipairs(adjustment.discards) do
+        discarded[exp] = true
     end
-    cinit = render([[
-        $CTMP
-        $TMPNAME = luaH_new(L);
-        sethvalue(L, $TMPSLOT, $TMPNAME);
-    ]], {
-        CTMP = ctmp,
-        TMPNAME = tmpname,
-        TMPSLOT = tmpslot,
-    })
-    table.insert(stats, cinit)
-    -- A trailing `...` field (key-less `Ast.ExpDots`, §4.7) makes this a
-    -- runtime-sized build: the static prefix fields precede it, then the current
-    -- frame's whole `...` tail (`args[_start .. n_args-1]`) is appended (§5.6).
-    local elemtype = node._type.elem
+
     local nfields = #node.fields
     local dots_tail = nfields > 0
         and node.fields[nfields].exp._tag == "Ast.ExpDots"
     local nprefix = dots_tail and nfields - 1 or nfields
-    local slots = {}
-    local discarded = {}
-    local openrun
-    if node._array_adjustment then
-        for _, exp in ipairs(node._array_adjustment.discards) do
-            discarded[exp] = true
-        end
-    end
-    if node._array_adjustment and node._array_adjustment.open_source then
-        local astats, _, tailnames, run = coder._codeadjustedopen(ctx,
-            node._array_adjustment, "LUA_MULTRET", "1")
+    if adjustment.open_source then
+        local astats, _, tailnames, run = coder._codeadjustedopen(
+            ctx, adjustment, "LUA_MULTRET", "1")
         for _, stat in ipairs(astats) do table.insert(stats, stat) end
         for _, name in ipairs(tailnames) do
             local slot = slotat(reserveslot(ctx))
-            table.insert(stats, setwrapped(elemtype, slot, name))
+            table.insert(stats, setslot(elemtype, slot, name))
             table.insert(slots, slot)
         end
         openrun = run
@@ -5856,8 +6577,9 @@ local function codearray(ctx, node, target)
                 table.insert(stats, cstats)
                 table.insert(stats, "(void)(" .. cexp .. ");")
             else
-                local ctmpe, tmpename, tmpeslot = newtmp(ctx, elemtype, true)
-                local code = render([[
+                local ctmpe, tmpename, tmpeslot =
+                    newtmp(ctx, elemtype, true)
+                table.insert(stats, render([[
                     $CSTATS
                     $CTMPE
                     $TMPENAME = $CEXP;
@@ -5867,14 +6589,43 @@ local function codearray(ctx, node, target)
                     CTMPE = ctmpe,
                     TMPENAME = tmpename,
                     CEXP = cexp,
-                    SETSLOT = setwrapped(elemtype, tmpeslot, tmpename),
-                })
-
+                    SETSLOT = setslot(elemtype, tmpeslot, tmpename),
+                }))
                 table.insert(slots, tmpeslot)
-                table.insert(stats, code)
             end
         end
     end
+    return stats, slots, openrun
+end
+
+local function codearray(ctx, node, target)
+    -- Always build the Array in a scanned stack slot. A target such as a
+    -- module-global upvalue is not necessarily remembered until the caller's
+    -- post-expression barrier, while constructor/open-run work can allocate.
+    -- The caller copies this rooted result into its final owner afterward.
+    local ctmp, tmpname, tmpslot = newtmp(ctx, node._type, true)
+    local inputstats, slots, openrun =
+        coder._materialize_positional_inputs(ctx, node, node._type.elem)
+    local stats = {}
+    -- Keep the C temporary in the constructor's outer scope. Runtime-sized
+    -- constructors perform allocation and filling in an inner block, but the
+    -- expression result is consumed after that block.
+    table.insert(stats, ctmp)
+    for _, stat in ipairs(inputstats) do table.insert(stats, stat) end
+    ctx.uses_base_off = true
+    local function initarray(capacity)
+        return render([[
+            $TMPNAME = titan_array_new(L, $META, $CAPACITY);
+            _base = restorestack(L, _base_off);
+            sethvalue(L, $TMPSLOT, $TMPNAME);
+        ]], {
+            TMPNAME = tmpname,
+            TMPSLOT = tmpslot,
+            META = array_metatable(ctx),
+            CAPACITY = capacity,
+        })
+    end
+    local elemtype = node._type.elem
     local nstored = #slots
     if openrun then
         -- Runtime-sized array build. The vararg elements are already anchored
@@ -5913,7 +6664,7 @@ local function codearray(ctx, node, target)
         local rawread = openrun.args .. "[" .. openrun.start .. " + _vj]"
         local element_store
         if types.equals(openrun.elem, elemtype) then
-            element_store = setwrapped(elemtype, "&" .. vslot, rawread)
+            element_store = setslot(elemtype, "&" .. vslot, rawread)
         else
             local csrc, srcname = newtmp(ctx, openrun.elem)
             local synthvar = { _tag = "Ast.VarName", _type = openrun.elem,
@@ -5931,14 +6682,13 @@ local function codearray(ctx, node, target)
                 SRCNAME = srcname,
                 RAWREAD = rawread,
                 CONVSTATS = convstats,
-                SETWRAPPED = setwrapped(elemtype, "&" .. vslot, convexp),
+                SETWRAPPED = setslot(elemtype, "&" .. vslot, convexp),
             })
         end
         table.insert(stats, render([[
             {
                 int _vacount = $RUNCOUNT;
-                luaH_resizearray(L, $TMPNAME, (unsigned int)($NPREFIX + _vacount));
-                _base = restorestack(L, _base_off);
+                $INITARRAY
                 $PREFIX_STORES
                 /* zero-init: a boolean store sets only the tag (booleans carry
                 ** no payload), but obj2arr copies value_ too — leaving it
@@ -5950,12 +6700,24 @@ local function codearray(ctx, node, target)
                     obj2arr($TMPNAME, $NPREFIX + _vj, &$VSLOT);
                     $BARRIER
                 }
+                unsigned _array_length =
+                    cast_uint($NPREFIX + _vacount);
+                while (_array_length > 0 &&
+                       tagisempty(*getArrTag($TMPNAME,
+                                            _array_length - 1u)))
+                    _array_length--;
+                titan_array_set_length($TMPNAME, _array_length);
                 $CLEANUP
             }
         ]], {
             RUNCOUNT = openrun.count,
             TMPNAME = tmpname,
             NPREFIX = c_integer_literal(nstored),
+            INITARRAY = initarray(render([[
+                ((lua_Unsigned)$NPREFIX + (lua_Unsigned)_vacount)
+            ]], {
+                NPREFIX = c_integer_literal(nstored),
+            })),
             VSLOT = vslot,
             SETWRAPPED = element_store,
             BARRIER = barrier,
@@ -5978,15 +6740,7 @@ local function codearray(ctx, node, target)
         }))
         return table.concat(stats, "\n"), tmpname
     end
-    if nstored > 0 then
-        table.insert(stats, render([[
-            luaH_resizearray(L, $TMPNAME, $SIZE);
-        ]], {
-            TMPNAME = tmpname,
-            SIZE = nstored
-        }))
-
-    end
+    table.insert(stats, initarray(c_integer_literal(nstored)))
     for i, slot in ipairs(slots) do
         table.insert(stats, render([[
             obj2arr($TMPNAME, $INDEX, $SLOT);
@@ -6004,10 +6758,126 @@ local function codearray(ctx, node, target)
             }))
         end
     end
+    table.insert(stats, render([[
+        {
+            unsigned _array_length = $SIZE;
+            while (_array_length > 0 &&
+                   tagisempty(*getArrTag($TMPNAME, _array_length - 1u)))
+                _array_length--;
+            titan_array_set_length($TMPNAME, _array_length);
+        }
+    ]], {
+        SIZE = c_integer_literal(nstored),
+        TMPNAME = tmpname,
+    }))
+    return table.concat(stats, "\n"), tmpname
+end
+
+function coder._codepositionalmap(ctx, node, target)
+    local valuetype = node._type.values
+    local inputstats, slots, openrun =
+        coder._materialize_positional_inputs(ctx, node, valuetype)
+    local ctmp, tmpname, tmpslot
+    if target and target._cvar then
+        ctmp, tmpname, tmpslot = "", target._cvar, target._slot
+    else
+        ctmp, tmpname, tmpslot = newtmp(ctx, node._type, true)
+    end
+
+    local stats = { ctmp }
+    for _, stat in ipairs(inputstats) do table.insert(stats, stat) end
+    ctx.uses_base_off = true
+
+    local function initmap(count)
+        return render([[
+            if (TITAN_UNLIKELY((lua_Unsigned)($COUNT) >
+                               (lua_Unsigned)TITAN_ARRAY_MAX_CAPACITY)) {
+                luaL_error(L, "positional map is too large");
+            }
+            $TMPNAME = luaH_new(L);
+            _base = restorestack(L, _base_off);
+            sethvalue(L, $TMPSLOT, $TMPNAME);
+            luaH_resizearray(L, $TMPNAME, cast_uint($COUNT));
+            _base = restorestack(L, _base_off);
+        ]], {
+            COUNT = count,
+            TMPNAME = tmpname,
+            TMPSLOT = tmpslot,
+        })
+    end
+
+    local function fixedstores()
+        local stores = {}
+        for i, slot in ipairs(slots) do
+            table.insert(stores, render([[
+                {
+                    TValue _map_value = {0};
+                    $BOX
+                    obj2arr($TMPNAME, $INDEX, &_map_value);
+                    $BARRIER
+                }
+            ]], {
+                BOX = setboxed(ctx, valuetype, "&_map_value",
+                    getslot(valuetype, nil, slot)),
+                TMPNAME = tmpname,
+                INDEX = c_integer_literal(i - 1),
+                BARRIER = types.is_gc(valuetype)
+                    and render([[
+                        luaC_barrierback(L, obj2gco($TMPNAME),
+                                         &_map_value);
+                    ]], { TMPNAME = tmpname })
+                    or "",
+            }))
+        end
+        return table.concat(stores, "\n")
+    end
+
+    if openrun then
+        local convstats, convexp = coder._convert_result_run_element(
+            ctx, openrun, valuetype, "_mi", node.loc)
+        table.insert(stats, render([[
+            {
+                int _map_open_count = $RUNCOUNT;
+                lua_Unsigned _map_count =
+                    (lua_Unsigned)$NPREFIX +
+                    (lua_Unsigned)_map_open_count;
+                $INITMAP
+                $FIXEDSTORES
+                TValue _map_value = {0};
+                for (int _mi = 0; _mi < _map_open_count; _mi++) {
+                    $CONVSTATS
+                    $BOX
+                    obj2arr($TMPNAME, $NPREFIX + _mi, &_map_value);
+                    $BARRIER
+                }
+                $CLEANUP
+            }
+        ]], {
+            RUNCOUNT = openrun.count,
+            NPREFIX = c_integer_literal(#slots),
+            INITMAP = initmap("_map_count"),
+            FIXEDSTORES = fixedstores(),
+            CONVSTATS = convstats,
+            BOX = setboxed(ctx, valuetype, "&_map_value", convexp),
+            TMPNAME = tmpname,
+            BARRIER = types.is_gc(valuetype)
+                and render([[
+                    luaC_barrierback(L, obj2gco($TMPNAME), &_map_value);
+                ]], { TMPNAME = tmpname })
+                or "",
+            CLEANUP = coder._cleanup_result_run(openrun),
+        }))
+    else
+        table.insert(stats, initmap(c_integer_literal(#slots)))
+        table.insert(stats, fixedstores())
+    end
     return table.concat(stats, "\n"), tmpname
 end
 
 local function codemap(ctx, node, target)
+    if node._positional_adjustment then
+        return coder._codepositionalmap(ctx, node, target)
+    end
     local stats = {}
     local cinit, ctmp, tmpname, tmpslot
     if target and target._cvar then
@@ -6051,13 +6921,13 @@ local function codemap(ctx, node, target)
             CTMPK = ctmpk,
             TMPKNAME = tmpkname,
             CKEXP = ckexp,
-            SETSLOTK = setwrapped(node._type.keys, tmpkslot, tmpkname),
+            SETSLOTK = setboxed(ctx, node._type.keys, tmpkslot, tmpkname),
 
             CVSTATS = cvstats,
             CTMPV = ctmpv,
             TMPVNAME = tmpvname,
             CVEXP = cvexp,
-            SETSLOTV = setwrapped(node._type.values, tmpvslot, tmpvname),
+            SETSLOTV = setboxed(ctx, node._type.values, tmpvslot, tmpvname),
         })
 
         table.insert(slots, { k = tmpkslot, v = tmpvslot })
@@ -6153,7 +7023,10 @@ local function codeunaryop(ctx, node, iscondition)
         local estats, ecode = codeexp(ctx, node.exp)
         local etype = types.resolve_c_typedef(node.exp._type)
         if node.exp._type._tag == "Type.Array" then
-            return estats, "luaH_getn(L, " .. ecode .. ")"
+            return estats, "((lua_Integer)titan_array_length(" .. ecode .. "))"
+        elseif node.exp._type._tag == "Type.Map" then
+            assert(types.equals(node.exp._type.keys, types.Integer()))
+            return estats, "l_castU2S(luaH_getn(L, " .. ecode .. "))"
         elseif etype._tag == "Type.CArray" then
             return estats, c_integer_literal(etype.len)
         elseif etype._tag == "Type.COwned" and etype.count then
@@ -6673,37 +7546,14 @@ local function codebinaryop(ctx, node, _)
 end
 
 local function codeindexarray(ctx, node)
-    local castats, caexp = codeexp(ctx, node.exp1)
-    local cistats, ciexp = codeexp(ctx, node.exp2)
+    local castats, caexp = materialize(ctx, node.exp1)
+    local cistats, ciexp = materialize(ctx, node.exp2)
     local typ = node._type
     local ctmp, tmpname, tmpslot = newtmp(ctx, typ, types.is_gc(typ))
     local cset = ""
-    local ccheck = checkandget(ctx, typ, tmpname, "_s", node.loc)
+    local ccheck = checkandgetmixed(ctx, typ, tmpname, "_s", node.loc)
     if types.is_gc(typ) then
         cset = setslot(typ, tmpslot, tmpname)
-    end
-    local cfinish
-    if typ._tag == "Type.Option" then
-        cfinish = render([[
-          if(ttisnil(_s)) {
-            setnilvalue(&$TMPNAME);
-          } else {
-            $CCHECK
-            $CSET
-          }
-        ]], {
-            TMPNAME = tmpname,
-            CCHECK = ccheck,
-            CSET = cset,
-        })
-    else
-        cfinish = render([[
-            $CCHECK
-            $CSET
-        ]], {
-            CCHECK = ccheck,
-            CSET = cset,
-        })
     end
     local stats = render([[
         $CTMP
@@ -6713,58 +7563,44 @@ local function codeindexarray(ctx, node)
             Table *_t = $CAEXP;
             lua_Integer _k = $CIEXP;
 
-            TValue _av;
-            lu_byte _atag;
-            luaH_fastgeti(_t, _k, &_av, _atag);
-            if (tagisempty(_atag)) {
+            TValue _av = {0};
+            if (_k < 1) {
                 setnilvalue(&_av);
+            } else {
+                lua_Unsigned _actual_i = l_castS2U(_k) - 1u;
+                if (_actual_i < _t->asize) {
+                    arr2obj(_t, cast_uint(_actual_i), &_av);
+                    if (tagisempty(ttypetag(&_av)))
+                        setnilvalue(&_av);
+                } else {
+                    setnilvalue(&_av);
+                }
             }
             const TValue *_s = &_av;
 
-            $CFINISH
+            $CCHECK
+            $CSET
     }]], {
         CTMP = ctmp,
         CASTATS = castats,
         CISTATS = cistats,
         CAEXP = caexp,
         CIEXP = ciexp,
-        CFINISH = cfinish
+        CCHECK = ccheck,
+        CSET = cset,
     })
     return stats, tmpname
 end
 
 local function codeindexmap(ctx, node)
-    local cmstats, cmexp = codeexp(ctx, node.exp1)
+    local cmstats, cmexp = materialize(ctx, node.exp1)
     local ckstats, ckexp = codeexp(ctx, node.exp2)
     local typ = node._type
     local ctmp, tmpname, tmpslot = newtmp(ctx, typ, types.is_gc(typ))
     local cset = ""
-    local ccheck = checkandget(ctx, typ, tmpname, "_s", node.loc)
+    local ccheck = checkandgetmixed(ctx, typ, tmpname, "_s", node.loc)
     if types.is_gc(typ) then
         cset = setslot(typ, tmpslot, tmpname)
-    end
-    local cfinish
-    if typ._tag == "Type.Option" then
-        cfinish = render([[
-          if(ttisnil(_s)) {
-            setnilvalue(&$TMPNAME);
-          } else {
-            $CCHECK
-            $CSET
-          }
-        ]], {
-            TMPNAME = tmpname,
-            CCHECK = ccheck,
-            CSET = cset,
-        })
-    else
-        cfinish = render([[
-            $CCHECK
-            $CSET
-        ]], {
-            CCHECK = ccheck,
-            CSET = cset,
-        })
     end
     local ktyp = node.exp2._type
     local ctmpk, tmpkname, tmpkslot = newtmp(ctx, ktyp, true)
@@ -6779,7 +7615,8 @@ local function codeindexmap(ctx, node)
             $SETSLOTK
             const TValue* _s;
             $CTABLEKEY
-            $CFINISH
+            $CCHECK
+            $CSET
     }]], {
         CTMP = ctmp,
         CMSTATS = cmstats,
@@ -6788,9 +7625,10 @@ local function codeindexmap(ctx, node)
         CTMPK = ctmpk,
         TMPKNAME = tmpkname,
         CKEXP = ckexp,
-        SETSLOTK = setwrapped(ktyp, tmpkslot, tmpkname),
+        SETSLOTK = setboxed(ctx, ktyp, tmpkslot, tmpkname),
         CTABLEKEY = get_table_key(ktyp, "_t", tmpkslot, "_s"),
-        CFINISH = cfinish
+        CCHECK = ccheck,
+        CSET = cset,
     })
     return stats, tmpname
 end
@@ -7159,7 +7997,7 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
         ]], {
             EXPSTATS = cstats,
             TMPTARGET = ctmp,
-            SETSLOT = setwrapped(node.exp._type, "&" .. tmpname, cexp)
+            SETSLOT = setboxed(ctx, node.exp._type, "&" .. tmpname, cexp)
         }), tmpname
     elseif tag == "Ast.ExpCast" and node.exp._type._tag == "Type.Integer" and node._type._tag == "Type.Float" then
         -- cast from integer to float
@@ -7586,13 +8424,13 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
         local fixedsets = {}
         if rettype then
             table.insert(fixedsets,
-                setwrapped(rettype, "s2v(_firstret)", "res") .. ";")
+                setboxed(tlcontext, rettype, "s2v(_firstret)", "res") .. ";")
         end
         for i = 2, #typ.rettypes do
             table.insert(fixedsets, render([[
                 $SETSLOT;
             ]], {
-                SETSLOT = setwrapped(typ.rettypes[i],
+                SETSLOT = setboxed(tlcontext, typ.rettypes[i],
                     "s2v(_firstret + " .. c_integer_literal(i - 1) .. ")",
                     "_outparam_" .. i),
             }))
@@ -7617,7 +8455,7 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
             NFIXED = c_integer_literal(#typ.rettypes),
             CALL = call,
             FIXEDSETS = table.concat(fixedsets, "\n"),
-            SETFLEX = setwrapped(flexrettype,
+            SETFLEX = setboxed(tlcontext, flexrettype,
                 "s2v(_firstret + " .. c_integer_literal(#typ.rettypes)
                     .. " + _fri)", "_flexdesc.args[_fri]"),
         }))
@@ -7646,7 +8484,7 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
             TYPE = ctype(rettype),
             NAME = titan_entry,
             PARAMS = table.concat(pnames, ", "),
-            SETSLOT = setwrapped(rettype, "s2v(_firstret)", "res"),
+            SETSLOT = setboxed(tlcontext, rettype, "s2v(_firstret)", "res"),
             NRET = #typ.rettypes
         }))
         for i = 2, #typ.rettypes do
@@ -7654,7 +8492,8 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
                 $SETSLOT;
                 _firstret++;
             ]], {
-                SETSLOT = setwrapped(typ.rettypes[i], "s2v(_firstret)", "_outparam_" .. i)
+                SETSLOT = setboxed(tlcontext, typ.rettypes[i],
+                    "s2v(_firstret)", "_outparam_" .. i)
             }))
         end
     end
@@ -8482,7 +9321,8 @@ local function codevardec(ctx, initvars, switch_get, switch_set, gvar_map, node)
             }
         ]], {
             I = c_integer_literal(node._upvalue),
-            COPYSLOT = copyslotwrapped("s2v(L->top.p - 1)", node._slot)
+            COPYSLOT = copyboxed(ctx, node._type,
+                "s2v(L->top.p - 1)", node._slot)
         }))
         table.insert(switch_set, render([[
             case $I: {
@@ -8567,6 +9407,7 @@ Udata *$INITNAME(lua_State *L) {
         Udata *_mod = luaS_newudata(L, 0, $NUPVALS);
         titan_pushmodule(L, _mod);
         lua_setfield(L, LUA_REGISTRYINDEX, $MODNAMESTR);
+        $INITARRAYMETA
         $LOADMODULES1
         $INITMODULES
         $LOADGLOBALS
@@ -8779,9 +9620,8 @@ local function coderecorddec(ctx, code, initrecs, node)
                 }
             ]], {
                 INDEX = c_integer_literal(field.index),
-                -- The field value (for any type, including a nominal whose
-                -- value is itself a udata) is held directly at _slot.
-                SETWRAPPED = "setobj2s(L, L->top.p - 1, _slot);"
+                SETWRAPPED = copyboxed(ctx, field.type,
+                    "s2v(L->top.p - 1)", "_slot"),
             }))
             table.insert(setswitch, render([[
                 case $INDEX: {
@@ -8947,6 +9787,10 @@ local function allocate_upvalues(tlcontext, ast)
             node._closure_upvalue = nextupvalue(tlcontext)
         end
     end
+    -- The first private slot is unconditional and ABI-visible: every generated
+    -- module caches the shared per-state Array proxy metatable immediately
+    -- after the importer-reconstructed public prefix.
+    tlcontext.array_metatable_upvalue = nextupvalue(tlcontext)
     for _, node in ipairs(ast) do
         if not node._ignore then
             local tag = node._tag
@@ -9455,6 +10299,16 @@ function coder.generate(modname, ast, static_deps, abi)
         FUNCS = table.concat(funcs, "\n"),
         INITNAMES = initnames,
         MODNAMESTR = c_string_literal("Titan module "..modname),
+        INITARRAYMETA = render([[
+            {
+                Table *_array_metatable = titan_array_metatable(L);
+                sethvalue(L, &_mod->uv[$INDEX].uv, _array_metatable);
+                luaC_barrierback(L, obj2gco(_mod),
+                    &_mod->uv[$INDEX].uv);
+            }
+        ]], {
+            INDEX = c_integer_literal(tlcontext.array_metatable_upvalue),
+        }),
         CREATEMETA = create_meta,
         MODULEINIT = moduleinit,
         NUPVALS = tlcontext.upvalue

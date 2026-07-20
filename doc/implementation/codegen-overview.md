@@ -33,7 +33,8 @@ plan instead of inventing conversions or arity rules of its own
 ([the type checker](checker.md)). This chapter covers the shape
 of the output and the protocols it implements; value-level details are in
 [values and the GC](values-and-gc.md), per-construct translations in
-[code generator: constructs](codegen-constructs.md).
+[code generator: constructs](codegen-constructs.md), and ABI-0.17 Array
+representation and lowering in [Dense Arrays](dense-arrays.md).
 
 One no-`main` CLI invocation may link several such translation units into a
 single [multi-module provider](multi-module-libraries.md). The coder still runs
@@ -412,8 +413,9 @@ closure entered from Lua still reaches its own captures), checks and
 converts each argument with
 `checkandget`, reserves stack space for the requested return values, calls the
 native function (passing `_fn` so a closure body can read its captures), and
-writes the results back with `setwrapped` (which hands records to Lua as
-their userdata wrapper). For a flexible result shape it reads Lua's requested
+writes the results back with `setboxed` (which leaves records as userdata and
+maps an internal Array backing to its canonical proxy). For a flexible result
+shape it reads Lua's requested
 result count with `get_nresults`, derives the tail budget after the fixed
 prefix, passes a typed `_flexout` descriptor plus `_flexwant`, and returns the
 fixed count plus the number the native body actually produced.
@@ -568,11 +570,19 @@ private `FS` constants instance alter private slot/initialization order but add
 no serialized descriptor field, native parameter, or importer-visible slot
 change: the exact `titan_uv_types` interface remained unchanged.
 
-The current ABI is **0.16**. Per-module descriptor and native-call shapes stay
-the same, but the generated/imported physical-provider contract changes from
-an exact logical DSO to a compiler-selected prefix container. A 0.15 runtime
-cannot discover the combined standard `titan.so`, so this layout change is an
-ABI boundary even without a C-signature change.
+ABI **0.16** kept per-module descriptor and native-call shapes but changed the
+generated/imported physical-provider contract from an exact logical DSO to a
+compiler-selected prefix container. A 0.15 runtime cannot discover the
+combined standard `titan.so`.
+
+The current ABI is **0.17**. `Type.Array` keeps `Table *` in exact native
+signatures and `Table **` in variadic/flexible descriptors, but the Table is
+now private backing storage and every Lua-visible Array is a canonical proxy
+Udata. Generated modules also reserve a per-state Array-metatable cache and
+use explicit internal-versus-boxed conversions. A 0.16 module would
+misinterpret Array values even when a serialized interface happens not to
+mention one, so the semantic/runtime boundary requires a full rebuild. See
+[Dense Arrays](dense-arrays.md#abi-017-boundary).
 
 ## The module protocol
 
@@ -581,7 +591,8 @@ never in shared C globals. In particular, per-Lua-state module state lives in
 one `Udata` (`_mod`) created by `_init`: the module table's slot is gone
 entirely, and member slots are 0-based with no reserved user value. The user values hold module
 variables, imported modules' `Udata`s, exported-function canonical
-closures, cached record metatables and per-record static-namespace tables
+closures, the unconditional Array-metatable cache, cached record metatables,
+and per-record static-namespace tables
 (allocation order below). Every generated function receives this `Udata` as its
 `_mod` parameter; the Lua wrappers recover it from their closure's
 upvalue 0. Around `_mod`, each module exports three protocol symbols:
@@ -716,8 +727,10 @@ The repository's historical 0.15 transition is a compatibility boundary for the
 intentional `titan.uv` public-member reorder caused by semantic ownership.
 Moving local record declarations and the private `FS` constants instance among
 contributors after that boundary changes private initialization layout but
-does not alter the serialized interface. ABI 0.16 then changes only how the
-physical provider is found and recorded transiently.
+does not alter the serialized interface. ABI 0.16 changes how the physical
+provider is found and recorded transiently; ABI 0.17 then changes Array
+representation and adds the module-local metatable cache without changing the
+serialized `Type.Array` constructor.
 
 ## Static vs dynamic dependency wiring
 
@@ -790,15 +803,17 @@ generated. `nextupvalue` hands out slots 0-based with no reserved slot
 equals the number of slots. First come **exported (non-`local`) module
 variables, in declaration order** (slots 0..n-1), followed by a canonical
 closure slot for every exported ordinary function, also in declaration order.
-Those are the two importer-visible groups. Local module variables and imports
-come next. A final AST-order allocation pass assigns slots to referenced local
-ordinary-function closures, every record-function closure, and every record's
-static-namespace table. Record metatables (`type2metatable`), owned-C
+Those are the two importer-visible groups. The unconditional per-module Array
+metatable cache is the first private slot, followed by local module variables
+and imports. A final AST-order allocation pass assigns slots to referenced
+local ordinary-function closures, every record-function closure, and every
+record's static-namespace table. Record metatables (`type2metatable`), owned-C
 metatables, and the transitive module `Udata` caches needed by cross-module
 method calls (`ctx.modules`) are then allocated on first use during codegen and
 filled in by `init_data_from_other_modules` or the module initializer. Thus all
-private groups come *after* the importer-visible variable and exported-function
-slots, so moving or adding them does not perturb the ABI slot math.
+private groups, beginning with the Array cache, come *after* the
+importer-visible variable and exported-function slots, so moving or adding
+them does not perturb the importer slot math.
 
 Exported variables come first because their slot numbers are part of the
 module's ABI: an importing module never sees this module's AST — in

@@ -326,15 +326,14 @@ describe("Titan type checker", function()
         assert.match("trying to take the length", err)
     end)
 
-    it("catches wrong use of length operator in maps", function()
+    it("accepts the length operator on integer-keyed maps", function()
         local code = [[
             function fn(x: {integer: integer}): integer
                 return #x
             end
         ]]
         local ok, err = run_checker(code)
-        assert.falsy(ok)
-        assert.match("trying to take the length", err)
+        assert.truthy(ok, err)
     end)
 
     it("catches wrong use of unary minus", function()
@@ -3078,7 +3077,7 @@ describe("Titan typecheck of records", function()
                 local p: Point = { x = 1 }
             end
         ]])
-        assert_type_error("missing field in initializer for record type 'test.Point'", [[
+        assert_type_error("cannot mix named, positional fields in a constructor", [[
             record Point
                 x: float
                 y: float

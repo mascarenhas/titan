@@ -48,8 +48,11 @@ local b: boolean = true
 
 An array type is written `{ t }` for any element type `t` (including
 other compound types — `{ {integer} }` is an array of arrays of
-integers); a map type is written `{ k : v }`. Both are backed by real Lua
-tables and can be passed to and from Lua freely; the full account is in
+integers); a map type is written `{ k : v }`. Arrays are dense-capacity
+containers represented at the Lua boundary by canonical Titan userdata
+proxies, while maps are ordinary Lua tables. Both can cross the Lua boundary,
+but an Array requires the exact proxy created by Titan rather than an arbitrary
+Lua table; the full account is in
 [Arrays and maps](arrays-maps.md).
 
 ```lua
@@ -434,7 +437,7 @@ de-optionization rule — see [Modules](modules.md).
 can hold any Titan value and anything Lua can produce. It is the
 deliberate escape hatch for code that traffics in genuinely dynamic data
 — heterogeneous tables, values handed over by Lua, containers like
-`{value}` that mirror plain Lua tables.
+`{value}` whose element values are checked dynamically.
 
 Conversions *to* `value` are free, implicit and total. Conversions *from*
 `value` are implicit in every coercion context listed above, and compile
@@ -481,7 +484,8 @@ error `... is a value instead of a number` (a `value` does not implicitly
 unbox inside operators; write `(v as integer) + 1`); relational
 comparison (`< <= > >=`, which require equal numeric or string types);
 concatenation (`cannot concatenate with value of type 'value'`); taking
-the length (`#` requires an array or string); and indexing *into* it
+the length (`#` requires an array, an exact integer-keyed map, or a string);
+and indexing *into* it
 (`expression in indexing is not an array or map but value`). Contextual calls
 are the deliberate callable exception: the surrounding demand supplies a
 complete temporary contract, and the generic path may honor an ordinary Lua

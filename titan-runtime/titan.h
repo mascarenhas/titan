@@ -76,9 +76,18 @@
    shared physical DSO provider for several logical modules. The serialized
    type schema and native call convention are unchanged, but 0.15-generated
    imports hard-code exact logical-module DSOs that the 0.16 standard-library
-   layout no longer installs. */
-#define TITAN_VER "0.16"
-#define TITAN_VER_SUFFIX "_0_16"
+   layout no longer installs.
+   0.16 -> 0.17: exact Array signatures remain Table * / Table ** and the
+   serialized Array type text and pointer width are unchanged, but old and new
+   generated code cannot safely share Array values. ABI-0.16 code may treat
+   lenhint as a mutable border cache, resize without restoring the new explicit
+   length, read or write reserved key 0 and expose/destroy the canonical proxy,
+   preserve negative keys, place high positive indices in the hash, or accept
+   and expose raw Tables at Lua/value boundaries. The ABI gate protects those
+   representation invariants and the boundary protocol; it is not a
+   Table * -> Udata * or Table ** -> Udata ** migration. */
+#define TITAN_VER "0.17"
+#define TITAN_VER_SUFFIX "_0_17"
 #define TITAN_PATH_VAR "TITAN_PATH"
 #define TITAN_PATH_SEP "/"
 #define TITAN_ROOT_DEFAULT "/usr/local"
@@ -118,6 +127,19 @@
 #define TITAN_TRACE_APPEND_KEY "4f895b66-bae0-4e97-afb3-83a31f2f9e96"
 
 #define TITAN_LUAINTEGER_NBITS cast_int(sizeof(lua_Integer) * CHAR_BIT)
+
+/*
+** Dense Titan Arrays use an ordinary Lua Table as their exact/native backing
+** object, but reserve its hash key 0 for the canonical Lua-visible proxy.
+** Keep this limit textually aligned with Lua 5.5's private MAXASIZE formula:
+** every positive Array index must fit in the table's array part, with no hash
+** fallback.
+*/
+#define TITAN_ARRAY_METATABLE "Titan array metatable"
+#define TITAN_ARRAY_MAX_CAPACITY                                             \
+  (((1u << (l_numbits(int) - 1)) < (MAX_SIZET / (sizeof(Value) + 1)))         \
+       ? (1u << (l_numbits(int) - 1))                                        \
+       : cast_uint(MAX_SIZET / (sizeof(Value) + 1)))
 
 /* Variadic-parameter descriptors. One per `ctype` so `args` has the exact
 ** element pointer type. `n_args` is the TOTAL backing count; `start` is NOT a
@@ -300,6 +322,33 @@ LUAI_FUNC void titan_check_abi(lua_State *L, void *lib, const char *sym,
                                const char *file);
 LUAI_FUNC void titan_invalidate_backtrace_state(lua_State *L);
 LUAI_FUNC void titan_init_paths(lua_State *L);
+
+/*
+** Dense Array runtime. A backing Table has no metatable, uses only its array
+** part for positive indices, and stores its logical length in lenhint. Its
+** reserved integer hash key 0 points at a canonical zero-payload Udata proxy;
+** the proxy's sole uservalue points back at the backing table.
+*/
+LUAI_FUNC Table *titan_array_metatable(lua_State *L);
+LUAI_FUNC Table *titan_array_new(lua_State *L, Table *metatable,
+                                 lua_Unsigned capacity);
+LUAI_FUNC lua_Unsigned titan_array_length(const Table *backing);
+LUAI_FUNC void titan_array_set_length(Table *backing, lua_Unsigned length);
+LUAI_FUNC unsigned titan_array_growth(lua_State *L, lua_Unsigned index);
+LUAI_FUNC void titan_array_resize(lua_State *L, Table *backing,
+                                  lua_Unsigned capacity);
+LUAI_FUNC lu_byte titan_array_get(Table *backing, lua_Integer index,
+                                  TValue *result);
+LUAI_FUNC void titan_array_set_stack(lua_State *L, Table *backing,
+                                     lua_Integer index, int value_index);
+LUAI_FUNC Udata *titan_array_try_proxy(Table *backing, Table *metatable);
+LUAI_FUNC Udata *titan_array_require_proxy(lua_State *L, Table *backing,
+                                           Table *metatable);
+LUAI_FUNC Table *titan_array_try_backing(const TValue *value,
+                                         Table *metatable);
+LUAI_FUNC Table *titan_array_require_backing(lua_State *L,
+                                             const TValue *value,
+                                             Table *metatable);
 
 TValue lua_totvalue(lua_State *L, int idx);
 void lua_pushtvalue(lua_State *L, TValue v);

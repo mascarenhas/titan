@@ -243,6 +243,13 @@ invoke only `M`'s initializer once per Lua state. No runtime component knows
 whether its object came from a flat or folder source representation, and the
 container does not gain a contributor protocol.
 
+ABI 0.17 likewise leaves folder composition and the serialized logical
+interface unchanged. Every generated module—flat or folder—reserves the same
+unconditional private Array-metatable cache after its importer-reconstructed
+public prefix. That private slot and the new Array boxing protocol require the
+ABI transition, but contributor boundaries still have no runtime identity.
+See [Dense Arrays](dense-arrays.md#canonical-proxy-and-module-cache).
+
 ## `titan.uv` dogfooding
 
 The production `titan.uv` source is the folder ensemble

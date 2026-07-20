@@ -159,8 +159,8 @@ Walking through it:
   function (extra returns come back through out-parameters), restores the
   slot pointer from the offset in case the native callee relocated the
   Lua stack with `lua_checkstack`, and writes each result into its slot with
-  `setwrapped` — which for a record is just `setslot`, since the record
-  *is* its Udata. `return NRET;` makes multiple Titan returns multiple
+  `setboxed` — records remain their Udata, while Arrays become their canonical
+  proxy Udata. `return NRET;` makes multiple Titan returns multiple
   Lua returns (`local x, y = titan_test.f(2)` works).
   For a flexible result shape it reads the caller's requested count through
   `get_nresults(L->ci->callstatus)`, subtracts the fixed prefix to derive
@@ -176,7 +176,7 @@ Walking through it:
 value passes to enter typed Titan code. Besides wrapper arguments and
 `self`, the same template guards the receivers of record
 `__index`/`__newindex` (below), `value`→`T` casts inside Titan, and
-every array/map element read — table interiors are never trusted
+every Array/Map element read — container interiors are never trusted
 ([code generator: constructs](codegen-constructs.md)). Per type, with
 messages prefixed `%s:%d:%d: ` (file:line:col of the relevant
 declaration, or of the read/cast expression for table reads and casts),
@@ -189,7 +189,8 @@ raised as run-time errors via `luaL_error`:
 | `boolean` | **anything**, by Lua truthiness: `l_isfalse(exp) ? 0 : 1` | never fails |
 | `nil` | only nil (`ttisnil`) | `type error, expected nil but found %s` |
 | `string` | only strings (`ttisstring`); no number→string coercion | `type error, expected string but found %s` |
-| `{T}` / `{K:V}` | **any table** (`ttistable`); element types are *not* checked here | `type error, expected table but found %s` |
+| `{T}` | a structurally valid canonical Array proxy Udata; elements are *not* checked here | `type error, expected array but found %s` |
+| `{K:V}` | **any table** (`ttistable`); elements are *not* checked here | `type error, expected table but found %s` |
 | `value` | anything, copied with `setobj2t` | never fails |
 | `T?` | nil (stores nil), else delegates to `checkandset` on the base — an `integer?` accepts an integral float just like a plain `integer`, but `boolean?` is stricter than a bare `boolean` parameter (a real boolean required) | the base type's message |
 | record | a full userdata whose metatable equals the record's metatable | three-way message, below |
@@ -441,7 +442,7 @@ static int __index(lua_State *L) {
     }
     switch(ivalue(&_indexv)) {
         case 1: {
-            /* exported variable: coerce out with copyslotwrapped */
+            /* exported variable: coerce out with copyboxed */
             setobj2t(L, s2v(L->top.p - 1), &_mod->uv[1].uv);
             break;
         }
@@ -459,8 +460,9 @@ not entered). A
 name miss raises `member '%s' does not exist in Titan module '%s'` —
 generalized from the old "global variable ..." message now that
 functions and records route through the same metamethods. A hit switches
-on the slot index: variable reads go through `copyslotwrapped` (a
-record-typed variable is handed out as its Udata — itself, now), while
+on the slot index: variable reads go through `copyboxed` (a record-typed
+variable remains its Udata; an Array backing becomes its canonical proxy),
+while
 functions and record namespaces are pushed read-only from their slots.
 `__newindex` allows only variable writes, through `checkandset` plus the
 **back** barrier `luaC_barrierback(L, obj2gco(_mod), slot)` for GC-able
@@ -508,7 +510,7 @@ The UUID-string constants are defined in `titan-runtime/titan.h`.
 
 ## Four shared-library loading paths
 
-The 0.16 layout has four deliberately separate paths. They share the ordinary
+The 0.17 layout has four deliberately separate paths. They share the ordinary
 per-logical-module symbols but differ in selection, flags, cache, and whether
 module initialization runs.
 
@@ -544,8 +546,8 @@ Udata* (*some_dep_init)(lua_State *L) =
         loadsym(L, some_dep_handle, "some_dep_init"));
 ```
 
-`loadlib` consults `TITAN_LIBS_KEY`, then walks `TITAN_PATH_0_16`,
-`TITAN_PATH`, or `".;<root>/lib/titan/0.16"`, with `;;` splicing the
+`loadlib` consults `TITAN_LIBS_KEY`, then walks `TITAN_PATH_0_17`,
+`TITAN_PATH`, or `".;<root>/lib/titan/0.17"`, with `;;` splicing the
 ordinary default. It maps `dir/file` with `RTLD_LAZY | RTLD_GLOBAL`, caches
 the handle by relative provider for the state, invalidates native backtrace
 state, and never calls `dlclose`. Two logical modules in one image reuse the
@@ -582,7 +584,7 @@ eager load. A second Lua state repeats its own cache insertion and promotion
 request while the operating-system loader may reuse the mapped image.
 
 The installed standard layout has paired providers at
-`<root>/lib/titan/0.16/{titan.so,titan.a}` and seven generated shims below
+`<root>/lib/titan/0.17/{titan.so,titan.a}` and seven generated shims below
 `<root>/share/lua/5.5/titan/`; the shims use the DSO form. A direct-libuv
 extension explicitly imports
 `uv` and foreign-imports `uv.h`; Titan runtime initialization loads the
@@ -690,7 +692,7 @@ bundled-mode extension DSOs leave their `uv_*` calls unresolved:
   state and runs `luaL_openlibs`. `titan_init_paths` then parses the inherited
   `package.cpath` for the first `/lib/lua/5.5/?.so` entry, initializes the
   Titan module-path default from that root, and ensures
-  `<root>/lib/titan/0.16/?.so` is present in `package.cpath`. The
+  `<root>/lib/titan/0.17/?.so` is present in `package.cpath`. The
   prefix-configured Titan-owned Lua already places that template before its
   `lib/lua` entries. It then
   registers the module's `luaopen_` function in
@@ -701,9 +703,11 @@ bundled-mode extension DSOs leave their `uv_*` calls unresolved:
   `require("<modname>")` and retrieves and retains its `main` callable. A
   transitive canonical `titan.uv` initialization calls `uv_setup_args` once
   and stores its possibly replaced `argv` pointer back in the registry.
-  `pmain` rereads that pointer, then builds the argument table with
-  `lua_rawseti(L, -2, i)` for `i = 0 .. argc-1` — so `args[0]` is the program
-  name and `args[1]` is the first real argument. Requiring first initializes
+  `pmain` rereads that pointer, then builds an Array with capacity
+  `argc - 1` and stores `argv[i]` at logical index `i` for
+  `i = 1 .. argc-1`. The program name is not inserted, so `args[0]` is nil,
+  `args[1]` is the first user argument, and `#args == argc - 1`.
+  Requiring first initializes
   transitive imports, which may install an async hook under
   `TITAN_MAIN_BOOTSTRAP_KEY`. After retaining the exact `main`, `pmain` calls
   `main(arg)` when the key is nil or `hook(main, arg)` when it is present. Both
@@ -740,14 +744,13 @@ exactly these places: function/method/static arguments including `self`
 (`genluaentry`); module-variable writes from Lua (module `__newindex`);
 record-field writes from Lua (record `__newindex`); record metamethod
 receivers (record `__index`/`__newindex`); `value`→`T` conversions
-inside Titan; and every array/map element read inside Titan — table
+inside Titan; and every Array/Map element read inside Titan — container
 interiors are never trusted, so each read re-checks the element type.
 
-On the way **out**, every value leaving Titan is an ordinary Lua value:
-numbers, strings, booleans and nil as-is; arrays and maps as the *same*
-Lua tables (aliased, never copied — the spec asserts table identity
-across the boundary); records as their stable `Udata` (the record value
-itself). Between
+On the way **out**, every value has one canonical Lua representation:
+numbers, strings, booleans and nil as-is; Maps as their ordinary Tables;
+Arrays as their proxy Udata; and records as their stable `Udata`. Identity is
+preserved and no container is copied. Between
 those edges, Titan code runs with no checks at all — Titan→Titan calls
 through an exactly tagged Titan closure use the native convention and trust
 the checker. A non-exact function value, Lua closure/C function, or `__call`
@@ -765,20 +768,27 @@ See [flexible-return internals](flexible-returns.md) for the exact/generic
 result-demand split.
 
 The deliberate deferral: **container contents are not checked at the
-boundary.** A `{T}` or `{K:V}` argument only has to be a table; Lua can
-place wrongly-typed elements in it before or after the call (the table
-is shared), and the error surfaces later, at the Titan read site —
-*deterministically*, since every read is checked, with the standard
-`expected X but found Y` message. The spec exercises exactly this for
-maps.
+boundary.** A `{K:V}` argument must be a Table; a `{T}` argument must be a
+structurally valid canonical proxy whose user value and key-0 reverse link
+identify its private backing Table. Lua can still place wrongly typed elements
+in either accepted container before or after a call, and the error surfaces
+later at the Titan read site. The complete `I(Array)`/`B(Array)` conversion
+matrix and nested-Array rule are in [Dense Arrays](dense-arrays.md).
+
+**Stock Lua 5.5 table-library reality.** `table.*` accepts the proxy through
+its `__index`, `__newindex`, and `__len` callbacks and therefore operates
+through the maintained Array protocol. `rawget`, `rawset`, and `rawlen` require
+a real Table and reject the Udata. No patched Lua or alternate Array
+representation is involved.
 
 Known soft spots, all verified in code:
 
 1. **`boolean` parameters accept anything** by truthiness — `42`
    silently becomes `true` — inconsistent with `checkandset`'s strict
    boolean for variable and field writes.
-2. **Container aliasing** means Titan-exported tables can be corrupted
-   from Lua after the fact; the per-read checks contain the damage to a
+2. **Container aliasing** means Titan-exported Maps and Array proxies can be
+   given wrongly typed contents from Lua after the fact; the per-read checks
+   contain the damage to a
    run-time error, never type confusion.
 3. **`value` is a free pass-through by design**, but every `value`→`T`
    conversion is checked, so it is not a laundering hole.

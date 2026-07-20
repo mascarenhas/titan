@@ -8,10 +8,347 @@
 #include "lapi.h"
 #include "ldo.h"
 #include "lfunc.h"
+#include "lgc.h"
 #include "lobject.h"
 #include "llimits.h"
 #include "lstate.h"
+#include "ltable.h"
 #include "titan.h"
+
+/*
+** These assertions make the assumptions inherited from Lua's MAXASIZE
+** definition explicit. They intentionally use C99-compatible negative-array
+** diagnostics because Titan compiles generated/runtime C in C99 mode.
+*/
+typedef char titan_array_assert_matching_int_width[
+    (l_numbits(unsigned int) == l_numbits(int)) ? 1 : -1];
+typedef char titan_array_assert_capacity_fits_lua_integer[
+    ((lua_Unsigned)TITAN_ARRAY_MAX_CAPACITY <=
+     (lua_Unsigned)LUA_MAXINTEGER) ? 1 : -1];
+typedef char titan_array_assert_useful_capacity[
+    (TITAN_ARRAY_MAX_CAPACITY >= 2u) ? 1 : -1];
+
+static Table *titan_array_callback_metatable(lua_State *L) {
+    TValue value = lua_totvalue(L, lua_upvalueindex(1));
+    if (!ttistable(&value))
+        luaL_error(L, "invalid Titan array metatable");
+    return hvalue(&value);
+}
+
+lua_Unsigned titan_array_length(const Table *backing) {
+    if (backing->asize == 0)
+        return 0;
+    lua_assert(*lenhint(backing) <= backing->asize);
+    return *lenhint(backing);
+}
+
+void titan_array_set_length(Table *backing, lua_Unsigned length) {
+    if (backing->asize == 0) {
+        lua_assert(length == 0);
+        return;
+    }
+    lua_assert(length <= backing->asize);
+    *lenhint(backing) = cast_uint(length);
+}
+
+static int titan_array_valid_length(const Table *backing) {
+    return backing->asize == 0 || *lenhint(backing) <= backing->asize;
+}
+
+Udata *titan_array_try_proxy(Table *backing, Table *metatable) {
+    TValue value;
+    Udata *proxy;
+
+    if (backing == NULL || metatable == NULL ||
+        backing->metatable != NULL || !titan_array_valid_length(backing))
+        return NULL;
+    if (tagisempty(luaH_getint(backing, 0, &value)) ||
+        !ttisfulluserdata(&value))
+        return NULL;
+    proxy = uvalue(&value);
+    if (proxy->len != 0 || proxy->nuvalue != 1 ||
+        proxy->metatable != metatable ||
+        !ttistable(&proxy->uv[0].uv) ||
+        hvalue(&proxy->uv[0].uv) != backing)
+        return NULL;
+    return proxy;
+}
+
+Udata *titan_array_require_proxy(lua_State *L, Table *backing,
+                                 Table *metatable) {
+    Udata *proxy = titan_array_try_proxy(backing, metatable);
+    if (proxy == NULL)
+        luaL_error(L, "invalid Titan array backing");
+    return proxy;
+}
+
+Table *titan_array_try_backing(const TValue *value, Table *metatable) {
+    Udata *proxy;
+    Table *backing;
+    TValue cycle;
+
+    if (metatable == NULL || !ttisfulluserdata(value))
+        return NULL;
+    proxy = uvalue(value);
+    if (proxy->len != 0 || proxy->nuvalue != 1 ||
+        proxy->metatable != metatable ||
+        !ttistable(&proxy->uv[0].uv))
+        return NULL;
+    backing = hvalue(&proxy->uv[0].uv);
+    if (backing->metatable != NULL || !titan_array_valid_length(backing))
+        return NULL;
+    if (tagisempty(luaH_getint(backing, 0, &cycle)) ||
+        !ttisfulluserdata(&cycle) || uvalue(&cycle) != proxy)
+        return NULL;
+    return backing;
+}
+
+Table *titan_array_require_backing(lua_State *L, const TValue *value,
+                                   Table *metatable) {
+    Table *backing = titan_array_try_backing(value, metatable);
+    if (backing == NULL)
+        luaL_error(L, "expected Titan array");
+    return backing;
+}
+
+unsigned titan_array_growth(lua_State *L, lua_Unsigned index) {
+    unsigned capacity = 2;
+
+    if (index < 1)
+        luaL_error(L, "Titan array index must be positive");
+    while ((lua_Unsigned)capacity <= index) {
+        if (capacity > TITAN_ARRAY_MAX_CAPACITY / 2u)
+            luaL_error(L, "array index too large");
+        capacity *= 2u;
+    }
+    if (capacity > TITAN_ARRAY_MAX_CAPACITY)
+        luaL_error(L, "array index too large");
+    return capacity;
+}
+
+void titan_array_resize(lua_State *L, Table *backing,
+                        lua_Unsigned capacity) {
+    lua_Unsigned length;
+
+    if (capacity > TITAN_ARRAY_MAX_CAPACITY)
+        luaL_error(L, "array index too large");
+    if (capacity < backing->asize)
+        luaL_error(L, "cannot shrink Titan array backing");
+    if (capacity == backing->asize)
+        return;
+    length = titan_array_length(backing);
+    lua_assert(length <= capacity);
+    luaH_resizearray(L, backing, cast_uint(capacity));
+    titan_array_set_length(backing, length);
+}
+
+lu_byte titan_array_get(Table *backing, lua_Integer index, TValue *result) {
+    lua_Unsigned offset;
+    lu_byte tag;
+
+    if (index < 1) {
+        setnilvalue(result);
+        return LUA_VNIL;
+    }
+    offset = l_castS2U(index) - 1u;
+    if (offset >= backing->asize) {
+        setnilvalue(result);
+        return LUA_VNIL;
+    }
+    tag = *getArrTag(backing, cast_uint(offset));
+    if (tagisempty(tag)) {
+        setnilvalue(result);
+        return LUA_VNIL;
+    }
+    farr2val(backing, cast_uint(offset), tag, result);
+    return tag;
+}
+
+void titan_array_set_stack(lua_State *L, Table *backing, lua_Integer index,
+                           int value_index) {
+    TValue value;
+    lua_Unsigned logical_index;
+    lua_Unsigned length;
+    unsigned offset;
+
+    if (index < 1)
+        luaL_error(L, "Titan array index must be positive");
+    logical_index = l_castS2U(index);
+    value = lua_totvalue(L, value_index);
+    length = titan_array_length(backing);
+
+    if (logical_index > backing->asize) {
+        if (ttisnil(&value))
+            return;
+        titan_array_resize(L, backing, titan_array_growth(L, logical_index));
+        /*
+        ** The value remains rooted at value_index while resize can allocate
+        ** and move the Lua stack. Refresh the copy after that allocation.
+        */
+        value = lua_totvalue(L, value_index);
+    }
+
+    offset = cast_uint(logical_index - 1u);
+    obj2arr(backing, offset, &value);
+    luaC_barrierback(L, obj2gco(backing), &value);
+
+    if (ttisnil(&value)) {
+        if (logical_index == length) {
+            do {
+                length--;
+            } while (length > 0 &&
+                     tagisempty(*getArrTag(backing, cast_uint(length - 1u))));
+            titan_array_set_length(backing, length);
+        }
+    }
+    else if (logical_index > length) {
+        titan_array_set_length(backing, logical_index);
+    }
+}
+
+static int titan_array_lua_index(lua_State *L) {
+    Table *metatable = titan_array_callback_metatable(L);
+    TValue receiver = lua_totvalue(L, 1);
+    Table *backing =
+        titan_array_require_backing(L, &receiver, metatable);
+    lua_Integer index;
+    TValue result;
+
+    if (lua_type(L, 2) != LUA_TNUMBER)
+        return luaL_error(L, "Titan array index must be an integer");
+    {
+        int isinteger;
+        index = lua_tointegerx(L, 2, &isinteger);
+        if (!isinteger)
+            return luaL_error(L, "Titan array index must be an integer");
+    }
+    titan_array_get(backing, index, &result);
+    if (ttistable(&result)) {
+        Udata *proxy =
+            titan_array_try_proxy(hvalue(&result), metatable);
+        if (proxy != NULL)
+            setuvalue(L, &result, proxy);
+    }
+    lua_pushtvalue(L, result);
+    return 1;
+}
+
+static int titan_array_lua_newindex(lua_State *L) {
+    Table *metatable = titan_array_callback_metatable(L);
+    TValue receiver = lua_totvalue(L, 1);
+    Table *backing =
+        titan_array_require_backing(L, &receiver, metatable);
+    lua_Integer index;
+    int isinteger;
+
+    if (lua_type(L, 2) != LUA_TNUMBER)
+        return luaL_error(L, "Titan array index must be an integer");
+    index = lua_tointegerx(L, 2, &isinteger);
+    if (!isinteger)
+        return luaL_error(L, "Titan array index must be an integer");
+    titan_array_set_stack(L, backing, index, 3);
+    return 0;
+}
+
+static int titan_array_lua_len(lua_State *L) {
+    Table *metatable = titan_array_callback_metatable(L);
+    TValue receiver = lua_totvalue(L, 1);
+    Table *backing =
+        titan_array_require_backing(L, &receiver, metatable);
+    lua_pushinteger(L, cast_Integer(titan_array_length(backing)));
+    return 1;
+}
+
+Table *titan_array_metatable(lua_State *L) {
+    static const luaL_Reg callbacks[] = {
+        {"__index", titan_array_lua_index},
+        {"__newindex", titan_array_lua_newindex},
+        {"__len", titan_array_lua_len},
+        {NULL, NULL}
+    };
+    Table *metatable;
+
+    if (luaL_newmetatable(L, TITAN_ARRAY_METATABLE)) {
+        TValue value;
+
+        lua_pushliteral(L, TITAN_ARRAY_METATABLE);
+        lua_setfield(L, -2, "__name");
+        lua_pushliteral(L, TITAN_ARRAY_METATABLE);
+        lua_setfield(L, -2, "__metatable");
+
+        lua_pushvalue(L, -1);
+        luaL_setfuncs(L, callbacks, 1);
+        value = lua_totvalue(L, -1);
+        lua_assert(ttistable(&value));
+        metatable = hvalue(&value);
+    }
+    else {
+        TValue value = lua_totvalue(L, -1);
+        if (!ttistable(&value))
+            luaL_error(L, "invalid Titan array metatable registry entry");
+        metatable = hvalue(&value);
+    }
+    lua_pop(L, 1);
+    return metatable;
+}
+
+Table *titan_array_new(lua_State *L, Table *metatable,
+                       lua_Unsigned capacity) {
+    int base;
+    int backing_index;
+    int proxy_index;
+    Table *backing;
+    Udata *proxy;
+    TValue value;
+
+    if (metatable == NULL)
+        luaL_error(L, "invalid Titan array metatable");
+    if (capacity > TITAN_ARRAY_MAX_CAPACITY)
+        luaL_error(L, "array index too large");
+    if (!lua_checkstack(L, 4))
+        luaL_error(L, "stack overflow creating Titan array");
+
+    base = lua_gettop(L);
+    backing = luaH_new(L);
+    sethvalue(L, &value, backing);
+    lua_pushtvalue(L, value);
+    backing_index = base + 1;
+
+    lua_newuserdatauv(L, 0, 1);
+    proxy_index = base + 2;
+    value = lua_totvalue(L, proxy_index);
+    proxy = uvalue(&value);
+
+    sethvalue(L, &value, metatable);
+    lua_pushtvalue(L, value);
+    lua_setmetatable(L, proxy_index);
+
+    luaH_resize(L, backing, cast_uint(capacity), 1);
+    titan_array_set_length(backing, 0);
+
+    {
+        int set;
+        lua_pushvalue(L, backing_index);
+        set = lua_setiuservalue(L, proxy_index, 1);
+        lua_assert(set);
+        cast_void(set);
+    }
+
+    value = lua_totvalue(L, proxy_index);
+    luaH_setint(L, backing, 0, &value);
+    /*
+    ** luaH_setint can force a full collection under HARDMEMTESTS. Both
+    ** objects stay independently stack-rooted throughout; refresh the proxy
+    ** TValue before installing the ordinary backward barrier.
+    */
+    value = lua_totvalue(L, proxy_index);
+    luaC_barrierback(L, obj2gco(backing), &value);
+
+    lua_assert(titan_array_try_proxy(backing, metatable) == proxy);
+    cast_void(proxy);
+    lua_settop(L, base);
+    return backing;
+}
 
 static void titan_bt_addframe_lstring(luaL_Buffer *buf, int *wrote_any,
                                       const char *text, size_t len) {

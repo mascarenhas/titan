@@ -132,7 +132,7 @@ describe("contextual calls through value (typechecker)", function()
 
         local array = find_function(tree, "collect").block.stats[1]
             ._result_adjustment.fixed[1]
-        local collect_call = array._array_adjustment.open_source
+        local collect_call = array._positional_adjustment.open_source
         assert.same(types.Function({}, {}, false, false, types.Integer()),
             collect_call._callee_type)
         assert.same("open", collect_call._flex_result_demand)
@@ -156,7 +156,7 @@ describe("contextual calls through value (typechecker)", function()
         assert.truthy(ok, err)
         local stat = find_function(tree, "collect").block.stats[1]
         local array = stat._result_adjustment.fixed[1]
-        local call = array._array_adjustment.open_source
+        local call = array._positional_adjustment.open_source
         assert.same(types.Array(types.Value()), stat.decls[1]._type)
         assert.same(types.Value(), call._callee_type.flexrettype)
         assert.same("open", call._flex_result_demand)
@@ -266,7 +266,7 @@ describe("contextual calls through value (typechecker)", function()
         assert.truthy(ok, err)
         local array = find_function(tree, "use").block.stats[1]
             ._result_adjustment.fixed[1]
-        local adjusted = array._array_adjustment
+        local adjusted = array._positional_adjustment
         local paren = adjusted.tail_scalars[1]
         assert.same("Ast.ExpAdjust", paren._tag)
         assert.falsy(adjusted.open_source)
@@ -372,14 +372,14 @@ describe("contextual calls through value (typechecker)", function()
         assert.truthy(ok, err)
         local array = find_function(tree, "use").block.stats[2]
             ._result_adjustment.fixed[1]
-        local call = array._array_adjustment.tail_scalars[1]
+        local call = array._positional_adjustment.tail_scalars[1]
         assert.same("Ast.ExpCall", call._tag)
         assert.falsy(call._contextual_value_call)
         assert.same(types.Function({}, { types.Integer() }, false, false,
             false), call._callee_type)
         assert.same({ types.Integer() }, call._visible_types)
         assert.falsy(call._open_results)
-        assert.falsy(array._array_adjustment.open_source)
+        assert.falsy(array._positional_adjustment.open_source)
     end)
 
     it("rejects named syntax on value callees", function()
