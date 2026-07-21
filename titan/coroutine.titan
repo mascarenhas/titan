@@ -40,19 +40,28 @@ end
 
 local function push_transfer(source: *mco.mco_coro,
                              ok: ffi.titan_ffi_int, payload: value)
+  coro_native.titan_coro_root_transfer(L, source, payload)
   local result = mco.mco_push(source, payload, ffi.TValue.sizeof)
-  check_mco_result(result)
+  if (result as integer) ~= (mco.MCO_SUCCESS as integer) then
+    coro_native.titan_coro_clear_transfer(source)
+    check_mco_result(result)
+  end
   result = mco.mco_push(source, ok, ffi.titan_ffi_int.sizeof)
   if (result as integer) ~= (mco.MCO_SUCCESS as integer) then
-    mco.mco_pop(source, nil, ffi.TValue.sizeof)
+    local rollback = mco.mco_pop(source, nil, ffi.TValue.sizeof)
+    check_mco_result(rollback)
+    coro_native.titan_coro_clear_transfer(source)
     check_mco_result(result)
   end
 end
 
 local function discard_transfer(source: *mco.mco_coro)
   if source then
-    mco.mco_pop(source, nil, ffi.titan_ffi_int.sizeof)
-    mco.mco_pop(source, nil, ffi.TValue.sizeof)
+    local ok_result = mco.mco_pop(source, nil, ffi.titan_ffi_int.sizeof)
+    check_mco_result(ok_result)
+    local payload_result = mco.mco_pop(source, nil, ffi.TValue.sizeof)
+    check_mco_result(payload_result)
+    coro_native.titan_coro_clear_transfer(source)
   end
 end
 
@@ -102,9 +111,10 @@ local function pop_transfer_or_raise(co: *mco.mco_coro,
   local ok: ffi.titan_ffi_int = 0 as ffi.titan_ffi_int
   local payload: ffi.TValue = nil
   local ok_result = mco.mco_pop(co, ok, ffi.titan_ffi_int.sizeof)
-  local payload_result = mco.mco_pop(co, payload, ffi.TValue.sizeof)
   check_mco_result(ok_result)
+  local payload_result = mco.mco_pop(co, payload, ffi.TValue.sizeof)
   check_mco_result(payload_result)
+  coro_native.titan_coro_clear_transfer(co)
   if (ok as integer) == 0 then
     if append_trace then
       raise_with_appended_trace(payload)
@@ -207,7 +217,8 @@ catch
 end
 
 function create(func: (value) -> value, default_tag: value): Coro
-  local slot: **mco.mco_coro = lua.lua_newuserdatauv(L, ffi.titan_ffi_void_ptr.sizeof, 4)
+  local slot: **mco.mco_coro = lua.lua_newuserdatauv(
+    L, ffi.titan_ffi_void_ptr.sizeof, coro_native.TITAN_CORO_OWNER_USERVALUES)
   local T = ffi.titan_newthread(L)
   lua.lua_setiuservalue(L, -2, 1)
   ffi.lua_pushtvalue(L, M)

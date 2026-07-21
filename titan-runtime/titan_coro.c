@@ -1,3 +1,4 @@
+#include "lgc.h"
 #include "lobject.h"
 #include "lvm.h"
 #include "titan/coro.h"
@@ -10,6 +11,28 @@
 
 int titan_coro_tag_equal(void *t1, void *t2) {
   return luaV_equalobj(NULL, (const TValue *)t1, (const TValue *)t2);
+}
+
+/*
+ * Minicoro copies transfer payload bytes but does not trace their Lua object.
+ * Keep the one pending transfer in the source coroutine owner's fifth
+ * uservalue until the receiver has copied it into a scanned Lua stack slot.
+ */
+void titan_coro_root_transfer(lua_State *L, mco_coro *co, TValue payload) {
+  if (co == NULL)
+    return;
+  Udata *ud = mco_get_user_data(co);
+  lua_assert(ud != NULL && ud->nuvalue == TITAN_CORO_OWNER_USERVALUES);
+  setobj(L, &ud->uv[4].uv, &payload);
+  luaC_barrierback(L, obj2gco(ud), &ud->uv[4].uv);
+}
+
+void titan_coro_clear_transfer(mco_coro *co) {
+  if (co == NULL)
+    return;
+  Udata *ud = mco_get_user_data(co);
+  lua_assert(ud != NULL && ud->nuvalue == TITAN_CORO_OWNER_USERVALUES);
+  setnilvalue(&ud->uv[4].uv);
 }
 
 typedef void (*titan_coro_entry_func)(lua_State *L, Udata *_mod,

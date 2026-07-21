@@ -9,7 +9,8 @@ The `coroutine` standard module is split deliberately:
 * `titan-runtime/titan_coro.c` owns only the pieces that still need C:
   compiling the single-file minicoro implementation, the Lua raw-equality
   tag comparator, and a tiny minicoro entry trampoline that calls the native
-  Titan entry function stored in the owner userdata.
+  Titan entry function stored in the owner userdata. It also owns the direct
+  userdata writes that root and clear a pending transfer with Lua's GC barrier.
 * `titan-runtime/minicoro.h` is a vendored copy of minicoro extended with
   tagged nested yield and a `MCO_STACKED` state.
 
@@ -80,8 +81,9 @@ lookup. User payloads are transported separately:
 
 1. `Coro:resume` reads its private, typed `mco_coro *` handle directly,
    selects the current transfer source (`co->stacked_co` when present,
-   otherwise `co`), pushes `payload=arg` and `ok=true`, and calls
-   `mco_resume` with the resolved tag.
+   otherwise `co`), stores `payload=arg` in that source owner's fifth
+   uservalue, pushes `payload=arg` and `ok=true`, and calls `mco_resume`
+   with the resolved tag.
 2. `Coro:error` follows the same path but pushes `ok=false` and
    `payload=err`.
 3. `coroutine.yield` reads `runtime.current_co`, pushes `payload=arg` and
@@ -90,7 +92,10 @@ lookup. User payloads are transported separately:
    again immediately after control returns. Tagged nested yield can change
    it from the resumed coroutine to the deepest stacked coroutine.
 5. The helper pops `ok` and `payload` separately before returning to its
-   caller. For `resume`/`error`, `ok=false` means the source coroutine has
+   caller. Generated FFI code refreshes the payload's Lua stack anchor
+   immediately after the payload pop; only then does the helper clear the
+   source owner's fifth uservalue. For `resume`/`error`, `ok=false` means the
+   source coroutine has
    already died; its entry point staged any coroutine-thread traceback and
    cleared its dead child-thread stack before returning control. The helper
    captures a resume/error-side propagation traceback, appends it to the
@@ -115,10 +120,12 @@ mco.mco_pop(source, payload, ffi.TValue.sizeof)
 
 When a C call mutates a stack-anchored `TValue` local through a mutable
 pointer argument, the FFI lowering refreshes that local's Lua stack anchor
-immediately after the call. Coroutine result helpers still keep the
-control switch and the result pops in the same Titan function, so no
-generated helper prologue can run a GC check while a final dead-coroutine
-payload exists only in minicoro storage.
+immediately after the call. A pending payload is also held in the exact
+source owner's fifth uservalue from before the first `mco_push` until that
+anchor refresh has happened. This is the root across the control switch,
+dead-child stack clearing, and any GC check in the receiver's generated
+prologue; same-function placement of the switch and pops is not itself a GC
+guarantee.
 
 For resume/yield tags, `titan/coroutine.titan` materializes the
 effective Titan `value` as a local C `TValue` and passes that local to
@@ -137,12 +144,15 @@ The helper stores live values in ordinary Lua roots:
 * `Coro.udata` roots the owner userdata whose raw payload stores the
   `mco_coro *`; `Coro.handle` is the same pointer cached as a native
   field and is not itself a GC root;
-* the owner userdata's four uservalues root the child Lua thread, module
-  state, native Titan entry closure, and callback function;
+* the owner userdata's first four uservalues root the child Lua thread,
+  module state, native Titan entry closure, and callback function;
+* its fifth uservalue roots the one pending payload copied through that
+  coroutine's minicoro storage. The helper writes it before the payload push
+  and clears it only after the payload has been removed and stack-anchored;
 * when the entry point finishes, its child-thread frame roots the final
-  return/error payload while it copies that payload into minicoro
-  storage, stages any captured traceback for the caller-side append step,
-  and clears the dead child stack before returning control;
+  return/error payload until `push_transfer` installs that fifth-userdata
+  root. It may then stage any captured traceback and clear the dead child
+  stack before returning control;
 * `mco_coro->user_data` points back to the owner userdata needed by
   `void (*func)(mco_coro *co)`; minicoro does not trace that raw pointer;
 * in-flight arguments, yielded values, errors, tags, and handles remain
@@ -166,18 +176,26 @@ ones.
 Transfer itself uses minicoro storage. `titan/coroutine.titan` pushes
 the payload `TValue` and then the `ok` flag with `mco_push`; the receiver
 pops `ok` first and the payload second with `mco_pop`. Minicoro copies
-the struct bytes. It never owns a Lua root for the collectable object
-referenced by the copied `TValue`; ordinary suspended transfers are
-rooted by the owning Lua/Titan frame. Final callback return/error
-payloads are rooted on the child stack while the entry copies them, then
-are popped by the receiver immediately after the context switch returns,
-before any intervening allocation.
+the struct bytes and never owns a Lua root for the collectable object
+referenced by the copied `TValue`. The selected source owner's fifth
+uservalue is therefore the protocol root for every pending transfer,
+including a nested transfer whose exact source is `stacked_co`. It remains
+set across the context switch and is cleared only after a successful payload
+pop has refreshed the generated stack anchor. A nil payload is valid, so nil
+in that slot is not used as an occupancy signal.
+
+On a failed first push, the helper clears the root before raising the
+minicoro error. On a failed flag push, it verifies that rolling back the
+already-pushed payload succeeded and then clears the root. Failed resume or
+yield discards and checks both stored values before clearing. If a pop or
+rollback itself fails, the root remains installed because storage removal has
+not been established.
 
 ## Entry Function
 
-Each coroutine owner userdata holds four uservalues: the
-`lua_newthread` thread, the owning module state, the native Titan entry
-closure, and the callback value. Creation stores the userdata pointer in
+Each coroutine owner userdata holds five uservalues: the `lua_newthread`
+thread, the owning module state, the native Titan entry closure, the callback
+value, and the pending transfer root. Creation stores the userdata pointer in
 `mco_coro->user_data` and installs a minicoro descriptor whose C entry is
 `titan_coro_entry`.
 
@@ -187,7 +205,7 @@ specific Lua-internal pointer type as GC-bearing: converting a non-NULL
 Creation can therefore store `M` directly in owner slot 2 as the actual module
 root. It does not need to recover an equivalent value from a closure upvalue.
 
-The C trampoline recovers those four values from the owner userdata,
+The C trampoline recovers the first four values from the owner userdata,
 reads the native function pointer from the Titan entry closure, and calls
 that native Titan entry directly with the child thread, module state,
 callback value, and `mco_coro *`. It does not enter through the Lua-stack
@@ -197,12 +215,15 @@ function-value call path and contains failure with its trailing
 function-level `catch`: exact Titan closures can take the native fast
 path, while other Lua callables use the generic Lua-stack path.
 
-On success, the entry records `ok=true`, copies the result `TValue` into
-minicoro storage, clears the dead child stack, and returns control. On
-error, the generated catch gives the Titan source both `error` and the
-saved catch-local `traceback`. The entry stores that traceback under
-`registry[TITAN_TRACE_APPEND_KEY]`, copies `(false, error)` into minicoro
-storage, clears the dead child stack, and returns control.
+On success, the entry records `ok=true`, roots the result in owner slot 5,
+copies the result `TValue` into minicoro storage, clears the dead child stack,
+and returns control. On error, the generated catch gives the Titan source
+both `error` and the saved catch-local `traceback`. The entry stores that
+traceback under
+`registry[TITAN_TRACE_APPEND_KEY]`, roots the error in owner slot 5, copies
+`(false, error)` into minicoro storage, clears the dead child stack, and
+returns control. The receiver clears slot 5 only after its successful pop has
+anchored the value.
 
 When the Titan wrapper observes `ok=false` after `resume` or `error`, it
 raises and catches the payload locally to capture a new traceback on the
@@ -215,8 +236,8 @@ also records where the error crossed the `resume`/`error` boundary.
 
 `Coro:error` before the first normal `resume` is handled without calling
 the callback: the entry sees the preloaded `ok=false` transfer, returns
-it as the final payload, and leaves the value rooted by the caller's
-suspended `err` parameter until the transfer is consumed.
+it as the final payload, and leaves the value in the owner's pending-transfer
+root until the transfer is consumed.
 
 ## FFI Experiment Notes
 
@@ -234,7 +255,9 @@ outside the current FFI or a native callback ABI:
 * defining `MINICORO_IMPL` exactly once while forcing Titan's minicoro
   compile-time options;
 * supplying the C tag comparator that compares arbitrary Lua values with
-  `luaV_equalobj(NULL, ...)`.
+  `luaV_equalobj(NULL, ...)`;
+* writing and clearing owner slot 5 directly, including the backward GC
+  barrier required when installing a pending transfer root.
 
 Those are plausible future FFI extensions, but they should be designed as
 general facilities rather than coroutine-specific escape hatches.
