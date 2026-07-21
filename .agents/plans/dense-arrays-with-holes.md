@@ -1,7 +1,7 @@
 # Dense arrays with holes — implementation plan
 
-Status: implemented and locally validated. Exact-head Linux CI and PR
-publication remain. The representation decision in this revision supersedes
+Status: implemented, locally validated, published in PR #38, and validated by
+exact-head Linux CI. The representation decision in this revision supersedes
 the earlier embedded-`Table`/patched-Lua draft.
 
 Primary feature brief:
@@ -1605,7 +1605,7 @@ The maintainer explicitly waived that manual dispatch for this delivery.
 - [x] Focused runtime/checker/coder/cross-provider/standalone/packaging tests
       pass in their correct shards.
 - [x] Sanitizer and full `make test` pass.
-- [ ] Exact-head Linux CI passes.
+- [x] Exact-head Linux CI passes.
 - [x] Manual macOS CI is waived by the maintainer for this delivery.
 - [x] Both manuals, README, and repository guidance are current.
 
