@@ -69,7 +69,7 @@ local function compiler_argv(output_root, source_root, titan_path, ...)
         "-u", "LUA_PATH", "-u", "LUA_PATH_5_5",
         "-u", "LUA_CPATH", "-u", "LUA_CPATH_5_5",
         "CCACHE_DISABLE=1",
-        "TITAN_PATH_0_16=" .. titan_path,
+        "TITAN_PATH_0_17=" .. titan_path,
         "TITAN_PATH=",
     }
     if PREFIX then
@@ -117,14 +117,14 @@ local function run_lua(cwd, titan_path, package_path, cpath_roots, code)
     for _, root in ipairs(cpath_roots) do
         table.insert(cpath, root .. "/?.so")
     end
-    table.insert(cpath, PREFIX .. "/lib/titan/0.16/?.so")
+    table.insert(cpath, PREFIX .. "/lib/titan/0.17/?.so")
     table.insert(cpath, PREFIX .. "/lib/lua/5.5/?.so")
 
     return run({
         "env",
         "-u", "LUA_PATH", "-u", "LUA_PATH_5_5",
         "-u", "LUA_CPATH", "-u", "LUA_CPATH_5_5",
-        "TITAN_PATH_0_16=" .. titan_path,
+        "TITAN_PATH_0_17=" .. titan_path,
         "TITAN_PATH=",
         LUA, "-e", string.format([[
 package.path = %q
@@ -292,6 +292,55 @@ end
             consumer_root, titan_path, consumer_root, { consumer_root }, [[
 local consumer = require "later_consumer"
 assert(consumer.answer() == 303)
+]])
+        assert.truthy(ok, output)
+    end)
+
+    it("shares dense arrays through a selected static provider", function()
+        write_file(source_one .. "/staticarray/api.titan", [[
+function make(): {value}
+    return {10, nil, 30}
+end
+
+function set(xs: {value}, i: integer, v: value)
+    xs[i] = v
+end
+
+function echo(xs: {value}): {value}
+    return xs
+end
+]])
+        assert_compiles(root_one, source_one, root_one, "staticarray.api")
+        assert.equal("file", lfs.attributes(
+            root_one .. "/staticarray/api.a", "mode"))
+
+        write_file(consumer_source .. "/static_array_consumer.titan", [[
+local api = import "staticarray.api"
+
+function roundtrip(): {value}
+    local xs = api.make()
+    api.set(xs, 5, 50)
+    return api.echo(xs)
+end
+]])
+        assert_compiles(consumer_root, consumer_source, root_one,
+            "--static", "static_array_consumer")
+
+        local generated = read_file(
+            consumer_source .. "/static_array_consumer.c")
+        assert.falsy(generated:find(
+            'loadlib(L, "staticarray/api.so")', 1, true), generated)
+        assert.truthy(generated:find(
+            "extern Udata *staticarray_api_init", 1, true), generated)
+
+        local ok, output = run_lua(
+            consumer_root, root_one, consumer_root, { consumer_root }, [[
+local consumer = require "static_array_consumer"
+local xs = consumer.roundtrip()
+assert(type(xs) == "userdata")
+assert(#xs == 5)
+assert(xs[1] == 10 and xs[2] == nil and xs[3] == 30)
+assert(xs[4] == nil and xs[5] == 50)
 ]])
         assert.truthy(ok, output)
     end)

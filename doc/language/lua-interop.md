@@ -3,10 +3,11 @@
 A compiled Titan module is, from Lua's point of view, an ordinary module:
 you `require` it, call its functions, read and write its exported
 variables, and pass values back and forth. There is no marshalling layer
-and no copying — Titan operates directly on Lua values. What the boundary
-adds is *checking*: every value that enters typed Titan code is validated
-once, at the edge, and a mismatch is a run-time error with a descriptive
-message rather than silent corruption. This chapter describes the boundary
+and no container copying — Titan operates on Lua-GC values, selecting an
+Array's canonical proxy when its private backing crosses a Lua-visible edge.
+What the boundary adds is *checking*: every value that enters typed Titan code
+is validated once, at the edge, and a mismatch is a run-time error with a
+descriptive message rather than silent corruption. This chapter describes the boundary
 from the Lua programmer's side: what `require` returns, what each Titan
 type looks like in Lua, exactly where the run-time checks happen, and what
 does and does not work in each direction.
@@ -94,17 +95,18 @@ assert(require "os" == lua_os)
 
 The same rule applies to `titan.coroutine`, `titan.async`, `titan.timer`,
 `titan.fs`, `titan.net`, and `titan.os`. The private `titan.uv` plumbing module
-uses the same canonical identity. In an installed Titan 0.16 tree, generated
+uses the same canonical identity. In an installed Titan 0.17 tree, generated
 loaders under `<root>/share/lua/5.5/titan/` all open the DSO form
-`<root>/lib/titan/0.16/titan.so` and invoke their own exact Lua entries. Titan
+`<root>/lib/titan/0.17/titan.so` and invoke their own exact Lua entries. Titan
 imports may instead select the paired self-describing `titan.a`; both forms
 expose the same logical-module ABI/types. The installation does not create
 child DSOs, parent-level or `lib/lua` copies, symbolic links, or hard links.
 
 ## How values map between the two languages
 
-Titan values *are* Lua values; nothing is converted on the way out of
-Titan. Entering Titan, each value is checked (and, for numbers, possibly
+Every Titan value has a canonical Lua representation. Most values are handed
+out directly; an Array backing is represented by its one-to-one proxy rather
+than copied. Entering Titan, each value is checked (and, for numbers, possibly
 converted) against the declared type:
 
 | Titan type | A Lua caller may pass | Lua receives back |
@@ -114,7 +116,7 @@ converted) against the declared type:
 | `boolean` | **any value**, converted by truthiness — see below | `true` or `false` |
 | `string` | a Lua string only — numbers are *not* coerced | the same string |
 | `nil` | only `nil` | `nil` |
-| `{T}` (array) | any table; the contents are **not** checked here | the *same* table — aliased, not copied |
+| `{T}` (array) | a canonical Titan Array proxy from the same Lua state; elements are **not** checked here | the *same* userdata proxy — aliased, not copied |
 | `{K:V}` (map) | any table; the contents are **not** checked here | the *same* table — aliased, not copied |
 | record type | a userdata created by that same record type (from any module instance) | a userdata carrying the record's metatable |
 | `T?` (option) | `nil`, or a value of type `T` — stricter than plain `T`, see below | `nil`, or whatever `T` produces |
@@ -159,8 +161,10 @@ Notes on the entries that deserve them:
 * **Strings are not coerced from numbers.** Where Lua's standard library
   often accepts a number and converts it, a Titan `string` parameter
   raises `type error, expected string but found number`.
-* **Arrays and maps are the very same Lua table** on both sides of the
-  boundary — see [Sharing arrays and maps](#sharing-arrays-and-maps-with-lua).
+* **Arrays and maps have distinct boundary representations.** Arrays are
+  canonical Titan userdata proxies; maps are ordinary Lua tables. Both retain
+  identity and are shared rather than copied — see
+  [Sharing arrays and maps](#sharing-arrays-and-maps-with-lua).
 * **Records are userdata, not tables** — see
   [Records from Lua](#records-from-lua).
 * **`nil` and options.** A `T?` parameter accepts `nil` or a value of
@@ -191,14 +195,15 @@ The boundary checks run at exactly these places:
 
 And, just as importantly, where they do *not* happen:
 
-* **Never inside containers.** A `{string:integer}` parameter only
-  requires *a table*; what is stored under its keys is not inspected when
-  the table crosses the boundary. Instead, every element read inside
+* **Never recursively inside containers.** A `{string:integer}` Map parameter
+  requires a table, while an `{integer}` Array parameter requires a valid
+  canonical Titan Array proxy. Neither check walks the contents. Instead,
+  every element read inside
   Titan re-checks the element type, so a wrongly-typed element produces a
   run-time error *later*, deterministically, at the Titan code that reads
   it — never silent misbehavior. The same applies in reverse: Lua can
-  freely (and type-incorrectly) mutate a table it got from Titan, and the
-  error surfaces at the next Titan read.
+  freely (and type-incorrectly) mutate a Map or an Array proxy obtained from
+  Titan, and the error surfaces at the next Titan read.
 * **Not on exact native Titan calls.** A direct Titan-to-Titan call, including
   across modules, needs no boundary checks because the compiler has already
   proven the types match. The same is true for a function value whose exact
@@ -263,9 +268,9 @@ they reach Lua. See [Flexible returns](flexible-returns.md).
 
 ## Sharing arrays and maps with Lua
 
-A Titan array or map *is* a Lua table — passing one in either direction
-passes a reference to the same object, with no copying. Mutations made on
-one side are immediately visible on the other:
+A Titan Map *is* an ordinary Lua table. Passing one in either direction passes
+a reference to the same object, with no copying. Mutations made on one side
+are immediately visible on the other:
 
 ```lua
 -- test.titan             -- Titan
@@ -296,12 +301,46 @@ m.foo = "wat"
 test.f(m)  --> error: test.titan:...: type error, expected integer but found string
 ```
 
-This deferred check is a deliberate trade-off: checking a whole table on
-every crossing would make the boundary cost proportional to the table's
-size, defeating the point of sharing. The guarantee Titan keeps is that
-the bad element can never be *used* at the wrong type — every read is
-checked. See [Arrays and maps](arrays-maps.md) for the container types
-themselves.
+An Array instead reaches Lua as userdata with a protected
+`"Titan array metatable"` metatable value. Lua may use positive integer
+indexing, assignment, and `#` through its `__index`, `__newindex`, and `__len`
+callbacks. The proxy preserves holes and reports the deterministic highest
+present positive index:
+
+```titan
+-- arrays.titan
+function make(): {value}
+    return {10, nil, 30}
+end
+```
+
+```lua
+local arrays = require "arrays"
+local xs = arrays.make()
+assert(type(xs) == "userdata")
+assert(xs[1] == 10 and xs[2] == nil and xs[3] == 30 and #xs == 3)
+xs[3] = nil
+assert(#xs == 1)
+```
+
+A plain Lua table is not an Array and is rejected for an `{T}` parameter.
+Likewise, a forged or structurally invalid userdata is rejected; Lua obtains a
+valid Array only from Titan code. Nested Array elements cross as their
+canonical proxies, while nested Maps remain tables.
+
+An Array is table-like, but it is not a Lua table. Stock Lua 5.5's `table.*`
+functions operate on the Array proxy through its `__index`, `__newindex`, and
+`__len` callbacks, so operations such as insertion, removal, movement,
+sorting, and concatenation use the public Array behavior. In contrast,
+`rawget`, `rawset`, and `rawlen` require an actual table and reject the
+userdata proxy. This distinction is a property of stock Lua 5.5's table
+library, not a second Array representation.
+
+For both container kinds, checking every element on each crossing would make
+the boundary cost proportional to container size. Titan instead validates the
+container representation at the edge and checks each element when typed code
+reads it. A bad element therefore cannot be used at the wrong type. See
+[Arrays and maps](arrays-maps.md) for the complete container semantics.
 
 ## Records from Lua
 
@@ -434,7 +473,7 @@ For a positional call whose static callee type is `value`, Titan derives a
 temporary function type from the written arguments and from the surrounding
 result demand. A finite annotated result supplies its expected type, an
 unannotated finite result becomes `value`, and an open variadic, flexible
-return, or array sink derives a flexible result tail. Named-call syntax is not
+return, or positional Array/integer-Map sink derives a flexible result tail. Named-call syntax is not
 available through `value`, because the run-time callable carries no Titan
 declaration names.
 
@@ -495,7 +534,8 @@ option-type idiom for recoverable failures.
 ## Multiple Lua states
 
 A Titan module keeps no instance state in C globals: everything a module
-instance owns (its variables, its module userdata, its record metatables)
+instance owns (its variables, its module userdata, its record and Array
+metatables)
 lives inside one Lua state. Consequently:
 
 * The same compiled module can be loaded into **several Lua states in the

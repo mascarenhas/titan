@@ -7,8 +7,8 @@ and from the result demand imposed by its consumer. The language semantics are
 described in the [flexible returns chapter](../language/flexible-returns.md).
 
 The implementation is deliberately not a second multiple-return subsystem.
-The checker reduces declarations, assignments, returns, calls, array
-constructors, generic `for`, input `...`, and contextual calls to one
+The checker reduces declarations, assignments, returns, calls, positional
+Array/integer-Map constructors, generic `for`, input `...`, and contextual calls to one
 finite/open expression-list demand. The coder then keeps two shapes distinct:
 
 * the callable's declared fixed/flexible shape, which determines its native
@@ -22,7 +22,7 @@ of native ABI truth.
 
 This chapter describes the completed implementation, including the generic
 open-consumer and pending-`finally` lifetime paths. Flexible returns introduced
-compiled-module ABI 0.14; current installed-module paths use ABI 0.16.
+compiled-module ABI 0.14; current installed-module paths use ABI 0.17.
 
 ## Representation in the AST and type graph
 
@@ -165,7 +165,7 @@ their counts. The enclosing node keeps the complete adjustment:
 | local declaration or assignment | `_result_adjustment` |
 | `return` | `_result_adjustment` |
 | call arguments | `_arg_adjustment` |
-| array constructor | `_array_adjustment` |
+| positional Array/integer-Map constructor | `_positional_adjustment` |
 
 Only the final expression can expand. Every earlier expression is checked
 under a one-result scalar demand while a fixed slot or open tail remains. Once
@@ -393,13 +393,16 @@ The same abstraction feeds four paths:
 * forwarding an input vararg;
 * receiving a flexible call result;
 * forwarding a flexible return; and
-* appending a final producer to an array constructor.
+* appending a final producer to a positional Array or exact integer-Map
+  constructor.
 
 Fixed results stay in their existing C temporaries and out-parameters. The
 dynamic run starts only after the declared fixed result prefix. Sink
-conversions are element-wise and use the normal `setwrapped`, `checkandget`,
-array-growth, and write-barrier paths rather than a flexible-only conversion
-system.
+conversions are element-wise and use the normal semantically typed
+boxing/unboxing, `checkandget`, container-growth, and write-barrier paths
+rather than a flexible-only conversion system. Arrays use backing storage and
+their maintained length; positional Maps remain ordinary Tables. See
+[Dense Arrays](dense-arrays.md#exact-and-generic-call-paths).
 
 A flexible function's return statement is statically open, but its native
 entry inherits the caller's runtime `_flexwant`. `codereturn` threads the

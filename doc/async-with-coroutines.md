@@ -209,12 +209,16 @@ The C helper interface is deliberately tiny. `titan/coroutine.titan` imports
 `minicoro.h` directly, reads the `mco_coro` fields it needs, constructs
 the owner userdata and typed handle, and calls the minicoro
 storage/control APIs directly.
-The C helper surface used by `titan/coroutine.titan` consists only of the
-entry trampoline and fixed tag comparator:
+The C helper surface used by `titan/coroutine.titan` consists of the entry
+trampoline, fixed tag comparator, and the two operations that directly update
+the owner userdata's pending-transfer root:
 
 ```c
+#define TITAN_CORO_OWNER_USERVALUES 5
 void titan_coro_entry(mco_coro *co);
 int titan_coro_tag_equal(void *t1, void *t2);
+void titan_coro_root_transfer(lua_State *L, mco_coro *co, TValue payload);
+void titan_coro_clear_transfer(mco_coro *co);
 ```
 
 The complete `mco_runtime` layout is available through `minicoro.h`, so Titan
@@ -296,13 +300,15 @@ end
 ```
 
 The exact source can be adjusted to local style, but the important point
-is that the public API and transfer choreography remain Titan code while
-only C-only callbacks and tag comparison stay in `titan_coro.c`.
-`resume_result_or_raise` and `yield_result_or_raise` intentionally perform
-the `mco_resume`/`mco_yield` and the matching `mco_pop` operations in the
-same Titan function: once a dead coroutine entry point has cleared its
-child stack, no generated Titan helper prologue may run before the result
-payload has been popped into a stack-anchored `TValue` local.
+is that the public API and transfer choreography remain Titan code. C owns
+the callback ABI, raw tag comparison, and the barrier-correct write into the
+owner userdata. `resume_result_or_raise` and `yield_result_or_raise` perform
+the control switch and then delegate the matching pops to
+`pop_transfer_or_raise`. Correctness does not depend on the absence of that
+generated helper's prologue or GC check: the exact source owner's fifth
+uservalue roots the payload across the helper boundary until `mco_pop` has
+written it into a `TValue` local and generated code has refreshed that local's
+Lua stack anchor.
 
 For uncaught coroutine-body errors, the entry point depends on a
 runtime-side invariant: before it returns `(false, error)` to the
@@ -359,9 +365,9 @@ local, temporary, or parameter whose C type is `TValue` is stack-anchored like
 Titan `value`, but C helpers and minicoro storage may also copy `TValue` structs
 by value. Any collectable object inside those helper-owned copies must remain
 rooted by the original Titan frame, coroutine userdata, Lua stack, or another
-traced Lua object. The coroutine helpers are allowed to keep by-value copies
-across a minicoro stack switch because the Titan frames that supplied those
-parameters are not unwound by `yield`.
+traced Lua object. Every coroutine transfer therefore also installs the
+payload in the exact source owner's fifth uservalue before copying it to
+minicoro storage.
 
 With those rules, `titan/coroutine.titan` does not need C shims for storage or
 tag-only minicoro operations. It can call `mco_push`/`mco_pop` directly
@@ -385,12 +391,14 @@ unwrapping a `value` for every `resume`, `error`, or `status` call. Only
 the owner userdata's `__gc` finalizer pushes its userdata argument,
 recovers the pointer with `lua_touserdata`, and calls `mco_destroy`.
 
-The owner userdata has four uservalues that root:
+The owner userdata has five uservalues that root:
 
 1. the Lua thread created by `lua_newthread`;
 2. the coroutine module state;
 3. the native Titan entry closure;
-4. the callback function value passed to `create`.
+4. the callback function value passed to `create`;
+5. the one pending transfer payload copied through that owner's minicoro
+   storage.
 
 The module slot is a real full-userdata root, not a boxed native pointer.
 `M` is a native `Udata *`, which the coder treats specially when it crosses a
@@ -399,12 +407,12 @@ lightuserdata, and NULL becomes nil. `create` therefore stores `M` directly in
 the owner userdata. The owner traces the actual module object without a
 closure-upvalue lookup or an intermediate userdata allocation.
 
-The child-thread frame roots a final callback return/error payload while
-the entry point copies it into minicoro storage, stages any captured
-traceback, and clears the dead child stack before returning control.
-Ordinary yielded/resumed payloads do not need a persistent uservalue
-slot. They remain rooted by the suspended Titan frames that own the
-formal parameters.
+The child-thread frame roots a final callback return/error payload until
+`push_transfer` writes it into the fifth uservalue. That uservalue then
+survives copying into minicoro storage, captured-traceback staging, clearing
+the dead child stack, and returning control. Ordinary yielded/resumed payloads
+use the same root even though their suspended Titan parameter frames are also
+roots.
 
 The raw `mco_coro` user data points back to the owner userdata needed by
 `void (*func)(mco_coro *co)`. That pointer is not a GC root. Every
@@ -450,19 +458,21 @@ a `TValue` does not allocate, and generated callers immediately anchor
 GC-able returns in their own stack slots before any later allocation.
 
 The runtime may copy a `TValue` through minicoro storage with
-`mco_push`/`mco_pop`, because minicoro copies the struct bytes and
-ordinary suspended transfers keep the owning Titan frame rooted. For
-final callback return/error payloads, the entry copies the payload
-immediately before returning control and the receiver pops it immediately
-after the context switch returns, before any intervening allocation. The
-runtime must not make minicoro storage, raw C heap memory, or untraced
-fields the only root for a collectable payload beyond those bounded
-transfer windows.
+`mco_push`/`mco_pop`, but minicoro only copies the struct bytes and does not
+trace the referenced Lua object. Before the first push, the sender writes the
+payload into the exact source owner's fifth uservalue with `setobj` and
+`luaC_barrierback`. This remains the root across nested source selection,
+control switching, child-stack clearing, and receiver-side GC. The receiver
+clears it only after a successful payload pop has refreshed the generated Lua
+stack anchor.
 
 Each transfer pushes two values into minicoro storage: the payload
 `TValue`, followed by the `ok` flag. The receiver pops `ok` first and
-the payload second. No payload or success flag needs to be cached in
-`mco_coro->user_data`.
+the payload second. The fifth uservalue roots the payload but is not an
+occupancy flag: nil is a valid pending payload. A failed first push clears the
+root before reporting the error. A failed second push verifies payload
+rollback before clearing it. Discard and receive paths likewise verify storage
+removal before clearing, so an unexpected failed pop leaves the root intact.
 
 When storing a collectable value into an old userdata uservalue or record
 field, use the existing Lua 5.5 barrier discipline. Public API helpers
@@ -473,16 +483,20 @@ barrier from Lua. Direct writes into `Udata->uv[]` need
 The implementation must be tested in both incremental and generational
 GC modes. In particular, an old `Coro` record must safely keep a young
 owner userdata reachable, and that userdata's uservalues must keep a
-young Lua thread, module state, entry closure, and callback reachable.
-The child-thread frame keeps any final return/error root reachable, and
-the `Coro` record itself keeps the default tag reachable.
+young Lua thread, module state, entry closure, callback, and pending payload
+reachable. A focused transfer test forces a full collection after
+`mco_resume` returns and before the result pop, then verifies both that a fresh
+finalizable payload survives with its identity intact and that it becomes
+collectable after the pop clears slot 5. The `Coro` record itself keeps the
+default tag reachable.
 
 ## Calling the entry function
 
 The minicoro entry point retrieves the owner userdata from
-`mco_coro->user_data`. Its four uservalues provide the coroutine's Lua
-thread, module state, native Titan entry closure, and callback function.
-The C trampoline extracts the native pointer from the entry closure and
+`mco_coro->user_data`. Its first four uservalues provide the coroutine's Lua
+thread, module state, native Titan entry closure, and callback function; the
+fifth is reserved for the pending transfer. The C trampoline extracts the
+native pointer from the entry closure and
 calls that Titan entry directly with the child thread, module state,
 callback, and `mco_coro *`; it does not enter through the Lua wrapper on
 every resume. The Titan entry calls the callback with one `value`
@@ -518,9 +532,11 @@ error:
 2. the original error value is preserved;
 3. the coroutine-thread traceback is staged under
    `TITAN_TRACE_APPEND_KEY` in the shared registry;
-4. the entry copies `(false, error)` into minicoro storage, clears the
-   dead child stack, and returns control to the resumer;
-5. the resumer pops the error payload immediately, captures its own
+4. the entry roots the error in owner slot 5, copies `(false, error)` into
+   minicoro storage, clears the dead child stack, and returns control to the
+   resumer;
+5. the resumer pops and stack-anchors the error payload, clears slot 5,
+   captures its own
    propagation traceback, appends it to the staged coroutine trace, pins
    the combined trace, and re-raises the same value.
 
@@ -600,9 +616,9 @@ Build `titan/coroutine.titan` as the ordinary qualified logical Titan module
 `titan.coroutine`. The combined standard binary exports `titan_coroutine_init`,
 `titan_coroutine_abi`, `titan_coroutine_types`, and
 `luaopen_titan_coroutine`. Install the paired physical standard provider as
-`<root>/lib/titan/0.16/{titan.so,titan.a}` and the generated logical shim as
+`<root>/lib/titan/0.17/{titan.so,titan.a}` and the generated logical shim as
 `<root>/share/lua/5.5/titan/coroutine.lua`. Titan's configured module path
-contains `<root>/lib/titan/0.16`; the parser desugars `import "coroutine"` to
+contains `<root>/lib/titan/0.17`; the parser desugars `import "coroutine"` to
 that qualified identity and prefix lookup claims it from the preferred native
 form.
 `require "titan.coroutine"` uses the shim to promote/map that provider and
@@ -613,6 +629,11 @@ a parent-level `coroutine.so` or a `lib/lua` DSO, and do not export a bare
 Titan code reaches this binary with `import "coroutine"`, while Lua code
 uses `require "titan.coroutine"`. The bare Lua name `coroutine` remains
 owned by Lua's standard library.
+
+ABI 0.17 keeps the coroutine's `TValue` transport, but a `value` containing an
+Array now carries the canonical proxy Udata rather than the private backing
+Table. Exact typed Array paths continue to use backing `Table *`. See
+[Dense Arrays](implementation/dense-arrays.md#exact-and-generic-call-paths).
 
 The rockspec and Makefile make `luarocks make` and `make test` build all seven
 logical standard modules in paired `titan.so`/`titan.a` providers plus
@@ -656,7 +677,8 @@ Add FFI coverage for the new `TValue` boundary:
   expressions implicitly coerced to `value`;
 * a C helper returning `TValue` produces a Titan `value`;
 * the conversion works for nil, booleans, numbers, strings, records,
-  arrays/maps, and function values;
+  Arrays as canonical proxy Udata, Maps as ordinary Tables, and function
+  values;
 * raw `TValue *`, `const TValue *`, and `TValue[]` interfaces import as C
   pointer/array types, and the new address coercions cover the scoped
   pointer arguments used by `titan/coroutine.titan`.
@@ -664,7 +686,7 @@ Add FFI coverage for the new `TValue` boundary:
 Add Titan runtime/coder coverage for:
 
 * create/resume/yield round trips with nil, booleans, integers, floats,
-  strings, records, arrays, maps, function values, and Lua closures;
+  strings, records, Array proxies, Maps, function values, and Lua closures;
 * `titan/coroutine.titan` resolving default tags, recording resume as success,
   recording error injection as failure, checking `mco_result`, and
   raising a returned failure payload;
@@ -698,7 +720,9 @@ Add Titan runtime/coder coverage for:
   `titan.so` on this dynamic Lua route);
 * GC stress in incremental and generational modes, including old
   coroutine owner userdata rooting young Lua threads, callback closures,
-  default tags, record/table payloads, and function-valued payloads;
+  default tags, record/table payloads, and function-valued payloads, plus a
+  full collection between terminal resume and pop for fresh finalizable
+  return and error values;
 * compiled-provider import of `titan.coroutine` (via the short import) from another Titan module and use from a
   standalone executable.
 

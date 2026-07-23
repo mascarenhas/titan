@@ -309,7 +309,7 @@ of these are declared anywhere; this table is the inventory.
 | `_types`, `_flexrettype`, `_callee_type` | `ExpCall` | checker | checker, coder | declared fixed results, declared flexible element, and complete callable type; these remain the native-ABI authority even when the consumer sees fewer results |
 | `_visible_types`, `_result_sources` | `ExpCall` | checker | checker, coder | finite results exposed to this consumer and whether each came from a fixed position or a possibly absent flexible projection |
 | `_finite_flex_prefix`, `_flex_result_demand`, `_open_results` | `ExpCall` | checker | coder | finite projected tail count, finite/open demand marker, and the dynamic source/target/start description for an open sink |
-| `_result_adjustment`, `_arg_adjustment`, `_array_adjustment`, `_tuple_adjustment` | expression-list consumers | checker | coder | shared finite/open elaboration: delivered fixed/tail scalars, retained effect-only expressions, and at most one dynamic final source |
+| `_result_adjustment`, `_arg_adjustment`, `_positional_adjustment`, `_tuple_adjustment` | expression-list consumers | checker | coder | shared finite/open elaboration: delivered fixed/tail scalars, retained effect-only expressions, and at most one dynamic final source; `_positional_adjustment` serves both Arrays and exact integer-keyed Maps |
 | `_discard_results`, `_voidok` | expressions/calls | checker | checker, coder | evaluate under zero-result demand; calls may legally expose no result |
 | `_npassed_args`, `_open_args` | `ExpCall` | checker | coder | statically passed argument count and a final dynamic run feeding an input-vararg tail |
 | `_contextual_value_call`, `_contextual_function_type` | `ExpCall` | checker | coder, specs | the callee began as `value` and was checked against a function shape synthesized from argument/result demand |
@@ -407,8 +407,9 @@ change. This is the checklist.
 4. **`coder.lua`** — every per-type C-rendering function dispatches on
    type tags: `ctype`, `getslot`, `setslot`, `toboolean`, `checkandget`
    and `checkandset` end in `error("invalid type ...")`, so a miss
-   crashes; `initval`, `setwrapped` and `copyslotwrapped` instead have
-   catch-all defaults that may be silently wrong for a new type. See
+   crashes; `initval` and the semantically typed internal/boxed conversion
+   helpers instead have broader defaults that may be silently wrong for a new
+   type. Array demonstrates why C type alone is insufficient. See
    [values and the GC](values-and-gc.md) for what each must produce.
 5. **Interop** — if values of the type cross the Lua boundary, the
    entry-wrapper checks in `genluaentry` and the record/module

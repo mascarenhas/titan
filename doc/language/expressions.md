@@ -185,8 +185,9 @@ type pairs:
   any comparison with NaN is false, so `x ~= x` is true when `x` is NaN.
 * **Strings** compare by content (lexicographically for the relational
   operators), exactly as in Lua.
-* **Arrays, maps and records** compare by identity, exactly like Lua's
-  raw table and userdata equality; metamethods are never involved.
+* **Arrays, maps and records** compare by identity. Arrays and records use
+  canonical userdata identities; maps use ordinary table identities.
+  Metamethods are never involved.
 * **Two `value`s** (or a `value` and anything else, which is promoted to
   `value`) compare with Lua's *raw* equality — `__eq` metamethods on
   tables that arrived from Lua are not consulted.
@@ -307,12 +308,14 @@ with a run-time error if they are nil.
 
 ## Length: `#`
 
-`#` accepts an array or a string and produces an `integer`. On a string
-it is the length in bytes; on an array it is the table length, with
-Lua's usual border semantics if you have created nil holes (see
-[arrays and maps](arrays-maps.md)). Taking the length of anything else,
-**including a map**, is the compile-time error
-`trying to take the length of a ... instead of an array or string`.
+`#` accepts an array, an exact integer-keyed map, or a string and produces an
+`integer`. On a string it is the length in bytes. On an Array it is
+deterministically the highest present positive index, so deleting a middle
+element does not shorten it while deleting the last present element does. On
+an exact `{integer: V}` Map it uses Lua's ordinary table-border result; for a
+holed Map any valid border may be selected. See
+[arrays and maps](arrays-maps.md). Other Map key types and other values are
+compile-time errors.
 
 ```lua
 function total_len(words: {string}): integer
@@ -405,8 +408,11 @@ position expects — and, failing that, by the shape of the first field:
 * **Array**: positional fields only. With no context, a constructor with
   positional fields is an array whose element type is inferred from the
   first element, and the empty `{}` defaults to `{integer}`.
-* **Map**: every key must be written **in brackets** — `[k] = v`. The
-  `name = v` form is *never* a map entry, even for string-keyed maps:
+* **Map**: computed entries write their key **in brackets** — `[k] = v`.
+  An exact integer-keyed Map may instead use an all-positional constructor;
+  its first value is stored at key 1, its second at key 2, and so on. The
+  two forms cannot be mixed. The `name = v` form is *never* a map entry,
+  even for string-keyed maps:
   `{ x = 10 }` in a `{string: integer}` context is the compile-time
   error `initializing field 'x' when expecting map`; write
   `{ ["x"] = 10 }`.
@@ -425,17 +431,19 @@ function constructors(): float
     local xs: {integer} = {1, 2, 3}
     local empty = {}                                 -- {integer}
     local grades: {string: float} = { ["ana"] = 9.5, ["bia"] = 8.0 }
+    local counts: {integer: integer} = {10, 20, 30}
     local p: Point = { x = 1.0, y = 2.0 }
     return p.x + (grades["ana"] or 0.0)
 end
 ```
 
 Fields are separated by `,` or `;` interchangeably, and a trailing
-separator is allowed. A call as the *last* positional element of an array
-constructor is an open result sink: it contributes all statically visible
-fixed results and, when declared, the complete run-time
+separator is allowed. A call as the *last* positional element of an Array or
+exact integer-keyed Map constructor is an open result sink: it contributes all
+statically visible fixed results and, when declared, the complete run-time
 [flexible tail](flexible-returns.md). In any other position a call contributes
-one value, and in a map or record field position surplus results are dropped.
+one value, and in a computed Map or record field position surplus results are
+dropped.
 See
 [arrays and maps](arrays-maps.md) and [records](records.md) for the full
 story on each constructor, including what `nil` elements mean.
@@ -501,7 +509,8 @@ constructor as one positional argument, enclose it in the call parentheses:
 A call used as an operand contributes its **first requested** result. A call in
 the *last* position of an expression list may expand to fill the consumer's
 remaining finite slots. A variadic argument tail, flexible `return` tail, or
-final array field is open and consumes the complete visible run instead.
+final positional Array/exact integer-Map field is open and consumes the
+complete visible run instead.
 Wrapping the call in parentheses always requests exactly one value, as in Lua:
 
 ```lua

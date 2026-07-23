@@ -397,6 +397,82 @@ local function c_index_elem_type(typ)
     end
 end
 
+-- C field/index assignment ultimately mutates storage rather than a by-value
+-- aggregate result. Pointer and COwned expressions identify persistent storage
+-- regardless of how their values were produced. A CStruct/CUnion/CArray,
+-- however, must itself be an addressable local/imported object or a subobject
+-- reached through another persistent C base. Keep this predicate aligned with
+-- the coder's recursive prepared-lvalue lowering: a call, cast, or other
+-- by-value aggregate expression cannot safely be retained by taking the
+-- address of a temporary.
+local c_assignment_base_has_storage
+
+local function c_aggregate_storage_expression(exp)
+    if not exp or exp._tag ~= "Ast.ExpVar" then
+        return false, exp
+    end
+
+    local var = exp.var
+    if var._tag == "Ast.VarName" then
+        local decl = var._decl
+        if decl and decl._tag == "Ast.Decl" then
+            return true
+        end
+    elseif var._tag == "Ast.VarDot" then
+        if var.exp and var.exp._type
+           and var.exp._type._tag == "Type.CModule"
+           and var._decl and var._decl._tag == "Type.ModuleMember" then
+            return true
+        elseif var._decl and var._decl._tag == "Type.CField"
+               and var.exp and var.exp._type
+               and types.is_c(var.exp._type) then
+            return c_assignment_base_has_storage(var.exp)
+        end
+    elseif var._tag == "Ast.VarBracket"
+           and var.exp1 and var.exp1._type
+           and types.is_c(var.exp1._type) then
+        return c_assignment_base_has_storage(var.exp1)
+    end
+
+    return false, exp
+end
+
+c_assignment_base_has_storage = function(exp)
+    local typ = exp and exp._type and c_resolve(exp._type)
+    if not typ or typ._tag == "Type.Invalid" then
+        -- The ordinary expression/type diagnostic is already authoritative.
+        return true
+    elseif typ._tag == "Type.CPointer" or typ._tag == "Type.COwned" then
+        return true
+    elseif typ._tag == "Type.CStruct" or typ._tag == "Type.CUnion"
+           or typ._tag == "Type.CArray" then
+        return c_aggregate_storage_expression(exp)
+    end
+    return true
+end
+
+local function check_c_assignment_storage(var, errors)
+    local base
+    if var._tag == "Ast.VarDot" and var._decl
+       and var._decl._tag == "Type.CField" then
+        base = var.exp
+    elseif var._tag == "Ast.VarBracket" and var.exp1
+           and var.exp1._type and types.is_c(var.exp1._type) then
+        base = var.exp1
+    else
+        return
+    end
+
+    local ok, culprit = c_assignment_base_has_storage(base)
+    if not ok then
+        culprit = culprit or base
+        checker.typeerror(errors, culprit.loc or var.loc,
+            "C assignment receiver must have persistent storage; "
+            .. "expression of type '%s' is a by-value C aggregate",
+            types.tostring(culprit._type or base._type))
+    end
+end
+
 local function has_c_length(typ)
     typ = c_resolve(typ)
     return typ._tag == "Type.CArray"
@@ -1090,22 +1166,210 @@ local function replace_adjusted_value(adjusted, old, new)
     end
 end
 
--- Find a `...` field in an `ExpInitList` (a key-less field whose expression is a
--- bare `Ast.ExpDots`). Returns (field, index) or nil. Reports an error and
--- returns nil if a `...` field exists but is not the last field (`{..., 1}`):
--- `...` consumes the whole runtime tail, so nothing may follow it.
-local function find_dots_field(node, errors)
+local function constructor_field_kind(field)
+    -- Parser-built positional fields use false; synthesized fields may use nil.
+    if not field.name then
+        return "positional"
+    elseif type(field.name) == "table" then
+        return "computed"
+    else
+        return "named"
+    end
+end
+
+-- Classify an initializer before checking any of its expressions. This keeps a
+-- positional field away from the computed-Map key path (where a nil key used to
+-- reach checkexp), and makes every mixed ordering fail in the same deliberate
+-- way. A bare `...` is positional, but it must be the sole trailing open
+-- producer.
+local function classify_constructor_fields(node, errors)
+    local seen, kinds = {}, {}
+    local dots_field
+    local invalid_dots = false
+
     for i, field in ipairs(node.fields) do
-        if not field.name and field.exp._tag == "Ast.ExpDots" then
+        local kind = constructor_field_kind(field)
+        if not seen[kind] then
+            seen[kind] = true
+            table.insert(kinds, kind)
+        end
+        if kind == "positional" and field.exp._tag == "Ast.ExpDots" then
+            if dots_field then
+                checker.typeerror(errors, field.loc,
+                    "'...' can appear only once in a positional constructor")
+                invalid_dots = true
+            else
+                dots_field = field
+            end
             if i ~= #node.fields then
                 checker.typeerror(errors, field.loc,
-                    "'...' must be the last field in an array constructor")
-                return nil
+                    "'...' must be the last field in a positional constructor")
+                invalid_dots = true
             end
-            return field, i
         end
     end
-    return nil
+
+    if #kinds == 0 then
+        return "empty", kinds, dots_field, invalid_dots
+    elseif #kinds == 1 then
+        return kinds[1], kinds, dots_field, invalid_dots
+    else
+        return "mixed", kinds, dots_field, invalid_dots
+    end
+end
+
+-- Check every written expression of a constructor that has already been
+-- rejected for its field shape. This preserves scope/name diagnostics without
+-- routing a bare trailing `...` through its scalar-only checkexp arm.
+local function check_rejected_constructor_fields(node, st, errors, context)
+    local value_context
+    local key_context
+    if context and context._tag == "Type.Array" then
+        value_context = context.elem
+    elseif context and context._tag == "Type.Map" then
+        key_context = context.keys
+        value_context = context.values
+    end
+
+    for _, field in ipairs(node.fields) do
+        local kind = constructor_field_kind(field)
+        if kind == "positional" and field.exp._tag == "Ast.ExpDots" then
+            check_dots_marker(field.exp, st, errors)
+        else
+            if kind == "computed" then
+                checkexp(field.name, st, errors, key_context)
+            end
+            checkexp(field.exp, st, errors, value_context)
+        end
+    end
+end
+
+local function positional_initializer_term(container_tag)
+    if container_tag == "Type.Array" then
+        return "array initializer"
+    else
+        return "positional map initializer"
+    end
+end
+
+-- Arrays and positional integer-keyed Maps are the same kind of open
+-- expression-list consumer. The checker elaboration is intentionally
+-- representation-neutral; code generation decides whether the sink is a
+-- private Array backing or an ordinary Map Table.
+local function check_positional_constructor(node, st, errors, container_tag,
+                                              keytype, elem_context)
+    local exps = {}
+    for _, field in ipairs(node.fields) do
+        assert(constructor_field_kind(field) == "positional")
+        table.insert(exps, field.exp)
+    end
+
+    local term = positional_initializer_term(container_tag)
+    local adjusted = adjust_explist(exps,
+        result_demand({}, elem_context or INFER_OPEN, {
+            term = term,
+            loc = node.loc,
+            missing = "error",
+            explicit_surplus = "discard",
+            open_coerce = true,
+            defer_open_check = true,
+        }), st, errors)
+    local etype = elem_context
+        or (adjusted.open_type
+            and adjusted.open_type._tag ~= "Type.Invalid"
+            and deoptionize(adjusted.open_type))
+        or (adjusted.tail_scalars[1]
+            and deoptionize(adjusted.tail_scalars[1]._type))
+        or types.Integer()
+
+    if container_tag == "Type.Array" then
+        node._type = types.Array(etype)
+    else
+        node._type = types.Map(assert(keytype), etype)
+    end
+
+    -- A contextual sink was already coerced and checked by adjust_explist.
+    -- Inference has no target during that pass, so apply its newly selected
+    -- element type here exactly once.
+    if not elem_context then
+        for i, exp in ipairs(adjusted.tail_scalars) do
+            local old = exp
+            exp = trycoerce(exp, etype, errors)
+            checkmatch(term .. " at position " .. i, etype,
+                exp._type, errors, exp.loc)
+            replace_adjusted_value(adjusted, old, exp)
+        end
+    end
+
+    if adjusted.open_source then
+        local source = adjusted.open_type
+        local container_name = container_tag == "Type.Array"
+            and "array" or "positional map"
+        if source._tag ~= "Type.Invalid"
+           and not types.equals(source, etype)
+           and not types.compatible(etype, source)
+           and not types.coerceable(source, etype) then
+            if adjusted.open_source._tag == "Ast.ExpDots" then
+                checker.typeerror(errors, adjusted.open_source.loc,
+                    "'...' element type %s is not coerceable to %s element type %s",
+                    types.tostring(source), container_name,
+                    types.tostring(etype))
+            else
+                checker.typeerror(errors, adjusted.open_source.loc,
+                    "open result element type %s is not coerceable to %s element type %s",
+                    types.tostring(source), container_name,
+                    types.tostring(etype))
+            end
+        end
+        adjusted.open_target = etype
+        if adjusted.open_source._tag == "Ast.ExpCall"
+           and adjusted.open_source._open_results then
+            adjusted.open_source._open_results.target_type = etype
+        elseif adjusted.open_source._tag == "Ast.ExpDots"
+               and adjusted.open_source._open_dots then
+            adjusted.open_source._open_dots.target_type = etype
+        end
+    end
+
+    node.fields = {}
+    for _, exp in ipairs(adjusted.exps) do
+        table.insert(node.fields, ast.Field(exp.loc, nil, exp))
+    end
+    node._positional_adjustment = adjusted
+end
+
+local function check_computed_map_constructor(node, st, errors, context)
+    local kcontext = context and context.keys
+    local vcontext = context and context.values
+    local ktypes, vtypes = {}, {}
+
+    for _, field in ipairs(node.fields) do
+        assert(constructor_field_kind(field) == "computed")
+        checkexp(field.name, st, errors, kcontext)
+        table.insert(ktypes, field.name._type)
+        checkexp(field.exp, st, errors, vcontext)
+        table.insert(vtypes, field.exp._type)
+    end
+
+    -- Empty constructors reach this helper only with a Map context; a
+    -- no-context empty constructor is the default empty Array.
+    local ktype = kcontext
+        or (ktypes[1] and deoptionize(ktypes[1]))
+        or types.Integer()
+    local vtype = vcontext
+        or (vtypes[1] and deoptionize(vtypes[1]))
+        or types.Integer()
+    node._type = types.Map(ktype, vtype)
+
+    for i, field in ipairs(node.fields) do
+        field.name = trycoerce(field.name, ktype, errors)
+        checkmatch("map key initializer at position " .. i, ktype,
+            field.name._type, errors, field.name.loc)
+
+        field.exp = trycoerce(field.exp, vtype, errors)
+        checkmatch("map value initializer at position " .. i, vtype,
+            field.exp._type, errors, field.exp.loc)
+    end
 end
 
 --
@@ -1873,6 +2137,7 @@ checkstat = util.make_visitor({
     ["Ast.StatAssign"] = function(node, st, errors)
         for _, var in ipairs(node.vars) do
             checkvar(var, st, errors)
+            check_c_assignment_storage(var, errors)
         end
         local fixed = {}
         for i, var in ipairs(node.vars) do
@@ -2576,149 +2841,88 @@ checkexp = util.make_visitor({
 
     ["Ast.ExpInitList"] = function(node, st, errors, context)
         context = context and deoptionize(context)
-        local expected = context and context._tag
-        if not expected then
-            -- try to detect from contents
-            local elem = node.fields[1]
-            if elem then
-                if elem.name and type(elem.name) == "table" then
-                    expected = "Type.Map"
-                elseif elem.name and type(elem.name) == "string" then
-                    expected = "Type.Nominal"
-                end
+        local shape, kinds, dots_field, invalid_dots =
+            classify_constructor_fields(node, errors)
+
+        if invalid_dots or shape == "mixed" then
+            if shape == "mixed" then
+                checker.typeerror(errors, node.loc,
+                    "cannot mix %s fields in a constructor",
+                    table.concat(kinds, ", "))
             end
-            -- fall back to array if not detected otherwise
-            if not expected then
-                expected = "Type.Array"
-            end
+            check_rejected_constructor_fields(node, st, errors, context)
+            node._type = context or types.Invalid()
+            return
         end
 
-        -- A trailing `...` field (`{e1, ..., ...}` / `{...}`) is array-shaped:
-        -- it whole-tail-spreads the vararg into the array. It is only legal in an
-        -- array constructor; in a map/record constructor it is an error.
-        local dots_field = find_dots_field(node, errors)
-        if dots_field and expected ~= "Type.Array" then
+        local expected = context and context._tag
+        if expected ~= "Type.Array"
+           and expected ~= "Type.Map"
+           and expected ~= "Type.Nominal" then
+            if shape == "computed" then
+                expected = "Type.Map"
+            elseif shape == "named" then
+                expected = "Type.Nominal"
+            else
+                -- Empty and positional constructors default to Array without a
+                -- useful structural context.
+                expected = "Type.Array"
+            end
+            context = nil
+        end
+
+        if dots_field and expected == "Type.Nominal" then
             checker.typeerror(errors, dots_field.loc,
-                "'...' can only appear in an array constructor")
-            -- Still resolve `$vararg` so scope diagnostics fire; drop the field
-            -- so the map/record arm below does not choke on the bare `...`.
-            check_dots_marker(dots_field.exp, st, errors)
-            table.remove(node.fields)
-            dots_field = nil
+                "'...' can only appear in an all-positional array or integer-keyed map constructor")
+            check_rejected_constructor_fields(node, st, errors, context)
+            node._type = context or types.Invalid()
+            return
         end
 
         if expected == "Type.Array" then
-            local econtext = context and context.elem
-            local exps = {}
-            local invalid_named = false
-            for _, field in ipairs(node.fields) do
-                if field.name then
-                    invalid_named = true
-                    checker.typeerror(errors, field.loc,
-                        "initializing field '%s' when expecting array", field.name)
-                    checkexp(field.exp, st, errors)
-                else
-                    table.insert(exps, field.exp)
-                end
-            end
-            if invalid_named then
-                node._type = types.Array(econtext or types.Integer())
-                return
-            end
-
-            local adjusted = adjust_explist(exps,
-                result_demand({}, econtext or INFER_OPEN, {
-                    term = "array initializer",
-                    loc = node.loc,
-                    missing = "error",
-                    explicit_surplus = "discard",
-                    open_coerce = true,
-                    defer_open_check = true,
-                }), st, errors)
-            local etype = econtext
-                or (adjusted.open_type
-                    and adjusted.open_type._tag ~= "Type.Invalid"
-                    and deoptionize(adjusted.open_type))
-                or (adjusted.tail_scalars[1]
-                    and deoptionize(adjusted.tail_scalars[1]._type))
-                or types.Integer()
-            node._type = types.Array(etype)
-
-            for i, exp in ipairs(adjusted.tail_scalars) do
-                local old = exp
-                exp = trycoerce(exp, etype, errors)
-                checkmatch("array initializer at position " .. i, etype,
-                    exp._type, errors, exp.loc)
-                replace_adjusted_value(adjusted, old, exp)
-            end
-
-            if adjusted.open_source then
-                local source = adjusted.open_type
-                if source._tag ~= "Type.Invalid"
-                   and not types.equals(source, etype)
-                   and not types.compatible(etype, source)
-                   and not types.coerceable(source, etype) then
-                    if adjusted.open_source._tag == "Ast.ExpDots" then
-                        checker.typeerror(errors, adjusted.open_source.loc,
-                            "'...' element type %s is not coerceable to array element type %s",
-                            types.tostring(source), types.tostring(etype))
+            if shape == "empty" or shape == "positional" then
+                check_positional_constructor(node, st, errors, expected, nil,
+                    context and context.elem)
+            else
+                for _, field in ipairs(node.fields) do
+                    if shape == "named" then
+                        checker.typeerror(errors, field.loc,
+                            "initializing field '%s' when expecting array",
+                            field.name)
                     else
-                        checker.typeerror(errors, adjusted.open_source.loc,
-                            "open result element type %s is not coerceable to array element type %s",
-                            types.tostring(source), types.tostring(etype))
+                        checker.typeerror(errors, field.loc,
+                            "initializing a computed field when expecting array")
                     end
                 end
-                adjusted.open_target = etype
-                if adjusted.open_source._tag == "Ast.ExpCall"
-                   and adjusted.open_source._open_results then
-                    adjusted.open_source._open_results.target_type = etype
-                elseif adjusted.open_source._tag == "Ast.ExpDots"
-                       and adjusted.open_source._open_dots then
-                    adjusted.open_source._open_dots.target_type = etype
-                end
+                check_rejected_constructor_fields(node, st, errors)
+                node._type = context or types.Array(types.Integer())
             end
-
-            node.fields = {}
-            for _, exp in ipairs(adjusted.exps) do
-                table.insert(node.fields, ast.Field(exp.loc, nil, exp))
-            end
-            node._array_adjustment = adjusted
         elseif expected == "Type.Map" then
-            local kcontext = context and context.keys
-            local vcontext = context and context.values
-            local ktypes = {}
-            local vtypes = {}
-            for _, field in ipairs(node.fields) do
-                if type(field.name) == "string" then
+            if shape == "computed" then
+                check_computed_map_constructor(node, st, errors, context)
+            elseif shape == "empty" then
+                assert(context)
+                check_computed_map_constructor(node, st, errors, context)
+            elseif shape == "positional" then
+                assert(context)
+                if types.equals(context.keys, types.Integer()) then
+                    check_positional_constructor(node, st, errors, expected,
+                        context.keys, context.values)
+                else
+                    checker.typeerror(errors, node.loc,
+                        "positional fields require an integer-keyed map, but found key type %s",
+                        types.tostring(context.keys))
+                    check_rejected_constructor_fields(node, st, errors, context)
+                    node._type = context
+                end
+            else
+                assert(context)
+                for _, field in ipairs(node.fields) do
                     checker.typeerror(errors, field.loc,
                         "initializing field '%s' when expecting map", field.name)
-                    checkexp(field.exp, st, errors)
-                else
-                    local kexp = field.name
-                    checkexp(kexp, st, errors, kcontext)
-                    table.insert(ktypes, kexp._type)
-
-                    local vexp = field.exp
-                    checkexp(vexp, st, errors, vcontext)
-                    table.insert(vtypes, vexp._type)
                 end
-            end
-
-            local ktype = kcontext or deoptionize(ktypes[1])
-            local vtype = vcontext or deoptionize(vtypes[1])
-            node._type = types.Map(ktype, vtype)
-            for i, field in ipairs(node.fields) do
-                if not field.name then
-                    field.name = trycoerce(field.name, ktype, errors)
-                    local kexp = field.name
-                    checkmatch("map key initializer at position " .. i, ktype,
-                               kexp._type, errors, kexp.loc)
-
-                    field.exp = trycoerce(field.exp, vtype, errors)
-                    local vexp = field.exp
-                    checkmatch("map value initializer at position " .. i, vtype,
-                               vexp._type, errors, vexp.loc)
-                end
+                check_rejected_constructor_fields(node, st, errors)
+                node._type = context
             end
         elseif expected == "Type.Nominal" then
             if not context then
@@ -2805,35 +3009,6 @@ checkexp = util.make_visitor({
                 end
                 node._type = types.Nominal(context.fqtn)
             end
-        else
-            local isarray = true
-            local ismap = false
-            local ktype
-            local vtype
-            for i, field in ipairs(node.fields) do
-                checkexp(field.exp, st, errors)
-                vtype = vtype or deoptionize(field.exp._type)
-                field.exp = trycoerce(field.exp, vtype, errors)
-                checkmatch("value expression no. " .. tostring(i),
-                    vtype, field.exp._type, errors, field.loc)
-                isarray = isarray and not field.name
-                if type(field.name) == "table" then
-                    checkexp(field.name, st, errors)
-                    ktype = ktype or deoptionize(field.name._type)
-                    field.name = trycoerce(field.name, ktype, errors)
-                    checkmatch("key expression no. " .. tostring(i),
-                        ktype, field.name._type, errors, field.loc)
-                    ismap = true
-                end
-            end
-            if ismap then
-                node._type = types.Map(ktype, vtype or types.Integer())
-            elseif isarray then
-                node._type = types.Array(vtype or types.Integer())
-            else
-                node._type = invalid(errors, node.loc,
-                    "no context to provide type for record constructor")
-            end
         end
     end,
 
@@ -2900,10 +3075,17 @@ checkexp = util.make_visitor({
         if op == "#" then
             node.exp = tryforce(node.exp)
             texp = node.exp._type
-            if texp._tag ~= "Type.Array" and texp._tag ~= "Type.String"
+            if texp._tag == "Type.Map"
+               and not types.equals(texp.keys, types.Integer()) then
+                checker.typeerror(errors, loc,
+                    "trying to take the length of a map with key type %s instead of an integer-keyed map",
+                    types.tostring(texp.keys))
+            elseif texp._tag ~= "Type.Array"
+               and texp._tag ~= "Type.Map"
+               and texp._tag ~= "Type.String"
                and not has_c_length(texp) then
                 checker.typeerror(errors, loc,
-                    "trying to take the length of a %s instead of an array, string, C array, or counted owned C array",
+                    "trying to take the length of a %s instead of an array, integer-keyed map, string, C array, or counted owned C array",
                     types.tostring(texp))
             end
             node._type = types.Integer()
@@ -3615,8 +3797,9 @@ checkexp = util.make_visitor({
 
     -- Bare `...` in a value position. `...` is only legal as the sole, trailing
     -- entry of an explist (a call argument, `return`, assignment/decl RHS) or an
-    -- array constructor, where the consuming loop (§4.6/§4.7) intercepts it as a
-    -- marker or rewrites it into `ExpDotsIndex` reads BEFORE reaching this arm.
+    -- positional Array/integer-Map constructor, where the consuming loop
+    -- intercepts it as a marker or rewrites it into `ExpDotsIndex` reads BEFORE
+    -- reaching this arm.
     -- Reaching this arm therefore means `...` appeared where a single value is
     -- required (e.g. `1 + ...`, a non-trailing list position), which is an error.
     -- We still resolve `$vararg` so the scope / not-variadic diagnostics fire.
@@ -3627,7 +3810,7 @@ checkexp = util.make_visitor({
             checker.typeerror(errors, node.loc,
                 "'...' can only be used as the last item of an argument list, "
                 .. "a return, an assignment, a generic for iterator tuple, "
-                .. "or an array constructor")
+                .. "or a positional array/integer-keyed map constructor")
         end
     end,
 

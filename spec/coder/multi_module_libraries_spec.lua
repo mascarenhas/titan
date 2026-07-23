@@ -106,7 +106,7 @@ local function compiler_argv(workspace, source_root, ...)
         "-u", "LUA_PATH", "-u", "LUA_PATH_5_5",
         "-u", "LUA_CPATH", "-u", "LUA_CPATH_5_5",
         "CCACHE_DISABLE=1",
-        "TITAN_PATH_0_16=" .. workspace,
+        "TITAN_PATH_0_17=" .. workspace,
         "TITAN_PATH=",
     }
     if PREFIX then
@@ -871,6 +871,73 @@ end
         ok, output = run_lua(workspace, [[
 local consumer = require "consumer"
 assert(consumer.run() == 1224)
+]])
+        assert.truthy(ok, output)
+    end)
+end)
+
+describe("dense arrays through one shared prefix provider", function()
+    local workspace
+    local source_root
+
+    before_each(function()
+        workspace = os.tmpname()
+        assert.truthy(os.remove(workspace))
+        assert.truthy(lfs.mkdir(workspace))
+        source_root = workspace .. "/source"
+        make_directory(source_root .. "/arraypkg")
+
+        write_file(source_root .. "/arraypkg/shared.titan", [[
+function make(): {value}
+    return {10, nil, 30}
+end
+
+function set(xs: {value}, i: integer, v: value)
+    xs[i] = v
+end
+
+function echo(xs: {value}): {value}
+    return xs
+end
+]])
+        write_file(source_root .. "/arraypkg/left.titan", [[
+local shared = import "arraypkg.shared"
+
+function roundtrip(): {value}
+    local xs = shared.make()
+    shared.set(xs, 5, 50)
+    return shared.echo(xs)
+end
+]])
+
+        local ok, output, why, code = compile(
+            workspace, source_root, "arraypkg.left", "arraypkg.shared")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+    end)
+
+    after_each(function()
+        if workspace then remove_tree(workspace) end
+    end)
+
+    it("shares one Array between its logical modules", function()
+        assert_provider_pair(workspace, "arraypkg", {
+            "arraypkg.left", "arraypkg.shared",
+        }, true)
+        assert.is_nil(lfs.attributes(
+            workspace .. "/arraypkg/left.so", "mode"))
+        assert.is_nil(lfs.attributes(
+            workspace .. "/arraypkg/shared.so", "mode"))
+
+        local ok, output = run_lua(workspace, [[
+local left = require "arraypkg.left"
+local shared = require "arraypkg.shared"
+local xs = left.roundtrip()
+assert(type(xs) == "userdata")
+assert(#xs == 5)
+assert(xs[1] == 10 and xs[2] == nil and xs[3] == 30)
+assert(xs[4] == nil and xs[5] == 50)
+assert(shared.echo(xs) == xs)
 ]])
         assert.truthy(ok, output)
     end)

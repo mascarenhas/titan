@@ -355,14 +355,16 @@ For a position reached through `flexrettype`, `_result_sources` marks the
 projection as possibly absent and its type is `optionize(T)` (`value` remains
 `value`). Open consumers do not synthesize an unbounded `ExpExtra` list: the
 call instead receives `_open_results = {source_type, target_type, start}`.
-Map/record fields and named arguments are scalar finite consumers. The `?`
+Computed Map/record fields and named arguments are scalar finite consumers.
+The `?`
 inference marker still applies per finite declaration slot.
 
 ### Shared finite/open expression-list demand
 
 `result_demand(fixed, tail, opts)` and
 `adjust_explist(exps, demand, st, errors)` own declarations, assignments,
-returns, positional calls, arrays, and the generic-for tuple. `fixed` is dense
+returns, positional calls, positional container constructors, and the
+generic-for tuple. `fixed` is dense
 (`UNKNOWN_SLOT` means inferred), while `tail` is false, a typed open element,
 or `INFER_OPEN`. The result retains every written expression in lexical order,
 records delivered `fixed` and `tail_scalars`, marks effect-only `discards`, and
@@ -381,7 +383,9 @@ a discarded call receives `_voidok`. A fixed-only deficit still reports the
 ordinary arity error. A declared flexible producer projects `T?` into finite
 slots, while an open sink preserves the actual `T` run. The three open sinks
 are an input-vararg call tail, a flexible return tail, and the final positional
-array field. See
+field of an Array or exact integer-keyed Map. Such a constructor stores the
+shared result as `_positional_adjustment`; computed Maps remain scalar and do
+not use it. See
 [Flexible returns](flexible-returns.md#one-finiteopen-result-demand).
 
 Named-call fields are the exception among call arguments: each field owns
@@ -538,8 +542,8 @@ Two helpers maintain the option invariants:
   `optionize`, `Option.base` is never an Option — code may rely on it.
 
 De-optionization is applied silently where nil-tolerance lives in the
-operation, not the type: array element types (`{integer?}` means
-`{integer}`), map value types, and initializer-list context types. Map *key*
+operation, not the type: Array element types (`{integer?}` means
+`{integer}`), Map value types, and initializer-list context types. Map *key*
 types reject Nil and Option with errors. In the other direction, every
 array/map indexing **read** is optionized: `arr[i]` has type `elem?` and
 `m[k]` has type `values?` — and since the same type is used when the element
@@ -671,12 +675,22 @@ with `_type = node._type`, the surrounding context applies its usual
   an *expected type* down the tree. It is not inference: literals ignore it
   (`10` in a float context is still an Integer that then gets a cast), but
   `Ast.ExpInitList` needs it to decide what `{ ... }` *is* — the context is
-  `deoptionize`d, its tag picks the array/map/record branch, and only a
+  `deoptionize`d, its tag picks the Array/Map/record branch, and only a
   Nominal context permits a record constructor (`no context to provide type
   for record constructor`). With no useful context the shape decides
-  (bracketed keys → map, named fields → record error, otherwise array; an
-  empty `{}` defaults to `{integer}`). A Boolean context also switches
+  (computed keys → Map, named fields → record error, otherwise Array; an
+  empty `{}` defaults to `{integer}`). A nonempty positional Map requires an
+  exact integer key type from context. Mixed field categories are rejected
+  before elaboration; an all-positional Array or integer Map then runs
+  `adjust_explist` exactly once and records `_positional_adjustment`.
+  A Boolean context also switches
   `and`/`or` into plain boolean mode.
+* **Length classification.** `Ast.ExpUnop` accepts `#` for an Array, a String,
+  existing countable C forms, or a Map whose resolved key type is exactly
+  `Type.Integer`. Other Map key types receive the dedicated
+  “not an integer-keyed map” diagnostic. This is exact resolved-type
+  classification, not `types.compatible`; code generation gives Arrays their
+  maintained length and integer Maps Lua's ordinary border.
 * **Record constructor omissions.** In a Nominal record context, explicit
   visible fields are checked in source order. Each absent field then gets the
   same `nil_can_adjust_to` test as an omitted named formal; an accepted field is

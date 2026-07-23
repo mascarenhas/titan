@@ -36,6 +36,42 @@ describe(".so-only cross-module imports", function()
         assert.truthy(rok, out)
     end)
 
+    it("shares dense arrays through a .so-only module", function ()
+        local ok, err = build_so_chain({
+            { name = "arraysofoo", src = [[
+                function make(): {value}
+                    return {10, nil, 30}
+                end
+                function set(xs: {value}, i: integer, v: value)
+                    xs[i] = v
+                end
+                function echo(xs: {value}): {value}
+                    return xs
+                end
+            ]] },
+            { name = "arraysobar", src = [[
+                local foo = import "arraysofoo"
+                function roundtrip(): {value}
+                    local xs = foo.make()
+                    foo.set(xs, 5, 50)
+                    return foo.echo(xs)
+                end
+            ]] },
+        })
+        assert.truthy(ok, err)
+
+        local rok, out = call("arraysobar", [[
+            local foo = require "arraysofoo"
+            local xs = arraysobar.roundtrip()
+            assert(type(xs) == "userdata")
+            assert(#xs == 5)
+            assert(xs[1] == 10 and xs[2] == nil and xs[3] == 30)
+            assert(xs[4] == nil and xs[5] == 50)
+            assert(foo.echo(xs) == xs)
+        ]])
+        assert.truthy(rok, out)
+    end)
+
     it("lowers named calls through a .so-only interface to the positional ABI",
     function ()
         local ok, err = build_so_chain({

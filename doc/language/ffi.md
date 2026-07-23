@@ -420,6 +420,62 @@ owned C objects. For pointer and owned bases, `p.x` uses C's `->` semantics.
 Bitfields are parsed and typed, but they remain C bitfields: assignment follows
 the C compiler's rules. Anonymous fields are not exposed as Titan members.
 
+### C Assignment Receivers And Order
+
+C field and index targets follow Titan's
+[prepared-target assignment order](statements.md#multiple-assignment). For a
+single assignment, Titan evaluates and freezes the complete receiver/base and
+index chain before the right-hand side, then performs the final NULL or bounds
+check and the store. A multiple assignment prepares every target in lexical
+left-hand order before any right-hand expression and later stores from left to
+right.
+
+A check needed merely to *reach* the final target is different from that final
+store check. For example, in `links()[i].next.x = rhs()`, checking the pointer
+and index needed to load `next` happens while preparing the left-hand side. If
+that intermediate step fails, `rhs()` does not run. Once the final target has
+been reached, its own pointer or bound validation remains deferred until after
+the right-hand side. An owned C receiver stays GC-rooted across this interval,
+so reassigning the Titan variable that supplied it does not retarget the
+pending store.
+
+A by-value C struct, union, or array used as an assignment receiver must
+ultimately denote persistent, addressable storage. Imported C objects, C
+locals or parameters, pointer-referenced storage, and fields or elements
+reached from those objects are persistent. A C pointer or owned C object
+identifies persistent storage regardless of how that pointer/userdata value was
+produced, so a pointer-returning function or `T.new()` call can be a receiver.
+A call, cast, or other temporary that produces a struct, union, or array *by
+value* is not persistent: Titan cannot retain a pointer to that temporary while
+the right-hand side runs.
+
+```lua
+local p: c.ffi_point = c.make_point()
+p.x = 1                  -- valid: p is persistent local storage
+c.make_point().x = 2     -- rejected: the returned struct is temporary
+```
+
+The rejected form reports:
+
+```text
+C assignment receiver must have persistent storage; expression of type 'ffi_point' is a by-value C aggregate
+```
+
+Reading from such a temporary remains valid. That includes reading a pointer
+field or pointer-array element during target preparation and then mutating the
+persistent object named by that copied pointer:
+
+```lua
+c.make_outer().pointer_field.x = 3  -- valid: x belongs to the pointee
+```
+
+Titan may materialize the returned aggregate just long enough to extract and
+freeze `pointer_field`; it does not try to mutate the temporary `outer`.
+Passing a materialized by-value object to a compatible `const *T` parameter
+for the duration of one C call likewise remains valid. The restriction is
+specifically on mutation of a by-value aggregate through an assignment
+receiver.
+
 ## Owned C Objects
 
 Any supported C object type has two pseudo-functions on its type namespace:

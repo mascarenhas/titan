@@ -29,7 +29,7 @@ end
 local function installed_stdlib_container()
     local prefix = assert(prefix_from_cpath(package.cpath),
         "cannot find the active Lua prefix in package.cpath")
-    return prefix .. "/lib/titan/0.16/" .. STDLIB_CONTAINER
+    return prefix .. "/lib/titan/0.17/" .. STDLIB_CONTAINER
 end
 
 local function quote(word)
@@ -909,7 +909,7 @@ exit 64
         local build_log = root .. "/build.log"
 
         local payload = assert(staticmetadata.render(
-            "fixture.module", "0.16", "{}"))
+            "fixture.module", "0.17", "{}"))
         local initializer = assert(staticmetadata.c_initializer(payload))
         write_file(source, string.format([[
 #if defined(__APPLE__)
@@ -1015,7 +1015,7 @@ printf 'build\n' >> %s
                 tostring(code) .. ")")
             assert.equal("build\nbuild\nbuild\n", read_file(build_log))
             assert.truthy(staticmetadata.scan_archive(static_archive, {
-                expected_abi = "0.16",
+                expected_abi = "0.17",
             }))
 
             assert.truthy(os.remove(provider))

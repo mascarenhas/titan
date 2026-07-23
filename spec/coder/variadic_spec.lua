@@ -358,10 +358,16 @@ describe("collectable variadic parameters (code generator)", function()
         ]])
     end)
 
-    -- A `...: {integer}` (array element type, Table*) callee: read the first
-    -- element of each forwarded array after a forced GC.
+    -- A `...: {integer}` callee: exact Array elements remain backing Table*
+    -- values in the descriptor's Table** buffer. Read each after a forced GC.
     it("...: {integer} (array) survives a forced GC in the callee", function()
         run_coder([[
+            function one(n: integer): {integer}
+                return {n}
+            end
+            function two(a: integer, b: integer): {integer}
+                return {a, b}
+            end
             function firstsum(...: {integer}): integer
                 local junk: {integer} = {}
                 local k = 1
@@ -381,7 +387,7 @@ describe("collectable variadic parameters (code generator)", function()
         ]], [[
             collectgarbage("incremental")
             assert(test.firstsum() == 0)
-            assert(test.firstsum({10}, {20, 99}, {30}) == 60)
+            assert(test.firstsum(test.one(10), test.two(20, 99), test.one(30)) == 60)
         ]])
     end)
 
@@ -1542,13 +1548,10 @@ describe("variadic parameters: functional coverage gaps (code generator)", funct
         ]])
     end)
 
-    -- DESIGN-DECISION PIN: `{...: value}` with a GENUINE nil element. `#...` counts
-    -- all the slots passed (3), `...[2]` reads the nil, but `#{...}` follows Lua's
-    -- table-border semantics for an array with a nil hole: the length is a border,
-    -- so `#t == 1` here. This MATCHES stock Lua `{...}`-with-nil (e.g. in plain
-    -- Lua `#({(function(...) return ... end)(1, nil, 3)}) == 1`); it is an
-    -- intentional consequence of the border rule, NOT a variadic miscompile.
-    it("{...: value} with a genuine nil element follows Lua border semantics", function()
+    -- DESIGN-DECISION PIN: `{...: value}` with a GENUINE nil element. `#...`
+    -- counts all passed slots, `...[2]` reads nil, and the resulting dense Array
+    -- length is the highest present positive index rather than a Lua table border.
+    it("{...: value} with a genuine nil preserves dense Array length", function()
         run_coder([[
             function dotslen(...: value): integer
                 return #...
@@ -1567,11 +1570,9 @@ describe("variadic parameters: functional coverage gaps (code generator)", funct
             assert(test.at(2, 1, nil, 3) == nil)
             assert(test.at(1, 1, nil, 3) == 1)
             assert(test.at(3, 1, nil, 3) == 3)
-            -- #{...} is a Lua table border: an array with a nil hole at index 2 has
-            -- a valid border at 1, so #t == 1. This matches stock Lua's behaviour
-            -- for `#{1, nil, 3}` packed from a vararg and is intentional, not a bug.
-            assert(test.tablelen(1, nil, 3) == 1)
-            -- a trailing nil also borders at the last non-nil
+            -- #{...} reports the highest present positive slot despite the hole.
+            assert(test.tablelen(1, nil, 3) == 3)
+            -- A trailing nil is absent, so the highest present slot remains 2.
             assert(test.tablelen(1, 2, nil) == 2)
         ]])
     end)

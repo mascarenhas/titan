@@ -83,7 +83,7 @@ describe("folder modules through the public compiler", function()
             "-u", "LUA_PATH", "-u", "LUA_CPATH",
             "-u", "LUA_PATH_5_5", "-u", "LUA_CPATH_5_5",
             "CCACHE_DISABLE=1",
-            "TITAN_PATH_0_16=" .. workspace,
+            "TITAN_PATH_0_17=" .. workspace,
             "TITAN_PATH=",
             TITANC, "--tree", source_root, modname,
         }, workspace)

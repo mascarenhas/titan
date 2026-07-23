@@ -8,7 +8,9 @@ generated translation unit and the calling convention are covered in the
 [code generator overview](codegen-overview.md); construct-by-construct
 translations are in [code generator: constructs](codegen-constructs.md);
 the Lua-side boundary checks in
-[Lua interop internals](lua-interop-internals.md).
+[Lua interop internals](lua-interop-internals.md). Array-specific ownership,
+boxing, length, and resize invariants are centralized in
+[Dense Arrays](dense-arrays.md).
 
 ## Background: TValue, the Lua stack, and the GC
 
@@ -49,8 +51,8 @@ for locals, parameters, return values and temporaries alike:
 | `boolean` | `int` | 0/1 — 5.5 booleans carry no payload, truth lives in the tag |
 | `nil` | `int` | always 0 (`getslot` for nil yields the constant `0`) |
 | `string` | `TString*` | raw pointer to the collectable string object |
-| `{T}` (array) | `Table*` | raw pointer; Titan arrays *are* Lua tables |
-| `{K:V}` (map) | `Table*` | likewise |
+| `{T}` (array) | `Table*` | internal backing Table; the Lua-visible value is its canonical proxy Udata |
+| `{K:V}` (map) | `Table*` | ordinary Lua table in both domains |
 | `value` | `TValue` | a full boxed Lua value, held **by value** |
 | function type (`(P..., ...: I) -> (R..., ...: O)`) | `TValue` | boxed callable value; input/output tails change the callable type and native entry ABI, not the boxed representation |
 | record type (`Type.Nominal`) | `Udata*` | the record value *is* this userdata (below) |
@@ -96,15 +98,15 @@ Three helper families in `coder.lua` mediate between C variables and
   `sethvalue`, `setuvalue` (for records), `setobj2t` for
   `value`/options. For `Udata *`, it emits `setuvalue` for a non-NULL pointer
   and nil for NULL rather than boxing the pointer as lightuserdata.
-* `setwrapped(typ, dst, src)` was historically `setslot` except for
-  records, where it had to swap the Titan-side closure for the
-  Lua-visible userdata. Now that a record *is* its userdata, `setwrapped`
-  for records is just `setslot` — there is no wrapper to swap to (next
-  section). It is still used whenever a value escapes anywhere Lua can
-  see — table elements, map keys/values, results returned to Lua —
-  because other code paths historically distinguished the two; for
-  records the two are identical. `copyslotwrapped` is the slot-to-slot
-  variant.
+* `setboxed(ctx, typ, dst, src)` and the corresponding unbox/mixed-read
+  helpers cross a representation domain. Records already are their
+  Lua-visible Udata, but Arrays are not: boxing maps an internal backing
+  `Table*` to its canonical proxy Udata, while unboxing validates that proxy
+  and recovers the backing. Map keys/values, `value`, generic calls, and Lua
+  results use the boxed domain. Typed slots and exact calls retain the
+  internal domain. This split replaces the old representation-blind
+  `setwrapped`/`copyslotwrapped` model; see
+  [Dense Arrays](dense-arrays.md#internal-and-boxed-representations).
 
 `types.is_gc` in `types.lua` decides which types the collector cares
 about, and therefore which values need anchoring: string, value,
@@ -200,8 +202,8 @@ type survives, plus a metatable-keyed reverse map for error messages
 ### Wrap and unwrap at the boundary
 
 Now that a record *is* its userdata, the boundary has nothing to swap:
-Titan and Lua hold the same object. `setwrapped` for a record is just
-`setslot` — it hands Lua the udata directly (for `T?` over a record,
+Titan and Lua hold the same object. `setboxed` for a record hands Lua the
+udata directly (for `T?` over a record,
 after a nil check). Coming back, the nominal case of `checkandget`
 compares the udata's metatable against the expected record's metatable
 (read per-Lua-state from the `_mod` user value caching it) and uses the
@@ -246,7 +248,7 @@ and metamethod dispatch — a full userdata; the metatable's
 verifies `type(p) == "userdata"` and that two instances share a
 metatable. **Titan needs** fixed-slot, unboxed-pointer field access and
 a GC object with barrier support for mutable slots — exactly
-what a `Udata`'s `UValue uv[]` array is. `setwrapped`/`checkandget`
+what a `Udata`'s `UValue uv[]` array is. `setboxed`/`checkandget`
 (Titan↔Lua) need no wrap or unwrap at all: the value crossing the
 boundary is the record itself, leaving only the one-pointer metatable
 compare on the way in.
@@ -374,22 +376,17 @@ back barrier on each GC-able field store keeps the (possibly old/black)
 udata honest. There is no longer a separate closure-then-udata sequence
 to order, and no forward-barriered cross-link to install.
 
-Container literals follow the same pattern. `codearray` anchors the
-fresh table immediately — and *always* in a stack slot, even when the
-constructor has a destination variable, per this comment in the source:
-
-> always build the array anchored in a stack slot; a target slot such as
-> a module-global upvalue is not scanned by minor collections, so the
-> fresh table could be swept while a callee in the fill loop triggers
-> the GC (caller stores + barriers after we return)
-
-Every element expression is then evaluated into its own GC-anchored
-temp (via `setwrapped`, so records are stored as their userdata), and
-only after all elements exist does the code pre-size the array part
-(`luaH_resizearray`) and copy the slots in with `obj2arr` — a
-collection triggered by element *k*'s expression cannot sweep elements
-1..k−1. Map constructors (`codemap`) do the same with anchored key and
-value temps. String results — literals (`luaS_new`), concatenation,
+Container literals preserve the same rooting rule with a different order:
+every Array element expression is first evaluated into an appropriately boxed
+or internal anchored temp. `titan_array_new` then roots the backing Table and
+proxy Udata independently while it builds their key-0/uservalue cycle; after
+it returns, generated code anchors the backing result before filling positive
+array slots from those temps. The constructor records its highest non-nil
+position in `lenhint`; resizes save and restore that authoritative length.
+Map constructors root their ordinary Table plus key and value temps, boxing an
+Array used as a raw-visible key or value. See
+[Dense Arrays](dense-arrays.md#runtime-construction). String results —
+literals (`luaS_new`), concatenation,
 number→string casts — are likewise stored to their temp's slot
 immediately after creation.
 
@@ -429,8 +426,10 @@ a `Udata` or a `Table`; used for:
   (`luaC_barrierback(L, obj2gco(_imod), _varslot)`), including writes
   coming from Lua through the module metatable's `__newindex`;
 * record field writes from Lua through the record's `__newindex`;
-* array element stores, map stores, and array/map-literal fills, each
-  gated on `types.is_gc` of the stored element or value type.
+* Array backing-slot stores, Map stores, and container-literal fills, each
+  gated on `types.is_gc` of the stored element or value type. Array stores
+  barrier the backing Table, never its proxy; the cycle edges use the barrier
+  appropriate to their actual Table/Udata owners.
 
 (The argument shape differs from the forward barrier: back takes the
 *value* and an `obj2gco`-wrapped container; forward takes the *slot
@@ -503,8 +502,8 @@ returns and is in a stack slot before any subsequent allocation can run.
 When a Lua program is the caller, the Lua entry wrapper plays this role:
 it reserves stack space for the fixed prefix and requested flexible capacity
 before invoking the native function, then writes each actual result back with
-`setwrapped` — for a record that is just the record's own userdata, since the
-value and its Lua face are one object
+`setboxed` — for a record that is just the record's own userdata, while an
+Array becomes its canonical proxy
 ([Lua interop internals](lua-interop-internals.md)).
 
 A pending `return` that crosses `finally` is the difficult lifetime case: the

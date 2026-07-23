@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
-# Keep compiler/language coverage separate from library behavior. LuaCov's
-# debug hook makes repeated checks of large Titan library sources expensive,
-# but those checks do not measure the Titan or C implementations themselves.
+# Keep compiler/language coverage separate from native/runtime and library
+# behavior. LuaCov's debug hook makes repeated checks of large Titan library
+# sources expensive, and it does not measure Titan's C runtime implementation.
 
 set -u
 
@@ -35,14 +35,15 @@ while IFS= read -r test_file; do
             # insulation and compiler modules loaded by earlier specs.
             compiler_unit_tests+=("$test_file")
             ;;
+        spec/dense_array_runtime_spec.lua | \
         spec/stdlib/coroutine_spec.lua | \
         spec/stdlib/loadlibglobal_spec.lua | \
         spec/stdlib_installer_spec.lua | \
         spec/libuv_build_spec.lua | \
         spec/minicoro_spec.lua | \
         spec/rockspec_spec.lua)
-            # These suites mutate or inspect shared root artifacts, so keep
-            # them out of the two private-workspace workers below.
+            # Keep serial native/runtime proofs and suites that mutate or
+            # inspect shared root artifacts out of the two workers below.
             library_serial_tests+=("$test_file")
             ;;
         spec/stdlib/uv*_spec.lua | \
@@ -148,8 +149,8 @@ case "$group" in
             "${compiler_isolated_coverage_tests[@]}"
         ;;
     library-serial)
-        echo "Running ${#library_serial_tests[@]} serial library" \
-            "spec files without LuaCov"
+        echo "Running ${#library_serial_tests[@]} serial native/runtime and" \
+            "library spec files without LuaCov"
         "$BUSTED" -o gtest -v "${library_serial_tests[@]}"
         ;;
     library-uv-fs)
@@ -165,7 +166,8 @@ case "$group" in
     libraries)
         library_count=$((${#library_serial_tests[@]} +
             ${#library_uv_fs_tests[@]} + ${#library_net_os_tests[@]}))
-        echo "Running $library_count library spec files without LuaCov"
+        echo "Running $library_count native/runtime and library spec files" \
+            "without LuaCov"
 
         serial_status=0
         "$BUSTED" -o gtest -v "${library_serial_tests[@]}" ||

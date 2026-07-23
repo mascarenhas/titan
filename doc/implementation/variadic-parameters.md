@@ -100,7 +100,7 @@ respectively.
 ### Spread and `...[e]`; `#...` as a unop
 
 A trailing `...` spread is admitted as the last item of an explist (call args,
-`return`, assignment/decl RHS) and of an array constructor:
+`return`, assignment/decl RHS) and of a positional container constructor:
 
 ```
 explist <- {| ((P  DOTS !LBRACKET) -> ExpDots) |}
@@ -237,7 +237,8 @@ resolves.
 
 * **`Ast.ExpDots`** resolves `$vararg` (so scope diagnostics fire) and then
   reports `'...' can only be used as the last item of an argument list, a
-  return, an assignment, or an array constructor` — a *bare* `...` outside a
+  return, an assignment, or a positional array/integer-keyed map constructor`
+  — a *bare* `...` outside a
   spread position is an error. In the legal spread positions the consuming loop
   intercepts the marker before it reaches this arm, calling `check_dots_marker`
   (which resolves `$vararg` onto `node._vararg_elem` **without** the bare-`...`
@@ -258,8 +259,9 @@ resolves.
 
 ### Shared finite/open expression-list demand
 
-Declarations, assignments, returns, calls, arrays, and the generic-for setup
-tuple all use `result_demand` plus `adjust_explist`; there are no longer four
+Declarations, assignments, returns, calls, positional Array/integer-Map
+constructors, and the generic-for setup tuple all use `result_demand` plus
+`adjust_explist`; there are no longer four
 independent spread loops. The adjustment record keeps every written expression
 in lexical order, separates fixed deliveries from scalar/open tail deliveries,
 and marks surplus expressions that must still run only for effect.
@@ -278,8 +280,9 @@ not an arity error.
 For an **open demand**, the final marker remains the single runtime-sized
 `open_source`. Input-variadic calls receive the remaining run after any fixed
 borrows; a function with `flexrettype` can forward it from `return ...`; and a
-final positional array field appends it. Static tail scalars are coerced to the
-consumer's element type. Codegen can pass an equal-representation input run by
+final positional Array or exact integer-Map field appends it. Static tail
+scalars are coerced to the consumer's element/value type. Codegen can pass an
+equal-representation input run by
 descriptor/start view, or allocate and convert a fresh run when the static
 prefix or element representation changes.
 
@@ -290,21 +293,19 @@ an error: the typed Titan descriptor has no C default-promotion contract.
 call and `...` is structurally impossible (`f(g(), ...)` truncates `g()` to one
 value).
 
-### Array `{...}`: backward typing
+### Positional `{...}`: backward typing
 
-`ExpInitList`'s Array arm recognizes a trailing key-less `ExpDots` field
-(and rejects `{..., 1}`: `'...' must be the last field in an array
-constructor`). A `...` field in a map/record constructor is an
-error (`'...' can only appear in an array constructor`). The element type is
+`ExpInitList` recognizes a trailing key-less `ExpDots` field in an
+all-positional Array or exact integer-keyed Map (and rejects `{..., 1}`:
+`'...' must be the last field in a positional constructor`). A `...` field in
+a computed Map or record constructor is an error. The element/value type is
 **seeded from the vararg element first** — `etype = econtext or
-deoptionize(dots_elem) or ...` — so `{...}` is `Array(t)`, **not** `Array(t?)`,
-and a no-context `{...}` is `{t}`. The kept `ExpDots` marker carries through to
-codegen. When a context overrides `etype` (e.g. `{...: integer}` in a `{float}`
-context), the vararg element type must be `equals` or `coerceable` to `etype`,
-else `'...' element type %s is not coerceable to array element type %s`.
-The same `_array_adjustment` can name a trailing flexible-result call as its
-open source; that run uses its declared `flexrettype` and the same per-element
-coercion into `etype`.
+deoptionize(dots_elem) or ...` — so a no-context `{...}` is `Array(t)`, not
+`Array(t?)`, while an exact `{integer: V}` context selects Map. The kept
+`ExpDots` marker carries through to codegen. A contextual target must accept
+the vararg element type or checking reports the ordinary positional
+initializer coercion error. The shared `_positional_adjustment` can likewise
+name a trailing flexible-result call as its open source.
 
 ### The coercion guarantee for codegen
 
@@ -459,16 +460,16 @@ is a `t?` `TValue`, mirroring the `codeindexarray` option branch.
 **`#...` (`ExpDotsLen`)** is the bare expression
 `((lua_Integer)_varargs->n_args - _start)`.
 
-**`{...}` / `{e1, ..., ...}` (`codearray`)** receives the trailing `ExpDots` as
-the adjustment's open source and switches to a runtime-sized build: the table
-is anchored, the static prefix fields are evaluated into reserved slots, the
-array part is sized at runtime from `nprefix + (n_args − _start)`, and a runtime loop stores each
-`args[_start + j]` with `obj2arr` plus a **`luaC_barrierback`** per collectable
-element (the table traces its array part). The driving struct/stride uses the
-**real** vararg element type `va.elem` (the struct actually allocated), not the
-array's declared element type, which a context may have overridden; when they
-differ, each element is converted via the ordinary cast lowering before the
-wrapped store. A final flexible-result call uses the same result-run consumer.
+**`{...}` / `{e1, ..., ...}` (`codearray` or positional `codemap`)** receives
+the trailing `ExpDots` as the adjustment's open source and switches to a
+runtime-sized build. The static prefix is evaluated into reserved roots, then
+the actual run count determines capacity. Array lowering creates the
+backing/proxy pair with `titan_array_new`, stores into positive backing slots,
+barriers collectable elements, and records the highest non-nil position as
+logical length. Positional Map lowering pre-sizes and fills an ordinary Table.
+The driving struct/stride uses the **real** vararg element type `va.elem`;
+when the contextual target differs, each element uses the ordinary typed
+conversion. A final flexible-result call uses the same result-run consumer.
 
 `return ...` uses finite `ExpDotsIndex` projections for fixed result slots and,
 when the current function has `flexrettype`, preserves the remaining input run
@@ -497,7 +498,7 @@ parameter:
    `TITAN_VARARG_MAX`, anchor the `Udata0` on a reserved slot, copy the static
    prefix (each gc prefix value anchored on its own slot first — §2.D) then each
    incoming `...` element converted to the callee element type (identical ctype →
-   raw copy; a `value` widening → `setwrapped`; a `value` narrowing →
+   raw copy; a `value` widening → `setboxed`; a `value` narrowing →
    `checkandget`), set `n_args`, pass `_start = 0`. The fresh allocation can
    relocate the Lua stack, so the function records
    `ctx.uses_base_off` and `_base` is recomputed from `_base_off` after the
@@ -554,10 +555,13 @@ flexible-array object (`lu_byte n_args; T args[]`) to a descriptor
 the struct layout did not; mixing 0.9 and 0.10 modules would misread the bytes
 after `n_args`, so they must live under different `TITAN_PATH` directories.
 
-The current ABI is **0.16**, newer than this variadic change. Flexible outputs
+The current ABI is **0.17**, newer than this variadic change. Flexible outputs
 reuse these descriptors but add `flexrettype` to serialized callable shapes and
 `_flexout`/`_flexwant` to native signatures. They shipped as ABI 0.14 rather
-than accepting both layouts under one marker.
+than accepting both layouts under one marker. ABI 0.17 leaves
+`TitanVargArrayOrMap` as `Table **`: exact Array elements remain internal
+backing Tables, while generic/Lua-visible runs box them as proxies. See
+[Dense Arrays](dense-arrays.md#internal-and-boxed-representations).
 
 Compiled-interface import paths round-trip `varargtype` through the same
 serialization, whether recovered from DSO callables or an archive metadata
@@ -611,12 +615,11 @@ points to never change; only the stack array can relocate):
 
 Two more mechanical points:
 
-* **`{...}` uses `luaC_barrierback`** per collectable element, because the table
-  traces its array part and the fresh elements are old→young stores. Scalars
-  skip the barrier.
-* **Stack relocation across struct allocation / `luaH_resizearray`.** A fresh
-  `Udata0` allocation (case-3, `genluaentry`) or a `luaH_resizearray` (in
-  `{...}`) can shrink or grow and thus **relocate** the Lua stack, dangling the
+* **`{...}` uses `luaC_barrierback`** per collectable element, against the
+  Array backing or ordinary positional-Map Table. Scalars skip the barrier.
+* **Stack relocation across struct/container allocation.** A fresh
+  `Udata0` allocation (case-3, `genluaentry`) or `titan_array_new`/Table resize
+  in `{...}` can shrink or grow and thus **relocate** the Lua stack, dangling the
   raw `_base` pointer. The codegen saves `_base` as an offset
   (`ctx.uses_base_off` makes the preamble declare `_base_off`) and rebases with
   `_base = restorestack(L, _base_off);` after the allocation/resize, so the

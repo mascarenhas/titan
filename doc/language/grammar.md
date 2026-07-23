@@ -1,7 +1,7 @@
 # The Titan grammar
 
 This chapter is the reference grammar of Titan as implemented by the
-0.16 prototype compiler: lexical conventions, the complete syntactic
+0.17 prototype compiler: lexical conventions, the complete syntactic
 grammar, operator precedence, and the restrictions the EBNF alone does
 not show. It replaces the old manual's stale grammar.
 
@@ -404,9 +404,11 @@ only `NamedLabel = exp`; positional fields, computed keys, `...`, and mixtures
 are syntax errors. A method name used in a `suffix`/`callargs` position is a
 call; a method name with **no** following `callargs` — a bare `o:m` — is
 instead a [bound method reference](closures.md#bound-method-references), a function
-value. Constructors cover arrays (positional fields), maps (`[k] = v`), and
-records (`name = v`); `,` and `;` are interchangeable and a trailing
-separator is allowed. A `funcexp` is an anonymous function: unlike a
+value. Constructors cover positional Arrays, Maps (computed `[k] = v` fields
+or, for an exact integer key type, all-positional fields), and records
+(`name = v`). Positional and keyed forms cannot be mixed; `,` and `;` are
+interchangeable and a trailing separator is allowed. A `funcexp` is an
+anonymous function: unlike a
 top-level `tlfunc` its parameter annotations are *optional* (inferred when
 omitted, as is the whole return annotation), and because it is a
 `simpleexp` and not a `prefixexp` it cannot be applied directly —
@@ -499,6 +501,8 @@ confused rule is not syntax at all:
    expression can go; the *type checker* then requires a named-field
    constructor to appear where the expected record type is known,
    reporting `no context to provide type for record constructor`
-   otherwise. Array and map constructors can instead have their types
-   inferred from their elements. See [Records](records.md) and
+   otherwise. Array and computed-key Map constructors can instead have their
+   types inferred from their elements. A positional constructor defaults to
+   Array and needs an exact `{integer: V}` context to construct a Map. See
+   [Records](records.md) and
    [Arrays and maps](arrays-maps.md).

@@ -57,8 +57,9 @@ different promises.
 **Seamless interoperation.** A compiled Titan module is, from Lua's point
 of view, just a module: you `require` it, call its functions, read and
 write its exported variables, index its records. Titan functions receive
-and return ordinary Lua values; Titan arrays and maps *are* Lua tables;
-Titan shares Lua's garbage collector rather than bringing its own.
+and return Lua-compatible values; Maps are ordinary Lua tables, while Arrays
+cross the boundary as canonical Titan userdata proxies over private Lua
+tables. Titan shares Lua's garbage collector rather than bringing its own.
 Crossing from Lua into Titan costs one dynamic type check per argument —
 comparable to what a careful C function would do with the `luaL_check*`
 API — and crossing between Titan functions costs nothing at all beyond a
@@ -81,11 +82,12 @@ expects. The flip side of the bargain is honored dynamically — the checks
 never silently disappear, so Lua code can never corrupt Titan data, only
 get an error thrown back at it.
 
-**Optimization-friendly data.** Lua has exactly one data structure; Titan
-deliberately splits it. Arrays (`{T}`) and maps (`{K:V}`) are still real
-Lua tables — so they can be handed to Lua freely — but the static types
-let the compiler use the table's array part and hash part directly,
-skipping the generic VM access paths. Records are *not* tables: they are
+**Optimization-friendly data.** Lua has exactly one table data structure;
+Titan deliberately splits its container types. Arrays (`{T}`) are canonical
+userdata proxies over private, array-part-only backing tables; maps (`{K:V}`)
+remain ordinary Lua tables. Both can be handed to Lua, but only Titan creates
+valid Array proxies. The static types let the compiler use their storage
+directly, skipping generic VM access paths. Records are also userdata:
 nominal, fixed-shape values with their fields at fixed slots, the moral
 equivalent of structs, designed so that `p.x` compiles to an indexed load
 rather than a hash lookup. The FFI extends the same idea outward: C

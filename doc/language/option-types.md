@@ -160,13 +160,21 @@ function first(xs: {integer}): integer
     local x: integer = xs[1]    -- implicit unwrap of integer?
     return x
 end
+
+function singleton(): {integer}
+    return {42}
+end
+
+function empty(): {integer}
+    return {}
+end
 ```
 
 ```lua
 -- Lua
 local m = require "first"
-print(m.first({42}))        --> 42
-print(pcall(m.first, {}))   --> false   first.titan:2:26: type error, expected integer but found nil
+print(m.first(m.singleton()))        --> 42
+print(pcall(m.first, m.empty()))     --> false   first.titan:2:26: type error, expected integer but found nil
 ```
 
 Besides annotated declarations, the checker unwraps options implicitly in
@@ -240,7 +248,7 @@ it, default it, or store it into an option and it flows.
 
 **Writing `nil` deletes.** Because the element's type in an assignment is
 the same optionized type, `nil` is assignable, and assigning it removes
-the element (clears the key), exactly as in Lua:
+the element (clears the Array slot or Map key):
 
 ```lua
 function delete(xs: {integer}, i: integer)
@@ -255,8 +263,9 @@ end
 element type or map value type written as an option is silently
 *de-optionized*: `{integer?}` means exactly `{integer}`, and
 `{string: integer?}` means `{string: integer}`. Nothing is lost — Titan
-arrays and maps are real Lua tables, and a Lua table cannot store nil:
-"holds nil" and "absent" are the same state. Indexing already gives you
+containers do not store nil elements: "holds nil" and "absent" are the same
+state in both an Array's private backing table and an ordinary Map table.
+Indexing already gives you
 `integer?` and assigning nil already deletes, so an option element type
 would promise a distinction the representation cannot make. Map *keys* are
 different: a nil key is impossible, so both forms are **compile-time

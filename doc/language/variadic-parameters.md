@@ -151,7 +151,7 @@ Using `...` in a function that is not variadic at all is the related error
 The three legal uses of `...` are `#...`, `...[e]`, and spreading it in a
 trailing position; a bare `...` anywhere else (`1 + ...`) is the error
 `'...' can only be used as the last item of an argument list, a return, an
-assignment, or an array constructor`.
+assignment, or a positional array/integer-keyed map constructor`.
 
 ## Length: `#...`
 
@@ -176,7 +176,7 @@ print(m.count(7, 8, 9))   --> 3
 `...[e]` reads the `e`-th variadic argument, **1-based**, with type `t` —
 the plain element type, **not** an option. The index is an `integer` (a
 `float` or `value` index is accepted and converted with a run-time check,
-exactly as for [array indexing](arrays-maps.md#indexing-and-reads)).
+exactly as for [array indexing](arrays-maps.md#positive-indices)).
 
 This is a deliberate **divergence from array indexing**. Reading `a[i]` from
 an array gives `t?`, because Lua arrays can have holes; a variadic run is
@@ -211,7 +211,8 @@ the surrounding list. As with the [expansion of a multi-return call](functions.m
 
 * **a call argument list** — `f(a, ...)` or `f(...)`;
 * **a `return`** — `return a, ...` or `return ...`;
-* **an array constructor** — `{a, ...}` or `{...}`.
+* **a positional Array or exact integer-keyed Map constructor** —
+  `{a, ...}` or `{...}`.
 
 ```lua
 function tail_call(...: integer): integer
@@ -223,10 +224,12 @@ function build(...: integer): {integer}
 end
 ```
 
-`{...}` (and `{e1, e2, ...}`) builds an array whose element type is the
-variadic element type `t` — `{...}` from a `...: string` function has type
-`{string}`, and `{}` when the run is empty. The element type can also be
-overridden by context, as long as `t` coerces to it: `{...}` of a
+Without a Map context, `{...}` (and `{e1, e2, ...}`) builds an Array whose
+element type is the variadic element type `t` — `{...}` from a
+`...: string` function has type `{string}`, and `{}` when the run is empty.
+An exact `{integer: V}` context instead builds an ordinary positional Map.
+The element/value type can be overridden by context, as long as `t` coerces
+to it: `{...}` of a
 `...: integer` run typed as `{float}` converts each element to a float, and
 typed as `{value}` boxes each element. A type that `t` cannot coerce to is
 the compile-time error `'...' element type integer is not coerceable to
@@ -238,10 +241,10 @@ function as_floats(...: integer): {float}
 end
 ```
 
-A `...` that is not last in a constructor (`{..., 1}`) is the error `'...'
-must be the last field in an array constructor`, and `...` inside a
-[map](arrays-maps.md#maps) or [record](records.md) constructor (whose
-entries are keyed, not positional) is `'...' can only appear in an array
+A `...` that is not last in a constructor (`{..., 1}`) is the error
+`'...' must be the last field in a positional constructor`. A `...` inside a
+computed-key [Map](arrays-maps.md#maps) or [record](records.md) constructor is
+`'...' can only appear in an all-positional array or integer-keyed map
 constructor`.
 
 ## Adjust-up: filling a fixed arity from `...`
@@ -402,7 +405,9 @@ print(pcall(m.greet))                --> false   greet.titan:1:1: type error, ex
 
 Spreading `...` works across the boundary in both directions: a variadic
 Titan function can be `return`ed and called from Lua, and a Titan `{...}`
-result arrives in Lua as a plain table.
+Array result arrives in Lua as its canonical userdata proxy. If the same
+positional expression is constructed under an exact integer-keyed Map context,
+the result is an ordinary Lua table.
 
 ## Limits and bans
 

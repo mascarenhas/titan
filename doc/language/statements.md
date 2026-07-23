@@ -155,11 +155,30 @@ x, foo.a = 2, 5              -- 'foo' is an imported module
 q, r = divmod(17, 5)         -- multi-return call expands
 ```
 
-The semantics are two-phase, matching Lua: **all** right-hand-side values
-are evaluated first, left to right, into temporaries; only then are the
-stores performed, left to right. This is what makes the swap idiom work.
-(Any expressions inside the *targets* — the table and index of `t[k]`, the
-receiver of `r.f` — are evaluated in the second phase, with the stores.)
+The semantics have three ordered phases:
+
+1. Every effectful target component is evaluated exactly once in lexical
+   left-hand order and frozen. For `t[k]`, this means the container and then
+   the key; for `r.f`, it means the receiver. Simple variable and module-slot
+   targets have nothing to evaluate.
+2. All right-hand-side values are evaluated left to right into temporaries.
+3. The stores, including each final target's store validation, happen left to
+   right.
+
+This preserves the original targets even if right-hand expressions have side
+effects, and the right-hand temporaries make the swap idiom work. If a later
+store raises — for example, because an Array index is not positive — every
+earlier store has already committed, while no later store runs.
+
+Single assignment follows the same ordering for its one target: effectful
+receiver, container, index, or key expressions are evaluated and frozen first;
+the right-hand side follows; then final-store validation and mutation occur.
+An error needed to evaluate or safely traverse an intermediate target
+component still occurs during target preparation. See
+[Arrays and maps](arrays-maps.md#positive-indices) for Array indexing and
+[The C FFI](ffi.md#c-assignment-receivers-and-order) for C fields and indices.
+Multiple assignment extends that rule by preparing *all* targets before any
+right-hand expression.
 
 The same finite-demand rules as multi-declarations apply: a trailing call may
 fill the remaining targets, earlier calls are scalar, and `(f())` requests one

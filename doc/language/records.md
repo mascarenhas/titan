@@ -3,9 +3,9 @@
 Records are Titan's structured data type: named, fixed-shape values with
 a declared set of typed fields, plus methods. They are the moral
 equivalent of structs — fields live at fixed slots, so reading `p.x`
-compiles to an indexed load, not a hash lookup. Unlike
-[arrays and maps](arrays-maps.md), records are **not** Lua tables: they
-are a distinct kind of value with their own identity, and they are typed
+compiles to an indexed load, not a hash lookup. Like Arrays but unlike Maps,
+records are **not** Lua tables at the Lua boundary; they are userdata.
+Records are a distinct kind of value with their own identity, and they are typed
 *nominally* — by which declaration they come from, not by what fields
 they happen to have.
 

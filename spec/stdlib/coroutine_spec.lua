@@ -34,12 +34,18 @@ local COROUTINE_VARIANT_ROOT = os.tmpname() .. "-titan-coroutine-exact"
 os.remove(COROUTINE_VARIANT_ROOT)
 local COROUTINE_VARIANT_SO =
     COROUTINE_VARIANT_ROOT .. "/titan/coroutine.so"
+local COROUTINE_VARIANT_SOURCE_ROOT =
+    COROUTINE_VARIANT_ROOT .. "/source"
+local COROUTINE_VARIANT_SOURCE =
+    COROUTINE_VARIANT_SOURCE_ROOT .. "/titan/coroutine.titan"
+local COROUTINE_VARIANT_C =
+    COROUTINE_VARIANT_SOURCE_ROOT .. "/titan/coroutine.c"
 local function quote(word)
     return "'" .. tostring(word):gsub("'", "'\\''") .. "'"
 end
 local TEST_ENV = "env -u LUA_PATH -u LUA_CPATH " ..
     "-u LUA_PATH_5_5 -u LUA_CPATH_5_5 CCACHE_DISABLE=1 " ..
-    "TITAN_PATH_0_16=" .. quote(COROUTINE_VARIANT_ROOT) .. " " ..
+    "TITAN_PATH_0_17=" .. quote(COROUTINE_VARIANT_ROOT) .. " " ..
     "LUA_PATH=" .. quote(COROUTINE_VARIANT_ROOT .. "/?.lua;./?.lua;;") ..
     " LUA_CPATH=" ..
     quote(COROUTINE_VARIANT_ROOT .. "/?.so;./?.so;;") .. " " ..
@@ -120,13 +126,23 @@ end
 local function build_coroutine()
     assert.truthy(exec_ok("rm -rf " .. quote(COROUTINE_VARIANT_ROOT)))
     assert.truthy(exec_ok(
-        "mkdir -p " .. quote(COROUTINE_VARIANT_ROOT .. "/titan")))
+        "mkdir -p " .. quote(COROUTINE_VARIANT_ROOT .. "/titan") .. " " ..
+        quote(COROUTINE_VARIANT_SOURCE_ROOT .. "/titan")))
+    local source = read_file("titan/coroutine.titan")
+    local anchor = "  local result = mco.mco_resume(co, ctag)\n"
+    local first, last = source:find(anchor, 1, true)
+    assert.truthy(first, "missing coroutine resume anchor")
+    assert.is_nil(source:find(anchor, last + 1, true),
+        "ambiguous coroutine resume anchor")
+    source = source:sub(1, last) ..
+        "  lua.lua_gc(L, lua.LUA_GCCOLLECT)\n" .. source:sub(last + 1)
+    write_file(COROUTINE_VARIANT_SOURCE, source)
     os.remove("titan/coroutine.a")
     os.remove("titan/coroutine.so")
     assert.truthy(exec_ok("rm -rf titan/coroutine.so.dSYM"))
     assert.truthy(exec_ok(
-        TEST_ENV .. "TITAN_PATH= " ..
-        TITANC .. " --tree . titan.coroutine"))
+        TEST_ENV .. "TITAN_PATH= " .. TITANC .. " --tree " ..
+        quote(COROUTINE_VARIANT_SOURCE_ROOT) .. " titan.coroutine"))
     assert.truthy(exec_ok("cp -p " .. quote("titan/coroutine.so") .. " " ..
         quote(COROUTINE_VARIANT_SO)))
     os.remove("titan/coroutine.a")
@@ -260,7 +276,7 @@ describe("coroutine standard module", function()
     end)
 
     it("keeps minicoro runtime state in GC-owned module-local storage", function()
-        local generated = read_file("titan/coroutine.c")
+        local generated = read_file(COROUTINE_VARIANT_C)
         assert.match("sizeof%(mco_runtime%)", generated)
         assert.match("getudatamem.-current_co", generated)
         assert.not_match("titan_coro_configure", generated, 1, true)
@@ -272,6 +288,27 @@ describe("coroutine standard module", function()
         assert.not_match("titan_coro_runtime", native, 1, true)
         assert.not_match("titan_coro_configure", native, 1, true)
         assert.not_match("titan_coro_running", native, 1, true)
+    end)
+
+    it("anchors a popped payload before clearing its transfer root", function()
+        local generated = read_file(COROUTINE_VARIANT_C)
+        local signature = "static TValue " ..
+            "titan_coroutine_pop_transfer_or_raise_titan("
+        local prototype = assert(generated:find(signature, 1, true))
+        local function_start = assert(generated:find(signature,
+            prototype + #signature, true))
+        local function_end = assert(generated:find("\n}\n", function_start,
+            true))
+        local body = generated:sub(function_start, function_end)
+        local payload_pop = assert(body:find("mco_pop(_param_co", 1, true))
+        payload_pop = assert(body:find("mco_pop(_param_co", payload_pop + 1,
+            true))
+        local anchor_refresh = assert(body:find("setobj2t", payload_pop,
+            true))
+        local root_clear = assert(body:find("titan_coro_clear_transfer",
+            payload_pop, true))
+        assert.is_true(payload_pop < anchor_refresh)
+        assert.is_true(anchor_refresh < root_clear)
     end)
 
     it("creates a coroutine and returns a callback result", function()
@@ -456,10 +493,62 @@ describe("coroutine standard module", function()
                 return (first as string) .. ":" .. (second as string)
             end
         ]], [==[
-            assert(test.default_resume() == "out:in")
-            assert(test.override_resume() == "out:in")
-            assert(test.default_error() == "ready:caught:oops")
-            assert(test.override_error() == "ready:caught:oops")
+            local function expect(label, expected, actual)
+                assert(actual == expected, label .. ": expected " .. expected ..
+                       ", got " .. tostring(actual))
+            end
+            expect("default_resume", "out:in", test.default_resume())
+            expect("override_resume", "out:in", test.override_resume())
+            expect("default_error", "ready:caught:oops",
+                   test.default_error())
+            expect("override_error", "ready:caught:oops",
+                   test.override_error())
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("roots fresh terminal result and error transfers through pop-side GC", function()
+        local out = run_lua([==[
+            local coroutine = require "titan.coroutine"
+
+            local finalized_result = 0
+            local weak_result = setmetatable({}, { __mode = "v" })
+
+            local returns_fresh = coroutine.create(function()
+                local value = setmetatable({ kind = "result" }, {
+                    __gc = function() finalized_result = finalized_result + 1 end,
+                })
+                weak_result[1] = value
+                return value
+            end, "tag")
+            local result = returns_fresh:resume(nil)
+            assert(result == weak_result[1] and result.kind == "result",
+                   "fresh terminal result was not preserved")
+            result = nil
+            for _ = 1, 4 do collectgarbage("collect") end
+            assert(weak_result[1] == nil and finalized_result == 1,
+                   "terminal result root was not cleared")
+
+            local finalized_error = 0
+            local weak_error = setmetatable({}, { __mode = "v" })
+            local raises_fresh = coroutine.create(function()
+                local value = setmetatable({ kind = "error" }, {
+                    __gc = function() finalized_error = finalized_error + 1 end,
+                })
+                weak_error[1] = value
+                error(value)
+            end, "tag")
+            local ok, err = pcall(function()
+                return raises_fresh:resume(nil)
+            end)
+            assert(not ok, "fresh terminal error was not raised")
+            assert(err == weak_error[1] and err.kind == "error",
+                   "fresh terminal error was not preserved")
+            err = nil
+            for _ = 1, 4 do collectgarbage("collect") end
+            assert(weak_error[1] == nil and finalized_error == 1,
+                   "terminal error root was not cleared")
             print("OK")
         ]==])
         assert.match("OK", out)

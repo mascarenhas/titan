@@ -253,6 +253,16 @@ The checker has FFI-specific handling in a few narrow places:
   already visible.
 * `Ast.VarBracket` accepts C pointers, C arrays with known static length, and
   counted owned C arrays. C indexing is 0-based.
+* After checking each `Ast.StatAssign` target, `check_c_assignment_storage`
+  recursively verifies that a by-value `CStruct`, `CUnion`, or `CArray`
+  receiver ends in persistent storage. `CPointer` and `COwned` expressions
+  identify storage regardless of how their values were produced. Aggregate
+  storage may instead be a local/parameter, an imported C object, or a nested
+  field/index chain rooted in such storage. A call, cast, or other aggregate
+  temporary used as the object being mutated is rejected with
+  `C assignment receiver must have persistent storage; expression of type 'T' is a by-value C aggregate`.
+  Extracting a pointer value from such a temporary is accepted because the
+  pointer's pointee, not the temporary aggregate, is the mutation target.
 * `#exp` accepts C arrays with known static length and counted owned C arrays.
 * `Ast.ExpCall` validates C allocation pseudo-functions, rejecting `void`,
   incomplete aggregates, C array typedefs, and structs with flexible array
@@ -420,26 +430,76 @@ structs/unions are deliberately not boxable in v1.
 
 ### C Arrays And Fields
 
-`codecindex_parts` centralizes C indexing. It evaluates the base and index once,
+Read lowering uses `codecindex_parts`: it evaluates the base and index once,
 materializes the integer index, emits bounds checks for static C arrays and
-counted owned arrays, and returns the C lvalue base/index pair. Reads and writes
-reuse that helper:
+counted owned arrays, and returns the C lvalue base/index pair. `codecfield`
+likewise renders a direct aggregate field read:
 
 ```c
 if (_i < 0 || _i >= 4) luaL_error(...);
 tmp = values[_i];
-values[_i] = rhs;
 ```
 
 Pointer indexing emits no bounds check, but it materializes the pointer once
 and raises a Lua error on `NULL`. Owned array length is reconstructed as
 `owner->len / sizeof(T)`, relying on Lua's `Udata.len` field.
 
-`codecfield` renders aggregate field lvalues:
+The direct field forms are:
 
 * `base.field` for C aggregate values;
 * `base->field` for C pointers after a `NULL` check;
 * `((T *)getudatamem(owner))->field` for owned objects.
+
+Assignment uses the generic prepared-lvalue pipeline instead of re-running
+those read helpers at store time. Both `codesingleassignment` and
+`codemultiassignment` call `_materialize_assignment_lvalue` before
+`_codeadjustedfixed` evaluates the right-hand side. The returned descriptor is
+then consumed by `codeassignment`, which performs the final validation and
+mutation. A multiple assignment prepares every target in lexical left-hand
+order first and consumes the descriptors from left to right.
+
+`_prepare_c_base` recursively preserves the original addressable storage:
+
+* a `CPointer` value is loaded and frozen in a C temporary;
+* a `COwned` userdata is materialized in a scanned Lua slot, and the descriptor
+  retains its payload pointer plus the count expression when applicable;
+* a `CArray` lvalue is retained through a synthesized element pointer (ordinary
+  C array decay) plus its static length, rather than copied into an
+  unassignable array temporary; and
+* a `CStruct` or `CUnion` subobject is retained through a synthesized pointer
+  to its persistent storage, rather than copied by value.
+
+`_prepare_c_storage` walks nested `VarDot`/`VarBracket` bases recursively.
+NULL and bounds validation for the *final* field or index stays in the
+descriptor and runs after the right-hand side. A validation needed to obtain
+an intermediate base runs during left-hand preparation, because the next
+field/index address cannot be formed safely without first dereferencing or
+indexing that base. This is why `null_link().next.x = rhs()` raises before
+`rhs()`, while `null_point().x = rhs()` evaluates `rhs()` before the final
+NULL check.
+
+The recursive storage path requires a by-value C aggregate receiver to end in
+persistent addressable storage. An imported C object, C local/parameter, or
+field/index chain rooted in one can supply that storage. `CPointer` and
+`COwned` expressions already identify storage regardless of how they were
+produced, but a call, cast, or other expression that produces a
+`CStruct`/`CUnion`/`CArray` temporary by value cannot. The checker emits
+`C assignment receiver must have persistent storage; expression of type 'T' is a by-value C aggregate`
+before code generation, while
+`_prepare_c_storage` retains a defensive assertion when persistent storage was
+required but an unexpected non-`ExpVar` receiver reaches code generation.
+
+There is one deliberate intermediate-read exception.
+`_prepare_c_loaded_value` needs only a copied pointer value when the final
+target base is a C pointer. It calls `_prepare_c_storage(..., true)`, allowing
+a by-value struct/union to be materialized long enough to read a pointer field
+or a pointer-array element. The pointer is then frozen in its own temporary;
+the final mutation targets its pointee, not the aggregate temporary. Thus
+`make_outer().inner.x = rhs()` is rejected, while
+`make_outer().pointer_field.x = rhs()` is valid. Ordinary reads and one-call
+`const *T` address coercions may likewise materialize by-value aggregate
+temporaries because their addresses do not have to survive a separately
+evaluated right-hand side.
 
 ### Owned C Objects
 
