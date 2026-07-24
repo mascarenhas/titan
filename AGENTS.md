@@ -78,9 +78,11 @@ not add epicycles around what may be a misunderstood simpler design.
   retain ordinary auto-insulation as the independent state-leak check.
   Disposable Titan fixtures and alternate images in the producer's
   serial/net-OS groups compile at `-O0`; purpose-built native harnesses retain
-  their explicit flags. Generated native fixtures in the consumer's heavy
-  compiler group also compile at `-O0` so optimization of disposable code does
-  not consume its 1-core runner budget. The Linux system-mode source-install
+  their explicit flags. Generated native fixtures in the producer's core
+  compiler group compile at `-O1`, retaining optimized generated-C coverage
+  without spending the full `-O2` compile cost. Fixtures in the consumer's
+  heavy compiler group compile at `-O0` so optimization of disposable code
+  does not consume its 1-core runner budget. The Linux system-mode source-install
   canary builds its installed provider at `-O0`, then its focused tests and
   production smoke use optimized consumers against that provider. The core
   Linux compiler group, the canonical bundled provider packed before those
@@ -91,10 +93,13 @@ not add epicycles around what may be a misunderstood simpler design.
   bare `require "titan"` after the first 0.18 rock install. The
   sanitizer job keeps its build
   and focused native-memory gate on one warm runner: representative timer/fs
-  suites, core owner/callback proofs, and production net/OS smokes. Keep full
-  library behavior suites in regular Linux unless they exercise a
-  distinct sanitizer-sensitive boundary; recompiling them under sanitizers
-  can consume the complete runner limit without improving that gate. Keep each
+  suites, core owner/callback proofs, and production net/OS smokes. Its Lua,
+  libbacktrace, and libuv dependencies compile with sanitizer instrumentation
+  at `-O1`, while the much larger generated Titan images and disposable test
+  fixtures use the same instrumentation at `-O0`; optimizing those generated
+  translation units can consume the complete runner limit without improving
+  the memory-safety gate. Keep full library behavior suites in regular Linux
+  unless they exercise a distinct sanitizer-sensitive boundary. Keep each
   Linux dependency build in the job that consumes its warmed tree, and keep
   the Linux production mode smokes in the regular producer: rebuilding them
   in a consumer wastes aggregate billed runner time even when the workflow's
@@ -116,10 +121,14 @@ not add epicycles around what may be a misunderstood simpler design.
   partial output archives lose source/output timestamp ordering and trigger
   Make rebuilds; it also preserves the prepared Lua installation, executable
   bits, and standard-library images. Run the serial and net/OS library groups
-  before core compiler coverage in that producer. Legacy compiler specs still
-  clean root-generated module outputs; running the packaging gate first avoids
-  rebuilding the complete standard library without exercising a new
-  configuration. The complete macOS flow likewise runs the library
+  before core compiler coverage in that producer. The `rockspec_spec.lua`
+  layout-publication case copies the already validated installed pair and
+  shims into a private stage before rerunning the real publisher; it must not
+  invoke the build-dependent `install-stdlib` target and recompile all seven
+  roots in the same bundled configuration. Use `publish-stdlib` with an exact
+  `STDLIB_INSTALL_STAGE` instead. Legacy compiler specs still clean
+  root-generated module outputs, so keep the packaging gate first. The
+  complete macOS flow likewise runs the library
   group before its uncovered compiler group. Its compiler gate also exercises
   x86_64/arm64 universal Mach-O archive lookup and repackaging; keep that real
   macOS proof in the one pre-merge manual dispatch rather than replacing it

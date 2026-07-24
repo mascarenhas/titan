@@ -132,8 +132,12 @@ jobs:
 
       # Restore the exact prepared checkout runtime plus canonical installed
       # standard container and shims after compiler-only groups and before the
-      # production smoke.
+      # production smoke. Keep disposable generated-C fixtures optimized, but
+      # use O1 so their compilation does not consume the producer's margin;
+      # the packed provider and bundled smoke remain at O2.
       - name: Run core compiler and language tests with coverage
+        env:
+          TITAN_EXTRA_CFLAGS: "-O1"
         run: |
           snapshot="$RUNNER_TEMP/titan-stdlib-before-compiler.tar"
           bash spec/support/ci_stdlib_snapshot.sh save "$snapshot"
@@ -397,18 +401,22 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       PREFIX: ${{ github.workspace }}/.lua
-      SANITIZER_FLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
-      # Keep these equal to SANITIZER_FLAGS (plus -fPIC where required). Make's
-      # content stamps deliberately revisit native dependencies from later
-      # targets, so the complete configuration must remain in the environment
-      # for the whole job rather than being supplied to only the first build.
+      # Generated Titan translation units are large enough that combining
+      # optimization with sanitizer instrumentation can exhaust this 1-core
+      # runner's budget. O0 retains the complete ASan/UBSan instrumentation;
+      # Lua, libbacktrace, and libuv remain at O1 below.
+      SANITIZER_FLAGS: "-O0 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      # Make's content stamps deliberately revisit native dependencies from
+      # later targets, so their complete O1 configuration must remain in the
+      # environment for the whole job rather than being supplied to only the
+      # first build.
       LUA_MYCFLAGS: "-fPIC -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       LUA_MYLDFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       LUA_MYLIBS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       LIBBT_CFLAGS: "-fPIC -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       LIBUV_BUILD_TYPE: Debug
       LIBUV_BUILD_CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
-      TITAN_EXTRA_CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      TITAN_EXTRA_CFLAGS: "-O0 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       TITAN_EXTRA_LDFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       # Every Titan image intentionally embeds the vendored static Lua archive;
       # disable only ASan's cross-image ODR diagnostic for those duplicate Lua

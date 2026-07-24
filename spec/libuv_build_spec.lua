@@ -1635,6 +1635,14 @@ fi
             "for output in $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_SHIMS)",
             "STDLIB_UV_LDFLAGS=$(STDLIB_UV_LDFLAGS)",
             "validate_archive()",
+            "STDLIB_INSTALL_STAGE       ?= $(CURDIR)",
+            "install-stdlib: stdlib",
+            "install-stdlib publish-stdlib: " ..
+                "scripts/stdlib_installer.lua",
+            "stage=$(call make_shell_quote,$(STDLIB_INSTALL_STAGE))",
+            "install -m 0644 THIRD_PARTY_NOTICES.md",
+            "install -m 0644 LICENSES/libuv-LICENSE",
+            '"$(TITAN_LUA)" -E "$(CURDIR)/scripts/stdlib_installer.lua"',
             "rm -f $(STDLIB_PROVIDER_OUTPUTS)",
             "rm -f $(STDLIB_SHIMS)",
             "rm -rf $(STDLIB_CONTAINER).dSYM",
@@ -1725,6 +1733,8 @@ fi
             "\n  test%-linux:(.-)\n  test%-macos:"))
         local macos_job = assert(workflow:match(
             "\n  test%-macos:(.-)\n  sanitizer:"))
+        local sanitizer_job = assert(workflow:match(
+            "\n  sanitizer:(.*)"))
         local function count_literal(text, needle)
             local count = 0
             local offset = 1
@@ -1751,6 +1761,10 @@ fi
         end
         assert_codecov_job(prepare_job, "compiler-core")
         assert_codecov_job(heavy_job, "compiler-heavy")
+        assert.equal(1, count_literal(prepare_job,
+            'TITAN_EXTRA_CFLAGS: "-O1"'), prepare_job)
+        assert.equal(1, count_literal(heavy_job,
+            'TITAN_EXTRA_CFLAGS: "-O0"'), heavy_job)
         assert.equal(2, count_literal(macos_job,
             "ci_retry_luarocks_dependencies.sh"), macos_job)
         assert.equal(2, count_literal(workflow,
@@ -1761,6 +1775,15 @@ fi
             "luarocks make --force"), macos_job)
         assert.equal(1, count_literal(macos_job,
             "luarocks test --prepare"), macos_job)
+        assert.equal(1, count_literal(sanitizer_job,
+            'SANITIZER_FLAGS: "-O0 -g -fsanitize=address,undefined'),
+            sanitizer_job)
+        assert.equal(1, count_literal(sanitizer_job,
+            'TITAN_EXTRA_CFLAGS: "-O0 -g ' ..
+                '-fsanitize=address,undefined'), sanitizer_job)
+        assert.equal(1, count_literal(sanitizer_job,
+            'LUA_MYCFLAGS: "-fPIC -O1 -g ' ..
+                '-fsanitize=address,undefined'), sanitizer_job)
         assert.falsy(workflow:find("CODECOV_TOKEN", 1, true), workflow)
     end)
 end)

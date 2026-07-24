@@ -42,6 +42,25 @@ local function make_directory(path)
     assert.truthy(lfs.mkdir(path), path)
 end
 
+local function copy_tree(source, destination)
+    local mode = assert(lfs.symlinkattributes(source, "mode"), source)
+    if mode == "file" then
+        local parent = assert(destination:match("^(.+)/[^/]+$"))
+        make_directory(parent)
+        write_file(destination, read_file(source))
+    elseif mode == "directory" then
+        make_directory(destination)
+        for entry in lfs.dir(source) do
+            if entry ~= "." and entry ~= ".." then
+                copy_tree(source .. "/" .. entry,
+                    destination .. "/" .. entry)
+            end
+        end
+    else
+        error("cannot copy " .. source .. " of type " .. mode)
+    end
+end
+
 local function remove_tree(path)
     local mode = lfs.symlinkattributes(path, "mode")
     if mode == "directory" then
@@ -325,10 +344,11 @@ describe("standalone-prefix source installation", function()
         end
     end)
 
-    it("publishes one image and removes only active-ABI layouts",
+    it("publishes one prepared image and removes only active-ABI layouts",
     function()
         workspace = temporary_directory("stdlib-layout-migration")
 
+        local stage = workspace .. "/stage"
         local canonical = workspace .. "/lib/titan/0.18/titan.so"
         local canonical_archive = workspace .. "/lib/titan/0.18/titan.a"
         local preserved = workspace .. "/lib/titan/0.17/titan/uv.so"
@@ -369,23 +389,24 @@ describe("standalone-prefix source installation", function()
             assert_unique_regular_file(canonical)
             assert_unique_regular_file(canonical_archive)
             local same, comparison, comparison_why, comparison_code = run({
-                "cmp", "-s", "titan.so", canonical,
+                "cmp", "-s", stage .. "/titan.so", canonical,
             })
             assert.truthy(same, comparison .. "\n(" ..
                 tostring(comparison_why) .. ", " ..
                 tostring(comparison_code) .. ")")
             same, comparison, comparison_why, comparison_code = run({
-                "cmp", "-s", "titan.a", canonical_archive,
+                "cmp", "-s", stage .. "/titan.a", canonical_archive,
             })
             assert.truthy(same, comparison .. "\n(" ..
                 tostring(comparison_why) .. ", " ..
                 tostring(comparison_code) .. ")")
             assert.equal(
-                lfs.symlinkattributes("titan.so.dSYM", "mode"),
+                lfs.symlinkattributes(stage .. "/titan.so.dSYM", "mode"),
                 lfs.symlinkattributes(canonical .. ".dSYM", "mode"),
                 canonical .. ".dSYM")
             for _, module in ipairs(STDLIB_MODULES) do
-                assert.equal(read_file("titan/" .. module .. ".lua"),
+                assert.equal(read_file(
+                    stage .. "/titan/" .. module .. ".lua"),
                     read_file(workspace .. "/share/lua/5.5/titan/" ..
                         module .. ".lua"))
                 assert_no_obsolete_module_layout(workspace, module)
@@ -401,22 +422,28 @@ describe("standalone-prefix source installation", function()
         assert.equal("file", lfs.attributes(canonical, "mode"),
             "canonical before installation")
         assert_absent(canonical_archive)
+        copy_tree(STDLIB_PROVIDER, stage .. "/titan.so")
+        copy_tree(STDLIB_STATIC_ARCHIVE, stage .. "/titan.a")
+        for _, module in ipairs(STDLIB_MODULES) do
+            copy_tree(STDLIB_SHIMDIR .. "/" .. module .. ".lua",
+                stage .. "/titan/" .. module .. ".lua")
+        end
+        if lfs.symlinkattributes(STDLIB_PROVIDER .. ".dSYM") then
+            copy_tree(STDLIB_PROVIDER .. ".dSYM",
+                stage .. "/titan.so.dSYM")
+        end
         local install = {
             "make", "--no-print-directory", "-s",
             "PREFIX=" .. PREFIX,
             "ROCKS_TREE=",
             "TITAN_INSTALL_TREE=" .. workspace,
             "TITAN_LUA=" .. LUA,
-            "install-stdlib",
+            "STDLIB_INSTALL_STAGE=" .. stage,
+            "publish-stdlib",
         }
         local ok, output, why, code = run(install)
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
-        assert_file("titan.so")
-        assert_file("titan.a")
-        for _, module in ipairs(STDLIB_MODULES) do
-            assert_generated_shim("titan/" .. module .. ".lua", module)
-        end
         assert.equal("file", lfs.attributes(canonical, "mode"),
             "canonical after installation")
         assert.equal("file", lfs.attributes(canonical_archive, "mode"),
