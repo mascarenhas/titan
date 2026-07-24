@@ -1550,6 +1550,67 @@ printf 'build\n' >> %s
         if not tested then error(test_error, 0) end
     end)
 
+    it("retries LuaRocks dependency acquisition in one warm prefix",
+       function()
+        local root = make_temp_dir()
+        local tested, test_error = xpcall(function()
+            local fake = root .. "/fake-luarocks.sh"
+            local counter = root .. "/attempts"
+            write_file(fake, [==[#!/usr/bin/env bash
+set -eu
+counter_file=$1
+success_on=$2
+shift 2
+if [[ $# -ne 2 || $1 != "spaced sentinel" ||
+      $2 != "--literal=two words" ]]; then
+    exit 74
+fi
+count=$(cat "$counter_file")
+count=$((count + 1))
+printf '%s\n' "$count" > "$counter_file"
+if [[ $count -lt $success_on ]]; then
+    exit 73
+fi
+]==])
+
+            local function run_case(success_on)
+                write_file(counter, "0\n")
+                return run_argv({
+                    "env",
+                    "TITAN_CI_LUAROCKS_RETRY_DELAY_SECONDS=0",
+                    "bash",
+                    "spec/support/ci_retry_luarocks_dependencies.sh",
+                    "bash",
+                    fake,
+                    counter,
+                    tostring(success_on),
+                    "spaced sentinel",
+                    "--literal=two words",
+                })
+            end
+
+            local ok, output, why, code = run_case(1)
+            assert.truthy(ok, output)
+            assert.equal("1\n", read_file(counter))
+
+            ok, output, why, code = run_case(3)
+            assert.truthy(ok, output)
+            assert.equal("3\n", read_file(counter))
+            assert.truthy(output:find("attempt 1/3, exit 73", 1, true),
+                output)
+            assert.truthy(output:find("attempt 2/3, exit 73", 1, true),
+                output)
+
+            ok, output, why, code = run_case(4)
+            assert.falsy(ok, output)
+            assert.equal("exit", why)
+            assert.equal(73, code)
+            assert.equal("3\n", read_file(counter))
+        end, debug.traceback)
+        remove_tree(root)
+        if not tested then error(test_error, 0) end
+    end)
+
     it("owns the provider pair through one stamp and exact cleanup",
        function()
         local makefile = read_file("Makefile")
@@ -1662,6 +1723,8 @@ printf 'build\n' >> %s
             "\n  prepare%-linux:(.-)\n  test%-linux:"))
         local heavy_job = assert(workflow:match(
             "\n  test%-linux:(.-)\n  test%-macos:"))
+        local macos_job = assert(workflow:match(
+            "\n  test%-macos:(.-)\n  sanitizer:"))
         local function count_literal(text, needle)
             local count = 0
             local offset = 1
@@ -1688,6 +1751,16 @@ printf 'build\n' >> %s
         end
         assert_codecov_job(prepare_job, "compiler-core")
         assert_codecov_job(heavy_job, "compiler-heavy")
+        assert.equal(2, count_literal(macos_job,
+            "ci_retry_luarocks_dependencies.sh"), macos_job)
+        assert.equal(2, count_literal(workflow,
+            "ci_retry_luarocks_dependencies.sh"), workflow)
+        assert.equal(1, count_literal(macos_job,
+            "luarocks make --only-deps"), macos_job)
+        assert.equal(1, count_literal(macos_job,
+            "luarocks make --force"), macos_job)
+        assert.equal(1, count_literal(macos_job,
+            "luarocks test --prepare"), macos_job)
         assert.falsy(workflow:find("CODECOV_TOKEN", 1, true), workflow)
     end)
 end)

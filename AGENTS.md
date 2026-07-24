@@ -98,7 +98,11 @@ not add epicycles around what may be a misunderstood simpler design.
   Linux dependency build in the job that consumes its warmed tree, and keep
   the Linux production mode smokes in the regular producer: rebuilding them
   in a consumer wastes aggregate billed runner time even when the workflow's
-  wall-clock critical path is unchanged. After the system-mode source-rock
+  wall-clock critical path is unchanged. The cold manual macOS job retries
+  only its runtime and test dependency-acquisition commands inside the same
+  prefix, so successful partial LuaRocks installs survive transient download
+  failures; keep the actual Titan build and complete test suite single-shot.
+  After the system-mode source-rock
   reinstall, rerun only the mode-dependent SDK-layout and external-DSO
   promotion cases from `rockspec_spec.lua`; the complete bundled packaging
   gate has already run, and repeating it would consume the producer's

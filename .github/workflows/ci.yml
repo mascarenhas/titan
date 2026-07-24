@@ -336,6 +336,8 @@ jobs:
       # `luarocks test` does not build the rock-under-test, only its dependencies.
       - name: Build and install the rock
         run: |
+          bash spec/support/ci_retry_luarocks_dependencies.sh \
+            luarocks make --only-deps
           luarocks make --force
           provider="$PREFIX/lib/titan/0.18/titan.so"
           static_archive="${provider%.so}.a"
@@ -349,7 +351,9 @@ jobs:
 
       # Test-only dependencies are not installed by `luarocks make`.
       - name: Prepare test dependencies
-        run: luarocks test --prepare
+        run: |
+          bash spec/support/ci_retry_luarocks_dependencies.sh \
+            luarocks test --prepare
 
       # Build one native argv/stdio child with the pinned bundled archive and
       # reuse it while smoke-testing both standard-library link modes. The OS
