@@ -180,20 +180,27 @@ describe("flexible return code generation", function()
             return table.concat(out, ", ")
         end
 
+        local function decllist(n)
+            local out = {}
+            for i = 1, n do out[i] = "v" .. i .. ": integer?" end
+            return table.concat(out, ", ")
+        end
+
         local fixed50 = typelist(50)
         local fixed51 = typelist(51)
-        local finite250 = typelist(250)
-        local finite251 = typelist(251)
+        local decls250 = decllist(250)
+        local decls251 = decllist(251)
         local nils51 = {}
         for i = 1, 51 do nils51[i] = "nil" end
         local source = [[
-            function actual(): (]] .. fixed51 .. [[, ...: integer?)
+            local function actual(): (]] .. fixed51 .. [[, ...: integer?)
                 return ]] .. table.concat(nils51, ", ") .. [[
             end
 
             function finite250(f: () -> (]] .. fixed50
-                .. [[, ...: integer?)): (]] .. finite250 .. [[)
-                return f()
+                .. [[, ...: integer?)): boolean
+                local ]] .. decls250 .. [[ = f()
+                return not v1 and not v250
             end
 
             function open251(f: () -> (]] .. fixed51
@@ -201,8 +208,9 @@ describe("flexible return code generation", function()
                 return f()
             end
 
-            function direct251(): (]] .. finite251 .. [[)
-                return actual()
+            function direct251(): boolean
+                local ]] .. decls251 .. [[ = actual()
+                return not v1 and not v251
             end
         ]]
 
@@ -216,10 +224,10 @@ describe("flexible return code generation", function()
         -- request. The direct native call remains legal with a 251-slot fixed
         -- sink because it does not encode a finite VM request.
         local ok, err = h.call("test", [[
-            local ok, first = pcall(test.finite250, function() end)
-            assert(ok and first == nil)
-            ok, first = pcall(test.direct251)
-            assert(ok and first == nil)
+            local ok, accepted = pcall(test.finite250, function() end)
+            assert(ok and accepted)
+            ok, accepted = pcall(test.direct251)
+            assert(ok and accepted)
 
             local values = {}
             for i = 1, 251 do values[i] = i end

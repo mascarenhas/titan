@@ -232,8 +232,13 @@ jobs:
       # static-provider coverage after the library suite: legacy compiler
       # cleanup may mutate root artifacts, but no production image is consumed
       # after this point. Codecov merges this same-commit report with the
-      # producer's core report.
+      # producer's core report. These tests compile disposable native fixtures,
+      # so avoid spending the 1-core runner budget optimizing them. The
+      # prepared production provider remains at -O2, and macOS repeats the
+      # complete suite at -O2.
       - name: Run heavy compiler and language tests with coverage
+        env:
+          TITAN_EXTRA_CFLAGS: "-O0"
         run: bash spec/support/ci_test_groups.sh compiler-heavy
 
       - name: Generate heavy compiler coverage report

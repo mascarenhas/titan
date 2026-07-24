@@ -78,12 +78,14 @@ not add epicycles around what may be a misunderstood simpler design.
   retain ordinary auto-insulation as the independent state-leak check.
   Disposable Titan fixtures and alternate images in the producer's
   serial/net-OS groups compile at `-O0`; purpose-built native harnesses retain
-  their explicit flags. The Linux system-mode source-install canary builds its
-  installed provider at `-O0`, then its focused tests and production smoke use
-  optimized consumers against that provider. The canonical bundled provider
-  packed before those tests, its bundled production smoke, the heavy Linux
-  compiler group, and the complete macOS run (including both libuv modes)
-  remain optimized. The
+  their explicit flags. Generated native fixtures in the consumer's heavy
+  compiler group also compile at `-O0` so optimization of disposable code does
+  not consume its 1-core runner budget. The Linux system-mode source-install
+  canary builds its installed provider at `-O0`, then its focused tests and
+  production smoke use optimized consumers against that provider. The core
+  Linux compiler group, the canonical bundled provider packed before those
+  tests, its bundled production smoke, and the complete macOS run (including
+  both libuv modes) remain optimized. The
   regular producer first configures its disposable prefix for ABI 0.17, then
   runs the supported `make lua`/`make luarocks` migration to 0.18 and proves
   bare `require "titan"` after the first 0.18 rock install. The
