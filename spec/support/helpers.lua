@@ -43,6 +43,54 @@ local function reset(imports)
 end
 M.reset = reset
 
+-- A checker probe session owns one compile-probe service so a spec which
+-- repeatedly checks immutable foreign headers can reuse exact compiler-query
+-- results. Loader and C-type identity state remain fresh for every check. The
+-- caller must close the session and must not rewrite a previously queried path
+-- while it is live.
+function M.new_checker_probe_session()
+    return driver.new_resolver_context()
+end
+
+function M.close_checker_probe_session(session)
+    local ok, err = driver.close_resolver_context(session)
+    assert.truthy(ok, err)
+end
+
+local function checker_probe_options(session)
+    if not session then return nil end
+    return {
+        probe_service_provider = function()
+            return driver.get_probe_service(session)
+        end,
+    }
+end
+
+-- Production libuv is compiled with this feature-test macro on Linux. Scope
+-- the same flag around compiler/codegen fixtures which import uv.h directly,
+-- then restore the process-global driver configuration even if an assertion
+-- fails.
+function M.with_libuv_feature_flags(body)
+    if not driver.UNAME:find("Linux", 1, true) then
+        return body()
+    end
+
+    local previous = driver.EXTRA_CPPFLAGS
+    local configured = {}
+    for _, flag in ipairs(previous or {}) do
+        configured[#configured + 1] = flag
+    end
+    configured[#configured + 1] = "-D_GNU_SOURCE"
+    driver.EXTRA_CPPFLAGS = configured
+    driver.configure_foreign_c()
+
+    local results = table.pack(xpcall(body, debug.traceback))
+    driver.EXTRA_CPPFLAGS = previous
+    driver.configure_foreign_c()
+    if not results[1] then error(results[2], 0) end
+    return table.unpack(results, 2, results.n)
+end
+
 function M.parse(code, chunkname)
     return parser.parse(chunkname or "(spec)", code)
 end
@@ -149,7 +197,7 @@ function M.compile_and_run(titan_code, lua_test, modname)
 end
 
 -- Check + compile `titan_code` as `modname` (default "test") and return the
--- generated C source.
+-- generated C source followed by the checked AST.
 function M.compile_and_read_c(titan_code, modname)
     modname = modname or "test"
     reset()
@@ -163,7 +211,7 @@ function M.compile_and_read_c(titan_code, modname)
     local f = assert(io.open(modname:gsub("[.]", "/") .. ".c", "r"))
     local csrc = f:read("*a")
     f:close()
-    return csrc
+    return csrc, ast
 end
 
 -- Check + compile `titan_code` as a standalone program and run it, capturing
@@ -300,13 +348,14 @@ end
 
 -- ===== typechecker-only helpers =====
 
-function M.run_checker(code)
+function M.run_checker(code, probe_session)
     reset(true)
     local ast = assert(M.parse(code))
     local loader = driver.defaultloader()
     local t, errs = driver.with_loader(loader, function(loader)
         return checker.check(
-            "test", ast, code, "test.titan", loader)
+            "test", ast, code, "test.titan", loader,
+            checker_probe_options(probe_session))
     end)
     return #errs == 0, table.concat(errs, "\n"), ast, t
 end
@@ -323,10 +372,12 @@ function M.run_checker_modules(modules, main)
 end
 
 -- Run the checker over `code` and return its list of error strings.
-function M.check_errs(code)
+function M.check_errs(code, probe_session)
     reset()
     local ast = assert(M.parse(code))
-    local _, errs = checker.check("test", ast, code, "test.titan")
+    local _, errs = checker.check(
+        "test", ast, code, "test.titan", nil,
+        checker_probe_options(probe_session))
     return errs
 end
 

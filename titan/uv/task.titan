@@ -915,7 +915,7 @@ local function timer_dispatch(owner: uv_timer_t, event_kind: integer,
                               _pointer: ffi.titan_ffi_void_ptr)
   local runtime = owner.metadata.runtime
 
-  if event_kind == EVENT_HANDLE_CLOSE then
+  if event_kind == shim.TITAN_UV_EVENT_HANDLE_CLOSE then
     local kind = owner.metadata.kind
     owner.metadata.lifecycle = OWNER_CLOSED
     if kind == OWNER_OBSERVE then

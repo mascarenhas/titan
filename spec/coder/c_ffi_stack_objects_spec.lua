@@ -179,6 +179,11 @@ describe("automatic C object code generation", function()
                         + #values
                 end
 
+                function out_of_range(): integer
+                    local values: c.ffi_int[3]
+                    return values[3] as integer
+                end
+
                 function struct_copy(): integer
                     local source: c.ffi_point =
                         c.ffi_make_point(43, 47)
@@ -242,7 +247,7 @@ describe("automatic C object code generation", function()
             assert.not_match("&%(_local_values_%d+%)", csrc)
             assert.not_match("&%(_local_matrix_%d+%)", csrc)
 
-            local out = h.compile_and_run(source, [[
+            local ok, out = h.call(MODULE, [[
                 assert(ffi_stack_objects.all_zero())
                 assert(ffi_stack_objects.direct_fill() == 152)
                 assert(ffi_stack_objects.pointer_fill() == 58)
@@ -250,33 +255,15 @@ describe("automatic C object code generation", function()
                 assert(ffi_stack_objects.struct_copy() == 90)
                 assert(ffi_stack_objects.anonymous_subobjects() == 1230)
                 assert(ffi_stack_objects.anonymous_longjmp() == 42)
-            ]], MODULE)
+            ]])
+            assert.truthy(ok, out)
             assert.equal("", out)
-        end)
-    end)
 
-    it("bounds-checks source-written fixed C arrays", function()
-        with_header(declarations, function(header)
-            local source = [[
-                local c = foreign import "]] .. header .. [["
-
-                function out_of_range(): integer
-                    local values: c.ffi_int[3]
-                    return values[3] as integer
-                end
-            ]]
-            h.reset(true)
-            local ast = assert(h.parse(source, MODULE .. ".titan"))
-            local checker = require "titan-compiler.checker"
-            local _, errors = checker.check(
-                MODULE, ast, source, MODULE .. ".titan")
-            assert.equal(0, #errors, table.concat(errors, "\n"))
-            assert.truthy(h.compile(MODULE, ast))
-            local ok, err = h.call(MODULE, [[
+            ok, out = h.call(MODULE, [[
                 ffi_stack_objects.out_of_range()
             ]])
             assert.falsy(ok)
-            assert.match("C index", err)
+            assert.match("C index", out)
         end)
     end)
 
@@ -491,54 +478,56 @@ describe("automatic C object code generation", function()
     function()
         assert(os.getenv("PREFIX"),
             "the real-libuv fixture requires the prepared Titan prefix")
-        with_header(
-            '#define _GNU_SOURCE 1\n'
-            .. '#include <netdb.h>\n#include <uv.h>\n'
-            .. 'static uv_pipe_t *ffi_pipe_pointer;\n'
-            .. 'static int ffi_stream_matches_pipe(\n'
-            .. '    uv_stdio_container_t *stdio, uv_pipe_t *pipe\n'
-            .. ') {\n'
-            .. '    return stdio[0].data.stream == (uv_stream_t *)pipe;\n'
-            .. '}\n',
-            function(header)
-                -- One translation-unit header is intentional: uv.h carries an
-                -- addrinfo forward reference while netdb.h owns its complete
-                -- definition. Their shared file-scope tag must complete in
-                -- place before this automatic object is admitted.
-                local source = [[
-                    local libuv = foreign import "]] .. header .. [["
+        h.with_libuv_feature_flags(function()
+            with_header(
+                '#include <netdb.h>\n#include <uv.h>\n'
+                .. 'static uv_pipe_t *ffi_pipe_pointer;\n'
+                .. 'static int ffi_stream_matches_pipe(\n'
+                .. '    uv_stdio_container_t *stdio, uv_pipe_t *pipe\n'
+                .. ') {\n'
+                .. '    return stdio[0].data.stream == (uv_stream_t *)pipe;\n'
+                .. '}\n',
+                function(header)
+                    -- One translation-unit header is intentional: uv.h carries
+                    -- an addrinfo forward reference while netdb.h owns its
+                    -- complete definition. Their shared file-scope tag must
+                    -- complete in place before this object is admitted.
+                    local source = [[
+                        local libuv = foreign import "]] .. header .. [["
 
-                    function shape(): integer
-                        local options: libuv.uv_process_options_t
-                        local stdio: libuv.uv_stdio_container_t[3]
-                        local address: libuv.addrinfo
+                        function shape(): integer
+                            local options: libuv.uv_process_options_t
+                            local stdio: libuv.uv_stdio_container_t[3]
+                            local address: libuv.addrinfo
 
-                        options.stdio = stdio
-                        options.stdio_count = #stdio
-                        stdio[0].data.stream =
-                            libuv.ffi_pipe_pointer as *libuv.uv_stream_t
-                        address.ai_flags = 0
-                        return options.stdio_count as integer
-                            + address.ai_flags as integer
-                            + libuv.ffi_stream_matches_pipe(
-                                stdio, libuv.ffi_pipe_pointer
-                              ) as integer
-                    end
-                ]]
-                local csrc = h.compile_and_read_c(source, MODULE)
-                assert.match(
-                    "uv_process_options_t _local_options_%d+ = %{0%};",
-                    csrc)
-                assert.match(
-                    "uv_stdio_container_t _local_stdio_%d+%[3%] = %{0%};",
-                    csrc)
-                assert.match(
-                    "struct addrinfo _local_address_%d+ = %{0%};", csrc)
+                            options.stdio = stdio
+                            options.stdio_count = #stdio
+                            stdio[0].data.stream =
+                                libuv.ffi_pipe_pointer as *libuv.uv_stream_t
+                            address.ai_flags = 0
+                            return options.stdio_count as integer
+                                + address.ai_flags as integer
+                                + libuv.ffi_stream_matches_pipe(
+                                    stdio, libuv.ffi_pipe_pointer
+                                  ) as integer
+                        end
+                    ]]
+                    local csrc = h.compile_and_read_c(source, MODULE)
+                    assert.match(
+                        "uv_process_options_t _local_options_%d+ = %{0%};",
+                        csrc)
+                    assert.match(
+                        "uv_stdio_container_t _local_stdio_%d+%[3%] = %{0%};",
+                        csrc)
+                    assert.match(
+                        "struct addrinfo _local_address_%d+ = %{0%};", csrc)
 
-                local out = h.compile_and_run(source, [[
-                    assert(ffi_stack_objects.shape() == 4)
-                ]], MODULE)
-                assert.equal("", out)
+                    local ok, out = h.call(MODULE, [[
+                        assert(ffi_stack_objects.shape() == 4)
+                    ]])
+                    assert.truthy(ok, out)
+                    assert.equal("", out)
             end)
+        end)
     end)
 end)

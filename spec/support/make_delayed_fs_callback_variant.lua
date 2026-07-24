@@ -135,11 +135,11 @@ end
 
 patch("uv.titan", [==[
 do
-  UV_EIO = libuv.UV_EIO as integer
+  local sigpipe_status =
 ]==], hook_api .. [==[
 
 do
-  UV_EIO = libuv.UV_EIO as integer
+  local sigpipe_status =
 ]==], "module initializer")
 
 -- The variant must retain the production source's direct public-libuv

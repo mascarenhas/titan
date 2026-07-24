@@ -1,5 +1,11 @@
 local h = require "spec.support.helpers"
 
+local probe_session
+
+local function run_checker(code)
+    return h.run_checker(code, probe_session)
+end
+
 local function with_header(contents, fn)
     local header = os.tmpname() .. ".h"
     local file = assert(io.open(header, "w"))
@@ -16,6 +22,15 @@ local function with_header(contents, fn)
 end
 
 describe("named file-scope C tags", function()
+    setup(function()
+        probe_session = h.new_checker_probe_session()
+    end)
+
+    teardown(function()
+        h.close_checker_probe_session(probe_session)
+        probe_session = nil
+    end)
+
     it("publishes complete struct and union tags as direct type aliases",
     function()
         with_header([[
@@ -26,7 +41,7 @@ describe("named file-scope C tags", function()
                 return item;
             }
         ]], function(header)
-            local ok, err, ast = h.run_checker([[
+            local ok, err, ast = run_checker([[
                 local c = foreign import "]] .. header .. [["
 
                 local function item(): c.Item
@@ -67,7 +82,7 @@ describe("named file-scope C tags", function()
     }) do
         it("gives a syntactic same-name typedef precedence", function()
             with_header(source, function(header)
-                local ok, err, ast = h.run_checker([[
+                local ok, err, ast = run_checker([[
                     local c = foreign import "]] .. header .. [["
                 ]])
                 assert.truthy(ok, err)
@@ -88,7 +103,7 @@ describe("named file-scope C tags", function()
             typedef struct Forward ForwardRef;
             struct PointerOnly *pointer_value;
         ]], function(header)
-            local ok, err, ast = h.run_checker([[
+            local ok, err, ast = run_checker([[
                 local c = foreign import "]] .. header .. [["
 
                 local function forward(p: *c.Forward): *c.ForwardRef
@@ -116,7 +131,7 @@ describe("named file-scope C tags", function()
             enum Choice { CHOICE_A };
             extern int consume(struct PrototypeOnly *value);
         ]], function(header)
-            local ok, err, ast = h.run_checker([[
+            local ok, err, ast = run_checker([[
                 local c = foreign import "]] .. header .. [["
             ]])
             assert.truthy(ok, err)
@@ -136,7 +151,7 @@ describe("named file-scope C tags", function()
                 return value;
             }
         ]], function(header)
-            local ok, err, ast = h.run_checker([[
+            local ok, err, ast = run_checker([[
                 local c = foreign import "]] .. header .. [["
 
                 local function call_stat(): integer
@@ -161,7 +176,7 @@ describe("named file-scope C tags", function()
             struct stat { int value; };
             static int stat(void) { return 9; }
         ]], function(header)
-            local ok, err = h.run_checker([[
+            local ok, err = run_checker([[
                 local c = foreign import "]] .. header .. [["
 
                 local function bad()
@@ -190,7 +205,7 @@ describe("named file-scope C tags", function()
             struct macro_name { int value; };
             #define macro_name 13
         ]], function(header)
-            local ok, err = h.run_checker([[
+            local ok, err = run_checker([[
                 local c = foreign import "]] .. header .. [["
 
                 local function real_fields(): integer
@@ -208,7 +223,7 @@ describe("named file-scope C tags", function()
                 { expression = "c.macro_name.alignof",
                   diagnostic = "macro_name%.alignof" },
             }) do
-                ok, err = h.run_checker([[
+                ok, err = run_checker([[
                     local c = foreign import "]] .. header .. [["
                     local function bad()
                         local result = ]] .. collided.expression
@@ -227,7 +242,7 @@ describe("named file-scope C tags", function()
         with_header([[
             struct Forward;
         ]], function(header)
-            local ok, err = h.run_checker([[
+            local ok, err = run_checker([[
                 local c = foreign import "]] .. header .. [["
 
                 local function identity(
@@ -307,7 +322,7 @@ describe("named file-scope C tags", function()
                 struct Forward;
                 extern struct Forward impossible(void);
             ]], function(header)
-                local ok, err = h.run_checker(
+                local ok, err = run_checker(
                     'local c = foreign import "' .. header .. '"\n'
                     .. use.code)
                 assert.falsy(ok)
@@ -329,7 +344,7 @@ describe("named file-scope C tags", function()
                     return item;
                 }
             ]], function(definition_header)
-                local ok, err, ast = h.run_checker([[
+                local ok, err, ast = run_checker([[
                     local before = foreign import "]] .. forward_header .. [["
                     local after = foreign import "]] .. definition_header .. [["
 
@@ -354,7 +369,7 @@ describe("named file-scope C tags", function()
             with_header([[
                 extern void consume(union Shared *value);
             ]], function(union_header)
-                local ok, err = h.run_checker([[
+                local ok, err = run_checker([[
                     local first = foreign import "]] .. struct_header .. [["
                     local second = foreign import "]] .. union_header .. [["
                 ]])
@@ -376,7 +391,7 @@ describe("named file-scope C tags", function()
                 void (*two)(union Local *);
             };
         ]], function(header)
-            local ok, err, ast = h.run_checker([[
+            local ok, err, ast = run_checker([[
                 local c = foreign import "]] .. header .. [["
             ]])
             assert.truthy(ok, err)
@@ -395,7 +410,7 @@ describe("named file-scope C tags", function()
                 char data[];
             };
         ]], function(header)
-            local ok, err = h.run_checker([[
+            local ok, err = run_checker([[
                 local c = foreign import "]] .. header .. [["
                 local packet_size = c.Packet.sizeof
                 local packet_alignment = c.Packet.alignof
@@ -404,60 +419,4 @@ describe("named file-scope C tags", function()
         end)
     end)
 
-    it("imports the production libuv DNS tags, constants, and callbacks",
-    function()
-        assert(os.getenv("PREFIX"),
-            "the real-libuv fixture requires the prepared Titan prefix")
-        local ok, err, ast = h.run_checker([[
-            local libuv = foreign import "uv.h"
-            local shim = foreign import "titan/uv.h"
-            local ffi = foreign import "titan/ffi.h"
-
-            local function submit(
-                loop: *libuv.uv_loop_t,
-                dns: *libuv.uv_getaddrinfo_t,
-                connect: *libuv.uv_connect_t,
-                tcp: *libuv.uv_tcp_t,
-                node: const *ffi.titan_ffi_char):
-                (ffi.titan_ffi_int, ffi.titan_ffi_int)
-                local service: ffi.titan_ffi_char[6]
-                local hints: libuv.addrinfo
-                hints.ai_family = libuv.AF_UNSPEC
-                hints.ai_socktype = libuv.SOCK_STREAM
-                hints.ai_protocol = libuv.IPPROTO_TCP
-                hints.ai_flags = libuv.AI_NUMERICSERV
-                local family4 = libuv.AF_INET
-                local family6 = libuv.AF_INET6
-                local dns_status = libuv.uv_getaddrinfo(
-                    loop, dns, shim.titan_uvshim_getaddrinfo_cb,
-                    node, service, hints)
-                local address =
-                    nil as const *libuv.sockaddr
-                local connect_status = libuv.uv_tcp_connect(
-                    connect, tcp, address,
-                    shim.titan_uvshim_connect_cb)
-                if family4 == family6 then
-                    return dns_status, connect_status
-                end
-                return dns_status, connect_status
-            end
-
-            local address_size = libuv.sockaddr_storage.sizeof
-        ]])
-        assert.truthy(ok, err)
-
-        local aliases = ast[1]._type.type_members
-        for _, name in ipairs({
-            "addrinfo", "sockaddr", "sockaddr_storage",
-        }) do
-            assert.truthy(aliases[name], name)
-            assert.is_true(aliases[name].complete, name)
-        end
-        for _, name in ipairs({
-            "AF_UNSPEC", "AF_INET", "AF_INET6", "SOCK_STREAM",
-            "IPPROTO_TCP", "AI_NUMERICSERV",
-        }) do
-            assert.truthy(ast[1]._type.members[name], name)
-        end
-    end)
 end)

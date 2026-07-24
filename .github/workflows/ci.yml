@@ -9,9 +9,10 @@ on:
 
 jobs:
   # Build and install the regular Linux tree once per workflow. Keep the
-  # compiler core and net/OS groups on this warm 1-core runner; the isolated
-  # uv/fs consumer restores the pristine tree and runs the two slow compiler
-  # specs instead of rebuilding dependencies.
+  # compiler core and net/OS groups on this warm 1-core runner. The uv/fs
+  # consumer restores the pristine tree and runs the broad end-to-end,
+  # measured C-FFI, and isolated static-provider coverage instead of rebuilding
+  # dependencies.
   prepare-linux:
     name: regular (ubuntu-slim, build+compiler-core+net-os)
     if: github.event_name == 'push'
@@ -135,7 +136,7 @@ jobs:
 
       - name: Generate core compiler coverage report
         run: |
-          luacov "titan%-compiler" "/spec/[^/]+.lua" "titanc"
+          luacov "titan%-compiler/" "spec/[^/]+$" "titanc$"
           grep "Summary" -B1 -A1000 luacov.report.out
 
       - name: Upload core compiler coverage to Codecov
@@ -221,16 +222,17 @@ jobs:
       - name: Run uv/timer/fs library tests without coverage
         run: bash spec/support/ci_test_groups.sh library-uv-fs
 
-      # Run the two slow covered specs after the library suite: legacy
-      # compiler cleanup may mutate root artifacts, but no production image is
-      # consumed after this point. Codecov merges this same-commit report with
-      # the producer's core report.
+      # Run the broad end-to-end specs, topical C-FFI cohort, and isolated
+      # static-provider coverage after the library suite: legacy compiler
+      # cleanup may mutate root artifacts, but no production image is consumed
+      # after this point. Codecov merges this same-commit report with the
+      # producer's core report.
       - name: Run heavy compiler and language tests with coverage
         run: bash spec/support/ci_test_groups.sh compiler-heavy
 
       - name: Generate heavy compiler coverage report
         run: |
-          luacov "titan%-compiler" "/spec/[^/]+.lua" "titanc"
+          luacov "titan%-compiler/" "spec/[^/]+$" "titanc$"
           grep "Summary" -B1 -A1000 luacov.report.out
 
       - name: Upload heavy compiler coverage to Codecov

@@ -1,6 +1,8 @@
 local h = require "spec.support.helpers"
 local types = require "titan-compiler.types"
 
+local probe_session
+
 local function with_header(contents, fn)
     local header = os.tmpname() .. ".h"
     local file = assert(io.open(header, "w"))
@@ -16,10 +18,20 @@ end
 
 local function check_with_header(header, body)
     return h.run_checker(
-        'local c = foreign import "' .. header .. '"\n' .. body)
+        'local c = foreign import "' .. header .. '"\n' .. body,
+        probe_session)
 end
 
 describe("automatic C objects and fixed arrays", function()
+    setup(function()
+        probe_session = h.new_checker_probe_session()
+    end)
+
+    teardown(function()
+        h.close_checker_probe_session(probe_session)
+        probe_session = nil
+    end)
+
     local objects = [[
         typedef int ffi_int;
         typedef int *ffi_int_pointer;

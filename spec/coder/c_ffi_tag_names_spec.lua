@@ -120,51 +120,70 @@ describe("named C tag code generation", function()
     it("renders the production libuv DNS tags and callback types", function()
         assert(os.getenv("PREFIX"),
             "the real-libuv fixture requires the prepared Titan prefix")
-        local csrc = h.compile_and_read_c([[
-            local libuv = foreign import "uv.h"
-            local shim = foreign import "titan/uv.h"
-            local ffi = foreign import "titan/ffi.h"
+        h.with_libuv_feature_flags(function()
+            local csrc, ast = h.compile_and_read_c([[
+                local libuv = foreign import "uv.h"
+                local shim = foreign import "titan/uv.h"
+                local ffi = foreign import "titan/ffi.h"
 
-            local function dns_shape(
-                loop: *libuv.uv_loop_t,
-                dns: *libuv.uv_getaddrinfo_t,
-                connect: *libuv.uv_connect_t,
-                tcp: *libuv.uv_tcp_t,
-                node: const *ffi.titan_ffi_char):
-                (ffi.titan_ffi_int, ffi.titan_ffi_int)
-                local service: ffi.titan_ffi_char[6]
-                local hints: libuv.addrinfo
-                local address: libuv.sockaddr
-                local storage: libuv.sockaddr_storage
-                hints.ai_family = libuv.AF_UNSPEC
-                hints.ai_socktype = libuv.SOCK_STREAM
-                hints.ai_protocol = libuv.IPPROTO_TCP
-                hints.ai_flags = libuv.AI_NUMERICSERV
-                if libuv.AF_INET == libuv.AF_INET6 then
-                    address.sa_family = 0
+                local function dns_shape(
+                    loop: *libuv.uv_loop_t,
+                    dns: *libuv.uv_getaddrinfo_t,
+                    connect: *libuv.uv_connect_t,
+                    tcp: *libuv.uv_tcp_t,
+                    node: const *ffi.titan_ffi_char):
+                    (ffi.titan_ffi_int, ffi.titan_ffi_int)
+                    local service: ffi.titan_ffi_char[6]
+                    local hints: libuv.addrinfo
+                    local address: libuv.sockaddr
+                    local storage: libuv.sockaddr_storage
+                    hints.ai_family = libuv.AF_UNSPEC
+                    hints.ai_socktype = libuv.SOCK_STREAM
+                    hints.ai_protocol = libuv.IPPROTO_TCP
+                    hints.ai_flags = libuv.AI_NUMERICSERV
+                    if libuv.AF_INET == libuv.AF_INET6 then
+                        address.sa_family = 0
+                    end
+                    local dns_status = libuv.uv_getaddrinfo(
+                        loop, dns, shim.titan_uvshim_getaddrinfo_cb,
+                        node, service, hints)
+                    local generic =
+                        storage as const *libuv.sockaddr
+                    local connect_status = libuv.uv_tcp_connect(
+                        connect, tcp, generic,
+                        shim.titan_uvshim_connect_cb)
+                    return dns_status, connect_status
                 end
-                local dns_status = libuv.uv_getaddrinfo(
-                    loop, dns, shim.titan_uvshim_getaddrinfo_cb,
-                    node, service, hints)
-                local generic =
-                    storage as const *libuv.sockaddr
-                local connect_status = libuv.uv_tcp_connect(
-                    connect, tcp, generic,
-                    shim.titan_uvshim_connect_cb)
-                return dns_status, connect_status
+            ]])
+            assert.match(
+                "struct addrinfo _local_hints_%d+ = %{0%};", csrc)
+            assert.match(
+                "struct sockaddr _local_address_%d+ = %{0%};", csrc)
+            assert.match(
+                "struct sockaddr_storage _local_storage_%d+ = %{0%};",
+                csrc)
+            local aliases = ast[1]._type.type_members
+            for _, name in ipairs({
+                "addrinfo", "sockaddr", "sockaddr_storage",
+            }) do
+                assert.truthy(aliases[name], name)
+                assert.is_true(aliases[name].complete, name)
             end
-        ]])
-        assert.match("struct addrinfo _local_hints_%d+ = %{0%};", csrc)
-        assert.match("struct sockaddr _local_address_%d+ = %{0%};", csrc)
-        assert.match(
-            "struct sockaddr_storage _local_storage_%d+ = %{0%};", csrc)
-        for _, spelling in ipairs({
-            "AF_UNSPEC", "AF_INET", "AF_INET6", "SOCK_STREAM",
-            "IPPROTO_TCP", "AI_NUMERICSERV",
-            "titan_uvshim_getaddrinfo_cb", "titan_uvshim_connect_cb",
-            "uv_getaddrinfo(", "uv_tcp_connect(",
-        }) do
-            assert.matches(spelling, csrc, 1, true)
-        end
+            for _, name in ipairs({
+                "AF_UNSPEC", "AF_INET", "AF_INET6", "SOCK_STREAM",
+                "IPPROTO_TCP", "AI_NUMERICSERV",
+            }) do
+                assert.truthy(ast[1]._type.members[name], name)
+            end
+            for _, spelling in ipairs({
+                "AF_UNSPEC", "AF_INET", "AF_INET6", "SOCK_STREAM",
+                "IPPROTO_TCP", "AI_NUMERICSERV",
+                "titan_uvshim_getaddrinfo_cb",
+                "titan_uvshim_connect_cb",
+                "uv_getaddrinfo(", "uv_tcp_connect(",
+            }) do
+                assert.matches(spelling, csrc, 1, true)
+            end
+        end)
     end)
 end)

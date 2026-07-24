@@ -303,7 +303,7 @@ end
 
 function _net_eof_error(operation: string, message: string,
                         subject: string): Error
-  local code = UV_EOF
+  local code = libuv.UV_EOF as integer
   return Error.new(code,
       libuv.uv_err_name(code as ffi.titan_ffi_int) as string,
       message, operation, subject)
@@ -964,7 +964,7 @@ local function continue_net_setup(operation: NetOperation)
   end
   local failure? = operation.last_error
   if not failure then
-    failure = make_error(UV_EADDRNOTAVAIL,
+    failure = make_error(libuv.UV_EADDRNOTAVAIL as integer,
                          "net.resolve", net_operation_subject(operation))
   end
   finish_net_setup(operation, nil, failure)
@@ -1091,7 +1091,7 @@ local function stop_server_accept(server: uv_tcp_t)
     local task = waiter
     if task.state == TASK_WAITING and not task.cancel_requested and
         task.epoch == epoch then
-      local failure = make_error(UV_ECANCELED,
+      local failure = make_error(libuv.UV_ECANCELED as integer,
                                  "net.accept", "server closed")
       schedule_task_drive(task, epoch, DRIVE_ERROR, failure, "", nil)
     end
@@ -1227,7 +1227,7 @@ local function dns_dispatch_body(owner: uv_getaddrinfo_t, result: integer,
     operation.addresses = addresses
     free_dns_result(control)
     if addresses.count == 0 then
-      failure = make_error(UV_EADDRNOTAVAIL,
+      failure = make_error(libuv.UV_EADDRNOTAVAIL as integer,
                            "net.resolve", net_operation_subject(operation))
     end
   end
@@ -1413,7 +1413,7 @@ local function tcp_read_dispatch(tcp: uv_tcp_t, result: integer)
     control.read_bytes = nil
     control.read_waiter = nil
     control.read_epoch = 0
-    if result == UV_EOF then
+    if result == libuv.UV_EOF then
       control.read_terminal = TCP_READ_EOF
       if waiter then
         local task = waiter
@@ -1540,13 +1540,13 @@ local function tcp_dispatch_body(owner: uv_tcp_t, event_kind: integer,
                                  result: integer, size: libuv.size_t,
                                  pointer: ffi.titan_ffi_void_ptr)
   local control = owner.metadata
-  if event_kind == EVENT_HANDLE_CLOSE then
+  if event_kind == shim.TITAN_UV_EVENT_HANDLE_CLOSE then
     finish_closed_tcp(owner)
-  elseif event_kind == EVENT_STREAM_ALLOC then
+  elseif event_kind == shim.TITAN_UV_EVENT_STREAM_ALLOC then
     tcp_alloc_dispatch(owner, size, pointer)
-  elseif event_kind == EVENT_STREAM_READ then
+  elseif event_kind == shim.TITAN_UV_EVENT_STREAM_READ then
     tcp_read_dispatch(owner, result)
-  elseif event_kind == EVENT_CONNECTION then
+  elseif event_kind == shim.TITAN_UV_EVENT_CONNECTION then
     if control.lifecycle == TCP_CLOSING or
        control.lifecycle == TCP_CLOSED then
       return
@@ -1558,7 +1558,7 @@ end
 local function tcp_dispatch(owner: uv_tcp_t, event_kind: integer,
                             result: integer, size: libuv.size_t,
                             pointer: ffi.titan_ffi_void_ptr)
-  if event_kind == EVENT_HANDLE_CLOSE then
+  if event_kind == shim.TITAN_UV_EVENT_HANDLE_CLOSE then
     owner.metadata.lifecycle = TCP_CLOSED
   end
   tcp_dispatch_body(owner, event_kind, result, size, pointer)
@@ -1566,7 +1566,7 @@ catch
   -- A failed alloc callback returns the shim's NULL/zero descriptor. libuv's
   -- Unix stream path must then issue UV_ENOBUFS through read_cb; stopping here
   -- would clear that callback before libuv calls it.
-  if event_kind ~= EVENT_STREAM_ALLOC and
+  if event_kind ~= shim.TITAN_UV_EVENT_STREAM_ALLOC and
       owner.metadata.read_active and owner.handle ~= nil then
     libuv.uv_read_stop(owner.handle)
     owner.metadata.read_active = false

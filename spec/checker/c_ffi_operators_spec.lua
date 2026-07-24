@@ -1,6 +1,12 @@
 local h = require "spec.support.helpers"
 local types = require "titan-compiler.types"
 
+local probe_session
+
+local function run_checker(code)
+    return h.run_checker(code, probe_session)
+end
+
 local function with_header(contents, fn)
     local header = os.tmpname() .. ".h"
     local file = assert(io.open(header, "w"))
@@ -70,9 +76,18 @@ local function resolved_tag(typ)
 end
 
 describe("C FFI operator type checking", function()
+    setup(function()
+        probe_session = h.new_checker_probe_session()
+    end)
+
+    teardown(function()
+        h.close_checker_probe_session(probe_session)
+        probe_session = nil
+    end)
+
     it("imports the real UINT_MAX with unsigned rank and no pre-narrowing",
     function()
-        local ok, err, ast = h.run_checker([[
+        local ok, err, ast = run_checker([[
             local limits = foreign import "limits.h"
 
             local function exceeds_buffer_limit(length: integer): boolean
@@ -92,7 +107,7 @@ describe("C FFI operator type checking", function()
 
     it("covers the accepted matrix with complete frozen traits", function()
         with_header(declarations, function(header)
-            local ok, err, ast = h.run_checker([[
+            local ok, err, ast = run_checker([[
                 local c = foreign import "]] .. header .. [["
 
                 local function matrix(
@@ -335,7 +350,7 @@ describe("C FFI operator type checking", function()
             }
 
             for _, case in ipairs(cases) do
-                local ok, err = h.run_checker([[
+                local ok, err = run_checker([[
                     local c = foreign import "]] .. header .. [["
                     local function rejected(]] .. case.params .. [[)
                         ]] .. case.body .. [[
@@ -351,7 +366,7 @@ describe("C FFI operator type checking", function()
 
     it("requires a cast before operating on a C bit-field", function()
         with_header(declarations, function(header)
-            local ok, err = h.run_checker([[
+            local ok, err = run_checker([[
                 local c = foreign import "]] .. header .. [["
                 local function rejected()
                     local result = c.ffi_flags.bits + 1
@@ -362,7 +377,7 @@ describe("C FFI operator type checking", function()
             assert.match("cast the bit%-field", err)
 
             local ast
-            ok, err, ast = h.run_checker([[
+            ok, err, ast = run_checker([[
                 local c = foreign import "]] .. header .. [["
                 local function accepted()
                     local c_value =
@@ -381,7 +396,7 @@ describe("C FFI operator type checking", function()
 
     it("leaves explicitly excluded syntax on the Titan paths", function()
         with_header(declarations, function(header)
-            local ok, err, ast = h.run_checker([[
+            local ok, err, ast = run_checker([[
                 local c = foreign import "]] .. header .. [["
                 local function accepted(
                     pointer: *c.ffi_item,
@@ -413,7 +428,7 @@ describe("C FFI operator type checking", function()
                 "forward.ffi_late_pointer + 1",
                 "forward.ffi_late_pointer - forward.ffi_late_pointer",
             }) do
-                local ok, err = h.run_checker([[
+                local ok, err = run_checker([[
                     local forward = foreign import "]]
                         .. forward_header .. [["
                     local early = ]] .. expression .. [[
@@ -425,7 +440,7 @@ describe("C FFI operator type checking", function()
                 assert.match("incomplete or not yet visible", err)
             end
 
-            local ok, err = h.run_checker([[
+            local ok, err = run_checker([[
                 local forward = foreign import "]]
                     .. forward_header .. [["
                 local definition = foreign import "]]

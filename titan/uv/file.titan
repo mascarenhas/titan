@@ -211,7 +211,7 @@ local function extract_fs_list(owner: uv_fs_t): {string}
   local entry = allocate_dirent()
   while true do
     local status = libuv.uv_fs_scandir_next(owner.handle, entry.handle)
-    if (status as integer) == UV_EOF then break end
+    if status == libuv.UV_EOF then break end
     if (status as integer) < 0 then
       raise make_error(status as integer, "fs.list.next",
                        fs_operation_subject(owner.metadata.operation))
@@ -777,7 +777,7 @@ local function fs_dispatch_body(owner: uv_fs_t, result: integer)
     end
   elseif operation.kind == FS.write then
     if result == 0 then
-      failure = make_error(UV_EIO,
+      failure = make_error(libuv.UV_EIO as integer,
                            "fs.write",
                            fs_operation_subject(operation))
     else

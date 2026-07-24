@@ -157,9 +157,9 @@ local function os_sized_buffer(
   local status = uv_buffer_func(bytes.data, sizes)
   if (status as integer) >= 0 then
     return bytes_to_string(bytes.data, sizes[0])
-  elseif (status as integer) == UV_ENOBUFS then
+  elseif status == libuv.UV_ENOBUFS then
     return os_sized_buffer(uv_buffer_func, sizes[0], error_from_status)
-  elseif (status as integer) == UV_ENOENT then
+  elseif status == libuv.UV_ENOENT then
     return nil
   else
     raise error_from_status(status)
@@ -260,7 +260,7 @@ local function signal_dispatch(owner: uv_signal_t, event_kind: integer,
                                _pointer: ffi.titan_ffi_void_ptr)
   local runtime = owner.metadata.runtime
 
-  if event_kind == EVENT_HANDLE_CLOSE then
+  if event_kind == shim.TITAN_UV_EVENT_HANDLE_CLOSE then
     owner.metadata.lifecycle = OWNER_CLOSED
     maybe_finish_session(runtime)
     owner.handle = nil
@@ -335,7 +335,7 @@ local function os_exepath_buffer(bytes: *ffi.titan_ffi_char,
   if (status as integer) >= 0 and
       (sizes[0] as integer) == supplied - 1 then
     sizes[0] = (supplied * 2) as libuv.size_t
-    return UV_ENOBUFS as ffi.titan_ffi_int
+    return libuv.UV_ENOBUFS as ffi.titan_ffi_int
   end
   return status
 end

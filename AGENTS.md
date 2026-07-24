@@ -65,8 +65,10 @@ not add epicycles around what may be a misunderstood simpler design.
   15-minute limit. The regular build job runs the core compiler/language shard
   plus serial and net/OS tests on its warm tree, and uploads a same-run,
   full-tree tar artifact for one consumer. That consumer runs uv/timer/fs
-  first, then the fixed heavy coverage shard (`coder_spec.lua` and
-  `flexible_returns_spec.lua`). The complete local `compiler` group remains
+  first, then the heavy coverage shard: `coder_spec.lua`,
+  `flexible_returns_spec.lua`, `cdriver_spec.lua`, every checker/coder
+  `c_ffi*_spec.lua`, and the static-provider specs that require isolated Busted
+  processes for direct coverage. The complete local `compiler` group remains
   the union of both coverage shards. Each shard uploads its explicit report
   through Codecov's GitHub OIDC flow with job-local `id-token: write`; upload
   errors fail the job so coverage publication cannot be silently skipped. The
@@ -244,9 +246,11 @@ repeated checks of large library sources disproportionately slow. CI uses
 `spec/support/ci_test_groups.sh` to run the compiler/language group with
 coverage and the library group without it. This includes both the async-I/O
 stdlib suites and the earlier coroutine stdlib suite; both must still run in
-full outside coverage. If a library suite exposes a compiler coverage gap, add
-a small focused compiler/checker test for that code path instead of covering
-the library integration suite.
+full outside coverage. The repository `.luacov` limits debug-hook collection
+to the same compiler, root-spec, and `titanc` paths emitted by CI's explicit
+report command; keep those filters aligned. If a library suite exposes a
+compiler coverage gap, add a small focused compiler/checker test for that code
+path instead of covering the library integration suite.
 
 **Spec layout.** Pure, layer-level specs live at `spec/` root (`abi_spec`,
 `cdriver_spec`, `cpp_spec`, `ctypes_spec`, `driver_spec`,

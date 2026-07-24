@@ -274,7 +274,7 @@ local function copy_text(source: string, operation: string,
                          subject: string?): Text
   local length = #source
   if _bytes_find(source, "\0") >= 0 then
-    raise make_error(UV_EINVAL, operation, subject)
+    raise make_error(libuv.UV_EINVAL as integer, operation, subject)
   end
   local bytes = allocate_bytes(length + 1)
   if length > 0 then

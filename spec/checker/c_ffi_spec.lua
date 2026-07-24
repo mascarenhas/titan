@@ -1,7 +1,18 @@
 local h = require 'spec.support.helpers'
 
-local run_checker = h.run_checker
-local run_checker_modules = h.run_checker_modules
+local probe_session
+
+local function run_checker(code)
+    return h.run_checker(code, probe_session)
+end
+
+local function run_checker_modules(modules, main)
+    return h.run_checker_modules(modules, main)
+end
+
+local function check_errs(code)
+    return h.check_errs(code, probe_session)
+end
 
 local function with_header(contents, fn)
     local header = os.tmpname() .. ".h"
@@ -19,6 +30,15 @@ local function with_header(contents, fn)
 end
 
 describe("C FFI type checking", function()
+    setup(function()
+        probe_session = h.new_checker_probe_session()
+    end)
+
+    teardown(function()
+        h.close_checker_probe_session(probe_session)
+        probe_session = nil
+    end)
+
     it("publishes complete, empty, and unavailable parameter-name metadata",
     function()
         with_header([[
@@ -1005,7 +1025,7 @@ describe("C FFI type checking", function()
             typedef int ffi_int;
             typedef int (*ffi_callback)(int, int);
         ]], function(header)
-            local errs = h.check_errs([[
+            local errs = check_errs([[
                 local c = foreign import "]] .. header .. [["
 
                 local function use(cb: c.ffi_callback): nil

@@ -346,48 +346,50 @@ describe("unsafe C object-pointer conversion code generation", function()
     function()
         assert(os.getenv("PREFIX"),
             "the real-libuv relation test requires PREFIX")
-        with_header("#include <uv.h>\n", function(header)
-            local csrc = h.compile_and_read_c([[
-                local c = foreign import "]] .. header .. [["
+        h.with_libuv_feature_flags(function()
+            with_header("#include <uv.h>\n", function(header)
+                local csrc = h.compile_and_read_c([[
+                    local c = foreign import "]] .. header .. [["
 
-                local function handle(
-                    tcp: *c.uv_tcp_t
-                ): *c.uv_handle_t
-                    return tcp
-                end
+                    local function handle(
+                        tcp: *c.uv_tcp_t
+                    ): *c.uv_handle_t
+                        return tcp
+                    end
 
-                local function stream(
-                    pipe: *c.uv_pipe_t
-                ): *c.uv_stream_t
-                    return pipe
-                end
+                    local function stream(
+                        pipe: *c.uv_pipe_t
+                    ): *c.uv_stream_t
+                        return pipe
+                    end
 
-                local function request(
-                    fs: *c.uv_fs_t
-                ): *c.uv_req_t
-                    return fs
-                end
+                    local function request(
+                        fs: *c.uv_fs_t
+                    ): *c.uv_req_t
+                        return fs
+                    end
 
-                local function direct(): integer
-                    local tcp: c.uv_tcp_t
-                    local fs: c.uv_fs_t
-                    c.uv_close(tcp, nil)
-                    return c.uv_cancel(fs) as integer
-                end
-            ]])
+                    local function direct(): integer
+                        local tcp: c.uv_tcp_t
+                        local fs: c.uv_fs_t
+                        c.uv_close(tcp, nil)
+                        return c.uv_cancel(fs) as integer
+                    end
+                ]])
 
-            assert.matches(
-                "((uv_handle_t *)(_param_tcp))", csrc, 1, true)
-            assert.matches(
-                "((uv_stream_t *)(_param_pipe))", csrc, 1, true)
-            assert.matches(
-                "((uv_req_t *)(_param_fs))", csrc, 1, true)
-            assert.matches(
-                "uv_close(((uv_handle_t *)((&(_local_tcp_1))))",
-                csrc, 1, true)
-            assert.matches(
-                "uv_cancel%(%(%(uv_req_t %*%).-_local_fs_%d+",
-                csrc)
+                assert.matches(
+                    "((uv_handle_t *)(_param_tcp))", csrc, 1, true)
+                assert.matches(
+                    "((uv_stream_t *)(_param_pipe))", csrc, 1, true)
+                assert.matches(
+                    "((uv_req_t *)(_param_fs))", csrc, 1, true)
+                assert.matches(
+                    "uv_close(((uv_handle_t *)((&(_local_tcp_1))))",
+                    csrc, 1, true)
+                assert.matches(
+                    "uv_cancel%(%(%(uv_req_t %*%).-_local_fs_%d+",
+                    csrc)
+            end)
         end)
     end)
 end)

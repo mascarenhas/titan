@@ -377,11 +377,11 @@ end
 
 patch("uv.titan", [==[
 do
-  UV_EIO = libuv.UV_EIO as integer
+  local sigpipe_status =
 ]==], hook_api .. [==[
 
 do
-  UV_EIO = libuv.UV_EIO as integer
+  local sigpipe_status =
 ]==], "variant hook API")
 
 -- Fail before generating a stale test variant if any production ownership

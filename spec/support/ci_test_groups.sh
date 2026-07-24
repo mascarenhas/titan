@@ -57,9 +57,27 @@ while IFS= read -r test_file; do
             ;;
         spec/coder/coder_spec.lua | \
         spec/coder/flexible_returns_spec.lua)
-            # These two end-to-end files account for more than half of the
-            # covered compiler runtime. Keep their fixed CI shard explicit so
-            # runner variance cannot push the producer past its time limit.
+            # These broad end-to-end files remain on the heavy worker with the
+            # measured C-FFI cohort and isolated static-provider coverage.
+            compiler_tests+=("$test_file")
+            compiler_heavy_tests+=("$test_file")
+            ;;
+        spec/cdriver_spec.lua | \
+        spec/checker/c_ffi_declaration_compatibility_spec.lua | \
+        spec/checker/c_ffi_operators_spec.lua | \
+        spec/checker/c_ffi_pointer_conversions_spec.lua | \
+        spec/checker/c_ffi_spec.lua | \
+        spec/checker/c_ffi_stack_objects_spec.lua | \
+        spec/checker/c_ffi_tag_names_spec.lua | \
+        spec/checker/c_ffi_target_profile_spec.lua | \
+        spec/coder/c_ffi_operators_spec.lua | \
+        spec/coder/c_ffi_pointer_conversions_spec.lua | \
+        spec/coder/c_ffi_spec.lua | \
+        spec/coder/c_ffi_stack_objects_spec.lua | \
+        spec/coder/c_ffi_tag_names_spec.lua)
+            # These compile-probe and generated-C cases are the measured
+            # growth in the covered compiler suite. Keep the cohort explicit
+            # instead of moving unrelated cheap parser/semantic unit files.
             compiler_tests+=("$test_file")
             compiler_heavy_tests+=("$test_file")
             ;;
@@ -71,8 +89,9 @@ while IFS= read -r test_file; do
         spec/staticmetadata_spec.lua)
             # Busted's file insulation reloads compiler modules between specs,
             # while LuaCov keeps only the last loaded prototype's line table
-            # inside one process. Preserve the direct feature coverage by
-            # running these files one process at a time after the main shard.
+            # inside one process. Preserve direct feature coverage by running
+            # these files one process at a time on the heavy worker after its
+            # shard.
             compiler_isolated_coverage_tests+=("$test_file")
             ;;
         *)
@@ -114,8 +133,7 @@ case "$group" in
         ;;
     compiler-core)
         compiler_count=$((${#compiler_core_tests[@]} +
-            ${#compiler_unit_tests[@]} +
-            ${#compiler_isolated_coverage_tests[@]}))
+            ${#compiler_unit_tests[@]}))
         echo "Running $compiler_count core compiler/language spec files" \
             "with LuaCov"
         compiler_status=0
@@ -124,19 +142,27 @@ case "$group" in
         unit_status=0
         "$BUSTED" -c -o gtest -v "${compiler_unit_tests[@]}" ||
             unit_status=$?
-        isolated_status=0
-        run_isolated_compiler_coverage || isolated_status=$?
-        if (( compiler_status != 0 || unit_status != 0 ||
-            isolated_status != 0 )); then
+        if (( compiler_status != 0 || unit_status != 0 )); then
             echo "compiler core test status: main=$compiler_status " \
-                "unit=$unit_status isolated=$isolated_status" >&2
+                "unit=$unit_status" >&2
             exit 1
         fi
         ;;
     compiler-heavy)
-        echo "Running ${#compiler_heavy_tests[@]} heavy compiler/language" \
-            "spec files with LuaCov"
-        "$BUSTED" -c -o gtest -v "${compiler_heavy_tests[@]}"
+        compiler_count=$((${#compiler_heavy_tests[@]} +
+            ${#compiler_isolated_coverage_tests[@]}))
+        echo "Running $compiler_count heavy compiler/language spec files" \
+            "with LuaCov"
+        compiler_status=0
+        "$BUSTED" -c -o gtest -v "${compiler_heavy_tests[@]}" ||
+            compiler_status=$?
+        isolated_status=0
+        run_isolated_compiler_coverage || isolated_status=$?
+        if (( compiler_status != 0 || isolated_status != 0 )); then
+            echo "compiler heavy test status: main=$compiler_status " \
+                "isolated=$isolated_status" >&2
+            exit 1
+        fi
         ;;
     compiler-uncovered)
         compiler_count=$((${#compiler_tests[@]} +
