@@ -74,6 +74,11 @@ local SIGPIPE_HOST_CALLS = {
     "sigaction",
     "sigemptyset",
 }
+-- Darwin may lower sigemptyset entirely through the system header, leaving no
+-- undefined object symbol. Its direct generated-C call is asserted below.
+local SIGPIPE_EXTERNAL_HOST_CALLS = {
+    "sigaction",
+}
 local PHASE8_RETIRED_WRAPPERS = {
     "titan_uvshim_getaddrinfo_cancel",
     "titan_uvshim_addrinfo_free",
@@ -683,6 +688,19 @@ describe("libuv Makefile configuration", function()
         local spawn_status_line = source_line_number(process_source,
             "local spawn_status = status as integer")
 
+        local sigpipe = generated_function(
+            generated, "titan_uv_ignore_sigpipe_if_default_titan")
+        assert_ordered(sigpipe,
+            "sigaction(",
+            "uv_translate_sys_error(errno)",
+            ".sa_handler",
+            "SIG_DFL",
+            "SIG_IGN",
+            "sigemptyset(",
+            "uv_translate_sys_error(errno)",
+            "sigaction(",
+            "uv_translate_sys_error(errno)")
+
         local process =
             generated_function(generated, "titan_uv_arm_process_spawn_titan")
         assert.match(
@@ -812,7 +830,7 @@ describe("libuv Makefile configuration", function()
             assert.truthy(nm_has_symbol(output, function_name),
                 logical_object .. ": " .. function_name)
         end
-        for _, function_name in ipairs(SIGPIPE_HOST_CALLS) do
+        for _, function_name in ipairs(SIGPIPE_EXTERNAL_HOST_CALLS) do
             assert.truthy(nm_has_symbol(output, function_name),
                 logical_object .. ": " .. function_name)
         end
@@ -845,7 +863,7 @@ describe("libuv Makefile configuration", function()
         for _, function_name in ipairs(PHASE8_PUBLIC_LIBUV_CALLS) do
             assert.truthy(nm_has_symbol(output, function_name), function_name)
         end
-        for _, function_name in ipairs(SIGPIPE_HOST_CALLS) do
+        for _, function_name in ipairs(SIGPIPE_EXTERNAL_HOST_CALLS) do
             assert.truthy(nm_has_symbol(output, function_name), function_name)
         end
         for _, wrapper in ipairs(PHASE8_RETIRED_WRAPPERS) do
