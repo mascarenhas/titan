@@ -5,6 +5,7 @@ local ffi = foreign import "titan/ffi.h"
 local coro_native = foreign import "titan/coro.h"
 
 local STACK_SIZE = 2 * 1024 * 1024
+local TITAN_CORO_OWNER_USERVALUES = 5
 local runtime = mco.mco_runtime.new()
 
 record Coro
@@ -52,7 +53,7 @@ local function root_transfer(co: *mco.mco_coro, payload: value)
   ffi.lua_pushtvalue(L, owner)
   ffi.lua_pushtvalue(L, payload)
   local set = lua.lua_setiuservalue(
-    L, -2, coro_native.TITAN_CORO_OWNER_USERVALUES)
+    L, -2, TITAN_CORO_OWNER_USERVALUES)
   if (set as integer) == 0 then
     lua.lua_settop(L, top)
     raise "cannot set coroutine transfer root"
@@ -244,7 +245,7 @@ end
 
 function create(func: (value) -> value, default_tag: value): Coro
   local slot: **mco.mco_coro = lua.lua_newuserdatauv(
-    L, ffi.titan_ffi_void_ptr.sizeof, coro_native.TITAN_CORO_OWNER_USERVALUES)
+    L, ffi.titan_ffi_void_ptr.sizeof, TITAN_CORO_OWNER_USERVALUES)
   local T = ffi.titan_newthread(L)
   lua.lua_setiuservalue(L, -2, 1)
   ffi.lua_pushtvalue(L, M)

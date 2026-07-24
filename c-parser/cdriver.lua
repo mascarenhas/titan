@@ -274,6 +274,11 @@ function cdriver.process_file(filename, options)
     end
 
     cdefines.register_defines(ffi_types, ctx.defines)
+    ffi_types.macro_definitions = ctx.defines
+    ffi_types.macro_changes = {}
+    for name in pairs(ctx.macro_changes or {}) do
+        ffi_types.macro_changes[name] = true
+    end
 
     -- The fourth result is deliberately contextual rather than process-global:
     -- target-profile acquisition needs the exact macro context that parsed the

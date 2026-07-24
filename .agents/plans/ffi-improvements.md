@@ -20,8 +20,10 @@ The completed change provides:
    Titan functions.
 4. Direct C arithmetic, comparison, and bitwise operations with C promotions
    and C run-time behavior.
-5. Correct preprocessing and import of libuv's `UV_E*` enumerators and
-   correctly typed unsigned object-like integer macros such as `UINT_MAX`.
+5. Correct preprocessing and import of libuv's `UV_E*` enumerators, correctly
+   typed unsigned object-like integer macros such as `UINT_MAX`, outer-cast
+   scalar macros such as `SIG_DFL`/`SIG_IGN`, and pure dotted macro field
+   projections such as `sa_handler`.
 6. A substantially smaller native libuv shim: Titan source calls public libuv
    directly wherever the only obstacle was a pointer cast, a C operator, a
    stack aggregate, a tag-only platform type, or an imported constant. This
@@ -98,7 +100,9 @@ address-coercion support already present on `master`; it does not redesign
 - C unary, arithmetic, relational, equality, bitwise, shift, and pointer
   operators described in section 6.
 - Correct C preprocessor argument substitution around `#` and `##`.
-- Direct use of imported enum and object-like macro constants.
+- Direct use of imported enum and supported object-like macro constants,
+  including fully expanded outer casts to integer, floating, object-pointer, or
+  function-pointer types, plus lazy pure dotted macro field projections.
 - Moving every libuv wrapper made unnecessary by these facilities into the
   owning `titan/uv/*.titan` contributor, including DNS result traversal and
   the bind/connect path while retaining the normalized opaque address cells.
@@ -124,16 +128,18 @@ address-coercion support already present on `master`; it does not redesign
 - Titan-function-to-C-callback adaptation. Libuv callback trampolines remain C.
 - Replacement of the normalized opaque `titan_uvshim_address` representation,
   interpretation of platform `sockaddr` fields by `titan.uv`, exposure of those
-  address types through the public `net` API, or removal of the cell's native
-  compile-time size/alignment assertions. The general FFI necessarily exposes
-  the complete tag types and their ordinary fields to source; this migration
-  deliberately uses only pointer conversion and `sockaddr_storage.sizeof`.
+  address types through the public `net` API, or use of the opaque cell as a
+  public structural contract. The general FFI necessarily exposes the complete
+  tag types and their ordinary fields to source; this migration deliberately
+  uses only pointer conversion and `sockaddr_storage.sizeof`.
 - Explicit Titan syntax for selecting a C tag when a real same-name typedef
   already owns the base type name, and named enum-tag aliases while imported
   enums still lower to C `int`.
 - C boolean short-circuit operators, C truthiness for `and`/`or`, C `sizeof`,
-  arbitrary function-like C macros, or C preprocessor expressions at Titan run
-  time.
+  function-like C macros, general support for arbitrary object-like macro forms
+  beyond recognized existing integer/accessor expressions, fully expanded
+  outer-cast scalars, and pure dotted projections, or C preprocessor
+  expressions at Titan run time.
 - Reinterpreting Titan `//` or `^`: they remain Titan floor division and
   exponentiation.
 - Purging the separately versioned 0.17 provider tree. The 0.18 installation
@@ -220,9 +226,11 @@ unspecified operand evaluation order.
 ### 3.4 Keep native ABI boundaries native
 
 Plain C callbacks required by libuv remain native because Titan functions have
-hidden `lua_State *`, module `Udata *`, and closure parameters. Compile-time
-layout assertions, the dispatcher, the narrow POSIX `SIGPIPE` helper, minicoro's
-entry function, and Lua-internal tag comparison also remain native.
+hidden `lua_State *`, module `Udata *`, and closure parameters. The dispatcher,
+minicoro's entry function, and Lua-internal tag comparison also remain native.
+The narrow POSIX `SIGPIPE` policy moves to the canonical `titan.uv` initializer,
+which can now express the host's cast-valued handler macros and projected
+`sigaction` fields through the reusable C FFI.
 
 Everything else moves only when Titan can express it using public C/Lua APIs
 without a new alias header, identity trick, private-layout dependency, or
@@ -233,8 +241,9 @@ checks, not part of the Titan or libuv behavioral contract. When a wrapper is
 deleted, do not recreate those assertions as Titan branches. Rely on the
 existing public Titan validation and control-flow invariants, and preserve only
 observable error behavior, ownership, lifetime, ordering, and narrowing rules.
-Compile-time layout assertions that remain beside a retained opaque native
-representation may stay in C; Titan does not duplicate them.
+The fixed owner declarations and deliberately overprovisioned opaque address
+cell remain in the shared header consumed by Titan and the callbacks. Titan
+does not duplicate deleted defensive native checks as runtime branches.
 
 ## 4. Named C tags and host-validated C conversions
 
@@ -833,7 +842,7 @@ signed overflow, division by zero, invalid shifts, and implementation-defined
 right shift retain C behavior or C undefined behavior. The language manual must
 say this directly.
 
-## 7. C constants and preprocessing
+## 7. C constants, macro fields, and preprocessing
 
 ### 7.1 `UV_E*` is a token-paste bug, not an enum-import feature
 
@@ -879,7 +888,7 @@ Regression coverage includes:
 - real pinned `uv.h` import of `uv_errno_t`, `UV_EIO`, `UV_EOF`,
   `UV_ECANCELED`, and other currently shimmed errors.
 
-### 7.3 Object-like integer macros
+### 7.3 Object-like scalar macros and projected fields
 
 `c-parser/cdefines.lua` currently recognizes rank suffixes but loses unsigned
 suffix semantics. Preserve the parsed object-macro expression and each integer
@@ -897,6 +906,42 @@ toolchain arithmetic profile when the target width matters.
 Before deleting `titan_uvshim_buf_max_length`, prove that direct
 `limits.UINT_MAX` has the correct C type and value on Linux and macOS and that
 the existing Titan bound check does not narrow it before comparison.
+
+Preserve the existing bounded best-effort expression form used by headers such
+as `errno.h`: a dereferenced accessor macro like `*accessor()` remains a typed
+value when the imported accessor declaration establishes its result type. This
+does not generalize object-like macros into arbitrary call, postfix, or operator
+expressions.
+
+An object-like macro whose fully expanded replacement has an outer cast to a
+supported C scalar is also a typed value. Convert the cast target through the
+ordinary C type machinery for integer, floating, object-pointer, and
+function-pointer targets, but retain and emit the public macro spelling. This
+is required for platform signal handler values such as `SIG_DFL` and `SIG_IGN`;
+it is not permission to expose arbitrary expanded expressions.
+
+A replacement containing only a dotted identifier path is a field-projection
+candidate. Generated C hoists every foreign header, so retain the raw macro
+definitions and the names actively defined, redefined, or undefined by each
+header closure. Seed one module-wide environment from the first import, replay
+later changes in source order, and lazily rescan the public token when a
+concrete aggregate receiver uses it. This makes later dependency redefinitions
+and `#undef` visible even at an earlier closure initializer. Resolve a final
+pure dotted path before physical field lookup, matching C preprocessing
+precedence, and validate it with the ordinary completeness and mutation rules.
+An active object-like macro with an unsupported final expansion is terminal;
+never fall back to a physical same-named field that generated C cannot name.
+Generated C emits the public field spelling, allowing the host header to expand
+implementation paths such as `sa_handler`. The separate contextual address
+coercion remains limited to eligible locals; calls, indexing, operators, casts,
+and other replacement forms do not become projected fields.
+
+Both forms inherit the independent-header limitation. Field lookup replays
+ordinary raw macro changes, but declaration extraction and conditional
+preprocessing still classify each import in isolation even though probes and
+generated C see the cumulative ordered header block. Conditional coupling, and
+later changes to scalar macros whose types were inferred through an earlier
+module namespace, belong behind one umbrella header.
 
 ## 8. Probe-session architecture
 
@@ -1079,14 +1124,17 @@ Existing behavior that must not regress:
 
 Keep in `titan-runtime/titan_uv.c`:
 
-1. Static ABI/layout assertions, including owner slots, integer widths, and the
-   opaque address cell's `sockaddr_storage` size/alignment.
-2. The owner dispatcher.
-3. Every plain-C libuv callback trampoline:
+1. The owner dispatcher.
+2. Every plain-C libuv callback trampoline:
    signal, process exit, DNS, connect, write, shutdown, allocation, read,
    connection, timer, close, and filesystem.
-4. `titan_uvshim_ignore_sigpipe_if_default`, which preserves an inherited signal
-   disposition and changes only `SIG_DFL`.
+
+The resulting C file's only function definitions are that common dispatcher
+and the callbacks. The fixed owner protocol and deliberately overprovisioned
+opaque address cell remain shared header declarations. The conditional
+inherited-`SIGPIPE` policy is a private Titan function that calls `sigaction`,
+`sigemptyset`, and `uv_translate_sys_error` through direct `signal.h`,
+`errno.h`, and `uv.h` imports.
 
 Callbacks that are currently `static` but become direct Titan arguments must be
 externally visible and declared in `titan-runtime/titan/uv.h`. Timer and
@@ -1155,8 +1203,9 @@ Process-spawn acceptance invariants are:
   regression test, with generated-order assertions around spawn/data/state.
 
 Signal mapping imports platform `SIG*` object constants from `signal.h`; never
-hardcode Linux signal numbers. `SIG_DFL`/`SIG_IGN` behavior stays in the native
-helper.
+hardcode Linux signal numbers. The canonical main also uses the typed
+`SIG_DFL`/`SIG_IGN` macros and lazily projected `sigaction` fields to preserve
+the existing inherited-disposition policy without a one-off native helper.
 
 Buffer initialization casts the existing opaque destination to
 `*libuv.uv_buf_t` and writes its public `.base` and `.len` fields after the
@@ -1226,9 +1275,8 @@ only:
 
 - `titan_uvshim_getaddrinfo_cb` and `titan_uvshim_connect_cb` as externally
   visible plain-C callbacks;
-- `titan_uvshim_address`, its alignment-probe structs, and the native
-  compile-time assertions that the opaque cell is large and aligned enough for
-  `struct sockaddr_storage`.
+- `titan_uvshim_address` as deliberately overprovisioned, aligned opaque
+  storage shared by Titan and the native callbacks.
 
 Implement DNS submission in `titan/uv/tcp.titan`:
 
@@ -1492,16 +1540,28 @@ Work:
 4. Preserve object-macro expression structure plus each integer token's base,
    suffix, and unsigned/rank candidates; do not finalize a target-dependent C
    type yet.
-5. Prove the real pinned libuv header publishes the named `UV_E*` constants.
-6. Prove a generated Titan module can compare a returned libuv C status to a
+5. Preserve the existing typed dereferenced-accessor expression path used by
+   `errno`, and reject unknown or unsupported postfix shapes without treating
+   every call-containing macro as categorically invalid.
+6. Classify fully expanded outer casts to supported scalar types. Retain raw
+   macro definitions and per-header change sets so pure dotted identifier
+   replacements resolve lazily against the final hoisted-header environment,
+   including direct/dependency redefinitions and `#undef`, while preserving
+   the public macro spelling for code generation. Treat an active unsupported
+   object macro as terminal before physical field lookup.
+7. Prove the real pinned libuv header publishes the named `UV_E*` constants
+   and the host signal header publishes typed `SIG_DFL`/`SIG_IGN` plus the
+   `sa_handler` projection where applicable.
+8. Prove a generated Titan module can compare a returned libuv C status to a
    direct enum constant.
 
 Do not touch `titan_uv.c` yet. The old getter functions remain the production
 path until the complete source migration.
 
 Exit criterion: custom preprocessing agrees with the host preprocessor on the
-focused macro corpus, direct `libuv.UV_EOF` typechecks and compiles, and all
-preprocessor/parser tests pass.
+focused macro corpus; direct `libuv.UV_EOF`, cast-valued signal handlers, and
+projected signal fields typecheck and compile; and all preprocessor/parser
+tests pass.
 
 ### Phase 2: Expose named tags, extract exact declarators, and define target semantics
 
@@ -1617,7 +1677,9 @@ Work:
 4. Make `foreigntypes` instantiate canonical primitives from that profile,
    retaining explicit 128-bit entries only when the selected target publishes
    them, and finalize object-like integer macro expressions with profile-aware
-   literal rules and usual arithmetic conversions.
+   literal rules and usual arithmetic conversions. Convert supported
+   outer-cast macro targets through those same canonical C types, while leaving
+   pure dotted field projections lazy.
 5. Expose the CPP path's safely quoted POSIX captured-command helper through
    `cdriver` and reuse it for probes.
 6. Build baseline and candidate sources through `cdeclarator`.
@@ -1877,27 +1939,35 @@ Files:
 Work:
 
 1. Initialize error constants directly from `libuv.UV_E*`.
-2. Replace signal mapping with Titan logic and imported platform constants.
-3. Implement complete process options/stdio construction in Titan and call
+2. Replace the one-shot signal-name mapping with Titan logic and imported
+   platform constants.
+3. Move the inherited-`SIGPIPE` policy into a private function in the canonical
+   Titan main. Use imported `SIG_DFL`/`SIG_IGN` values and projected
+   `sigaction` fields, call `sigaction`, `sigemptyset`, and
+   `uv_translate_sys_error` directly, and preserve translation of the captured
+   public `errno` value. Remove
+   `titan_uvshim_ignore_sigpipe_if_default` from the native source and header.
+4. Implement complete process options/stdio construction in Titan and call
    `uv_spawn` directly.
-4. Preserve owner-data plus unconditional `PROCESS_SPAWNED` transition ordering
+5. Preserve owner-data plus unconditional `PROCESS_SPAWNED` transition ordering
    on success and synchronous failure.
-5. Add an explicit `string.h` foreign import in the canonical folder main; move
+6. Add an explicit `string.h` foreign import in the canonical folder main; move
    buffer initialization through public `uv_buf_t` field lvalues and byte
    helpers through `cstring.memcpy`/`cstring.memcmp` under their existing owning
    Titan validation/control flow. Preserve valid
    empty/oversized-needle/terminator behavior and necessary post-validation
    narrowing, but do not translate defensive shim `assert(...)` predicates into
    new Titan branches.
-6. Prove the exact bundled/system/macOS feature-test flags expose the required
+7. Prove the exact bundled/system/macOS feature-test flags expose the required
    stat constants, then move stat extraction/classification.
-7. Retain public maximum/offset validation tests and add focused zero-length,
+8. Retain public maximum/offset validation tests and add focused zero-length,
    empty/oversized-needle, and NUL-termination cases plus generated-C assertions
    for the operational branches and post-validation casts.
-8. Replace `UV_BUF_MAX` with a proven `UINT_MAX` path.
-9. Remove `as integer` only where C-mode expressions make it redundant.
-10. Delete all newly obsolete prototypes/definitions and assert neither the
-   source tree nor generated 0.18 provider refers to them.
+9. Replace `UV_BUF_MAX` with a proven `UINT_MAX` path.
+10. Remove `as integer` only where C-mode expressions make it redundant.
+11. Delete all newly obsolete prototypes/definitions and assert neither the
+    source tree nor generated 0.18 provider refers to them, including an
+    explicit absence check for `titan_uvshim_ignore_sigpipe_if_default`.
 
 Exit criterion: process spawn/communicate, signals, filesystem stat, buffers,
 TCP, and all error paths pass in both bundled and system libuv modes.
@@ -1983,11 +2053,10 @@ Work:
     and listener round trips.
 
 Exit criterion: DNS submission, result normalization, bind, and connect
-submission are implemented in Titan; the opaque address cell, its native
-compile-time layout assertions, and the two callback trampolines remain C; all
-net suites and bundled/system/static/sanitizer smokes pass; and neither the
-active header, runtime, nor 0.18 provider references a removed DNS/address
-helper.
+submission are implemented in Titan; the opaque address cell remains in the
+shared header and the two callback trampolines remain C; all net suites and
+bundled/system/static/sanitizer smokes pass; and neither the active header,
+runtime, nor 0.18 provider references a removed DNS/address helper.
 
 ### Phase 11: Migrate coroutine transfer rooting
 
@@ -2106,6 +2175,11 @@ Tag-name coverage includes:
 - `struct stat` plus same-named function, static function, object, enumerator,
   and imported object-macro values, proving type lookup and expression lookup
   select their separate namespaces;
+- outer-cast integer, floating, object-pointer, and function-pointer macros,
+  plus pure dotted macro projections resolved against their actual aggregate
+  receivers; unsupported cast targets, arbitrary object-like forms beyond
+  recognized existing integer/accessor expressions, fully expanded outer casts,
+  and pure dotted projections, and all function-like macros remain absent;
 - a clear rejection for collided `.new`/`.new_array`/`.sizeof`/`.alignof`
   pseudo-members rather than hiding the ordinary value, plus a same-named
   imported aggregate object whose real fields are named `new`, `new_array`,
@@ -2204,7 +2278,8 @@ Add `doc/language/c-ffi-expressions.md`, linked from
 - the complete C operator table and mixed Titan/C rules;
 - C promotions/result types and direct operator spelling;
 - C undefined/implementation-defined behavior;
-- direct enum/object-like macro constants;
+- direct enum/object-like macro constants, including typed outer-cast scalar
+  macros and pure dotted field projections while retaining public spelling;
 - a process-options example using a neutral host-provided C callback fixture,
   not Titan's private libuv dispatcher callbacks.
 
@@ -2246,8 +2321,8 @@ Update:
   collided pseudo-member diagnostics;
 - `doc/implementation/libuv-runtime.md` with the new native/Titan ownership
   table, ABI-0.18 callback/runtime boundary, direct constants, Titan-owned DNS
-  submission/normalization/bind/connect logic, and the retained opaque address
-  cell plus native callbacks/compile-time layout assertions;
+  submission/normalization/bind/connect and inherited-`SIGPIPE` logic, and the
+  retained opaque address cell plus native callbacks;
 - `doc/implementation/libuv-networking.md` with Titan-owned DNS submission,
   typed borrowed-result traversal and direct release, bind/connect submission,
   the narrower portable shim boundary, and the new deterministic DNS-variant
@@ -2340,6 +2415,21 @@ The feature is done only when all of the following are true:
 - `libuv.UV_EOF`, `UV_EIO`, `UV_ECANCELED`, and related enumerators import
   directly from the real header.
 - `UINT_MAX` imports with correct unsigned rank/value on Linux and macOS.
+- The public `errno` macro retains its existing typed dereferenced-accessor
+  expression path without implying general call-containing macro support.
+- Fully expanded outer-cast integer, floating, object-pointer, and
+  function-pointer macros import with the cast target type and generate their
+  public spelling.
+- Supported object-like macro forms include recognized existing
+  integer/accessor expressions, those fully expanded outer casts, and pure
+  dotted projections; arbitrary forms beyond those are not generally
+  supported, and all function-like macros remain unsupported.
+- Pure dotted identifier replacement macros resolve lazily against the final
+  hoisted-header macro environment and generate their public spelling, taking
+  precedence over a physical same-named field just as preprocessing does.
+  Later direct/dependency redefinitions and `#undef` are reflected even at an
+  earlier closure initializer; an active unsupported object macro is terminal
+  rather than falling back to a physical field.
 - A repeated exact probe compiles once per session; changed toolchain/header/
   flags produce a distinct result.
 - Probe baseline failures and candidate rejections have distinct diagnostics.
@@ -2396,13 +2486,14 @@ The feature is done only when all of the following are true:
   `0`, `9`, `10`, and `65535`; the owned normalized-address array and its raw
   cell pointer survive forced full/generational GC through release and
   failed-candidate close-before-retry.
-- The normalized opaque address cell and its native compile-time size/alignment
-  assertions remain C-owned, but Titan neither interprets platform `sockaddr`
-  fields nor reproduces deleted wrappers' defensive runtime assertions.
+- The normalized opaque address cell remains deliberately overprovisioned
+  shared storage, but Titan neither interprets platform `sockaddr` fields nor
+  reproduces deleted wrappers' defensive runtime assertions.
 - Coroutine result/error/nil transfers survive forced full and generational GC
   through Titan-side uservalue rooting.
-- Native callback trampolines, compile-time layout assertions, `SIGPIPE`,
-  coroutine entry, and tag comparison remain C.
+- Native callback trampolines, their common dispatcher, coroutine entry, and
+  tag comparison remain C. The inherited-`SIGPIPE` policy runs in Titan through
+  reusable macro-value and macro-field FFI behavior.
 - Retired wrapper/root symbols are absent from the active headers/runtime, and
   the 0.18 provider references only the new callback/runtime boundary.
 - Direct inspection of 0.18 logical archive objects shows required undefined

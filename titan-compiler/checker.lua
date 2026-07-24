@@ -7,6 +7,7 @@ local ast = require "titan-compiler.ast"
 local util = require "titan-compiler.util"
 local foreigntypes = require "titan-compiler.foreigntypes"
 local cdriver = require("c-parser.cdriver")
+local cdefines = require("c-parser.cdefines")
 local cprobe = require "titan-compiler.cprobe"
 local csemantics = require "titan-compiler.csemantics"
 
@@ -925,6 +926,99 @@ local function is_c_pseudo_member_name(name)
         or name == "sizeof" or name == "alignof"
 end
 
+local function field_macro_path_spelling(path)
+    local parts = {}
+    for _, segment in ipairs(path or {}) do
+        if type(segment) ~= "string" or segment == "" then
+            return "<invalid>"
+        end
+        parts[#parts + 1] = segment
+    end
+    return #parts > 0 and table.concat(parts, ".") or "<invalid>"
+end
+
+local function field_macro_error(root, name, projection, reason)
+    return string.format(
+        "C field macro '%s' expands to '%s', which is not a valid physical "
+        .. "field path in C type '%s': %s",
+        name, field_macro_path_spelling(projection and projection.path),
+        types.tostring(root), reason)
+end
+
+local function projected_c_field(root, name, projection, st)
+    local path = projection and projection.path
+    if type(path) ~= "table" or #path == 0 then
+        return nil, field_macro_error(
+            root, name, projection, "the recorded path is empty or malformed")
+    end
+
+    local owner = root
+    for index, segment in ipairs(path) do
+        if type(segment) ~= "string" or segment == "" then
+            return nil, field_macro_error(
+                root, name, projection,
+                "the recorded path contains a non-identifier segment")
+        end
+
+        owner = c_resolve(owner)
+        if owner._tag ~= "Type.CStruct"
+           and owner._tag ~= "Type.CUnion" then
+            return nil, field_macro_error(
+                root, name, projection,
+                string.format(
+                    "segment '%s' follows non-aggregate C type '%s'",
+                    segment, types.tostring(owner)))
+        elseif not st:foreign_definition_visible(owner) then
+            return nil, field_macro_error(
+                root, name, projection,
+                string.format(
+                    "C type '%s' is incomplete or not yet visible before "
+                    .. "segment '%s'",
+                    types.tostring(owner), segment))
+        end
+
+        -- Resolve the fully expanded path through physical fields only. In
+        -- particular, glibc's sa_handler replacement ends in another token
+        -- named sa_handler; that token is not recursively expanded while the
+        -- outer macro is disabled during its own replacement rescan.
+        local field = owner.fields and owner.fields[segment]
+        if not field then
+            return nil, field_macro_error(
+                root, name, projection,
+                string.format(
+                    "physical field '%s' is not present in C type '%s'",
+                    segment, types.tostring(owner)))
+        end
+
+        if index == #path then
+            local projected = types.CField(
+                root, name, field.type,
+                field.bitfield, field.flexible_array)
+            projected._macro_projection = projection
+            return projected
+        end
+        owner = field.type
+    end
+end
+
+local function active_field_macro(name, st)
+    local cached, known =
+        st:find_cached_foreign_field_macro(name)
+    if known then return cached end
+
+    local definition, initialized =
+        st:find_foreign_macro_definition(name)
+    if not initialized or not definition or definition.args then
+        st:cache_foreign_field_macro(name, nil)
+        return nil
+    end
+
+    local macro = cdefines.classify_field_macro(
+        name, st:foreign_macro_environment())
+    st:cache_foreign_field_macro(name, macro)
+    return macro
+end
+
 local function c_field_decl(typ, name, st)
     typ = c_resolve(typ)
     if typ._tag == "Type.CPointer" then
@@ -940,6 +1034,21 @@ local function c_field_decl(typ, name, st)
                 "field '%s' not found in C type '%s' because its definition "
                 .. "is incomplete or not yet visible",
                 name, types.tostring(typ))
+        end
+        local macro = active_field_macro(name, st)
+        if macro and macro.unsupported then
+            return nil, string.format(
+                "C field token '%s' is an active object-like macro whose "
+                .. "final expansion '%s' is not a supported pure dotted "
+                .. "field projection in C type '%s'",
+                name, macro.replacement or "<unknown>",
+                types.tostring(typ))
+        elseif macro then
+            -- Preprocessing happens before C member lookup. A live projection
+            -- therefore wins even when the aggregate has a physical field with
+            -- the same public spelling; a bad expansion is terminal rather
+            -- than falling back to the field C itself cannot name here.
+            return projected_c_field(typ, name, macro, st)
         end
         if typ.fields and typ.fields[name] then
             return typ.fields[name]
@@ -5302,6 +5411,8 @@ local toplevel_visitor = util.make_visitor({
             st.module_probe_error = nil
             st.module_probe_includes_version = nil
             st.module_probe_error_includes_version = nil
+            st:apply_foreign_macro_changes(
+                ftypes.macro_changes, ftypes.macro_definitions)
             local members = {}
             local type_members = {}
             local ordinary_declarations = {}

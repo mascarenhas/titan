@@ -62,27 +62,54 @@ describe("Titan symbol table", function()
         assert.equal(record, st:find_symbol("record"))
     end)
 
-    it("recovers the foreign declarations visible at an initializer", function()
+    it("keeps foreign declaration frontiers and final hoisted macro state",
+    function()
         local st = symtab.new()
         local early_type, late_type = {}, {}
         local early_name, late_name = {}, {}
+        local early_macro = { "early", ".", "field" }
+        local late_macro = { "late", ".", "field" }
 
         st.current_toplevel_order = 1
         st:add_foreign_type("shared", early_type)
         st:add_foreign_name("shared", early_name)
+        st:apply_foreign_macro_changes({}, {
+            projected = early_macro,
+        })
         st.current_toplevel_order = 4
         st:add_foreign_type("shared", late_type)
         st:add_foreign_name("shared", late_name)
+        st:apply_foreign_macro_changes({ projected = true }, {
+            projected = late_macro,
+        })
         st.current_toplevel_order = nil
 
         assert.equal(late_type, st:find_foreign_type("shared"))
         assert.equal(late_name, st:find_foreign_name("shared"))
+        assert.equal(late_macro,
+            (st:find_foreign_macro_definition("projected")))
         st.initializer_order = 2
         assert.equal(early_type, st:find_foreign_type("shared"))
         assert.equal(early_name, st:find_foreign_name("shared"))
+        -- C headers are hoisted in generated translation units, so macro
+        -- definitions use the final view even at an initializer frontier.
+        assert.equal(late_macro,
+            (st:find_foreign_macro_definition("projected")))
         st.initializer_order = 0
         assert.is_nil(st:find_foreign_type("shared"))
         assert.is_nil(st:find_foreign_name("shared"))
+        assert.equal(late_macro,
+            (st:find_foreign_macro_definition("projected")))
+
+        local cached_projection = { name = "projected" }
+        st:cache_foreign_field_macro("projected", cached_projection)
+        assert.equal(cached_projection,
+            (st:find_cached_foreign_field_macro("projected")))
+        st:apply_foreign_macro_changes({ projected = true }, {})
+        assert.is_nil(st:find_foreign_macro_definition("projected"))
+        local _, known =
+            st:find_cached_foreign_field_macro("projected")
+        assert.is_false(known)
     end)
 
     describe("ordered C tag registry", function()

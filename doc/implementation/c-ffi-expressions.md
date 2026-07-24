@@ -3,8 +3,9 @@
 This chapter describes the implementation added around the existing
 [`foreign import` pipeline](ffi-internals.md): source-visible tag-only
 aggregates, exact C declarators, session-scoped compiler probes, contextual
-object-pointer conversions, automatic C objects, and C-mode operators. It is
-the implementation counterpart of the language chapter
+object-pointer conversions, automatic C objects, typed object macros, lazy
+macro-field projections, and C-mode operators. It is the implementation
+counterpart of the language chapter
 [C FFI declarations and expressions](../language/c-ffi-expressions.md).
 
 The central boundary is intentional:
@@ -428,6 +429,58 @@ The C99 preprocessing grammar canonicalizes digraphs as one token; the raw
 spelling remains solely in the side metadata. This avoids the earlier
 raw-plus-canonical duplicate-token bug.
 
+## Typed object macros and field projections
+
+`cdefines.lua` classifies supported object-like macros after recursively
+expanding their replacement tokens in the importing header's preprocessor
+context. The existing integer-constant path remains target-profile aware, and
+the bounded best-effort expression path retains typed dereferenced accessors
+such as `errno`'s `*accessor()` expansion. A second path accepts a fully
+expanded replacement whose outer expression is a C cast to a supported scalar
+type: integer, floating, object pointer, or function pointer. The cast target
+goes through the ordinary C-type converter and becomes the foreign member's
+static type.
+
+The expansion is evidence for typing only. The member retains its public macro
+name, and `codeforeignvar` emits that spelling rather than copying the expanded
+tokens. The generated compiler therefore performs the authoritative expansion
+under the translation unit's real header state.
+
+A separate object-macro form contains only a dotted identifier replacement,
+such as `implementation.member`. `cdriver` also retains the raw final macro
+definitions plus the names actively defined, redefined, or undefined by each
+header closure. Because generated C hoists all foreign includes, the symbol
+table seeds one module macro environment from the first import and applies
+those later mutations in source order. Field lookup expands the public token
+lazily against that final environment, so a later dependency redefinition or
+`#undef` cannot leave a stale projection at an earlier initializer.
+
+When the final expansion is a pure dotted path, the checker resolves it against
+the expression's actual aggregate type before physical field lookup, matching
+C preprocessing precedence. The result keeps the projected physical field's
+type and lvalue/mutation properties, but the coder emits the public source
+spelling so the host header performs the same projection. An active
+object-like macro with any unsupported final expansion is terminal; falling
+back to a physical same-named field would disagree with generated C. Existing
+contextual address coercion remains limited to eligible locals and does not
+acquire a special subobject exception.
+
+Field projection deliberately stops at pure identifier paths: calls, indexing,
+operators, casts, and other replacement forms do not become projected fields.
+That does not categorically reject every call-containing value macro: the
+existing typed dereferenced-accessor form remains supported. Function-like
+macros remain unavailable, while other object-like forms beyond recognized
+existing integer/accessor expressions, fully expanded outer casts to supported
+scalar types, and pure dotted projections are not generally supported. Macro
+classification also retains the existing independent-header limitation:
+declaration extraction does not inherit macro state from an earlier foreign
+import, even though probes and generated C see the cumulative ordered header
+block. The replayed field environment handles ordinary definitions,
+redefinitions, dependency rescans, and undefinitions, but conditional
+preprocessing whose result itself depends on an earlier import still belongs
+behind one umbrella header. The same umbrella rule applies when a later import
+changes a scalar value macro whose type was inferred in an earlier import.
+
 ## Ownership map
 
 | Module | Owns |
@@ -435,13 +488,14 @@ raw-plus-canonical duplicate-token bug.
 | `c-parser/cpp.lua` | preprocessing, raw/prescanned macro forms, captured compiler execution |
 | `c-parser/c99.lua` | preprocessing-token and C99 declaration grammar |
 | `c-parser/ctypes.lua` | `TypeList`, file/prototype tag metadata and scopes |
-| `titan-compiler/foreigntypes.lua` | ordered canonical C-type conversion and tag binding |
+| `c-parser/cdefines.lua` | target-neutral object-macro expression/cast metadata and lazy classification against the final raw field-macro environment |
+| `titan-compiler/foreigntypes.lua` | ordered canonical C-type conversion, tag binding, target-profile macro-expression finalization, and macro cast-target conversion |
 | `titan-compiler/cdeclarator.lua` | exact C declarations/type names/parameter adjustment |
 | `titan-compiler/cpreamble.lua` | fixed generated/probe prefix around ordered foreign headers |
 | `titan-compiler/csemantics.lua` | target profile interpretation, C categories/promotions/result types |
 | `titan-compiler/cprobe.lua` | session/workspace/header contexts, baselines, candidate probes and caches |
-| `titan-compiler/checker.lua` | source eligibility, contextual adjustments, traits, completeness and mutation analysis |
-| `titan-compiler/coder.lua` | ordered lowering of already-proven traits and volatile aggregate spills |
+| `titan-compiler/checker.lua` | source eligibility, contextual adjustments, lazy macro-field projection, traits, completeness and mutation analysis |
+| `titan-compiler/coder.lua` | ordered lowering, public macro spelling, and volatile aggregate spills |
 
 ## Tests
 
@@ -451,7 +505,7 @@ Pure ownership lives in `spec/cpp_spec.lua`, `spec/ctypes_spec.lua`,
 specs. Checker-only behavior is split into topical C FFI tag, target-profile,
 pointer-conversion, stack-object, and operator specs. Coder specs compile and
 execute exact declarators, automatic storage, longjmp spills, pointer casts,
-and C operator results.
+typed object macros, macro-projected field lvalues, and C operator results.
 
 Real-header/tag and libuv-shaped conversions remain compiler tests rather than
 stdlib integration tests. Libuv/process/DNS behavior stays under

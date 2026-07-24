@@ -223,6 +223,36 @@ describe("C FFI cdriver", function()
         assert.is_nil(occurrences.cdriver_macro_only_type)
     end)
 
+    it("records final field projections and every touched macro name",
+    function()
+        local header = tmp_header([[
+            #define cdriver_projection implementation.member
+            #define cdriver_removed implementation.member
+            #undef cdriver_removed
+            #define cdriver_replaced implementation.member
+            #undef cdriver_replaced
+            #define cdriver_replaced 17
+        ]])
+
+        local ffi_types = assert_process_file(header)
+        os.remove(header)
+
+        assert.same(
+            { "implementation", "member" },
+            ffi_types.field_macro_paths.cdriver_projection.path)
+        assert.is_nil(ffi_types.field_macro_paths.cdriver_removed)
+        assert.is_nil(ffi_types.field_macro_paths.cdriver_replaced)
+        assert.is_true(ffi_types.macro_changes.cdriver_projection)
+        assert.is_true(ffi_types.macro_changes.cdriver_removed)
+        assert.is_true(ffi_types.macro_changes.cdriver_replaced)
+        assert.same(
+            { "implementation", ".", "member" },
+            ffi_types.macro_definitions.cdriver_projection)
+        assert.is_nil(ffi_types.macro_definitions.cdriver_removed)
+        assert.same({ "17" },
+            ffi_types.macro_definitions.cdriver_replaced)
+    end)
+
 
     describe("configured preprocessor toolchain", function()
         setup(function()

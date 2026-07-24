@@ -28,6 +28,35 @@ local function target_profile(with_int128)
 end
 
 describe("foreign C type conversion", function()
+    it("publishes cast macros only for supported C scalar targets", function()
+        local st = symtab.new()
+        st.c_profile = target_profile(true)
+
+        local integer = assert(foreigntypes.convert(st, {
+            type = { "unsigned", "long" },
+            _macro_cast = {},
+        }))
+        assert.equal("Type.CInteger", integer._tag)
+        assert.equal("unsigned long", integer.spelling)
+
+        local pointer = assert(foreigntypes.convert(st, {
+            type = { "void", "*" },
+            _macro_cast = {},
+        }))
+        assert.equal("Type.CPointer", pointer._tag)
+        assert.equal("Type.CVoid", pointer.pointee._tag)
+
+        assert.is_nil(foreigntypes.convert(st, {
+            type = { "void" },
+            _macro_cast = {},
+        }))
+        assert.is_nil(foreigntypes.convert(st, {
+            type = { "int" },
+            idxs = { 4 },
+            _macro_cast = {},
+        }))
+    end)
+
     it("canonicalizes an unqualified short int", function()
         local scope = {
             find_foreign_type = function()

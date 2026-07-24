@@ -691,8 +691,8 @@ describe("coroutine standard module", function()
             "lua_newuserdatauv(", 1, true))
         local owner_create_end = assert(generated:find(
             ");", owner_create, true))
-        assert.match("TITAN_CORO_OWNER_USERVALUES",
-            generated:sub(owner_create, owner_create_end), 1, true)
+        assert.match("ivalue%(&_mod%->uv%[%d+%]%.uv%)",
+            generated:sub(owner_create, owner_create_end))
 
         local native = read_file("titan-runtime/titan_coro.c")
         assert.not_match("titan_coro_runtime", native, 1, true)
@@ -704,8 +704,15 @@ describe("coroutine standard module", function()
         assert.not_match("titan_coro_clear_transfer", native, 1, true)
 
         local header = read_file("titan-runtime/titan/coro.h")
-        assert.match("#define TITAN_CORO_OWNER_USERVALUES 5",
+        local source = read_file("titan/coroutine.titan")
+        assert.match("local TITAN_CORO_OWNER_USERVALUES = 5",
+            source, 1, true)
+        assert.not_match("TITAN_CORO_OWNER_USERVALUES", header, 1, true)
+        assert.not_match("TITAN_CORO_ENTRY_FUNCTION", header, 1, true)
+        assert.match("struct mco_coro;", header, 1, true)
+        assert.match("void titan_coro_entry(struct mco_coro *co);",
             header, 1, true)
+        assert.not_match("typedef struct mco_coro", header, 1, true)
         assert.not_match("titan_coro_root_transfer", header, 1, true)
         assert.not_match("titan_coro_clear_transfer", header, 1, true)
     end)

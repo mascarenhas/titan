@@ -64,12 +64,23 @@ The C-pipeline stages are:
    includes share the per-import context.
 2. `c99.match_language_grammar` parses the preprocessed C translation unit.
 3. `ctypes.register_types` extracts declarations into a TypeList.
-4. `cdefines.register_defines` adds typed object-like `#define` constants.
-   A bare-identifier replacement that resolves to a parsed typedef is
-   type-valued: a macro-only type alias remains unsupported, while a macro
-   shadowing an existing typedef rebinds that public spelling to the active
-   replacement typedef so generated C and checker semantics agree. Aliases to
-   functions, objects, and enumerators remain expression-valued members.
+4. `cdefines.register_defines` adds supported object-like `#define` constants
+   and records pure dotted-identifier field projections. A bare-identifier
+   replacement that resolves to a parsed typedef is type-valued: a macro-only
+   type alias remains unsupported, while a macro shadowing an existing typedef
+   rebinds that public spelling to the active replacement typedef so generated
+   C and checker semantics agree. Aliases to functions, objects, and
+   enumerators remain expression-valued members. Integer-constant expressions
+   retain target-neutral literal and expression metadata for later
+   target-profile evaluation, while the existing best-effort expression path
+   recognizes typed dereferenced accessors such as `errno`'s `*accessor()`
+   expansion. A fully expanded outer cast to a supported integer, floating,
+   object-pointer, or function-pointer type records that target declaration for
+   ordinary C-type conversion while preserving the public macro spelling.
+   `cdriver` also retains raw macro definitions and the names changed by each
+   header closure. Dotted replacements are left unresolved until a field
+   access supplies both the receiver aggregate and the final module-wide macro
+   environment.
 
 `cdeclarator.lua` then owns exact C spelling shared by generated code and
 compile probes; `csemantics.lua` owns target categories, constants, promotions,
@@ -285,9 +296,14 @@ The checker has FFI-specific handling in a few narrow places:
   type-pseudo-member access gets a specific diagnostic instead of silently
   selecting the type.
 * `Ast.VarDot` on a C struct/union, pointer-to-aggregate, or owned aggregate
-  resolves a `Type.CField`. At a module-variable frontier it does so only when
-  `symtab.foreign_definition_visible` says the aggregate's defining import is
-  already visible.
+  resolves a `Type.CField`. A pure dotted field macro is expanded logically
+  through physical aggregate fields first, because C preprocessing precedes
+  member lookup; otherwise the checker selects the ordinary physical field.
+  Generated C hoists all foreign includes, so macro lookup always uses the
+  final module-wide environment even inside an earlier module-variable closure.
+  Every aggregate definition along the selected physical path must still be
+  visible at the ordinary module-variable frontier. An active object-like macro
+  with an unsupported final expansion is terminal rather than falling back.
 * `Ast.VarBracket` accepts C pointers, C arrays with known static length, and
   counted owned C arrays. C indexing is 0-based.
 * After checking each `Ast.StatAssign` target, `check_c_assignment_storage`
@@ -362,11 +378,14 @@ modules.
 
 The checker keeps a per-module `symtab.foreign_names` table for the final
 ordinary C identifier environment and a source-ordered history for frontier
-lookup. A later published occurrence of one ordinary name is compared with the
-first using C declaration compatibility, including typedef resolution,
-normalized qualification, parameter adjustment, and incomplete/known array
-composites. Structurally matching anonymous aggregates are only conditional
-candidates.
+lookup. Field tokens instead use the generated translation unit's final macro
+view: the first import seeds a raw macro environment, later imports replay
+their active definitions/redefinitions/undefinitions, and lazy lookup rescans
+transitive dependencies before classifying a projection. A later published
+occurrence of one ordinary name is compared with the first using C declaration
+compatibility, including typedef resolution, normalized qualification,
+parameter adjustment, and incomplete/known array composites. Structurally
+matching anonymous aggregates are only conditional candidates.
 
 After the final baseline succeeds, every queued exact or conditional pair is
 rendered as two `extern` declarations of one probe-private synthetic identifier and
@@ -432,9 +451,15 @@ name-to-position mapping itself—from reordering Titan effects. The path retain
 the positional implementation's post-call `mutable_out_anchor` refreshes for
 GC-bearing `TValue` out parameters.
 
-`codeforeignvar` emits a bare C variable or macro name. Reading a C scalar into
-Titan code keeps the C value type until a cast or context converts it. C arrays
-are kept as C array expressions and can be indexed or decayed to pointers.
+`codeforeignvar` emits a bare C variable or public macro name. Reading a C
+scalar into Titan code keeps the C value type until a cast or context converts
+it. C arrays are kept as C array expressions and can be indexed or decayed to
+pointers. For a live pure dotted-identifier macro, the checker resolves the
+recorded replacement lazily against the receiver before physical field lookup,
+matching preprocessing precedence, and retains the projected field's type,
+lvalue status, and mutation rules. The coder still emits the public field
+spelling, leaving expansion to the included host header. This does not widen
+the separate contextual address coercion from eligible locals to subobjects.
 
 `codecfunctionptrcall` handles calls through C function pointer values. It
 evaluates the pointer expression once, materializes it into a C temporary,
@@ -610,7 +635,12 @@ left for a later FFI iteration.
 * Some preprocessor paths still raise raw Lua errors instead of diagnostics
   (`#if` operators outside the implemented set, unterminated function-like
   macros).
-* Function-like macros are invisible to Titan.
+* Function-like macros are invisible to Titan. An object-like macro is
+  expression-valued through bounded recognized forms, including supported
+  integer-constant expressions and typed dereferenced accessors, or when it
+  fully expands to an outer cast to a supported scalar type. A pure dotted
+  identifier replacement can become a field projection. Other object-like
+  forms are not generally supported.
 * Generated C shares one ordinary-identifier namespace and one tag namespace
   across all foreign imports. Titan does not rename declarations; the final
   foreign-header baseline validates cumulative declaration and tag state

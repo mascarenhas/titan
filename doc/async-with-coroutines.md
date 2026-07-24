@@ -211,11 +211,12 @@ the owner userdata and typed handle, and calls the minicoro
 storage/control APIs directly.
 The C helper surface used by `titan/coroutine.titan` consists only of the
 entry trampoline and fixed tag comparator. The owner-userdata slot count is a
-shared header constant:
+private `titan/coroutine.titan` module variable. The header therefore contains
+only a bare forward declaration and the two native entry points:
 
 ```c
-#define TITAN_CORO_OWNER_USERVALUES 5
-void titan_coro_entry(mco_coro *co);
+struct mco_coro;
+void titan_coro_entry(struct mco_coro *co);
 int titan_coro_tag_equal(void *t1, void *t2);
 ```
 

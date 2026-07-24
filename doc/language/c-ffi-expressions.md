@@ -4,7 +4,8 @@ The [C FFI overview](ffi.md) explains `foreign import`, the supported C type
 families, owned allocation, and calls. This chapter covers the parts of the C
 interface that participate directly in Titan declarations and expressions:
 named C tags, automatic C objects, fixed arrays, contextual pointer
-conversions, and operators evaluated with C semantics.
+conversions, supported object-like macro values and field projections, and
+operators evaluated with C semantics.
 
 These facilities remain unsafe. The checker preserves C type and lifetime
 rules that it can establish statically, and it asks the configured C compiler
@@ -351,17 +352,81 @@ meaning. Some of those cases are undefined behavior. Titan does not add safety
 checks or define a portable result; use an explicit Titan conversion before
 the operation when Titan semantics are required.
 
-## C constants
+## C constants and macro-projected fields
 
-Top-level enum constants and supported object-like integer macros are direct
-members of the foreign module:
+Top-level enum constants and supported object-like macros are direct members of
+the foreign module:
 
 ```lua
 local uv = foreign import "uv.h"
+local signal = foreign import "signal.h"
 
-local cancelled = uv.UV_ECANCELED
-local readable = uv.UV_READABLE
+local function imported_constants(): integer
+    local cancelled = uv.UV_ECANCELED
+    local readable = uv.UV_READABLE
+    return (cancelled as integer) + (readable as integer)
+end
+
+local function signal_handlers_differ(): boolean
+    local ignored_handler = signal.SIG_IGN
+    return ignored_handler ~= signal.SIG_DFL
+end
 ```
+
+Supported integer-constant expressions retain their target-correct C integer
+type. In addition, when a macro's fully expanded replacement is an outer cast
+to a supported C scalar type, Titan imports the value with that cast's target
+type. The target may be an integer, floating, object-pointer, or
+function-pointer type. Generated C still names the public macro (`SIG_IGN`
+above), leaving the host compiler to expand it under the same headers and
+flags; Titan does not paste the implementation-specific replacement into the
+generated file.
+
+The existing bounded expression importer also recognizes typed dereferenced
+accessors, such as the common `errno` expansion `*accessor()`, when the imported
+accessor declaration establishes the result type. This is not general support
+for arbitrary call-containing object macros.
+
+Some system headers expose a public field name as an object-like macro whose
+replacement is only a dotted identifier path, for example:
+
+```c
+typedef struct RecordStorage {
+    int member;
+} RecordStorage;
+
+typedef struct Record {
+    RecordStorage implementation;
+} Record;
+
+#define public_member implementation.member
+```
+
+Titan resolves such a projection lazily against the receiver's C aggregate
+type and the final macro environment produced by all foreign headers in the
+module. This matches generated C, which includes those headers before every
+declaration and body: a later definition or dependency redefinition also
+affects an earlier closure initializer, while a later `#undef` removes the
+projection. A live macro takes precedence over a physical field with the same
+public name, matching preprocessing before C field lookup. Source continues to
+use and generated C continues to emit the public spelling:
+
+```lua
+local c = foreign import "header.h"
+
+local function set_public_member(): integer
+    local item: c.Record
+    item.public_member = 1
+    return item.public_member as integer
+end
+```
+
+The final replacement must be a pure identifier path. Indexing, calls,
+operators, casts, and other arbitrary macro expressions do not become
+projected fields. If an active object-like macro with such an unsupported
+replacement has the same name as a physical field, Titan reports an error
+instead of selecting that field: C preprocessing would rewrite the token before
+field lookup.
 
 The preprocessor expands macro arguments according to C rules: ordinary
 parameter occurrences use a prescanned argument, while `#` stringification and
@@ -371,9 +436,18 @@ escapes quotes and backslashes. This is why token-pasted families such as
 libuv's `UV_E*` names import directly; they do not require a Titan-specific
 enum exception.
 
-Function-like macros remain unavailable as foreign members. Macro constants
-whose value cannot be represented by the supported integer-constant importer
-are skipped.
+Function-like macros remain unavailable as foreign members. Other object-like
+forms beyond recognized existing integer/accessor expressions, fully expanded
+outer casts to supported scalar types, and pure dotted field projections are
+not generally supported. Declaration extraction still preprocesses each
+imported header independently, so a macro whose meaning depends on state
+established by another import remains subject to the
+[umbrella-header discipline described in the FFI limitations](ffi.md#current-limitations).
+Ordinary field-macro definitions, dependency rescans, and undefinitions are
+replayed into a final module environment. Conditional macro behavior whose
+result itself depends on an earlier import, and later changes to a scalar macro
+whose type was inferred in an earlier import, still require one umbrella
+header.
 
 ## Related chapters
 

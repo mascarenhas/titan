@@ -19,6 +19,33 @@ local function candidates(...)
     return out
 end
 
+local function cast_type_list()
+    local handler = {
+        type = "typedef",
+        name = "ffi_handler",
+        def = {
+            type = "functionptr",
+            name = "ffi_handler",
+            ret = { type = { "void" } },
+            params = {
+                { name = nil, type = { "int" } },
+            },
+            vararg = false,
+            pointer = { "*" },
+            _paramstyle = "prototype",
+            _declarator_ops = { "*" },
+        },
+    }
+    return {
+        typedef_names = { ffi_handler = true },
+        ffi_handler = handler,
+        {
+            name = "ffi_handler",
+            type = handler,
+        },
+    }
+end
+
 local I = { "int", false, "int" }
 local UI = { "int", true, "unsigned int" }
 local L = { "long", false, "long" }
@@ -27,6 +54,155 @@ local LL = { "long_long", false, "long long" }
 local ULL = { "long_long", true, "unsigned long long" }
 
 describe("C object-like macro metadata", function()
+    it("publishes outer casts with their declared C target type", function()
+        local types = cast_type_list()
+
+        cdefines.register_define(
+            types, "FFI_TYPEDEF_NULL",
+            "( ( ffi_handler ) ( 0 ) )", {})
+        local typedef_null = assert(types.FFI_TYPEDEF_NULL)
+        assert.same({ "ffi_handler" }, typedef_null.type)
+        assert.same({ "ffi_handler" }, typedef_null._declarator_base)
+        assert.same({}, typedef_null._declarator_ops)
+        assert.same({ "0" }, typedef_null._macro_cast.operand)
+        assert.is_nil(typedef_null.macro_expression)
+
+        cdefines.register_define(
+            types, "FFI_DIRECT_NULL",
+            "( ( void ( * ) ( int ) ) 0 )", {})
+        local direct_null = assert(types.FFI_DIRECT_NULL)
+        assert.equal("functionptr", direct_null.type)
+        assert.same({ "*" }, direct_null._declarator_ops)
+        assert.same({ "void" }, direct_null.ret.type)
+        assert.same({ "int" }, direct_null.params[1].type)
+
+        cdefines.register_define(
+            types, "FFI_CAST_LONG",
+            "( ( unsigned long ) 7 )", {})
+        assert.same(
+            { "unsigned", "long" },
+            types.FFI_CAST_LONG.type)
+    end)
+
+    it("does not infer a type from non-outer or malformed casts", function()
+        for _, replacement in ipairs({
+            "( ( ffi_handler ) 0 ) + 1",
+            "( ( int * ) 0 ) [ 0 ]",
+            "( ( int * ) 0 ) -> value",
+            "( ( void ( * ) ( int ) ) 0 ) ( 1 )",
+            "( ( missing_handler ) 0 )",
+            "( ( ffi_handler ) 0 ) trailing",
+        }) do
+            local types = cast_type_list()
+            cdefines.register_define(
+                types, "FFI_REJECTED", replacement, {})
+            assert.is_nil(types.FFI_REJECTED, replacement)
+        end
+    end)
+
+    it("types a dereferenced accessor macro but rejects unknown postfixes",
+    function()
+        local accessor = {
+            type = "function",
+            name = "ffi_int_location",
+            ret = { type = { "int", "*" } },
+            params = {},
+            vararg = false,
+        }
+        local types = {
+            ffi_int_location = accessor,
+            {
+                name = "ffi_int_location",
+                type = accessor,
+            },
+        }
+
+        cdefines.register_define(
+            types, "FFI_DEREFERENCED",
+            "* ffi_int_location ( )", {})
+        assert.same({ "int" }, types.FFI_DEREFERENCED.type)
+
+        for _, replacement in ipairs({
+            "ffi_unknown ( 0 )",
+            "ffi_unknown [ 0 ]",
+            "ffi_unknown -> field",
+            "ffi_unknown ++",
+        }) do
+            cdefines.register_define(
+                types, "FFI_REJECTED", replacement, {})
+            assert.is_nil(types.FFI_REJECTED, replacement)
+        end
+    end)
+
+    it("records pure dotted field projections without publishing values",
+    function()
+        local types = {}
+
+        cdefines.register_define(
+            types, "ffi_public", "ffi_storage . nested . value", {})
+
+        assert.is_nil(types.ffi_public)
+        assert.equal(0, #types)
+        local projection = assert(types.field_macro_paths.ffi_public)
+        assert.equal("ffi_public", projection.name)
+        assert.same(
+            { "ffi_storage", "nested", "value" },
+            projection.path)
+        assert.equal(
+            "ffi_storage . nested . value",
+            projection.replacement)
+    end)
+
+    it("rejects non-dotted field macro replacement shapes", function()
+        for _, replacement in ipairs({
+            "ffi_storage",
+            "ffi_storage -> value",
+            "ffi_storage . value ( )",
+            "ffi_storage . value [ 0 ]",
+            "ffi_storage + value",
+        }) do
+            local types = {}
+            cdefines.register_define(
+                types, "ffi_public", replacement, {})
+            assert.is_nil(types.field_macro_paths,
+                "unexpected field projection for " .. replacement)
+        end
+    end)
+
+    it("classifies fields against the final transitive macro environment",
+    function()
+        local definitions = {
+            projected = { "alias", ".", "leaf" },
+            alias = { "nested" },
+        }
+
+        local projection =
+            assert(cdefines.classify_field_macro(
+                "projected", definitions))
+        assert.same({ "nested", "leaf" }, projection.path)
+
+        definitions.alias = { "other" }
+        projection = assert(cdefines.classify_field_macro(
+            "projected", definitions))
+        assert.same({ "other", "leaf" }, projection.path)
+
+        definitions.projected = { "42" }
+        local unsupported = assert(cdefines.classify_field_macro(
+            "projected", definitions))
+        assert.is_true(unsupported.unsupported)
+        assert.equal("42", unsupported.replacement)
+
+        definitions.projected = nil
+        assert.is_nil(cdefines.classify_field_macro(
+            "projected", definitions))
+        definitions.projected = {
+            args = { "value" },
+            repl = { "value" },
+        }
+        assert.is_nil(cdefines.classify_field_macro(
+            "projected", definitions))
+    end)
+
     it("publishes a bare identifier alias to a parsed C function", function()
         local types = {}
         local target = {

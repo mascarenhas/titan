@@ -6,10 +6,10 @@
 #include <sys/types.h>
 
 /*
- * GC-owned normalized address storage. The C implementation statically
- * verifies that this parser-visible opaque cell is large and aligned enough
- * for sockaddr_storage on every supported target. Titan allocates arrays with
- * titan_uvshim_address.sizeof/alignof and never inspects their bytes.
+ * GC-owned normalized address storage. This parser-visible opaque cell is
+ * deliberately overprovisioned and carries pointer/integer alignment. Titan
+ * allocates arrays with titan_uvshim_address.sizeof/alignof and never inspects
+ * their bytes.
  */
 typedef union titan_uvshim_address {
   void *align_pointer;
@@ -21,29 +21,23 @@ typedef union titan_uvshim_address {
 typedef char *titan_uvshim_char_ptr;
 
 /*
- * Minimal libuv forward declarations for Titan's FFI.  The standard uv module
+ * Minimal libuv forward declarations for Titan's FFI. The standard uv module
  * imports <uv.h> separately and generated C includes it first; keeping this
  * header narrow avoids presenting a second copy of libuv's declarations as
- * part of the private shim namespace.  The typedefs exist only for the FFI's
- * independent parse of this header.
+ * part of the private shim namespace.
  */
-#ifndef UV_H
 struct addrinfo;
-typedef struct uv_buf_t uv_buf_t;
-typedef struct uv_connect_s uv_connect_t;
-typedef struct uv_fs_s uv_fs_t;
-typedef struct uv_getaddrinfo_s uv_getaddrinfo_t;
-typedef struct uv_handle_s uv_handle_t;
-typedef struct uv_loop_s uv_loop_t;
-typedef struct uv_process_s uv_process_t;
-typedef struct uv_req_s uv_req_t;
-typedef struct uv_signal_s uv_signal_t;
-typedef struct uv_shutdown_s uv_shutdown_t;
-typedef struct uv_stream_s uv_stream_t;
-typedef struct uv_tcp_s uv_tcp_t;
-typedef struct uv_timer_s uv_timer_t;
-typedef struct uv_write_s uv_write_t;
-#endif
+struct uv_buf_t;
+struct uv_connect_s;
+struct uv_fs_s;
+struct uv_getaddrinfo_s;
+struct uv_handle_s;
+struct uv_process_s;
+struct uv_signal_s;
+struct uv_shutdown_s;
+struct uv_stream_s;
+struct uv_timer_s;
+struct uv_write_s;
 
 /*
  * Callback-owner records use these fields in this exact order.  Titan record
@@ -93,32 +87,24 @@ enum titan_uvshim_event_kind {
  * APIs. They are private to titan.uv's fixed six-slot owner protocol, not a
  * general callback API for user programs.
  */
-void titan_uvshim_signal_cb(uv_signal_t *signal, int signum);
-void titan_uvshim_process_exit_cb(uv_process_t *process,
+void titan_uvshim_signal_cb(struct uv_signal_s *signal, int signum);
+void titan_uvshim_process_exit_cb(struct uv_process_s *process,
                                   int64_t exit_status,
                                   int term_signal);
-void titan_uvshim_getaddrinfo_cb(uv_getaddrinfo_t *req, int status,
+void titan_uvshim_getaddrinfo_cb(struct uv_getaddrinfo_s *req, int status,
                                  struct addrinfo *result);
-void titan_uvshim_connect_cb(uv_connect_t *req, int status);
-void titan_uvshim_write_cb(uv_write_t *req, int status);
-void titan_uvshim_shutdown_cb(uv_shutdown_t *req, int status);
-void titan_uvshim_alloc_cb(uv_handle_t *handle, size_t suggested_size,
-                           uv_buf_t *buf);
-void titan_uvshim_read_cb(uv_stream_t *stream, ssize_t nread,
-                          const uv_buf_t *buf);
-void titan_uvshim_connection_cb(uv_stream_t *server, int status);
-void titan_uvshim_close_cb(uv_handle_t *handle);
-
-/*
- * Libuv's Unix stream writes use write/writev, so a closed pipe can deliver
- * SIGPIPE before libuv reports UV_EPIPE. Ignore the signal only when the host
- * left its disposition at SIG_DFL; an embedding application's explicit
- * SIG_IGN or custom handler remains untouched.
- */
-int titan_uvshim_ignore_sigpipe_if_default(void);
+void titan_uvshim_connect_cb(struct uv_connect_s *req, int status);
+void titan_uvshim_write_cb(struct uv_write_s *req, int status);
+void titan_uvshim_shutdown_cb(struct uv_shutdown_s *req, int status);
+void titan_uvshim_alloc_cb(struct uv_handle_s *handle, size_t suggested_size,
+                           struct uv_buf_t *buf);
+void titan_uvshim_read_cb(struct uv_stream_s *stream, ssize_t nread,
+                          const struct uv_buf_t *buf);
+void titan_uvshim_connection_cb(struct uv_stream_s *server, int status);
+void titan_uvshim_close_cb(struct uv_handle_s *handle);
 
 /* Fixed callback shapes passed directly to public libuv start functions. */
-void titan_uvshim_timer_cb(uv_timer_t *timer);
-void titan_uvshim_fs_cb(uv_fs_t *req);
+void titan_uvshim_timer_cb(struct uv_timer_s *timer);
+void titan_uvshim_fs_cb(struct uv_fs_s *req);
 
 #endif

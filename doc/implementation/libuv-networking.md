@@ -141,12 +141,13 @@ root lists must be empty before `uv_loop_close`.
 
 The owning Titan contributors call public libuv base-handle and base-request
 APIs directly; the C FFI emits host-validated conversions from concrete libuv
-pointers. The native runtime retains the fixed owner dispatcher, plain-C
-callback trampolines, owner-slot and integer-width static assertions,
-address-cell layout assertions, and the narrow inherited `SIGPIPE` policy. DNS
-submission, result filtering/copying/release, address selection, bind, connect,
-stream operations, and close all use public libuv functions directly from
-Titan. There is no POSIX socket, read, write, or poll fallback.
+pointers. The native runtime retains only the fixed owner dispatcher and
+plain-C callback trampolines. The shared header describes the fixed owner
+protocol and deliberately overprovisioned opaque address storage consumed by
+both sides. DNS submission, result filtering/copying/release, address
+selection, bind, connect, stream operations, close, and the narrow inherited
+`SIGPIPE` policy all run directly from Titan through public host/libuv
+declarations. There is no POSIX socket, read, write, or poll fallback.
 
 The callback dispatcher adds one opaque pointer argument for the DNS callback's
 temporary `addrinfo` payload. The pointer is never converted to a Titan

@@ -10,6 +10,8 @@ function symtab.new(modname)
         foreign_type_history = {},
         foreign_names = {},
         foreign_name_history = {},
+        foreign_macro_definitions = nil,
+        foreign_field_macro_cache = {},
         c_file_tags = {},
         c_prototype_tags = {},
         modname = modname
@@ -133,6 +135,46 @@ function symtab:find_foreign_name(name)
         return nil
     end
     return self.foreign_names[name]
+end
+
+-- Generated C hoists every foreign include before declarations and function
+-- bodies. Reconstruct that final raw macro environment by seeding it from the
+-- first independently parsed header, then applying only the names actively
+-- defined/redefined/undefined by each later header closure. Field projection
+-- classification is lazy in the checker so a later change to a transitive
+-- replacement dependency is reflected when the public field token is used.
+function symtab:apply_foreign_macro_changes(changes, definitions)
+    if not self.foreign_macro_definitions then
+        self.foreign_macro_definitions = {}
+        for name, definition in pairs(definitions or {}) do
+            self.foreign_macro_definitions[name] = definition
+        end
+    else
+        for name in pairs(changes or {}) do
+            self.foreign_macro_definitions[name] =
+                definitions and definitions[name] or nil
+        end
+    end
+    self.foreign_field_macro_cache = {}
+end
+
+function symtab:find_foreign_macro_definition(name)
+    if not self.foreign_macro_definitions then return nil, false end
+    return self.foreign_macro_definitions[name], true
+end
+
+function symtab:foreign_macro_environment()
+    return self.foreign_macro_definitions
+end
+
+function symtab:find_cached_foreign_field_macro(name)
+    local cached = self.foreign_field_macro_cache[name]
+    if cached == nil then return nil, false end
+    return cached ~= false and cached or nil, true
+end
+
+function symtab:cache_foreign_field_macro(name, projection)
+    self.foreign_field_macro_cache[name] = projection or false
 end
 
 local function c_tag_provenance(provenance)

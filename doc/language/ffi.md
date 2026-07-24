@@ -87,12 +87,23 @@ Foreign modules contain three categories of members:
 * C functions become callable members. This includes ordinary prototypes and
   header-defined `static` functions. C variadic functions such as
   `printf`/`snprintf` accept extra arguments after their fixed parameters.
-* C variables and object-like `#define` constants become C values. Assigning to
-  a foreign variable name itself is rejected; assigning through an indexed C
-  array or through a field is emitted as C. Titan does not model `const` or
-  other C writeability rules for subobjects in v1, so the C compiler may still
-  reject those assignments. Top-level enum constants become C integer members;
-  simple numeric enum values are retained in Titan's C type list.
+* C variables and supported object-like `#define` constants become C values.
+  Recognized forms include integer-constant expressions, typed dereferenced
+  accessors such as the common `errno` expansion, and fully expanded outer
+  casts to supported C integer, floating, object-pointer, or function-pointer
+  types; generated C emits the public macro spelling. Assigning to a foreign
+  variable name itself is rejected; assigning through an indexed C array or
+  through a field is emitted as C. A pure dotted-identifier replacement macro
+  may also provide a lazily resolved public field spelling. Field lookup uses
+  the final macro environment from the module's ordered, hoisted headers,
+  including ordinary redefinitions, dependency rescans, and `#undef`. Like the
+  C preprocessor, a live macro takes precedence over a physical field with the
+  same name; an active unsupported object macro is terminal rather than
+  falling back. Titan does not model `const` or other C writeability rules for
+  subobjects in v1, so the C compiler may still reject those assignments.
+  Top-level enum constants become C integer members; simple numeric enum values
+  are retained in Titan's C type list. See
+  [C constants and macro-projected fields](c-ffi-expressions.md#c-constants-and-macro-projected-fields).
 * C typedef names become the source-nameable type namespace. Named file-scope
   tag-only `struct S` / `union U` declarations also publish `c.S` using their
   exact tag spelling; a real same-name typedef takes precedence. These names
@@ -674,7 +685,14 @@ process-global state.
 * Titan functions and closures cannot be adapted to C callback ABIs.
 * C types are local to the importing Titan module and cannot appear in exported
   Titan interfaces.
-* Function-like macros are not imported.
+* Function-like macros are not imported. Object-like macros are values only
+  through bounded recognized expression forms, including supported
+  integer-constant expressions and typed dereferenced accessors, or when they
+  fully expand to an outer cast to a supported scalar type. A pure dotted
+  identifier replacement can stand in for a field. Other object-like forms are
+  not generally supported. Conditional macro behavior that depends on state
+  from a separate earlier import, or a later import changing a scalar macro
+  already typed through another module namespace, requires an umbrella header.
 * Owned allocation does not support `void`, incomplete aggregate types, C array
   typedefs, or structs with flexible array members.
 * C adopted pointers/lifetimes are parked for a later design; v1 has borrowed C

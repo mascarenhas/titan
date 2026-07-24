@@ -128,6 +128,18 @@ defs["type_exp"] = typed("string, number, table -> boolean, Exp", function(_, _,
     return true, exp
 end)
 
+-- The ordinary standalone expression grammar deliberately has no typedef
+-- context and therefore cannot distinguish a parenthesized identifier from a
+-- cast. Typed object-like macro parsing supplies that context explicitly. Keep
+-- the historical positional cast shape while marking its two roles so callers
+-- never have to infer a cast from an otherwise ambiguous two-element table.
+defs["typed_cast_exp"] = function(_, _, exp)
+    exp.cast_type = exp[1]
+    exp.cast_operand = exp[2]
+    typed.set_type(exp, "Exp")
+    return true, exp
+end
+
 -- Types
 defs["type"] = typed("string, number, table -> boolean, Type", function(_, _, typ)
     typed.set_type(typ, "Type")
@@ -542,7 +554,7 @@ sizeofOrPostfixExpression <- {| {:op: "sizeof" :} _ "(" _ typeName ")" _ |} => t
                            / {| {:op: "sizeof" :} _ unaryExpression |} => nest_exp
                            / postfixExpression
 
-castExpression <- {| "(" _ typeName ")" _ castExpression |} => type_exp
+castExpression <- {| "(" _ typeName ")" _ castExpression |} => typed_cast_exp
                 / unaryExpression
 
 ]]
@@ -623,6 +635,20 @@ postfixExpression <- {| primaryExpression {:postfix: peRec :} |} => postfix
 sizeofOrPostfixExpression <- postfixExpression
 
 castExpression <- unaryExpression
+
+]]
+
+local typed_language_expression_rules = [[--lpeg.re
+
+--------------------------------------------------------------------------------
+-- Typedef-aware Language Expression Rules
+--
+-- This leading rule selects the complete language grammar below as an
+-- expression parser and requires the complete subject to be one expression.
+-- Object-like macro registration must not accept a valid prefix and silently
+-- ignore trailing replacement tokens.
+
+typedExpression <- expression !.
 
 ]]
 
@@ -773,6 +799,13 @@ local language_expression_grammar = re.compile(
     lexical_rules ..
     common_expression_rules, defs)
 
+local typed_language_expression_grammar = re.compile(
+    typed_language_expression_rules ..
+    language_rules ..
+    language_expression_rules ..
+    lexical_rules ..
+    common_expression_rules, defs)
+
 local language_grammar = re.compile(
     language_rules ..
     language_expression_rules ..
@@ -805,6 +838,19 @@ end
 
 function c99.match_language_expression_grammar(subject)
     return match(language_expression_grammar, subject)
+end
+
+function c99.match_typed_language_expression_grammar(subject, typedef_names)
+    local previous_typedefs = typedefs
+    local scoped_typedefs = {}
+    for name, present in pairs(typedef_names or {}) do
+        if present then scoped_typedefs[name] = true end
+    end
+    typedefs = scoped_typedefs
+    local results = table.pack(match(
+        typed_language_expression_grammar, subject))
+    typedefs = previous_typedefs
+    return table.unpack(results, 1, results.n)
 end
 
 function c99.match_preprocessing_grammar(subject)

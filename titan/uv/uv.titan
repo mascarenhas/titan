@@ -4,6 +4,8 @@ local ffi = foreign import "titan/ffi.h"
 local shim = foreign import "titan/uv.h"
 local cstring = foreign import "string.h"
 local climits = foreign import "limits.h"
+local csignal = foreign import "signal.h"
+local cerrno = foreign import "errno.h"
 local coroutine = import "coroutine"
 
 -- The canonical folder main owns these ordinary foreign imports so every
@@ -161,9 +163,33 @@ local function setup_program_args(): boolean
   return true
 end
 
+local function ignore_sigpipe_if_default(): integer
+  local current: csignal.sigaction
+  if (csignal.sigaction(csignal.SIGPIPE, nil, current) as integer) ~= 0 then
+    return libuv.uv_translate_sys_error(cerrno.errno) as integer
+  end
+  if current.sa_handler ~= csignal.SIG_DFL then
+    return 0
+  end
+
+  local ignore: csignal.sigaction
+  ignore.sa_handler = csignal.SIG_IGN
+  -- Mutable address coercions deliberately apply to locals, not subobjects.
+  -- Keep the mask portable across aggregate and scalar sigset_t definitions.
+  local mask: csignal.sigset_t = ignore.sa_mask
+  if (csignal.sigemptyset(mask) as integer) ~= 0 then
+    return libuv.uv_translate_sys_error(cerrno.errno) as integer
+  end
+  ignore.sa_mask = mask
+  if (csignal.sigaction(csignal.SIGPIPE, ignore, nil) as integer) ~= 0 then
+    return libuv.uv_translate_sys_error(cerrno.errno) as integer
+  end
+  return 0
+end
+
 do
   local sigpipe_status =
-    shim.titan_uvshim_ignore_sigpipe_if_default() as integer
+    ignore_sigpipe_if_default()
   if sigpipe_status < 0 then
     raise make_error(sigpipe_status, "runtime.sigpipe", nil)
   end

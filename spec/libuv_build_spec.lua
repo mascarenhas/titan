@@ -66,8 +66,13 @@ local PHASE8_PUBLIC_LIBUV_CALLS = {
     "uv_tcp_init",
     "uv_tcp_bind",
     "uv_tcp_connect",
+    "uv_translate_sys_error",
     "uv_spawn",
     "uv_write",
+}
+local SIGPIPE_HOST_CALLS = {
+    "sigaction",
+    "sigemptyset",
 }
 local PHASE8_RETIRED_WRAPPERS = {
     "titan_uvshim_getaddrinfo_cancel",
@@ -125,6 +130,9 @@ local PHASE10_RETIRED_HELPERS = {
     "titan_uvshim_address_at",
     "titan_uvshim_tcp_bind",
     "titan_uvshim_tcp_connect_start",
+}
+local FFI_RETIRED_HELPERS = {
+    "titan_uvshim_ignore_sigpipe_if_default",
 }
 
 local function prefix_from_cpath(cpath)
@@ -554,6 +562,14 @@ describe("libuv Makefile configuration", function()
                     path .. ": " .. helper)
             end
         end
+        for _, helper in ipairs(FFI_RETIRED_HELPERS) do
+            assert.falsy(runtime:find(helper, 1, true), helper)
+            assert.falsy(header:find(helper, 1, true), helper)
+            for path, source in pairs(sources) do
+                assert.falsy(source:find(helper, 1, true),
+                    path .. ": " .. helper)
+            end
+        end
 
         local all_sources = {}
         for _, path in ipairs(discovered_uv_sources()) do
@@ -562,6 +578,10 @@ describe("libuv Makefile configuration", function()
         local combined = table.concat(all_sources, "\n")
         for _, function_name in ipairs(PHASE8_PUBLIC_LIBUV_CALLS) do
             assert.truthy(combined:find("libuv." .. function_name, 1, true),
+                function_name)
+        end
+        for _, function_name in ipairs(SIGPIPE_HOST_CALLS) do
+            assert.truthy(combined:find("csignal." .. function_name, 1, true),
                 function_name)
         end
 
@@ -619,7 +639,11 @@ describe("libuv Makefile configuration", function()
             'foreign import "string.h"', 1, true))
         assert.truthy(sources["titan/uv/uv.titan"]:find(
             'foreign import "limits.h"', 1, true))
-        assert.truthy(sources["titan/uv/os.titan"]:find(
+        assert.truthy(sources["titan/uv/uv.titan"]:find(
+            'foreign import "signal.h"', 1, true))
+        assert.truthy(sources["titan/uv/uv.titan"]:find(
+            'foreign import "errno.h"', 1, true))
+        assert.falsy(sources["titan/uv/os.titan"]:find(
             'foreign import "signal.h"', 1, true))
         assert.truthy(sources["titan/uv/file.titan"]:find(
             'foreign import "sys/stat.h"', 1, true))
@@ -627,12 +651,19 @@ describe("libuv Makefile configuration", function()
             "cstring.memcpy", 1, true))
         assert.truthy(sources["titan/uv/runtime.titan"]:find(
             "cstring.memcmp", 1, true))
-        assert.truthy(runtime:find(
-            "\nint titan_uvshim_ignore_sigpipe_if_default(", 1, true))
-        assert.truthy(header:find(
-            "int titan_uvshim_ignore_sigpipe_if_default(", 1, true))
         assert.truthy(sources["titan/uv/uv.titan"]:find(
-            "shim.titan_uvshim_ignore_sigpipe_if_default()", 1, true))
+            "local function ignore_sigpipe_if_default()", 1, true))
+        assert.truthy(sources["titan/uv/uv.titan"]:find(
+            "current.sa_handler ~= csignal.SIG_DFL", 1, true))
+        assert.truthy(sources["titan/uv/uv.titan"]:find(
+            "ignore.sa_handler = csignal.SIG_IGN", 1, true))
+        assert.truthy(sources["titan/uv/uv.titan"]:find(
+            "libuv.uv_translate_sys_error(cerrno.errno)", 1, true))
+        assert.falsy(header:find("typedef struct uv_", 1, true))
+        assert.truthy(header:find("struct uv_timer_s;", 1, true))
+        assert.truthy(header:find(
+            "void titan_uvshim_timer_cb(struct uv_timer_s *timer);",
+            1, true))
         assert_ordered(sources["titan/uv/process.titan"],
             "local owner, pointer = allocate_pipe_write_owner",
             "libuv.uv_req_set_data(owner.handle, pointer)",
@@ -763,6 +794,9 @@ describe("libuv Makefile configuration", function()
         for _, helper in ipairs(PHASE10_RETIRED_HELPERS) do
             assert.falsy(nm_has_symbol(output, helper), helper)
         end
+        for _, helper in ipairs(FFI_RETIRED_HELPERS) do
+            assert.falsy(nm_has_symbol(output, helper), helper)
+        end
 
         local logical_object = "titan/uv/uv.o"
         assert.truthy(file_exists(logical_object), logical_object)
@@ -778,6 +812,10 @@ describe("libuv Makefile configuration", function()
             assert.truthy(nm_has_symbol(output, function_name),
                 logical_object .. ": " .. function_name)
         end
+        for _, function_name in ipairs(SIGPIPE_HOST_CALLS) do
+            assert.truthy(nm_has_symbol(output, function_name),
+                logical_object .. ": " .. function_name)
+        end
         for _, wrapper in ipairs(PHASE8_RETIRED_WRAPPERS) do
             assert.falsy(nm_has_symbol(output, wrapper),
                 logical_object .. ": " .. wrapper)
@@ -787,6 +825,10 @@ describe("libuv Makefile configuration", function()
                 logical_object .. ": " .. helper)
         end
         for _, helper in ipairs(PHASE10_RETIRED_HELPERS) do
+            assert.falsy(nm_has_symbol(output, helper),
+                logical_object .. ": " .. helper)
+        end
+        for _, helper in ipairs(FFI_RETIRED_HELPERS) do
             assert.falsy(nm_has_symbol(output, helper),
                 logical_object .. ": " .. helper)
         end
@@ -803,6 +845,9 @@ describe("libuv Makefile configuration", function()
         for _, function_name in ipairs(PHASE8_PUBLIC_LIBUV_CALLS) do
             assert.truthy(nm_has_symbol(output, function_name), function_name)
         end
+        for _, function_name in ipairs(SIGPIPE_HOST_CALLS) do
+            assert.truthy(nm_has_symbol(output, function_name), function_name)
+        end
         for _, wrapper in ipairs(PHASE8_RETIRED_WRAPPERS) do
             assert.falsy(nm_has_symbol(output, wrapper), wrapper)
         end
@@ -810,6 +855,9 @@ describe("libuv Makefile configuration", function()
             assert.falsy(nm_has_symbol(output, helper), helper)
         end
         for _, helper in ipairs(PHASE10_RETIRED_HELPERS) do
+            assert.falsy(nm_has_symbol(output, helper), helper)
+        end
+        for _, helper in ipairs(FFI_RETIRED_HELPERS) do
             assert.falsy(nm_has_symbol(output, helper), helper)
         end
     end)

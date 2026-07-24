@@ -1,5 +1,3 @@
-local csignal = foreign import "signal.h"
-
 local record SignalSpec
   local name: string
   local signum: integer

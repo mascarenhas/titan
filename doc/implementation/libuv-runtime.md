@@ -64,7 +64,7 @@ one module state inside the combined DSO:
 
 | Source | Ownership |
 | --- | --- |
-| `titan/uv/uv.titan` | shared imports, constants, module state, bootstrap, program-argument setup, and the sole root initializer; no record or public member |
+| `titan/uv/uv.titan` | shared imports, constants, module state, bootstrap, program-argument and inherited-`SIGPIPE` setup, and the sole root initializer; no record or public member |
 | `file.titan` | public `uv_file` and `_fs_*` API plus private FS constants, operations, controls, requests, File FIFO/ownership, callbacks, dispatch, and shutdown repair |
 | `os.titan` | public non-process `_os_*` API plus private signal specifications/controls/owners, one-shot callback retirement, and portable OS helpers |
 | `process.titan` | public `uv_process_t`, `_os_process_*`, and `_os_communicate` API plus private process/pipe controls, operations, requests, helper groups, child stdio callbacks, and forced shutdown |
@@ -80,12 +80,14 @@ The ABI-0.18 native/Titan boundary is correspondingly explicit:
 | byte/text operations, stat extraction, process options/stdio/spawn, DNS hints/traversal/copy/release, and bind/connect submission | Titan calls the public C/libuv APIs directly |
 | fixed six-slot owner recovery and dispatch | native runtime |
 | timer, close, filesystem, DNS, connect, write, shutdown, allocation, read, connection, signal, and process-exit callback trampolines | native runtime |
-| owner-slot and integer-width contracts, plus opaque normalized-address size/alignment | native compile-time assertions |
-| conditional inherited `SIGPIPE` handling | native runtime, because libuv has no public operation for that host policy |
+| fixed six-slot owner protocol and opaque normalized-address storage | shared header declarations consumed by Titan and the native callbacks |
+| conditional inherited `SIGPIPE` handling | Titan calls the host `sigaction`/`sigemptyset` APIs directly through the C FFI and translates failures with public libuv |
 
 No operational libuv wrapper sits between the generated module and those
 public APIs. The callback trampolines are external native symbols because
 archive-backed generated standard-library objects refer to them directly.
+Those trampolines and their common owner dispatcher are the complete function
+boundary retained in `titan-runtime/titan_uv.c`.
 
 Every contributor uses the main source's imports, constants, and module state;
 record types shared across subsystems are referenced directly from whichever
@@ -326,9 +328,9 @@ Linux/macOS names with the host's imported `SIG*` constants, after the ordinary
 NUL-free text copy has validated the public name. Before arbitrary continuation
 code runs, the callback records the signal, stops the watcher, clears its
 waiter epoch, and initiates `uv_close`. Cancellation performs the same physical
-stop-and-close path without delivering a stale signal. Only the inherited
-`SIGPIPE` disposition policy remains native, because libuv has no public
-equivalent.
+stop-and-close path without delivering a stale signal. The separate inherited
+`SIGPIPE` policy belongs to the canonical main initializer: Titan imports the
+host signal declarations directly rather than extending the callback shim.
 
 ## Child processes and stdio pipes
 
@@ -387,9 +389,12 @@ through the real stream callback sequence.
 
 Libuv implements Unix stream writes with `write`/`writev`, which can deliver
 `SIGPIPE` before the write callback can report `UV_EPIPE`. During `titan.uv`
-initialization, the native shim uses `sigaction` to change `SIGPIPE` from
-`SIG_DFL` to `SIG_IGN`. It leaves an inherited `SIG_IGN` or application-owned
-handler unchanged. This narrow POSIX initialization is necessary because
+initialization, Titan uses the C FFI to call `sigaction` and change `SIGPIPE`
+from `SIG_DFL` to `SIG_IGN`, with `sigemptyset` supplying the replacement
+mask. It leaves an inherited `SIG_IGN` or application-owned handler unchanged
+and reads the public `cerrno.errno` macro through the imported `errno.h` before
+converting it with `uv_translate_sys_error` and raising the ordinary
+`runtime.sigpipe` Error. This narrow POSIX initialization is necessary because
 libuv has no equivalent configuration API; all pipe creation, I/O, and close
 operations continue to use public libuv APIs.
 

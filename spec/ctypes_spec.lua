@@ -1,4 +1,5 @@
 local cdriver = require "c-parser.cdriver"
+local c99 = require "c-parser.c99"
 local ctypes = require "c-parser.ctypes"
 
 local function with_header(contents, fn)
@@ -33,6 +34,58 @@ local function parse_header_error(contents)
 end
 
 describe("C FFI ctype registration", function()
+    it("parses cast expressions in an explicit typedef scope", function()
+        local ftypes = parse_header([[
+            typedef void (*ffi_handler)(int);
+        ]])
+        local exp, err =
+            c99.match_typed_language_expression_grammar(
+                "( ( ffi_handler ) 0 ) ", ftypes.typedef_names)
+        assert(exp, err)
+        assert.equal(exp[1], exp.cast_type)
+        assert.equal(exp[2], exp.cast_operand)
+        assert.same({ "ffi_handler" }, exp.cast_type)
+        assert.same({ "0" }, exp.cast_operand)
+
+        -- A completed parse must neither accept trailing replacement tokens nor
+        -- leak the typedef set into the next independent expression parse.
+        assert.is_nil(c99.match_typed_language_expression_grammar(
+            "( ( ffi_handler ) 0 ) trailing ", ftypes.typedef_names))
+        assert.is_nil(c99.match_typed_language_expression_grammar(
+            "( ( ffi_handler ) 0 ) ", {}))
+    end)
+
+    it("builds CType declarations from cast type names", function()
+        local ftypes = parse_header([[
+            typedef void (*ffi_handler)(int);
+        ]])
+
+        local typedef_cast =
+            assert(c99.match_typed_language_expression_grammar(
+                "( ( ffi_handler ) 0 ) ", ftypes.typedef_names))
+        local typedef_value = assert(ctypes.declaration_from_type_name(
+            ftypes, "FFI_TYPEDEF_HANDLER", typedef_cast.cast_type))
+        assert.equal("FFI_TYPEDEF_HANDLER", typedef_value.name)
+        assert.same({ "ffi_handler" }, typedef_value.type)
+        assert.same({ "ffi_handler" }, typedef_value._declarator_base)
+        assert.same({}, typedef_value._declarator_ops)
+
+        local direct_cast =
+            assert(c99.match_typed_language_expression_grammar(
+                "( ( void ( * ) ( int ) ) 0 ) ",
+                ftypes.typedef_names))
+        local direct_value = assert(ctypes.declaration_from_type_name(
+            ftypes, "FFI_DIRECT_HANDLER", direct_cast.cast_type))
+        assert.equal("functionptr", direct_value.type)
+        assert.equal("FFI_DIRECT_HANDLER", direct_value.name)
+        assert.same({ "*" }, direct_value.pointer)
+        assert.same({ "*" }, direct_value._declarator_ops)
+        assert.same({ "void" }, direct_value.ret.type)
+        assert.equal("prototype", direct_value._paramstyle)
+        assert.equal(1, #direct_value.params)
+        assert.same({ "int" }, direct_value.params[1].type)
+    end)
+
     it("registers standalone structs and preserves field declarators", function()
         local ftypes = parse_header([[
             struct P {

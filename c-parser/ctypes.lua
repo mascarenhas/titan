@@ -1904,4 +1904,36 @@ ctypes.register_types = typed("{Decl}, table? -> TypeList?, string?", function(p
     return lst, nil
 end)
 
+-- Convert a parsed C type-name (the first child of a cast expression) through
+-- the exact declarator path used by real object declarations. A type-name has
+-- no identifier: its optional final untyped table is the abstract declarator,
+-- while aggregate/enum specifier tables carry their own `type` tag and remain
+-- part of the declaration specifiers.
+function ctypes.declaration_from_type_name(lst, name, type_name)
+    if type(lst) ~= "table" then
+        return nil, "type-name conversion requires a C type list"
+    elseif type(name) ~= "string" or name == "" then
+        return nil, "type-name conversion requires a declaration name"
+    elseif type(type_name) ~= "table" or #type_name == 0 then
+        return nil, "type-name conversion requires a parsed C type name"
+    end
+
+    local spec = {}
+    local declarator = {}
+    for index, part in ipairs(type_name) do
+        if index == #type_name
+           and type(part) == "table"
+           and part.type == nil then
+            declarator = part
+        else
+            spec[#spec + 1] = part
+        end
+    end
+    if #spec == 0 then
+        return nil, "parsed C type name has no declaration specifier"
+    end
+    return make_declarator_type(
+        lst, name, spec, declarator, false)
+end
+
 return ctypes

@@ -846,6 +846,25 @@ substitution, recursive; error on missing keys). Key facts:
 
 `foreign import "header.h"` invokes a pure-Lua C toolchain: `cpp.lua` (full hand-written preprocessor; asks the configured `CC -std=c99` plus parsed `TITAN_EXTRA_CPPFLAGS` for system include paths and predefined macros), `c99.lua` (relabel C99 grammar; module-global typedef table, not reentrant), `ctypes.lua`/`cdefines.lua` (build a TypeList), and `cdriver.lua` (include resolution plus C type extraction). The checker passes the importing Titan source directory and the shared toolchain configuration to `cdriver`, which emits quoted `#include "..."` syntax only when the header is found by the quoted-include rules relative to that source; otherwise generated C uses angle brackets. `cdriver` also exposes `titan-runtime/titan/ffi.h`, which defines selected `titan_ffi_*` aliases for portable C primitive types. Contextual conversions and C operators use one resolver-owned, session-scoped `cprobe.Service`: its compile-only probes share the generated objects' exact parsed `CC`, C99/CPP/target flags, include ordering, and target arithmetic profile. Probe answers and caches do not survive that compilation session or enter pure `types.compatible` relations or serialized module types.
 
+Recognized existing object-like integer/accessor expressions and fully expanded
+outer casts to C integer, floating, object-pointer, or function-pointer types
+become typed FFI values while generated C retains the public macro spelling.
+The bounded accessor path includes typed dereferences such as the common
+`errno` expansion; it is not general support for arbitrary call-containing
+expressions. A pure dotted identifier replacement becomes a lazily resolved
+field projection, again emitted by public spelling. Generated C hoists all
+foreign headers, so checker lookup replays their raw definitions,
+redefinitions, dependency rescans, and undefinitions into one final module
+macro environment, even for earlier closure initializers. Because C
+preprocessing precedes field lookup, a live projection wins over a same-named
+physical field, and an invalid path or active unsupported object macro is
+terminal rather than falling back to that field. Other object-like forms are
+not generally supported, and all function-like macros remain unsupported.
+Declaration extraction still preprocesses each foreign header independently,
+while probes and generated C see the cumulative ordered header block, so
+conditional macro coupling and later changes to scalar macros typed by an
+earlier import belong behind one umbrella header imported once.
+
 `foreigntypes.convert` maps C declarations to the `Type.C*` family (`CVoid`, `CInteger`, `CFloat`, `CPointer`, `CArray`, `CStruct`, `CUnion`, `CFunction`, `CTypedef`, `CModule`, and owned storage wrappers). C imports are namespaces, not first-class values: the checker represents them as `Type.CModule` (renamed from the prototype's foreign-module type), typedef-qualified names such as `c.T` may be used in local annotations, and `types.serialize` rejects any exported function/method/variable type that mentions a C FFI type. An eligible named file-scope tag-only `struct T` or `union T` is published as the base-name Titan type `c.T`, but remains its canonical `CStruct`/`CUnion` and generates exact tag spelling; do not invent a `CTypedef`, header alias, or ordinary C identifier. A real same-name typedef always wins. C aggregate fields, C array indexing, `#` on static arrays and counted owned buffers, and explicit C vararg calls are implemented; C array indexing is 0-based, bounds-checked for `CArray` and counted `COwned`, and null-checked but otherwise unchecked for raw `CPointer`. Object-pointer conversions, C arithmetic, relational/equality, bitwise, and shift operators, C promotions, and mixed Titan/C operands follow the target profile plus the contextual probe policy; they do not reuse Titan's Lua-semantics operator helpers. Titan's `and`/`or`/`not` remain excluded from C-mode operators.
 
 Owned C objects are Titan-owned Lua userdata payloads allocated by the generated `.new()` and `.new_array(count)` pseudo-functions on C types. They are zeroed, anchored on the Lua stack during initialization, stamped with a per-owned-C-type metatable for `value` cast checks, and need no finalizer because the Lua GC owns the payload; dynamic array counts are reconstructed from `Udata.len`. Function-local complete non-pointer C structs, unions, and fixed arrays may also be declared without a right-hand side as zero-initialized automatic objects. Their lifetime is the generated C block, no escape analysis is attempted, and aggregate values are spilled through volatile byte storage around catchable Titan calls so normal-return mutation commits while a caught longjmp reloads the last Titan-visible state. Owned allocation rejects `void`, incomplete aggregates, C array typedefs, and structs/unions with flexible array members. Automatic storage accepts complete fixed arrays, including imported array-typedef and nested-array shapes, but rejects void, incomplete, flexible-array-member, and GC-bearing objects. Imported/static C functions can be converted to compatible C function pointers and called through them; adapting a Titan function to a C callback ABI remains a parked follow-up alongside `CAdopted` lifetimes and stronger Lua C API coverage. `c-parser/typed.lua` (used only by c-parser) is a runtime signature-checking DSL that ships **disabled** — `typed.off()` is the last line; flip to `typed.on()` to debug c-parser type confusion.
@@ -854,9 +873,11 @@ The 0.18 `titan.uv` sources import `UV_E*` enumerators directly and call public
 libuv operations directly, including process, stat, DNS traversal/release,
 bind, and connect submission. The retained native boundary is deliberately
 narrow: the fixed owner-slot dispatcher, the twelve plain-C callback
-trampolines declared by `titan-runtime/titan/uv.h`, owner-slot/integer-width
-static assertions, opaque normalized-address storage plus its compile-time
-size/alignment assertions, and the conditional SIGPIPE helper. Operational
+trampolines declared by `titan-runtime/titan/uv.h`, shared fixed-owner
+declarations, and deliberately overprovisioned opaque normalized-address
+storage. The conditional inherited-`SIGPIPE` policy is implemented in
+`titan/uv/uv.titan` through direct `signal.h`/`errno.h` FFI calls and
+`uv_translate_sys_error`. Operational
 libuv wrappers, including the old DNS/address helpers, must not return.
 Archive-backed generated modules now have direct undefined references to those
 external callbacks and no references to the retired helpers, which is why this

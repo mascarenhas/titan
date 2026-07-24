@@ -471,6 +471,7 @@ local function probe_default_defines(config)
     local blank_ctx = {
         incdirs = {},
         defines = {},
+        macro_changes = {},
         ifmode = { true },
         output = {},
         output_origins = {},
@@ -519,6 +520,7 @@ function cpp.new_context(options)
     local ctx = {
         incdirs = copy_incdirs(probed.incdirs),
         defines = copy_map(probed.defines),
+        macro_changes = {},
         ifmode = { true },
         output = {},
         output_origins = {},
@@ -1415,6 +1417,12 @@ cpp.parse_file = typed("string, FILE*?, Ctx? -> Ctx?, string?", function(filenam
     end
 
     ctx.output_origins = ctx.output_origins or {}
+    -- Record the names whose active macro definition this header closure
+    -- changes. Foreign imports are parsed independently, but generated C
+    -- includes every header in source order; checker-side field projections
+    -- therefore need later definitions, redefinitions, and undefinitions to
+    -- replace the earlier state rather than accumulate forever.
+    ctx.macro_changes = ctx.macro_changes or {}
 
     local current_dir = filename:gsub("/[^/]*$", "")
     if current_dir == filename then
@@ -1466,8 +1474,10 @@ cpp.parse_file = typed("string, FILE*?, Ctx? -> Ctx?, string?", function(filenam
                 local k = tk.id
                 local v = tk.args and tk or tk.repl
                 ctx.defines[k] = v
+                ctx.macro_changes[k] = true
             elseif tk.directive == "undef" then
                 ctx.defines[tk.id] = nil
+                ctx.macro_changes[tk.id] = true
             elseif tk.directive == "ifdef" then
                 table.insert(ifmode, (ctx.defines[tk.id] ~= nil))
             elseif tk.directive == "ifndef" then

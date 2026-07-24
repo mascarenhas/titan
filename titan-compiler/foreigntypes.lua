@@ -1075,6 +1075,19 @@ function foreigntypes.convert(st, ftype)
        or type(ftype.type) == "table" then
         converted = declaration_array_view(converted)
     end
+    if ftype._macro_cast then
+        local scalar = types.resolve_c_typedef(converted)
+        if not scalar
+           or (scalar._tag ~= "Type.CInteger"
+               and scalar._tag ~= "Type.CFloat"
+               and scalar._tag ~= "Type.CPointer") then
+            -- A C cast expression can produce only a scalar value (or void).
+            -- The parser also accepts syntactically shaped but semantically
+            -- invalid aggregate/array targets, so do not publish those as
+            -- usable macro members.
+            return nil
+        end
+    end
     -- Direct scalar/pointer qualification is declaration metadata, not value
     -- type identity. Keep it beside the converted type: profile primitives and
     -- canonical tags are shared objects and must never be mutated per

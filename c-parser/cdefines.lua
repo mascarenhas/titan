@@ -3,6 +3,7 @@ local cdefines = {}
 
 local c99 = require("c-parser.c99")
 local cpp = require("c-parser.cpp")
+local ctypes = require("c-parser.ctypes")
 local typed = require("c-parser.typed")
 
 local function add_type(lst, name, typ)
@@ -230,7 +231,8 @@ local bitop_set = {
 -- Best-effort assessment of the type of a #define
 local get_type_of_exp
 get_type_of_exp = typed("Exp, TypeList -> {string}?", function(exp, lst)
-    if type(exp[1]) == "string" and exp[2] == nil then
+    if type(exp[1]) == "string" and exp[2] == nil
+       and not exp.postfix then
         local val = exp[1]
         if val:sub(1,1) == '"' or val:sub(1,2) == 'L"' then
             return base_c_types.CONST_CHAR_PTR
@@ -256,7 +258,12 @@ get_type_of_exp = typed("Exp, TypeList -> {string}?", function(exp, lst)
         end
     end
 
-    if type(exp[1]) == "string" and exp[2] and exp[2].args then
+    if type(exp[1]) == "string"
+       and type(exp.postfix) == "table"
+       and exp.postfix.args then
+        for key in pairs(exp.postfix) do
+            if key ~= "args" then return nil end
+        end
         local fn = lst[exp[1]]
         if not fn or not fn.ret then
             return nil -- unknown function, or not a function
@@ -265,15 +272,17 @@ get_type_of_exp = typed("Exp, TypeList -> {string}?", function(exp, lst)
         return table.move(r, 1, #r, 1, {}) -- shallow_copy(r)
     end
 
-    if exp.unop == "*" then
+    local unary =
+        exp.unop or (exp.op and exp[2] == nil and exp.op)
+    if unary == "*" then
         local etype = get_type_of_exp(exp[1], lst)
         if not etype then
             return nil
         end
         local rem = table.remove(etype)
-        assert(rem == "*")
+        if rem ~= "*" then return nil end
         return etype
-    elseif exp.unop == "-" then
+    elseif unary == "-" then
         return get_type_of_exp(exp[1], lst)
     elseif exp.op == "?" then
         return get_type_of_exp(exp[2], lst)
@@ -303,11 +312,87 @@ get_type_of_exp = typed("Exp, TypeList -> {string}?", function(exp, lst)
 end)
 
 local function bare_identifier(exp)
-    if exp.op or #exp ~= 1 or type(exp[1]) ~= "string"
+    if exp.op or exp.postfix or #exp ~= 1 or type(exp[1]) ~= "string"
        or not exp[1]:match("^[_%a][_%w]*$") then
         return nil
     end
     return exp[1]
+end
+
+-- Recognize only a member-projection replacement made entirely from ordinary
+-- identifiers and dots. The public macro spelling remains the field emitted
+-- by generated C; this path is checker metadata for determining the leaf type.
+-- Arrow, call, index, increment, and operator expressions stay outside this
+-- bounded feature.
+local function dotted_identifier_path(exp)
+    if exp.op or #exp ~= 1 or type(exp[1]) ~= "string"
+       or not exp[1]:match("^[_%a][_%w]*$")
+       or type(exp.postfix) ~= "table" then
+        return nil
+    end
+
+    for key in pairs(exp) do
+        if key ~= 1 and key ~= "postfix" then return nil end
+    end
+
+    local path = { exp[1] }
+    local suffix = exp.postfix
+    while suffix do
+        if type(suffix.dot) ~= "string"
+           or not suffix.dot:match("^[_%a][_%w]*$") then
+            return nil
+        end
+        path[#path + 1] = suffix.dot
+
+        local next_suffix
+        for key, value in pairs(suffix) do
+            if key == 1 then
+                if type(value) ~= "table" or next_suffix then return nil end
+                next_suffix = value
+            elseif key ~= "dot" then
+                return nil
+            end
+        end
+        suffix = next_suffix
+    end
+
+    return #path > 1 and path or nil
+end
+
+-- Classify one field token against a cumulative raw macro environment.
+-- Object-like macros always participate in preprocessing when used after `.`
+-- or `->`: a supported pure dotted expansion supplies projection metadata,
+-- while any other active object-like expansion must remain terminal instead
+-- of falling back to a physical field that generated C cannot name. A
+-- function-like macro does not expand on a plain field token and is therefore
+-- outside this object-macro classifier.
+function cdefines.classify_field_macro(name, define_set)
+    local definition = define_set and define_set[name]
+    if not definition or definition.args then return nil end
+
+    local ok, text = pcall(cpp.expand_macro, name, define_set)
+    if not ok or type(text) ~= "string" then
+        return {
+            name = name,
+            replacement = "<macro expansion failed>",
+            unsupported = true,
+        }
+    end
+
+    local exp = c99.match_language_expression_grammar(text .. " ")
+    local path = exp and dotted_identifier_path(exp)
+    if path then
+        return {
+            name = name,
+            path = path,
+            replacement = text,
+        }
+    end
+    return {
+        name = name,
+        replacement = text,
+        unsupported = true,
+    }
 end
 
 local function function_alias_declaration(lst, name, exp)
@@ -335,12 +420,45 @@ local function function_alias_declaration(lst, name, exp)
 end
 
 function cdefines.register_define(lst, name, text, _)
-    local exp, _, _, _ = c99.match_language_expression_grammar(text .. " ")
-    if not exp then
-        -- failed parsing expression
-        -- print(("failed parsing: %d:%d: %s\n"):format(line, col, text))
+    -- Parse with the header's explicit typedef scope first. Besides recognizing
+    -- ordinary `(T) value` spelling, this disambiguates `(T)(value)` from a
+    -- call through an ordinary identifier. A cast marker can survive when the
+    -- parser attaches a later call/index/member postfix to that cast table, so
+    -- accept it only when the cast itself is the complete root expression.
+    local cast =
+        c99.match_typed_language_expression_grammar(
+            text .. " ", lst.typedef_names or {})
+    if cast and cast.cast_type and not cast.op and not cast.postfix then
+        local declaration =
+            ctypes.declaration_from_type_name(
+                lst, name, cast.cast_type)
+        if declaration then
+            declaration._macro_cast = {
+                expression = cast,
+                operand = cast.cast_operand,
+                replacement = text,
+            }
+            add_type(lst, name, declaration)
+        end
         return
     end
+
+    -- The ordinary expression grammar deliberately needs no typedef context.
+    -- Retain its historical best-effort typing for non-cast macro constants.
+    local exp, _, _, _ = c99.match_language_expression_grammar(text .. " ")
+    if not exp then return end
+
+    local path = dotted_identifier_path(exp)
+    if path then
+        lst.field_macro_paths = lst.field_macro_paths or {}
+        lst.field_macro_paths[name] = {
+            name = name,
+            path = path,
+            replacement = text,
+        }
+        return
+    end
+
     local function_alias =
         function_alias_declaration(lst, name, exp)
     if function_alias then
