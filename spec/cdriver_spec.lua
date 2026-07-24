@@ -252,8 +252,12 @@ describe("C FFI cdriver", function()
             end
 
             assert.equal("enum", assert(types.UV_EIO).type)
-            assert.equal(-5, enum_value("UV_EIO"))
-            assert.equal(-125, enum_value("UV_ECANCELED"))
+            local eio = assert(enum_value("UV_EIO"))
+            local canceled = assert(enum_value("UV_ECANCELED"))
+            -- POSIX errno numbers are target-specific; libuv's portable
+            -- contract is that every error value is negative.
+            assert.is_true(eio < 0)
+            assert.is_true(canceled < 0)
             assert.equal(-4095, enum_value("UV_EOF"))
             assert.equal("typedef", assert(types.uv_errno_t).type)
         end)

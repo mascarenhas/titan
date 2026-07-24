@@ -286,6 +286,10 @@ describe("session-scoped C probe service", function()
         }, state.calls[2].argv)
 
         local baseline_source = state.calls[1].metadata.source
+        assert.truthy(baseline_source:find(
+            "static TITAN_UNUSED inline int " ..
+                "titan_errfunc_is_errorhandler",
+            1, true))
         assert.matches([[
 #include "/project/module/local%.h"
 #include <api%.h>

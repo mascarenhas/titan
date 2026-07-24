@@ -24,7 +24,7 @@ cpreamble.fixed_includes = [[#include <stdlib.h>
 
 cpreamble.fixed_prefix = cpreamble.fixed_includes .. [[
 
-static inline int titan_errfunc_is_errorhandler(lua_State *L) {
+static TITAN_UNUSED inline int titan_errfunc_is_errorhandler(lua_State *L) {
     if (L->errfunc == 0) return 0;
     StkId errfunc = restorestack(L, L->errfunc);
     TValue *v = s2v(errfunc);
