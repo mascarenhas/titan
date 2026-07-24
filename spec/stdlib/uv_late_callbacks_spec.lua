@@ -1,4 +1,7 @@
+local lfs = require "lfs"
 local async_stdlib = require "spec.support.async_stdlib"
+local LATE_FS_CASES =
+    require "spec.support.uv_late_fs_callback_cases"
 
 local LATE_DNS_CASES = [==[
 -- Runs only against the generated delayed-DNS callback uv variant.
@@ -243,29 +246,22 @@ function schedule_rooted_retry_gc(first_port: integer): async.Task
 end
 ]==]
 
-describe("uv late DNS callbacks", function()
+-- Both timing hooks live in one exact, generated titan.uv provider. Each test
+-- still executes in a fresh Lua process, so their mutable hook state remains
+-- isolated while the expensive source/provider build is shared.
+describe("uv delayed callback variants", function()
     local workspace
+    local root
     local layout
 
     setup(function()
         workspace, layout = async_stdlib.variant_workspace(
-            "spec/support/make_delayed_dns_callback_variant.lua")
-
-        -- Build the public net facade only after the transformed exact uv
-        -- provider exists, so it cannot fall back to the installed container.
-        async_stdlib.write_source(workspace, "titan.net",
-            async_stdlib.read(async_stdlib.repo .. "/titan/net.titan"))
-        async_stdlib.compile(workspace, "titan.net", {
-            layout = layout,
-            cppflags = "",
-        })
-        async_stdlib.register_exact_provider(layout, "titan.net")
-
-        async_stdlib.write_source(workspace, "uv_late_dns_callback_cases",
-            LATE_DNS_CASES)
-        async_stdlib.compile(workspace, "uv_late_dns_callback_cases", {
-            layout = layout,
-        })
+            {
+                "spec/support/make_delayed_dns_callback_variant.lua",
+                "spec/support/make_delayed_fs_callback_variant.lua",
+            })
+        root = workspace .. "/data"
+        assert.truthy(lfs.mkdir(root))
     end)
 
     teardown(function()
@@ -317,8 +313,27 @@ end
 ]==]
     end
 
-    it("formats every decimal port boundary in the six-byte array", function()
-        run([==[
+    describe("DNS cases", function()
+        setup(function()
+            -- Build the public net facade only after the transformed exact uv
+            -- provider exists, so it cannot fall back to the installed container.
+            async_stdlib.write_source(workspace, "titan.net",
+                async_stdlib.read(async_stdlib.repo .. "/titan/net.titan"))
+            async_stdlib.compile(workspace, "titan.net", {
+                layout = layout,
+                cppflags = "",
+            })
+            async_stdlib.register_exact_provider(layout, "titan.net")
+
+            async_stdlib.write_source(workspace, "uv_late_dns_callback_cases",
+                LATE_DNS_CASES)
+            async_stdlib.compile(workspace, "uv_late_dns_callback_cases", {
+                layout = layout,
+            })
+        end)
+
+        it("formats every decimal port boundary in the six-byte array", function()
+            run([==[
             local uv = require "titan.uv"
             for _, expected in ipairs({
                 { 0, "0" },
@@ -331,27 +346,27 @@ end
                 assert(text == expected[2], text)
                 assert(terminator == 0, terminator)
             end
-        ]==])
-    end)
+            ]==])
+        end)
 
-    it("delivers and releases a held successful result once", function()
-        run(port_prelude("late-success") .. [==[
+        it("delivers and releases a held successful result once", function()
+            run(port_prelude("late-success") .. [==[
 local task = cases.schedule_late_success(first_port)
 assert_loop()
 assert(task:join() == "late-success-ok")
 ]==])
-    end)
+        end)
 
-    it("lets cancellation win without a stale resume", function()
-        run(port_prelude("late-cancel") .. [==[
+        it("lets cancellation win without a stale resume", function()
+            run(port_prelude("late-cancel") .. [==[
 local task = cases.schedule_late_cancellation(first_port)
 assert_loop()
 assert(task:join() == "late-cancellation-ok")
 ]==])
-    end)
+        end)
 
-    it("cleanup-shields a held result through Runtime shutdown", function()
-        run(port_prelude("shutdown-held") .. [==[
+        it("cleanup-shields a held result through Runtime shutdown", function()
+            run(port_prelude("shutdown-held") .. [==[
 local task = cases.schedule_shutdown_with_held_result(first_port)
 assert_loop()
 assert(task:join() == "shutdown-held-ok")
@@ -365,10 +380,11 @@ end)
 assert_loop()
 assert(next_session:join() == "shutdown-followup-ok")
 ]==])
-    end)
+        end)
 
-    it("releases once after copy longjmp, drains, and reuses Runtime", function()
-        run(port_prelude("copy-longjmp") .. [==[
+        it("releases once after copy longjmp, drains, and reuses Runtime",
+        function()
+            run(port_prelude("copy-longjmp") .. [==[
 local failed = cases.schedule_copy_failure(first_port)
 local ok, failure = pcall(async.loop)
 assert(not ok)
@@ -381,14 +397,78 @@ local followup = cases.schedule_followup_round_trip(first_port + 1)
 assert_loop()
 assert(followup:join() == "followup-round-trip-ok")
 ]==])
-    end)
+        end)
 
-    it("roots addresses across full/generational GC and failed retry",
-    function()
-        run(port_prelude("rooted-retry-gc") .. [==[
+        it("roots addresses across full/generational GC and failed retry",
+        function()
+            run(port_prelude("rooted-retry-gc") .. [==[
 local task = cases.schedule_rooted_retry_gc(first_port)
 assert_loop()
 assert(task:join() == "rooted-retry-gc-ok")
 ]==])
+        end)
+    end)
+
+    describe("filesystem cases", function()
+        setup(function()
+            async_stdlib.write_source(workspace, "titan.fs",
+                async_stdlib.read(async_stdlib.repo .. "/titan/fs.titan"))
+            async_stdlib.compile(workspace, "titan.fs", {
+                layout = layout,
+                cppflags = "",
+            })
+            async_stdlib.register_exact_provider(layout, "titan.fs")
+
+            async_stdlib.write_source(workspace, "uv_late_fs_callback_cases",
+                LATE_FS_CASES)
+            async_stdlib.compile(workspace, "uv_late_fs_callback_cases", {
+                layout = layout,
+            })
+        end)
+
+        it("roots a cross-generation Runtime/File/Task/buffer/error graph",
+        function()
+            run(string.format([==[
+            local root = %q
+            local async = require "titan.async"
+            local cases = require "uv_late_fs_callback_cases"
+            local task = cases.schedule_cross_generation_graph(root)
+            async.loop()
+            assert(task:join() == "cross-generation-graph-ok")
+            ]==], root))
+        end)
+
+        it("lets cancellation win over a delayed result", function()
+            run(string.format([==[
+            local root = %q
+            local async = require "titan.async"
+            local cases = require "uv_late_fs_callback_cases"
+            local task = cases.schedule_late_fs_cancellation(root)
+            async.loop()
+            assert(task:join() == "late-fs-cancellation-ok")
+            ]==], root))
+        end)
+
+        it("disposes a delayed successful open after cancellation",
+        function()
+            run(string.format([==[
+            local root = %q
+            local async = require "titan.async"
+            local cases = require "uv_late_fs_callback_cases"
+            local path = root .. "/late-cancelled-open.dat"
+            local task = cases.schedule_late_open_cancellation(path)
+            async.loop()
+            assert(task:join() == "late-successful-open-cancellation-ok")
+            assert(os.remove(path))
+
+            -- A fresh public session proves the cancelled-open File and request
+            -- roots were fully retired without inspecting private Runtime lists.
+            local next_session = async.run(function()
+                return "next-session-ok"
+            end)
+            async.loop()
+            assert(next_session:join() == "next-session-ok")
+            ]==], root))
+        end)
     end)
 end)

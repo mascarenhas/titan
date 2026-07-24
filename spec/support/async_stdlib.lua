@@ -268,14 +268,41 @@ local function build_variant_workspace(transformer)
     local built, variant_or_error = pcall(function()
     assert.truthy(lfs.mkdir(workspace .. "/titan"))
     make_directory(workspace .. "/src/titan")
-    local transform = transformer
-    if transform:sub(1, 1) ~= "/" then transform = REPO .. "/" .. transform end
+    local transformers
+    if type(transformer) == "string" then
+        transformers = { transformer }
+    else
+        assert.truthy(type(transformer) == "table",
+            "async stdlib variant transformer must be a path or ordered array")
+        assert.truthy(#transformer > 0,
+            "async stdlib variant transformer array must not be empty")
+        transformers = transformer
+        for key in pairs(transformers) do
+            assert.truthy(type(key) == "number" and key >= 1
+                and key <= #transformers and key % 1 == 0,
+                "async stdlib variant transformers must be a dense array")
+        end
+    end
+
     local raw_lua = host_lua()
-    local ok, _, output = run(table.concat({
-        quote(raw_lua), quote(transform), quote(REPO .. "/titan/uv"),
-        quote(workspace .. "/src/titan/uv"),
-    }, " "), workspace)
-    assert.truthy(ok, output)
+    local input = REPO .. "/titan/uv"
+    for index, configured in ipairs(transformers) do
+        assert.truthy(type(configured) == "string" and configured ~= "",
+            "async stdlib variant transformer paths must be nonempty strings")
+        local transform = configured
+        if transform:sub(1, 1) ~= "/" then
+            transform = REPO .. "/" .. transform
+        end
+        local destination = index == #transformers
+            and workspace .. "/src/titan/uv"
+            or workspace .. "/variant-stage-" .. tostring(index)
+        local ok, _, output = run(table.concat({
+            quote(raw_lua), quote(transform), quote(input),
+            quote(destination),
+        }, " "), workspace)
+        assert.truthy(ok, output)
+        input = destination
+    end
     assert.truthy(exists(workspace .. "/src/titan/uv/uv.titan"),
         "async stdlib variant transformer did not copy the folder main")
     copy_file(REPO .. "/titan/timer.titan",

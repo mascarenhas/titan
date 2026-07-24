@@ -4,7 +4,6 @@ local async_stdlib = require "spec.support.async_stdlib"
 local NATIVE_FIXTURES = async_stdlib.repo .. "/spec/fixtures/stdlib/native"
 
 local NATIVE_OWNER_PROBE = [[
-    local libuv = foreign import "uv.h"
     local lua = foreign import "lua.h"
     local ffi = foreign import "titan/ffi.h"
     local allocation = foreign import "titan_uv_test_allocation.h"
@@ -13,15 +12,17 @@ local NATIVE_OWNER_PROBE = [[
     -- Importers carry the exact record identity across module calls without
     -- converting it through value.
     record uv_timer_t
-      local handle: *libuv.uv_timer_t
+      local handle: *allocation.titan_uv_test_timer
       local storage: value
     end
 
     function new_timer(): uv_timer_t
       local top = lua.lua_gettop(L)
-      local memory = lua.lua_newuserdatauv(L, libuv.uv_timer_t.sizeof, 0)
+      local memory = lua.lua_newuserdatauv(
+          L, allocation.titan_uv_test_timer_size(), 0)
       local storage = ffi.lua_totvalue(L, -1)
-      local timer = uv_timer_t.new(memory as *libuv.uv_timer_t, storage)
+      local timer = uv_timer_t.new(
+          memory as *allocation.titan_uv_test_timer, storage)
       lua.lua_settop(L, top)
       return timer
     end
@@ -71,7 +72,7 @@ local function append_shell_words(argv, words, label)
     for _, word in ipairs(parsed) do argv[#argv + 1] = word end
 end
 
-local function compile_allocation_counter(workspace)
+local function compile_allocation_counter(workspace, cppflags)
     local object = workspace .. "/titan_uv_test_allocation.o"
     local argv = {}
     append_shell_words(argv, os.getenv("CC") or "cc", "CC")
@@ -79,6 +80,7 @@ local function compile_allocation_counter(workspace)
     argv[#argv + 1] = "-fPIC"
     argv[#argv + 1] = "-I" .. async_stdlib.repo .. "/lua-5.5.0/src"
     argv[#argv + 1] = "-I" .. NATIVE_FIXTURES
+    append_shell_words(argv, cppflags, "libuv CPPFLAGS")
     append_shell_words(argv, os.getenv("TITAN_TEST_EXTRA_CFLAGS") or "",
         "TITAN_TEST_EXTRA_CFLAGS")
     argv[#argv + 1] = "-c"
@@ -102,7 +104,8 @@ describe("uv opaque native handle ownership", function()
             NATIVE_OWNER_CONSUMER)
         local cppflags = async_stdlib.host_libuv_config()
         cppflags = cppflags .. " -I" .. NATIVE_FIXTURES
-        local allocation_counter = compile_allocation_counter(workspace)
+        local allocation_counter =
+            compile_allocation_counter(workspace, cppflags)
         local options = {
             cppflags = cppflags,
             cflags = "-fno-strict-aliasing " ..

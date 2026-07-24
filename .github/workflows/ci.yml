@@ -455,7 +455,8 @@ jobs:
             spec/stdlib/uv_states_spec.lua \
             spec/stdlib/timer_spec.lua \
             spec/stdlib/fs_spec.lua \
-            spec/stdlib/uv_late_fs_callbacks_spec.lua
+            spec/stdlib/uv_late_callbacks_spec.lua \
+            --filter-out='DNS'
 
       - name: Run native async sanitizer gate (core-uv)
         env:

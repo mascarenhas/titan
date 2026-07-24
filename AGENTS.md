@@ -330,20 +330,25 @@ teardown so a later packaging test does not rebuild the whole standard
 library.
 
 Async standard-library behavioral specs compile against the canonical
-production modules whenever public behavior can prove the contract. The two
-narrow exceptions are `spec/stdlib/uv_late_fs_callbacks_spec.lua` and
-`spec/stdlib/uv_late_dns_callbacks_spec.lua`. Their isolated
-`spec/support/make_delayed_{fs,dns}_callback_variant.lua` flows copy the
-complete `titan/uv/` source ensemble and patch the owning contributors through
-unique per-file anchors, then build exact coroutine/uv/async/timer DSOs under a
-private root with no shallow `titan.so`. The FS variant covers late
+production modules whenever public behavior can prove the contract. The one
+narrow exception is `spec/stdlib/uv_late_callbacks_spec.lua`. Its isolated
+flow applies `spec/support/make_delayed_dns_callback_variant.lua` and then
+`spec/support/make_delayed_fs_callback_variant.lua` to one complete copy of the
+`titan/uv/` source ensemble, with each transformer patching the owning
+contributors through unique per-file anchors. It builds the exact
+coroutine/uv/async/timer DSOs once under a private root with no shallow
+`titan.so`, then builds both private net/fs facades and their case modules.
+The FS cases cover late
 cancellation, disposal of a late successful open, and cross-generation
-Runtime/File/Task/buffer/error rooting. The DNS variant captures the successful
+Runtime/File/Task/buffer/error rooting. The DNS cases capture the successful
 borrowed result before logical dispatch, cleanup-shields only its delayed
 delivery owner through `close_all_owners`, and owns the release-counter,
 copy-fault, invalid-cell retry, port-format, and full/generational-GC hooks
-needed to prove exactly-once release and rooted address cells. Keep every such
-hook out of installed modules; neither variant is a general scheduler or
+needed to prove exactly-once release and rooted address cells. Each behavior
+case still runs in a fresh Lua process, so the combined provider's test state
+does not cross cases. The sanitizer gate selects only the filesystem cases;
+the complete combined suite remains in regular Linux. Keep every such hook out
+of installed modules; this variant is not a general scheduler or
 fault-injection interface.
 
 `titanc` takes dot-separated **module names**, not file paths (dots map to

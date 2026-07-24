@@ -206,7 +206,7 @@ describe("flexible return code generation", function()
             end
         ]]
 
-        local csrc = generate(source)
+        local csrc = h.compile_and_read_c(source)
         assert.match("luaD_callnoyield%(L, restorestack%(L, _vc_func%), 250%);",
             csrc)
         assert.match("luaD_callnoyield%(L, restorestack%(L, _vc_func%), LUA_MULTRET%);%s+if %(L%->ci%->top%.p < L%->top%.p%) L%->ci%->top%.p = L%->top%.p;",
@@ -215,7 +215,7 @@ describe("flexible return code generation", function()
         -- The ordinary function-value call uses the largest encodable finite
         -- request. The direct native call remains legal with a 251-slot fixed
         -- sink because it does not encode a finite VM request.
-        run_coder(source, [[
+        local ok, err = h.call("test", [[
             local ok, first = pcall(test.finite250, function() end)
             assert(ok and first == nil)
             ok, first = pcall(test.direct251)
@@ -228,6 +228,7 @@ describe("flexible return code generation", function()
             end))
             assert(got.n == 251 and got[1] == 1 and got[251] == 251)
         ]])
+        assert.truthy(ok, err)
     end)
 
     it("forwards exact open runs under inherited finite and open demand", function()

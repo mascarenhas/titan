@@ -3092,159 +3092,132 @@ describe("Titan code generator", function()
             { t = "Point", l1 = "titan_test.Point.new(10, 20)", l2 = "titan_test.Point.new(30, 40)" },
         }
 
-        for _, t1 in ipairs(test_types) do
-            for _, t2 in ipairs(test_types) do
-                local map = "{" .. t1.t .. " : " .. t2.t .. "}"
-
-                it("declares a map " .. map, function()
-                    local code = util.render([[
-                        record Point
-                            x: integer
-                            y: integer
-                        end
-                        function array_one(): {integer}
-                            return {10, 20}
-                        end
-                        function array_two(): {integer}
-                            return {}
-                        end
-                        function new_map(k1: $TK, k2: $TK, v1: $TV, v2: $TV): $MAP
-                            local m = { [$K1] = $V1, [$K2] = $V2 }
-                            return m
-                        end
-                    ]], {
-                        MAP = map,
-                        K1 = t1.v1 or "k1",
-                        K2 = t1.v2 or "k2",
-                        V1 = t2.v1 or "v1",
-                        V2 = t2.v2 or "v2",
-                        TK = t1.t,
-                        TV = t2.t,
-                    })
-                    local ast, err = parse(code)
-                    assert.truthy(ast, err)
-                    local _, err = checker.check("titan_test", ast, code, "test.titan")
-                    assert.equal(0, #err, table.concat(err, "\n"))
-                    local ok, err = compile("titan_test", ast)
-                    assert.truthy(ok, err)
-                    local ok, err = call("titan_test", util.render([[
-                        local k1, k2, v1, v2 = $LK1, $LK2, $LV1, $LV2
-                        local m = titan_test.new_map(k1, k2, v1, v2)
-                        assert(m[$K1] == $V1 and m[$K2] == $V2)
-                    ]], {
-                        K1 = t1.v1 or "k1",
-                        K2 = t1.v2 or "k2",
-                        V1 = t2.v1 or "v1",
-                        V2 = t2.v2 or "v2",
-                        LK1 = t1.l1 or t1.v1,
-                        LK2 = t1.l2 or t1.v2,
-                        LV1 = t2.l1 or t2.v1,
-                        LV2 = t2.l2 or t2.v2,
-                    }))
-                    assert.truthy(ok, err)
-                end)
-
-                it("assigns to a map " .. map, function()
-                    local code = util.render([[
-                        record Point
-                            x: integer
-                            y: integer
-                        end
-                        function array_one(): {integer}
-                            return {10, 20}
-                        end
-                        function array_two(): {integer}
-                            return {}
-                        end
-                        function new_map(k1: $TK, k2: $TK, v1: $TV, v2: $TV): $MAP
-                            local m: $MAP = {}
-                            m[$K1] = $V1
-                            m[$K2] = $V2
-                            return m
-                        end
-                    ]], {
-                        MAP = map,
-                        K1 = t1.v1 or "k1",
-                        K2 = t1.v2 or "k2",
-                        V1 = t2.v1 or "v1",
-                        V2 = t2.v2 or "v2",
-                        TK = t1.t,
-                        TV = t2.t,
-                    })
-                    local ast, err = parse(code)
-                    assert.truthy(ast, err)
-                    local _, err = checker.check("titan_test", ast, code, "test.titan")
-                    assert.equal(0, #err, table.concat(err, "\n"))
-                    local ok, err = compile("titan_test", ast)
-                    assert.truthy(ok, err)
-                    local ok, err = call("titan_test", util.render([[
-                        local k1, k2, v1, v2 = $LK1, $LK2, $LV1, $LV2
-                        local m = titan_test.new_map(k1, k2, v1, v2)
-                        assert(m[$K1] == $V1 and m[$K2] == $V2)
-                    ]], {
-                        K1 = t1.v1 or "k1",
-                        K2 = t1.v2 or "k2",
-                        V1 = t2.v1 or "v1",
-                        V2 = t2.v2 or "v2",
-                        LK1 = t1.l1 or t1.v1,
-                        LK2 = t1.l2 or t1.v2,
-                        LV1 = t2.l1 or t2.v1,
-                        LV2 = t2.l2 or t2.v2,
-                    }))
-                    assert.truthy(ok, err)
-                end)
-
-                it("indexes a map " .. map, function()
-                    local code = util.render([[
-                        record Point
-                            x: integer
-                            y: integer
-                        end
-                        function array_one(): {integer}
-                            return {10, 20}
-                        end
-                        function array_two(): {integer}
-                            return {}
-                        end
-                        function get_map_value(k1: $TK, k2: $TK, v1: $TV, v2: $TV): $TV
-                            local m: $MAP = {}
-                            m[$K1] = $V1
-                            m[$K2] = $V2
-                            return m[$K1]
-                        end
-                    ]], {
-                        MAP = map,
-                        K1 = t1.v1 or "k1",
-                        K2 = t1.v2 or "k2",
-                        V1 = t2.v1 or "v1",
-                        V2 = t2.v2 or "v2",
-                        TK = t1.t,
-                        TV = t2.t,
-                    })
-                    local ast, err = parse(code)
-                    assert.truthy(ast, err)
-                    local _, err = checker.check("titan_test", ast, code, "test.titan")
-                    assert.equal(0, #err, table.concat(err, "\n"))
-                    local ok, err = compile("titan_test", ast)
-                    assert.truthy(ok, err)
-                    call("titan_test", "v = titan_test.get_map_value(); assert(v == 1984)")
-                    local ok, err = call("titan_test", util.render([[
-                        local k1, k2, v1, v2 = $LK1, $LK2, $LV1, $LV2
-                        local v = titan_test.get_map_value(k1, k2, v1, v2)
-                        assert(v == $V1)
-                    ]], {
-                        K1 = t1.v1 or "k1",
-                        K2 = t1.v2 or "k2",
-                        V1 = t2.v1 or "v1",
-                        V2 = t2.v2 or "v2",
-                        LK1 = t1.l1 or t1.v1,
-                        LK2 = t1.l2 or t1.v2,
-                        LV1 = t2.l1 or t2.v1,
-                        LV2 = t2.l2 or t2.v2,
-                    }))
-                    assert.truthy(ok, err)
-                end)
+        local map_prelude = [[
+            record Point
+                x: integer
+                y: integer
             end
+            function array_one(): {integer}
+                return {10, 20}
+            end
+            function array_two(): {integer}
+                return {}
+            end
+        ]]
+
+        local map_operations = {
+            declare = {
+                description = "declares",
+                source = [[
+                    function $FN(k1: $TK, k2: $TK,
+                                 v1: $TV, v2: $TV): $MAP
+                        local m = { [$K1] = $V1, [$K2] = $V2 }
+                        return m
+                    end
+                ]],
+                check = [[
+                    local m = titan_test.$FN(k1, k2, v1, v2)
+                    assert(m[$K1] == $V1 and m[$K2] == $V2)
+                ]],
+            },
+            assign = {
+                description = "assigns to",
+                source = [[
+                    function $FN(k1: $TK, k2: $TK,
+                                 v1: $TV, v2: $TV): $MAP
+                        local m: $MAP = {}
+                        m[$K1] = $V1
+                        m[$K2] = $V2
+                        return m
+                    end
+                ]],
+                check = [[
+                    local m = titan_test.$FN(k1, k2, v1, v2)
+                    assert(m[$K1] == $V1 and m[$K2] == $V2)
+                ]],
+            },
+            index = {
+                description = "indexes",
+                source = [[
+                    function $FN(k1: $TK, k2: $TK,
+                                 v1: $TV, v2: $TV): $TV
+                        local m: $MAP = {}
+                        m[$K1] = $V1
+                        m[$K2] = $V2
+                        return m[$K1]
+                    end
+                ]],
+                check = [[
+                    local v = titan_test.$FN(k1, k2, v1, v2)
+                    assert(v == $V1)
+                ]],
+            },
+        }
+
+        local function run_map_matrix(operation_name)
+            local operation = assert(map_operations[operation_name])
+            local source = { map_prelude }
+            local checks = {}
+
+            for key_index, key_type in ipairs(test_types) do
+                for value_index, value_type in ipairs(test_types) do
+                    local map = "{" .. key_type.t ..
+                        " : " .. value_type.t .. "}"
+                    local context = {
+                        FN = string.format(
+                            "map_%s_%d_%d",
+                            operation_name, key_index, value_index),
+                        MAP = map,
+                        K1 = key_type.v1 or "k1",
+                        K2 = key_type.v2 or "k2",
+                        V1 = value_type.v1 or "v1",
+                        V2 = value_type.v2 or "v2",
+                        TK = key_type.t,
+                        TV = value_type.t,
+                        LK1 = key_type.l1 or key_type.v1,
+                        LK2 = key_type.l2 or key_type.v2,
+                        LV1 = value_type.l1 or value_type.v1,
+                        LV2 = value_type.l2 or value_type.v2,
+                        LABEL = operation.description .. " a map " .. map,
+                    }
+                    source[#source + 1] =
+                        util.render(operation.source, context)
+                    context.CHECK = util.render(operation.check, context)
+                    checks[#checks + 1] = util.render([[
+                        do
+                            local case_ok, case_err = pcall(function()
+                                local k1, k2, v1, v2 =
+                                    $LK1, $LK2, $LV1, $LV2
+                                $CHECK
+                            end)
+                            assert(case_ok,
+                                "$LABEL: " .. tostring(case_err))
+                        end
+                    ]], context)
+                end
+            end
+
+            local code = table.concat(source, "\n")
+            local ast, err = parse(code)
+            assert.truthy(ast, err)
+            local _, errors =
+                checker.check("titan_test", ast, code, "test.titan")
+            assert.equal(0, #errors, table.concat(errors, "\n"))
+            local ok
+            ok, err = compile("titan_test", ast)
+            assert.truthy(ok, err)
+            ok, err = call("titan_test", table.concat(checks, "\n"))
+            assert.truthy(ok, err)
+        end
+
+        for _, operation_name in ipairs({
+            "declare", "assign", "index",
+        }) do
+            local operation = map_operations[operation_name]
+            it(operation.description ..
+               " every map key/value type combination", function()
+                run_map_matrix(operation_name)
+            end)
         end
 
         it("coerces map key", function ()
