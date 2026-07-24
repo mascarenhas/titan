@@ -413,9 +413,23 @@ local function generate_uv_c()
     local previous_imported = driver.imported
     local previous_registry = types.registry
     local previous_source_path = driver.TITAN_SOURCE_PATH
+    local previous_cppflags = driver.EXTRA_CPPFLAGS
     driver.imported = {}
     types.registry = {}
     driver.TITAN_SOURCE_PATH = "."
+    -- This helper compiles the production titan.uv sources directly instead
+    -- of entering through Make's stdlib recipe. Reproduce that recipe's Linux
+    -- feature-test macro so uv.h and every later cumulative system header are
+    -- parsed and probed in the same C99 feature namespace as the real build.
+    local linux = driver.UNAME:find("Linux", 1, true) ~= nil
+    if linux then
+        driver.EXTRA_CPPFLAGS = {}
+        for _, flag in ipairs(previous_cppflags or {}) do
+            driver.EXTRA_CPPFLAGS[#driver.EXTRA_CPPFLAGS + 1] = flag
+        end
+        driver.EXTRA_CPPFLAGS[#driver.EXTRA_CPPFLAGS + 1] = "-D_GNU_SOURCE"
+        driver.configure_foreign_c()
+    end
 
     local ok, generated = xpcall(function()
         local static_deps = {}
@@ -438,6 +452,10 @@ local function generate_uv_c()
     driver.TITAN_SOURCE_PATH = previous_source_path
     types.registry = previous_registry
     driver.imported = previous_imported
+    if linux then
+        driver.EXTRA_CPPFLAGS = previous_cppflags
+        driver.configure_foreign_c()
+    end
     if not ok then error(generated, 0) end
     return generated
 end
