@@ -8,4 +8,4 @@ comment:
   require_head: yes
 
 ignore:
-  - "spec/**/*"
+  - "spec"
