@@ -263,7 +263,13 @@ function M.compile(workspace, modname, options)
     assert.truthy(ok, output)
 end
 
-local function build_variant_workspace(transformer)
+local function build_variant_workspace(transformer, options)
+    options = options or {}
+    assert.truthy(type(options) == "table",
+        "async stdlib variant options must be a table")
+    assert.truthy(options.facades == nil or type(options.facades) == "boolean",
+        "async stdlib variant facades option must be boolean")
+    local build_facades = options.facades ~= false
     local workspace = M.workspace("variant")
     local built, variant_or_error = pcall(function()
     assert.truthy(lfs.mkdir(workspace .. "/titan"))
@@ -330,20 +336,22 @@ local function build_variant_workspace(transformer)
         ldflags = ldflags,
     })
     register_exact_provider(variant_layout, "titan.uv")
-    -- Build the public facade against this private uv image. Its imported uv
-    -- module is loaded globally by the ordinary generated dependency loader,
-    -- so alias-owned Task methods resolve transitively without another import
-    -- in each consumer.
-    M.compile(workspace, "titan.async", {
-        layout = variant_layout,
-        cppflags = "",
-    })
-    register_exact_provider(variant_layout, "titan.async")
-    M.compile(workspace, "titan.timer", {
-        layout = variant_layout,
-        cppflags = "",
-    })
-    register_exact_provider(variant_layout, "titan.timer")
+    if build_facades then
+        -- Build the public facades against this private uv image. Its imported
+        -- uv module is loaded globally by the ordinary generated dependency
+        -- loader, so alias-owned Task methods resolve transitively without
+        -- another import in each consumer.
+        M.compile(workspace, "titan.async", {
+            layout = variant_layout,
+            cppflags = "",
+        })
+        register_exact_provider(variant_layout, "titan.async")
+        M.compile(workspace, "titan.timer", {
+            layout = variant_layout,
+            cppflags = "",
+        })
+        register_exact_provider(variant_layout, "titan.timer")
+    end
     return variant_layout
     end)
     if not built then
@@ -353,8 +361,8 @@ local function build_variant_workspace(transformer)
     return workspace, variant_or_error
 end
 
-function M.variant_workspace(transformer)
-    return build_variant_workspace(transformer)
+function M.variant_workspace(transformer, options)
+    return build_variant_workspace(transformer, options)
 end
 
 function M.run_lua_source(workspace, source, options)

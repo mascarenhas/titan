@@ -137,7 +137,12 @@ case "$group" in
         echo "Running $compiler_count core compiler/language spec files" \
             "with LuaCov"
         compiler_status=0
-        "$BUSTED" -c -o gtest -v "${compiler_core_tests[@]}" ||
+        # Keep Busted's per-file environments but reuse one compiler module
+        # graph and its immutable foreign-header probe caches. The complete
+        # local and macOS groups retain ordinary auto-insulation as an
+        # independent state-leak check.
+        "$BUSTED" --no-auto-insulate -c -o gtest -v \
+            "${compiler_core_tests[@]}" ||
             compiler_status=$?
         unit_status=0
         "$BUSTED" -c -o gtest -v "${compiler_unit_tests[@]}" ||

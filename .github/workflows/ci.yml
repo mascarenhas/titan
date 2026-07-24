@@ -120,6 +120,12 @@ jobs:
       # so legacy compiler cleanup cannot make the serial packaging gate rebuild
       # the complete standard library again.
       - name: Run serial and net/OS library tests without coverage
+        # These tests compile disposable fixtures and alternate images. The
+        # installed bundled provider packed above remains the optimized
+        # production image, and macOS repeats the complete suite at -O2.
+        env:
+          TITAN_EXTRA_CFLAGS: "-O0"
+          TITAN_TEST_EXTRA_CFLAGS: "-O0"
         run: |
           bash spec/support/ci_test_groups.sh library-serial
           bash spec/support/ci_test_groups.sh library-net-os
@@ -170,7 +176,7 @@ jobs:
       # owns the complete installed runtime behavior.
       - name: Canary source-rock installation with system libuv
         run: |
-          LIBUV_MODE=system luarocks make --force
+          LIBUV_MODE=system TITAN_EXTRA_CFLAGS=-O0 luarocks make --force
           TITAN_EXPECT_LIBUV_MODE=system \
             "$PREFIX/bin/busted" -o gtest -v spec/rockspec_spec.lua \
               --name='standalone-prefix source installation installs one matching Lua and Titan SDK before the standard images' \
@@ -450,6 +456,7 @@ jobs:
         env:
           TITAN_TEST_EXTRA_CFLAGS: ${{ env.SANITIZER_FLAGS }}
           TITAN_TEST_EXTRA_LDFLAGS: ${{ env.SANITIZER_FLAGS }}
+          TITAN_TEST_UV_LATE_FS_ONLY: "1"
         run: |
           .lua/bin/busted -o gtest -v \
             spec/stdlib/uv_states_spec.lua \

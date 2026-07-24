@@ -1,13 +1,8 @@
 local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
-local checker = require "titan-compiler.checker"
-local coder = require "titan-compiler.coder"
-local driver = require "titan-compiler.driver"
 local lfs = require "lfs"
 local parser = require "titan-compiler.parser"
-local pretty = require "titan-compiler.pretty"
 local staticmetadata = require "titan-compiler.staticmetadata"
-local types = require "titan-compiler.types"
 
 local PKG_CONFIG = "sh spec/fixtures/libuv/fake-pkg-config.sh"
 local UV_MAIN_SOURCE = "titan/uv/uv.titan"
@@ -201,11 +196,21 @@ local function read_file(path)
     return contents
 end
 
-local function public_declarations(path)
-    local ast, err = parser.parse(path, read_file(path))
+local parsed_sources = {}
+
+local function parsed_source(path)
+    local ast = parsed_sources[path]
+    if ast then return ast end
+    local err
+    ast, err = parser.parse(path, read_file(path))
     assert.truthy(ast, err and err.label)
+    parsed_sources[path] = ast
+    return ast
+end
+
+local function public_declarations(path)
     local declarations = {}
-    for _, node in ipairs(ast) do
+    for _, node in ipairs(parsed_source(path)) do
         if not node.islocal then
             local tag = node._tag
             local name
@@ -227,10 +232,8 @@ local function public_declarations(path)
 end
 
 local function local_record_declarations(path)
-    local ast, err = parser.parse(path, read_file(path))
-    assert.truthy(ast, err and err.label)
     local records = {}
-    for _, node in ipairs(ast) do
+    for _, node in ipairs(parsed_source(path)) do
         if node._tag == "Ast.TopLevelRecord" and node.islocal then
             records[#records + 1] = node.name
         end
@@ -409,54 +412,37 @@ local function source_line_number(source, needle)
     return newlines + 1
 end
 
-local function generate_uv_c()
-    local previous_imported = driver.imported
-    local previous_registry = types.registry
-    local previous_source_path = driver.TITAN_SOURCE_PATH
-    local previous_cppflags = driver.EXTRA_CPPFLAGS
-    driver.imported = {}
-    types.registry = {}
-    driver.TITAN_SOURCE_PATH = "."
-    -- This helper compiles the production titan.uv sources directly instead
-    -- of entering through Make's stdlib recipe. Reproduce that recipe's Linux
-    -- feature-test macro so uv.h and every later cumulative system header are
-    -- parsed and probed in the same C99 feature namespace as the real build.
-    local linux = driver.UNAME:find("Linux", 1, true) ~= nil
-    if linux then
-        driver.EXTRA_CPPFLAGS = {}
-        for _, flag in ipairs(previous_cppflags or {}) do
-            driver.EXTRA_CPPFLAGS[#driver.EXTRA_CPPFLAGS + 1] = flag
+local function replace_plain(source, old, new)
+    local pieces = {}
+    local position = 1
+    while true do
+        local first, last = source:find(old, position, true)
+        if not first then
+            pieces[#pieces + 1] = source:sub(position)
+            return table.concat(pieces)
         end
-        driver.EXTRA_CPPFLAGS[#driver.EXTRA_CPPFLAGS + 1] = "-D_GNU_SOURCE"
-        driver.configure_foreign_c()
+        pieces[#pieces + 1] = source:sub(position, first - 1)
+        pieces[#pieces + 1] = new
+        position = last + 1
     end
+end
 
-    local ok, generated = xpcall(function()
-        local static_deps = {}
-        local loader = driver.defaultloader(static_deps, {
-            source_roots = { ["titan.uv"] = true },
-        })
-        return driver.with_loader(loader, function(loader)
-            local modtype, errors =
-                checker.checkimport("titan.uv", loader)
-            assert.truthy(modtype, errors)
-            assert.equal(0, #errors, table.concat(errors, "\n"))
-            local module = assert(driver.imported["titan.uv"])
-            local code =
-                coder.generate("titan.uv", module.ast, static_deps,
-                    driver.TITAN_VER)
-            return pretty.reindent_c(code)
-        end)
-    end, debug.traceback)
-
-    driver.TITAN_SOURCE_PATH = previous_source_path
-    types.registry = previous_registry
-    driver.imported = previous_imported
-    if linux then
-        driver.EXTRA_CPPFLAGS = previous_cppflags
-        driver.configure_foreign_c()
+local function prepared_uv_c()
+    local path = "titan/uv/uv.c"
+    assert.equal("file", lfs.attributes(path, "mode"),
+        path .. " must be prepared by the current source-rock build")
+    local generated = read_file(path)
+    -- The source-only post-install compiles through an absolute --tree,
+    -- whereas checkout `make stdlib` uses ".". Normalize only that spelling;
+    -- every line number and generated operation remains the prepared output.
+    local source_prefix = generated:match(
+        '#line %d+ "([^"]*titan/uv/)process%.titan"')
+    assert.truthy(source_prefix,
+        "prepared titan.uv C has no process.titan source directives")
+    if source_prefix ~= "./titan/uv/" then
+        generated = replace_plain(
+            generated, '"' .. source_prefix, '"./titan/uv/')
     end
-    if not ok then error(generated, 0) end
     return generated
 end
 
@@ -659,7 +645,7 @@ describe("libuv Makefile configuration", function()
 
     it("emits the migrated validation, aggregate, and submit order in C",
        function()
-        local generated = generate_uv_c()
+        local generated = prepared_uv_c()
         local process_source = read_file("titan/uv/process.titan")
         local process_lifecycle_line = source_line_number(process_source,
             "process_control.lifecycle = PROCESS_SPAWNED")
@@ -939,15 +925,13 @@ describe("libuv Makefile configuration", function()
     end)
 
     it("keeps the private FS constants instance beside its record", function()
-        local main_ast = assert(parser.parse(UV_MAIN_SOURCE,
-            read_file(UV_MAIN_SOURCE)))
+        local main_ast = parsed_source(UV_MAIN_SOURCE)
         for _, node in ipairs(main_ast) do
             assert.falsy(node._tag == "Ast.TopLevelVar" and
                 node.decl.name == "FS")
         end
 
-        local file_ast = assert(parser.parse("titan/uv/file.titan",
-            read_file("titan/uv/file.titan")))
+        local file_ast = parsed_source("titan/uv/file.titan")
         local record_index, fs_index
         for index, node in ipairs(file_ast) do
             if node._tag == "Ast.TopLevelRecord" and

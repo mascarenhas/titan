@@ -49,6 +49,8 @@ local CHECKSTACK_VARIANT_SOURCE_ROOT =
     CHECKSTACK_VARIANT_ROOT .. "/source"
 local CHECKSTACK_VARIANT_SOURCE =
     CHECKSTACK_VARIANT_SOURCE_ROOT .. "/titan/coroutine.titan"
+local WRAPPER_FIXTURE_SO = COROUTINE_VARIANT_ROOT .. "/test.so"
+local WRAPPER_FIXTURE_SHIM = COROUTINE_VARIANT_ROOT .. "/test.lua"
 local CHECKSTACK_FIXTURE = lfs.currentdir() ..
     "/spec/fixtures/stdlib/native/coroutine_transfer_fault.h"
 local function quote(word)
@@ -69,6 +71,7 @@ local CHECKSTACK_TEST_ENV =
 local function clean_test_artifacts()
     os.execute("rm -rf test.o test.so test.a test.c test.titan " ..
         "test.lua test__entrypoint.c test__entrypoint.o test test.dSYM " ..
+        "test.so.dSYM " ..
         "coroutine_standalone app app__entrypoint.c app__entrypoint.o " ..
         "app.dSYM")
 end
@@ -256,6 +259,336 @@ end
         CHECKSTACK_TEST_ENV)
 end
 
+local WRAPPER_FIXTURE = [=[
+local coroutine = import "coroutine"
+
+function create_body(arg: value): value
+    return arg
+end
+
+function create_and_resume(): value
+    local co = coroutine.create(create_body, "tag")
+    return co:resume("hello")
+end
+
+function canonical_body(arg: value): value
+    return arg
+end
+
+function canonical_make(): coroutine.Coro
+    return coroutine.create(canonical_body, "tag")
+end
+
+function yield_body(arg: value): value
+    if not coroutine.is_yieldable("tag") then
+        raise "not yieldable"
+    end
+    if coroutine.is_yieldable("other") then
+        raise "wrong tag yieldable"
+    end
+    local back = coroutine.yield(arg, "tag")
+    return back
+end
+
+function outside(): boolean
+    return coroutine.is_yieldable("tag")
+end
+
+function yield_run(): string
+    local co = coroutine.create(yield_body, "tag")
+    local s0 = co:status()
+    local first = co:resume("out")
+    local s1 = co:status()
+    local second = co:resume("in")
+    local s2 = co:status()
+    return s0 .. ":" .. (first as string) .. ":" .. s1 ..
+        ":" .. (second as string) .. ":" .. s2
+end
+
+function default_resume(): string
+    local co = coroutine.create(function (arg: value): value
+        local got = coroutine.yield(arg, "default")
+        return got
+    end, "default")
+    local first = co:resume("out", nil)
+    local second = co:resume("in", nil)
+    return (first as string) .. ":" .. (second as string)
+end
+
+function override_resume(): string
+    local co = coroutine.create(function (arg: value): value
+        local got = coroutine.yield(arg, "override")
+        return got
+    end, "default")
+    local first = co:resume("out", "override")
+    local second = co:resume("in", "override")
+    return (first as string) .. ":" .. (second as string)
+end
+
+function default_error(): string
+    local co = coroutine.create(function (arg: value): value
+        do
+            coroutine.yield("ready", "default")
+        catch
+            return "caught:" .. (error as string)
+        end
+        return "missed"
+    end, "default")
+    local first = co:resume(nil, nil)
+    local second = co:error("oops", nil)
+    return (first as string) .. ":" .. (second as string)
+end
+
+function override_error(): string
+    local co = coroutine.create(function (arg: value): value
+        do
+            coroutine.yield("ready", "override")
+        catch
+            return "caught:" .. (error as string)
+        end
+        return "missed"
+    end, "default")
+    local first = co:resume(nil, "override")
+    local second = co:error("oops", "override")
+    return (first as string) .. ":" .. (second as string)
+end
+
+function nested_yield_run(): string
+    local tag_main: value = "main"
+    local tag_a: value = "a"
+    local b = coroutine.create(function (arg: value): value
+        coroutine.yield("from-b", tag_main)
+        return "b-done"
+    end, tag_a)
+    local a = coroutine.create(function (arg: value): value
+        local got = b:resume("to-b")
+        return "a:" .. (got as string)
+    end, tag_main)
+    local first = a:resume("start", tag_main)
+    local middle = a:status() .. "/" .. b:status()
+    local second = a:resume("again", tag_main)
+    return (first as string) .. "," .. middle .. "," ..
+        (second as string) .. "," .. a:status() .. "/" .. b:status()
+end
+
+function nested_error_run(): string
+    local tag_main: value = "main"
+    local tag_a: value = "a"
+    local b = coroutine.create(function (arg: value): value
+        do
+            coroutine.yield("from-b", tag_main)
+        catch
+            return "b-caught:" .. (error as string)
+        end
+        return "b-missed"
+    end, tag_a)
+    local a = coroutine.create(function (arg: value): value
+        local got = b:resume("to-b")
+        return "a:" .. (got as string)
+    end, tag_main)
+    local first = a:resume("start", tag_main)
+    local second = a:error("oops", tag_main)
+    return (first as string) .. "," .. (second as string) ..
+        "," .. a:status() .. "/" .. b:status()
+end
+
+nested_main_tag: value = nil
+nested_a_tag: value = nil
+
+function nested_fail_body(arg: value): value
+    coroutine.yield("from-b", nested_main_tag)
+    return "missed"
+end
+
+function nested_uncaught(): value
+    nested_main_tag = "main"
+    nested_a_tag = "a"
+    local b = coroutine.create(nested_fail_body, nested_a_tag)
+    local a = coroutine.create(function (arg: value): value
+        local got = b:resume("to-b")
+        return "a:" .. (got as string)
+    end, nested_main_tag)
+    local first = a:resume("start", nested_main_tag)
+    if (first as string) ~= "from-b" then
+        raise "bad first"
+    end
+    return a:error("oops", nested_main_tag)
+end
+
+function stacked_resume_run(): string
+    local tag_main: value = "main"
+    local tag_a: value = "a"
+    local b = coroutine.create(function (arg: value): value
+        coroutine.yield("from-b", tag_main)
+        return "b-done"
+    end, tag_a)
+    local a = coroutine.create(function (arg: value): value
+        local got = b:resume("to-b")
+        return "a:" .. (got as string)
+    end, tag_main)
+    local first = a:resume("start", tag_main)
+    local stacked = a:status() .. "/" .. b:status()
+    local rejected: string = "missed"
+    do
+        b:resume("direct", tag_a)
+    catch
+        rejected = error as string
+    end
+    local restored = a:resume("again", tag_main)
+    return (first as string) .. "," .. stacked .. "," ..
+        rejected .. "," .. (restored as string)
+end
+
+function nil_payload_run(): boolean
+    local co = coroutine.create(function (arg: value): value
+        if arg ~= nil then
+            raise "initial arg was not nil"
+        end
+        local got = coroutine.yield(nil, "tag")
+        if got ~= nil then
+            raise "resume arg was not nil"
+        end
+        return nil
+    end, "tag")
+    local first = co:resume(nil)
+    local second = co:resume(nil)
+    return first == nil and second == nil and co:status() == "dead"
+end
+
+function fail(): value
+    raise "boom"
+    return nil
+end
+
+function fresh_fail(): value
+    raise "fresh"
+    return nil
+end
+
+function uncaught_body(arg: value): value
+    return fail()
+end
+
+function uncaught(): value
+    local co = coroutine.create(uncaught_body, "tag")
+    return co:resume(nil)
+end
+
+injected_trace: value = nil
+
+function catcher(arg: value): value
+    do
+        coroutine.yield("ready", "tag")
+    catch
+        injected_trace = traceback
+        return "caught:" .. (error as string)
+    end
+    return "missed"
+end
+
+function inject(): string
+    local co = coroutine.create(catcher, "tag")
+    local first = co:resume(nil)
+    local second = co:error("oops")
+    return (first as string) .. "," .. (second as string) ..
+        "," .. co:status()
+end
+
+function injected_backtrace(): value
+    return injected_trace
+end
+
+finally_log: string = ""
+
+function finally_body(arg: value): value
+    do
+        finally_log = finally_log .. "body;"
+        coroutine.yield("pause", "tag")
+        finally_log = finally_log .. "after;"
+    finally
+        finally_log = finally_log .. "finally;"
+    end
+    return finally_log
+end
+
+function finally_run(): string
+    local co = coroutine.create(finally_body, "tag")
+    local first = co:resume(nil)
+    local mid = finally_log
+    local second = co:resume(nil)
+    return (first as string) .. ":" .. mid .. ":" ..
+        (second as string)
+end
+
+function dead_body(arg: value): value
+    return arg
+end
+
+function after_dead(): string
+    local co = coroutine.create(dead_body, "tag")
+    local got = co:resume("done")
+    local status = co:status()
+    do
+        co:resume("again")
+    catch
+        local resume_error = error as string
+        do
+            co:error("oops")
+        catch
+            return (got as string) .. ":" .. status .. ":" ..
+                resume_error .. ":" .. (error as string)
+        end
+    end
+    return "missed"
+end
+
+function missing_body(arg: value): value
+    return arg
+end
+
+function missing(): value
+    local co = coroutine.create(missing_body)
+    return co:resume(nil)
+end
+
+seen: boolean = false
+
+function before_start_body(arg: value): value
+    seen = true
+    return arg
+end
+
+function before_start(): value
+    local co = coroutine.create(before_start_body, "tag")
+    return co:error("pre-start")
+end
+
+function was_seen(): boolean
+    return seen
+end
+]=]
+
+local wrapper_fixture_built = false
+
+local function build_wrapper_fixture()
+    if wrapper_fixture_built then return end
+
+    clean_test_artifacts()
+    write_file("test.titan", WRAPPER_FIXTURE)
+    assert.truthy(exec_ok(TEST_ENV .. TITANC .. " test"))
+    assert.truthy(exec_ok("cp -p test.so " .. quote(WRAPPER_FIXTURE_SO)))
+    assert.truthy(exec_ok("cp -p test.lua " .. quote(WRAPPER_FIXTURE_SHIM)))
+
+    if lfs.attributes("test.so.dSYM", "mode") == "directory" then
+        local destination = WRAPPER_FIXTURE_SO .. ".dSYM"
+        assert.truthy(exec_ok("rm -rf " .. quote(destination)))
+        assert.truthy(exec_ok(
+            "cp -Rp test.so.dSYM " .. quote(destination)))
+    end
+
+    wrapper_fixture_built = true
+end
+
 local function clean_coroutine_artifacts()
     os.remove("titan/coroutine.a")
     os.remove("titan/coroutine.so")
@@ -265,54 +598,20 @@ local function clean_coroutine_artifacts()
     os.remove("titan/coroutine.o")
     exec_ok("rm -rf " .. quote(COROUTINE_VARIANT_ROOT))
     exec_ok("rm -rf " .. quote(CHECKSTACK_VARIANT_ROOT))
+    wrapper_fixture_built = false
 end
 
-local function compile_and_run(titan_code, lua_code)
-    clean_test_artifacts()
-    write_file("test.titan", titan_code)
-    assert.truthy(exec_ok(TEST_ENV .. TITANC .. " test"))
-    local so = assert(io.open("test.so", "r"))
-    so:close()
-
+local function run_wrapper(lua_code, preload)
+    build_wrapper_fixture()
     local script = os.tmpname()
     write_file(script, lua_code)
-    local f = assert(io.popen(TEST_ENV .. LUA .. " -l test " ..
-        script .. " 2>&1"))
+    local load = preload == false and "" or "-l test "
+    local f = assert(io.popen(
+        TEST_ENV .. LUA .. " " .. load .. script .. " 2>&1"))
     local out = f:read("*a")
     local ok, why, status = f:close()
     os.remove(script)
     assert.truthy(ok, "lua failed (" .. tostring(why) .. ", " ..
-        tostring(status) .. ")\n" .. out)
-    return out
-end
-
-local function compile_and_run_require_first(titan_code, lua_code)
-    clean_test_artifacts()
-    write_file("test.titan", titan_code)
-    assert.truthy(exec_ok(TEST_ENV .. TITANC .. " test"))
-    local so = assert(io.open("test.so", "r"))
-    so:close()
-
-    local script = os.tmpname()
-    write_file(script, lua_code)
-    local f = assert(io.popen(TEST_ENV .. LUA .. " " .. script .. " 2>&1"))
-    local out = f:read("*a")
-    local ok, why, status = f:close()
-    os.remove(script)
-    assert.truthy(ok, "lua failed (" .. tostring(why) .. ", " ..
-        tostring(status) .. ")\n" .. out)
-    return out
-end
-
-local function compile_and_run_app(titan_code)
-    clean_test_artifacts()
-    write_file("test.titan", titan_code)
-    assert.truthy(exec_ok(TEST_ENV .. TITANC .. " test"))
-
-    local f = assert(io.popen(TEST_ENV .. "./test 2>&1"))
-    local out = f:read("*a")
-    local ok, why, status = f:close()
-    assert.truthy(ok, "program failed (" .. tostring(why) .. ", " ..
         tostring(status) .. ")\n" .. out)
     return out
 end
@@ -371,7 +670,6 @@ describe("coroutine standard module", function()
         -- the temporary exact DSO/shim in a private root. The production
         -- titan.so stays on Lua's C path only to provide bare support APIs.
         build_coroutine()
-        build_checkstack_coroutine()
     end)
 
     after_each(clean_test_artifacts)
@@ -470,6 +768,10 @@ describe("coroutine standard module", function()
 
     it("restores the exact top and pushes nothing on checkstack failure",
         function()
+        -- Build this second transformed provider only for the one fault-
+        -- injection case that consumes it. Filtered sanitizer runs exercise
+        -- the ordinary transfer-root variant without paying for this DSO.
+        build_checkstack_coroutine()
         local out = run_lua_in_env([==[
             local coroutine = require "titan.coroutine"
             local co = coroutine.create(function(arg)
@@ -556,38 +858,17 @@ describe("coroutine standard module", function()
     end)
 
     it("creates a coroutine and returns a callback result", function()
-        local out = compile_and_run([[
-            local coroutine = import "coroutine"
-
-            function body(arg: value): value
-                return arg
-            end
-
-            function run(): value
-                local co = coroutine.create(body, "tag")
-                return co:resume("hello")
-            end
-        ]], [==[
-            assert(test.run() == "hello")
+        local out = run_wrapper([==[
+            assert(test.create_and_resume() == "hello")
             print("OK")
         ]==])
         assert.match("OK", out)
     end)
 
     it("shares the canonical module when Titan imports before Lua requires", function()
-        local out = compile_and_run([[
-            local coroutine = import "coroutine"
-
-            function body(arg: value): value
-                return arg
-            end
-
-            function make(): coroutine.Coro
-                return coroutine.create(body, "tag")
-            end
-        ]], [==[
+        local out = run_wrapper([==[
             local lua_coroutine = require "coroutine"
-            local from_titan = test.make()
+            local from_titan = test.canonical_make()
             local titan_coroutine = require "titan.coroutine"
             local from_lua = titan_coroutine.create(function(arg)
                 return arg
@@ -616,24 +897,14 @@ describe("coroutine standard module", function()
     end)
 
     it("shares the canonical module when Lua requires before Titan imports", function()
-        local out = compile_and_run_require_first([[
-            local coroutine = import "coroutine"
-
-            function body(arg: value): value
-                return arg
-            end
-
-            function make(): coroutine.Coro
-                return coroutine.create(body, "tag")
-            end
-        ]], [==[
+        local out = run_wrapper([==[
             local lua_coroutine = require "coroutine"
             local titan_coroutine = require "titan.coroutine"
             local from_lua = titan_coroutine.create(function(arg)
                 return arg
             end, "tag")
             local test = require "test"
-            local from_titan = test.make()
+            local from_titan = test.canonical_make()
 
             assert(type(titan_coroutine) == "userdata")
             assert(require "coroutine" == lua_coroutine)
@@ -644,99 +915,21 @@ describe("coroutine standard module", function()
                 "TITAN_COROUTINE_TEST_SO")), "luaopen_titan_coroutine"))
             assert(open() == titan_coroutine)
             print("OK")
-        ]==])
+        ]==], false)
         assert.match("OK", out)
     end)
 
     it("yields, resumes, reports status, and checks yieldability", function()
-        local out = compile_and_run([[
-            local coroutine = import "coroutine"
-
-            function body(arg: value): value
-                if not coroutine.is_yieldable("tag") then
-                    raise "not yieldable"
-                end
-                if coroutine.is_yieldable("other") then
-                    raise "wrong tag yieldable"
-                end
-                local back = coroutine.yield(arg, "tag")
-                return back
-            end
-
-            function outside(): boolean
-                return coroutine.is_yieldable("tag")
-            end
-
-            function run(): string
-                local co = coroutine.create(body, "tag")
-                local s0 = co:status()
-                local first = co:resume("out")
-                local s1 = co:status()
-                local second = co:resume("in")
-                local s2 = co:status()
-                return s0 .. ":" .. (first as string) .. ":" .. s1 ..
-                    ":" .. (second as string) .. ":" .. s2
-            end
-        ]], [==[
+        local out = run_wrapper([==[
             assert(test.outside() == false)
-            assert(test.run() == "suspended:out:suspended:in:dead")
+            assert(test.yield_run() == "suspended:out:suspended:in:dead")
             print("OK")
         ]==])
         assert.match("OK", out)
     end)
 
     it("uses default tags, explicit overrides, and explicit nil fallback", function()
-        local out = compile_and_run([[
-            local coroutine = import "coroutine"
-
-            function default_resume(): string
-                local co = coroutine.create(function (arg: value): value
-                    local got = coroutine.yield(arg, "default")
-                    return got
-                end, "default")
-                local first = co:resume("out", nil)
-                local second = co:resume("in", nil)
-                return (first as string) .. ":" .. (second as string)
-            end
-
-            function override_resume(): string
-                local co = coroutine.create(function (arg: value): value
-                    local got = coroutine.yield(arg, "override")
-                    return got
-                end, "default")
-                local first = co:resume("out", "override")
-                local second = co:resume("in", "override")
-                return (first as string) .. ":" .. (second as string)
-            end
-
-            function default_error(): string
-                local co = coroutine.create(function (arg: value): value
-                    do
-                        coroutine.yield("ready", "default")
-                    catch
-                        return "caught:" .. (error as string)
-                    end
-                    return "missed"
-                end, "default")
-                local first = co:resume(nil, nil)
-                local second = co:error("oops", nil)
-                return (first as string) .. ":" .. (second as string)
-            end
-
-            function override_error(): string
-                local co = coroutine.create(function (arg: value): value
-                    do
-                        coroutine.yield("ready", "override")
-                    catch
-                        return "caught:" .. (error as string)
-                    end
-                    return "missed"
-                end, "default")
-                local first = co:resume(nil, "override")
-                local second = co:error("oops", "override")
-                return (first as string) .. ":" .. (second as string)
-            end
-        ]], [==[
+        local out = run_wrapper([==[
             local function expect(label, expected, actual)
                 assert(actual == expected, label .. ": expected " .. expected ..
                        ", got " .. tostring(actual))
@@ -881,91 +1074,25 @@ describe("coroutine standard module", function()
     end)
 
     it("routes a nested tagged yield through a suspended outer handler", function()
-        local out = compile_and_run([[
-            local coroutine = import "coroutine"
-
-            function run(): string
-                local tag_main: value = "main"
-                local tag_a: value = "a"
-                local b = coroutine.create(function (arg: value): value
-                    coroutine.yield("from-b", tag_main)
-                    return "b-done"
-                end, tag_a)
-                local a = coroutine.create(function (arg: value): value
-                    local got = b:resume("to-b")
-                    return "a:" .. (got as string)
-                end, tag_main)
-                local first = a:resume("start", tag_main)
-                local middle = a:status() .. "/" .. b:status()
-                local second = a:resume("again", tag_main)
-                return (first as string) .. "," .. middle .. "," ..
-                    (second as string) .. "," .. a:status() .. "/" .. b:status()
-            end
-        ]], [==[
-            assert(test.run() == "from-b,suspended/stacked,a:b-done,dead/dead")
+        local out = run_wrapper([==[
+            assert(test.nested_yield_run() ==
+                   "from-b,suspended/stacked,a:b-done,dead/dead")
             print("OK")
         ]==])
         assert.match("OK", out)
     end)
 
     it("injects errors through a nested stacked yield", function()
-        local out = compile_and_run([[
-            local coroutine = import "coroutine"
-
-            function run(): string
-                local tag_main: value = "main"
-                local tag_a: value = "a"
-                local b = coroutine.create(function (arg: value): value
-                    do
-                        coroutine.yield("from-b", tag_main)
-                    catch
-                        return "b-caught:" .. (error as string)
-                    end
-                    return "b-missed"
-                end, tag_a)
-                local a = coroutine.create(function (arg: value): value
-                    local got = b:resume("to-b")
-                    return "a:" .. (got as string)
-                end, tag_main)
-                local first = a:resume("start", tag_main)
-                local second = a:error("oops", tag_main)
-                return (first as string) .. "," .. (second as string) ..
-                    "," .. a:status() .. "/" .. b:status()
-            end
-        ]], [==[
-            assert(test.run() == "from-b,a:b-caught:oops,dead/dead")
+        local out = run_wrapper([==[
+            assert(test.nested_error_run() ==
+                   "from-b,a:b-caught:oops,dead/dead")
             print("OK")
         ]==])
         assert.match("OK", out)
     end)
 
     it("preserves traces for uncaught errors through a nested stacked yield", function()
-        local out = compile_and_run([[
-            local coroutine = import "coroutine"
-
-            nested_main_tag: value = nil
-            nested_a_tag: value = nil
-
-            function nested_fail_body(arg: value): value
-                coroutine.yield("from-b", nested_main_tag)
-                return "missed"
-            end
-
-            function nested_uncaught(): value
-                nested_main_tag = "main"
-                nested_a_tag = "a"
-                local b = coroutine.create(nested_fail_body, nested_a_tag)
-                local a = coroutine.create(function (arg: value): value
-                    local got = b:resume("to-b")
-                    return "a:" .. (got as string)
-                end, nested_main_tag)
-                local first = a:resume("start", nested_main_tag)
-                if (first as string) ~= "from-b" then
-                    raise "bad first"
-                end
-                return a:error("oops", nested_main_tag)
-            end
-        ]], [==[
+        local out = run_wrapper([==[
             local titan = require 'titan'
             local ok, err = pcall(test.nested_uncaught)
             assert(not ok and err == "oops")
@@ -980,34 +1107,8 @@ describe("coroutine standard module", function()
     end)
 
     it("rejects direct resume of a stacked coroutine at the Titan wrapper", function()
-        local out = compile_and_run([[
-            local coroutine = import "coroutine"
-
-            function run(): string
-                local tag_main: value = "main"
-                local tag_a: value = "a"
-                local b = coroutine.create(function (arg: value): value
-                    coroutine.yield("from-b", tag_main)
-                    return "b-done"
-                end, tag_a)
-                local a = coroutine.create(function (arg: value): value
-                    local got = b:resume("to-b")
-                    return "a:" .. (got as string)
-                end, tag_main)
-                local first = a:resume("start", tag_main)
-                local stacked = a:status() .. "/" .. b:status()
-                local rejected: string = "missed"
-                do
-                    b:resume("direct", tag_a)
-                catch
-                    rejected = error as string
-                end
-                local restored = a:resume("again", tag_main)
-                return (first as string) .. "," .. stacked .. "," ..
-                    rejected .. "," .. (restored as string)
-            end
-        ]], [==[
-            local text = test.run()
+        local out = run_wrapper([==[
+            local text = test.stacked_resume_run()
             assert(text:find("^from%-b,suspended/stacked,", 1), text)
             assert(text:find("Coroutine not suspended", 1, true), text)
             assert(text:find(",a:b%-done$", 1), text)
@@ -1017,78 +1118,15 @@ describe("coroutine standard module", function()
     end)
 
     it("round-trips nil yield, resume, and return payloads", function()
-        local out = compile_and_run([[
-            local coroutine = import "coroutine"
-
-            function run(): boolean
-                local co = coroutine.create(function (arg: value): value
-                    if arg ~= nil then
-                        raise "initial arg was not nil"
-                    end
-                    local got = coroutine.yield(nil, "tag")
-                    if got ~= nil then
-                        raise "resume arg was not nil"
-                    end
-                    return nil
-                end, "tag")
-                local first = co:resume(nil)
-                local second = co:resume(nil)
-                return first == nil and second == nil and co:status() == "dead"
-            end
-        ]], [==[
-            assert(test.run() == true)
+        local out = run_wrapper([==[
+            assert(test.nil_payload_run() == true)
             print("OK")
         ]==])
         assert.match("OK", out)
     end)
 
     it("preserves callback traces and injects errors into a suspended yield", function()
-        local out = compile_and_run([[
-            local coroutine = import "coroutine"
-
-            function fail(): value
-                raise "boom"
-                return nil
-            end
-
-            function fresh_fail(): value
-                raise "fresh"
-                return nil
-            end
-
-            function body(arg: value): value
-                return fail()
-            end
-
-            function uncaught(): value
-                local co = coroutine.create(body, "tag")
-                return co:resume(nil)
-            end
-
-            injected_trace: value = nil
-
-            function catcher(arg: value): value
-                do
-                    coroutine.yield("ready", "tag")
-                catch
-                    injected_trace = traceback
-                    return "caught:" .. (error as string)
-                end
-                return "missed"
-            end
-
-            function inject(): string
-                local co = coroutine.create(catcher, "tag")
-                local first = co:resume(nil)
-                local second = co:error("oops")
-                return (first as string) .. "," .. (second as string) ..
-                    "," .. co:status()
-            end
-
-            function injected_backtrace(): value
-                return injected_trace
-            end
-        ]], [==[
+        local out = run_wrapper([==[
             local titan = require 'titan'
             local ok, err = pcall(test.uncaught)
             assert(not ok and err == "boom")
@@ -1117,63 +1155,15 @@ describe("coroutine standard module", function()
     end)
 
     it("preserves finally state across yield and later resume", function()
-        local out = compile_and_run([[
-            local coroutine = import "coroutine"
-
-            log: string = ""
-
-            function body(arg: value): value
-                do
-                    log = log .. "body;"
-                    coroutine.yield("pause", "tag")
-                    log = log .. "after;"
-                finally
-                    log = log .. "finally;"
-                end
-                return log
-            end
-
-            function run(): string
-                local co = coroutine.create(body, "tag")
-                local first = co:resume(nil)
-                local mid = log
-                local second = co:resume(nil)
-                return (first as string) .. ":" .. mid .. ":" ..
-                    (second as string)
-            end
-        ]], [==[
-            assert(test.run() == "pause:body;:body;after;finally;")
+        local out = run_wrapper([==[
+            assert(test.finally_run() == "pause:body;:body;after;finally;")
             print("OK")
         ]==])
         assert.match("OK", out)
     end)
 
     it("rejects resume and error after a coroutine is dead", function()
-        local out = compile_and_run([[
-            local coroutine = import "coroutine"
-
-            function body(arg: value): value
-                return arg
-            end
-
-            function after_dead(): string
-                local co = coroutine.create(body, "tag")
-                local got = co:resume("done")
-                local status = co:status()
-                do
-                    co:resume("again")
-                catch
-                    local resume_error = error as string
-                    do
-                        co:error("oops")
-                    catch
-                        return (got as string) .. ":" .. status .. ":" ..
-                            resume_error .. ":" .. (error as string)
-                    end
-                end
-                return "missed"
-            end
-        ]], [==[
+        local out = run_wrapper([==[
             local text = test.after_dead()
             assert(text:find("done:dead:", 1, true), text)
             assert(text:find("Coroutine not suspended", 1, true), text)
@@ -1184,18 +1174,7 @@ describe("coroutine standard module", function()
     end)
 
     it("rejects missing effective tags in the Titan wrapper", function()
-        local out = compile_and_run([[
-            local coroutine = import "coroutine"
-
-            function body(arg: value): value
-                return arg
-            end
-
-            function missing(): value
-                local co = coroutine.create(body)
-                return co:resume(nil)
-            end
-        ]], [==[
+        local out = run_wrapper([==[
             local ok, err = pcall(test.missing)
             assert(not ok)
             assert(tostring(err):find("must provide tag argument", 1, true))
@@ -1205,25 +1184,7 @@ describe("coroutine standard module", function()
     end)
 
     it("injects an error before first resume without calling the entry function", function()
-        local out = compile_and_run([[
-            local coroutine = import "coroutine"
-
-            seen: boolean = false
-
-            function body(arg: value): value
-                seen = true
-                return arg
-            end
-
-            function before_start(): value
-                local co = coroutine.create(body, "tag")
-                return co:error("pre-start")
-            end
-
-            function was_seen(): boolean
-                return seen
-            end
-        ]], [==[
+        local out = run_wrapper([==[
             local ok, err = pcall(test.before_start)
             assert(not ok and err == "pre-start")
             assert(test.was_seen() == false)

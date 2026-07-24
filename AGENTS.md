@@ -72,6 +72,18 @@ not add epicycles around what may be a misunderstood simpler design.
   the union of both coverage shards. Each shard uploads its explicit report
   through Codecov's GitHub OIDC flow with job-local `id-token: write`; upload
   errors fail the job so coverage publication cannot be silently skipped. The
+  Linux core invocation keeps Busted's per-file environments but uses
+  `--no-auto-insulate` to reuse one compiler module graph and immutable
+  foreign-header probe caches; the complete local and macOS compiler groups
+  retain ordinary auto-insulation as the independent state-leak check.
+  Disposable Titan fixtures and alternate images in the producer's
+  serial/net-OS groups compile at `-O0`; purpose-built native harnesses retain
+  their explicit flags. The Linux system-mode source-install canary builds its
+  installed provider at `-O0`, then its focused tests and production smoke use
+  optimized consumers against that provider. The canonical bundled provider
+  packed before those tests, its bundled production smoke, the heavy Linux
+  compiler group, and the complete macOS run (including both libuv modes)
+  remain optimized. The
   regular producer first configures its disposable prefix for ABI 0.17, then
   runs the supported `make lua`/`make luarocks` migration to 0.18 and proves
   bare `require "titan"` after the first 0.18 rock install. The
@@ -332,12 +344,14 @@ library.
 Async standard-library behavioral specs compile against the canonical
 production modules whenever public behavior can prove the contract. The one
 narrow exception is `spec/stdlib/uv_late_callbacks_spec.lua`. Its isolated
-flow applies `spec/support/make_delayed_dns_callback_variant.lua` and then
-`spec/support/make_delayed_fs_callback_variant.lua` to one complete copy of the
-`titan/uv/` source ensemble, with each transformer patching the owning
+flow normally applies `spec/support/make_delayed_dns_callback_variant.lua` and
+then `spec/support/make_delayed_fs_callback_variant.lua` to one complete copy
+of the `titan/uv/` source ensemble, with each transformer patching the owning
 contributors through unique per-file anchors. It builds the exact
-coroutine/uv/async/timer DSOs once under a private root with no shallow
-`titan.so`, then builds both private net/fs facades and their case modules.
+coroutine/uv DSOs once under a private root with no shallow `titan.so`; the DNS
+setup adds exact async/timer/net facades, while the FS setup adds only the
+exact fs facade and calls uv scheduling primitives directly from its case
+module.
 The FS cases cover late
 cancellation, disposal of a late successful open, and cross-generation
 Runtime/File/Task/buffer/error rooting. The DNS cases capture the successful
@@ -346,10 +360,11 @@ delivery owner through `close_all_owners`, and owns the release-counter,
 copy-fault, invalid-cell retry, port-format, and full/generational-GC hooks
 needed to prove exactly-once release and rooted address cells. Each behavior
 case still runs in a fresh Lua process, so the combined provider's test state
-does not cross cases. The sanitizer gate selects only the filesystem cases;
-the complete combined suite remains in regular Linux. Keep every such hook out
-of installed modules; this variant is not a general scheduler or
-fault-injection interface.
+does not cross cases. The sanitizer gate selects only the filesystem cases and
+sets validated `TITAN_TEST_UV_LATE_FS_ONLY=1`, which applies only the FS
+transformer and omits the unused async/timer facade builds; the complete
+combined suite remains in regular Linux. Keep every such hook out of installed
+modules; this variant is not a general scheduler or fault-injection interface.
 
 `titanc` takes dot-separated **module names**, not file paths (dots map to
 directory separators under `--tree`, default `.`). For logical `M`, slash path

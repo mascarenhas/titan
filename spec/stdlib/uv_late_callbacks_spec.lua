@@ -3,6 +3,13 @@ local async_stdlib = require "spec.support.async_stdlib"
 local LATE_FS_CASES =
     require "spec.support.uv_late_fs_callback_cases"
 
+local fs_only_setting = os.getenv("TITAN_TEST_UV_LATE_FS_ONLY")
+assert(fs_only_setting == nil or fs_only_setting == "" or
+       fs_only_setting == "1",
+    "TITAN_TEST_UV_LATE_FS_ONLY must be unset or 1")
+local FS_ONLY = fs_only_setting == "1"
+local describe_dns = FS_ONLY and function() end or describe
+
 local LATE_DNS_CASES = [==[
 -- Runs only against the generated delayed-DNS callback uv variant.
 local lua = foreign import "lua.h"
@@ -255,11 +262,20 @@ describe("uv delayed callback variants", function()
     local layout
 
     setup(function()
-        workspace, layout = async_stdlib.variant_workspace(
-            {
+        local transformers
+        if FS_ONLY then
+            transformers = {
+                "spec/support/make_delayed_fs_callback_variant.lua",
+            }
+        else
+            transformers = {
                 "spec/support/make_delayed_dns_callback_variant.lua",
                 "spec/support/make_delayed_fs_callback_variant.lua",
-            })
+            }
+        end
+        workspace, layout = async_stdlib.variant_workspace(transformers, {
+            facades = false,
+        })
         root = workspace .. "/data"
         assert.truthy(lfs.mkdir(root))
     end)
@@ -313,8 +329,18 @@ end
 ]==]
     end
 
-    describe("DNS cases", function()
+    describe_dns("DNS cases", function()
         setup(function()
+            -- These convenience facades are needed only by the DNS cases.
+            -- The sanitizer's FS-only mode skips this describe and its builds.
+            for _, modname in ipairs({ "titan.async", "titan.timer" }) do
+                async_stdlib.compile(workspace, modname, {
+                    layout = layout,
+                    cppflags = "",
+                })
+                async_stdlib.register_exact_provider(layout, modname)
+            end
+
             -- Build the public net facade only after the transformed exact uv
             -- provider exists, so it cannot fall back to the installed container.
             async_stdlib.write_source(workspace, "titan.net",
@@ -430,10 +456,9 @@ assert(task:join() == "rooted-retry-gc-ok")
         function()
             run(string.format([==[
             local root = %q
-            local async = require "titan.async"
             local cases = require "uv_late_fs_callback_cases"
             local task = cases.schedule_cross_generation_graph(root)
-            async.loop()
+            cases.loop()
             assert(task:join() == "cross-generation-graph-ok")
             ]==], root))
         end)
@@ -441,10 +466,9 @@ assert(task:join() == "rooted-retry-gc-ok")
         it("lets cancellation win over a delayed result", function()
             run(string.format([==[
             local root = %q
-            local async = require "titan.async"
             local cases = require "uv_late_fs_callback_cases"
             local task = cases.schedule_late_fs_cancellation(root)
-            async.loop()
+            cases.loop()
             assert(task:join() == "late-fs-cancellation-ok")
             ]==], root))
         end)
@@ -453,20 +477,17 @@ assert(task:join() == "rooted-retry-gc-ok")
         function()
             run(string.format([==[
             local root = %q
-            local async = require "titan.async"
             local cases = require "uv_late_fs_callback_cases"
             local path = root .. "/late-cancelled-open.dat"
             local task = cases.schedule_late_open_cancellation(path)
-            async.loop()
+            cases.loop()
             assert(task:join() == "late-successful-open-cancellation-ok")
             assert(os.remove(path))
 
-            -- A fresh public session proves the cancelled-open File and request
+            -- A fresh Runtime session proves the cancelled-open File and request
             -- roots were fully retired without inspecting private Runtime lists.
-            local next_session = async.run(function()
-                return "next-session-ok"
-            end)
-            async.loop()
+            local next_session = cases.schedule_next_session()
+            cases.loop()
             assert(next_session:join() == "next-session-ok")
             ]==], root))
         end)

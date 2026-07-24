@@ -393,6 +393,26 @@ describe("recoverable paired standard-library publication", function()
         end)
     end
 
+    it("repeats a complete publication and retires active-ABI debris",
+       function()
+        seed_complete_pair(root)
+        local ok, err = publish({
+            stage = stage, root = root, platform = "Darwin",
+        })
+        assert.truthy(ok, err)
+        assert_new_install(root, true)
+
+        -- A repeated source installation publishes the same complete set over
+        -- its own predecessor. Reintroduced active-layout debris is still
+        -- retired, while the captured older-ABI tree remains exact.
+        seed_active_debris(root)
+        ok, err = publish({
+            stage = stage, root = root, platform = "Darwin",
+        })
+        assert.truthy(ok, err)
+        assert_new_install(root, true)
+    end)
+
     it("publishes archive before the DSO with stable public permissions",
        function()
         seed_complete_pair(root)

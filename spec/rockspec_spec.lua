@@ -325,7 +325,7 @@ describe("standalone-prefix source installation", function()
         end
     end)
 
-    it("publishes one image repeatedly and removes only active-ABI layouts",
+    it("publishes one image and removes only active-ABI layouts",
     function()
         workspace = temporary_directory("stdlib-layout-migration")
 
@@ -421,17 +421,6 @@ describe("standalone-prefix source installation", function()
             "canonical after installation")
         assert.equal("file", lfs.attributes(canonical_archive, "mode"),
             "canonical archive after installation")
-        assert_migrated()
-
-        -- A repeated source installation republishes the same complete set;
-        -- it must not recreate any active-ABI compatibility paths.
-        ok, output, why, code = run(install)
-        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-            tostring(code) .. ")")
-        assert.equal("file", lfs.attributes(canonical, "mode"),
-            "canonical after repeated installation")
-        assert.equal("file", lfs.attributes(canonical_archive, "mode"),
-            "canonical archive after repeated installation")
         assert_migrated()
     end)
 
