@@ -7,6 +7,8 @@ local ast = require "titan-compiler.ast"
 local util = require "titan-compiler.util"
 local foreigntypes = require "titan-compiler.foreigntypes"
 local cdriver = require("c-parser.cdriver")
+local cprobe = require "titan-compiler.cprobe"
+local csemantics = require "titan-compiler.csemantics"
 
 -- The compiler driver installs the exact C toolchain configuration used for
 -- generated code. Keeping this small hook in the checker makes every foreign
@@ -18,6 +20,130 @@ local foreign_c_config_error
 function checker.configure_foreign_c(options, config_error)
     foreign_c_options = options or {}
     foreign_c_config_error = config_error
+end
+
+local function new_direct_probe_service()
+    local toolchain = foreign_c_options.toolchain
+    if not toolchain then
+        local compile_flags = foreign_c_options.compile_flags or {}
+        toolchain = {
+            compiler = foreign_c_options.compiler or
+                os.getenv("CC") or "cc",
+            compile_flags = compile_flags,
+            language_mode = foreign_c_options.language_mode or "c99",
+            language_flag = foreign_c_options.language_flag,
+            cppflags = foreign_c_options.cppflags or {},
+            cflags = {},
+            include_dirs =
+                foreign_c_options.compiler_include_dirs,
+        }
+        if foreign_c_options.language_flag == nil
+           and #compile_flags > 0 then
+            toolchain.language_flag = false
+        end
+    end
+    if not toolchain.profile then
+        local configured = {}
+        for key, value in pairs(toolchain) do configured[key] = value end
+
+        -- Checker-only embeddings do not load the compiler driver and
+        -- therefore have no process-global target profile to borrow. Acquire
+        -- it from the exact compiler/flags/include context that will perform
+        -- the probes, just as the public driver does.
+        local inputs, input_error =
+            cdriver.target_profile_inputs({
+                compiler = toolchain.compiler_argv
+                    or toolchain.compiler,
+                compile_flags = toolchain.compile_flags,
+                language_mode = toolchain.language_mode,
+                language_flag = toolchain.language_flag,
+                cppflags = toolchain.cppflags,
+                compiler_include_dirs = toolchain.include_dirs,
+            })
+        if not inputs then return nil, input_error end
+        local profile, profile_error =
+            csemantics.build_profile(inputs)
+        if not profile then return nil, profile_error end
+        configured.profile = profile
+        configured.profile_identity = profile.identity
+        toolchain = configured
+    end
+    return cprobe.new_service({
+        toolchain = toolchain,
+        runner = foreign_c_options.probe_runner or
+            cdriver.capture_command,
+        verbose = foreign_c_options.verbose == true,
+    })
+end
+
+local function ensure_probe_service(st)
+    if st.probe_service then return st.probe_service end
+    if st.probe_service_error then
+        return nil, st.probe_service_error
+    end
+    local service, err
+    if st.probe_service_provider then
+        service, err = st.probe_service_provider()
+    else
+        service, err = new_direct_probe_service()
+        if service then st.owns_probe_service = true end
+    end
+    if not service then
+        st.probe_service_error = err or
+            "could not create the C probe service"
+        return nil, st.probe_service_error
+    elseif type(service.profile) ~= "table" then
+        st.probe_service_error =
+            "the C probe service has no authoritative target profile"
+        if st.owns_probe_service and type(service.close) == "function" then
+            pcall(service.close, service)
+        end
+        st.owns_probe_service = false
+        return nil, st.probe_service_error
+    end
+    st.probe_service = service
+    st.c_profile = service.profile
+    return service
+end
+
+local function ensure_module_probe(st)
+    local includes_version = st.foreign_includes_version or 0
+    if st.module_probe
+       and st.module_probe_includes_version == includes_version then
+        return st.module_probe
+    end
+    if st.module_probe_error
+       and st.module_probe_error_includes_version == includes_version then
+        return nil, st.module_probe_error
+    end
+    -- A probe context owns an immutable ordered include preamble. Never let a
+    -- context built for an earlier import prefix survive another include.
+    st.module_probe = nil
+    st.module_probe_error = nil
+    st.module_probe_includes_version = nil
+    st.module_probe_error_includes_version = nil
+
+    local service, err = ensure_probe_service(st)
+    if not service then
+        st.module_probe_error = err
+        st.module_probe_error_includes_version = includes_version
+        return nil, st.module_probe_error
+    end
+
+    local module_probe
+    module_probe, err = service:module_context({
+        source_dir = st.source_dir or ".",
+        includes = st.foreign_includes or {},
+    })
+    if not module_probe then
+        st.module_probe_error = err or
+            "could not create the module C probe context"
+        st.module_probe_error_includes_version = includes_version
+        return nil, st.module_probe_error
+    end
+    st.module_probe = module_probe
+    st.module_probe_includes_version = includes_version
+    return module_probe
 end
 
 
@@ -59,6 +185,7 @@ local finally_loop_floor = 0
 -- explicitly at the top of `checker.check` (unlike `loop_depth`, which is never
 -- reset).
 local func_stack = {}
+local active_check_state
 
 function checker.typeerror(errors, loc, fmt, ...)
     local errmsg = location.format_error(loc, "type error: "..fmt, ...)
@@ -299,6 +426,296 @@ local function is_foreign_ordinary_identifier(name, ftype)
                 or ftype.type == "enum")
 end
 
+local function queue_foreign_redeclaration(
+        st, node, name, previous, current, compatibility)
+    local queue = st.pending_foreign_redeclarations
+    queue[#queue + 1] = {
+        node = node,
+        name = name,
+        header = node.headername,
+        previous = previous,
+        current = current.type,
+        current_entry = current,
+        declaration = current.declaration,
+        compatibility = compatibility,
+    }
+    return queue[#queue]
+end
+
+local function bind_pending_foreign_slot(
+        pending, members, type_members, is_type)
+    if not pending then return end
+    if is_type then
+        pending.type_members = type_members
+    else
+        pending.member = members[pending.name]
+    end
+end
+
+local function copy_foreign_paramnames(names)
+    if names == false then return false end
+    local out = {}
+    for _, name in ipairs(names) do
+        out[#out + 1] = name
+    end
+    return out
+end
+
+local function same_foreign_paramnames(left, right)
+    if #left ~= #right then return false end
+    for i = 1, #left do
+        if left[i] ~= right[i] then return false end
+    end
+    return true
+end
+
+-- Parameter spellings are declaration metadata rather than C type identity.
+-- Merge them only after the declaration pair probe accepts the redeclaration,
+-- then rewrite every accepted import occurrence to the same consensus.
+local function merge_foreign_paramnames(previous, current)
+    local previous_state = previous.paramnames_state
+    local current_state = current.paramnames_state
+    if not previous_state or not current_state then return end
+
+    local state
+    local names = false
+    if previous_state == "conflicting"
+       or current_state == "conflicting" then
+        state = "conflicting"
+    elseif previous_state == "complete"
+       and current_state == "complete" then
+        if same_foreign_paramnames(
+                previous.paramnames, current.paramnames) then
+            state = "complete"
+            names = previous.paramnames
+        else
+            state = "conflicting"
+        end
+    elseif previous_state == "complete" then
+        state = "complete"
+        names = previous.paramnames
+    elseif current_state == "complete" then
+        state = "complete"
+        names = current.paramnames
+    else
+        state = "unknown"
+    end
+
+    local members = {}
+    local seen = {}
+    for _, entry in ipairs({ previous, current }) do
+        for _, member in ipairs(entry.paramname_members or {}) do
+            if not seen[member] then
+                seen[member] = true
+                members[#members + 1] = member
+            end
+        end
+    end
+
+    previous.paramnames_state = state
+    previous.paramnames = copy_foreign_paramnames(names)
+    previous.paramname_members = members
+    current.paramnames_state = state
+    current.paramnames = copy_foreign_paramnames(names)
+    current.paramname_members = members
+    for _, member in ipairs(members) do
+        member.paramnames = copy_foreign_paramnames(names)
+    end
+end
+
+local function rewrite_foreign_type_history(
+        st, name, current, canonical)
+    if st.foreign_types[name] == current then
+        st.foreign_types[name] = canonical
+    end
+    for _, entry in ipairs(st.foreign_type_history[name] or {}) do
+        if entry.decl == current then entry.decl = canonical end
+    end
+end
+
+local function canonicalize_foreign_redeclaration(st, pending)
+    local previous = pending.previous
+    local current = pending.current
+    local canonical = foreigntypes.merge_declaration_composite(
+        previous.type, current)
+
+    -- A separately parsed occurrence of one accepted typedef can be retained
+    -- by declarations unique to that header snapshot. Point its private alias
+    -- object at the canonical target before replacing public slots, so those
+    -- transitive references also follow the accepted canonical declaration.
+    if current._tag == "Type.CTypedef"
+       and previous.type._tag == "Type.CTypedef" then
+        current.target = previous.type.target
+    end
+
+    if pending.type_members then
+        pending.type_members[pending.name] = canonical
+        rewrite_foreign_type_history(
+            st, pending.name, current, canonical)
+    elseif pending.member then
+        pending.member.type = canonical
+    end
+    merge_foreign_paramnames(previous, pending.current_entry)
+    st.foreign_names[pending.name] = previous
+end
+
+local function report_foreign_redeclaration_failure(
+        pending, errors, result)
+    local summary = result and (result.message or result.summary
+        or result.diagnostic) or
+        "the final ordered C header validation returned no result"
+    if result and result.status == "rejected" then
+        checker.typeerror(errors, pending.node.loc,
+            "conflicting C declaration for '%s' in foreign import '%s'; "
+            .. "previous declaration from '%s' has type %s, "
+            .. "new declaration has type %s; %s",
+            pending.name, pending.header, pending.previous.header,
+            types.tostring(pending.previous.type),
+            types.tostring(pending.current), summary)
+    else
+        checker.typeerror(errors, pending.node.loc,
+            "cannot validate potentially compatible C declaration for "
+            .. "'%s' in foreign import '%s' against the previous "
+            .. "declaration from '%s': %s",
+            pending.name, pending.header, pending.previous.header, summary)
+    end
+end
+
+local function report_foreign_header_context_failure(st, errors, result)
+    local node = st.last_foreign_import_node
+    local loc = node and node.loc
+    local summary = result and (result.message or result.summary
+        or result.diagnostic) or
+        "the final ordered C header validation returned no result"
+    if result and result.status == "rejected" then
+        checker.typeerror(errors, loc,
+            "final ordered C header context is invalid: %s", summary)
+    else
+        checker.typeerror(errors, loc,
+            "cannot validate the final ordered C header context: %s",
+            summary)
+    end
+end
+
+local function restore_rejected_foreign_type_registries(st, pending)
+    local rejected, names = {}, {}
+    for _, declaration in ipairs(pending) do
+        if declaration.type_members then
+            rejected[declaration.current] = true
+            names[declaration.name] = declaration.previous.type
+        end
+    end
+    for name, canonical in pairs(names) do
+        local history = st.foreign_type_history[name] or {}
+        local retained = {}
+        for _, entry in ipairs(history) do
+            if not rejected[entry.decl] then
+                retained[#retained + 1] = entry
+            end
+        end
+        st.foreign_type_history[name] = retained
+        st.foreign_types[name] =
+            retained[#retained] and retained[#retained].decl or canonical
+    end
+end
+
+local function finalize_foreign_redeclarations(st, errors)
+    local pending = st.pending_foreign_redeclarations
+    -- Independent parsing supplies each import's member graph, but only the C
+    -- compiler can validate the macro/tag/declaration state produced by their
+    -- exact cumulative order. Validate every nonempty preamble: the
+    -- best-effort isolated parser may collapse an invalid repeated declaration
+    -- within one header before it reaches the converted declaration registry.
+    -- The one final compiler baseline is therefore the authoritative
+    -- translation-unit check for both one-header and multi-header modules.
+    if #st.foreign_includes == 0 then return end
+
+    local module_probe, probe_error = ensure_module_probe(st)
+    local result
+    if not module_probe then
+        result = {
+            status = "infrastructure_failure",
+            message = probe_error or
+                "could not create the final ordered C header context",
+        }
+    elseif type(module_probe.validate_baseline) ~= "function" then
+        result = {
+            status = "infrastructure_failure",
+            message =
+                "the C probe service cannot validate an ordered header baseline",
+        }
+    else
+        local ok, validated = pcall(
+            module_probe.validate_baseline, module_probe)
+        if ok and type(validated) == "table" then
+            result = validated
+        else
+            result = {
+                status = "infrastructure_failure",
+                message = ok
+                    and "the ordered header baseline returned no result"
+                    or "ordered header baseline validation failed: "
+                        .. tostring(validated),
+            }
+        end
+    end
+
+    if result.status == "success" then
+        local rejected = {}
+        for _, declaration in ipairs(pending) do
+            local compatibility
+            if type(module_probe.validate_declaration_compatibility)
+                ~= "function" then
+                compatibility = {
+                    status = "infrastructure_failure",
+                    message =
+                        "the C probe service cannot validate a declaration pair",
+                }
+            else
+                local ok, validated = pcall(
+                    module_probe.validate_declaration_compatibility,
+                    module_probe,
+                    declaration.previous.type,
+                    declaration.current,
+                    declaration.previous.declaration,
+                    declaration.declaration)
+                if ok and type(validated) == "table" then
+                    compatibility = validated
+                else
+                    compatibility = {
+                        status = "infrastructure_failure",
+                        message = ok
+                            and "the C declaration compatibility probe "
+                                .. "returned no result"
+                            or "C declaration compatibility validation "
+                                .. "failed: " .. tostring(validated),
+                    }
+                end
+            end
+
+            if compatibility.status == "success" then
+                canonicalize_foreign_redeclaration(st, declaration)
+            else
+                rejected[#rejected + 1] = declaration
+                report_foreign_redeclaration_failure(
+                    declaration, errors, compatibility)
+            end
+        end
+        restore_rejected_foreign_type_registries(st, rejected)
+    else
+        restore_rejected_foreign_type_registries(st, pending)
+        report_foreign_header_context_failure(st, errors, result)
+        if result.status == "rejected" then
+            for _, declaration in ipairs(pending) do
+                if declaration.compatibility == "conditional" then
+                    report_foreign_redeclaration_failure(
+                        declaration, errors, result)
+                end
+            end
+        end
+    end
+end
+
 local function c_resolve(t)
     return types.resolve_c_typedef(t)
 end
@@ -326,12 +743,33 @@ end
 local function c_function_as_function_type(cfunc)
     local ret = c_resolve(cfunc.ret)
     local rettypes = ret._tag == "Type.CVoid" and {} or { cfunc.ret }
-    return types.Function(cfunc.params, rettypes, cfunc.vararg, false, false)
+    local converted =
+        types.Function(cfunc.params, rettypes, cfunc.vararg, false, false)
+    converted._c_function = cfunc
+    converted._c_return_type = cfunc.ret
+    converted._paramstyle = cfunc._paramstyle
+    converted._return_declaration_qualifiers =
+        cfunc._return_declaration_qualifiers
+    return converted
 end
 
 local function c_function_pointer_accepts_function(target, ftype)
-    local cfunc = c_function_pointer_type(target)
-    return cfunc and types.equals(c_function_as_function_type(cfunc), ftype)
+    local expected = c_function_pointer_type(target)
+    if not expected or ftype._tag ~= "Type.Function"
+       or #ftype.rettypes > 1
+       or ftype.varargtype or ftype.flexrettype then
+        return false
+    end
+    local actual = ftype._c_function
+    if not actual then
+        local ret = ftype.rettypes[1] or types.CVoid()
+        actual = types.CFunction(
+            ftype.params, ret, ftype.vararg, false)
+        actual._paramstyle = ftype._paramstyle
+        actual._return_declaration_qualifiers =
+            ftype._return_declaration_qualifiers
+    end
+    return types.c_function_types_equal(expected, actual)
 end
 
 local function is_foreign_function_var(var)
@@ -340,7 +778,118 @@ local function is_foreign_function_var(var)
         and var.exp._type._tag == "Type.CModule"
 end
 
-local function c_pseudo_member(typ, name)
+local function incomplete_c_object_error(typ, st, subject, seen)
+    -- TValue is an intrinsic compiler/runtime boundary whose concrete Lua
+    -- 5.5 layout is supplied by the configured internal headers even when the
+    -- best-effort C registrar retains only its forward tag. Existing value
+    -- lowering, sizeof/alignof, and spill slots depend on that exact SDK type.
+    if types.is_c_tvalue(typ) then return nil end
+    typ = c_resolve(typ)
+    if not typ then return nil end
+    seen = seen or {}
+    if seen[typ] then return nil end
+    seen[typ] = true
+
+    if typ._tag == "Type.CStruct" or typ._tag == "Type.CUnion" then
+        if not st:foreign_definition_visible(typ) then
+            return string.format(
+                "%s requires complete C %s type '%s', but its definition is "
+                .. "incomplete or not yet visible",
+                subject,
+                typ._tag == "Type.CStruct" and "struct" or "union",
+                types.tostring(typ))
+        end
+    elseif typ._tag == "Type.CArray" then
+        if typ.len == nil or typ.len == false or typ.len == "" then
+            return string.format(
+                "%s requires a complete C array type, but '%s' has no "
+                .. "known extent",
+                subject, types.tostring(typ))
+        end
+        return incomplete_c_object_error(typ.elem, st,
+            subject .. " array element", seen)
+    end
+end
+
+local function report_incomplete_c_object(typ, st, subject, loc, errors)
+    local err = incomplete_c_object_error(typ, st, subject)
+    if err then
+        checker.typeerror(errors, loc, err)
+        return false
+    end
+    return true
+end
+
+local function automatic_c_layout_error(typ, st, seen)
+    typ = c_resolve(typ)
+    if not typ or typ._tag == "Type.Invalid" then return nil end
+    seen = seen or {}
+    if seen[typ] then return nil end
+    seen[typ] = true
+
+    if typ._tag == "Type.CStruct" or typ._tag == "Type.CUnion" then
+        if not st:foreign_definition_visible(typ) then
+            return string.format(
+                "automatic C object type '%s' is incomplete or not yet visible",
+                types.tostring(typ))
+        elseif typ._tag == "Type.CStruct" and typ.has_fam then
+            return string.format(
+                "automatic C object type '%s' has a flexible array member",
+                types.tostring(typ))
+        end
+    elseif typ._tag == "Type.CArray" then
+        if math.type(typ.len) ~= "integer" or typ.len <= 0 then
+            return string.format(
+                "automatic C array type '%s' requires a positive "
+                .. "compile-time integer literal extent",
+                types.tostring(typ))
+        end
+        local elem = c_resolve(typ.elem)
+        if not elem or elem._tag == "Type.Invalid" then
+            return nil
+        elseif elem._tag == "Type.CVoid" then
+            return "an automatic C array cannot have void elements"
+        elseif elem._tag == "Type.CFunction" then
+            return "an automatic C array cannot have function elements"
+        elseif elem._tag == "Type.CArray"
+            or elem._tag == "Type.CStruct"
+            or elem._tag == "Type.CUnion" then
+            return automatic_c_layout_error(elem, st, seen)
+        elseif elem._tag ~= "Type.CInteger"
+           and elem._tag ~= "Type.CFloat"
+           and elem._tag ~= "Type.CPointer" then
+            return string.format(
+                "type '%s' is not a complete C object type usable as an "
+                .. "automatic C array element",
+                types.tostring(typ.elem))
+        end
+    end
+end
+
+local function automatic_c_object_error(typ, st)
+    local resolved = c_resolve(typ)
+    if not resolved or resolved._tag == "Type.Invalid" then return nil end
+    if resolved._tag ~= "Type.CStruct"
+       and resolved._tag ~= "Type.CUnion"
+       and resolved._tag ~= "Type.CArray" then
+        return string.format(
+            "initializer-less local declarations require a complete C "
+            .. "struct, union, or fixed array, not '%s'",
+            types.tostring(typ))
+    end
+
+    local bearing, offender = types.c_automatic_gc_bearing(typ)
+    if bearing then
+        return string.format(
+            "automatic C object type '%s' transitively contains "
+            .. "GC-bearing FFI storage '%s', which automatic C objects do "
+            .. "not trace",
+            types.tostring(typ), types.tostring(offender))
+    end
+    return automatic_c_layout_error(typ, st)
+end
+
+local function c_pseudo_member(typ, name, st)
     if name == "new" then
         return {
             _tag = "Type.CPseudoNew",
@@ -359,6 +908,9 @@ local function c_pseudo_member(typ, name)
                 { c_owned_type(typ, true) }, false, false, false),
         }
     elseif name == "sizeof" or name == "alignof" then
+        local err = incomplete_c_object_error(typ, st,
+            "C pseudo-member '." .. name .. "'")
+        if err then return nil, err end
         return {
             _tag = "Type.CPseudoSize",
             ctype = typ,
@@ -368,6 +920,11 @@ local function c_pseudo_member(typ, name)
     end
 end
 
+local function is_c_pseudo_member_name(name)
+    return name == "new" or name == "new_array"
+        or name == "sizeof" or name == "alignof"
+end
+
 local function c_field_decl(typ, name, st)
     typ = c_resolve(typ)
     if typ._tag == "Type.CPointer" then
@@ -375,10 +932,18 @@ local function c_field_decl(typ, name, st)
     elseif typ._tag == "Type.COwned" then
         typ = c_resolve(typ.pointee)
     end
-    if (typ._tag == "Type.CStruct" or typ._tag == "Type.CUnion")
-       and st:foreign_definition_visible(typ)
-       and typ.fields and typ.fields[name] then
-        return typ.fields[name]
+    if typ._tag == "Type.CStruct" or typ._tag == "Type.CUnion" then
+        local err = incomplete_c_object_error(typ, st,
+            "C field access '" .. name .. "'")
+        if err then
+            return nil, string.format(
+                "field '%s' not found in C type '%s' because its definition "
+                .. "is incomplete or not yet visible",
+                name, types.tostring(typ))
+        end
+        if typ.fields and typ.fields[name] then
+            return typ.fields[name]
+        end
     end
 end
 
@@ -482,18 +1047,21 @@ end
 
 local function c_allocation_error(typ, st)
     local rtyp = c_resolve(typ)
+    local layout_error = incomplete_c_object_error(
+        rtyp, st, "C allocation")
     if rtyp._tag == "Type.CVoid" then
         return "cannot allocate C void type in this FFI version"
-    elseif rtyp._tag == "Type.CStruct"
-           and not st:foreign_definition_visible(rtyp) then
-        return string.format(
-            "cannot allocate incomplete C struct type '%s' in this FFI version",
-            types.tostring(rtyp))
-    elseif rtyp._tag == "Type.CUnion"
-           and not st:foreign_definition_visible(rtyp) then
-        return string.format(
-            "cannot allocate incomplete C union type '%s' in this FFI version",
-            types.tostring(rtyp))
+    elseif layout_error then
+        if rtyp._tag == "Type.CStruct"
+           or rtyp._tag == "Type.CUnion" then
+            return string.format(
+                "cannot allocate incomplete C %s type '%s' in this FFI "
+                .. "version because its definition is incomplete or not "
+                .. "yet visible",
+                rtyp._tag == "Type.CStruct" and "struct" or "union",
+                types.tostring(rtyp))
+        end
+        return layout_error
     elseif rtyp._tag == "Type.CStruct" and rtyp.has_fam then
         return string.format(
             "cannot allocate C struct type '%s' with a flexible array member in this FFI version",
@@ -629,6 +1197,17 @@ typefromnode = util.make_visitor({
         return types.CPointer(pointee, node.const and { "const" } or {})
     end,
 
+    ["Ast.TypeCArray"] = function(node, st, errors)
+        local elem = typefromnode(node.base, st, errors)
+        if not types.is_c(elem) then
+            elem = invalid(errors, node.base.loc or node.loc,
+                "fixed C array element type must be a C FFI type, not '%s'",
+                types.tostring(elem))
+        end
+        local len = node.length and node.length.value
+        return types.CArray(elem, len)
+    end,
+
     ["Ast.TypeArray"] = function(node, st, errors)
         return types.Array(deoptionize(typefromnode(node.subtype, st, errors)))
     end,
@@ -696,7 +1275,152 @@ local function mark_mutable_c_address_source(source)
     end
 end
 
-local function trycoerce(source, target, errors)
+local function c_pointer_is_const(target)
+    target = types.resolve_c_typedef(target)
+    if not target or target._tag ~= "Type.CPointer" then return false end
+    return types.c_pointer_has_qual(target, "const")
+end
+
+local function failed_c_adjustment(source, target)
+    local n = ast.ExpCast(source.loc, source, target)
+    n._implicit_coercion = true
+    n._c_conversion_failed = true
+    n._type = target
+    return n
+end
+
+local function pointer_category_diagnostic(
+        source_pointer, target, errors, loc, use)
+    local source_category = types.c_pointer_category(source_pointer)
+    local target_category = types.c_pointer_category(target)
+    if not source_category or not target_category
+       or source_category == target_category then
+        return false
+    end
+    if (source_category == "object" and target_category == "function")
+       or (source_category == "function"
+           and target_category == "object") then
+        checker.typeerror(errors, loc,
+            "cannot convert %s pointer '%s' to %s pointer '%s'%s",
+            source_category, types.tostring(source_pointer),
+            target_category, types.tostring(target),
+            use and (" in " .. use) or "")
+        return true
+    end
+    return false
+end
+
+-- Validate one contextual or explicit object-pointer reinterpretation. Returns
+-- a conversion annotation on success, nil when this is not an unsafe pointer
+-- relation, and false after emitting a definitive diagnostic.
+function checker._unsafe_c_pointer_conversion(
+        source, target, errors, use)
+    if types.equals(types.resolve_c_typedef(source._type),
+                    types.resolve_c_typedef(target)) then
+        return nil
+    end
+
+    local source_pointer = source._type
+    local conversion_kind = "unsafe_object_pointer"
+    local address_source = false
+    local source_res = types.resolve_c_typedef(source._type)
+
+    -- An array expression always reaches a pointer conversion through ordinary
+    -- C decay, regardless of whether it names a local or an imported object.
+    -- Keep it distinct from struct/union local-address adjustment: codegen casts
+    -- the decayed expression and must never synthesize `&array`.
+    if source_res and source_res._tag == "Type.CArray" then
+        source_pointer = assert(types.c_local_address_pointer(source._type))
+    end
+
+    local candidate = types.c_unsafe_object_pointer_candidate(
+        source_pointer, target)
+    if not candidate and source_res
+       and source_res._tag ~= "Type.CArray"
+       and is_mutable_c_address_source(source) then
+        local natural_pointer =
+            types.c_local_address_pointer(source._type)
+        if natural_pointer then
+            source_pointer = natural_pointer
+            candidate = types.c_unsafe_object_pointer_candidate(
+                source_pointer, target)
+            if candidate then
+                conversion_kind =
+                    "address_then_unsafe_object_pointer"
+                address_source = true
+            end
+        end
+    end
+
+    local discarded =
+        types.c_discarded_pointer_qualifier(source_pointer, target)
+    if discarded then
+        checker.typeerror(errors, source.loc,
+            "unsafe C conversion from '%s' to '%s' would discard %s%s",
+            types.tostring(source_pointer), types.tostring(target),
+            discarded, use and (" in " .. use) or "")
+        return false
+    end
+
+    if not candidate then
+        if pointer_category_diagnostic(
+                source_pointer, target, errors, source.loc, use) then
+            return false
+        end
+        return nil
+    end
+
+    local st = active_check_state
+    local module_probe, probe_error
+    if st then
+        module_probe, probe_error = ensure_module_probe(st)
+    else
+        probe_error = "no active checker context"
+    end
+    if not module_probe then
+        checker.typeerror(errors, source.loc,
+            "cannot validate C conversion because the probe service " ..
+            "could not be configured%s: %s",
+            use and (" for " .. use) or "", tostring(probe_error))
+        return false
+    end
+
+    local result = module_probe:probe_unsafe_object_pointer(
+        source_pointer, target)
+    if result.status ~= "success" then
+        checker.typeerror(errors, source.loc, "%s%s",
+            result.message or
+                "cannot validate the unsafe C object-pointer conversion",
+            use and (" in " .. use) or "")
+        return false
+    end
+
+    if address_source then
+        mark_mutable_c_address_source(source)
+    end
+    return {
+        kind = conversion_kind,
+        source = source_pointer,
+        target = target,
+        probe_key = result.key,
+    }
+end
+
+local function adjust_unsafe_c_pointer(source, target, errors, use)
+    local conversion = checker._unsafe_c_pointer_conversion(
+        source, target, errors, use)
+    if not conversion then
+        return conversion == false
+            and failed_c_adjustment(source, target) or source
+    end
+    local n = ast.ExpCast(source.loc, source, target)
+    n._implicit_coercion = true
+    n._c_conversion = conversion
+    n._type = target
+    return n
+end
+
+local function trycoerce(source, target, errors, use)
     if is_mutable_c_address_source(source)
        and types.c_mutable_address_coerceable(source._type, target)
        and not types.c_address_coerceable(source._type, target) then
@@ -718,7 +1442,7 @@ local function trycoerce(source, target, errors)
             local inner = ast.ExpCast(source.loc, source, source._type.base)
             inner._implicit_coercion = true
             inner._type = source._type.base
-            n = trycoerce(inner, target, errors)
+            n = trycoerce(inner, target, errors, use)
         elseif target._tag == "Type.Option" then
             if source._type._tag == "Type.Nil"
                or source._type._tag == "Type.Value" then
@@ -729,7 +1453,8 @@ local function trycoerce(source, target, errors)
                 -- option has a chance to preserve it.
                 n = ast.ExpCast(source.loc, source, target)
             else
-                n = ast.ExpCast(source.loc, trycoerce(source, target.base, errors), target)
+                n = ast.ExpCast(source.loc,
+                    trycoerce(source, target.base, errors, use), target)
             end
         else
             n = ast.ExpCast(source.loc, source, target)
@@ -738,7 +1463,7 @@ local function trycoerce(source, target, errors)
         n._type = target
         return n
     else
-        return source
+        return adjust_unsafe_c_pointer(source, target, errors, use)
     end
 end
 
@@ -857,7 +1582,7 @@ local function coerce_demanded_value(exp, target, term, errors)
     target = expected_type(target)
     if not target then return exp end
     local source = exp
-    exp = trycoerce(exp, target, errors)
+    exp = trycoerce(exp, target, errors, term)
     if source._missing_value then exp._missing_value = true end
     checkmatch(term, target, exp._type, errors, exp.loc)
     return exp
@@ -1379,6 +2104,9 @@ end
 checkdecl = function(node, st, errors)
     node._type = node._type or typefromnode(node.type, st, errors)
     checktype(node._type, node.loc, errors)
+    report_incomplete_c_object(node._type, st,
+        "declaration of local variable '" .. tostring(node.name) .. "'",
+        node.loc, errors)
 end
 
 local function declare(node, st, errors)
@@ -1545,8 +2273,17 @@ local function function_type_as_c_pointer(ftype)
     if #ftype.rettypes > 1 or ftype.varargtype or ftype.flexrettype then
         return nil
     end
-    local ret = ftype.rettypes[1] or types.CVoid()
-    return types.CPointer(types.CFunction(ftype.params, ret, ftype.vararg, false), {})
+    local cfunc = ftype._c_function
+    if not cfunc then
+        local ret = ftype._c_return_type
+            or ftype.rettypes[1] or types.CVoid()
+        cfunc =
+            types.CFunction(ftype.params, ret, ftype.vararg, false)
+        cfunc._paramstyle = ftype._paramstyle
+        cfunc._return_declaration_qualifiers =
+            ftype._return_declaration_qualifiers
+    end
+    return types.CPointer(cfunc, {})
 end
 
 local function check_forin_callable_exp(exp, st, errors, context, demand)
@@ -1934,11 +2671,54 @@ end
 --   returns whether statement always returns from its function (always false for repeat/until)
 checkstat = util.make_visitor({
     ["Ast.StatDecl"] = function(node, st, errors)
+        -- The parser reserves an empty RHS for the one-declaration automatic
+        -- C-object form. It is not an arity-adjusted expression list: the
+        -- declaration itself owns deterministic C zero initialization.
+        if #node.exps == 0 then
+            if #node.decls ~= 1 or not node.decls[1].type then
+                checker.typeerror(errors, node.loc,
+                    "an initializer-less local must declare exactly one "
+                    .. "explicitly typed automatic C object")
+                for _, decl in ipairs(node.decls) do
+                    decl._type = decl.type
+                        and typefromnode(decl.type, st, errors)
+                        or types.Invalid()
+                    declare(decl, st, errors)
+                end
+                return
+            end
+
+            local decl = node.decls[1]
+            decl._type = typefromnode(decl.type, st, errors)
+            checktype(decl._type, decl.loc, errors)
+            local automatic_error =
+                automatic_c_object_error(decl._type, st)
+            if automatic_error then
+                local errloc = decl.loc
+                if decl.type._tag == "Ast.TypeCArray"
+                   and (math.type(decl.type.length.value) ~= "integer"
+                        or decl.type.length.value <= 0) then
+                    errloc = decl.type.length.loc or errloc
+                end
+                checker.typeerror(errors, errloc, "%s", automatic_error)
+            else
+                decl._c_zero_init = true
+                decl._c_automatic_object = true
+                node._c_zero_init = true
+            end
+            declare(decl, st, errors)
+            return
+        end
+
         local fixed = {}
         for i, decl in ipairs(node.decls) do
             if decl.type then
                 checkdecl(decl, st, errors)
                 fixed[i] = decl._type
+                if types.is_c_array(decl._type) then
+                    checker.typeerror(errors, decl.loc,
+                        "cannot initialize a local by copying a whole C array")
+                end
             else
                 fixed[i] = UNKNOWN_SLOT
             end
@@ -1971,6 +2751,10 @@ checkstat = util.make_visitor({
                     decl._type = exp._type
                 end
                 checkdecl(decl, st, errors)
+                if types.is_c_array(decl._type) then
+                    checker.typeerror(errors, decl.loc,
+                        "cannot initialize a local by copying a whole C array")
+                end
                 exp = trycoerce(exp, decl._type, errors)
                 checkmatch("declaration of local variable " .. decl.name,
                     decl._type, exp._type, errors, decl.loc)
@@ -2138,6 +2922,11 @@ checkstat = util.make_visitor({
         for _, var in ipairs(node.vars) do
             checkvar(var, st, errors)
             check_c_assignment_storage(var, errors)
+            if var._type and types.is_c_array(var._type) then
+                checker.typeerror(errors, var.loc,
+                    "cannot assign to a whole C array; assign its elements "
+                    .. "or retain a pointer instead")
+            end
         end
         local fixed = {}
         for i, var in ipairs(node.vars) do
@@ -2294,21 +3083,28 @@ checkvar = util.make_visitor({
             -- (innermost) one.
             if decl._tag == "Ast.Decl" and decl._funcdepth
                and decl._funcdepth < #func_stack then
-                if decl._c_address_taken then
+                if types.is_c_aggregate(decl._type) then
+                    checker.typeerror(errors, node.loc,
+                        "cannot capture C aggregate variable '%s'; capture "
+                        .. "an explicit pointer to its automatic storage "
+                        .. "instead",
+                        node.name)
+                elseif decl._c_address_taken then
                     checker.typeerror(errors, node.loc,
                         "cannot capture variable '%s' after taking its mutable C address",
                         node.name)
-                end
-                decl._captured = true
-                -- A variable only *written* (never read) by a nested function
-                -- would otherwise miss StatDecl's `_used` gate and never get a
-                -- box allocated; force it used here.
-                decl._used = true
-                for d = decl._funcdepth + 1, #func_stack do
-                    local frame = func_stack[d]
-                    if not frame.capture_set[decl] then
-                        frame.capture_set[decl] = true
-                        table.insert(frame.captures, decl)
+                else
+                    decl._captured = true
+                    -- A variable only *written* (never read) by a nested
+                    -- function would otherwise miss StatDecl's `_used` gate
+                    -- and never get a box allocated; force it used here.
+                    decl._used = true
+                    for d = decl._funcdepth + 1, #func_stack do
+                        local frame = func_stack[d]
+                        if not frame.capture_set[decl] then
+                            frame.capture_set[decl] = true
+                            table.insert(frame.captures, decl)
+                        end
                     end
                 end
             end
@@ -2327,8 +3123,15 @@ checkvar = util.make_visitor({
         local ltype = node.exp._type
         if ltype._tag == "Type.Module" or ltype._tag == "Type.CModule" then
             local mod = ltype
-            if ltype._tag == "Type.CModule" and mod.type_members
-               and mod.type_members[node.name] then
+            if mod.members[node.name] then
+                node._decl = mod.members[node.name]
+                node._type = node._decl.type
+                if ltype._tag == "Type.CModule" and mod.type_members
+                   and mod.type_members[node.name] then
+                    node._c_type_collision = mod.type_members[node.name]
+                end
+            elseif ltype._tag == "Type.CModule" and mod.type_members
+                   and mod.type_members[node.name] then
                 node._decl = {
                     _tag = "Type.CTypeNamespace",
                     name = node.name,
@@ -2340,9 +3143,6 @@ checkvar = util.make_visitor({
                 node._type = invalid(errors, node.loc,
                     "member '%s' not found inside module '%s'",
                     node.name, mod.name)
-            else
-                node._decl = mod.members[node.name]
-                node._type = node._decl.type
             end
         elseif ltype._tag == "Type.Record" then
             local decl = ltype.functions[node.name]
@@ -2387,20 +3187,52 @@ checkvar = util.make_visitor({
                     node.name, ltype.fqtn)
                 end
             end
+        elseif node.exp._tag == "Ast.ExpVar"
+               and node.exp.var
+               and node.exp.var._c_type_collision
+               and is_c_pseudo_member_name(node.name) then
+            -- The ordinary C identifier wins a value lookup, but a following
+            -- pseudo-member spelling is otherwise liable to fall through to
+            -- generic C field lookup (and produce the misleading "field not
+            -- found" diagnostic). Preserve real aggregate fields named
+            -- `new`/`sizeof`/...; only diagnose the hidden type namespace when
+            -- the ordinary value has no such field.
+            local field_error
+            node._decl, field_error =
+                c_field_decl(ltype, node.name, st)
+            if node._decl then
+                node._type = node._decl.type
+            else
+                node._type = invalid(errors, node.loc,
+                    "C type pseudo-member '%s.%s' is unavailable because "
+                    .. "foreign module '%s' also has an ordinary member named '%s'",
+                    node.exp.var.name, node.name,
+                    node.exp.var.exp._type.name, node.exp.var.name)
+            end
         elseif types.is_c(ltype) or is_c_type_namespace(node.exp) then
             if is_c_type_namespace(node.exp) then
-                node._decl = c_pseudo_member(ltype, node.name)
+                local pseudo_error
+                node._decl, pseudo_error =
+                    c_pseudo_member(ltype, node.name, st)
                 if node._decl then
                     node._type = node._decl.type
+                elseif pseudo_error then
+                    node._type = invalid(errors, node.loc,
+                        pseudo_error)
                 else
                     node._type = invalid(errors, node.loc,
                         "C type '%s' has no pseudo-member '%s'",
                         types.tostring(ltype), node.name)
                 end
             else
-                node._decl = c_field_decl(ltype, node.name, st)
+                local field_error
+                node._decl, field_error =
+                    c_field_decl(ltype, node.name, st)
                 if node._decl then
                     node._type = node._decl.type
+                elseif field_error then
+                    node._type = invalid(errors, node.loc,
+                        field_error)
                 else
                     node._type = invalid(errors, node.loc,
                         "field '%s' not found in C type '%s'",
@@ -2556,6 +3388,88 @@ local function annotate_call_arguments(node, adjusted)
         target_type = adjusted.open_target,
         start = adjusted.open_start,
     } or false
+end
+
+-- Return the direct automatic object whose address/decay is passed to a
+-- mutable C parameter. Pointer-valued aliases intentionally do not qualify:
+-- after their creation the checker cannot know which object a pointer denotes.
+local function mutable_c_call_argument_decl(exp, target)
+    if not target or c_pointer_is_const(target) then return nil end
+
+    local adjusted = exp
+    local unsafe_array_decay = false
+    local direct_address_source = false
+    while exp and exp._tag == "Ast.ExpCast" do
+        local conversion = exp._c_conversion
+        if conversion and conversion.kind == "unsafe_object_pointer" then
+            unsafe_array_decay = true
+        elseif conversion and conversion.kind ==
+               "address_then_unsafe_object_pointer" then
+            direct_address_source = exp.exp
+        elseif is_mutable_c_address_source(exp.exp)
+           and types.c_mutable_address_coerceable(
+               exp.exp._type, exp._type) then
+            -- An inner explicit cast may take the exact local address before
+            -- an outer unsafe pointer reinterpretation reaches the parameter.
+            direct_address_source = exp.exp
+        end
+        exp = exp.exp
+    end
+    exp = direct_address_source or exp
+    if not is_mutable_c_address_source(exp) then return nil end
+
+    if direct_address_source then
+        return exp.var._decl, exp
+    end
+
+    if types.c_mutable_address_coerceable(exp._type, target) then
+        return exp.var._decl, exp
+    end
+
+    local source = types.resolve_c_typedef(exp._type)
+    if source and source._tag == "Type.CArray"
+       and (unsafe_array_decay or types.coerceable(exp._type, target)
+            or (adjusted._type and types.equals(adjusted._type, target))) then
+        return exp.var._decl, exp
+    end
+    return nil
+end
+
+-- A C variadic tail has no formal parameter type, but an explicit pointer cast
+-- still describes the exact argument type passed across the ABI. Direct arrays
+-- likewise undergo the ordinary C call-site decay. Recover only those two
+-- pointer-bearing shapes here; a struct/union passed by value and an already
+-- stored pointer alias intentionally do not become tracked automatic roots.
+local function c_variadic_mutation_target(exp)
+    local resolved = exp and types.resolve_c_typedef(exp._type)
+    if not resolved then
+        return nil
+    elseif resolved._tag == "Type.CPointer" then
+        return exp._type
+    elseif resolved._tag == "Type.CArray" then
+        return types.CPointer(resolved.elem, resolved.quals or {})
+    end
+    return nil
+end
+
+local function annotate_c_call_mutations(node, ftype)
+    local mutated, seen = {}, {}
+    for i, arg in ipairs(node.args.args) do
+        local target = (ftype.params or {})[i]
+        if not target and ftype.vararg then
+            target = c_variadic_mutation_target(arg)
+        end
+        if target then
+            local decl, source =
+                mutable_c_call_argument_decl(arg, target)
+            if decl and not seen[decl] then
+                seen[decl] = true
+                mark_mutable_c_address_source(source)
+                table.insert(mutated, decl)
+            end
+        end
+    end
+    node._c_mutated_decls = #mutated > 0 and mutated or false
 end
 
 -- Return the expressions carried by either positional or named call syntax.
@@ -2777,8 +3691,10 @@ local function check_named_args(ftype, paramnames, fields, loc, fname, st, error
         else
             local ptype = ftype.params[index]
             checkexp(field.exp, st, errors, ptype)
-            local exp = trycoerce(field.exp, ptype, errors)
-            checkmatch("named argument '" .. field.name .. "' of " .. fname,
+            local term =
+                "named argument '" .. field.name .. "' of " .. fname
+            local exp = trycoerce(field.exp, ptype, errors, term)
+            checkmatch(term,
                 ptype, exp._type, errors, field.loc)
             if supplied[index] then
                 checker.typeerror(errors, field.loc,
@@ -2810,6 +3726,175 @@ local function check_named_args(ftype, paramnames, fields, loc, fname, st, error
         end
     end
     return dense, order
+end
+
+local function is_direct_c_bitfield_expression(exp)
+    return exp
+       and exp._tag == "Ast.ExpVar"
+       and exp.var
+       and exp.var._decl
+       and exp.var._decl._tag == "Type.CField"
+       and exp.var._decl.bitfield ~= false
+end
+
+local function reject_direct_c_bitfield(node, operands, errors)
+    for _, operand in ipairs(operands) do
+        if is_direct_c_bitfield_expression(operand) then
+            checker.typeerror(errors, operand.loc or node.loc,
+                "C operator '%s' cannot be applied directly to bit-field "
+                .. "'%s'; cast the bit-field to an ordinary C or Titan "
+                .. "integer type first",
+                node.op, operand.var._decl.name)
+            node._type = types.Invalid()
+            return true
+        end
+    end
+    return false
+end
+
+local function c_operator_pointer_type(typ)
+    local value = csemantics.decay_array(typ)
+    value = types.resolve_c_typedef(value)
+    return value and value._tag == "Type.CPointer"
+        and value or nil
+end
+
+local function c_operator_integer_type(typ)
+    typ = types.resolve_c_typedef(typ)
+    return typ and (typ._tag == "Type.Integer"
+        or typ._tag == "Type.CInteger") or false
+end
+
+local function reject_invisible_c_operator_pointee(
+        node, st, errors, operand, subject)
+    local pointer = c_operator_pointer_type(operand._type)
+    if not pointer then return false end
+    local err = incomplete_c_object_error(
+        pointer.pointee, st, subject)
+    if not err then return false end
+    checker.typeerror(errors, operand.loc or node.loc, "%s", err)
+    node._type = types.Invalid()
+    return true
+end
+
+local function reject_invisible_c_operator_object(node, st, errors)
+    if node._tag ~= "Ast.ExpBinop"
+       or (node.op ~= "+" and node.op ~= "-") then
+        return false
+    end
+
+    local lhs_pointer = c_operator_pointer_type(node.lhs._type)
+    local rhs_pointer = c_operator_pointer_type(node.rhs._type)
+    local lhs_integer = c_operator_integer_type(node.lhs._type)
+    local rhs_integer = c_operator_integer_type(node.rhs._type)
+    if node.op == "+"
+       and lhs_pointer and rhs_integer then
+        return reject_invisible_c_operator_pointee(
+            node, st, errors, node.lhs,
+            "C operator '+' pointer arithmetic")
+    elseif node.op == "+"
+       and lhs_integer and rhs_pointer then
+        return reject_invisible_c_operator_pointee(
+            node, st, errors, node.rhs,
+            "C operator '+' pointer arithmetic")
+    elseif node.op == "-"
+       and lhs_pointer and rhs_integer then
+        return reject_invisible_c_operator_pointee(
+            node, st, errors, node.lhs,
+            "C operator '-' pointer arithmetic")
+    elseif node.op == "-"
+       and lhs_pointer and rhs_pointer then
+        return reject_invisible_c_operator_pointee(
+            node, st, errors, node.lhs,
+            "C operator '-' pointer subtraction")
+            or reject_invisible_c_operator_pointee(
+                node, st, errors, node.rhs,
+                "C operator '-' pointer subtraction")
+    end
+    return false
+end
+
+local function finish_c_operator(node, st, errors, decide, operands)
+    if reject_direct_c_bitfield(node, operands, errors) then
+        return true
+    end
+    for _, operand in ipairs(operands) do
+        if operand._type._tag == "Type.Invalid" then
+            node._type = types.Invalid()
+            return true
+        end
+    end
+    if reject_invisible_c_operator_object(node, st, errors) then
+        return true
+    end
+
+    local trait, decision_error = decide(st.c_profile)
+    if not trait and decision_error
+       and decision_error:match("target profile") then
+        local _, profile_error = ensure_probe_service(st)
+        if not st.c_profile then
+            checker.typeerror(errors, node.loc,
+                "cannot determine C operator '%s' semantics because the "
+                .. "configured C probe service is unavailable: %s",
+                node.op, tostring(profile_error))
+            node._type = types.Invalid()
+            return true
+        end
+        trait, decision_error = decide(st.c_profile)
+    end
+    if not trait then
+        checker.typeerror(errors, node.loc, "%s",
+            decision_error or
+                ("unsupported C operator '" .. tostring(node.op) .. "'"))
+        node._type = types.Invalid()
+        return true
+    end
+
+    local module_probe, probe_error = ensure_module_probe(st)
+    if not module_probe then
+        checker.typeerror(errors, node.loc,
+            "cannot validate C operator '%s' because the configured "
+            .. "C probe service is unavailable: %s",
+            node.op, tostring(probe_error))
+        node._type = types.Invalid()
+        return true
+    end
+
+    local probe = module_probe:probe_operator(trait)
+    if not probe or probe.status ~= "success" then
+        checker.typeerror(errors, node.loc, "%s",
+            probe and probe.message or
+                "cannot validate C operator because the probe returned no result")
+        node._type = types.Invalid()
+        return true
+    end
+
+    trait.probe_key = probe.key
+    node._c_operator = trait
+    node._type = trait.result
+    return true
+end
+
+local function check_c_unary_operator(node, st, errors)
+    if not csemantics.is_unary_operator_candidate(
+            node.op, node.exp._type) then
+        return false
+    end
+    return finish_c_operator(node, st, errors, function(profile)
+        return csemantics.decide_unary_operator(
+            profile, node.op, node.exp._type)
+    end, {node.exp})
+end
+
+local function check_c_binary_operator(node, st, errors)
+    if not csemantics.is_binary_operator_candidate(
+            node.op, node.lhs._type, node.rhs._type) then
+        return false
+    end
+    return finish_c_operator(node, st, errors, function(profile)
+        return csemantics.decide_binary_operator(
+            profile, node.op, node.lhs._type, node.rhs._type)
+    end, {node.lhs, node.rhs})
 end
 
 -- Typechecks an expression
@@ -3070,6 +4155,9 @@ checkexp = util.make_visitor({
             return
         end
         checkexp(node.exp, st, errors)
+        if check_c_unary_operator(node, st, errors) then
+            return
+        end
         local texp = node.exp._type
         local loc = node.loc
         if op == "#" then
@@ -3144,6 +4232,9 @@ checkexp = util.make_visitor({
         local tlhs = node.lhs._type
         checkexp(node.rhs, st, errors)
         local trhs = node.rhs._type
+        if check_c_binary_operator(node, st, errors) then
+            return
+        end
         local loc = node.loc
         if op == "==" or op == "~=" then
             -- tries to coerce to value if either side is value
@@ -3371,6 +4462,7 @@ checkexp = util.make_visitor({
                     checkargs(cftype, node.args.args, node.loc,
                         "function pointer '" .. fname .. "'", st, errors,
                         false))
+                annotate_c_call_mutations(node, cftype)
                 annotate_call_results(node, cftype, demand, errors)
                 if node._type._tag == "Type.Void" and not node._voidok
                    and not demand.tail then
@@ -3482,6 +4574,10 @@ checkexp = util.make_visitor({
                                           and node.exp.var._decl._tag == "Type.CPseudoNew")))))
                 end
             end
+            if not pseudo_new and node.exp._tag == "Ast.ExpVar"
+               and is_foreign_function_var(node.exp.var) then
+                annotate_c_call_mutations(node, ftype)
+            end
             annotate_call_results(node, ftype, demand, errors)
             check_generic_result_limit(node, errors)
             if node._type._tag == "Type.Void" and not node._voidok
@@ -3586,6 +4682,8 @@ checkexp = util.make_visitor({
 
     ["Ast.ExpCast"] = function(node, st, errors, _)
         node.target = typefromnode(node.target, st, errors)
+        report_incomplete_c_object(node.target, st,
+            "by-value C cast target", node.loc, errors)
         checkexp(node.exp, st, errors, node.target)
         local source = node.exp._type
         local target = node.target
@@ -3602,9 +4700,20 @@ checkexp = util.make_visitor({
             mark_mutable_c_address_source(node.exp)
             ok = true
         else
-            ok = types.explicitly_coerceable(source, target) or
-                 (types.coerceable(source, target) and
-                  types.compatible(source, target))
+            local conversion = checker._unsafe_c_pointer_conversion(
+                node.exp, target, errors, "explicit C cast")
+            if conversion then
+                node._c_conversion = conversion
+                ok = true
+            elseif conversion == false then
+                -- The conversion helper already emitted the more precise
+                -- category/qualifier/probe diagnostic.
+                ok = true
+            else
+                ok = types.explicitly_coerceable(source, target) or
+                     (types.coerceable(source, target) and
+                      types.compatible(source, target))
+            end
         end
         if not ok then
             checker.typeerror(errors, node.loc, "cannot cast '%s' to '%s'",
@@ -3888,6 +4997,15 @@ function checkfuncbody(node, st, errors, opts)
         local rloc = (node.rettypes and node.rettypes[i] and node.rettypes[i].loc)
             or node.loc
         checktype(rettype, rloc, errors)
+        report_incomplete_c_object(rettype, st,
+            "return type " .. i .. " of function '"
+            .. tostring(node.name or "<anonymous>") .. "'",
+            rloc, errors)
+        if types.is_c_array(rettype) then
+            checker.typeerror(errors, rloc,
+                "a whole C array cannot be returned by value; return a "
+                .. "pointer to its storage instead")
+        end
     end
     if node._type.flexrettype then
         -- An explicit tail reports at its annotation; an inferred lambda tail
@@ -3917,6 +5035,10 @@ function checkfuncbody(node, st, errors, opts)
             end
             st:add_symbol(param.name, param)
             checktype(param._type, param.loc, errors)
+            report_incomplete_c_object(param._type, st,
+                "parameter '" .. tostring(param.name) .. "' of function '"
+                .. tostring(node.name or "<anonymous>") .. "'",
+                param.loc, errors)
             if pnames[param.name] then
                 checker.typeerror(errors, node.loc,
                     "duplicate parameter '%s' in %s", param.name, fdesc)
@@ -4061,7 +5183,8 @@ local function isconst(node)
         end
 
     elseif tag == "Ast.ExpVar" then
-        return false
+        return node.var and node.var._decl
+            and node.var._decl._tag == "Type.CPseudoSize"
 
     elseif tag == "Ast.ExpConcat" then
         local const = true
@@ -4153,60 +5276,142 @@ local toplevel_visitor = util.make_visitor({
 
     ["Ast.TopLevelForeignImport"] = function(node, st, errors)
         local name = node.headername
-        local options = {
-            source_dir = st.source_dir,
-            compiler = foreign_c_options.compiler,
-            language_mode = foreign_c_options.language_mode,
-            cppflags = foreign_c_options.cppflags,
-            compiler_include_dirs = foreign_c_options.compiler_include_dirs,
-        }
         local ftypes, err, include
         if foreign_c_config_error then
             err = foreign_c_config_error
         else
-            ftypes, err, include = cdriver.process_file(name, options)
+            local service
+            service, err = ensure_probe_service(st)
+            if service then
+                local options
+                options, err = service:cdriver_process_options()
+                if options then
+                    options.source_dir = st.source_dir
+                    ftypes, err, include =
+                        cdriver.process_file(name, options)
+                end
+            end
         end
         if ftypes then
             node._include = include
+            st.last_foreign_import_node = node
+            st.foreign_includes[#st.foreign_includes + 1] = include
+            st.foreign_includes_version =
+                st.foreign_includes_version + 1
+            st.module_probe = nil
+            st.module_probe_error = nil
+            st.module_probe_includes_version = nil
+            st.module_probe_error_includes_version = nil
             local members = {}
             local type_members = {}
+            local ordinary_declarations = {}
+            local ordinary_order = {}
             for _, item in ipairs(ftypes) do
                 local fname = item.name
                 local ftype = item.type
-                local decl = foreigntypes.convert(st, ftype)
+                local decl, conversion_error, declaration =
+                    foreigntypes.convert(st, ftype)
                 if decl then
+                    local ordinary
                     if is_foreign_ordinary_identifier(fname, ftype) then
-                        local previous = st:find_foreign_name(fname)
-                        if previous and previous.header ~= name
-                           and not types.equals(previous.type, decl) then
-                            checker.typeerror(errors, node.loc,
-                                "conflicting C declaration for '%s' in foreign import '%s'; "
-                                .. "previous declaration from '%s' has type %s, new declaration has type %s",
-                                fname, name, previous.header,
-                                types.tostring(previous.type), types.tostring(decl))
-                        elseif not previous then
-                            st:add_foreign_name(fname, {
-                                header = name,
-                                type = decl,
-                            })
+                        ordinary = {
+                            header = name,
+                            type = decl,
+                            declaration = declaration,
+                            import_node = node,
+                        }
+                        if not ordinary_declarations[fname] then
+                            ordinary_order[#ordinary_order + 1] = fname
                         end
+                        ordinary_declarations[fname] = ordinary
                     end
-                    if is_foreign_type_declaration(ftype) then
+                    local type_declaration =
+                        is_foreign_type_declaration(ftype)
+                    if type_declaration then
                         type_members[fname] = decl
                         st:add_foreign_type(fname, decl)
                     else
                         local paramnames = ftype.type == "function"
-                            and ftype.paramnames or false
-                        members[fname] = types.ModuleMember(name, fname, decl,
-                            paramnames)
+                            and copy_foreign_paramnames(ftype.paramnames)
+                            or false
+                        local member = types.ModuleMember(
+                            name, fname, decl, paramnames)
+                        members[fname] = member
+                        if ordinary and ftype.type == "function" then
+                            ordinary.paramnames_state =
+                                ftype.paramnames_state
+                                or (ftype.paramnames == false
+                                    and "unknown" or "complete")
+                            ordinary.paramnames =
+                                copy_foreign_paramnames(ftype.paramnames)
+                            ordinary.paramname_members = { member }
+                        end
                     end
+                    if ordinary then
+                        ordinary.type_declaration = type_declaration
+                    end
+                elseif conversion_error
+                       and conversion_error:match(
+                           "^conflicting C tag kinds") then
+                    checker.typeerror(errors, node.loc,
+                        "%s", conversion_error)
                 end
                 -- else: the member uses an unsupported C type; skip it so the
                 -- rest of the header still imports. Referencing a skipped
                 -- member is then a clean "not a member" error, never a crash.
             end
-            local modtype = types.CModule(name, members)
-            modtype.type_members = type_members
+            -- The registrar can expose several source forms for one ordinary
+            -- name within a single independently parsed header (notably stdio
+            -- object declarations plus macro projections). Compare only the
+            -- final member that this import publishes, and compare it with the
+            -- final member from earlier import occurrences.
+            for _, fname in ipairs(ordinary_order) do
+                local current = ordinary_declarations[fname]
+                local previous = st:find_foreign_name(fname)
+                local pending
+                if previous then
+                    local compatibility =
+                        foreigntypes.declaration_compatibility(
+                            previous.type, current.type,
+                            previous.declaration, current.declaration)
+                    if compatibility then
+                        pending = queue_foreign_redeclaration(
+                            st, node, fname, previous, current,
+                            compatibility)
+                    else
+                        checker.typeerror(errors, node.loc,
+                            "conflicting C declaration for '%s' in foreign import '%s'; "
+                            .. "previous declaration from '%s' has type %s, new declaration has type %s",
+                            fname, name, previous.header,
+                            types.tostring(previous.type),
+                            types.tostring(current.type))
+                    end
+                else
+                    st:add_foreign_name(fname, current)
+                end
+                bind_pending_foreign_slot(
+                    pending, members, type_members,
+                    current.type_declaration)
+            end
+            -- Named file-scope struct/union tags are projected into this
+            -- import's Titan type namespace under their base spelling only
+            -- when no real syntactic typedef reserves that name. The alias is
+            -- the canonical CStruct/CUnion itself: no fake C typedef or global
+            -- bare foreign name is manufactured.
+            for tagname, metadata in pairs(ftypes.file_scope_tags or {}) do
+                if (metadata.kind == "struct"
+                    or metadata.kind == "union")
+                   and not (ftypes.typedef_names
+                            and ftypes.typedef_names[tagname]) then
+                    local tagtype =
+                        st:find_foreign_type(metadata.raw_key)
+                    if tagtype then
+                        type_members[tagname] = tagtype
+                    end
+                end
+            end
+
+            local modtype = types.CModule(name, members, type_members)
             node._type = modtype
         else
             node._type = types.Nil()
@@ -4219,6 +5424,9 @@ local toplevel_visitor = util.make_visitor({
         if node.decl.type then
             node._type = typefromnode(node.decl.type, st, errors)
             checktype(node._type, node.decl.type.loc or node.loc, errors)
+            report_incomplete_c_object(node._type, st,
+                "declaration of module variable '" .. node.decl.name .. "'",
+                node.decl.type.loc or node.loc, errors)
             checkexp(node.value, st, errors, node._type)
             node.value = trycoerce(node.value, node._type, errors)
             checkmatch("declaration of module variable " .. node.decl.name,
@@ -4505,6 +5713,7 @@ local function checktoplevel(ast, st, errors, loader)
             visit_toplevel(node, st, errors, loader)
         end
     end
+    finalize_foreign_redeclarations(st, errors)
 
     for _, node in ipairs(ast) do
         if not node._ignore and node._tag == "Ast.TopLevelTypeAlias" then
@@ -4874,7 +6083,8 @@ end
 --   returns the module type and a list of type errors found
 --   annotates the AST with the types of its terms in "_type" fields
 --   annotates duplicate top-level declarations with a "_ignore" boolean field
-function checker.check(modname, ast, subject, filename, loader)
+function checker.check(modname, ast, subject, filename, loader, options)
+    options = options or {}
     loader = loader or function ()
         return nil, "you must pass a loader to import modules"
     end
@@ -4884,6 +6094,13 @@ function checker.check(modname, ast, subject, filename, loader)
     finally_loop_floor = 0
     loop_depth = 0
     local st = symtab.new(modname)
+    local previous_check_state = active_check_state
+    active_check_state = st
+    st.c_profile = nil
+    st.foreign_includes = {}
+    st.foreign_includes_version = 0
+    st.pending_foreign_redeclarations = {}
+    st.probe_service_provider = options.probe_service_provider
     if filename then
         st.source_dir = filename:match("^(.*)/[^/]*$")
         if not st.source_dir or st.source_dir == "" then
@@ -4891,14 +6108,39 @@ function checker.check(modname, ast, subject, filename, loader)
         end
     end
     local errors = {subject = subject, filename = filename}
-    mark_toplevel_duplicates(ast, errors)
-    collect_type_aliases(ast, st, errors)
-    checktoplevel(ast, st, errors, loader)
-    checkbodies(ast, st, errors)
-    reject_exported_c_ffi_types(modname, ast, errors)
-    reject_exported_local_record_types(modname, ast, errors)
-    ast._type = makemoduletype(modname, ast)
-    return ast._type, errors
+    local function run_check()
+        mark_toplevel_duplicates(ast, errors)
+        collect_type_aliases(ast, st, errors)
+        checktoplevel(ast, st, errors, loader)
+        checkbodies(ast, st, errors)
+        reject_exported_c_ffi_types(modname, ast, errors)
+        reject_exported_local_record_types(modname, ast, errors)
+        ast._type = makemoduletype(modname, ast)
+        return ast._type, errors
+    end
+
+    -- Foreign conversion probing is lazily owned by this checker invocation.
+    -- Checker internals are allowed to throw on violated invariants, so both
+    -- the active nested-check context and an owned compiler service need the
+    -- same finally-style cleanup as the ordinary diagnostic-return path.
+    local checked, result_or_error, result_errors =
+        xpcall(run_check, function(err) return err end)
+    local close_call_ok, closed, close_err = true, true
+    if st.owns_probe_service and st.probe_service then
+        close_call_ok, closed, close_err =
+            pcall(st.probe_service.close, st.probe_service)
+        if checked and close_call_ok and not closed then
+            table.insert(errors,
+                "cannot clean the C probe service: " .. tostring(close_err))
+        end
+    end
+    active_check_state = previous_check_state
+    if not checked then
+        error(result_or_error, 0)
+    elseif not close_call_ok then
+        error(closed, 0)
+    end
+    return result_or_error, result_errors
 end
 
 return checker

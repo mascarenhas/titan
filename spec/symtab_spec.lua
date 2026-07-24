@@ -1,4 +1,5 @@
 local symtab = require 'titan-compiler.symtab'
+local types = require 'titan-compiler.types'
 
 describe("Titan symbol table", function()
 
@@ -82,5 +83,122 @@ describe("Titan symbol table", function()
         st.initializer_order = 0
         assert.is_nil(st:find_foreign_type("shared"))
         assert.is_nil(st:find_foreign_name("shared"))
+    end)
+
+    describe("ordered C tag registry", function()
+        local function provenance(header, order, scope, definition)
+            return {
+                header = header,
+                declaration_order = order,
+                scope = scope or "file",
+                definition = definition and true or false,
+            }
+        end
+
+        it("reuses one file tag record and honors the import frontier",
+           function()
+            local st = symtab.new()
+            st.current_toplevel_order = 2
+            local first = assert(st:register_c_file_tag(
+                "Item", "struct", provenance("first.h", 1)))
+            local canonical = types.CStruct(
+                nil, "Item", nil, {}, false, false)
+            assert.equal(canonical,
+                st:set_c_tag_canonical(first, canonical))
+
+            st.current_toplevel_order = 5
+            local second = assert(st:register_c_file_tag(
+                "Item", "struct",
+                provenance("second.h", 4, "file", true)))
+            st.current_toplevel_order = nil
+
+            assert.equal(first, second)
+            assert.equal(canonical, second.canonical)
+            assert.equal(2, #second.provenances)
+            assert.equal("first.h", second.header)
+            assert.equal(second, st:find_c_file_tag("Item", "struct"))
+
+            st.initializer_order = 1
+            assert.is_nil(st:find_c_file_tag("Item", "struct"))
+            st.initializer_order = 2
+            assert.equal(second, st:find_c_file_tag("Item", "struct"))
+        end)
+
+        it("reports cross-import shared-namespace conflicts with both sites",
+           function()
+            local st = symtab.new()
+            assert(st:register_c_file_tag(
+                "Conflict", "struct",
+                provenance("structs.h", 3)))
+
+            local record, err = st:register_c_enum_tag(
+                "Conflict", provenance("enums.h", 7))
+            assert.is_nil(record)
+            assert.matches("conflicting C tag kinds for 'Conflict'",
+                err, 1, true)
+            assert.matches("structs.h", err, 1, true)
+            assert.matches("declaration 3", err, 1, true)
+            assert.matches("enums.h", err, 1, true)
+            assert.matches("declaration 7", err, 1, true)
+            assert.matches("struct", err, 1, true)
+            assert.matches("enum", err, 1, true)
+        end)
+
+        it("binds eligible prototype references to a visible file tag",
+           function()
+            local st = symtab.new()
+            local file = assert(st:register_c_file_tag(
+                "Prior", "union", provenance("prior.h", 1)))
+            local bound = assert(st:bind_c_prototype_tag(
+                "Prior", "union", 1,
+                provenance("consumer.h", 2, "prototype:1"),
+                true))
+            assert.equal(file, bound)
+            assert.is_nil(st.c_prototype_tags["consumer.h"])
+        end)
+
+        it("rejects a wrong-kind prototype reference to a visible file tag",
+           function()
+            local st = symtab.new()
+            assert(st:register_c_file_tag(
+                "Prior", "struct", provenance("prior.h", 1)))
+            local bound, err = st:bind_c_prototype_tag(
+                "Prior", "union", 1,
+                provenance("consumer.h", 2, "prototype:1"),
+                true)
+            assert.is_nil(bound)
+            assert.matches("conflicting C tag kinds for 'Prior'",
+                err, 1, true)
+            assert.matches("prior.h", err, 1, true)
+            assert.matches("consumer.h", err, 1, true)
+            assert.matches("struct", err, 1, true)
+            assert.matches("union", err, 1, true)
+        end)
+
+        it("interns prototype tags by header, scope, and base name",
+           function()
+            local st = symtab.new()
+            local a1 = assert(st:bind_c_prototype_tag(
+                "Local", "struct", 1,
+                provenance("a.h", 2, "prototype:1"), true))
+            local a2 = assert(st:bind_c_prototype_tag(
+                "Local", "struct", 1,
+                provenance("a.h", 2, "prototype:1"), true))
+            local b = assert(st:bind_c_prototype_tag(
+                "Local", "struct", 1,
+                provenance("b.h", 2, "prototype:1"), true))
+            local other_scope = assert(st:bind_c_prototype_tag(
+                "Local", "struct", 2,
+                provenance("a.h", 2, "prototype:2"), true))
+
+            assert.equal(a1, a2)
+            assert.not_equal(a1, b)
+            assert.not_equal(a1, other_scope)
+            assert.is_nil(st:find_c_file_tag("Local"))
+
+            local later = assert(st:register_c_file_tag(
+                "Local", "struct", provenance("later.h", 1)))
+            assert.not_equal(a1, later)
+        end)
     end)
 end)

@@ -40,16 +40,31 @@ local COROUTINE_VARIANT_SOURCE =
     COROUTINE_VARIANT_SOURCE_ROOT .. "/titan/coroutine.titan"
 local COROUTINE_VARIANT_C =
     COROUTINE_VARIANT_SOURCE_ROOT .. "/titan/coroutine.c"
+local CHECKSTACK_VARIANT_ROOT =
+    os.tmpname() .. "-titan-coroutine-checkstack"
+os.remove(CHECKSTACK_VARIANT_ROOT)
+local CHECKSTACK_VARIANT_SO =
+    CHECKSTACK_VARIANT_ROOT .. "/titan/coroutine.so"
+local CHECKSTACK_VARIANT_SOURCE_ROOT =
+    CHECKSTACK_VARIANT_ROOT .. "/source"
+local CHECKSTACK_VARIANT_SOURCE =
+    CHECKSTACK_VARIANT_SOURCE_ROOT .. "/titan/coroutine.titan"
+local CHECKSTACK_FIXTURE = lfs.currentdir() ..
+    "/spec/fixtures/stdlib/native/coroutine_transfer_fault.h"
 local function quote(word)
     return "'" .. tostring(word):gsub("'", "'\\''") .. "'"
 end
-local TEST_ENV = "env -u LUA_PATH -u LUA_CPATH " ..
-    "-u LUA_PATH_5_5 -u LUA_CPATH_5_5 CCACHE_DISABLE=1 " ..
-    "TITAN_PATH_0_17=" .. quote(COROUTINE_VARIANT_ROOT) .. " " ..
-    "LUA_PATH=" .. quote(COROUTINE_VARIANT_ROOT .. "/?.lua;./?.lua;;") ..
-    " LUA_CPATH=" ..
-    quote(COROUTINE_VARIANT_ROOT .. "/?.so;./?.so;;") .. " " ..
-    "TITAN_COROUTINE_TEST_SO=" .. quote(COROUTINE_VARIANT_SO) .. " "
+local function test_env(root, so)
+    return "env -u LUA_PATH -u LUA_CPATH " ..
+        "-u LUA_PATH_5_5 -u LUA_CPATH_5_5 CCACHE_DISABLE=1 " ..
+        "TITAN_PATH=" .. quote(root) .. " " ..
+        "LUA_PATH=" .. quote(root .. "/?.lua;./?.lua;;") ..
+        " LUA_CPATH=" .. quote(root .. "/?.so;./?.so;;") .. " " ..
+        "TITAN_COROUTINE_TEST_SO=" .. quote(so) .. " "
+end
+local TEST_ENV = test_env(COROUTINE_VARIANT_ROOT, COROUTINE_VARIANT_SO)
+local CHECKSTACK_TEST_ENV =
+    test_env(CHECKSTACK_VARIANT_ROOT, CHECKSTACK_VARIANT_SO)
 
 local function clean_test_artifacts()
     os.execute("rm -rf test.o test.so test.a test.c test.titan " ..
@@ -123,38 +138,122 @@ local function read_file(path)
     return contents
 end
 
-local function build_coroutine()
-    assert.truthy(exec_ok("rm -rf " .. quote(COROUTINE_VARIANT_ROOT)))
+local function replace_once(source, old, new)
+    local first, last = source:find(old, 1, true)
+    assert.truthy(first, "missing coroutine variant anchor: " .. old)
+    assert.is_nil(source:find(old, last + 1, true),
+        "ambiguous coroutine variant anchor: " .. old)
+    return source:sub(1, first - 1) .. new .. source:sub(last + 1)
+end
+
+local function compile_coroutine_variant(root, source_root, source_path,
+                                         so_path, source, env)
+    assert.truthy(exec_ok("rm -rf " .. quote(root)))
     assert.truthy(exec_ok(
-        "mkdir -p " .. quote(COROUTINE_VARIANT_ROOT .. "/titan") .. " " ..
-        quote(COROUTINE_VARIANT_SOURCE_ROOT .. "/titan")))
-    local source = read_file("titan/coroutine.titan")
-    local anchor = "  local result = mco.mco_resume(co, ctag)\n"
-    local first, last = source:find(anchor, 1, true)
-    assert.truthy(first, "missing coroutine resume anchor")
-    assert.is_nil(source:find(anchor, last + 1, true),
-        "ambiguous coroutine resume anchor")
-    source = source:sub(1, last) ..
-        "  lua.lua_gc(L, lua.LUA_GCCOLLECT)\n" .. source:sub(last + 1)
-    write_file(COROUTINE_VARIANT_SOURCE, source)
+        "mkdir -p " .. quote(root .. "/titan") .. " " ..
+        quote(source_root .. "/titan")))
+    write_file(source_path, source)
     os.remove("titan/coroutine.a")
     os.remove("titan/coroutine.so")
     assert.truthy(exec_ok("rm -rf titan/coroutine.so.dSYM"))
     assert.truthy(exec_ok(
-        TEST_ENV .. "TITAN_PATH= " .. TITANC .. " --tree " ..
-        quote(COROUTINE_VARIANT_SOURCE_ROOT) .. " titan.coroutine"))
+        env .. "TITAN_PATH= " .. TITANC .. " --tree " ..
+        quote(source_root) .. " titan.coroutine"))
     assert.truthy(exec_ok("cp -p " .. quote("titan/coroutine.so") .. " " ..
-        quote(COROUTINE_VARIANT_SO)))
+        quote(so_path)))
     os.remove("titan/coroutine.a")
     os.remove("titan/coroutine.so")
     assert.truthy(exec_ok("cp -p " .. quote("titan/coroutine.lua") .. " " ..
-        quote(COROUTINE_VARIANT_ROOT .. "/titan/coroutine.lua")))
+        quote(root .. "/titan/coroutine.lua")))
     os.remove("titan/coroutine.lua")
     if lfs.attributes("titan/coroutine.so.dSYM", "mode") == "directory" then
         assert.truthy(exec_ok("cp -Rp " .. quote("titan/coroutine.so.dSYM") ..
-            " " .. quote(COROUTINE_VARIANT_SO .. ".dSYM")))
+            " " .. quote(so_path .. ".dSYM")))
         assert.truthy(exec_ok("rm -rf titan/coroutine.so.dSYM"))
     end
+end
+
+local function build_coroutine()
+    local source = read_file("titan/coroutine.titan")
+    source = replace_once(source,
+        "local runtime = mco.mco_runtime.new()\n",
+        "local runtime = mco.mco_runtime.new()\n" ..
+        "local transfer_gc_mode: integer = 0\n")
+    local anchor = "  local result = mco.mco_resume(co, ctag)\n"
+    source = replace_once(source, anchor,
+        anchor ..
+        "  if transfer_gc_mode == 1 then\n" ..
+        "    lua.lua_gc(L, lua.LUA_GCCOLLECT)\n" ..
+        "  elseif transfer_gc_mode == 2 then\n" ..
+        "    lua.lua_gc(L, lua.LUA_GCSTEP, 0 as lua.lua_Integer)\n" ..
+        "  end\n")
+    local exports = [[
+
+function _test_set_transfer_gc_mode(mode: integer)
+  transfer_gc_mode = mode
+end
+]]
+    local initializer = '\ndo\n  local res = lual.luaL_newmetatable'
+    source = replace_once(source, initializer, exports .. initializer)
+    compile_coroutine_variant(
+        COROUTINE_VARIANT_ROOT,
+        COROUTINE_VARIANT_SOURCE_ROOT,
+        COROUTINE_VARIANT_SOURCE,
+        COROUTINE_VARIANT_SO,
+        source,
+        TEST_ENV)
+end
+
+local function build_checkstack_coroutine()
+    local source = read_file("titan/coroutine.titan")
+    source = replace_once(source,
+        'local coro_native = foreign import "titan/coro.h"\n',
+        'local coro_native = foreign import "titan/coro.h"\n' ..
+        'local coro_test = foreign import "' ..
+        CHECKSTACK_FIXTURE .. '"\n')
+    source = replace_once(source,
+        "lua.lua_checkstack(L, 2)",
+        "coro_test.titan_coro_test_lua_checkstack(L, 2)")
+    source = replace_once(source,
+        "ffi.lua_pushtvalue(L, owner)",
+        "coro_test.titan_coro_test_lua_pushtvalue(L, owner)")
+    source = replace_once(source,
+        "ffi.lua_pushtvalue(L, payload)",
+        "coro_test.titan_coro_test_lua_pushtvalue(L, payload)")
+
+    local helper_start = assert(source:find(
+        "local function root_transfer", 1, true))
+    local helper_end = assert(source:find(
+        "\nend\n\nlocal function clear_transfer", helper_start, true))
+    local helper = source:sub(helper_start, helper_end + 4)
+    local top_replacements
+    helper, top_replacements = helper:gsub(
+        "lua%.lua_settop%(L, top%)",
+        "coro_test.titan_coro_test_lua_settop(L, top)")
+    assert.same(3, top_replacements,
+        "transfer-root helper must restore the top on both failures and success")
+    source = source:sub(1, helper_start - 1) .. helper ..
+        source:sub(helper_end + 5)
+
+    local exports = [[
+
+function _test_arm_checkstack_failure()
+  coro_test.titan_coro_test_arm_checkstack_failure()
+end
+
+function _test_checkstack_failure_ok(): boolean
+  return (coro_test.titan_coro_test_checkstack_failure_ok() as integer) ~= 0
+end
+]]
+    local initializer = '\ndo\n  local res = lual.luaL_newmetatable'
+    source = replace_once(source, initializer, exports .. initializer)
+    compile_coroutine_variant(
+        CHECKSTACK_VARIANT_ROOT,
+        CHECKSTACK_VARIANT_SOURCE_ROOT,
+        CHECKSTACK_VARIANT_SOURCE,
+        CHECKSTACK_VARIANT_SO,
+        source,
+        CHECKSTACK_TEST_ENV)
 end
 
 local function clean_coroutine_artifacts()
@@ -165,6 +264,7 @@ local function clean_coroutine_artifacts()
     os.remove("titan/coroutine.c")
     os.remove("titan/coroutine.o")
     exec_ok("rm -rf " .. quote(COROUTINE_VARIANT_ROOT))
+    exec_ok("rm -rf " .. quote(CHECKSTACK_VARIANT_ROOT))
 end
 
 local function compile_and_run(titan_code, lua_code)
@@ -217,16 +317,20 @@ local function compile_and_run_app(titan_code)
     return out
 end
 
-local function run_lua(lua_code)
+local function run_lua_in_env(lua_code, env)
     local script = os.tmpname()
     write_file(script, lua_code)
-    local f = assert(io.popen(TEST_ENV .. LUA .. " " .. script .. " 2>&1"))
+    local f = assert(io.popen(env .. LUA .. " " .. script .. " 2>&1"))
     local out = f:read("*a")
     local ok, why, status = f:close()
     os.remove(script)
     assert.truthy(ok, "lua failed (" .. tostring(why) .. ", " ..
         tostring(status) .. ")\n" .. out)
     return out
+end
+
+local function run_lua(lua_code)
+    return run_lua_in_env(lua_code, TEST_ENV)
 end
 
 local function compile_and_run_standalone_import()
@@ -267,6 +371,7 @@ describe("coroutine standard module", function()
         -- the temporary exact DSO/shim in a private root. The production
         -- titan.so stays on Lua's C path only to provide bare support APIs.
         build_coroutine()
+        build_checkstack_coroutine()
     end)
 
     after_each(clean_test_artifacts)
@@ -284,10 +389,143 @@ describe("coroutine standard module", function()
         assert.not_match("Titan coroutine runtime 0.11", generated, 1, true)
         assert.not_match("lua_getupvalue", generated, 1, true)
 
+        local owner_create = assert(generated:find(
+            "lua_newuserdatauv(", 1, true))
+        local owner_create_end = assert(generated:find(
+            ");", owner_create, true))
+        assert.match("TITAN_CORO_OWNER_USERVALUES",
+            generated:sub(owner_create, owner_create_end), 1, true)
+
         local native = read_file("titan-runtime/titan_coro.c")
         assert.not_match("titan_coro_runtime", native, 1, true)
         assert.not_match("titan_coro_configure", native, 1, true)
         assert.not_match("titan_coro_running", native, 1, true)
+        assert.not_match("titan_coro_root_transfer", generated, 1, true)
+        assert.not_match("titan_coro_clear_transfer", generated, 1, true)
+        assert.not_match("titan_coro_root_transfer", native, 1, true)
+        assert.not_match("titan_coro_clear_transfer", native, 1, true)
+
+        local header = read_file("titan-runtime/titan/coro.h")
+        assert.match("#define TITAN_CORO_OWNER_USERVALUES 5",
+            header, 1, true)
+        assert.not_match("titan_coro_root_transfer", header, 1, true)
+        assert.not_match("titan_coro_clear_transfer", header, 1, true)
+    end)
+
+    it("roots transfers through checked public Lua uservalue APIs", function()
+        local generated = read_file(COROUTINE_VARIANT_C)
+        local signature = "static void " ..
+            "titan_coroutine_root_transfer_titan("
+        local prototype = assert(generated:find(signature, 1, true))
+        local function_start = assert(generated:find(
+            signature, prototype + #signature, true))
+        local function_end = assert(generated:find(
+            "\n}\n", function_start, true))
+        local body = generated:sub(function_start, function_end)
+
+        local recover = assert(body:find("mco_get_user_data", 1, true))
+        local owner = assert(body:find("Udata *_local_owner", recover, true))
+        local anchor = assert(body:find(
+            "setuvalue(L, s2v((restorestack", owner, true))
+        local saved_top = assert(body:find("lua_gettop(L)", anchor, true))
+        local checkstack = assert(body:find(
+            "lua_checkstack(L, ((int)(2)))", saved_top, true))
+        local owner_push = assert(body:find(
+            "lua_pushtvalue(L", checkstack, true))
+        local payload_push = assert(body:find(
+            "lua_pushtvalue(L", owner_push + 1, true))
+        local setter = assert(body:find(
+            "lua_setiuservalue(L", payload_push, true))
+        local setter_check = assert(body:find("if(", setter, true))
+
+        assert.is_true(recover < owner)
+        assert.is_true(owner < anchor)
+        assert.is_true(anchor < saved_top)
+        assert.is_true(saved_top < checkstack)
+        assert.is_true(checkstack < owner_push)
+        assert.is_true(owner_push < payload_push)
+        assert.is_true(payload_push < setter)
+        assert.is_true(setter < setter_check)
+
+        local restores = {}
+        local position = 1
+        while true do
+            local restore = body:find("lua_settop(L, _local_top", position,
+                true)
+            if not restore then
+                break
+            end
+            restores[#restores + 1] = restore
+            position = restore + 1
+        end
+        assert.same(3, #restores)
+        assert.is_true(checkstack < restores[1])
+        assert.is_true(restores[1] < owner_push)
+        assert.is_true(setter_check < restores[2])
+        assert.is_true(restores[2] < restores[3])
+
+        assert.not_match("ud->uv", body, 1, true)
+        assert.not_match("luaC_barrierback", body, 1, true)
+    end)
+
+    it("restores the exact top and pushes nothing on checkstack failure",
+        function()
+        local out = run_lua_in_env([==[
+            local coroutine = require "titan.coroutine"
+            local co = coroutine.create(function(arg)
+                return arg
+            end, "tag")
+
+            coroutine._test_arm_checkstack_failure()
+            local ok, err = pcall(function()
+                return co:resume("first")
+            end)
+            assert(not ok, "injected lua_checkstack failure did not raise")
+            assert(tostring(err):find(
+                "cannot reserve Lua stack for coroutine transfer root",
+                1, true), tostring(err))
+            assert(coroutine._test_checkstack_failure_ok(),
+                   "failure path pushed or did not restore the saved top")
+            assert(co:status() == "suspended")
+            assert(co:resume("second") == "second")
+            assert(co:status() == "dead")
+            print("OK")
+        ]==], CHECKSTACK_TEST_ENV)
+        assert.match("OK", out)
+    end)
+
+    it("keeps titan_coro.o as one exact runtime archive member", function()
+        local ar = os.getenv("AR") or "ar"
+        local pipe = assert(io.popen(
+            ar .. " t " .. quote("titan-runtime/libtitan.a") .. " 2>&1"))
+        local output = pipe:read("*a")
+        assert.truthy(pipe:close(), output)
+        local members = {}
+        for member in output:gmatch("[^\r\n]+") do
+            members[#members + 1] = member
+        end
+        assert.same({
+            "titan.o",
+            "titan_coro.o",
+            "titan_uv.o",
+        }, members)
+    end)
+
+    it("removes retired transfer helpers from runtime objects", function()
+        local nm = os.getenv("NM") or "nm"
+        for _, path in ipairs({
+            "titan-runtime/titan_coro.o",
+            "titan-runtime/libtitan.a",
+        }) do
+            local pipe = assert(io.popen(
+                nm .. " -g " .. quote(path) .. " 2>&1"))
+            local output = pipe:read("*a")
+            assert.truthy(pipe:close(), output)
+            assert.match("titan_coro_entry", output, 1, true)
+            assert.match("titan_coro_tag_equal", output, 1, true)
+            assert.not_match("titan_coro_root_transfer", output, 1, true)
+            assert.not_match("titan_coro_clear_transfer", output, 1, true)
+        end
     end)
 
     it("anchors a popped payload before clearing its transfer root", function()
@@ -305,7 +543,8 @@ describe("coroutine standard module", function()
             true))
         local anchor_refresh = assert(body:find("setobj2t", payload_pop,
             true))
-        local root_clear = assert(body:find("titan_coro_clear_transfer",
+        local root_clear = assert(body:find(
+            "titan_coroutine_clear_transfer_titan",
             payload_pop, true))
         assert.is_true(payload_pop < anchor_refresh)
         assert.is_true(anchor_refresh < root_clear)
@@ -512,43 +751,72 @@ describe("coroutine standard module", function()
         local out = run_lua([==[
             local coroutine = require "titan.coroutine"
 
-            local finalized_result = 0
-            local weak_result = setmetatable({}, { __mode = "v" })
+            local function exercise(mode, transfer_gc_mode)
+                collectgarbage(mode)
 
-            local returns_fresh = coroutine.create(function()
-                local value = setmetatable({ kind = "result" }, {
-                    __gc = function() finalized_result = finalized_result + 1 end,
-                })
-                weak_result[1] = value
-                return value
-            end, "tag")
-            local result = returns_fresh:resume(nil)
-            assert(result == weak_result[1] and result.kind == "result",
-                   "fresh terminal result was not preserved")
-            result = nil
-            for _ = 1, 4 do collectgarbage("collect") end
-            assert(weak_result[1] == nil and finalized_result == 1,
-                   "terminal result root was not cleared")
+                local finalized_result = 0
+                local weak_result = setmetatable({}, { __mode = "v" })
+                local returns_fresh = coroutine.create(function()
+                    local value = setmetatable({
+                        kind = mode .. "-result",
+                    }, {
+                        __gc = function()
+                            finalized_result = finalized_result + 1
+                        end,
+                    })
+                    weak_result[1] = value
+                    return value
+                end, "tag")
+                if mode == "generational" then
+                    -- Promote the owner before the coroutine creates its fresh
+                    -- result so the injected minor collection needs the
+                    -- uservalue setter's old-to-young back barrier.
+                    collectgarbage("collect")
+                end
+                coroutine._test_set_transfer_gc_mode(transfer_gc_mode)
+                local result = returns_fresh:resume(nil)
+                assert(result == weak_result[1] and
+                       result.kind == mode .. "-result",
+                       mode .. " fresh terminal result was not preserved")
+                result = nil
+                for _ = 1, 4 do collectgarbage("collect") end
+                assert(weak_result[1] == nil and finalized_result == 1,
+                       mode .. " terminal result root was not cleared")
 
-            local finalized_error = 0
-            local weak_error = setmetatable({}, { __mode = "v" })
-            local raises_fresh = coroutine.create(function()
-                local value = setmetatable({ kind = "error" }, {
-                    __gc = function() finalized_error = finalized_error + 1 end,
-                })
-                weak_error[1] = value
-                error(value)
-            end, "tag")
-            local ok, err = pcall(function()
-                return raises_fresh:resume(nil)
-            end)
-            assert(not ok, "fresh terminal error was not raised")
-            assert(err == weak_error[1] and err.kind == "error",
-                   "fresh terminal error was not preserved")
-            err = nil
-            for _ = 1, 4 do collectgarbage("collect") end
-            assert(weak_error[1] == nil and finalized_error == 1,
-                   "terminal error root was not cleared")
+                local finalized_error = 0
+                local weak_error = setmetatable({}, { __mode = "v" })
+                local raises_fresh = coroutine.create(function()
+                    local value = setmetatable({
+                        kind = mode .. "-error",
+                    }, {
+                        __gc = function()
+                            finalized_error = finalized_error + 1
+                        end,
+                    })
+                    weak_error[1] = value
+                    error(value)
+                end, "tag")
+                if mode == "generational" then
+                    collectgarbage("collect")
+                end
+                coroutine._test_set_transfer_gc_mode(transfer_gc_mode)
+                local ok, err = pcall(function()
+                    return raises_fresh:resume(nil)
+                end)
+                assert(not ok, mode .. " fresh terminal error was not raised")
+                assert(err == weak_error[1] and
+                       err.kind == mode .. "-error",
+                       mode .. " fresh terminal error was not preserved")
+                err = nil
+                for _ = 1, 4 do collectgarbage("collect") end
+                assert(weak_error[1] == nil and finalized_error == 1,
+                       mode .. " terminal error root was not cleared")
+            end
+
+            exercise("incremental", 1)
+            exercise("generational", 2)
+            coroutine._test_set_transfer_gc_mode(0)
+            collectgarbage("incremental")
             print("OK")
         ]==])
         assert.match("OK", out)

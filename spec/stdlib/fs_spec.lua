@@ -65,6 +65,15 @@ function schedule_modes(root: string): async.Task
       file:read(-1)
       return nil
     end, "negative read succeeded")
+    local portable_limit = false
+    do
+      file:read(4294967296)
+    catch
+      portable_limit =
+        error == "read size exceeds the portable libuv buffer limit"
+    end
+    check(portable_limit,
+          "read larger than UINT_MAX reached allocation or libuv")
     file:close()
 
     file = fs.open(path, "a")

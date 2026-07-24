@@ -122,8 +122,8 @@ a/b.so
 a/b/c.so
 ```
 
-The binary path comes from `TITAN_PATH_0_17` when set, otherwise `TITAN_PATH`,
-otherwise the default `.;<root>/lib/titan/0.17`. In an override, `;;` inserts
+The binary path comes from `TITAN_PATH_0_18` when set, otherwise `TITAN_PATH`,
+otherwise the default `.;<root>/lib/titan/0.18`. In an override, `;;` inserts
 that default at the same position. Search is **path-root first**: Titan walks
 all candidates in the first path root before moving to the second root. Once
 an earlier root contains a file at a relative candidate such as `a/b.so`, that
@@ -133,7 +133,7 @@ still advance to a deeper candidate such as `a/b/c.so`.
 
 A candidate claims `a.b.c` when it exports either member of the requested
 metadata pair, `a_b_c_abi` and `a_b_c_types`. Once claimed, validation is
-terminal: both entries must exist, the ABI marker must be `0.17`, and the type
+terminal: both entries must exist, the ABI marker must be `0.18`, and the type
 metadata must describe `a.b.c`. Broken, half-present, mismatched, or malformed
 metadata is an error rather than permission to skip to another file. An
 ancestor with neither entry is an unrelated nonclaim; an exact `a/b/c.so`
@@ -218,12 +218,17 @@ The standard library is the canonical provider with this name.
 
 ## Compiled compatibility
 
-The current provider contract is compiled-module ABI 0.17. ABI 0.17 changes
-Array meaning and representation: `{T}` is now a canonical proxy over private
-dense-capacity backing storage, not an ordinary table. That semantic break
-changes what the existing native Array pointer slots mean, along with generated
-container code and Lua boundary checks, so every module must be rebuilt with
-the 0.17 runtime and loaded from the 0.17 binary path.
+The current provider contract is compiled-module ABI 0.18. Generated standard
+library archive objects now refer directly to callback trampolines promoted
+into the runtime's external symbol contract and no longer refer to the retired
+libuv/coroutine helpers. A provider and runtime must therefore both be 0.18;
+either direction of a 0.17/0.18 static pairing is incompatible.
+
+ABI 0.17 introduced the current Array meaning and representation: `{T}` is a
+canonical proxy over private dense-capacity backing storage, not an ordinary
+table. That semantic break changed what the existing native Array pointer slots
+mean, along with generated container code and Lua boundary checks, so 0.16 and
+0.17 providers could not be mixed. ABI 0.18 preserves that Array contract.
 
 Historically, ABI 0.16 introduced prefix-container discovery: a 0.15 consumer
 recorded only an imported module's exact child-DSO pathname and could not
@@ -244,8 +249,8 @@ Titan's complete installed standard library is the production example of this
 model. One paired provider:
 
 ```text
-$ROCKS_TREE/lib/titan/0.17/titan.so
-$ROCKS_TREE/lib/titan/0.17/titan.a
+$ROCKS_TREE/lib/titan/0.18/titan.so
+$ROCKS_TREE/lib/titan/0.18/titan.a
 ```
 
 contains the native support entry plus the independent logical modules

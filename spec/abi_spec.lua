@@ -1,5 +1,6 @@
 local driver = require "titan-compiler.driver"
 local cdriver = require "c-parser.cdriver"
+local staticmetadata = require "titan-compiler.staticmetadata"
 
 local function prefix_from_cpath(cpath)
     for template in (cpath .. ";"):gmatch("(.-);") do
@@ -16,12 +17,21 @@ local function shell_command(argv)
     return table.concat(words, " ")
 end
 
+local function configured_command(command, ...)
+    local argv = assert(cdriver.split_shell_words(command))
+    for _, word in ipairs({ ... }) do argv[#argv + 1] = word end
+    return shell_command(argv)
+end
+
 describe("compiled-module ABI version", function()
     after_each(function()
         os.remove("legacy.c")
         os.remove("legacy.so")
-        os.remove("legacy16.c")
-        os.remove("legacy16.so")
+        os.remove("legacy17.c")
+        os.remove("legacy17.so")
+        os.remove("legacy17archive.c")
+        os.remove("legacy17archive.o")
+        os.remove("legacy17archive.a")
     end)
 
     it("keeps the compiler lookup and runtime loader versions in sync", function()
@@ -34,6 +44,9 @@ describe("compiled-module ABI version", function()
         f = assert(io.open(".github/workflows/ci.yml", "r"))
         local workflow = f:read("*a")
         f:close()
+        f = assert(io.open("scripts/stdlib_installer.lua", "r"))
+        local installer = f:read("*a")
+        f:close()
 
         local runtime_version =
             assert(header:match('#define%s+TITAN_VER%s+"([^"]+)"'))
@@ -44,13 +57,16 @@ describe("compiled-module ABI version", function()
         assert.equal(driver.TITAN_VER_SUFFIX, runtime_suffix)
         assert.equal("_" .. driver.TITAN_VER:gsub("%.", "_"),
                      driver.TITAN_VER_SUFFIX)
-        assert.equal("0.17", driver.TITAN_VER)
-        assert.equal("_0_17", driver.TITAN_VER_SUFFIX)
-        assert.match("TITAN_ABI_VERSION%s*:?=%s*0%.17", makefile)
-        assert.match("TITAN_PATH_0_17", makefile)
-        assert.match("TITAN_PATH_0_17", workflow)
-        assert.not_match("TITAN_PATH_0_16", makefile)
-        assert.not_match("TITAN_PATH_0_16", workflow)
+        assert.equal("0.18", driver.TITAN_VER)
+        assert.equal("_0_18", driver.TITAN_VER_SUFFIX)
+        assert.match("TITAN_ABI_VERSION%s*:?=%s*0%.18", makefile)
+        assert.match("TITAN_PATH_0_18", makefile)
+        assert.match("TITAN_PATH_0_18", workflow)
+        assert.not_match("TITAN_PATH_0_17", makefile)
+        assert.not_match("TITAN_PATH_0_17", workflow)
+        assert.match("lib/titan/0%.18", installer)
+        assert.match("stdlib_0_18", installer)
+        assert.not_match("lib/titan/0%.17", installer)
     end)
 
     it("rejects a compiled container with types but no ABI marker", function()
@@ -71,26 +87,28 @@ describe("compiled-module ABI version", function()
         assert.truthy(ok, "could not build fake legacy module")
 
         local loader = driver.defaultloader({})
-        local loaded, err = loader("legacy")
+        local loaded, err = driver.with_loader(loader, function(loader)
+            return loader("legacy")
+        end)
         assert.falsy(loaded)
         assert.match("claims module 'legacy'", err, 1, true)
         assert.match("missing metadata symbol 'legacy_abi'", err, 1, true)
     end)
 
-    it("rejects a 0.16 module before executing its old type metadata", function()
-        os.remove("legacy16.titan")
-        local f = assert(io.open("legacy16.c", "w"))
+    it("rejects a 0.17 DSO before executing its old type metadata", function()
+        os.remove("legacy17.titan")
+        local f = assert(io.open("legacy17.c", "w"))
         f:write([[
             typedef struct lua_State lua_State;
             extern const char *lua_pushstring(lua_State *L, const char *s);
 
-            int legacy16_abi(lua_State *L) {
-                lua_pushstring(L, "0.16");
+            int legacy17_abi(lua_State *L) {
+                lua_pushstring(L, "0.17");
                 return 1;
             }
 
-            int legacy16_types(lua_State *L) {
-                lua_pushstring(L, "this is deliberately invalid 0.16 metadata");
+            int legacy17_types(lua_State *L) {
+                lua_pushstring(L, "this is deliberately invalid 0.17 metadata");
                 return 1;
             }
         ]])
@@ -98,14 +116,72 @@ describe("compiled-module ABI version", function()
         local shared = driver.IS_DARWIN and "-shared -undefined dynamic_lookup"
             or "-shared"
         local ok = os.execute(table.concat({
-            driver.CC, "-fPIC", shared, "-o", "legacy16.so", "legacy16.c"
+            driver.CC, "-fPIC", shared, "-o", "legacy17.so", "legacy17.c"
         }, " "))
-        assert.truthy(ok, "could not build fake 0.16 module")
+        assert.truthy(ok, "could not build fake 0.17 module")
 
         local loader = driver.defaultloader({})
-        local loaded, err = loader("legacy16")
+        local loaded, err = driver.with_loader(loader, function(loader)
+            return loader("legacy17")
+        end)
         assert.falsy(loaded)
-        assert.match("ABI mismatch: expected 0.17 but found 0.16", err, 1, true)
+        assert.match("ABI mismatch: expected 0.18 but found 0.17", err, 1, true)
+    end)
+
+    it("rejects a 0.17 archive before decoding or linking old metadata",
+       function()
+        local payload = assert(staticmetadata.render(
+            "legacy17archive", "0.17",
+            "this is deliberately invalid 0.17 metadata"))
+        local initializer = assert(staticmetadata.c_initializer(payload))
+        local f = assert(io.open("legacy17archive.c", "w"))
+        f:write(string.format([[
+#if defined(__APPLE__)
+#define TITAN_META_SECTION \
+    __attribute__((used, aligned(1), section("__TEXT,__titanmeta")))
+#else
+#define TITAN_META_SECTION \
+    __attribute__((used, aligned(1), section(".titan.meta")))
+#endif
+TITAN_META_SECTION
+static const unsigned char legacy17archive_metadata[] = %s;
+int legacy17archive_payload(void) { return 0; }
+]], initializer))
+        f:close()
+
+        local ok = os.execute(configured_command(
+            driver.CC, "-c", "-fPIC", "legacy17archive.c",
+            "-o", "legacy17archive.o"))
+        assert.truthy(ok, "could not build fake 0.17 archive object")
+        ok = os.execute(configured_command(
+            driver.AR, "rcs", "legacy17archive.a", "legacy17archive.o"))
+        assert.truthy(ok, "could not build fake 0.17 archive")
+        ok = os.execute(configured_command(
+            driver.RANLIB, "legacy17archive.a"))
+        assert.truthy(ok, "could not index fake 0.17 archive")
+
+        driver.imported = {}
+        local decoded = false
+        local original_decode = driver.decode_module_interface
+        driver.decode_module_interface = function(...)
+            decoded = true
+            return original_decode(...)
+        end
+        local loader = driver.defaultloader({}, {
+                prefer_static = true,
+            })
+        local result = table.pack(pcall(function()
+            return driver.with_loader(loader, function(loader)
+                return loader("legacy17archive")
+            end)
+        end))
+        driver.decode_module_interface = original_decode
+        assert.truthy(result[1], result[2])
+        local loaded, err = result[2], result[3]
+        assert.falsy(loaded)
+        assert.falsy(decoded)
+        assert.match("ABI mismatch", err, 1, true)
+        assert.match("expected 0.18 but found 0.17", err, 1, true)
     end)
 
     it("ignores the previous versioned Titan path variable", function()
@@ -114,8 +190,8 @@ describe("compiled-module ABI version", function()
         local script = [[
             package.path = "./?.lua;./?/init.lua;" .. package.path
             local current = require "titan-compiler.driver"
-            assert(current.TITAN_BIN_PATH ~= "/obsolete/titan-0.16")
-            assert(current.TITAN_BIN_PATH:match("0%.17"))
+            assert(current.TITAN_BIN_PATH ~= "/obsolete/titan-0.17")
+            assert(current.TITAN_BIN_PATH:match("0%.18"))
         ]]
         local ok = os.execute(shell_command({
             "env",
@@ -123,9 +199,9 @@ describe("compiled-module ABI version", function()
             "-u", "LUA_CPATH",
             "-u", "LUA_PATH_5_5",
             "-u", "LUA_CPATH_5_5",
-            "-u", "TITAN_PATH_0_17",
+            "-u", "TITAN_PATH_0_18",
             "-u", "TITAN_PATH",
-            "TITAN_PATH_0_16=/obsolete/titan-0.16",
+            "TITAN_PATH_0_17=/obsolete/titan-0.17",
             prefix .. "/bin/lua", "-e", script,
         }))
         assert.truthy(ok)

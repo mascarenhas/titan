@@ -250,6 +250,10 @@ public prefix. That private slot and the new Array boxing protocol require the
 ABI transition, but contributor boundaries still have no runtime identity.
 See [Dense Arrays](dense-arrays.md#canonical-proxy-and-module-cache).
 
+ABI 0.18 preserves folder composition, contributor ordering, and the logical
+interface again. Its compatibility boundary is instead the external callback
+symbol contract between standard-library archive objects and the runtime.
+
 ## `titan.uv` dogfooding
 
 The production `titan.uv` source is the folder ensemble

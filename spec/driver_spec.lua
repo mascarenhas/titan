@@ -29,7 +29,7 @@ end
 describe("compiler installation discovery", function()
     it("uses the first literal Lua 5.5 C-module prefix", function()
         local cpath = table.concat({
-            "/first prefix/lib/titan/0.17/?.so",
+            "/first prefix/lib/titan/0.18/?.so",
             "/wrong/lib/lua/5.4/?.so",
             "/also-wrong/lib/lua/5.5/?.dylib",
             "/first prefix/lib/lua/5.5/?.so",
@@ -100,8 +100,8 @@ describe("compiler installation discovery", function()
             libtitan = "/opt/titan/lib/libtitan.a",
             libbacktrace = "/opt/titan/lib/libbacktrace.a",
             liblua = "/opt/titan/lib/liblua.a",
-            titan_bin = "/opt/titan/lib/titan/0.17",
-            lua_cpath = "/opt/titan/lib/titan/0.17/?.so",
+            titan_bin = "/opt/titan/lib/titan/0.18",
+            lua_cpath = "/opt/titan/lib/titan/0.18/?.so",
         }, paths)
 
         assert.same({
@@ -152,6 +152,34 @@ describe("compiler installation discovery", function()
             "lua-5.5.0/src/liblua.a",
             "-ldl", "-lm",
         }, driver.source_link_inputs("lua-5.5.0/src"))
+    end)
+
+    it("shares the exact generated-object prefix with profiles and probes",
+    function()
+        local descriptor = assert(driver.toolchain_descriptor())
+        local reconstructed = {}
+        for _, argument in ipairs(descriptor.compiler_argv) do
+            reconstructed[#reconstructed + 1] = argument
+        end
+        for _, argument in ipairs(descriptor.compile_flags) do
+            reconstructed[#reconstructed + 1] = argument
+        end
+        for _, directory in ipairs(descriptor.include_dirs) do
+            reconstructed[#reconstructed + 1] = "-I"
+            reconstructed[#reconstructed + 1] = directory
+        end
+
+        assert.same(assert(driver.generated_compile_prefix()),
+            reconstructed)
+        assert.same(driver.foreign_include_dirs(),
+            descriptor.include_dirs)
+        if not driver.INSTALLED then
+            assert.same({
+                driver.TITAN_RUNTIME_PATH,
+                driver.LUA_SOURCE_PATH,
+                driver.LIBBACKTRACE_PATH,
+            }, descriptor.include_dirs)
+        end
     end)
 
     it("rescans selected ELF payload after the Titan runtime", function()
@@ -273,6 +301,125 @@ describe("compiled-container path contracts", function()
             assert(directory:match("^(.*)/[^/]+$")))
         assert.equal(directory .. "/provider.so", staged)
         remove_tree(workspace)
+    end)
+end)
+
+describe("loader resolver ownership", function()
+    it("closes the titanc resolver when an unexpected error unwinds the chunk",
+    function()
+        local close_calls = 0
+        local fake_driver = {
+            deduplicate_module_names = function(modules) return modules end,
+            new_resolver_context = function() return {} end,
+            configure_foreign_c = function() end,
+            defaultloader = function()
+                error("injected titanc loader failure")
+            end,
+            close_resolver_context = function(context)
+                assert.is_table(context)
+                close_calls = close_calls + 1
+                return true
+            end,
+        }
+        local argument_parser = {}
+        local chain = { args = function(self) return self end }
+        function argument_parser:argument() return chain end
+        function argument_parser:flag() return chain end
+        function argument_parser:option() return chain end
+        function argument_parser:parse()
+            return {
+                module = { "exceptional" },
+                extra_object = {},
+            }
+        end
+        local fake_argparse = setmetatable({}, {
+            __call = function() return argument_parser end,
+        })
+        local modules = {
+            argparse = fake_argparse,
+            ["titan-compiler.checker"] = {},
+            ["titan-compiler.coder"] = {},
+            ["titan-compiler.parser"] = {},
+            ["titan-compiler.driver"] = fake_driver,
+            ["titan-compiler.util"] = {},
+        }
+        local environment = setmetatable({
+            arg = {},
+            require = function(name)
+                return assert(modules[name], "unexpected module " .. name)
+            end,
+        }, { __index = _G })
+        local chunk = assert(loadfile("titanc", "t", environment))
+        local ok, err = pcall(chunk)
+        assert.is_false(ok)
+        assert.matches("injected titanc loader failure", tostring(err),
+            1, true)
+        assert.equal(1, close_calls)
+    end)
+
+    it("closes internally owned default and table resolvers exactly once",
+    function()
+        local original_close = driver.close_resolver_context
+        local close_calls = 0
+        driver.close_resolver_context = function(context)
+            assert.is_table(context)
+            close_calls = close_calls + 1
+            return true
+        end
+
+        local ran, failure = pcall(function()
+            local default = driver.defaultloader({})
+            local first, second, third =
+                driver.with_loader(default, function(loader)
+                    assert.is_function(loader)
+                    return "done", nil, 3
+                end)
+            assert.equal("done", first)
+            assert.is_nil(second)
+            assert.equal(3, third)
+            assert.equal(1, close_calls)
+            assert.is_true(driver.close_loader(default))
+            assert.equal(1, close_calls)
+
+            local in_memory = driver.tableloader({}, {}, {})
+            local body_ok, body_error = pcall(
+                driver.with_loader, in_memory, function()
+                    error("injected loader body failure")
+                end)
+            assert.is_false(body_ok)
+            assert.matches("injected loader body failure",
+                tostring(body_error), 1, true)
+            assert.equal(2, close_calls)
+            assert.is_true(driver.close_tableloader(in_memory))
+            assert.equal(2, close_calls)
+
+            local borrowed_context = driver.new_resolver_context()
+            local borrowed = driver.defaultloader({}, {
+                context = borrowed_context,
+            })
+            assert.is_true(driver.close_loader(borrowed))
+            assert.equal(2, close_calls)
+            assert.is_true(original_close(borrowed_context))
+        end)
+        driver.close_resolver_context = original_close
+        assert.truthy(ran, failure)
+    end)
+
+    it("reports an owned resolver close failure after a successful body",
+    function()
+        local original_close = driver.close_resolver_context
+        driver.close_resolver_context = function()
+            return nil, "injected resolver close failure"
+        end
+        local loader = driver.defaultloader({})
+        local ok, err = pcall(
+            driver.with_loader, loader, function() return true end)
+        driver.close_resolver_context = original_close
+
+        assert.is_false(ok)
+        assert.matches("failed to close loader resolver context", err)
+        assert.matches("injected resolver close failure", err)
+        assert.is_true(driver.close_loader(loader))
     end)
 end)
 

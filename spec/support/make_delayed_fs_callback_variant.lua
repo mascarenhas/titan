@@ -54,6 +54,16 @@ local function patch(filename, needle, replacement, label)
         filename .. ": " .. label)
 end
 
+local function require_once(filename, needle, label)
+    local source = sources[filename]
+    local first = assert(source:find(needle, 1, true),
+        "missing delayed-FS direct-call contract: " .. filename .. ": " ..
+        label)
+    assert(not source:find(needle, first + #needle, true),
+        "duplicate delayed-FS direct-call contract: " .. filename .. ": " ..
+        label)
+end
+
 patch("uv.titan", [==[
 local OWNER_TASK_DRIVE = 8
 ]==], [==[
@@ -125,12 +135,22 @@ end
 
 patch("uv.titan", [==[
 do
-  UV_EIO = shim.titan_uvshim_error_eio() as integer
+  UV_EIO = libuv.UV_EIO as integer
 ]==], hook_api .. [==[
 
 do
-  UV_EIO = shim.titan_uvshim_error_eio() as integer
+  UV_EIO = libuv.UV_EIO as integer
 ]==], "module initializer")
+
+-- The variant must retain the production source's direct public-libuv
+-- ownership boundary. These unique checks fail before generating a stale
+-- test-only copy if request publication or cancellation moves contributors.
+require_once("file.titan",
+    "libuv.uv_req_set_data(owner.handle, pointer)",
+    "FS owner data installation")
+require_once("task.titan",
+    "libuv.uv_cancel(fs_owner.handle)",
+    "submitted FS cancellation")
 
 for _, filename in ipairs(filenames) do
     local output = output_dir .. "/" .. filename

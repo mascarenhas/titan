@@ -62,7 +62,7 @@ local function find_standard_layout()
     local prefix = os.getenv("PREFIX")
     if prefix and prefix ~= "" then
         layouts[#layouts + 1] = production_layout(
-            prefix .. "/lib/titan/0.17", prefix .. "/share/lua/5.5")
+            prefix .. "/lib/titan/0.18", prefix .. "/share/lua/5.5")
     end
 
     -- Discover the two owners independently. The supported installation puts
@@ -72,12 +72,12 @@ local function find_standard_layout()
     local installed_shim = package.searchpath(
         "titan.coroutine", package.path)
     local installed_abi_root = installed_container and
-        installed_container:match("^(.*)/lib/titan/0%.17/titan%.so$")
+        installed_container:match("^(.*)/lib/titan/0%.18/titan%.so$")
     local installed_shim_root = installed_shim and
         installed_shim:match("^(.*)/titan/coroutine%.lua$")
     if installed_abi_root and installed_shim_root then
         layouts[#layouts + 1] = production_layout(
-            installed_abi_root .. "/lib/titan/0.17", installed_shim_root)
+            installed_abi_root .. "/lib/titan/0.18", installed_shim_root)
     end
 
     layouts[#layouts + 1] = production_layout(REPO, REPO)
@@ -223,7 +223,7 @@ function M.compile(workspace, modname, options)
     local environment = {
         "env -u LUA_PATH -u LUA_CPATH" ..
             " -u LUA_PATH_5_5 -u LUA_CPATH_5_5 CCACHE_DISABLE=1",
-        "TITAN_PATH_0_17=" .. quote(layout.abi_root),
+        "TITAN_PATH_0_18=" .. quote(layout.abi_root),
         "TITAN_PATH=",
     }
     if options.cppflags then
@@ -265,6 +265,7 @@ end
 
 local function build_variant_workspace(transformer)
     local workspace = M.workspace("variant")
+    local built, variant_or_error = pcall(function()
     assert.truthy(lfs.mkdir(workspace .. "/titan"))
     make_directory(workspace .. "/src/titan")
     local transform = transformer
@@ -316,7 +317,13 @@ local function build_variant_workspace(transformer)
         cppflags = "",
     })
     register_exact_provider(variant_layout, "titan.timer")
-    return workspace, variant_layout
+    return variant_layout
+    end)
+    if not built then
+        run("rm -rf " .. quote(workspace))
+        error(variant_or_error, 0)
+    end
+    return workspace, variant_or_error
 end
 
 function M.variant_workspace(transformer)
@@ -339,7 +346,7 @@ function M.run_lua_source(workspace, source, options)
     local command = {
         "env -u LUA_PATH -u LUA_CPATH" ..
             " -u LUA_PATH_5_5 -u LUA_CPATH_5_5",
-        "TITAN_PATH_0_17=" .. quote(layout.abi_root),
+        "TITAN_PATH_0_18=" .. quote(layout.abi_root),
         "TITAN_PATH=",
         "LUA_PATH=" .. quote(lua_path),
         "LUA_PATH_5_5=" .. quote(lua_path),
@@ -367,7 +374,7 @@ local function app_command(workspace, modname)
     end
     return "env -u LUA_PATH -u LUA_CPATH" ..
         " -u LUA_PATH_5_5 -u LUA_CPATH_5_5" ..
-        " TITAN_PATH_0_17=" .. quote(layout.abi_root) .. " " ..
+        " TITAN_PATH_0_18=" .. quote(layout.abi_root) .. " " ..
         "TITAN_PATH= " .. quote(workspace .. "/" .. program_output)
 end
 

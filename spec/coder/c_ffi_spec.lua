@@ -47,6 +47,52 @@ describe("C FFI code generation", function()
         end)
     end)
 
+    it("executes comparisons against direct libuv-shaped UV_E enumerators", function()
+        with_header([[
+            #define UV_ERRNO_MAP(XX) \
+                XX(EIO, -5) XX(EOF, -4095) XX(ECANCELED, -125)
+            #define XX(code, value) UV_ ## code = value,
+            typedef enum { UV_ERRNO_MAP(XX) } ffi_uv_errno_t;
+            #undef XX
+            static int ffi_uv_eio(void) { return UV_EIO; }
+        ]], function(header)
+            h.run_coder([[
+                local libuv = foreign import "]] .. header .. [["
+
+                function errors_match(): boolean
+                    local status = libuv.ffi_uv_eio()
+                    return (status as integer) == (libuv.UV_EIO as integer)
+                        and (status as integer) ~= (libuv.UV_EOF as integer)
+                        and (status as integer)
+                            ~= (libuv.UV_ECANCELED as integer)
+                end
+            ]], [[
+                assert(test.errors_match())
+            ]])
+        end)
+    end)
+
+    it("uses the active replacement of a macro-shadowed C typedef",
+    function()
+        with_header([[
+            typedef int ffi_public_number;
+            typedef double ffi_replacement_number;
+            #define ffi_public_number ffi_replacement_number
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                function identity(x: float): float
+                    local converted =
+                        x as c.ffi_public_number
+                    return converted as float
+                end
+            ]], [[
+                assert(test.identity(1.25) == 1.25)
+            ]])
+        end)
+    end)
+
     it("preserves Udata pointers as full-userdata TValues", function()
         h.run_coder([[
             local lua = foreign import "lua.h"
@@ -923,6 +969,81 @@ describe("C FFI code generation", function()
                 end
             ]], [[
                 assert(test.sum() == 23)
+            ]])
+        end)
+    end)
+
+    it("executes exact pointer, array, and function declarator shapes",
+    function()
+        with_header([[
+            static int ffi_first = 10;
+            static int ffi_second = 20;
+            static int ffi_third = 30;
+            static int *ffi_pointer_array[3] = {
+                &ffi_first, &ffi_second, &ffi_third
+            };
+            static int ffi_row[3] = { 4, 5, 6 };
+            static int (*ffi_array_pointer)[3] = &ffi_row;
+            static int ffi_add_two(int value) {
+                return value + 2;
+            }
+            static int (*ffi_callbacks[2])(int) = {
+                ffi_add_two, ffi_add_two
+            };
+            static int (*ffi_row_factory(void))[3] {
+                return &ffi_row;
+            }
+            static int ffi_matrix[1][3] = { { 7, 8, 9 } };
+            static int ffi_matrix_sum(int values[][3]) {
+                return values[0][0] + values[0][1] + values[0][2];
+            }
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                function exact_declarators(): integer
+                    return (c.ffi_pointer_array[1][0] as integer)
+                        + (c.ffi_array_pointer[0][1] as integer)
+                        + (c.ffi_callbacks[0](4) as integer)
+                        + (c.ffi_row_factory()[0][2] as integer)
+                        + (c.ffi_matrix_sum(c.ffi_matrix) as integer)
+                end
+            ]], [[
+                assert(test.exact_declarators() == 61)
+            ]])
+        end)
+    end)
+
+    it("renders qualified callback returns in locals and calls", function()
+        with_header([[
+            typedef const int (*ffi_qualified_callback)(void);
+
+            static const int ffi_qualified_answer(void) {
+                return 42;
+            }
+
+            static ffi_qualified_callback ffi_choose_qualified(void) {
+                return ffi_qualified_answer;
+            }
+
+            static int ffi_apply_qualified(
+                    ffi_qualified_callback callback) {
+                return callback();
+            }
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                function qualified_callbacks(): integer
+                    local direct: c.ffi_qualified_callback =
+                        c.ffi_qualified_answer
+                    local chosen = c.ffi_choose_qualified()
+                    return (direct() as integer)
+                        + (c.ffi_apply_qualified(direct) as integer)
+                        + (chosen() as integer)
+                end
+            ]], [[
+                assert(test.qualified_callbacks() == 126)
             ]])
         end)
     end)

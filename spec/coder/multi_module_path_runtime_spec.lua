@@ -69,7 +69,7 @@ local function compiler_argv(output_root, source_root, titan_path, ...)
         "-u", "LUA_PATH", "-u", "LUA_PATH_5_5",
         "-u", "LUA_CPATH", "-u", "LUA_CPATH_5_5",
         "CCACHE_DISABLE=1",
-        "TITAN_PATH_0_17=" .. titan_path,
+        "TITAN_PATH_0_18=" .. titan_path,
         "TITAN_PATH=",
     }
     if PREFIX then
@@ -117,14 +117,14 @@ local function run_lua(cwd, titan_path, package_path, cpath_roots, code)
     for _, root in ipairs(cpath_roots) do
         table.insert(cpath, root .. "/?.so")
     end
-    table.insert(cpath, PREFIX .. "/lib/titan/0.17/?.so")
+    table.insert(cpath, PREFIX .. "/lib/titan/0.18/?.so")
     table.insert(cpath, PREFIX .. "/lib/lua/5.5/?.so")
 
     return run({
         "env",
         "-u", "LUA_PATH", "-u", "LUA_PATH_5_5",
         "-u", "LUA_CPATH", "-u", "LUA_CPATH_5_5",
-        "TITAN_PATH_0_17=" .. titan_path,
+        "TITAN_PATH_0_18=" .. titan_path,
         "TITAN_PATH=",
         LUA, "-e", string.format([[
 package.path = %q

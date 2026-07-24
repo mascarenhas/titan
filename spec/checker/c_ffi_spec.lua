@@ -78,6 +78,30 @@ describe("C FFI type checking", function()
         assert.truthy(ok, err)
     end)
 
+    it("compares a returned status with direct libuv-shaped UV_E enumerators", function()
+        with_header([[
+            #define UV_ERRNO_MAP(XX) \
+                XX(EIO, -5) XX(EOF, -4095) XX(ECANCELED, -125)
+            #define XX(code, value) UV_ ## code = value,
+            typedef enum { UV_ERRNO_MAP(XX) } ffi_uv_errno_t;
+            #undef XX
+            static int ffi_uv_eio(void) { return UV_EIO; }
+        ]], function(header)
+            local ok, err = run_checker([[
+                local libuv = foreign import "]] .. header .. [["
+
+                local function is_io(): boolean
+                    local status = libuv.ffi_uv_eio()
+                    return (status as integer) == (libuv.UV_EIO as integer)
+                        and (status as integer) ~= (libuv.UV_EOF as integer)
+                        and (status as integer)
+                            ~= (libuv.UV_ECANCELED as integer)
+                end
+            ]])
+            assert.truthy(ok, err)
+        end)
+    end)
+
     it("accepts matching C redeclarations reached through typedef chains", function()
         with_header([[
             typedef long ffi_base;

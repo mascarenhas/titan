@@ -42,6 +42,27 @@ local function expand(src)
     return table.concat(ctx.output, " ")
 end
 
+-- Ask the configured host preprocessor for the spelling of one output line.
+-- This keeps the stringification differential focused: directives are
+-- suppressed with -P, and surrounding newlines are not part of the contract.
+local function host_expand(src)
+    local tmp = os.tmpname() .. ".c"
+    local f = assert(io.open(tmp, "wb"))
+    f:write(src)
+    f:close()
+    local compiler = assert(cpp.split_shell_words(os.getenv("CC") or "cc"))
+    table.insert(compiler, "-E")
+    table.insert(compiler, "-P")
+    table.insert(compiler, "-x")
+    table.insert(compiler, "c")
+    table.insert(compiler, tmp)
+    local result = cpp.capture_command(compiler)
+    os.remove(tmp)
+    assert.is_true(result.started, result.diagnostic)
+    assert.is_true(result.ok, result.diagnostic)
+    return result.output:match("^%s*(.-)%s*$")
+end
+
 -- Preprocess `src` like the FFI does, then run the C99 declaration grammar
 -- (c-parser/c99.lua) over the result. Returns (parsed_ok, recoveries) where
 -- `recoveries` is how many top-level declarations the error-recovery rule had
@@ -49,7 +70,7 @@ end
 -- headers (extended floats, _Static_assert, function-body skipping, recovery).
 local function parse_decls(src)
     local res = c99.match_language_grammar(expand(src) .. " $EOF$")
-    return res ~= nil, c99.recoveries, res and #res or 0
+    return res ~= nil, c99.recoveries, res and #res or 0, res
 end
 
 describe("c preprocessor (cpp)", function()
@@ -92,6 +113,20 @@ describe("c preprocessor (cpp)", function()
             words, err = cpp.split_shell_words("-I/tmp/path\\")
             assert.is_nil(words)
             assert.matches("trailing backslash", err)
+        end)
+
+        it("normalizes a shell-reported child signal as interruption",
+        function()
+            local result = cpp.capture_command({
+                "/bin/sh", "-c", "kill -TERM $$",
+            })
+            assert.is_true(result.started)
+            assert.is_false(result.ok)
+            assert.is_true(result.interrupted)
+            assert.equal("signal", result.why)
+            assert.equal(15, result.signal)
+            assert.equal(15, result.status)
+            assert.equal(143, result.shell_status)
         end)
     end)
 
@@ -176,11 +211,128 @@ describe("c preprocessor (cpp)", function()
         it("stringizes an argument with #", function()
             assert.equal('"hello"', expand("#define STR(x) #x\nSTR(hello)\n"))
         end)
+        it("stringizes raw tokens without expanding macro arguments", function()
+            assert.equal('"NAME"', expand([[
+#define NAME expanded
+#define STR(x) #x
+STR(NAME)
+]]))
+        end)
+        it("does not prescan an argument used only by stringize", function()
+            assert.equal('"FAIL(a)"', expand([[
+#define FAIL(x) x ## +
+#define STR(x) #x
+STR(FAIL(a))
+]]))
+        end)
+        it("preserves adjacency and collapses only existing whitespace", function()
+            assert.equal('"a+b" "a + b"', expand([[
+#define STR(x) #x
+STR(a+b) STR(  a   +	 b  )
+]]))
+        end)
+        it("turns comment replacement into one stringized space", function()
+            assert.equal('"a + b"', expand([[
+#define STR(x) #x
+STR(a/**/+/* comment */b)
+]]))
+        end)
+        it("preserves argument spelling through a generated macro call", function()
+            assert.equal('"a+b"', expand([[
+#define STR(x) #x
+#define APPLY(x) STR(x)
+APPLY(a+b)
+]]))
+        end)
+        it("carries whitespace across an empty prescanned macro", function()
+            assert.equal('"a +b" "a++b" "a++b"', expand([[
+#define STR(x) #x
+#define PASS(x) STR(x)
+#define EMPTY
+#define EMPTY_CALL(...)
+PASS(a EMPTY+b) PASS(a+EMPTY_CALL( )+b) PASS(a+EMPTY_CALL(x  , y)+b)
+]]))
+        end)
+        it("keeps raw digraph spelling while expanding canonical tokens",
+        function()
+            assert.equal('"a %: b" "a <: b :>"', expand([[
+#define STR(x) #x
+STR(a %: b) STR(a <: b :>)
+]]))
+            assert.equal("42 foobar", expand([[
+%:define VALUE 42
+#define CAT(a,b) a %:%: b
+VALUE CAT(foo,bar)
+]]))
+        end)
+        it("matches the host for adjacent, spaced, and comment-separated tokens",
+        function()
+            local src = [=[
+#define STR(x) #x
+#define PASS(x) STR(x)
+#define EMPTY
+#define EMPTY_CALL(...)
+STR(a+b) STR(  a   + b  ) STR(a/**/+b) STR("a\b") PASS(a EMPTY+b) PASS(a+EMPTY_CALL( )+b) PASS(a+EMPTY_CALL(x  , y)+b) STR(a %: b) STR(a <: b :>)
+]=]
+            assert.equal(host_expand(src), expand(src))
+        end)
+        it("escapes quotes and backslashes while stringizing", function()
+            assert.equal([["\"a\\b\""]], expand([[
+#define STR(x) #x
+STR("a\b")
+]]))
+        end)
         it("pastes tokens with ##", function()
             assert.equal("foobar", expand("#define CAT(a,b) a ## b\nCAT(foo,bar)\n"))
         end)
+        it("uses raw arguments for one-level paste and prescanned arguments ordinarily", function()
+            assert.equal("1 2", expand([[
+#define A X
+#define B Y
+#define AB 1
+#define XY 2
+#define CAT(a,b) a ## b
+#define EXPAND_CAT(a,b) CAT(a,b)
+CAT(A,B) EXPAND_CAT(A,B)
+]]))
+        end)
+        it("keeps raw and expanded forms independent for repeated parameters", function()
+            assert.equal("prefix_NAME expanded", expand([[
+#define NAME expanded
+#define BOTH(x) prefix_ ## x x
+BOTH(NAME)
+]]))
+        end)
         it("pastes with an empty argument (placemarker)", function()
             assert.equal("acos", expand("#define CAT(x,y) x ## y\nCAT(acos,)\n"))
+        end)
+        it("handles empty left, right, and chained paste arguments", function()
+            assert.equal("left right ac", expand([[
+#define CAT(a,b) a ## b
+#define CHAIN(a,b,c) a ## b ## c
+CAT(,left) CAT(right,) CHAIN(a,,c)
+]]))
+        end)
+        it("pastes only the boundary token of a multi-token raw argument", function()
+            assert.equal("a + bc", expand("#define CAT(a,b) a ## b\nCAT(a + b,c)\n"))
+        end)
+        it("rejects a paste that does not form one preprocessing token", function()
+            local ok, err = pcall(
+                expand, "#define CAT(a,b) a ## b\nCAT(+,*)\n")
+            assert.falsy(ok)
+            assert.matches(
+                "invalid preprocessing token paste at line 2: '+' ## '*'",
+                tostring(err), 1, true)
+        end)
+        it("preserves libuv-shaped X-macro enumerator names", function()
+            assert.equal("UV_EIO , UV_EOF , UV_ECANCELED ,", expand([[
+#define EIO 5
+#define EOF -1
+#define ECANCELED 125
+#define UV_ERRNO_MAP(XX) XX(EIO) XX(EOF) XX(ECANCELED)
+#define XX(code) UV_ ## code ,
+UV_ERRNO_MAP(XX)
+]]))
         end)
         -- Regression: a paste macro reused across sibling expansions must not be
         -- suppressed by the recursion guard. This mirrors glibc's <math.h>, where
@@ -263,6 +415,51 @@ VEC(acos,, (double __x))
         end)
         it("abstract (unnamed) parameter declarators", function()
             ok_decls("int f(int, char *);\n", 1)
+        end)
+        it("captures suffixes on abstract parameter declarators", function()
+            local ok, rec, n, parsed = parse_decls([[
+                extern int f(
+                    int [7],
+                    int (*)(double),
+                    int (*)[7]);
+            ]])
+            assert.is_true(ok)
+            assert.equal(0, rec)
+            assert.equal(1, n)
+
+            local params = parsed[1].ids[1].decl.params
+            assert.same({"7"}, params[1].param.id[1].idx)
+            assert.same({"*"}, params[2].param.id.declarator)
+            assert.same(
+                {"double"}, params[2].param.id.params[1].param.type)
+            assert.same({"*"}, params[3].param.id.declarator)
+            assert.same({"7"}, params[3].param.id[1].idx)
+        end)
+        it("separates array parameter markers from their bounds", function()
+            local ok, rec, n, parsed = parse_decls([[
+                extern int f(
+                    int [static const 3],
+                    int [volatile static 4],
+                    int [*]);
+            ]])
+            assert.is_true(ok)
+            assert.equal(0, rec)
+            assert.equal(1, n)
+
+            local params = parsed[1].ids[1].decl.params
+            assert.same({
+                array_static = "static",
+                array_qualifiers = { "const" },
+                idx = { "3" },
+            }, params[1].param.id[1])
+            assert.same({
+                array_static = "static",
+                array_qualifiers = { "volatile" },
+                idx = { "4" },
+            }, params[2].param.id[1])
+            assert.same({
+                idx = "*",
+            }, params[3].param.id[1])
         end)
         it("function-pointer parameters (qsort-style)", function()
             ok_decls("void qs(void *b, int (*cmp)(const void *, const void *));\n", 1)
@@ -414,6 +611,8 @@ extern int after(void);
             assert.equal("OK", on("1 && 1"))
             assert.equal("OK", on("0 || 1"))
             assert.equal("OK", on("!0"))
+            assert.equal("", on("!2"))
+            assert.equal("", on("!-1"))
             assert.equal("OK", on("(1 ? 2 : 0) == 2"))
         end)
         it("octal, hex, and parenthesized constants", function()

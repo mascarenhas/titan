@@ -6,9 +6,11 @@ local SIGNAL_CASES = [====[
 local libuv = foreign import "uv.h"
 local lua = foreign import "lua.h"
 local ffi = foreign import "titan/ffi.h"
+local csignal = foreign import "signal.h"
 local os = import "os"
 local timer = import "timer"
 local async = import "async"
+local uv = import "uv"
 
 local cancelled_wait_resumed = false
 local sent_cancelled_wait_resumed = false
@@ -155,8 +157,18 @@ function schedule_validation_rejections(): async.Task
     catch
       uncatchable = true
     end
-    check(unknown and uncatchable,
-          "invalid or uncatchable signal name was accepted")
+    local embedded_nul = false
+    do
+      os.wait_signal("usr1\0kill")
+    catch
+      embedded_nul = true
+    end
+    check(unknown and uncatchable and embedded_nul,
+          "invalid, uncatchable, or NUL-containing signal name was accepted")
+    local wrapped_term =
+      4294967296 + (csignal.SIGTERM as integer)
+    check(not uv._os_signal_name(wrapped_term),
+          "large signal number wrapped before host-constant comparison")
 
     -- Immediate validation failures must leave ordinary signal use intact.
     local waiter = async.run(function (): value

@@ -1,0 +1,384 @@
+# C FFI declarations, conversions, and expressions
+
+The [C FFI overview](ffi.md) explains `foreign import`, the supported C type
+families, owned allocation, and calls. This chapter covers the parts of the C
+interface that participate directly in Titan declarations and expressions:
+named C tags, automatic C objects, fixed arrays, contextual pointer
+conversions, and operators evaluated with C semantics.
+
+These facilities remain unsafe. The checker preserves C type and lifetime
+rules that it can establish statically, and it asks the configured C compiler
+to validate target-specific conversions and expressions. It does not make a C
+pointer safe, extend automatic storage, or define behavior that C leaves
+undefined.
+
+## Named `struct` and `union` tags
+
+A named file-scope C tag is source-nameable through the foreign module even
+when the header does not declare a typedef:
+
+```c
+/* geometry.h */
+struct Point {
+    int x;
+    int y;
+};
+
+union Cell {
+    int integer_value;
+    double number;
+};
+
+typedef struct Point Row[2];
+```
+
+```lua
+local geometry = foreign import "geometry.h"
+
+local function x_of(point: geometry.Point): integer
+    return point.x as integer
+end
+
+local function clear(cell: geometry.Cell)
+    cell.integer_value = 0
+end
+```
+
+`geometry.Point` above denotes the real C type spelled `struct Point`, and
+`geometry.Cell` denotes `union Cell`. Titan does not invent C typedefs for
+these names. Generated declarations, casts, and probes retain the exact
+`struct` or `union` spelling required by the header.
+
+Only named tags introduced at file scope are published this way. Anonymous
+aggregates, enum tags, and tags whose scope is only a function prototype are
+not source aliases. A forward declaration such as `struct Opaque;` does
+publish `module.Opaque`, but an incomplete aggregate may be used only behind a
+pointer. By-value parameters, returns, locals, casts, field access, `sizeof`,
+and allocation require the complete definition to be visible at that source
+point.
+
+### Real typedefs take precedence
+
+C has separate ordinary-identifier and tag namespaces. Titan presents both
+through the foreign module while preserving that distinction:
+
+```c
+typedef long Item;
+struct Item { int value; };
+```
+
+Here `header.Item` is the real `typedef long Item`, regardless of whether the
+typedef appears before or after the tag declaration. The tag still describes
+C declarations that explicitly use `struct Item`, but Titan does not replace a
+real typedef with the convenient tag alias.
+
+All `struct` and `union` tags share C's one tag namespace in a scope. A visible
+`struct Item` and `union Item` therefore conflict; they are not two overloads.
+Forward declarations imported from separate headers complete the same
+canonical tag when their kinds agree.
+
+The ordinary value namespace remains separate. A header may legally declare
+both `struct stat` and a function named `stat`, and Titan supports both:
+
+```lua
+local c = foreign import "sys/stat.h"
+
+local function inspect(path: string): integer
+    local info: c.stat
+    return c.stat(path, info)
+end
+```
+
+An ordinary value wins when a dotted expression is ambiguous. Consequently,
+type pseudo-members such as `c.stat.new()`, `c.stat.new_array(n)`,
+`c.stat.sizeof`, or `c.stat.alignof` are unavailable when the ordinary member
+`c.stat` collides with the type name; the checker reports that collision
+specifically. Fields named `new`, `new_array`, `sizeof`, or `alignof` on an
+actual aggregate value are ordinary C fields and remain usable.
+
+## Contextual object-pointer conversions
+
+C libraries often expose related opaque structures as different pointer types
+and require the caller to use a cast. Libuv handles are a familiar example:
+converting `uv_tcp_t *` to `uv_handle_t *` is a documented C cast convention,
+not inheritance or a subtype relationship in Titan.
+
+Titan admits such conversions only in a context that already supplies the
+destination C pointer type:
+
+```lua
+local function close_tcp(tcp: *uv.uv_tcp_t)
+    uv.uv_close(tcp, nil)                 -- parameter supplies *uv_handle_t
+end
+
+local function as_handle(tcp: *uv.uv_tcp_t): *uv.uv_handle_t
+    return tcp                            -- return type supplies the target
+end
+
+local function explicit(tcp: *uv.uv_tcp_t): *uv.uv_handle_t
+    return tcp as *uv.uv_handle_t
+end
+```
+
+The same rule is used for annotated locals, assignment, positional and named C
+arguments, C function-pointer calls, returns, explicit casts, and typed C
+variadic arguments. The configured C compiler validates the exact directional
+cast using the fixed standard/Lua/Titan header prefix, ordered foreign-header
+block, and target/toolchain inputs selected for generated compilation.
+Independent declaration extraction does not include the fixed prefix or
+cumulative earlier-import macro state; headers whose declarations depend on
+either need the
+[umbrella-header discipline described in the FFI limitations](ffi.md#current-limitations).
+A compiler rejection is a Titan type error; a broken header or toolchain probe
+is reported as a probe failure, not as an incompatible conversion.
+
+Guardrails apply before the compiler probe:
+
+* both sides must be C object pointers after array decay;
+* object pointers never convert to function pointers, or conversely;
+* reachable `const` or `volatile` qualification may be added but not discarded;
+* qualifiers carried by typedefs and array element types remain effective;
+* the conversion is directional and does not change the global
+  `types.compatible` relation.
+
+Fixed C arrays decay to their element pointer before this rule is considered.
+An automatic or imported array is therefore passed as the array expression,
+not as `&array`.
+
+An existing address coercion still handles a by-value C object passed to a
+pointer parameter. A mutable local or parameter may supply a mutable out
+pointer; other by-value object expressions can supply only a compatible
+`const` pointer. When the pointed-to types need the unsafe conversion above,
+Titan first takes the permitted address and then emits the validated C cast.
+
+## Zero-initialized automatic C objects
+
+A local declaration with a C aggregate type may omit its right-hand side:
+
+```lua
+local c = foreign import "geometry.h"
+
+local function origin(): integer
+    local point: c.Point
+    return (point.x as integer) + (point.y as integer)
+end
+```
+
+This initializer-less production is deliberately narrow: its source grammar is
+exactly `local name: module.Type` or
+`local name: module.Type[positive_literal]`. A Titan alias that happens to
+resolve to a C type, a direct pointer spelling, an option marker, multiple
+declarations, or an inferred type does not enter this production. Initialized
+locals continue to use the ordinary, more general declaration grammar.
+
+This is not an uninitialized Titan local. It emits a C automatic object with a
+`{0}` initializer, so the complete object is zero-initialized according to C.
+The no-right-hand-side form is accepted only for:
+
+* a complete C `struct`;
+* a complete C `union`;
+* a fixed-size C array whose complete element type is eligible recursively.
+
+It is rejected for C scalars, pointers, `void`, incomplete aggregates,
+flexible-array-member structs, unsized or zero-length arrays, and aggregates
+that transitively contain Lua-GC-bearing FFI storage such as `TValue` or
+`Udata *`.
+
+An initialized C local keeps the ordinary declaration syntax:
+
+```lua
+local point: c.Point = c.make_point()
+```
+
+## Fixed C arrays
+
+A positive literal extent after a C element type declares an automatic fixed
+array:
+
+```lua
+local ffi = foreign import "titan/ffi.h"
+local geometry = foreign import "geometry.h"
+
+local bytes: ffi.titan_ffi_unsigned_char[256]
+local points: geometry.Point[8]
+local matrix: geometry.Row[4] -- imported array typedefs may be nested
+```
+
+The extent is a positive compile-time integer literal. Indexing is zero-based,
+because the generated expression is a C array access:
+
+```lua
+bytes[0] = 65 as ffi.titan_ffi_unsigned_char
+bytes[255] = 0 as ffi.titan_ffi_unsigned_char
+```
+
+`#array` is the fixed element count. Direct indexing of a statically sized C
+array is checked against that count; indexing through a decayed/raw C pointer
+is unchecked. In a pointer context the array decays to a pointer to its first
+element, retaining element qualification.
+
+C arrays are not assignable values. Titan rejects whole-array inference,
+copy-initialization, assignment, return, and capture. Element and field writes
+remain available, and a pointer obtained by decay may be captured like any
+other C pointer.
+
+Automatic aggregates and arrays have ordinary C block lifetime. Titan performs
+no escape analysis: returning, storing, or capturing a pointer to automatic
+storage can leave a dangling pointer after the block or function returns. The
+programmer owns that lifetime contract.
+
+The older `T.new()` and `T.new_array(count)` forms still allocate GC-owned C
+storage. They are different from automatic objects and keep their existing
+allocation and ownership rules.
+
+## A callback-options example
+
+Automatic objects, named tags, function-pointer casts, and address coercion can
+be combined without a private Titan runtime wrapper. Suppose a host library
+provides:
+
+```c
+/* process_fixture.h */
+typedef void (*process_exit_callback)(int status, void *data);
+
+struct ProcessOptions {
+    const char *file;
+    process_exit_callback on_exit;
+    void *data;
+};
+
+extern void host_report_exit(int status, void *data);
+extern int host_spawn(const struct ProcessOptions *options);
+```
+
+Titan can construct the options in automatic storage and pass its address:
+
+```lua
+local host = foreign import "process_fixture.h"
+
+local function spawn(file: string): integer
+    local options: host.ProcessOptions
+    options.file = file
+    options.on_exit =
+        host.host_report_exit as host.process_exit_callback
+    options.data = nil
+    return host.host_spawn(options) as integer
+end
+```
+
+The callback is a host-provided C function and the call remains an ordinary C
+ABI boundary. Titan does not adapt a Titan function or closure to a C callback
+ABI; only a compatible C function or C function-pointer value can fill this
+field.
+
+## C operator mode
+
+An operator uses C mode when at least one operand is a C scalar, C pointer, or
+C array and the combination appears in the following table. Otherwise the
+existing Titan operator rules are unchanged.
+
+| Titan syntax | C-mode operands | Result |
+| --- | --- | --- |
+| `-x` | C integer or C float | promoted integer or original C float |
+| `~x` | C integer | promoted C integer |
+| `a + b` | arithmetic pair; complete object pointer/array plus integer | usual C arithmetic type or pointer |
+| `a - b` | arithmetic pair; pointer/array minus integer; compatible complete object pointers | usual C type, pointer, or Titan `integer` for pointer difference |
+| `a * b`, `a / b` | arithmetic pair | usual C arithmetic type |
+| `a % b` | C integer pair | usual C arithmetic type |
+| `<`, `<=`, `>`, `>=` | arithmetic pair or compatible object pointers | Titan `boolean` |
+| `==`, `~=` | arithmetic pair; object/`void`-pointer pair; pointer and `nil`; matching function pointers | Titan `boolean` |
+| `a & b`, `a \| b`, binary `a ~ b` | C integer pair | usual C arithmetic type |
+| `a << b`, `a >> b` | C integer pair | promoted left C integer type |
+
+Titan `~=` emits C `!=`, and binary Titan `~` emits C `^`. Arrays decay before
+the operator is classified. Both operands are evaluated once in source order,
+then the generated C operator is applied to the temporaries.
+
+The following remain Titan operations and never acquire C meaning: `//` floor
+division, `^` exponentiation, `and`, `or`, `not`, concatenation, and the
+existing meanings of `#`. `COwned` is a Titan userdata wrapper rather than a C
+operand; a context must first adjust it to its payload pointer.
+
+Unsupported C combinations are errors rather than a fallback to Titan numeric
+helpers. These include floating remainder, aggregate operators, arithmetic on
+`void *`, function pointers, or incomplete-object pointers, relational
+function-pointer comparison, and pointer multiplication, division, modulo,
+bitwise operations, or shifts. A C bit-field expression must first be cast to
+an ordinary C or Titan integer, because its declared width can affect C integer
+promotion.
+
+### Promotions and mixed Titan operands
+
+C integer promotions and usual arithmetic conversions determine result types.
+Arithmetic drops typedef identity and produces the target's resolved primitive
+C type. Float rank follows C (`long double`, `double`, `float`), shifts use the
+promoted left type, and pointer subtraction produces a Titan `integer`.
+
+A Titan `integer` mixed with a C operand participates as the configured
+`lua_Integer`; a Titan `float` participates as the configured `lua_Number`.
+The compiler reads those types and all C integer widths, ranks, signedness, and
+ranges from the active target toolchain. It does not assume the Lua process
+running the compiler has the same data model.
+
+This distinction matters. In `small_unsigned + titan_integer`, the small C
+operand is promoted and then combined with `lua_Integer`; the Titan operand is
+not first narrowed to the original small type. Pointer addition and subtraction
+accept a Titan integer offset. Pointer equality accepts Titan `nil` as a
+target-typed null pointer; other pointer/integer comparisons are rejected.
+
+Compatible object pointers use a symmetric common pointer type. Equality
+between otherwise unrelated object pointers is allowed through a qualified
+`void *` common type. That unrelated-pointer fallback is not used for ordering,
+subtraction, or pointer arithmetic. Function pointers support equality only
+when their types match.
+
+### C behavior remains C behavior
+
+C-mode code emits the direct C operator. It deliberately does not use Titan's
+wrapping arithmetic helper, floor-division correction, modulo correction,
+normalized shifts, exponentiation, numeric comparison helpers, or
+divide-by-zero guard. For example:
+
+```lua
+local q = (c_value(-7) / c_value(3))  -- C result: -2
+local r = (c_value(-7) % c_value(3))  -- C result: -1
+```
+
+Unsigned conversion and wrap, signed overflow, division by zero, invalid
+shifts, and implementation-defined right shift consequently have their C
+meaning. Some of those cases are undefined behavior. Titan does not add safety
+checks or define a portable result; use an explicit Titan conversion before
+the operation when Titan semantics are required.
+
+## C constants
+
+Top-level enum constants and supported object-like integer macros are direct
+members of the foreign module:
+
+```lua
+local uv = foreign import "uv.h"
+
+local cancelled = uv.UV_ECANCELED
+local readable = uv.UV_READABLE
+```
+
+The preprocessor expands macro arguments according to C rules: ordinary
+parameter occurrences use a prescanned argument, while `#` stringification and
+`##` token paste use its raw preprocessing tokens. Stringification preserves
+token adjacency, collapses actual whitespace/comments to one space, and
+escapes quotes and backslashes. This is why token-pasted families such as
+libuv's `UV_E*` names import directly; they do not require a Titan-specific
+enum exception.
+
+Function-like macros remain unavailable as foreign members. Macro constants
+whose value cannot be represented by the supported integer-constant importer
+are skipped.
+
+## Related chapters
+
+* [The C FFI](ffi.md) covers imports, calls, fields, ownership, and the wider
+  type boundary.
+* [Statements](statements.md) covers ordinary initialized local declarations.
+* [Expressions](expressions.md) describes Titan operator semantics and
+  precedence outside C mode.
+* [Types](types.md) describes Titan's normal coercion and compatibility rules.

@@ -38,19 +38,45 @@ local function check_mco_result(result: mco.mco_result)
   end
 end
 
+local function root_transfer(co: *mco.mco_coro, payload: value)
+  if not co then
+    return
+  end
+  local owner: *ffi.Udata =
+    mco.mco_get_user_data(co) as *ffi.Udata
+  local top = lua.lua_gettop(L)
+  if (lua.lua_checkstack(L, 2) as integer) == 0 then
+    lua.lua_settop(L, top)
+    raise "cannot reserve Lua stack for coroutine transfer root"
+  end
+  ffi.lua_pushtvalue(L, owner)
+  ffi.lua_pushtvalue(L, payload)
+  local set = lua.lua_setiuservalue(
+    L, -2, coro_native.TITAN_CORO_OWNER_USERVALUES)
+  if (set as integer) == 0 then
+    lua.lua_settop(L, top)
+    raise "cannot set coroutine transfer root"
+  end
+  lua.lua_settop(L, top)
+end
+
+local function clear_transfer(co: *mco.mco_coro)
+  root_transfer(co, nil)
+end
+
 local function push_transfer(source: *mco.mco_coro,
                              ok: ffi.titan_ffi_int, payload: value)
-  coro_native.titan_coro_root_transfer(L, source, payload)
+  root_transfer(source, payload)
   local result = mco.mco_push(source, payload, ffi.TValue.sizeof)
   if (result as integer) ~= (mco.MCO_SUCCESS as integer) then
-    coro_native.titan_coro_clear_transfer(source)
+    clear_transfer(source)
     check_mco_result(result)
   end
   result = mco.mco_push(source, ok, ffi.titan_ffi_int.sizeof)
   if (result as integer) ~= (mco.MCO_SUCCESS as integer) then
     local rollback = mco.mco_pop(source, nil, ffi.TValue.sizeof)
     check_mco_result(rollback)
-    coro_native.titan_coro_clear_transfer(source)
+    clear_transfer(source)
     check_mco_result(result)
   end
 end
@@ -61,7 +87,7 @@ local function discard_transfer(source: *mco.mco_coro)
     check_mco_result(ok_result)
     local payload_result = mco.mco_pop(source, nil, ffi.TValue.sizeof)
     check_mco_result(payload_result)
-    coro_native.titan_coro_clear_transfer(source)
+    clear_transfer(source)
   end
 end
 
@@ -114,7 +140,7 @@ local function pop_transfer_or_raise(co: *mco.mco_coro,
   check_mco_result(ok_result)
   local payload_result = mco.mco_pop(co, payload, ffi.TValue.sizeof)
   check_mco_result(payload_result)
-  coro_native.titan_coro_clear_transfer(co)
+  clear_transfer(co)
   if (ok as integer) == 0 then
     if append_trace then
       raise_with_appended_trace(payload)

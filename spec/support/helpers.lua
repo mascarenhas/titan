@@ -225,25 +225,29 @@ function M.generate_modules(modules, main, forapp)
     reset(true)
     local imported, deps = {}, {}
     local loader = driver.tableloader(modules, imported, deps)
-    local typ, err = checker.checkimport(main, loader)
-    if not typ then return nil, err end
-    if #err ~= 0 then return nil, table.concat(err, "\n") end
-    local ofiles = {}
-    for name, mod in pairs(imported) do
-        local ok, e = driver.compile_module(name, mod, deps, verbose())
-        table.insert(ofiles, name .. ".o")
-        if not ok then return nil, e end
-    end
-    if forapp then
-        local ok, e = driver.compile_program(main, ofiles, nil, verbose())
-        if not ok then return nil, e end
-    else
-        for name, _ in pairs(imported) do
-            local ok, e = driver.compile_library(name, ofiles, nil, verbose())
+    return driver.with_loader(loader, function(loader)
+        local typ, err = checker.checkimport(main, loader)
+        if not typ then return nil, err end
+        if #err ~= 0 then return nil, table.concat(err, "\n") end
+        local ofiles = {}
+        for name, mod in pairs(imported) do
+            local ok, e = driver.compile_module(name, mod, deps, verbose())
+            table.insert(ofiles, name .. ".o")
             if not ok then return nil, e end
         end
-    end
-    return true
+        if forapp then
+            local ok, e =
+                driver.compile_program(main, ofiles, nil, verbose())
+            if not ok then return nil, e end
+        else
+            for name, _ in pairs(imported) do
+                local ok, e =
+                    driver.compile_library(name, ofiles, nil, verbose())
+                if not ok then return nil, e end
+            end
+        end
+        return true
+    end)
 end
 
 -- ===== `.so`-only import path =====
@@ -262,8 +266,11 @@ local function build_one_so(name, src, names)
     -- a `.so`-only module invisible in traces.
     local ast = M.parse(src, name .. ".titan")
     if not ast then return nil, "parse error in " .. name end
-    local _, errs = checker.check(name, ast, src, name .. ".titan",
-        driver.defaultloader(static_deps))
+    local loader = driver.defaultloader(static_deps)
+    local _, errs = driver.with_loader(loader, function(loader)
+        return checker.check(
+            name, ast, src, name .. ".titan", loader)
+    end)
     if #errs ~= 0 then return nil, name .. ": " .. table.concat(errs, "\n") end
     for dep in pairs(static_deps) do
         if names[dep] and dep ~= name then
@@ -296,8 +303,11 @@ end
 function M.run_checker(code)
     reset(true)
     local ast = assert(M.parse(code))
-    local t, errs = checker.check("test", ast, code, "test.titan",
-        driver.defaultloader())
+    local loader = driver.defaultloader()
+    local t, errs = driver.with_loader(loader, function(loader)
+        return checker.check(
+            "test", ast, code, "test.titan", loader)
+    end)
     return #errs == 0, table.concat(errs, "\n"), ast, t
 end
 
@@ -305,7 +315,9 @@ function M.run_checker_modules(modules, main)
     reset(true)
     local imported = {}
     local loader = driver.tableloader(modules, imported)
-    local modt, err = checker.checkimport(main, loader)
+    local modt, err = driver.with_loader(loader, function(loader)
+        return checker.checkimport(main, loader)
+    end)
     if not modt then return false, err end
     return #err == 0, table.concat(err, "\n"), imported
 end
@@ -329,8 +341,11 @@ function M.check_against_so(deps, main_name, main_src)
     end
     reset(true)
     local mast = assert(M.parse(main_src))
-    local mtype, errs = checker.check(main_name, mast, main_src,
-        main_name .. ".titan", driver.defaultloader({}))
+    local loader = driver.defaultloader({})
+    local mtype, errs = driver.with_loader(loader, function(loader)
+        return checker.check(main_name, mast, main_src,
+            main_name .. ".titan", loader)
+    end)
     return errs, mtype
 end
 

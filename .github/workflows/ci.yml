@@ -65,7 +65,7 @@ jobs:
       - name: Install regular build dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake curl libreadline-dev libuv1-dev pkg-config
 
-      - name: Migrate an ABI-0.16 configured prefix to ABI 0.17
+      - name: Migrate an ABI-0.17 configured prefix to ABI 0.18
         run: bash spec/support/ci_abi_migration_smoke.sh prepare linux
 
       - name: Build the bundled libbacktrace
@@ -85,7 +85,7 @@ jobs:
         # titan dev-1. Force this checkout through both source-install phases.
         run: |
           luarocks make --force
-          provider="$PREFIX/lib/titan/0.17/titan.so"
+          provider="$PREFIX/lib/titan/0.18/titan.so"
           static_archive="${provider%.so}.a"
           test -f "$provider" && test ! -L "$provider"
           test -f "$static_archive" && test ! -L "$static_archive"
@@ -324,7 +324,7 @@ jobs:
       - name: Build and install the rock
         run: |
           luarocks make --force
-          provider="$PREFIX/lib/titan/0.17/titan.so"
+          provider="$PREFIX/lib/titan/0.18/titan.so"
           static_archive="${provider%.so}.a"
           test -f "$provider" && test ! -L "$provider"
           test -f "$static_archive" && test ! -L "$static_archive"
@@ -424,7 +424,7 @@ jobs:
       - name: Build sanitizer-enabled Titan artifacts
         run: |
           luarocks make --force
-          provider="$PREFIX/lib/titan/0.17/titan.so"
+          provider="$PREFIX/lib/titan/0.18/titan.so"
           static_archive="${provider%.so}.a"
           test -f "$provider" && test ! -L "$provider"
           test -f "$static_archive" && test ! -L "$static_archive"
@@ -468,6 +468,15 @@ jobs:
             spec/stdlib/uv_tasks_spec.lua \
             spec/stdlib/uv_bootstrap_spec.lua
 
+      - name: Run coroutine transfer sanitizer gate
+        env:
+          TITAN_TEST_EXTRA_CFLAGS: ${{ env.SANITIZER_FLAGS }}
+          TITAN_TEST_EXTRA_LDFLAGS: ${{ env.SANITIZER_FLAGS }}
+        run: |
+          .lua/bin/busted -o gtest -v \
+            spec/stdlib/coroutine_spec.lua \
+            --name='coroutine standard module roots fresh terminal result and error transfers through pop-side GC'
+
       - name: Build sanitizer child-process smoke fixture
         env:
           TITAN_TEST_EXTRA_CFLAGS: ${{ env.SANITIZER_FLAGS }}
@@ -482,14 +491,14 @@ jobs:
       - name: Run sanitized net/OS production smokes
         run: |
           env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-            TITAN_PATH_0_17="$PREFIX/lib/titan/0.17" \
+            TITAN_PATH_0_18="$PREFIX/lib/titan/0.18" \
             LUA_PATH="$PREFIX/share/lua/5.5/?.lua;$PREFIX/share/lua/5.5/?/init.lua;;" \
-            LUA_CPATH="$PREFIX/lib/titan/0.17/?.so;$PREFIX/lib/lua/5.5/?.so;;" \
+            LUA_CPATH="$PREFIX/lib/titan/0.18/?.so;$PREFIX/lib/lua/5.5/?.so;;" \
             .lua/bin/lua spec/fixtures/libuv/net_production_smoke.lua \
               sanitizer
           env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-            TITAN_PATH_0_17="$PREFIX/lib/titan/0.17" \
+            TITAN_PATH_0_18="$PREFIX/lib/titan/0.18" \
             LUA_PATH="$PREFIX/share/lua/5.5/?.lua;$PREFIX/share/lua/5.5/?/init.lua;;" \
-            LUA_CPATH="$PREFIX/lib/titan/0.17/?.so;$PREFIX/lib/lua/5.5/?.so;;" \
+            LUA_CPATH="$PREFIX/lib/titan/0.18/?.so;$PREFIX/lib/lua/5.5/?.so;;" \
             .lua/bin/lua spec/fixtures/libuv/os_production_smoke.lua \
               sanitizer "$TITAN_PROCESS_SMOKE_CHILD"

@@ -231,7 +231,7 @@ local function close_owner(owner: uv_timer_t)
     end
     libuv.uv_timer_stop(owner.handle)
     owner.metadata.lifecycle = OWNER_CLOSING
-    shim.titan_uvshim_timer_close(owner.handle)
+    libuv.uv_close(owner.handle, shim.titan_uvshim_close_cb)
   end
 end
 
@@ -313,7 +313,7 @@ local function start_owner(runtime: Runtime, kind: integer, task: Task?,
     return owner, status as integer
   end
   owner.metadata.lifecycle = OWNER_ACTIVE
-  shim.titan_uvshim_timer_set_data(owner.handle, pointer)
+  libuv.uv_handle_set_data(owner.handle, pointer)
   status = libuv.uv_timer_start {
     handle = owner.handle,
     cb = shim.titan_uvshim_timer_cb,
@@ -326,7 +326,7 @@ local function start_owner(runtime: Runtime, kind: integer, task: Task?,
     -- state immediately after this native owner transition returns.
     libuv.uv_timer_stop(owner.handle)
     owner.metadata.lifecycle = OWNER_CLOSING
-    shim.titan_uvshim_timer_close(owner.handle)
+    libuv.uv_close(owner.handle, shim.titan_uvshim_close_cb)
   end
   return owner, status as integer
 end
@@ -486,7 +486,7 @@ local function detach_fs_wait(task: Task, request: Request)
     if fs_owner.metadata.lifecycle == FS_OWNER_SUBMITTED then
       -- Success still completes through the normal callback.  A too-late
       -- failure is likewise harmless because logical cancellation already won.
-      shim.titan_uvshim_fs_cancel(fs_owner.handle)
+      libuv.uv_cancel(fs_owner.handle)
     end
   elseif operation.file then
     local file = operation.file
@@ -506,7 +506,7 @@ local function detach_net_wait(task: Task, request: Request)
     elseif operation.owner ~= nil then
       local dns: uv_getaddrinfo_t = operation.owner
       if dns.metadata.lifecycle == NET_OWNER_SUBMITTED then
-        shim.titan_uvshim_getaddrinfo_cancel(dns.handle)
+        libuv.uv_cancel(dns.handle)
       end
     end
     return

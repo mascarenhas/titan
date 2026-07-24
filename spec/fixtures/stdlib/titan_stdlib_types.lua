@@ -1,6 +1,6 @@
 -- Exact serialized interfaces captured from the seven separate ABI 0.15
 -- standard-library DSOs before they were bundled into the ABI 0.16 titan.so;
--- the interfaces remain unchanged in the ABI 0.17 paired provider.
+-- the interfaces remain unchanged in the ABI 0.18 paired provider.
 -- The uv contract already has its own byte-counted fixture.
 local uv = assert(loadfile("spec/fixtures/libuv/titan_uv_types.lua"))()
 

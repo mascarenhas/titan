@@ -19,6 +19,172 @@ local base_c_types = {
     INT = { "int" },
 }
 
+-- Target-neutral metadata for an integer constant token. The candidate list is
+-- the ordered C99 6.4.4.1 list; a later target profile chooses the first class
+-- whose range contains the token's value. Keeping the candidates structured
+-- avoids encoding target width, plain-char signedness, or the host Lua number
+-- representation in the registrar.
+local function candidate_class(rank, unsigned)
+    local spelling
+    if rank == "int" then
+        spelling = unsigned and "unsigned int" or "int"
+    elseif rank == "long" then
+        spelling = unsigned and "unsigned long" or "long"
+    else
+        assert(rank == "long_long")
+        spelling = unsigned and "unsigned long long" or "long long"
+    end
+    return {
+        rank = rank,
+        unsigned = unsigned,
+        spelling = spelling,
+    }
+end
+
+local function integer_candidates(base, rank_suffix, unsigned)
+    if unsigned then
+        if rank_suffix == "long_long" then
+            return {
+                candidate_class("long_long", true),
+            }
+        elseif rank_suffix == "long" then
+            return {
+                candidate_class("long", true),
+                candidate_class("long_long", true),
+            }
+        else
+            return {
+                candidate_class("int", true),
+                candidate_class("long", true),
+                candidate_class("long_long", true),
+            }
+        end
+    elseif base == "decimal" then
+        if rank_suffix == "long_long" then
+            return {
+                candidate_class("long_long", false),
+            }
+        elseif rank_suffix == "long" then
+            return {
+                candidate_class("long", false),
+                candidate_class("long_long", false),
+            }
+        else
+            return {
+                candidate_class("int", false),
+                candidate_class("long", false),
+                candidate_class("long_long", false),
+            }
+        end
+    elseif rank_suffix == "long_long" then
+        return {
+            candidate_class("long_long", false),
+            candidate_class("long_long", true),
+        }
+    elseif rank_suffix == "long" then
+        return {
+            candidate_class("long", false),
+            candidate_class("long", true),
+            candidate_class("long_long", false),
+            candidate_class("long_long", true),
+        }
+    else
+        return {
+            candidate_class("int", false),
+            candidate_class("int", true),
+            candidate_class("long", false),
+            candidate_class("long", true),
+            candidate_class("long_long", false),
+            candidate_class("long_long", true),
+        }
+    end
+end
+
+local function integer_literal_metadata(token)
+    local base, radix, digits, suffix
+    digits, suffix = token:match("^0[xX]([0-9a-fA-F]+)([uUlL]*)$")
+    if digits then
+        base, radix = "hexadecimal", 16
+    else
+        digits, suffix = token:match("^0([0-7]*)([uUlL]*)$")
+        if digits then
+            base, radix = "octal", 8
+            if digits == "" then digits = "0" end
+        else
+            digits, suffix = token:match("^([1-9][0-9]*)([uUlL]*)$")
+            if not digits then return nil end
+            base, radix = "decimal", 10
+        end
+    end
+
+    local normalized_suffix = suffix:lower()
+    local unsigned = normalized_suffix:find("u", 1, true) ~= nil
+    local rank_letters = normalized_suffix:gsub("u", "")
+    local rank_suffix
+    if rank_letters == "ll" then
+        rank_suffix = "long_long"
+    elseif rank_letters == "l" then
+        rank_suffix = "long"
+    else
+        assert(rank_letters == "")
+        rank_suffix = "none"
+    end
+
+    return {
+        token = token,
+        base = base,
+        radix = radix,
+        digits = digits,
+        suffix = suffix,
+        normalized_suffix = normalized_suffix,
+        unsigned = unsigned,
+        rank_suffix = rank_suffix,
+        candidate_classes =
+            integer_candidates(base, rank_suffix, unsigned),
+    }
+end
+
+-- Annotate the parsed expression in place and return its integer literal
+-- occurrences in deterministic source/tree order. Numeric children carry the
+-- expression order; keyed child tables cover postfix/argument shapes without
+-- relying on Lua's `pairs` order.
+local function annotate_integer_literals(exp)
+    local literals = {}
+    local seen = {}
+
+    local function visit(node)
+        if type(node) ~= "table" or seen[node] then return end
+        seen[node] = true
+
+        if #node == 1 and type(node[1]) == "string" then
+            local metadata = integer_literal_metadata(node[1])
+            if metadata then
+                node.integer_literal = metadata
+                literals[#literals + 1] = metadata
+            end
+        end
+
+        for i = 1, #node do
+            if type(node[i]) == "table" then visit(node[i]) end
+        end
+
+        local keys = {}
+        for key, value in pairs(node) do
+            if type(key) ~= "number" and key ~= "integer_literal"
+               and type(value) == "table" then
+                keys[#keys + 1] = key
+            end
+        end
+        table.sort(keys, function(left, right)
+            return tostring(left) < tostring(right)
+        end)
+        for _, key in ipairs(keys) do visit(node[key]) end
+    end
+
+    visit(exp)
+    return literals
+end
+
 local function get_binop_type(e1, e2)
     if e1[1] == "double" or e2[1] == "double" then
         return base_c_types.DOUBLE
@@ -47,6 +213,9 @@ local relop_set = {
     ["<="] = true,
     ["=="] = true,
     ["!="] = true,
+    ["&&"] = true,
+    ["||"] = true,
+    ["!"] = true,
 }
 
 local bitop_set = {
@@ -55,6 +224,7 @@ local bitop_set = {
     ["&"] = true,
     ["^"] = true,
     ["|"] = true,
+    ["~"] = true,
 }
 
 -- Best-effort assessment of the type of a #define
@@ -132,6 +302,38 @@ get_type_of_exp = typed("Exp, TypeList -> {string}?", function(exp, lst)
     return nil
 end)
 
+local function bare_identifier(exp)
+    if exp.op or #exp ~= 1 or type(exp[1]) ~= "string"
+       or not exp[1]:match("^[_%a][_%w]*$") then
+        return nil
+    end
+    return exp[1]
+end
+
+local function function_alias_declaration(lst, name, exp)
+    local target_name = bare_identifier(exp)
+    if not target_name then return nil end
+    local target = lst[target_name]
+    if not target or target.type ~= "function" then
+        return nil
+    end
+
+    -- The preprocessor has already renamed the declaration itself, so the
+    -- replacement identifier owns the authoritative parsed signature. Publish
+    -- an ordinary function declaration under the macro spelling used by
+    -- generated C. Keep the nested declaration objects shared: registration is
+    -- complete before this pass and no consumer mutates the signature.
+    if target_name == name then
+        return target
+    end
+    local alias = {}
+    for key, value in pairs(target) do
+        alias[key] = value
+    end
+    alias.name = name
+    return alias
+end
+
 function cdefines.register_define(lst, name, text, _)
     local exp, _, _, _ = c99.match_language_expression_grammar(text .. " ")
     if not exp then
@@ -139,9 +341,54 @@ function cdefines.register_define(lst, name, text, _)
         -- print(("failed parsing: %d:%d: %s\n"):format(line, col, text))
         return
     end
+    local function_alias =
+        function_alias_declaration(lst, name, exp)
+    if function_alias then
+        if lst[name] ~= function_alias then
+            add_type(lst, name, function_alias)
+        end
+        return
+    end
+    local identifier = bare_identifier(exp)
+    if identifier then
+        local target = lst[identifier]
+        if not target then
+            -- A bare C identifier has no intrinsic `int` type. In particular,
+            -- command-line symbol-renaming macros are visible while processing
+            -- unrelated headers, where the renamed declaration is absent.
+            -- Defer publication until an import that actually declares the
+            -- target can register the alias with its authoritative type.
+            return
+        elseif target.type == "typedef" then
+            -- Compiler headers use temporary object-like macros whose
+            -- replacement is a C type name (Clang's stdint.h
+            -- `__int_least*_t` aliases are a common example). A macro-only
+            -- type alias remains unsupported, but when the macro shadows a
+            -- real typedef of the same name, every generated use of that
+            -- spelling expands to the replacement typedef. Publish a shallow
+            -- declaration under the public spelling so checker semantics and
+            -- generated C agree. A self-referential macro leaves the original
+            -- declaration unchanged.
+            local existing = lst[name]
+            if existing and existing.type == "typedef"
+               and identifier ~= name then
+                local alias = {}
+                for key, value in pairs(target) do
+                    alias[key] = value
+                end
+                alias.name = name
+                add_type(lst, name, alias)
+            end
+            return
+        end
+    end
     local typ = get_type_of_exp(exp, lst)
     if typ then
-        add_type(lst, name, { type = typ })
+        add_type(lst, name, {
+            type = typ,
+            macro_expression = exp,
+            integer_literals = annotate_integer_literals(exp),
+        })
     end
 end
 

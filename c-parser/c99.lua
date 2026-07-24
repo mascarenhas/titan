@@ -313,7 +313,7 @@ recoverItem <- ";" _
 -- so its parentheses don't confuse paren matching.
 staticAssertDeclaration <- ( ("_Static_assert" / "static_assert") _ "(" _ constantExpression ("," _ STRING_LITERAL+)? ")" _ ";" _ ) => discard
 
-functionDefinition <- {| {:spec: {| declarationSpecifier+ |} :} {:func: declarator :} {:decls: declaration* :} functionBody |} => decl_func
+functionDefinition <- {| {:_source_position: {} :} {:spec: {| declarationSpecifier+ |} :} {:func: declarator :} {:decls: declaration* :} functionBody |} => decl_func
 
 -- The FFI only needs a function's signature, never its body (and headers carry
 -- `static inline` definitions whose bodies use the full C statement grammar,
@@ -331,7 +331,7 @@ charSkip <- ("'" / "L'") cChar+ "'" _
 --------------------------------------------------------------------------------
 -- Declarations
 
-declaration <- {| gccExtensionSpecifier? {:spec: {| declarationSpecifier+ |} :} gccExtensionSpecifier* ({:ids: initDeclarationList :})? gccExtensionSpecifier* ";" _ |} => decl_ids
+declaration <- {| {:_source_position: {} :} gccExtensionSpecifier? {:spec: {| declarationSpecifier+ |} :} gccExtensionSpecifier* ({:ids: initDeclarationList :})? gccExtensionSpecifier* ";" _ |} => decl_ids
 
 declarationSpecifier <- storageClassSpecifier
                       / typeSpecifier
@@ -435,14 +435,24 @@ directDeclarator <- {:name: IDENTIFIER :} ddRec
 -- Keep C's old-style empty `()` distinct from a parameter-type-list
 -- prototype. The registrar needs this source-level distinction because
 -- `(void)` is a known empty name list while `()` publishes no parameter API.
-ddRec <- "[" _ {| {:idx: typeQualifier* assignmentExpression?          :} |} "]" _ ddRec
-       / "[" _ {| {:idx: { "static" } _ typeQualifier* assignmentExpression :} |} "]" _ ddRec
-       / "[" _ {| {:idx: typeQualifier+ { "static" } _ assignmentExpression :} |} "]" _ ddRec
-       / "[" _ {| {:idx: typeQualifier* { "*" } _                           :} |} "]" _ ddRec
+ddRec <- arrayDeclaratorSuffix ddRec
        / "(" _ {:params: parameterTypeList :} {:paramstyle: "" -> "prototype" :} ")" _ ddRec
        / "(" _ {:params: empty :} {:paramstyle: "" -> "oldstyle" :} ")" _ ddRec
        / "(" _ {:params: identifierList :} {:paramstyle: "" -> "oldstyle" :} ")" _ ddRec
        / ""
+
+-- Keep bracket qualifiers and `static` out of the bound capture. A named
+-- capture around their whole token sequence retains only its first capture,
+-- turning `[static 3]` into the invalid synthetic spelling `[static]`.
+-- Canonical consumers may render `static` before the qualifier list: the two
+-- source orders have the same adjusted parameter-type meaning.
+arrayDeclaratorSuffix <- "[" _ arrayDeclaratorContents "]" _
+arrayDeclaratorContents <-
+         {| {:array_static: { "static" } :} _ arrayDeclaratorQualifiers? {:idx: assignmentExpression :} |}
+       / {| arrayDeclaratorQualifiers {:array_static: { "static" } :} _ {:idx: assignmentExpression :} |}
+       / {| arrayDeclaratorQualifiers? {:idx: { "*" } :} _ |}
+       / {| arrayDeclaratorQualifiers? ({:idx: assignmentExpression :} / {:idx: "" -> "" :}) |}
+arrayDeclaratorQualifiers <- {:array_qualifiers: {| typeQualifier+ |} :}
 
 pointer <- {| ({ "*"/"^" } _ typeQualifier*)+ |}
 
@@ -455,14 +465,22 @@ parameterDeclaration <- {| {:param: {| {:type: {| declarationSpecifier+ |} :} {:
 
 typeName <- {| specifierQualifier+ abstractDeclarator? |} => type
 
-abstractDeclarator <- pointer? directAbstractDeclarator
+abstractDeclarator <- {| pointer? directAbstractDeclarator |}
                     / pointer
 
-directAbstractDeclarator <- ("(" _ abstractDeclarator ")" _) directAbstractDeclarator2*
-                          / directAbstractDeclarator2+
-directAbstractDeclarator2 <- "[" _ assignmentExpression? "]" _
-                           / "[" _ "*" _ "]" _
-                           / "(" _ (parameterTypeList / empty) ")" _
+-- Preserve abstract declarators in the same recursive shape as named
+-- declarators. The old suffix-only recognizer consumed `(*)[N]` and
+-- `(*)(P...)` but captured only the inner `*`, so unnamed parameters silently
+-- lost their array/function nesting before CType conversion.
+directAbstractDeclarator <- "(" _ {:declarator: abstractDeclarator :} ")" _ daRec
+                          / daRecNonempty
+daRec <- arrayDeclaratorSuffix daRec
+       / "(" _ {:params: parameterTypeList :} {:paramstyle: "" -> "prototype" :} ")" _ daRec
+       / "(" _ {:params: empty :} {:paramstyle: "" -> "oldstyle" :} ")" _ daRec
+       / ""
+daRecNonempty <- arrayDeclaratorSuffix daRec
+               / "(" _ {:params: parameterTypeList :} {:paramstyle: "" -> "prototype" :} ")" _ daRec
+               / "(" _ {:params: empty :} {:paramstyle: "" -> "oldstyle" :} ")" _ daRec
 
 typedefName <- IDENTIFIER => is_typedef
 
@@ -614,8 +632,8 @@ castExpression <- unaryExpression
 
 local preprocessing_rules = [[--lpeg.re
 
-preprocessingLine <- _ ( "#" _ directive _
-                       / "#" _ preprocessingTokenList? {| _ |} -- non-directive, ignore
+preprocessingLine <- _ ( ("#" / "%:") _ directive _
+                       / ("#" / "%:") _ preprocessingTokenList? {| _ |} -- non-directive, ignore
                        / preprocessingTokenList
                        / empty
                        )
@@ -672,7 +690,11 @@ preprocessingNumber <- { ("."? digit) ( digit
                                       / "."
                                       )* }
 
-punctuator <- { digraphs / '...' / '<<=' / '>>=' /
+-- `digraphs` already produces the canonical replacement capture. Keep it
+-- outside the ordinary substring capture; wrapping both used to emit two
+-- preprocessing tokens (the raw `%:` plus `#`, `<:` plus `[`, and so on).
+punctuator <- digraphs
+            / { '...' / '<<=' / '>>=' /
                 '##' / '<<' / '>>' / '->' / '++' / '--' / '&&' / '||' / '<=' / '>=' /
                 '==' / '!=' / '*=' / '/=' / '%=' / '+=' / '-=' / '&=' / '^=' / '|=' /
                 '#' / '[' / ']' / '(' / ')' / '{' / '}' / '.' / '&' /

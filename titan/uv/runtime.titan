@@ -60,8 +60,27 @@ local record Buffer
 end
 
 function _bytes_find(haystack: string, needle: string): integer
-  return shim.titan_uvshim_bytes_find(
-      haystack, #haystack, needle, #needle) as integer
+  local haystack_length = #haystack
+  local needle_length = #needle
+  if needle_length == 0 then return 0 end
+  if needle_length > haystack_length then return -1 end
+
+  local haystack_pointer =
+    haystack as const *ffi.titan_ffi_char
+  local needle_pointer =
+    needle as const *ffi.titan_ffi_char
+  local offset = 0
+  while offset <= haystack_length - needle_length do
+    if haystack_pointer[offset] == needle_pointer[0] and
+        cstring.memcmp(
+          haystack_pointer + offset,
+          needle_pointer,
+          needle_length as cstring.size_t) == 0 then
+      return offset
+    end
+    offset = offset + 1
+  end
+  return -1
 end
 
 function _bytes_slice(data: string, offset: integer,
@@ -71,7 +90,11 @@ function _bytes_slice(data: string, offset: integer,
     raise "byte slice is out of range"
   end
   local bytes = allocate_bytes(length)
-  shim.titan_uvshim_bytes_slice_copy(bytes.data, data, offset, length)
+  if length > 0 then
+    local source = data as const *ffi.titan_ffi_char
+    cstring.memcpy(bytes.data, source + offset,
+                   length as cstring.size_t)
+  end
   return bytes_string(bytes, length)
 end
 
@@ -250,19 +273,32 @@ end
 local function copy_text(source: string, operation: string,
                          subject: string?): Text
   local length = #source
-  if (shim.titan_uvshim_bytes_find(source, length, "\0", 1) as integer) >= 0 then
+  if _bytes_find(source, "\0") >= 0 then
     raise make_error(UV_EINVAL, operation, subject)
   end
   local bytes = allocate_bytes(length + 1)
-  shim.titan_uvshim_text_copy(bytes.data, source, length)
+  if length > 0 then
+    cstring.memcpy(bytes.data, source, length as cstring.size_t)
+  end
+  bytes.data[length] = 0 as ffi.titan_ffi_char
   return Text.new(bytes, source)
 end
 
 local function copy_bytes(source: string): Bytes
   local length = #source
   local bytes = allocate_bytes(length)
-  shim.titan_uvshim_bytes_copy(bytes.data, source, length)
+  if length > 0 then
+    cstring.memcpy(bytes.data, source, length as cstring.size_t)
+  end
   return bytes
+end
+
+local function initialize_buffer(memory: ffi.titan_ffi_void_ptr,
+                                 base: *ffi.titan_ffi_char,
+                                 length: libuv.size_t)
+  local buffer = memory as *libuv.uv_buf_t
+  buffer.base = base
+  buffer.len = length
 end
 
 local function make_buffer(bytes: Bytes, offset: integer,
@@ -270,7 +306,11 @@ local function make_buffer(bytes: Bytes, offset: integer,
   local top = lua.lua_gettop(L)
   local memory = lua.lua_newuserdatauv(L, libuv.uv_buf_t.sizeof, 0)
   local storage = ffi.lua_totvalue(L, -1)
-  shim.titan_uvshim_buf_init_slice(memory, bytes.data, offset, length)
+  local base = bytes.data
+  if offset > 0 then
+    base = base + offset
+  end
+  initialize_buffer(memory, base, length as libuv.size_t)
   local buffer = Buffer.new(memory as *libuv.uv_buf_t, storage, bytes)
   lua.lua_settop(L, top)
   return buffer
@@ -292,10 +332,10 @@ end
 -- full userdata when stored in value, so Bytes.storage is the only GC edge
 -- needed to keep its raw pointer valid.
 local function allocate_stream_bytes(size: libuv.size_t): Bytes
-  local length = size as integer
-  if length <= 0 or length > UV_BUF_MAX then
+  if size == 0 or size > climits.UINT_MAX then
     raise internal_error("stream.alloc.size")
   end
+  local length = size as integer
   local owned = ffi.titan_ffi_char.new_array(length)
   local storage: value = owned
   return Bytes.new(owned as *ffi.titan_ffi_char, storage, length)

@@ -313,6 +313,10 @@ function schedule_wait_and_read_cancellation(child: string): async.Task
       process:kill("not-a-signal")
       return nil
     end, "Process accepted an unknown signal name")
+    expect_failure(function (): value
+      process:kill("term\0kill")
+      return nil
+    end, "Process accepted an embedded NUL in a signal name")
     local replacement = async.run(function (): value
       return process:wait()
     end)

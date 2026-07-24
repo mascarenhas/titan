@@ -2,11 +2,13 @@ local libuv = foreign import "uv.h"
 local lua = foreign import "lua.h"
 local ffi = foreign import "titan/ffi.h"
 local shim = foreign import "titan/uv.h"
+local cstring = foreign import "string.h"
+local climits = foreign import "limits.h"
 local coroutine = import "coroutine"
 
--- Portable libuv error values are macros hidden behind the private C shim.
--- Resolve them once when this module image initializes; callback and error
--- paths should not repeatedly cross the FFI boundary for constants.
+-- Resolve portable libuv and host constants once when this module image
+-- initializes. The canonical folder main owns these ordinary foreign imports
+-- so every contributor sees one shared set of C namespaces.
 local UV_EIO = 0
 local UV_EOF = 0
 local UV_ECANCELED = 0
@@ -15,7 +17,6 @@ local UV_EINVAL = 0
 local UV_ENOBUFS = 0
 local UV_ENOENT = 0
 local UV_ESRCH = 0
-local UV_BUF_MAX = 0
 
 -- Private continuation runtime. Native pointers stay in exact local fields;
 -- every callback is a direct call to timer_dispatch's native Titan entry.
@@ -177,15 +178,14 @@ local function setup_program_args(): boolean
 end
 
 do
-  UV_EIO = shim.titan_uvshim_error_eio() as integer
-  UV_EOF = shim.titan_uvshim_error_eof() as integer
-  UV_ECANCELED = shim.titan_uvshim_error_ecanceled() as integer
-  UV_EADDRNOTAVAIL = shim.titan_uvshim_error_eaddrnotavail() as integer
-  UV_EINVAL = shim.titan_uvshim_error_einval() as integer
-  UV_ENOBUFS = shim.titan_uvshim_error_enobufs() as integer
-  UV_ENOENT = shim.titan_uvshim_error_enoent() as integer
-  UV_ESRCH = shim.titan_uvshim_error_esrch() as integer
-  UV_BUF_MAX = shim.titan_uvshim_buf_max_length() as integer
+  UV_EIO = libuv.UV_EIO as integer
+  UV_EOF = libuv.UV_EOF as integer
+  UV_ECANCELED = libuv.UV_ECANCELED as integer
+  UV_EADDRNOTAVAIL = libuv.UV_EADDRNOTAVAIL as integer
+  UV_EINVAL = libuv.UV_EINVAL as integer
+  UV_ENOBUFS = libuv.UV_ENOBUFS as integer
+  UV_ENOENT = libuv.UV_ENOENT as integer
+  UV_ESRCH = libuv.UV_ESRCH as integer
   EVENT_TIMER = shim.TITAN_UV_EVENT_TIMER as integer
   EVENT_HANDLE_CLOSE = shim.TITAN_UV_EVENT_HANDLE_CLOSE as integer
   EVENT_STREAM_ALLOC = shim.TITAN_UV_EVENT_STREAM_ALLOC as integer

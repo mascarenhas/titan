@@ -10,6 +10,8 @@ function symtab.new(modname)
         foreign_type_history = {},
         foreign_names = {},
         foreign_name_history = {},
+        c_file_tags = {},
+        c_prototype_tags = {},
         modname = modname
     }
     return setmetatable(self, symtab)
@@ -131,6 +133,172 @@ function symtab:find_foreign_name(name)
         return nil
     end
     return self.foreign_names[name]
+end
+
+local function c_tag_provenance(provenance)
+    provenance = provenance or {}
+    return {
+        header = provenance.header or "<unknown>",
+        declaration_order = provenance.declaration_order,
+        scope = provenance.scope or "file",
+        definition = provenance.definition and true or false,
+    }
+end
+
+local function describe_c_tag_provenance(provenance)
+    provenance = c_tag_provenance(provenance)
+    local order = provenance.declaration_order
+        and tostring(provenance.declaration_order) or "<unknown>"
+    return ("header '%s', declaration %s, scope %s")
+        :format(provenance.header, order, provenance.scope)
+end
+
+local function c_tag_conflict(name, previous, kind, provenance)
+    return ("conflicting C tag kinds for '%s' across foreign imports: "
+        .. "%s from %s conflicts with %s from %s")
+        :format(name, previous.kind,
+            describe_c_tag_provenance(previous.provenance),
+            kind, describe_c_tag_provenance(provenance))
+end
+
+-- File-scope C tags use one module-wide namespace shared by struct, union, and
+-- enum. Same-kind declarations append provenance and reuse the same record;
+-- only struct/union records normally acquire a canonical Titan aggregate.
+function symtab:register_c_file_tag(name, kind, provenance, canonical)
+    if type(name) ~= "string" or name == "" then
+        return nil, "a file-scope C tag requires a name"
+    end
+    if kind ~= "struct" and kind ~= "union" and kind ~= "enum" then
+        return nil, "invalid C tag kind '" .. tostring(kind) .. "'"
+    end
+
+    provenance = c_tag_provenance(provenance)
+    local previous = self.c_file_tags[name]
+    if previous and previous.kind ~= kind then
+        return nil, c_tag_conflict(name, previous, kind, provenance)
+    end
+
+    local record = previous
+    if not record then
+        record = {
+            name = name,
+            kind = kind,
+            scope = "file",
+            header = provenance.header,
+            provenance = provenance,
+            provenances = {},
+            order = self.current_toplevel_order or 0,
+        }
+        self.c_file_tags[name] = record
+    end
+    record.provenances[#record.provenances + 1] = provenance
+    if canonical and not record.canonical then
+        record.canonical = canonical
+    end
+    return record
+end
+
+-- Enum tags have no source alias in the current feature, but registering their
+-- metadata here is necessary to enforce C's shared tag namespace.
+function symtab:register_c_enum_tag(name, provenance, canonical)
+    return self:register_c_file_tag(name, "enum", provenance, canonical)
+end
+
+-- Retrieval is frontier-aware for future checker tag aliases. During ordered
+-- import conversion initializer_order is unset, so prototype references see
+-- precisely the file tags registered by prior/current imports.
+function symtab:find_c_file_tag(name, kind)
+    local record = self.c_file_tags[name]
+    if not record or (kind and record.kind ~= kind) then
+        return nil
+    end
+    local frontier = self.initializer_order
+    if frontier and record.order > frontier then
+        return nil
+    end
+    return record
+end
+
+-- Prototype tag scope numbers are only stable within one parsed header.
+-- Nesting maps by header, then scope, then base name prevents equal numeric
+-- scope ids in separate headers from accidentally sharing identity.
+function symtab:bind_c_prototype_tag(name, kind, scope_id, provenance,
+                                     allow_outer, canonical)
+    if type(name) ~= "string" or name == "" then
+        return nil, "a prototype-scope C tag requires a name"
+    end
+    if kind ~= "struct" and kind ~= "union" and kind ~= "enum" then
+        return nil, "invalid C tag kind '" .. tostring(kind) .. "'"
+    end
+    if scope_id == nil then
+        return nil, "a prototype-scope C tag requires a stable scope id"
+    end
+
+    provenance = c_tag_provenance(provenance)
+    if provenance.header == "<unknown>" then
+        return nil, "a prototype-scope C tag requires header provenance"
+    end
+
+    if allow_outer then
+        local outer = self:find_c_file_tag(name)
+        if outer then
+            if outer.kind ~= kind then
+                return nil, c_tag_conflict(
+                    name, outer, kind, provenance)
+            end
+            return outer
+        end
+    end
+
+    local header_scopes = self.c_prototype_tags[provenance.header]
+    if not header_scopes then
+        header_scopes = {}
+        self.c_prototype_tags[provenance.header] = header_scopes
+    end
+    local scope = header_scopes[scope_id]
+    if not scope then
+        scope = {}
+        header_scopes[scope_id] = scope
+    end
+
+    local previous = scope[name]
+    if previous and previous.kind ~= kind then
+        return nil, ("conflicting C tag kinds for '%s' in prototype scope %s: "
+            .. "%s from %s conflicts with %s from %s")
+            :format(name, tostring(scope_id), previous.kind,
+                describe_c_tag_provenance(previous.provenance),
+                kind, describe_c_tag_provenance(provenance))
+    end
+
+    local record = previous
+    if not record then
+        record = {
+            name = name,
+            kind = kind,
+            scope = "prototype",
+            scope_id = scope_id,
+            header = provenance.header,
+            provenance = provenance,
+            provenances = {},
+        }
+        scope[name] = record
+    end
+    record.provenances[#record.provenances + 1] = provenance
+    if canonical and not record.canonical then
+        record.canonical = canonical
+    end
+    return record
+end
+
+function symtab:set_c_tag_canonical(record, canonical)
+    if not record then
+        return nil, "missing C tag record"
+    end
+    if record.canonical then
+        return record.canonical
+    end
+    record.canonical = canonical
+    return canonical
 end
 
 -- C struct/union objects are canonical and may be completed in place by a

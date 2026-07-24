@@ -107,10 +107,183 @@ describe("C FFI cdriver", function()
         end)
     end)
 
+    it("retains suffixes on unnamed parameter declarators", function()
+        local header = tmp_header([[
+            extern int named_array(int value[7]);
+            extern int unnamed_array(int [7]);
+            extern int named_callback(int (*callback)(double));
+            extern int unnamed_callback(int (*)(double));
+            extern int named_array_pointer(int (*values)[7]);
+            extern int unnamed_array_pointer(int (*)[7]);
+        ]])
+
+        local ffi_types = assert_process_file(header)
+        os.remove(header)
+
+        for _, pair in ipairs({
+            {"named_array", "unnamed_array"},
+            {"named_callback", "unnamed_callback"},
+            {"named_array_pointer", "unnamed_array_pointer"},
+        }) do
+            local named = ffi_types[pair[1]].params[1]
+            local unnamed = ffi_types[pair[2]].params[1]
+            assert.same(named._declarator_ops, unnamed._declarator_ops)
+            assert.same(named.type, unnamed.type)
+        end
+        assert.equal(
+            "functionptr",
+            ffi_types.unnamed_callback.params[1].type)
+        assert.same(
+            {{idx = 7}, "*"},
+            ffi_types.unnamed_array_pointer.params[1]._declarator_ops)
+    end)
+
+    it("publishes completed typedef-array declarators in either order",
+    function()
+        local header = tmp_header([[
+            typedef int cdriver_array[];
+
+            extern cdriver_array cdriver_alias_first;
+            extern int cdriver_alias_first[7];
+            extern int cdriver_direct_first[7];
+            extern cdriver_array cdriver_direct_first;
+
+            extern cdriver_array *cdriver_nested_alias_first;
+            extern int (*cdriver_nested_alias_first)[7];
+            extern int (*cdriver_nested_direct_first)[7];
+            extern cdriver_array *cdriver_nested_direct_first;
+
+            extern void cdriver_function_alias_first(
+                cdriver_array *values);
+            extern void cdriver_function_alias_first(
+                int (*values)[7]);
+            extern void cdriver_function_direct_first(
+                int (*values)[7]);
+            extern void cdriver_function_direct_first(
+                cdriver_array *values);
+        ]])
+
+        local ffi_types = assert_process_file(header)
+        os.remove(header)
+
+        for _, name in ipairs({
+            "cdriver_alias_first",
+            "cdriver_direct_first",
+        }) do
+            assert.same(
+                {{idx = 7}},
+                ffi_types[name]._declarator_ops)
+        end
+        for _, name in ipairs({
+            "cdriver_nested_alias_first",
+            "cdriver_nested_direct_first",
+        }) do
+            assert.same(
+                {{idx = 7}, "*"},
+                ffi_types[name]._declarator_ops)
+        end
+        for _, name in ipairs({
+            "cdriver_function_alias_first",
+            "cdriver_function_direct_first",
+        }) do
+            assert.same(
+                {{idx = 7}, "*"},
+                ffi_types[name].params[1]._declarator_ops)
+        end
+    end)
+
+    it("uses active same-name type macros but suppresses macro-only aliases",
+    function()
+        local header = tmp_header([[
+            typedef double cdriver_replacement_type;
+            typedef int cdriver_public_type;
+            typedef signed char cdriver_self_type;
+            #define cdriver_public_type cdriver_replacement_type
+            #define cdriver_macro_only_type cdriver_replacement_type
+            #define cdriver_self_type cdriver_self_type
+        ]])
+
+        local ffi_types = assert_process_file(header)
+        os.remove(header)
+
+        assert.equal("typedef", ffi_types.cdriver_replacement_type.type)
+        assert.equal("typedef", ffi_types.cdriver_public_type.type)
+        assert.same({"double"}, ffi_types.cdriver_public_type.def)
+        assert.equal("typedef", ffi_types.cdriver_self_type.type)
+        assert.same(
+            {"signed", "char"}, ffi_types.cdriver_self_type.def)
+        assert.is_nil(ffi_types.cdriver_macro_only_type)
+        local occurrences = {}
+        for _, item in ipairs(ffi_types) do
+            occurrences[item.name] = (occurrences[item.name] or 0) + 1
+        end
+        assert.equal(1, occurrences.cdriver_replacement_type)
+        assert.equal(2, occurrences.cdriver_public_type)
+        assert.equal(1, occurrences.cdriver_self_type)
+        assert.is_nil(occurrences.cdriver_macro_only_type)
+    end)
+
 
     describe("configured preprocessor toolchain", function()
         setup(function()
             require("c-parser.cpp").clear_probe_cache()
+        end)
+
+        it("imports libuv X-macro error enumerators under production flags", function()
+            local types = assert_process_file("uv.h", {
+                compiler = { os.getenv("CC") or "cc" },
+                language_mode = "c99",
+                cppflags = {
+                    "-Ilibuv-v1.52.1/include",
+                    "-D_GNU_SOURCE",
+                },
+                compiler_include_dirs = {
+                    "titan-runtime",
+                    "lua-5.5.0/src",
+                },
+            })
+
+            local function enum_value(name)
+                for _, item in ipairs(assert(types[name]).values) do
+                    if item.name == name then
+                        return item.value
+                    end
+                end
+            end
+
+            assert.equal("enum", assert(types.UV_EIO).type)
+            assert.equal(-5, enum_value("UV_EIO"))
+            assert.equal(-125, enum_value("UV_ECANCELED"))
+            assert.equal(-4095, enum_value("UV_EOF"))
+            assert.equal("typedef", assert(types.uv_errno_t).type)
+        end)
+
+        it("publishes compile-flag aliases to renamed C functions", function()
+            local types = assert_process_file("lua.h", {
+                compiler = { os.getenv("CC") or "cc" },
+                language_mode = "c99",
+                language_flag = false,
+                compile_flags = {
+                    "--std=c99",
+                    "-Dlua_newuserdatauv=titan_uv_test_newuserdatauv",
+                },
+                cppflags = {},
+                compiler_include_dirs = {
+                    "titan-runtime",
+                    "lua-5.5.0/src",
+                },
+            })
+
+            local alias = assert(types.lua_newuserdatauv)
+            local target = assert(types.titan_uv_test_newuserdatauv)
+            assert.equal("function", target.type)
+            assert.equal("function", alias.type)
+            assert.equal("lua_newuserdatauv", alias.name)
+            assert.equal(target.ret, alias.ret)
+            assert.equal(target.params, alias.params)
+            assert.equal(target.paramnames, alias.paramnames)
+            assert.equal(target.paramnames_state, alias.paramnames_state)
+            assert.equal(target.vararg, alias.vararg)
         end)
 
         it("uses -I and -D flags for top-level and recursive header parsing", function()
@@ -327,7 +500,33 @@ typedef double compiler_selection;
             local root = tmp_dir()
             local header = root .. "/alternate_lua_path.h"
             local old_lua_path = driver.LUA_SOURCE_PATH
+            local original_lua_path = old_lua_path
+            if original_lua_path:sub(1, 1) ~= "/" then
+                original_lua_path =
+                    assert(lfs.currentdir()) .. "/" .. original_lua_path
+            end
+            local files = { header, root .. "/lua.h" }
             write_file(header, "typedef int alternate_lua_path_marker;\n")
+            write_file(root .. "/lua.h", [[
+typedef long long lua_Integer;
+typedef double lua_Number;
+]])
+            -- The checker baseline now compiles the exact fixed generated-C
+            -- prefix. Keep this target-profile fixture's alternate `lua.h`
+            -- while making the remaining real internal headers available
+            -- through the same selected Lua source directory.
+            for _, name in ipairs({
+                "luaconf.h", "lauxlib.h", "llimits.h",
+                "lstate.h", "lgc.h",
+                "ltable.h", "ltm.h", "lfunc.h", "lstring.h",
+                "lvm.h", "lobject.h", "ldo.h",
+            }) do
+                local wrapper = root .. "/" .. name
+                files[#files + 1] = wrapper
+                write_file(wrapper,
+                    '#include "' .. original_lua_path
+                        .. "/" .. name .. '"\n')
+            end
 
             local ok, err = pcall(function()
                 driver.LUA_SOURCE_PATH = root
@@ -346,7 +545,66 @@ typedef double compiler_selection;
             end)
             driver.LUA_SOURCE_PATH = old_lua_path
             driver.configure_foreign_c()
-            remove_tree({ header }, { root })
+            remove_tree(files, { root })
+            assert.truthy(ok, err)
+        end)
+
+        it("acquires Lua numeric spellings and target macros under exact flags",
+           function()
+            local inputs = assert(cdriver.target_profile_inputs({
+                compiler = { os.getenv("CC") or "cc" },
+                language_mode = "c99",
+                language_flag = false,
+                compile_flags = {
+                    "--std=c99",
+                    "-funsigned-char",
+                    "-DTITAN_PROFILE_FLAG=23",
+                },
+                cppflags = {},
+                compiler_include_dirs = {
+                    "titan-runtime",
+                    "lua-5.5.0/src",
+                },
+            }))
+
+            assert.equal("long long", inputs.lua_integer)
+            assert.equal("double", inputs.lua_number)
+            assert.same({ "1" }, inputs.macros.__CHAR_UNSIGNED__)
+            assert.same({ "23" }, inputs.macros.TITAN_PROFILE_FLAG)
+            assert.same({
+                "titan-runtime",
+                "lua-5.5.0/src",
+            }, inputs.fixed_include_dirs)
+            assert.equal("lua.h", inputs.lua_header.original)
+            assert.matches("/lua%.h$", inputs.lua_header.resolved)
+        end)
+
+        it("rebuilds profiles and resolver probe services after reconfiguration",
+           function()
+            local driver = require "titan-compiler.driver"
+            local old_cflags = driver.CFLAGS
+            local context = driver.new_resolver_context()
+            local first = assert(driver.get_probe_service(context))
+            local first_configuration =
+                driver.FOREIGN_C_CONFIGURATION_ID
+
+            local ok, err = pcall(function()
+                driver.CFLAGS = old_cflags .. " -funsigned-char"
+                driver.configure_foreign_c()
+                assert.is_true(
+                    driver.FOREIGN_C_CONFIGURATION_ID >
+                    first_configuration)
+                assert.is_false(driver.TARGET_PROFILE.char_signed)
+
+                local second = assert(driver.get_probe_service(context))
+                assert.not_equal(first, second)
+                assert.is_true(first.closed)
+                assert.equal(driver.TARGET_PROFILE.identity,
+                    second.profile_identity)
+            end)
+            driver.close_resolver_context(context)
+            driver.CFLAGS = old_cflags
+            driver.configure_foreign_c()
             assert.truthy(ok, err)
         end)
 

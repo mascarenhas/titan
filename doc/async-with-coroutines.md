@@ -209,16 +209,14 @@ The C helper interface is deliberately tiny. `titan/coroutine.titan` imports
 `minicoro.h` directly, reads the `mco_coro` fields it needs, constructs
 the owner userdata and typed handle, and calls the minicoro
 storage/control APIs directly.
-The C helper surface used by `titan/coroutine.titan` consists of the entry
-trampoline, fixed tag comparator, and the two operations that directly update
-the owner userdata's pending-transfer root:
+The C helper surface used by `titan/coroutine.titan` consists only of the
+entry trampoline and fixed tag comparator. The owner-userdata slot count is a
+shared header constant:
 
 ```c
 #define TITAN_CORO_OWNER_USERVALUES 5
 void titan_coro_entry(mco_coro *co);
 int titan_coro_tag_equal(void *t1, void *t2);
-void titan_coro_root_transfer(lua_State *L, mco_coro *co, TValue payload);
-void titan_coro_clear_transfer(mco_coro *co);
 ```
 
 The complete `mco_runtime` layout is available through `minicoro.h`, so Titan
@@ -301,9 +299,10 @@ end
 
 The exact source can be adjusted to local style, but the important point
 is that the public API and transfer choreography remain Titan code. C owns
-the callback ABI, raw tag comparison, and the barrier-correct write into the
-owner userdata. `resume_result_or_raise` and `yield_result_or_raise` perform
-the control switch and then delegate the matching pops to
+the callback ABI and raw tag comparison; Titan writes the pending-transfer
+uservalue through Lua's public, barrier-correct API.
+`resume_result_or_raise` and `yield_result_or_raise` perform the control
+switch and then delegate the matching pops to
 `pop_transfer_or_raise`. Correctness does not depend on the absence of that
 generated helper's prologue or GC check: the exact source owner's fifth
 uservalue roots the payload across the helper boundary until `mco_pop` has
@@ -326,11 +325,13 @@ site. If it escapes the callback, the entry boundary then treats it like
 any other uncaught coroutine-body error and returns a staged traceback to
 the resumer.
 
-No `TITAN_VER` bump is required if the implementation is confined to
-this new module and does not change generated native signatures,
-function-value layout, serialized type syntax, or existing runtime
-contracts. If any of those change, bump the ABI and update the ABI tests
-in the same patch.
+This work ships with ABI 0.18 because generated standard-library archive
+objects now refer directly to promoted callback trampolines and no longer
+refer to the retired libuv/coroutine helpers. The provider and runtime must
+therefore be built and distributed together. Moving the coroutine root update
+from a private C helper to public `lua_setiuservalue`, while retaining Titan's
+existing raw-`TValue` push bridge, does not itself change the coroutine module's
+serialized signature.
 
 ## FFI extensions for `TValue` and C addresses
 
@@ -459,12 +460,15 @@ GC-able returns in their own stack slots before any later allocation.
 
 The runtime may copy a `TValue` through minicoro storage with
 `mco_push`/`mco_pop`, but minicoro only copies the struct bytes and does not
-trace the referenced Lua object. Before the first push, the sender writes the
-payload into the exact source owner's fifth uservalue with `setobj` and
-`luaC_barrierback`. This remains the root across nested source selection,
-control switching, child-stack clearing, and receiver-side GC. The receiver
-clears it only after a successful payload pop has refreshed the generated Lua
-stack anchor.
+trace the referenced Lua object. Before the first push, the sender recovers
+the exact source owner, stack-anchors that `Udata *`, saves the Lua top,
+reserves two slots with `lua_checkstack`, pushes owner then payload, and writes
+the fifth uservalue with `lua_setiuservalue`. The public setter supplies the
+backward barrier. Both failure paths and the success path restore the exact
+saved top. This remains the root across nested source selection, control
+switching, child-stack clearing, and receiver-side GC. The receiver clears it
+through the same checked path with nil, only after a successful payload pop
+has refreshed the generated Lua stack anchor.
 
 Each transfer pushes two values into minicoro storage: the payload
 `TValue`, followed by the `ok` flag. The receiver pops `ok` first and
@@ -477,8 +481,8 @@ removal before clearing, so an unexpected failed pop leaves the root intact.
 When storing a collectable value into an old userdata uservalue or record
 field, use the existing Lua 5.5 barrier discipline. Public API helpers
 that operate through Lua API calls such as `lua_setiuservalue` get that
-barrier from Lua. Direct writes into `Udata->uv[]` need
-`luaC_barrierback`.
+barrier from Lua. Coroutine transfer rooting intentionally stays on that
+public path and does not write `Udata->uv[]` directly.
 
 The implementation must be tested in both incremental and generational
 GC modes. In particular, an old `Coro` record must safely keep a young
@@ -616,9 +620,9 @@ Build `titan/coroutine.titan` as the ordinary qualified logical Titan module
 `titan.coroutine`. The combined standard binary exports `titan_coroutine_init`,
 `titan_coroutine_abi`, `titan_coroutine_types`, and
 `luaopen_titan_coroutine`. Install the paired physical standard provider as
-`<root>/lib/titan/0.17/{titan.so,titan.a}` and the generated logical shim as
+`<root>/lib/titan/0.18/{titan.so,titan.a}` and the generated logical shim as
 `<root>/share/lua/5.5/titan/coroutine.lua`. Titan's configured module path
-contains `<root>/lib/titan/0.17`; the parser desugars `import "coroutine"` to
+contains `<root>/lib/titan/0.18`; the parser desugars `import "coroutine"` to
 that qualified identity and prefix lookup claims it from the preferred native
 form.
 `require "titan.coroutine"` uses the shim to promote/map that provider and
@@ -630,9 +634,10 @@ Titan code reaches this binary with `import "coroutine"`, while Lua code
 uses `require "titan.coroutine"`. The bare Lua name `coroutine` remains
 owned by Lua's standard library.
 
-ABI 0.17 keeps the coroutine's `TValue` transport, but a `value` containing an
-Array now carries the canonical proxy Udata rather than the private backing
-Table. Exact typed Array paths continue to use backing `Table *`. See
+ABI 0.17 introduced the rule that a coroutine `value` containing an Array
+carries the canonical proxy Udata rather than the private backing Table. ABI
+0.18 preserves that `TValue` transport rule. Exact typed Array paths continue
+to use backing `Table *`. See
 [Dense Arrays](implementation/dense-arrays.md#exact-and-generic-call-paths).
 
 The rockspec and Makefile make `luarocks make` and `make test` build all seven

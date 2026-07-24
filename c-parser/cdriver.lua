@@ -99,6 +99,37 @@ local function default_compiler_include_dirs()
     return compiler_include_dirs
 end
 
+-- Resolve the fixed Titan/Lua SDK roots once and return an owned ordered copy.
+-- Passing nil requests checkout/installed-module discovery; an explicit empty
+-- array remains empty. This distinction lets direct checker embeddings share
+-- the exact roots later installed in their probe service instead of
+-- accidentally converting "discover" into "no fixed headers".
+function cdriver.resolve_compiler_include_dirs(value)
+    if value == nil then value = default_compiler_include_dirs() end
+    if type(value) ~= "table" then
+        return nil, "compiler include dirs must be an ordered array"
+    end
+    local copy = {}
+    for index = 1, #value do
+        local directory = value[index]
+        if type(directory) ~= "string" or directory == "" then
+            return nil, "compiler include dir " .. index ..
+                " must be a nonempty string"
+        elseif directory:find("\0", 1, true) then
+            return nil, "compiler include dir " .. index ..
+                " contains a NUL byte"
+        end
+        copy[index] = directory
+    end
+    for key in pairs(value) do
+        if type(key) ~= "number" or key < 1 or key > #value
+        or key % 1 ~= 0 then
+            return nil, "compiler include dirs must be a dense ordered array"
+        end
+    end
+    return copy
+end
+
 local function find_header(filename, incdirs)
     for _, incdir in ipairs(incdirs or {}) do
         local candidate = join_path(incdir, filename)
@@ -160,16 +191,24 @@ local function resolve_include(filename, options, incdirs)
     }
 end
 
-function cdriver.process_file(filename, options)
-    options = normalize_options(options)
-    local own_dirs = options.compiler_include_dirs
-        or default_compiler_include_dirs()
-    local ctx, err = cpp.new_context({
+local function new_cpp_context(options)
+    local own_dirs, dirs_error =
+        cdriver.resolve_compiler_include_dirs(
+            options.compiler_include_dirs)
+    if not own_dirs then return nil, dirs_error end
+    return cpp.new_context({
         compiler = options.compiler,
         language_mode = options.language_mode,
+        language_flag = options.language_flag,
+        compile_flags = options.compile_flags,
         cppflags = options.cppflags,
         fixed_include_dirs = own_dirs,
     })
+end
+
+function cdriver.process_file(filename, options)
+    options = normalize_options(options)
+    local ctx, err = new_cpp_context(options)
     if not ctx then
         return nil, "failed configuring C preprocessor: " .. err
     end
@@ -189,14 +228,113 @@ function cdriver.process_file(filename, options)
         return nil, ("failed parsing: %s:%d:%d: %s\n%s"):format(filename, line, col, err, fragment)
     end
 
-    local ffi_types, err = ctypes.register_types(res)
+    -- Preserve source positions through the flattened preprocessor stream for
+    -- declaration diagnostics. Compatibility never treats path/line/column as
+    -- proof of C type identity; the final ordered-header compiler baseline is
+    -- authoritative for independently parsed anonymous declarations.
+    local line_starts = {}
+    local next_start = 1
+    for index, output_line in ipairs(ctx.output) do
+        line_starts[index] = next_start
+        next_start = next_start + #output_line + 1
+    end
+    local function source_origin(position)
+        local low, high = 1, #line_starts
+        local found = 1
+        while low <= high do
+            local middle = math.floor((low + high) / 2)
+            if line_starts[middle] <= position then
+                found = middle
+                low = middle + 1
+            else
+                high = middle - 1
+            end
+        end
+        local origin = ctx.output_origins
+            and ctx.output_origins[found]
+        if not origin then return nil end
+        return {
+            file = origin.file,
+            line = origin.line,
+            column = position - line_starts[found] + 1,
+        }
+    end
+    for _, declaration in ipairs(res) do
+        declaration._declaration_provenance =
+            source_origin(declaration._source_position)
+        declaration._source_position = nil
+    end
+
+    local ffi_types, err = ctypes.register_types(res, {
+        header = filename,
+        resolved_header = include.resolved,
+    })
     if not ffi_types then
         return nil, err
     end
 
     cdefines.register_defines(ffi_types, ctx.defines)
 
-    return ffi_types, nil, include
+    -- The fourth result is deliberately contextual rather than process-global:
+    -- target-profile acquisition needs the exact macro context that parsed the
+    -- configured Lua headers, while ordinary callers retain the historical
+    -- first three results.
+    return ffi_types, nil, include, ctx
+end
+
+local function primitive_typedef_spelling(ffi_types, name)
+    local item = ffi_types[name]
+    local declaration = item and item.type == "typedef" and item
+        or item and item.type
+    local definition = declaration and declaration.def
+    if type(definition) ~= "table" or definition.type ~= nil then
+        return nil, "configured '" .. name ..
+            "' is not a primitive C typedef"
+    end
+
+    local tokens = {}
+    for index = 1, #definition do
+        if type(definition[index]) ~= "string" then
+            return nil, "configured '" .. name ..
+                "' has a non-primitive C spelling"
+        end
+        tokens[#tokens + 1] = definition[index]
+    end
+    if #tokens == 0 then
+        return nil, "configured '" .. name .. "' has an empty C spelling"
+    end
+    return table.concat(tokens, " ")
+end
+
+-- Acquire the pure target-profile inputs under the same compiler argv,
+-- target-selecting flags, and installed luaconf.h used for generated code.
+-- csemantics owns interpretation; this layer only exposes parser facts.
+function cdriver.target_profile_inputs(options)
+    options = normalize_options(options)
+    local fixed_include_dirs, dirs_error =
+        cdriver.resolve_compiler_include_dirs(
+            options.compiler_include_dirs)
+    if not fixed_include_dirs then return nil, dirs_error end
+    local ffi_types, err, include, ctx =
+        cdriver.process_file("lua.h", options)
+    if not ffi_types then
+        return nil, "failed acquiring configured Lua numeric types: " .. err
+    end
+
+    local lua_integer
+    lua_integer, err = primitive_typedef_spelling(ffi_types, "lua_Integer")
+    if not lua_integer then return nil, err end
+    local lua_number
+    lua_number, err = primitive_typedef_spelling(ffi_types, "lua_Number")
+    if not lua_number then return nil, err end
+
+    return {
+        macros = ctx.defines,
+        lua_integer = lua_integer,
+        lua_number = lua_number,
+        lua_header = include,
+        fixed_include_dirs = fixed_include_dirs,
+    }
 end
 
 -- Shared argument handling for driver/checker integration. CPPFLAGS must be
@@ -204,5 +342,6 @@ end
 -- by splitting on whitespace at the call site.
 cdriver.split_shell_words = cpp.split_shell_words
 cdriver.shell_quote = cpp.shell_quote
+cdriver.capture_command = cpp.capture_command
 
 return cdriver

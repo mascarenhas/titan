@@ -1,7 +1,7 @@
 # The Titan grammar
 
 This chapter is the reference grammar of Titan as implemented by the
-0.17 prototype compiler: lexical conventions, the complete syntactic
+0.18 prototype compiler: lexical conventions, the complete syntactic
 grammar, operator precedence, and the restrictions the EBNF alone does
 not show. It replaces the old manual's stale grammar.
 
@@ -209,6 +209,8 @@ Notes on the top level:
 ```
 decl       ::= Name ['?'] [':' type]
 decllist   ::= decl {',' decl}
+qualifiedtype ::= Name '.' Name
+automaticlocaldecl ::= Name ':' qualifiedtype ['[' ['-'] Numeral ']']
 type       ::= simpletype
             |  funargtypes '->' rettype
             |  simpletype '->' rettype
@@ -298,6 +300,7 @@ statement  ::= ';'
             |  if exp then block {elseif exp then block} [else block] end
             |  for decl '=' exp ',' exp [',' exp] do block end
             |  for decllist in explist do block end
+            |  local automaticlocaldecl
             |  local decllist '=' explist
             |  varlist '=' explist
             |  functioncall
@@ -316,9 +319,14 @@ var        ::= Name
 An lvalue (`var`) is a plain name or a suffixed expression whose *last*
 suffix is an index or a field selection — `f()[1] = v`, `m[k][1] = v`,
 and `f().x = v` are assignable, as is reading `f().x`; a bare call is
-not. Multiple assignment and multiple `local`
-declaration mirror Lua, but a `local` declaration *requires* an
-initializer — plain `local x: integer` is a syntax error. `return`
+not. Multiple assignment and multiple initialized `local`
+declarations mirror Lua. The one no-initializer production is restricted to a
+single qualified C type (optionally with one source-written extent), such as
+`local options: c.Options` or `local storage: c.Item[3]`; the checker then
+requires an eligible complete C aggregate and a positive integer extent. See
+[C FFI declarations and expressions](c-ffi-expressions.md). Any other local
+declaration requires an initializer, so plain `local x: integer` is a syntax
+error. `return`
 takes zero or more expressions, only as the last statement of a block.
 In a zero-return function (`(...) -> ()`), a bare `return` returns zero
 values. Written return expressions are evaluated but their values are
@@ -491,8 +499,10 @@ confused rule is not syntax at all:
 6. **Lvalues cannot be parenthesized.** `(x) = 1` is a syntax error
    (`Expected a valid lvalue in the left side of assignment but found
    a regular expression.`).
-7. **Declarations need initializers.** Both module variables and
-   `local` statements require `= explist`.
+7. **Declarations need initializers, except automatic C aggregates.** Module
+   variables and ordinary `local` statements require `= explist`. The narrow
+   `local name: module.CType` / `local name: module.CType[N]` production is
+   reserved for one zero-initialized automatic C aggregate.
 8. **Parenthesizing a call truncates it.** `(f())` adjusts a
    multiple-value call to exactly its first value, as in Lua. See
    [Functions](functions.md).

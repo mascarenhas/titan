@@ -89,6 +89,12 @@ local errors = {
 
     TypeDecl = "Expected a type name after ':'.",
 
+    CArrayExtent = "Expected an integer literal extent in an automatic C array declaration.",
+
+    RBracketCArray = "Expected ']' after the extent in an automatic C array declaration.",
+
+    CArrayOnlyAutomatic = "Source-written fixed C array syntax requires a qualified type on a single initializer-less automatic local.",
+
     TypeType = "Expected a type name after '{'.",
 
     RCurlyType = "Expected '}' to close type specification.",

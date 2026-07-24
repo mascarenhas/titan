@@ -3,7 +3,7 @@
 Static compiled modules extend the compiled-module loader and native-output
 pipeline without changing Titan's AST, type tags, serialized `Type.Module`,
 or native calling convention. The static-provider feature shipped within ABI
-0.16; current artifacts carry ABI 0.17. One checked interface can now come
+0.16; current artifacts carry ABI 0.18. One checked interface can now come
 from a DSO's callable metadata or from a canonical section embedded in an
 archive member.
 
@@ -34,14 +34,27 @@ module object:
 #define TITAN_META_SECTION \
     __attribute__((used, aligned(1), section(".titan.meta")))
 #endif
+
+#if defined(__clang__)
+#define TITAN_META_NO_ADDRESS_SANITIZE \
+    __attribute__((no_sanitize("address")))
+#else
+#define TITAN_META_NO_ADDRESS_SANITIZE
+#endif
+
+TITAN_META_SECTION TITAN_META_NO_ADDRESS_SANITIZE
+static const unsigned char module_metadata[] = { /* canonical bytes */ };
 ```
 
 The numeric byte array has no trailing NUL and no relocations. `aligned(1)`
-makes the section length exactly the canonical payload length. The interface
-therefore travels with the object that defines the module's `_abi`, `_types`,
-`_init`, and `luaopen_` entries. Archive flattening naturally retains it, with
-no aggregate metadata member to regenerate and no archive leaf name used as
-logical identity.
+requests byte alignment, while the Clang-only `no_sanitize("address")`
+attribute prevents AddressSanitizer from adding a global redzone to the custom
+section. Together they keep the section length equal to the canonical payload
+length in both ordinary and sanitized builds. The interface therefore travels
+with the object that defines the module's `_abi`, `_types`, `_init`, and
+`luaopen_` entries. Archive flattening naturally retains it, with no aggregate
+metadata member to regenerate and no archive leaf name used as logical
+identity.
 
 The standalone entrypoint, runtime objects, `titanlib.o`, and ordinary native
 payload do not carry logical metadata.
@@ -55,7 +68,7 @@ feed the callable `_types` entry and:
 -- Titan archive module metadata v1
 return {
     ["pkg.left"] = {
-        abi = "0.17",
+        abi = "0.18",
         types = "Module('pkg.left', ...)",
     },
 }
@@ -323,15 +336,22 @@ removal. Titan never scans a directory and never removes an unrecognized Lua
 file.
 
 The canonical standard installation places `titan.so` and `titan.a` together
-under `lib/titan/0.17`. Bootstrap remains DSO-only; post-install recognizes
-bootstrap, a complete active-0.17 DSO/shim set without an archive, and
-complete-pair predecessor states. A separately versioned 0.16 installation is
+under `lib/titan/0.18`. Bootstrap remains DSO-only; post-install recognizes
+bootstrap, a complete active-0.18 DSO/shim set without an archive, and
+complete-pair predecessor states. A separately versioned 0.17 installation is
 preserved, not treated as an active-layout predecessor.
 
 ABI 0.17 keeps the serialized `Array(...)` text and exact `Table *` /
 `Table **` native shapes but changes the represented Array protocol, so
 embedded and callable metadata must reject 0.16 providers before linking them.
 See [Dense Arrays](dense-arrays.md#abi-017-boundary).
+
+ABI 0.18 preserves that Array protocol but changes the standard-library static
+runtime contract. Its logical archive objects directly reference promoted
+libuv callback trampolines and no longer reference the replaced
+libuv/coroutine helpers. Static validation must therefore reject a 0.17
+provider before native linking; a 0.18 provider and runtime are distributed
+together.
 
 Bundled libuv enters as shared `-X` provider payload and is present in both
 native forms. System libuv remains a repeated final-link setting and never

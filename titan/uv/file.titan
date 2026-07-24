@@ -1,3 +1,5 @@
+local cstat = foreign import "sys/stat.h"
+
 local record FsConstants
   local stat: integer
   local open: integer
@@ -118,7 +120,7 @@ end
 
 function _fs_read(file: uv_file, max_bytes: integer): string?
   if max_bytes <= 0 then raise "read size must be positive" end
-  if max_bytes > UV_BUF_MAX then
+  if max_bytes > climits.UINT_MAX then
     raise "read size exceeds the portable libuv buffer limit"
   end
   validate_file(file, "read from", false)
@@ -130,7 +132,7 @@ function _fs_write(file: uv_file, data: string): integer
   ordinary_task()
   validate_file(file, "write to", false)
   if #data == 0 then return 0 end
-  if #data > UV_BUF_MAX then
+  if #data > climits.UINT_MAX then
     raise "write data exceeds the portable libuv buffer limit"
   end
   local request = new_file_request(FS.write, file, data, 0, false)
@@ -347,7 +349,7 @@ local function allocate_fs_owner(runtime: Runtime,
   ffi.lua_pushtvalue(L, owner)
   local pointer = ffi.lua_togco(L, -1)
   link_fs_owner(runtime, owner)
-  shim.titan_uvshim_fs_set_data(owner.handle, pointer)
+  libuv.uv_req_set_data(owner.handle, pointer)
   lua.lua_settop(L, top)
   return owner
 end
@@ -732,33 +734,24 @@ local function wake_close_waiters(file: uv_file, failure: Error?)
   end
 end
 
-local function fs_stat_kind(kind: integer): string
-  if kind == (shim.TITAN_UV_STAT_FILE as integer) then return "file" end
-  if kind == (shim.TITAN_UV_STAT_DIRECTORY as integer) then
-    return "directory"
-  end
-  if kind == (shim.TITAN_UV_STAT_SYMLINK as integer) then return "symlink" end
-  return "other"
-end
-
 local function extract_fs_stat(owner: uv_fs_t): FsStatResult
-  local size: libuv.int64_t = 0 as libuv.int64_t
-  local mode: libuv.int64_t = 0 as libuv.int64_t
-  local modified_seconds: libuv.int64_t = 0 as libuv.int64_t
-  local modified_nanoseconds: libuv.int64_t = 0 as libuv.int64_t
-  local kind: ffi.titan_ffi_int = 0 as ffi.titan_ffi_int
   local statbuf = libuv.uv_fs_get_statbuf(owner.handle)
-  shim.titan_uvshim_stat_extract {
-    statbuf = statbuf as ffi.titan_ffi_void_ptr,
-    size = size,
-    mode = mode,
-    modified_seconds = modified_seconds,
-    modified_nanoseconds = modified_nanoseconds,
-    kind = kind,
-  }
-  return FsStatResult.new(size as integer, fs_stat_kind(kind as integer),
-      mode as integer, modified_seconds as integer,
-      modified_nanoseconds as integer)
+  local mode = statbuf.st_mode
+  local file_type = mode & cstat.S_IFMT
+  local kind = "other"
+  if file_type == cstat.S_IFREG then
+    kind = "file"
+  elseif file_type == cstat.S_IFDIR then
+    kind = "directory"
+  elseif file_type == cstat.S_IFLNK then
+    kind = "symlink"
+  end
+  return FsStatResult.new(
+      statbuf.st_size as integer,
+      kind,
+      mode as integer,
+      statbuf.st_mtim.tv_sec as integer,
+      statbuf.st_mtim.tv_nsec as integer)
 end
 
 local function fs_dispatch_body(owner: uv_fs_t, result: integer)

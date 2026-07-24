@@ -1,5 +1,6 @@
 local types = require "titan-compiler.types"
 local util  = require "titan-compiler.util"
+local cdeclarator = require "titan-compiler.cdeclarator"
 
 local coder = {}
 
@@ -97,8 +98,6 @@ local function emitline(node)
         .. c_string_literal(loc.filename) .. "\n"
 end
 
-local foreignctype
-
 local function getslot(typ --[[:table]], dst --[[:string?]], src --[[:string]])
     dst = dst and dst .. " =" or ""
     local tmpl
@@ -118,20 +117,21 @@ local function getslot(typ --[[:table]], dst --[[:string?]], src --[[:string]])
     elseif typ._tag == "Type.CInteger" or
            (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CInteger") then
         tmpl = "$DST (($CT)ivalue($SRC))"
-        ct = foreignctype(typ)
+        ct = cdeclarator.render_type_name(typ)
     elseif typ._tag == "Type.CFloat" or
            (typ._tag == "Type.CTypedef" and types.resolve_c_typedef(typ)._tag == "Type.CFloat") then
         tmpl = "$DST (($CT)fltvalue($SRC))"
-        ct = foreignctype(typ)
+        ct = cdeclarator.render_type_name(typ)
     elseif types.is_c_udata_pointer(typ) then
         tmpl = "$DST (ttisnil($SRC) ? NULL : (($CT)uvalue($SRC)))"
-        ct = foreignctype(typ)
+        ct = cdeclarator.render_type_name(typ)
     elseif typ._tag == "Type.CPointer" or typ._tag == "Type.CArray" or
            (typ._tag == "Type.CTypedef"
             and (types.resolve_c_typedef(typ)._tag == "Type.CPointer"
                  or types.resolve_c_typedef(typ)._tag == "Type.CArray")) then
         tmpl = "$DST (($CT)pvalue($SRC))"
-        ct = foreignctype(typ)
+        ct = cdeclarator.render_type_name(
+            cdeclarator.adjust_parameter_type(typ))
     elseif typ._tag == "Type.COwned" then
         tmpl = "$DST uvalue($SRC)"
     else error("invalid type " .. types.tostring(typ)) end
@@ -355,7 +355,7 @@ local function type2metatable(ctx, typ --[[:table]])
     return ctx.metatables[typ.fqtn]
 end
 
--- Every ABI-0.17 module reserves one private uservalue slot for the canonical
+-- Every ABI-0.17-or-newer module reserves one private uservalue slot for the canonical
 -- per-state Array proxy metatable.  Importers reconstruct only the public
 -- variable/function prefix and never need this private slot.  Array's native
 -- representation remains Table*: only boxed/Lua-facing conversions consult
@@ -512,7 +512,7 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
         ]], {
             EXP = exp,
             VAR = cvar,
-            CT = foreignctype(typ),
+            CT = cdeclarator.render_type_name(typ),
             FILE = c_string_literal(loc.filename),
             LINE = c_integer_literal(loc.line),
             COL = c_integer_literal(loc.col),
@@ -532,7 +532,7 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
         ]], {
             EXP = exp,
             VAR = cvar,
-            CT = foreignctype(typ),
+            CT = cdeclarator.render_type_name(typ),
             FILE = c_string_literal(loc.filename),
             LINE = c_integer_literal(loc.line),
             COL = c_integer_literal(loc.col),
@@ -550,7 +550,7 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
         ]], {
             EXP = exp,
             VAR = cvar,
-            CT = foreignctype(typ),
+            CT = cdeclarator.render_type_name(typ),
             FILE = c_string_literal(loc.filename),
             LINE = c_integer_literal(loc.line),
             COL = c_integer_literal(loc.col),
@@ -569,7 +569,7 @@ local function checkandget(ctx, typ --[[:table]], cvar --[[:string]], exp --[[:s
         ]], {
             EXP = exp,
             VAR = cvar,
-            CT = foreignctype(typ),
+            CT = cdeclarator.render_type_name(typ),
             FILE = c_string_literal(loc.filename),
             LINE = c_integer_literal(loc.line),
             COL = c_integer_literal(loc.col),
@@ -1123,87 +1123,9 @@ checkandsetmixed = function(ctx, typ, dst, src, loc)
     return checkandset(ctx, typ, dst, src, loc)
 end
 
-foreignctype = function(typ --[[:table]])
-    if typ._tag == "Type.CTypedef" then
-        return typ.name
-    elseif typ._tag == "Type.COwned" then
-        return "Udata*"
-    elseif typ._tag == "Type.CVoid" then
-        return "void"
-    elseif typ._tag == "Type.CInteger" or typ._tag == "Type.CFloat" then
-        return typ.spelling
-    elseif typ._tag == "Type.CStruct" then
-        return "struct " .. (typ.tagname or typ.cname)
-    elseif typ._tag == "Type.CUnion" then
-        return "union " .. (typ.tagname or typ.cname)
-    elseif typ._tag == "Type.CArray" then
-        return foreignctype(typ.elem) .. "*"
-    elseif typ._tag == "Type.CPointer" then
-        local pointee = types.resolve_c_typedef(typ.pointee)
-        local quals = typ.quals and #typ.quals > 0
-            and table.concat(typ.quals, " ") .. " " or ""
-        if pointee._tag == "Type.CFunction" then
-            local params = {}
-            for _, param in ipairs(pointee.params) do
-                table.insert(params, foreignctype(param))
-            end
-            if pointee.vararg then
-                table.insert(params, "...")
-            end
-            if #params == 0 then
-                table.insert(params, "void")
-            end
-            return render("$RET (*$QUALS)($PARAMS)", {
-                RET = foreignctype(pointee.ret),
-                QUALS = quals,
-                PARAMS = table.concat(params, ", "),
-            })
-        end
-        return quals .. foreignctype(typ.pointee) .. " *"
-    elseif typ._tag == "Type.Pointer" then
-        if typ.type._tag == "Type.Nil" then
-            return "void*"
-        end
-        if typ.type._tag == "Type.Typedef" then
-            return typ.type.name .. "*"
-        end
-        return foreignctype(typ.type) .. "*"
-    elseif typ._tag == "Type.String" then
-        return "char*"
-    end
-    error("FIXME unknown foreign c type: "..types.tostring(typ))
-end
-
-local function foreigncdecl(typ, name)
-    if typ._tag == "Type.CPointer" then
-        local pointee = types.resolve_c_typedef(typ.pointee)
-        if pointee._tag == "Type.CFunction" then
-            local params = {}
-            for _, param in ipairs(pointee.params) do
-                table.insert(params, foreignctype(param))
-            end
-            if pointee.vararg then
-                table.insert(params, "...")
-            end
-            if #params == 0 then
-                table.insert(params, "void")
-            end
-            local quals = typ.quals and #typ.quals > 0
-                and " " .. table.concat(typ.quals, " ") .. " " or ""
-            return render("$RET (*$QUALS$NAME)($PARAMS)", {
-                RET = foreignctype(pointee.ret),
-                QUALS = quals,
-                NAME = name,
-                PARAMS = table.concat(params, ", "),
-            })
-        end
-    end
-    return foreignctype(typ) .. " " .. name
-end
-
 local function foreigncast(exp, typ --[[:table]])
     return render([[(($CASTTYPE)($CEXP))]], {
-        CASTTYPE = foreignctype(typ),
+        CASTTYPE = cdeclarator.render_type_name(typ),
         CEXP = exp,
     })
 end
@@ -1218,9 +1140,13 @@ local function ctype(typ --[[:table]])
     elseif typ._tag == "Type.Map" then return "Table*"
     elseif typ._tag == "Type.Value" then return "TValue"
     elseif typ._tag == "Type.Nominal" then return "Udata*"
-    elseif typ._tag == "Type.Pointer" then return foreignctype(typ)
-    elseif typ._tag == "Type.COwned" then return "Udata*"
-    elseif types.is_c(typ) then return foreignctype(typ)
+    elseif typ._tag == "Type.Pointer" then
+        return cdeclarator.render_type_name(typ)
+    elseif typ._tag == "Type.COwned" then
+        return cdeclarator.render_type_name(typ)
+    elseif types.is_c(typ) then
+        return cdeclarator.render_type_name(
+            cdeclarator.adjust_parameter_type(typ))
     elseif typ._tag == "Type.Option" then return "TValue"
     -- A first-class function value is boxed (it may be a Titan closure, a Lua
     -- closure, a C function, or a `__call` object), like `value`/`option`.
@@ -1243,10 +1169,35 @@ end
 -- values are protected by explicit spill/reload slots below, keeping the source
 -- local/param C autos ordinary (and avoiding volatile in the function ABI).
 local function cvardecl(ctx, typ, name)
-    if types.is_c(typ) and typ._tag ~= "Type.CTypedef" then
-        return foreigncdecl(typ, name)
+    if types.is_c(typ) or typ._tag == "Type.Pointer" then
+        return cdeclarator.render_declaration(typ, name)
     end
     return ctype(typ) .. " " .. name
+end
+
+local function cpointerdecl(typ, name)
+    if types.is_c(typ) or typ._tag == "Type.Pointer" then
+        return cdeclarator.render_declaration(
+            types.CPointer(typ, {}), name)
+    end
+    return ctype(typ) .. " *" .. name
+end
+
+local function cpointertype(typ)
+    if types.is_c(typ) or typ._tag == "Type.Pointer" then
+        return cdeclarator.render_type_name(types.CPointer(typ, {}))
+    end
+    return ctype(typ) .. "*"
+end
+
+local function cfunctiondecl(rettype, name, params, is_pointer)
+    local declarator = is_pointer and "(*" .. name .. ")" or name
+    declarator = declarator .. "(" .. params .. ")"
+    if rettype
+       and (types.is_c(rettype) or rettype._tag == "Type.Pointer") then
+        return cdeclarator.render_declaration(rettype, declarator)
+    end
+    return (rettype and ctype(rettype) or "void") .. " " .. declarator
 end
 
 -- A statement after which control never falls through (return/break/raise). The
@@ -1295,8 +1246,8 @@ end
 -- read is made from volatile-backed storage. We do not make every local/param
 -- volatile. Instead this pass marks only Decl objects assigned in a protected
 -- region whose post-longjmp path can read them. Codegen then keeps GC values in
--- their existing Lua-stack slots and uses tiny volatile C spill slots only for
--- non-GC scalars.
+-- their existing Lua-stack slots and uses volatile scalar or byte-
+-- representation spill storage for non-GC values.
 local collect_reads_exp, collect_reads_stat, collect_writes_stat
 
 local function collect_reads_var(node, out)
@@ -1328,10 +1279,34 @@ local function collect_lvalue_reads(node, out)
     return out
 end
 
-local function collect_lvalue_write(node, out)
-    if node and node._decl and node._decl._tag == "Ast.Decl" then
-        set_add(out, node._decl)
+-- Follow a C aggregate subobject lvalue back to its automatic root. Pointer
+-- dereferences deliberately stop the walk: a raw pointer may alias any object,
+-- so only direct by-value aggregate storage has a checker-visible root whose
+-- complete representation we can commit.
+function coder._lvalue_root_decl(node)
+    if not node then return nil end
+    if node._tag == "Ast.ExpVar" then
+        return coder._lvalue_root_decl(node.var)
+    elseif node._tag == "Ast.VarName" then
+        local decl = node._decl
+        if decl and decl._tag == "Ast.Decl" then return decl end
+    elseif node._tag == "Ast.VarDot" then
+        if node._decl and node._decl._tag == "Type.CField"
+           and node.exp and node.exp._type
+           and types.is_c_aggregate(node.exp._type) then
+            return coder._lvalue_root_decl(node.exp)
+        end
+    elseif node._tag == "Ast.VarBracket" then
+        if node.exp1 and node.exp1._type
+           and types.is_c_aggregate(node.exp1._type) then
+            return coder._lvalue_root_decl(node.exp1)
+        end
     end
+    return nil
+end
+
+local function collect_lvalue_write(node, out)
+    set_add(out, coder._lvalue_root_decl(node))
     return out
 end
 
@@ -1395,6 +1370,48 @@ collect_reads_exp = function(node, out)
     return out
 end
 
+function coder._collect_writes_exp(node, out)
+    out = out or {}
+    if not node or node == false then return out end
+    local tag = node._tag
+    if tag == "Ast.VarDot" then
+        coder._collect_writes_exp(node.exp, out)
+    elseif tag == "Ast.VarBracket" then
+        coder._collect_writes_exp(node.exp1, out)
+        coder._collect_writes_exp(node.exp2, out)
+    elseif tag == "Ast.ExpVar" then
+        coder._collect_writes_exp(node.var, out)
+    elseif tag == "Ast.ExpInitList" then
+        for _, field in ipairs(node.fields) do
+            coder._collect_writes_exp(field.exp, out)
+        end
+    elseif tag == "Ast.ExpCall" then
+        for _, decl in ipairs(node._c_mutated_decls or {}) do
+            set_add(out, decl)
+        end
+        coder._collect_writes_exp(node.exp, out)
+        for _, arg in ipairs(node.args.args) do
+            coder._collect_writes_exp(arg, out)
+        end
+    elseif tag == "Ast.ExpUnop" or tag == "Ast.ExpCast"
+            or tag == "Ast.ExpAdjust" or tag == "Ast.ExpDotsIndex"
+            or tag == "Ast.ExpExtra" or tag == "Ast.ExpMethodRef" then
+        coder._collect_writes_exp(node.exp, out)
+    elseif tag == "Ast.ExpBinop" then
+        coder._collect_writes_exp(node.lhs, out)
+        coder._collect_writes_exp(node.rhs, out)
+    elseif tag == "Ast.ExpConcat" then
+        for _, exp in ipairs(node.exps) do
+            coder._collect_writes_exp(exp, out)
+        end
+    elseif tag == "Ast.ExpFunction" then
+        -- Nested functions/lambdas have their own setjmp scopes and contexts.
+    else
+        -- names and literals do not write.
+    end
+    return out
+end
+
 collect_reads_stat = function(node, out)
     out = out or {}
     if not node or node == false then return out end
@@ -1450,16 +1467,47 @@ collect_writes_stat = function(node, out)
         collect_writes_block(node, out)
     elseif tag == "Ast.StatDecl" then
         for _, decl in ipairs(node.decls) do set_add(out, decl) end
+        for _, exp in ipairs(node.exps) do
+            coder._collect_writes_exp(exp, out)
+        end
     elseif tag == "Ast.StatAssign" then
-        for _, var in ipairs(node.vars) do collect_lvalue_write(var, out) end
+        for _, var in ipairs(node.vars) do
+            collect_lvalue_write(var, out)
+            coder._collect_writes_exp(var, out)
+        end
+        for _, exp in ipairs(node.exps) do
+            coder._collect_writes_exp(exp, out)
+        end
+    elseif tag == "Ast.StatCall" then
+        coder._collect_writes_exp(node.callexp, out)
+    elseif tag == "Ast.StatReturn" then
+        for _, exp in ipairs(node.exps) do
+            coder._collect_writes_exp(exp, out)
+        end
+    elseif tag == "Ast.StatRaise" then
+        coder._collect_writes_exp(node.exp, out)
     elseif tag == "Ast.StatWhile" or tag == "Ast.StatRepeat"
             or tag == "Ast.StatFor" or tag == "Ast.StatForIn" then
+        if tag == "Ast.StatWhile" or tag == "Ast.StatRepeat" then
+            coder._collect_writes_exp(node.condition, out)
+        elseif tag == "Ast.StatFor" then
+            coder._collect_writes_exp(node.start, out)
+            coder._collect_writes_exp(node.finish, out)
+            coder._collect_writes_exp(node.inc, out)
+        else
+            for _, exp in ipairs(node.exps) do
+                coder._collect_writes_exp(exp, out)
+            end
+        end
         if tag == "Ast.StatForIn" then
             for _, decl in ipairs(node.decls) do set_add(out, decl) end
         end
         collect_writes_block(node.block, out)
     elseif tag == "Ast.StatIf" then
-        for _, t in ipairs(node.thens) do collect_writes_block(t.block, out) end
+        for _, t in ipairs(node.thens) do
+            coder._collect_writes_exp(t.condition, out)
+            collect_writes_block(t.block, out)
+        end
         collect_writes_block(node.elsestat, out)
     elseif tag == "Ast.StatTry" then
         collect_writes_block(node.block, out)
@@ -1562,10 +1610,13 @@ local function unreachable_return(rettype, block)
         /* unreachable: every path above already returned/raised; this satisfies
         ** the C control-flow check (Titan never falls through here) */
         {
-            $TYPE _ur = $INIT;
+            $DECL = $INIT;
             L->top.p = _base;
             return _ur;
-        }]], { TYPE = ctype(rettype), INIT = initval(rettype) })
+        }]], {
+            DECL = cvardecl(nil, rettype, "_ur"),
+            INIT = initval(rettype),
+        })
 end
 
 -- The `TitanVarg*` descriptor for a vararg of element type `elemtype`, keyed on
@@ -1627,7 +1678,7 @@ local function function_sig(fname, ftype, is_pointer)
         table.insert(params, "int _start")
     end
     for i = 2, #ftype.rettypes do
-        table.insert(params, ctype(ftype.rettypes[i]) .. "*")
+        table.insert(params, cpointertype(ftype.rettypes[i]))
     end
     -- A flexible result run is caller-owned typed storage. Keep this pair last
     -- so every fixed-only signature remains byte-for-byte unchanged.
@@ -1637,15 +1688,11 @@ local function function_sig(fname, ftype, is_pointer)
         table.insert(params, "int _flexwant")
     end
     local rettype = ftype.rettypes[1]
-    local template = is_pointer
-                     and "$RETTYPE (*$FNAME)($PARAMS)"
-                     or  "$RETTYPE $FNAME($PARAMS)"
-    return render(template, {
-        -- a zero-return `() -> ()` function has a `void` native entry
-        RETTYPE = rettype and ctype(rettype) or "void",
-        FNAME = fname,
-        PARAMS = table.concat(params, ", ")
-    })
+    -- A zero-return `() -> ()` function has a `void` native entry. Rendering
+    -- the return type around the complete function declarator also handles a
+    -- C function-pointer return without losing precedence.
+    return cfunctiondecl(
+        rettype, fname, table.concat(params, ", "), is_pointer)
 end
 
 -- creates a new code generation context for a function
@@ -1714,6 +1761,37 @@ local function spill_cvar(decl)
     return decl._spill_cvar
 end
 
+function coder._aggregate_spill_copy(decl, to_spill)
+    local spill = spill_cvar(decl)
+    local cvar = assert(decl._cvar)
+    if to_spill then
+        return render([[
+            {
+                for (size_t _spill_i = 0;
+                     _spill_i < sizeof($CVAR); _spill_i++) {
+                    $SPILL[_spill_i] =
+                        ((const unsigned char *)&$CVAR)[_spill_i];
+                }
+            }
+        ]], {
+            SPILL = spill,
+            CVAR = cvar,
+        })
+    end
+    return render([[
+        {
+            for (size_t _spill_i = 0;
+                 _spill_i < sizeof($CVAR); _spill_i++) {
+                ((unsigned char *)&$CVAR)[_spill_i] =
+                    $SPILL[_spill_i];
+            }
+        }
+    ]], {
+        SPILL = spill,
+        CVAR = cvar,
+    })
+end
+
 local function spill_decl_init(ctx, decl)
     if not decl_needs_spill(decl) then return "" end
     register_spill_decl(ctx, decl)
@@ -1721,6 +1799,16 @@ local function spill_decl_init(ctx, decl)
         -- GC values already have a Lua-stack slot. That slot is the stable
         -- storage; no separate C spill is needed.
         return ""
+    end
+    if types.is_c_aggregate(decl._type) then
+        return render([[
+            volatile unsigned char $SPILL[sizeof($CVAR)];
+            $COPY
+        ]], {
+            SPILL = spill_cvar(decl),
+            CVAR = decl._cvar,
+            COPY = coder._aggregate_spill_copy(decl, true),
+        })
     end
     return render([[
         volatile $CT $SPILL = $CVAR;
@@ -1735,6 +1823,14 @@ local function spill_decl_zero(ctx, decl)
     if not decl_needs_spill(decl) then return "" end
     register_spill_decl(ctx, decl)
     if types.is_gc(decl._type) then return "" end
+    if types.is_c_aggregate(decl._type) then
+        return render([[
+            volatile unsigned char $SPILL[sizeof($CVAR)] = {0};
+        ]], {
+            SPILL = spill_cvar(decl),
+            CVAR = decl._cvar,
+        })
+    end
     return render([[
         volatile $CT $SPILL = $INIT;
     ]], {
@@ -1746,6 +1842,9 @@ end
 
 local function spill_update(decl)
     if not decl_needs_spill(decl) or types.is_gc(decl._type) then return "" end
+    if types.is_c_aggregate(decl._type) then
+        return coder._aggregate_spill_copy(decl, true)
+    end
     return render([[
         $SPILL = $CVAR;
     ]], {
@@ -1766,10 +1865,15 @@ local function spill_reload(ctx)
                         getslot(decl._type, decl._cvar, decl._slot) .. ";")
                 end
             elseif decl._spill_cvar then
-                table.insert(lines, render("$CVAR = $SPILL;", {
-                    CVAR = decl._cvar,
-                    SPILL = decl._spill_cvar,
-                }))
+                if types.is_c_aggregate(decl._type) then
+                    table.insert(lines,
+                        coder._aggregate_spill_copy(decl, false))
+                else
+                    table.insert(lines, render("$CVAR = $SPILL;", {
+                        CVAR = decl._cvar,
+                        SPILL = decl._spill_cvar,
+                    }))
+                end
             end
         end
     end
@@ -1782,19 +1886,24 @@ local function newtmp(ctx --[[:table]], typ --[[:table]], isgc --[[:boolean]])
     local tmp = ctx.tmp
     ctx.tmp = ctx.tmp + 1
     local tmpname = "_tmp_" .. tmp
+    -- A temporary freezes an expression value, so a C array/function uses its
+    -- adjusted pointer representation. Direct array declarators are reserved
+    -- for actual object storage (locals/fields), never assignment-based temps.
+    local tmptype = (types.is_c(typ) and
+        cdeclarator.adjust_parameter_type(typ)) or typ
     if isgc then
         local slot = newslot(ctx)
         return render([[
             $DECL = $INIT;
         ]], {
-            DECL = cvardecl(ctx, typ, tmpname),
+            DECL = cvardecl(ctx, tmptype, tmpname),
             INIT = initval(typ)
         }), tmpname, slot
     else
         return render([[
             $DECL = $INIT;
         ]], {
-            DECL = cvardecl(ctx, typ, tmpname),
+            DECL = cvardecl(ctx, tmptype, tmpname),
             INIT = initval(typ)
         }), tmpname
     end
@@ -1927,8 +2036,7 @@ local function newforeigntmp(ctx --[[:table]], typ --[[:table]])
         fdecl = "char* " .. tmpname
         finit = " = NULL"
     elseif typ._tag == "Type.Pointer" or types.is_c(typ) then
-        fdecl = types.is_c(typ) and foreigncdecl(typ, tmpname)
-            or foreignctype(typ) .. " " .. tmpname
+        fdecl = cdeclarator.render_declaration(typ, tmpname)
         if typ._tag == "Type.Pointer" or typ._tag == "Type.COwned"
            or rtyp._tag == "Type.CPointer" then
             finit = " = NULL"
@@ -2494,8 +2602,8 @@ local codecfield
 local codecindex_parts
 
 local function code_owned_payload(owner, pointee)
-    return render("(($CT *)getudatamem($OWNER))", {
-        CT = foreignctype(pointee),
+    return render("(($CT)getudatamem($OWNER))", {
+        CT = cdeclarator.render_type_name(types.CPointer(pointee, {})),
         OWNER = owner,
     })
 end
@@ -2545,16 +2653,6 @@ function coder._prepared_c_bounds_check(var, index, length)
     }, true)
 end
 
-function coder._new_c_pointer_tmp(ctx, pointee)
-    local tmp = ctx.tmp
-    ctx.tmp = ctx.tmp + 1
-    local name = "_tmp_" .. tmp
-    return render("$TYPE *$NAME = NULL;", {
-        TYPE = foreignctype(pointee),
-        NAME = name,
-    }), name
-end
-
 function coder._materialize_c_aggregate(ctx, exp)
     local stats, value = codeexp(ctx, exp)
     local tmp = ctx.tmp
@@ -2566,7 +2664,7 @@ function coder._materialize_c_aggregate(ctx, exp)
         $NAME = $VALUE;
     ]], {
         STATS = stats,
-        DECLARATION = foreigncdecl(exp._type, name),
+        DECLARATION = cdeclarator.render_declaration(exp._type, name),
         NAME = name,
         VALUE = value,
     }), name
@@ -2576,8 +2674,10 @@ end
 -- defers its own NULL/range validation until the store; any field/index step
 -- needed to obtain that target's base is an ordinary LHS read, so its checks
 -- execute during preparation. COwned roots remain in scanned slots across the
--- RHS, aggregate subobjects are retained by pointer, and C arrays decay to a
--- synthesized element pointer instead of an unassignable array temporary.
+-- RHS. Aggregate and array subobjects retain a stable access path assembled
+-- only from already-frozen roots and indices. This is equivalent to retaining
+-- their address but does not require naming an anonymous C struct/union (or an
+-- array whose element is one), which C99 cannot express in a declarator.
 function coder._is_nested_c_storage(exp)
     if exp._tag ~= "Ast.ExpVar" then return false end
     local var = exp.var
@@ -2610,59 +2710,55 @@ function coder._prepare_c_base(ctx, exp, allow_temporary)
         return stats, {
             type = basetype,
             base = pointer,
+            indirect = true,
         }
     elseif basetype._tag == "Type.COwned" then
         local stats, owner = materialize(ctx, exp)
         local length = basetype.count and render(
             "((lua_Integer)($OWNER->len / sizeof($TYPE)))", {
                 OWNER = owner,
-                TYPE = foreignctype(basetype.pointee),
+                TYPE = cdeclarator.render_declaration(
+                    basetype.pointee, ""),
             }) or nil
         return stats, {
             type = basetype,
             base = code_owned_payload(owner, basetype.pointee),
             length = length,
+            indirect = true,
         }
     elseif basetype._tag == "Type.CArray" then
         local stats, storage =
             coder._prepare_c_storage(ctx, exp, allow_temporary)
-        local declaration, pointer =
-            coder._new_c_pointer_tmp(ctx, basetype.elem)
-        return render([[
-            $STATS
-            $DECLARATION
-            $POINTER = $STORAGE;
-        ]], {
-            STATS = stats,
-            DECLARATION = declaration,
-            POINTER = pointer,
-            STORAGE = storage,
-        }), {
+        return stats, {
             type = basetype,
-            base = pointer,
+            base = storage,
             length = c_integer_literal(basetype.len),
+            indirect = false,
         }
     elseif basetype._tag == "Type.CStruct"
            or basetype._tag == "Type.CUnion" then
         local stats, storage =
             coder._prepare_c_storage(ctx, exp, allow_temporary)
-        local declaration, pointer =
-            coder._new_c_pointer_tmp(ctx, exp._type)
-        return render([[
-            $STATS
-            $DECLARATION
-            $POINTER = &($STORAGE);
-        ]], {
-            STATS = stats,
-            DECLARATION = declaration,
-            POINTER = pointer,
-            STORAGE = storage,
-        }), {
+        return stats, {
             type = basetype,
-            base = pointer,
+            base = storage,
+            indirect = false,
         }
     end
     error("invalid prepared C base " .. types.tostring(exp._type))
+end
+
+function coder._prepared_c_field(base, name)
+    if base.indirect then
+        return render("($BASE)->$FIELD", {
+            BASE = base.base,
+            FIELD = name,
+        })
+    end
+    return render("($BASE).$FIELD", {
+        BASE = base.base,
+        FIELD = name,
+    })
 end
 
 function coder._prepare_c_storage(ctx, exp, allow_temporary)
@@ -2690,10 +2786,7 @@ function coder._prepare_c_storage(ctx, exp, allow_temporary)
         ]], {
             STATS = stats,
             CHECK = check,
-        }), render("$BASE->$FIELD", {
-            BASE = base.base,
-            FIELD = var.name,
-        })
+        }), coder._prepared_c_field(base, var.name)
     elseif var._tag == "Ast.VarBracket"
            and types.is_c(var.exp1._type) then
         local stats, base =
@@ -2752,22 +2845,27 @@ local function codeassignment(ctx, var, cexp, etype, lvalue)
                           and "luaC_barrierback(L, obj2gco(_recobj), _fieldslot);" or ""
             })
         elseif vtag == "Ast.VarDot" and var._decl._tag == "Type.CField" then
+            local spill = spill_update(coder._lvalue_root_decl(var))
             if lvalue and lvalue.cfield_base then
-                local basetype = assert(lvalue.cfield_type)
-                local check = basetype._tag == "Type.CPointer"
+                local base = {
+                    type = assert(lvalue.cfield_type),
+                    base = lvalue.cfield_base,
+                    indirect = lvalue.cfield_indirect,
+                }
+                local check = base.type._tag == "Type.CPointer"
                     and coder._prepared_c_null_check(
-                        var, lvalue.cfield_base) or ""
-                local field = render("$BASE->$FIELD", {
-                    BASE = lvalue.cfield_base,
-                    FIELD = var._decl.name,
-                })
+                        var, base.base) or ""
+                local field =
+                    coder._prepared_c_field(base, var._decl.name)
                 return render([[
                     $CHECK
                     $FIELD = $CEXP;
+                    $SPILL
                 ]], {
                     CHECK = check,
                     FIELD = field,
                     CEXP = cexp,
+                    SPILL = spill,
                 })
             end
             local lstats, lexp
@@ -2779,10 +2877,12 @@ local function codeassignment(ctx, var, cexp, etype, lvalue)
             return render([[
                 $STATS
                 $FIELD = $CEXP;
+                $SPILL
             ]], {
                 STATS = lstats,
                 FIELD = lexp,
                 CEXP = cexp,
+                SPILL = spill,
             })
         elseif vtag == "Ast.VarDot" then -- module variable
             assert(var._decl._tag == "Type.ModuleVariable")
@@ -2969,6 +3069,7 @@ local function codeassignment(ctx, var, cexp, etype, lvalue)
                           and "luaC_barrierback(L, obj2gco(_t), &_vv);" or ""
             })
         elseif types.is_c(var.exp1._type) then
+            local spill = spill_update(coder._lvalue_root_decl(var))
             local parts, indexprep
             if lvalue then
                 local basetype = assert(lvalue.cbase_type)
@@ -3008,6 +3109,7 @@ local function codeassignment(ctx, var, cexp, etype, lvalue)
                     $BSTATS
                     $INDEXPREP
                     $BASE[$IDX] = $CEXP;
+                    $SPILL
                 }
             ]], {
                 BSTATS = parts.bstats,
@@ -3015,6 +3117,7 @@ local function codeassignment(ctx, var, cexp, etype, lvalue)
                 IDX = parts.idxname,
                 BASE = parts.baseexp,
                 CEXP = cexp,
+                SPILL = spill,
             })
         end
     else
@@ -3072,6 +3175,7 @@ function coder._materialize_assignment_lvalue(ctx, var)
             return stats, {
                 cfield_base = base.base,
                 cfield_type = base.type,
+                cfield_indirect = base.indirect,
             }
         end
         return "", nil
@@ -3268,13 +3372,34 @@ end
 
 local function mutable_out_anchor(ctx, exp, target)
     local source = exp
-    if exp._tag == "Ast.ExpCast"
-       and exp.exp
-       and target
-       and types.c_mutable_address_coerceable(exp.exp._type, target) then
-        source = exp.exp
+    local direct_address_source = false
+    while source._tag == "Ast.ExpCast" and source.exp do
+        local operand = source.exp
+        local conversion = source._c_conversion
+        if conversion and conversion.kind ==
+           "address_then_unsafe_object_pointer" then
+            direct_address_source = operand
+        elseif is_addressable_local(operand)
+           and types.c_mutable_address_coerceable(
+               operand._type, source._type) then
+            -- Preserve the local root across an exact-address inner cast and
+            -- an unrelated-pointer outer cast.
+            direct_address_source = operand
+        end
+        source = operand
     end
-    if not (target and types.c_mutable_address_coerceable(source._type, target))
+
+    source = direct_address_source or exp
+    local mutable_address = target
+        and types.c_mutable_address_coerceable(source._type, target)
+    if direct_address_source then
+        local target_res = types.resolve_c_typedef(target)
+        mutable_address = target_res
+            and target_res._tag == "Type.CPointer"
+            and not types.c_pointer_has_qual(target_res, "const")
+    end
+
+    if not mutable_address
        or not is_addressable_local(source)
        or not types.is_gc(source._type) then
         return nil
@@ -3462,6 +3587,13 @@ local function finish_foreign_call(ctx, ret, prestats, ccall, poststats)
     }), fname
 end
 
+function coder._append_c_mutation_spills(node, poststats)
+    for _, decl in ipairs(node._c_mutated_decls or {}) do
+        local update = spill_update(decl)
+        if update ~= "" then table.insert(poststats, update) end
+    end
+end
+
 local function codeforeigncall(ctx, node)
     local cfuncname = node.exp.var.name
     local ftype = node.exp._type
@@ -3518,6 +3650,10 @@ local function codeforeigncall(ctx, node)
             end
         end
     end
+    -- A direct mutable-address argument may have changed the complete local
+    -- object representation. Commit only after the C call returns normally;
+    -- a C-side nonlocal exit must retain the last pre-call spill.
+    coder._append_c_mutation_spills(node, poststats)
     local cstats = table.concat(castats, "\n")
     local ccall = render("$NAME($CAEXPS)", {
         NAME = cfuncname,
@@ -3558,6 +3694,7 @@ local function codecfunctionptrcall(ctx, node)
             table.insert(poststats, anchor)
         end
     end
+    coder._append_c_mutation_spills(node, poststats)
     local cstats = table.concat(castats, "\n")
     local ccall = render("$FNAME($ARGS)", {
         FNAME = fname,
@@ -5059,9 +5196,9 @@ local function dispatch_return_epilogue(ctx, frame)
     -- after `L->top.p = _base` would touch a slot above top. No allocation runs
     -- here, so the temps hold valid (register-held) values across the reset.
     for i = 1, #from do
-        table.insert(lines, render("$CT $NAME = $READ;", {
-            CT = ctype(from[i].typ),
-            NAME = "_pa_dret_" .. frame.id .. "_" .. i,
+        local name = "_pa_dret_" .. frame.id .. "_" .. i
+        table.insert(lines, render("$DECL = $READ;", {
+            DECL = cvardecl(ctx, from[i].typ, name),
             READ = coder._saved_fixed_value(from[i]),
         }))
     end
@@ -6017,8 +6154,18 @@ local function predeclare_defer_tail(ctx, block)
                        and not decl._defer_tail_predeclared then
                         decl._cvar = "_local_" .. localname(ctx, decl.name)
                         decl._defer_tail_predeclared = true
-                        table.insert(out, cvardecl(ctx, decl._type, decl._cvar) .. ";")
-                        local spill = spill_decl_zero(ctx, decl)
+                        if decl._c_zero_init then
+                            table.insert(out,
+                                cvardecl(ctx, decl._type, decl._cvar)
+                                .. " = {0};")
+                            decl._c_zero_predeclared = true
+                        else
+                            table.insert(out,
+                                cvardecl(ctx, decl._type, decl._cvar) .. ";")
+                        end
+                        local spill = decl._c_zero_init
+                            and spill_decl_init(ctx, decl)
+                            or spill_decl_zero(ctx, decl)
                         if spill ~= "" then
                             decl._defer_tail_spill_predeclared = true
                             table.insert(out, spill)
@@ -6152,6 +6299,31 @@ end
 local function codestat_dispatch(ctx, node)
     local tag = node._tag
     if tag == "Ast.StatDecl" then
+        if node._c_zero_init then
+            local decl = assert(node.decls[1])
+            assert(#node.decls == 1 and #node.exps == 0
+                and decl._c_zero_init)
+            -- Automatic C aggregates are direct C objects, never adjusted
+            -- expression results or closure boxes. An unused object has no
+            -- observable initialization, so it may follow the ordinary unused
+            -- local elision rule.
+            decl._boxed = false
+            if not decl._used then return "" end
+            if not decl._cvar then
+                decl._cvar = "_local_" .. localname(ctx, decl.name)
+            end
+            if decl._c_zero_predeclared then
+                return ""
+            end
+            return render([[
+                $CDECL = {0};
+                $CSPILLDECL
+            ]], {
+                CDECL = cvardecl(ctx, decl._type, decl._cvar),
+                CSPILLDECL = spill_decl_init(ctx, decl),
+            })
+        end
+
         local code, initnames = coder._codeadjustedfixed(ctx, node)
         local fixed = node._result_adjustment
             and node._result_adjustment.fixed or node.exps
@@ -6375,7 +6547,7 @@ codecindex_parts = function(ctx, node)
         baseexp = code_owned_payload(bexp, basetype.pointee)
         lenexp = render("((lua_Integer)($OWNER->len / sizeof($CT)))", {
             OWNER = bexp,
-            CT = foreignctype(basetype.pointee),
+            CT = cdeclarator.render_declaration(basetype.pointee, ""),
         })
     else
         error("invalid C index base " .. types.tostring(node.exp1._type))
@@ -7014,7 +7186,68 @@ local function coderecord(ctx, node, target)
     return table.concat(stats, "\n"), tmpname
 end
 
+function coder._freeze_c_operator_operand(ctx, exp, target)
+    local cstats, cexp
+    if exp._type._tag == "Type.Nil" then
+        -- A nil-producing call can keep its effect in the expression half
+        -- rather than in `stats`; the generic native-to-foreign bridge quite
+        -- correctly replaces the value with NULL, but would then discard that
+        -- expression.  Evaluate it explicitly before materializing the
+        -- target-typed null constant.
+        cstats, cexp = codeexp(ctx, exp)
+        cstats = cstats .. "\n(void)(" .. cexp .. ");"
+        cexp = "0"
+    else
+        cstats, cexp = codeforeignexp(ctx, exp, target)
+    end
+    local cdecl, cname = newforeigntmp(ctx, target)
+    return render([[
+        $CSTATS
+        $CDECL
+        $CNAME = $CAST;
+    ]], {
+        CSTATS = cstats,
+        CDECL = cdecl,
+        CNAME = cname,
+        CAST = foreigncast(cexp, target),
+    }), cname
+end
+
+function coder._code_c_unary_operator(ctx, node)
+    local trait = assert(node._c_operator)
+    local stats, operand = coder._freeze_c_operator_operand(
+        ctx, node.exp, trait.lhs_target)
+    return stats, "(" .. trait.cop .. operand .. ")"
+end
+
+function coder._code_c_binary_operator(ctx, node)
+    local trait = assert(node._c_operator)
+    -- Always freeze both sides.  Besides preserving Titan's left-to-right
+    -- evaluation rule for two raw C calls, this makes array decay happen into
+    -- the selected pointer temporary rather than ever attempting an array
+    -- temporary assignment.
+    local lstats, lhs = coder._freeze_c_operator_operand(
+        ctx, node.lhs, trait.lhs_target)
+    local rstats, rhs = coder._freeze_c_operator_operand(
+        ctx, node.rhs, trait.rhs_target)
+    local expression =
+        "(" .. lhs .. " " .. trait.cop .. " " .. rhs .. ")"
+    local ltarget = types.resolve_c_typedef(trait.lhs_target)
+    local rtarget = types.resolve_c_typedef(trait.rhs_target)
+    if node._type._tag == "Type.Integer"
+       and ltarget and rtarget
+       and ltarget._tag == "Type.CPointer"
+       and rtarget._tag == "Type.CPointer"
+       and trait.cop == "-" then
+        expression = "((lua_Integer)(" .. expression .. "))"
+    end
+    return lstats .. "\n" .. rstats, expression
+end
+
 local function codeunaryop(ctx, node, iscondition)
+    if node._c_operator then
+        return coder._code_c_unary_operator(ctx, node)
+    end
     local op = node.op
     if op == "not" then
         local estats, ecode = codeexp(ctx, node.exp, iscondition)
@@ -7032,7 +7265,7 @@ local function codeunaryop(ctx, node, iscondition)
         elseif etype._tag == "Type.COwned" and etype.count then
             return estats, render("((lua_Integer)($OWNER->len / sizeof($CT)))", {
                 OWNER = ecode,
-                CT = foreignctype(etype.pointee),
+                CT = cdeclarator.render_declaration(etype.pointee, ""),
             })
         else
             return estats, "tsslen(" .. ecode .. ")"
@@ -7270,6 +7503,9 @@ ordered_binary_operands = function(ctx, node)
 end
 
 local function codebinaryop(ctx, node, _)
+    if node._c_operator then
+        return coder._code_c_binary_operator(ctx, node)
+    end
     local op = node.op
     if op == "~=" then op = "!=" end
     if op == "and" then
@@ -7713,7 +7949,7 @@ local function codecpseudonew(ctx, node)
         CTMP = ctmp,
         COUNTDECL = countdecl,
         COUNTASSIGN = countassign,
-        CT = foreignctype(ctyp),
+        CT = cdeclarator.render_declaration(ctyp, ""),
         TMPNAME = tmpname,
         TMPSLOT = tmpslot,
         META = c_integer_literal(owned_c_metatable(ctx, ret)),
@@ -7920,6 +8156,13 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
         -- typedef but its C representation already is the underlying scalar, so
         -- just emit the operand unchanged under its resolved type.
         return codeexp(ctx, node.exp, iscondition, target)
+    elseif tag == "Ast.ExpCast"
+           and node._c_conversion
+           and node._c_conversion.kind ==
+               "address_then_unsafe_object_pointer" then
+        local cstats, cexp = codeexp(ctx, node.exp)
+        local address = render("(&($CEXP))", { CEXP = cexp })
+        return cstats, foreigncast(address, node._type)
     elseif tag == "Ast.ExpCast" and types.is_c(node._type) then
         local cstats, cexp = codeexp(ctx, node.exp)
         local fstats, fexp = nativetoforeignexp(ctx, node.exp, cexp, node._type)
@@ -8274,11 +8517,31 @@ function codeforeignexp(ctx, node, target)
         return codeforeigncall(ctx, node)
     elseif tag == "Ast.VarDot" and node.exp._type._tag == "Type.CModule" then
         return codeforeignvar(ctx, node)
+    elseif tag == "Ast.ExpVar"
+           and not node._foreign_function_pointer
+           and node.var
+           and node.var._tag == "Ast.VarDot"
+           and node.var.exp
+           and node.var.exp._type
+           and node.var.exp._type._tag == "Type.CModule" then
+        -- `codeexp` normally converts a foreign scalar/module member into its
+        -- Titan representation at this wrapper.  C operators and C call
+        -- operands need the declaration's raw C expression so promotions
+        -- happen from its actual type (not a premature lua_Integer/
+        -- lua_Number cast).
+        return codeforeignvar(ctx, node.var)
     elseif tag == "Ast.ExpString" then
         return "", c_string_literal(node.value)
     elseif tag == "Ast.ExpCast" and node.target._tag == "Type.String" then
         local cstats, cexp = codeforeignexp(ctx, node.exp)
         return cstats, foreigncast(cexp, node._type)
+    elseif tag == "Ast.ExpCast"
+           and node._c_conversion
+           and node._c_conversion.kind ==
+               "address_then_unsafe_object_pointer" then
+        local cstats, cexp = codeexp(ctx, node.exp)
+        local address = render("(&($CEXP))", { CEXP = cexp })
+        return cstats, foreigncast(address, node._type)
     elseif tag == "Ast.ExpCast" and types.is_c(node._type) then
         local cstats, cexp = codeexp(ctx, node.exp)
         local fstats, fexp = nativetoforeignexp(ctx, node.exp, cexp, node._type)
@@ -8311,7 +8574,8 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
         local pname = "_param_" .. tostring(i)
         local slot = "s2v(func + " .. i .. ")"
         table.insert(pnames, pname)
-        table.insert(stats, ctype(param) .. " " .. pname .. " = " .. initval(param) .. ";")
+        table.insert(stats, cvardecl(tlcontext, param, pname)
+            .. " = " .. initval(param) .. ";")
         table.insert(stats, checkandget(tlcontext, param, pname, slot, loc))
     end
     -- Variadic: build the backing struct from the surplus Lua-stack args. Pinned
@@ -8372,7 +8636,8 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
         local ptype = typ.rettypes[i]
         local pname = "_outparam_" .. i
         table.insert(pnames, "&" .. pname)
-        table.insert(stats, ctype(ptype) .. " " .. pname .. " = " .. initval(ptype) .. ";")
+        table.insert(stats, cvardecl(tlcontext, ptype, pname)
+            .. " = " .. initval(ptype) .. ";")
     end
     local flexrettype = typ.flexrettype
     if flexrettype then
@@ -8410,8 +8675,8 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
     if flexrettype then
         local call
         if rettype then
-            call = render("$TYPE res = $NAME($PARAMS);", {
-                TYPE = ctype(rettype),
+            call = render("$DECL = $NAME($PARAMS);", {
+                DECL = cvardecl(tlcontext, rettype, "res"),
                 NAME = titan_entry,
                 PARAMS = table.concat(pnames, ", "),
             })
@@ -8473,7 +8738,7 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
             lua_checkstack(L, $NRET);
             ptrdiff_t _firstret_off = savestack(L, L->top.p);
             L->top.p += $NRET;
-            $TYPE res = $NAME($PARAMS);
+            $DECL = $NAME($PARAMS);
             /* the native callee may have grown (and thus relocated) the Lua
                stack via lua_checkstack, so recompute the return slot pointer
                from the saved offset before writing through it */
@@ -8481,7 +8746,7 @@ local function genluaentry(tlcontext, titan_name, titan_entry, typ, loc, lua_nam
             $SETSLOT;
             _firstret++;
         ]], {
-            TYPE = ctype(rettype),
+            DECL = cvardecl(tlcontext, rettype, "res"),
             NAME = titan_entry,
             PARAMS = table.concat(pnames, ", "),
             SETSLOT = setboxed(tlcontext, rettype, "s2v(_firstret)", "res"),
@@ -8679,7 +8944,8 @@ local function codefuncdec(tlcontext, node)
     end
     for i = 2, #node._type.rettypes do
         local outtype = node._type.rettypes[i]
-        table.insert(cparams, ctype(outtype) .. " *" .. "_outparam_" .. i)
+        table.insert(cparams,
+            cpointerdecl(outtype, "_outparam_" .. i))
     end
     if node._type.flexrettype then
         table.insert(cparams,
@@ -8739,7 +9005,6 @@ local function codefuncdec(tlcontext, node)
     -- A zero-return `() -> ()` function has no `rettypes[1]`: its native entry
     -- returns C `void`, so falling off the end emits a bare `return;`. A
     -- `nil`-returning function returns the int 0 (the native nil encoding).
-    local crettype = rettype and ctype(rettype) or "void"
     local flexempty = node._type.flexrettype
         and "            _flexout->n_args = 0;\n" or ""
     if not rettype then
@@ -8754,23 +9019,21 @@ local function codefuncdec(tlcontext, node)
         local ur = unreachable_return(rettype, node.block)
         if ur then table.insert(stats, ur) end
     end
+    local nativesig = cfunctiondecl(
+        rettype, fname, table.concat(cparams, ", "), false)
     node._body = render([[
-    $ISLOCAL $RETTYPE $NAME($PARAMS) {
+    $ISLOCAL $SIGNATURE {
         $BODY
     }]], {
         ISLOCAL = node.islocal and "static" or "",
-        RETTYPE = crettype,
-        NAME = fname,
-        PARAMS = table.concat(cparams, ", "),
+        SIGNATURE = nativesig,
         BODY = table.concat(stats, "\n")
     })
     node._sig = render([[
-        $ISLOCAL $RETTYPE $NAME($PARAMS);
+        $ISLOCAL $SIGNATURE;
     ]], {
         ISLOCAL = node.islocal and "static" or "",
-        RETTYPE = crettype,
-        NAME = fname,
-        PARAMS = table.concat(cparams, ", ")
+        SIGNATURE = nativesig,
     })
     node._luabody = genluaentry(tlcontext, node.name, fname, node._type, node.loc, luaname)
 end
@@ -8858,7 +9121,6 @@ local function codemethodtrampoline(tlcontext, node)
     register_trace_name(tlcontext, nativename,
         mtype.fqtn .. ":" .. mtype.name)
     local rettype = mtype.rettypes[1]
-    local crettype = rettype and ctype(rettype) or "void"
 
     -- Named parameter list matching function_sig(ftype) so the trampoline body
     -- can forward each one. Names are local to the trampoline (`_bp_N` for params,
@@ -8868,7 +9130,7 @@ local function codemethodtrampoline(tlcontext, node)
         "uvalue(&_fn->upvalue[3])" }
     for i, ptype in ipairs(mtype.params) do
         local pname = "_bp_" .. i
-        table.insert(cparams, ctype(ptype) .. " " .. pname)
+        table.insert(cparams, cvardecl(tlcontext, ptype, pname))
         table.insert(callargs, pname)
     end
     -- A variadic method's bound trampoline forwards the backing struct + start
@@ -8882,7 +9144,8 @@ local function codemethodtrampoline(tlcontext, node)
     end
     for i = 2, #mtype.rettypes do
         local oname = "_outparam_" .. i
-        table.insert(cparams, ctype(mtype.rettypes[i]) .. " *" .. oname)
+        table.insert(cparams,
+            cpointerdecl(mtype.rettypes[i], oname))
         table.insert(callargs, oname)
     end
     if mtype.flexrettype then
@@ -8906,12 +9169,8 @@ local function codemethodtrampoline(tlcontext, node)
     -- native trampoline signature == function_sig of the self-removed type, but
     -- with named parameters so the body can forward them.
     local storage = node.islocal and "static TITAN_UNUSED " or ""
-    local nativesig = render("$STORAGE$RETTYPE $NAME($PARAMS)", {
-        STORAGE = storage,
-        RETTYPE = crettype,
-        NAME = nativename,
-        PARAMS = table.concat(cparams, ", "),
-    })
+    local nativesig = storage .. cfunctiondecl(
+        rettype, nativename, table.concat(cparams, ", "), false)
     -- Public bound trampolines are exported (non-static): a bind site in a
     -- module that only has this module's `.so` reaches the native one for the
     -- fast path AND the Lua one (the closure's lua_CFunction) by dlsym.
@@ -9206,7 +9465,8 @@ function codelambdadec(tlcontext, node)
     end
     for i = 2, #node._type.rettypes do
         local outtype = node._type.rettypes[i]
-        table.insert(cparams, ctype(outtype) .. " *" .. "_outparam_" .. i)
+        table.insert(cparams,
+            cpointerdecl(outtype, "_outparam_" .. i))
     end
     if node._type.flexrettype then
         table.insert(cparams,
@@ -9251,7 +9511,6 @@ function codelambdadec(tlcontext, node)
         table.insert(stats, 1, capbinds[i])
     end
     table.insert(stats, body)
-    local crettype = rettype and ctype(rettype) or "void"
     local flexempty = node._type.flexrettype
         and "            _flexout->n_args = 0;\n" or ""
     if not rettype then
@@ -9266,22 +9525,20 @@ function codelambdadec(tlcontext, node)
         local ur = unreachable_return(rettype, node.block)
         if ur then table.insert(stats, ur) end
     end
+    local nativesig = cfunctiondecl(
+        rettype, fname, table.concat(cparams, ", "), false)
     node._body = render([[
-    static $RETTYPE $NAME($PARAMS) {
+    static $SIGNATURE {
         $BODY
     }]], {
-        RETTYPE = crettype,
-        NAME = fname,
-        PARAMS = table.concat(cparams, ", "),
+        SIGNATURE = nativesig,
         BODY = table.concat(stats, "\n")
     })
     node._sig = render([[
-        static $RETTYPE $NAME($PARAMS);
+        static $SIGNATURE;
         static int $LUANAME(lua_State *L);
     ]], {
-        RETTYPE = crettype,
-        NAME = fname,
-        PARAMS = table.concat(cparams, ", "),
+        SIGNATURE = nativesig,
         LUANAME = luaname,
     })
     node._luabody = genluaentry(tlcontext, "lambda", fname, node._type, node.loc, luaname)
@@ -9294,14 +9551,14 @@ local function codevardec(ctx, initvars, switch_get, switch_set, gvar_map, node)
     table.insert(initvars, render([[
         $CSTATS
         {
-            $CTYPE _var = $CEXP;
+            $CDECL = $CEXP;
             $SETSLOT
             $BARRIER
         }
     ]], {
         CSTATS = cstats,
         CEXP = cexp,
-        CTYPE = ctype(node._type),
+        CDECL = cvardecl(ctx, node._type, "_var"),
         SETSLOT = setslot(node._type, node._slot, "_var"),
         BARRIER = types.is_gc(node._type)
                   and "luaC_barrierback(L, obj2gco(_mod), " .. node._slot .. ");" or ""
@@ -9340,37 +9597,11 @@ local function codevardec(ctx, initvars, switch_get, switch_set, gvar_map, node)
 end
 
 local preamble = [[
-#include <stdlib.h>
-#include <string.h>
-#include <math.h>
-
-#include "luaconf.h"
-#include "lauxlib.h"
-#include "lstate.h"
-#include "lgc.h"
-#include "ltable.h"
-#include "ltm.h"
-#include "lfunc.h"
-#include "lstring.h"
-#include "lvm.h"
-#include "lobject.h"
-#include "ldo.h"
-
-#include "titan.h"
-
-static inline int titan_errfunc_is_errorhandler(lua_State *L) {
-    if (L->errfunc == 0) return 0;
-    StkId errfunc = restorestack(L, L->errfunc);
-    TValue *v = s2v(errfunc);
-    return ttislcf(v) && fvalue(v) == errorhandler;
-}
+$FIXEDPREFIX
 
 $FOREIGNIMPORTS
 
-#ifdef __clang__
-#pragma clang diagnostic ignored "-Wunused-function"
-#pragma clang diagnostic ignored "-Wparentheses-equality"
-#endif
+$AFTERFOREIGNIMPORTS
 
 $INCLUDES
 
@@ -9452,7 +9683,14 @@ coder.modmetadata = [[
 #error unsupported object format for Titan archive metadata
 #endif
 
-TITAN_META_SECTION
+#if defined(__clang__)
+#define TITAN_META_NO_ADDRESS_SANITIZE \
+    __attribute__((no_sanitize("address")))
+#else
+#define TITAN_META_NO_ADDRESS_SANITIZE
+#endif
+
+TITAN_META_SECTION TITAN_META_NO_ADDRESS_SANITIZE
 static const unsigned char $METADATANAME[] = $METADATA;
 ]]
 
@@ -10320,6 +10558,10 @@ function coder.generate(modname, ast, static_deps, abi)
     }))
 
     local preamble = render(preamble, {
+        FIXEDPREFIX =
+            require("titan-compiler.cpreamble").fixed_prefix,
+        AFTERFOREIGNIMPORTS =
+            require("titan-compiler.cpreamble").after_foreign_imports,
         INCLUDES = table.concat(includes, "\n"),
         SIGS = table.concat(sigs, "\n"),
         FOREIGNIMPORTS = table.concat(foreignimports, "\n"),

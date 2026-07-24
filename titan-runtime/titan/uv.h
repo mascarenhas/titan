@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/types.h>
 
 /*
  * GC-owned normalized address storage. The C implementation statically
@@ -27,14 +28,18 @@ typedef char *titan_uvshim_char_ptr;
  * independent parse of this header.
  */
 #ifndef UV_H
+struct addrinfo;
+typedef struct uv_buf_t uv_buf_t;
 typedef struct uv_connect_s uv_connect_t;
 typedef struct uv_fs_s uv_fs_t;
 typedef struct uv_getaddrinfo_s uv_getaddrinfo_t;
+typedef struct uv_handle_s uv_handle_t;
 typedef struct uv_loop_s uv_loop_t;
-typedef struct uv_pipe_s uv_pipe_t;
 typedef struct uv_process_s uv_process_t;
+typedef struct uv_req_s uv_req_t;
 typedef struct uv_signal_s uv_signal_t;
 typedef struct uv_shutdown_s uv_shutdown_t;
+typedef struct uv_stream_s uv_stream_t;
 typedef struct uv_tcp_s uv_tcp_t;
 typedef struct uv_timer_s uv_timer_t;
 typedef struct uv_write_s uv_write_t;
@@ -83,30 +88,26 @@ enum titan_uvshim_event_kind {
   TITAN_UV_EVENT_STREAM_ALLOC = 12
 };
 
-/* Concrete wrappers for libuv's public base-handle/base-request API. */
-void titan_uvshim_timer_set_data(uv_timer_t *timer, void *data);
-int titan_uvshim_timer_is_closing(const uv_timer_t *timer);
-void titan_uvshim_timer_close(uv_timer_t *timer);
-
-void titan_uvshim_fs_set_data(uv_fs_t *req, void *data);
-int titan_uvshim_fs_cancel(uv_fs_t *req);
-int titan_uvshim_error_eio(void);
-int titan_uvshim_error_eof(void);
-int titan_uvshim_error_ecanceled(void);
-int titan_uvshim_error_eaddrnotavail(void);
-int titan_uvshim_error_einval(void);
-int titan_uvshim_error_enobufs(void);
-int titan_uvshim_error_enoent(void);
-int titan_uvshim_error_esrch(void);
-
 /*
- * Common Linux/macOS signal names.  Host signal numbers intentionally stay in
- * this shim because the user-defined signal numbers differ by platform.
- * The number helper returns zero for unknown names and also recognizes "kill"
- * for Process:kill; Titan rejects that name for one-shot waits.
+ * Plain-C callback trampolines passed directly from Titan to public libuv
+ * APIs. They are private to titan.uv's fixed six-slot owner protocol, not a
+ * general callback API for user programs.
  */
-int titan_uvshim_signal_number(const char *name);
-const char *titan_uvshim_signal_name(int signum);
+void titan_uvshim_signal_cb(uv_signal_t *signal, int signum);
+void titan_uvshim_process_exit_cb(uv_process_t *process,
+                                  int64_t exit_status,
+                                  int term_signal);
+void titan_uvshim_getaddrinfo_cb(uv_getaddrinfo_t *req, int status,
+                                 struct addrinfo *result);
+void titan_uvshim_connect_cb(uv_connect_t *req, int status);
+void titan_uvshim_write_cb(uv_write_t *req, int status);
+void titan_uvshim_shutdown_cb(uv_shutdown_t *req, int status);
+void titan_uvshim_alloc_cb(uv_handle_t *handle, size_t suggested_size,
+                           uv_buf_t *buf);
+void titan_uvshim_read_cb(uv_stream_t *stream, ssize_t nread,
+                          const uv_buf_t *buf);
+void titan_uvshim_connection_cb(uv_stream_t *server, int status);
+void titan_uvshim_close_cb(uv_handle_t *handle);
 
 /*
  * Libuv's Unix stream writes use write/writev, so a closed pipe can deliver
@@ -116,113 +117,8 @@ const char *titan_uvshim_signal_name(int signum);
  */
 int titan_uvshim_ignore_sigpipe_if_default(void);
 
-/* Concrete one-shot signal wrappers around public libuv handle APIs. */
-int titan_uvshim_signal_init(uv_loop_t *loop,
-                             uv_signal_t *signal,
-                             void *data);
-int titan_uvshim_signal_start_oneshot(uv_signal_t *signal, int signum);
-void titan_uvshim_signal_close(uv_signal_t *signal);
-
-/*
- * DNS is submitted through this wrapper so the private header does not need
- * to expose platform addrinfo constants to Titan. The wrapper still calls
- * only public libuv APIs. Libuv copies node before this function returns.
- */
-int titan_uvshim_getaddrinfo_start(uv_loop_t *loop,
-                                   uv_getaddrinfo_t *req,
-                                   void *data,
-                                   const char *node,
-                                   int port);
-int titan_uvshim_getaddrinfo_cancel(uv_getaddrinfo_t *req);
-int64_t titan_uvshim_addrinfo_count(const void *result);
-void titan_uvshim_addrinfo_copy(const void *result,
-                                void *address_storage);
-void titan_uvshim_addrinfo_free(void *result);
-
-/* Concrete TCP/stream/request wrappers around public libuv base APIs. */
-int titan_uvshim_tcp_init(uv_loop_t *loop, uv_tcp_t *tcp, void *data);
-void titan_uvshim_tcp_close(uv_tcp_t *tcp);
-int titan_uvshim_tcp_bind(uv_tcp_t *tcp,
-                          const void *address_storage,
-                          int64_t index);
-int titan_uvshim_tcp_listen(uv_tcp_t *tcp, int64_t backlog);
-int titan_uvshim_tcp_accept(uv_tcp_t *server, uv_tcp_t *client);
-int titan_uvshim_tcp_read_start(uv_tcp_t *tcp);
-int titan_uvshim_tcp_read_stop(uv_tcp_t *tcp);
-int titan_uvshim_tcp_connect_start(uv_connect_t *req,
-                                   uv_tcp_t *tcp,
-                                   void *data,
-                                   const void *address_storage,
-                                   int64_t index);
-int titan_uvshim_tcp_write_start(uv_write_t *req,
-                                 uv_tcp_t *tcp,
-                                 void *data,
-                                 const void *buffer);
-int titan_uvshim_tcp_shutdown_start(uv_shutdown_t *req,
-                                    uv_tcp_t *tcp,
-                                    void *data);
-
-/* Typed pipe wrappers; Titan never casts a uv_pipe_t through uv_stream_t. */
-int titan_uvshim_pipe_init(uv_loop_t *loop, uv_pipe_t *pipe, void *data);
-int titan_uvshim_pipe_read_start(uv_pipe_t *pipe);
-int titan_uvshim_pipe_read_stop(uv_pipe_t *pipe);
-int titan_uvshim_pipe_write_start(uv_write_t *req,
-                                  uv_pipe_t *pipe,
-                                  void *data,
-                                  const void *buffer);
-void titan_uvshim_pipe_close(uv_pipe_t *pipe);
-
-/*
- * argv contains argv[0], the caller arguments, and a trailing NULL. The three
- * pipe handles have been initialized, but not opened: uv_spawn creates their
- * parent endpoints through its public UV_CREATE_PIPE stdio contract.
- */
-int titan_uvshim_process_spawn(uv_loop_t *loop,
-                               uv_process_t *process,
-                               void *data,
-                               titan_uvshim_char_ptr *argv,
-                               uv_pipe_t *stdin_pipe,
-                               uv_pipe_t *stdout_pipe,
-                               uv_pipe_t *stderr_pipe);
-void titan_uvshim_process_close(uv_process_t *process);
-
 /* Fixed callback shapes passed directly to public libuv start functions. */
 void titan_uvshim_timer_cb(uv_timer_t *timer);
 void titan_uvshim_fs_cb(uv_fs_t *req);
-
-/*
- * Initialize a public uv_buf_t slice through an opaque pointer. The opaque
- * parameter keeps uv_buf_t out of this private header while the implementation
- * still delegates construction to uv_buf_init. Callers validate user-derived
- * lengths before entering this trusted helper.
- */
-void titan_uvshim_buf_init(void *buf, char *base, size_t length);
-void titan_uvshim_buf_init_slice(void *buf, char *base, int64_t offset,
-                                 int64_t length);
-void titan_uvshim_bytes_copy(char *destination, const char *source,
-                             int64_t length);
-/* Zero-based binary search: -1 means absent. */
-int64_t titan_uvshim_bytes_find(const char *haystack, int64_t haystack_length,
-                                const char *needle, int64_t needle_length);
-/* Explicit-length binary slice copy; no NUL-termination semantics. */
-void titan_uvshim_bytes_slice_copy(char *destination, const char *source,
-                                   int64_t offset, int64_t length);
-int64_t titan_uvshim_buf_max_length(void);
-
-/* Copy validated text into caller-owned NUL-terminated storage. */
-void titan_uvshim_text_copy(char *destination, const char *source,
-                            int64_t length);
-
-enum titan_uvshim_stat_kind {
-  TITAN_UV_STAT_OTHER = 0,
-  TITAN_UV_STAT_FILE = 1,
-  TITAN_UV_STAT_DIRECTORY = 2,
-  TITAN_UV_STAT_SYMLINK = 3
-};
-
-/* Extract the portable public portion of an opaque uv_stat_t. */
-void titan_uvshim_stat_extract(const void *statbuf, int64_t *size,
-                               int64_t *mode, int64_t *modified_seconds,
-                               int64_t *modified_nanoseconds, int *kind);
 
 #endif
