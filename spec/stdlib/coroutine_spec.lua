@@ -502,7 +502,12 @@ describe("coroutine standard module", function()
         assert.truthy(pipe:close(), output)
         local members = {}
         for member in output:gmatch("[^\r\n]+") do
-            members[#members + 1] = member
+            if member ~= "__.SYMDEF" and
+               member ~= "__.SYMDEF SORTED" and
+               member ~= "__.SYMDEF_64" and
+               member ~= "__.SYMDEF_64 SORTED" then
+                members[#members + 1] = member
+            end
         end
         assert.same({
             "titan.o",
