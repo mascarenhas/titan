@@ -93,8 +93,9 @@ An ordinary value wins when a dotted expression is ambiguous. Consequently,
 type pseudo-members such as `c.stat.new()`, `c.stat.new_array(n)`,
 `c.stat.sizeof`, or `c.stat.alignof` are unavailable when the ordinary member
 `c.stat` collides with the type name; the checker reports that collision
-specifically. Fields named `new`, `new_array`, `sizeof`, or `alignof` on an
-actual aggregate value are ordinary C fields and remain usable.
+specifically. Fields named `new`, `new_array`, or `alignof` on an actual
+aggregate value are ordinary C fields and remain usable (`sizeof` itself is a
+C keyword and cannot name a field).
 
 ## Contextual object-pointer conversions
 

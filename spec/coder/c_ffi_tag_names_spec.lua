@@ -72,6 +72,9 @@ describe("named C tag code generation", function()
         with_header([[
             struct stat { int new; };
             static int stat(void) { return 31; }
+            struct external_stat { int value; };
+            extern int external_stat(void);
+            int external_stat(void) { return 37; }
             static struct stat make_stat(void) {
                 struct stat result = { 47 };
                 return result;
@@ -84,12 +87,17 @@ describe("named C tag code generation", function()
                     return c.stat() as integer
                 end
 
+                function external_function_value(): integer
+                    return c.external_stat() as integer
+                end
+
                 function field_value(): integer
                     local result: c.stat = c.make_stat()
                     return result.new as integer
                 end
             ]], [[
                 assert(test.function_value() == 31)
+                assert(test.external_function_value() == 37)
                 assert(test.field_value() == 47)
             ]])
         end)

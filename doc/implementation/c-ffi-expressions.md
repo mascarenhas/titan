@@ -111,7 +111,8 @@ When only a type exists, expression lookup may synthesize a
 When both namespaces contain the spelling, those pseudo-members are
 intentionally unavailable and the checker emits a collision-specific
 diagnostic. This avoids parent-sensitive guessing and keeps real fields named
-`new` or `sizeof` ordinary fields.
+`new`, `new_array`, or `alignof` ordinary fields. `sizeof` itself is a C
+keyword and cannot name a field.
 
 None of these C type aliases are serialized into compiled Titan module
 interfaces.

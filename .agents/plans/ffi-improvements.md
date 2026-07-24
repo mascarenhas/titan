@@ -2108,8 +2108,9 @@ Tag-name coverage includes:
   select their separate namespaces;
 - a clear rejection for collided `.new`/`.new_array`/`.sizeof`/`.alignof`
   pseudo-members rather than hiding the ordinary value, plus a same-named
-  imported aggregate object whose real fields are named `new` and `sizeof` to
-  prove ordinary field lookup is never stolen.
+  imported aggregate object whose real fields are named `new`, `new_array`,
+  and `alignof` to prove ordinary field lookup is never stolen (`sizeof`
+  itself is a C keyword and cannot name a field).
 
 ### 13.3 Coder tests
 
@@ -2361,7 +2362,7 @@ The feature is done only when all of the following are true:
   macros remain usable as ordinary values; type and expression lookup preserve
   C's separate tag and ordinary namespaces, with an explicit diagnostic for
   collided type pseudo-members and no interference with real aggregate fields
-  named `new`/`sizeof`.
+  named `new`/`new_array`/`alignof`; `sizeof` itself remains a C keyword.
 - `uv_tcp_t *` can flow to `uv_handle_t *` through one explicit generated C
   cast; qualifier loss and object/function crossing remain errors.
 - Every call/assignment/return/function-pointer/named-call adjustment path uses
