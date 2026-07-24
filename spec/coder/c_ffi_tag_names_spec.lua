@@ -1,4 +1,5 @@
 local h = require "spec.support.helpers"
+local installed_prefix = require "spec.support.installed_prefix"
 
 local function with_header(contents, fn)
     local header = os.tmpname() .. ".h"
@@ -118,8 +119,7 @@ describe("named C tag code generation", function()
     end)
 
     it("renders the production libuv DNS tags and callback types", function()
-        assert(os.getenv("PREFIX"),
-            "the real-libuv fixture requires the prepared Titan prefix")
+        installed_prefix.active()
         h.with_libuv_feature_flags(function()
             local csrc, ast = h.compile_and_read_c([[
                 local libuv = foreign import "uv.h"

@@ -1,4 +1,5 @@
 local h = require "spec.support.helpers"
+local installed_prefix = require "spec.support.installed_prefix"
 
 local function with_header(contents, fn)
     local header = os.tmpname() .. ".h"
@@ -344,8 +345,7 @@ describe("unsafe C object-pointer conversion code generation", function()
 
     it("emits pinned libuv prefix casts for direct uv calls",
     function()
-        assert(os.getenv("PREFIX"),
-            "the real-libuv relation test requires PREFIX")
+        installed_prefix.active()
         h.with_libuv_feature_flags(function()
             with_header("#include <uv.h>\n", function(header)
                 local csrc = h.compile_and_read_c([[

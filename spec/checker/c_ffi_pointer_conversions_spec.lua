@@ -3,6 +3,7 @@ local cprobe = require "titan-compiler.cprobe"
 local csemantics = require "titan-compiler.csemantics"
 local cdriver = require "c-parser.cdriver"
 local h = require "spec.support.helpers"
+local installed_prefix = require "spec.support.installed_prefix"
 
 local profile
 local function test_profile()
@@ -535,8 +536,7 @@ describe("contextual unsafe C object-pointer conversions", function()
 
     it("proves pinned libuv nominal-prefix relations and direct calls",
     function()
-        local prefix = assert(os.getenv("PREFIX"),
-            "the real-libuv relation test requires PREFIX")
+        local prefix = installed_prefix.active()
         local include_dirs = {prefix .. "/include"}
         for _, directory in ipairs(
                 assert(cdriver.resolve_compiler_include_dirs())) do

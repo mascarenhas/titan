@@ -1,4 +1,5 @@
 local h = require "spec.support.helpers"
+local installed_prefix = require "spec.support.installed_prefix"
 
 local MODULE = "ffi_stack_objects"
 
@@ -476,8 +477,7 @@ describe("automatic C object code generation", function()
 
     it("builds the process-options, stdio-array, and addrinfo shape",
     function()
-        assert(os.getenv("PREFIX"),
-            "the real-libuv fixture requires the prepared Titan prefix")
+        installed_prefix.active()
         h.with_libuv_feature_flags(function()
             with_header(
                 '#include <netdb.h>\n#include <uv.h>\n'
