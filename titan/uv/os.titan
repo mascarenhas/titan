@@ -64,16 +64,16 @@ function _os_setenv(name: string, contents: string)
   local copied_value = copy_text(contents, "os.setenv", name)
   local status = libuv.uv_os_setenv(copied_name.bytes.data,
                                     copied_value.bytes.data)
-  if (status as integer) < 0 then
-    raise make_error(status as integer, "os.setenv", name)
+  if status < 0 then
+    raise make_error(status, "os.setenv", name)
   end
 end
 
 function _os_unsetenv(name: string)
   local copied = copy_text(name, "os.unsetenv", name)
   local status = libuv.uv_os_unsetenv(copied.bytes.data)
-  if (status as integer) < 0 then
-    raise make_error(status as integer, "os.unsetenv", name)
+  if status < 0 then
+    raise make_error(status, "os.unsetenv", name)
   end
 end
 
@@ -86,8 +86,8 @@ end
 function _os_chdir(path: string)
   local copied = copy_text(path, "os.chdir", path)
   local status = libuv.uv_chdir(copied.bytes.data)
-  if (status as integer) < 0 then
-    raise make_error(status as integer, "os.chdir", path)
+  if status < 0 then
+    raise make_error(status, "os.chdir", path)
   end
 end
 
@@ -119,11 +119,11 @@ function _os_exepath(): string
 end
 
 function _os_pid(): integer
-  return libuv.uv_os_getpid() as integer
+  return libuv.uv_os_getpid()
 end
 
 function _os_ppid(): integer
-  return libuv.uv_os_getppid() as integer
+  return libuv.uv_os_getppid()
 end
 
 function _os_wait_signal(name: string): string
@@ -132,10 +132,10 @@ function _os_wait_signal(name: string): string
   if signum <= 0 or name == "kill" then
     raise "unsupported waitable signal name '" .. name .. "'"
   end
-  local canonical? = signal_name(signum as integer)
+  local canonical? = signal_name(signum)
   if not canonical then raise internal_error("signal.name") end
   local request = new_request(REQUEST_SIGNAL,
-      SignalSpec.new(canonical, signum as integer), 0)
+      SignalSpec.new(canonical, signum), 0)
   return coroutine.yield(request, UV_TAG)
 end
 
@@ -153,7 +153,7 @@ local function os_sized_buffer(
   local bytes = allocate_sized_bytes(capacity)
   sizes[0] = capacity
   local status = uv_buffer_func(bytes.data, sizes)
-  if (status as integer) >= 0 then
+  if status >= 0 then
     return bytes_to_string(bytes.data, sizes[0])
   elseif status == libuv.UV_ENOBUFS then
     return os_sized_buffer(uv_buffer_func, sizes[0], error_from_status)
@@ -235,7 +235,7 @@ local function start_signal_owner(runtime: Runtime, task: Task,
     owner.metadata.lifecycle = OWNER_CLOSED
     owner.handle = nil
     owner.storage = nil
-    return owner, status as integer
+    return owner, status
   end
   libuv.uv_handle_set_data(owner.handle, pointer)
   owner.metadata.lifecycle = OWNER_ACTIVE
@@ -247,7 +247,7 @@ local function start_signal_owner(runtime: Runtime, task: Task,
     owner.metadata.lifecycle = OWNER_CLOSING
     libuv.uv_close(owner.handle, shim.titan_uvshim_close_cb)
   end
-  return owner, status as integer
+  return owner, status
 end
 
 -- Trusted one-shot signal dispatcher.  Stop + close state is published before
@@ -296,7 +296,7 @@ local function os_error_from_status(operation: string,
                                     subject: string?):
                                     (ffi.titan_ffi_int) -> Error
   return function (status: ffi.titan_ffi_int): Error
-    return make_error(status as integer, operation, subject)
+    return make_error(status, operation, subject)
   end
 end
 
@@ -330,7 +330,7 @@ local function os_exepath_buffer(bytes: *ffi.titan_ffi_char,
   -- than UV_ENOBUFS. Translate only that public-API result into the generic
   -- recursive retry contract.
   local supplied = capacity as integer
-  if (status as integer) >= 0 and
+  if status >= 0 and
       (sizes[0] as integer) == supplied - 1 then
     sizes[0] = (supplied * 2) as libuv.size_t
     return libuv.UV_ENOBUFS as ffi.titan_ffi_int

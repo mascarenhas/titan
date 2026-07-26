@@ -171,9 +171,9 @@ function _os_process_kill(process: uv_process_t, signal: string)
     raise "unsupported process signal name '" .. signal .. "'"
   end
   local status = libuv.uv_process_kill(process.handle, signum)
-  if (status as integer) < 0 and
+  if status < 0 and
       status ~= libuv.UV_ESRCH then
-    raise make_error(status as integer, "process.kill", signal)
+    raise make_error(status, "process.kill", signal)
   end
 end
 
@@ -552,11 +552,11 @@ local function start_process_grace(control: ProcessControl): integer
   local owner, pointer = allocate_process_grace(control)
   local status = libuv.uv_timer_init(control.runtime.loop.handle,
                                     owner.handle)
-  if (status as integer) < 0 then
+  if status < 0 then
     control.grace_owner = nil
     owner.handle = nil
     owner.storage = nil
-    return status as integer
+    return status
   end
   libuv.uv_handle_set_data(owner.handle, pointer)
   status = libuv.uv_timer_start {
@@ -565,10 +565,10 @@ local function start_process_grace(control: ProcessControl): integer
     timeout = PROCESS_GRACE_MILLISECONDS,
     repeat = 0,
   }
-  if (status as integer) < 0 then
+  if status < 0 then
     libuv.uv_close(owner.handle, shim.titan_uvshim_close_cb)
   end
-  return status as integer
+  return status
 end
 
 local function make_process_operation(kind: integer, task: Task,
@@ -754,15 +754,15 @@ local function begin_one_process_shutdown(control: ProcessControl): integer
     control.kill_sent = true
     local kill = csignal.SIGKILL
     local emergency_status = libuv.uv_process_kill(process.handle, kill)
-    if (emergency_status as integer) < 0 and
+    if emergency_status < 0 and
         emergency_status ~= libuv.UV_ESRCH
     then
-      return emergency_status as integer
+      return emergency_status
     end
   end
-  if (kill_status as integer) < 0 and
+  if kill_status < 0 and
       kill_status ~= libuv.UV_ESRCH then
-    return kill_status as integer
+    return kill_status
   end
   return grace_status
 end
@@ -821,7 +821,7 @@ local function advance_pipe_output(pipe: uv_pipe_t,
       end
       retire_process_request(owner.metadata)
       remove_pipe_output(pipe, operation)
-      local failure = make_error(status as integer,
+      local failure = make_error(status,
                                  "process.stdin.write", nil)
       if operation.task and operation.request then
         local task = operation.task
@@ -924,7 +924,7 @@ local function arm_process_spawn(task: Task,
     process_control.lifecycle = PROCESS_SPAWNED
   end
 
-  local spawn_status = status as integer
+  local spawn_status = status
   if spawn_status >= 0 then
     stdin_pipe.metadata.lifecycle = PIPE_OPEN
     stdout_pipe.metadata.lifecycle = PIPE_OPEN
@@ -1054,7 +1054,7 @@ local function start_pipe_read(pipe: uv_pipe_t): integer
   local status = libuv.uv_read_start(
       pipe.handle, shim.titan_uvshim_alloc_cb, shim.titan_uvshim_read_cb)
   if status >= 0 then pipe.metadata.read_active = true end
-  return status as integer
+  return status
 end
 
 local function deliver_process_disposer(task: Task?, epoch: integer)
@@ -1154,7 +1154,7 @@ local function process_dispatch(owner: uv_process_t, event_kind: integer,
   if event_kind == shim.TITAN_UV_EVENT_PROCESS_EXIT then
     owner.metadata.exit_seen = true
     owner.metadata.exit_status = result
-    owner.metadata.term_signal = size as integer
+    owner.metadata.term_signal = size
     owner.metadata.lifecycle = PROCESS_EXITED
   elseif event_kind == shim.TITAN_UV_EVENT_HANDLE_CLOSE then
     owner.metadata.lifecycle = PROCESS_CLOSED
@@ -1263,7 +1263,7 @@ local function finish_pipe_close(pipe: uv_pipe_t)
       control.close_waiter = operation
     elseif process_operation_deliverable(operation) then
       local failure = make_error(
-          libuv.UV_ECANCELED as integer, "process.stdin.write", nil)
+          libuv.UV_ECANCELED, "process.stdin.write", nil)
       drive_task(operation.task, DRIVE_ERROR, failure, "")
     end
   end
@@ -1376,9 +1376,9 @@ local function process_grace_dispatch(owner: uv_process_grace_t,
       local process = control.owner
       local kill = csignal.SIGKILL
       local status = libuv.uv_process_kill(process.handle, kill)
-      if (status as integer) < 0 and
+      if status < 0 and
           status ~= libuv.UV_ESRCH then
-        raise make_error(status as integer, "process.kill", "kill")
+        raise make_error(status, "process.kill", "kill")
       end
       control.kill_sent = true
     end
@@ -1400,7 +1400,7 @@ catch
       local process = owner.metadata.owner
       local kill = csignal.SIGKILL
       local status = libuv.uv_process_kill(process.handle, kill)
-      if (status as integer) >= 0 or
+      if status >= 0 or
           status == libuv.UV_ESRCH then
         owner.metadata.kill_sent = true
       end
@@ -1746,7 +1746,7 @@ local function repair_aborted_grace(control: ProcessControl)
         control.owner then
       local kill = csignal.SIGKILL
       local status = libuv.uv_process_kill(control.owner.handle, kill)
-      if (status as integer) >= 0 or
+      if status >= 0 or
           status == libuv.UV_ESRCH then
         control.kill_sent = true
       end
@@ -1784,7 +1784,7 @@ local function repair_aborted_process(control: ProcessControl)
     control.callback_aborted = false
   elseif control.lifecycle == PROCESS_CLOSED then
     process_dispatch_body(
-        process, shim.TITAN_UV_EVENT_HANDLE_CLOSE as integer)
+        process, shim.TITAN_UV_EVENT_HANDLE_CLOSE)
     control.callback_aborted = false
   end
 end

@@ -303,7 +303,7 @@ end
 
 function _net_eof_error(operation: string, message: string,
                         subject: string): Error
-  local code = libuv.UV_EOF as integer
+  local code = libuv.UV_EOF
   return Error.new(code,
       libuv.uv_err_name(code as ffi.titan_ffi_int) as string,
       message, operation, subject)
@@ -684,7 +684,7 @@ local function initialize_tcp(runtime: Runtime): (uv_tcp_t, integer)
     tcp.storage = nil
     control.lifecycle = TCP_CLOSED
     control.owner = nil
-    return tcp, status as integer
+    return tcp, status
   end
   libuv.uv_handle_set_data(tcp.handle, pointer)
   tcp.metadata.lifecycle = TCP_INITIALIZED
@@ -863,12 +863,12 @@ local function start_dns(operation: NetOperation):
     service = service_pointer,
     hints = hints,
   }
-  if (status as integer) >= 0 then
+  if status >= 0 then
     owner.metadata.lifecycle = NET_OWNER_SUBMITTED
   else
     retire_net_control(owner.metadata)
   end
-  return owner, status as integer
+  return owner, status
 end
 
 local function finish_net_setup(operation: NetOperation, tcp: uv_tcp_t?,
@@ -926,13 +926,13 @@ local function continue_net_setup(operation: NetOperation)
           addr = address,
           cb = shim.titan_uvshim_connect_cb,
         }
-        if (status as integer) >= 0 then
+        if status >= 0 then
           owner.metadata.lifecycle = NET_OWNER_SUBMITTED
           return
         end
         tcp.metadata.connect_pending = false
         retire_net_control(owner.metadata)
-        operation.last_error = make_error(status as integer, "net.connect",
+        operation.last_error = make_error(status, "net.connect",
                                           net_operation_subject(operation))
         start_tcp_close(tcp)
         return
@@ -942,7 +942,7 @@ local function continue_net_setup(operation: NetOperation)
         local address =
           address_cell.bytes as const *libuv.sockaddr
         local status = libuv.uv_tcp_bind(tcp.handle, address, 0)
-        if (status as integer) >= 0 then
+        if status >= 0 then
           status = libuv.uv_listen(
               tcp.handle,
               operation.backlog as ffi.titan_ffi_int,
@@ -955,7 +955,7 @@ local function continue_net_setup(operation: NetOperation)
           finish_net_setup(operation, tcp, nil)
           return
         end
-        operation.last_error = make_error(status as integer, "net.listen",
+        operation.last_error = make_error(status, "net.listen",
                                           net_operation_subject(operation))
         start_tcp_close(tcp)
         return
@@ -964,7 +964,7 @@ local function continue_net_setup(operation: NetOperation)
   end
   local failure? = operation.last_error
   if not failure then
-    failure = make_error(libuv.UV_EADDRNOTAVAIL as integer,
+    failure = make_error(libuv.UV_EADDRNOTAVAIL,
                          "net.resolve", net_operation_subject(operation))
   end
   finish_net_setup(operation, nil, failure)
@@ -1030,7 +1030,7 @@ local function advance_tcp_output(tcp: uv_tcp_t,
     -- Synchronous rejection owes no callback.  Retire the native owner and
     -- unlink/clear the FIFO publication before allocating its Error value.
     remove_output(tcp, operation)
-    local failure = make_error(status as integer,
+    local failure = make_error(status,
         operation.kind == NET_WRITE and "net.write" or "net.shutdown",
         net_operation_subject(operation))
     if operation.task and operation.request then
@@ -1060,7 +1060,7 @@ local function start_tcp_read(tcp: uv_tcp_t): integer
   local status = libuv.uv_read_start(
       tcp.handle, shim.titan_uvshim_alloc_cb, shim.titan_uvshim_read_cb)
   if status >= 0 then tcp.metadata.read_active = true end
-  return status as integer
+  return status
 end
 
 local function stop_tcp_read(tcp: uv_tcp_t, discard_queue: boolean)
@@ -1091,7 +1091,7 @@ local function stop_server_accept(server: uv_tcp_t)
     local task = waiter
     if task.state == TASK_WAITING and not task.cancel_requested and
         task.epoch == epoch then
-      local failure = make_error(libuv.UV_ECANCELED as integer,
+      local failure = make_error(libuv.UV_ECANCELED,
                                  "net.accept", "server closed")
       schedule_task_drive(task, epoch, DRIVE_ERROR, failure, "", nil)
     end
@@ -1227,7 +1227,7 @@ local function dns_dispatch_body(owner: uv_getaddrinfo_t, result: integer,
     operation.addresses = addresses
     free_dns_result(control)
     if addresses.count == 0 then
-      failure = make_error(libuv.UV_EADDRNOTAVAIL as integer,
+      failure = make_error(libuv.UV_EADDRNOTAVAIL,
                            "net.resolve", net_operation_subject(operation))
     end
   end
@@ -1494,7 +1494,7 @@ local function tcp_connection_dispatch(server: uv_tcp_t, result: integer)
   if status < 0 then
     start_tcp_close(client)
     server_callback_failure(server,
-        make_error(status as integer, "net.accept", "server"))
+        make_error(status, "net.accept", "server"))
     return
   end
   client.metadata.lifecycle = TCP_CONNECTION

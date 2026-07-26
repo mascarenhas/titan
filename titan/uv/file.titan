@@ -212,8 +212,8 @@ local function extract_fs_list(owner: uv_fs_t): {string}
   while true do
     local status = libuv.uv_fs_scandir_next(owner.handle, entry.handle)
     if status == libuv.UV_EOF then break end
-    if (status as integer) < 0 then
-      raise make_error(status as integer, "fs.list.next",
+    if status < 0 then
+      raise make_error(status, "fs.list.next",
                        fs_operation_subject(owner.metadata.operation))
     end
     names[#names + 1] = entry.handle.name as string
@@ -386,12 +386,12 @@ local function fs_operation_subject(operation: FsOperation): string?
 end
 
 local function fs_open_flags(mode: string): integer
-  local read_only = libuv.UV_FS_O_RDONLY as integer
-  local write_only = libuv.UV_FS_O_WRONLY as integer
-  local read_write = libuv.UV_FS_O_RDWR as integer
-  local create = libuv.UV_FS_O_CREAT as integer
-  local truncate = libuv.UV_FS_O_TRUNC as integer
-  local append = libuv.UV_FS_O_APPEND as integer
+  local read_only = libuv.UV_FS_O_RDONLY
+  local write_only = libuv.UV_FS_O_WRONLY
+  local read_write = libuv.UV_FS_O_RDWR
+  local create = libuv.UV_FS_O_CREAT
+  local truncate = libuv.UV_FS_O_TRUNC
+  local append = libuv.UV_FS_O_APPEND
   if mode == "r" or mode == "rb" then return read_only end
   if mode == "w" or mode == "wb" then
     return write_only | create | truncate
@@ -538,10 +538,10 @@ local function submit_fs_operation(operation: FsOperation):
       cb = shim.titan_uvshim_fs_cb,
     }
   end
-  if (status as integer) < 0 then
+  if status < 0 then
     clean_fs_owner(owner)
   end
-  return owner, status as integer
+  return owner, status
 end
 
 local function make_fs_operation(kind: integer, task: Task?,
@@ -747,11 +747,11 @@ local function extract_fs_stat(owner: uv_fs_t): FsStatResult
     kind = "symlink"
   end
   return FsStatResult.new(
-      statbuf.st_size as integer,
+      statbuf.st_size,
       kind,
-      mode as integer,
-      statbuf.st_mtim.tv_sec as integer,
-      statbuf.st_mtim.tv_nsec as integer)
+      mode,
+      statbuf.st_mtim.tv_sec,
+      statbuf.st_mtim.tv_nsec)
 end
 
 local function fs_dispatch_body(owner: uv_fs_t, result: integer)
@@ -777,7 +777,7 @@ local function fs_dispatch_body(owner: uv_fs_t, result: integer)
     end
   elseif operation.kind == FS.write then
     if result == 0 then
-      failure = make_error(libuv.UV_EIO as integer,
+      failure = make_error(libuv.UV_EIO,
                            "fs.write",
                            fs_operation_subject(operation))
     else
@@ -937,7 +937,7 @@ local function retire_fs_owners(runtime: Runtime)
     owner = to_retire.metadata.next_owner
     if to_retire.metadata.lifecycle == FS_OWNER_CLEANED then
       repair_aborted_fs_callback(to_retire)
-      if (to_retire.metadata.acquired_file as integer) < 0 then
+      if to_retire.metadata.acquired_file < 0 then
         retire_fs_owner_now(to_retire)
       end
     end
@@ -948,7 +948,7 @@ local function repair_acquired_files(runtime: Runtime)
   local owner? = runtime.fs_pending_head
   while owner do
     if owner.metadata.lifecycle == FS_OWNER_CLEANED and
-        (owner.metadata.acquired_file as integer) >= 0 then
+        owner.metadata.acquired_file >= 0 then
       local operation = owner.metadata.operation
       local subject = "<late-open>"
       local actual_subject? = fs_operation_subject(operation)

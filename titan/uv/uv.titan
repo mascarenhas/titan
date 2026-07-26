@@ -148,7 +148,7 @@ end
 local function setup_program_args(): boolean
   local top = lua.lua_gettop(L)
   lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGC_KEY)
-  if (lua.lua_type(L, -1) as integer) == (lua.LUA_TNIL as integer) then
+  if lua.lua_type(L, -1) == lua.LUA_TNIL then
     lua.lua_settop(L, top)
     return false
   end
@@ -165,8 +165,8 @@ end
 
 local function ignore_sigpipe_if_default(): integer
   local current: csignal.sigaction
-  if (csignal.sigaction(csignal.SIGPIPE, nil, current) as integer) ~= 0 then
-    return libuv.uv_translate_sys_error(cerrno.errno) as integer
+  if csignal.sigaction(csignal.SIGPIPE, nil, current) ~= 0 then
+    return libuv.uv_translate_sys_error(cerrno.errno)
   end
   if current.sa_handler ~= csignal.SIG_DFL then
     return 0
@@ -177,12 +177,12 @@ local function ignore_sigpipe_if_default(): integer
   -- Mutable address coercions deliberately apply to locals, not subobjects.
   -- Keep the mask portable across aggregate and scalar sigset_t definitions.
   local mask: csignal.sigset_t = ignore.sa_mask
-  if (csignal.sigemptyset(mask) as integer) ~= 0 then
-    return libuv.uv_translate_sys_error(cerrno.errno) as integer
+  if csignal.sigemptyset(mask) ~= 0 then
+    return libuv.uv_translate_sys_error(cerrno.errno)
   end
   ignore.sa_mask = mask
-  if (csignal.sigaction(csignal.SIGPIPE, ignore, nil) as integer) ~= 0 then
-    return libuv.uv_translate_sys_error(cerrno.errno) as integer
+  if csignal.sigaction(csignal.SIGPIPE, ignore, nil) ~= 0 then
+    return libuv.uv_translate_sys_error(cerrno.errno)
   end
   return 0
 end

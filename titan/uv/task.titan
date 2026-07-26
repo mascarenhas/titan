@@ -291,7 +291,7 @@ local function start_owner(runtime: Runtime, kind: integer, task: Task?,
                            (uv_timer_t, integer)
   local owner, pointer = allocate_owner(runtime, kind, task, peer, epoch)
   local status = libuv.uv_timer_init(runtime.loop.handle, owner.handle)
-  if (status as integer) < 0 then
+  if status < 0 then
     -- Keep synchronous rejection cleanup in this already-reserved frame.
     -- Calling unlink_owner here would enter another Titan function after the
     -- owner was published, opening an emergency GC/stack-growth longjmp gap.
@@ -310,7 +310,7 @@ local function start_owner(runtime: Runtime, kind: integer, task: Task?,
     owner.handle = nil
     owner.storage = nil
     owner.metadata.lifecycle = OWNER_CLOSED
-    return owner, status as integer
+    return owner, status
   end
   owner.metadata.lifecycle = OWNER_ACTIVE
   libuv.uv_handle_set_data(owner.handle, pointer)
@@ -320,7 +320,7 @@ local function start_owner(runtime: Runtime, kind: integer, task: Task?,
     timeout = timeout,
     repeat = repeat_time,
   }
-  if (status as integer) < 0 then
+  if status < 0 then
     -- As above, do not cross a fresh Titan function prologue after libuv owns
     -- an initialized handle. The Ticker caller rolls back its public `open`
     -- state immediately after this native owner transition returns.
@@ -328,7 +328,7 @@ local function start_owner(runtime: Runtime, kind: integer, task: Task?,
     owner.metadata.lifecycle = OWNER_CLOSING
     libuv.uv_close(owner.handle, shim.titan_uvshim_close_cb)
   end
-  return owner, status as integer
+  return owner, status
 end
 
 local function terminal(state: integer): boolean
@@ -1164,7 +1164,7 @@ local function close_runtime(runtime: Runtime)
         not not runtime.process_head or
         not not runtime.process_request_head do
     local alive = libuv.uv_run(runtime.loop.handle,
-                              libuv.UV_RUN_DEFAULT) as integer
+                              libuv.UV_RUN_DEFAULT)
     retire_closed_owners(runtime)
     retire_closed_signal_owners(runtime)
     retire_fs_owners(runtime)
@@ -1203,10 +1203,10 @@ local function close_runtime(runtime: Runtime)
     end
   end
   local status = libuv.uv_loop_close(runtime.loop.handle)
-  if (status as integer) ~= 0 then
+  if status ~= 0 then
     if not runtime.fatal then
       runtime.fatal = true
-      runtime.fatal_error = make_error(status as integer, "loop.close", nil)
+      runtime.fatal_error = make_error(status, "loop.close", nil)
       runtime.fatal_traceback = ""
     end
     -- Keep active_runtime and its storage root intact: reclaiming a busy loop

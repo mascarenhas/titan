@@ -105,7 +105,7 @@ function _loop()
   if not active_runtime then
     return
   end
-  if (lua.lua_checkstack(L, lua.LUA_MINSTACK) as integer) == 0 then
+  if lua.lua_checkstack(L, lua.LUA_MINSTACK) == 0 then
     raise "cannot reserve stack for libuv native callbacks"
   end
   local runtime = active_runtime
@@ -139,7 +139,7 @@ function _loop()
     advance_process_shutdown(runtime)
     drive_cancel_fallbacks(runtime)
     while runtime.task_head do
-      if (libuv.uv_loop_alive(runtime.loop.handle) as integer) == 0 then
+      if libuv.uv_loop_alive(runtime.loop.handle) == 0 then
         -- No callback can make progress.  The only legal callback-less
         -- cancellation delivery is this outer-driver fallback.
         local task? = runtime.task_head
@@ -151,7 +151,7 @@ function _loop()
         end
         drive_cancel_fallbacks(runtime)
         if runtime.task_head and
-            (libuv.uv_loop_alive(runtime.loop.handle) as integer) == 0 then
+            libuv.uv_loop_alive(runtime.loop.handle) == 0 then
           -- A shielded Task without any live cleanup owner is an internal
           -- deadlock, not a reason to return with a suspended root retained.
           -- The first Runtime fatal remains authoritative; terminalize these
@@ -249,7 +249,7 @@ local function on_main_thread(): boolean
   local top = lua.lua_gettop(L)
   local is_main = lua.lua_pushthread(L)
   lua.lua_settop(L, top)
-  return (is_main as integer) ~= 0
+  return is_main ~= 0
 end
 
 local function allocate_bytes(length: integer): Bytes
@@ -274,7 +274,7 @@ local function copy_text(source: string, operation: string,
                          subject: string?): Text
   local length = #source
   if _bytes_find(source, "\0") >= 0 then
-    raise make_error(libuv.UV_EINVAL as integer, operation, subject)
+    raise make_error(libuv.UV_EINVAL, operation, subject)
   end
   local bytes = allocate_bytes(length + 1)
   if length > 0 then
@@ -335,7 +335,7 @@ local function allocate_stream_bytes(size: libuv.size_t): Bytes
   if size == 0 or size > climits.UINT_MAX then
     raise internal_error("stream.alloc.size")
   end
-  local length = size as integer
+  local length = size
   local owned = ffi.titan_ffi_char.new_array(length)
   local storage: value = owned
   return Bytes.new(owned as *ffi.titan_ffi_char, storage, length)
@@ -417,10 +417,10 @@ local function new_runtime(): Runtime
   generation = generation + 1
   local loop = allocate_loop()
   local status = libuv.uv_loop_init(loop.handle)
-  if (status as integer) < 0 then
+  if status < 0 then
     loop.handle = nil
     loop.storage = nil
-    raise make_error(status as integer, "loop.init", nil)
+    raise make_error(status, "loop.init", nil)
   end
   local runtime: Runtime = {
     loop = loop,

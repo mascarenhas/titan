@@ -686,7 +686,7 @@ describe("libuv Makefile configuration", function()
         local process_lifecycle_line = source_line_number(process_source,
             "process_control.lifecycle = PROCESS_SPAWNED")
         local spawn_status_line = source_line_number(process_source,
-            "local spawn_status = status as integer")
+            "local spawn_status = status")
 
         local sigpipe = generated_function(
             generated, "titan_uv_ignore_sigpipe_if_default_titan")
@@ -749,7 +749,7 @@ describe("libuv Makefile configuration", function()
         assert_ordered(stream,
             "UINT_MAX",
             '#line 338 "./titan/uv/runtime.titan"',
-            "((lua_Integer)_param_size)")
+            "((lua_Integer)_local_length_1)")
 
         local usable =
             generated_function(generated, "titan_uv_usable_address_titan")
