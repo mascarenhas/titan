@@ -15,6 +15,64 @@ local function with_header(contents, fn)
     return table.unpack(results)
 end
 
+local FIELD_PROJECTION_HEADER = [[
+    typedef struct ffi_projection_inner {
+        int leaf;
+    } ffi_projection_inner;
+
+    typedef struct ffi_projection_left {
+        ffi_projection_inner nested;
+        double projected;
+    } ffi_projection_left;
+
+    typedef struct ffi_projection_right {
+        ffi_projection_inner nested;
+        double projected;
+    } ffi_projection_right;
+
+    static ffi_projection_left ffi_projection_left_value =
+        { { 7 }, 701.0 };
+    static ffi_projection_right ffi_projection_right_value =
+        { { 11 }, 1101.0 };
+    static ffi_projection_right *ffi_projection_right_ptr =
+        &ffi_projection_right_value;
+
+    static int ffi_projection_physical_sum(void) {
+        return (int)(ffi_projection_left_value.projected +
+                     ffi_projection_right_value.projected);
+    }
+
+    #define projected nested.leaf
+]]
+
+local CAST_MACRO_HEADER = [[
+    typedef int (*ffi_macro_callback)(int);
+    typedef long ffi_macro_long;
+    typedef double ffi_macro_double;
+    typedef int *ffi_macro_int_ptr;
+    typedef int ffi_macro_array[4];
+
+    static int ffi_macro_value = 9;
+
+    static int ffi_macro_add5(int value) {
+        return value + 5;
+    }
+
+    static int ffi_macro_add7(int value) {
+        return value + 7;
+    }
+
+    #define FFI_TYPEDEF_CALLBACK \
+        ((ffi_macro_callback) ffi_macro_add5)
+    #define FFI_DIRECT_CALLBACK \
+        ((int (*)(int)) ffi_macro_add7)
+    #define FFI_CAST_INT ((long) 41)
+    #define FFI_CAST_DOUBLE ((double) 1.5)
+    #define FFI_CAST_POINTER ((int *) &ffi_macro_value)
+    #define FFI_VOID_CAST ((void) 0)
+    #define FFI_ARRAY_CAST ((ffi_macro_array) 0)
+]]
+
 describe("C FFI code generation", function()
     after_each(function()
         os.remove("test.o")
@@ -43,6 +101,52 @@ describe("C FFI code generation", function()
             ]], [[
                 assert(test.has_state() == 1)
                 assert(test.has_module() == 1)
+            ]])
+        end)
+    end)
+
+    it("executes comparisons against direct libuv-shaped UV_E enumerators", function()
+        with_header([[
+            #define UV_ERRNO_MAP(XX) \
+                XX(EIO, -5) XX(EOF, -4095) XX(ECANCELED, -125)
+            #define XX(code, value) UV_ ## code = value,
+            typedef enum { UV_ERRNO_MAP(XX) } ffi_uv_errno_t;
+            #undef XX
+            static int ffi_uv_eio(void) { return UV_EIO; }
+        ]], function(header)
+            h.run_coder([[
+                local libuv = foreign import "]] .. header .. [["
+
+                function errors_match(): boolean
+                    local status = libuv.ffi_uv_eio()
+                    return (status as integer) == (libuv.UV_EIO as integer)
+                        and (status as integer) ~= (libuv.UV_EOF as integer)
+                        and (status as integer)
+                            ~= (libuv.UV_ECANCELED as integer)
+                end
+            ]], [[
+                assert(test.errors_match())
+            ]])
+        end)
+    end)
+
+    it("uses the active replacement of a macro-shadowed C typedef",
+    function()
+        with_header([[
+            typedef int ffi_public_number;
+            typedef double ffi_replacement_number;
+            #define ffi_public_number ffi_replacement_number
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                function identity(x: float): float
+                    local converted =
+                        x as c.ffi_public_number
+                    return converted as float
+                end
+            ]], [[
+                assert(test.identity(1.25) == 1.25)
             ]])
         end)
     end)
@@ -657,6 +761,246 @@ describe("C FFI code generation", function()
         end)
     end)
 
+    it("emits and executes public dotted field-macro spellings", function()
+        with_header(FIELD_PROJECTION_HEADER, function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                function read_projected(): integer
+                    return (c.ffi_projection_left_value.projected as integer)
+                        + (c.ffi_projection_right_ptr.projected as integer)
+                end
+
+                function write_projected(): integer
+                    c.ffi_projection_left_value.projected = 17
+                    c.ffi_projection_right_ptr.projected = 23
+                    return (c.ffi_projection_left_value.projected as integer)
+                        + (c.ffi_projection_right_ptr.projected as integer)
+                end
+
+                function read_physical(): integer
+                    return c.ffi_projection_physical_sum() as integer
+                end
+            ]], [[
+                assert(test.read_projected() == 18)
+                assert(test.read_physical() == 1802)
+                assert(test.write_projected() == 40)
+                assert(test.read_projected() == 40)
+                assert(test.read_physical() == 1802)
+            ]])
+
+            local file = assert(io.open("test.c", "r"))
+            local generated = file:read("*a")
+            file:close()
+            assert.truthy(generated:find(".projected", 1, true))
+            assert.truthy(generated:find("->projected", 1, true))
+            assert.falsy(generated:find(".nested.leaf", 1, true))
+            assert.falsy(generated:find("->nested.leaf", 1, true))
+        end)
+    end)
+
+    it("uses the final hoisted field-macro state across ordered imports",
+    function()
+        with_header([[
+            typedef struct ffi_final_inner {
+                int leaf;
+            } ffi_final_inner;
+            typedef struct ffi_final_record {
+                ffi_final_inner nested;
+                ffi_final_inner projected;
+            } ffi_final_record;
+            static ffi_final_record ffi_final_value = { { 7 }, { 99 } };
+        ]], function(base_header)
+            with_header([[
+                #define projected nested.leaf
+            ]], function(macro_header)
+                h.run_coder([[
+                    local base = foreign import "]] .. base_header .. [["
+                    local reader = function(): integer
+                        return base.ffi_final_value.projected as integer
+                    end
+                    local macros = foreign import "]] .. macro_header .. [["
+
+                    function read_projected(): integer
+                        return reader()
+                    end
+                ]], [[
+                    assert(test.read_projected() == 7)
+                ]])
+            end)
+        end)
+    end)
+
+    it("re-expands field macros after a later dependency redefinition",
+    function()
+        with_header([[
+            typedef struct ffi_rescan_leaf {
+                int value;
+            } ffi_rescan_leaf;
+            typedef struct ffi_rescan_nested {
+                ffi_rescan_leaf leaf;
+            } ffi_rescan_nested;
+            typedef struct ffi_rescan_other {
+                int leaf;
+            } ffi_rescan_other;
+            typedef struct ffi_rescan_record {
+                ffi_rescan_nested nested;
+                ffi_rescan_other other;
+            } ffi_rescan_record;
+            static ffi_rescan_record ffi_rescan_value = {
+                { { 7 } }, { 23 }
+            };
+        ]], function(base_header)
+            with_header([[
+                #define alias nested
+                #define projected alias.leaf
+            ]], function(macro_header)
+                with_header([[
+                    #undef alias
+                    #define alias other
+                ]], function(redefine_header)
+                    h.run_coder([[
+                        local base =
+                            foreign import "]] .. base_header .. [["
+                        local macros =
+                            foreign import "]] .. macro_header .. [["
+                        local reader = function(): integer
+                            return base.ffi_rescan_value.projected as integer
+                        end
+                        local redefined =
+                            foreign import "]] .. redefine_header .. [["
+
+                        function read_reexpanded(): integer
+                            return reader()
+                        end
+                    ]], [[
+                        assert(test.read_reexpanded() == 23)
+                    ]])
+                end)
+            end)
+        end)
+    end)
+
+    it("uses a physical field after a later imported macro undefinition",
+    function()
+        with_header([[
+            typedef struct ffi_undef_leaf {
+                int value;
+            } ffi_undef_leaf;
+            typedef struct ffi_undef_nested {
+                ffi_undef_leaf leaf;
+            } ffi_undef_nested;
+            typedef struct ffi_undef_record {
+                ffi_undef_nested nested;
+                int projected;
+            } ffi_undef_record;
+            static ffi_undef_record ffi_undef_value = { { { 7 } }, 99 };
+        ]], function(base_header)
+            with_header([[
+                #define projected nested.leaf
+            ]], function(macro_header)
+                with_header([[
+                    #undef projected
+                ]], function(undef_header)
+                    h.run_coder([[
+                        local base =
+                            foreign import "]] .. base_header .. [["
+                        local macros =
+                            foreign import "]] .. macro_header .. [["
+                        local reader = function(): integer
+                            return base.ffi_undef_value.projected as integer
+                        end
+                        local without_macro =
+                            foreign import "]] .. undef_header .. [["
+
+                        function read_physical(): integer
+                            return reader()
+                        end
+                    ]], [[
+                        assert(test.read_physical() == 99)
+                    ]])
+                end)
+            end)
+        end)
+    end)
+
+    it("emits and executes public scalar cast-macro spellings", function()
+        with_header(CAST_MACRO_HEADER, function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                function use_cast_macros(): integer
+                    local typedef_callback: c.ffi_macro_callback =
+                        c.FFI_TYPEDEF_CALLBACK
+                    local direct_callback: c.ffi_macro_callback =
+                        c.FFI_DIRECT_CALLBACK
+                    local count: c.ffi_macro_long = c.FFI_CAST_INT
+                    local fraction: c.ffi_macro_double = c.FFI_CAST_DOUBLE
+                    local pointer: c.ffi_macro_int_ptr = c.FFI_CAST_POINTER
+
+                    if typedef_callback ~= direct_callback
+                       and count == c.FFI_CAST_INT
+                       and fraction < 2.0
+                       and pointer == c.FFI_CAST_POINTER then
+                        return (typedef_callback(1) as integer)
+                            + (direct_callback(1) as integer)
+                            + (pointer[0] as integer)
+                            + (count as integer)
+                    end
+                    return 0
+                end
+            ]], [[
+                assert(test.use_cast_macros() == 64)
+            ]])
+
+            local file = assert(io.open("test.c", "r"))
+            local generated = file:read("*a")
+            file:close()
+            for _, name in ipairs({
+                "FFI_TYPEDEF_CALLBACK",
+                "FFI_DIRECT_CALLBACK",
+                "FFI_CAST_INT",
+                "FFI_CAST_DOUBLE",
+                "FFI_CAST_POINTER",
+            }) do
+                assert.truthy(generated:find(name, 1, true), name)
+            end
+        end)
+    end)
+
+    it("executes real POSIX signal disposition macro values", function()
+        h.run_coder([[
+            local signal = foreign import "signal.h"
+
+            function signal_dispositions_differ(): boolean
+                local default_handler = signal.SIG_DFL
+                local ignored_handler = signal.SIG_IGN
+                return default_handler ~= ignored_handler
+            end
+        ]], [[
+            assert(test.signal_dispositions_differ())
+        ]])
+    end)
+
+    it("executes a read of the real POSIX errno accessor macro", function()
+        with_header([[
+            #include <errno.h>
+            static void ffi_set_errno(int requested) { errno = requested; }
+        ]], function(header)
+            h.run_coder([[
+                local cerrno = foreign import "errno.h"
+                local helper = foreign import "]] .. header .. [["
+
+                function current_errno(): integer
+                    helper.ffi_set_errno(37)
+                    return cerrno.errno
+                end
+            ]], [[
+                assert(test.current_errno() == 37)
+            ]])
+        end)
+    end)
+
     it("generates field access for named C structs completed after forward typedefs", function()
         with_header([[
             typedef struct ffi_node ffi_node;
@@ -923,6 +1267,81 @@ describe("C FFI code generation", function()
                 end
             ]], [[
                 assert(test.sum() == 23)
+            ]])
+        end)
+    end)
+
+    it("executes exact pointer, array, and function declarator shapes",
+    function()
+        with_header([[
+            static int ffi_first = 10;
+            static int ffi_second = 20;
+            static int ffi_third = 30;
+            static int *ffi_pointer_array[3] = {
+                &ffi_first, &ffi_second, &ffi_third
+            };
+            static int ffi_row[3] = { 4, 5, 6 };
+            static int (*ffi_array_pointer)[3] = &ffi_row;
+            static int ffi_add_two(int value) {
+                return value + 2;
+            }
+            static int (*ffi_callbacks[2])(int) = {
+                ffi_add_two, ffi_add_two
+            };
+            static int (*ffi_row_factory(void))[3] {
+                return &ffi_row;
+            }
+            static int ffi_matrix[1][3] = { { 7, 8, 9 } };
+            static int ffi_matrix_sum(int values[][3]) {
+                return values[0][0] + values[0][1] + values[0][2];
+            }
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                function exact_declarators(): integer
+                    return (c.ffi_pointer_array[1][0] as integer)
+                        + (c.ffi_array_pointer[0][1] as integer)
+                        + (c.ffi_callbacks[0](4) as integer)
+                        + (c.ffi_row_factory()[0][2] as integer)
+                        + (c.ffi_matrix_sum(c.ffi_matrix) as integer)
+                end
+            ]], [[
+                assert(test.exact_declarators() == 61)
+            ]])
+        end)
+    end)
+
+    it("renders qualified callback returns in locals and calls", function()
+        with_header([[
+            typedef const int (*ffi_qualified_callback)(void);
+
+            static const int ffi_qualified_answer(void) {
+                return 42;
+            }
+
+            static ffi_qualified_callback ffi_choose_qualified(void) {
+                return ffi_qualified_answer;
+            }
+
+            static int ffi_apply_qualified(
+                    ffi_qualified_callback callback) {
+                return callback();
+            }
+        ]], function(header)
+            h.run_coder([[
+                local c = foreign import "]] .. header .. [["
+
+                function qualified_callbacks(): integer
+                    local direct: c.ffi_qualified_callback =
+                        c.ffi_qualified_answer
+                    local chosen = c.ffi_choose_qualified()
+                    return (direct() as integer)
+                        + (c.ffi_apply_qualified(direct) as integer)
+                        + (chosen() as integer)
+                end
+            ]], [[
+                assert(test.qualified_callbacks() == 126)
             ]])
         end)
     end)

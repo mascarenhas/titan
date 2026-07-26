@@ -6,8 +6,12 @@ and emits direct C expressions in `coder.lua`. The generated translation unit
 includes the same header, so the host C compiler sees the real prototypes; the
 Lua-side pipeline exists to typecheck Titan source before code generation.
 
-For user-facing behavior see [the C FFI](../language/ffi.md) and
-[Named arguments](../language/named-arguments.md).
+For user-facing behavior see [the C FFI](../language/ffi.md),
+[C FFI declarations and expressions](../language/c-ffi-expressions.md), and
+[Named arguments](../language/named-arguments.md). The exact tag, declarator,
+probe, contextual-conversion, automatic-storage, and C-operator machinery is
+covered in
+[C FFI declarations and expressions](c-ffi-expressions.md).
 
 ## Import Pipeline
 
@@ -37,7 +41,20 @@ header name, the resolved parse path, an `include_kind` (`"quote"` or
 found beside the Titan source becomes `#include "name.h"`; a compiler-provided
 or system header becomes `#include <name.h>`; an absolute path is quoted.
 
-The four C-pipeline stages are:
+After the import pass, every module with a nonempty list of successful foreign
+imports builds one `cprobe.ModuleContext` from the complete ordered descriptor
+list and validates its baseline translation unit. The shared
+`cpreamble.fixed_includes` block places the same standard, Lua, and Titan
+headers before those imports as generated module C. This includes a one-header
+module: the best-effort isolated registrar can collapse an invalid repeated
+declaration before two published entries reach the checker. The baseline
+compiler-checks cumulative state and declaration legality: include guards,
+`#pragma once`, ordinary redeclarations, and repeated tag definitions are
+interpreted by the configured compiler rather than inferred from parser
+provenance. The immutable context is versioned by the include count, so an
+earlier prefix context cannot be reused after another import.
+
+The C-pipeline stages are:
 
 1. `cpp.new_context` asks the configured compiler with user CPP flags first,
    Titan's fixed C99 mode next, and the actual runtime/Lua include directories
@@ -47,7 +64,30 @@ The four C-pipeline stages are:
    includes share the per-import context.
 2. `c99.match_language_grammar` parses the preprocessed C translation unit.
 3. `ctypes.register_types` extracts declarations into a TypeList.
-4. `cdefines.register_defines` adds typed object-like `#define` constants.
+4. `cdefines.register_defines` adds supported object-like `#define` constants
+   and records pure dotted-identifier field projections. A bare-identifier
+   replacement that resolves to a parsed typedef is type-valued: a macro-only
+   type alias remains unsupported, while a macro shadowing an existing typedef
+   rebinds that public spelling to the active replacement typedef so generated
+   C and checker semantics agree. Aliases to functions, objects, and
+   enumerators remain expression-valued members. Integer-constant expressions
+   retain target-neutral literal and expression metadata for later
+   target-profile evaluation, while the existing best-effort expression path
+   recognizes typed dereferenced accessors such as `errno`'s `*accessor()`
+   expansion. A fully expanded outer cast to a supported integer, floating,
+   object-pointer, or function-pointer type records that target declaration for
+   ordinary C-type conversion while preserving the public macro spelling.
+   `cdriver` also retains raw macro definitions and the names changed by each
+   header closure. Dotted replacements are left unresolved until a field
+   access supplies both the receiver aggregate and the final module-wide macro
+   environment.
+
+`cdeclarator.lua` then owns exact C spelling shared by generated code and
+compile probes; `csemantics.lua` owns target categories, constants, promotions,
+and result types; and one resolver-scoped `cprobe.lua` service owns the active
+toolchain profile, header-context baselines, candidate compilation, caches,
+temporary files, and cleanup. The checker decides which candidates are
+semantically eligible before asking that service to compile them.
 
 The checker iterates the TypeList array part in declaration order. Each
 successful `foreigntypes.convert(st, ftype)` result is either a value member or
@@ -57,9 +97,10 @@ a type member:
   `types.ModuleMember`;
 * `typedef`, `struct` and `union` declarations become entries in
   `symtab.foreign_types`, while source-nameable typedefs also become entries in
-  the C type namespace (`modtype.type_members`). Tag-only aggregates are kept
-  under internal keys such as `struct@P`; users need a typedef name to write
-  `c.T` in Titan source.
+  the C type namespace (`modtype.type_members`). Named file-scope tag-only
+  structs/unions are published there by base name when no real same-name
+  typedef exists, but still point directly at canonical internal owners such as
+  `struct@P`; no fake `CTypedef` is created.
 
 Each accepted C type is also appended to `foreign_type_history` with the
 foreign-import node's top-level order; accepted ordinary identifiers use the
@@ -145,14 +186,14 @@ CVoid        = {}
 CInteger     = {"spelling", "signed", "rank", "bits"}
 CFloat       = {"spelling"}
 CPointer     = {"pointee", "quals"}
-CArray       = {"elem", "len"}
+CArray       = {"elem", "len", "quals"}
 CFunction    = {"params", "ret", "vararg", "abi"}
 CStruct      = {"cname", "tagname", "typedef", "fields", "complete", "has_fam"}
 CUnion       = {"cname", "tagname", "typedef", "fields", "complete"}
 CField       = {"owner", "name", "type", "bitfield", "flexible_array"}
-CTypedef     = {"name", "target"}
+CTypedef     = {"name", "target", "quals"}
 COwned       = {"pointee", "count"}
-CModule      = {"name", "members"}
+CModule      = {"name", "members", "type_members"}
 ```
 
 `CFunction` deliberately has no parameter-name field. Callback/function-pointer
@@ -163,9 +204,14 @@ direct foreign member is built.
 value/type shapes but deliberately excludes `CModule`, since a C module is only
 a namespace.
 
-The equality relation compares exact C identity: spelling, qualifiers, array
-length, typedef name and target, aggregate field shape, and so on. The
-compatibility/coercion relations add the Titan boundary conversions:
+Exact value-type equality compares primitive spelling, qualifiers, array
+length, aggregate identity/shape, and the other representation fields.
+`CTypedef` equality itself is nominal by typedef name and qualifiers; it
+deliberately does not compare the stored target graph. The separate C
+declaration-compatibility relation unwraps typedef chains, preserves their
+qualifiers, and compares the resolved targets before accepted repeated
+declarations are canonicalized. The compatibility/coercion relations add the
+Titan boundary conversions:
 
 * C integer -> Titan `integer`, and Titan `integer` -> C integer;
 * C float -> Titan `float`, and Titan `integer`/`float` -> C float;
@@ -242,15 +288,22 @@ The checker has FFI-specific handling in a few narrow places:
   `symtab.find_symbol` masks a later C-module alias by `initializer_order`.
 * `Ast.TypeCPointer` accepts `*c.T` and `const *c.T`, producing `CPointer`
   values over imported C pointees and rejecting non-C pointees.
-* `Ast.VarDot` on a `CModule` first consults `type_members`; a type member
-  yields a `Type.CTypeNamespace` pseudo-declaration so `.new` and `.new_array`
-  can be resolved on it. `sizeof` and `alignof` on a C type namespace produce
-  pseudo-declarations that codegen emits as `sizeof(T)` and `_Alignof(T)`.
-  Value members still come from `mod.members`.
+* `Ast.VarDot` on a `CModule` consults ordinary `members` first. If no value
+  has that name, a `type_members` entry yields a `Type.CTypeNamespace`
+  pseudo-declaration so `.new`, `.new_array`, `.sizeof`, and `.alignof` can be
+  resolved. When both namespaces contain the spelling, the ordinary value
+  remains usable and the checker records the collision so a later
+  type-pseudo-member access gets a specific diagnostic instead of silently
+  selecting the type.
 * `Ast.VarDot` on a C struct/union, pointer-to-aggregate, or owned aggregate
-  resolves a `Type.CField`. At a module-variable frontier it does so only when
-  `symtab.foreign_definition_visible` says the aggregate's defining import is
-  already visible.
+  resolves a `Type.CField`. A pure dotted field macro is expanded logically
+  through physical aggregate fields first, because C preprocessing precedes
+  member lookup; otherwise the checker selects the ordinary physical field.
+  Generated C hoists all foreign includes, so macro lookup always uses the
+  final module-wide environment even inside an earlier module-variable closure.
+  Every aggregate definition along the selected physical path must still be
+  visible at the ordinary module-variable frontier. An active object-like macro
+  with an unsupported final expansion is terminal rather than falling back.
 * `Ast.VarBracket` accepts C pointers, C arrays with known static length, and
   counted owned C arrays. C indexing is 0-based.
 * After checking each `Ast.StatAssign` target, `check_c_assignment_storage`
@@ -325,12 +378,37 @@ modules.
 
 The checker keeps a per-module `symtab.foreign_names` table for the final
 ordinary C identifier environment and a source-ordered history for frontier
-lookup. If a later foreign import declares the same ordinary name with an
-incompatible type, Titan reports the conflict before generating C. Duplicate
-declarations from the same header are ignored here because system headers can
-expose implementation-specific aliases during preprocessing. During a module
-variable, `find_foreign_name` and `find_foreign_type` scan their histories
-backward and return the last declaration whose order is no later than
+lookup. Field tokens instead use the generated translation unit's final macro
+view: the first import seeds a raw macro environment, later imports replay
+their active definitions/redefinitions/undefinitions, and lazy lookup rescans
+transitive dependencies before classifying a projection. A later published
+occurrence of one ordinary name is compared with the first using C declaration
+compatibility, including typedef resolution, normalized qualification,
+parameter adjustment, and incomplete/known array composites. Structurally
+matching anonymous aggregates are only conditional candidates.
+
+After the final baseline succeeds, every queued exact or conditional pair is
+rendered as two `extern` declarations of one probe-private synthetic identifier and
+compiled in the same foreign-header context. Acceptance proves that the two
+independently extracted declaration types can form compatible declarations in
+that context; it does not prove that both source declarations survived
+preprocessing. Only an accepted pair is rewritten to the first canonical
+declaration type and allowed to form a declaration composite.
+
+Array-bound completion mutates only a declaration-owned cloned view, never a
+canonical shared typedef target. Accepted repeated typedefs use a separate
+operation: the checker rebinds the later isolated `CTypedef.target` to the
+first target so transitive references that share that alias in the later
+snapshot follow the chosen canonical target.
+
+An isolated semantic incompatibility is reported immediately. A failed final
+baseline reports the complete header-context failure and performs no
+canonicalization. A rejected or unrenderable declaration pair is reported as a
+conflict and any later type-registry entries are withdrawn. A compiler spawn,
+interruption, workspace, or cleanup failure is an infrastructure diagnostic,
+never a declaration-compatibility verdict.
+During a module variable, `find_foreign_name` and `find_foreign_type` scan their
+histories backward and return the last declaration whose order is no later than
 `initializer_order`; outside that pass they use the final maps directly.
 `foreign_definition_visible` performs the analogous check for canonical
 struct/union objects that a later import completed in place.
@@ -339,15 +417,16 @@ struct/union objects that a later import completed in place.
 
 ### Rendering C Types
 
-`foreignctype` renders C FFI types back to C spellings. A `CTypedef` renders as
-its typedef name, preserving headers' preferred spelling for calls and
-allocation. C function pointer types use declarator-aware rendering helpers for
-locals and temporaries, because `int (*cb)(int)` cannot be produced by simply
-concatenating a type spelling and a name. `COwned` renders as `Udata*`; its
-payload is reached through `getudatamem`.
+`cdeclarator.render_type_name` and `render_declaration` render C FFI types back
+to exact C spellings. A `CTypedef` renders as its typedef name, preserving
+headers' preferred spelling for calls and allocation. Declarators are built
+recursively for locals and temporaries, because `int (*cb)(int)` cannot be
+produced by concatenating a type spelling and a name. `COwned` renders as
+`Udata *`; its payload is reached through `getudatamem`.
 
-The general `ctype` function routes C values through `foreignctype`, except
-`COwned`, which is always a Lua full userdata pointer.
+The general `ctype` function routes C values through `cdeclarator`, applying C
+parameter adjustment where appropriate. `COwned` remains a Lua full-userdata
+pointer.
 
 ### Calls And Variables
 
@@ -372,9 +451,15 @@ name-to-position mapping itself—from reordering Titan effects. The path retain
 the positional implementation's post-call `mutable_out_anchor` refreshes for
 GC-bearing `TValue` out parameters.
 
-`codeforeignvar` emits a bare C variable or macro name. Reading a C scalar into
-Titan code keeps the C value type until a cast or context converts it. C arrays
-are kept as C array expressions and can be indexed or decayed to pointers.
+`codeforeignvar` emits a bare C variable or public macro name. Reading a C
+scalar into Titan code keeps the C value type until a cast or context converts
+it. C arrays are kept as C array expressions and can be indexed or decayed to
+pointers. For a live pure dotted-identifier macro, the checker resolves the
+recorded replacement lazily against the receiver before physical field lookup,
+matching preprocessing precedence, and retains the projected field's type,
+lvalue status, and mutation rules. The coder still emits the public field
+spelling, leaving expansion to the included host header. This does not widen
+the separate contextual address coercion from eligible locals to subobjects.
 
 `codecfunctionptrcall` handles calls through C function pointer values. It
 evaluates the pointer expression once, materializes it into a C temporary,
@@ -463,11 +548,15 @@ order first and consumes the descriptors from left to right.
 * a `CPointer` value is loaded and frozen in a C temporary;
 * a `COwned` userdata is materialized in a scanned Lua slot, and the descriptor
   retains its payload pointer plus the count expression when applicable;
-* a `CArray` lvalue is retained through a synthesized element pointer (ordinary
-  C array decay) plus its static length, rather than copied into an
-  unassignable array temporary; and
-* a `CStruct` or `CUnion` subobject is retained through a synthesized pointer
-  to its persistent storage, rather than copied by value.
+* `CArray`, `CStruct`, and `CUnion` subobjects retain a stable access path
+  assembled only from already-frozen roots and indices, rather than being
+  copied by value.
+
+The access-path form is equivalent to retaining the subobject address while
+remaining valid C99 for anonymous nested structs/unions and arrays whose
+element type has no legal standalone declarator. Named pointer and `COwned`
+bases still use real materialized pointers, and the latter remains rooted in
+its scanned slot across right-hand evaluation.
 
 `_prepare_c_storage` walks nested `VarDot`/`VarBracket` bases recursively.
 NULL and bounds validation for the *final* field or index stays in the
@@ -546,10 +635,32 @@ left for a later FFI iteration.
 * Some preprocessor paths still raise raw Lua errors instead of diagnostics
   (`#if` operators outside the implemented set, unterminated function-like
   macros).
-* Function-like macros are invisible to Titan.
-* The generated C translation unit has one flat C namespace. Titan does not
-  rename declarations; it detects incompatible ordinary declarations from
-  distinct foreign imports before the C compiler sees them.
+* Function-like macros are invisible to Titan. An object-like macro is
+  expression-valued through bounded recognized forms, including supported
+  integer-constant expressions and typed dereferenced accessors, or when it
+  fully expands to an outer cast to a supported scalar type. A pure dotted
+  identifier replacement can become a field projection. Other object-like
+  forms are not generally supported.
+* Generated C shares one ordinary-identifier namespace and one tag namespace
+  across all foreign imports. Titan does not rename declarations; the final
+  foreign-header baseline validates cumulative declaration and tag state
+  before module checking continues.
+* `cdriver.process_file` still extracts each import's TypeList from an
+  independently preprocessed header without the fixed generated-C prefix.
+  Probes and generated module C both place the ordered foreign-header block
+  after the shared fixed standard, Lua, and Titan headers. Earlier
+  foreign-import macros can therefore make an isolated TypeList differ from
+  the cumulative probe/generated-C view, and macros from the fixed prefix can
+  cause that divergence even for the first import.
+* Neither the final baseline nor a declaration-pair probe reconstructs the
+  alternate cumulative TypeList or proves that both extracted declarations
+  occurred. The checker can retain an isolated unique value or type-namespace
+  binding, reject an isolated incompatibility that disappears cumulatively, or
+  canonicalize a repeat that cumulative preprocessing suppressed. A suppressed
+  `extern int a[7]` can, for example, complete an earlier `extern int a[]` in
+  Titan's declaration composite even though only the incomplete declaration
+  occurs cumulatively. Macro-coupled APIs need one umbrella header imported
+  once.
 
 ## `typed.lua`
 

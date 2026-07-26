@@ -555,12 +555,13 @@ flexible-array object (`lu_byte n_args; T args[]`) to a descriptor
 the struct layout did not; mixing 0.9 and 0.10 modules would misread the bytes
 after `n_args`, so they must live under different `TITAN_PATH` directories.
 
-The current ABI is **0.17**, newer than this variadic change. Flexible outputs
+The current ABI is **0.18**, newer than this variadic change. Flexible outputs
 reuse these descriptors but add `flexrettype` to serialized callable shapes and
 `_flexout`/`_flexwant` to native signatures. They shipped as ABI 0.14 rather
-than accepting both layouts under one marker. ABI 0.17 leaves
-`TitanVargArrayOrMap` as `Table **`: exact Array elements remain internal
-backing Tables, while generic/Lua-visible runs box them as proxies. See
+than accepting both layouts under one marker. ABI 0.17 introduced the current
+Array boundary while leaving `TitanVargArrayOrMap` as `Table **`: exact Array
+elements remain internal backing Tables, while generic/Lua-visible runs box
+them as proxies. ABI 0.18 preserves that descriptor contract. See
 [Dense Arrays](dense-arrays.md#internal-and-boxed-representations).
 
 Compiled-interface import paths round-trip `varargtype` through the same

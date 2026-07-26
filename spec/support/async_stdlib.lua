@@ -62,7 +62,7 @@ local function find_standard_layout()
     local prefix = os.getenv("PREFIX")
     if prefix and prefix ~= "" then
         layouts[#layouts + 1] = production_layout(
-            prefix .. "/lib/titan/0.17", prefix .. "/share/lua/5.5")
+            prefix .. "/lib/titan/0.18", prefix .. "/share/lua/5.5")
     end
 
     -- Discover the two owners independently. The supported installation puts
@@ -72,12 +72,12 @@ local function find_standard_layout()
     local installed_shim = package.searchpath(
         "titan.coroutine", package.path)
     local installed_abi_root = installed_container and
-        installed_container:match("^(.*)/lib/titan/0%.17/titan%.so$")
+        installed_container:match("^(.*)/lib/titan/0%.18/titan%.so$")
     local installed_shim_root = installed_shim and
         installed_shim:match("^(.*)/titan/coroutine%.lua$")
     if installed_abi_root and installed_shim_root then
         layouts[#layouts + 1] = production_layout(
-            installed_abi_root .. "/lib/titan/0.17", installed_shim_root)
+            installed_abi_root .. "/lib/titan/0.18", installed_shim_root)
     end
 
     layouts[#layouts + 1] = production_layout(REPO, REPO)
@@ -223,7 +223,7 @@ function M.compile(workspace, modname, options)
     local environment = {
         "env -u LUA_PATH -u LUA_CPATH" ..
             " -u LUA_PATH_5_5 -u LUA_CPATH_5_5 CCACHE_DISABLE=1",
-        "TITAN_PATH_0_17=" .. quote(layout.abi_root),
+        "TITAN_PATH_0_18=" .. quote(layout.abi_root),
         "TITAN_PATH=",
     }
     if options.cppflags then
@@ -263,18 +263,52 @@ function M.compile(workspace, modname, options)
     assert.truthy(ok, output)
 end
 
-local function build_variant_workspace(transformer)
+local function build_variant_workspace(transformer, options)
+    options = options or {}
+    assert.truthy(type(options) == "table",
+        "async stdlib variant options must be a table")
+    assert.truthy(options.facades == nil or type(options.facades) == "boolean",
+        "async stdlib variant facades option must be boolean")
+    local build_facades = options.facades ~= false
     local workspace = M.workspace("variant")
+    local built, variant_or_error = pcall(function()
     assert.truthy(lfs.mkdir(workspace .. "/titan"))
     make_directory(workspace .. "/src/titan")
-    local transform = transformer
-    if transform:sub(1, 1) ~= "/" then transform = REPO .. "/" .. transform end
+    local transformers
+    if type(transformer) == "string" then
+        transformers = { transformer }
+    else
+        assert.truthy(type(transformer) == "table",
+            "async stdlib variant transformer must be a path or ordered array")
+        assert.truthy(#transformer > 0,
+            "async stdlib variant transformer array must not be empty")
+        transformers = transformer
+        for key in pairs(transformers) do
+            assert.truthy(type(key) == "number" and key >= 1
+                and key <= #transformers and key % 1 == 0,
+                "async stdlib variant transformers must be a dense array")
+        end
+    end
+
     local raw_lua = host_lua()
-    local ok, _, output = run(table.concat({
-        quote(raw_lua), quote(transform), quote(REPO .. "/titan/uv"),
-        quote(workspace .. "/src/titan/uv"),
-    }, " "), workspace)
-    assert.truthy(ok, output)
+    local input = REPO .. "/titan/uv"
+    for index, configured in ipairs(transformers) do
+        assert.truthy(type(configured) == "string" and configured ~= "",
+            "async stdlib variant transformer paths must be nonempty strings")
+        local transform = configured
+        if transform:sub(1, 1) ~= "/" then
+            transform = REPO .. "/" .. transform
+        end
+        local destination = index == #transformers
+            and workspace .. "/src/titan/uv"
+            or workspace .. "/variant-stage-" .. tostring(index)
+        local ok, _, output = run(table.concat({
+            quote(raw_lua), quote(transform), quote(input),
+            quote(destination),
+        }, " "), workspace)
+        assert.truthy(ok, output)
+        input = destination
+    end
     assert.truthy(exists(workspace .. "/src/titan/uv/uv.titan"),
         "async stdlib variant transformer did not copy the folder main")
     copy_file(REPO .. "/titan/timer.titan",
@@ -302,25 +336,33 @@ local function build_variant_workspace(transformer)
         ldflags = ldflags,
     })
     register_exact_provider(variant_layout, "titan.uv")
-    -- Build the public facade against this private uv image. Its imported uv
-    -- module is loaded globally by the ordinary generated dependency loader,
-    -- so alias-owned Task methods resolve transitively without another import
-    -- in each consumer.
-    M.compile(workspace, "titan.async", {
-        layout = variant_layout,
-        cppflags = "",
-    })
-    register_exact_provider(variant_layout, "titan.async")
-    M.compile(workspace, "titan.timer", {
-        layout = variant_layout,
-        cppflags = "",
-    })
-    register_exact_provider(variant_layout, "titan.timer")
-    return workspace, variant_layout
+    if build_facades then
+        -- Build the public facades against this private uv image. Its imported
+        -- uv module is loaded globally by the ordinary generated dependency
+        -- loader, so alias-owned Task methods resolve transitively without
+        -- another import in each consumer.
+        M.compile(workspace, "titan.async", {
+            layout = variant_layout,
+            cppflags = "",
+        })
+        register_exact_provider(variant_layout, "titan.async")
+        M.compile(workspace, "titan.timer", {
+            layout = variant_layout,
+            cppflags = "",
+        })
+        register_exact_provider(variant_layout, "titan.timer")
+    end
+    return variant_layout
+    end)
+    if not built then
+        run("rm -rf " .. quote(workspace))
+        error(variant_or_error, 0)
+    end
+    return workspace, variant_or_error
 end
 
-function M.variant_workspace(transformer)
-    return build_variant_workspace(transformer)
+function M.variant_workspace(transformer, options)
+    return build_variant_workspace(transformer, options)
 end
 
 function M.run_lua_source(workspace, source, options)
@@ -339,7 +381,7 @@ function M.run_lua_source(workspace, source, options)
     local command = {
         "env -u LUA_PATH -u LUA_CPATH" ..
             " -u LUA_PATH_5_5 -u LUA_CPATH_5_5",
-        "TITAN_PATH_0_17=" .. quote(layout.abi_root),
+        "TITAN_PATH_0_18=" .. quote(layout.abi_root),
         "TITAN_PATH=",
         "LUA_PATH=" .. quote(lua_path),
         "LUA_PATH_5_5=" .. quote(lua_path),
@@ -367,7 +409,7 @@ local function app_command(workspace, modname)
     end
     return "env -u LUA_PATH -u LUA_CPATH" ..
         " -u LUA_PATH_5_5 -u LUA_CPATH_5_5" ..
-        " TITAN_PATH_0_17=" .. quote(layout.abi_root) .. " " ..
+        " TITAN_PATH_0_18=" .. quote(layout.abi_root) .. " " ..
         "TITAN_PATH= " .. quote(workspace .. "/" .. program_output)
 end
 

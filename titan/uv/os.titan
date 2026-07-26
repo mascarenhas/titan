@@ -25,6 +25,28 @@ local record uv_signal_t
   local buffer: nil
 end
 
+local function signal_number(name: string): ffi.titan_ffi_int
+  if name == "hup" then return csignal.SIGHUP end
+  if name == "int" then return csignal.SIGINT end
+  if name == "quit" then return csignal.SIGQUIT end
+  if name == "kill" then return csignal.SIGKILL end
+  if name == "term" then return csignal.SIGTERM end
+  if name == "usr1" then return csignal.SIGUSR1 end
+  if name == "usr2" then return csignal.SIGUSR2 end
+  return 0 as ffi.titan_ffi_int
+end
+
+local function signal_name(signum: integer): string?
+  if signum == csignal.SIGHUP then return "hup" end
+  if signum == csignal.SIGINT then return "int" end
+  if signum == csignal.SIGQUIT then return "quit" end
+  if signum == csignal.SIGKILL then return "kill" end
+  if signum == csignal.SIGTERM then return "term" end
+  if signum == csignal.SIGUSR1 then return "usr1" end
+  if signum == csignal.SIGUSR2 then return "usr2" end
+  return nil
+end
+
 function _os_getenv(name: string): string?
   local copied = copy_text(name, "os.getenv", name)
   local getenv_buffer = function (bytes: *ffi.titan_ffi_char,
@@ -42,16 +64,16 @@ function _os_setenv(name: string, contents: string)
   local copied_value = copy_text(contents, "os.setenv", name)
   local status = libuv.uv_os_setenv(copied_name.bytes.data,
                                     copied_value.bytes.data)
-  if (status as integer) < 0 then
-    raise make_error(status as integer, "os.setenv", name)
+  if status < 0 then
+    raise make_error(status, "os.setenv", name)
   end
 end
 
 function _os_unsetenv(name: string)
   local copied = copy_text(name, "os.unsetenv", name)
   local status = libuv.uv_os_unsetenv(copied.bytes.data)
-  if (status as integer) < 0 then
-    raise make_error(status as integer, "os.unsetenv", name)
+  if status < 0 then
+    raise make_error(status, "os.unsetenv", name)
   end
 end
 
@@ -64,8 +86,8 @@ end
 function _os_chdir(path: string)
   local copied = copy_text(path, "os.chdir", path)
   local status = libuv.uv_chdir(copied.bytes.data)
-  if (status as integer) < 0 then
-    raise make_error(status as integer, "os.chdir", path)
+  if status < 0 then
+    raise make_error(status, "os.chdir", path)
   end
 end
 
@@ -97,22 +119,21 @@ function _os_exepath(): string
 end
 
 function _os_pid(): integer
-  return libuv.uv_os_getpid() as integer
+  return libuv.uv_os_getpid()
 end
 
 function _os_ppid(): integer
-  return libuv.uv_os_getppid() as integer
+  return libuv.uv_os_getppid()
 end
 
 function _os_wait_signal(name: string): string
-  local copied = copy_text(name, "signal.name", name)
-  local signum = shim.titan_uvshim_signal_number(
-      copied.bytes.data) as integer
+  local validated = copy_text(name, "signal.name", name)
+  local signum = signal_number(validated.source)
   if signum <= 0 or name == "kill" then
     raise "unsupported waitable signal name '" .. name .. "'"
   end
-  local canonical = shim.titan_uvshim_signal_name(
-      signum as ffi.titan_ffi_int) as string
+  local canonical? = signal_name(signum)
+  if not canonical then raise internal_error("signal.name") end
   local request = new_request(REQUEST_SIGNAL,
       SignalSpec.new(canonical, signum), 0)
   return coroutine.yield(request, UV_TAG)
@@ -120,10 +141,7 @@ end
 
 function _os_signal_name(signal_number: integer): string?
   if signal_number <= 0 then return nil end
-  local name = shim.titan_uvshim_signal_name(
-      signal_number as ffi.titan_ffi_int)
-  if not name then return nil end
-  return name as string
+  return signal_name(signal_number)
 end
 
 local function os_sized_buffer(
@@ -135,11 +153,11 @@ local function os_sized_buffer(
   local bytes = allocate_sized_bytes(capacity)
   sizes[0] = capacity
   local status = uv_buffer_func(bytes.data, sizes)
-  if (status as integer) >= 0 then
+  if status >= 0 then
     return bytes_to_string(bytes.data, sizes[0])
-  elseif (status as integer) == UV_ENOBUFS then
+  elseif status == libuv.UV_ENOBUFS then
     return os_sized_buffer(uv_buffer_func, sizes[0], error_from_status)
-  elseif (status as integer) == UV_ENOENT then
+  elseif status == libuv.UV_ENOENT then
     return nil
   else
     raise error_from_status(status)
@@ -150,7 +168,7 @@ local function close_signal_owner(owner: uv_signal_t)
   if owner.metadata.lifecycle == OWNER_ACTIVE then
     libuv.uv_signal_stop(owner.handle)
     owner.metadata.lifecycle = OWNER_CLOSING
-    shim.titan_uvshim_signal_close(owner.handle)
+    libuv.uv_close(owner.handle, shim.titan_uvshim_close_cb)
   end
 end
 
@@ -197,9 +215,8 @@ local function start_signal_owner(runtime: Runtime, task: Task,
                                   spec: SignalSpec, epoch: integer):
                                   (uv_signal_t, integer)
   local owner, pointer = allocate_signal_owner(runtime, task, spec, epoch)
-  local status = shim.titan_uvshim_signal_init(runtime.loop.handle,
-                                               owner.handle, pointer)
-  if (status as integer) < 0 then
+  local status = libuv.uv_signal_init(runtime.loop.handle, owner.handle)
+  if status < 0 then
     -- This is the same callback-less init-failure boundary as timer init.
     -- Unlink inline in the already-reserved frame; do not enter a fresh Titan
     -- function after publishing the owner and before clearing its GC roots.
@@ -218,17 +235,19 @@ local function start_signal_owner(runtime: Runtime, task: Task,
     owner.metadata.lifecycle = OWNER_CLOSED
     owner.handle = nil
     owner.storage = nil
-    return owner, status as integer
+    return owner, status
   end
+  libuv.uv_handle_set_data(owner.handle, pointer)
   owner.metadata.lifecycle = OWNER_ACTIVE
-  status = shim.titan_uvshim_signal_start_oneshot(
-      owner.handle, spec.signum as ffi.titan_ffi_int)
-  if (status as integer) < 0 then
+  status = libuv.uv_signal_start_oneshot(
+      owner.handle, shim.titan_uvshim_signal_cb,
+      spec.signum as ffi.titan_ffi_int)
+  if status < 0 then
     libuv.uv_signal_stop(owner.handle)
     owner.metadata.lifecycle = OWNER_CLOSING
-    shim.titan_uvshim_signal_close(owner.handle)
+    libuv.uv_close(owner.handle, shim.titan_uvshim_close_cb)
   end
-  return owner, status as integer
+  return owner, status
 end
 
 -- Trusted one-shot signal dispatcher.  Stop + close state is published before
@@ -239,7 +258,7 @@ local function signal_dispatch(owner: uv_signal_t, event_kind: integer,
                                _pointer: ffi.titan_ffi_void_ptr)
   local runtime = owner.metadata.runtime
 
-  if event_kind == EVENT_HANDLE_CLOSE then
+  if event_kind == shim.TITAN_UV_EVENT_HANDLE_CLOSE then
     owner.metadata.lifecycle = OWNER_CLOSED
     maybe_finish_session(runtime)
     owner.handle = nil
@@ -277,7 +296,7 @@ local function os_error_from_status(operation: string,
                                     subject: string?):
                                     (ffi.titan_ffi_int) -> Error
   return function (status: ffi.titan_ffi_int): Error
-    return make_error(status as integer, operation, subject)
+    return make_error(status, operation, subject)
   end
 end
 
@@ -311,10 +330,10 @@ local function os_exepath_buffer(bytes: *ffi.titan_ffi_char,
   -- than UV_ENOBUFS. Translate only that public-API result into the generic
   -- recursive retry contract.
   local supplied = capacity as integer
-  if (status as integer) >= 0 and
+  if status >= 0 and
       (sizes[0] as integer) == supplied - 1 then
     sizes[0] = (supplied * 2) as libuv.size_t
-    return UV_ENOBUFS as ffi.titan_ffi_int
+    return libuv.UV_ENOBUFS as ffi.titan_ffi_int
   end
   return status
 end

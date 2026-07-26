@@ -366,6 +366,18 @@ end
 
 function schedule_localhost_retry(first_port: integer): async.Task
   return async.run(function (): value
+    local resolve_failed = false
+    do
+      net.connect("not/a/host", first_port)
+    catch
+      local failure = error as async.Error
+      check(failure.operation == "net.resolve" and failure.code < 0,
+            "invalid host failed outside DNS resolution")
+      resolve_failed = true
+    end
+    check(resolve_failed, "invalid host unexpectedly resolved")
+
+    -- The same Runtime must remain usable after an ordinary DNS failure.
     local server, port = listen_available("127.0.0.1", first_port, 4)
     local accept = async.run(function (): value
       local peer = server:accept()

@@ -218,7 +218,8 @@ TITAN_COMPILER_LUA := $(wildcard titan-compiler/*.lua c-parser/*.lua)
 # install-stdlib target can publish to PREFIX when ROCKS_TREE is omitted;
 # it is not part of an installed Titan tree.
 TITAN_INSTALL_TREE         := $(if $(strip $(ROCKS_TREE)),$(ROCKS_TREE),$(PREFIX))
-TITAN_ABI_VERSION          := 0.17
+STDLIB_INSTALL_STAGE       ?= $(CURDIR)
+TITAN_ABI_VERSION          := 0.18
 TITAN_STDLIB_ABI_DIR       ?= $(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_ABI_VERSION)
 TITAN_CANONICAL_SUPPORT_SO ?= $(TITAN_STDLIB_ABI_DIR)/titan.so
 TITAN_CANONICAL_STATIC_ARCHIVE ?= $(TITAN_STDLIB_ABI_DIR)/titan.a
@@ -245,6 +246,7 @@ STDLIB_COMPLETION_STAMP := titan-runtime/.titan-stdlib-complete
 .PHONY: all help lua luarocks libbacktrace libuv libuv-config \
 	check-libuv-tools check-system-libuv invalid-libuv-mode runtime titan \
 	stage-titan-bootstrap install-titan-sdk stdlib install-stdlib \
+	publish-stdlib \
 	rock-post-install test rock-build \
 	examples clean clean-lua clean-luarocks clean-libbacktrace clean-libuv \
 	distclean FORCE
@@ -1020,7 +1022,7 @@ $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES) titanc \
 	  CC=$(call make_shell_quote,$(CC)) \
 	    AR=$(call make_shell_quote,$(AR)) \
 	    RANLIB=$(call make_shell_quote,$(RANLIB)) \
-	    TITAN_PATH_0_17=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
+	    TITAN_PATH_0_18=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 	    TITAN_ROCKS_ROOT=$(call make_shell_quote,$(TITAN_ROCKS_ROOT)) \
 	    TITAN_RUNTIME_PREBUILT=1 \
 	    TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))) \
@@ -1047,7 +1049,8 @@ $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES) titanc \
 	rm -rf $(addsuffix .dSYM,$(STDLIB_SOS)) \
 		$(addsuffix .dSYM,$(STDLIB_QUALIFIED_SOS))
 
-install-stdlib: stdlib scripts/stdlib_installer.lua ## Install the paired standard library from this source tree
+install-stdlib: stdlib ## Install the paired standard library from this source tree
+install-stdlib publish-stdlib: scripts/stdlib_installer.lua
 	@set -e; \
 	mkdir -p "$(TITAN_INSTALL_TREE)" "$(TITAN_SHARE_DIR)/LICENSES"; \
 	install -m 0644 THIRD_PARTY_NOTICES.md \
@@ -1055,12 +1058,12 @@ install-stdlib: stdlib scripts/stdlib_installer.lua ## Install the paired standa
 	install -m 0644 LICENSES/libuv-LICENSE \
 	  "$(TITAN_SHARE_DIR)/LICENSES/libuv-LICENSE"; \
 	root=$$(CDPATH= cd "$(TITAN_INSTALL_TREE)" && pwd -P); \
-	stage=$(call make_shell_quote,$(CURDIR)); \
+	stage=$(call make_shell_quote,$(STDLIB_INSTALL_STAGE)); \
 	( unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
 	  export CC=$(call make_shell_quote,$(CC)); \
 	  export AR=$(call make_shell_quote,$(AR)); \
 	  export RANLIB=$(call make_shell_quote,$(RANLIB)); \
-	  export TITAN_PATH_0_17=$(call make_shell_quote,$(CURDIR)); \
+	  export TITAN_PATH_0_18=$(call make_shell_quote,$(CURDIR)); \
 	  export TITAN_PATH=; \
 	  export TITAN_ROCKS_ROOT=$(call make_shell_quote,$(TITAN_ROCKS_ROOT)); \
 	  export TITAN_RUNTIME_PREBUILT=1; \
@@ -1101,7 +1104,7 @@ rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS)
 	( cd "$$stage"; \
 	  unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
 	  export TITAN_ROCKS_ROOT="$$rocks_tree"; \
-	  export TITAN_PATH_0_17="$$abi_dir"; \
+	  export TITAN_PATH_0_18="$$abi_dir"; \
 	  export TITAN_PATH=; \
 	  export TITAN_RUNTIME_PREBUILT=1; \
 	  export CC=$(call make_shell_quote,$(CC)); \

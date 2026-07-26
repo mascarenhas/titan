@@ -1,0 +1,10 @@
+return {
+    -- Match the explicit report set used by CI. Restricting collection here
+    -- avoids paying LuaCov's per-line debug-hook cost in the C parser,
+    -- dependencies, and nested spec bodies that the report discards anyway.
+    include = {
+        "titan%-compiler/",
+        "spec/[^/]+$",
+        "titanc$",
+    },
+}

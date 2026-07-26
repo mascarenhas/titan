@@ -536,6 +536,8 @@ describe("Titan types", function()
             assert.same("double", types.tostring(types.CFloat("double")))
             assert.same("const int *", types.tostring(types.CPointer(int, {"const"})))
             assert.same("int[4]", types.tostring(types.CArray(int, 4)))
+            assert.same("const int[4]",
+                types.tostring(types.CArray(int, 4, {"const"})))
             assert.same("double (int, ...)", types.tostring(
                 types.CFunction({int}, types.CFloat("double"), true, "cdecl")))
             assert.same("struct point", types.tostring(
@@ -549,7 +551,7 @@ describe("Titan types", function()
         end)
 
         it("uses CModule as the public foreign module type", function()
-            local mod = types.CModule("stdio.h", { printf = cint() })
+            local mod = types.CModule("stdio.h", { printf = cint() }, {})
             assert.same("Type.CModule", mod._tag)
             assert.same("stdio.h", mod.name)
             assert.same("C module stdio.h", types.tostring(mod))
@@ -568,11 +570,146 @@ describe("Titan types", function()
                 types.CPointer(int, {"const"}),
                 types.CPointer(cint(), {})))
             assert.truthy(types.equals(
+                types.CArray(int, 3, {"const"}),
+                types.CArray(cint(), 3, {"const"})))
+            assert.falsy(types.equals(
+                types.CArray(int, 3, {"const"}),
+                types.CArray(cint(), 3)))
+            assert.truthy(types.equals(
                 types.CFunction({int}, types.CVoid(), false, "cdecl"),
                 types.CFunction({cint()}, types.CVoid(), false, "cdecl")))
             assert.falsy(types.equals(int, types.Integer()))
             assert.truthy(types.compatible(int, types.Integer()))
             assert.truthy(types.coerceable(int, types.Integer()))
+        end)
+
+        it("compares C function signatures through aliases and qualifiers",
+        function()
+            local int = cint()
+            local first_int = types.CTypedef("ffi_first_int", int)
+            local second_int = types.CTypedef("ffi_second_int", cint())
+            local first = types.CFunction(
+                {first_int}, first_int, false, "cdecl")
+            local second = types.CFunction(
+                {second_int}, second_int, false, "cdecl")
+
+            assert.is_true(types.c_function_types_equal(first, second))
+            assert.is_true(types.equals(
+                types.CPointer(first, {}),
+                types.CPointer(second, {})))
+
+            local first_callback =
+                types.CTypedef("ffi_first_callback",
+                    types.CPointer(first, {}))
+            local second_callback =
+                types.CTypedef("ffi_second_callback",
+                    types.CPointer(second, {}))
+            assert.is_true(types.equals(
+                types.CPointer(first_callback, {}),
+                types.CPointer(second_callback, {})))
+
+            local const_return = types.CFunction(
+                {second_int}, second_int, false, "cdecl")
+            const_return._return_declaration_qualifiers = {"const"}
+            assert.equal("const ffi_second_int (ffi_second_int)",
+                types.tostring(const_return))
+            assert.is_false(types.c_function_types_equal(
+                first, const_return))
+            assert.is_false(types.equals(
+                types.CPointer(first, {}),
+                types.CPointer(const_return, {})))
+
+            local mutable_pointer =
+                types.CPointer(first_int, {})
+            local const_pointer =
+                types.CPointer(second_int, {"const"})
+            local takes_mutable = types.CFunction(
+                {mutable_pointer}, types.CVoid(), false, "cdecl")
+            local takes_const = types.CFunction(
+                {const_pointer}, types.CVoid(), false, "cdecl")
+            assert.is_false(types.c_function_types_equal(
+                takes_mutable, takes_const))
+            assert.is_false(types.equals(
+                types.CPointer(
+                    types.CTypedef("ffi_mutable_callback",
+                        types.CPointer(takes_mutable, {})), {}),
+                types.CPointer(
+                    types.CTypedef("ffi_const_callback",
+                        types.CPointer(takes_const, {})), {})))
+
+            local top_const_pointer =
+                types.CTypedef("ffi_const_pointer",
+                    types.CPointer(first_int, {}), {"const"})
+            local top_plain_pointer =
+                types.CPointer(second_int, {})
+            assert.is_true(types.c_function_types_equal(
+                types.CFunction(
+                    {top_const_pointer}, types.CVoid(), false, "cdecl"),
+                types.CFunction(
+                    {top_plain_pointer}, types.CVoid(), false, "cdecl")))
+
+            local const_void =
+                types.CFunction({}, types.CVoid(), false, "cdecl")
+            const_void._return_declaration_qualifiers = {"const"}
+            assert.is_false(types.c_function_types_equal(
+                const_void,
+                types.CFunction({}, types.CVoid(), false, "cdecl")))
+            local const_void_alias =
+                types.CTypedef("ffi_const_void", types.CVoid(), {"const"})
+            assert.is_true(types.c_function_types_equal(
+                const_void,
+                types.CFunction(
+                    {}, const_void_alias, false, "cdecl")))
+
+            local first_value =
+                types.Function({first_int}, {first_int},
+                    false, false, false)
+            first_value._c_function = first
+            first_value._c_return_type = first.ret
+            local second_value =
+                types.Function({second_int}, {second_int},
+                    false, false, false)
+            second_value._c_function = second
+            second_value._c_return_type = second.ret
+            assert.is_true(types.equals(first_value, second_value))
+
+            local const_void_value =
+                types.Function({}, {}, false, false, false)
+            const_void_value._c_function = const_void
+            const_void_value._c_return_type = const_void.ret
+            const_void_value._return_declaration_qualifiers =
+                {"const"}
+            local plain_void_value =
+                types.Function({}, {}, false, false, false)
+            plain_void_value._c_function =
+                types.CFunction(
+                    {}, types.CVoid(), false, "cdecl")
+            plain_void_value._c_return_type =
+                plain_void_value._c_function.ret
+            assert.equal(
+                "() -> const void",
+                types.tostring(const_void_value))
+            assert.is_false(types.equals(
+                const_void_value, plain_void_value))
+
+            local unknown_array =
+                types.CArray(first_int, nil)
+            local known_array =
+                types.CArray(second_int, 7)
+            assert.is_true(types.c_function_types_equal(
+                types.CFunction({
+                    types.CPointer(unknown_array, {}),
+                }, types.CVoid(), false, "cdecl"),
+                types.CFunction({
+                    types.CPointer(known_array, {}),
+                }, types.CVoid(), false, "cdecl")))
+            assert.is_false(types.c_function_types_equal(
+                types.CFunction({
+                    types.CPointer(types.CArray(first_int, 6), {}),
+                }, types.CVoid(), false, "cdecl"),
+                types.CFunction({
+                    types.CPointer(known_array, {}),
+                }, types.CVoid(), false, "cdecl")))
         end)
 
         it("resolves C typedef chains", function()
@@ -623,6 +760,15 @@ describe("Titan types", function()
             local const_vptr = types.CPointer(types.CVoid(), {"const"})
             local const_iptr = types.CPointer(int, {"const"})
             local alias_array = types.CArray(alias, 4)
+            local const_array = types.CArray(alias, 4, {"const"})
+            local volatile_array =
+                types.CArray(alias, 4, {"volatile"})
+            local volatile_iptr =
+                types.CPointer(int, {"volatile"})
+            local const_alias =
+                types.CTypedef("ffi_const_int", int, {"const"})
+            local const_alias_array =
+                types.CArray(const_alias, 4)
 
             assert.truthy(types.compatible(vptr, iptr))
             assert.truthy(types.coerceable(iptr, vptr))
@@ -633,6 +779,19 @@ describe("Titan types", function()
             assert.falsy(types.c_mutable_address_coerceable(iptr, vptr))
             assert.truthy(types.compatible(alias_array, iptr))
             assert.truthy(types.coerceable(alias_array, iptr))
+            assert.falsy(types.coerceable(const_array, iptr))
+            assert.truthy(types.coerceable(const_array, const_iptr))
+            assert.falsy(types.coerceable(volatile_array, iptr))
+            assert.truthy(types.coerceable(
+                volatile_array, volatile_iptr))
+            assert.falsy(types.coerceable(
+                const_alias_array, iptr))
+            assert.truthy(types.coerceable(
+                const_alias_array, const_iptr))
+            assert.falsy(types.coerceable(
+                types.CPointer(const_alias, {}), iptr))
+            assert.same({"const"},
+                types.c_local_address_pointer(const_array).quals)
         end)
 
         it("detects C types nested inside type trees", function()
@@ -670,8 +829,8 @@ describe("Titan types", function()
 
         it("treats owned C pointers as GC values, but C modules as non-values", function()
             assert.truthy(types.is_gc(types.COwned(cint(), false)))
-            assert.falsy(types.is_gc(types.CModule("ffi", {})))
-            assert.falsy(types.is_c(types.CModule("ffi", {})))
+            assert.falsy(types.is_gc(types.CModule("ffi", {}, {})))
+            assert.falsy(types.is_c(types.CModule("ffi", {}, {})))
             assert.falsy(types.is_truthy(types.CPointer(cint(), {})))
             assert.falsy(types.is_truthy(types.CTypedef(
                 "ffi_iptr", types.CPointer(cint(), {}))))

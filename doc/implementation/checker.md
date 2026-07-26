@@ -14,7 +14,7 @@ never decides to coerce anything on its own.
 ## Entry point and contract
 
 ```lua
-function checker.check(modname, ast, subject, filename, loader)
+function checker.check(modname, ast, subject, filename, loader, options)
 ```
 
 (`checker.lua`, `checker.check`.) It builds a fresh symbol table with
@@ -24,7 +24,9 @@ body checking (below), computes the module's interface type with
 — a `Type.Module` and the error list. Callers test `#errors == 0` (as
 `spec/checker_spec.lua` does). `loader` is
 the import callback (see [Imports](#imports-and-the-loader-protocol)); if
-omitted, a stub that fails every import is used.
+omitted, a stub that fails every import is used. `options` is optional
+invocation context; the driver uses it to share the resolver-owned C probe
+service and source directory through dependency checks.
 
 For a [folder module](folder-modules.md), `driver.defaultloader` independently
 parses all source files and calls this entry point once with one dense combined
@@ -64,7 +66,10 @@ aliases and C declarations:
   canonical C struct/union owners also carry `_definition_order`;
   `foreign_definition_visible` prevents an in-place completion performed by a
   later header from exposing fields or allocation eligibility at an earlier
-  frontier.
+  frontier. A third checker-owned registry holds module-wide file-scope C tags
+  by base name/kind/provenance. It reuses same-kind owners across imports,
+  rejects cross-import kind conflicts, and stays distinct from both ordinary C
+  names and prototype-local tag scopes.
 * During a `TopLevelVar`, `initializer_order` makes `find_symbol` hide the
   current and later module variables and later Titan/foreign imports. The C
   lookup helpers scan their histories backward for the last declaration whose
@@ -829,7 +834,13 @@ the C parser pipeline and converts each declaration with
 `foreigntypes.convert`. C values become members of a `Type.CModule`; C type
 declarations become `type_members` plus entries in the symbol table's
 `foreign_types` namespace, which is what lets local annotations such as
-`c.size_t` resolve (see [FFI internals](ffi-internals.md)).
+`c.size_t` resolve (see [FFI internals](ffi-internals.md)). Before conversion,
+the `TypeList` supplies complete syntactic typedef-name and file-scope tag
+metadata. A named tag-only struct/union with no same-name real typedef is
+published directly in `type_members` through its canonical `struct@T` /
+`union@T` owner; it is not wrapped in a fake `CTypedef`. Ordered conversion
+binds a prototype tag to an already-visible file tag when appropriate and
+otherwise keeps it prototype-local.
 Every converted C type and accepted ordinary C name is also recorded with the
 foreign-import node's `_toplevel_order`. Although the final foreign namespaces
 are available to later declaration stages, a module variable asks those
@@ -840,6 +851,20 @@ Because C aggregate owners are canonical objects completed in place,
 `_definition_order`; field lookup and allocation call
 `foreign_definition_visible` so that later completion is treated as absent or
 incomplete at an earlier module-variable frontier.
+The same frontier-aware complete-object predicate protects by-value
+parameters/results/locals/casts, fixed-array elements, allocation,
+`sizeof`/`alignof`, and field lookup. Expression lookup on `Type.CModule` is
+value-first; when an ordinary member collides with a type spelling, type
+pseudo-members are rejected with a collision-specific diagnostic instead of
+stealing the real function/variable.
+
+The checker also receives the resolver's session-scoped `cprobe.Service`.
+After all foreign imports establish a module's ordered header context,
+contextual object-pointer conversions and C operators ask that service to
+compile their exact `cdeclarator` spelling. The checker records complete
+conversion/operator traits on the AST; `types.compatible` remains pure and the
+coder consumes the traits without repeating target-C reasoning. See
+[C FFI declarations and expressions](c-ffi-expressions.md).
 The checker derives its C include `source_dir` from the canonical main
 filename. Folder contributors are immediate siblings of that main, so quoted
 headers imported from a contributor use the same directory without a

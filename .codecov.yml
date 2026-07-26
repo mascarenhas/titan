@@ -6,3 +6,15 @@ comment:
   require_changes: yes # Require coverage change to post comment
   require_base: no
   require_head: yes
+
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        # This branch establishes compiler-only coverage and excludes spec/.
+        # Remove the tolerance after master has a report under that baseline.
+        threshold: 2%
+
+ignore:
+  - "spec"

@@ -9,8 +9,9 @@ The `coroutine` standard module is split deliberately:
 * `titan-runtime/titan_coro.c` owns only the pieces that still need C:
   compiling the single-file minicoro implementation, the Lua raw-equality
   tag comparator, and a tiny minicoro entry trampoline that calls the native
-  Titan entry function stored in the owner userdata. It also owns the direct
-  userdata writes that root and clear a pending transfer with Lua's GC barrier.
+  Titan entry function stored in the owner userdata. The Titan module itself
+  installs and clears pending-transfer roots through public Lua stack and
+  uservalue APIs plus Titan's existing raw-`TValue` push bridge.
 * `titan-runtime/minicoro.h` is a vendored copy of minicoro extended with
   tagged nested yield and a `MCO_STACKED` state.
 
@@ -18,7 +19,7 @@ The source compiles under the qualified Titan identity `titan.coroutine`.
 Titan code uses `import "coroutine"`, which the parser desugars to that name;
 Lua uses the ordinary `luaopen_titan_coroutine` entry through
 `require "titan.coroutine"`. Titan prefix lookup claims that logical module
-from `<root>/lib/titan/0.17/titan.so`; Lua finds the generated
+from `<root>/lib/titan/0.18/titan.so`; Lua finds the generated
 `<root>/share/lua/5.5/titan/coroutine.lua` shim, promotes/maps the same provider
 through `titan._loadlibglobal`, and invokes `luaopen_titan_coroutine`. The
 module keeps its own state and initializer beside the other logical standard
@@ -29,8 +30,9 @@ standard coroutine library.
 Coroutine payloads use `value`, so an Array crossing `resume`, `yield`, or
 `error` remains its canonical proxy Udata; the private backing Table never
 leaks through the coroutine boundary. Exact typed Array paths elsewhere still
-use backing `Table *`. This internal/boxed distinction is part of ABI 0.17;
-see [Dense Arrays](dense-arrays.md#exact-and-generic-call-paths).
+use backing `Table *`. This internal/boxed distinction was introduced by ABI
+0.17 and remains part of ABI 0.18; see
+[Dense Arrays](dense-arrays.md#exact-and-generic-call-paths).
 
 ## Public Wrapper
 
@@ -138,6 +140,18 @@ mco.mco_resume(co, ctag)
 
 Minicoro treats that pointer opaquely and compares it before returning
 from the control-transfer call.
+
+`root_transfer` implements the uservalue update in Titan. It first recovers
+the exact owner userdata from `mco_get_user_data` and assigns that `Udata *`
+to a local, which gives generated code a Lua-stack anchor for the owner. It
+then saves `lua_gettop(L)`, requires two stack slots with
+`lua_checkstack(L, 2)`, pushes the owner and payload with
+`lua_pushtvalue`, and assigns owner uservalue 5 with
+`lua_setiuservalue`. The public setter supplies Lua's backward GC barrier.
+Both checked failures restore the saved top before raising, and the success
+path restores the same top before returning. `clear_transfer` invokes that
+same path with nil, so installing and clearing the root share the checked
+ordering and stack-balance contract. There is no private C root/clear helper.
 
 The helper stores live values in ordinary Lua roots:
 
@@ -255,12 +269,13 @@ outside the current FFI or a native callback ABI:
 * defining `MINICORO_IMPL` exactly once while forcing Titan's minicoro
   compile-time options;
 * supplying the C tag comparator that compares arbitrary Lua values with
-  `luaV_equalobj(NULL, ...)`;
-* writing and clearing owner slot 5 directly, including the backward GC
-  barrier required when installing a pending transfer root.
+  `luaV_equalobj(NULL, ...)`.
 
-Those are plausible future FFI extensions, but they should be designed as
-general facilities rather than coroutine-specific escape hatches.
+The pending-transfer update no longer belongs to that C surface:
+`titan/coroutine.titan` uses public `lua_checkstack`, `lua_setiuservalue`, and
+`lua_settop` directly, with Titan's existing `lua_pushtvalue` support bridge
+for raw `TValue` pushes. The runtime header and archive therefore export neither
+`titan_coro_root_transfer` nor `titan_coro_clear_transfer`.
 
 ## Tagged Minicoro
 

@@ -212,6 +212,34 @@ function defs.constcptrtype(pos, subtype)
     return ast.TypeCPointer(pos, subtype, true)
 end
 
+local function carraylength(loc, n)
+    if math.type(n) ~= "integer" then
+        return false
+    end
+    return ast.ExpInteger(loc, n)
+end
+
+function defs.carraylength(_, _, loc, n)
+    local length = carraylength(loc, n)
+    if not length then
+        return false
+    end
+    return true, length
+end
+
+function defs.negativecarraylength(_, _, loc, n)
+    local length = carraylength(loc, n)
+    if not length then
+        return false
+    end
+    length.value = -length.value
+    return true, length
+end
+
+function defs.automaticlocal(pos, decl)
+    return ast.StatDecl(pos, { decl }, {})
+end
+
 function defs.ifstat(pos, exp, block, thens, elseopt)
     table.insert(thens, 1, ast.Then(pos, exp, block))
     return ast.StatIf(pos, thens, elseopt)
@@ -624,7 +652,28 @@ local grammar = re.compile([[
 
     decllist        <- {| decl (COMMA decl^DeclParList)* |}      -- produces {Decl}
 
-    simpletype      <- (((P  NIL)                                -> TypeNil
+    -- A source-written fixed C array is deliberately not part of the general
+    -- type grammar. It is available only to the single, initializer-less
+    -- automatic-local statement below. Its signed integer token is retained as
+    -- an ExpInteger so the checker receives both the value and its source
+    -- location when enforcing the positive-extent rule.
+    qualifiedtype   <- (P  NAME DOT NAME^QualName)               -> TypeQualName
+
+    carraylength    <- (((P  SUB NUMBER) => negativecarraylength)
+                       / ((P  NUMBER) => carraylength)
+                       / %{CArrayExtent})
+
+    automaticlocaltype
+                    <- (P  qualifiedtype
+                            LBRACKET carraylength
+                            RBRACKET^RBracketCArray)             -> TypeCArray
+                     / qualifiedtype
+
+    automaticlocaldecl
+                    <- (P  NAME COLON
+                            automaticlocaltype)                  -> typeddecl
+
+    simpletype      <- ((((P  NIL)                               -> TypeNil
                      / (P  BOOLEAN)                              -> TypeBoolean
                      / (P  INTEGER)                              -> TypeInteger
                      / (P  FLOAT)                                -> TypeFloat
@@ -632,7 +681,7 @@ local grammar = re.compile([[
                      / (P  VALUE)                                -> TypeValue
                      / (P  CONST MUL simpletype^TypeType)        -> constcptrtype
                      / (P  MUL simpletype^TypeType)              -> cptrtype
-                     / (P  NAME DOT NAME^QualName)               -> TypeQualName
+                     / qualifiedtype
                      / (P  NAME)                                 -> TypeName
                      / (P  LCURLY type^TypeType
                            COLON
@@ -640,7 +689,8 @@ local grammar = re.compile([[
                            RCURLY^RCurlyType)                    -> TypeMap
                      / (P  LCURLY type^TypeType
                            RCURLY^RCurlyType)                    -> TypeArray)
-                                                  (OPT -> '?')?) -> typeopt
+                                                  (OPT -> '?')?) -> typeopt)
+                        (!LBRACKET / %{CArrayOnlyAutomatic})
 
     -- A trailing, last-only `...: t` in a function-type arg list. The element
     -- type is mandatory (the `: t` declaration style). Produces the element type
@@ -727,6 +777,9 @@ local grammar = re.compile([[
                      / (P  IF exp^ExpIf THEN^ThenIf block
                            elseifstats elseopt END^EndIf)        -> ifstat
                      / forstat
+                     / (P  LOCAL automaticlocaldecl
+                                !ASSIGN !COMMA
+                                !(OPT / LBRACKET))               -> automaticlocal
                      / (P  LOCAL decllist^DeclLocal ASSIGN^AssignLocal
                                  explist^ExpLocal)                   -> StatDecl
                      / (P  varlist ASSIGN^AssignAssign

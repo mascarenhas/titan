@@ -10,6 +10,13 @@ Lua", it means bit-for-bit (upstream PR #216): reproducing Lua's
 arithmetic exactly, even where C's operators disagree, is a stated
 design principle (see [the design philosophy](philosophy.md)).
 
+That guarantee describes Titan operands. When at least one operand is a
+supported C scalar, pointer, or array imported through `foreign import`, the
+expression may instead enter
+[C operator mode](c-ffi-expressions.md#c-operator-mode): target C promotions
+and direct C behavior apply, and unsupported combinations are compile-time
+errors rather than Titan fallbacks.
+
 ## Literals
 
 ### nil and booleans

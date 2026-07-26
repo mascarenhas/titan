@@ -165,15 +165,15 @@ end
 function _os_process_kill(process: uv_process_t, signal: string)
   ordinary_task()
   validate_process(process, "signal", false)
-  local copied = copy_text(signal, "process.kill", signal)
-  local signum = shim.titan_uvshim_signal_number(copied.bytes.data)
-  if (signum as integer) <= 0 then
+  local validated = copy_text(signal, "process.kill", signal)
+  local signum = signal_number(validated.source)
+  if signum <= 0 then
     raise "unsupported process signal name '" .. signal .. "'"
   end
   local status = libuv.uv_process_kill(process.handle, signum)
-  if (status as integer) < 0 and
-      (status as integer) ~= UV_ESRCH then
-    raise make_error(status as integer, "process.kill", signal)
+  if status < 0 and
+      status ~= libuv.UV_ESRCH then
+    raise make_error(status, "process.kill", signal)
   end
 end
 
@@ -188,7 +188,7 @@ function _os_process_write_stdin(process: uv_process_t, data: string)
     raise "cannot write after Process stdin close"
   end
   if #data == 0 then return end
-  if #data > UV_BUF_MAX then
+  if #data > climits.UINT_MAX then
     raise "process stdin data exceeds the portable libuv buffer limit"
   end
   -- Writes own their bytes before entering the shared FIFO; later cancellation
@@ -426,7 +426,7 @@ local function start_pipe_close(pipe: uv_pipe_t)
   if control.lifecycle == PIPE_CLOSED or
       control.lifecycle == PIPE_CLOSING then return end
   if control.read_active then
-    shim.titan_uvshim_pipe_read_stop(pipe.handle)
+    libuv.uv_read_stop(pipe.handle)
     control.read_active = false
   end
   control.read_bytes = nil
@@ -435,7 +435,7 @@ local function start_pipe_close(pipe: uv_pipe_t)
     return
   end
   control.lifecycle = PIPE_CLOSING
-  shim.titan_uvshim_pipe_close(pipe.handle)
+  libuv.uv_close(pipe.handle, shim.titan_uvshim_close_cb)
 end
 
 local function discard_process_storage(process: uv_process_t)
@@ -456,7 +456,7 @@ local function start_process_close(process: uv_process_t)
     return
   end
   control.lifecycle = PROCESS_CLOSING
-  shim.titan_uvshim_process_close(process.handle)
+  libuv.uv_close(process.handle, shim.titan_uvshim_close_cb)
 end
 
 local function new_process_request_control(runtime: Runtime,
@@ -541,9 +541,9 @@ local function close_process_grace(control: ProcessControl)
   if not control.grace_owner then return end
   local owner = control.grace_owner
   if owner.handle == nil then return end
-  if (shim.titan_uvshim_timer_is_closing(owner.handle) as integer) == 0 then
+  if libuv.uv_is_closing(owner.handle) == 0 then
     libuv.uv_timer_stop(owner.handle)
-    shim.titan_uvshim_timer_close(owner.handle)
+    libuv.uv_close(owner.handle, shim.titan_uvshim_close_cb)
   end
 end
 
@@ -552,23 +552,23 @@ local function start_process_grace(control: ProcessControl): integer
   local owner, pointer = allocate_process_grace(control)
   local status = libuv.uv_timer_init(control.runtime.loop.handle,
                                     owner.handle)
-  if (status as integer) < 0 then
+  if status < 0 then
     control.grace_owner = nil
     owner.handle = nil
     owner.storage = nil
-    return status as integer
+    return status
   end
-  shim.titan_uvshim_timer_set_data(owner.handle, pointer)
+  libuv.uv_handle_set_data(owner.handle, pointer)
   status = libuv.uv_timer_start {
     handle = owner.handle,
     cb = shim.titan_uvshim_timer_cb,
     timeout = PROCESS_GRACE_MILLISECONDS,
     repeat = 0,
   }
-  if (status as integer) < 0 then
-    shim.titan_uvshim_timer_close(owner.handle)
+  if status < 0 then
+    libuv.uv_close(owner.handle, shim.titan_uvshim_close_cb)
   end
-  return status as integer
+  return status
 end
 
 local function make_process_operation(kind: integer, task: Task,
@@ -747,22 +747,22 @@ local function begin_one_process_shutdown(control: ProcessControl): integer
   control.shutdown_started = true
   process_close_all_pipes(control)
   local process = control.owner
-  local term = shim.titan_uvshim_signal_number("term")
+  local term = csignal.SIGTERM
   local kill_status = libuv.uv_process_kill(process.handle, term)
   local grace_status = start_process_grace(control)
   if grace_status < 0 and not control.exit_seen then
     control.kill_sent = true
-    local kill = shim.titan_uvshim_signal_number("kill")
+    local kill = csignal.SIGKILL
     local emergency_status = libuv.uv_process_kill(process.handle, kill)
-    if (emergency_status as integer) < 0 and
-        (emergency_status as integer) ~= UV_ESRCH
+    if emergency_status < 0 and
+        emergency_status ~= libuv.UV_ESRCH
     then
-      return emergency_status as integer
+      return emergency_status
     end
   end
-  if (kill_status as integer) < 0 and
-      (kill_status as integer) ~= UV_ESRCH then
-    return kill_status as integer
+  if kill_status < 0 and
+      kill_status ~= libuv.UV_ESRCH then
+    return kill_status
   end
   return grace_status
 end
@@ -806,16 +806,22 @@ local function advance_pipe_output(pipe: uv_pipe_t,
                                                        operation)
       operation.owner = owner
       control.output_current = operation
-      status = shim.titan_uvshim_pipe_write_start(
-          owner.handle, pipe.handle, pointer, buffer.handle)
-      if (status as integer) >= 0 then
+      libuv.uv_req_set_data(owner.handle, pointer)
+      status = libuv.uv_write {
+        req = owner.handle,
+        handle = pipe.handle,
+        bufs = buffer.handle,
+        nbufs = 1,
+        cb = shim.titan_uvshim_write_cb,
+      }
+      if status >= 0 then
         owner.metadata.lifecycle = PROCESS_OWNER_SUBMITTED
         operation.prepared_buffer = nil
         return nil
       end
       retire_process_request(owner.metadata)
       remove_pipe_output(pipe, operation)
-      local failure = make_error(status as integer,
+      local failure = make_error(status,
                                  "process.stdin.write", nil)
       if operation.task and operation.request then
         local task = operation.task
@@ -874,37 +880,51 @@ local function arm_process_spawn(task: Task,
   end
   argv[argument_count] = nil
 
-  local status = shim.titan_uvshim_pipe_init(runtime.loop.handle,
-      stdin_pipe.handle, stdin_pointer)
+  local status = libuv.uv_pipe_init(
+      runtime.loop.handle, stdin_pipe.handle, 0)
   local failed_operation = "process.stdin.init"
-  if (status as integer) >= 0 then
+  if status >= 0 then
+    libuv.uv_handle_set_data(stdin_pipe.handle, stdin_pointer)
     stdin_pipe.metadata.lifecycle = PIPE_INITIALIZED
-    status = shim.titan_uvshim_pipe_init(runtime.loop.handle,
-        stdout_pipe.handle, stdout_pointer)
+    status = libuv.uv_pipe_init(
+        runtime.loop.handle, stdout_pipe.handle, 0)
     failed_operation = "process.stdout.init"
   end
-  if (status as integer) >= 0 then
+  if status >= 0 then
+    libuv.uv_handle_set_data(stdout_pipe.handle, stdout_pointer)
     stdout_pipe.metadata.lifecycle = PIPE_INITIALIZED
-    status = shim.titan_uvshim_pipe_init(runtime.loop.handle,
-        stderr_pipe.handle, stderr_pointer)
+    status = libuv.uv_pipe_init(
+        runtime.loop.handle, stderr_pipe.handle, 0)
     failed_operation = "process.stderr.init"
   end
-  if (status as integer) >= 0 then
+  if status >= 0 then
+    libuv.uv_handle_set_data(stderr_pipe.handle, stderr_pointer)
     stderr_pipe.metadata.lifecycle = PIPE_INITIALIZED
-    status = shim.titan_uvshim_process_spawn {
-      loop = runtime.loop.handle,
-      process = process.handle,
-      data = process_pointer,
-      argv = argv,
-      stdin_pipe = stdin_pipe.handle,
-      stdout_pipe = stdout_pipe.handle,
-      stderr_pipe = stderr_pipe.handle,
-    }
+    local options: libuv.uv_process_options_t
+    local stdio: libuv.uv_stdio_container_t[3]
+    stdio[0].flags = libuv.UV_CREATE_PIPE | libuv.UV_READABLE_PIPE
+    stdio[0].data.stream =
+      stdin_pipe.handle as *libuv.uv_stream_t
+    stdio[1].flags = libuv.UV_CREATE_PIPE | libuv.UV_WRITABLE_PIPE
+    stdio[1].data.stream =
+      stdout_pipe.handle as *libuv.uv_stream_t
+    stdio[2].flags = libuv.UV_CREATE_PIPE | libuv.UV_WRITABLE_PIPE
+    stdio[2].data.stream =
+      stderr_pipe.handle as *libuv.uv_stream_t
+    options.exit_cb = shim.titan_uvshim_process_exit_cb
+    options.file = argv[0]
+    options.args = argv
+    options.env = nil
+    options.cwd = nil
+    options.stdio_count = 3 as ffi.titan_ffi_int
+    options.stdio = stdio
     failed_operation = "process.spawn"
+    status = libuv.uv_spawn(runtime.loop.handle, process.handle, options)
+    libuv.uv_handle_set_data(process.handle, process_pointer)
     process_control.lifecycle = PROCESS_SPAWNED
   end
 
-  local spawn_status = status as integer
+  local spawn_status = status
   if spawn_status >= 0 then
     stdin_pipe.metadata.lifecycle = PIPE_OPEN
     stdout_pipe.metadata.lifecycle = PIPE_OPEN
@@ -1031,9 +1051,10 @@ local function arm_helper_request(task: Task,
 end
 
 local function start_pipe_read(pipe: uv_pipe_t): integer
-  local status = shim.titan_uvshim_pipe_read_start(pipe.handle)
-  if (status as integer) >= 0 then pipe.metadata.read_active = true end
-  return status as integer
+  local status = libuv.uv_read_start(
+      pipe.handle, shim.titan_uvshim_alloc_cb, shim.titan_uvshim_read_cb)
+  if status >= 0 then pipe.metadata.read_active = true end
+  return status
 end
 
 local function deliver_process_disposer(task: Task?, epoch: integer)
@@ -1102,7 +1123,7 @@ local function process_dispatch_body(owner: uv_process_t,
                                      event_kind: integer)
   local control = owner.metadata
   local runtime = control.runtime
-  if event_kind == EVENT_PROCESS_EXIT then
+  if event_kind == shim.TITAN_UV_EVENT_PROCESS_EXIT then
     close_process_grace(control)
     if control.stdin_pipe then
       start_pipe_close(control.stdin_pipe)
@@ -1112,7 +1133,7 @@ local function process_dispatch_body(owner: uv_process_t,
     start_process_close(owner)
     control.callback_aborted = false
     return
-  elseif event_kind == EVENT_HANDLE_CLOSE then
+  elseif event_kind == shim.TITAN_UV_EVENT_HANDLE_CLOSE then
     owner.handle = nil
     owner.storage = nil
     control.owner = owner
@@ -1130,12 +1151,12 @@ end
 local function process_dispatch(owner: uv_process_t, event_kind: integer,
                                 result: integer, size: libuv.size_t,
                                 _pointer: ffi.titan_ffi_void_ptr)
-  if event_kind == EVENT_PROCESS_EXIT then
+  if event_kind == shim.TITAN_UV_EVENT_PROCESS_EXIT then
     owner.metadata.exit_seen = true
     owner.metadata.exit_status = result
-    owner.metadata.term_signal = size as integer
+    owner.metadata.term_signal = size
     owner.metadata.lifecycle = PROCESS_EXITED
-  elseif event_kind == EVENT_HANDLE_CLOSE then
+  elseif event_kind == shim.TITAN_UV_EVENT_HANDLE_CLOSE then
     owner.metadata.lifecycle = PROCESS_CLOSED
   end
   process_dispatch_body(owner, event_kind)
@@ -1159,7 +1180,7 @@ local function pipe_alloc_dispatch(pipe: uv_pipe_t, size: libuv.size_t,
   end
   local bytes = allocate_stream_bytes(size)
   control.read_bytes = bytes
-  shim.titan_uvshim_buf_init(pointer, bytes.data, size)
+  initialize_buffer(pointer, bytes.data, size)
 end
 
 local function pipe_read_dispatch(pipe: uv_pipe_t, result: integer)
@@ -1173,13 +1194,13 @@ local function pipe_read_dispatch(pipe: uv_pipe_t, result: integer)
   local bytes? = control.read_bytes
   if result < 0 then
     if control.read_active then
-      shim.titan_uvshim_pipe_read_stop(pipe.handle)
+      libuv.uv_read_stop(pipe.handle)
       control.read_active = false
     end
     control.read_bytes = nil
     control.read_waiter = nil
     control.read_epoch = 0
-    if result == UV_EOF then
+    if result == libuv.UV_EOF then
       control.read_terminal = TCP_READ_EOF
       start_pipe_close(pipe)
       if waiter then
@@ -1241,7 +1262,8 @@ local function finish_pipe_close(pipe: uv_pipe_t)
       close = operation
       control.close_waiter = operation
     elseif process_operation_deliverable(operation) then
-      local failure = make_error(UV_ECANCELED, "process.stdin.write", nil)
+      local failure = make_error(
+          libuv.UV_ECANCELED, "process.stdin.write", nil)
       drive_task(operation.task, DRIVE_ERROR, failure, "")
     end
   end
@@ -1263,11 +1285,11 @@ end
 local function pipe_dispatch_body(owner: uv_pipe_t, event_kind: integer,
                                   result: integer, size: libuv.size_t,
                                   pointer: ffi.titan_ffi_void_ptr)
-  if event_kind == EVENT_HANDLE_CLOSE then
+  if event_kind == shim.TITAN_UV_EVENT_HANDLE_CLOSE then
     finish_pipe_close(owner)
-  elseif event_kind == EVENT_STREAM_ALLOC then
+  elseif event_kind == shim.TITAN_UV_EVENT_STREAM_ALLOC then
     pipe_alloc_dispatch(owner, size, pointer)
-  elseif event_kind == EVENT_STREAM_READ then
+  elseif event_kind == shim.TITAN_UV_EVENT_STREAM_READ then
     pipe_read_dispatch(owner, result)
   end
 end
@@ -1275,7 +1297,7 @@ end
 local function pipe_dispatch(owner: uv_pipe_t, event_kind: integer,
                              result: integer, size: libuv.size_t,
                              pointer: ffi.titan_ffi_void_ptr)
-  if event_kind == EVENT_HANDLE_CLOSE then
+  if event_kind == shim.TITAN_UV_EVENT_HANDLE_CLOSE then
     owner.metadata.lifecycle = PIPE_CLOSED
   end
   pipe_dispatch_body(owner, event_kind, result, size, pointer)
@@ -1283,9 +1305,9 @@ catch
   owner.metadata.callback_aborted = true
   -- Preserve read_cb after an alloc failure so libuv can report UV_ENOBUFS
   -- for the shim's NULL/zero descriptor before the read side is stopped.
-  if event_kind ~= EVENT_STREAM_ALLOC and
+  if event_kind ~= shim.TITAN_UV_EVENT_STREAM_ALLOC and
       owner.metadata.read_active and owner.handle ~= nil then
-    shim.titan_uvshim_pipe_read_stop(owner.handle)
+    libuv.uv_read_stop(owner.handle)
     owner.metadata.read_active = false
   end
   owner.metadata.read_bytes = nil
@@ -1345,21 +1367,23 @@ local function process_grace_dispatch(owner: uv_process_grace_t,
                                       _pointer: ffi.titan_ffi_void_ptr)
   local control = owner.metadata
   local runtime = control.runtime
-  if event_kind == EVENT_TIMER then control.grace_fired = true end
-  if event_kind == EVENT_TIMER then
+  if event_kind == shim.TITAN_UV_EVENT_TIMER then
+    control.grace_fired = true
+  end
+  if event_kind == shim.TITAN_UV_EVENT_TIMER then
     libuv.uv_timer_stop(owner.handle)
     if not control.exit_seen and not control.kill_sent then
       local process = control.owner
-      local kill = shim.titan_uvshim_signal_number("kill")
+      local kill = csignal.SIGKILL
       local status = libuv.uv_process_kill(process.handle, kill)
-      if (status as integer) < 0 and
-          (status as integer) ~= UV_ESRCH then
-        raise make_error(status as integer, "process.kill", "kill")
+      if status < 0 and
+          status ~= libuv.UV_ESRCH then
+        raise make_error(status, "process.kill", "kill")
       end
       control.kill_sent = true
     end
-    shim.titan_uvshim_timer_close(owner.handle)
-  elseif event_kind == EVENT_HANDLE_CLOSE then
+    libuv.uv_close(owner.handle, shim.titan_uvshim_close_cb)
+  elseif event_kind == shim.TITAN_UV_EVENT_HANDLE_CLOSE then
     control.grace_owner = nil
     control.grace_callback_aborted = false
     owner.handle = nil
@@ -1369,22 +1393,22 @@ local function process_grace_dispatch(owner: uv_process_grace_t,
   end
 catch
   owner.metadata.grace_callback_aborted = true
-  if event_kind == EVENT_TIMER then
+  if event_kind == shim.TITAN_UV_EVENT_TIMER then
     libuv.uv_timer_stop(owner.handle)
     if not owner.metadata.exit_seen and not owner.metadata.kill_sent and
         owner.metadata.owner then
       local process = owner.metadata.owner
-      local kill = shim.titan_uvshim_signal_number("kill")
+      local kill = csignal.SIGKILL
       local status = libuv.uv_process_kill(process.handle, kill)
-      if (status as integer) >= 0 or
-          (status as integer) == UV_ESRCH then
+      if status >= 0 or
+          status == libuv.UV_ESRCH then
         owner.metadata.kill_sent = true
       end
     end
-    if (shim.titan_uvshim_timer_is_closing(owner.handle) as integer) == 0 then
-      shim.titan_uvshim_timer_close(owner.handle)
+    if libuv.uv_is_closing(owner.handle) == 0 then
+      libuv.uv_close(owner.handle, shim.titan_uvshim_close_cb)
     end
-  elseif event_kind == EVENT_HANDLE_CLOSE then
+  elseif event_kind == shim.TITAN_UV_EVENT_HANDLE_CLOSE then
     owner.metadata.grace_owner = nil
     owner.handle = nil
     owner.storage = nil
@@ -1720,15 +1744,15 @@ local function repair_aborted_grace(control: ProcessControl)
     libuv.uv_timer_stop(owner.handle)
     if not control.exit_seen and not control.kill_sent and
         control.owner then
-      local kill = shim.titan_uvshim_signal_number("kill")
+      local kill = csignal.SIGKILL
       local status = libuv.uv_process_kill(control.owner.handle, kill)
-      if (status as integer) >= 0 or
-          (status as integer) == UV_ESRCH then
+      if status >= 0 or
+          status == libuv.UV_ESRCH then
         control.kill_sent = true
       end
     end
-    if (shim.titan_uvshim_timer_is_closing(owner.handle) as integer) == 0 then
-      shim.titan_uvshim_timer_close(owner.handle)
+    if libuv.uv_is_closing(owner.handle) == 0 then
+      libuv.uv_close(owner.handle, shim.titan_uvshim_close_cb)
     end
   end
 end
@@ -1759,7 +1783,8 @@ local function repair_aborted_process(control: ProcessControl)
     start_process_close(process)
     control.callback_aborted = false
   elseif control.lifecycle == PROCESS_CLOSED then
-    process_dispatch_body(process, EVENT_HANDLE_CLOSE)
+    process_dispatch_body(
+        process, shim.TITAN_UV_EVENT_HANDLE_CLOSE)
     control.callback_aborted = false
   end
 end

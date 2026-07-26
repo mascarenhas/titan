@@ -2,20 +2,14 @@ local libuv = foreign import "uv.h"
 local lua = foreign import "lua.h"
 local ffi = foreign import "titan/ffi.h"
 local shim = foreign import "titan/uv.h"
+local cstring = foreign import "string.h"
+local climits = foreign import "limits.h"
+local csignal = foreign import "signal.h"
+local cerrno = foreign import "errno.h"
 local coroutine = import "coroutine"
 
--- Portable libuv error values are macros hidden behind the private C shim.
--- Resolve them once when this module image initializes; callback and error
--- paths should not repeatedly cross the FFI boundary for constants.
-local UV_EIO = 0
-local UV_EOF = 0
-local UV_ECANCELED = 0
-local UV_EADDRNOTAVAIL = 0
-local UV_EINVAL = 0
-local UV_ENOBUFS = 0
-local UV_ENOENT = 0
-local UV_ESRCH = 0
-local UV_BUF_MAX = 0
+-- The canonical folder main owns these ordinary foreign imports so every
+-- contributor uses the same C namespaces directly.
 
 -- Private continuation runtime. Native pointers stay in exact local fields;
 -- every callback is a direct call to timer_dispatch's native Titan entry.
@@ -24,13 +18,6 @@ local OWNER_ALLOCATED = 0
 local OWNER_ACTIVE = 1
 local OWNER_CLOSING = 2
 local OWNER_CLOSED = 3
-
-local EVENT_TIMER = 0
-local EVENT_HANDLE_CLOSE = 0
-local EVENT_STREAM_ALLOC = 0
-local EVENT_STREAM_READ = 0
-local EVENT_CONNECTION = 0
-local EVENT_PROCESS_EXIT = 0
 
 local TASK_NEW = 0
 local TASK_READY = 1
@@ -161,7 +148,7 @@ end
 local function setup_program_args(): boolean
   local top = lua.lua_gettop(L)
   lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGC_KEY)
-  if (lua.lua_type(L, -1) as integer) == (lua.LUA_TNIL as integer) then
+  if lua.lua_type(L, -1) == lua.LUA_TNIL then
     lua.lua_settop(L, top)
     return false
   end
@@ -176,24 +163,33 @@ local function setup_program_args(): boolean
   return true
 end
 
+local function ignore_sigpipe_if_default(): integer
+  local current: csignal.sigaction
+  if csignal.sigaction(csignal.SIGPIPE, nil, current) ~= 0 then
+    return libuv.uv_translate_sys_error(cerrno.errno)
+  end
+  if current.sa_handler ~= csignal.SIG_DFL then
+    return 0
+  end
+
+  local ignore: csignal.sigaction
+  ignore.sa_handler = csignal.SIG_IGN
+  -- Mutable address coercions deliberately apply to locals, not subobjects.
+  -- Keep the mask portable across aggregate and scalar sigset_t definitions.
+  local mask: csignal.sigset_t = ignore.sa_mask
+  if csignal.sigemptyset(mask) ~= 0 then
+    return libuv.uv_translate_sys_error(cerrno.errno)
+  end
+  ignore.sa_mask = mask
+  if csignal.sigaction(csignal.SIGPIPE, ignore, nil) ~= 0 then
+    return libuv.uv_translate_sys_error(cerrno.errno)
+  end
+  return 0
+end
+
 do
-  UV_EIO = shim.titan_uvshim_error_eio() as integer
-  UV_EOF = shim.titan_uvshim_error_eof() as integer
-  UV_ECANCELED = shim.titan_uvshim_error_ecanceled() as integer
-  UV_EADDRNOTAVAIL = shim.titan_uvshim_error_eaddrnotavail() as integer
-  UV_EINVAL = shim.titan_uvshim_error_einval() as integer
-  UV_ENOBUFS = shim.titan_uvshim_error_enobufs() as integer
-  UV_ENOENT = shim.titan_uvshim_error_enoent() as integer
-  UV_ESRCH = shim.titan_uvshim_error_esrch() as integer
-  UV_BUF_MAX = shim.titan_uvshim_buf_max_length() as integer
-  EVENT_TIMER = shim.TITAN_UV_EVENT_TIMER as integer
-  EVENT_HANDLE_CLOSE = shim.TITAN_UV_EVENT_HANDLE_CLOSE as integer
-  EVENT_STREAM_ALLOC = shim.TITAN_UV_EVENT_STREAM_ALLOC as integer
-  EVENT_STREAM_READ = shim.TITAN_UV_EVENT_STREAM_READ as integer
-  EVENT_CONNECTION = shim.TITAN_UV_EVENT_CONNECTION as integer
-  EVENT_PROCESS_EXIT = shim.TITAN_UV_EVENT_PROCESS_EXIT as integer
   local sigpipe_status =
-    shim.titan_uvshim_ignore_sigpipe_if_default() as integer
+    ignore_sigpipe_if_default()
   if sigpipe_status < 0 then
     raise make_error(sigpipe_status, "runtime.sigpipe", nil)
   end

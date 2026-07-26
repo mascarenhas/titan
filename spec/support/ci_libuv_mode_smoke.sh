@@ -23,7 +23,7 @@ if [[ $PREFIX != /* ]]; then PREFIX=$PWD/$PREFIX; fi
 PREFIX=$(CDPATH= cd "$PREFIX" && pwd -P)
 LUA="$PREFIX/bin/lua"
 TITANC="$PREFIX/bin/titanc"
-ABI_ROOT="$PREFIX/lib/titan/0.17"
+ABI_ROOT="$PREFIX/lib/titan/0.18"
 SHIM_ROOT="$PREFIX/share/lua/5.5"
 PROVIDER="$ABI_ROOT/titan.so"
 STATIC_ARCHIVE="$ABI_ROOT/titan.a"
@@ -352,22 +352,22 @@ run_mode_smoke() {
 
     if [[ $mode == system ]]; then
         env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-            TITAN_PATH_0_17="$titan_path" LUA_PATH="$lua_path" \
+            TITAN_PATH_0_18="$titan_path" LUA_PATH="$lua_path" \
             LUA_CPATH="$lua_cpath" \
             "$LUA" -e 'local uv = require "titan.uv"; local async = require "titan.async"; local timer = require "titan.timer"; local fs = require "titan.fs"; local net = require "titan.net"; local path = os.tmpname(); os.remove(path); local task = async.run(function() timer.sleep(0); fs.write_file(path, "system\0uv"); assert(fs.read_file(path) == "system\0uv"); fs.unlink(path); return true end); async.loop(); assert(task:join()); assert(type(async.version()) == "string"); assert(type(uv) == "userdata"); assert(type(net) == "userdata")'
     else
         env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-            TITAN_PATH_0_17="$titan_path" LUA_PATH="$lua_path" \
+            TITAN_PATH_0_18="$titan_path" LUA_PATH="$lua_path" \
             LUA_CPATH="$lua_cpath" \
             "$LUA" -e 'local uv = require "titan.uv"; local async = require "titan.async"; local timer = require "titan.timer"; local fs = require "titan.fs"; local net = require "titan.net"; local path = os.tmpname(); os.remove(path); local task = async.run(function() timer.yield(); fs.write_file(path, "bundled"); local data = fs.read_file(path); fs.unlink(path); return data end); async.loop(); assert(task:join() == "bundled"); assert(type(uv) == "userdata"); assert(type(net) == "userdata")'
     fi
 
     env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-        TITAN_PATH_0_17="$titan_path" LUA_PATH="$lua_path" \
+        TITAN_PATH_0_18="$titan_path" LUA_PATH="$lua_path" \
         LUA_CPATH="$lua_cpath" \
         "$LUA" spec/fixtures/libuv/net_production_smoke.lua "$mode"
     env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-        TITAN_PATH_0_17="$titan_path" LUA_PATH="$lua_path" \
+        TITAN_PATH_0_18="$titan_path" LUA_PATH="$lua_path" \
         LUA_CPATH="$lua_cpath" \
         "$LUA" spec/fixtures/libuv/os_production_smoke.lua "$mode" \
         "$TITAN_PROCESS_SMOKE_CHILD"
@@ -410,6 +410,7 @@ end
 
 function main(args: {string}): integer
   local marker = args[1]
+  local process_child = args[2]
   local envname = "TITAN_STATIC_LIBUV_MODE_SMOKE"
   local original: string? = system.getenv(envname)
   do
@@ -445,6 +446,18 @@ function main(args: {string}): integer
     fs.write_file(marker, "static-titan-libuv")
     check(fs.read_file(marker) == "static-titan-libuv",
           "static fs round trip changed the payload")
+    local metadata = fs.stat(marker)
+    check(metadata.kind == "file" and metadata.size == 18,
+          "static fs stat changed size or file classification")
+
+    local process_args: {string} = {"echo"}
+    local process_payload = "static\0process\0payload"
+    local output, diagnostics, process_status =
+      system.communicate(process_child, process_args, process_payload)
+    check(output == process_payload and diagnostics == "" and
+          process_status.code == 0 and not process_status.signal and
+          process_status.signal_number == 0,
+          "static process communicate changed payload or exit status")
     fs.unlink(marker)
   finally
     if original then
@@ -477,7 +490,7 @@ TITAN
         cd "$mode_dir"
         env -u LUA_PATH -u LUA_CPATH -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
             TITAN_ROCKS_ROOT="$PREFIX" \
-            TITAN_PATH_0_17="$ABI_ROOT" TITAN_PATH= \
+            TITAN_PATH_0_18="$ABI_ROOT" TITAN_PATH= \
             TITAN_RUNTIME_PREBUILT=1 \
             TITAN_EXTRA_CPPFLAGS="$cppflags" \
             TITAN_EXTRA_CFLAGS="-fno-strict-aliasing" \
@@ -488,7 +501,7 @@ TITAN
 
     mv "$PROVIDER" "$PROVIDER_HIDDEN"
     mv "$SHIM_ROOT/titan" "$SHIMS_HIDDEN"
-    "$executable" "$marker"
+    "$executable" "$marker" "$TITAN_PROCESS_SMOKE_CHILD"
     restore_hidden_provider
     test ! -e "$marker"
 

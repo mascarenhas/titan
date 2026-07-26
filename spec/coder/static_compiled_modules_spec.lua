@@ -254,6 +254,17 @@ describe("static compiled-module native containers", function()
         assert.equal("fixture.target", parsed.metadata.module)
         assert.equal(driver.TITAN_VER, parsed.metadata.abi)
 
+        local generated = read_file(workspace .. "/fixture_target.c")
+        assert.match(
+            '#define TITAN_META_NO_ADDRESS_SANITIZE',
+            generated, 1, true)
+        assert.match(
+            '__attribute__((no_sanitize("address")))',
+            generated, 1, true)
+        assert.match(
+            "TITAN_META_SECTION TITAN_META_NO_ADDRESS_SANITIZE",
+            generated, 1, true)
+
         local wrong, err = driver.derive_target_fingerprint(
             plain_object, "fixture.target")
         assert.falsy(wrong)

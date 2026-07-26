@@ -336,7 +336,7 @@ therefore not itself a stack-relocation hazard.
 
 ## ABI and search path
 
-The current compiled-module ABI is `0.17`. The error-handling control-flow
+The current compiled-module ABI is `0.18`. The error-handling control-flow
 machinery did not by itself require an ABI bump, but this branch also
 changed the `TitanVargX` structs from inline flexible-array backing
 objects to descriptor structs with an `args` pointer. That layout change
@@ -373,12 +373,18 @@ must keep backing, proxy, RHS, and pending flexible values rooted across any
 allocation or `luaL_error`. A 0.16 module cannot safely participate in that
 protocol. See [Dense Arrays](dense-arrays.md#failure-and-performance-boundaries).
 
+ABI 0.18 also leaves this error and nonlocal-control-flow machinery unchanged.
+It advances the compiled-module boundary because standard-library archive
+objects now directly reference promoted libuv callback trampolines and no
+longer reference replaced libuv/coroutine helper symbols. A 0.18 provider and
+runtime must be distributed together.
+
 The compiler and runtime therefore agree on:
 
-* `TITAN_VER "0.17"`
-* `TITAN_VER_SUFFIX "_0_17"`
-* versioned binary path variable `TITAN_PATH_0_17`
-* default binary path `.;<root>/lib/titan/0.17`, with `<root>` recovered from
+* `TITAN_VER "0.18"`
+* `TITAN_VER_SUFFIX "_0_18"`
+* versioned binary path variable `TITAN_PATH_0_18`
+* default binary path `.;<root>/lib/titan/0.18`, with `<root>` recovered from
   the Lua `PREFIX`'s `package.cpath` in the currently supported layout where
   that path also names the equal Titan `ROCKS_TREE`
 

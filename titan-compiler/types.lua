@@ -26,16 +26,30 @@ local types = typedecl("Type", {
         CInteger     = {"spelling", "signed", "rank", "bits"},
         CFloat       = {"spelling"},
         CPointer     = {"pointee", "quals"},
-        CArray       = {"elem", "len"},
+        CArray       = {"elem", "len", "quals"},
         CFunction    = {"params", "ret", "vararg", "abi"},
         CStruct      = {"cname", "tagname", "typedef", "fields", "complete", "has_fam"},
         CUnion       = {"cname", "tagname", "typedef", "fields", "complete"},
         CField       = {"owner", "name", "type", "bitfield", "flexible_array"},
-        CTypedef     = {"name", "target"},
+        CTypedef     = {"name", "target", "quals"},
         COwned       = {"pointee", "count"},
-        CModule      = {"name", "members"}
+        CModule      = {"name", "members", "type_members"}
     }
 })
+
+-- Array qualification belongs to the element type in C declarator syntax, but
+-- it must remain attached to the array shape until decay. Keep the constructor
+-- source-compatible for existing unqualified callers while making the
+-- qualifier list explicit in the structural type.
+local raw_CArray = types.CArray
+function types.CArray(elem, len, quals)
+    return raw_CArray(elem, len, quals or {})
+end
+
+local raw_CTypedef = types.CTypedef
+function types.CTypedef(name, target, quals)
+    return raw_CTypedef(name, target, quals or {})
+end
 
 -- Registry for nominal types
 -- Keys are canonical FQTNs (fully qualified type names)
@@ -64,6 +78,57 @@ function types.resolve_c_typedef(t)
         t = t.target
     end
     return t
+end
+
+-- Qualifiers written into a typedef declaration are semantically part of
+-- every use of that name even though C declarators should continue to render
+-- the typedef spelling itself. Array qualifiers likewise qualify the element
+-- object reached by decay. Return only qualification of this object level:
+-- CPointer.quals belongs to its pointee and is handled by the pointer layer.
+function types.c_type_qualifiers(t)
+    local out, seen_quals, seen_types = {}, {}, {}
+    while t and t._tag == "Type.CTypedef" and not seen_types[t] do
+        seen_types[t] = true
+        for _, qual in ipairs(t.quals or {}) do
+            if not seen_quals[qual] then
+                seen_quals[qual] = true
+                table.insert(out, qual)
+            end
+        end
+        t = t.target
+    end
+    if t and t._tag == "Type.CArray" then
+        for _, qual in ipairs(t.quals or {}) do
+            if not seen_quals[qual] then
+                seen_quals[qual] = true
+                table.insert(out, qual)
+            end
+        end
+    end
+    return out
+end
+
+function types.c_pointer_pointee_qualifiers(t)
+    t = types.resolve_c_typedef(t)
+    if not t or t._tag ~= "Type.CPointer" then return {} end
+    local out, seen = {}, {}
+    for _, quals in ipairs({
+            t.quals or {}, types.c_type_qualifiers(t.pointee)}) do
+        for _, qual in ipairs(quals) do
+            if not seen[qual] then
+                seen[qual] = true
+                table.insert(out, qual)
+            end
+        end
+    end
+    return out
+end
+
+function types.c_pointer_has_qual(t, wanted)
+    for _, qual in ipairs(types.c_pointer_pointee_qualifiers(t)) do
+        if qual == wanted then return true end
+    end
+    return false
 end
 
 local function find_c_type(t, include_legacy, descend_function_values)
@@ -203,6 +268,50 @@ function types.is_c_udata_pointer(t)
         and (pointee.tagname == "Udata" or pointee.cname == "Udata")
 end
 
+-- Automatic C aggregate storage is not represented in Lua's traced object
+-- graph. Keep this predicate structural: a pointer normally contributes only
+-- its pointer bits (and therefore does not recurse into its pointee), while the
+-- compiler's special Udata pointer representation is itself GC-bearing.
+-- Struct/union fields and array elements are embedded by value, so they do
+-- recurse. The returned second value is the first offending embedded type and
+-- is useful for a precise checker diagnostic.
+function types.c_automatic_gc_bearing(t, seen)
+    if not t then return false end
+    t = types.resolve_c_typedef(t)
+    if not t then return false end
+    if types.is_c_tvalue(t) or types.is_c_udata_pointer(t)
+       or t._tag == "Type.COwned" then
+        return true, t
+    end
+
+    seen = seen or {}
+    if seen[t] then return false end
+    seen[t] = true
+
+    if t._tag == "Type.CArray" then
+        return types.c_automatic_gc_bearing(t.elem, seen)
+    elseif t._tag == "Type.CStruct" or t._tag == "Type.CUnion" then
+        for _, field in ipairs(t.fields or {}) do
+            local bearing, offender =
+                types.c_automatic_gc_bearing(field.type, seen)
+            if bearing then return true, offender end
+        end
+    end
+    return false
+end
+
+function types.is_c_aggregate(t)
+    t = types.resolve_c_typedef(t)
+    return t and (t._tag == "Type.CStruct"
+        or t._tag == "Type.CUnion"
+        or t._tag == "Type.CArray") or false
+end
+
+function types.is_c_array(t)
+    t = types.resolve_c_typedef(t)
+    return t and t._tag == "Type.CArray" or false
+end
+
 function types.contains_c_ffi_type(t)
     return types.first_c_ffi_type(t) ~= nil
 end
@@ -302,19 +411,95 @@ local function is_c_function_pointer(t)
         and resolved_c(t.pointee)._tag == "Type.CFunction"
 end
 
-local function is_c_object_pointer(t)
-    return is_c_pointer(t) and not is_c_function_pointer(t)
+local function c_pointer_category(t)
+    t = resolved_c(t)
+    if not (t and t._tag == "Type.CPointer") then return nil end
+    local pointee = resolved_c(t.pointee)
+    if pointee._tag == "Type.CFunction" then
+        return "function"
+    elseif pointee._tag == "Type.CVoid" then
+        return "void"
+    end
+    return "object"
 end
 
-local function has_const_qual(typ)
+local function has_qual(typ, wanted)
     for _, qual in ipairs(typ.quals or {}) do
-        if qual == "const" then return true end
+        if qual == wanted then return true end
     end
     return false
 end
 
+local function has_const_qual(typ)
+    return typ and typ._tag == "Type.CPointer"
+        and types.c_pointer_has_qual(typ, "const")
+        or has_qual(typ, "const")
+end
+
+local function discarded_pointer_qualifier(source, target)
+    source = resolved_c(source)
+    target = resolved_c(target)
+    if not (source and target
+            and source._tag == "Type.CPointer"
+            and target._tag == "Type.CPointer") then
+        return nil
+    end
+    for _, qualifier in ipairs({ "const", "volatile" }) do
+        if types.c_pointer_has_qual(source, qualifier) and
+           not types.c_pointer_has_qual(target, qualifier) then
+            return qualifier
+        end
+    end
+
+    local source_pointee = resolved_c(source.pointee)
+    local target_pointee = resolved_c(target.pointee)
+    if source_pointee._tag == "Type.CPointer"
+       and target_pointee._tag == "Type.CPointer" then
+        return discarded_pointer_qualifier(
+            source.pointee, target.pointee)
+    end
+    return nil
+end
+
 local function qualifiers_include(target, source)
-    return not has_const_qual(source) or has_const_qual(target)
+    return discarded_pointer_qualifier(source, target) == nil
+end
+
+function types.c_pointer_category(t)
+    return c_pointer_category(t)
+end
+
+function types.c_discarded_pointer_qualifier(source, target)
+    return discarded_pointer_qualifier(source, target)
+end
+
+function types.c_unsafe_object_pointer_candidate(source, target)
+    local source_res = resolved_c(source)
+    local target_res = resolved_c(target)
+    if c_pointer_category(source_res) ~= "object"
+       or c_pointer_category(target_res) ~= "object" then
+        return nil
+    end
+    local discarded =
+        discarded_pointer_qualifier(source_res, target_res)
+    if discarded then
+        return nil, discarded
+    end
+    return true, nil, source_res, target_res
+end
+
+-- Natural pointer produced by using a local C object as an address source.
+-- Arrays undergo C decay; every other admissible object becomes `T *`.
+function types.c_local_address_pointer(source)
+    local resolved = resolved_c(source)
+    if not resolved or not types.is_c(source) then return nil end
+    if resolved._tag == "Type.CArray" then
+        return types.CPointer(resolved.elem, resolved.quals or {})
+    elseif resolved._tag == "Type.CStruct"
+        or resolved._tag == "Type.CUnion" then
+        return types.CPointer(source, {})
+    end
+    return nil
 end
 
 local function c_assignable_equal(t1, t2)
@@ -373,8 +558,10 @@ local function c_pointer_compatible(source, target)
         return c_assignable_equal(source.pointee, target.pointee)
             and qualifiers_include(target, source)
     elseif source._tag == "Type.CArray" then
-        return c_assignable_equal(source.elem, target.pointee)
-            or resolved_c(target.pointee)._tag == "Type.CVoid"
+        local decayed =
+            types.CPointer(source.elem, source.quals or {})
+        return c_pointer_compatible(decayed, target)
+            or c_object_to_void_pointer_compatible(decayed, target)
     elseif source._tag == "Type.COwned" then
         return c_assignable_equal(source.pointee, target.pointee)
             or resolved_c(target.pointee)._tag == "Type.CVoid"
@@ -757,6 +944,186 @@ end
 
 local type_equals
 
+local function c_qualifier_sets_equal(first, second)
+    local left, right = {}, {}
+    for _, qualifier in ipairs(first or {}) do left[qualifier] = true end
+    for _, qualifier in ipairs(second or {}) do right[qualifier] = true end
+    for qualifier in pairs(left) do
+        if not right[qualifier] then return false end
+    end
+    for qualifier in pairs(right) do
+        if not left[qualifier] then return false end
+    end
+    return true
+end
+
+local function c_combined_qualifiers(...)
+    local out = {}
+    for index = 1, select("#", ...) do
+        for _, qualifier in ipairs(select(index, ...) or {}) do
+            out[#out + 1] = qualifier
+        end
+    end
+    return out
+end
+
+local function c_resolve_with_qualifiers(typ)
+    local quals, seen = {}, {}
+    while typ and typ._tag == "Type.CTypedef" and not seen[typ] do
+        seen[typ] = true
+        for _, qualifier in ipairs(typ.quals or {}) do
+            quals[#quals + 1] = qualifier
+        end
+        typ = typ.target
+    end
+    return typ, quals
+end
+
+local function c_same_value(left, right, seen)
+    if left == right then return true end
+    if type(left) ~= type(right) then return false end
+    if type(left) ~= "table" then return false end
+    seen = seen or {}
+    local matches = seen[left]
+    if matches and matches[right] then return true end
+    if not matches then
+        matches = {}
+        seen[left] = matches
+    end
+    matches[right] = true
+    for key, value in pairs(left) do
+        if not c_same_value(value, right[key], seen) then return false end
+    end
+    for key in pairs(right) do
+        if left[key] == nil then return false end
+    end
+    return true
+end
+
+local function c_array_bounds_compatible(left, right)
+    local left_unknown =
+        left == nil or left == false or left == ""
+    local right_unknown =
+        right == nil or right == false or right == ""
+    return left_unknown or right_unknown
+        or c_same_value(left, right)
+end
+
+local c_declaration_type_equals
+
+local function c_function_type_equals(left, right, seen)
+    left = types.resolve_c_typedef(left)
+    right = types.resolve_c_typedef(right)
+    if not (left and right
+            and left._tag == "Type.CFunction"
+            and right._tag == "Type.CFunction")
+       or left.vararg ~= right.vararg
+       or left.abi ~= right.abi
+       or (left._paramstyle or "prototype")
+            ~= (right._paramstyle or "prototype")
+       or #left.params ~= #right.params then
+        return false
+    end
+    for index, parameter in ipairs(left.params) do
+        -- C adjusts away the outer qualification of a parameter declaration.
+        if not c_declaration_type_equals(
+                parameter, right.params[index], seen, true) then
+            return false
+        end
+    end
+    return c_declaration_type_equals(
+        left.ret, right.ret, seen, false,
+        left._return_declaration_qualifiers,
+        right._return_declaration_qualifiers)
+end
+
+c_declaration_type_equals = function(
+        left, right, seen, ignore_outer_qualifiers,
+        left_extra_qualifiers, right_extra_qualifiers)
+    if type(left) ~= "table" or type(right) ~= "table" then
+        return left == right
+    end
+    local ltype, lalias_quals = c_resolve_with_qualifiers(left)
+    local rtype, ralias_quals = c_resolve_with_qualifiers(right)
+    if not ltype or not rtype or ltype._tag ~= rtype._tag then return false end
+
+    local tag = ltype._tag
+    if not ignore_outer_qualifiers and tag ~= "Type.CArray"
+       and not c_qualifier_sets_equal(
+            c_combined_qualifiers(
+                left_extra_qualifiers, lalias_quals),
+            c_combined_qualifiers(
+                right_extra_qualifiers, ralias_quals)) then
+        return false
+    end
+    if ltype == rtype and tag ~= "Type.CArray" then return true end
+
+    seen = seen or {}
+    local matches = seen[ltype]
+    if matches and matches[rtype] then return true end
+    if not matches then
+        matches = {}
+        seen[ltype] = matches
+    end
+    matches[rtype] = true
+
+    if tag == "Type.CVoid" then
+        return true
+    elseif tag == "Type.CInteger" then
+        return ltype.spelling == rtype.spelling
+           and ltype.signed == rtype.signed
+           and ltype.rank == rtype.rank
+           and ltype.bits == rtype.bits
+    elseif tag == "Type.CFloat" then
+        return ltype.spelling == rtype.spelling
+    elseif tag == "Type.CPointer" then
+        local _, lpointee_alias_quals =
+            c_resolve_with_qualifiers(ltype.pointee)
+        local _, rpointee_alias_quals =
+            c_resolve_with_qualifiers(rtype.pointee)
+        return c_qualifier_sets_equal(
+                c_combined_qualifiers(
+                    ltype.quals, lpointee_alias_quals),
+                c_combined_qualifiers(
+                    rtype.quals, rpointee_alias_quals))
+           and c_declaration_type_equals(
+                ltype.pointee, rtype.pointee, seen, true)
+    elseif tag == "Type.CArray" then
+        local _, lelem_alias_quals =
+            c_resolve_with_qualifiers(ltype.elem)
+        local _, relem_alias_quals =
+            c_resolve_with_qualifiers(rtype.elem)
+        return c_array_bounds_compatible(
+                ltype.len, rtype.len)
+           and c_qualifier_sets_equal(
+                c_combined_qualifiers(
+                    left_extra_qualifiers, lalias_quals,
+                    ltype.quals, lelem_alias_quals),
+                c_combined_qualifiers(
+                    right_extra_qualifiers, ralias_quals,
+                    rtype.quals, relem_alias_quals))
+           and c_declaration_type_equals(
+                ltype.elem, rtype.elem, seen, true)
+    elseif tag == "Type.CFunction" then
+        return c_function_type_equals(ltype, rtype, seen)
+    elseif tag == "Type.CStruct" or tag == "Type.CUnion" then
+        -- File/prototype-scope tag binding and the conditional-header
+        -- baseline canonicalize compatible aggregate identities before value
+        -- compatibility reaches this relation.
+        return ltype == rtype
+    end
+    return false
+end
+
+function types.c_declaration_type_equals(left, right, ignore_outer_qualifiers)
+    return c_declaration_type_equals(
+        left, right, {}, ignore_outer_qualifiers and true or false)
+end
+
+function types.c_function_types_equal(left, right)
+    return c_function_type_equals(left, right, {})
+end
+
 local function same_value(v1, v2, seen)
     if v1 == v2 then
         return true
@@ -799,12 +1166,24 @@ end
 -- input/output tails are present on all three shapes. Declaration-only
 -- parameter names deliberately stay outside exact type identity.
 local function callable_shape_equals(t1, t2, seen, compare_c_vararg)
-    if compare_c_vararg and t1.vararg ~= t2.vararg then
-        return false
-    end
-    if not same_list(t1.params, t2.params, seen)
-       or not same_list(t1.rettypes, t2.rettypes, seen) then
-        return false
+    local exact_c_signature =
+        compare_c_vararg and t1._c_function and t2._c_function
+    if exact_c_signature then
+        -- Foreign functions retain their declaration carrier because Titan's
+        -- projected result list cannot represent a qualified void return and
+        -- nominal typedef spellings can obscure otherwise equal C signatures.
+        if not c_function_type_equals(
+                t1._c_function, t2._c_function, seen) then
+            return false
+        end
+    else
+        if compare_c_vararg and t1.vararg ~= t2.vararg then
+            return false
+        end
+        if not same_list(t1.params, t2.params, seen)
+           or not same_list(t1.rettypes, t2.rettypes, seen) then
+            return false
+        end
     end
 
     local v1, v2 = t1.varargtype, t2.varargtype
@@ -862,15 +1241,13 @@ type_equals = function(t1, t2, seen)
     elseif tag1 == "Type.CFloat" then
         return t1.spelling == t2.spelling
     elseif tag1 == "Type.CPointer" then
-        return type_equals(t1.pointee, t2.pointee, seen) and
-               same_value(t1.quals, t2.quals, seen)
+        return c_declaration_type_equals(
+            t1, t2, seen, false)
     elseif tag1 == "Type.CArray" then
-        return t1.len == t2.len and type_equals(t1.elem, t2.elem, seen)
+        return c_declaration_type_equals(
+            t1, t2, seen, false)
     elseif tag1 == "Type.CFunction" then
-        return t1.vararg == t2.vararg and
-               t1.abi == t2.abi and
-               same_list(t1.params, t2.params, seen) and
-               type_equals(t1.ret, t2.ret, seen)
+        return c_function_type_equals(t1, t2, seen)
     elseif tag1 == "Type.CStruct" then
         return t1.cname == t2.cname and
                t1.tagname == t2.tagname and
@@ -897,10 +1274,13 @@ type_equals = function(t1, t2, seen)
         -- distinct target graphs for the same typedef name (for example through
         -- system-header typedef chains). Those are the same C name for equality.
         return t1.name == t2.name
+            and same_value(t1.quals or {}, t2.quals or {}, seen)
     elseif tag1 == "Type.COwned" then
         return t1.count == t2.count and type_equals(t1.pointee, t2.pointee, seen)
     elseif tag1 == "Type.CModule" then
-        return t1.name == t2.name and same_value(t1.members, t2.members, seen)
+        return t1.name == t2.name
+           and same_value(t1.members, t2.members, seen)
+           and same_value(t1.type_members, t2.type_members, seen)
     elseif tag1 == "Type.Function" then
         -- Typed input/output tails are part of the exact runtime function tag;
         -- differing tail element types must therefore fall back from the
@@ -985,8 +1365,16 @@ function types.tostring(t)
         table.insert(out, table.concat(ptypes, ", "))
         table.insert(out, ")")
         local rtypes = {}
-        for _, rettype in ipairs(t.rettypes) do
-            table.insert(rtypes, types.tostring(rettype))
+        local c_return_qualifiers =
+            t._return_declaration_qualifiers
+            and #t._return_declaration_qualifiers > 0
+            and table.concat(
+                t._return_declaration_qualifiers, " ") .. " "
+            or ""
+        for index, rettype in ipairs(t.rettypes) do
+            table.insert(rtypes,
+                (index == 1 and c_return_qualifiers or "")
+                    .. types.tostring(rettype))
         end
         if t.flexrettype then
             table.insert(rtypes, "...: " .. types.tostring(t.flexrettype))
@@ -1003,6 +1391,14 @@ function types.tostring(t)
             table.insert(out, " -> (")
             table.insert(out, table.concat(rtypes, ", "))
             table.insert(out, ")")
+        elseif c_return_qualifiers ~= ""
+           and t._c_return_type then
+            -- Titan projects C void to zero results. Retain its declaration
+            -- qualification in diagnostics even though call semantics stay
+            -- the ordinary zero-result shape.
+            table.insert(out, " -> ")
+            table.insert(out, c_return_qualifiers)
+            table.insert(out, types.tostring(t._c_return_type))
         else
             -- zero return values: canonicalize as `(P...) -> ()`, distinct
             -- from a `nil`-returning function `(P...) -> nil`
@@ -1058,7 +1454,9 @@ function types.tostring(t)
         return quals .. types.tostring(t.pointee) .. " *"
     elseif tag == "Type.CArray" then
         local len = t.len and tostring(t.len) or ""
-        return types.tostring(t.elem) .. "[" .. len .. "]"
+        local quals = t.quals and #t.quals > 0
+            and table.concat(t.quals, " ") .. " " or ""
+        return quals .. types.tostring(t.elem) .. "[" .. len .. "]"
     elseif tag == "Type.CFunction" then
         local params = {}
         local rendered_params = tostring_list(t.params)
@@ -1068,7 +1466,14 @@ function types.tostring(t)
         if t.vararg then
             table.insert(params, "...")
         end
-        return types.tostring(t.ret) .. " (" .. table.concat(params, ", ") .. ")"
+        local return_qualifiers =
+            t._return_declaration_qualifiers
+            and #t._return_declaration_qualifiers > 0
+            and table.concat(
+                t._return_declaration_qualifiers, " ") .. " "
+            or ""
+        return return_qualifiers .. types.tostring(t.ret)
+            .. " (" .. table.concat(params, ", ") .. ")"
     elseif tag == "Type.CStruct" then
         return "struct " .. (c_display_name(t.tagname or t.cname or t.typedef) or "<anonymous>")
     elseif tag == "Type.CUnion" then

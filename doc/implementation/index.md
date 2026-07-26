@@ -74,6 +74,7 @@ Two facts shape everything downstream of the checker:
 | [Libuv DNS and TCP implementation](libuv-networking.md) | The `net` facade, opaque GC-owned address and TCP storage, DNS ownership, stream callbacks, per-Connection FIFO and close state, cancellation, and portable shim boundary. |
 | [Lua interop internals](lua-interop-internals.md) | The boundary machinery: Lua entry wrappers and per-type checks, record metatables and metatable-based type identity, the module `Udata`'s member metatable, dynamic module loading, the error handler, the standalone entrypoint, and the safety argument. |
 | [FFI internals](ffi-internals.md) | The pure-Lua C toolchain under `foreign import` (preprocessor, C99 grammar, type extraction) and how foreign declarations become Titan types and direct C calls. |
+| [C FFI declarations and expressions](c-ffi-expressions.md) | File/prototype tag identity, exact declarators, target arithmetic profiles, session-scoped C probes, contextual pointer conversions, automatic aggregate spills, typed object-macro values, lazy macro-field projection, preprocessing, and C operator traits. |
 | [Lua C API FFI follow-up](ffi-lua-api-followup.md) | Preliminary notes for a later design pass on calling the Lua C API through the C FFI. This is not part of FFI v1. |
 | [Driver and toolchain](driver.md) | `driver.lua`, `titanc`, the runtime support library (`titan-runtime/`), `pretty.lua`, `util.lua`, and every default path and flag. |
 | [Folder modules](folder-modules.md) | Tagged flat/folder source resolution, independent parsing into one dense AST, shared checking/codegen identity, deterministic ordering, artifacts, and the `titan.uv` source ensemble. |
@@ -121,7 +122,7 @@ cause.
 | Path | What it is |
 | --- | --- |
 | `titanc` | The compiler CLI. |
-| `titan-compiler/` | The compiler proper: `lexer`, `parser`, `syntax_errors`, `ast`, `typedecl`, `checker`, `types`, `symtab`, `coder`, `pretty`, `driver`, `staticmetadata`, `foreigntypes`, `location`, `util`. |
+| `titan-compiler/` | The compiler proper: `lexer`, `parser`, `syntax_errors`, `ast`, `typedecl`, `checker`, `types`, `symtab`, `coder`, `pretty`, `driver`, `staticmetadata`, `foreigntypes`, the C-FFI `cdeclarator`/`cpreamble`/`csemantics`/`cprobe` modules, `location`, and `util`. |
 | `c-parser/` | The pure-Lua C preprocessor and C99 parser behind `foreign import`. |
 | `titan/` | Titan standard-library sources. They are seven independent qualified `titan.*` modules linked together into the physical `titan.so` and `titan.a`; `titan.uv` dogfoods the folder ensemble rooted at `titan/uv/uv.titan`. The generated `titan/*.lua` files are logical-module shims, not sources. |
 | `titan-runtime/` | `titan.h`/`titan.c` (`RTLD_LAZY` + `RTLD_GLOBAL` generated-import loader and error handler), `titan_coro.c`, and `titan_uv.c`, whose three objects are the exact members of runtime-SDK `libtitan.a`; separate vendored `libbacktrace.a`; `titanlib.c`, carried as `titanlib.o` into the full standard `titan.so`/`titan.a` pair and linked alone into the private bootstrap, exposing `backtrace`, internal `pin`/`clear`, compiler-local `_loadlib`, and shim-facing `_loadlibglobal`; `minicoro.h`, `titan_longjmp.h`, and the namespaced `titan/{ffi,coro,uv}.h` SDK headers. |

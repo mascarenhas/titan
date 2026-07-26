@@ -24,25 +24,37 @@ They do not use a generated Lua entry or a second protected-call layer.
 
 ## DNS extraction
 
-Host text has an operation-owned NUL-terminated copy. The shim calls
-asynchronous `uv_getaddrinfo` with stream/TCP hints and constructs the numeric
-service locally for the submission. Compatible IPv4/IPv6 addresses are copied
-in resolver order into GC-owned arrays of opaque `titan_uvshim_address` cells.
-Static assertions in the shim guarantee that each cell is large and aligned
-enough for the platform's `sockaddr_storage`; Titan never inspects its bytes.
+Host text has an operation-owned NUL-terminated copy. `tcp.titan` formats the
+validated port in a zeroed six-byte automatic C array and builds a zeroed
+`addrinfo` hint with `AF_UNSPEC`, `SOCK_STREAM`, `IPPROTO_TCP`, and
+`AI_NUMERICSERV`. It roots and publishes the request owner, installs its data,
+then calls public `uv_getaddrinfo` with the native callback trampoline. Libuv
+copies the automatic node, service, and hints inputs during that call.
+
+The result walker uses the complete named `addrinfo`, `sockaddr`, and
+`sockaddr_storage` tags imported from the host `uv.h` closure. It accepts only
+IPv4/IPv6 entries with a non-null address whose length fits the host's exact
+`sockaddr_storage`, then copies them in resolver order into a typed, zeroed,
+GC-owned array of opaque `titan_uvshim_address` cells. The operation roots that
+owned array before the borrowed chain is released. Static assertions in the
+native runtime guarantee that each opaque cell is large and aligned enough;
+Titan never interprets its bytes.
 
 The C callback passes libuv's borrowed `addrinfo` pointer directly to the
 trusted Titan dispatcher. The dispatcher first copies usable addresses, then
-calls `titan_uvshim_addrinfo_free`, whose C implementation invokes
-`uv_freeaddrinfo`, before it drives a Task or starts a socket attempt. Its
-trailing emergency catch performs the same release directly when needed. No
-continuation observes or retains the borrowed pointer, and each non-null result
-has one release path.
+calls public `uv_freeaddrinfo` directly before it drives a Task or starts a
+socket attempt. Its trailing emergency catch performs the same direct release
+when needed. No continuation observes or retains the borrowed pointer, and
+each non-null result has one release path.
 
 Connect and listen allocate a fresh TCP handle for every address attempt. A
 failed initialized candidate is closed and drained before the next attempt.
 Cancellation closes an unpublished candidate and waits for both request and
-close callbacks; late success is never published.
+close callbacks; late success is never published. While the owned address
+array remains rooted, Titan derives the selected cell, explicitly converts its
+bytes to `const struct sockaddr *`, and calls public `uv_tcp_bind` or
+`uv_tcp_connect`. Connect computes that pointer before publishing its request
+owner, installs request data, and then submits with the native connect callback.
 
 ## Stream callbacks
 
@@ -75,8 +87,8 @@ nothing.
 
 EOF and non-EOF read errors clear any current allocation, stop reading, and
 record a sticky terminal before driving arbitrary code. EOF directly resumes a
-waiter with `nil` but leaves the TCP write side open. Another error stores a
-the uv-owned `Error` record (publicly `async.Error`), raises it directly in a
+waiter with `nil` but leaves the TCP write side open. Another error stores the
+uv-owned `Error` record (publicly `async.Error`), raises it directly in a
 waiter, and initiates physical close. A
 later low-level read first joins and drains the entire completed queue, then
 returns sticky `nil` or repeatedly raises the stored error. With no data or
@@ -127,17 +139,23 @@ root lists must be empty before `uv_loop_close`.
 
 ## Portable shim boundary
 
-The shim contains only callback ABI normalization, concrete-to-base libuv
-casts, explicit-length byte and address copying, and small sockaddr adapters
-required by public libuv APIs. All socket, resolver, stream, and close behavior
-uses public libuv functions. There is no POSIX socket, read, write, or poll
-fallback.
+The owning Titan contributors call public libuv base-handle and base-request
+APIs directly; the C FFI emits host-validated conversions from concrete libuv
+pointers. The native runtime retains only the fixed owner dispatcher and
+plain-C callback trampolines. The shared header describes the fixed owner
+protocol and deliberately overprovisioned opaque address storage consumed by
+both sides. DNS submission, result filtering/copying/release, address
+selection, bind, connect, stream operations, close, and the narrow inherited
+`SIGPIPE` policy all run directly from Titan through public host/libuv
+declarations. There is no POSIX socket, read, write, or poll fallback.
 
 The callback dispatcher adds one opaque pointer argument for the DNS callback's
 temporary `addrinfo` payload. The pointer is never converted to a Titan
-`value`; callbacks without a pointer payload pass NULL. Address-family
-constants remain isolated in the sockaddr adapter because libuv's public
-DNS/TCP interface itself uses those host structures.
+`value`; it is converted once to a typed borrowed pointer and stored in the
+request control before any allocating callback body runs. Callbacks without a
+pointer payload pass NULL. Host address-family, socket, protocol, and resolver
+constants come from the same production `uv.h` import as the corresponding
+fields.
 
 ## Verification
 
@@ -151,12 +169,17 @@ exclusive waiters, continuous background buffering, cancellation that leaves
 the watcher active, sticky EOF, delimiter terminal tails, leaked-resource
 shutdown, and sequential Runtime generations.
 
-Fault-source variants count callback arrival, calls into the DNS-result release
-shim, handle close, pending owners, and TCP resources. The DNS release counter
-observes the Titan-to-C shim call; the physical `uv_freeaddrinfo` executes
-synchronously inside that C helper rather than in instrumented Titan code.
-Regular Linux and manual macOS CI run those variants. The focused Linux
-ASan/UBSan gate instead uses the production DNS/TCP smoke, including a delayed
-reader that keeps a large `uv_write_t` pending across Task cancellation,
-coroutine unwind, forced GC, exact binary delivery, and a follow-up write.
-Manual macOS CI also repeats the normal linkage checks.
+The isolated DNS source variant delays logical delivery after capturing a
+successful borrowed result, injects a copy failure, observes the decimal
+formatter, optionally prefixes one invalid opaque candidate, and counts the
+direct `uv_freeaddrinfo` call. It deterministically covers cancellation,
+shutdown, exactly-once release, no stale resume, generational/full GC, and the
+failed-candidate close-before-retry window without putting a timing hook in the
+installed module. Generated-source and archive-symbol checks keep callback
+references and result release on their direct native boundaries. Regular Linux
+and the one pre-merge macOS run exercise that variant. The focused Linux
+ASan/UBSan gate instead uses the
+production DNS/TCP smoke, including a delayed reader that keeps a large
+`uv_write_t` pending across Task cancellation, coroutine unwind, forced GC,
+exact binary delivery, and a follow-up write. Manual macOS CI also repeats the
+normal linkage checks.

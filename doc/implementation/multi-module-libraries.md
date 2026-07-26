@@ -61,7 +61,7 @@ a/b/c.so
 ```
 
 The exact historical location is therefore the final candidate. The compiler
-first expands the selected `TITAN_PATH_0_17`/`TITAN_PATH` with the runtime's
+first expands the selected `TITAN_PATH_0_18`/`TITAN_PATH` with the runtime's
 `;;` default-insertion semantics. It then searches **root-major**: all
 shallow-to-exact candidates in the first path root, then all candidates in the
 second root, and so on.
@@ -97,7 +97,7 @@ The states are deliberately strict:
 * an exact candidate with neither symbol retains the markerless-binary error
   instead of falling through to source.
 
-The ABI marker must return exactly one string equal to `0.17`. The types entry
+The ABI marker must return exactly one string equal to `0.18`. The types entry
 must return exactly one serialized `Type.Module` for the requested logical
 name, with a canonical public schema. The loader does not scan later images
 after a claim; visible duplicate providers are resolved by ordinary first
@@ -295,7 +295,7 @@ logical protocols, and the archive advertises exactly seven metadata keys.
 
 `make titan` builds a distinct private bootstrap at
 `titan-runtime/bootstrap/titan.so`, linked only from `titanlib.o`. During a
-source-rock install it is staged at `<root>/lib/titan/0.17/titan.so` only when
+source-rock install it is staged at `<root>/lib/titan/0.18/titan.so` only when
 that pathname is absent. A usable existing bootstrap or full image is
 preserved, so a repeated build never replaces a full library with the smaller
 bootstrap. An incompatible existing image is an error and is not overwritten.
@@ -310,19 +310,19 @@ the exact seven-key set, compares embedded metadata with the staged DSO and a
 fresh-process archive-backed validation image, validates bare
 `luaopen_titan`, the seven exact shims, and the macOS dSYM, then publishes the
 paired bundle with the DSO last. It recognizes bootstrap-only, legacy complete
-ABI-0.17 DSO/shims-without-archive, and complete-pair predecessors. Injected
+ABI-0.18 DSO/shims-without-archive, and complete-pair predecessors. Injected
 failures restore the exact predecessor, including leaving `titan.a` absent
 when rolling back a legacy installation. After the DSO commit, backup cleanup
 is best effort and cannot turn the coherent install into a reported hook
-failure. Separately versioned 0.16 artifacts are not purged.
+failure. Separately versioned 0.17 artifacts are not purged.
 
 The canonical installed files are the provider pair (plus the DSO's macOS
 dSYM) and seven Lua shims:
 
 ```text
-<root>/lib/titan/0.17/titan.so
-<root>/lib/titan/0.17/titan.a
-<root>/lib/titan/0.17/titan.so.dSYM          # macOS only
+<root>/lib/titan/0.18/titan.so
+<root>/lib/titan/0.18/titan.a
+<root>/lib/titan/0.18/titan.so.dSYM          # macOS only
 <root>/share/lua/5.5/titan/{coroutine,uv,async,timer,fs,net,os}.lua
 ```
 
@@ -342,7 +342,7 @@ compiler groups; its system-libuv smoke replaces the whole paired generation
 rather than one logical child, while the prepared artifact retains the
 bundled generation.
 
-## ABI 0.17 and test-only exact providers
+## ABI 0.16, 0.17, 0.18, and test-only exact providers
 
 ABI 0.16 changed neither per-module serialized type shapes nor Titan's native
 calling convention. It is nevertheless a mandatory compatibility boundary:
@@ -351,8 +351,9 @@ introduced the shallow combined `titan.so`; the later self-describing
 `titan.a` repeats that unchanged ABI/types protocol and therefore does not
 require another bump. The marker, `TITAN_PATH_0_16`, and
 `lib/titan/0.16` namespace move together so an old consumer cannot appear
-compatible and then fail to locate a removed child DSO. Exact 0.16 DSOs and
-archives remain valid because exact is the final candidate in each format.
+compatible and then fail to locate a removed child DSO. Within the ABI-0.16
+loader, exact-path DSOs and archives remained valid because exact was the final
+candidate in each format; current loaders still reject their old ABI marker.
 
 ABI 0.17 preserves that provider model but changes the Array runtime contract.
 Exact signatures still use `Table *` and descriptors still use `Table **`;
@@ -360,9 +361,16 @@ those pointers now denote private backing Tables paired one-to-one with
 canonical Lua proxy Udata. Every generated module also caches the per-state
 Array metatable. Since 0.16 code could expose or mutate a backing as an
 ordinary table, 0.16 and 0.17 providers must never be mixed. Current lookup
-uses `TITAN_PATH_0_17` and `lib/titan/0.17`; the installed 0.16 tree is
+uses `TITAN_PATH_0_18` and `lib/titan/0.18`; the installed 0.17 tree is
 preserved only as a separately versioned predecessor. See
 [Dense Arrays](dense-arrays.md#abi-017-boundary).
+
+ABI 0.18 preserves the provider model and Array protocol, but the generated
+standard-library archive objects now reference callback trampolines promoted
+into the runtime's external native contract and no longer reference replaced
+libuv/coroutine helpers. Either direction of a 0.17/0.18 static pairing is
+incompatible, so the current marker, path variable, and installed namespace
+advance together.
 
 Production and installed tests use the combined image. The delayed-filesystem
 callback variant is deliberately different: in an isolated root with no

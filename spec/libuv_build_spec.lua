@@ -18,6 +18,127 @@ local STDLIB_SHIMS = {
 }
 local STDLIB_CONTAINER = "titan.so"
 local STDLIB_STATIC_ARCHIVE = "titan.a"
+local PHASE8_CALLBACKS = {
+    "titan_uvshim_signal_cb",
+    "titan_uvshim_process_exit_cb",
+    "titan_uvshim_getaddrinfo_cb",
+    "titan_uvshim_connect_cb",
+    "titan_uvshim_write_cb",
+    "titan_uvshim_shutdown_cb",
+    "titan_uvshim_alloc_cb",
+    "titan_uvshim_read_cb",
+    "titan_uvshim_connection_cb",
+    "titan_uvshim_close_cb",
+    "titan_uvshim_timer_cb",
+    "titan_uvshim_fs_cb",
+}
+local PHASE8_PROVIDER_CALLBACKS = {
+    "titan_uvshim_timer_cb",
+    "titan_uvshim_fs_cb",
+    "titan_uvshim_signal_cb",
+    "titan_uvshim_process_exit_cb",
+    "titan_uvshim_write_cb",
+    "titan_uvshim_shutdown_cb",
+    "titan_uvshim_alloc_cb",
+    "titan_uvshim_read_cb",
+    "titan_uvshim_connection_cb",
+    "titan_uvshim_close_cb",
+    "titan_uvshim_getaddrinfo_cb",
+    "titan_uvshim_connect_cb",
+}
+local PHASE8_PUBLIC_LIBUV_CALLS = {
+    "uv_accept",
+    "uv_cancel",
+    "uv_close",
+    "uv_freeaddrinfo",
+    "uv_fs_get_statbuf",
+    "uv_getaddrinfo",
+    "uv_handle_set_data",
+    "uv_is_closing",
+    "uv_listen",
+    "uv_pipe_init",
+    "uv_read_start",
+    "uv_read_stop",
+    "uv_req_set_data",
+    "uv_shutdown",
+    "uv_signal_init",
+    "uv_signal_start_oneshot",
+    "uv_tcp_init",
+    "uv_tcp_bind",
+    "uv_tcp_connect",
+    "uv_translate_sys_error",
+    "uv_spawn",
+    "uv_write",
+}
+local SIGPIPE_HOST_CALLS = {
+    "sigaction",
+    "sigemptyset",
+}
+-- Darwin may lower sigemptyset entirely through the system header, leaving no
+-- undefined object symbol. Its direct generated-C call is asserted below.
+local SIGPIPE_EXTERNAL_HOST_CALLS = {
+    "sigaction",
+}
+local PHASE8_RETIRED_WRAPPERS = {
+    "titan_uvshim_getaddrinfo_cancel",
+    "titan_uvshim_addrinfo_free",
+    "titan_uvshim_tcp_init",
+    "titan_uvshim_tcp_close",
+    "titan_uvshim_tcp_listen",
+    "titan_uvshim_tcp_accept",
+    "titan_uvshim_tcp_read_start",
+    "titan_uvshim_tcp_read_stop",
+    "titan_uvshim_tcp_write_start",
+    "titan_uvshim_tcp_shutdown_start",
+    "titan_uvshim_pipe_init",
+    "titan_uvshim_pipe_read_start",
+    "titan_uvshim_pipe_read_stop",
+    "titan_uvshim_pipe_write_start",
+    "titan_uvshim_pipe_close",
+    "titan_uvshim_process_close",
+    "titan_uvshim_timer_set_data",
+    "titan_uvshim_timer_is_closing",
+    "titan_uvshim_timer_close",
+    "titan_uvshim_fs_set_data",
+    "titan_uvshim_fs_cancel",
+    "titan_uvshim_signal_init",
+    "titan_uvshim_signal_start_oneshot",
+    "titan_uvshim_signal_close",
+}
+local PHASE9_RETIRED_HELPERS = {
+    "titan_uvshim_process_spawn",
+    "titan_uvshim_error_eio",
+    "titan_uvshim_error_eof",
+    "titan_uvshim_error_ecanceled",
+    "titan_uvshim_error_eaddrnotavail",
+    "titan_uvshim_error_einval",
+    "titan_uvshim_error_enobufs",
+    "titan_uvshim_error_enoent",
+    "titan_uvshim_error_esrch",
+    "titan_uvshim_signal_number",
+    "titan_uvshim_signal_name",
+    "titan_uvshim_buf_max_length",
+    "titan_uvshim_buf_init",
+    "titan_uvshim_buf_init_slice",
+    "titan_uvshim_bytes_copy",
+    "titan_uvshim_bytes_find",
+    "titan_uvshim_bytes_slice_copy",
+    "titan_uvshim_text_copy",
+    "titan_uvshim_stat_extract",
+}
+local PHASE10_RETIRED_HELPERS = {
+    "titan_uvshim_format_port",
+    "titan_uvshim_getaddrinfo_start",
+    "titan_uvshim_addrinfo_is_usable",
+    "titan_uvshim_addrinfo_count",
+    "titan_uvshim_addrinfo_copy",
+    "titan_uvshim_address_at",
+    "titan_uvshim_tcp_bind",
+    "titan_uvshim_tcp_connect_start",
+}
+local FFI_RETIRED_HELPERS = {
+    "titan_uvshim_ignore_sigpipe_if_default",
+}
 
 local function prefix_from_cpath(cpath)
     for template in (cpath .. ";"):gmatch("(.-);") do
@@ -29,7 +150,13 @@ end
 local function installed_stdlib_container()
     local prefix = assert(prefix_from_cpath(package.cpath),
         "cannot find the active Lua prefix in package.cpath")
-    return prefix .. "/lib/titan/0.17/" .. STDLIB_CONTAINER
+    return prefix .. "/lib/titan/0.18/" .. STDLIB_CONTAINER
+end
+
+local function installed_stdlib_archive()
+    local prefix = assert(prefix_from_cpath(package.cpath),
+        "cannot find the active Lua prefix in package.cpath")
+    return prefix .. "/lib/titan/0.18/" .. STDLIB_STATIC_ARCHIVE
 end
 
 local function quote(word)
@@ -48,6 +175,13 @@ end
 
 local function compiler_argv(...)
     local argv = assert(cdriver.split_shell_words(os.getenv("CC") or "cc"))
+    for _, word in ipairs({ ... }) do argv[#argv + 1] = word end
+    return argv
+end
+
+local function tool_argv(environment, fallback, ...)
+    local argv = assert(cdriver.split_shell_words(
+        os.getenv(environment) or fallback))
     for _, word in ipairs({ ... }) do argv[#argv + 1] = word end
     return argv
 end
@@ -75,11 +209,21 @@ local function read_file(path)
     return contents
 end
 
-local function public_declarations(path)
-    local ast, err = parser.parse(path, read_file(path))
+local parsed_sources = {}
+
+local function parsed_source(path)
+    local ast = parsed_sources[path]
+    if ast then return ast end
+    local err
+    ast, err = parser.parse(path, read_file(path))
     assert.truthy(ast, err and err.label)
+    parsed_sources[path] = ast
+    return ast
+end
+
+local function public_declarations(path)
     local declarations = {}
-    for _, node in ipairs(ast) do
+    for _, node in ipairs(parsed_source(path)) do
         if not node.islocal then
             local tag = node._tag
             local name
@@ -101,10 +245,8 @@ local function public_declarations(path)
 end
 
 local function local_record_declarations(path)
-    local ast, err = parser.parse(path, read_file(path))
-    assert.truthy(ast, err and err.label)
     local records = {}
-    for _, node in ipairs(ast) do
+    for _, node in ipairs(parsed_source(path)) do
         if node._tag == "Ast.TopLevelRecord" and node.islocal then
             records[#records + 1] = node.name
         end
@@ -168,6 +310,14 @@ local function archive_object_members(output)
         end
     end
     return members
+end
+
+local function nm_has_symbol(output, expected)
+    for line in output:gmatch("[^\r\n]+") do
+        local symbol = line:match("(%S+)%s*$")
+        if symbol == expected or symbol == "_" .. expected then return true end
+    end
+    return false
 end
 
 local function make_temp_dir()
@@ -268,6 +418,95 @@ local function count_plain(haystack, needle)
     end
 end
 
+local function source_line_number(source, needle)
+    local offset = assert(source:find(needle, 1, true),
+        "missing source statement: " .. needle)
+    local _, newlines = source:sub(1, offset - 1):gsub("\n", "\n")
+    return newlines + 1
+end
+
+local function replace_plain(source, old, new)
+    local pieces = {}
+    local position = 1
+    while true do
+        local first, last = source:find(old, position, true)
+        if not first then
+            pieces[#pieces + 1] = source:sub(position)
+            return table.concat(pieces)
+        end
+        pieces[#pieces + 1] = source:sub(position, first - 1)
+        pieces[#pieces + 1] = new
+        position = last + 1
+    end
+end
+
+local function prepared_uv_c()
+    local path = "titan/uv/uv.c"
+    assert.equal("file", lfs.attributes(path, "mode"),
+        path .. " must be prepared by the current source-rock build")
+    local generated = read_file(path)
+    -- The source-only post-install compiles through an absolute --tree,
+    -- whereas checkout `make stdlib` uses ".". Normalize only that spelling;
+    -- every line number and generated operation remains the prepared output.
+    local source_prefix = generated:match(
+        '#line %d+ "([^"]*titan/uv/)process%.titan"')
+    assert.truthy(source_prefix,
+        "prepared titan.uv C has no process.titan source directives")
+    if source_prefix ~= "./titan/uv/" then
+        generated = replace_plain(
+            generated, '"' .. source_prefix, '"./titan/uv/')
+    end
+    return generated
+end
+
+local function assert_ordered(source, ...)
+    local position = 1
+    for _, needle in ipairs({ ... }) do
+        local found = source:find(needle, position, true)
+        assert.truthy(found, "missing or out-of-order source anchor: " ..
+            needle)
+        position = found + #needle
+    end
+end
+
+local function generated_function(source, name)
+    local position = 1
+    local first
+    local next_definition
+    while position <= #source do
+        local newline = source:find("\n", position, true) or (#source + 1)
+        local line = source:sub(position, newline - 1)
+        local definition = not line:match("^%s") and
+            line:find("_titan(", 1, true) and line:match("{%s*$")
+        if definition then
+            if first then
+                next_definition = position
+                break
+            elseif line:find(name .. "(", 1, true) then
+                first = position
+            end
+        end
+        position = newline + 1
+    end
+    assert.truthy(first, "missing generated function " .. name)
+    return source:sub(first, (next_definition or (#source + 1)) - 1)
+end
+
+local function matching_c_brace(source, opening)
+    assert.equal("{", source:sub(opening, opening))
+    local depth = 0
+    for position = opening, #source do
+        local byte = source:sub(position, position)
+        if byte == "{" then
+            depth = depth + 1
+        elseif byte == "}" then
+            depth = depth - 1
+            if depth == 0 then return position end
+        end
+    end
+    error("unmatched generated-C brace at byte " .. opening, 0)
+end
+
 local function stdlib_command(output)
     local normalized = output:gsub("\\\r\n", " "):gsub("\\\n", " ")
         :gsub("%s+", " ")
@@ -293,6 +532,352 @@ describe("libuv Makefile configuration", function()
         end
         table.sort(normalized)
         assert.same(discovered_uv_sources(), normalized)
+    end)
+
+    it("owns every migrated libuv operation in Titan source",
+       function()
+        local sources = {}
+        for _, path in ipairs(discovered_uv_sources()) do
+            sources[path] = read_file(path)
+        end
+        local runtime = read_file("titan-runtime/titan_uv.c")
+        local header = read_file("titan-runtime/titan/uv.h")
+
+        for _, wrapper in ipairs(PHASE8_RETIRED_WRAPPERS) do
+            assert.falsy(runtime:find(wrapper, 1, true), wrapper)
+            assert.falsy(header:find(wrapper, 1, true), wrapper)
+            for path, source in pairs(sources) do
+                assert.falsy(source:find(wrapper, 1, true),
+                    path .. ": " .. wrapper)
+            end
+        end
+        for _, helper in ipairs(PHASE9_RETIRED_HELPERS) do
+            assert.falsy(runtime:find(helper, 1, true), helper)
+            assert.falsy(header:find(helper, 1, true), helper)
+            for path, source in pairs(sources) do
+                assert.falsy(source:find(helper, 1, true),
+                    path .. ": " .. helper)
+            end
+        end
+        for _, helper in ipairs(PHASE10_RETIRED_HELPERS) do
+            assert.falsy(runtime:find(helper, 1, true), helper)
+            assert.falsy(header:find(helper, 1, true), helper)
+            for path, source in pairs(sources) do
+                assert.falsy(source:find(helper, 1, true),
+                    path .. ": " .. helper)
+            end
+        end
+        for _, helper in ipairs(FFI_RETIRED_HELPERS) do
+            assert.falsy(runtime:find(helper, 1, true), helper)
+            assert.falsy(header:find(helper, 1, true), helper)
+            for path, source in pairs(sources) do
+                assert.falsy(source:find(helper, 1, true),
+                    path .. ": " .. helper)
+            end
+        end
+
+        local all_sources = {}
+        for _, path in ipairs(discovered_uv_sources()) do
+            all_sources[#all_sources + 1] = sources[path]
+        end
+        local combined = table.concat(all_sources, "\n")
+        for _, function_name in ipairs(PHASE8_PUBLIC_LIBUV_CALLS) do
+            assert.truthy(combined:find("libuv." .. function_name, 1, true),
+                function_name)
+        end
+        for _, function_name in ipairs(SIGPIPE_HOST_CALLS) do
+            assert.truthy(combined:find("csignal." .. function_name, 1, true),
+                function_name)
+        end
+
+        assert_ordered(sources["titan/uv/file.titan"],
+            "link_fs_owner(runtime, owner)",
+            "libuv.uv_req_set_data(owner.handle, pointer)",
+            "lua.lua_settop(L, top)")
+        assert_ordered(sources["titan/uv/os.titan"],
+            "local status = libuv.uv_signal_init",
+            "libuv.uv_handle_set_data(owner.handle, pointer)",
+            "owner.metadata.lifecycle = OWNER_ACTIVE",
+            "status = libuv.uv_signal_start_oneshot")
+        assert_ordered(sources["titan/uv/tcp.titan"],
+            "local status = libuv.uv_tcp_init",
+            "libuv.uv_handle_set_data(tcp.handle, pointer)",
+            "tcp.metadata.lifecycle = TCP_INITIALIZED")
+        assert_ordered(sources["titan/uv/tcp.titan"],
+            "local owner, pointer = allocate_write_owner",
+            "libuv.uv_req_set_data(owner.handle, pointer)",
+            "status = libuv.uv_write")
+        assert_ordered(sources["titan/uv/tcp.titan"],
+            "local owner, pointer = allocate_shutdown_owner",
+            "libuv.uv_req_set_data(owner.handle, pointer)",
+            "status = libuv.uv_shutdown")
+        assert_ordered(sources["titan/uv/tcp.titan"],
+            "local service_pointer = format_port(port, service)",
+            "local hints: libuv.addrinfo",
+            "local owner, pointer = allocate_dns_owner",
+            "libuv.uv_req_set_data(owner.handle, pointer)",
+            "local status = libuv.uv_getaddrinfo")
+        assert_ordered(sources["titan/uv/tcp.titan"],
+            "local copy_length = entry.ai_addrlen as cstring.size_t",
+            "local destination = data + copied",
+            "cstring.memcpy(destination.bytes, entry.ai_addr, copy_length)")
+        assert_ordered(sources["titan/uv/tcp.titan"],
+            "local address =\n          address_cell.bytes as const *libuv.sockaddr",
+            "local owner, pointer = allocate_connect_owner",
+            "libuv.uv_req_set_data(owner.handle, pointer)",
+            "local status = libuv.uv_tcp_connect")
+        assert_ordered(sources["titan/uv/process.titan"],
+            "local status = libuv.uv_pipe_init",
+            "libuv.uv_handle_set_data(stdin_pipe.handle, stdin_pointer)",
+            "stdin_pipe.metadata.lifecycle = PIPE_INITIALIZED",
+            "status = libuv.uv_pipe_init",
+            "libuv.uv_handle_set_data(stdout_pipe.handle, stdout_pointer)",
+            "stdout_pipe.metadata.lifecycle = PIPE_INITIALIZED",
+            "status = libuv.uv_pipe_init",
+            "libuv.uv_handle_set_data(stderr_pipe.handle, stderr_pointer)",
+            "stderr_pipe.metadata.lifecycle = PIPE_INITIALIZED",
+            'failed_operation = "process.spawn"',
+            "status = libuv.uv_spawn",
+            "libuv.uv_handle_set_data(process.handle, process_pointer)",
+            "process_control.lifecycle = PROCESS_SPAWNED")
+        assert.truthy(sources["titan/uv/uv.titan"]:find(
+            'foreign import "string.h"', 1, true))
+        assert.truthy(sources["titan/uv/uv.titan"]:find(
+            'foreign import "limits.h"', 1, true))
+        assert.truthy(sources["titan/uv/uv.titan"]:find(
+            'foreign import "signal.h"', 1, true))
+        assert.truthy(sources["titan/uv/uv.titan"]:find(
+            'foreign import "errno.h"', 1, true))
+        assert.falsy(sources["titan/uv/os.titan"]:find(
+            'foreign import "signal.h"', 1, true))
+        assert.truthy(sources["titan/uv/file.titan"]:find(
+            'foreign import "sys/stat.h"', 1, true))
+        assert.truthy(sources["titan/uv/runtime.titan"]:find(
+            "cstring.memcpy", 1, true))
+        assert.truthy(sources["titan/uv/runtime.titan"]:find(
+            "cstring.memcmp", 1, true))
+        assert.truthy(sources["titan/uv/uv.titan"]:find(
+            "local function ignore_sigpipe_if_default()", 1, true))
+        assert.truthy(sources["titan/uv/uv.titan"]:find(
+            "current.sa_handler ~= csignal.SIG_DFL", 1, true))
+        assert.truthy(sources["titan/uv/uv.titan"]:find(
+            "ignore.sa_handler = csignal.SIG_IGN", 1, true))
+        assert.truthy(sources["titan/uv/uv.titan"]:find(
+            "libuv.uv_translate_sys_error(cerrno.errno)", 1, true))
+        assert.falsy(header:find("typedef struct uv_", 1, true))
+        assert.truthy(header:find("struct uv_timer_s;", 1, true))
+        assert.truthy(header:find(
+            "void titan_uvshim_timer_cb(struct uv_timer_s *timer);",
+            1, true))
+        assert_ordered(sources["titan/uv/process.titan"],
+            "local owner, pointer = allocate_pipe_write_owner",
+            "libuv.uv_req_set_data(owner.handle, pointer)",
+            "status = libuv.uv_write")
+        assert_ordered(sources["titan/uv/task.titan"],
+            "owner.metadata.lifecycle = OWNER_ACTIVE",
+            "libuv.uv_handle_set_data(owner.handle, pointer)",
+            "status = libuv.uv_timer_start")
+    end)
+
+    it("emits the migrated validation, aggregate, and submit order in C",
+       function()
+        local generated = prepared_uv_c()
+        local process_source = read_file("titan/uv/process.titan")
+        local process_lifecycle_line = source_line_number(process_source,
+            "process_control.lifecycle = PROCESS_SPAWNED")
+        local spawn_status_line = source_line_number(process_source,
+            "local spawn_status = status")
+
+        local sigpipe = generated_function(
+            generated, "titan_uv_ignore_sigpipe_if_default_titan")
+        assert_ordered(sigpipe,
+            "sigaction(",
+            "uv_translate_sys_error(errno)",
+            ".sa_handler",
+            "SIG_DFL",
+            "SIG_IGN",
+            "sigemptyset(",
+            "uv_translate_sys_error(errno)",
+            "sigaction(",
+            "uv_translate_sys_error(errno)")
+
+        local process =
+            generated_function(generated, "titan_uv_arm_process_spawn_titan")
+        assert.match(
+            "uv_process_options_t _local_options_%d+ = %{0%};", process)
+        assert.match(
+            "uv_stdio_container_t _local_stdio_%d+%[3%] = %{0%};",
+            process)
+        assert_ordered(process,
+            "uv_spawn(",
+            "uv_handle_set_data(",
+            ('#line %d "./titan/uv/process.titan"'):format(
+                process_lifecycle_line),
+            "setivalue(",
+            ('#line %d "./titan/uv/process.titan"'):format(
+                spawn_status_line))
+
+        local find =
+            generated_function(generated, "titan_uv__bytes_find_titan")
+        assert_ordered(find,
+            '#line 65 "./titan/uv/runtime.titan"',
+            "return _tmp_3;",
+            '#line 66 "./titan/uv/runtime.titan"',
+            "return _tmp_4;",
+            '#line 68 "./titan/uv/runtime.titan"',
+            "getstr(_param_haystack)",
+            "intop(-, _local_haystack_length_1, _local_needle_length_1)",
+            "memcmp(")
+
+        local slice =
+            generated_function(generated, "titan_uv__bytes_slice_titan")
+        assert_ordered(slice,
+            "if((_param_length>0))",
+            "getstr(_param_data)",
+            "memcpy(")
+
+        local copy_text =
+            generated_function(generated, "titan_uv_copy_text_titan")
+        assert_ordered(copy_text,
+            "if((_local_length_1>0))",
+            "memcpy(",
+            '#line 283 "./titan/uv/runtime.titan"',
+            "_tmp_19[_tmp_20] = _tmp_21;")
+
+        local stream = generated_function(
+            generated, "titan_uv_allocate_stream_bytes_titan")
+        assert_ordered(stream,
+            "UINT_MAX",
+            '#line 338 "./titan/uv/runtime.titan"',
+            "((lua_Integer)_local_length_1)")
+
+        local usable =
+            generated_function(generated, "titan_uv_usable_address_titan")
+        assert.truthy(usable:find(
+            "sizeof(struct sockaddr_storage)", 1, true))
+        local copy =
+            generated_function(generated, "titan_uv_copy_addresses_titan")
+        local call = "titan_uv_usable_address_titan(L, _mod"
+        local first = assert(copy:find(call, 1, true))
+        local second = assert(copy:find(call, first + #call, true))
+        local guard = assert(copy:find("if(", second, true))
+        local opening = assert(copy:find("{", guard, true))
+        local closing = matching_c_brace(copy, opening)
+        local cast = assert(copy:find("((size_t)(", second, true))
+        local memcpy = assert(copy:find("memcpy(", cast, true))
+        assert.is_true(second < guard and guard < cast and cast < memcpy and
+            memcpy < closing)
+
+        local dns =
+            generated_function(generated, "titan_uv_start_dns_titan")
+        assert.match("titan_ffi_char _local_service_%d+%[6%] = %{0%};",
+            dns)
+        assert.match("struct addrinfo _local_hints_%d+ = %{0%};", dns)
+        assert_ordered(dns,
+            "titan_uv_format_port_titan(",
+            "titan_uv_allocate_dns_owner_titan(",
+            "uv_req_set_data(",
+            "uv_getaddrinfo(")
+    end)
+
+    it("declares and defines every direct callback trampoline", function()
+        local runtime = read_file("titan-runtime/titan_uv.c")
+        local header = read_file("titan-runtime/titan/uv.h")
+        for _, callback in ipairs(PHASE8_CALLBACKS) do
+            assert.truthy(header:find(callback .. "(", 1, true), callback)
+            assert.truthy(runtime:find("\nvoid " .. callback .. "(", 1, true),
+                callback)
+            assert.falsy(runtime:find("static void " .. callback .. "(",
+                1, true), callback)
+        end
+    end)
+
+    it("exports callbacks and records direct libuv archive references",
+       function()
+        local runtime_object = "titan-runtime/titan_uv.o"
+        assert.truthy(file_exists(runtime_object), runtime_object)
+        local ok, output, why, code = run_argv(tool_argv(
+            "NM", "nm", "-g", runtime_object))
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        for _, callback in ipairs(PHASE8_CALLBACKS) do
+            assert.truthy(nm_has_symbol(output, callback), callback)
+        end
+        for _, wrapper in ipairs(PHASE8_RETIRED_WRAPPERS) do
+            assert.falsy(nm_has_symbol(output, wrapper), wrapper)
+        end
+        for _, helper in ipairs(PHASE9_RETIRED_HELPERS) do
+            assert.falsy(nm_has_symbol(output, helper), helper)
+        end
+        for _, helper in ipairs(PHASE10_RETIRED_HELPERS) do
+            assert.falsy(nm_has_symbol(output, helper), helper)
+        end
+        for _, helper in ipairs(FFI_RETIRED_HELPERS) do
+            assert.falsy(nm_has_symbol(output, helper), helper)
+        end
+
+        local logical_object = "titan/uv/uv.o"
+        assert.truthy(file_exists(logical_object), logical_object)
+        ok, output, why, code = run_argv(tool_argv(
+            "NM", "nm", "-u", logical_object))
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        for _, callback in ipairs(PHASE8_PROVIDER_CALLBACKS) do
+            assert.truthy(nm_has_symbol(output, callback),
+                logical_object .. ": " .. callback)
+        end
+        for _, function_name in ipairs(PHASE8_PUBLIC_LIBUV_CALLS) do
+            assert.truthy(nm_has_symbol(output, function_name),
+                logical_object .. ": " .. function_name)
+        end
+        for _, function_name in ipairs(SIGPIPE_EXTERNAL_HOST_CALLS) do
+            assert.truthy(nm_has_symbol(output, function_name),
+                logical_object .. ": " .. function_name)
+        end
+        for _, wrapper in ipairs(PHASE8_RETIRED_WRAPPERS) do
+            assert.falsy(nm_has_symbol(output, wrapper),
+                logical_object .. ": " .. wrapper)
+        end
+        for _, helper in ipairs(PHASE9_RETIRED_HELPERS) do
+            assert.falsy(nm_has_symbol(output, helper),
+                logical_object .. ": " .. helper)
+        end
+        for _, helper in ipairs(PHASE10_RETIRED_HELPERS) do
+            assert.falsy(nm_has_symbol(output, helper),
+                logical_object .. ": " .. helper)
+        end
+        for _, helper in ipairs(FFI_RETIRED_HELPERS) do
+            assert.falsy(nm_has_symbol(output, helper),
+                logical_object .. ": " .. helper)
+        end
+
+        local archive = installed_stdlib_archive()
+        assert.truthy(file_exists(archive), archive)
+        ok, output, why, code = run_argv(tool_argv(
+            "NM", "nm", "-u", archive))
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        for _, callback in ipairs(PHASE8_PROVIDER_CALLBACKS) do
+            assert.truthy(nm_has_symbol(output, callback), callback)
+        end
+        for _, function_name in ipairs(PHASE8_PUBLIC_LIBUV_CALLS) do
+            assert.truthy(nm_has_symbol(output, function_name), function_name)
+        end
+        for _, function_name in ipairs(SIGPIPE_EXTERNAL_HOST_CALLS) do
+            assert.truthy(nm_has_symbol(output, function_name), function_name)
+        end
+        for _, wrapper in ipairs(PHASE8_RETIRED_WRAPPERS) do
+            assert.falsy(nm_has_symbol(output, wrapper), wrapper)
+        end
+        for _, helper in ipairs(PHASE9_RETIRED_HELPERS) do
+            assert.falsy(nm_has_symbol(output, helper), helper)
+        end
+        for _, helper in ipairs(PHASE10_RETIRED_HELPERS) do
+            assert.falsy(nm_has_symbol(output, helper), helper)
+        end
+        for _, helper in ipairs(FFI_RETIRED_HELPERS) do
+            assert.falsy(nm_has_symbol(output, helper), helper)
+        end
     end)
 
     it("keeps the reviewed standard-library roots, sources, and shims exact",
@@ -406,15 +991,13 @@ describe("libuv Makefile configuration", function()
     end)
 
     it("keeps the private FS constants instance beside its record", function()
-        local main_ast = assert(parser.parse(UV_MAIN_SOURCE,
-            read_file(UV_MAIN_SOURCE)))
+        local main_ast = parsed_source(UV_MAIN_SOURCE)
         for _, node in ipairs(main_ast) do
             assert.falsy(node._tag == "Ast.TopLevelVar" and
                 node.decl.name == "FS")
         end
 
-        local file_ast = assert(parser.parse("titan/uv/file.titan",
-            read_file("titan/uv/file.titan")))
+        local file_ast = parsed_source("titan/uv/file.titan")
         local record_index, fs_index
         for index, node in ipairs(file_ast) do
             if node._tag == "Ast.TopLevelRecord" and
@@ -909,7 +1492,7 @@ exit 64
         local build_log = root .. "/build.log"
 
         local payload = assert(staticmetadata.render(
-            "fixture.module", "0.17", "{}"))
+            "fixture.module", "0.18", "{}"))
         local initializer = assert(staticmetadata.c_initializer(payload))
         write_file(source, string.format([[
 #if defined(__APPLE__)
@@ -1015,7 +1598,7 @@ printf 'build\n' >> %s
                 tostring(code) .. ")")
             assert.equal("build\nbuild\nbuild\n", read_file(build_log))
             assert.truthy(staticmetadata.scan_archive(static_archive, {
-                expected_abi = "0.17",
+                expected_abi = "0.18",
             }))
 
             assert.truthy(os.remove(provider))
@@ -1033,6 +1616,67 @@ printf 'build\n' >> %s
         if not tested then error(test_error, 0) end
     end)
 
+    it("retries LuaRocks dependency acquisition in one warm prefix",
+       function()
+        local root = make_temp_dir()
+        local tested, test_error = xpcall(function()
+            local fake = root .. "/fake-luarocks.sh"
+            local counter = root .. "/attempts"
+            write_file(fake, [==[#!/usr/bin/env bash
+set -eu
+counter_file=$1
+success_on=$2
+shift 2
+if [[ $# -ne 2 || $1 != "spaced sentinel" ||
+      $2 != "--literal=two words" ]]; then
+    exit 74
+fi
+count=$(cat "$counter_file")
+count=$((count + 1))
+printf '%s\n' "$count" > "$counter_file"
+if [[ $count -lt $success_on ]]; then
+    exit 73
+fi
+]==])
+
+            local function run_case(success_on)
+                write_file(counter, "0\n")
+                return run_argv({
+                    "env",
+                    "TITAN_CI_LUAROCKS_RETRY_DELAY_SECONDS=0",
+                    "bash",
+                    "spec/support/ci_retry_luarocks_dependencies.sh",
+                    "bash",
+                    fake,
+                    counter,
+                    tostring(success_on),
+                    "spaced sentinel",
+                    "--literal=two words",
+                })
+            end
+
+            local ok, output, why, code = run_case(1)
+            assert.truthy(ok, output)
+            assert.equal("1\n", read_file(counter))
+
+            ok, output, why, code = run_case(3)
+            assert.truthy(ok, output)
+            assert.equal("3\n", read_file(counter))
+            assert.truthy(output:find("attempt 1/3, exit 73", 1, true),
+                output)
+            assert.truthy(output:find("attempt 2/3, exit 73", 1, true),
+                output)
+
+            ok, output, why, code = run_case(4)
+            assert.falsy(ok, output)
+            assert.equal("exit", why)
+            assert.equal(73, code)
+            assert.equal("3\n", read_file(counter))
+        end, debug.traceback)
+        remove_tree(root)
+        if not tested then error(test_error, 0) end
+    end)
+
     it("owns the provider pair through one stamp and exact cleanup",
        function()
         local makefile = read_file("Makefile")
@@ -1042,7 +1686,10 @@ printf 'build\n' >> %s
                 "$(STDLIB_STATIC_ARCHIVE)",
             "STDLIB_EXTRA_OBJECTS := $(TITANLIB_O) " ..
                 "$(LIBUV_EXTRA_OBJECTS)",
+            "TITAN_COMPILER_LUA := " ..
+                "$(wildcard titan-compiler/*.lua c-parser/*.lua)",
             "$(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES)",
+            "$(TITAN_COMPILER_LUA) Makefile $(STDLIB_CONFIG_STAMP)",
             "$(STDLIB_CONFIG_STAMP): FORCE",
             'rm -f "$(STDLIB_COMPLETION_STAMP)"',
             "STDLIB_STATIC_ARCHIVE=$(STDLIB_STATIC_ARCHIVE)",
@@ -1054,6 +1701,14 @@ printf 'build\n' >> %s
             "for output in $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_SHIMS)",
             "STDLIB_UV_LDFLAGS=$(STDLIB_UV_LDFLAGS)",
             "validate_archive()",
+            "STDLIB_INSTALL_STAGE       ?= $(CURDIR)",
+            "install-stdlib: stdlib",
+            "install-stdlib publish-stdlib: " ..
+                "scripts/stdlib_installer.lua",
+            "stage=$(call make_shell_quote,$(STDLIB_INSTALL_STAGE))",
+            "install -m 0644 THIRD_PARTY_NOTICES.md",
+            "install -m 0644 LICENSES/libuv-LICENSE",
+            '"$(TITAN_LUA)" -E "$(CURDIR)/scripts/stdlib_installer.lua"',
             "rm -f $(STDLIB_PROVIDER_OUTPUTS)",
             "rm -f $(STDLIB_SHIMS)",
             "rm -rf $(STDLIB_CONTAINER).dSYM",
@@ -1102,6 +1757,8 @@ printf 'build\n' >> %s
             "local peer = async.run(",
             "timer.sleep(0)",
             "fs.write_file(marker,",
+            "local metadata = fs.stat(marker)",
+            "system.communicate(process_child, process_args, process_payload)",
             'net.connect("127.0.0.1", port)',
             "system.exepath()",
             '"$LIBUV_PKG_CONFIG" --static --libs libuv',
@@ -1113,6 +1770,7 @@ printf 'build\n' >> %s
             'if ! defines_uv_version "$static_provider"',
             'if defines_uv_version "$STATIC_ARCHIVE"',
             "build_and_run_static_titan system-static",
+            '"$executable" "$marker" "$TITAN_PROCESS_SMOKE_CHILD"',
             'if ! defines_uv_version "$executable"',
             'if defines_uv_version "$STATIC_ARCHIVE"',
         }) do
@@ -1139,6 +1797,10 @@ printf 'build\n' >> %s
             "\n  prepare%-linux:(.-)\n  test%-linux:"))
         local heavy_job = assert(workflow:match(
             "\n  test%-linux:(.-)\n  test%-macos:"))
+        local macos_job = assert(workflow:match(
+            "\n  test%-macos:(.-)\n  sanitizer:"))
+        local sanitizer_job = assert(workflow:match(
+            "\n  sanitizer:(.*)"))
         local function count_literal(text, needle)
             local count = 0
             local offset = 1
@@ -1165,6 +1827,29 @@ printf 'build\n' >> %s
         end
         assert_codecov_job(prepare_job, "compiler-core")
         assert_codecov_job(heavy_job, "compiler-heavy")
+        assert.equal(1, count_literal(prepare_job,
+            'TITAN_EXTRA_CFLAGS: "-O1"'), prepare_job)
+        assert.equal(1, count_literal(heavy_job,
+            'TITAN_EXTRA_CFLAGS: "-O0"'), heavy_job)
+        assert.equal(2, count_literal(macos_job,
+            "ci_retry_luarocks_dependencies.sh"), macos_job)
+        assert.equal(2, count_literal(workflow,
+            "ci_retry_luarocks_dependencies.sh"), workflow)
+        assert.equal(1, count_literal(macos_job,
+            "luarocks make --only-deps"), macos_job)
+        assert.equal(1, count_literal(macos_job,
+            "luarocks make --force"), macos_job)
+        assert.equal(1, count_literal(macos_job,
+            "luarocks test --prepare"), macos_job)
+        assert.equal(1, count_literal(sanitizer_job,
+            'SANITIZER_FLAGS: "-O0 -g -fsanitize=address,undefined'),
+            sanitizer_job)
+        assert.equal(1, count_literal(sanitizer_job,
+            'TITAN_EXTRA_CFLAGS: "-O0 -g ' ..
+                '-fsanitize=address,undefined'), sanitizer_job)
+        assert.equal(1, count_literal(sanitizer_job,
+            'LUA_MYCFLAGS: "-fPIC -O1 -g ' ..
+                '-fsanitize=address,undefined'), sanitizer_job)
         assert.falsy(workflow:find("CODECOV_TOKEN", 1, true), workflow)
     end)
 end)

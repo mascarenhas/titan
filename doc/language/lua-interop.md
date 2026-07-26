@@ -95,9 +95,9 @@ assert(require "os" == lua_os)
 
 The same rule applies to `titan.coroutine`, `titan.async`, `titan.timer`,
 `titan.fs`, `titan.net`, and `titan.os`. The private `titan.uv` plumbing module
-uses the same canonical identity. In an installed Titan 0.17 tree, generated
+uses the same canonical identity. In an installed Titan 0.18 tree, generated
 loaders under `<root>/share/lua/5.5/titan/` all open the DSO form
-`<root>/lib/titan/0.17/titan.so` and invoke their own exact Lua entries. Titan
+`<root>/lib/titan/0.18/titan.so` and invoke their own exact Lua entries. Titan
 imports may instead select the paired self-describing `titan.a`; both forms
 expose the same logical-module ABI/types. The installation does not create
 child DSOs, parent-level or `lib/lua` copies, symbolic links, or hard links.

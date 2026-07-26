@@ -115,7 +115,7 @@ module key:
 ```lua
 return {
     ["geometry.shape"] = {
-        abi = "0.17",
+        abi = "0.18",
         types = "Module(...)",
     },
 }
@@ -128,11 +128,13 @@ containers, duplicate logical keys, incompatible ABIs, invalid type
 interfaces, or disagreement between the embedded and callable forms before
 publishing or consuming an artifact.
 
-ABI 0.17 is required even though `Array(...)` serialization and exact native
-pointer widths are unchanged: Array pointers now denote private backings with
-canonical Lua proxies, so a 0.16 object cannot safely exchange Array values
-with 0.17 code. A separately installed 0.16 archive remains in its versioned
-directory but is rejected as a dependency.
+ABI 0.18 is required because generated standard-library archives can directly
+reference callback trampolines in the matching runtime and no longer reference
+retired libuv/coroutine helpers. A 0.18 provider and runtime must be built and
+distributed together. ABI 0.17 previously introduced the current Array
+backing/proxy contract even though `Array(...)` serialization and exact native
+pointer widths stayed unchanged. A separately installed 0.17 archive remains
+in its versioned directory but is rejected as a dependency.
 
 Selecting one logical key makes that archive a native link input. It does not
 make every other key in the archive an ordinary lookup result. A later import
@@ -200,8 +202,8 @@ behavior, not a hidden dependency manifest.
 The canonical installed ABI directory contains:
 
 ```text
-$ROCKS_TREE/lib/titan/0.17/titan.so
-$ROCKS_TREE/lib/titan/0.17/titan.a
+$ROCKS_TREE/lib/titan/0.18/titan.so
+$ROCKS_TREE/lib/titan/0.18/titan.a
 ```
 
 Both contain the seven `titan.*` logical standard modules. The DSO also

@@ -7,6 +7,8 @@ local types = require "titan-compiler.types"
 local location = require "titan-compiler.location"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local cdriver = require "c-parser.cdriver"
+local cprobe = require "titan-compiler.cprobe"
+local csemantics = require "titan-compiler.csemantics"
 
 local lfs = require "lfs"
 
@@ -14,8 +16,8 @@ local driver = {}
 
 driver.imported = {}
 
-driver.TITAN_VER = "0.17"
-driver.TITAN_VER_SUFFIX = "_0_17"
+driver.TITAN_VER = "0.18"
+driver.TITAN_VER_SUFFIX = "_0_18"
 driver.LUA_VERSION = "5.5"
 
 local LUA_CPATH_SUFFIX = "/lib/lua/" .. driver.LUA_VERSION .. "/?.so"
@@ -172,8 +174,9 @@ driver.EXTRA_LDFLAGS, ldflags_error =
     parse_extra_flags("TITAN_EXTRA_LDFLAGS")
 driver.TOOLCHAIN_ERROR = driver.INSTALLATION_ERROR or cppflags_error or
     cflags_error or ldflags_error
+driver.FOREIGN_C_CONFIGURATION_ID = 0
 
-function driver.configure_foreign_c()
+function driver.foreign_include_dirs()
     local include_dirs
     if driver.INSTALLED then
         include_dirs = { driver.INCLUDE_PATH, driver.LUA_SOURCE_PATH }
@@ -181,19 +184,53 @@ function driver.configure_foreign_c()
         include_dirs = {
             driver.TITAN_RUNTIME_PATH,
             driver.LUA_SOURCE_PATH,
+            driver.LIBBACKTRACE_PATH,
         }
     end
-    checker.configure_foreign_c({
-        compiler = driver.CC,
-        language_mode = "c99",
-        cppflags = driver.EXTRA_CPPFLAGS or {},
-        compiler_include_dirs = include_dirs,
-    }, driver.TOOLCHAIN_ERROR)
+    return include_dirs
 end
 
-driver.configure_foreign_c()
+function driver.configure_foreign_c()
+    -- Configuration is replaceable in embeddings and tests. A profile belongs
+    -- to one exact compiler identity and must never survive a reconfiguration.
+    driver.TARGET_PROFILE = nil
+    local toolchain, toolchain_err
+    if driver.toolchain_descriptor then
+        toolchain, toolchain_err = driver.toolchain_descriptor()
+    end
+    local options = {
+        compiler = driver.CC,
+        language_mode = "c99",
+        cppflags = toolchain and {} or (driver.EXTRA_CPPFLAGS or {}),
+        compile_flags = toolchain and toolchain.compile_flags or {},
+        compiler_include_dirs = driver.foreign_include_dirs(),
+        toolchain = toolchain,
+        probe_runner = cdriver.capture_command,
+    }
+    if toolchain then options.language_flag = false end
+
+    local profile_error
+    if not (driver.TOOLCHAIN_ERROR or toolchain_err) then
+        local inputs
+        inputs, profile_error = cdriver.target_profile_inputs(options)
+        if inputs then
+            driver.TARGET_PROFILE, profile_error =
+                csemantics.build_profile(inputs)
+        end
+    end
+    if driver.TARGET_PROFILE then
+        options.profile = driver.TARGET_PROFILE
+        toolchain.profile = driver.TARGET_PROFILE
+        toolchain.profile_identity = driver.TARGET_PROFILE.identity
+    end
+    driver.FOREIGN_C_CONFIGURATION_ID =
+        driver.FOREIGN_C_CONFIGURATION_ID + 1
+    checker.configure_foreign_c(
+        options, driver.TOOLCHAIN_ERROR or toolchain_err or profile_error)
+end
 
 local CIRCULAR_MARK = {}
+local loader_contexts = setmetatable({}, { __mode = "k" })
 
 function driver.new_resolver_context(options)
     options = options or {}
@@ -203,6 +240,7 @@ function driver.new_resolver_context(options)
         contextual_types = {},
         native_interface_types = {},
         native_constraints = {},
+        probe_verbose = options.verbose == true,
     }
 end
 
@@ -281,6 +319,137 @@ local function compiler_argv(include_extra_compile_flags)
     end
     return argv
 end
+
+local function append_compile_includes(args)
+    for _, directory in ipairs(driver.foreign_include_dirs()) do
+        append_argv(args, { "-I", directory })
+    end
+end
+
+-- Exact command prefix shared by every generated C object compile. The
+-- descriptor below represents this as compiler argv + compile flags + ordered
+-- include roots; cprobe/cdriver reconstruct the same sequence before adding
+-- their private source/output arguments.
+function driver.generated_compile_prefix()
+    local args, err = compiler_argv(true)
+    if not args then return nil, err end
+    append_compile_includes(args)
+    return args
+end
+
+-- One immutable description of the native compiler prefix used for generated
+-- objects, predefined-macro/header discovery, and compile-only checker probes.
+-- `compile_flags` deliberately includes Titan's fixed language selection, so
+-- cprobe is told not to synthesize a second `-std` spelling.
+function driver.toolchain_descriptor()
+    if driver.TOOLCHAIN_ERROR then return nil, driver.TOOLCHAIN_ERROR end
+    local cc, err = parsed_words(driver.CC, "CC")
+    if not cc then return nil, err end
+    if #cc == 0 then return nil, "CC command is empty" end
+
+    local effective, compile_err = compiler_argv(true)
+    if not effective then return nil, compile_err end
+    local flags = {}
+    for index = #cc + 1, #effective do
+        flags[#flags + 1] = effective[index]
+    end
+    return {
+        compiler_argv = cc,
+        compile_flags = flags,
+        language_mode = "c99",
+        language_flag = false,
+        cppflags = {},
+        cflags = {},
+        include_dirs = driver.foreign_include_dirs(),
+        profile = driver.TARGET_PROFILE,
+        profile_identity = driver.TARGET_PROFILE
+            and driver.TARGET_PROFILE.identity or "",
+    }
+end
+
+function driver.get_probe_service(context)
+    local configuration_id = driver.FOREIGN_C_CONFIGURATION_ID
+    if context.probe_configuration_id ~= configuration_id then
+        if context.probe_service then
+            local closed, close_err = context.probe_service:close()
+            if not closed then
+                context.probe_service_error = close_err
+                return nil, close_err
+            end
+        end
+        context.probe_service = nil
+        context.probe_service_error = nil
+        context.probe_configuration_id = configuration_id
+    end
+    if context.probe_service then return context.probe_service end
+    if context.probe_service_error then
+        return nil, context.probe_service_error
+    end
+    local toolchain, err = driver.toolchain_descriptor()
+    if not toolchain then
+        context.probe_service_error = err
+        return nil, err
+    end
+    local service
+    service, err = cprobe.new_service({
+        toolchain = toolchain,
+        runner = cdriver.capture_command,
+        verbose = context.probe_verbose,
+    })
+    if not service then
+        context.probe_service_error = err
+        return nil, err
+    end
+    context.probe_service = service
+    return service
+end
+
+function driver.close_resolver_context(context)
+    if not context or not context.probe_service then return true end
+    local service = context.probe_service
+    context.probe_service = nil
+    local ok, err = service:close()
+    if not ok then
+        context.probe_service_error = err
+        return nil, err
+    end
+    return true
+end
+
+function driver.close_loader(loader)
+    local binding = loader_contexts[loader]
+    if not binding then return true end
+    loader_contexts[loader] = nil
+    if not binding.owned then return true end
+    return driver.close_resolver_context(binding.context)
+end
+
+-- Execute a loader-scoped operation and close an internally owned resolver on
+-- both returns and exceptions. A caller which injected `options.context`
+-- retains ownership of that context; close_loader is then an idempotent no-op.
+function driver.with_loader(loader, body, ...)
+    if type(loader) ~= "function" then
+        error("loader must be a function", 2)
+    elseif type(body) ~= "function" then
+        error("loader body must be a function", 2)
+    end
+    local arguments = table.pack(...)
+    local results = table.pack(xpcall(function()
+        return body(loader, table.unpack(arguments, 1, arguments.n))
+    end, function(err) return err end))
+    local close_call = table.pack(pcall(driver.close_loader, loader))
+    if not results[1] then
+        error(results[2], 0)
+    elseif not close_call[1] then
+        error(close_call[2], 0)
+    elseif not close_call[2] then
+        error("failed to close loader resolver context: " ..
+            tostring(close_call[3]), 0)
+    end
+    return table.unpack(results, 2, results.n)
+end
+
+driver.configure_foreign_c()
 
 driver.UNAME = shell("uname")
 -- On Mach-O (macOS), libbacktrace needs a companion `.dSYM` bundle to symbolize
@@ -842,6 +1011,7 @@ end
 function driver.defaultloader(static_deps, options)
     static_deps = static_deps or {}
     options = options or {}
+    local owns_context = options.context == nil
     local context = options.context or driver.new_resolver_context(options)
     local source_roots = options.source_roots or {}
     local dependency_stack = {}
@@ -908,7 +1078,11 @@ function driver.defaultloader(static_deps, options)
         local direct_deps = {}
         table.insert(dependency_stack, direct_deps)
         local modt, errors = checker.check(
-            modname, ast, main_input, source.main, loader)
+            modname, ast, main_input, source.main, loader, {
+                probe_service_provider = function()
+                    return driver.get_probe_service(context)
+                end,
+            })
         table.remove(dependency_stack)
         driver.imported[modname] = {
             kind = "source",
@@ -1069,6 +1243,10 @@ function driver.defaultloader(static_deps, options)
         return ok, modt, errors
     end
     context.loader = loader
+    loader_contexts[loader] = {
+        context = context,
+        owned = owns_context,
+    }
     return loader
 end
 
@@ -1322,8 +1500,11 @@ function driver.required_static_protocol_names(context, used_native_names)
     return names
 end
 
-function driver.tableloader(modtable, imported, deps)
+function driver.tableloader(modtable, imported, deps, options)
     deps = deps or {}
+    options = options or {}
+    local owns_context = options.context == nil
+    local context = options.context or driver.new_resolver_context(options)
     local function loader(modname)
         if imported[modname] == CIRCULAR_MARK then
             imported[modname] = nil
@@ -1339,7 +1520,12 @@ function driver.tableloader(modtable, imported, deps)
         local ast, err = parser.parse(modf, modtable[modname])
         if not ast then return false, parser.error_to_string(err, modf) end
         imported[modname] = CIRCULAR_MARK
-        local modt, errors = checker.check(modname, ast, input, modf, loader)
+        local modt, errors = checker.check(
+            modname, ast, input, modf, loader, {
+                probe_service_provider = function()
+                    return driver.get_probe_service(context)
+                end,
+            })
         if #errors ~= 0 then
             imported[modname] = {
                 kind = "source", ast = ast, type = modt, filename = modf,
@@ -1359,7 +1545,15 @@ function driver.tableloader(modtable, imported, deps)
         deps[modname] = true
         return true, modt, errors
     end
+    loader_contexts[loader] = {
+        context = context,
+        owned = owns_context,
+    }
     return loader
+end
+
+function driver.close_tableloader(loader)
+    return driver.close_loader(loader)
 end
 
 local function shared_flag()
@@ -1486,21 +1680,6 @@ local function check_runtime(verbose)
     end
     runtime_checked = true
     return true
-end
-
-local function append_compile_includes(args)
-    if driver.INSTALLED then
-        append_argv(args, {
-            "-I", driver.INCLUDE_PATH,
-            "-I", driver.LUA_SOURCE_PATH,
-        })
-    else
-        append_argv(args, {
-            "-I", driver.TITAN_RUNTIME_PATH,
-            "-I", driver.LUA_SOURCE_PATH,
-            "-I", driver.LIBBACKTRACE_PATH,
-        })
-    end
 end
 
 function driver.installed_link_inputs(paths, is_darwin)
@@ -1632,10 +1811,9 @@ function driver.compile(modname, ast, sourcef, static_deps, verbose)
     os.remove(libname)
     local ok, err = util.set_file_contents(filename, code)
     if not ok then return nil, err end
-    local args, flags_err = compiler_argv(true)
+    local args, flags_err = driver.generated_compile_prefix()
     if not args then return nil, flags_err end
     append_argv(args, { static_flag(), filename })
-    append_compile_includes(args)
     append_argv(args, { "-o", libname })
     local ok, err = run_argv(args, verbose)
     if ok then
@@ -3583,13 +3761,12 @@ function driver.run_standalone_archive_probe(
         return nil, write_err
     end
 
-    local compile_args, flags_err = compiler_argv(true)
+    local compile_args, flags_err = driver.generated_compile_prefix()
     if not compile_args then
         cleanup()
         return nil, flags_err
     end
     append_argv(compile_args, { "-c", source })
-    append_compile_includes(compile_args)
     append_argv(compile_args, { "-o", object })
     local compiled, compile_term, compile_code =
         run_argv(compile_args, verbose)
@@ -3652,10 +3829,9 @@ function driver.compile_program(modname, libnames, link, verbose, extra_objects,
     os.remove(entrypoint_o)
 
     local compile_args
-    compile_args, err = compiler_argv(true)
+    compile_args, err = driver.generated_compile_prefix()
     if not compile_args then return nil, err end
     append_argv(compile_args, { "-c", entrypoint_c })
-    append_compile_includes(compile_args)
     append_argv(compile_args, { "-o", entrypoint_o })
     local compiled, cterm, ccode = run_argv(compile_args, verbose)
     if not compiled then return nil, cterm, ccode end

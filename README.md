@@ -82,8 +82,8 @@ The installed files used to compile Titan code include:
 | `$ROCKS_TREE/lib/libbacktrace.a` | The separate vendored native unwinder/symbolizer archive |
 | `$ROCKS_TREE/include/minicoro.h`, `titan.h`, `titan_longjmp.h` | Non-Lua top-level SDK headers |
 | `$ROCKS_TREE/include/titan/{ffi,coro,uv}.h` | Namespaced portable FFI, coroutine, and libuv shim headers |
-| `$ROCKS_TREE/lib/titan/0.17/titan.so` | The dynamic standard-library provider: native `require "titan"` support plus the independent `coroutine`, `uv`, `async`, `timer`, `fs`, `net`, and `os` logical modules |
-| `$ROCKS_TREE/lib/titan/0.17/titan.a` | The self-describing static form of the same seven logical standard modules, plus native support and bundled-libuv payload when that mode is selected |
+| `$ROCKS_TREE/lib/titan/0.18/titan.so` | The dynamic standard-library provider: native `require "titan"` support plus the independent `coroutine`, `uv`, `async`, `timer`, `fs`, `net`, and `os` logical modules |
+| `$ROCKS_TREE/lib/titan/0.18/titan.a` | The self-describing static form of the same seven logical standard modules, plus native support and bundled-libuv payload when that mode is selected |
 | `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,fs,net,os}.lua` | Generated logical-module loader shims that map the canonical provider globally and invoke their exact `luaopen_titan_*` entries |
 
 Bundled-libuv installs also contain `$ROCKS_TREE/include/uv.h` and
@@ -206,7 +206,7 @@ compiler; select unusual CMake toolchain executables explicitly through
 own runtime archive.
 
 The Titan-owned Lua's configured default `package.cpath` contains
-`$PREFIX/lib/titan/0.17/?.so` before `$PREFIX/lib/lua/5.5/?.so`. The first
+`$PREFIX/lib/titan/0.18/?.so` before `$PREFIX/lib/lua/5.5/?.so`. The first
 template lets the generated `titan.*` loaders find the canonical provider; the
 second remains the root-discovery anchor. The default `package.path` finds all
 seven loaders under `$PREFIX/share/lua/5.5/titan/`. In the currently supported
@@ -216,16 +216,16 @@ layout
 During the source rock's post-install build, the internal `TITAN_ROCKS_ROOT`
 override identifies `ROCKS_TREE` directly. The recovered Titan root supplies
 the staged Lua sources and archives and compiled provider under
-`$ROCKS_TREE/lib/titan/0.17/`; the standard library's qualified `titan.*`
+`$ROCKS_TREE/lib/titan/0.18/`; the standard library's qualified `titan.*`
 modules consequently live as independent entries inside both `titan.so` and
 `titan.a`. This
 discovery rule implements the supported equal-root layout; it does not redefine the
 separately owned `PREFIX` and `ROCKS_TREE` as one concept.
 
 At startup a compiled executable inherits Lua's default `package.cpath` and
-ensures `$ROCKS_TREE/lib/titan/0.17/?.so` is present. Both it and the installed
+ensures `$ROCKS_TREE/lib/titan/0.18/?.so` is present. Both it and the installed
 Lua therefore resolve `titan.<name>` through a generated loader to the same
-canonical file at `$ROCKS_TREE/lib/titan/0.17/titan.so`; there are no child,
+canonical file at `$ROCKS_TREE/lib/titan/0.18/titan.so`; there are no child,
 Lua-facing, or parent-level compatibility copies.
 
 An unmodified Lua 5.5 can reproduce those search paths with versioned
@@ -234,16 +234,16 @@ is also Titan's installation-root anchor:
 
 ```sh
 export LUA_PATH_5_5="$ROCKS_TREE/share/lua/5.5/?.lua;$ROCKS_TREE/share/lua/5.5/?/init.lua;;"
-export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.17/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
+export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.18/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
 ```
 
 If that root-anchor template is deliberately omitted, set
-`TITAN_PATH_0_17="$ROCKS_TREE/lib/titan/0.17"` as well.
+`TITAN_PATH_0_18="$ROCKS_TREE/lib/titan/0.18"` as well.
 
-`TITAN_PATH_0_17` (or the unversioned `TITAN_PATH`) overrides the Titan binary
+`TITAN_PATH_0_18` (or the unversioned `TITAN_PATH`) overrides the Titan binary
 search path. A short standard-library import is desugared before resolution
 (`import "timer"` becomes `import "titan.timer"`), so ordinary qualified
-lookup below `$ROCKS_TREE/lib/titan/0.17` reaches the canonical provider. In a
+lookup below `$ROCKS_TREE/lib/titan/0.18` reaches the canonical provider. In a
 source checkout, `--lua` can select another complete Lua source/build tree for an
 individual compiler invocation. An installed compiler rejects `--lua` because
 its headers, `liblua.a`, and `libtitan.a` are one matched SDK. These overrides
@@ -255,9 +255,9 @@ and applications: give a project its own standalone absolute `PREFIX` and use
 the currently equal system-style `ROCKS_TREE` and installed `titanc`. The
 current Titan rock is likewise a **source-install** package. Its
 `build_target = "titan"` builds the runtime, a private support-only bootstrap,
-and the SDK archives/headers/Lua sources. When the canonical 0.17 provider is
+and the SDK archives/headers/Lua sources. When the canonical 0.18 provider is
 absent, the build atomically stages that bootstrap at
-`$ROCKS_TREE/lib/titan/0.17/titan.so` so the just-installed compiler can load
+`$ROCKS_TREE/lib/titan/0.18/titan.so` so the just-installed compiler can load
 its native support table; a repeated install preserves an already valid full
 image. After LuaRocks deploys the compiler, the source-only `post_install` hook
 invokes that `titanc` once for all seven standard roots, stages the paired
@@ -283,8 +283,8 @@ request. Modules
 are looked up in the source tree (defaults to the current working directory,
 but you can override this with the `--tree` option), as well as in the Titan
 binary path, a semicolon-separated list of paths. By default this is the
-current directory plus `<root>/lib/titan/0.17`, where `<root>` is recovered
-from `package.cpath`; override it with `TITAN_PATH_0_17` or `TITAN_PATH`.
+current directory plus `<root>/lib/titan/0.18`, where `<root>` is recovered
+from `package.cpath`; override it with `TITAN_PATH_0_18` or `TITAN_PATH`.
 
 Compiled dependency lookup probes component-prefix providers. For logical
 `a.b.c`, the default first performs a complete shared pass at `a.so`,
@@ -363,6 +363,13 @@ dense-capacity backing storage, with positive-only indices, nil holes, and a
 deterministic highest-present length. Maps remain ordinary Lua tables, and
 exact integer-keyed Maps also support positional construction and Lua border
 length. See [Arrays and maps](doc/language/arrays-maps.md).
+
+The active compiled-module ABI is 0.18. It preserves the ABI-0.17 Array
+contract but changes the standard-library static boundary: generated archive
+objects directly reference promoted libuv callback trampolines and no longer
+reference replaced libuv/coroutine helpers. A 0.18 provider and runtime must
+be distributed together. Migration leaves a separately versioned 0.17 tree
+untouched; current lookup and publication use only the 0.18 namespace.
 
 From Titan, importing `timer` is enough to enable the standalone async
 bootstrap:
@@ -607,7 +614,8 @@ they are in the roadmap:
 
 * minimal standard library, continued (string library including tostring, math
   library including tonumber, and a Lua library to load/run Lua code)
-* FFI with C, continued (function pointers, callbacks from C into Titan, owned structs with flexible array members)
+* FFI with C, continued (Titan-function adapters for C callback ABIs,
+  adopted-pointer lifetimes, and owned structs with flexible array members)
 * tagged variants (unions of records with some syntax for switch/case on the record tag)
 * parametric polymorphism (via type erasure and boxed values)
 * some mechanism for ad-hoc polymorphism, either Go/Java/C#/Swift-like interfaces/protocols or Haskell/Rust-like typeclasses/traits

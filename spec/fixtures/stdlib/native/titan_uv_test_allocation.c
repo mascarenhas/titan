@@ -1,3 +1,6 @@
+#include <uv.h>
+
+#include "lua.h"
 #include "titan_uv_test_allocation.h"
 
 #include "lobject.h"
@@ -5,6 +8,10 @@
 
 static size_t titan_uv_test_userdata_allocations;
 static size_t titan_uv_test_internal_userdata_allocations;
+
+size_t titan_uv_test_timer_size(void) {
+  return sizeof(uv_timer_t);
+}
 
 void *titan_uv_test_newuserdatauv(lua_State *L, size_t size, int uservalues) {
   titan_uv_test_userdata_allocations++;

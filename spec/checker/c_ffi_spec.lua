@@ -1,7 +1,18 @@
 local h = require 'spec.support.helpers'
 
-local run_checker = h.run_checker
-local run_checker_modules = h.run_checker_modules
+local probe_session
+
+local function run_checker(code)
+    return h.run_checker(code, probe_session)
+end
+
+local function run_checker_modules(modules, main)
+    return h.run_checker_modules(modules, main)
+end
+
+local function check_errs(code)
+    return h.check_errs(code, probe_session)
+end
 
 local function with_header(contents, fn)
     local header = os.tmpname() .. ".h"
@@ -18,7 +29,79 @@ local function with_header(contents, fn)
     return table.unpack(results)
 end
 
+local FIELD_PROJECTION_HEADER = [[
+    typedef struct ffi_projection_inner {
+        int leaf;
+    } ffi_projection_inner;
+
+    typedef struct ffi_projection_left {
+        ffi_projection_inner nested;
+        double projected;
+    } ffi_projection_left;
+
+    typedef struct ffi_projection_right {
+        ffi_projection_inner nested;
+        double projected;
+    } ffi_projection_right;
+
+    typedef struct ffi_projection_bad {
+        int projected;
+    } ffi_projection_bad;
+
+    static ffi_projection_left ffi_projection_left_value =
+        { { 7 }, 701.0 };
+    static ffi_projection_right ffi_projection_right_value =
+        { { 11 }, 1101.0 };
+    static ffi_projection_right *ffi_projection_right_ptr =
+        &ffi_projection_right_value;
+    static ffi_projection_bad ffi_projection_bad_value = { 17 };
+
+    static int ffi_projection_physical_sum(void) {
+        return (int)(ffi_projection_left_value.projected +
+                     ffi_projection_right_value.projected);
+    }
+
+    #define projected nested.leaf
+]]
+
+local CAST_MACRO_HEADER = [[
+    typedef int (*ffi_macro_callback)(int);
+    typedef long ffi_macro_long;
+    typedef double ffi_macro_double;
+    typedef int *ffi_macro_int_ptr;
+    typedef int ffi_macro_array[4];
+
+    static int ffi_macro_value = 9;
+
+    static int ffi_macro_add5(int value) {
+        return value + 5;
+    }
+
+    static int ffi_macro_add7(int value) {
+        return value + 7;
+    }
+
+    #define FFI_TYPEDEF_CALLBACK \
+        ((ffi_macro_callback) ffi_macro_add5)
+    #define FFI_DIRECT_CALLBACK \
+        ((int (*)(int)) ffi_macro_add7)
+    #define FFI_CAST_INT ((long) 41)
+    #define FFI_CAST_DOUBLE ((double) 1.5)
+    #define FFI_CAST_POINTER ((int *) &ffi_macro_value)
+    #define FFI_VOID_CAST ((void) 0)
+    #define FFI_ARRAY_CAST ((ffi_macro_array) 0)
+]]
+
 describe("C FFI type checking", function()
+    setup(function()
+        probe_session = h.new_checker_probe_session()
+    end)
+
+    teardown(function()
+        h.close_checker_probe_session(probe_session)
+        probe_session = nil
+    end)
+
     it("publishes complete, empty, and unavailable parameter-name metadata",
     function()
         with_header([[
@@ -76,6 +159,30 @@ describe("C FFI type checking", function()
             end
         ]])
         assert.truthy(ok, err)
+    end)
+
+    it("compares a returned status with direct libuv-shaped UV_E enumerators", function()
+        with_header([[
+            #define UV_ERRNO_MAP(XX) \
+                XX(EIO, -5) XX(EOF, -4095) XX(ECANCELED, -125)
+            #define XX(code, value) UV_ ## code = value,
+            typedef enum { UV_ERRNO_MAP(XX) } ffi_uv_errno_t;
+            #undef XX
+            static int ffi_uv_eio(void) { return UV_EIO; }
+        ]], function(header)
+            local ok, err = run_checker([[
+                local libuv = foreign import "]] .. header .. [["
+
+                local function is_io(): boolean
+                    local status = libuv.ffi_uv_eio()
+                    return (status as integer) == (libuv.UV_EIO as integer)
+                        and (status as integer) ~= (libuv.UV_EOF as integer)
+                        and (status as integer)
+                            ~= (libuv.UV_ECANCELED as integer)
+                end
+            ]])
+            assert.truthy(ok, err)
+        end)
     end)
 
     it("accepts matching C redeclarations reached through typedef chains", function()
@@ -547,6 +654,284 @@ describe("C FFI type checking", function()
         end)
     end)
 
+    it("types dotted field macros through objects and pointers", function()
+        with_header(FIELD_PROJECTION_HEADER, function(header)
+            local ok, err, ast = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                function projected_fields(): integer
+                    local left = c.ffi_projection_left_value.projected
+                    c.ffi_projection_left_value.projected = 19
+                    local right = c.ffi_projection_right_ptr.projected
+                    c.ffi_projection_right_ptr.projected = 23
+                    return (left as integer) + (right as integer)
+                end
+            ]])
+            assert.truthy(ok, err)
+
+            local stats = ast[2].block.stats
+            local fields = {
+                stats[1].exps[1].var,
+                stats[2].vars[1],
+                stats[3].exps[1].var,
+                stats[4].vars[1],
+            }
+            for _, field in ipairs(fields) do
+                assert.equal("Type.CField", field._decl._tag)
+                assert.equal("Type.CInteger", field._type._tag)
+                assert.equal("projected", field._decl.name)
+                assert.same({ "nested", "leaf" },
+                    field._decl._macro_projection.path)
+            end
+
+            -- The macro's integer leaf wins over each physical double field.
+            -- The same translation-unit macro is resolved independently
+            -- against two distinct, compatible aggregate shapes.
+            local left_owner = fields[1]._decl.owner
+            local right_owner = fields[3]._decl.owner
+            assert.not_equal(left_owner, right_owner)
+            assert.equal("Type.CFloat",
+                left_owner.fields.projected.type._tag)
+            assert.equal("Type.CFloat",
+                right_owner.fields.projected.type._tag)
+            assert.equal(fields[1]._decl._macro_projection,
+                fields[3]._decl._macro_projection)
+        end)
+    end)
+
+    it("uses a later imported field macro in an earlier closure initializer",
+    function()
+        with_header([[
+            typedef struct ffi_final_inner {
+                int leaf;
+            } ffi_final_inner;
+            typedef struct ffi_final_record {
+                ffi_final_inner nested;
+                ffi_final_inner projected;
+            } ffi_final_record;
+            static ffi_final_record ffi_final_value = { { 7 }, { 99 } };
+        ]], function(base_header)
+            with_header([[
+                #define projected nested.leaf
+            ]], function(macro_header)
+                local ok, err = run_checker([[
+                    local base = foreign import "]] .. base_header .. [["
+                    local reader = function(): integer
+                        return base.ffi_final_value.projected as integer
+                    end
+                    local macros = foreign import "]] .. macro_header .. [["
+
+                    function read_projected(): integer
+                        return reader()
+                    end
+                ]])
+                assert.truthy(ok, err)
+            end)
+        end)
+    end)
+
+    it("removes a projected field after a later imported undefinition",
+    function()
+        with_header([[
+            typedef struct ffi_undef_leaf {
+                int value;
+            } ffi_undef_leaf;
+            typedef struct ffi_undef_nested {
+                ffi_undef_leaf leaf;
+            } ffi_undef_nested;
+            typedef struct ffi_undef_record {
+                ffi_undef_nested nested;
+                int projected;
+            } ffi_undef_record;
+            static ffi_undef_record ffi_undef_value = { { { 7 } }, 99 };
+        ]], function(base_header)
+            with_header([[
+                #define projected nested.leaf
+            ]], function(macro_header)
+                with_header([[
+                    #undef projected
+                ]], function(undef_header)
+                    local ok, err = run_checker([[
+                        local base =
+                            foreign import "]] .. base_header .. [["
+                        local macros =
+                            foreign import "]] .. macro_header .. [["
+                        local reader = function(): integer
+                            return base.ffi_undef_value.projected as integer
+                        end
+                        local without_macro =
+                            foreign import "]] .. undef_header .. [["
+
+                        function read_physical(): integer
+                            return reader()
+                        end
+                    ]])
+                    assert.truthy(ok, err)
+                end)
+            end)
+        end)
+    end)
+
+    it("rejects an active unsupported object macro before physical lookup",
+    function()
+        with_header([[
+            typedef struct ffi_unsupported_record {
+                int projected;
+            } ffi_unsupported_record;
+            static ffi_unsupported_record ffi_unsupported_value = { 99 };
+        ]], function(base_header)
+            with_header([[
+                #define projected 42
+            ]], function(macro_header)
+                local ok, err = run_checker([[
+                    local base = foreign import "]] .. base_header .. [["
+                    local macros = foreign import "]] .. macro_header .. [["
+
+                    function read_physical(): integer
+                        return base.ffi_unsupported_value.projected as integer
+                    end
+                ]])
+                assert.falsy(ok)
+                assert.match("active object%-like macro", err)
+                assert.match("final expansion '42'", err)
+                assert.match("not a supported pure dotted field projection",
+                    err)
+            end)
+        end)
+    end)
+
+    it("does not fall back to a physical field after an invalid macro path",
+    function()
+        with_header(FIELD_PROJECTION_HEADER, function(header)
+            local ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                function invalid_projection(): integer
+                    return c.ffi_projection_bad_value.projected as integer
+                end
+            ]])
+            assert.falsy(ok)
+            assert.match(
+                "C field macro 'projected' expands to 'nested%.leaf'", err)
+            assert.match("not a valid physical field path", err)
+            assert.match(
+                "physical field 'nested' is not present in C type "
+                    .. "'struct ffi_projection_bad'",
+                err)
+        end)
+    end)
+
+    it("types scalar cast macros and skips unsupported cast targets",
+    function()
+        with_header(CAST_MACRO_HEADER, function(header)
+            local ok, err, ast = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                function use_cast_macros(): integer
+                    local typedef_callback: c.ffi_macro_callback =
+                        c.FFI_TYPEDEF_CALLBACK
+                    local direct_callback: c.ffi_macro_callback =
+                        c.FFI_DIRECT_CALLBACK
+                    local count: c.ffi_macro_long = c.FFI_CAST_INT
+                    local fraction: c.ffi_macro_double = c.FFI_CAST_DOUBLE
+                    local pointer: c.ffi_macro_int_ptr = c.FFI_CAST_POINTER
+
+                    if typedef_callback ~= direct_callback
+                       and count == c.FFI_CAST_INT
+                       and fraction < 2.0
+                       and pointer == c.FFI_CAST_POINTER then
+                        return (typedef_callback(1) as integer)
+                            + (direct_callback(1) as integer)
+                            + (pointer[0] as integer)
+                    end
+                    return 0
+                end
+            ]])
+            assert.truthy(ok, err)
+
+            local members = ast[1]._type.members
+            local typedef_callback =
+                assert(members.FFI_TYPEDEF_CALLBACK).type
+            assert.equal("Type.CTypedef", typedef_callback._tag)
+            assert.equal("ffi_macro_callback", typedef_callback.name)
+            assert.equal("Type.CPointer", typedef_callback.target._tag)
+            assert.equal("Type.CFunction",
+                typedef_callback.target.pointee._tag)
+
+            local direct_callback =
+                assert(members.FFI_DIRECT_CALLBACK).type
+            assert.equal("Type.CPointer", direct_callback._tag)
+            assert.equal("Type.CFunction",
+                direct_callback.pointee._tag)
+            assert.equal(1, #direct_callback.pointee.params)
+
+            local integer = assert(members.FFI_CAST_INT).type
+            assert.equal("Type.CInteger", integer._tag)
+            assert.equal("long", integer.spelling)
+
+            local floating = assert(members.FFI_CAST_DOUBLE).type
+            assert.equal("Type.CFloat", floating._tag)
+            assert.equal("double", floating.spelling)
+
+            local pointer = assert(members.FFI_CAST_POINTER).type
+            assert.equal("Type.CPointer", pointer._tag)
+            assert.equal("Type.CInteger", pointer.pointee._tag)
+            assert.equal("int", pointer.pointee.spelling)
+
+            assert.is_nil(members.FFI_VOID_CAST)
+            assert.is_nil(members.FFI_ARRAY_CAST)
+        end)
+    end)
+
+    it("imports real POSIX signal disposition macros as function pointers",
+    function()
+        local ok, err, ast = run_checker([[
+            local signal = foreign import "signal.h"
+
+            function signal_dispositions_differ(): boolean
+                local default_handler = signal.SIG_DFL
+                local ignored_handler = signal.SIG_IGN
+                return default_handler ~= ignored_handler
+            end
+        ]])
+        assert.truthy(ok, err)
+
+        local function resolved(typ)
+            while typ and typ._tag == "Type.CTypedef" do
+                typ = typ.target
+            end
+            return typ
+        end
+
+        local members = ast[1]._type.members
+        local default_handler =
+            resolved(assert(members.SIG_DFL).type)
+        local ignored_handler =
+            resolved(assert(members.SIG_IGN).type)
+        for _, handler in ipairs({
+                default_handler, ignored_handler}) do
+            assert.equal("Type.CPointer", handler._tag)
+            assert.equal("Type.CFunction", handler.pointee._tag)
+            assert.equal(1, #handler.pointee.params)
+        end
+    end)
+
+    it("imports the real POSIX errno accessor macro as an integer expression",
+    function()
+        local ok, err, ast = run_checker([[
+            local cerrno = foreign import "errno.h"
+
+            function current_errno(): integer
+                return cerrno.errno
+            end
+        ]])
+        assert.truthy(ok, err)
+
+        local errno_type = assert(ast[1]._type.members.errno).type
+        assert.equal("Type.CInteger", errno_type._tag)
+        assert.equal("int", errno_type.spelling)
+    end)
+
     it("completes forward-declared C structs across foreign imports", function()
         with_header([[
             typedef struct ffi_split ffi_split;
@@ -981,7 +1366,7 @@ describe("C FFI type checking", function()
             typedef int ffi_int;
             typedef int (*ffi_callback)(int, int);
         ]], function(header)
-            local errs = h.check_errs([[
+            local errs = check_errs([[
                 local c = foreign import "]] .. header .. [["
 
                 local function use(cb: c.ffi_callback): nil

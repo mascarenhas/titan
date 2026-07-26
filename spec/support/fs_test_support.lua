@@ -22,8 +22,9 @@ function M.compile(workspace, modname, options)
     return async_stdlib.compile(workspace, modname, options)
 end
 
-function M.variant_workspace(transformer)
-    local workspace, layout = async_stdlib.variant_workspace(transformer)
+function M.variant_workspace(transformer, options)
+    local workspace, layout =
+        async_stdlib.variant_workspace(transformer, options)
     local root = workspace .. "/data"
     assert.truthy(lfs.mkdir(root))
 

@@ -18,7 +18,10 @@ it binds: Titan cannot stop a C function from writing past a buffer, storing a
 pointer into a Titan string, freeing memory it does not own, or crashing the
 process.
 
-Implementation details are in [FFI internals](../implementation/ffi-internals.md).
+Named tag-only aggregates, automatic C storage, contextual object-pointer
+casts, and C-mode operators are covered in
+[C FFI declarations and expressions](c-ffi-expressions.md). Implementation
+details are in [FFI internals](../implementation/ffi-internals.md).
 
 ## Importing a Header
 
@@ -32,6 +35,24 @@ local c = foreign import "myheader.h"
 The namespace is a compile-time namespace, not a first-class value. You can
 call `c.func(...)`, read `c.variable`, and name imported C types such as
 `c.size_t`, but you cannot store or return `c` itself.
+
+Each import is written into generated C in source order. After at least one
+foreign import has been parsed successfully, Titan asks the configured C
+compiler to validate the complete generated header preamble once before
+checking the rest of the module: the fixed standard, Lua, and Titan headers
+followed by the ordered foreign imports. This includes a module with only one
+foreign import, so the compiler can reject an invalid same-header
+redeclaration that the isolated declaration extractor did not retain as two
+entries. The check observes real include guards, `#pragma once`, macro state,
+ordinary-identifier redeclarations, and tag redefinitions.
+
+Before Titan treats compatible extracted repeats as declarations of one C
+ordinary identifier, the compiler also checks the pair of extracted declaration
+types in that final foreign-header context. This proves that the pair can form
+compatible declarations there, not that both original declarations survived
+preprocessing. An accepted incomplete/known array pair forms the known-bound
+composite, and array or function parameters undergo the usual C parameter
+adjustment.
 
 ### Header Resolution
 
@@ -66,17 +87,29 @@ Foreign modules contain three categories of members:
 * C functions become callable members. This includes ordinary prototypes and
   header-defined `static` functions. C variadic functions such as
   `printf`/`snprintf` accept extra arguments after their fixed parameters.
-* C variables and object-like `#define` constants become C values. Assigning to
-  a foreign variable name itself is rejected; assigning through an indexed C
-  array or through a field is emitted as C. Titan does not model `const` or
-  other C writeability rules for subobjects in v1, so the C compiler may still
-  reject those assignments. Top-level enum constants become C integer members;
-  simple numeric enum values are retained in Titan's C type list.
-* C typedef names become the source-nameable type namespace. They may be used
-  in local annotations, casts, and the `.new()` / `.new_array(count)` allocation
-  pseudo-functions. Tag-only `struct S` / `union U` declarations are understood
-  for imported values, pointers, and fields, but cannot be written as `c.S`
-  unless the header also provides a typedef name.
+* C variables and supported object-like `#define` constants become C values.
+  Recognized forms include integer-constant expressions, typed dereferenced
+  accessors such as the common `errno` expansion, and fully expanded outer
+  casts to supported C integer, floating, object-pointer, or function-pointer
+  types; generated C emits the public macro spelling. Assigning to a foreign
+  variable name itself is rejected; assigning through an indexed C array or
+  through a field is emitted as C. A pure dotted-identifier replacement macro
+  may also provide a lazily resolved public field spelling. Field lookup uses
+  the final macro environment from the module's ordered, hoisted headers,
+  including ordinary redefinitions, dependency rescans, and `#undef`. Like the
+  C preprocessor, a live macro takes precedence over a physical field with the
+  same name; an active unsupported object macro is terminal rather than
+  falling back. Titan does not model `const` or other C writeability rules for
+  subobjects in v1, so the C compiler may still reject those assignments.
+  Top-level enum constants become C integer members; simple numeric enum values
+  are retained in Titan's C type list. See
+  [C constants and macro-projected fields](c-ffi-expressions.md#c-constants-and-macro-projected-fields).
+* C typedef names become the source-nameable type namespace. Named file-scope
+  tag-only `struct S` / `union U` declarations also publish `c.S` using their
+  exact tag spelling; a real same-name typedef takes precedence. These names
+  may be used in local annotations, casts, and the `.new()` /
+  `.new_array(count)` allocation pseudo-functions. See
+  [named C tags](c-ffi-expressions.md#named-struct-and-union-tags).
 
 The value namespace and the type namespace are separate: an `extern int x;`
 member is read as `c.x`, but `c.x` is not a type annotation.
@@ -96,7 +129,7 @@ Supported C type families:
 | `T *` | nullable C pointer type |
 | `R (*)(P...)` | nullable C function pointer type, usually through a typedef |
 | `T[N]` | C array type with static length |
-| `struct S`, `union U` | C aggregate type with fields when the header exposes them; source annotations need a typedef name in v1 |
+| `struct S`, `union U` | C aggregate type with fields when the header exposes them; named file-scope tags are source-nameable through the foreign module |
 | `typedef T name` | C typedef that resolves through its target |
 | exact by-value `TValue` | distinct C `TValue`, with FFI coercions to/from Titan `value` |
 
@@ -136,8 +169,9 @@ end
 C type, so `*integer` and pointers to non-FFI Titan types are compile-time
 errors.
 
-Every imported C type namespace exposes `sizeof` and `alignof` pseudo-members.
-They compile to C `sizeof(T)` and `_Alignof(T)` and return a Titan `integer`:
+An imported C type namespace exposes `sizeof` and `alignof` pseudo-members when
+no ordinary C value has the same module member name. They compile to C
+`sizeof(T)` and `_Alignof(T)` and return a Titan `integer`:
 
 ```lua
 local ffi = foreign import "titan/ffi.h"
@@ -146,6 +180,11 @@ function int_layout(): integer
     return ffi.titan_ffi_int.sizeof + ffi.titan_ffi_int.alignof
 end
 ```
+
+When a legal ordinary identifier collides with the type spelling, as with
+`struct stat` and `stat()`, expression lookup keeps the ordinary value usable
+and these type pseudo-members are unavailable. See
+[C FFI declarations and expressions](c-ffi-expressions.md#named-struct-and-union-tags).
 
 ## The Built-In Lua State
 
@@ -222,8 +261,8 @@ If the mutable C value is a GC-bearing `TValue`, Titan refreshes its stack
 anchor immediately after the foreign call, before any later call can run
 the collector.
 
-When a C scalar participates in Titan arithmetic, cast it to the Titan type you
-want:
+When a C scalar participates in arithmetic, cast it to the Titan type you want
+when you require Titan semantics:
 
 ```lua
 local string_h = foreign import "string.h"
@@ -232,6 +271,10 @@ function len_plus_one(s: string): integer
     return (string_h.strlen(s) as integer) + 1
 end
 ```
+
+Supported operators can instead remain in
+[C operator mode](c-ffi-expressions.md#c-operator-mode), where the configured
+target's C promotions, result type, and behavior apply.
 
 ## Calling C Functions
 
@@ -304,6 +347,10 @@ function via_callback(): integer
     return c.apply(cb, 41) as integer
 end
 ```
+
+Titan does not adapt a Titan function or closure to a C callback ABI. The
+source of a C function-pointer value must itself be a compatible C function,
+C function pointer, or null value.
 
 C function pointer values are callable with the same call syntax. The call is a
 C call through the pointer, not a Titan function-value call, and raises a
@@ -398,6 +445,11 @@ end
 Unsized C arrays, including flexible array members, cannot be indexed or
 measured in this version.
 
+Functions may also declare a zero-initialized automatic fixed array with
+`local values: c.element_type[N]`; the declaration, decay, copy, capture, and
+lifetime rules are in
+[Fixed C arrays](c-ffi-expressions.md#fixed-c-arrays).
+
 ## Structs, Unions, And Fields
 
 When the header exposes a complete struct or union definition, Titan imports
@@ -419,6 +471,11 @@ owned C objects. For pointer and owned bases, `p.x` uses C's `->` semantics.
 
 Bitfields are parsed and typed, but they remain C bitfields: assignment follows
 the C compiler's rules. Anonymous fields are not exposed as Titan members.
+
+Named file-scope tag-only aggregates are available as `c.Tag` without a C
+typedef. A function may also declare a complete aggregate without an
+initializer to request C `{0}` initialization. See
+[C FFI declarations and expressions](c-ffi-expressions.md).
 
 ### C Assignment Receivers And Order
 
@@ -625,14 +682,40 @@ process-global state.
 
 * Foreign functions are not Titan first-class values. They can only be called by
   name or converted to compatible C function pointer types.
+* Titan functions and closures cannot be adapted to C callback ABIs.
 * C types are local to the importing Titan module and cannot appear in exported
   Titan interfaces.
-* Function-like macros are not imported.
+* Function-like macros are not imported. Object-like macros are values only
+  through bounded recognized expression forms, including supported
+  integer-constant expressions and typed dereferenced accessors, or when they
+  fully expand to an outer cast to a supported scalar type. A pure dotted
+  identifier replacement can stand in for a field. Other object-like forms are
+  not generally supported. Conditional macro behavior that depends on state
+  from a separate earlier import, or a later import changing a scalar macro
+  already typed through another module namespace, requires an umbrella header.
 * Owned allocation does not support `void`, incomplete aggregate types, C array
   typedefs, or structs with flexible array members.
 * C adopted pointers/lifetimes are parked for a later design; v1 has borrowed C
   pointers and Titan-owned userdata only.
-* The C namespace is flat across all foreign imports in one generated C file,
-  so compatible duplicate names denote the same C symbol. Titan reports
-  conflicting ordinary declarations from distinct foreign imports before code
-  generation, but it does not attempt to namespace or rename C declarations.
+* The C ordinary-identifier namespace is shared across all foreign imports in
+  one generated C file. Titan validates the ordered foreign-header context and
+  checks compatible extracted repeats before treating them as declarations of
+  the same identifier, but it does not attempt to namespace or rename C
+  declarations.
+* Declaration extraction still preprocesses each foreign import independently,
+  without the fixed generated-C prefix. Compiler probes replay that fixed
+  standard/Lua/Titan prefix followed by the ordered foreign-header block, just
+  as generated module C does. Macro state established by an earlier foreign
+  import can therefore make a later isolated TypeList differ from the
+  cumulative probe/generated-C view; macro state from the fixed prefix can
+  cause that divergence even for the first foreign import.
+* The baseline and declaration-pair checks validate the contexts and
+  declaration types they compile, but they neither reconstruct a cumulative
+  TypeList nor prove that an extracted declaration survived preprocessing. A
+  unique value or type-namespace binding can consequently retain its isolated
+  type, and Titan may reject isolated declarations that become compatible only
+  cumulatively. Conversely, a macro-suppressed isolated repeat can still affect
+  canonicalization or contribute composite information: for example, an
+  isolated `extern int a[7]` hidden by cumulative macro state can complete an
+  earlier `extern int a[]` to `[7]` in Titan's view. Put macro-coupled
+  declarations behind one umbrella header and import that header once.

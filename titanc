@@ -20,8 +20,30 @@ p:option('-X --extra-object',
     'Additional native object/archive payload; library mode carries it into both provider forms.'):args("*")
 local args = p:parse()
 
+local resolver_context
+local resolver_cleanup <close> = setmetatable({}, {
+    __close = function()
+        if not resolver_context then return end
+        local context = resolver_context
+        resolver_context = nil
+        -- Preserve the original exceptional-exit diagnostic. Ordinary exits
+        -- use exit() or the explicit success close below and can report a
+        -- cleanup failure directly.
+        pcall(driver.close_resolver_context, context)
+    end,
+})
+
 -- Work like assert, but don't print the stack trace
 local function exit(msg)
+    if resolver_context then
+        local closed, close_err =
+            driver.close_resolver_context(resolver_context)
+        resolver_context = nil
+        if not closed then
+            msg = tostring(msg) .. "\nfailed to clean C probe service: " ..
+                tostring(close_err)
+        end
+    end
     io.stderr:write(msg, "\n")
     os.exit(1)
 end
@@ -47,8 +69,9 @@ local main_module = nil
 
 local requested_roots = {}
 local requested_modules = driver.deduplicate_module_names(args.module)
-local resolver_context = driver.new_resolver_context({
+resolver_context = driver.new_resolver_context({
     prefer_static = args.static,
+    verbose = args.verbose,
 })
 for _, modname in ipairs(requested_modules) do
     requested_roots[modname] = true
@@ -438,3 +461,10 @@ else
 end
 
 if #errors > 0 then exit(table.concat(errors, "\n")) end
+
+local probes_closed, probes_close_err =
+    driver.close_resolver_context(resolver_context)
+resolver_context = nil
+if not probes_closed then
+    exit("failed to clean C probe service: " .. tostring(probes_close_err))
+end

@@ -32,7 +32,7 @@ local record NetRequestControl
   local operation: NetOperation
   local next_control: NetRequestControl?
   local previous_control: NetRequestControl?
-  local result_pointer: ffi.titan_ffi_void_ptr
+  local result_pointer: *libuv.addrinfo
 end
 
 local record TcpControl
@@ -211,7 +211,7 @@ function _net_write(tcp: uv_tcp_t, data: string)
     raise "cannot write after Connection shutdown"
   end
   if #data == 0 then return end
-  if #data > UV_BUF_MAX then
+  if #data > climits.UINT_MAX then
     raise "TCP write data exceeds the portable libuv buffer limit"
   end
   local request = new_net_request {
@@ -303,21 +303,43 @@ end
 
 function _net_eof_error(operation: string, message: string,
                         subject: string): Error
-  local code = UV_EOF
+  local code = libuv.UV_EOF
   return Error.new(code,
       libuv.uv_err_name(code as ffi.titan_ffi_int) as string,
       message, operation, subject)
 end
 
-local function copy_addresses(pointer: ffi.titan_ffi_void_ptr,
+local function usable_address(entry: *libuv.addrinfo): boolean
+  return entry.ai_addr ~= nil and
+      (entry.ai_family == libuv.AF_INET or
+       entry.ai_family == libuv.AF_INET6) and
+      entry.ai_addrlen <= libuv.sockaddr_storage.sizeof
+end
+
+local function copy_addresses(pointer: *libuv.addrinfo,
                               subject: string): AddressList
-  local count = shim.titan_uvshim_addrinfo_count(pointer) as integer
-  local cell_size = shim.titan_uvshim_address.sizeof as integer
-  local bytes = allocate_bytes(count * cell_size)
-  shim.titan_uvshim_addrinfo_copy(pointer, bytes.data)
-  return AddressList.new((bytes.data as ffi.titan_ffi_void_ptr) as
-                         *shim.titan_uvshim_address,
-                         bytes.storage, count)
+  local count = 0
+  local entry = pointer
+  while entry ~= nil do
+    if usable_address(entry) then count = count + 1 end
+    entry = entry.ai_next
+  end
+
+  local owned = shim.titan_uvshim_address.new_array(count)
+  local storage: value = owned
+  local data = owned as *shim.titan_uvshim_address
+  local copied = 0
+  entry = pointer
+  while entry ~= nil do
+    if usable_address(entry) then
+      local copy_length = entry.ai_addrlen as cstring.size_t
+      local destination = data + copied
+      cstring.memcpy(destination.bytes, entry.ai_addr, copy_length)
+      copied = copied + 1
+    end
+    entry = entry.ai_next
+  end
+  return AddressList.new(data, storage, count)
 end
 
 local function validate_tcp_identity(tcp: uv_tcp_t, operation: string,
@@ -641,9 +663,8 @@ end
 
 local function initialize_tcp(runtime: Runtime): (uv_tcp_t, integer)
   local tcp, pointer = allocate_tcp_owner(runtime)
-  local status = shim.titan_uvshim_tcp_init(runtime.loop.handle, tcp.handle,
-                                            pointer)
-  if (status as integer) < 0 then
+  local status = libuv.uv_tcp_init(runtime.loop.handle, tcp.handle)
+  if status < 0 then
     -- The handle was never accepted by libuv.  Inline terminal unlink so an
     -- emergency longjmp cannot strand an owner for which no callback is owed.
     local control = tcp.metadata
@@ -663,8 +684,9 @@ local function initialize_tcp(runtime: Runtime): (uv_tcp_t, integer)
     tcp.storage = nil
     control.lifecycle = TCP_CLOSED
     control.owner = nil
-    return tcp, status as integer
+    return tcp, status
   end
+  libuv.uv_handle_set_data(tcp.handle, pointer)
   tcp.metadata.lifecycle = TCP_INITIALIZED
   return tcp, 0
 end
@@ -679,17 +701,17 @@ local function start_tcp_close(tcp: uv_tcp_t)
     return
   end
   if control.read_active then
-    shim.titan_uvshim_tcp_read_stop(tcp.handle)
+    libuv.uv_read_stop(tcp.handle)
     control.read_active = false
   end
   control.read_bytes = nil
   control.lifecycle = TCP_CLOSING
-  shim.titan_uvshim_tcp_close(tcp.handle)
+  libuv.uv_close(tcp.handle, shim.titan_uvshim_close_cb)
 end
 
 local function free_dns_result(control: NetRequestControl)
   if control.result_pointer ~= nil then
-    shim.titan_uvshim_addrinfo_free(control.result_pointer)
+    libuv.uv_freeaddrinfo(control.result_pointer)
     control.result_pointer = nil
   end
 end
@@ -798,6 +820,21 @@ local function net_operation_subject(operation: NetOperation): string?
   return nil
 end
 
+local function format_port(port: ffi.titan_ffi_int,
+                           service: *ffi.titan_ffi_char):
+                           *ffi.titan_ffi_char
+  local digits =
+    "0123456789" as const *ffi.titan_ffi_char
+  local cursor = service + 5
+  cursor[0] = 0 as ffi.titan_ffi_char
+  repeat
+    cursor = cursor - 1
+    cursor[0] = digits[port % 10]
+    port = port / (10 as ffi.titan_ffi_int)
+  until port == 0
+  return cursor
+end
+
 local function start_dns(operation: NetOperation):
                          (uv_getaddrinfo_t, integer)
   local task = operation.task
@@ -806,21 +843,32 @@ local function start_dns(operation: NetOperation):
   local loop_handle = runtime.loop.handle
   local node = host.bytes.data
   local port = operation.port as ffi.titan_ffi_int
+  local service: ffi.titan_ffi_char[6]
+  local service_pointer = format_port(port, service)
+
+  local hints: libuv.addrinfo
+  hints.ai_family = libuv.AF_UNSPEC
+  hints.ai_socktype = libuv.SOCK_STREAM
+  hints.ai_protocol = libuv.IPPROTO_TCP
+  hints.ai_flags = libuv.AI_NUMERICSERV
+
   local owner, pointer = allocate_dns_owner(runtime, operation)
   operation.owner = owner
-  local status = shim.titan_uvshim_getaddrinfo_start {
+  libuv.uv_req_set_data(owner.handle, pointer)
+  local status = libuv.uv_getaddrinfo {
     loop = loop_handle,
     req = owner.handle,
-    data = pointer,
+    getaddrinfo_cb = shim.titan_uvshim_getaddrinfo_cb,
     node = node,
-    port = port,
+    service = service_pointer,
+    hints = hints,
   }
-  if (status as integer) >= 0 then
+  if status >= 0 then
     owner.metadata.lifecycle = NET_OWNER_SUBMITTED
   else
     retire_net_control(owner.metadata)
   end
-  return owner, status as integer
+  return owner, status
 end
 
 local function finish_net_setup(operation: NetOperation, tcp: uv_tcp_t?,
@@ -862,46 +910,52 @@ local function continue_net_setup(operation: NetOperation)
       if operation.kind == NET_CONNECT then
         -- Cache every borrowed native argument before the request owner is
         -- linked.  From allocation through submit, only field stores and the
-        -- non-raising C shim call are allowed.
+        -- non-raising C calls are allowed.
         local tcp_handle = tcp.handle
-        local address_data = addresses.data as ffi.titan_ffi_void_ptr
         local address_index = operation.address_index - 1
+        local address_cell = addresses.data + address_index
+        local address =
+          address_cell.bytes as const *libuv.sockaddr
         local owner, pointer = allocate_connect_owner(runtime, operation)
         operation.owner = owner
         tcp.metadata.connect_pending = true
-        local status = shim.titan_uvshim_tcp_connect_start {
+        libuv.uv_req_set_data(owner.handle, pointer)
+        local status = libuv.uv_tcp_connect {
           req = owner.handle,
-          tcp = tcp_handle,
-          data = pointer,
-          address_storage = address_data,
-          index = address_index,
+          handle = tcp_handle,
+          addr = address,
+          cb = shim.titan_uvshim_connect_cb,
         }
-        if (status as integer) >= 0 then
+        if status >= 0 then
           owner.metadata.lifecycle = NET_OWNER_SUBMITTED
           return
         end
         tcp.metadata.connect_pending = false
         retire_net_control(owner.metadata)
-        operation.last_error = make_error(status as integer, "net.connect",
+        operation.last_error = make_error(status, "net.connect",
                                           net_operation_subject(operation))
         start_tcp_close(tcp)
         return
       else
-        local status = shim.titan_uvshim_tcp_bind(
-            tcp.handle, addresses.data as ffi.titan_ffi_void_ptr,
-            operation.address_index - 1)
-        if (status as integer) >= 0 then
-          status = shim.titan_uvshim_tcp_listen(tcp.handle,
-                                                operation.backlog)
+        local address_cell =
+          addresses.data + operation.address_index - 1
+        local address =
+          address_cell.bytes as const *libuv.sockaddr
+        local status = libuv.uv_tcp_bind(tcp.handle, address, 0)
+        if status >= 0 then
+          status = libuv.uv_listen(
+              tcp.handle,
+              operation.backlog as ffi.titan_ffi_int,
+              shim.titan_uvshim_connection_cb)
         end
-        if (status as integer) >= 0 then
+        if status >= 0 then
           tcp.metadata.lifecycle = TCP_SERVER
           tcp.metadata.server = true
           tcp.metadata.accept_capacity = operation.backlog
           finish_net_setup(operation, tcp, nil)
           return
         end
-        operation.last_error = make_error(status as integer, "net.listen",
+        operation.last_error = make_error(status, "net.listen",
                                           net_operation_subject(operation))
         start_tcp_close(tcp)
         return
@@ -910,7 +964,7 @@ local function continue_net_setup(operation: NetOperation)
   end
   local failure? = operation.last_error
   if not failure then
-    failure = make_error(UV_EADDRNOTAVAIL,
+    failure = make_error(libuv.UV_EADDRNOTAVAIL,
                          "net.resolve", net_operation_subject(operation))
   end
   finish_net_setup(operation, nil, failure)
@@ -943,13 +997,15 @@ local function advance_tcp_output(tcp: uv_tcp_t,
       local owner, pointer = allocate_write_owner(control.runtime, operation)
       operation.owner = owner
       control.output_current = operation
-      status = shim.titan_uvshim_tcp_write_start {
+      libuv.uv_req_set_data(owner.handle, pointer)
+      status = libuv.uv_write {
         req = owner.handle,
-        tcp = tcp_handle,
-        data = pointer,
-        buffer = buffer_handle,
+        handle = tcp_handle,
+        bufs = buffer_handle,
+        nbufs = 1,
+        cb = shim.titan_uvshim_write_cb,
       }
-      if (status as integer) >= 0 then
+      if status >= 0 then
         owner.metadata.lifecycle = NET_OWNER_SUBMITTED
         operation.prepared_buffer = nil
         return nil
@@ -961,9 +1017,10 @@ local function advance_tcp_output(tcp: uv_tcp_t,
                                                      operation)
       operation.owner = owner
       control.output_current = operation
-      status = shim.titan_uvshim_tcp_shutdown_start(
-          owner.handle, tcp_handle, pointer)
-      if (status as integer) >= 0 then
+      libuv.uv_req_set_data(owner.handle, pointer)
+      status = libuv.uv_shutdown(
+          owner.handle, tcp_handle, shim.titan_uvshim_shutdown_cb)
+      if status >= 0 then
         owner.metadata.lifecycle = NET_OWNER_SUBMITTED
         return nil
       end
@@ -973,7 +1030,7 @@ local function advance_tcp_output(tcp: uv_tcp_t,
     -- Synchronous rejection owes no callback.  Retire the native owner and
     -- unlink/clear the FIFO publication before allocating its Error value.
     remove_output(tcp, operation)
-    local failure = make_error(status as integer,
+    local failure = make_error(status,
         operation.kind == NET_WRITE and "net.write" or "net.shutdown",
         net_operation_subject(operation))
     if operation.task and operation.request then
@@ -1000,15 +1057,16 @@ local function advance_tcp_output(tcp: uv_tcp_t,
 end
 
 local function start_tcp_read(tcp: uv_tcp_t): integer
-  local status = shim.titan_uvshim_tcp_read_start(tcp.handle)
-  if (status as integer) >= 0 then tcp.metadata.read_active = true end
-  return status as integer
+  local status = libuv.uv_read_start(
+      tcp.handle, shim.titan_uvshim_alloc_cb, shim.titan_uvshim_read_cb)
+  if status >= 0 then tcp.metadata.read_active = true end
+  return status
 end
 
 local function stop_tcp_read(tcp: uv_tcp_t, discard_queue: boolean)
   local control = tcp.metadata
   if control.read_active then
-    shim.titan_uvshim_tcp_read_stop(tcp.handle)
+    libuv.uv_read_stop(tcp.handle)
     control.read_active = false
   end
   control.read_bytes = nil
@@ -1033,7 +1091,7 @@ local function stop_server_accept(server: uv_tcp_t)
     local task = waiter
     if task.state == TASK_WAITING and not task.cancel_requested and
         task.epoch == epoch then
-      local failure = make_error(UV_ECANCELED,
+      local failure = make_error(libuv.UV_ECANCELED,
                                  "net.accept", "server closed")
       schedule_task_drive(task, epoch, DRIVE_ERROR, failure, "", nil)
     end
@@ -1162,13 +1220,14 @@ local function dns_dispatch_body(owner: uv_getaddrinfo_t, result: integer,
     failure = make_error(result, "net.resolve",
                          net_operation_subject(operation))
   else
-    local addresses = copy_addresses(pointer, net_operation_subject(operation))
+    local addresses = copy_addresses(
+        control.result_pointer, net_operation_subject(operation))
     -- Root the copied address array in the operation before entering another
     -- helper or releasing the borrowed addrinfo chain.
     operation.addresses = addresses
     free_dns_result(control)
     if addresses.count == 0 then
-      failure = make_error(UV_EADDRNOTAVAIL,
+      failure = make_error(libuv.UV_EADDRNOTAVAIL,
                            "net.resolve", net_operation_subject(operation))
     end
   end
@@ -1192,11 +1251,11 @@ end
 local function dns_dispatch(owner: uv_getaddrinfo_t, _event_kind: integer,
                             result: integer, _size: libuv.size_t,
                             pointer: ffi.titan_ffi_void_ptr)
-  owner.metadata.result_pointer = pointer
+  owner.metadata.result_pointer = pointer as *libuv.addrinfo
   dns_dispatch_body(owner, result, pointer)
 catch
   if owner.metadata.result_pointer ~= nil then
-    shim.titan_uvshim_addrinfo_free(owner.metadata.result_pointer)
+    libuv.uv_freeaddrinfo(owner.metadata.result_pointer)
     owner.metadata.result_pointer = nil
   end
   owner.metadata.lifecycle = NET_OWNER_CALLBACK
@@ -1334,7 +1393,7 @@ local function tcp_alloc_dispatch(tcp: uv_tcp_t, size: libuv.size_t,
   if control.read_bytes then raise internal_error("net.read.alloc.pending") end
   local bytes = allocate_stream_bytes(size)
   control.read_bytes = bytes
-  shim.titan_uvshim_buf_init(pointer, bytes.data, size)
+  initialize_buffer(pointer, bytes.data, size)
 end
 
 local function tcp_read_dispatch(tcp: uv_tcp_t, result: integer)
@@ -1348,13 +1407,13 @@ local function tcp_read_dispatch(tcp: uv_tcp_t, result: integer)
   local bytes? = control.read_bytes
   if result < 0 then
     if control.read_active then
-      shim.titan_uvshim_tcp_read_stop(tcp.handle)
+      libuv.uv_read_stop(tcp.handle)
       control.read_active = false
     end
     control.read_bytes = nil
     control.read_waiter = nil
     control.read_epoch = 0
-    if result == UV_EOF then
+    if result == libuv.UV_EOF then
       control.read_terminal = TCP_READ_EOF
       if waiter then
         local task = waiter
@@ -1431,11 +1490,11 @@ local function tcp_connection_dispatch(server: uv_tcp_t, result: integer)
         make_error(init_status, "net.accept.init", "server"))
     return
   end
-  local status = shim.titan_uvshim_tcp_accept(server.handle, client.handle)
-  if (status as integer) < 0 then
+  local status = libuv.uv_accept(server.handle, client.handle)
+  if status < 0 then
     start_tcp_close(client)
     server_callback_failure(server,
-        make_error(status as integer, "net.accept", "server"))
+        make_error(status, "net.accept", "server"))
     return
   end
   client.metadata.lifecycle = TCP_CONNECTION
@@ -1481,13 +1540,13 @@ local function tcp_dispatch_body(owner: uv_tcp_t, event_kind: integer,
                                  result: integer, size: libuv.size_t,
                                  pointer: ffi.titan_ffi_void_ptr)
   local control = owner.metadata
-  if event_kind == EVENT_HANDLE_CLOSE then
+  if event_kind == shim.TITAN_UV_EVENT_HANDLE_CLOSE then
     finish_closed_tcp(owner)
-  elseif event_kind == EVENT_STREAM_ALLOC then
+  elseif event_kind == shim.TITAN_UV_EVENT_STREAM_ALLOC then
     tcp_alloc_dispatch(owner, size, pointer)
-  elseif event_kind == EVENT_STREAM_READ then
+  elseif event_kind == shim.TITAN_UV_EVENT_STREAM_READ then
     tcp_read_dispatch(owner, result)
-  elseif event_kind == EVENT_CONNECTION then
+  elseif event_kind == shim.TITAN_UV_EVENT_CONNECTION then
     if control.lifecycle == TCP_CLOSING or
        control.lifecycle == TCP_CLOSED then
       return
@@ -1499,7 +1558,7 @@ end
 local function tcp_dispatch(owner: uv_tcp_t, event_kind: integer,
                             result: integer, size: libuv.size_t,
                             pointer: ffi.titan_ffi_void_ptr)
-  if event_kind == EVENT_HANDLE_CLOSE then
+  if event_kind == shim.TITAN_UV_EVENT_HANDLE_CLOSE then
     owner.metadata.lifecycle = TCP_CLOSED
   end
   tcp_dispatch_body(owner, event_kind, result, size, pointer)
@@ -1507,9 +1566,9 @@ catch
   -- A failed alloc callback returns the shim's NULL/zero descriptor. libuv's
   -- Unix stream path must then issue UV_ENOBUFS through read_cb; stopping here
   -- would clear that callback before libuv calls it.
-  if event_kind ~= EVENT_STREAM_ALLOC and
+  if event_kind ~= shim.TITAN_UV_EVENT_STREAM_ALLOC and
       owner.metadata.read_active and owner.handle ~= nil then
-    shim.titan_uvshim_tcp_read_stop(owner.handle)
+    libuv.uv_read_stop(owner.handle)
     owner.metadata.read_active = false
   end
   owner.metadata.read_bytes = nil

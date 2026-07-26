@@ -2,6 +2,7 @@
 local foreigntypes = {}
 
 local types = require "titan-compiler.types"
+local csemantics = require "titan-compiler.csemantics"
 local inspect = require "inspect"
 
 local qualifiers = {
@@ -25,6 +26,454 @@ local function copy_list(xs)
     return out
 end
 
+local function same_qualifiers(left, right)
+    local lset, rset = {}, {}
+    for _, qualifier in ipairs(left or {}) do lset[qualifier] = true end
+    for _, qualifier in ipairs(right or {}) do rset[qualifier] = true end
+    for qualifier in pairs(lset) do
+        if not rset[qualifier] then return false end
+    end
+    for qualifier in pairs(rset) do
+        if not lset[qualifier] then return false end
+    end
+    return true
+end
+
+local function combined_qualifiers(...)
+    local out = {}
+    for index = 1, select("#", ...) do
+        for _, qualifier in ipairs(select(index, ...) or {}) do
+            out[#out + 1] = qualifier
+        end
+    end
+    return out
+end
+
+-- A C typedef introduces a user-visible spelling, but declarations that use
+-- two different typedef names can still denote the same C type. Preserve the
+-- aliases in imported module members and peel them only for this compatibility
+-- relation. Qualifiers attached by typedef declarations remain significant.
+local function resolve_declaration_typedefs(typ)
+    local qualifiers = {}
+    local seen = {}
+    local chain = {}
+    while typ and typ._tag == "Type.CTypedef" do
+        if seen[typ] then return nil end
+        seen[typ] = true
+        chain[#chain + 1] = typ
+        for _, qualifier in ipairs(typ.quals or {}) do
+            qualifiers[#qualifiers + 1] = qualifier
+        end
+        typ = typ.target
+    end
+    return typ, qualifiers, chain
+end
+
+local declaration_types_compatible
+
+local function same_declaration_list(left, right, seen,
+                                     ignore_outer_qualifiers,
+                                     allow_anonymous_aggregate,
+                                     allow_oldstyle_prototype,
+                                     allow_array_bound_candidate)
+    if #left ~= #right then return false end
+    for index = 1, #left do
+        if not declaration_types_compatible(
+            left[index], right[index], seen, ignore_outer_qualifiers,
+            allow_anonymous_aggregate,
+            allow_oldstyle_prototype,
+            allow_array_bound_candidate) then
+            return false
+        end
+    end
+    return true
+end
+
+local function same_declaration_value(left, right, seen)
+    if left == right then return true end
+    if type(left) ~= type(right) or type(left) ~= "table" then
+        return false
+    end
+    seen = seen or {}
+    local matches = seen[left]
+    if matches and matches[right] then return true end
+    if not matches then
+        matches = {}
+        seen[left] = matches
+    end
+    matches[right] = true
+    for key, value in pairs(left) do
+        if not same_declaration_value(value, right[key], seen) then
+            return false
+        end
+    end
+    for key in pairs(right) do
+        if left[key] == nil then return false end
+    end
+    return true
+end
+
+local function is_anonymous_aggregate(typ)
+    return (typ._tag == "Type.CStruct" or typ._tag == "Type.CUnion")
+       and typ.cname == nil
+       and typ.tagname == nil
+       and typ.typedef == nil
+end
+
+local function unknown_array_bound(bound)
+    return bound == nil or bound == false or bound == ""
+end
+
+local function array_bounds_compatible(
+        left, right, allow_array_bound_candidate)
+    return unknown_array_bound(left)
+        or unknown_array_bound(right)
+        or same_declaration_value(left, right)
+        or allow_array_bound_candidate
+end
+
+local function anonymous_aggregates_compatible(
+        left, right, seen, allow_oldstyle_prototype,
+        allow_array_bound_candidate)
+    if not is_anonymous_aggregate(left)
+       or not is_anonymous_aggregate(right)
+       or left.complete ~= right.complete
+       or left.has_fam ~= right.has_fam
+       or #(left.fields or {}) ~= #(right.fields or {}) then
+        return false
+    end
+    for index, lfield in ipairs(left.fields or {}) do
+        local rfield = right.fields[index]
+        if not rfield
+           or lfield.name ~= rfield.name
+           or not same_declaration_value(
+                lfield.bitfield, rfield.bitfield)
+           or lfield.flexible_array ~= rfield.flexible_array
+           or not declaration_types_compatible(
+                lfield.type, rfield.type, seen, false, true,
+                allow_oldstyle_prototype,
+                allow_array_bound_candidate) then
+            return false
+        end
+    end
+    return true
+end
+
+local function function_returns_compatible(
+        left, right, left_qualifiers, right_qualifiers, seen,
+        allow_anonymous_aggregate, allow_oldstyle_prototype,
+        allow_array_bound_candidate)
+    local _, lalias_quals =
+        resolve_declaration_typedefs(left)
+    local _, ralias_quals =
+        resolve_declaration_typedefs(right)
+    return same_qualifiers(
+            combined_qualifiers(left_qualifiers, lalias_quals),
+            combined_qualifiers(right_qualifiers, ralias_quals))
+       and declaration_types_compatible(
+            left, right, seen, true,
+            allow_anonymous_aggregate,
+            allow_oldstyle_prototype,
+            allow_array_bound_candidate)
+end
+
+local function function_paramstyle(typ)
+    return typ._paramstyle or "prototype"
+end
+
+local function oldstyle_prototype_candidate(left, right)
+    local left_style = function_paramstyle(left)
+    local right_style = function_paramstyle(right)
+    if left_style == right_style then return false end
+    local oldstyle = left_style == "oldstyle"
+        and left or right_style == "oldstyle"
+        and right
+    local prototype = left_style == "prototype"
+        and left or right_style == "prototype"
+        and right
+    return oldstyle and prototype
+       and #(oldstyle.params or {}) == 0
+       and not oldstyle.vararg
+       and not prototype.vararg
+end
+
+-- Exact compatibility for two declarations of one C ordinary identifier.
+-- This is deliberately narrower than Titan's assignment compatibility:
+-- integer promotions, void-pointer conversions, and unsafe pointer probes do
+-- not make two declarations compatible. Named aggregates remain nominal and
+-- therefore compare only through the canonical object interned by the tag
+-- registry.
+declaration_types_compatible = function(left, right, seen,
+                                        ignore_outer_qualifiers,
+                                        allow_anonymous_aggregate,
+                                        allow_oldstyle_prototype,
+                                        allow_array_bound_candidate)
+    if left == right then return true end
+    if type(left) ~= "table" or type(right) ~= "table" then return false end
+    local ltype, lquals =
+        resolve_declaration_typedefs(left)
+    local rtype, rquals =
+        resolve_declaration_typedefs(right)
+    if not ltype or not rtype then return false end
+    if not ignore_outer_qualifiers
+       and ltype._tag ~= "Type.CArray"
+       and rtype._tag ~= "Type.CArray"
+       and not same_qualifiers(lquals, rquals) then
+        return false
+    end
+    if ltype == rtype and ltype._tag ~= "Type.CArray" then
+        return true
+    end
+    if ltype._tag ~= rtype._tag then return false end
+
+    seen = seen or {}
+    local matches = seen[ltype]
+    if matches and matches[rtype] then return true end
+    if not matches then
+        matches = {}
+        seen[ltype] = matches
+    end
+    matches[rtype] = true
+
+    local tag = ltype._tag
+    if tag == "Type.CVoid" then
+        return true
+    elseif tag == "Type.CInteger" then
+        return ltype.spelling == rtype.spelling
+           and ltype.signed == rtype.signed
+           and ltype.rank == rtype.rank
+           and ltype.bits == rtype.bits
+    elseif tag == "Type.CFloat" then
+        return ltype.spelling == rtype.spelling
+    elseif tag == "Type.CPointer" then
+        local _, lpointee_quals =
+            resolve_declaration_typedefs(ltype.pointee)
+        local _, rpointee_quals =
+            resolve_declaration_typedefs(rtype.pointee)
+        return same_qualifiers(
+                combined_qualifiers(ltype.quals, lpointee_quals),
+                combined_qualifiers(rtype.quals, rpointee_quals))
+           and declaration_types_compatible(
+                ltype.pointee, rtype.pointee, seen, true,
+                allow_anonymous_aggregate,
+                allow_oldstyle_prototype,
+                allow_array_bound_candidate)
+    elseif tag == "Type.CArray" then
+        local _, lelem_quals =
+            resolve_declaration_typedefs(ltype.elem)
+        local _, relem_quals =
+            resolve_declaration_typedefs(rtype.elem)
+        return array_bounds_compatible(
+                ltype.len, rtype.len, allow_array_bound_candidate)
+           and same_qualifiers(
+                combined_qualifiers(
+                    lquals, ltype.quals, lelem_quals),
+                combined_qualifiers(
+                    rquals, rtype.quals, relem_quals))
+           and declaration_types_compatible(
+                ltype.elem, rtype.elem, seen, true,
+                allow_anonymous_aggregate,
+                allow_oldstyle_prototype,
+                allow_array_bound_candidate)
+    elseif tag == "Type.CFunction" then
+        local oldstyle_candidate =
+            oldstyle_prototype_candidate(ltype, rtype)
+        local params_compatible =
+            function_paramstyle(ltype)
+                == function_paramstyle(rtype)
+            and ltype.vararg == rtype.vararg
+            and same_declaration_list(
+                ltype.params, rtype.params, seen, true,
+                allow_anonymous_aggregate,
+                allow_oldstyle_prototype,
+                allow_array_bound_candidate)
+            or allow_oldstyle_prototype
+                and oldstyle_candidate
+        return params_compatible
+           and ltype.abi == rtype.abi
+           and function_returns_compatible(
+                ltype.ret, rtype.ret,
+                ltype._return_declaration_qualifiers,
+                rtype._return_declaration_qualifiers, seen,
+                allow_anonymous_aggregate,
+                allow_oldstyle_prototype,
+                allow_array_bound_candidate)
+    elseif tag == "Type.Function" then
+        -- Foreign functions are represented as ordinary Titan Function values
+        -- whose slots contain C types. C ignores the outer qualification of a
+        -- parameter declaration, hence the true argument below.
+        if ltype._c_function and rtype._c_function then
+            return declaration_types_compatible(
+                ltype._c_function, rtype._c_function, seen, false,
+                allow_anonymous_aggregate,
+                allow_oldstyle_prototype,
+                allow_array_bound_candidate)
+        end
+        return function_paramstyle(ltype)
+                    == function_paramstyle(rtype)
+           and ltype.vararg == rtype.vararg
+           and not ltype.varargtype and not rtype.varargtype
+           and not ltype.flexrettype and not rtype.flexrettype
+           and same_declaration_list(
+                ltype.params, rtype.params, seen, true,
+                allow_anonymous_aggregate,
+                allow_oldstyle_prototype,
+                allow_array_bound_candidate)
+           and #ltype.rettypes == #rtype.rettypes
+           and (#ltype.rettypes == 0
+                or function_returns_compatible(
+                    ltype.rettypes[1], rtype.rettypes[1],
+                    ltype._return_declaration_qualifiers,
+                    rtype._return_declaration_qualifiers, seen,
+                    allow_anonymous_aggregate,
+                    allow_oldstyle_prototype,
+                    allow_array_bound_candidate))
+    elseif tag == "Type.CStruct" or tag == "Type.CUnion" then
+        if allow_anonymous_aggregate then
+            return anonymous_aggregates_compatible(
+                ltype, rtype, seen,
+                allow_oldstyle_prototype,
+                allow_array_bound_candidate)
+        end
+        -- Reaching this branch means the objects are distinct. Equal tag
+        -- spellings do not collapse distinct file/prototype-scope identities,
+        -- and anonymous objects compare structurally only through the
+        -- shared physical typedef-declaration exception above.
+        return false
+    end
+    return false
+end
+
+function foreigntypes.declaration_compatibility(
+        left, right, left_declaration, right_declaration)
+    local ltype, lalias_quals =
+        resolve_declaration_typedefs(left)
+    local rtype, ralias_quals =
+        resolve_declaration_typedefs(right)
+    if not ltype or not rtype then return false end
+    local arrays = ltype._tag == "Type.CArray"
+        and rtype._tag == "Type.CArray"
+    if not arrays
+       and not same_qualifiers(
+            combined_qualifiers(
+                left_declaration and left_declaration.qualifiers,
+                lalias_quals),
+            combined_qualifiers(
+                right_declaration and right_declaration.qualifiers,
+                ralias_quals)) then
+        return false
+    end
+    -- Non-array declaration/typedef qualifiers were compared in their
+    -- normalized object-level position above. Array qualification belongs to
+    -- its element type and is therefore normalized by the array branch.
+    if declaration_types_compatible(
+        left, right, {}, not arrays, false, false, false) then
+        return "exact"
+    end
+    -- Distinct anonymous aggregates, old-style/prototype pairs, and unequal
+    -- known array-bound syntax from independently parsed header snapshots
+    -- need target-C authority. Structural agreement only makes these
+    -- declarations candidates for a probe in the final ordered-header
+    -- context; it is never sufficient evidence by itself.
+    if declaration_types_compatible(
+        left, right, {}, not arrays, true, true, true) then
+        return "conditional"
+    end
+    return false
+end
+
+function foreigntypes.declarations_compatible(...)
+    return foreigntypes.declaration_compatibility(...) == "exact"
+end
+
+local function merge_declaration_composite(previous, current, seen)
+    -- The first published declaration-owned view is shared by its earlier
+    -- module member and the ordinary-name registry. Complete unknown array
+    -- bounds recursively through that private graph so either import order
+    -- exposes C's known-bound composite. Canonical typedef targets remain
+    -- untouched; only aliases marked as declaration array views are descended.
+    if previous == current
+       or type(previous) ~= "table"
+       or type(current) ~= "table"
+       then
+        return previous
+    end
+    if previous._tag == "Type.CTypedef" then
+        if previous._declaration_array_view then
+            merge_declaration_composite(
+                previous.target,
+                current._tag == "Type.CTypedef"
+                    and current.target or current,
+                seen)
+        end
+        return previous
+    elseif current._tag == "Type.CTypedef" then
+        return merge_declaration_composite(
+            previous, current.target, seen)
+    elseif previous._tag ~= current._tag then
+        return previous
+    end
+    seen = seen or {}
+    local merged = seen[previous]
+    if merged and merged[current] then return previous end
+    if not merged then
+        merged = {}
+        seen[previous] = merged
+    end
+    merged[current] = true
+
+    local tag = previous._tag
+    if tag == "Type.CArray" then
+        if unknown_array_bound(previous.len)
+           and not unknown_array_bound(current.len) then
+            previous.len = current.len
+        end
+        merge_declaration_composite(
+            previous.elem, current.elem, seen)
+    elseif tag == "Type.CPointer" then
+        merge_declaration_composite(
+            previous.pointee, current.pointee, seen)
+    elseif tag == "Type.CFunction" then
+        if function_paramstyle(previous) == "oldstyle"
+           and function_paramstyle(current) == "prototype" then
+            previous.params = current.params
+            previous.vararg = current.vararg
+            previous._paramstyle = "prototype"
+        end
+        for index, param in ipairs(previous.params or {}) do
+            merge_declaration_composite(
+                param, current.params[index], seen)
+        end
+        merge_declaration_composite(
+            previous.ret, current.ret, seen)
+    elseif tag == "Type.Function" then
+        if previous._c_function and current._c_function then
+            merge_declaration_composite(
+                previous._c_function,
+                current._c_function, seen)
+        end
+        if function_paramstyle(previous) == "oldstyle"
+           and function_paramstyle(current) == "prototype" then
+            previous.params = current.params
+            previous.rettypes = current.rettypes
+            previous.vararg = current.vararg
+            previous._paramstyle = "prototype"
+        end
+        for index, param in ipairs(previous.params or {}) do
+            merge_declaration_composite(
+                param, current.params[index], seen)
+        end
+        for index, ret in ipairs(previous.rettypes or {}) do
+            merge_declaration_composite(
+                ret, current.rettypes[index], seen)
+        end
+    end
+    return previous
+end
+
+foreigntypes.merge_declaration_composite =
+    merge_declaration_composite
+
 local function c_type_key(ftype)
     if ftype.type == "struct" or ftype.type == "union" or ftype.type == "enum" then
         local name = c_name(ftype.name)
@@ -32,6 +481,43 @@ local function c_type_key(ftype)
             return nil
         end
         return ftype.type .. "@" .. tostring(name)
+    end
+end
+
+local function tag_provenance(ftype)
+    local metadata = ftype._file_scope_tag_metadata
+        or (ftype._canonical_tag
+            and ftype._canonical_tag._file_scope_tag_metadata)
+    local is_definition = ftype.fields ~= nil or ftype.values ~= nil
+    if is_definition and metadata and metadata.declarations then
+        for _, provenance in ipairs(metadata.declarations) do
+            if provenance.definition then return provenance end
+        end
+    end
+    if metadata and metadata.declarations
+       and metadata.declarations[1] then
+        return metadata.declarations[1]
+    end
+    return ftype._tag_provenance
+        or (ftype._canonical_tag and ftype._canonical_tag._tag_provenance)
+end
+
+-- Bind only parser-annotated tags. Legacy/manual declarations without scope
+-- metadata retain the old raw-key behavior below.
+local function bind_tag_record(st, ftype)
+    local name = c_name(ftype.name)
+    if not name then return nil end
+
+    local provenance = tag_provenance(ftype)
+    if ftype._file_scope_tag then
+        if ftype.type == "enum" then
+            return st:register_c_enum_tag(name, provenance)
+        end
+        return st:register_c_file_tag(name, ftype.type, provenance)
+    elseif ftype._prototype_scope_id ~= nil then
+        return st:bind_c_prototype_tag(
+            name, ftype.type, ftype._prototype_scope_id, provenance,
+            ftype._allow_outer_binding)
     end
 end
 
@@ -91,9 +577,7 @@ local function canonical_spelling(tokens)
         end
     end
 
-    if #tokens == 1 and integer_specs[tokens[1]] then
-        return tokens[1]
-    elseif seen.void then
+    if seen.void then
         return "void"
     elseif seen._Complex then
         return nil
@@ -105,33 +589,43 @@ local function canonical_spelling(tokens)
         if unsigned then return "unsigned char" end
         if signed then return "signed char" end
         return "char"
+    elseif seen["__int128"] then
+        if unsigned then return "unsigned __int128" end
+        return "__int128"
     elseif seen.short then
         if unsigned then return "unsigned short" end
-        if signed then return "signed short" end
         return "short"
     elseif longs >= 2 then
         if unsigned then return "unsigned long long" end
-        if signed then return "signed long long" end
         return "long long"
     elseif longs == 1 then
         if unsigned then return "unsigned long" end
-        if signed then return "signed long" end
         return "long"
     elseif seen.int or unsigned or signed then
         if unsigned then return "unsigned int" end
-        if signed then return "signed int" end
         return "int"
     end
 
     return table.concat(tokens, " ")
 end
 
-local function primitive_from_tokens(tokens)
+local function primitive_from_tokens(profile, tokens)
     local spelling = canonical_spelling(tokens)
     if spelling == "" then
         return nil
     elseif spelling == "void" then
         return types.CVoid()
+    elseif profile and profile.floats
+           and profile.floats[spelling] then
+        return profile.floats[spelling].type
+    elseif profile and profile.integers
+           and profile.integers[spelling] then
+        return profile.integers[spelling].type
+    elseif profile then
+        -- A configured profile is authoritative. In particular, compiler
+        -- extension integers such as __int128 must not leak in from a
+        -- hard-coded host assumption when the selected target lacks them.
+        return nil
     elseif float_specs[spelling] then
         return types.CFloat(spelling)
     elseif integer_specs[spelling] then
@@ -140,14 +634,41 @@ local function primitive_from_tokens(tokens)
     end
 end
 
-local function with_array_dims(base, idxs)
+local function merged_qualifiers(first, second)
+    local out = {}
+    for _, qual in ipairs(first or {}) do table.insert(out, qual) end
+    for _, qual in ipairs(second or {}) do table.insert(out, qual) end
+    return out
+end
+
+local function qualify_array(base, quals)
+    if not quals or #quals == 0 then return base end
+    local resolved = types.resolve_c_typedef(base)
+    if not resolved or resolved._tag ~= "Type.CArray" then
+        -- Top-level scalar/pointer qualification does not affect the value type
+        -- imported by Titan. Array qualification is retained because it becomes
+        -- pointee qualification on decay.
+        return base
+    end
+    return types.CArray(resolved.elem, resolved.len,
+        merged_qualifiers(resolved.quals, quals))
+end
+
+local function with_array_dims(base, idxs, quals)
     for i = #(idxs or {}), 1, -1 do
         base = types.CArray(base, idxs[i])
     end
-    return base
+    local resolved = types.resolve_c_typedef(base)
+    if resolved and resolved._tag == "Type.CArray" then
+        return qualify_array(base, quals), nil, {}
+    end
+    -- A direct declaration may ignore top-level scalar/pointer qualification,
+    -- but a typedef definition must retain it for every later use of the name.
+    return base, nil, copy_list(quals or {})
 end
 
 local convert_type
+local convert_parts
 
 local function apply_pointer_suffixes(base, suffixes)
     local quals = {}
@@ -159,7 +680,7 @@ local function apply_pointer_suffixes(base, suffixes)
             table.insert(quals, suffix)
         end
     end
-    return base
+    return base, quals
 end
 
 local function populate_struct_or_union(st, owner, ftype)
@@ -169,9 +690,6 @@ local function populate_struct_or_union(st, owner, ftype)
 
     local fields = {}
     local has_fam = false
-    owner.fields = fields
-    owner.complete = true
-    owner._definition_order = st.current_toplevel_order or 0
     for _, field in ipairs(ftype.fields) do
         if not field.anonymous and field.name then
             local ftyp, err = convert_type(st, field)
@@ -184,13 +702,51 @@ local function populate_struct_or_union(st, owner, ftype)
             has_fam = has_fam or (field.flexible_array and true or false)
         end
     end
+    -- Completion is atomic. A seeded raw tag can be visited before typedefs
+    -- needed by its fields have been converted; a failed best-effort attempt
+    -- must leave the canonical owner incomplete so a later declaration can
+    -- complete it rather than freezing a partial field list.
+    owner.fields = fields
+    owner.complete = true
+    owner._definition_order = st.current_toplevel_order or 0
     if owner._tag == "Type.CStruct" then
         owner.has_fam = has_fam
     end
     return owner
 end
 
+local function new_struct_or_union(ftype)
+    local fields = {}
+    local tagname = c_name(ftype.name)
+    return (ftype.type == "struct")
+        and types.CStruct(nil, tagname, nil, fields, false, false)
+        or types.CUnion(nil, tagname, nil, fields, false)
+end
+
 local function convert_struct_or_union(st, ftype)
+    local record, binding_err = bind_tag_record(st, ftype)
+    if binding_err then return nil, binding_err end
+    if record then
+        local owner = record.canonical
+        if not owner then
+            local key
+            local raw
+            if record.scope == "file" then
+                key = ftype.type .. "@" .. c_name(ftype.name)
+                raw = st:find_foreign_type(key)
+            end
+            owner = st:set_c_tag_canonical(
+                record, raw or new_struct_or_union(ftype))
+            if key and not raw then
+                st:add_foreign_type(key, owner)
+            end
+        end
+        if ftype.fields and not owner.complete then
+            return populate_struct_or_union(st, owner, ftype)
+        end
+        return owner
+    end
+
     local key = c_type_key(ftype) or ""
     local existing = st:find_foreign_type(key)
     if existing then
@@ -200,12 +756,7 @@ local function convert_struct_or_union(st, ftype)
         return existing
     end
 
-    local owner
-    local fields = {}
-    local tagname = c_name(ftype.name)
-    owner = (ftype.type == "struct")
-        and types.CStruct(nil, tagname, nil, fields, ftype.fields ~= nil, false)
-        or types.CUnion(nil, tagname, nil, fields, ftype.fields ~= nil)
+    local owner = new_struct_or_union(ftype)
     if key ~= "" then
         st:add_foreign_type(key, owner)
     end
@@ -216,12 +767,27 @@ end
 local function convert_struct_or_union_declarator(st, ftype)
     local base, err = convert_struct_or_union(st, ftype)
     if not base then return nil, err end
-    return with_array_dims(apply_pointer_suffixes(base, ftype.pointer),
-                           ftype.idxs)
+    local adjusted, quals =
+        apply_pointer_suffixes(base, ftype.pointer)
+    return with_array_dims(adjusted, ftype.idxs, quals)
 end
 
-local function convert_enum()
-    return types.CInteger("int", true, 3, false)
+local function convert_enum(st, ftype)
+    local record, binding_err = bind_tag_record(st, ftype)
+    if binding_err then return nil, binding_err end
+    if record and record.canonical then
+        return record.canonical
+    end
+
+    local enum_type = st.c_profile
+        and st.c_profile.integers
+        and st.c_profile.integers.int
+        and st.c_profile.integers.int.type
+        or types.CInteger("int", true, 3, false)
+    if record then
+        enum_type = st:set_c_tag_canonical(record, enum_type)
+    end
+    return enum_type
 end
 
 local function convert_function_type(st, ftype)
@@ -231,24 +797,40 @@ local function convert_function_type(st, ftype)
         if not pt then return nil, err end
         local rpt = types.resolve_c_typedef(pt)
         if rpt._tag == "Type.CArray" then
-            pt = types.CPointer(rpt.elem, {})
+            pt = types.CPointer(rpt.elem, rpt.quals or {})
         end
         if pt._tag ~= "Type.CVoid" then
             table.insert(ptypes, pt)
         end
     end
-    local rt, err = convert_type(st, ftype.ret)
+    local rt, err, return_qualifiers =
+        convert_type(st, ftype.ret)
     if not rt then return nil, err end
-    return types.CFunction(ptypes, rt, ftype.vararg, false)
+    local converted =
+        types.CFunction(ptypes, rt, ftype.vararg, false)
+    converted._paramstyle =
+        ftype._paramstyle
+    converted._return_declaration_qualifiers =
+        copy_list(return_qualifiers or {})
+    return converted
 end
 
 local function convert_function_pointer(st, ftype)
     local cfunc, err = convert_function_type(st, ftype)
     if not cfunc then return nil, err end
-    return with_array_dims(apply_pointer_suffixes(cfunc, ftype.pointer), ftype.idxs)
+    if ftype._declarator_ops then
+        local parts = { cfunc }
+        for _, operation in ipairs(ftype._declarator_ops) do
+            parts[#parts + 1] = operation
+        end
+        return convert_parts(st, parts)
+    end
+    local adjusted, quals =
+        apply_pointer_suffixes(cfunc, ftype.pointer)
+    return with_array_dims(adjusted, ftype.idxs, quals)
 end
 
-local function convert_parts(st, parts, idxs)
+convert_parts = function(st, parts, idxs)
     local base_tokens = {}
     local suffixes = {}
     local quals = {}
@@ -265,7 +847,9 @@ local function convert_parts(st, parts, idxs)
             if not ctyp then return nil, err end
             table.insert(base_tokens, ctyp)
         elseif type(part) == "table" and part.type == "enum" then
-            table.insert(base_tokens, convert_enum(part))
+            local ctyp, err = convert_enum(st, part)
+            if not ctyp then return nil, err end
+            table.insert(base_tokens, ctyp)
         elseif qualifiers[part] then
             table.insert(quals, part)
         elseif st:find_foreign_type(part) then
@@ -287,7 +871,7 @@ local function convert_parts(st, parts, idxs)
                 return nil, "unsupported mixed C type: " .. inspect(parts)
             end
         end
-        base = primitive_from_tokens(tokens)
+        base = primitive_from_tokens(st.c_profile, tokens)
     end
 
     if not base then
@@ -302,18 +886,27 @@ local function convert_parts(st, parts, idxs)
         end
     end
 
-    return with_array_dims(base, idxs)
+    return with_array_dims(base, idxs, quals)
 end
 
 convert_type = function(st, ftype)
     if ftype.type == "struct" or ftype.type == "union" then
         return convert_struct_or_union_declarator(st, ftype)
     elseif ftype.type == "enum" then
-        return convert_enum(ftype)
+        return convert_enum(st, ftype)
     elseif ftype.type == "functionptr" then
         return convert_function_pointer(st, ftype)
     elseif ftype.type == "typedef" then
         return foreigntypes.convert(st, ftype)
+    elseif ftype._declarator_base then
+        local parts = {}
+        for _, part in ipairs(ftype._declarator_base) do
+            parts[#parts + 1] = part
+        end
+        for _, operation in ipairs(ftype._declarator_ops or {}) do
+            parts[#parts + 1] = operation
+        end
+        return convert_parts(st, parts)
     elseif type(ftype.type) == "table" then
         return convert_parts(st, ftype.type, ftype.idxs)
     end
@@ -323,37 +916,187 @@ end
 local function convert_function(st, ftype)
     local cfunc, err = convert_function_type(st, ftype)
     if not cfunc then return nil, err end
-    local rettypes = cfunc.ret._tag == "Type.CVoid" and {} or { cfunc.ret }
-    return types.Function(cfunc.params, rettypes, cfunc.vararg, false, false)
+    local resolved_return = types.resolve_c_typedef(cfunc.ret)
+    local rettypes =
+        resolved_return._tag == "Type.CVoid" and {} or { cfunc.ret }
+    local converted =
+        types.Function(cfunc.params, rettypes, cfunc.vararg, false, false)
+    converted._c_function = cfunc
+    converted._c_return_type = cfunc.ret
+    converted._paramstyle = cfunc._paramstyle
+    converted._return_declaration_qualifiers =
+        copy_list(cfunc._return_declaration_qualifiers or {})
+    return converted
 end
 
 local function convert_typedef(st, ftype)
-    local target, err
+    local target, err, quals
     if type(ftype.def) == "table" and ftype.def.type == "functionptr" then
-        target, err = convert_function_pointer(st, ftype.def)
+        target, err, quals =
+            convert_function_pointer(st, ftype.def)
+    elseif ftype._declarator_base then
+        local parts = {}
+        for _, part in ipairs(ftype._declarator_base) do
+            parts[#parts + 1] = part
+        end
+        for _, operation in ipairs(ftype._declarator_ops or {}) do
+            parts[#parts + 1] = operation
+        end
+        target, err, quals = convert_parts(st, parts)
     else
-        target, err = convert_parts(st, ftype.def, ftype.idxs)
+        target, err, quals =
+            convert_parts(st, ftype.def, ftype.idxs)
     end
     if not target then return nil, err end
-    return types.CTypedef(ftype.name, target)
+    local converted = types.CTypedef(
+        ftype.name, target, quals or {})
+    converted._declaration_provenance =
+        ftype._declaration_provenance
+    return converted
+end
+
+local function declaration_array_view(typ, memo)
+    if type(typ) ~= "table" then return typ, false end
+    memo = memo or {}
+    local cached = memo[typ]
+    if cached then return cached.type, cached.cloned end
+
+    -- Install a conservative entry before descending. Valid C declarator
+    -- graphs cannot contain an array cycle, while canonical aggregate cycles
+    -- stop below because aggregates themselves are never cloned here.
+    memo[typ] = { type = typ, cloned = false }
+    local tag = typ._tag
+    local view, cloned
+    if tag == "Type.CArray" then
+        local elem =
+            declaration_array_view(typ.elem, memo)
+        view = types.CArray(
+            elem, typ.len, copy_list(typ.quals or {}))
+        cloned = true
+    elseif tag == "Type.CTypedef" then
+        local target, target_cloned =
+            declaration_array_view(typ.target, memo)
+        if target_cloned then
+            view = types.CTypedef(
+                typ.name, target, copy_list(typ.quals or {}))
+            view._declaration_provenance =
+                typ._declaration_provenance
+            view._declaration_array_view = true
+            cloned = true
+        end
+    elseif tag == "Type.CPointer" then
+        local pointee, pointee_cloned =
+            declaration_array_view(typ.pointee, memo)
+        if pointee_cloned then
+            view = types.CPointer(
+                pointee, copy_list(typ.quals or {}))
+            cloned = true
+        end
+    elseif tag == "Type.CFunction" then
+        local params, changed = {}, false
+        for index, param in ipairs(typ.params or {}) do
+            local converted, param_cloned =
+                declaration_array_view(param, {})
+            params[index] = converted
+            changed = changed or param_cloned
+        end
+        local ret, ret_cloned =
+            declaration_array_view(typ.ret, {})
+        changed = changed or ret_cloned
+        if changed then
+            view = types.CFunction(
+                params, ret, typ.vararg, typ.abi)
+            view._paramstyle = typ._paramstyle
+            view._return_declaration_qualifiers =
+                copy_list(typ._return_declaration_qualifiers or {})
+            cloned = true
+        end
+    elseif tag == "Type.Function" then
+        local cfunc, cfunc_cloned =
+            declaration_array_view(typ._c_function, memo)
+        if cfunc_cloned then
+            local resolved_return =
+                types.resolve_c_typedef(cfunc.ret)
+            local rettypes = resolved_return._tag == "Type.CVoid"
+                and {} or { cfunc.ret }
+            view = types.Function(
+                cfunc.params, rettypes, cfunc.vararg, false, false)
+            view._c_function = cfunc
+            view._c_return_type = cfunc.ret
+            view._paramstyle = cfunc._paramstyle
+            view._return_declaration_qualifiers =
+                copy_list(cfunc._return_declaration_qualifiers or {})
+            cloned = true
+        end
+    end
+
+    view = view or typ
+    memo[typ] = { type = view, cloned = cloned and true or false }
+    return view, cloned and true or false
 end
 
 function foreigntypes.convert(st, ftype)
+    if ftype.macro_expression
+       and ftype.integer_literals
+       and #ftype.integer_literals > 0
+       and st.c_profile then
+        local evaluated, evaluation_error =
+            csemantics.evaluate_macro_expression(
+                st.c_profile, ftype.macro_expression)
+        if not evaluated then
+            return nil, "unsupported target integer macro expression: " ..
+                tostring(evaluation_error)
+        end
+        ftype._macro_evaluation = evaluated
+        return evaluated.type
+    end
+    local converted, err, declaration_qualifiers
     if ftype.type == "function" then
-        return convert_function(st, ftype)
+        converted, err = convert_function(st, ftype)
     elseif ftype.type == "typedef" then
-        return convert_typedef(st, ftype)
+        converted, err = convert_typedef(st, ftype)
     elseif ftype.type == "struct" or ftype.type == "union" then
-        return convert_struct_or_union_declarator(st, ftype)
+        converted, err, declaration_qualifiers =
+            convert_struct_or_union_declarator(st, ftype)
     elseif ftype.type == "enum" then
-        return convert_enum(ftype)
+        converted, err = convert_enum(st, ftype)
     elseif ftype.type == "functionptr" then
-        return convert_function_pointer(st, ftype)
+        converted, err, declaration_qualifiers =
+            convert_function_pointer(st, ftype)
     elseif type(ftype.type) == "table" then
-        return convert_type(st, ftype)
+        converted, err, declaration_qualifiers =
+            convert_type(st, ftype)
     else
         return nil, "FIXME unconverted " .. inspect(ftype)
     end
+    if not converted then return nil, err end
+    if ftype.type == "function"
+       or ftype.type == "functionptr"
+       or type(ftype.type) == "table" then
+        converted = declaration_array_view(converted)
+    end
+    if ftype._macro_cast then
+        local scalar = types.resolve_c_typedef(converted)
+        if not scalar
+           or (scalar._tag ~= "Type.CInteger"
+               and scalar._tag ~= "Type.CFloat"
+               and scalar._tag ~= "Type.CPointer") then
+            -- A C cast expression can produce only a scalar value (or void).
+            -- The parser also accepts syntactically shaped but semantically
+            -- invalid aggregate/array targets, so do not publish those as
+            -- usable macro members.
+            return nil
+        end
+    end
+    -- Direct scalar/pointer qualification is declaration metadata, not value
+    -- type identity. Keep it beside the converted type: profile primitives and
+    -- canonical tags are shared objects and must never be mutated per
+    -- declaration.
+    local declaration = {
+        qualifiers = copy_list(declaration_qualifiers or {}),
+        provenance = ftype._declaration_provenance,
+    }
+    return converted, nil, declaration
 end
 
 return foreigntypes

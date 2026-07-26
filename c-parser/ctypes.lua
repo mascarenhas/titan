@@ -27,11 +27,94 @@ local equal_lists = typed("array, array -> boolean", function(l1, l2)
     return true
 end)
 
+local function equal_symbolic_values(left, right)
+    if type(left) ~= type(right) then
+        return false
+    elseif type(left) ~= "table" then
+        return left == right
+    end
+
+    for key, value in pairs(left) do
+        if not equal_symbolic_values(value, right[key]) then
+            return false
+        end
+    end
+    for key in pairs(right) do
+        if left[key] == nil then
+            return false
+        end
+    end
+    return true
+end
+
+local function normalized_declarator_operations(operations)
+    local normalized = {}
+    for _, operation in ipairs(operations or {}) do
+        if operation == "*" then
+            normalized[#normalized + 1] = {
+                kind = "pointer",
+                qualifiers = {},
+            }
+        elseif type(operation) == "string" then
+            local pointer = normalized[#normalized]
+            if not pointer or pointer.kind ~= "pointer" then
+                return nil
+            end
+            pointer.qualifiers[operation] = true
+        elseif type(operation) == "table"
+           and operation.idx ~= nil then
+            normalized[#normalized + 1] = {
+                kind = "array",
+                bound = operation.idx,
+            }
+        else
+            return nil
+        end
+    end
+    return normalized
+end
+
+local function equal_declarator_operations(left, right)
+    local left_ops = normalized_declarator_operations(left)
+    local right_ops = normalized_declarator_operations(right)
+    if not left_ops or not right_ops or #left_ops ~= #right_ops then
+        return false
+    end
+
+    for index, left_op in ipairs(left_ops) do
+        local right_op = right_ops[index]
+        if left_op.kind ~= right_op.kind then
+            return false
+        elseif left_op.kind == "pointer" then
+            if not equal_symbolic_values(
+                    left_op.qualifiers, right_op.qualifiers) then
+                return false
+            end
+        else
+            local left_unknown =
+                left_op.bound == nil or left_op.bound == ""
+            local right_unknown =
+                right_op.bound == nil or right_op.bound == ""
+            if not left_unknown and not right_unknown
+               and not equal_symbolic_values(
+                    left_op.bound, right_op.bound) then
+                return false
+            end
+        end
+    end
+    return true
+end
+
 equal_declarations = function(t1, t2)
     if type(t1) == "string" or type(t2) == "nil" then
         return t1 == t2
     end
     if not equal_declarations(t1.type, t2.type) then
+        return false
+    end
+    if (t1._declarator_ops or t2._declarator_ops)
+       and not equal_declarator_operations(
+            t1._declarator_ops, t2._declarator_ops) then
         return false
     end
 --    if not equal_lists(t1.name, t2.name) then
@@ -42,6 +125,10 @@ equal_declarations = function(t1, t2)
             return false
         end
     elseif t1.type == "function" then
+        if (t1._paramstyle or "prototype")
+           ~= (t2._paramstyle or "prototype") then
+            return false
+        end
         if not equal_declarations(t1.ret.type, t2.ret.type) then
             return false
         end
@@ -52,6 +139,10 @@ equal_declarations = function(t1, t2)
             return false
         end
     elseif t1.type == "functionptr" then
+        if (t1._paramstyle or "prototype")
+           ~= (t2._paramstyle or "prototype") then
+            return false
+        end
         if not equal_declarations(t1.ret.type, t2.ret.type) then
             return false
         end
@@ -69,7 +160,8 @@ equal_declarations = function(t1, t2)
 end
 
 local function is_modifier(str)
-    return str == "*" or str == "restrict" or str == "const"
+    return str == "*" or str == "restrict"
+        or str == "const" or str == "volatile"
 end
 
 local function extract_modifiers(ret_pointer, items)
@@ -173,47 +265,67 @@ end
 
 local get_type
 local get_fields
-local make_function_pointer_type
+local make_declarator_type
 
-local convert_value = typed("TypeList, table -> CType?, string?", function (lst, src)
-    local name = nil
-    local ret_pointer = {}
-    local idxs = nil
-
-    if type(src.id) == "table" or type(src.ids) == "table" then
-        -- FIXME multiple ids, e.g.: int *x, y, *z;
-        local ok
-        local is_funcptr = src.id and src.id.params
-            and is_function_pointer_declarator(src.id)
-        local outer_pointer = src.id and leading_modifiers(src.id) or {}
-        -- get_name fills these only when ok is true (checked below); LuaLS can't correlate.
-        ---@diagnostic disable-next-line: cast-local-type
-        ok, name, ret_pointer, idxs = get_name(src.id or src.ids)
-        if not ok then
-            return nil, name
-        end
-        if is_funcptr then
-            local typ, err = make_function_pointer_type(lst, name, src.type,
-                src.id, ret_pointer, idxs, outer_pointer)
-            if not typ then
-                return nil, err
-            end
-            return typ, nil
-        elseif src.id and src.id.declarator then
-            ret_pointer = prepend_modifiers(outer_pointer, ret_pointer)
-        end
+-- C declarators apply operators from the declaration specifiers out toward
+-- the identifier. Parentheses therefore change the order in which pointer,
+-- array, and function operators are applied. Preserve that order explicitly
+-- instead of flattening a nested declarator into an independent pointer list
+-- and array-dimension list.
+local function collect_declarator_operations(decl, operations)
+    operations = operations or {}
+    if type(decl) ~= "table" then
+        return operations
     end
 
-    local typ, err = get_type(lst, src, ret_pointer)
-    if not typ then
-        return nil, err
+    for _, modifier in ipairs(leading_modifiers(decl)) do
+        operations[#operations + 1] = modifier
     end
 
-    return typed.table("CType", {
-        name = name,
-        type = typ,
-        idxs = idxs,
-    }), nil
+    local dimensions = {}
+    for _, part in ipairs(decl) do
+        if type(part) == "table" and part.idx ~= nil then
+            dimensions[#dimensions + 1] = {
+                idx = calculate_or_original(part.idx),
+            }
+        end
+    end
+    for index = #dimensions, 1, -1 do
+        operations[#operations + 1] = dimensions[index]
+    end
+
+    if decl.params then
+        operations[#operations + 1] = {
+            function_declarator = decl,
+        }
+    end
+    if decl.declarator then
+        collect_declarator_operations(decl.declarator, operations)
+    end
+    return operations
+end
+
+local function declarator_name(decl)
+    if type(decl) ~= "table" then
+        return type(decl) == "string" and decl or nil
+    elseif decl.name then
+        return decl.name
+    elseif decl.declarator then
+        return declarator_name(decl.declarator)
+    end
+end
+
+local convert_value = typed("TypeList, table, boolean? -> CType?, string?", function (lst, src, adjust_function_parameter)
+    local decl = src.id or src.ids
+    if type(decl) == "table" then
+        return make_declarator_type(
+            lst, declarator_name(decl), src.type, decl,
+            adjust_function_parameter)
+    end
+
+    local typ, err = get_type(lst, src, {})
+    if not typ then return nil, err end
+    return typed.table("CType", { name = nil, type = typ }), nil
 end)
 
 local function mark_flexible_array_member(field)
@@ -319,12 +431,13 @@ local get_composite_type = typed("TypeList, string?, string, array, string, func
     local name = specid
     local key = spectype .. "@" .. (name or tostring(parts))
 
-    if not lst[key] then
-        -- Forward declaration
-        lst[key] = typed.table("CType", {
+    local typ = lst[key]
+    if not typ then
+        typ = typed.table("CType", {
             type = spectype,
             name = name,
         })
+        lst[key] = typ
     end
 
     if parts then
@@ -335,18 +448,22 @@ local get_composite_type = typed("TypeList, string?, string, array, string, func
         end
     end
 
-    local typ = typed.table("CType", {
-        type = spectype,
-        name = name,
-        [partsfield] = parts,
-    })
-
-    if lst[key] then
-        if typ[partsfield] and lst[key][partsfield] and not equal_declarations(typ, lst[key]) then
+    if parts then
+        local completed = typed.table("CType", {
+            type = spectype,
+            name = name,
+            [partsfield] = parts,
+        })
+        if typ[partsfield] and not equal_declarations(completed, typ) then
             return nil, "redeclaration for " .. key
         end
+        typ[partsfield] = parts
     end
-    add_type(lst, key, typ)
+
+    if not typ._file_scope_tag and not typ._type_list_published then
+        add_type(lst, key, typ)
+        typ._type_list_published = true
+    end
 
     return typ, key
 end)
@@ -372,16 +489,70 @@ local function get_enum(lst, spec)
 end
 
 local function refer(lst, item, get_fn)
-    if item.id and not item.fields and not item.values then
-        local key = item.type .. "@" .. item.id
-        local su_typ = lst[key]
-        if not su_typ then
-            return {
-                type = item.type,
-                name = { item.id },
-            }
+    if item._c_tag_binding == "prototype" then
+        local scopes = lst.prototype_tags
+        if not scopes then
+            scopes = {}
+            lst.prototype_tags = scopes
         end
-        return su_typ
+        local scope = scopes[item._c_tag_scope_id]
+        if not scope then
+            scope = {}
+            scopes[item._c_tag_scope_id] = scope
+        end
+
+        local typ = scope[item.id]
+        if not typ then
+            typ = typed.table("CType", {
+                type = item.type,
+                name = item.id,
+                _prototype_scope_id = item._c_tag_scope_id,
+                _allow_outer_binding = item._c_tag_allow_outer and true or false,
+                _tag_provenance = item._c_tag_provenance,
+            })
+            scope[item.id] = typ
+        end
+
+        local parts = item.fields or item.values
+        if parts then
+            local converted, err
+            if item.type == "enum" then
+                converted, err = get_enum_items(lst, parts)
+                if converted then typ.values = converted end
+            else
+                converted, err = get_fields(lst, parts)
+                if converted then typ.fields = converted end
+            end
+            if not converted then return nil, err end
+        end
+        return typ
+    end
+
+    if item.id and not item.fields and not item.values then
+        local key = item._c_tag_raw_key or (item.type .. "@" .. item.id)
+        local canonical = lst[key]
+        if not canonical then
+            canonical = typed.table("CType", {
+                type = item.type,
+                name = item.id,
+                _file_scope_tag = true,
+                _tag_provenance = item._c_tag_provenance,
+            })
+            lst[key] = canonical
+        end
+        -- A declaration reference must not acquire fields merely because a
+        -- later declaration completed the canonical raw tag during the
+        -- registrar's whole-header pass. Keep a non-completing view here; the
+        -- foreign-type converter interns it by the same raw key, and the raw
+        -- canonical entry published after ordinary declarations completes
+        -- that one Titan CStruct/CUnion object in place.
+        return typed.table("CType", {
+            type = item.type,
+            name = item.id,
+            _file_scope_tag = true,
+            _canonical_tag = canonical,
+            _tag_provenance = item._c_tag_provenance,
+        })
     else
         local typ, key = get_fn(lst, item)
         if not typ then
@@ -406,15 +577,21 @@ calculate = function(val, env)
     if type(val) == "string" then
         return tonumber(val) or (env and env[val]) or val
     end
+    if type(val) ~= "table" then
+        return val
+    end
     if type(val) == "table" and val[1] and not val.op and not val.unop then
         if #val == 1 then
             return calculate(val[1], env)
         end
         return val
     end
-    if val.unop == "+" then
+    -- The language-expression grammar records both unary and binary operators
+    -- in `op`; older hand-built expression values may still use `unop`.
+    local unary = val.unop or (val.op and val[2] == nil and val.op)
+    if unary == "+" then
         return calculate(val[1], env)
-    elseif val.unop == "-" then
+    elseif unary == "-" then
         local e = calculate(val[1], env)
         return type(e) == "number" and -e or { e, unop = "-" }
     end
@@ -588,7 +765,8 @@ local get_params = typed("TypeList, array, string? -> *, *, *", function(lst, pa
         elseif type(param_src) == "string" then
             return nil, "old-style function parameter lists are unsupported", false
         else
-            local param, err = convert_value(lst, param_src.param)
+            local param, err =
+                convert_value(lst, param_src.param, true)
             if not param then
                 return nil, err, false
             end
@@ -610,34 +788,635 @@ local get_params = typed("TypeList, array, string? -> *, *, *", function(lst, pa
     return params, vararg, paramnames
 end)
 
-make_function_pointer_type = function(lst, name, spec, decl, pointer, idxs, ret_pointer)
-    local ret_type, err = get_type(lst, spec, ret_pointer or {})
-    if not ret_type then
-        return nil, err
+local function append_operations(parts, operations)
+    local out = {}
+    for _, part in ipairs(parts or {}) do out[#out + 1] = part end
+    for _, operation in ipairs(operations or {}) do
+        out[#out + 1] = operation
     end
-    local params, vararg, paramnames = get_params(lst, decl.params,
-        decl.paramstyle)
-    if not params then
-        return nil, vararg
+    return out
+end
+
+local function legacy_operation_views(operations)
+    local pointer, idxs = {}, {}
+    for _, operation in ipairs(operations or {}) do
+        if type(operation) == "string" then
+            pointer[#pointer + 1] = operation
+        elseif operation.idx ~= nil then
+            -- The historical raw representation records dimensions in source
+            -- order, while the exact operator path records application order.
+            table.insert(idxs, 1, operation.idx)
+        end
     end
+    return pointer, next(idxs) and idxs or nil
+end
+
+local declaration_qualifiers = {
+    const = true,
+    restrict = true,
+    volatile = true,
+}
+
+local declaration_qualifier_order = {
+    "const",
+    "restrict",
+    "volatile",
+}
+
+local function copy_array(values)
+    local out = {}
+    for _, value in ipairs(values or {}) do
+        out[#out + 1] = value
+    end
+    return out
+end
+
+local function qualifier_set(values)
+    local out = {}
+    for _, value in ipairs(values or {}) do
+        out[value] = true
+    end
+    return out
+end
+
+local function qualifier_list(values)
+    local present = type(values) == "table" and values or {}
+    local out = {}
+    for _, qualifier in ipairs(declaration_qualifier_order) do
+        if present[qualifier] then
+            out[#out + 1] = qualifier
+        end
+    end
+    return out
+end
+
+local function same_qualifiers(left, right)
+    return equal_symbolic_values(
+        type(left) == "table" and left or {},
+        type(right) == "table" and right or {})
+end
+
+local function canonical_base_parts(parts)
+    local qualifiers_set = {}
+    local strings, objects = {}, {}
+    for _, part in ipairs(parts or {}) do
+        if type(part) == "string"
+           and declaration_qualifiers[part] then
+            qualifiers_set[part] = true
+        elseif type(part) == "string" then
+            strings[#strings + 1] = part
+        else
+            objects[#objects + 1] = part
+        end
+    end
+    table.sort(strings)
+    local canonical = {}
+    for _, part in ipairs(strings) do canonical[#canonical + 1] = part end
+    for _, part in ipairs(objects) do canonical[#canonical + 1] = part end
+    return canonical, qualifiers_set
+end
+
+local function canonical_base_object(value)
+    if type(value) ~= "table" then return value end
+    return value._canonical_tag or value
+end
+
+local function same_base_parts(left, right)
+    if #left ~= #right then return false end
+    for index, left_part in ipairs(left) do
+        local right_part = right[index]
+        if type(left_part) ~= type(right_part) then
+            return false
+        elseif type(left_part) == "table" then
+            if canonical_base_object(left_part)
+               ~= canonical_base_object(right_part) then
+                return false
+            end
+        elseif left_part ~= right_part then
+            return false
+        end
+    end
+    return true
+end
+
+local declaration_shape
+
+local function copy_shape_with_outer_qualifiers(shape, qualifiers_set)
+    if not next(qualifiers_set) then return shape end
+    local out = {}
+    for key, value in pairs(shape) do out[key] = value end
+    out.qualifiers = qualifier_set(qualifier_list(shape.qualifiers))
+    for qualifier in pairs(qualifiers_set) do
+        out.qualifiers[qualifier] = true
+    end
+    return out
+end
+
+local function apply_shape_operations(shape, operations)
+    local normalized = normalized_declarator_operations(operations)
+    if not normalized then return nil end
+    for _, operation in ipairs(normalized) do
+        if operation.kind == "pointer" then
+            shape = {
+                kind = "pointer",
+                pointee = shape,
+                qualifiers = operation.qualifiers,
+                template = shape.template,
+                array_origin = shape.array_origin,
+            }
+        else
+            shape = {
+                kind = "array",
+                elem = shape,
+                bound = operation.bound,
+                qualifiers = {},
+                template = shape.template,
+                array_origin = true,
+            }
+        end
+    end
+    return shape
+end
+
+local function shape_from_base(lst, parts, operations, seen, template)
+    local base_parts, base_qualifiers =
+        canonical_base_parts(parts)
+    local alias
+    if #base_parts == 1 and type(base_parts[1]) == "string" then
+        local candidate = lst[base_parts[1]]
+        if candidate and candidate.type == "typedef" then
+            alias = candidate
+        end
+    end
+
+    local shape
+    if alias and not seen[alias] then
+        shape = declaration_shape(lst, alias, seen)
+        if not shape then return nil end
+        shape = copy_shape_with_outer_qualifiers(
+            shape, base_qualifiers)
+    else
+        shape = {
+            kind = "base",
+            parts = base_parts,
+            qualifiers = base_qualifiers,
+            template = template,
+        }
+    end
+    shape = apply_shape_operations(shape, operations)
+    if shape then shape.template = template end
+    return shape
+end
+
+local function adjust_parameter_shape(shape)
+    if shape.kind == "array" then
+        return {
+            kind = "pointer",
+            pointee = shape.elem,
+            qualifiers = qualifier_set(
+                qualifier_list(shape.qualifiers)),
+            template = shape.template,
+            array_origin = true,
+        }
+    elseif shape.kind == "function" then
+        return {
+            kind = "pointer",
+            pointee = shape,
+            qualifiers = {},
+            template = shape.template,
+            array_origin = shape.array_origin,
+        }
+    elseif shape.kind == "pointer"
+       and next(shape.qualifiers or {}) then
+        local adjusted = {}
+        for key, value in pairs(shape) do adjusted[key] = value end
+        -- Qualification of the parameter object itself is not part of the
+        -- adjusted C function type.
+        adjusted.qualifiers = {}
+        return adjusted
+    end
+    return shape
+end
+
+declaration_shape = function(lst, typ, seen)
+    if type(typ) ~= "table" then return nil end
+    seen = seen or {}
+    if seen[typ] then return nil end
+    seen[typ] = true
+
+    local shape
+    if typ.type == "typedef" then
+        if type(typ.def) == "table"
+           and typ.def.type == "functionptr" then
+            shape = declaration_shape(lst, typ.def, seen)
+        elseif typ._declarator_base then
+            shape = shape_from_base(
+                lst, typ._declarator_base,
+                typ._declarator_ops, seen, typ)
+        elseif type(typ.def) == "table" then
+            shape = shape_from_base(
+                lst, typ.def, nil, seen, typ)
+        end
+    elseif typ.type == "function"
+       or typ.type == "functionptr" then
+        local return_shape =
+            declaration_shape(lst, typ.ret, seen)
+        if return_shape then
+            local params = {}
+            for _, parameter in ipairs(typ.params or {}) do
+                local parameter_shape =
+                    declaration_shape(lst, parameter, seen)
+                if not parameter_shape then
+                    return nil
+                end
+                params[#params + 1] =
+                    adjust_parameter_shape(parameter_shape)
+            end
+            shape = {
+                kind = "function",
+                ret = return_shape,
+                params = params,
+                vararg = typ.vararg and true or false,
+                paramstyle = typ._paramstyle,
+                qualifiers = {},
+                template = typ,
+            }
+            shape = apply_shape_operations(
+                shape, typ._declarator_ops)
+        end
+    elseif typ._declarator_base then
+        shape = shape_from_base(
+            lst, typ._declarator_base,
+            typ._declarator_ops, seen, typ)
+    elseif type(typ.type) == "table" then
+        local operations = {}
+        for index = #(typ.idxs or {}), 1, -1 do
+            operations[#operations + 1] = {
+                idx = typ.idxs[index],
+            }
+        end
+        shape = shape_from_base(
+            lst, typ.type, operations, seen, typ)
+    end
+
+    seen[typ] = nil
+    return shape
+end
+
+local function merge_declaration_shapes(left, right)
+    if not left or not right or left.kind ~= right.kind
+       or not same_qualifiers(
+            left.qualifiers, right.qualifiers) then
+        return nil
+    end
+
+    local merged = {
+        kind = right.kind,
+        qualifiers = qualifier_set(
+            qualifier_list(right.qualifiers)),
+        template = right.template or left.template,
+        array_origin =
+            left.array_origin or right.array_origin,
+    }
+    if left.kind == "base" then
+        if not same_base_parts(left.parts, right.parts) then
+            return nil
+        end
+        merged.parts = copy_array(right.parts)
+    elseif left.kind == "pointer" then
+        merged.pointee =
+            merge_declaration_shapes(left.pointee, right.pointee)
+        if not merged.pointee then return nil end
+    elseif left.kind == "array" then
+        merged.elem =
+            merge_declaration_shapes(left.elem, right.elem)
+        if not merged.elem then return nil end
+        local left_unknown =
+            left.bound == nil or left.bound == ""
+        local right_unknown =
+            right.bound == nil or right.bound == ""
+        if not left_unknown and not right_unknown
+           and not equal_symbolic_values(
+                left.bound, right.bound) then
+            return nil
+        end
+        merged.bound =
+            not right_unknown and right.bound or left.bound
+    elseif left.kind == "function" then
+        if left.vararg ~= right.vararg
+           or #left.params ~= #right.params then
+            return nil
+        end
+        merged.ret =
+            merge_declaration_shapes(left.ret, right.ret)
+        if not merged.ret then return nil end
+        merged.params = {}
+        for index, right_parameter in ipairs(right.params) do
+            local parameter = merge_declaration_shapes(
+                left.params[index], right_parameter)
+            if not parameter then return nil end
+            merged.params[index] = parameter
+        end
+        merged.vararg = right.vararg
+        merged.paramstyle =
+            right.paramstyle or left.paramstyle
+    else
+        return nil
+    end
+    return merged
+end
+
+local function shape_has_array(shape, seen)
+    if not shape then return false end
+    if shape.kind == "array" or shape.array_origin then
+        return true
+    end
+    seen = seen or {}
+    if seen[shape] then return false end
+    seen[shape] = true
+    if shape.kind == "pointer" then
+        return shape_has_array(shape.pointee, seen)
+    elseif shape.kind == "function" then
+        if shape_has_array(shape.ret, seen) then return true end
+        for _, parameter in ipairs(shape.params or {}) do
+            if shape_has_array(parameter, seen) then return true end
+        end
+    end
+    return false
+end
+
+local function decompose_declaration_shape(shape)
+    if shape.kind == "base" or shape.kind == "function" then
+        return shape, {}
+    end
+
+    local child = shape.kind == "pointer"
+        and shape.pointee or shape.elem
+    local core, operations =
+        decompose_declaration_shape(child)
+    if shape.kind == "pointer" then
+        operations[#operations + 1] = "*"
+        for _, qualifier in ipairs(
+                qualifier_list(shape.qualifiers)) do
+            operations[#operations + 1] = qualifier
+        end
+    else
+        operations[#operations + 1] = {
+            idx = shape.bound == nil and "" or shape.bound,
+        }
+    end
+    return core, operations
+end
+
+local function shape_to_declaration(shape, template)
+    local core, operations =
+        decompose_declaration_shape(shape)
+    template = template or shape.template or core.template or {}
+    local name = template.name
+
+    if core.kind == "function" then
+        local params = {}
+        for index, parameter in ipairs(core.params or {}) do
+            params[index] = shape_to_declaration(
+                parameter,
+                parameter.template
+                    or (core.template
+                        and core.template.params
+                        and core.template.params[index]))
+        end
+        local pointer, idxs =
+            legacy_operation_views(operations)
+        local typ = typed.table("CType", {
+            type = #operations == 0
+                and "function" or "functionptr",
+            name = name,
+            idxs = idxs,
+            ret = shape_to_declaration(
+                core.ret,
+                core.ret.template
+                    or (core.template and core.template.ret)),
+            params = params,
+            vararg = core.vararg,
+            pointer = pointer,
+            _paramstyle = core.paramstyle,
+            _declarator_ops = operations,
+        })
+        local names_source =
+            (template.type == "function"
+                or template.type == "functionptr")
+            and template or core.template
+        if names_source and names_source.paramnames ~= nil then
+            typ.paramnames =
+                copy_names(names_source.paramnames)
+            typ.paramnames_state =
+                names_source.paramnames_state
+        else
+            set_initial_paramnames(typ, false)
+        end
+        return typ
+    end
+
+    local base = qualifier_list(core.qualifiers)
+    for _, part in ipairs(core.parts) do
+        base[#base + 1] = part
+    end
+    local pointer, idxs =
+        legacy_operation_views(operations)
+    return typed.table("CType", {
+        name = name,
+        type = append_operations(base, pointer),
+        idxs = idxs,
+        _declarator_base = base,
+        _declarator_ops = operations,
+    })
+end
+
+local function composite_array_declaration(lst, previous, current)
+    local previous_shape =
+        declaration_shape(lst, previous)
+    local current_shape =
+        declaration_shape(lst, current)
+    local merged = merge_declaration_shapes(
+        previous_shape, current_shape)
+    if not merged
+       or not (shape_has_array(previous_shape)
+            or shape_has_array(current_shape)) then
+        return nil
+    end
+
+    local typ = shape_to_declaration(merged, current)
+    typ._declaration_provenance =
+        current._declaration_provenance
+    return typ
+end
+
+local function composite_oldstyle_function(previous, current)
+    local previous_function =
+        previous.type == "function"
+        or previous.type == "functionptr"
+    local current_function =
+        current.type == "function"
+        or current.type == "functionptr"
+    if not previous_function or not current_function then
+        return nil
+    end
+
+    local previous_style =
+        previous._paramstyle or "prototype"
+    local current_style =
+        current._paramstyle or "prototype"
+    if previous_style == current_style then return nil end
+
+    local oldstyle = previous_style == "oldstyle"
+        and previous or current_style == "oldstyle"
+        and current
+    local prototype = previous_style == "prototype"
+        and previous or current_style == "prototype"
+        and current
+    if not oldstyle or not prototype
+       or #(oldstyle.params or {}) ~= 0
+       or oldstyle.vararg
+       or prototype.vararg
+       or previous.type ~= current.type
+       or not equal_declarations(
+            previous.ret, current.ret)
+       or not equal_declarator_operations(
+            previous._declarator_ops,
+            current._declarator_ops) then
+        return nil
+    end
+
+    -- C accepts this pair only when every prototype parameter survives the
+    -- default argument promotions. The registrar cannot decide that from its
+    -- best-effort target model, so it retains the informative prototype
+    -- tentatively; the checker's unconditional ordered-header compiler
+    -- baseline is authoritative for rejecting an invalid pair.
+    return prototype
+end
+
+local function complete_declarator_bounds(previous, current)
+    if type(previous) ~= "table" or type(current) ~= "table" then
+        return
+    end
+
+    local previous_ops = previous._declarator_ops or {}
+    local current_ops = current._declarator_ops or {}
+    if #previous_ops == #current_ops then
+        for index, current_op in ipairs(current_ops) do
+            local previous_op = previous_ops[index]
+            if type(previous_op) == "table"
+               and type(current_op) == "table"
+               and previous_op.idx ~= nil
+               and current_op.idx ~= nil
+               and current_op.idx == ""
+               and previous_op.idx ~= "" then
+                current_op.idx = previous_op.idx
+            end
+        end
+        local pointer, idxs =
+            legacy_operation_views(current_ops)
+        current.idxs = idxs
+        if current.type == "functionptr" then
+            current.pointer = pointer
+        end
+    end
+
+    if (previous.type == "function"
+        or previous.type == "functionptr")
+       and (current.type == "function"
+        or current.type == "functionptr") then
+        complete_declarator_bounds(previous.ret, current.ret)
+        for index, parameter in ipairs(current.params or {}) do
+            complete_declarator_bounds(
+                previous.params and previous.params[index],
+                parameter)
+        end
+    elseif previous.type == "typedef"
+       and current.type == "typedef"
+       and type(previous.def) == "table"
+       and type(current.def) == "table"
+       and previous.def.type
+       and current.def.type then
+        complete_declarator_bounds(previous.def, current.def)
+    end
+end
+
+make_declarator_type = function(
+        lst, name, spec, decl, adjust_function_parameter)
+    local base_type, err = get_type(lst, spec, {})
+    if not base_type then return nil, err end
+
+    local operations = collect_declarator_operations(decl)
+    local function_index
+    for index, operation in ipairs(operations) do
+        if type(operation) == "table"
+           and operation.function_declarator then
+            if function_index then
+                return nil, "nested C function declarators are unsupported"
+            end
+            function_index = index
+        end
+    end
+
+    if not function_index then
+        local _, _, legacy_pointer, legacy_idxs = get_name(decl)
+        local legacy_type =
+            append_operations(base_type, legacy_pointer)
+        return typed.table("CType", {
+            name = name,
+            type = legacy_type,
+            idxs = legacy_idxs,
+            _declarator_base = base_type,
+            _declarator_ops = operations,
+        }), nil
+    end
+
+    local function_marker = operations[function_index]
+    local return_operations, value_operations = {}, {}
+    for index = 1, function_index - 1 do
+        return_operations[#return_operations + 1] = operations[index]
+    end
+    for index = function_index + 1, #operations do
+        value_operations[#value_operations + 1] = operations[index]
+    end
+
+    -- A parameter declared with bare function type is adjusted by C to a
+    -- pointer to that function. Parenthesized function pointers and arrays of
+    -- callbacks already carry their own value-side operators.
+    if adjust_function_parameter and #value_operations == 0 then
+        value_operations[#value_operations + 1] = "*"
+    end
+
+    local params, vararg, paramnames = get_params(
+        lst, function_marker.function_declarator.params,
+        function_marker.function_declarator.paramstyle)
+    if not params then return nil, vararg end
+
+    local pointer, idxs = legacy_operation_views(value_operations)
     local typ = typed.table("CType", {
-        type = "functionptr",
+        type = #value_operations == 0 and "function" or "functionptr",
         name = name,
         idxs = idxs,
         ret = {
-            type = ret_type,
+            type = append_operations(base_type, return_operations),
+            _declarator_base = base_type,
+            _declarator_ops = return_operations,
         },
         params = params,
         vararg = vararg,
         pointer = pointer,
+        _paramstyle =
+            function_marker.function_declarator.paramstyle,
+        _declarator_ops = value_operations,
     })
     set_initial_paramnames(typ, paramnames)
     return typ
 end
 
-local register_many = function(register_item_fn, lst, ids, spec)
+local register_many = function(register_item_fn, lst, ids, spec, provenance)
     for _, id in ipairs(ids) do
-        local ok, err = register_item_fn(lst, id, spec)
+        local ok, err =
+            register_item_fn(lst, id, spec, provenance)
         if not ok then
             return false, err
         end
@@ -645,59 +1424,29 @@ local register_many = function(register_item_fn, lst, ids, spec)
     return true, nil
 end
 
-local register_decl_item = function(lst, id, spec)
-    local outer_pointer = leading_modifiers(id.decl)
-    local is_funcptr = id.decl.params and is_function_pointer_declarator(id.decl)
-    local ok, name, ret_pointer, idxs = get_name(id.decl)
-    if not ok then
-        return false, name
-    end
+local register_decl_item = function(lst, id, spec, provenance)
+    local name = declarator_name(id.decl)
     assert(name)
-    local typ
-    if is_funcptr then
-        local err
-        typ, err = make_function_pointer_type(lst, name, spec, id.decl,
-            ret_pointer, idxs, outer_pointer)
-        if not typ then
-            return false, err
-        end
-    else
-        if id.decl.declarator then
-            ret_pointer = prepend_modifiers(outer_pointer, ret_pointer)
-        end
-        local ret_type, err = get_type(lst, spec, ret_pointer)
-        if not ret_type then
-            return false, err
-        end
-        if id.decl.params then
-            local params, vararg, paramnames = get_params(lst, id.decl.params,
-                id.decl.paramstyle)
-            if not params then
-                return false, vararg
-            end
-            typ = typed.table("CType", {
-                type = "function",
-                name = name,
-                idxs = idxs,
-                ret = {
-                    type = ret_type,
-                },
-                params = params,
-                vararg = vararg,
-            })
-            set_initial_paramnames(typ, paramnames)
-        else
-            typ = typed.table("CType", {
-                type = ret_type,
-                name = name,
-                idxs = idxs,
-            })
-        end
-    end
+    local typ, err =
+        make_declarator_type(lst, name, spec, id.decl, false)
+    if not typ then return false, err end
+
+    typ._declaration_provenance = provenance
 
     if lst[name] then
         if not equal_declarations(lst[name], typ) then
-            return false, "inconsistent declaration for " .. name .. " - " .. inspect(lst[name]) .. " VERSUS " .. inspect(typ)
+            local composite =
+                composite_oldstyle_function(
+                    lst[name], typ)
+                or
+                composite_array_declaration(
+                    lst, lst[name], typ)
+            if not composite then
+                return false, "inconsistent declaration for " .. name .. " - " .. inspect(lst[name]) .. " VERSUS " .. inspect(typ)
+            end
+            typ = composite
+        else
+            complete_declarator_bounds(lst[name], typ)
         end
         if (typ.type == "function" or typ.type == "functionptr")
            and (lst[name].type == "function" or lst[name].type == "functionptr") then
@@ -709,80 +1458,53 @@ local register_decl_item = function(lst, id, spec)
     return true, nil
 end
 
-local register_decls = function(lst, ids, spec)
-    return register_many(register_decl_item, lst, ids, spec)
+local register_decls = function(lst, item)
+    return register_many(
+        register_decl_item, lst, item.ids, item.spec,
+        item._declaration_provenance)
 end
 
 -- Convert an table produced by an `extern inline` declaration
 -- into one compatible with `register_decl`.
 local function register_function(lst, item)
-    local id = {
-        decl = {
-            name = item.func.name,
-            params = item.func.params,
-            paramstyle = item.func.paramstyle,
-        }
-    }
-    return register_decl_item(lst, id, item.spec)
+    -- Preserve the complete definition declarator. Reconstructing only its
+    -- name and parameter list silently discarded return-pointer/array shape
+    -- from definitions such as `static struct Opaque *identity(...)`.
+    local id = { decl = item.func }
+    return register_decl_item(
+        lst, id, item.spec, item._declaration_provenance)
 end
 
 local function register_static_function(lst, item)
     return register_function(lst, item)
 end
 
-local register_typedef_item = typed("TypeList, table, table -> boolean, string?", function(lst, id, spec)
-    if id.decl.params then
-        local outer_pointer = leading_modifiers(id.decl)
-        if not is_function_pointer_declarator(id.decl) then
-            -- A typedef of a bare C function type (not a function pointer)
-            -- remains out of scope; do not mis-model it as a callable value.
-            return true, nil
-        end
-        local ok, name, pointer, idxs = get_name(id.decl)
-        if not ok then
-            return false, name or "failed"
-        end
-        local def, err = make_function_pointer_type(lst, name, spec, id.decl,
-            pointer, idxs, outer_pointer)
-        if not def then
-            return false, err or "failed"
-        end
-        local typ = typed.table("CType", {
-            type = "typedef",
-            name = name,
-            def = def,
-            idxs = idxs,
-        })
-
-        if lst[name] then
-            if not equal_declarations(lst[name], typ) then
-                return false, "inconsistent declaration for " .. name .. " - " .. inspect(lst[name]) .. " VERSUS " .. inspect(typ)
-            end
-        end
-        add_type(lst, name, typ)
-
+local register_typedef_item = typed("TypeList, table, table, table? -> boolean, string?", function(lst, id, spec, provenance)
+    local name = declarator_name(id.decl)
+    if not name then return false, "could not find typedef name" end
+    local def, err =
+        make_declarator_type(lst, name, spec, id.decl, false)
+    if not def then return false, err or "failed" end
+    if def.type == "function" then
+        -- A typedef of a bare C function type (not a function pointer)
+        -- remains out of scope; do not mis-model it as a callable value.
         return true, nil
-    end
-
-    local ok, name, ret_pointer, idxs = get_name(id.decl)
-    if not ok then
-        return false, name or "failed"
-    end
-    local def, err = get_type(lst, spec, ret_pointer)
-    if not def then
-        return false, err or "failed"
     end
     local typ = typed.table("CType", {
         type = "typedef",
         name = name,
-        def = def,
-        idxs = idxs,
+        def = def.type == "functionptr" and def or def.type,
+        idxs = def.idxs,
+        _declarator_base = def._declarator_base,
+        _declarator_ops = def._declarator_ops,
+        _declaration_provenance = provenance,
     })
 
     if lst[name] then
         if not equal_declarations(lst[name], typ) then
             return false, "inconsistent declaration for " .. name .. " - " .. inspect(lst[name]) .. " VERSUS " .. inspect(typ)
         end
+        complete_declarator_bounds(lst[name], typ)
     end
     add_type(lst, name, typ)
 
@@ -790,7 +1512,9 @@ local register_typedef_item = typed("TypeList, table, table -> boolean, string?"
 end)
 
 local register_typedefs = function(lst, item)
-    return register_many(register_typedef_item, lst, item.ids, item.spec)
+    return register_many(
+        register_typedef_item, lst, item.ids, item.spec,
+        item._declaration_provenance)
 end
 
 local function register_structunion(lst, item)
@@ -807,28 +1531,348 @@ local function register_one(lst, item)
     local spec_set = util.to_set(item.spec)
     local spec_type = item.spec.type or (item.spec[1] and item.spec[1].type)
     if spec_set.extern and item.ids then
-        return register_decls(lst, item.ids, item.spec)
+        return register_decls(lst, item)
     elseif spec_set.extern and item.func then
         return register_function(lst, item)
     elseif spec_set.static and item.func then
         return register_static_function(lst, item)
     elseif spec_set.typedef then
         return register_typedefs(lst, item)
-    elseif spec_type == "struct" or spec_type == "union" then
+    elseif (spec_type == "struct" or spec_type == "union")
+           and not item.ids then
         return register_structunion(lst, item)
-    elseif spec_type == "enum" then
+    elseif spec_type == "enum" and not item.ids then
         return register_enum(lst, item)
     elseif not item.ids then
         return true -- forward declaration (e.g. "struct foo;")
     elseif item.ids then
-        return register_decls(lst, item.ids, item.spec)
+        return register_decls(lst, item)
     else
         return false, "uncategorized declaration"
     end
 end
 
-ctypes.register_types = typed("{Decl} -> TypeList?, string?", function(parsed)
+local tag_kinds = {
+    struct = true,
+    union = true,
+    enum = true,
+}
+
+local function syntactic_declarator_name(decl)
+    if type(decl) ~= "table" then return nil end
+    if decl.name then return decl.name end
+    if decl.declarator then
+        return syntactic_declarator_name(decl.declarator)
+    end
+end
+
+local function each_tag_spec(spec, visit, seen)
+    if type(spec) ~= "table" then return end
+    seen = seen or {}
+    if seen[spec] then return end
+    seen[spec] = true
+
+    if tag_kinds[spec.type] then
+        visit(spec)
+        -- A struct/union member list is not a C tag scope. Tags introduced by
+        -- member declaration specifiers therefore remain file-scoped when the
+        -- containing aggregate is declared at file scope.
+        for _, field in ipairs(spec.fields or {}) do
+            each_tag_spec(field.type or field.spec, visit, seen)
+        end
+        return
+    end
+    for _, part in ipairs(spec) do
+        each_tag_spec(part, visit, seen)
+    end
+end
+
+local function prescan_declarations(parsed, options)
+    options = options or {}
+    local metadata = {
+        typedef_names = {},
+        file_scope_tags = {},
+        file_scope_tag_order = {},
+        next_prototype_scope = 0,
+    }
+    local visible_tags = {}
+
+    local function provenance(order, scope, definition)
+        return {
+            header = options.header,
+            declaration_order = order,
+            scope = scope,
+            definition = definition and true or false,
+        }
+    end
+
+    local function record_file_tag(spec, order)
+        if not spec.id then return true end
+        local name = spec.id
+        local kind = spec.type
+        local previous = visible_tags[name]
+        if previous and previous.kind ~= kind then
+            local old = previous.declarations[#previous.declarations]
+            return nil, ("conflicting C tag kinds for '%s' in foreign header '%s': "
+                .. "%s declaration at item %d conflicts with %s declaration at item %d")
+                :format(name, options.header or "<unknown>",
+                    previous.kind, old.declaration_order, kind, order)
+        end
+
+        local record = previous
+        if not record then
+            record = {
+                name = name,
+                kind = kind,
+                raw_key = kind .. "@" .. name,
+                declarations = {},
+            }
+            visible_tags[name] = record
+            metadata.file_scope_tags[name] = record
+            table.insert(metadata.file_scope_tag_order, record)
+        end
+        local prov = provenance(order, "file", spec.fields or spec.values)
+        table.insert(record.declarations, prov)
+        record.defined = record.defined or prov.definition
+        spec._c_tag_binding = "file"
+        spec._c_tag_raw_key = record.raw_key
+        spec._c_tag_provenance = prov
+        return true
+    end
+
+    local function prototype_tag_conflict(name, scope, previous_kind,
+                                          current_kind)
+        return ("conflicting C tag kinds for '%s' in prototype scope %d "
+            .. "of foreign header '%s': %s conflicts with %s")
+            :format(name, scope.id, options.header or "<unknown>",
+                previous_kind, current_kind)
+    end
+
+    local function find_prototype_tag(scope, name)
+        while scope do
+            local tag = scope.tags[name]
+            if tag then return tag, scope end
+            scope = scope.parent
+        end
+    end
+
+    local function bind_prototype_spec(spec, tag, owner_scope, order,
+                                       is_definition)
+        tag.specs = tag.specs or {}
+        tag.specs[#tag.specs + 1] = spec
+        if is_definition then
+            tag.defined = true
+            tag.allow_outer = false
+            -- A later definition in the same prototype scope establishes that
+            -- the tag is local. Earlier forward references must not
+            -- opportunistically bind a file tag imported from another header.
+            for _, previous_spec in ipairs(tag.specs) do
+                previous_spec._c_tag_allow_outer = false
+            end
+        end
+        spec._c_tag_binding = "prototype"
+        spec._c_tag_scope_id = owner_scope.id
+        spec._c_tag_allow_outer = tag.allow_outer
+        spec._c_tag_provenance =
+            provenance(order, "prototype:" .. owner_scope.id, is_definition)
+    end
+
+    local function annotate_prototype_type(type_spec, scope, order)
+        local ok, err = true
+        each_tag_spec(type_spec, function(spec)
+            if not ok or not spec.id then return end
+            local is_definition = spec.fields or spec.values
+            if is_definition then
+                -- A definition introduces or completes a tag in this exact
+                -- prototype scope; unlike a reference it may shadow an outer
+                -- prototype or file-scope tag.
+                local local_tag = scope.tags[spec.id]
+                if local_tag and local_tag.kind ~= spec.type then
+                    ok = false
+                    err = prototype_tag_conflict(
+                        spec.id, scope, local_tag.kind, spec.type)
+                    return
+                elseif not local_tag then
+                    local_tag = {
+                        kind = spec.type,
+                        allow_outer = false,
+                    }
+                    scope.tags[spec.id] = local_tag
+                end
+                bind_prototype_spec(
+                    spec, local_tag, scope, order, true)
+                return
+            end
+
+            local local_tag, owner_scope =
+                find_prototype_tag(scope, spec.id)
+            if local_tag then
+                if local_tag.kind ~= spec.type then
+                    ok = false
+                    err = prototype_tag_conflict(
+                        spec.id, scope, local_tag.kind, spec.type)
+                    return
+                end
+                bind_prototype_spec(
+                    spec, local_tag, owner_scope, order, false)
+                return
+            end
+
+            -- A tag reference consults the ordinary visible tag namespace
+            -- without filtering by kind first: using "union T" when "struct
+            -- T" is visible is a constraint violation, not a new prototype
+            -- tag.
+            local visible = visible_tags[spec.id]
+            if visible then
+                if visible.kind ~= spec.type then
+                    ok = false
+                    err = prototype_tag_conflict(
+                        spec.id, scope, visible.kind, spec.type)
+                    return
+                end
+                spec._c_tag_binding = "file"
+                spec._c_tag_raw_key = visible.raw_key
+                spec._c_tag_provenance =
+                    provenance(order, "prototype-reference", false)
+                return
+            end
+
+            local_tag = {
+                kind = spec.type,
+                allow_outer = true,
+            }
+            scope.tags[spec.id] = local_tag
+            bind_prototype_spec(spec, local_tag, scope, order, false)
+        end)
+        return ok, err
+    end
+
+    local annotate_aggregate_declarators
+    local annotate_declarator
+    annotate_declarator = function(decl, order, parent_scope)
+        if type(decl) ~= "table" then return true end
+        local declarator_scope = parent_scope
+        if decl.params then
+            metadata.next_prototype_scope =
+                metadata.next_prototype_scope + 1
+            local scope = {
+                id = metadata.next_prototype_scope,
+                tags = {},
+                parent = parent_scope,
+            }
+            declarator_scope = scope
+            for _, wrapped in ipairs(decl.params) do
+                local param = wrapped.param or wrapped
+                local ok, err = annotate_prototype_type(
+                    param.type, scope, order)
+                if not ok then return nil, err end
+                ok, err = annotate_aggregate_declarators(
+                    param.type, order, scope)
+                if not ok then return nil, err end
+                ok, err = annotate_declarator(param.id, order, scope)
+                if not ok then return nil, err end
+            end
+        end
+        if decl.declarator then
+            return annotate_declarator(
+                decl.declarator, order, declarator_scope)
+        end
+        return true
+    end
+
+    -- Aggregate member declaration specifiers live in the aggregate's
+    -- enclosing tag scope, but a function declarator nested in a member opens
+    -- its own prototype scope. Walk the two pieces separately so callback
+    -- parameter tags never leak into file-scope metadata.
+    annotate_aggregate_declarators = function(type_spec, order, parent_scope,
+                                               seen)
+        if type(type_spec) ~= "table" then return true end
+        seen = seen or {}
+        if seen[type_spec] then return true end
+        seen[type_spec] = true
+
+        if tag_kinds[type_spec.type] then
+            for _, field in ipairs(type_spec.fields or {}) do
+                local field_type = field.type or field.spec
+                local ok, err = annotate_aggregate_declarators(
+                    field_type, order, parent_scope, seen)
+                if not ok then return nil, err end
+                for _, id in ipairs(field.ids or {}) do
+                    ok, err = annotate_declarator(
+                        id.decl or id,
+                        order, parent_scope)
+                    if not ok then return nil, err end
+                end
+            end
+            return true
+        end
+        for _, part in ipairs(type_spec) do
+            local ok, err = annotate_aggregate_declarators(
+                part, order, parent_scope, seen)
+            if not ok then return nil, err end
+        end
+        return true
+    end
+
+    for order, item in ipairs(parsed) do
+        local spec_set = util.to_set(item.spec)
+        if spec_set.typedef then
+            for _, id in ipairs(item.ids or {}) do
+                local name = syntactic_declarator_name(id.decl)
+                if name then metadata.typedef_names[name] = true end
+            end
+        end
+
+        local ok, err = true
+        each_tag_spec(item.spec, function(spec)
+            if not ok then return end
+            ok, err = record_file_tag(spec, order)
+        end)
+        if not ok then return nil, err end
+        ok, err = annotate_aggregate_declarators(
+            item.spec, order, nil)
+        if not ok then return nil, err end
+
+        for _, id in ipairs(item.ids or {}) do
+            ok, err = annotate_declarator(id.decl, order, nil)
+            if not ok then return nil, err end
+        end
+        if item.func then
+            ok, err = annotate_declarator(item.func, order, nil)
+            if not ok then return nil, err end
+        end
+    end
+
+    return metadata
+end
+
+ctypes.register_types = typed("{Decl}, table? -> TypeList?, string?", function(parsed, options)
+    local metadata, metadata_error = prescan_declarations(parsed, options)
+    if not metadata then
+        return nil, metadata_error
+    end
+
     local lst = typed.table("TypeList", {})
+    lst.typedef_names = metadata.typedef_names
+    lst.file_scope_tags = metadata.file_scope_tags
+    lst.prototype_tags = {}
+
+    -- Seed every syntactic file-scope tag before best-effort conversion. This
+    -- retains forward tags reached only through typedefs or pointer
+    -- declarations and gives all declarations in this header one canonical
+    -- raw CType object.
+    for _, record in ipairs(metadata.file_scope_tag_order) do
+        local typ = typed.table("CType", {
+            type = record.kind,
+            name = record.name,
+            _file_scope_tag = true,
+            _file_scope_tag_metadata = record,
+            _tag_provenance = record.declarations[1],
+        })
+        lst[record.raw_key] = typ
+        record.raw_type = typ
+    end
+
     local skipped = 0
     for _, item in ipairs(parsed) do
         -- Best-effort: any declaration we cannot model -- an unsupported C type
@@ -844,8 +1888,52 @@ ctypes.register_types = typed("{Decl} -> TypeList?, string?", function(parsed)
             skipped = skipped + 1
         end
     end
+
+    -- Publish canonical file tags after ordinary declaration entries.
+    -- Forward typedefs/functions/objects therefore create incomplete Titan
+    -- owners first, while this final entry supplies a definition only after
+    -- every supporting typedef from the header has been converted.
+    for _, record in ipairs(metadata.file_scope_tag_order) do
+        table.insert(lst, {
+            name = record.raw_key,
+            type = record.raw_type,
+        })
+    end
+
     ctypes.skipped = skipped
     return lst, nil
 end)
+
+-- Convert a parsed C type-name (the first child of a cast expression) through
+-- the exact declarator path used by real object declarations. A type-name has
+-- no identifier: its optional final untyped table is the abstract declarator,
+-- while aggregate/enum specifier tables carry their own `type` tag and remain
+-- part of the declaration specifiers.
+function ctypes.declaration_from_type_name(lst, name, type_name)
+    if type(lst) ~= "table" then
+        return nil, "type-name conversion requires a C type list"
+    elseif type(name) ~= "string" or name == "" then
+        return nil, "type-name conversion requires a declaration name"
+    elseif type(type_name) ~= "table" or #type_name == 0 then
+        return nil, "type-name conversion requires a parsed C type name"
+    end
+
+    local spec = {}
+    local declarator = {}
+    for index, part in ipairs(type_name) do
+        if index == #type_name
+           and type(part) == "table"
+           and part.type == nil then
+            declarator = part
+        else
+            spec[#spec + 1] = part
+        end
+    end
+    if #spec == 0 then
+        return nil, "parsed C type name has no declaration specifier"
+    end
+    return make_declarator_type(
+        lst, name, spec, declarator, false)
+end
 
 return ctypes

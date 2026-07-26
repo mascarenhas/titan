@@ -344,6 +344,125 @@ end
         })
     end)
 
+    it("can parse initializer-less automatic C object and array locals",
+    function()
+        assert_statements_ast([[
+            local options: ffi.Options
+            local storage: ffi.Item[3]
+            local zero: ffi.Item[0]
+            local negative: ffi.Item[-2]
+        ]], {
+            { _tag = "Ast.StatDecl", decls = {
+                { _tag = "Ast.Decl", name = "options", type = {
+                    _tag = "Ast.TypeQualName",
+                    module = "ffi",
+                    name = "Options",
+                }, option = false },
+            }, exps = {} },
+            { _tag = "Ast.StatDecl", decls = {
+                { _tag = "Ast.Decl", name = "storage", type = {
+                    _tag = "Ast.TypeCArray",
+                    base = {
+                        _tag = "Ast.TypeQualName",
+                        module = "ffi",
+                        name = "Item",
+                    },
+                    length = { _tag = "Ast.ExpInteger", value = 3 },
+                }, option = false },
+            }, exps = {} },
+            { _tag = "Ast.StatDecl", decls = {
+                { name = "zero", type = {
+                    _tag = "Ast.TypeCArray",
+                    length = { _tag = "Ast.ExpInteger", value = 0 },
+                } },
+            }, exps = {} },
+            { _tag = "Ast.StatDecl", decls = {
+                { name = "negative", type = {
+                    _tag = "Ast.TypeCArray",
+                    length = { _tag = "Ast.ExpInteger", value = -2 },
+                } },
+            }, exps = {} },
+        })
+
+        -- Zero and negative integer tokens reach the checker so it can issue
+        -- the semantic positive-extent diagnostic. Keep the sign position on
+        -- the literal node for that diagnostic.
+        local source = "function f() local storage: ffi.Item[-8] end"
+        local program = assert(parser.parse("automatic.titan", source))
+        local arraytype = program[1].block.stats[1].decls[1].type
+        assert.same({
+            filename = "automatic.titan",
+            line = 1,
+            col = 29,
+        }, arraytype.loc)
+        assert.same(arraytype.loc, arraytype.base.loc)
+        assert.same({
+            filename = "automatic.titan",
+            line = 1,
+            col = 38,
+        }, arraytype.length.loc)
+    end)
+
+    it("retains ordinary initialized qualified local declarations", function()
+        assert_statements_ast([[
+            local object: ffi.Object = source
+            local first: ffi.Object, second: ffi.Other = a, b
+        ]], {
+            { _tag = "Ast.StatDecl", decls = {
+                { name = "object", type = {
+                    _tag = "Ast.TypeQualName",
+                    module = "ffi",
+                    name = "Object",
+                } },
+            }, exps = { { _tag = "Ast.ExpVar" } } },
+            { _tag = "Ast.StatDecl", decls = {
+                { name = "first", type = { _tag = "Ast.TypeQualName" } },
+                { name = "second", type = { _tag = "Ast.TypeQualName" } },
+            }, exps = {
+                { _tag = "Ast.ExpVar" },
+                { _tag = "Ast.ExpVar" },
+            } },
+        })
+    end)
+
+    it("rejects malformed automatic C array extents precisely", function()
+        for _, extent in ipairs({ "", "count", "3.0", "-2.5" }) do
+            assert_statements_syntax_error(
+                "local storage: ffi.Item[" .. extent .. "]",
+                "CArrayExtent")
+        end
+        assert_statements_syntax_error(
+            "local storage: ffi.Item[1 + 2]", "RBracketCArray")
+        assert_statements_syntax_error(
+            "local storage: ffi.Item[3", "RBracketCArray")
+    end)
+
+    it("keeps fixed C array syntax out of general type positions", function()
+        local programs = {
+            "function f(x: ffi.Item[3]) end",
+            "function f(): ffi.Item[3] end",
+            "type Items = ffi.Item[3]",
+            "record R item: ffi.Item[3] end",
+            "local items: ffi.Item[3] = nil",
+            "function f() local x = y as ffi.Item[3] end",
+            "function f() local items: ffi.Item[3] = source end",
+            "function f() local items: ffi.Item?[3] end",
+            "function f() local items: ffi.Item[3]? end",
+            "function f() local items: ffi.Item[3][4] end",
+            "function f() local a: ffi.Item[3], b: ffi.Item[3] end",
+            "function f() local items: Item[3] end",
+            "function f() local items: integer[3] end",
+        }
+        for _, program in ipairs(programs) do
+            assert_program_syntax_error(program, "CArrayOnlyAutomatic")
+        end
+
+        -- The initializer-less object form is single-declaration only, while
+        -- the existing initialized multiple-declaration form remains legal.
+        assert_statements_syntax_error(
+            "local first: ffi.Item, second: ffi.Item", "AssignLocal")
+    end)
+
     it("can parse toplevel function declarations", function()
         assert_program_ast([[
             local function fA(): nil

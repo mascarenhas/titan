@@ -575,7 +575,8 @@ generated/imported physical-provider contract from an exact logical DSO to a
 compiler-selected prefix container. A 0.15 runtime cannot discover the
 combined standard `titan.so`.
 
-The current ABI is **0.17**. `Type.Array` keeps `Table *` in exact native
+ABI **0.17** introduced the current Array contract. `Type.Array` keeps
+`Table *` in exact native
 signatures and `Table **` in variadic/flexible descriptors, but the Table is
 now private backing storage and every Lua-visible Array is a canonical proxy
 Udata. Generated modules also reserve a per-state Array-metatable cache and
@@ -583,6 +584,12 @@ use explicit internal-versus-boxed conversions. A 0.16 module would
 misinterpret Array values even when a serialized interface happens not to
 mention one, so the semantic/runtime boundary requires a full rebuild. See
 [Dense Arrays](dense-arrays.md#abi-017-boundary).
+
+The current ABI is **0.18**. It preserves those generated Array shapes and the
+ordinary module protocol, but standard-library archive objects now directly
+reference promoted libuv callback trampolines and no longer reference replaced
+libuv/coroutine helper symbols. A 0.18 provider and runtime must be built and
+distributed together.
 
 ## The module protocol
 
@@ -730,7 +737,8 @@ contributors after that boundary changes private initialization layout but
 does not alter the serialized interface. ABI 0.16 changes how the physical
 provider is found and recorded transiently; ABI 0.17 then changes Array
 representation and adds the module-local metatable cache without changing the
-serialized `Type.Array` constructor.
+serialized `Type.Array` constructor. ABI 0.18 preserves that logical protocol
+while advancing the standard-library archive/runtime native-symbol boundary.
 
 ## Static vs dynamic dependency wiring
 

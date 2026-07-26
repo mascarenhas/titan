@@ -421,10 +421,13 @@ Mixing those operations with ABI-0.17 Arrays can destroy the proxy link or
 length/storage invariants. The ABI gate protects that representation contract;
 it is not a `Table *` → `Udata *` migration.
 
-ABI-0.17 providers live under `lib/titan/0.17`, use
-`TITAN_PATH_0_17`, and reject 0.16 dependencies through the existing provider
-ABI protocol. A separately installed 0.16 tree is preserved for migration and
-rollback rather than treated as compatible.
+ABI-0.17 providers lived under `lib/titan/0.17`, used
+`TITAN_PATH_0_17`, and rejected 0.16 dependencies through the existing
+provider ABI protocol. Current ABI-0.18 providers preserve the same Array
+contract under `lib/titan/0.18` and `TITAN_PATH_0_18`, while advancing the
+standard-library archive/runtime native-symbol boundary. A separately
+installed 0.17 tree is preserved for migration and rollback rather than
+treated as compatible.
 
 ## Failure and performance boundaries
 
@@ -437,7 +440,8 @@ rollback rather than treated as compatible.
 - Every Array pays for one Udata, one user value, and one live hash entry in
   addition to its Table array storage.
 - Oversized construction/growth fails before narrowing or Table overflow.
-- There is no shrinking resize in ABI 0.17.
+- The Array contract introduced in ABI 0.17 and retained in ABI 0.18 has no
+  shrinking resize.
 
 ### Raw and stock table-library boundary
 

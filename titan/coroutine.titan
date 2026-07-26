@@ -5,6 +5,7 @@ local ffi = foreign import "titan/ffi.h"
 local coro_native = foreign import "titan/coro.h"
 
 local STACK_SIZE = 2 * 1024 * 1024
+local TITAN_CORO_OWNER_USERVALUES = 5
 local runtime = mco.mco_runtime.new()
 
 record Coro
@@ -33,24 +34,50 @@ local function effective_tag(default_tag: value, explicit_tag: value): value
 end
 
 local function check_mco_result(result: mco.mco_result)
-  if (result as integer) ~= (mco.MCO_SUCCESS as integer) then
+  if result ~= mco.MCO_SUCCESS then
     raise (mco.mco_result_description(result) as string)
   end
 end
 
+local function root_transfer(co: *mco.mco_coro, payload: value)
+  if not co then
+    return
+  end
+  local owner: *ffi.Udata =
+    mco.mco_get_user_data(co) as *ffi.Udata
+  local top = lua.lua_gettop(L)
+  if lua.lua_checkstack(L, 2) == 0 then
+    lua.lua_settop(L, top)
+    raise "cannot reserve Lua stack for coroutine transfer root"
+  end
+  ffi.lua_pushtvalue(L, owner)
+  ffi.lua_pushtvalue(L, payload)
+  local set = lua.lua_setiuservalue(
+    L, -2, TITAN_CORO_OWNER_USERVALUES)
+  if set == 0 then
+    lua.lua_settop(L, top)
+    raise "cannot set coroutine transfer root"
+  end
+  lua.lua_settop(L, top)
+end
+
+local function clear_transfer(co: *mco.mco_coro)
+  root_transfer(co, nil)
+end
+
 local function push_transfer(source: *mco.mco_coro,
                              ok: ffi.titan_ffi_int, payload: value)
-  coro_native.titan_coro_root_transfer(L, source, payload)
+  root_transfer(source, payload)
   local result = mco.mco_push(source, payload, ffi.TValue.sizeof)
-  if (result as integer) ~= (mco.MCO_SUCCESS as integer) then
-    coro_native.titan_coro_clear_transfer(source)
+  if result ~= mco.MCO_SUCCESS then
+    clear_transfer(source)
     check_mco_result(result)
   end
   result = mco.mco_push(source, ok, ffi.titan_ffi_int.sizeof)
-  if (result as integer) ~= (mco.MCO_SUCCESS as integer) then
+  if result ~= mco.MCO_SUCCESS then
     local rollback = mco.mco_pop(source, nil, ffi.TValue.sizeof)
     check_mco_result(rollback)
-    coro_native.titan_coro_clear_transfer(source)
+    clear_transfer(source)
     check_mco_result(result)
   end
 end
@@ -61,7 +88,7 @@ local function discard_transfer(source: *mco.mco_coro)
     check_mco_result(ok_result)
     local payload_result = mco.mco_pop(source, nil, ffi.TValue.sizeof)
     check_mco_result(payload_result)
-    coro_native.titan_coro_clear_transfer(source)
+    clear_transfer(source)
   end
 end
 
@@ -114,8 +141,8 @@ local function pop_transfer_or_raise(co: *mco.mco_coro,
   check_mco_result(ok_result)
   local payload_result = mco.mco_pop(co, payload, ffi.TValue.sizeof)
   check_mco_result(payload_result)
-  coro_native.titan_coro_clear_transfer(co)
-  if (ok as integer) == 0 then
+  clear_transfer(co)
+  if ok == 0 then
     if append_trace then
       raise_with_appended_trace(payload)
     else
@@ -130,7 +157,7 @@ local function resume_result_or_raise(co: *mco.mco_coro,
                                       tag: value): value
   local ctag: ffi.TValue = tag
   local result = mco.mco_resume(co, ctag)
-  if (result as integer) ~= (mco.MCO_SUCCESS as integer) then
+  if result ~= mco.MCO_SUCCESS then
     discard_transfer(source)
     check_mco_result(result)
   end
@@ -144,7 +171,7 @@ end
 local function yield_result_or_raise(co: *mco.mco_coro, tag: value): value
   local ctag: ffi.TValue = tag
   local result = mco.mco_yield(co, ctag)
-  if (result as integer) ~= (mco.MCO_SUCCESS as integer) then
+  if result ~= mco.MCO_SUCCESS then
     discard_transfer(co)
     check_mco_result(result)
   end
@@ -169,16 +196,16 @@ end
 
 function Coro:status(): string
   local status = mco.mco_status(self.handle)
-  if (status as integer) == (mco.MCO_SUSPENDED as integer) then
+  if status == mco.MCO_SUSPENDED then
     return "suspended"
   end
-  if (status as integer) == (mco.MCO_RUNNING as integer) then
+  if status == mco.MCO_RUNNING then
     return "running"
   end
-  if (status as integer) == (mco.MCO_NORMAL as integer) then
+  if status == mco.MCO_NORMAL then
     return "normal"
   end
-  if (status as integer) == (mco.MCO_STACKED as integer) then
+  if status == mco.MCO_STACKED then
     return "stacked"
   end
   return "dead"
@@ -198,7 +225,7 @@ function is_yieldable(tag: value): boolean
     missing_yield_tag()
   end
   local ctag: ffi.TValue = tag
-  return (mco.mco_is_yieldable(runtime.current_co, ctag) as integer) ~= 0
+  return mco.mco_is_yieldable(runtime.current_co, ctag) ~= 0
 end
 
 local function coro_gc(handle: value)
@@ -218,7 +245,7 @@ end
 
 function create(func: (value) -> value, default_tag: value): Coro
   local slot: **mco.mco_coro = lua.lua_newuserdatauv(
-    L, ffi.titan_ffi_void_ptr.sizeof, coro_native.TITAN_CORO_OWNER_USERVALUES)
+    L, ffi.titan_ffi_void_ptr.sizeof, TITAN_CORO_OWNER_USERVALUES)
   local T = ffi.titan_newthread(L)
   lua.lua_setiuservalue(L, -2, 1)
   ffi.lua_pushtvalue(L, M)
@@ -235,7 +262,7 @@ function create(func: (value) -> value, default_tag: value): Coro
   desc.user_data = ffi.lua_togco(L, -1)
 
   local res = mco.mco_create(slot, desc)
-  if res as integer ~= mco.MCO_SUCCESS as integer then
+  if res ~= mco.MCO_SUCCESS then
     raise "could not create coroutine: " .. (mco.mco_result_description(res) as string)
   end
 
@@ -244,7 +271,7 @@ end
 
 do
   local res = lual.luaL_newmetatable(L, "titan.coroutine")
-  if res as integer == 1 then
+  if res == 1 then
     ffi.lua_pushtvalue(L, coro_gc)
     lua.lua_setfield(L, -2, "__gc")
   end

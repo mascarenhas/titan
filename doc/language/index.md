@@ -30,7 +30,7 @@ local m = require "sum"
 print(m.sum_list(m.sample())) --> 10
 ```
 
-This is the reference for the language as implemented by the Titan 0.17
+This is the reference for the language as implemented by the Titan 0.18
 prototype compiler in this repository. It replaces the old single-file
 manual. For how the compiler itself works — including how each construct
 is translated to C — see the
@@ -71,11 +71,12 @@ Start with the [design philosophy](philosophy.md) if you want to know
 | [TCP networking standard library](standard-library-net.md) | Asynchronous DNS and TCP clients/servers, binary stream reads and FIFO writes, shutdown, close, and cancellation. |
 | [Operating-system standard library](standard-library-os.md) | Portable environment, directory, identity, executable-path, one-shot signals, child processes with binary stdio, and deadlock-free `communicate`. |
 | [The C FFI](ffi.md) | `foreign import`: binding C headers, supported types, calling C functions, limitations. |
+| [C FFI declarations and expressions](c-ffi-expressions.md) | Named C tags, host-validated pointer conversions, zero-initialized automatic aggregates and fixed arrays, typed object-macro values, macro-projected fields, and target-correct C operators. |
 | [Grammar](grammar.md) | The complete lexical and syntactic grammar. |
 
 ## Status and limitations
 
-Titan is a working prototype, version 0.17. The language documented here is
+Titan is a working prototype, version 0.18. The language documented here is
 implemented and covered by the compiler's test suite. Its boundaries are
 mostly missing features, plus a handful of constructs the compiler rejects
 with a clean error; each links to the chapter that documents it in full.
@@ -138,8 +139,12 @@ with a clean error; each links to the chapter that documents it in full.
   `.new_array(count)` allocate zeroed Lua-GC-owned userdata with no
   finalizer. Explicit C variadic calls are supported; Titan functions cannot yet be
   passed to C, adopted lifetimes are parked, and owned structs with
-  flexible array members are deliberately rejected for this version
-  ([the full list](ffi.md#current-limitations)).
+  flexible array members are deliberately rejected for this version.
+  Zero-initialized automatic aggregates/fixed arrays, named tag-only
+  structures, contextual object-pointer casts, and target-correct C operators
+  are described in
+  [C FFI declarations and expressions](c-ffi-expressions.md);
+  see also [the full FFI limitation list](ffi.md#current-limitations).
 
 ### Other
 

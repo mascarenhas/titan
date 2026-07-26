@@ -25,8 +25,8 @@ policy once. Bundled mode carries the private archive's objects into both
 SDK. System mode keeps the pkg-config-selected dependency as a final-link
 setting and does not copy it into `titan.a`.
 
-Installation publishes `<root>/lib/titan/0.17/titan.so` and
-`<root>/lib/titan/0.17/titan.a`, plus seven generated shims below
+Installation publishes `<root>/lib/titan/0.18/titan.so` and
+`<root>/lib/titan/0.18/titan.a`, plus seven generated shims below
 `<root>/share/lua/5.5/titan/`. Titan prefix lookup
 claims `titan.uv` through the image's `titan_uv_abi`/`titan_uv_types`; Lua
 `require "titan.uv"` reaches `titan/uv.lua`, which selects provider `titan`,
@@ -64,13 +64,30 @@ one module state inside the combined DSO:
 
 | Source | Ownership |
 | --- | --- |
-| `titan/uv/uv.titan` | shared imports, constants, module state, bootstrap, program-argument setup, and the sole root initializer; no record or public member |
+| `titan/uv/uv.titan` | shared imports, constants, module state, bootstrap, program-argument and inherited-`SIGPIPE` setup, and the sole root initializer; no record or public member |
 | `file.titan` | public `uv_file` and `_fs_*` API plus private FS constants, operations, controls, requests, File FIFO/ownership, callbacks, dispatch, and shutdown repair |
 | `os.titan` | public non-process `_os_*` API plus private signal specifications/controls/owners, one-shot callback retirement, and portable OS helpers |
 | `process.titan` | public `uv_process_t`, `_os_process_*`, and `_os_communicate` API plus private process/pipe controls, operations, requests, helper groups, child stdio callbacks, and forced shutdown |
 | `runtime.titan` | public `Error`, `_bytes_*`, `_loop`, and `_version` API plus private loop/Runtime and byte/text/buffer records, trace preservation, allocation, and ownership helpers |
 | `task.titan` | public `Cancelled`, `uv_timer_t`, `Task`, Task methods, `_run`/`_sleep`/`_yield`, and ticker API plus private timer/drive/request/ticker records and coroutine driving |
 | `tcp.titan` | public `uv_tcp_t`, `_net_*`, and `_net_eof_error` API plus private address/operation/request/control/owner records, DNS/TCP queues, callbacks, and network teardown |
+
+The ABI-0.18 native/Titan boundary is correspondingly explicit:
+
+| Responsibility | Owner |
+| --- | --- |
+| `UV_E*`, socket, resolver, signal, mode, and `UINT_MAX` constants | Titan imports the host headers directly under the production target flags |
+| byte/text operations, stat extraction, process options/stdio/spawn, DNS hints/traversal/copy/release, and bind/connect submission | Titan calls the public C/libuv APIs directly |
+| fixed six-slot owner recovery and dispatch | native runtime |
+| timer, close, filesystem, DNS, connect, write, shutdown, allocation, read, connection, signal, and process-exit callback trampolines | native runtime |
+| fixed six-slot owner protocol and opaque normalized-address storage | shared header declarations consumed by Titan and the native callbacks |
+| conditional inherited `SIGPIPE` handling | Titan calls the host `sigaction`/`sigemptyset` APIs directly through the C FFI and translates failures with public libuv |
+
+No operational libuv wrapper sits between the generated module and those
+public APIs. The callback trampolines are external native symbols because
+archive-backed generated standard-library objects refer to them directly.
+Those trampolines and their common owner dispatcher are the complete function
+boundary retained in `titan-runtime/titan_uv.c`.
 
 Every contributor uses the main source's imports, constants, and module state;
 record types shared across subsystems are referenced directly from whichever
@@ -99,6 +116,14 @@ Tables. Native exact Array paths and `TitanVargArrayOrMap` retain backing
 `Table *` / `Table **`; callback-owned roots must preserve whichever internal
 or boxed domain their typed slot specifies. See
 [Dense Arrays](dense-arrays.md#internal-and-boxed-representations).
+
+ABI 0.18 preserves that logical interface and Array contract while changing
+the archive-backed native boundary. Generated standard-library objects now
+refer directly to callback trampolines promoted from `titan_uv.o`'s private
+implementation into the runtime's external symbol contract, and retired
+libuv/coroutine helper symbols are no longer part of that contract. A 0.18
+provider and runtime must be built and distributed together; a 0.17 static
+provider cannot be paired with the 0.18 runtime in either direction.
 
 The Makefile's explicit `UV_TITAN_SOURCES` list names all seven files inside
 the reviewed `STDLIB_TITAN_SOURCES` prerequisite set. It intentionally does
@@ -257,11 +282,12 @@ through task-specific callbacks, and removes the Runtime root. A failed close
 also invalidates the wrapper and reports that one error to the waiting Task, or
 to the Runtime for an internal shutdown close. It is never submitted again.
 
-`stat` uses public `uv_fs_stat`, which follows symbolic links. The narrow shim
-copies the portable `uv_stat_t` size, mode, and modification fields and
-classifies the resulting target kind. Titan exposes no `lstat` operation yet.
-All actual I/O and path changes use public libuv APIs; the shim contains no
-POSIX `open`, `read`, `write`, or `close` fallback.
+`stat` uses public `uv_fs_stat`, which follows symbolic links. Titan reads the
+public `uv_stat_t` size, mode, and modification fields directly and classifies
+the target with host `S_IFMT`, `S_IFREG`, `S_IFDIR`, and `S_IFLNK` constants
+imported under the production feature-test flags. Titan exposes no `lstat`
+operation yet. All actual I/O and path changes use public libuv APIs; the
+runtime contains no POSIX `open`, `read`, `write`, or `close` fallback.
 
 ## Portable OS helpers and signals
 
@@ -297,27 +323,33 @@ the provider skips setup and `os.exepath` raises instead of calling libuv
 outside its documented prerequisite.
 
 A one-shot signal wait uses GC-owned `uv_signal_t` storage and the same fixed
-owner layout as other callback handles. Host signal-number mapping is isolated
-in the shim; the Titan interface exposes only the common lowercase Linux/macOS
-names. Before arbitrary continuation code runs, the callback records the
-signal, stops the watcher, clears its waiter epoch, and initiates `uv_close`.
-Cancellation performs the same physical stop-and-close path without delivering
-a stale signal.
+owner layout as other callback handles. Titan maps the common lowercase
+Linux/macOS names with the host's imported `SIG*` constants, after the ordinary
+NUL-free text copy has validated the public name. Before arbitrary continuation
+code runs, the callback records the signal, stops the watcher, clears its
+waiter epoch, and initiates `uv_close`. Cancellation performs the same physical
+stop-and-close path without delivering a stale signal. The separate inherited
+`SIGPIPE` policy belongs to the canonical main initializer: Titan imports the
+host signal declarations directly rather than extending the callback shim.
 
 ## Child processes and stdio pipes
 
 `os.spawn` copies the executable and every argument into rooted NUL-terminated
 GC storage, then builds a GC-owned `char *` array containing `argv[0]`, the
 caller arguments, and the final `NULL`. It allocates the process and three
-GC-owned pipe owners, initializes each with public `uv_pipe_init`, and passes
-their handles to the spawn shim.
+GC-owned pipe owners and initializes each with public `uv_pipe_init`.
 
-The shim describes stdin as `UV_CREATE_PIPE | UV_READABLE_PIPE` and stdout and
-stderr as `UV_CREATE_PIPE | UV_WRITABLE_PIPE`. Public `uv_spawn` therefore
-creates and opens the parent endpoints itself; Titan never manages raw pipe
-descriptors or child ends. A failed initialization or spawn closes every
-initialized handle through the ordinary libuv callback path. There is no POSIX
-`pipe`, `dup`, or `close` fallback.
+Titan then constructs zeroed automatic `uv_process_options_t` and three-element
+`uv_stdio_container_t` objects. It describes stdin as
+`UV_CREATE_PIPE | UV_READABLE_PIPE`, stdout and stderr as
+`UV_CREATE_PIPE | UV_WRITABLE_PIPE`, installs the three explicitly converted
+stream pointers, and calls public `uv_spawn` with the native exit callback.
+Process data is installed after every attempted spawn and the metadata moves
+unconditionally to `PROCESS_SPAWNED`, even on synchronous rejection, so the
+initialized handle follows the ordinary close path. A failed pipe
+initialization or spawn closes every initialized handle through the ordinary
+libuv callback path. Titan never manages raw pipe descriptors or child ends;
+there is no POSIX `pipe`, `dup`, or `close` fallback.
 
 After `uv_spawn` succeeds, Titan starts continuous reads on both output pipes
 before publishing the Process. If either `uv_read_start` fails, an
@@ -357,9 +389,12 @@ through the real stream callback sequence.
 
 Libuv implements Unix stream writes with `write`/`writev`, which can deliver
 `SIGPIPE` before the write callback can report `UV_EPIPE`. During `titan.uv`
-initialization, the native shim uses `sigaction` to change `SIGPIPE` from
-`SIG_DFL` to `SIG_IGN`. It leaves an inherited `SIG_IGN` or application-owned
-handler unchanged. This narrow POSIX initialization is necessary because
+initialization, Titan uses the C FFI to call `sigaction` and change `SIGPIPE`
+from `SIG_DFL` to `SIG_IGN`, with `sigemptyset` supplying the replacement
+mask. It leaves an inherited `SIG_IGN` or application-owned handler unchanged
+and reads the public `cerrno.errno` macro through the imported `errno.h` before
+converting it with `uv_translate_sys_error` and raising the ordinary
+`runtime.sigpipe` Error. This narrow POSIX initialization is necessary because
 libuv has no equivalent configuration API; all pipe creation, I/O, and close
 operations continue to use public libuv APIs.
 
@@ -378,23 +413,23 @@ stdin/stdout/stderr pipe deadlock that a series of ordinary joins would allow.
 ## Direct native callback boundary
 
 `titan-runtime/titan_uv.c` recovers a rooted timer, signal, filesystem, DNS,
-stream, pipe, write-request, or process owner through public libuv data
-accessors, reads its main-thread and dispatcher slots, recovers the module from
-the dispatcher's first upvalue, obtains the native Titan function pointer, and
-calls:
+stream, pipe, connect-request, write-request, shutdown-request, or process
+owner through public libuv data accessors, reads its main-thread and dispatcher
+slots, recovers the module from the dispatcher's first upvalue, obtains the
+native Titan function pointer, and calls:
 
 ```c
 dispatch(L, M, NULL, owner, event_kind, result, size, pointer);
 ```
 
 The fixed final payload is `NULL` for timer, signal, close, filesystem,
-stream-read, pipe-write, and process-exit callbacks. A stream-allocation
-callback passes libuv's borrowed output `uv_buf_t *`; the Titan dispatcher
-initializes its base and length from freshly allocated, rooted GC storage
-before returning. A process exit uses `result` for the exit status and `size`
-for the termination signal. DNS completion uses the payload for libuv's
-borrowed `addrinfo` list, which the trusted dispatcher copies into GC-owned
-opaque address storage and releases before returning to libuv.
+connect, write, shutdown, stream-read, connection, and process-exit callbacks.
+A stream-allocation callback passes libuv's borrowed output `uv_buf_t *`; the
+Titan dispatcher initializes its base and length from freshly allocated,
+rooted GC storage before returning. A process exit uses `result` for the exit
+status and `size` for the termination signal. DNS completion uses the payload
+for libuv's borrowed `addrinfo` list, which the trusted dispatcher copies into
+GC-owned opaque address storage and releases before returning to libuv.
 
 There is no `lua_pcall`, Lua entry wrapper, or VM generic-call path around this
 call. Dispatchers are trusted library code. Each function-level trailing Titan
@@ -497,14 +532,19 @@ the Titan runtime, and standard modules under ASan/UBSan, then runs
 representative timer/FS and core owner/callback suites plus production net/OS
 smokes. Regular Linux runs the complete production behavior suites. CI
 snapshots and restores the combined provider pair, conditional dSYM, and
-generated shims around compiler groups and mode changes. The sole isolated source
-variant copies the complete `titan/uv/` ensemble, builds exact
+generated shims around compiler groups and mode changes. Two isolated source
+variants copy the complete `titan/uv/` ensemble, build exact
 coroutine/uv/async/timer providers under a private root with no shallow
-`titan.so`, patches the owning files through unique per-file anchors, and
-delays selected FS callbacks
-to cover late
-cancellation, disposal of a late successful open, and cross-generation
-Runtime/File/Task/buffer/error rooting. The sanitizer net smoke specifically
+`titan.so`, and patch the owning files through unique per-file anchors. The FS
+variant delays selected callbacks to cover late cancellation, disposal of a
+late successful open, and cross-generation Runtime/File/Task/buffer/error
+rooting. The DNS variant captures a successful borrowed `addrinfo` result
+before logical dispatch and cleanup-shields only its delayed-delivery owner
+through Runtime shutdown. Its private release counter, copy-fault,
+invalid-cell retry, formatter, and GC hooks prove exactly-once direct release,
+no stale Task resume, and rooted normalized-address cells through
+full/generational collection and close-before-retry. None of those hooks enter
+the installed modules. The sanitizer net smoke specifically
 keeps a large write pending across Task cancellation, unwind, and forced GC. Its
 stack-use-after-return coverage relies on `minicoro.h` announcing every native
 coroutine stack switch to the ASan fiber API, including tagged and stacked

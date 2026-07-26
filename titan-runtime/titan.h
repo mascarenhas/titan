@@ -85,9 +85,14 @@
    preserve negative keys, place high positive indices in the hash, or accept
    and expose raw Tables at Lua/value boundaries. The ABI gate protects those
    representation invariants and the boundary protocol; it is not a
-   Table * -> Udata * or Table ** -> Udata ** migration. */
-#define TITAN_VER "0.17"
-#define TITAN_VER_SUFFIX "_0_17"
+   Table * -> Udata * or Table ** -> Udata ** migration.
+   0.17 -> 0.18: standard-library archive objects directly reference callback
+   trampolines promoted into the runtime's external native symbol contract,
+   and no longer reference the replaced libuv and coroutine helper symbols.
+   A 0.18 provider and runtime must therefore be built and distributed
+   together; either direction of a 0.17/0.18 static pairing is incompatible. */
+#define TITAN_VER "0.18"
+#define TITAN_VER_SUFFIX "_0_18"
 #define TITAN_PATH_VAR "TITAN_PATH"
 #define TITAN_PATH_SEP "/"
 #define TITAN_ROOT_DEFAULT "/usr/local"

@@ -222,6 +222,12 @@ local function normalize_toolchain(options)
     if not cppflags then
         return nil, err
     end
+    local compile_flags
+    compile_flags, err =
+        normalize_argv(options.compile_flags, "compile flags", false)
+    if not compile_flags then
+        return nil, err
+    end
 
     local fixed_include_dirs
     fixed_include_dirs, err = normalize_argv(
@@ -235,10 +241,20 @@ local function normalize_toolchain(options)
     or not language_mode:match("^[%w%+_.-]+$") then
         return nil, "invalid C language mode"
     end
+    local language_flag = options.language_flag
+    if language_flag == nil then
+        language_flag = "-std=" .. language_mode
+    elseif language_flag ~= false and
+           (type(language_flag) ~= "string" or language_flag == "" or
+            language_flag:find("[\r\n%z]")) then
+        return nil, "language flag must be false or a nonempty single-line string"
+    end
 
     return {
         compiler = compiler,
         language_mode = language_mode,
+        language_flag = language_flag,
+        compile_flags = compile_flags,
         cppflags = cppflags,
         fixed_include_dirs = fixed_include_dirs,
     }
@@ -262,37 +278,137 @@ local function shell_command(argv)
     return table.concat(quoted, " ")
 end
 
-local function run_command(argv, stderr_to_stdout)
-    local command, err = shell_command(argv)
+-- Execute an already parsed argv through the one POSIX captured-command path
+-- used by both preprocessing discovery and checker-side compile probes.
+-- Callers receive process state rather than having an expected nonzero status
+-- collapsed into a transport error.
+function cpp.capture_command(argv, options)
+    options = options or {}
+    local normalized, normalize_err =
+        normalize_argv(argv, "command", false)
+    if not normalized then
+        return {
+            started = false,
+            ok = false,
+            diagnostic = normalize_err,
+        }
+    elseif #normalized == 0 then
+        return {
+            started = false,
+            ok = false,
+            diagnostic = "command is empty",
+        }
+    end
+
+    local command, err = shell_command(normalized)
     if not command then
-        return nil, err
+        return {
+            started = false,
+            ok = false,
+            diagnostic = err,
+        }
     end
     command = "env LANG=C LC_ALL=C " .. command
-    if stderr_to_stdout then
+    if options.stderr_to_stdout ~= false then
         command = command .. " 2>&1"
     end
-    local pipe
-    pipe, err = io.popen(command, "r")
-    if not pipe then
-        return nil, err
+
+    local opened, pipe, popen_err = pcall(io.popen, command, "r")
+    if not opened or not pipe then
+        return {
+            started = false,
+            ok = false,
+            command = command,
+            diagnostic = "could not start captured command: " ..
+                tostring(opened and popen_err or pipe),
+        }
     end
-    local output = pipe:read("*a")
-    local ok, why, status = pipe:close()
-    if not ok then
+
+    local read_ok, output = pcall(pipe.read, pipe, "*a")
+    if not read_ok then
+        pcall(pipe.close, pipe)
+        return {
+            started = false,
+            ok = false,
+            command = command,
+            diagnostic = "could not capture command output: " ..
+                tostring(output),
+        }
+    end
+
+    local close_ok, succeeded, why, status =
+        pcall(pipe.close, pipe)
+    if not close_ok then
+        return {
+            started = false,
+            ok = false,
+            command = command,
+            diagnostic = output .. "\nfailed waiting for command: " ..
+                tostring(succeeded),
+        }
+    end
+
+    -- Lua receives a direct child's signal termination as
+    -- `(nil, "signal", signo)`, but io.popen necessarily inserts a POSIX
+    -- shell. That shell conventionally reports a signalled command as
+    -- `128 + signo` and exits normally itself. Normalize both shapes so a
+    -- killed compiler is never mistaken for an ordinary rejected C program.
+    -- POSIX signal numbers occupy the low 7 bits in this convention; bounding
+    -- the translation avoids treating arbitrary large application exit codes
+    -- as signals.
+    local shell_status = not succeeded and why == "exit"
+        and type(status) == "number"
+        and status >= 129 and status <= 192
+        and status or nil
+    local signal = not succeeded and (
+        why == "signal" and status
+        or shell_status and (shell_status - 128)
+    ) or nil
+    local interrupted = signal ~= nil
+    if interrupted then
+        why = "signal"
+        status = signal
+    end
+    local missing = not succeeded and why == "exit"
+        and (status == 126 or status == 127)
+    return {
+        started = not missing,
+        ok = succeeded == true,
+        status = succeeded and 0 or status,
+        shell_status = shell_status,
+        signal = signal,
+        why = why,
+        interrupted = interrupted,
+        command = command,
+        diagnostic = output,
+        output = output,
+    }
+end
+
+local function run_command(argv, stderr_to_stdout)
+    local result = cpp.capture_command(argv, {
+        stderr_to_stdout = stderr_to_stdout,
+    })
+    if not result.started or not result.ok then
         return nil, ("command failed (%s %s): %s"):format(
-            tostring(why), tostring(status), output)
+            tostring(result.why or "spawn"),
+            tostring(result.status or "?"),
+            result.diagnostic or "")
     end
-    return output
+    return result.output
 end
 
 local function config_argv(config)
     local argv = {}
     append_argv(argv, config.compiler)
+    append_argv(argv, config.compile_flags)
     append_argv(argv, config.cppflags)
     -- Match generated/runtime compilation: user CPP flags precede Titan's
     -- fixed language/default flags, so the fixed C99 mode wins if a caller
     -- accidentally supplies another -std option in the CPP channel.
-    table.insert(argv, "-std=" .. config.language_mode)
+    if config.language_flag then
+        table.insert(argv, config.language_flag)
+    end
     for _, dir in ipairs(config.fixed_include_dirs) do
         append_argv(argv, { "-I", dir })
     end
@@ -355,8 +471,10 @@ local function probe_default_defines(config)
     local blank_ctx = {
         incdirs = {},
         defines = {},
+        macro_changes = {},
         ifmode = { true },
         output = {},
+        output_origins = {},
         current_dir = {},
     }
     typed.set_type(blank_ctx, "Ctx")
@@ -402,8 +520,10 @@ function cpp.new_context(options)
     local ctx = {
         incdirs = copy_incdirs(probed.incdirs),
         defines = copy_map(probed.defines),
+        macro_changes = {},
         ifmode = { true },
         output = {},
+        output_origins = {},
         current_dir = {},
     }
     typed.set_type(ctx, "Ctx")
@@ -622,8 +742,171 @@ cpp.initial_processing = typed("FILE* -> LineList", function(fd)
     return output
 end)
 
+-- Stringification needs the spelling relationship between adjacent
+-- preprocessing tokens, not merely the tokens themselves: `a+b` must become
+-- `"a+b"`, while `a /* comment */ + b` must become `"a + b"`. Keep that
+-- small amount of provenance out-of-band so the parser and the rest of the
+-- preprocessor can continue to use ordinary string arrays. Raw spelling is
+-- separate because C digraphs behave canonically during expansion but retain
+-- their original spelling under `#`.
+local pp_spacing = setmetatable({}, { __mode = "k" })
+local pp_raw_spelling = setmetatable({}, { __mode = "k" })
+
+local pp_token_spellings = {
+    ["##"] = { "##", "%:%:" },
+    ["#"] = { "#", "%:" },
+    ["["] = { "[", "<:" },
+    ["]"] = { "]", ":>" },
+    ["{"] = { "{", "<%" },
+    ["}"] = { "}", "%>" },
+}
+
+local function token_spellings(token)
+    return pp_token_spellings[token] or { token }
+end
+
+local function match_token_forward(line, pos, token)
+    for _, spelling in ipairs(token_spellings(token)) do
+        if line:sub(pos, pos + #spelling - 1) == spelling then
+            return pos + #spelling, spelling
+        end
+    end
+    return nil
+end
+
+local function match_token_backward(line, last, token)
+    for _, spelling in ipairs(token_spellings(token)) do
+        local first = last - #spelling + 1
+        if first >= 1 and line:sub(first, last) == spelling then
+            return first, spelling
+        end
+    end
+    return nil
+end
+
+local function record_full_spacing(tokens, line)
+    local spacing = {}
+    local raw = {}
+    local pos = 1
+    for i, token in ipairs(tokens) do
+        local whitespace_start = pos
+        while pos <= #line and line:sub(pos, pos):match("%s") do
+            pos = pos + 1
+        end
+        spacing[i] = pos > whitespace_start
+        local nextpos, spelling = match_token_forward(line, pos, token)
+        if not nextpos then
+            return
+        end
+        pos = nextpos
+        raw[i] = spelling
+    end
+    if line:sub(pos):find("%S") then
+        return
+    end
+    pp_spacing[tokens] = spacing
+    pp_raw_spelling[tokens] = raw
+end
+
+-- Directive replacement/expression lists are suffixes of their logical line.
+-- Match from the end so repeated identifiers in the macro header cannot be
+-- mistaken for replacement-list tokens.
+local function record_suffix_spacing(tokens, line)
+    local first, last = {}, {}
+    local raw = {}
+    local pos = #line
+    while pos >= 1 and line:sub(pos, pos):match("%s") do
+        pos = pos - 1
+    end
+    for i = #tokens, 1, -1 do
+        last[i] = pos
+        first[i], raw[i] = match_token_backward(line, pos, tokens[i])
+        if not first[i] then
+            return
+        end
+        pos = first[i] - 1
+        while pos >= 1 and line:sub(pos, pos):match("%s") do
+            pos = pos - 1
+        end
+    end
+
+    local spacing = {}
+    spacing[1] = false
+    for i = 2, #tokens do
+        local gap = line:sub(last[i - 1] + 1, first[i] - 1)
+        if gap:find("%S") then
+            return
+        end
+        spacing[i] = #gap > 0
+    end
+    pp_spacing[tokens] = spacing
+    pp_raw_spelling[tokens] = raw
+end
+
+local function token_has_space_before(tokens, i)
+    local spacing = pp_spacing[tokens]
+    return spacing and spacing[i] or false
+end
+
+local function set_token_spacing(tokens, spacing)
+    pp_spacing[tokens] = spacing
+end
+
+local function token_raw_spelling(tokens, i)
+    local raw = pp_raw_spelling[tokens]
+    return raw and raw[i] or tokens[i]
+end
+
+local function append_token(tokens, token, has_space_before, raw_spelling)
+    table.insert(tokens, token)
+    local spacing = pp_spacing[tokens]
+    if not spacing then
+        spacing = {}
+        pp_spacing[tokens] = spacing
+    end
+    spacing[#tokens] = has_space_before == true
+    local raw = pp_raw_spelling[tokens]
+    if not raw then
+        raw = {}
+        pp_raw_spelling[tokens] = raw
+    end
+    raw[#tokens] = raw_spelling or token
+end
+
+local function append_tokens(tokens, values, first_has_space_before)
+    local value_spacing = pp_spacing[values]
+    local value_raw = pp_raw_spelling[values]
+    for i, token in ipairs(values) do
+        local before
+        if i == 1 then
+            before = first_has_space_before
+        elseif value_spacing then
+            before = value_spacing[i]
+        else
+            -- A caller-created string array has lost its raw spelling. Keep
+            -- its tokens separate rather than inventing adjacency.
+            before = true
+        end
+        append_token(tokens, token, before,
+            value_raw and value_raw[i] or token)
+    end
+end
+
 cpp.tokenize = typed("string -> table", function(line)
-    return c99.match_preprocessing_grammar(line)
+    local tokens = c99.match_preprocessing_grammar(line)
+    if not tokens then
+        return tokens
+    end
+
+    if not tokens.directive then
+        record_full_spacing(tokens, line)
+    elseif tokens.directive == "define" and tokens.repl then
+        record_suffix_spacing(tokens.repl, line)
+    elseif (tokens.directive == "if" or tokens.directive == "elif")
+    and tokens.exp then
+        record_suffix_spacing(tokens.exp, line)
+    end
+    return tokens
 end)
 
 local function find_file(ctx, filename, mode, is_next)
@@ -713,7 +996,7 @@ eval_exp = typed("Ctx, Exp -> number", function(ctx, exp)
     elseif exp.op == "<=" then return (eval_exp(ctx, exp[1]) <= eval_exp(ctx, exp[2])) and 1 or 0
     elseif exp.op == ">"  then return (eval_exp(ctx, exp[1]) > eval_exp(ctx, exp[2])) and 1 or 0
     elseif exp.op == "<"  then return (eval_exp(ctx, exp[1]) < eval_exp(ctx, exp[2])) and 1 or 0
-    elseif exp.op == "!"  then return (eval_exp(ctx, exp[1]) == 1) and 0 or 1
+    elseif exp.op == "!"  then return (eval_exp(ctx, exp[1]) ~= 0) and 0 or 1
     elseif exp.op == "&&" then
         for _, e in ipairs(exp) do
             if eval_exp(ctx, e) == 0 then
@@ -745,6 +1028,7 @@ local consume_parentheses = typed("{string}, number, LineList, number -> {{strin
     local args = {}
     local i = start + 1
     local arg = {}
+    set_token_spacing(arg, {})
     local stack = 0
     while true do
         local token = tokens[i]
@@ -756,13 +1040,17 @@ local consume_parentheses = typed("{string}, number, LineList, number -> {{strin
                 end
                 local nextline = linelist[cur].tk
                 linelist[cur].tk = {}
-                table.move(nextline, 1, #nextline, i, tokens)
+                set_token_spacing(linelist[cur].tk, {})
+                -- A physical newline separating two logical preprocessing
+                -- lines is whitespace for stringification.
+                append_tokens(tokens, nextline, true)
                 token = tokens[i]
             until token
         end
         if token == "(" then
             stack = stack + 1
-            table.insert(arg, token)
+            append_token(arg, token, token_has_space_before(tokens, i),
+                token_raw_spelling(tokens, i))
         elseif token == ")" then
             if stack == 0 then
                 if #arg > 0 then
@@ -771,16 +1059,20 @@ local consume_parentheses = typed("{string}, number, LineList, number -> {{strin
                 break
             end
             stack = stack - 1
-            table.insert(arg, token)
+            append_token(arg, token, token_has_space_before(tokens, i),
+                token_raw_spelling(tokens, i))
         elseif token == "," then
             if stack == 0 then
                 table.insert(args, arg)
                 arg = {}
+                set_token_spacing(arg, {})
             else
-                table.insert(arg, token)
+                append_token(arg, token, token_has_space_before(tokens, i),
+                    token_raw_spelling(tokens, i))
             end
         else
-            table.insert(arg, token)
+            append_token(arg, token, token_has_space_before(tokens, i),
+                token_raw_spelling(tokens, i))
         end
         i = i + 1
     end
@@ -792,15 +1084,35 @@ local function array_copy(t)
     for i,v in ipairs(t) do
         t2[i] = v
     end
+    local spacing = pp_spacing[t]
+    if spacing then
+        local spacing2 = {}
+        for i = 1, #t do
+            spacing2[i] = spacing[i]
+        end
+        pp_spacing[t2] = spacing2
+    end
+    local raw = pp_raw_spelling[t]
+    if raw then
+        local raw2 = {}
+        for i = 1, #t do
+            raw2[i] = raw[i]
+        end
+        pp_raw_spelling[t2] = raw2
+    end
     return t2
-end
-
-local function table_remove(list, pos, n)
-    table.move(list, pos + n, #list + n, pos)
 end
 
 local function table_replace_n_with(list, at, n, values)
     local old = #list
+    local old_tokens = {}
+    for i = 1, old do
+        old_tokens[i] = list[i]
+    end
+    local old_spacing = pp_spacing[list]
+    local value_spacing = pp_spacing[values]
+    local old_raw = pp_raw_spelling[list]
+    local value_raw = pp_raw_spelling[values]
     debug("TRNW?", list, "AT", at, "N", n, "VALUES", values)
     --assert(is_sequence(list))
     local nvalues = #values
@@ -813,10 +1125,72 @@ local function table_replace_n_with(list, at, n, values)
     --assert(is_sequence(list))
     debug("TRNW!", list)
     assert(#list == old - n + #values)
+
+    if old_spacing or value_spacing then
+        local spacing = {}
+        for i = 1, at - 1 do
+            spacing[i] = old_spacing and old_spacing[i] or false
+        end
+        for i = 1, nvalues do
+            if i == 1 then
+                spacing[at] = at > 1 and old_spacing
+                    and old_spacing[at] or false
+            elseif value_spacing then
+                spacing[at + i - 1] = value_spacing[i] == true
+            else
+                spacing[at + i - 1] = true
+            end
+        end
+        local newat = at + nvalues
+        for oldi = at + n, old do
+            local before = old_spacing and old_spacing[oldi] or false
+            if nvalues == 0 and oldi == at + n and at > 1
+            and old_spacing then
+                -- Whitespace before an empty macro invocation remains between
+                -- the surviving tokens (`a E+b`, where E expands to nothing,
+                -- becomes the token spelling `a +b`). Whitespace *inside* an
+                -- empty function-like invocation is consumed with it.
+                before = before or old_spacing[at] == true
+            end
+            spacing[newat] = before
+            newat = newat + 1
+        end
+        pp_spacing[list] = spacing
+    end
+
+    if old_raw or value_raw then
+        local raw = {}
+        for i = 1, at - 1 do
+            raw[i] = old_raw and old_raw[i] or old_tokens[i]
+        end
+        for i = 1, nvalues do
+            raw[at + i - 1] = value_raw and value_raw[i] or values[i]
+        end
+        local newat = at + nvalues
+        for oldi = at + n, old do
+            raw[newat] = old_raw and old_raw[oldi] or old_tokens[oldi]
+            newat = newat + 1
+        end
+        pp_raw_spelling[list] = raw
+    end
+end
+
+local function table_remove(list, pos, n)
+    table_replace_n_with(list, pos, n, {})
 end
 
 local stringify = typed("{string} -> string", function(tokens)
-    return '"'..table.concat(tokens, " "):gsub("\"", "\\")..'"'
+    local pieces = {}
+    local spacing = pp_spacing[tokens]
+    for i in ipairs(tokens) do
+        if i > 1 and (not spacing or spacing[i]) then
+            table.insert(pieces, " ")
+        end
+        table.insert(pieces, token_raw_spelling(tokens, i))
+    end
+    local text = table.concat(pieces)
+    text = text:gsub("\\", "\\\\"):gsub('"', '\\"')
+    return '"' .. text .. '"'
 end)
 
 local macro_expand
@@ -845,45 +1219,114 @@ local valid_noloop = typed("table, string, number -> boolean", function(noloop, 
     return noloop[token] == nil or noloop[token] < n
 end)
 
+local PLACEMARKER = {}
+
+local function paste_error(linelist, cur, lhs, rhs)
+    local line = linelist and linelist[cur]
+    local where = line and line.nr and (" at line %d"):format(line.nr) or ""
+    error(("invalid preprocessing token paste%s: '%s' ## '%s'")
+        :format(where, lhs, rhs), 0)
+end
+
+local function paste_token(linelist, cur, lhs, rhs)
+    local joined = lhs .. rhs
+    local parsed = cpp.tokenize(joined)
+    if not parsed or #parsed ~= 1 then
+        paste_error(linelist, cur, lhs, rhs)
+    end
+    return parsed[1], token_raw_spelling(parsed, 1)
+end
+
 local replace_args = typed("Ctx, {string}, table, LineList, number -> ()", function(ctx, tokens, args, linelist, cur)
-    local i = 1
-    local hash_next = false
-    local join_next = false
-    while true do
-        local token = tokens[i]
-        if not token then
-            break
+    -- C macro arguments have two simultaneous representations. `#` and `##`
+    -- consume the raw preprocessing tokens, while an ordinary occurrence
+    -- consumes an independently prescanned copy. Never expand the shared raw
+    -- argument in place: one parameter can occur in both contexts.
+    local expanded_args = {}
+    local function expanded_argument(name)
+        local expanded = expanded_args[name]
+        if not expanded then
+            expanded = array_copy(args[name])
+            macro_expand(ctx, expanded, linelist, cur, false)
+            expanded_args[name] = expanded
         end
-        if token == "#" then
-            hash_next = true
-            table.remove(tokens, i)
-        elseif token == "##" then
-            join_next = true
-            table.remove(tokens, i)
+        return expanded
+    end
+
+    local substituted = {}
+    set_token_spacing(substituted, {})
+    local i = 1
+    while i <= #tokens do
+        local token = tokens[i]
+        if token == "#" and args[tokens[i + 1]] then
+            append_token(substituted, stringify(args[tokens[i + 1]]),
+                token_has_space_before(tokens, i))
+            i = i + 2
         elseif args[token] then
-            macro_expand(ctx, args[token], linelist, cur, false)
-            if hash_next then
-                tokens[i] = stringify(args[token])
-                hash_next = false
-            elseif join_next then
-                tokens[i - 1] = tokens[i - 1] .. table.concat(args[token], " ")
-                table.remove(tokens, i)
-                join_next = false
+            local paste_operand = tokens[i - 1] == "##" or tokens[i + 1] == "##"
+            local replacement = paste_operand and args[token]
+                or expanded_argument(token)
+            if paste_operand and #replacement == 0 then
+                append_token(substituted, PLACEMARKER,
+                    token_has_space_before(tokens, i))
             else
-                table_replace_n_with(tokens, i, 1, args[token])
-                debug(token, args[token], tokens)
-                i = i + #args[token]
+                append_tokens(substituted, replacement,
+                    token_has_space_before(tokens, i))
             end
-        elseif join_next then
-            tokens[i - 1] = tokens[i - 1] .. tokens[i]
-            table.remove(tokens, i)
-            join_next = false
+            i = i + 1
         else
-            hash_next = false
-            join_next = false
+            append_token(substituted, token,
+                token_has_space_before(tokens, i),
+                token_raw_spelling(tokens, i))
             i = i + 1
         end
     end
+
+    -- Complete every paste left-to-right. When a raw argument has multiple
+    -- tokens only its boundary token participates, because the substitution
+    -- above inserted the complete raw sequence around the `##` marker.
+    i = 1
+    while i <= #substituted do
+        if substituted[i] == "##" then
+            local lhs = substituted[i - 1]
+            local rhs = substituted[i + 1]
+            if lhs == nil or rhs == nil then
+                paste_error(linelist, cur, tostring(lhs), tostring(rhs))
+            end
+            local pasted
+            local pasted_raw
+            if lhs == PLACEMARKER and rhs == PLACEMARKER then
+                pasted = PLACEMARKER
+            elseif lhs == PLACEMARKER then
+                pasted = rhs
+                pasted_raw = token_raw_spelling(substituted, i + 1)
+            elseif rhs == PLACEMARKER then
+                pasted = lhs
+                pasted_raw = token_raw_spelling(substituted, i - 1)
+            else
+                pasted, pasted_raw = paste_token(linelist, cur,
+                    token_raw_spelling(substituted, i - 1),
+                    token_raw_spelling(substituted, i + 1))
+            end
+            local pasted_values = {}
+            append_token(pasted_values, pasted, false, pasted_raw)
+            table_replace_n_with(substituted, i - 1, 3, pasted_values)
+            i = math.max(i - 1, 1)
+        else
+            i = i + 1
+        end
+    end
+
+    local replacement = {}
+    set_token_spacing(replacement, {})
+    for i, token in ipairs(substituted) do
+        if token ~= PLACEMARKER then
+            append_token(replacement, token,
+                token_has_space_before(substituted, i),
+                token_raw_spelling(substituted, i))
+        end
+    end
+    table_replace_n_with(tokens, 1, #tokens, replacement)
 end)
 
 macro_expand = typed("Ctx, {string}, LineList, number, boolean -> ()", function(ctx, tokens, linelist, cur, expr_mode)
@@ -935,10 +1378,10 @@ macro_expand = typed("Ctx, {string}, LineList, number, boolean -> ()", function(
             else
                 local ndefine = #define
                 if ndefine == 0 then
-                    table.remove(tokens, i)
+                    table_remove(tokens, i, 1)
                     shift_noloop(noloop, -1, i)
                 elseif ndefine == 1 then
-                    tokens[i] = define[1]
+                    table_replace_n_with(tokens, i, 1, define)
                     mark_noloop(noloop, token, i)
                     noloop[token] = math.max(noloop[token] or 0, i)
                 else
@@ -972,6 +1415,14 @@ cpp.parse_file = typed("string, FILE*?, Ctx? -> Ctx?, string?", function(filenam
             end
         end
     end
+
+    ctx.output_origins = ctx.output_origins or {}
+    -- Record the names whose active macro definition this header closure
+    -- changes. Foreign imports are parsed independently, but generated C
+    -- includes every header in source order; checker-side field projections
+    -- therefore need later definitions, redefinitions, and undefinitions to
+    -- replace the earlier state rather than accumulate forever.
+    ctx.macro_changes = ctx.macro_changes or {}
 
     local current_dir = filename:gsub("/[^/]*$", "")
     if current_dir == filename then
@@ -1023,8 +1474,10 @@ cpp.parse_file = typed("string, FILE*?, Ctx? -> Ctx?, string?", function(filenam
                 local k = tk.id
                 local v = tk.args and tk or tk.repl
                 ctx.defines[k] = v
+                ctx.macro_changes[k] = true
             elseif tk.directive == "undef" then
                 ctx.defines[tk.id] = nil
+                ctx.macro_changes[tk.id] = true
             elseif tk.directive == "ifdef" then
                 table.insert(ifmode, (ctx.defines[tk.id] ~= nil))
             elseif tk.directive == "ifndef" then
@@ -1061,6 +1514,10 @@ cpp.parse_file = typed("string, FILE*?, Ctx? -> Ctx?, string?", function(filenam
             else
                 macro_expand(ctx, tk, linelist, cur, false)
                 table.insert(ctx.output, table.concat(tk, " "))
+                ctx.output_origins[#ctx.output] = {
+                    file = filename,
+                    line = lineitem.nr,
+                }
             end
         elseif ifmode[#ifmode] == false then
             if tk.directive == "ifdef"
