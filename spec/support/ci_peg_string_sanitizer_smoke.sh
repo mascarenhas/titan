@@ -54,6 +54,18 @@ assert(found and found:whole() == "ab-abx" and found:group(1) == "ab")
 assert(strings.find("a\0b\0c", "\0b") == 2)
 local ok, failure = pcall(strings.compile_regex, "[a-b-c]")
 assert(not ok and tostring(failure):find("[bad_range]", 1, true), failure)
+
+peg.set_max_stack(1)
+local nested = string.rep("(?:", 512) .. "a" .. string.rep(")", 512)
+local nested_regex = strings.compile_regex(nested)
+assert(nested_regex:match("a"):whole() == "a")
+peg.set_max_stack(400)
+
+local too_deep = string.rep("(?:", 513) .. "a" .. string.rep(")", 513)
+ok, failure = pcall(strings.compile_regex, too_deep)
+assert(not ok and
+       tostring(failure):find("[group_nesting_too_deep]", 1, true),
+       failure)
 LUA
 
 cat >"$SMOKE_TMP/static_peg_string_smoke.titan" <<'TITAN'

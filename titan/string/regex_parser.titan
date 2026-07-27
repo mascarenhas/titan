@@ -23,6 +23,7 @@ local REGEX_WORD_START = 10
 local REGEX_WORD_END = 11
 
 local REGEX_MAX_CAPTURES = 200
+local REGEX_MAX_NESTING = 512
 
 local record RegexNode
   local kind: integer
@@ -39,6 +40,7 @@ local record RegexParser
   local position: integer
   local length: integer
   local capture_count: integer
+  local nesting_depth: integer
   local closed_groups: {integer: boolean}
   local nullable_groups: {integer: boolean}
 end
@@ -165,8 +167,6 @@ local function build_regex_syntax_parser(): peg.Pattern
   local eof = peg.negative(any)
   local digit = peg.ranges("09")
   local nonzero_digit = peg.ranges("19")
-  local decimal = peg.one_or_more(digit)
-  local quantifier_start = peg.set("*+?{")
 
   local escaped_literal = peg.set("()[]{}\\?*+|.^$")
   local simple_escape = peg.set("wWdDsStnrf ea<>")
@@ -211,37 +211,6 @@ local function build_regex_syntax_parser(): peg.Pattern
     peg.optional(peg.literal("^")),
     class_body)
 
-  local counted = peg.sequence(
-    peg.literal("{"),
-    peg.choice(decimal, peg.throw("bad_quantifier")),
-    peg.choice(
-      peg.literal("}"),
-      peg.sequence(
-        peg.literal(","),
-        peg.optional(decimal),
-        peg.choice(
-          peg.literal("}"), peg.throw("bad_quantifier"))),
-      peg.throw("bad_quantifier")))
-  local quantifier = peg.choice(peg.set("*+?"), counted)
-  local no_second_quantifier = peg.choice(
-    peg.sequence(
-      peg.lookahead(quantifier_start),
-      peg.throw("bad_quantifier")),
-    peg.succeed())
-
-  local literal = peg.difference(
-    any, peg.set("()[]{}\\?*+|.^$"))
-  local bad_atom = peg.choice(
-    peg.sequence(
-      peg.lookahead(quantifier_start),
-      peg.throw("misplaced_quantifier")),
-    peg.sequence(
-      peg.lookahead(peg.literal("^")),
-      peg.throw("misplaced_anchor")),
-    peg.sequence(
-      peg.lookahead(peg.set("]}")),
-      peg.throw("trailing_input")))
-
   local group_open = peg.choice(
     peg.literal("(?:"),
     peg.sequence(
@@ -251,39 +220,13 @@ local function build_regex_syntax_parser(): peg.Pattern
           peg.lookahead(peg.literal("?")),
           peg.throw("expected_atom")),
         peg.succeed())))
-  local group = peg.sequence(
-    group_open,
-    peg.variable("alternation"),
-    peg.choice(
-      peg.literal(")"),
-      peg.sequence(
-        peg.lookahead(peg.literal("$")),
-        peg.throw("misplaced_anchor")),
-      peg.throw("expected_group_close")))
-  local atom = peg.choice(
-    peg.literal("."), character_class, escape, group, literal, bad_atom)
-  local piece = peg.sequence(
-    atom, peg.optional(quantifier), no_second_quantifier)
-  local concatenation = peg.zero_or_more(piece)
-  local alternation = peg.sequence(
-    concatenation,
-    peg.zero_or_more(
-      peg.sequence(peg.literal("|"), concatenation)))
-  local finish = peg.choice(
-    peg.sequence(peg.literal("$"), peg.choice(
-      eof, peg.throw("misplaced_anchor"))),
-    eof,
-    peg.throw("trailing_input"))
-  local regex = peg.sequence(
-    peg.optional(peg.literal("^")),
-    peg.variable("alternation"),
-    finish)
 
-  local rules: {integer: peg.Rule} = {
-    peg.rule("regex", regex),
-    peg.rule("alternation", alternation),
-  }
-  return peg.grammar("regex", rules)
+  -- Keep the PEG pre-pass lexical and constant-depth. Grouping, alternation,
+  -- anchors, and quantifier placement belong to the recursive descent below;
+  -- making PEG recurse through groups ties valid regex depth to LPegLabel's
+  -- mutable backtrack-stack setting and can leak its raw overflow error.
+  local token = peg.choice(character_class, escape, group_open, any)
+  return peg.sequence(peg.zero_or_more(token), eof)
 end
 
 local function regex_empty(position: integer): RegexNode
@@ -578,8 +521,8 @@ local function regex_parse_decimal(parser: RegexParser,
                                     label_position: integer): integer
   if not regex_is_digit(regex_current(parser)) then
     raise_regex_diagnostic(
-      "bad_quantifier", "expected a decimal repeat bound",
-      parser.source, label_position)
+      "bad_quantifier", regex_syntax_message("bad_quantifier"),
+      parser.source, parser.position)
   end
   local result = 0
   while regex_is_digit(regex_current(parser)) do
@@ -623,6 +566,14 @@ local function regex_parse_atom(parser: RegexParser): RegexNode
       capturing = false
     end
 
+    parser.nesting_depth = parser.nesting_depth + 1
+    if parser.nesting_depth > REGEX_MAX_NESTING then
+      raise_regex_diagnostic(
+        "group_nesting_too_deep",
+        "regular expression has more than 512 nested groups",
+        parser.source, position)
+    end
+
     local group_index = 0
     if capturing then
       parser.capture_count = parser.capture_count + 1
@@ -636,12 +587,19 @@ local function regex_parse_atom(parser: RegexParser): RegexNode
     end
 
     local child = regex_parse_alternation(parser)
+    if regex_current(parser) == 36 then
+      raise_regex_diagnostic(
+        "misplaced_anchor",
+        "anchor is only valid around the whole expression",
+        parser.source, parser.position)
+    end
     if regex_current(parser) ~= 41 then
       raise_regex_diagnostic(
         "expected_group_close", "expected ')'",
         parser.source, parser.position)
     end
     regex_advance(parser)
+    parser.nesting_depth = parser.nesting_depth - 1
     if not capturing then return child end
 
     parser.closed_groups[group_index] = true
@@ -664,7 +622,7 @@ local function regex_parse_atom(parser: RegexParser): RegexNode
       parser.source, position)
   elseif byte == 93 or byte == 125 then
     raise_regex_diagnostic(
-      "trailing_input", "unexpected regular-expression metacharacter",
+      "trailing_input", regex_syntax_message("trailing_input"),
       parser.source, position)
   end
   regex_advance(parser)
@@ -709,7 +667,7 @@ local function regex_parse_piece(parser: RegexParser): RegexNode
     end
     if regex_current(parser) ~= 125 then
       raise_regex_diagnostic(
-        "bad_quantifier", "expected '}' after repeat bound",
+        "bad_quantifier", regex_syntax_message("bad_quantifier"),
         parser.source, parser.position)
     end
     regex_advance(parser)
@@ -724,7 +682,7 @@ local function regex_parse_piece(parser: RegexParser): RegexNode
   local next = regex_current(parser)
   if next == 42 or next == 43 or next == 63 or next == 123 then
     raise_regex_diagnostic(
-      "bad_quantifier", "an atom may have only one quantifier",
+      "bad_quantifier", regex_syntax_message("bad_quantifier"),
       parser.source, parser.position)
   end
   local node = regex_node(REGEX_REPEAT, position)
@@ -779,7 +737,7 @@ local function parse_regex(expression: string): ParsedRegex
   local closed: {integer: boolean} = {}
   local nullable: {integer: boolean} = {}
   local parser = RegexParser.new(
-    expression, 1, #expression, 0, closed, nullable)
+    expression, 1, #expression, 0, 0, closed, nullable)
   local anchored_start = false
   if regex_current(parser) == 94 then
     anchored_start = true
@@ -791,12 +749,19 @@ local function parse_regex(expression: string): ParsedRegex
   if regex_current(parser) == 36 then
     anchored_end = true
     regex_advance(parser)
+    if parser.position <= parser.length then
+      raise_regex_diagnostic(
+        "misplaced_anchor",
+        "anchor is only valid around the whole expression",
+        expression, parser.position)
+    end
   end
   if parser.position <= parser.length then
     local byte = regex_current(parser)
     if byte == 41 then
       raise_regex_diagnostic(
-        "trailing_input", "unexpected ')'", expression, parser.position)
+        "trailing_input", regex_syntax_message("trailing_input"),
+        expression, parser.position)
     elseif byte == 94 or byte == 36 then
       raise_regex_diagnostic(
         "misplaced_anchor",

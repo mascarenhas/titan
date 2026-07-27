@@ -1383,8 +1383,13 @@ flexible optional strings.
 
 ### 9.5 Labeled diagnostics
 
-Build the regex parser itself with `titan.peg` and place throws only after an
-unambiguous prefix. At minimum define stable labels for:
+Build a nonrecursive lexical pre-pass with `titan.peg` and place throws only
+after an unambiguous character-class, escape, or group-prefix introducer.
+Leave grouping, alternation, anchors, quantifier placement, and AST
+construction to recursive descent so accepted group depth does not scale with
+LPegLabel's mutable backtrack stack. Bound that recursion at 512 nested
+capturing or noncapturing groups, preserving the complete 200-capture
+contract. At minimum define stable labels for:
 
 ```text
 expected_atom
@@ -1401,6 +1406,7 @@ misplaced_anchor
 misplaced_quantifier
 invalid_backreference
 too_many_captures
+group_nesting_too_deep
 pattern_too_large
 trailing_input
 ```
@@ -1418,8 +1424,10 @@ a{5,2}
 The bracketed label, byte position, line, column, message, source line, and
 caret are the stable test/API contract. Parser failures, semantic validation
 failures, and native LPegLabel construction errors are all translated to this
-public string error; no raw LPegLabel assertion or internal back-capture error
-escapes.
+public string error. Regex compilation cannot leak a raw LPegLabel error,
+including a depth-dependent pre-pass backtrack-stack overflow. A referenced
+group which did not participate during matching remains ordinary mismatch
+rather than leaking an internal missing-back-capture error.
 
 ### 9.6 Empty-match progress
 
@@ -1846,7 +1854,9 @@ Port all 89 upstream assertions, then add:
   values;
 - typed compiled/source `match` records and `values` preserving trailing nil
   capture slots;
-- 200-group success plus labeled 201-group rejection;
+- exact 512-deep noncapturing-group success with labeled 513-depth rejection,
+  including independence from `peg.set_max_stack`;
+- 200 nested-capture success plus labeled 201-capture rejection;
 - generic-for over a match whose group 1 is unmatched, proving the non-nil
   `RegexMatch` iterator control value;
 - empty-match progress at start, between bytes, and end, with exact `gmatch`

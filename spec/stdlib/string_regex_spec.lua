@@ -327,8 +327,24 @@ describe("titan.string regex", function()
             diagnostic("\\10", "unsupported_escape")
             diagnostic("\\1", "invalid_backreference")
             diagnostic("(\\1a)", "invalid_backreference")
-            diagnostic("a{,2}", "bad_quantifier")
-            diagnostic("a**", "bad_quantifier")
+            local malformed =
+                diagnostic("a{,2}", "bad_quantifier")
+            assert(malformed:find("(byte 3)", 1, true), malformed)
+            assert(malformed:find(
+                ": malformed counted quantifier\n", 1, true), malformed)
+            malformed = diagnostic("a{1,", "bad_quantifier")
+            assert(malformed:find("(byte 5)", 1, true), malformed)
+            assert(malformed:find(
+                ": malformed counted quantifier\n", 1, true), malformed)
+            malformed = diagnostic("a**", "bad_quantifier")
+            assert(malformed:find(
+                ": malformed counted quantifier\n", 1, true), malformed)
+            local trailing = diagnostic(")", "trailing_input")
+            assert(trailing:find(
+                ": unexpected trailing input\n", 1, true), trailing)
+            trailing = diagnostic("]", "trailing_input")
+            assert(trailing:find(
+                ": unexpected trailing input\n", 1, true), trailing)
             diagnostic("(a?)*", "nullable_repetition")
             diagnostic("(a?)\\1*", "nullable_repetition")
             diagnostic("a$b", "misplaced_anchor")
@@ -351,6 +367,59 @@ describe("titan.string regex", function()
             local found = regex:match("")
             assert(found and select("#", found:values()) == 200)
             diagnostic(string.rep("()", 201), "too_many_captures")
+        ]=])
+    end)
+
+    it("keeps group nesting independent of the PEG backtrack stack",
+    function()
+        run([=[
+            local peg = require "titan.peg"
+            local str = require "titan.string"
+
+            peg.set_max_stack(1)
+            local noncapturing =
+                string.rep("(?:", 512) .. "a" .. string.rep(")", 512)
+            local regex = str.compile_regex(noncapturing)
+            assert(regex:group_count() == 0)
+            local found = regex:match("a")
+            assert(found and found:whole() == "a")
+            peg.set_max_stack(400)
+
+            local siblings = str.compile_regex(
+                string.rep("(?:a)", 513))
+            assert(siblings:group_count() == 0)
+            assert(siblings:match(string.rep("a", 513)):whole() ==
+                   string.rep("a", 513))
+
+            local capturing =
+                string.rep("(", 200) .. "a" .. string.rep(")", 200)
+            regex = str.compile_regex(capturing)
+            assert(regex:group_count() == 200)
+            found = regex:match("a")
+            assert(found and found:whole() == "a")
+            local values = table.pack(found:values())
+            assert(values.n == 200)
+            for index = 1, values.n do
+                assert(values[index] == "a", index)
+            end
+
+            local too_deep =
+                string.rep("(?:", 513) .. "a" .. string.rep(")", 513)
+            local ok, err = pcall(str.compile_regex, too_deep)
+            assert(not ok)
+            err = tostring(err)
+            assert(err:find(
+                "[group_nesting_too_deep] at L1:C1537 (byte 1537): " ..
+                "regular expression has more than 512 nested groups",
+                1, true), err)
+
+            local too_many =
+                string.rep("(", 201) .. "a" .. string.rep(")", 201)
+            ok, err = pcall(str.compile_regex, too_many)
+            assert(not ok)
+            err = tostring(err)
+            assert(err:find("[too_many_captures]", 1, true), err)
+            assert(err:find("(byte 201)", 1, true), err)
         ]=])
     end)
 

@@ -233,11 +233,19 @@ never a zero-result operation.
 
 ## Regex parser and compiler
 
-The regex parser is itself assembled from `titan.peg` patterns and labeled
-throws. It produces a private byte-oriented AST whose nodes retain source byte
-offsets. Syntax failures and later semantic checks use the same diagnostic
-record and are formatted into the public label/line/column/source/caret
-message before raising.
+A nonrecursive `titan.peg` pre-pass scans character classes, escapes, and group
+prefixes and uses labeled throws for their lexical failures. Grouping,
+alternation, anchors, quantifier placement, and the private byte-oriented AST
+belong to the following recursive descent, whose nodes retain source byte
+offsets. Keeping structural recursion out of the PEG pre-pass means its stack
+use no longer scales with group depth or LPegLabel's mutable backtrack-stack
+setting. The recursive descent allows 512 nested capturing or noncapturing
+groups before raising the stable `group_nesting_too_deep` diagnostic; this
+protects the C stack while preserving all 200 nested captures. Syntax failures
+and later semantic checks use the same diagnostic record and are formatted
+into the public label/line/column/source/caret message before raising.
+LPegLabel's max-stack setting still governs execution of a compiled pattern;
+the parser change removes only the accidental compilation-depth dependency.
 
 Compilation is continuation-based. Each AST node is converted with the
 pattern that must follow it, which gives greedy repetition its required
@@ -256,6 +264,7 @@ Before construction, the compiler:
 * rejects a maximum smaller than its minimum;
 * computes nullability and rejects an unbounded nullable repetition;
 * numbers captures once in left-to-right opening order;
+* bounds recursive group nesting at 512;
 * validates each single-digit backreference against a previously closed group;
 * projects the resulting PEG tree size, including continuation and capture
   wrappers, against `SHRT_MAX - 10`;

@@ -59,9 +59,11 @@ when its type has a fixed prefix. Thus:
 * a regex may contain at most 200 capture groups, all of which can be returned
   by `RegexMatch:values`.
 
-Crossing one of these bounds raises Titan's ordinary variadic or
-flexible-result error. For `unpack` and `RegexMatch:values`, the fixed first
-result leaves room for at most 199 values in the flexible tail.
+Crossing one of the argument or result bounds raises Titan's ordinary variadic
+or flexible-result error. `compile_regex` instead reports
+`too_many_captures` for the capture bound. For `unpack` and
+`RegexMatch:values`, the fixed first result leaves room for at most 199 values
+in the flexible tail.
 
 ## Byte operations
 
@@ -406,8 +408,16 @@ a{5,2}
 
 Labels distinguish malformed groups/classes/ranges/quantifiers, nullable
 repetition, dangling or unsupported escapes, misplaced anchors/quantifiers,
-invalid backreferences, excessive captures/pattern size, and trailing input.
-CRLF counts as one line ending.
+invalid backreferences, excessive captures/group nesting/pattern size, and
+trailing input. CRLF counts as one line ending.
 
-No raw PEG-engine assertion or missing-back-capture error is part of this
-public contract.
+Capturing and noncapturing groups share a stable maximum nesting depth of 512.
+The 200-capture limit therefore remains valid even when all captures are
+nested. Exceeding the nesting limit raises `group_nesting_too_deep`;
+`peg.set_max_stack` does not control which group depths compile. It still
+controls LPegLabel's execution stack when a compiled regex is matched.
+
+Regex compilation exposes no raw PEG-engine error; in particular, its syntax
+pre-pass cannot leak a depth-dependent backtrack-stack overflow. During
+matching, a backreference to a group which did not participate is ordinary
+mismatch rather than a missing-back-capture error.
