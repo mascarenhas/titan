@@ -128,11 +128,12 @@ end
 A pattern `Definition` retains both so the relabel parser can safely rewrap
 the private native pattern without losing the construction bound; a dynamic
 definition records `-1` instead. The contributors expose no top-level public
-declarations: they implement module-local raw-boundary, combinator, capture,
-definition, matching, diagnostic, and cache helpers. `relabel_parser.titan`
-assembles the self-hosted expression grammar from operations in that shared
-module scope. Main-file wrappers preserve the exact public callable types and
-forward variadic/flexible runs directly.
+declarations. Public constructor, combinator, capture, definition, matching,
+and relabel-convenience implementations live directly in the canonical main.
+The contributors retain only module-local native-boundary operations,
+conservative size projections, diagnostics, caches, callbacks, and
+parser/compiler helpers. `relabel_parser.titan` assembles the self-hosted
+expression grammar from operations in that shared module scope.
 
 The folder ensemble is parsed separately and then combined into one AST and
 one checker/code-generator pass. It emits only:

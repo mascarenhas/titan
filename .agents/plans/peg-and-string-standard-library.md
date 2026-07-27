@@ -326,7 +326,6 @@ Recommended source layout:
 titan/
   peg/
     peg.titan                 # canonical main, public records, imports, initializer
-    captures.titan
     combinators.titan
     native.titan
     relabel.titan
@@ -2091,3 +2090,179 @@ acceptance is:
 | Prototype ABI policy | Keep 0.18 here; no historical migration/conflict machinery; clean install on future ABI bumps |
 | Add test suite | Section 13 across behavior, defects, GC, packaging, sanitizer, macOS |
 | Keep docs part of done | Two language and two implementation chapters plus index/current-provider updates |
+
+## 17. Post-implementation API and implementation cleanup
+
+Status: implementation, audit, and local validation complete on
+`agent/peg-string-standard-library`; all changes remain unstaged.
+
+This section is the durable continuation record for the maintainer's API
+spot-checks and the repository-wide pattern audit they imply. Preserve all
+pre-existing unstaged work; do not stage, commit, push, or update the PR unless
+the maintainer asks.
+
+### 17.1 Required design rules
+
+- The canonical `titan/string/string.titan` and `titan/peg/peg.titan` mains own
+  both the public declarations and their implementations. A contributor may
+  retain module-local records, state, and helpers shared by multiple public
+  implementations, but must not contain a sole-use implementation function
+  whose only caller is a public declaration that merely forwards the same
+  arguments and results. Inline that body in the public declaration and
+  delete the dead local.
+- Preserve an adapter closure when its exact callable type is valuable for a
+  repeatedly executed fast path. The rule above targets obfuscating sole-use
+  forwarding layers, not exact-type hot-loop adapters or genuinely shared
+  helpers.
+- A pure zero-parameter query whose answer is invariant for the loaded module
+  on a machine must run once in the canonical main's `do ... end` initializer
+  and populate module-local cached state. Do not apply this to factories,
+  mutable-state initialization, locale-sensitive builders, or lazy work whose
+  execution is conditional.
+- `ffi.<type>.new_array(count)` already returns GC-owned dynamically sized
+  storage. The owner can be passed directly to a `value` field or argument,
+  queried with `#owner`, and cast to the corresponding FFI pointer. Do not add
+  a record or a temporary `local storage: value = owner` merely to duplicate
+  those three capabilities. Keep a record when it carries genuinely distinct
+  metadata, such as a logical length different from the allocation, a borrowed
+  or offset pointer, asynchronous lifetime/type erasure, or related state.
+- Every maintainer spot-check of one such pattern requires a sibling/call-graph
+  audit across the standard library, not just a local edit. Encode the result
+  in `AGENTS.md` so future work repeats the audit automatically.
+
+### 17.2 Changes already made
+
+- Public `string` and `Regex` forwarding wrappers have been inlined into
+  `titan/string/string.titan`; their now-unreferenced contributor helpers have
+  been removed.
+- Public PEG forwarding wrappers have been inlined into
+  `titan/peg/peg.titan`; their now-unreferenced contributor helpers have been
+  removed.
+- `titan/peg/captures.titan` became empty and has been removed from the folder
+  ensemble, Make/source manifests, fixture constituent lists, and this plan's
+  source layout.
+- The machine-invariant string limits and native format facts are cached once
+  from the main module initializer: maximum string bytes, integer length
+  modifier, host endianness, and native maximum alignment.
+
+The direct allocation pass is settled and independently reviewed.
+
+### 17.3 Completed delegated work
+
+- `/root/ffi_string_buffers` replaced `StringBytes` and
+  `allocate_string_bytes` with direct owned FFI arrays, preserving the
+  distinction between allocation count and logical string length, and ran
+  focused string tests.
+- `/root/stdlib_antipattern_audit` performed a read-only audit of every
+  `titan/**/*.titan` module for the three patterns above; it reported exact
+  declarations, call counts, and whether each candidate is a real violation
+  or an intentional adapter, factory, or lifetime record.
+- `/root/inline_refactor_adversary` performed adversarial review after the
+  shared files settled, including dead declarations, stale source lists,
+  documentation claims, and focused compile/runtime failures.
+- `/root/uv_owned_array_cleanup` implemented the justified UV siblings, and
+  `/root/owned_array_adversary` plus `/root/uv_cleanup_adversary`
+  independently checked their GC, width, pointer, and logical-length
+  invariants.
+- The primary agent integrated the cross-stdlib fixes, updated `AGENTS.md` and
+  implementation manuals, reconciled overlapping edits, and ran the final
+  validation matrix.
+
+No agent staged or committed any file.
+
+### 17.4 Completed implementation and documentation work
+
+1. Finished the direct-owned-array string allocation pass and inspected every
+   pointer/count use for zero-length, terminator, overflow, and logical-length
+   correctness.
+2. Triaged the cross-stdlib audit, applied only structurally equivalent fixes,
+   and documented why records or adapters with extra semantic work remain.
+3. Updated `AGENTS.md` with the rules in section 17.1.
+4. Corrected `doc/implementation/string-library.md` and
+   `doc/implementation/lpeglabel-embedding.md`: contributor files expose only
+   module-local declarations and shared implementation machinery, while the
+   canonical mains contain public implementations. Removed stale references to
+   thin forwarding wrappers and `captures.titan`.
+5. Searched source, specs, docs, Make inputs, and plans for removed
+   declarations, `_impl` names, `captures.titan`, and claims that contributor
+   files own the public implementations.
+
+### 17.5 Validation matrix
+
+Run all commands from the repository root with one prepared isolated absolute
+prefix. Keep the real Git index untouched; source-pack tests that need the
+unstaged deletion of `captures.titan` must use a temporary index populated
+from `HEAD` and updated only inside `/tmp`.
+
+Required gates:
+
+1. `make stdlib` to typecheck and link the canonical nine-module provider.
+2. `bash spec/support/ci_test_groups.sh library-peg-string`.
+3. Focused `spec/libuv_build_spec.lua` declaration/source-manifest cases and
+   the rockspec vendored-source pack/unpack case.
+4. At least one delayed-DNS `spec/stdlib/uv_late_callbacks_spec.lua` case,
+   because its private source ensemble mirrors the PEG/string contributors.
+5. Any focused suites covering cross-stdlib files changed after the audit.
+6. `git diff --check`, an unused/dead-local search, and a final adversarial
+   diff review.
+7. If the cross-stdlib cleanup reaches async/UV lifetime code or otherwise
+   broadens beyond mechanically equivalent declarations, run the complete
+   non-coverage `libraries` group; use `make test` if compiler behavior or
+   shared compiler fixtures are affected.
+
+The final handoff must distinguish tests run after the last shared-file edit
+from earlier green runs, list intentional retained adapters/records, and call
+out that all changes remain unstaged unless the maintainer requests
+publication.
+
+### 17.6 Cross-standard-library audit classification
+
+The full `titan/**/*.titan` audit found no additional public declaration whose
+body merely forwards to a sole-use private implementation, and no additional
+private zero-parameter helper that recomputes a pure module/machine invariant.
+The apparent no-parameter candidates outside string/PEG are factories,
+dynamic runtime/task/thread queries, mutable initializers, or public foreign
+endpoints. In particular, `titan.uv._version` is public rather than the private
+helper pattern requested here.
+
+The UV storage audit classifies the candidates as follows:
+
+- `Dirent`/`allocate_dirent` was a synchronous one-caller pointer/owner wrapper
+  and became one owned `libuv.uv_dirent_t.new()` local at the scandir consumer.
+- The `storage: value = owned` aliases in stream-byte and DNS-address
+  construction added no lifetime or type information, so the constructors now
+  receive `owned` directly in their `value` slots. The exact DNS source
+  transformer in `spec/support/make_delayed_dns_callback_variant.lua` was
+  updated with the source anchor.
+- `SizedBytes`/`allocate_sized_bytes` was removed with an explicit
+  `size_t <= LUA_MAXINTEGER` check before converting the libuv-reported
+  capacity to the Titan `integer` required by `new_array`. The successful
+  logical result remains `sizes[0]`, not `#owned`.
+- `Bytes`, `Buffer`, and `AddressList` were retained. They carry pointers/owners across
+  callback, queue, retry, or other long-lived state; their logical/view lengths
+  may differ from allocation counts, and repeated pointer access occurs after
+  the owned foreign type has deliberately been erased into a record.
+- Process `argv` ownership and its explicit logical count were retained: its
+  allocation includes the final null sentinel while public `argc` does not.
+  Exact nominal facade adapters and shared read/run helpers were also retained;
+  they serve repeated typed calls or multiple public operations rather than a
+  sole-use forwarding layer.
+
+### 17.7 Completed validation
+
+- The combined nine-module `make stdlib` build passed after the final string
+  and UV allocation edits.
+- Focused public suites passed: PEG/relabel 15/15, string 8/8, string regex
+  8/8, OS helpers 2/2, filesystem 3/3, and net/TCP 4/4.
+- The PEG/string CI shard passed 31/31. Focused source/declaration/private-UV
+  roster checks passed 4/4, the transformed delayed-DNS provider/port case
+  passed 1/1, and the rockspec vendored-source pack/unpack case passed 1/1.
+- The complete non-coverage library group passed 200/200 across 23 files:
+  native/packaging 120/120, uv/timer/fs 35/35, net/OS 14/14, and PEG/string
+  31/31.
+- The source-pack and complete library runs used a temporary Git index under
+  `/tmp` that removed the unstaged `captures.titan` entry. The real index hash
+  was unchanged and its staged diff stayed empty.
+- `git diff --check`, dead-declaration/reference searches, owned-array GC
+  stress, and independent string/UV/full-diff adversarial reviews all passed.
+  No manual macOS dispatch was requested or run for this cleanup.

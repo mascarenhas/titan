@@ -126,7 +126,6 @@ local test_dns_retry_gc_count = 0
 -- variant can reserve cell zero without reading or writing sockaddr fields.
 patch("tcp.titan", [==[
   local owned = shim.titan_uvshim_address.new_array(count)
-  local storage: value = owned
   local data = owned as *shim.titan_uvshim_address
   local copied = 0
 ]==], [==[
@@ -137,7 +136,6 @@ patch("tcp.titan", [==[
     leading = 1
   end
   local owned = shim.titan_uvshim_address.new_array(count + leading)
-  local storage: value = owned
   local data = owned as *shim.titan_uvshim_address
   local copied = leading
 ]==], "optional leading zeroed address cell")
@@ -155,9 +153,9 @@ patch("tcp.titan", [==[
 ]==], "copy-longjmp injection")
 
 patch("tcp.titan", [==[
-  return AddressList.new(data, storage, count)
+  return AddressList.new(data, owned, count)
 ]==], [==[
-  return AddressList.new(data, storage, count + leading)
+  return AddressList.new(data, owned, count + leading)
 ]==], "variant address count")
 
 -- Count each physical release immediately after its direct non-raising C call.

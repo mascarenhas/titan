@@ -32,7 +32,7 @@ describe("titan.string regex", function()
             "run make lpeglabel before regex specs")
         workspace = async_stdlib.workspace("string-regex")
         for _, name in ipairs({
-            "peg", "native", "combinators", "captures",
+            "peg", "native", "combinators",
             "relabel", "relabel_parser",
         }) do
             async_stdlib.write_source(

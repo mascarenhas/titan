@@ -736,6 +736,29 @@ substitution, recursive; error on missing keys). Key facts:
   the receiver's successful payload `mco_pop` has refreshed its generated
   stack anchor; the retired native root/clear helpers must not return.
 
+- **Keep public standard-library implementations direct, and audit every
+  sibling occurrence of a spotted antipattern.** In `titan.string` and
+  `titan.peg`, the canonical main owns both each public declaration and its
+  implementation; modules such as `titan.uv` that intentionally give semantic
+  contributors public ownership keep each implementation with its declaration
+  there instead. Contributors may retain module-local records, state, and
+  helpers that are shared or represent genuine recursive, callback, lifetime,
+  or other internal machinery. Do not put the complete implementation in a
+  sole-use local function when its only caller is a public function that
+  forwards the same arguments and results; inline the body and delete the dead
+  local. Preserve an adapter closure when its exact callable type pays for a
+  repeatedly executed fast path: that is semantic performance machinery, not
+  an obfuscating forwarding layer. Likewise, evaluate a pure zero-parameter
+  machine/module invariant once in its owning module's final `do ... end`
+  initializer and cache it in module-local state; do not apply this to
+  factories, mutable-state initialization, locale-sensitive builders, or
+  intentionally lazy conditional work. An owned FFI
+  `T.new_array(count)` value is already a traced, counted allocation: use it
+  directly as a `value`, query it with `#`, and cast it to `T *` without a
+  duplicate storage alias or wrapper record. Retain a record when it carries
+  distinct logical length, offset/borrowed pointer, asynchronous lifetime or
+  type erasure, or related state. A maintainer spot-check of any one of these
+  patterns requires the same call-graph audit across the standard library.
 - **Apply Titan's existing call adjustment before widening an API.** A
   fixed call fills each missing parameter position with nil and discards the
   values of surplus arguments, including through Lua entry wrappers and

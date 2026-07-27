@@ -149,12 +149,22 @@ local function os_sized_buffer(
                     ffi.titan_ffi_int,
     capacity: libuv.size_t,
     error_from_status: (ffi.titan_ffi_int) -> Error): string?
+  -- new_array takes a Titan integer count. A size_t at least as wide as
+  -- lua_Integer can carry values that do not fit, so reject those before
+  -- converting the allocation count.
+  if libuv.size_t.sizeof >= lua.lua_Integer.sizeof and
+      capacity > lua.LUA_MAXINTEGER as libuv.size_t then
+    raise "OS buffer size is too large"
+  end
   local sizes = libuv.size_t.new_array(1)
-  local bytes = allocate_sized_bytes(capacity)
+  local owned = ffi.titan_ffi_char.new_array(capacity as integer)
+  local bytes = owned as *ffi.titan_ffi_char
   sizes[0] = capacity
-  local status = uv_buffer_func(bytes.data, sizes)
+  local status = uv_buffer_func(bytes, sizes)
   if status >= 0 then
-    return bytes_to_string(bytes.data, sizes[0])
+    -- sizes[0], rather than the allocation count, is the successful logical
+    -- result length reported by libuv.
+    return bytes_to_string(bytes, sizes[0])
   elseif status == libuv.UV_ENOBUFS then
     return os_sized_buffer(uv_buffer_func, sizes[0], error_from_status)
   elseif status == libuv.UV_ENOENT then

@@ -14,27 +14,11 @@ local function maximum_string_bytes(): integer
   return maximum
 end
 
-local record StringBytes
-  local data: *ffi.titan_ffi_char
-  local storage: value
-  local length: integer
-end
-
-local function allocate_string_bytes(length: integer): StringBytes
-  if length < 0 then
-    raise "resulting string is too large"
-  end
+local function finish_string(bytes: *ffi.titan_ffi_char,
+                             length: integer): string
+  if length == 0 then return "" end
   local top = lua.lua_gettop(L)
-  local memory = lua.lua_newuserdatauv(L, length, 0)
-  local storage = ffi.lua_totvalue(L, -1)
-  lua.lua_settop(L, top)
-  return StringBytes.new(memory as *ffi.titan_ffi_char, storage, length)
-end
-
-local function finish_string(bytes: StringBytes): string
-  if bytes.length == 0 then return "" end
-  local top = lua.lua_gettop(L)
-  lua.lua_pushlstring(L, bytes.data, bytes.length as lua.size_t)
+  lua.lua_pushlstring(L, bytes, length as lua.size_t)
   local result: value = ffi.lua_totvalue(L, -1)
   lua.lua_settop(L, top)
   return result
@@ -74,11 +58,13 @@ end
 local function copy_interval(subject: string, first: integer,
                              count: integer): string
   if count == 0 then return "" end
-  local output = allocate_string_bytes(count)
+  if count < 0 then raise "resulting string is too large" end
+  local owned = ffi.titan_ffi_char.new_array(count)
+  local output = owned as *ffi.titan_ffi_char
   local source = subject as const *ffi.titan_ffi_char
-  cstring.memcpy(output.data, source + first - 1,
+  cstring.memcpy(output, source + first - 1,
                  count as cstring.size_t)
-  return finish_string(output)
+  return finish_string(output, #owned)
 end
 
 local function byte_results(subject: string, current: integer,
@@ -88,189 +74,4 @@ local function byte_results(subject: string, current: integer,
   local octet = source[current - 1] as integer
   if current == last then return octet end
   return octet, byte_results(subject, current + 1, last)
-end
-
-local function _string_len(subject: string): integer
-  return #subject
-end
-
-local function _string_sub(subject: string, first: integer,
-                           last: integer?): string
-  local length = #subject
-  local normalized_first = initial_position(first, length)
-  local raw_last = -1
-  if last then raw_last = last end
-  local normalized_last = ending_position(raw_last, length)
-  if normalized_first > normalized_last then return "" end
-  return copy_interval(subject, normalized_first,
-                       normalized_last - normalized_first + 1)
-end
-
-local function _string_reverse(subject: string): string
-  local length = #subject
-  if length == 0 then return "" end
-  local output = allocate_string_bytes(length)
-  local source = subject as const *ffi.titan_ffi_char
-  local index = 0
-  while index < length do
-    output.data[index] = source[length - index - 1]
-    index = index + 1
-  end
-  return finish_string(output)
-end
-
-local function _string_lower(subject: string): string
-  local length = #subject
-  if length == 0 then return "" end
-  local output = allocate_string_bytes(length)
-  local source = subject as const *ffi.titan_ffi_char
-  local index = 0
-  while index < length do
-    local octet = source[index] as ffi.titan_ffi_unsigned_char
-    output.data[index] =
-      cctype.tolower(octet as ffi.titan_ffi_int) as ffi.titan_ffi_char
-    index = index + 1
-  end
-  return finish_string(output)
-end
-
-local function _string_upper(subject: string): string
-  local length = #subject
-  if length == 0 then return "" end
-  local output = allocate_string_bytes(length)
-  local source = subject as const *ffi.titan_ffi_char
-  local index = 0
-  while index < length do
-    local octet = source[index] as ffi.titan_ffi_unsigned_char
-    output.data[index] =
-      cctype.toupper(octet as ffi.titan_ffi_int) as ffi.titan_ffi_char
-    index = index + 1
-  end
-  return finish_string(output)
-end
-
-local function _string_rep(subject: string, count: integer,
-                           separator: string?): string
-  if count <= 0 then return "" end
-
-  local actual_separator = ""
-  if separator then actual_separator = separator end
-  local subject_length = #subject
-  local separator_length = #actual_separator
-  local maximum_length = maximum_string_bytes()
-
-  if subject_length > maximum_length - separator_length then
-    raise "resulting string is too large"
-  end
-  local unit_length = subject_length + separator_length
-  if unit_length > maximum_length // count then
-    raise "resulting string is too large"
-  end
-  local total_length = unit_length * count - separator_length
-  if total_length == 0 then return "" end
-
-  local output = allocate_string_bytes(total_length)
-  local subject_bytes = subject as const *ffi.titan_ffi_char
-  local separator_bytes =
-    actual_separator as const *ffi.titan_ffi_char
-  local occurrence = 1
-  local offset = 0
-  while occurrence < count do
-    if subject_length > 0 then
-      cstring.memcpy(output.data + offset, subject_bytes,
-                     subject_length as cstring.size_t)
-      offset = offset + subject_length
-    end
-    if separator_length > 0 then
-      cstring.memcpy(output.data + offset, separator_bytes,
-                     separator_length as cstring.size_t)
-      offset = offset + separator_length
-    end
-    occurrence = occurrence + 1
-  end
-  if subject_length > 0 then
-    cstring.memcpy(output.data + offset, subject_bytes,
-                   subject_length as cstring.size_t)
-  end
-  return finish_string(output)
-end
-
-local function _string_byte(subject: string, first: integer?,
-                            last: integer?): (...: integer)
-  local length = #subject
-  local raw_first = 1
-  if first then raw_first = first end
-  local normalized_first = initial_position(raw_first, length)
-  local raw_last = raw_first
-  if last then raw_last = last end
-  local normalized_last = ending_position(raw_last, length)
-  if normalized_first > normalized_last then return end
-  if normalized_last - normalized_first + 1 > 200 then
-    raise "too many flexible return values (max 200)"
-  end
-  return byte_results(subject, normalized_first, normalized_last)
-end
-
-local function _string_char(...: integer): string
-  local length = #...
-  if length == 0 then return "" end
-  local output = allocate_string_bytes(length)
-  local index = 1
-  while index <= length do
-    local octet = ...[index]
-    if octet < 0 or octet > 255 then
-      raise "character value out of range"
-    end
-    local byte = octet as ffi.titan_ffi_unsigned_char
-    output.data[index - 1] = byte as ffi.titan_ffi_char
-    index = index + 1
-  end
-  return finish_string(output)
-end
-
-local function _string_tostring(candidate: value): string
-  local top = lua.lua_gettop(L)
-  local result: value = nil
-  do
-    ffi.lua_pushtvalue(L, candidate)
-    lual.luaL_tolstring(L, -1, nil)
-    result = ffi.lua_totvalue(L, -1)
-  finally
-    lua.lua_settop(L, top)
-  end
-  return result
-end
-
--- Search for a literal byte sequence and return one-based inclusive bounds.
--- This is deliberately length-aware: embedded zero bytes are ordinary data.
-local function _string_find(subject: string, needle: string,
-                            init: integer?): (integer?, integer?)
-  local raw_init = 1
-  if init then raw_init = init end
-  local subject_length = #subject
-  local needle_length = #needle
-  local first = initial_position(raw_init, subject_length)
-  if first > subject_length + 1 then return nil, nil end
-  if needle_length == 0 then return first, first - 1 end
-  if first > subject_length or
-      needle_length > subject_length - first + 1 then
-    return nil, nil
-  end
-
-  local subject_bytes =
-    subject as const *ffi.titan_ffi_char
-  local needle_bytes =
-    needle as const *ffi.titan_ffi_char
-  local offset = first - 1
-  local limit = subject_length - needle_length
-  while offset <= limit do
-    if subject_bytes[offset] == needle_bytes[0] and
-        cstring.memcmp(
-          subject_bytes + offset, needle_bytes,
-          needle_length as cstring.size_t) == 0 then
-      return offset + 1, offset + needle_length
-    end
-    offset = offset + 1
-  end
-  return nil, nil
 end

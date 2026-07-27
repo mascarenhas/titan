@@ -326,7 +326,6 @@ local function copy_addresses(pointer: *libuv.addrinfo,
   end
 
   local owned = shim.titan_uvshim_address.new_array(count)
-  local storage: value = owned
   local data = owned as *shim.titan_uvshim_address
   local copied = 0
   entry = pointer
@@ -339,7 +338,7 @@ local function copy_addresses(pointer: *libuv.addrinfo,
     end
     entry = entry.ai_next
   end
-  return AddressList.new(data, storage, count)
+  return AddressList.new(data, owned, count)
 end
 
 local function validate_tcp_identity(tcp: uv_tcp_t, operation: string,

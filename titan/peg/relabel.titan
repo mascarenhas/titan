@@ -3,10 +3,11 @@
 -- Copyright (c) 2014-2022 Sérgio Medeiros. MIT terms are reproduced in
 -- LICENSES/lpeglabel-LICENSE.
 --
--- This contributor owns the module-local implementations for definitions,
--- lexical and semantic callbacks, diagnostics, and caches. Public relabel
--- declarations live in peg.titan. relabel_parser.titan assembles the
--- expression grammar exclusively from titan.peg's public named operations.
+-- This contributor owns the module-local state, lexical and semantic
+-- callbacks, diagnostics, caches, and parser-building helpers. Public relabel
+-- declarations and their implementations live in peg.titan.
+-- relabel_parser.titan assembles the expression grammar exclusively from
+-- titan.peg's public named operations.
 -- Neither contributor depends on titan.string or on the installed Lua
 -- relabel module.
 
@@ -141,33 +142,6 @@ local function _relabel_slice(source: string, first: integer,
   return result as string
 end
 
-local function _line_column_impl(
-    subject: string, position: integer): (integer, integer)
-  if position < 1 or position > #subject + 1 then
-    raise "PEG source position is out of range"
-  end
-  local line = 1
-  local line_start = 1
-  local cursor = 1
-  while cursor < position do
-    local byte = _relabel_byte(subject, cursor)
-    if byte == 13 and cursor < #subject and
-        _relabel_byte(subject, cursor + 1) == 10 then
-      if cursor + 1 >= position then break end
-      line = line + 1
-      cursor = cursor + 2
-      line_start = cursor
-    elseif byte == 10 or byte == 13 then
-      line = line + 1
-      cursor = cursor + 1
-      line_start = cursor
-    else
-      cursor = cursor + 1
-    end
-  end
-  return line, position - line_start + 1
-end
-
 local function _relabel_source_line(subject: string,
                                     position: integer): string
   local start = position
@@ -298,28 +272,6 @@ local function _relabel_valid_name(name: string): boolean
     index = index + 1
   end
   return true
-end
-
-local function _define_impl(
-    name: string, pattern: Pattern): Definition
-  if not _relabel_valid_name(name) then
-    raise "invalid PEG definition name"
-  end
-  return Definition.new(
-    name, pattern.raw, pattern.tree_size)
-end
-
-local function _define_value_impl(
-    name: string, candidate: value): Definition
-  if not _relabel_valid_name(name) then
-    raise "invalid PEG definition name"
-  end
-  if candidate == nil or
-      (_raw_type(candidate) == lua.LUA_TBOOLEAN and
-       not (candidate as boolean)) then
-    raise "PEG definition value must be truthy"
-  end
-  return Definition.new(name, candidate, -1)
 end
 
 local function _relabel_definition_table(
@@ -984,40 +936,6 @@ local function _relabel_cached_source(
   return compiled
 end
 
-local function _compile_impl(
-    candidate: value,
-    definitions: {integer: Definition}?): Pattern
-  _relabel_ensure_initialized()
-  if _relabel_is_pattern(candidate) then
-    return candidate as Pattern
-  end
-  if _raw_type(candidate) ~= lua.LUA_TSTRING then
-    raise "PEG expression must be a string or Pattern"
-  end
-  local source = candidate as string
-  if not definitions then
-    return _relabel_cached_source(
-      source, _relabel_match_cache)
-  end
-  return _relabel_compile_source(source, definitions)
-end
-
-local function _match_impl(
-    subject: string, candidate: value,
-    init: integer?): (value, ...: value)
-  _relabel_ensure_initialized()
-  local compiled: Pattern = succeed()
-  if _relabel_is_pattern(candidate) then
-    compiled = candidate as Pattern
-  elseif _raw_type(candidate) == lua.LUA_TSTRING then
-    compiled = _relabel_cached_source(
-      candidate as string, _relabel_match_cache)
-  else
-    raise "PEG expression must be a string or Pattern"
-  end
-  return compiled:match(subject, init)
-end
-
 local function _relabel_find_pattern(
     pattern: Pattern): Pattern
   local discarded = select_capture(pattern, 0)
@@ -1026,73 +944,6 @@ local function _relabel_find_pattern(
       sequence(position(), discarded, position()),
       sequence(any(), variable("__find")))),
   })
-end
-
-local function _find_impl(
-    subject: string, candidate: value,
-    init: integer?): (integer?, integer?)
-  _relabel_ensure_initialized()
-  local search: Pattern = succeed()
-  if _relabel_is_pattern(candidate) then
-    search = _relabel_find_pattern(candidate as Pattern)
-  elseif _raw_type(candidate) == lua.LUA_TSTRING then
-    local source = candidate as string
-    local cached = _relabel_raw_get(
-      _relabel_find_cache, source)
-    if cached ~= nil then
-      search = cached as Pattern
-    else
-      search = _relabel_find_pattern(
-        _relabel_compile_source(source, nil))
-      _relabel_raw_set(
-        _relabel_find_cache, source, search)
-    end
-  else
-    raise "PEG expression must be a string or Pattern"
-  end
-  local first: value, after: value = search:match(subject, init)
-  if first == nil then return nil, nil end
-  return first as integer, (after as integer) - 1
-end
-
-local function _gsub_impl(
-    subject: string, candidate: value,
-    replacement: value): string
-  _relabel_ensure_initialized()
-  local substitution_pattern: Pattern = succeed()
-  if _relabel_is_pattern(candidate) then
-    local replaced = _relabel_replace(
-      candidate as Pattern, replacement)
-    substitution_pattern = substitution(
-      zero_or_more(choice(replaced, any())))
-  elseif _raw_type(candidate) == lua.LUA_TSTRING then
-    local source = candidate as string
-    -- Keep the weak outer value strongly rooted for this call.  Its inner
-    -- replacement keys are intentionally strong; once the call returns the
-    -- weak outer entry permits the complete source/replacement group to die.
-    local group = _relabel_raw_get(
-      _relabel_gsub_cache, source)
-    if group == nil then
-      group = _relabel_new_table()
-      _relabel_raw_set(_relabel_gsub_cache, source, group)
-    end
-    local cached = _relabel_raw_get(group, replacement)
-    if cached ~= nil then
-      substitution_pattern = cached as Pattern
-    else
-      local compiled = _relabel_compile_source(source, nil)
-      local replaced =
-        _relabel_replace(compiled, replacement)
-      substitution_pattern = substitution(
-        zero_or_more(choice(replaced, any())))
-      _relabel_raw_set(
-        group, replacement, substitution_pattern)
-    end
-  else
-    raise "PEG expression must be a string or Pattern"
-  end
-  local result: value = substitution_pattern:match(subject)
-  return result as string
 end
 
 local function _relabel_refresh_locale()
@@ -1137,14 +988,6 @@ local function _relabel_refresh_locale()
   _relabel_find_cache = _relabel_new_weak_values()
   _relabel_gsub_cache = _relabel_new_weak_values()
   _relabel_parser = _relabel_build_parser()
-end
-
-local function _update_locale_impl()
-  if _relabel_parser then
-    _relabel_refresh_locale()
-  else
-    _relabel_initialize()
-  end
 end
 
 local function _relabel_initialize()

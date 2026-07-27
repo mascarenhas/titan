@@ -481,7 +481,6 @@ describe("standalone-prefix source installation", function()
             "vendor/lpeglabel/LICENSE",
             "vendor/lpeglabel/UPSTREAM.md",
             "titan/peg/peg.titan",
-            "titan/peg/captures.titan",
             "titan/peg/combinators.titan",
             "titan/peg/native.titan",
             "titan/peg/relabel.titan",

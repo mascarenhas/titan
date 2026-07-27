@@ -83,231 +83,599 @@ end
 
 function Pattern:match(subject: string, init: integer?,
                        ...: value): (value, ...: value)
-  return _pattern_match_impl(self, subject, init, ...)
+  local start = _normalized_init(subject, init)
+  local raw = _sequence(
+    _sequence(_Cc(_match_success_sentinel), self.raw), _Cp())
+  local top = lua.lua_gettop(L)
+  local had_error = false
+  local error_value: value = nil
+  local matched = false
+  local success_position = 0
+  local result_count = 0
+  local result_table: value = nil
+  local failure_label: value = nil
+  local failure_position = 0
+  do
+    ffi.lua_pushtvalue(L, _match)
+    ffi.lua_pushtvalue(L, raw)
+    ffi.lua_pushtvalue(L, subject)
+    ffi.lua_pushtvalue(L, start)
+    local index = 1
+    while index <= #... do
+      ffi.lua_pushtvalue(L, ...[index])
+      index = index + 1
+    end
+
+    local status = lua.lua_pcallk(
+      L, (3 + #...) as ffi.titan_ffi_int, lua.LUA_MULTRET,
+      0, 0, nil)
+    if status ~= lua.LUA_OK then
+      had_error = true
+      error_value = ffi.lua_totvalue(L, -1)
+    else
+      local native_count = lua.lua_gettop(L) - top
+      local first_result: value = nil
+      if native_count > 0 then
+        first_result = ffi.lua_totvalue(
+          L, (top + 1) as ffi.titan_ffi_int)
+      end
+      if native_count >= 2 and
+          first_result == _match_success_sentinel then
+        matched = true
+        local raw_position: value = ffi.lua_totvalue(
+          L, (top + native_count) as ffi.titan_ffi_int)
+        success_position = raw_position as integer
+        result_count = native_count - 2
+        if result_count > 200 then
+          raise "too many flexible return values (max 200)"
+        end
+        if result_count > 0 then
+          lua.lua_createtable(
+            L, result_count as ffi.titan_ffi_int, 0)
+          local table_index = lua.lua_gettop(L)
+          index = 1
+          while index <= result_count do
+            lua.lua_pushvalue(
+              L, (top + index + 1) as ffi.titan_ffi_int)
+            lua.lua_rawseti(L, table_index, index)
+            index = index + 1
+          end
+          result_table = ffi.lua_totvalue(L, table_index)
+        end
+      elseif native_count == 3 then
+        failure_label = ffi.lua_totvalue(
+          L, (top + 2) as ffi.titan_ffi_int)
+        local raw_position: value = ffi.lua_totvalue(
+          L, (top + 3) as ffi.titan_ffi_int)
+        failure_position = (raw_position as integer) + start - 1
+      else
+        raise "embedded LPegLabel returned an invalid match result"
+      end
+    end
+  finally
+    lua.lua_settop(L, top)
+  end
+
+  if had_error then raise error_value end
+  if matched then
+    if result_count == 0 then return success_position end
+    return _unpack_results(result_table, 1, result_count)
+  end
+  return nil, _decoded_label(failure_label), failure_position
 end
 
 function rule(name: value, pattern: Pattern): Rule
-  return _rule_impl(name, pattern)
+  return Rule.new(_encoded_name(name), pattern)
 end
 
 function grammar(start: value,
                  rules: {integer: Rule}): Pattern
-  return _grammar_impl(start, rules)
+  local top = lua.lua_gettop(L)
+  local count = 0
+  local maximum = 0
+  local total_size = 2
+  local seen: {string: boolean} = {}
+  local encoded_start = _encoded_name(start)
+  local native: value = nil
+  do
+    lua.lua_createtable(L, 1, 0)
+    local grammar_index = lua.lua_gettop(L)
+    ffi.lua_pushtvalue(L, encoded_start)
+    lua.lua_rawseti(L, grammar_index, 1)
+
+    ffi.lua_pushtvalue(L, rules)
+    local rules_index = lua.lua_gettop(L)
+    lua.lua_pushnil(L)
+    while lua.lua_next(L, rules_index) ~= 0 do
+      if lua.lua_isinteger(L, -2) == 0 then
+        raise "PEG grammar rule indices must be integers"
+      end
+      local raw_index: value = ffi.lua_totvalue(L, -2)
+      local index = raw_index as integer
+      if index < 1 then
+        raise "PEG grammar rule indices must be positive"
+      end
+      local raw_item: value = ffi.lua_totvalue(L, -1)
+      local item = raw_item as Rule
+      count = count + 1
+      if count > MAX_RULES then raise "PEG grammar has too many rules" end
+      if index > maximum then maximum = index end
+      if seen[item.encoded_name] then
+        raise "duplicate PEG grammar rule name"
+      end
+      seen[item.encoded_name] = true
+      total_size = _checked_sum(
+        total_size, item.pattern.tree_size, 2)
+
+      ffi.lua_pushtvalue(L, item.encoded_name)
+      ffi.lua_pushtvalue(L, item.pattern.raw)
+      lua.lua_rawset(L, grammar_index)
+      lua.lua_settop(
+        L, (lua.lua_gettop(L) - 1) as ffi.titan_ffi_int)
+    end
+    if count ~= maximum then raise "PEG grammar rules must be dense" end
+    if not seen[encoded_start] then
+      raise "PEG grammar has no start rule"
+    end
+    native = _P(ffi.lua_totvalue(L, grammar_index))
+  finally
+    lua.lua_settop(L, top)
+  end
+  return _pattern(native, total_size)
 end
 
 function locale(): Locale
-  return _locale_impl()
+  local native = _locale()
+  return Locale.new(
+    _pattern(_field(native, "alnum"), 5),
+    _pattern(_field(native, "alpha"), 5),
+    _pattern(_field(native, "cntrl"), 5),
+    _pattern(_field(native, "digit"), 5),
+    _pattern(_field(native, "graph"), 5),
+    _pattern(_field(native, "lower"), 5),
+    _pattern(_field(native, "print"), 5),
+    _pattern(_field(native, "punct"), 5),
+    _pattern(_field(native, "space"), 5),
+    _pattern(_field(native, "upper"), 5),
+    _pattern(_field(native, "xdigit"), 5))
 end
 
 function set_max_stack(maximum: integer)
-  _set_max_stack_impl(maximum)
+  if maximum < 1 or maximum > MAX_STACK then
+    raise "PEG maximum stack is out of range"
+  end
+  _setmaxstack(maximum)
 end
 
 function version(): string
-  return _version_impl()
+  return _version_text
 end
 
 -- Constructors and combinators.
 
 function literal(text: string): Pattern
-  return _literal_impl(text)
+  local length = #text
+  local size = 1
+  if length > 0 then
+    if length > (MAX_PATTERN_SIZE + 1) // 2 then
+      raise "PEG pattern is too large"
+    end
+    size = 2 * length - 1
+  end
+  return _pattern(_P(text), size)
 end
 
 function any(count: integer?): Pattern
-  return _any_impl(count)
+  local amount = 1
+  if count then amount = count as integer end
+  local size = 1
+  if amount > 0 then
+    if amount > (MAX_PATTERN_SIZE + 1) // 2 then
+      raise "PEG pattern is too large"
+    end
+    size = 2 * amount - 1
+  elseif amount < 0 then
+    if amount < -(MAX_PATTERN_SIZE // 2) then
+      raise "PEG pattern is too large"
+    end
+    size = -2 * amount
+  end
+  return _pattern(_P(amount), size)
 end
 
 function succeed(): Pattern
-  return _succeed_impl()
+  return _pattern(_P(true), 1)
 end
 
 function fail(): Pattern
-  return _fail_impl()
+  return _pattern(_P(false), 1)
 end
 
 function runtime(
     callback: (string, integer, string) ->
       (...: value)): Pattern
-  return _runtime_impl(callback)
+  _require_raw_function(callback, "runtime")
+  return _pattern(_P(callback), 2)
 end
 
 function set(bytes: string): Pattern
-  return _set_impl(bytes)
+  return _pattern(_S(bytes), 5)
 end
 
 function ranges(...: string): Pattern
-  return _ranges_impl(...)
+  local index = 1
+  while index <= #... do
+    if #(...[index]) ~= 2 then
+      raise "each PEG range must contain exactly two bytes"
+    end
+    index = index + 1
+  end
+  return _pattern(_R(...), 5)
 end
 
 function utf_range(first: integer,
                    last: integer): Pattern
-  return _utf_range_impl(first, last)
+  if first < 0 or last < first or last > 0x10ffff then
+    raise "invalid UTF-8 code-point range"
+  end
+  local size = 2
+  if last <= 0x7f then size = 5 end
+  return _pattern(_utfR(first, last), size)
 end
 
 function variable(name: value): Pattern
-  return _variable_impl(name)
+  return _pattern(_V(_encoded_name(name)), 1)
 end
 
 function behind(pattern: Pattern): Pattern
-  return _behind_impl(pattern)
+  -- The engine remains authoritative for fixed-length/capture-free checks.
+  -- Its numeric bound is validated there after Titan's tree-size projection.
+  local size = _checked_unary(pattern, 1)
+  return _pattern(_B(pattern.raw), size)
 end
 
 function throw(label: value): Pattern
-  return _throw_impl(label)
+  return _pattern(_T(_encoded_name(label)), 1)
 end
 
 function sequence(...: Pattern): Pattern
-  return _sequence_impl(...)
+  if #... == 0 then return succeed() end
+  local result = ...[1]
+  local index = 2
+  while index <= #... do
+    local next_pattern = ...[index]
+    local size = _checked_sum(
+      result.tree_size, next_pattern.tree_size, 1)
+    result = _pattern(
+      _sequence(result.raw, next_pattern.raw), size)
+    index = index + 1
+  end
+  return result
 end
 
 function choice(...: Pattern): Pattern
-  return _choice_impl(...)
+  if #... == 0 then return fail() end
+  local result = ...[1]
+  local index = 2
+  while index <= #... do
+    local next_pattern = ...[index]
+    local size = _checked_sum(
+      result.tree_size, next_pattern.tree_size, 1)
+    result = _pattern(
+      _choice(result.raw, next_pattern.raw), size)
+    index = index + 1
+  end
+  return result
 end
 
 function difference(first: Pattern,
                     ...: Pattern): Pattern
-  return _difference_impl(first, ...)
+  local result = first
+  local index = 1
+  while index <= #... do
+    local next_pattern = ...[index]
+    local size = _checked_sum(
+      result.tree_size, next_pattern.tree_size, 2)
+    result = _pattern(
+      _difference(result.raw, next_pattern.raw), size)
+    index = index + 1
+  end
+  return result
 end
 
 function lookahead(pattern: Pattern): Pattern
-  return _lookahead_impl(pattern)
+  return _pattern(
+    _lookahead(pattern.raw), _checked_unary(pattern, 1))
 end
 
 function negative(pattern: Pattern): Pattern
-  return _negative_impl(pattern)
+  return _pattern(
+    _negative(pattern.raw), _checked_unary(pattern, 1))
 end
 
 function at_least(pattern: Pattern,
                   count: integer): Pattern
-  return _at_least_impl(pattern, count)
+  if count < 0 then raise "PEG repetition count must be nonnegative" end
+  local size = _at_least_size(pattern, count)
+  return _pattern(_repeat(pattern.raw, count), size)
 end
 
 function at_most(pattern: Pattern,
                  count: integer): Pattern
-  return _at_most_impl(pattern, count)
+  if count < 0 then raise "PEG repetition count must be nonnegative" end
+  if count == 0 then return succeed() end
+  local size = _at_most_size(pattern, count)
+  return _pattern(_repeat(pattern.raw, -count), size)
 end
 
 function zero_or_more(pattern: Pattern): Pattern
-  return _zero_or_more_impl(pattern)
+  return at_least(pattern, 0)
 end
 
 function one_or_more(pattern: Pattern): Pattern
-  return _one_or_more_impl(pattern)
+  return at_least(pattern, 1)
 end
 
 function optional(pattern: Pattern): Pattern
-  return _optional_impl(pattern)
+  return at_most(pattern, 1)
 end
 
 -- Captures.
 
 function capture(pattern: Pattern): Pattern
-  return _capture_impl(pattern)
+  return _pattern(
+    _C(pattern.raw), _checked_unary(pattern, 1))
 end
 
 function constant(...: value): Pattern
-  return _constant_impl(...)
+  local count = #...
+  local size = 1
+  if count == 1 then
+    size = 2
+  elseif count > 1 then
+    size = 3 * count
+  end
+  if size > MAX_PATTERN_SIZE then raise "PEG pattern is too large" end
+  return _pattern(_Cc(...), size)
 end
 
 function match_time(
     pattern: Pattern,
     callback: (string, integer, value, ...: value) ->
       (...: value)): Pattern
-  return _match_time_impl(pattern, callback)
+  _require_raw_function(callback, "match-time")
+  return _pattern(
+    _Cmt(pattern.raw, callback), _checked_unary(pattern, 1))
 end
 
 function back_capture(key: value): Pattern
-  return _back_capture_impl(key)
+  if key == nil then raise "PEG back-capture key must be non-nil" end
+  return _pattern(_Cb(key), 2)
 end
 
 function argument(index: integer): Pattern
-  return _argument_impl(index)
+  if index < 1 or index > MAX_SHORT then
+    raise "PEG argument index is out of range"
+  end
+  return _pattern(_Carg(index), 2)
 end
 
 function position(): Pattern
-  return _position_impl()
+  return _pattern(_Cp(), 2)
 end
 
 function substitution(pattern: Pattern): Pattern
-  return _substitution_impl(pattern)
+  return _pattern(
+    _Cs(pattern.raw), _checked_unary(pattern, 1))
 end
 
 function table_capture(pattern: Pattern): Pattern
-  return _table_capture_impl(pattern)
+  return _pattern(
+    _Ct(pattern.raw), _checked_unary(pattern, 1))
 end
 
 function fold_capture(
     pattern: Pattern,
     callback: (value, ...: value) -> value): Pattern
-  return _fold_capture_impl(pattern, callback)
+  _require_raw_function(callback, "fold-capture")
+  return _pattern(
+    _Cf(pattern.raw, callback), _checked_unary(pattern, 1))
 end
 
 function group(pattern: Pattern, key: value): Pattern
-  return _group_impl(pattern, key)
+  return _pattern(
+    _Cg(pattern.raw, key), _checked_unary(pattern, 1))
 end
 
 function select_capture(pattern: Pattern,
                         index: integer): Pattern
-  return _select_capture_impl(pattern, index)
+  if index < 0 or index > MAX_SHORT then
+    raise "PEG capture index is out of range"
+  end
+  return _pattern(
+    _capture_replace(pattern.raw, index),
+    _checked_unary(pattern, 1))
 end
 
 function template_capture(pattern: Pattern,
                           template: string): Pattern
-  return _template_capture_impl(pattern, template)
+  return _pattern(
+    _capture_replace(pattern.raw, template),
+    _checked_unary(pattern, 1))
 end
 
 function query_capture(pattern: Pattern,
                        lookup: {value: value}): Pattern
-  return _query_capture_impl(pattern, lookup)
+  return _pattern(
+    _capture_replace(pattern.raw, lookup),
+    _checked_unary(pattern, 1))
 end
 
 function function_capture(
     pattern: Pattern,
     callback: (value, ...: value) ->
       (...: value)): Pattern
-  return _function_capture_impl(pattern, callback)
+  _require_raw_function(callback, "function-capture")
+  return _pattern(
+    _capture_replace(pattern.raw, callback),
+    _checked_unary(pattern, 1))
 end
 
 -- Relabel expressions and convenience operations.
 
 function line_column(subject: string,
                      position: integer): (integer, integer)
-  return _line_column_impl(subject, position)
+  if position < 1 or position > #subject + 1 then
+    raise "PEG source position is out of range"
+  end
+  local line = 1
+  local line_start = 1
+  local cursor = 1
+  while cursor < position do
+    local byte = _relabel_byte(subject, cursor)
+    if byte == 13 and cursor < #subject and
+        _relabel_byte(subject, cursor + 1) == 10 then
+      if cursor + 1 >= position then break end
+      line = line + 1
+      cursor = cursor + 2
+      line_start = cursor
+    elseif byte == 10 or byte == 13 then
+      line = line + 1
+      cursor = cursor + 1
+      line_start = cursor
+    else
+      cursor = cursor + 1
+    end
+  end
+  return line, position - line_start + 1
 end
 
 function define(name: string,
                 pattern: Pattern): Definition
-  return _define_impl(name, pattern)
+  if not _relabel_valid_name(name) then
+    raise "invalid PEG definition name"
+  end
+  return Definition.new(
+    name, pattern.raw, pattern.tree_size)
 end
 
 function define_value(name: string,
                       candidate: value): Definition
-  return _define_value_impl(name, candidate)
+  if not _relabel_valid_name(name) then
+    raise "invalid PEG definition name"
+  end
+  if candidate == nil or
+      (_raw_type(candidate) == lua.LUA_TBOOLEAN and
+       not (candidate as boolean)) then
+    raise "PEG definition value must be truthy"
+  end
+  return Definition.new(name, candidate, -1)
 end
 
 function compile(
     candidate: value,
     definitions: {integer: Definition}?): Pattern
-  return _compile_impl(candidate, definitions)
+  _relabel_ensure_initialized()
+  if _relabel_is_pattern(candidate) then
+    return candidate as Pattern
+  end
+  if _raw_type(candidate) ~= lua.LUA_TSTRING then
+    raise "PEG expression must be a string or Pattern"
+  end
+  local source = candidate as string
+  if not definitions then
+    return _relabel_cached_source(
+      source, _relabel_match_cache)
+  end
+  return _relabel_compile_source(source, definitions)
 end
 
 function match(subject: string, candidate: value,
                init: integer?): (value, ...: value)
-  return _match_impl(subject, candidate, init)
+  _relabel_ensure_initialized()
+  local compiled: Pattern = succeed()
+  if _relabel_is_pattern(candidate) then
+    compiled = candidate as Pattern
+  elseif _raw_type(candidate) == lua.LUA_TSTRING then
+    compiled = _relabel_cached_source(
+      candidate as string, _relabel_match_cache)
+  else
+    raise "PEG expression must be a string or Pattern"
+  end
+  return compiled:match(subject, init)
 end
 
 function find(subject: string, candidate: value,
               init: integer?): (integer?, integer?)
-  return _find_impl(subject, candidate, init)
+  _relabel_ensure_initialized()
+  local search: Pattern = succeed()
+  if _relabel_is_pattern(candidate) then
+    search = _relabel_find_pattern(candidate as Pattern)
+  elseif _raw_type(candidate) == lua.LUA_TSTRING then
+    local source = candidate as string
+    local cached = _relabel_raw_get(
+      _relabel_find_cache, source)
+    if cached ~= nil then
+      search = cached as Pattern
+    else
+      search = _relabel_find_pattern(
+        _relabel_compile_source(source, nil))
+      _relabel_raw_set(
+        _relabel_find_cache, source, search)
+    end
+  else
+    raise "PEG expression must be a string or Pattern"
+  end
+  local first: value, after: value = search:match(subject, init)
+  if first == nil then return nil, nil end
+  return first as integer, (after as integer) - 1
 end
 
 function gsub(subject: string, candidate: value,
               replacement: value): string
-  return _gsub_impl(subject, candidate, replacement)
+  _relabel_ensure_initialized()
+  local substitution_pattern: Pattern = succeed()
+  if _relabel_is_pattern(candidate) then
+    local replaced = _relabel_replace(
+      candidate as Pattern, replacement)
+    substitution_pattern = substitution(
+      zero_or_more(choice(replaced, any())))
+  elseif _raw_type(candidate) == lua.LUA_TSTRING then
+    local source = candidate as string
+    -- Keep the weak outer value strongly rooted for this call.  Its inner
+    -- replacement keys are intentionally strong; once the call returns the
+    -- weak outer entry permits the complete source/replacement group to die.
+    local group = _relabel_raw_get(
+      _relabel_gsub_cache, source)
+    if group == nil then
+      group = _relabel_new_table()
+      _relabel_raw_set(_relabel_gsub_cache, source, group)
+    end
+    local cached = _relabel_raw_get(group, replacement)
+    if cached ~= nil then
+      substitution_pattern = cached as Pattern
+    else
+      local compiled = _relabel_compile_source(source, nil)
+      local replaced =
+        _relabel_replace(compiled, replacement)
+      substitution_pattern = substitution(
+        zero_or_more(choice(replaced, any())))
+      _relabel_raw_set(
+        group, replacement, substitution_pattern)
+    end
+  else
+    raise "PEG expression must be a string or Pattern"
+  end
+  local result: value = substitution_pattern:match(subject)
+  return result as string
 end
 
 function update_locale()
-  _update_locale_impl()
+  if _relabel_parser then
+    _relabel_refresh_locale()
+  else
+    _relabel_initialize()
+  end
 end
 
 do

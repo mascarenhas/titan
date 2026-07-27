@@ -6,7 +6,12 @@ local cctype = foreign import "ctype.h"
 local peg = import "titan.peg"
 
 -- The canonical folder main is the complete public surface. Contributors
--- contain only module-local implementation records, state, and helpers.
+-- contain only module-local records, state, and shared helpers.
+
+local MAXIMUM_STRING_BYTES = 0
+local INTEGER_LENGTH_MODIFIER = ""
+local HOST_IS_LITTLE_ENDIAN = false
+local NATIVE_MAXIMUM_ALIGNMENT = 0
 
 record Span
   first: integer
@@ -26,129 +31,726 @@ record Regex
 end
 
 function len(subject: string): integer
-  return _string_len(subject)
+  return #subject
 end
 
 function sub(subject: string, first: integer,
              last: integer?): string
-  return _string_sub(subject, first, last)
+  local length = #subject
+  local normalized_first = initial_position(first, length)
+  local raw_last = -1
+  if last then raw_last = last end
+  local normalized_last = ending_position(raw_last, length)
+  if normalized_first > normalized_last then return "" end
+  return copy_interval(subject, normalized_first,
+                       normalized_last - normalized_first + 1)
 end
 
 function reverse(subject: string): string
-  return _string_reverse(subject)
+  local length = #subject
+  if length == 0 then return "" end
+  local owned = ffi.titan_ffi_char.new_array(length)
+  local source = subject as const *ffi.titan_ffi_char
+  local index = 0
+  while index < length do
+    owned[index] = source[length - index - 1]
+    index = index + 1
+  end
+  return finish_string(
+    owned as *ffi.titan_ffi_char, #owned)
 end
 
 function lower(subject: string): string
-  return _string_lower(subject)
+  local length = #subject
+  if length == 0 then return "" end
+  local owned = ffi.titan_ffi_char.new_array(length)
+  local source = subject as const *ffi.titan_ffi_char
+  local index = 0
+  while index < length do
+    local octet = source[index] as ffi.titan_ffi_unsigned_char
+    owned[index] =
+      cctype.tolower(octet as ffi.titan_ffi_int) as ffi.titan_ffi_char
+    index = index + 1
+  end
+  return finish_string(
+    owned as *ffi.titan_ffi_char, #owned)
 end
 
 function upper(subject: string): string
-  return _string_upper(subject)
+  local length = #subject
+  if length == 0 then return "" end
+  local owned = ffi.titan_ffi_char.new_array(length)
+  local source = subject as const *ffi.titan_ffi_char
+  local index = 0
+  while index < length do
+    local octet = source[index] as ffi.titan_ffi_unsigned_char
+    owned[index] =
+      cctype.toupper(octet as ffi.titan_ffi_int) as ffi.titan_ffi_char
+    index = index + 1
+  end
+  return finish_string(
+    owned as *ffi.titan_ffi_char, #owned)
 end
 
 function rep(subject: string, count: integer,
              separator: string?): string
-  return _string_rep(subject, count, separator)
+  if count <= 0 then return "" end
+
+  local actual_separator = ""
+  if separator then actual_separator = separator end
+  local subject_length = #subject
+  local separator_length = #actual_separator
+  local maximum_length = MAXIMUM_STRING_BYTES
+
+  if subject_length > maximum_length - separator_length then
+    raise "resulting string is too large"
+  end
+  local unit_length = subject_length + separator_length
+  if unit_length > maximum_length // count then
+    raise "resulting string is too large"
+  end
+  local total_length = unit_length * count - separator_length
+  if total_length == 0 then return "" end
+
+  local owned = ffi.titan_ffi_char.new_array(total_length)
+  local output = owned as *ffi.titan_ffi_char
+  local subject_bytes = subject as const *ffi.titan_ffi_char
+  local separator_bytes =
+    actual_separator as const *ffi.titan_ffi_char
+  local occurrence = 1
+  local offset = 0
+  while occurrence < count do
+    if subject_length > 0 then
+      cstring.memcpy(output + offset, subject_bytes,
+                     subject_length as cstring.size_t)
+      offset = offset + subject_length
+    end
+    if separator_length > 0 then
+      cstring.memcpy(output + offset, separator_bytes,
+                     separator_length as cstring.size_t)
+      offset = offset + separator_length
+    end
+    occurrence = occurrence + 1
+  end
+  if subject_length > 0 then
+    cstring.memcpy(output + offset, subject_bytes,
+                   subject_length as cstring.size_t)
+  end
+  return finish_string(output, #owned)
 end
 
 function byte(subject: string, first: integer?,
               last: integer?): (...: integer)
-  return _string_byte(subject, first, last)
+  local length = #subject
+  local raw_first = 1
+  if first then raw_first = first end
+  local normalized_first = initial_position(raw_first, length)
+  local raw_last = raw_first
+  if last then raw_last = last end
+  local normalized_last = ending_position(raw_last, length)
+  if normalized_first > normalized_last then return end
+  if normalized_last - normalized_first + 1 > 200 then
+    raise "too many flexible return values (max 200)"
+  end
+  return byte_results(subject, normalized_first, normalized_last)
 end
 
 function char(...: integer): string
-  return _string_char(...)
+  local length = #...
+  if length == 0 then return "" end
+  local owned = ffi.titan_ffi_char.new_array(length)
+  local index = 1
+  while index <= length do
+    local octet = ...[index]
+    if octet < 0 or octet > 255 then
+      raise "character value out of range"
+    end
+    local byte = octet as ffi.titan_ffi_unsigned_char
+    owned[index - 1] = byte as ffi.titan_ffi_char
+    index = index + 1
+  end
+  return finish_string(
+    owned as *ffi.titan_ffi_char, #owned)
 end
 
 function tostring(candidate: value): string
-  return _string_tostring(candidate)
+  local top = lua.lua_gettop(L)
+  local result: value = nil
+  do
+    ffi.lua_pushtvalue(L, candidate)
+    lual.luaL_tolstring(L, -1, nil)
+    result = ffi.lua_totvalue(L, -1)
+  finally
+    lua.lua_settop(L, top)
+  end
+  return result
 end
 
+-- Search for a literal byte sequence and return one-based inclusive bounds.
+-- This is deliberately length-aware: embedded zero bytes are ordinary data.
 function find(subject: string, needle: string,
               init: integer?): (integer?, integer?)
-  return _string_find(subject, needle, init)
+  local raw_init = 1
+  if init then raw_init = init end
+  local subject_length = #subject
+  local needle_length = #needle
+  local first = initial_position(raw_init, subject_length)
+  if first > subject_length + 1 then return nil, nil end
+  if needle_length == 0 then return first, first - 1 end
+  if first > subject_length or
+      needle_length > subject_length - first + 1 then
+    return nil, nil
+  end
+
+  local subject_bytes =
+    subject as const *ffi.titan_ffi_char
+  local needle_bytes =
+    needle as const *ffi.titan_ffi_char
+  local offset = first - 1
+  local limit = subject_length - needle_length
+  while offset <= limit do
+    if subject_bytes[offset] == needle_bytes[0] and
+        cstring.memcmp(
+          subject_bytes + offset, needle_bytes,
+          needle_length as cstring.size_t) == 0 then
+      return offset + 1, offset + needle_length
+    end
+    offset = offset + 1
+  end
+  return nil, nil
 end
 
 function format(format_string: string, ...: value): string
-  return _string_format(format_string, ...)
+  local builder = new_string_builder()
+  local length = #format_string
+  local cursor = 1
+  local run = 1
+  local argument = 0
+  while cursor <= length do
+    if format_byte(format_string, cursor) ~= 37 then
+      cursor = cursor + 1
+    else
+      if cursor > run then
+        builder_append(
+            builder,
+            copy_interval(format_string, run, cursor - run))
+      end
+      cursor = cursor + 1
+      if cursor <= length and
+          format_byte(format_string, cursor) == 37 then
+        builder_append(builder, "%")
+        cursor = cursor + 1
+      else
+        local form, specifier, next_cursor =
+          read_format(format_string, cursor)
+        cursor = next_cursor
+        argument = argument + 1
+        if argument > #... then
+          raise "no value for format conversion"
+        end
+        local candidate = ...[argument]
+
+        if specifier == 99 then
+          check_format(form, "-", false)
+          builder_append(
+              builder,
+              render_character(form, checked_integer(candidate)))
+        elseif specifier == 100 or specifier == 105 then
+          check_format(form, "-+0 ", true)
+          builder_append(
+              builder,
+              render_signed(
+                add_integer_length(form),
+                checked_integer(candidate)))
+        elseif specifier == 117 then
+          check_format(form, "-0", true)
+          builder_append(
+              builder,
+              render_unsigned(
+                add_integer_length(form),
+                checked_integer(candidate)))
+        elseif specifier == 111 or specifier == 120 or
+            specifier == 88 then
+          check_format(form, "-#0", true)
+          builder_append(
+              builder,
+              render_unsigned(
+                add_integer_length(form),
+                checked_integer(candidate)))
+        elseif specifier == 97 or specifier == 65 or
+            specifier == 101 or specifier == 69 or
+            specifier == 102 or specifier == 103 or
+            specifier == 71 then
+          check_format(form, "-+#0 ", true)
+          builder_append(
+              builder,
+              render_number(form, checked_number(candidate)))
+        elseif specifier == 112 then
+          check_format(form, "-", false)
+          builder_append(builder, render_pointer(form, candidate))
+        elseif specifier == 113 then
+          if #form ~= 2 then
+            raise "specifier '%q' cannot have modifiers"
+          end
+          append_literal(builder, candidate)
+        elseif specifier == 115 then
+          local converted = tostring(candidate)
+          if #form == 2 then
+            builder_append(builder, converted)
+          else
+            if contains_byte(converted, 0) then
+              raise "string contains zeros"
+            end
+            check_format(form, "-", true)
+            if not contains_byte(form, 46) and
+                #converted >= 100 then
+              builder_append(builder, converted)
+            else
+              builder_append(
+                  builder, render_c_string(form, converted))
+            end
+          end
+        else
+          raise "invalid conversion to 'format'"
+        end
+      end
+      run = cursor
+    end
+  end
+  if run <= length then
+    builder_append(
+        builder,
+        copy_interval(format_string, run, length - run + 1))
+  end
+  return builder_finish(builder)
 end
 
 function pack(format_string: string, ...: value): string
-  return _string_pack(format_string, ...)
+  local state = new_pack_state(format_string)
+  local builder = new_string_builder()
+  local arguments: {value} = {...}
+  local argument = 0
+
+  while not pack_format_at_end(state) do
+    local option = read_pack_details(state, builder.length)
+    checked_pack_growth(builder.length, option.padding)
+    checked_pack_growth(
+      builder.length + option.padding, option.size)
+    if option.padding > 0 then
+      builder_append(builder, zero_bytes(option.padding))
+    end
+
+    if option.kind == PACK_INT then
+      argument = argument + 1
+      local number =
+        checked_integer(next_pack_argument(arguments, argument))
+      check_signed_pack_range(number, option.size)
+      builder_append(
+        builder,
+        pack_integer_bytes(
+          number, option.size, state.little_endian, number < 0))
+    elseif option.kind == PACK_UINT then
+      argument = argument + 1
+      local number =
+        checked_integer(next_pack_argument(arguments, argument))
+      check_unsigned_pack_range(number, option.size)
+      builder_append(
+        builder,
+        pack_integer_bytes(
+          number, option.size, state.little_endian, false))
+    elseif option.kind == PACK_FLOAT then
+      argument = argument + 1
+      builder_append(
+        builder,
+        pack_float_bytes(
+          checked_number(next_pack_argument(arguments, argument)),
+          state.little_endian, state.native_little_endian))
+    elseif option.kind == PACK_NUMBER then
+      argument = argument + 1
+      builder_append(
+        builder,
+        pack_number_bytes(
+          checked_number(next_pack_argument(arguments, argument)),
+          state.little_endian, state.native_little_endian))
+    elseif option.kind == PACK_DOUBLE then
+      argument = argument + 1
+      builder_append(
+        builder,
+        pack_double_bytes(
+          checked_number(next_pack_argument(arguments, argument)),
+          state.little_endian, state.native_little_endian))
+    elseif option.kind == PACK_CHAR then
+      argument = argument + 1
+      local text =
+        checked_string(next_pack_argument(arguments, argument))
+      if #text > option.size then
+        raise "string longer than given size"
+      end
+      builder_append(builder, text)
+      if #text < option.size then
+        builder_append(
+          builder, zero_bytes(option.size - #text))
+      end
+    elseif option.kind == PACK_STRING then
+      argument = argument + 1
+      local text =
+        checked_string(next_pack_argument(arguments, argument))
+      check_unsigned_pack_range(
+        #text as lua.lua_Integer, option.size)
+      builder_append(
+        builder,
+        pack_integer_bytes(
+          #text as lua.lua_Integer, option.size,
+          state.little_endian, false))
+      checked_pack_growth(builder.length, #text)
+      builder_append(builder, text)
+    elseif option.kind == PACK_ZSTRING then
+      argument = argument + 1
+      local text =
+        checked_string(next_pack_argument(arguments, argument))
+      if contains_byte(text, 0) then
+        raise "string contains zeros"
+      end
+      checked_pack_growth(builder.length, #text)
+      builder_append(builder, text)
+      checked_pack_growth(builder.length, 1)
+      builder_append(builder, zero_bytes(1))
+    elseif option.kind == PACK_PADDING then
+      builder_append(builder, zero_bytes(1))
+    end
+  end
+
+  return builder_finish(builder)
 end
 
 function packsize(format_string: string): integer
-  return _string_packsize(format_string)
+  local state = new_pack_state(format_string)
+  local total_size = 0
+  while not pack_format_at_end(state) do
+    local option = read_pack_details(state, total_size)
+    if option.kind == PACK_STRING or
+        option.kind == PACK_ZSTRING then
+      raise "variable-length format"
+    end
+    checked_pack_growth(total_size, option.padding)
+    total_size = total_size + option.padding
+    checked_pack_growth(total_size, option.size)
+    total_size = total_size + option.size
+  end
+  return total_size
 end
 
 function unpack(format_string: string, data: string,
                 initial: integer?): (value, ...: value)
-  return _string_unpack(format_string, data, initial)
+  local raw_initial = 1
+  if initial then raw_initial = initial end
+  local position =
+    initial_position(raw_initial, #data) - 1
+  if position > #data then
+    raise "initial position out of string"
+  end
+
+  local state = new_pack_state(format_string)
+  local results: {value} = {}
+  while not pack_format_at_end(state) do
+    local option = read_pack_details(state, position)
+    if option.padding > #data - position or
+        option.size > #data - position - option.padding then
+      raise "data string too short"
+    end
+    position = position + option.padding
+
+    if option.kind == PACK_INT or option.kind == PACK_UINT then
+      if #results >= 199 then
+        raise "too many flexible return values (max 200)"
+      end
+      results[#results + 1] =
+        unpack_integer_bytes(
+          data, position, option.size, state.little_endian,
+          option.kind == PACK_INT)
+    elseif option.kind == PACK_FLOAT then
+      if #results >= 199 then
+        raise "too many flexible return values (max 200)"
+      end
+      results[#results + 1] =
+        unpack_float_bytes(
+          data, position, state.little_endian,
+          state.native_little_endian)
+    elseif option.kind == PACK_NUMBER then
+      if #results >= 199 then
+        raise "too many flexible return values (max 200)"
+      end
+      results[#results + 1] =
+        unpack_number_bytes(
+          data, position, state.little_endian,
+          state.native_little_endian)
+    elseif option.kind == PACK_DOUBLE then
+      if #results >= 199 then
+        raise "too many flexible return values (max 200)"
+      end
+      results[#results + 1] =
+        unpack_double_bytes(
+          data, position, state.little_endian,
+          state.native_little_endian)
+    elseif option.kind == PACK_CHAR then
+      if #results >= 199 then
+        raise "too many flexible return values (max 200)"
+      end
+      if option.size == 0 then
+        results[#results + 1] = ""
+      else
+        results[#results + 1] =
+          copy_interval(data, position + 1, option.size)
+      end
+    elseif option.kind == PACK_STRING then
+      if #results >= 199 then
+        raise "too many flexible return values (max 200)"
+      end
+      local packed_length =
+        unpack_integer_bytes(
+          data, position, option.size,
+          state.little_endian, false) as lua.lua_Unsigned
+      if packed_length >
+          (MAXIMUM_STRING_BYTES as lua.lua_Unsigned) then
+        raise "data string too short"
+      end
+      local length = packed_length as integer
+      if length > #data - position - option.size then
+        raise "data string too short"
+      end
+      if length == 0 then
+        results[#results + 1] = ""
+      else
+        results[#results + 1] =
+          copy_interval(
+            data, position + option.size + 1, length)
+      end
+      position = position + length
+    elseif option.kind == PACK_ZSTRING then
+      if #results >= 199 then
+        raise "too many flexible return values (max 200)"
+      end
+      local bytes =
+        data as const *ffi.titan_ffi_unsigned_char
+      local ending = position
+      while ending < #data and bytes[ending] ~= 0 do
+        ending = ending + 1
+      end
+      if ending >= #data then
+        raise "unfinished string for format 'z'"
+      end
+      results[#results + 1] =
+        copy_interval(data, position + 1, ending - position)
+      position = ending + 1
+    end
+    position = position + option.size
+  end
+
+  results[#results + 1] = position + 1
+  return flexible_values(results, 1)
 end
 
 function compile_regex(expression: string): Regex
-  return _string_compile_regex(expression)
+  local parsed = parse_regex(expression)
+  local projected, overflow_position =
+    regex_projected_size(parsed.root)
+  projected = regex_saturating_add(
+    projected, parsed.capture_count * 14 + 12)
+  if projected > REGEX_PATTERN_LIMIT then
+    if overflow_position == 0 then
+      overflow_position = parsed.root.position
+    end
+    raise_regex_diagnostic(
+      "pattern_too_large",
+      "compiled regular expression exceeds the pattern-size limit",
+      expression, overflow_position)
+  end
+
+  local pattern: peg.Pattern? = nil
+  do
+    pattern = regex_build_pattern(parsed)
+  catch
+    raise_regex_diagnostic(
+      "pattern_too_large",
+      "compiled regular expression exceeds the pattern-size limit",
+      expression, parsed.root.position)
+  end
+  return Regex.new(
+    expression, parsed.capture_count, pattern as peg.Pattern)
 end
 
 function Regex:source(): string
-  return _regex_source(self)
+  return self.expression
 end
 
 function Regex:group_count(): integer
-  return _regex_group_count(self)
+  return self.capture_count
 end
 
 function Regex:match(subject: string,
                      init: integer?): RegexMatch?
-  return _regex_match(self, subject, init)
+  local position, overshoot = regex_normalized_init(subject, init)
+  if overshoot then return nil end
+  return regex_find_from(self, subject, position)
 end
 
 function Regex:gmatch(subject: string,
                       init: integer?): () -> RegexMatch?
-  return _regex_gmatch(self, subject, init)
+  local position, overshoot = regex_normalized_init(subject, init)
+  local current = position
+  local previous_end = 0
+  local finished = overshoot
+  local anchored = regex_is_start_anchored(self)
+  local owner = self
+  local rooted_subject = subject
+
+  return function (): RegexMatch?
+    while not finished do
+      local found: RegexMatch? =
+        regex_find_from(owner, rooted_subject, current)
+      if not found then
+        finished = true
+        return nil
+      end
+      local actual = found as RegexMatch
+      local span = actual.matched_span
+      local after = span.last + 1
+      if span.last < span.first and after == previous_end then
+        if after > #rooted_subject then
+          finished = true
+          return nil
+        end
+        current = after + 1
+        if anchored then
+          finished = true
+          return nil
+        end
+      else
+        previous_end = after
+        current = after
+        if anchored then finished = true end
+        return actual
+      end
+    end
+    return nil
+  end
 end
 
 function Regex:gsub(subject: string, replacement: value,
                     maximum: integer?): (string, integer)
-  return _regex_gsub(self, subject, replacement, maximum)
+  local limit = #subject + 1
+  if maximum then limit = maximum end
+
+  local kind = raw_value_type(replacement)
+  if kind ~= lua.LUA_TSTRING and kind ~= lua.LUA_TNUMBER and
+      kind ~= lua.LUA_TTABLE and kind ~= lua.LUA_TFUNCTION then
+    raise "invalid replacement type"
+  end
+  if limit <= 0 then return subject, 0 end
+
+  local builder = new_string_builder()
+  local search = 1
+  local copied = 1
+  local previous_end = 0
+  local count = 0
+  local anchored = regex_is_start_anchored(self)
+  local finished = false
+  while not finished and count < limit do
+    local found: RegexMatch? =
+      regex_find_from(self, subject, search)
+    if not found then
+      finished = true
+    else
+      local actual = found as RegexMatch
+      local span = actual.matched_span
+      local after = span.last + 1
+      if span.last < span.first and after == previous_end then
+        if after > #subject or anchored then
+          finished = true
+        else
+          search = after + 1
+        end
+      else
+        if span.first > copied then
+          builder_append(
+            builder,
+            copy_interval(subject, copied, span.first - copied))
+        end
+        builder_append(
+          builder,
+          regex_dynamic_replacement(replacement, kind, actual))
+        count = count + 1
+        copied = after
+        previous_end = after
+        search = after
+        if anchored then finished = true end
+      end
+    end
+  end
+  if copied <= #subject then
+    builder_append(
+      builder,
+      copy_interval(subject, copied, #subject - copied + 1))
+  end
+  return builder_finish(builder), count
 end
 
 function RegexMatch:span(): Span
-  return _regex_match_span(self)
+  return Span.new(self.matched_span.first, self.matched_span.last)
 end
 
 function RegexMatch:group_count(): integer
-  return _regex_match_group_count(self)
+  return #self.groups
 end
 
 function RegexMatch:group_span(index: integer): Span?
-  return _regex_match_group_span(self, index)
+  if index < 1 or index > #self.groups then
+    raise "capture group index out of range"
+  end
+  local stored: Span? = self.groups[index].span
+  if not stored then return nil end
+  local span = stored as Span
+  return Span.new(span.first, span.last)
 end
 
 function RegexMatch:whole(): string
-  return _regex_match_whole(self)
+  return copy_interval(
+    self.subject, self.matched_span.first,
+    self.matched_span.last - self.matched_span.first + 1)
 end
 
 function RegexMatch:group(index: integer): string?
-  return _regex_match_group(self, index)
+  local span: Span? = self:group_span(index)
+  if not span then return nil end
+  local actual = span as Span
+  return copy_interval(
+    self.subject, actual.first, actual.last - actual.first + 1)
 end
 
 function RegexMatch:values(): (string?, ...: string?)
-  return _regex_match_values(self)
+  if #self.groups == 0 then return self:whole() end
+  return regex_group_values(self, 1)
 end
 
 function match(subject: string, expression: string,
                init: integer?): RegexMatch?
-  return _string_match(subject, expression, init)
+  return cached_regex(expression):match(subject, init)
 end
 
 function gmatch(subject: string, expression: string,
                 init: integer?): () -> RegexMatch?
-  return _string_gmatch(subject, expression, init)
+  return cached_regex(expression):gmatch(subject, init)
 end
 
 function gsub(subject: string, expression: string,
               replacement: value,
               maximum: integer?): (string, integer)
-  return _string_gsub(subject, expression, replacement, maximum)
+  return cached_regex(expression):gsub(subject, replacement, maximum)
+end
+
+do
+  MAXIMUM_STRING_BYTES = maximum_string_bytes()
+  INTEGER_LENGTH_MODIFIER = integer_length_modifier()
+  HOST_IS_LITTLE_ENDIAN = host_is_little_endian()
+  NATIVE_MAXIMUM_ALIGNMENT = native_maximum_alignment()
 end

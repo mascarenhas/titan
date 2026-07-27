@@ -41,13 +41,6 @@ local record Bytes
   local length: integer
 end
 
--- Synchronous libuv helpers report lengths as size_t. Keep that type until
--- lua_pushlstring consumes it instead of narrowing through Titan integer.
-local record SizedBytes
-  local data: *ffi.titan_ffi_char
-  local storage: value
-end
-
 local record Text
   local bytes: Bytes
   local source: string
@@ -247,15 +240,6 @@ local function allocate_bytes(length: integer): Bytes
   return bytes
 end
 
-local function allocate_sized_bytes(length: libuv.size_t): SizedBytes
-  local top = lua.lua_gettop(L)
-  local memory = lua.lua_newuserdatauv(L, length, 0)
-  local storage = ffi.lua_totvalue(L, -1)
-  local bytes = SizedBytes.new(memory as *ffi.titan_ffi_char, storage)
-  lua.lua_settop(L, top)
-  return bytes
-end
-
 local function copy_text(source: string, operation: string,
                          subject: string?): Text
   local length = #source
@@ -323,8 +307,7 @@ local function allocate_stream_bytes(size: libuv.size_t): Bytes
   end
   local length = size
   local owned = ffi.titan_ffi_char.new_array(length)
-  local storage: value = owned
-  return Bytes.new(owned as *ffi.titan_ffi_char, storage, length)
+  return Bytes.new(owned as *ffi.titan_ffi_char, owned, length)
 end
 
 local function queued_bytes_string(queue: {Bytes}): string

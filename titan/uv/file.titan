@@ -38,11 +38,6 @@ local FS = FsConstants.new {
   file_closed = 3,
 }
 
-local record Dirent
-  local handle: *libuv.uv_dirent_t
-  local storage: value
-end
-
 local record FsStatResult
   local size: integer
   local kind: string
@@ -197,26 +192,17 @@ function _fs_list(path: string): {string}
                          UV_TAG)
 end
 
-local function allocate_dirent(): Dirent
-  local top = lua.lua_gettop(L)
-  local memory = lua.lua_newuserdatauv(L, libuv.uv_dirent_t.sizeof, 0)
-  local storage = ffi.lua_totvalue(L, -1)
-  local entry = Dirent.new(memory as *libuv.uv_dirent_t, storage)
-  lua.lua_settop(L, top)
-  return entry
-end
-
 local function extract_fs_list(owner: uv_fs_t): {string}
   local names: {string} = {}
-  local entry = allocate_dirent()
+  local entry = libuv.uv_dirent_t.new()
   while true do
-    local status = libuv.uv_fs_scandir_next(owner.handle, entry.handle)
+    local status = libuv.uv_fs_scandir_next(owner.handle, entry)
     if status == libuv.UV_EOF then break end
     if status < 0 then
       raise make_error(status, "fs.list.next",
                        fs_operation_subject(owner.metadata.operation))
     end
-    names[#names + 1] = entry.handle.name as string
+    names[#names + 1] = entry.name as string
   end
   return names
 end

@@ -341,7 +341,7 @@ end
             assert.truthy(lfs.attributes(LPEGLABEL_ARCHIVE, "mode"),
                 "run make lpeglabel before delayed-DNS callback specs")
             for _, name in ipairs({
-                "peg", "native", "combinators", "captures",
+                "peg", "native", "combinators",
                 "relabel", "relabel_parser",
             }) do
                 async_stdlib.write_source(

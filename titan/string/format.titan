@@ -20,7 +20,7 @@ end
 local function builder_append(builder: CoreStringBuilder, text: string)
   local length = #text
   if length == 0 then return end
-  local maximum = maximum_string_bytes()
+  local maximum = MAXIMUM_STRING_BYTES
   if length > maximum - builder.length then
     raise "resulting string is too large"
   end
@@ -30,26 +30,29 @@ end
 
 local function builder_finish(builder: CoreStringBuilder): string
   if builder.length == 0 then return "" end
-  local output = allocate_string_bytes(builder.length)
+  local owned = ffi.titan_ffi_char.new_array(builder.length)
+  local output = owned as *ffi.titan_ffi_char
   local offset = 0
   local index = 1
   while index <= #builder.chunks do
     local chunk = builder.chunks[index] as string
     local length = #chunk
     local source = chunk as const *ffi.titan_ffi_char
-    cstring.memcpy(output.data + offset, source,
+    cstring.memcpy(output + offset, source,
                    length as cstring.size_t)
     offset = offset + length
     index = index + 1
   end
-  return finish_string(output)
+  return finish_string(output, #owned)
 end
 
 local function zero_bytes(length: integer): string
   if length == 0 then return "" end
-  local output = allocate_string_bytes(length)
-  cstring.memset(output.data, 0, length as cstring.size_t)
-  return finish_string(output)
+  if length < 0 then raise "resulting string is too large" end
+  local owned = ffi.titan_ffi_char.new_array(length)
+  local output = owned as *ffi.titan_ffi_char
+  cstring.memset(output, 0, #owned as cstring.size_t)
+  return finish_string(output, #owned)
 end
 
 local function checked_integer(candidate: value): lua.lua_Integer
@@ -113,19 +116,19 @@ local function checked_boolean(candidate: value): boolean
   return result
 end
 
-local function prepare_snprintf(required: integer): StringBytes
+local function snprintf_allocation_length(required: integer): integer
   if required < 0 then raise "string formatting failed" end
-  if required >= maximum_string_bytes() then
+  if required >= MAXIMUM_STRING_BYTES then
     raise "resulting string is too large"
   end
-  return allocate_string_bytes(required + 1)
+  return required + 1
 end
 
-local function finish_snprintf(output: StringBytes, required: integer,
+local function finish_snprintf(output: *ffi.titan_ffi_char,
+                               required: integer,
                                actual: integer): string
   if actual ~= required then raise "string formatting failed" end
-  output.length = required
-  return finish_string(output)
+  return finish_string(output, required)
 end
 
 local function integer_length_modifier(): string
@@ -140,7 +143,7 @@ end
 
 local function add_integer_length(form: string): string
   return copy_interval(form, 1, #form - 1) ..
-         integer_length_modifier() ..
+         INTEGER_LENGTH_MODIFIER ..
          copy_interval(form, #form, 1)
 end
 
@@ -149,25 +152,31 @@ local function render_signed(form: string,
   if lua.lua_Integer.sizeof <= ffi.titan_ffi_int.sizeof then
     local converted = number as ffi.titan_ffi_int
     local required = stdio.snprintf(nil, 0, form, converted)
-    local output = prepare_snprintf(required)
+    local owned = ffi.titan_ffi_char.new_array(
+      snprintf_allocation_length(required))
+    local output = owned as *ffi.titan_ffi_char
     local actual = stdio.snprintf(
-        output.data, (required + 1) as cstring.size_t,
+        output, #owned as cstring.size_t,
         form, converted)
     return finish_snprintf(output, required, actual)
   elseif lua.lua_Integer.sizeof <= ffi.titan_ffi_long.sizeof then
     local converted = number as ffi.titan_ffi_long
     local required = stdio.snprintf(nil, 0, form, converted)
-    local output = prepare_snprintf(required)
+    local owned = ffi.titan_ffi_char.new_array(
+      snprintf_allocation_length(required))
+    local output = owned as *ffi.titan_ffi_char
     local actual = stdio.snprintf(
-        output.data, (required + 1) as cstring.size_t,
+        output, #owned as cstring.size_t,
         form, converted)
     return finish_snprintf(output, required, actual)
   else
     local converted = number as ffi.titan_ffi_long_long
     local required = stdio.snprintf(nil, 0, form, converted)
-    local output = prepare_snprintf(required)
+    local owned = ffi.titan_ffi_char.new_array(
+      snprintf_allocation_length(required))
+    local output = owned as *ffi.titan_ffi_char
     local actual = stdio.snprintf(
-        output.data, (required + 1) as cstring.size_t,
+        output, #owned as cstring.size_t,
         form, converted)
     return finish_snprintf(output, required, actual)
   end
@@ -178,25 +187,31 @@ local function render_unsigned(form: string,
   if lua.lua_Integer.sizeof <= ffi.titan_ffi_int.sizeof then
     local converted = number as ffi.titan_ffi_unsigned_int
     local required = stdio.snprintf(nil, 0, form, converted)
-    local output = prepare_snprintf(required)
+    local owned = ffi.titan_ffi_char.new_array(
+      snprintf_allocation_length(required))
+    local output = owned as *ffi.titan_ffi_char
     local actual = stdio.snprintf(
-        output.data, (required + 1) as cstring.size_t,
+        output, #owned as cstring.size_t,
         form, converted)
     return finish_snprintf(output, required, actual)
   elseif lua.lua_Integer.sizeof <= ffi.titan_ffi_long.sizeof then
     local converted = number as ffi.titan_ffi_unsigned_long
     local required = stdio.snprintf(nil, 0, form, converted)
-    local output = prepare_snprintf(required)
+    local owned = ffi.titan_ffi_char.new_array(
+      snprintf_allocation_length(required))
+    local output = owned as *ffi.titan_ffi_char
     local actual = stdio.snprintf(
-        output.data, (required + 1) as cstring.size_t,
+        output, #owned as cstring.size_t,
         form, converted)
     return finish_snprintf(output, required, actual)
   else
     local converted = number as ffi.titan_ffi_unsigned_long_long
     local required = stdio.snprintf(nil, 0, form, converted)
-    local output = prepare_snprintf(required)
+    local owned = ffi.titan_ffi_char.new_array(
+      snprintf_allocation_length(required))
+    local output = owned as *ffi.titan_ffi_char
     local actual = stdio.snprintf(
-        output.data, (required + 1) as cstring.size_t,
+        output, #owned as cstring.size_t,
         form, converted)
     return finish_snprintf(output, required, actual)
   end
@@ -206,9 +221,11 @@ local function render_character(form: string,
                                 number: lua.lua_Integer): string
   local converted = number as ffi.titan_ffi_int
   local required = stdio.snprintf(nil, 0, form, converted)
-  local output = prepare_snprintf(required)
+  local owned = ffi.titan_ffi_char.new_array(
+    snprintf_allocation_length(required))
+  local output = owned as *ffi.titan_ffi_char
   local actual = stdio.snprintf(
-      output.data, (required + 1) as cstring.size_t,
+      output, #owned as cstring.size_t,
       form, converted)
   return finish_snprintf(output, required, actual)
 end
@@ -217,18 +234,22 @@ local function render_number(form: string,
                              number: lua.lua_Number): string
   local converted = number as ffi.titan_ffi_double
   local required = stdio.snprintf(nil, 0, form, converted)
-  local output = prepare_snprintf(required)
+  local owned = ffi.titan_ffi_char.new_array(
+    snprintf_allocation_length(required))
+  local output = owned as *ffi.titan_ffi_char
   local actual = stdio.snprintf(
-      output.data, (required + 1) as cstring.size_t,
+      output, #owned as cstring.size_t,
       form, converted)
   return finish_snprintf(output, required, actual)
 end
 
 local function render_c_string(form: string, text: string): string
   local required = stdio.snprintf(nil, 0, form, text)
-  local output = prepare_snprintf(required)
+  local owned = ffi.titan_ffi_char.new_array(
+    snprintf_allocation_length(required))
+  local output = owned as *ffi.titan_ffi_char
   local actual = stdio.snprintf(
-      output.data, (required + 1) as cstring.size_t,
+      output, #owned as cstring.size_t,
       form, text)
   return finish_snprintf(output, required, actual)
 end
@@ -245,9 +266,11 @@ local function render_pointer(form: string, candidate: value): string
       result = render_c_string(string_form, "(null)")
     else
       local required = stdio.snprintf(nil, 0, form, pointer)
-      local output = prepare_snprintf(required)
+      local owned = ffi.titan_ffi_char.new_array(
+        snprintf_allocation_length(required))
+      local output = owned as *ffi.titan_ffi_char
       local actual = stdio.snprintf(
-          output.data, (required + 1) as cstring.size_t,
+          output, #owned as cstring.size_t,
           form, pointer)
       result = finish_snprintf(output, required, actual)
     end
@@ -350,16 +373,17 @@ local function decimal_escape(octet: integer,
   elseif octet >= 10 then
     length = 2
   end
-  local output = allocate_string_bytes(length)
+  local owned = ffi.titan_ffi_char.new_array(length)
   local remaining = octet
   local index = length - 1
   while index >= 0 do
-    output.data[index] =
+    owned[index] =
       (48 + remaining % 10) as ffi.titan_ffi_char
     remaining = remaining // 10
     index = index - 1
   end
-  return finish_string(output)
+  return finish_string(
+    owned as *ffi.titan_ffi_char, #owned)
 end
 
 local function locale_neutral_hex(number: lua.lua_Number): string
@@ -372,18 +396,19 @@ local function locale_neutral_hex(number: lua.lua_Number): string
       not contains_byte(rendered, decimal_octet) then
     return rendered
   end
-  local output = allocate_string_bytes(#rendered)
+  local owned = ffi.titan_ffi_char.new_array(#rendered)
   local source = rendered as const *ffi.titan_ffi_char
   local index = 0
   while index < #rendered do
     if source[index] == decimal then
-      output.data[index] = 46 as ffi.titan_ffi_char
+      owned[index] = 46 as ffi.titan_ffi_char
     else
-      output.data[index] = source[index]
+      owned[index] = source[index]
     end
     index = index + 1
   end
-  return finish_string(output)
+  return finish_string(
+    owned as *ffi.titan_ffi_char, #owned)
 end
 
 local function append_quoted(builder: CoreStringBuilder, text: string)
@@ -466,110 +491,4 @@ local function append_literal(builder: CoreStringBuilder,
   else
     raise "value has no literal form"
   end
-end
-
-local function _string_format(format_string: string,
-                              ...: value): string
-  local builder = new_string_builder()
-  local length = #format_string
-  local cursor = 1
-  local run = 1
-  local argument = 0
-  while cursor <= length do
-    if format_byte(format_string, cursor) ~= 37 then
-      cursor = cursor + 1
-    else
-      if cursor > run then
-        builder_append(
-            builder,
-            copy_interval(format_string, run, cursor - run))
-      end
-      cursor = cursor + 1
-      if cursor <= length and
-          format_byte(format_string, cursor) == 37 then
-        builder_append(builder, "%")
-        cursor = cursor + 1
-      else
-        local form, specifier, next_cursor =
-          read_format(format_string, cursor)
-        cursor = next_cursor
-        argument = argument + 1
-        if argument > #... then
-          raise "no value for format conversion"
-        end
-        local candidate = ...[argument]
-
-        if specifier == 99 then
-          check_format(form, "-", false)
-          builder_append(
-              builder,
-              render_character(form, checked_integer(candidate)))
-        elseif specifier == 100 or specifier == 105 then
-          check_format(form, "-+0 ", true)
-          builder_append(
-              builder,
-              render_signed(
-                add_integer_length(form),
-                checked_integer(candidate)))
-        elseif specifier == 117 then
-          check_format(form, "-0", true)
-          builder_append(
-              builder,
-              render_unsigned(
-                add_integer_length(form),
-                checked_integer(candidate)))
-        elseif specifier == 111 or specifier == 120 or
-            specifier == 88 then
-          check_format(form, "-#0", true)
-          builder_append(
-              builder,
-              render_unsigned(
-                add_integer_length(form),
-                checked_integer(candidate)))
-        elseif specifier == 97 or specifier == 65 or
-            specifier == 101 or specifier == 69 or
-            specifier == 102 or specifier == 103 or
-            specifier == 71 then
-          check_format(form, "-+#0 ", true)
-          builder_append(
-              builder,
-              render_number(form, checked_number(candidate)))
-        elseif specifier == 112 then
-          check_format(form, "-", false)
-          builder_append(builder, render_pointer(form, candidate))
-        elseif specifier == 113 then
-          if #form ~= 2 then
-            raise "specifier '%q' cannot have modifiers"
-          end
-          append_literal(builder, candidate)
-        elseif specifier == 115 then
-          local converted = tostring(candidate)
-          if #form == 2 then
-            builder_append(builder, converted)
-          else
-            if contains_byte(converted, 0) then
-              raise "string contains zeros"
-            end
-            check_format(form, "-", true)
-            if not contains_byte(form, 46) and
-                #converted >= 100 then
-              builder_append(builder, converted)
-            else
-              builder_append(
-                  builder, render_c_string(form, converted))
-            end
-          end
-        else
-          raise "invalid conversion to 'format'"
-        end
-      end
-      run = cursor
-    end
-  end
-  if run <= length then
-    builder_append(
-        builder,
-        copy_interval(format_string, run, length - run + 1))
-  end
-  return builder_finish(builder)
 end

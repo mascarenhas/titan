@@ -936,8 +936,8 @@ describe("libuv Makefile configuration", function()
             "titan/uv/tcp.titan", "titan/async.titan",
             "titan/timer.titan", "titan/fs.titan", "titan/net.titan",
             "titan/os.titan", "titan/peg/peg.titan",
-            "titan/peg/captures.titan", "titan/peg/combinators.titan",
-            "titan/peg/native.titan", "titan/peg/relabel.titan",
+            "titan/peg/combinators.titan", "titan/peg/native.titan",
+            "titan/peg/relabel.titan",
             "titan/peg/relabel_parser.titan",
             "titan/string/string.titan",
             "titan/string/bytes.titan", "titan/string/format.titan",
@@ -1017,7 +1017,7 @@ describe("libuv Makefile configuration", function()
             "match", "find", "gsub", "update_locale",
         }, public_declarations("titan/peg/peg.titan"))
         for _, contributor in ipairs({
-            "captures", "combinators", "native",
+            "combinators", "native",
             "relabel", "relabel_parser",
         }) do
             assert.same({}, public_declarations(
@@ -1048,7 +1048,7 @@ describe("libuv Makefile configuration", function()
        function()
         assert.same({}, local_record_declarations(UV_MAIN_SOURCE))
         assert.same({
-            "FsConstants", "Dirent", "FsStatResult", "FsOperation",
+            "FsConstants", "FsStatResult", "FsOperation",
             "FsControl", "uv_fs_t",
         }, local_record_declarations("titan/uv/file.titan"))
         assert.same({
@@ -1060,7 +1060,7 @@ describe("libuv Makefile configuration", function()
             "uv_pipe_t", "uv_pipe_write_t", "uv_process_grace_t",
         }, local_record_declarations("titan/uv/process.titan"))
         assert.same({
-            "Loop", "Runtime", "Bytes", "SizedBytes", "Text", "Buffer",
+            "Loop", "Runtime", "Bytes", "Text", "Buffer",
         }, local_record_declarations("titan/uv/runtime.titan"))
         assert.same({
             "TimerControl", "DriveControl", "Request", "TickerState",
@@ -1545,8 +1545,8 @@ exit 64
             "titan/coroutine.titan", "titan/async.titan",
             "titan/timer.titan", "titan/fs.titan", "titan/net.titan",
             "titan/os.titan", "titan/peg/peg.titan",
-            "titan/peg/captures.titan", "titan/peg/combinators.titan",
-            "titan/peg/native.titan", "titan/peg/relabel.titan",
+            "titan/peg/combinators.titan", "titan/peg/native.titan",
+            "titan/peg/relabel.titan",
             "titan/peg/relabel_parser.titan",
             "titan/string/string.titan",
             "titan/string/bytes.titan", "titan/string/format.titan",

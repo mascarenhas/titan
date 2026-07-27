@@ -301,32 +301,3 @@ local function regex_build_pattern(parsed: ParsedRegex): peg.Pattern
   end
   return peg.table_capture(complete)
 end
-
-local function _string_compile_regex(expression: string): Regex
-  local parsed = parse_regex(expression)
-  local projected, overflow_position =
-    regex_projected_size(parsed.root)
-  projected = regex_saturating_add(
-    projected, parsed.capture_count * 14 + 12)
-  if projected > REGEX_PATTERN_LIMIT then
-    if overflow_position == 0 then
-      overflow_position = parsed.root.position
-    end
-    raise_regex_diagnostic(
-      "pattern_too_large",
-      "compiled regular expression exceeds the pattern-size limit",
-      expression, overflow_position)
-  end
-
-  local pattern: peg.Pattern? = nil
-  do
-    pattern = regex_build_pattern(parsed)
-  catch
-    raise_regex_diagnostic(
-      "pattern_too_large",
-      "compiled regular expression exceeds the pattern-size limit",
-      expression, parsed.root.position)
-  end
-  return Regex.new(
-    expression, parsed.capture_count, pattern as peg.Pattern)
-end

@@ -12,15 +12,16 @@ The user-facing contract is in the
 ## Module and provider placement
 
 The source is a folder ensemble rooted at `titan/string/string.titan`.
-The main owns every public record, method, and function. Contributors contain
-only module-local records, state, and implementation helpers divided among
-byte operations, formatting, packing, and regex parsing/compilation. They are
-parsed as separate files but combined into one dense AST, one
-checker/code-generator pass, one `titan_string_*` protocol, one generated
-object, and one `titan/string.lua` shim. Thin main-file wrappers preserve each
-helper's exact fixed prefix and any genuinely variadic or flexible tail, so
-return-all forwarding does not accidentally loosen or truncate the public
-result shape.
+The main owns every public record, method, and function together with its
+implementation. Contributors expose no public declarations; they contain only
+module-local records, state, and shared implementation machinery divided among
+byte operations, formatting, packing, and regex parsing/compilation. A helper
+remains separate when it is reused or represents a real internal operation
+such as recursive parsing, callback adaptation, or byte-storage handling, not
+merely to receive the unchanged arguments from one public function and return
+all of its results. The files are parsed separately but combined into one dense
+AST, one checker/code-generator pass, one `titan_string_*` protocol, one
+generated object, and one `titan/string.lua` shim.
 
 The dependency direction is:
 
@@ -76,21 +77,22 @@ installed in the compiler SDK.
 ## Exact-byte storage
 
 The shared byte layer treats every input as a `(pointer, length)` pair. It
-never uses NUL termination for an ordinary string. A generated result uses a
-small rooted record:
+never uses NUL termination for an ordinary string. A generated result is a
+counted owned C array:
 
 ```titan
-local record StringBytes
-  local data: *ffi.titan_ffi_char
-  local storage: value
-  local length: integer
-end
+local owned = ffi.titan_ffi_char.new_array(length)
+local output = owned as *ffi.titan_ffi_char
 ```
 
-Allocation creates a Lua full userdata and immediately captures that userdata
-as the traced `storage` root. The raw pointer is valid only while the record is
-live. Finalization pushes the exact length with `lua_pushlstring` and converts
-that stack value back to a Titan string.
+`new_array` creates the Lua full userdata, records its element count, and
+leaves `owned` as the traced GC root. C calls and pointer arithmetic use the
+cast pointer while `#owned` recovers the allocation length. The raw pointer is
+valid only while `owned` is live. Finalization pushes the exact logical length
+with `lua_pushlstring` and converts that stack value back to a Titan string.
+Usually that length is `#owned`; `snprintf` destinations are the exception,
+because they allocate `required + 1` bytes for the terminating zero but finish
+only the `required` result bytes.
 
 All size arithmetic remains in a checked Titan integer until it is known to
 fit both `lua_Integer` and target `size_t`. Multiplication and addition use

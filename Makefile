@@ -207,8 +207,8 @@ STDLIB_ROOTS := titan.coroutine titan.uv titan.async titan.timer \
 STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/async.titan titan/timer.titan titan/fs.titan titan/net.titan \
 	titan/os.titan \
-	titan/peg/peg.titan titan/peg/captures.titan \
-	titan/peg/combinators.titan titan/peg/native.titan \
+	titan/peg/peg.titan titan/peg/combinators.titan \
+	titan/peg/native.titan \
 	titan/peg/relabel.titan titan/peg/relabel_parser.titan \
 	titan/string/string.titan titan/string/bytes.titan \
 	titan/string/format.titan titan/string/pack.titan \

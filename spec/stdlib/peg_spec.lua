@@ -108,7 +108,7 @@ describe("titan.peg", function()
             "run make lpeglabel before titan.peg specs")
         workspace = async_stdlib.workspace("peg")
         for _, name in ipairs({
-            "peg", "native", "combinators", "captures",
+            "peg", "native", "combinators",
             "relabel", "relabel_parser",
         }) do
             async_stdlib.write_source(

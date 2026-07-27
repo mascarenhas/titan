@@ -148,10 +148,9 @@ buffer or `uv_buf_t`, opaque address cell, argv cell, and scandir entry used by
 the runtime is allocated in Lua full-userdata payload bytes. The `uv_buf_t`
 passed to a stream allocation callback is the exception: libuv owns that
 descriptor, while Titan owns and roots only the byte storage to which it
-points. The Titan source uses
-the imported foreign type's `<module>.<type>.sizeof` and `.alignof`, captures
-the storage userdata once, and stores the resulting pointer in a local field
-of an opaque record:
+points. Native handle and request wrappers use the imported foreign type's
+`<module>.<type>.sizeof` and `.alignof`, capture the storage userdata once,
+and store the resulting pointer in a local field of an opaque record:
 
 ```titan
 record uv_timer_t
@@ -168,6 +167,18 @@ Runtime roots a timer wrapper through its close callback and an `uv_fs_t`
 wrapper through completion and `uv_fs_req_cleanup`; each wrapper roots its
 storage userdata. An initialized handle is never released by a GC finalizer
 before its close callback.
+
+Callback-owned typed arrays instead use `new_array`; their `Bytes` or
+`AddressList` record retains the owner together with the exact pointer and the
+logical length or element count required after type erasure and across
+callbacks.
+
+Short-lived synchronous scratch objects do not need that extra record layer.
+The OS text helpers allocate a counted
+`ffi.titan_ffi_char.new_array(capacity)`, and filesystem directory extraction
+uses `uv_dirent_t.new()` directly. Those owned FFI values are themselves the
+GC roots, coerce to pointers for the libuv calls, and expose their fields or
+allocation count without separately storing a pointer and `value` root.
 
 Persistent file descriptors use a separate exported `uv_file` wrapper. Its
 first local field has the exact scalar C type `uv_file`, followed by local
@@ -304,11 +315,14 @@ combined standard image), which invokes public `uv_os_*`, `uv_cwd`/`uv_chdir`,
 and `uv_exepath` APIs. Variable-size text results use
 Titan-owned byte storage. A generic helper accepts the libuv buffer function
 and an error-construction closure, keeps both the capacity and returned length
-as `size_t`, and starts with a 256-byte GC-owned buffer. `UV_ENOBUFS` recurses
-with the exact capacity reported through libuv's size pointer; success passes
-that `size_t` directly to `lua_pushlstring`. `uv_os_getenv` additionally maps
-`UV_ENOENT` to `nil`. Other failures become uv-owned `Error` values, exported
-to users through the transparent `async.Error` alias; there
+as `size_t`, and starts with a 256-byte counted owned FFI array. Before the
+capacity becomes the `new_array` count, the helper rejects a `size_t` value
+that cannot fit a Titan integer. `UV_ENOBUFS` recurses with the exact capacity
+reported through libuv's size pointer; success uses that reported `size_t` as
+the logical result length, independently of the allocation count, and passes
+it directly to `lua_pushlstring`. `uv_os_getenv` additionally maps `UV_ENOENT`
+to `nil`. Other failures become uv-owned `Error` values, exported to users
+through the transparent `async.Error` alias; there
 is no hidden POSIX fallback or private checked-growth policy.
 
 The supported Linux and macOS `uv_exepath` implementations signal truncation
