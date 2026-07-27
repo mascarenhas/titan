@@ -3,7 +3,152 @@ local lual = foreign import "lauxlib.h"
 local ffi = foreign import "titan/ffi.h"
 local cstring = foreign import "string.h"
 local cctype = foreign import "ctype.h"
+local peg = import "titan.peg"
 
--- The canonical folder main owns the foreign namespaces shared by the
--- byte-oriented contributors. Regex support is added by a later contributor;
--- this core deliberately has no dependency on titan.peg.
+-- The canonical folder main is the complete public surface. Contributors
+-- contain only module-local implementation records, state, and helpers.
+
+record Span
+  first: integer
+  last: integer
+end
+
+record RegexMatch
+  local subject: string
+  local matched_span: Span
+  local groups: {GroupSpan}
+end
+
+record Regex
+  local expression: string
+  local capture_count: integer
+  local pattern: peg.Pattern
+end
+
+function len(subject: string): integer
+  return _string_len(subject)
+end
+
+function sub(subject: string, first: integer,
+             last: integer?): string
+  return _string_sub(subject, first, last)
+end
+
+function reverse(subject: string): string
+  return _string_reverse(subject)
+end
+
+function lower(subject: string): string
+  return _string_lower(subject)
+end
+
+function upper(subject: string): string
+  return _string_upper(subject)
+end
+
+function rep(subject: string, count: integer,
+             separator: string?): string
+  return _string_rep(subject, count, separator)
+end
+
+function byte(subject: string, first: integer?,
+              last: integer?): (...: integer)
+  return _string_byte(subject, first, last)
+end
+
+function char(...: integer): string
+  return _string_char(...)
+end
+
+function tostring(candidate: value): string
+  return _string_tostring(candidate)
+end
+
+function find(subject: string, needle: string,
+              init: integer?): (integer?, integer?)
+  return _string_find(subject, needle, init)
+end
+
+function format(format_string: string, ...: value): string
+  return _string_format(format_string, ...)
+end
+
+function pack(format_string: string, ...: value): string
+  return _string_pack(format_string, ...)
+end
+
+function packsize(format_string: string): integer
+  return _string_packsize(format_string)
+end
+
+function unpack(format_string: string, data: string,
+                initial: integer?): (value, ...: value)
+  return _string_unpack(format_string, data, initial)
+end
+
+function compile_regex(expression: string): Regex
+  return _string_compile_regex(expression)
+end
+
+function Regex:source(): string
+  return _regex_source(self)
+end
+
+function Regex:group_count(): integer
+  return _regex_group_count(self)
+end
+
+function Regex:match(subject: string,
+                     init: integer?): RegexMatch?
+  return _regex_match(self, subject, init)
+end
+
+function Regex:gmatch(subject: string,
+                      init: integer?): () -> RegexMatch?
+  return _regex_gmatch(self, subject, init)
+end
+
+function Regex:gsub(subject: string, replacement: value,
+                    maximum: integer?): (string, integer)
+  return _regex_gsub(self, subject, replacement, maximum)
+end
+
+function RegexMatch:span(): Span
+  return _regex_match_span(self)
+end
+
+function RegexMatch:group_count(): integer
+  return _regex_match_group_count(self)
+end
+
+function RegexMatch:group_span(index: integer): Span?
+  return _regex_match_group_span(self, index)
+end
+
+function RegexMatch:whole(): string
+  return _regex_match_whole(self)
+end
+
+function RegexMatch:group(index: integer): string?
+  return _regex_match_group(self, index)
+end
+
+function RegexMatch:values(): (string?, ...: string?)
+  return _regex_match_values(self)
+end
+
+function match(subject: string, expression: string,
+               init: integer?): RegexMatch?
+  return _string_match(subject, expression, init)
+end
+
+function gmatch(subject: string, expression: string,
+                init: integer?): () -> RegexMatch?
+  return _string_gmatch(subject, expression, init)
+end
+
+function gsub(subject: string, expression: string,
+              replacement: value,
+              maximum: integer?): (string, integer)
+  return _string_gsub(subject, expression, replacement, maximum)
+end

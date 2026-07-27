@@ -108,7 +108,7 @@ end
 
 local function regex_word_start_capture(
     subject: string, position: integer,
-    _whole: string): (...: value)
+    _whole: string): value
   if position > #subject then return false end
   local current = regex_byte(subject, position)
   if not regex_is_word_byte(current) then return false end
@@ -121,7 +121,7 @@ end
 
 local function regex_word_end_capture(
     subject: string, position: integer,
-    _whole: string): (...: value)
+    _whole: string): value
   if position <= 1 or
       not regex_is_word_byte(regex_byte(subject, position - 1)) then
     return false
@@ -135,12 +135,12 @@ end
 
 local function regex_backreference_capture(
     subject: string, position: integer,
-    first: value, ...: value): (...: value)
+    first: value, group_after_value: value): value
   regex_initialize_state()
   if first == _regex_group_sentinel then return false end
-  if #... ~= 1 then return false end
+  if group_after_value == nil then return false end
   local group_first = first as integer
-  local group_after = ...[1] as integer
+  local group_after = group_after_value as integer
   local length = group_after - group_first
   if length < 0 or length > #subject - position + 1 then return false end
   if length > 0 then
@@ -155,16 +155,16 @@ local function regex_backreference_capture(
 end
 
 local function regex_group_result(
-    first: value, ...: value): (...: value)
+    first: value, group_after_value: value): GroupSpan
   regex_initialize_state()
   if first == _regex_group_sentinel then
     return GroupSpan.new(nil)
   end
-  if #... ~= 1 then
+  if group_after_value == nil then
     raise "internal regular-expression group capture is invalid"
   end
   local group_first = first as integer
-  local group_after = ...[1] as integer
+  local group_after = group_after_value as integer
   return GroupSpan.new(Span.new(group_first, group_after - 1))
 end
 
@@ -302,7 +302,7 @@ local function regex_build_pattern(parsed: ParsedRegex): peg.Pattern
   return peg.table_capture(complete)
 end
 
-function compile_regex(expression: string): Regex
+local function _string_compile_regex(expression: string): Regex
   local parsed = parse_regex(expression)
   local projected, overflow_position =
     regex_projected_size(parsed.root)

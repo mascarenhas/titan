@@ -49,7 +49,9 @@ package.cpath = prefix .. "/lib/titan/0.18/?.so;" ..
 local peg = require "titan.peg"
 local strings = require "titan.string"
 assert(peg.literal("ok"):match("ok") == 3)
-assert(strings.match("ab-abx", "((a|b)+)-\\1x") == "ab")
+local found = strings.match("ab-abx", "((a|b)+)-\\1x")
+assert(found and found:whole() == "ab-abx" and found:group(1) == "ab")
+assert(strings.find("a\0b\0c", "\0b") == 2)
 local ok, failure = pcall(strings.compile_regex, "[a-b-c]")
 assert(not ok and tostring(failure):find("[bad_range]", 1, true), failure)
 LUA
@@ -62,8 +64,13 @@ function main(_args: {string}): integer
   if #peg.version() == 0 then
     raise "private PEG engine did not initialize"
   end
-  if strings.match("ab-abx", "((a|b)+)-\\1x") ~= "ab" then
+  local found = strings.match("ab-abx", "((a|b)+)-\\1x")
+  if not found or (found as strings.RegexMatch):group(1) ~= "ab" then
     raise "regex backreference lost its continuation"
+  end
+  local first, last = strings.find("a\0b\0c", "\0b")
+  if first ~= 2 or last ~= 3 then
+    raise "literal binary find returned the wrong span"
   end
   local malformed = false
   do

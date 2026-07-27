@@ -35,7 +35,7 @@ local function add(accumulator: value, ...: value): value
   return result
 end
 
-local function decimal(candidate: value, ...: value): (...: value)
+local function decimal(candidate: value): integer
   local text = candidate as string
   if text == "3" then return 3
   elseif text == "401" then return 401
@@ -320,7 +320,10 @@ describe("titan.peg relabel", function()
             local first, last, surplus =
                 peg.find("alo", "{.}{'o'}")
             assert(first == 2 and last == 3 and surplus == nil)
-            assert(select("#", peg.find("alo", "'z'")) == 1)
+            local missing_first, missing_last =
+                peg.find("alo", "'z'")
+            assert(select("#", peg.find("alo", "'z'")) == 2)
+            assert(missing_first == nil and missing_last == nil)
             assert(select("#", peg.find("alo", "'a'")) == 2)
             local empty_first, empty_last = peg.find("", "''")
             assert(empty_first == 1 and empty_last == 0)

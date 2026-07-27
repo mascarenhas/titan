@@ -376,9 +376,9 @@ then `spec/support/make_delayed_fs_callback_variant.lua` to one complete copy
 of the `titan/uv/` source ensemble, with each transformer patching the owning
 contributors through unique per-file anchors. It builds the exact
 coroutine/uv DSOs once under a private root with no shallow `titan.so`; the DNS
-setup adds exact async/timer/net facades, while the FS setup adds only the
-exact fs facade and calls uv scheduling primitives directly from its case
-module.
+setup adds the complete exact PEG and string providers followed by exact
+async/timer/net facades, while the FS setup adds only the exact fs facade and
+calls uv scheduling primitives directly from its case module.
 The FS cases cover late
 cancellation, disposal of a late successful open, and cross-generation
 Runtime/File/Task/buffer/error rooting. The DNS cases capture the successful
@@ -389,9 +389,10 @@ needed to prove exactly-once release and rooted address cells. Each behavior
 case still runs in a fresh Lua process, so the combined provider's test state
 does not cross cases. The sanitizer gate selects only the filesystem cases and
 sets validated `TITAN_TEST_UV_LATE_FS_ONLY=1`, which applies only the FS
-transformer and omits the unused async/timer facade builds; the complete
-combined suite remains in regular Linux. Keep every such hook out of installed
-modules; this variant is not a general scheduler or fault-injection interface.
+transformer and omits the unused PEG/string and async/timer/net builds; the
+complete combined suite remains in regular Linux. Keep every such hook out of
+installed modules; this variant is not a general scheduler or fault-injection
+interface.
 
 `titanc` takes dot-separated **module names**, not file paths (dots map to
 directory separators under `--tree`, default `.`). For logical `M`, slash path
@@ -452,8 +453,11 @@ must use the same shared argument builder for this order.
 
 The standard library uses ordinary qualified module names: most source files
 are `titan/<module>.titan`, while `titan.uv`, `titan.peg`, and `titan.string`
-use canonical folder mains plus immediate contributors. Production invokes all
-nine roots in one compiler process, publishes
+use canonical folder mains plus immediate contributors. `titan.uv` keeps
+public declarations with their semantic contributors; `titan.peg` and
+`titan.string` instead collect their complete public APIs in the canonical
+main and require every contributor top-level declaration to be module-local.
+Production invokes all nine roots in one compiler process, publishes
 `<root>/lib/titan/0.18/{titan.so,titan.a}`, and installs nine generated shims
 below `<root>/share/lua/5.5/titan/`. The archive advertises exactly nine
 logical metadata keys; its metadata-free payload begins with `titanlib.o` and
@@ -747,7 +751,20 @@ substitution, recursive; error on missing keys). Key facts:
   type with a fixed prefix, variadic tail, and/or flexible result can express
   its protocol. Reserve unqualified `value` arguments for genuinely dynamic
   unions/dispatch surfaces or opaque Lua objects, not a callback whose
-  callable protocol is expressible.
+  callable protocol is expressible. Apply the same discipline to results: use
+  a fixed option tuple when the semantic protocol has a fixed number of slots,
+  even if one branch fills them with nil and callers commonly consume only
+  the first. A flexible result tail is for genuinely run-time-variable arity,
+  not for preserving the raw result count of a looser source API. Flexible
+  returns are contagious through `return callee(...)`: whenever a producer is
+  tightened, recursively inspect every return-all forwarder and remove the
+  propagated tail until the call graph reaches a genuinely variable result.
+  Callable compatibility must account for the same adjustment: extra actual
+  fixed parameters are safe only when they accept nil, and, behind an expected
+  variadic tail, its element type. A merely compatible callable uses generic
+  dispatch, so an exact-type adapter closure can still be worthwhile when a
+  Titan typed call site will invoke it repeatedly; weigh that one-time wrapper
+  against the hot-path savings rather than removing adapters mechanically.
 - **Treat ABI bumps as clean-start prototype boundaries.** Titan is still a
   prototype, so users are expected to remove stale compiled providers and
   rebuild or start from a fresh installation when the ABI changes. Do not add

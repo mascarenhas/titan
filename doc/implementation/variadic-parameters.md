@@ -148,8 +148,10 @@ Consumers test `varargtype`; the two never mix. Four relations change:
 
 * **`compatible(expected, actual)`** is now directional. Parameter positions
   are contravariant and may move between the fixed prefix and the actual input
-  tail; an actual function may ignore an expected fixed suffix, but may not
-  hide fixed parameters that expected callers are not required to provide.
+  tail; an actual function may ignore an expected fixed suffix. Additional
+  actual fixed parameters are admitted only when ordinary adjustment can
+  nil-fill each one, and, for an expected input tail, when each also accepts
+  the tail element. Non-nilable hidden requirements remain incompatible.
   The expected output shape then observes the actual fixed/flexible results
   covariantly. Input-tail presence is therefore no longer a blanket equality
   test. See [flexible returns](flexible-returns.md#strict-identity-and-directional-compatibility)

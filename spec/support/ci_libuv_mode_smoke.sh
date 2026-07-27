@@ -409,12 +409,12 @@ run_mode_smoke() {
         env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
             TITAN_PATH_0_18="$titan_path" LUA_PATH="$lua_path" \
             LUA_CPATH="$lua_cpath" \
-            "$LUA" -e 'local uv = require "titan.uv"; local async = require "titan.async"; local timer = require "titan.timer"; local fs = require "titan.fs"; local net = require "titan.net"; local peg = require "titan.peg"; local strings = require "titan.string"; local builtin_string = require "string"; local path = os.tmpname(); os.remove(path); local task = async.run(function() timer.sleep(0); fs.write_file(path, "system\0uv"); assert(fs.read_file(path) == "system\0uv"); fs.unlink(path); return true end); async.loop(); assert(task:join()); assert(peg.literal("peg"):match("peg") == 4); assert(strings.len("a\0b") == 3); assert(strings.match("regex42", "([0-9]+)") == "42"); assert(builtin_string == string); assert(type(async.version()) == "string"); assert(type(uv) == "userdata"); assert(type(net) == "userdata")'
+            "$LUA" -e 'local uv = require "titan.uv"; local async = require "titan.async"; local timer = require "titan.timer"; local fs = require "titan.fs"; local net = require "titan.net"; local peg = require "titan.peg"; local strings = require "titan.string"; local builtin_string = require "string"; local path = os.tmpname(); os.remove(path); local task = async.run(function() timer.sleep(0); fs.write_file(path, "system\0uv"); assert(fs.read_file(path) == "system\0uv"); fs.unlink(path); return true end); async.loop(); assert(task:join()); assert(peg.literal("peg"):match("peg") == 4); assert(strings.len("a\0b") == 3); local found = strings.match("regex42", "([0-9]+)"); assert(found and found:whole() == "42" and found:group(1) == "42"); assert(strings.find("a\0b", "\0b") == 2); assert(builtin_string == string); assert(type(async.version()) == "string"); assert(type(uv) == "userdata"); assert(type(net) == "userdata")'
     else
         env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
             TITAN_PATH_0_18="$titan_path" LUA_PATH="$lua_path" \
             LUA_CPATH="$lua_cpath" \
-            "$LUA" -e 'local uv = require "titan.uv"; local async = require "titan.async"; local timer = require "titan.timer"; local fs = require "titan.fs"; local net = require "titan.net"; local peg = require "titan.peg"; local strings = require "titan.string"; local builtin_string = require "string"; local path = os.tmpname(); os.remove(path); local task = async.run(function() timer.yield(); fs.write_file(path, "bundled"); local data = fs.read_file(path); fs.unlink(path); return data end); async.loop(); assert(task:join() == "bundled"); assert(peg.literal("peg"):match("peg") == 4); assert(strings.len("a\0b") == 3); assert(strings.match("regex42", "([0-9]+)") == "42"); assert(builtin_string == string); assert(type(uv) == "userdata"); assert(type(net) == "userdata")'
+            "$LUA" -e 'local uv = require "titan.uv"; local async = require "titan.async"; local timer = require "titan.timer"; local fs = require "titan.fs"; local net = require "titan.net"; local peg = require "titan.peg"; local strings = require "titan.string"; local builtin_string = require "string"; local path = os.tmpname(); os.remove(path); local task = async.run(function() timer.yield(); fs.write_file(path, "bundled"); local data = fs.read_file(path); fs.unlink(path); return data end); async.loop(); assert(task:join() == "bundled"); assert(peg.literal("peg"):match("peg") == 4); assert(strings.len("a\0b") == 3); local found = strings.match("regex42", "([0-9]+)"); assert(found and found:whole() == "42" and found:group(1) == "42"); assert(strings.find("a\0b", "\0b") == 2); assert(builtin_string == string); assert(type(uv) == "userdata"); assert(type(net) == "userdata")'
     fi
 
     env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
@@ -481,8 +481,14 @@ function main(args: {string}): integer
           "static PEG native engine initialization failed")
     check(strings.len("static\0string") == 13,
           "static string byte behavior failed")
-    check(strings.match("static42", "([0-9]+)") == "42",
+    local found = strings.match("static42", "([0-9]+)")
+    check(found and
+          (found as strings.RegexMatch):group(1) == "42",
           "static regex provider behavior failed")
+    local literal_first, literal_last =
+      strings.find("static\0string", "\0str")
+    check(literal_first == 7 and literal_last == 10,
+          "static literal string search failed")
 
     local server, port = listen_available()
     local peer = async.run(function (): value

@@ -22,7 +22,7 @@ local REGEX_BACKREFERENCE = 9
 local REGEX_WORD_START = 10
 local REGEX_WORD_END = 11
 
-local REGEX_MAX_CAPTURES = 198
+local REGEX_MAX_CAPTURES = 200
 
 local record RegexNode
   local kind: integer
@@ -629,7 +629,7 @@ local function regex_parse_atom(parser: RegexParser): RegexNode
       if parser.capture_count > REGEX_MAX_CAPTURES then
         raise_regex_diagnostic(
           "too_many_captures",
-          "regular expression has more than 198 capture groups",
+          "regular expression has more than 200 capture groups",
           parser.source, position)
       end
       group_index = parser.capture_count

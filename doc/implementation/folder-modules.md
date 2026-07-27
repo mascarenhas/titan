@@ -294,16 +294,20 @@ because all nine source roots are linked together.
 
 `titan.peg` and `titan.string` apply the same folder-module rules: each has one
 canonical main, immediate contributors sharing module-private scope, one
-generated C/object pair, and one logical shim. Their contributor filenames do
-not become modules or archive metadata keys.
+generated C/object pair, and one logical shim. Unlike `titan.uv`, both mains
+own their complete public API and every contributor has only module-local
+top-level declarations. Their contributor filenames do not become modules or
+archive metadata keys.
 
-The late-filesystem-callback test variant reuses the production folder-source
-ensemble but deliberately not its provider layout. Its support code copies the
-complete ensemble to an isolated workspace, patches the owning contributors by
-unique per-file anchors, and compiles an exact `titan.uv` provider. Its private
-root intentionally has no shallow `titan.so`, so prefix lookup reaches
-`titan/uv.so`. It does not reconstruct or concatenate a monolithic source and
-is not a production layout.
+The late-callback test variant reuses the production folder-source ensembles
+but deliberately not their provider layout. Its support code copies the
+complete uv ensemble to an isolated workspace, patches the owning contributors
+by unique per-file anchors, and compiles an exact `titan.uv` provider. DNS
+cases additionally build complete exact PEG and string providers before the
+exact net facade; filesystem-only sanitizer cases omit that dependency closure.
+The private root intentionally has no shallow `titan.so`, so prefix lookup
+reaches exact providers such as `titan/uv.so`. It does not reconstruct or
+concatenate a monolithic source and is not a production layout.
 
 See [Driver and toolchain](driver.md) for the complete search/build flow,
 [Lexer and parser](lexer-parser.md) for locations and non-reentrancy,

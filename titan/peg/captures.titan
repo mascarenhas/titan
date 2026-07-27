@@ -1,11 +1,12 @@
--- The complete public capture surface of the pinned engine.
+-- Module-local implementations of the complete capture surface declared
+-- in peg.titan.
 
-function capture(pattern: Pattern): Pattern
+local function _capture_impl(pattern: Pattern): Pattern
   return _pattern(
     _C(pattern.raw), _checked_unary(pattern, 1))
 end
 
-function constant(...: value): Pattern
+local function _constant_impl(...: value): Pattern
   local count = #...
   local size = 1
   if count == 1 then
@@ -17,7 +18,7 @@ function constant(...: value): Pattern
   return _pattern(_Cc(...), size)
 end
 
-function match_time(
+local function _match_time_impl(
     pattern: Pattern,
     callback: (string, integer, value, ...: value) ->
       (...: value)): Pattern
@@ -26,33 +27,33 @@ function match_time(
     _Cmt(pattern.raw, callback), _checked_unary(pattern, 1))
 end
 
-function back_capture(key: value): Pattern
+local function _back_capture_impl(key: value): Pattern
   if key == nil then raise "PEG back-capture key must be non-nil" end
   return _pattern(_Cb(key), 2)
 end
 
-function argument(index: integer): Pattern
+local function _argument_impl(index: integer): Pattern
   if index < 1 or index > MAX_SHORT then
     raise "PEG argument index is out of range"
   end
   return _pattern(_Carg(index), 2)
 end
 
-function position(): Pattern
+local function _position_impl(): Pattern
   return _pattern(_Cp(), 2)
 end
 
-function substitution(pattern: Pattern): Pattern
+local function _substitution_impl(pattern: Pattern): Pattern
   return _pattern(
     _Cs(pattern.raw), _checked_unary(pattern, 1))
 end
 
-function table_capture(pattern: Pattern): Pattern
+local function _table_capture_impl(pattern: Pattern): Pattern
   return _pattern(
     _Ct(pattern.raw), _checked_unary(pattern, 1))
 end
 
-function fold_capture(
+local function _fold_capture_impl(
     pattern: Pattern,
     callback: (value, ...: value) -> value): Pattern
   _require_raw_function(callback, "fold-capture")
@@ -60,13 +61,14 @@ function fold_capture(
     _Cf(pattern.raw, callback), _checked_unary(pattern, 1))
 end
 
-function group(pattern: Pattern, key: value): Pattern
+local function _group_impl(
+    pattern: Pattern, key: value): Pattern
   return _pattern(
     _Cg(pattern.raw, key), _checked_unary(pattern, 1))
 end
 
-function select_capture(pattern: Pattern,
-                        index: integer): Pattern
+local function _select_capture_impl(
+    pattern: Pattern, index: integer): Pattern
   if index < 0 or index > MAX_SHORT then
     raise "PEG capture index is out of range"
   end
@@ -75,21 +77,21 @@ function select_capture(pattern: Pattern,
     _checked_unary(pattern, 1))
 end
 
-function template_capture(pattern: Pattern,
-                          template: string): Pattern
+local function _template_capture_impl(
+    pattern: Pattern, template: string): Pattern
   return _pattern(
     _capture_replace(pattern.raw, template),
     _checked_unary(pattern, 1))
 end
 
-function query_capture(pattern: Pattern,
-                       lookup: {value: value}): Pattern
+local function _query_capture_impl(
+    pattern: Pattern, lookup: {value: value}): Pattern
   return _pattern(
     _capture_replace(pattern.raw, lookup),
     _checked_unary(pattern, 1))
 end
 
-function function_capture(
+local function _function_capture_impl(
     pattern: Pattern,
     callback: (value, ...: value) -> (...: value)): Pattern
   _require_raw_function(callback, "function-capture")

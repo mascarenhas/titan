@@ -6,9 +6,9 @@ local staticmetadata = require "titan-compiler.staticmetadata"
 
 local PKG_CONFIG = "sh spec/fixtures/libuv/fake-pkg-config.sh"
 local UV_MAIN_SOURCE = "titan/uv/uv.titan"
-local STDLIB_TYPES_BASELINE =
+local STDLIB_TYPES_FIXTURE =
     "spec/fixtures/stdlib/titan_stdlib_types.lua"
-local PRE_BUNDLE_UNCHANGED_STDLIB_ROOTS = {
+local PREEXISTING_STDLIB_ROOTS = {
     "titan.coroutine", "titan.uv", "titan.async", "titan.timer",
     "titan.fs", "titan.net", "titan.os",
 }
@@ -700,6 +700,12 @@ describe("libuv Makefile configuration", function()
             "bytes.data[length] = 0")
         local stream_length_line = source_line_number(runtime_source,
             "local length = size")
+        local empty_needle_line = source_line_number(runtime_source,
+            "if needle_length == 0 then return 0 end")
+        local long_needle_line = source_line_number(runtime_source,
+            "if needle_length > haystack_length then return -1 end")
+        local haystack_pointer_line = source_line_number(runtime_source,
+            "local haystack_pointer =")
 
         local sigpipe = generated_function(
             generated, "titan_uv_ignore_sigpipe_if_default_titan")
@@ -733,22 +739,17 @@ describe("libuv Makefile configuration", function()
         local find =
             generated_function(generated, "titan_uv__bytes_find_titan")
         assert_ordered(find,
-            '#line 65 "./titan/uv/runtime.titan"',
+            ('#line %d "./titan/uv/runtime.titan"'):format(
+                empty_needle_line),
             "return _tmp_3;",
-            '#line 66 "./titan/uv/runtime.titan"',
+            ('#line %d "./titan/uv/runtime.titan"'):format(
+                long_needle_line),
             "return _tmp_4;",
-            '#line 68 "./titan/uv/runtime.titan"',
+            ('#line %d "./titan/uv/runtime.titan"'):format(
+                haystack_pointer_line),
             "getstr(_param_haystack)",
             "intop(-, _local_haystack_length_1, _local_needle_length_1)",
             "memcmp(")
-
-        local slice =
-            generated_function(generated, "titan_uv__bytes_slice_titan")
-        assert_ordered(slice,
-            "byte slice is out of range",
-            "if((_param_length>0))",
-            "getstr(_param_data)",
-            "memcpy(")
 
         local copy_text =
             generated_function(generated, "titan_uv_copy_text_titan")
@@ -946,14 +947,14 @@ describe("libuv Makefile configuration", function()
         }, expanded)
     end)
 
-    it("preserves all seven pre-feature interfaces in the container",
+    it("pins all seven pre-existing interfaces in the container",
        function()
-        local expected = assert(loadfile(STDLIB_TYPES_BASELINE))()
-        assert.equal(7875, #expected.uv)
+        local expected = assert(loadfile(STDLIB_TYPES_FIXTURE))()
+        assert.equal(7611, #expected.uv)
 
         local support = require "titan"
         local container = installed_stdlib_container()
-        for _, root in ipairs(PRE_BUNDLE_UNCHANGED_STDLIB_ROOTS) do
+        for _, root in ipairs(PREEXISTING_STDLIB_ROOTS) do
             local name = assert(root:match("^titan%.(.+)$"))
             local types_function, load_error = support._loadlib(
                 container, "titan_" .. name .. "_types")
@@ -983,8 +984,7 @@ describe("libuv Makefile configuration", function()
             "_os_communicate",
         }, public_declarations("titan/uv/process.titan"))
         assert.same({
-            "Error", "Error.new", "_bytes_find", "_bytes_slice", "_loop",
-            "_version",
+            "Error", "Error.new", "_loop", "_version",
         }, public_declarations("titan/uv/runtime.titan"))
         assert.same({
             "Cancelled", "Cancelled.new", "uv_timer_t", "Task", "_run",
@@ -997,6 +997,51 @@ describe("libuv Makefile configuration", function()
             "_net_accept", "_net_close", "_net_is_closed",
             "_net_eof_error",
         }, public_declarations("titan/uv/tcp.titan"))
+    end)
+
+    it("centralizes every peg and string export in the folder main",
+       function()
+        assert.same({
+            "Pattern", "Rule", "Locale", "Locale.new", "Definition",
+            "Pattern:match", "rule", "grammar", "locale",
+            "set_max_stack", "version", "literal", "any", "succeed",
+            "fail", "runtime", "set", "ranges", "utf_range",
+            "variable", "behind", "throw", "sequence", "choice",
+            "difference", "lookahead", "negative", "at_least",
+            "at_most", "zero_or_more", "one_or_more", "optional",
+            "capture", "constant", "match_time", "back_capture",
+            "argument", "position", "substitution", "table_capture",
+            "fold_capture", "group", "select_capture",
+            "template_capture", "query_capture", "function_capture",
+            "line_column", "define", "define_value", "compile",
+            "match", "find", "gsub", "update_locale",
+        }, public_declarations("titan/peg/peg.titan"))
+        for _, contributor in ipairs({
+            "captures", "combinators", "native",
+            "relabel", "relabel_parser",
+        }) do
+            assert.same({}, public_declarations(
+                "titan/peg/" .. contributor .. ".titan"))
+        end
+
+        assert.same({
+            "Span", "Span.new", "RegexMatch", "Regex", "len", "sub",
+            "reverse", "lower", "upper", "rep", "byte", "char",
+            "tostring", "find", "format", "pack", "packsize",
+            "unpack", "compile_regex", "Regex:source",
+            "Regex:group_count", "Regex:match", "Regex:gmatch",
+            "Regex:gsub", "RegexMatch:span", "RegexMatch:group_count",
+            "RegexMatch:group_span", "RegexMatch:whole",
+            "RegexMatch:group", "RegexMatch:values", "match",
+            "gmatch", "gsub",
+        }, public_declarations("titan/string/string.titan"))
+        for _, contributor in ipairs({
+            "bytes", "format", "pack",
+            "regex_api", "regex_compile", "regex_parser",
+        }) do
+            assert.same({}, public_declarations(
+                "titan/string/" .. contributor .. ".titan"))
+        end
     end)
 
     it("keeps every private uv record with its semantic contributor",
@@ -1819,8 +1864,10 @@ fi
             'local strings = import "titan.string"',
             '#peg.version() > 0',
             'strings.len("static\\0string") == 13',
-            'strings.match("static42", "([0-9]+)") == "42"',
-            'strings.match("regex42", "([0-9]+)") == "42"',
+            'local found = strings.match("static42", "([0-9]+)")',
+            'local found = strings.match("regex42", "([0-9]+)")',
+            'strings.find("static\\0string", "\\0str")',
+            'strings.find("a\\0b", "\\0b")',
             "local peer = async.run(",
             "timer.sleep(0)",
             "fs.write_file(marker,",

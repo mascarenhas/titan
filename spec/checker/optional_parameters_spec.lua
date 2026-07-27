@@ -60,6 +60,55 @@ describe("optional function parameters", function()
         assert.truthy(ok, err)
     end)
 
+    it("adjusts hidden parameters of compatible function values", function()
+        local ok, err = run_checker([[
+            function fixed(a: integer?, b: value): integer
+                return 1
+            end
+
+            function tailed(a: integer?, b: value): integer
+                return 2
+            end
+
+            function run(): integer
+                local noargs: () -> integer = fixed
+                local integers: (...: integer) -> integer = tailed
+                return noargs() + integers(10, 20)
+            end
+        ]])
+        assert.truthy(ok, err)
+    end)
+
+    it("rejects hidden parameters that adjustment cannot populate", function()
+        local ok, err = run_checker([[
+            function required(a: integer): integer
+                return a
+            end
+
+            function run(): integer
+                local noargs: () -> integer = required
+                return noargs()
+            end
+        ]])
+        assert.falsy(ok)
+        assert.match("types in declaration of local variable noargs do not match",
+            err)
+
+        ok, err = run_checker([[
+            function strings(a: string?): integer
+                return 1
+            end
+
+            function run(): integer
+                local integers: (...: integer) -> integer = strings
+                return integers(10)
+            end
+        ]])
+        assert.falsy(ok)
+        assert.match("types in declaration of local variable integers do not match",
+            err)
+    end)
+
     it("adjusts borrowed fixed parameters when forwarding ... to a variadic callee", function()
         local ok, err = run_checker([[
             function fill(a: integer?, b: boolean, ...: integer): integer

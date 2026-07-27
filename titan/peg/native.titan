@@ -1,4 +1,5 @@
--- Private LPegLabel state and raw-Lua boundary.
+-- Module-local implementations of the LPegLabel state and raw-Lua
+-- boundary exposed by peg.titan.
 
 local function _field(table_value: value, name: string): value
   local top = lua.lua_gettop(L)
@@ -78,7 +79,7 @@ local function _initialize_native()
     -- capture.  The sentinel makes a native failure triple unambiguous even
     -- when successful user captures begin with nil, "fail", and an integer.
     -- The wrapper is stripped on the raw Lua stack before its results cross
-    -- Titan's 200-value flexible-result boundary.
+    -- the PEG adapter's 200-value public-result boundary.
     lua.lua_createtable(L, 0, 0)
     _match_success_sentinel = ffi.lua_totvalue(L, -1)
   finally
@@ -223,8 +224,9 @@ local function _unpack_results(items: value, index: integer,
     _unpack_results(items, index + 1, limit)
 end
 
-function Pattern:match(subject: string, init: integer?,
-                       ...: value): (...: value)
+local function _pattern_match_impl(
+    self: Pattern, subject: string, init: integer?,
+    ...: value): (value, ...: value)
   local start = _normalized_init(subject, init)
   local raw = _sequence(
     _sequence(_Cc(_match_success_sentinel), self.raw), _Cp())
@@ -306,11 +308,12 @@ function Pattern:match(subject: string, init: integer?,
   return nil, _decoded_label(failure_label), failure_position
 end
 
-function rule(name: value, pattern: Pattern): Rule
+local function _rule_impl(name: value, pattern: Pattern): Rule
   return Rule.new(_encoded_name(name), pattern)
 end
 
-function grammar(start: value, rules: {integer: Rule}): Pattern
+local function _grammar_impl(
+    start: value, rules: {integer: Rule}): Pattern
   local top = lua.lua_gettop(L)
   local count = 0
   local maximum = 0
@@ -365,7 +368,7 @@ function grammar(start: value, rules: {integer: Rule}): Pattern
   return _pattern(native, total_size)
 end
 
-function locale(): Locale
+local function _locale_impl(): Locale
   local native = _locale()
   return Locale.new(
     _pattern(_field(native, "alnum"), 5),
@@ -381,13 +384,13 @@ function locale(): Locale
     _pattern(_field(native, "xdigit"), 5))
 end
 
-function set_max_stack(maximum: integer)
+local function _set_max_stack_impl(maximum: integer)
   if maximum < 1 or maximum > MAX_STACK then
     raise "PEG maximum stack is out of range"
   end
   _setmaxstack(maximum)
 end
 
-function version(): string
+local function _version_impl(): string
   return _version_text
 end

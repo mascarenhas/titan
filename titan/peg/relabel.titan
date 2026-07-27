@@ -3,16 +3,12 @@
 -- Copyright (c) 2014-2022 Sérgio Medeiros. MIT terms are reproduced in
 -- LICENSES/lpeglabel-LICENSE.
 --
--- This contributor owns definitions, lexical and semantic callbacks,
--- diagnostics, and caches. relabel_parser.titan assembles the expression
--- grammar exclusively from titan.peg's public named operations. Neither
--- contributor depends on titan.string or on the installed Lua relabel module.
-
-record Definition
-  local name: string
-  local raw: value
-  local tree_size: integer
-end
+-- This contributor owns the module-local implementations for definitions,
+-- lexical and semantic callbacks, diagnostics, and caches. Public relabel
+-- declarations live in peg.titan. relabel_parser.titan assembles the
+-- expression grammar exclusively from titan.peg's public named operations.
+-- Neither contributor depends on titan.string or on the installed Lua
+-- relabel module.
 
 local record RelabelSuffix
   local kind: integer
@@ -145,8 +141,8 @@ local function _relabel_slice(source: string, first: integer,
   return result as string
 end
 
-function line_column(subject: string,
-                     position: integer): (integer, integer)
+local function _line_column_impl(
+    subject: string, position: integer): (integer, integer)
   if position < 1 or position > #subject + 1 then
     raise "PEG source position is out of range"
   end
@@ -304,7 +300,8 @@ local function _relabel_valid_name(name: string): boolean
   return true
 end
 
-function define(name: string, pattern: Pattern): Definition
+local function _define_impl(
+    name: string, pattern: Pattern): Definition
   if not _relabel_valid_name(name) then
     raise "invalid PEG definition name"
   end
@@ -312,7 +309,8 @@ function define(name: string, pattern: Pattern): Definition
     name, pattern.raw, pattern.tree_size)
 end
 
-function define_value(name: string, candidate: value): Definition
+local function _define_value_impl(
+    name: string, candidate: value): Definition
   if not _relabel_valid_name(name) then
     raise "invalid PEG definition name"
   end
@@ -400,25 +398,24 @@ local function _relabel_expect(pattern: Pattern,
 end
 
 local function _relabel_literal_capture(
-    first: value, ...: value): (...: value)
+    first: value): Pattern
   return literal(first as string)
 end
 
 local function _relabel_range_capture(
-    first: value, ...: value): (...: value)
-  local last = ...[1] as string
-  return ranges((first as string) .. last)
+    first: value, last: value): Pattern
+  return ranges((first as string) .. (last as string))
 end
 
 local function _relabel_choice_fold(
-    accumulator: value, ...: value): value
-  return choice(accumulator as Pattern, ...[1] as Pattern)
+    accumulator: value, next: value): Pattern
+  return choice(accumulator as Pattern, next as Pattern)
 end
 
 local function _relabel_class_capture(
-    first: value, ...: value): (...: value)
+    first: value, captured_pattern: value): Pattern
   local complement = first as string
-  local pattern = ...[1] as Pattern
+  local pattern = captured_pattern as Pattern
   if complement == "^" then
     return difference(any(), pattern)
   end
@@ -426,10 +423,11 @@ local function _relabel_class_capture(
 end
 
 local function _relabel_resolve_pattern(
-    first: value, ...: value): (...: value)
+    first: value, raw_definitions: value,
+    raw_sizes: value): Pattern
   local name = first as string
-  local definitions = ...[1]
-  local sizes = ...[2] as {string: integer?}
+  local definitions = raw_definitions
+  local sizes = raw_sizes as {string: integer?}
   local candidate =
     _relabel_raw_get(definitions, name)
   if candidate == nil then
@@ -446,9 +444,8 @@ local function _relabel_resolve_pattern(
 end
 
 local function _relabel_resolve_value(
-    first: value, ...: value): (...: value)
+    first: value, definitions: value): value
   local name = first as string
-  local definitions = ...[1]
   local candidate =
     _relabel_raw_get(definitions, name)
   if candidate == nil then
@@ -458,53 +455,53 @@ local function _relabel_resolve_value(
 end
 
 local function _relabel_named_replace_suffix(
-    first: value, ...: value): (...: value)
-  local candidate = _relabel_resolve_value(first, ...[1])
+    first: value, definitions: value): RelabelSuffix
+  local candidate = _relabel_resolve_value(first, definitions)
   return RelabelSuffix.new(
     RELABEL_SUFFIX_REPLACE, candidate)
 end
 
 local function _relabel_named_match_time_suffix(
-    first: value, ...: value): (...: value)
-  local candidate = _relabel_resolve_value(first, ...[1])
+    first: value, definitions: value): RelabelSuffix
+  local candidate = _relabel_resolve_value(first, definitions)
   return RelabelSuffix.new(
     RELABEL_SUFFIX_MATCH_TIME, candidate)
 end
 
 local function _relabel_named_fold_suffix(
-    first: value, ...: value): (...: value)
-  local candidate = _relabel_resolve_value(first, ...[1])
+    first: value, definitions: value): RelabelSuffix
+  local candidate = _relabel_resolve_value(first, definitions)
   return RelabelSuffix.new(
     RELABEL_SUFFIX_FOLD, candidate)
 end
 
 local function _relabel_number_value(
-    first: value, ...: value): (...: value)
+    first: value): integer
   return _relabel_decimal(first as string)
 end
 
 local function _relabel_number_suffix(
-    first: value, ...: value): (...: value)
+    first: value): RelabelSuffix
   return RelabelSuffix.new(
     RELABEL_SUFFIX_REPLACE,
     _relabel_decimal(first as string))
 end
 
 local function _relabel_string_suffix(
-    first: value, ...: value): (...: value)
+    first: value): RelabelSuffix
   return RelabelSuffix.new(
     RELABEL_SUFFIX_REPLACE, first as string)
 end
 
 local function _relabel_exact_suffix(
-    first: value, ...: value): (...: value)
+    first: value): RelabelSuffix
   return RelabelSuffix.new(
     RELABEL_SUFFIX_EXACT,
     _relabel_decimal(first as string))
 end
 
 local function _relabel_signed_suffix(
-    first: value, ...: value): (...: value)
+    first: value): RelabelSuffix
   local text = first as string
   local amount = _relabel_decimal(
     _relabel_slice(text, 2, #text + 1))
@@ -517,7 +514,7 @@ local function _relabel_signed_suffix(
 end
 
 local function _relabel_label_suffix(
-    first: value, ...: value): (...: value)
+    first: value): RelabelSuffix
   return RelabelSuffix.new(
     RELABEL_SUFFIX_LABEL, first)
 end
@@ -593,7 +590,7 @@ local function _relabel_replace(pattern: Pattern,
 end
 
 local function _relabel_apply_suffixes(
-    first: value, ...: value): (...: value)
+    first: value, ...: value): Pattern
   local pattern = first as Pattern
   local index = 1
   while index <= #... do
@@ -628,7 +625,7 @@ local function _relabel_apply_suffixes(
 end
 
 local function _relabel_sequence_capture(
-    first: value, ...: value): (...: value)
+    first: value, ...: value): Pattern
   local result = first as Pattern
   local index = 1
   while index <= #... do
@@ -639,7 +636,7 @@ local function _relabel_sequence_capture(
 end
 
 local function _relabel_choice_capture(
-    first: value, ...: value): (...: value)
+    first: value, ...: value): Pattern
   local result = first as Pattern
   local index = 1
   while index <= #... do
@@ -650,28 +647,28 @@ local function _relabel_choice_capture(
 end
 
 local function _relabel_lookahead_capture(
-    first: value, ...: value): (...: value)
+    first: value): Pattern
   return lookahead(first as Pattern)
 end
 
 local function _relabel_negative_capture(
-    first: value, ...: value): (...: value)
+    first: value): Pattern
   return negative(first as Pattern)
 end
 
 local function _relabel_throw_capture(
-    first: value, ...: value): (...: value)
+    first: value): Pattern
   return throw(first)
 end
 
 local function _relabel_group_capture(
-    first: value, ...: value): (...: value)
-  return group(...[1] as Pattern, first)
+    first: value, captured_pattern: value): Pattern
+  return group(captured_pattern as Pattern, first)
 end
 
 local function _relabel_back_reference_callback(
     subject: string, position: integer,
-    first: value, ...: value): (...: value)
+    first: value): integer?
   if _raw_type(first) ~= lua.LUA_TSTRING then return nil end
   local captured = first as string
   if #captured > #subject - position + 1 then return nil end
@@ -687,31 +684,31 @@ local function _relabel_back_reference_callback(
 end
 
 local function _relabel_back_reference(
-    first: value, ...: value): (...: value)
+    first: value): Pattern
   return match_time(
     back_capture(first),
     _relabel_back_reference_callback)
 end
 
 local function _relabel_substitution_capture(
-    first: value, ...: value): (...: value)
+    first: value): Pattern
   return substitution(first as Pattern)
 end
 
 local function _relabel_table_capture_callback(
-    first: value, ...: value): (...: value)
+    first: value): Pattern
   return table_capture(first as Pattern)
 end
 
 local function _relabel_simple_capture(
-    first: value, ...: value): (...: value)
+    first: value): Pattern
   return capture(first as Pattern)
 end
 
 local function _relabel_nonterminal(
-    first: value, ...: value): (...: value)
+    first: value, raw_in_grammar: value): Pattern
   local name = first as string
-  local in_grammar = ...[1] as boolean
+  local in_grammar = raw_in_grammar as boolean
   if not in_grammar then
     raise "rule '" .. name .. "' used outside a grammar"
   end
@@ -719,13 +716,13 @@ local function _relabel_nonterminal(
 end
 
 local function _relabel_parsed_rule(
-    first: value, ...: value): (...: value)
+    first: value, captured_pattern: value): RelabelParsedRule
   return RelabelParsedRule.new(
-    first as string, ...[1] as Pattern)
+    first as string, captured_pattern as Pattern)
 end
 
 local function _relabel_target_grammar(
-    first: value, ...: value): (...: value)
+    first: value, ...: value): Pattern
   local initial = first as RelabelParsedRule
   local seen: {string: boolean} = {
     [initial.name] = true,
@@ -987,8 +984,9 @@ local function _relabel_cached_source(
   return compiled
 end
 
-function compile(candidate: value,
-                 definitions: {integer: Definition}?): Pattern
+local function _compile_impl(
+    candidate: value,
+    definitions: {integer: Definition}?): Pattern
   _relabel_ensure_initialized()
   if _relabel_is_pattern(candidate) then
     return candidate as Pattern
@@ -1004,8 +1002,9 @@ function compile(candidate: value,
   return _relabel_compile_source(source, definitions)
 end
 
-function match(subject: string, candidate: value,
-               init: integer?): (...: value)
+local function _match_impl(
+    subject: string, candidate: value,
+    init: integer?): (value, ...: value)
   _relabel_ensure_initialized()
   local compiled: Pattern = succeed()
   if _relabel_is_pattern(candidate) then
@@ -1029,8 +1028,9 @@ local function _relabel_find_pattern(
   })
 end
 
-function find(subject: string, candidate: value,
-              init: integer?): (...: integer?)
+local function _find_impl(
+    subject: string, candidate: value,
+    init: integer?): (integer?, integer?)
   _relabel_ensure_initialized()
   local search: Pattern = succeed()
   if _relabel_is_pattern(candidate) then
@@ -1051,12 +1051,13 @@ function find(subject: string, candidate: value,
     raise "PEG expression must be a string or Pattern"
   end
   local first: value, after: value = search:match(subject, init)
-  if first == nil then return nil end
+  if first == nil then return nil, nil end
   return first as integer, (after as integer) - 1
 end
 
-function gsub(subject: string, candidate: value,
-              replacement: value): string
+local function _gsub_impl(
+    subject: string, candidate: value,
+    replacement: value): string
   _relabel_ensure_initialized()
   local substitution_pattern: Pattern = succeed()
   if _relabel_is_pattern(candidate) then
@@ -1138,7 +1139,7 @@ local function _relabel_refresh_locale()
   _relabel_parser = _relabel_build_parser()
 end
 
-function update_locale()
+local function _update_locale_impl()
   if _relabel_parser then
     _relabel_refresh_locale()
   else

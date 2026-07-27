@@ -892,11 +892,10 @@ focused named-argument specs are green under the current installed compiler.
    than converting every `uv._*` bridge call. Zero- and one-parameter calls are
    positional. Short calls with distinct types, conventional ordering, or
    self-describing operands are positional too, including slice
-   `(data, offset, length)` calls. The retained `_bytes_find { haystack = ...,
-   needle = ... }` calls in `net.titan` and `os.titan` provide a bounded
-   production proof of names rehydrated from the already-built `titan/uv.so`:
-   both operands are strings and search APIs do not expose one universal
-   positional surface.
+   `(data, offset, length)` calls. The later string-library work retired the
+   temporary `_bytes_find` facade calls in favor of the typed literal
+   `titan.string.find`; named-call coverage remains in focused compiler
+   fixtures.
 
 6. Do not add empty named calls as production sentinels. `f{}` and the
    zero-parameter direct-FFI form are syntax/codegen cases covered by focused

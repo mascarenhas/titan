@@ -1,24 +1,5 @@
-local peg = import "titan.peg"
-
-record Span
-  first: integer
-  last: integer
-end
-
 local record GroupSpan
   local span: Span?
-end
-
-record RegexMatch
-  local subject: string
-  local matched_span: Span
-  local groups: {GroupSpan}
-end
-
-record Regex
-  local expression: string
-  local capture_count: integer
-  local pattern: peg.Pattern
 end
 
 local record RegexDiagnostic
@@ -156,23 +137,24 @@ local function regex_find_from(regex: Regex, subject: string,
   return nil
 end
 
-function Regex:source(): string
+local function _regex_source(self: Regex): string
   return self.expression
 end
 
-function Regex:group_count(): integer
+local function _regex_group_count(self: Regex): integer
   return self.capture_count
 end
 
-function RegexMatch:span(): Span
+local function _regex_match_span(self: RegexMatch): Span
   return Span.new(self.matched_span.first, self.matched_span.last)
 end
 
-function RegexMatch:group_count(): integer
+local function _regex_match_group_count(self: RegexMatch): integer
   return #self.groups
 end
 
-function RegexMatch:group_span(index: integer): Span?
+local function _regex_match_group_span(self: RegexMatch,
+                                       index: integer): Span?
   if index < 1 or index > #self.groups then
     raise "capture group index out of range"
   end
@@ -182,13 +164,14 @@ function RegexMatch:group_span(index: integer): Span?
   return Span.new(span.first, span.last)
 end
 
-function RegexMatch:whole(): string
+local function _regex_match_whole(self: RegexMatch): string
   return copy_interval(
     self.subject, self.matched_span.first,
     self.matched_span.last - self.matched_span.first + 1)
 end
 
-function RegexMatch:group(index: integer): string?
+local function _regex_match_group(self: RegexMatch,
+                                  index: integer): string?
   local span: Span? = self:group_span(index)
   if not span then return nil end
   local actual = span as Span
@@ -203,26 +186,22 @@ local function regex_group_values(found: RegexMatch,
   return found:group(index), regex_group_values(found, index + 1)
 end
 
-function RegexMatch:values(): (...: string?)
+local function _regex_match_values(
+    self: RegexMatch): (string?, ...: string?)
   if #self.groups == 0 then return self:whole() end
   return regex_group_values(self, 1)
 end
 
-function Regex:find(subject: string, init: integer?): RegexMatch?
+local function _regex_match(self: Regex, subject: string,
+                            init: integer?): RegexMatch?
   local position, overshoot = regex_normalized_init(subject, init)
   if overshoot then return nil end
   return regex_find_from(self, subject, position)
 end
 
-function Regex:match(subject: string,
-                     init: integer?): (...: string?)
-  local found: RegexMatch? = self:find(subject, init)
-  if not found then return nil end
-  return (found as RegexMatch):values()
-end
-
-function Regex:gmatch(subject: string,
-                      init: integer?): () -> RegexMatch?
+local function _regex_gmatch(
+    self: Regex, subject: string,
+    init: integer?): () -> RegexMatch?
   local position, overshoot = regex_normalized_init(subject, init)
   local current = position
   local previous_end = 0
@@ -389,8 +368,9 @@ local function regex_dynamic_replacement(replacement: value,
   return ""
 end
 
-function Regex:gsub(subject: string, replacement: value,
-                    maximum: integer?): (string, integer)
+local function _regex_gsub(
+    self: Regex, subject: string, replacement: value,
+    maximum: integer?): (string, integer)
   local limit = #subject + 1
   if maximum then limit = maximum end
 
@@ -448,38 +428,20 @@ function Regex:gsub(subject: string, replacement: value,
   return builder_finish(builder), count
 end
 
-local function regex_find_values(found: RegexMatch,
-                                 index: integer): (...: value)
-  if index > #found.groups then return end
-  if index == #found.groups then return found:group(index) end
-  return found:group(index), regex_find_values(found, index + 1)
-end
-
-function find(subject: string, expression: string,
-              init: integer?): (...: value)
-  local found: RegexMatch? =
-    cached_regex(expression):find(subject, init)
-  if not found then return nil end
-  local actual = found as RegexMatch
-  if #actual.groups == 0 then
-    return actual.matched_span.first, actual.matched_span.last
-  end
-  return actual.matched_span.first, actual.matched_span.last,
-    regex_find_values(actual, 1)
-end
-
-function match(subject: string, expression: string,
-               init: integer?): (...: string?)
+local function _string_match(
+    subject: string, expression: string,
+    init: integer?): RegexMatch?
   return cached_regex(expression):match(subject, init)
 end
 
-function gmatch(subject: string, expression: string,
-                init: integer?): () -> RegexMatch?
+local function _string_gmatch(
+    subject: string, expression: string,
+    init: integer?): () -> RegexMatch?
   return cached_regex(expression):gmatch(subject, init)
 end
 
-function gsub(subject: string, expression: string,
-              replacement: value,
-              maximum: integer?): (string, integer)
+local function _string_gsub(
+    subject: string, expression: string, replacement: value,
+    maximum: integer?): (string, integer)
   return cached_regex(expression):gsub(subject, replacement, maximum)
 end

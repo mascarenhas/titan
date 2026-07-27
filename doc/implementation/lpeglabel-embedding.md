@@ -102,7 +102,8 @@ registry key for that state only.
 
 ## Typed folder-module boundary
 
-The folder ensemble defines the opaque public records:
+The canonical main defines every public record, method, and function. In
+particular, its opaque records are:
 
 ```titan
 record Pattern
@@ -126,11 +127,12 @@ end
 `tree_size` is conservative construction accounting, not a raw native field.
 A pattern `Definition` retains both so the relabel parser can safely rewrap
 the private native pattern without losing the construction bound; a dynamic
-definition records `-1` instead. The core contributors implement the raw
-boundary, combinators, and captures. `relabel.titan` owns definitions,
-lexical and semantic callbacks, diagnostics, and weak caches;
-`relabel_parser.titan` assembles the self-hosted expression grammar from the
-public combinators. Both contributors share the same module scope.
+definition records `-1` instead. The contributors expose no top-level public
+declarations: they implement module-local raw-boundary, combinator, capture,
+definition, matching, diagnostic, and cache helpers. `relabel_parser.titan`
+assembles the self-hosted expression grammar from operations in that shared
+module scope. Main-file wrappers preserve the exact public callable types and
+forward variadic/flexible runs directly.
 
 The folder ensemble is parsed separately and then combined into one AST and
 one checker/code-generator pass. It emits only:
@@ -160,7 +162,14 @@ Ordinary Titan call adjustment remains authoritative. Nil fills omitted fixed
 slots and evaluated surplus arguments are discarded. A function is variadic
 only where the engine consumes a run, and callback types use variadic inputs
 or flexible outputs only where the native callback protocol is genuinely
-open.
+open. Parser- and regex-specific callbacks whose construction guarantees a
+fixed number of capture slots keep fixed parameter lists; directional callable
+compatibility admits those extra `value` slots because adjustment can nil-fill
+them and they accept the generic capture tail. LPegLabel invokes the stored
+closure through its raw Lua callback path, so adding another exact-type Titan
+adapter around these fixed helpers would add a call rather than unlock a
+typed-call fast path. The relabel adapters for raw dynamic definition values
+remain genuinely variadic/flexible.
 
 ## Construction accounting and typed labels
 
@@ -195,9 +204,12 @@ recovery rule matches only an exactly equal public name.
 
 ## Match adapter and failure positions
 
-The native `match` result is dynamically shaped, while Titan exposes a
-flexible `value` result and must preserve successful leading nil captures.
-The wrapper constructs this private pattern around the user's pattern:
+The native `match` result is dynamically shaped but never empty: successful
+capture evaluation produces at least one capture or the final position, and
+failure produces its fixed leading nil. Titan therefore exposes a fixed
+`value` prefix plus a flexible `value` tail while preserving successful
+leading nil captures. The wrapper constructs this private pattern around the
+user's pattern:
 
 ```text
 constant(success_sentinel) * pattern * position_capture()
@@ -207,7 +219,8 @@ It then calls the cached native `match` through `lua_pcallk` with
 `LUA_MULTRET`. A sentinel result identifies success independently of user
 capture contents. The final position capture is removed from the public
 capture run; when there are no user captures it becomes the sole success
-result.
+result. The adapter caps the complete public projection at 200 values, so the
+fixed first result leaves at most 199 values in the flexible tail.
 
 Before restoring the Lua stack, a nonempty capture run is copied to a fresh
 ordinary table and that table is captured as a traced Titan `value`. A bounded

@@ -1,6 +1,7 @@
--- Constructors and the named equivalents of LPeg's pattern operators.
+-- Module-local implementations of the public constructors and the named
+-- equivalents of LPeg's pattern operators declared in peg.titan.
 
-function literal(text: string): Pattern
+local function _literal_impl(text: string): Pattern
   local length = #text
   local size = 1
   if length > 0 then
@@ -12,7 +13,7 @@ function literal(text: string): Pattern
   return _pattern(_P(text), size)
 end
 
-function any(count: integer?): Pattern
+local function _any_impl(count: integer?): Pattern
   local amount = 1
   if count then amount = count as integer end
   local size = 1
@@ -30,25 +31,25 @@ function any(count: integer?): Pattern
   return _pattern(_P(amount), size)
 end
 
-function succeed(): Pattern
+local function _succeed_impl(): Pattern
   return _pattern(_P(true), 1)
 end
 
-function fail(): Pattern
+local function _fail_impl(): Pattern
   return _pattern(_P(false), 1)
 end
 
-function runtime(
+local function _runtime_impl(
     callback: (string, integer, string) -> (...: value)): Pattern
   _require_raw_function(callback, "runtime")
   return _pattern(_P(callback), 2)
 end
 
-function set(bytes: string): Pattern
+local function _set_impl(bytes: string): Pattern
   return _pattern(_S(bytes), 5)
 end
 
-function ranges(...: string): Pattern
+local function _ranges_impl(...: string): Pattern
   local index = 1
   while index <= #... do
     if #(...[index]) ~= 2 then
@@ -59,7 +60,8 @@ function ranges(...: string): Pattern
   return _pattern(_R(...), 5)
 end
 
-function utf_range(first: integer, last: integer): Pattern
+local function _utf_range_impl(
+    first: integer, last: integer): Pattern
   if first < 0 or last < first or last > 0x10ffff then
     raise "invalid UTF-8 code-point range"
   end
@@ -68,22 +70,22 @@ function utf_range(first: integer, last: integer): Pattern
   return _pattern(_utfR(first, last), size)
 end
 
-function variable(name: value): Pattern
+local function _variable_impl(name: value): Pattern
   return _pattern(_V(_encoded_name(name)), 1)
 end
 
-function behind(pattern: Pattern): Pattern
+local function _behind_impl(pattern: Pattern): Pattern
   -- The engine remains authoritative for fixed-length/capture-free checks.
   -- Its numeric bound is validated there after Titan's tree-size projection.
   local size = _checked_unary(pattern, 1)
   return _pattern(_B(pattern.raw), size)
 end
 
-function throw(label: value): Pattern
+local function _throw_impl(label: value): Pattern
   return _pattern(_T(_encoded_name(label)), 1)
 end
 
-function sequence(...: Pattern): Pattern
+local function _sequence_impl(...: Pattern): Pattern
   if #... == 0 then return succeed() end
   local result = ...[1]
   local index = 2
@@ -98,7 +100,7 @@ function sequence(...: Pattern): Pattern
   return result
 end
 
-function choice(...: Pattern): Pattern
+local function _choice_impl(...: Pattern): Pattern
   if #... == 0 then return fail() end
   local result = ...[1]
   local index = 2
@@ -113,7 +115,8 @@ function choice(...: Pattern): Pattern
   return result
 end
 
-function difference(first: Pattern, ...: Pattern): Pattern
+local function _difference_impl(
+    first: Pattern, ...: Pattern): Pattern
   local result = first
   local index = 1
   while index <= #... do
@@ -127,12 +130,12 @@ function difference(first: Pattern, ...: Pattern): Pattern
   return result
 end
 
-function lookahead(pattern: Pattern): Pattern
+local function _lookahead_impl(pattern: Pattern): Pattern
   return _pattern(
     _lookahead(pattern.raw), _checked_unary(pattern, 1))
 end
 
-function negative(pattern: Pattern): Pattern
+local function _negative_impl(pattern: Pattern): Pattern
   return _pattern(
     _negative(pattern.raw), _checked_unary(pattern, 1))
 end
@@ -157,27 +160,29 @@ local function _at_most_size(pattern: Pattern,
   return count * unit - 1
 end
 
-function at_least(pattern: Pattern, count: integer): Pattern
+local function _at_least_impl(
+    pattern: Pattern, count: integer): Pattern
   if count < 0 then raise "PEG repetition count must be nonnegative" end
   local size = _at_least_size(pattern, count)
   return _pattern(_repeat(pattern.raw, count), size)
 end
 
-function at_most(pattern: Pattern, count: integer): Pattern
+local function _at_most_impl(
+    pattern: Pattern, count: integer): Pattern
   if count < 0 then raise "PEG repetition count must be nonnegative" end
   if count == 0 then return succeed() end
   local size = _at_most_size(pattern, count)
   return _pattern(_repeat(pattern.raw, -count), size)
 end
 
-function zero_or_more(pattern: Pattern): Pattern
+local function _zero_or_more_impl(pattern: Pattern): Pattern
   return at_least(pattern, 0)
 end
 
-function one_or_more(pattern: Pattern): Pattern
+local function _one_or_more_impl(pattern: Pattern): Pattern
   return at_least(pattern, 1)
 end
 
-function optional(pattern: Pattern): Pattern
+local function _optional_impl(pattern: Pattern): Pattern
   return at_most(pattern, 1)
 end

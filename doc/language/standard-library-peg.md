@@ -278,7 +278,7 @@ function Pattern:match(
   subject: string,
   init: integer?,
   ...: value
-): (...: value)
+): (value, ...: value)
 ```
 
 Matching is anchored at the normalized initial position; it does not search
@@ -298,7 +298,8 @@ last byte.
 
 On success, `match` returns capture values when the pattern has captures.
 Without captures it returns the absolute one-based position after the match.
-Nil capture slots and their exact arity are preserved.
+Nil capture slots and their exact arity are preserved. The fixed `value`
+prefix records that matching always produces at least one result.
 
 Ordinary failure returns:
 
@@ -316,9 +317,10 @@ Failure positions remain absolute when matching begins after byte 1. String
 and integer labels retain their original types. The values after `init` are
 available to `argument(n)`.
 
-Flexible results and extra match arguments follow Titan's 200-element
-flexible/variadic limits. This is a Titan call boundary, not a smaller native
-capture limit.
+Extra match arguments follow Titan's 200-element variadic limit. The PEG
+adapter caps the complete public result list at 200 values; its fixed first
+result therefore leaves room for at most 199 values in the flexible tail.
+This is a Titan API boundary, not a smaller native capture limit.
 
 ## Call adjustment
 
@@ -397,12 +399,12 @@ function match(
   subject: string,
   candidate: value,
   init: integer?
-): (...: value)
+): (value, ...: value)
 function find(
   subject: string,
   candidate: value,
   init: integer?
-): (...: integer?)
+): (integer?, integer?)
 function gsub(
   subject: string,
   candidate: value,
@@ -429,8 +431,9 @@ requirement when it consumes the value.
 
 `match` has the same anchored capture/failure results and initial-position
 normalization as `Pattern:match`. `find` searches forward from that normalized
-position and returns the one-based start and inclusive end on success, or
-exactly one nil on failure. An empty match has `last == first - 1`. `gsub`
+position and returns the fixed pair of one-based start and inclusive end on
+success, or `nil, nil` on failure. A caller interested only in success may
+consume the first result. An empty match has `last == first - 1`. `gsub`
 returns only the transformed string, unlike Lua's `string.gsub`, which also
 returns a count. Its replacement uses the native string, integer-selector,
 table-query, or raw-function capture-replacement forms.

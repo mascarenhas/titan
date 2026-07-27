@@ -11,7 +11,10 @@ titan.so
   |                         |--> titan.timer
   |                         |--> titan.fs
   |                         |--> titan.net
-  |                         `--> titan.os <-- titan.string <-- titan.peg
+  |                         `--> titan.os
+  |-- titan.peg --> titan.string
+  |                  |--> titan.net
+  |                  `--> titan.os
   `-- luaopen_titan (native support)
 ```
 
@@ -70,7 +73,7 @@ one module state inside the combined DSO:
 | `file.titan` | public `uv_file` and `_fs_*` API plus private FS constants, operations, controls, requests, File FIFO/ownership, callbacks, dispatch, and shutdown repair |
 | `os.titan` | public non-process `_os_*` API plus private signal specifications/controls/owners, one-shot callback retirement, and portable OS helpers |
 | `process.titan` | public `uv_process_t`, `_os_process_*`, and `_os_communicate` API plus private process/pipe controls, operations, requests, helper groups, child stdio callbacks, and forced shutdown |
-| `runtime.titan` | public `Error`, `_bytes_*`, `_loop`, and `_version` API plus private loop/Runtime and byte/text/buffer records, trace preservation, allocation, and ownership helpers |
+| `runtime.titan` | public `Error`, `_loop`, and `_version` API plus private loop/Runtime and byte/text/buffer records, literal NUL scanning, trace preservation, allocation, and ownership helpers |
 | `task.titan` | public `Cancelled`, `uv_timer_t`, `Task`, Task methods, `_run`/`_sleep`/`_yield`, and ticker API plus private timer/drive/request/ticker records and coroutine driving |
 | `tcp.titan` | public `uv_tcp_t`, `_net_*`, and `_net_eof_error` API plus private address/operation/request/control/owner records, DNS/TCP queues, callbacks, and network teardown |
 
@@ -101,31 +104,33 @@ The production all-roots invocation emits `titan/uv/uv.c` and
 shim; no source basename enters a symbol, registry key, metadata key, or
 artifact name.
 
-The exported declarations established the deterministic ABI 0.15
-interface when the folder split was introduced. The follow-up relocates the
-remaining private records and moves the private `FS` constants instance beside
+The exported declarations established the deterministic ABI 0.15 interface
+when the folder split was introduced. The follow-up relocates the remaining
+private records and moves the private `FS` constants instance beside
 `FsConstants` in `file.titan`. That changes private slot/initialization order,
 but not `titan_uv_types`, importer-visible variable slots, canonical
-exported-function closure slots, or native signatures, so the exact interface
-fixture remained unchanged. ABI 0.16 later changes only physical provider
-discovery and the standard-library layout; the `titan_uv_types` shape and
-native entries stay unchanged.
+exported-function closure slots, or native signatures. ABI 0.16 later changes
+only physical provider discovery and the standard-library layout, and ABI
+0.17 likewise leaves the logical interface unchanged.
 
-ABI 0.17 likewise leaves `titan_uv_types` unchanged, but every standard
-module is rebuilt because generated module state now includes the Array
+Every ABI 0.17 standard module is nevertheless rebuilt because generated
+module state now includes the Array
 metatable cache and Lua-visible Array values use proxy Udata rather than raw
 Tables. Native exact Array paths and `TitanVargArrayOrMap` retain backing
 `Table *` / `Table **`; callback-owned roots must preserve whichever internal
 or boxed domain their typed slot specifies. See
 [Dense Arrays](dense-arrays.md#internal-and-boxed-representations).
 
-ABI 0.18 preserves that logical interface and Array contract while changing
-the archive-backed native boundary. Generated standard-library objects now
-refer directly to callback trampolines promoted from `titan_uv.o`'s private
-implementation into the runtime's external symbol contract, and retired
-libuv/coroutine helper symbols are no longer part of that contract. A 0.18
-provider and runtime must be built and distributed together; a 0.17 static
-provider cannot be paired with the 0.18 runtime in either direction.
+ABI 0.18 preserves the Array contract while changing the archive-backed native
+boundary. Generated standard-library objects now refer directly to callback
+trampolines promoted from `titan_uv.o`'s private implementation into the
+runtime's external symbol contract, and retired libuv/coroutine helper symbols
+are no longer part of that contract. The current prototype also retires the
+transient public `_bytes_find` and `_bytes_slice` helpers after `titan.net` and
+`titan.os` move to `titan.string`; the exact interface fixture records this
+intentional logical API change. No migration is provided: a 0.18 provider and
+runtime must be built and distributed together, and users of a changed
+prototype image must clean and rebuild from source.
 
 The Makefile's explicit `UV_TITAN_SOURCES` list names all seven files inside
 the reviewed `STDLIB_TITAN_SOURCES` prerequisite set. It intentionally does

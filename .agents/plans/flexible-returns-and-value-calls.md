@@ -347,11 +347,11 @@ Input compatibility is based on what callers of the expected type may send:
   ordinary compatible/coerceable rules in the input direction. Additional
   expected arguments are either ignored by a non-variadic actual function or
   checked against the actual vararg element type.
-- Do not initially accept an actual function with additional fixed parameters
-  that the expected type does not expose. Although a direct call can pad
-  missing arguments with nil, such a value would add hidden required
-  positions. A later relaxation could admit unmatched option/`value`
-  parameters deliberately, but it is not required by this feature.
+- An actual function with additional fixed parameters is compatible only when
+  every additional position accepts nil from ordinary call adjustment. If the
+  expected type has an input vararg, each such position must also accept that
+  tail's element type because callers may supply or omit it. This admits
+  unmatched option/`value` positions without hiding a non-nilable requirement.
 - When the expected type has an input vararg, an actual non-variadic function
   may ignore that tail. If the actual function also observes a vararg tail,
   the expected tail type must be acceptable at the actual input position.
@@ -728,8 +728,9 @@ arity boundaries without relying on code generation.
 5. Extend the `Type.Function` arm of `types.compatible(expected, found)` with
    the arity and flexible-tail rules, reversing recursive compatibility only
    for parameter positions and preserving the existing two-way `value` rule.
-6. Add focused tests for shorter actual input arity, extra actual result arity,
-   vararg/flexible-tail matrices, exact equality, and incompatible prefixes.
+6. Add focused tests for shorter actual input arity, nil-fillable and rejected
+   extra actual inputs, extra actual result arity, vararg/flexible-tail
+   matrices, exact equality, and incompatible prefixes.
 
 Phase exit: checker tests cover Lua-style dynamic calls and every compatibility
 matrix cell; already typed Titan calls are not contextually resynthesized.

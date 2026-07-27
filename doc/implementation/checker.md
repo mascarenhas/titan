@@ -234,9 +234,11 @@ Value-consistency reaches through containers); Nominal/Nominal compares fqtns
 **directional**: the first argument is the expected slot and the second the
 actual callable. Parameters are checked in the input direction, results in the
 output direction, shorter actual fixed-input lists may ignore an expected
-suffix, and finite expected results may hide actual surplus. Input and output
-tails participate in those same rules; an actual flexible result supplies
-optionized finite projections. The full matrix is in
+suffix, and additional actual fixed inputs are allowed only when adjustment
+can nil-fill them (and they accept the expected tail element, when present).
+Finite expected results may hide actual surplus. Input and output tails
+participate in those same rules; an actual flexible result supplies optionized
+finite projections. The full matrix is in
 [Flexible returns](flexible-returns.md#strict-identity-and-directional-compatibility).
 Outside function types the relation retains its earlier symmetric behavior
 except for one-way `explicitly_coerceable` pointer/string handling.

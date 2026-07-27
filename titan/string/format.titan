@@ -468,7 +468,8 @@ local function append_literal(builder: CoreStringBuilder,
   end
 end
 
-function format(format_string: string, ...: value): string
+local function _string_format(format_string: string,
+                              ...: value): string
   local builder = new_string_builder()
   local length = #format_string
   local cursor = 1

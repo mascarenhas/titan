@@ -216,8 +216,9 @@ comparisons, and as the precondition of explicit `as` casts. The rules:
    future calls: parameter positions are checked in the reverse direction,
    result positions in the forward direction, and safe arity/tail adjustment
    is allowed. An actual function may ignore inputs or results hidden by the
-   expected type, but it may not require an input or omit a fixed result that
-   callers of the expected type rely on.
+   expected type. Additional nil-accepting actual parameters may be filled by
+   adjustment, but an actual function may not require a non-nil input or omit a
+   fixed result that callers of the expected type rely on.
 4. Record types are compatible only with themselves. The recursion of
    rule 3 does **not** look inside records: `PointV` above, whose fields
    are `value`, is still incompatible with `PointF`. Nominal means

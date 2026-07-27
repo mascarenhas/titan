@@ -34,10 +34,12 @@ bytes:
 * public positions are one-based, and inclusive end positions are used where
   an API returns a range.
 
-The module follows Lua 5.5 semantics for values admitted by its Titan
-signatures. A fixed `string` parameter requires an actual string; unlike some
-Lua library functions, it does not coerce a number to a string. A fixed
-`integer` parameter accepts a Lua integer or an exactly integral,
+The Lua-derived byte, case, format, and pack operations follow Lua 5.5
+semantics for values admitted by their Titan signatures. The regex API below
+deliberately uses typed `Regex` and `RegexMatch` records instead of Lua's
+pattern-result tuples. A fixed `string` parameter requires an actual string;
+unlike some Lua library functions, it does not coerce a number to a string. A
+fixed `integer` parameter accepts a Lua integer or an exactly integral,
 representable Lua float at the Lua boundary. Fractional and out-of-range
 numbers are rejected.
 
@@ -46,17 +48,20 @@ their format strings select Lua's integer, number, or string conversion for
 each operand. In particular, the `c[n]`, `s[n]`, and `z` packing options accept
 Lua numbers through Lua's number-to-string conversion.
 
-Titan variadic and flexible-result runs contain at most 200 elements. Thus:
+Titan variadic and flexible-result tails contain at most 200 elements. This
+module additionally caps each projected result list at 200 total values, even
+when its type has a fixed prefix. Thus:
 
 * `byte` returns at most 200 bytes;
 * `char`, `format`, and `pack` accept at most 200 variadic operands;
 * `unpack` returns at most 200 values, including its final next-position
   result;
-* a regex `find` can expose at most 198 capture groups because its two position
-  results share the same 200-result limit.
+* a regex may contain at most 200 capture groups, all of which can be returned
+  by `RegexMatch:values`.
 
 Crossing one of these bounds raises Titan's ordinary variadic or
-flexible-result error.
+flexible-result error. For `unpack` and `RegexMatch:values`, the fixed first
+result leaves room for at most 199 values in the flexible tail.
 
 ## Byte operations
 
@@ -76,6 +81,10 @@ function byte(subject: string,
               first: integer?,
               last: integer?): (...: integer)
 function char(...: integer): string
+
+function find(subject: string,
+              needle: string,
+              init: integer?): (integer?, integer?)
 ```
 
 `len` returns `#subject`. `reverse` reverses bytes, including NUL and high-bit
@@ -100,6 +109,16 @@ than byte 1. An empty interval likewise returns no values.
 
 `char` returns a string made from its byte operands. Every operand must be in
 `0..255`; `char()` returns `""`.
+
+`find` searches for the first literal occurrence of `needle`. Regex
+metacharacters have no special meaning, and embedded NUL and high-bit bytes
+are ordinary data. Success returns its one-based first and inclusive last
+positions; failure returns the fixed pair `nil, nil`. A caller interested only
+in success may consume the first result and let ordinary call adjustment
+discard the second. `init` uses the same normalization as `sub`: omitted/nil
+means 1, zero or a negative overshoot becomes 1, and an in-range negative
+value counts from the end. A positive start after `#subject + 1` fails. An
+empty needle at a valid start succeeds with `last == first - 1`.
 
 ## Value conversion
 
@@ -159,7 +178,7 @@ function pack(format_string: string, ...: value): string
 function packsize(format_string: string): integer
 function unpack(format_string: string,
                 data: string,
-                position: integer?): (...: value)
+                initial: integer?): (value, ...: value)
 ```
 
 The binary format language is the Lua 5.5 language:
@@ -191,9 +210,12 @@ checked.
 variable-length `s[n]` and `z` options.
 
 `unpack` returns every decoded value followed by the one-based position of the
-next unread byte. Omitted or nil `position` means 1. Zero and a negative
-overshoot normalize to byte 1; a negative in range counts from the end.
-`#data + 1` is valid, while a larger positive position raises.
+next unread byte. Its fixed `value` result expresses that there is always at
+least that final position, even when the format decodes no values; the
+flexible tail accounts for the format-dependent remainder. Omitted or nil
+`initial` means 1. Zero and a negative overshoot normalize to byte 1; a
+negative in range counts from the end. `#data + 1` is valid, while a larger
+positive position raises.
 
 ## Compiled regular expressions
 
@@ -213,10 +235,8 @@ function compile_regex(expression: string): Regex
 
 function Regex:source(): string
 function Regex:group_count(): integer
-function Regex:find(subject: string,
-                    init: integer?): RegexMatch?
 function Regex:match(subject: string,
-                     init: integer?): (...: string?)
+                     init: integer?): RegexMatch?
 function Regex:gmatch(subject: string,
                       init: integer?): () -> RegexMatch?
 function Regex:gsub(subject: string,
@@ -228,39 +248,37 @@ function RegexMatch:group_count(): integer
 function RegexMatch:group_span(index: integer): Span?
 function RegexMatch:whole(): string
 function RegexMatch:group(index: integer): string?
-function RegexMatch:values(): (...: string?)
+function RegexMatch:values(): (string?, ...: string?)
 ```
 
 `compile_regex` parses once and returns a reusable regex. `source` returns its
 expression, and `group_count` returns the number of capturing groups.
 
-`Regex:find` returns a typed match record containing the whole-match and group
+`Regex:match` returns a typed match record containing the whole-match and group
 spans, or nil. The match roots the exact subject from which its spans are
-read. Span accessors return fresh records. `Span.last` is inclusive; an empty
-match has `last == first - 1`.
+read. It performs an unanchored search and returns the leftmost match at or
+after the normalized `init`; `^` is the explicit way to require the match to
+start there. Span accessors return fresh records. `Span.last` is inclusive; an
+empty match has `last == first - 1`.
 
 `group_span` and `group` use indices in
 `1..RegexMatch:group_count()`. An out-of-range index raises. An unmatched
 in-range group returns nil, while an empty participating group returns an
 empty span/string. A repeated group retains its final iteration. `values`
 returns the whole match when there are no groups; otherwise it returns one
-value per group, preserving unmatched nil slots.
+value per group, preserving unmatched nil slots. Its fixed optional prefix
+expresses that every match produces at least one projected value.
 
-`Regex:match` returns capture strings, or the whole match when there are no
-groups; no match returns nil. `Regex:gmatch` returns an iterator whose
-non-nil result is always a `RegexMatch`. The record result is intentional:
-returning an unmatched first capture as nil would prematurely terminate
-Titan's generic `for`.
+`Regex:gmatch` returns an iterator whose non-nil result is always a
+`RegexMatch`. The record result is intentional: returning an unmatched first
+capture as nil would prematurely terminate Titan's generic `for`.
 
-The source-string conveniences compile through a private weak cache:
+The source-expression conveniences compile through a private weak cache:
 
 ```titan
-function find(subject: string,
-              expression: string,
-              init: integer?): (...: value)
 function match(subject: string,
                expression: string,
-               init: integer?): (...: string?)
+               init: integer?): RegexMatch?
 function gmatch(subject: string,
                 expression: string,
                 init: integer?): () -> RegexMatch?
@@ -270,12 +288,13 @@ function gsub(subject: string,
               maximum: integer?): (string, integer)
 ```
 
-The top-level `find` follows Lua's result shape: success returns first byte,
-inclusive last byte, and capture strings; failure returns exactly one nil.
+Top-level `match` is the cached source-expression form of `Regex:match` and
+performs the same leftmost search, returning the same typed record. Call
+`RegexMatch:values` when capture strings are the desired result.
 
 ### Initial positions and anchors
 
-Regex searches normalize `init` like Lua `string.find`:
+Regex searches normalize `init` as follows:
 
 | Supplied `init` | Search start |
 | --- | --- |

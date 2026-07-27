@@ -73,6 +73,243 @@ record Locale
   xdigit: Pattern
 end
 
+record Definition
+  local name: string
+  local raw: value
+  local tree_size: integer
+end
+
+-- Matching and grammar construction.
+
+function Pattern:match(subject: string, init: integer?,
+                       ...: value): (value, ...: value)
+  return _pattern_match_impl(self, subject, init, ...)
+end
+
+function rule(name: value, pattern: Pattern): Rule
+  return _rule_impl(name, pattern)
+end
+
+function grammar(start: value,
+                 rules: {integer: Rule}): Pattern
+  return _grammar_impl(start, rules)
+end
+
+function locale(): Locale
+  return _locale_impl()
+end
+
+function set_max_stack(maximum: integer)
+  _set_max_stack_impl(maximum)
+end
+
+function version(): string
+  return _version_impl()
+end
+
+-- Constructors and combinators.
+
+function literal(text: string): Pattern
+  return _literal_impl(text)
+end
+
+function any(count: integer?): Pattern
+  return _any_impl(count)
+end
+
+function succeed(): Pattern
+  return _succeed_impl()
+end
+
+function fail(): Pattern
+  return _fail_impl()
+end
+
+function runtime(
+    callback: (string, integer, string) ->
+      (...: value)): Pattern
+  return _runtime_impl(callback)
+end
+
+function set(bytes: string): Pattern
+  return _set_impl(bytes)
+end
+
+function ranges(...: string): Pattern
+  return _ranges_impl(...)
+end
+
+function utf_range(first: integer,
+                   last: integer): Pattern
+  return _utf_range_impl(first, last)
+end
+
+function variable(name: value): Pattern
+  return _variable_impl(name)
+end
+
+function behind(pattern: Pattern): Pattern
+  return _behind_impl(pattern)
+end
+
+function throw(label: value): Pattern
+  return _throw_impl(label)
+end
+
+function sequence(...: Pattern): Pattern
+  return _sequence_impl(...)
+end
+
+function choice(...: Pattern): Pattern
+  return _choice_impl(...)
+end
+
+function difference(first: Pattern,
+                    ...: Pattern): Pattern
+  return _difference_impl(first, ...)
+end
+
+function lookahead(pattern: Pattern): Pattern
+  return _lookahead_impl(pattern)
+end
+
+function negative(pattern: Pattern): Pattern
+  return _negative_impl(pattern)
+end
+
+function at_least(pattern: Pattern,
+                  count: integer): Pattern
+  return _at_least_impl(pattern, count)
+end
+
+function at_most(pattern: Pattern,
+                 count: integer): Pattern
+  return _at_most_impl(pattern, count)
+end
+
+function zero_or_more(pattern: Pattern): Pattern
+  return _zero_or_more_impl(pattern)
+end
+
+function one_or_more(pattern: Pattern): Pattern
+  return _one_or_more_impl(pattern)
+end
+
+function optional(pattern: Pattern): Pattern
+  return _optional_impl(pattern)
+end
+
+-- Captures.
+
+function capture(pattern: Pattern): Pattern
+  return _capture_impl(pattern)
+end
+
+function constant(...: value): Pattern
+  return _constant_impl(...)
+end
+
+function match_time(
+    pattern: Pattern,
+    callback: (string, integer, value, ...: value) ->
+      (...: value)): Pattern
+  return _match_time_impl(pattern, callback)
+end
+
+function back_capture(key: value): Pattern
+  return _back_capture_impl(key)
+end
+
+function argument(index: integer): Pattern
+  return _argument_impl(index)
+end
+
+function position(): Pattern
+  return _position_impl()
+end
+
+function substitution(pattern: Pattern): Pattern
+  return _substitution_impl(pattern)
+end
+
+function table_capture(pattern: Pattern): Pattern
+  return _table_capture_impl(pattern)
+end
+
+function fold_capture(
+    pattern: Pattern,
+    callback: (value, ...: value) -> value): Pattern
+  return _fold_capture_impl(pattern, callback)
+end
+
+function group(pattern: Pattern, key: value): Pattern
+  return _group_impl(pattern, key)
+end
+
+function select_capture(pattern: Pattern,
+                        index: integer): Pattern
+  return _select_capture_impl(pattern, index)
+end
+
+function template_capture(pattern: Pattern,
+                          template: string): Pattern
+  return _template_capture_impl(pattern, template)
+end
+
+function query_capture(pattern: Pattern,
+                       lookup: {value: value}): Pattern
+  return _query_capture_impl(pattern, lookup)
+end
+
+function function_capture(
+    pattern: Pattern,
+    callback: (value, ...: value) ->
+      (...: value)): Pattern
+  return _function_capture_impl(pattern, callback)
+end
+
+-- Relabel expressions and convenience operations.
+
+function line_column(subject: string,
+                     position: integer): (integer, integer)
+  return _line_column_impl(subject, position)
+end
+
+function define(name: string,
+                pattern: Pattern): Definition
+  return _define_impl(name, pattern)
+end
+
+function define_value(name: string,
+                      candidate: value): Definition
+  return _define_value_impl(name, candidate)
+end
+
+function compile(
+    candidate: value,
+    definitions: {integer: Definition}?): Pattern
+  return _compile_impl(candidate, definitions)
+end
+
+function match(subject: string, candidate: value,
+               init: integer?): (value, ...: value)
+  return _match_impl(subject, candidate, init)
+end
+
+function find(subject: string, candidate: value,
+              init: integer?): (integer?, integer?)
+  return _find_impl(subject, candidate, init)
+end
+
+function gsub(subject: string, candidate: value,
+              replacement: value): string
+  return _gsub_impl(subject, candidate, replacement)
+end
+
+function update_locale()
+  _update_locale_impl()
+end
+
 do
   _initialize_native()
 end

@@ -15,9 +15,9 @@ The feature has three inseparable deliverables:
 
 1. A self-contained `titan.peg` binding to a privately embedded LPegLabel
    engine, plus a Titan port of `relabel.lua`.
-2. A `titan.string` module whose `find`, `match`, `gmatch`, and `gsub`
-   functions use a labeled, byte-oriented regular-expression dialect ported
-   from `ta-regex/pegex.lua`.
+2. A `titan.string` module whose `match`, `gmatch`, and `gsub` functions use a
+   labeled, byte-oriented regular-expression dialect ported from
+   `ta-regex/pegex.lua`, while `find` is a literal binary-safe byte search.
 3. The rest of the practical Lua 5.5 string surface implemented in Titan, with
    C99 and the Lua C API used through the existing FFI where they are the
    appropriate primitive boundary.
@@ -272,9 +272,9 @@ vendored private LPegLabel C archive
                   |
                   v
             titan.string
-                  |
-                  v
-              titan.os
+               /     \
+              v       v
+         titan.net  titan.os
 
 titan.coroutine --> titan.uv --> titan.async
                          |-----> titan.timer
@@ -288,7 +288,7 @@ all nine logical roots --> titan.so + self-describing titan.a
 `titan.peg` must not import `titan.string`; the relabel translation contains
 small private byte slicing, line splitting, decimal parsing, and diagnostic
 formatting helpers to avoid a cycle. `titan.string` may import `peg`, and
-`titan.os` is the sole existing-module client of `titan.string`.
+both `titan.net` and `titan.os` use its literal find and byte slicing.
 
 The canonical provider now has:
 
@@ -315,9 +315,10 @@ titan.string
 
 `peg` precedes `string`; otherwise preserve the current seven-root order so
 existing declaration and archive order changes only by appending the two new
-modules. This is not a topological order: while processing `titan.os`, the
-compiler recursively loads its `titan.string` dependency (and in turn
-`titan.peg`) before those modules appear later as explicit requested roots.
+modules. This is not a topological order: while processing `titan.net` and
+`titan.os`, the compiler recursively loads their `titan.string` dependency
+(and in turn `titan.peg`) before those modules appear later as explicit
+requested roots.
 
 Recommended source layout:
 
@@ -341,14 +342,16 @@ titan/
 ```
 
 The exact contributor split may change to keep files coherent, but it must not
-create additional logical modules. The canonical main owns every module
-variable needed by contributors and the sole final initializer.
+create additional logical modules. Each canonical main owns the complete
+public API, every contributor has only module-local top-level declarations,
+and the main owns every module variable needed by contributors plus the sole
+final initializer.
 
 Because `string` is a Titan type keyword, examples use an alias:
 
 ```titan
 local str = import "string"
-local first, last = str.find("alpha-42", "[a-z]+")
+local first, last = str.find("alpha-42", "-")
 ```
 
 ## 5. Private LPegLabel embedding
@@ -695,12 +698,18 @@ A callable table remains a query capture only when passed to
 and rejects fractional/out-of-range values before the pinned C code narrows
 them; its native range is `0..SHRT_MAX`.
 
+Internal relabel and regex callbacks use fixed parameters when their
+constructed capture shape is fixed. The public callback slots remain
+variadic/flexible where arbitrary user patterns make the run genuinely open;
+adjustment-aware callable compatibility admits the fixed helpers because their
+additional `value` parameters accept both nil and the tail element.
+
 ### 6.5 Matching
 
 ```titan
 function Pattern:match(subject: string,
                        init: integer?,
-                       ...: value): (...: value)
+                       ...: value): (value, ...: value)
 ```
 
 Nil/omitted `init` means 1. Matching is anchored at normalized `init`. A
@@ -740,8 +749,8 @@ Initial positions deliberately preserve LPeg behavior while avoiding
 Normalize with checked Titan arithmetic, then pass a safe positive position to
 the engine.
 
-The method's flexible `value` result and its extra match arguments are subject
-to Titan's documented 200-element flexible/variadic bounds. This is a language
+The method's fixed `value` prefix, flexible `value` tail, and extra match
+arguments are subject to Titan's documented bounds. This is a language
 boundary, not a smaller LPegLabel capture limit.
 
 ### 6.6 Locale and engine controls
@@ -819,10 +828,10 @@ function compile(candidate: value,
                  definitions: {integer: Definition}?): Pattern
 function match(subject: string,
                candidate: value,
-               init: integer?): (...: value)
+               init: integer?): (value, ...: value)
 function find(subject: string,
               candidate: value,
-              init: integer?): (...: integer?)
+              init: integer?): (integer?, integer?)
 function gsub(subject: string,
               candidate: value,
               replacement: value): string
@@ -842,9 +851,10 @@ and `gsub` likewise accept either form. They weakly cache only
 definition-free source strings. `gsub` returns only the transformed string,
 matching relabel rather than `string.gsub`.
 
-Relabel `find` uses a flexible optional-integer result to preserve upstream
-arity: success returns start and inclusive end, including `last == first - 1`
-for an empty match, while miss returns exactly one nil.
+Relabel `find` uses a fixed option pair: success returns start and inclusive
+end, including `last == first - 1` for an empty match, while miss returns
+`nil, nil`. A caller that consumes only the first result discards the second
+through ordinary call adjustment.
 
 As upstream does, `compile(pattern, definitions)` returns the pattern and
 ignores the definition collection; definitions participate only while parsing
@@ -948,12 +958,16 @@ function byte(subject: string,
               last: integer?): (...: integer)
 function char(...: integer): string
 
+function find(subject: string,
+              needle: string,
+              init: integer?): (integer?, integer?)
+
 function format(format_string: string, ...: value): string
 function pack(format_string: string, ...: value): string
 function packsize(format_string: string): integer
 function unpack(format_string: string,
                 data: string,
-                position: integer?): (...: value)
+                initial: integer?): (value, ...: value)
 
 function tostring(candidate: value): string
 ```
@@ -964,7 +978,10 @@ Common rules:
 - public positions are one-based and inclusive;
 - negative indices count from the end;
 - `sub` and `byte` clamp zero and out-of-range indices exactly as Lua 5.5
-  does; `unpack` normalizes zero and a negative overshoot to byte 1, accepts
+  does; literal `find` uses the same initial-position normalization and returns
+  one-based inclusive bounds or the fixed pair `nil, nil`; `unpack` normalizes
+  zero and
+  a negative overshoot to byte 1, accepts
   an initial position through `#data + 1`, and rejects a larger positive
   position instead of clamping it;
 - arithmetic and allocation sizes are checked before conversion to C
@@ -994,11 +1011,13 @@ Nil/omitted `last` in `sub` means -1; nil/omitted `separator` in `rep` means
 the empty string; nil/omitted `first` in `byte` means 1; nil/omitted `last` in
 `byte` defaults to the same raw supplied/defaulted `first` before each endpoint
 is normalized (so `byte(s, 0)` and a negative overshoot return no values, as in
-Lua 5.5); and nil/omitted `position` in `unpack` means 1. An empty byte interval
+Lua 5.5); and nil/omitted `initial` in `unpack` means 1. An empty byte interval
 returns no values. `char()` returns the empty string and every argument must be
 in `[0,255]`.
 
-Titan variadic/flexible functions have a 200-element bound. Consequently:
+Titan variadic/flexible tails have a 200-element bound. The string API also
+caps projected result lists at 200 total values, including any fixed prefix.
+Consequently:
 
 - `byte` returns at most 200 byte values per call;
 - `char`, `format`, and `pack` accept at most 200 variadic values;
@@ -1176,11 +1195,9 @@ function RegexMatch:group_count(): integer
 function RegexMatch:group_span(index: integer): Span?
 function RegexMatch:whole(): string
 function RegexMatch:group(index: integer): string?
-function RegexMatch:values(): (...: string?)
-function Regex:find(subject: string,
-                    init: integer?): RegexMatch?
+function RegexMatch:values(): (string?, ...: string?)
 function Regex:match(subject: string,
-                     init: integer?): (...: string?)
+                     init: integer?): RegexMatch?
 function Regex:gmatch(subject: string,
                       init: integer?): () -> RegexMatch?
 function Regex:gsub(subject: string,
@@ -1188,15 +1205,12 @@ function Regex:gsub(subject: string,
                     maximum: integer?): (string, integer)
 ```
 
-and source-string conveniences:
+and source-expression conveniences:
 
 ```titan
-function find(subject: string,
-              expression: string,
-              init: integer?): (...: value)
 function match(subject: string,
                expression: string,
-               init: integer?): (...: string?)
+               init: integer?): RegexMatch?
 function gmatch(subject: string,
                 expression: string,
                 init: integer?): () -> RegexMatch?
@@ -1212,19 +1226,14 @@ Compiled methods avoid repeated parsing.
 Nil/omitted `init` means 1, and nil/omitted `maximum` selects the default
 substitution bound described below.
 
-Result shape matches Lua:
+Result shape is deliberately typed rather than Lua-shaped:
 
-- `find` uses a flexible `value` result so success returns start, inclusive
-  end, then capture substrings, while failure returns exactly one nil just as
-  Lua does;
-- `match` returns capture substrings, or the whole match when there are no
-  groups; no match returns nil;
+- compiled and source-expression `match` return `RegexMatch?`;
+- callers explicitly use `whole`, `group`, `span`, or `values` to select the
+  desired projection;
 - each `gmatch` iteration returns one non-nil typed `RegexMatch`; its
-  `whole`, `group`, and `values` methods recover the Lua-style text results;
+  `whole`, `group`, and `values` methods recover text results;
 - `gsub` returns transformed string and match count.
-
-`Regex:find` is the lower-level span API needed by implementations and clients
-that want group positions rather than substrings.
 
 Each match roots the exact subject it indexes. The span accessors return fresh
 `Span` records, not references that can mutate the match's local state.
@@ -1367,9 +1376,10 @@ is an error, not literal text. Literal braces must be escaped.
   so an unbounded repetition of that reference is rejected before it can form
   a non-consuming loop.
 
-Reject more than 198 capture groups with a labeled error. The top-level
-`find` result needs two positions plus every capture, so 198 is the largest
-global count that fits Titan's 200-element flexible-result contract.
+Reject more than 200 capture groups with a labeled error.
+`RegexMatch:values` can expose all 200 groups within Titan's
+200-value projection contract: one fixed optional string plus at most 199
+flexible optional strings.
 
 ### 9.5 Labeled diagnostics
 
@@ -1772,8 +1782,8 @@ Port every pinned expression-language behavior case and every
   repetition after `^`, and recovery;
 - weak cache reuse followed by collection;
 - `match`, leftmost `find`, empty inclusive ranges, and relabel `gsub`;
-- Lua `select('#', ...)` proving relabel `find` returns two values on success
-  and exactly one nil on miss;
+- Lua `select('#', ...)` proving relabel `find` returns its fixed pair on
+  success and miss;
 - exact labeled position/line/column/source/caret messages at EOF,
   CRLF, and multiline errors, with an explicit snapshot for Titan's corrected
   `line_column` divergence.
@@ -1831,10 +1841,12 @@ Port all 89 upstream assertions, then add:
   `\s` membership (vertical tab yes, form feed no), and locale invariance;
 - exact labeled regex diagnostics at beginning, middle, EOF, and
   multiline/CRLF input;
-- Lua `select('#', ...)` checks for `find` miss, success, and trailing nil
-  capture slots; whole/no-capture versus capture result shapes for `find` and
-  `match`;
-- 198-group success plus labeled 199/200-group rejection;
+- literal `find` differential checks over metacharacters, empty needles,
+  extreme initial positions, NUL/high bytes, and exact fixed-pair result
+  values;
+- typed compiled/source `match` records and `values` preserving trailing nil
+  capture slots;
+- 200-group success plus labeled 201-group rejection;
 - generic-for over a match whose group 1 is unmatched, proving the non-nil
   `RegexMatch` iterator control value;
 - empty-match progress at start, between bytes, and end, with exact `gmatch`
@@ -1963,11 +1975,11 @@ regression, and no raw LPegLabel error escapes.
 2. Port format and pack languages through C99 FFI with exact per-slot Lua C
    conversions and explicit typed C variadic calls.
 3. Add Lua 5.5 differential and GC/error tests.
-4. Audit existing standard-library byte/string helpers. Reuse
-   `titan.string.sub` in `titan.os`; retain the ABI-0.18 UV byte helpers in
-   `titan.net`, where they preserve arbitrary binary-delimiter search and the
-   deliberately narrow exact net/UV delayed-DNS test image without pulling in
-   the full `string -> peg -> LPegLabel` dependency chain.
+4. Audit existing standard-library byte/string helpers. Use
+   `titan.string.find` and `titan.string.sub` in both `titan.net` and
+   `titan.os`; keep the delayed-DNS test honest by building the exact complete
+   `peg -> string -> net` dependency closure. Remove the transient public UV
+   byte helpers that no production facade needs.
 
 Exit: every agreed non-regex function matches the local Lua 5.5 oracle over
 the documented typed input domain and within Titan's 200-value boundary, and
@@ -1980,7 +1992,8 @@ introducing fixture-only dependency machinery.
    paths and stamps.
 2. Extend installed/source runtime builds, current-layout publisher
    validation, licenses, cleanup, snapshots, and smokes.
-3. Preserve/recheck the historical seven-interface fixture and, if adopted,
+3. Recheck the current seven pre-existing interfaces, refreshing the exact UV
+   fixture for the deliberate prototype helper retirement, and, if adopted,
    generate/review separate peg/string interface snapshots.
 4. Prove bundled/system, dynamic/static, clean-search-path, and
    clean/current-layout publication behavior.
@@ -2060,7 +2073,7 @@ acceptance is:
 | Regex first client in new `string` module | Sections 8-9 and one-way dependency graph |
 | Port linked `pegex.lua` | Exact commit, dialect, upstream assertions, attribution |
 | Better invalid-regex errors using labels | Structured labels and diagnostic matrix in sections 9.5 and 13.4 |
-| Regex-backed `find/gmatch/gsub/match` | Exact public signatures/results in section 9.1 |
+| Typed regex `match`/`gmatch`/`gsub` plus literal `find` | Exact public signatures/results in sections 8.2 and 9.1 |
 | Rest of string library in Titan/C99, no shim | Sections 8.2-8.6; only `dump` is an explicit review exclusion |
 | Add `tostring` and identify other Lua conversion use | Section 8.3: only `format %s` shares `luaL_tolstring` |
 | No installed lpeglabel/relabel runtime dependency | Private archive, clean search-path, static/dynamic isolation proofs |

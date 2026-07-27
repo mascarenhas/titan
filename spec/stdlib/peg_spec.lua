@@ -27,12 +27,12 @@ local peg = import "peg"
 
 local function runtime_callback(
     subject: string, position: integer,
-    whole: string): (...: value)
+    whole: string): (integer, string, string, string)
   return position + 1, "titan-runtime", whole, subject
 end
 
 local function delayed_callback(
-    first: value, ...: value): (...: value)
+    first: value, ...: value): (string, value, ...: value)
   return "titan-function", first, ...
 end
 
@@ -45,6 +45,13 @@ local function fold_callback(
     index = index + 1
   end
   return total
+end
+
+local function no_results(): ()
+end
+
+local function first_only(first: value): value
+  return first
 end
 
 function recursive(): peg.Pattern
@@ -73,6 +80,23 @@ function fold_pattern(): peg.Pattern
       peg.constant(7)),
     fold_callback)
 end
+
+function zero_runtime_pattern(): peg.Pattern
+  return peg.runtime(no_results)
+end
+
+function zero_match_time_pattern(): peg.Pattern
+  return peg.match_time(peg.succeed(), no_results)
+end
+
+function zero_function_pattern(): peg.Pattern
+  return peg.function_capture(peg.succeed(), no_results)
+end
+
+function fixed_function_pattern(): peg.Pattern
+  return peg.function_capture(
+    peg.constant("first", "ignored"), first_only)
+end
 ]]
 
 describe("titan.peg", function()
@@ -85,6 +109,7 @@ describe("titan.peg", function()
         workspace = async_stdlib.workspace("peg")
         for _, name in ipairs({
             "peg", "native", "combinators", "captures",
+            "relabel", "relabel_parser",
         }) do
             async_stdlib.write_source(
                 workspace, "titan.peg." .. name,
@@ -556,6 +581,10 @@ describe("titan.peg", function()
             assert(packed.n == 2)
             assert(packed[1] == "titan-function" and packed[2] == "x")
             assert(probe.fold_pattern():match("") == 40)
+            assert(probe.zero_runtime_pattern():match("") == nil)
+            assert(probe.zero_match_time_pattern():match("") == nil)
+            assert(probe.zero_function_pattern():match("") == 1)
+            assert(probe.fixed_function_pattern():match("") == "first")
 
             local events = {}
             local delayed = peg.function_capture(

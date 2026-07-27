@@ -1,6 +1,11 @@
 local assert = require "luassert"
 local async_stdlib = require "spec.support.async_stdlib"
 
+local REPO = async_stdlib.repo
+local LPEGLABEL_ARCHIVE =
+    REPO .. "/lpeglabel-build/libtitan-lpeglabel.a"
+local LPEGLABEL_CPPFLAGS = "-I" .. REPO .. "/vendor/lpeglabel"
+
 local function quote(word)
     return "'" .. tostring(word):gsub("'", "'\\''") .. "'"
 end
@@ -47,20 +52,34 @@ describe("titan.string", function()
     local layout
 
     setup(function()
+        assert.truthy(exists(LPEGLABEL_ARCHIVE),
+            "run make lpeglabel before titan.string specs")
         workspace = async_stdlib.workspace("string-core")
-        async_stdlib.write_source(
-            workspace, "titan.string.string",
-            async_stdlib.read("titan/string/string.titan"))
-        async_stdlib.write_source(
-            workspace, "titan.string.bytes",
-            async_stdlib.read("titan/string/bytes.titan"))
-        async_stdlib.write_source(
-            workspace, "titan.string.format",
-            async_stdlib.read("titan/string/format.titan"))
-        async_stdlib.write_source(
-            workspace, "titan.string.pack",
-            async_stdlib.read("titan/string/pack.titan"))
+        for _, name in ipairs({
+            "peg", "native", "combinators", "captures",
+            "relabel", "relabel_parser",
+        }) do
+            async_stdlib.write_source(
+                workspace, "titan.peg." .. name,
+                async_stdlib.read("titan/peg/" .. name .. ".titan"))
+        end
         layout = async_stdlib.exact_layout(workspace)
+        async_stdlib.compile(workspace, "titan.peg", {
+            layout = layout,
+            cppflags = LPEGLABEL_CPPFLAGS,
+            extra_objects = { LPEGLABEL_ARCHIVE },
+        })
+        async_stdlib.register_exact_provider(layout, "titan.peg")
+
+        for _, name in ipairs({
+            "string", "bytes", "format", "pack",
+            "regex_api", "regex_compile", "regex_parser",
+        }) do
+            async_stdlib.write_source(
+                workspace, "titan.string." .. name,
+                async_stdlib.read(
+                    "titan/string/" .. name .. ".titan"))
+        end
         async_stdlib.compile(workspace, "titan.string", {
             layout = layout,
             cppflags = "",
@@ -81,7 +100,8 @@ describe("titan.string", function()
 
     local function run(source)
         local lua_path = workspace .. "/?.lua;;"
-        local cpath = workspace .. "/?.so;;"
+        local cpath = workspace .. "/?.so;" ..
+            workspace .. "/titan-runtime/bootstrap/?.so;;"
         local command = table.concat({
             "env -u LUA_PATH -u LUA_CPATH" ..
                 " -u LUA_PATH_5_5 -u LUA_CPATH_5_5",
@@ -154,6 +174,49 @@ describe("titan.string", function()
             assert(select("#", str.byte("abc", -1000)) == 0)
             assert(select("#",
                 str.byte("x", math.maxinteger, math.maxinteger)) == 0)
+        ]])
+    end)
+
+    it("finds literal byte strings with binary-safe Lua position semantics",
+    function()
+        run([[
+            local native = string
+            local str = require "titan.string"
+            local subjects = {
+                "", "abcabc", "a\0b\0c", native.char(0, 255, 0, 255),
+            }
+            local needles = {
+                "", "a", "abc", "\0", "\0b", native.char(255, 0), "missing",
+            }
+            local positions = {
+                math.mininteger, -1000, -5, -1, 0,
+                1, 2, 5, 1000, math.maxinteger,
+            }
+
+            for _, subject in ipairs(subjects) do
+                for _, needle in ipairs(needles) do
+                    for _, position in ipairs(positions) do
+                        local actual =
+                            table.pack(str.find(subject, needle, position))
+                        local expected =
+                            table.pack(native.find(
+                                subject, needle, position, true))
+                        assert(actual.n == 2)
+                        for index = 1, 2 do
+                            assert(actual[index] == expected[index])
+                        end
+                    end
+                end
+            end
+
+            local found = table.pack(str.find("a\0b\0c", "\0b"))
+            assert(found.n == 2 and found[1] == 2 and found[2] == 3)
+            local missing = table.pack(str.find("abc", "z"))
+            assert(missing.n == 2 and missing[1] == nil and
+                   missing[2] == nil)
+            assert(not pcall(str.find, 42, "2"))
+            assert(not pcall(str.find, "42", 2))
+            assert(not pcall(str.find, "42", "2", 1.5))
         ]])
     end)
 
@@ -415,6 +478,8 @@ describe("titan.string", function()
                     table.pack(str.unpack(case[1], actual)),
                     table.pack(native.unpack(case[1], expected)))
             end
+            local empty_unpack = table.pack(str.unpack("", ""))
+            assert(empty_unpack.n == 1 and empty_unpack[1] == 1)
 
             local fixed = {
                 "", "bBhHlLjJTfnd", "i1i2i4i8i16I1I16",

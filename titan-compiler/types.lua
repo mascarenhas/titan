@@ -794,14 +794,23 @@ local function function_compatible(expected, actual)
         return false
     end
 
-    -- Do not admit hidden fixed parameters. Even an expected variadic tail is
-    -- optional, so its callers do not promise to supply those positions.
-    if #actual.params > #expected.params then
-        return false
+    for i = 1, math.min(#actual.params, #expected.params) do
+        if not slot_compatible(actual.params[i], expected.params[i]) then
+            return false
+        end
     end
 
-    for i = 1, #actual.params do
-        if not slot_compatible(actual.params[i], expected.params[i]) then
+    -- Calls through a shorter expected fixed prefix adjust omitted arguments
+    -- upward with nil. If the expected type also has an input tail, each extra
+    -- actual fixed slot can instead receive one of its elements. The actual
+    -- slot must therefore accept every value that adjustment can place there.
+    for i = #expected.params + 1, #actual.params do
+        if not slot_compatible(actual.params[i], types.Nil()) then
+            return false
+        end
+        if expected.varargtype
+           and not slot_compatible(actual.params[i],
+                                   expected.varargtype) then
             return false
         end
     end

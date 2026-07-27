@@ -249,7 +249,12 @@ describe("Titan types", function()
                 { "fixed actual ignores expected tail", fn({i}, {}, i), fn({i}), true },
                 { "matching tails", fn({i}, {}, i), fn({i}, {}, i), true },
                 { "incompatible observed tails", fn({i}, {}, i), fn({i}, {}, s), false },
-                { "hidden actual fixed parameter", fn({i}, {}, i), fn({i, i}), false },
+                { "nilable hidden actual fixed parameter", fn({i}), fn({i, types.Option(i)}), true },
+                { "value hidden actual fixed parameter", fn({i}), fn({i, types.Value()}), true },
+                { "non-nilable hidden actual fixed parameter", fn({i}), fn({i, i}), false },
+                { "expected tail reaches hidden actual fixed parameter", fn({i}, {}, i), fn({i, types.Option(i)}), true },
+                { "expected tail incompatible with hidden actual fixed parameter", fn({i}, {}, i), fn({i, types.Option(s)}), false },
+                { "all hidden actual fixed parameters are checked", fn({i}), fn({i, types.Option(i), s}), false },
             }
             for _, case in ipairs(cases) do
                 assert.same(case[4], types.compatible(case[2], case[3]),

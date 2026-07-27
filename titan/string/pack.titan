@@ -343,7 +343,8 @@ local function next_pack_argument(arguments: {value},
   return arguments[index]
 end
 
-function pack(format_string: string, ...: value): string
+local function _string_pack(format_string: string,
+                            ...: value): string
   local state = new_pack_state(format_string)
   local builder = new_string_builder()
   local arguments: {value} = {...}
@@ -441,7 +442,7 @@ function pack(format_string: string, ...: value): string
   return builder_finish(builder)
 end
 
-function packsize(format_string: string): integer
+local function _string_packsize(format_string: string): integer
   local state = new_pack_state(format_string)
   local total_size = 0
   while not pack_format_at_end(state) do
@@ -566,8 +567,8 @@ local function flexible_values(results: {value},
   return results[index], flexible_values(results, index + 1)
 end
 
-function unpack(format_string: string, data: string,
-                initial: integer?): (...: value)
+local function _string_unpack(format_string: string, data: string,
+                              initial: integer?): (value, ...: value)
   local raw_initial = 1
   if initial then raw_initial = initial end
   local position =

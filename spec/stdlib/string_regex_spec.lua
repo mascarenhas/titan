@@ -33,6 +33,7 @@ describe("titan.string regex", function()
         workspace = async_stdlib.workspace("string-regex")
         for _, name in ipairs({
             "peg", "native", "combinators", "captures",
+            "relabel", "relabel_parser",
         }) do
             async_stdlib.write_source(
                 workspace, "titan.peg." .. name,
@@ -183,7 +184,7 @@ describe("titan.string regex", function()
             }
             assert(#cases == 89)
             for index, case in ipairs(cases) do
-                local found = str.compile_regex(case[1]):find(case[2])
+                local found = str.compile_regex(case[1]):match(case[2])
                 local actual = found and found:whole() or false
                 assert(actual == case[3],
                     ("case %d / %q / %q: %q ~= %q"):format(
@@ -200,7 +201,8 @@ describe("titan.string regex", function()
             local regex = str.compile_regex("(a|(b))+(c)?")
             assert(regex:source() == "(a|(b))+(c)?")
             assert(regex:group_count() == 3)
-            local found = regex:find("xxabb", 1)
+            assert(not pcall(function() return regex.find end))
+            local found = regex:match("xxabb", 1)
             assert(found and found:whole() == "abb")
             assert(found:group_count() == regex:group_count())
             assert(found:group(1) == "b")
@@ -216,25 +218,23 @@ describe("titan.string regex", function()
             assert(not pcall(found.group, found, 0))
             assert(not pcall(found.group_span, found, 4))
 
-            local packed = table.pack(str.find("a", "(a)?(b)?"))
-            assert(packed.n == 4 and packed[1] == 1 and
-                   packed[2] == 1 and packed[3] == "a" and
-                   packed[4] == nil)
-            packed = table.pack(str.find("x", "z"))
-            assert(packed.n == 1 and packed[1] == nil)
-            packed = table.pack(str.match("a", "(a)?(b)?"))
+            local source_match = str.match("a", "(a)?(b)?")
+            assert(source_match and source_match:whole() == "a")
+            local packed = table.pack(source_match:values())
             assert(packed.n == 2 and packed[1] == "a" and
                    packed[2] == nil)
-            packed = table.pack(str.match("xxab", "ab"))
+            source_match = str.match("xxab", "ab")
+            assert(source_match and source_match:whole() == "ab")
+            packed = table.pack(source_match:values())
             assert(packed.n == 1 and packed[1] == "ab")
 
-            assert(str.match("ba", "^a", 2) == "a")
+            assert(str.match("ba", "^a", 2):whole() == "a")
             assert(str.match("ba", "^a", 1) == nil)
-            assert(str.match("ba", "^b", 0) == "b")
-            assert(str.match("ba", "^b", -99) == "b")
-            assert(str.match("ba", "^a", -1) == "a")
+            assert(str.match("ba", "^b", 0):whole() == "b")
+            assert(str.match("ba", "^b", -99):whole() == "b")
+            assert(str.match("ba", "^a", -1):whole() == "a")
             assert(str.match("ba", "a", 4) == nil)
-            assert(str.match("", "^$", 1) == "")
+            assert(str.match("", "^$", 1):whole() == "")
         ]=])
     end)
 
@@ -242,20 +242,24 @@ describe("titan.string regex", function()
     function()
         run([=[
             local str = require "titan.string"
-            assert(str.match("aaab", "a*ab") == "aaab")
-            assert(str.match("aaab", "a+ab") == "aaab")
-            assert(str.match("aab", "(a)\\1b") == "a")
-            assert(str.match("aa", "((a))\\1") == "a")
+            local function whole(subject, expression, init)
+                local found = str.match(subject, expression, init)
+                return found and found:whole() or nil
+            end
+            assert(whole("aaab", "a*ab") == "aaab")
+            assert(whole("aaab", "a+ab") == "aaab")
+            assert(whole("aab", "(a)\\1b") == "aab")
+            assert(whole("aa", "((a))\\1") == "aa")
             assert(str.match("b", "(a)|(b)\\1") == nil)
 
-            local nested = str.compile_regex("(ab*)+"):find("xxabbbab!")
+            local nested = str.compile_regex("(ab*)+"):match("xxabbbab!")
             assert(nested and nested:whole() == "abbbab")
             assert(nested:group(1) == "ab")
-            nested = str.compile_regex("(a+b+)*"):find("aaabbabx")
+            nested = str.compile_regex("(a+b+)*"):match("aaabbabx")
             assert(nested and nested:whole() == "aaabbab")
             assert(nested:group(1) == "ab")
             nested = str.compile_regex(
-                "((?:ab*)+)-\\1"):find("xabbbab-abbbab!")
+                "((?:ab*)+)-\\1"):match("xabbbab-abbbab!")
             assert(nested and nested:whole() == "abbbab-abbbab")
             assert(nested:group(1) == "abbbab")
 
@@ -265,19 +269,19 @@ describe("titan.string regex", function()
                 assert(str.compile_regex(expression):group_count() == 1)
             end
             assert(str.compile_regex("(a)?\\1"):match("") == nil)
-            assert(str.compile_regex("(a?)\\1"):match("") == "")
+            assert(str.compile_regex("(a?)\\1"):match(""):whole() == "")
 
-            assert(str.match("\0\xff", "[\0\xff]+") == "\0\xff")
-            assert(str.match("\r", ".") == "\r")
+            assert(whole("\0\xff", "[\0\xff]+") == "\0\xff")
+            assert(whole("\r", ".") == "\r")
             assert(str.match("\n", ".") == nil)
-            assert(str.match("\v", "\\s") == "\v")
+            assert(whole("\v", "\\s") == "\v")
             assert(str.match("\f", "\\s") == nil)
-            assert(str.match("\f", "\\S") == "\f")
-            assert(str.match(" foo", "\\<foo") == "foo")
-            assert(str.match("foo!", "foo\\>") == "foo")
-            assert(str.match("-ac", "[-a-c]+") == "-ac")
-            assert(str.match("c-", "[a-c-]+") == "c-")
-            assert(str.match("a-c", "[a\\-c]+") == "a-c")
+            assert(whole("\f", "\\S") == "\f")
+            assert(whole(" foo", "\\<foo") == "foo")
+            assert(whole("foo!", "foo\\>") == "foo")
+            assert(whole("-ac", "[-a-c]+") == "-ac")
+            assert(whole("c-", "[a-c-]+") == "c-")
+            assert(whole("a-c", "[a\\-c]+") == "a-c")
         ]=])
     end)
 
@@ -341,12 +345,12 @@ describe("titan.string regex", function()
             assert(after_newline:find(
                 "at L2:C2 (byte 9)", 1, true), after_newline)
 
-            local groups198 = string.rep("()", 198)
-            local regex = str.compile_regex(groups198)
-            assert(regex:group_count() == 198)
-            assert(select("#", str.find("", groups198)) == 200)
-            diagnostic(string.rep("()", 199), "too_many_captures")
-            diagnostic(string.rep("()", 200), "too_many_captures")
+            local groups200 = string.rep("()", 200)
+            local regex = str.compile_regex(groups200)
+            assert(regex:group_count() == 200)
+            local found = regex:match("")
+            assert(found and select("#", found:values()) == 200)
+            diagnostic(string.rep("()", 201), "too_many_captures")
         ]=])
     end)
 
@@ -483,7 +487,9 @@ describe("titan.string regex", function()
 
             collectgarbage("incremental")
             for _ = 1, 12 do collectgarbage("collect") end
-            assert(str.match("zz-aa-aa", "((a)+)-\\1") == "aa")
+            local found = str.match("zz-aa-aa", "((a)+)-\\1")
+            assert(found and found:whole() == "aa-aa")
+            assert(found:group(1) == "aa")
         ]=])
     end)
 end)

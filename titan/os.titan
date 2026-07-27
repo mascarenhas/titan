@@ -116,13 +116,11 @@ local function read_output_until(process: Process, state: ReadState,
         count = count + 1
         chunks[count] = chunk
         local boundary = tail .. chunk
-        local match = uv._bytes_find {
-          haystack = boundary,
-          needle = delimiter,
-        }
+        local match: integer? = str.find(boundary, delimiter)
         total = total + #chunk
-        if match >= 0 then
-          local match_end = total - #boundary + match + #delimiter
+        if match then
+          local match_end =
+            total - #boundary + (match as integer) - 1 + #delimiter
           local result_end = match_end
           if chop then result_end = result_end - #delimiter end
           local all = join_chunks(chunks, 1, count)

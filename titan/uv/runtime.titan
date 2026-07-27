@@ -59,7 +59,8 @@ local record Buffer
   local bytes: Bytes
 end
 
-function _bytes_find(haystack: string, needle: string): integer
+local function _bytes_find(haystack: string,
+                           needle: string): integer
   local haystack_length = #haystack
   local needle_length = #needle
   if needle_length == 0 then return 0 end
@@ -81,24 +82,6 @@ function _bytes_find(haystack: string, needle: string): integer
     offset = offset + 1
   end
   return -1
-end
-
--- Compatibility helper retained in the published ABI-0.18 interface.
--- Keep it self-contained because the delayed-callback tests deliberately
--- compile isolated titan.uv variants together with the exact net facade.
-function _bytes_slice(data: string, offset: integer,
-                      length: integer): string
-  if offset < 0 or length < 0 or offset > #data or
-      length > #data - offset then
-    raise "byte slice is out of range"
-  end
-  local bytes = allocate_bytes(length)
-  if length > 0 then
-    local source = data as const *ffi.titan_ffi_char
-    cstring.memcpy(bytes.data, source + offset,
-                   length as cstring.size_t)
-  end
-  return bytes_string(bytes, length)
 end
 
 function _loop()

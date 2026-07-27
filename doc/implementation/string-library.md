@@ -12,11 +12,15 @@ The user-facing contract is in the
 ## Module and provider placement
 
 The source is a folder ensemble rooted at `titan/string/string.titan`.
-Contributors divide the implementation into byte operations, formatting,
-packing, regex parsing/compilation, and the public regex API. They are parsed
-as separate files but combined into one dense AST, one checker/code-generator
-pass, one `titan_string_*` protocol, one generated object, and one
-`titan/string.lua` shim.
+The main owns every public record, method, and function. Contributors contain
+only module-local records, state, and implementation helpers divided among
+byte operations, formatting, packing, and regex parsing/compilation. They are
+parsed as separate files but combined into one dense AST, one
+checker/code-generator pass, one `titan_string_*` protocol, one generated
+object, and one `titan/string.lua` shim. Thin main-file wrappers preserve each
+helper's exact fixed prefix and any genuinely variadic or flexible tail, so
+return-all forwarding does not accidentally loosen or truncate the public
+result shape.
 
 The dependency direction is:
 
@@ -28,17 +32,19 @@ private namespaced LPegLabel archive
                 |
                 v
           titan.string
-                |
-                v
-            titan.os
+             /     \
+            v       v
+       titan.net  titan.os
 ```
 
 `titan.peg` does not import `titan.string`; its relabel implementation retains
 small private byte/diagnostic helpers to avoid a cycle. `titan.string` uses the
 typed PEG surface and never reaches the embedded engine through a private raw
-escape hatch. `titan.os` dogfoods `titan.string.sub`; `titan.net` deliberately
-retains the narrow uv-owned byte helpers needed by its isolated delayed-DNS
-test provider, avoiding an otherwise unrelated PEG/native payload dependency.
+escape hatch. Both `titan.net` and `titan.os` dogfood the literal
+`titan.string.find` and byte-preserving `titan.string.sub` operations. The
+isolated delayed-DNS fixture therefore constructs complete exact PEG and
+string providers before its exact net facade; production already places all
+nine logical modules and LPegLabel in one static bundle.
 
 The installed standard build requests nine roots in stable order:
 
@@ -55,8 +61,9 @@ titan.string
 ```
 
 The request order preserves the previous seven roots and appends PEG before
-string; it is not topological. Recursive import loading resolves the
-`titan.os` to `titan.string` to `titan.peg` chain while `titan.os` is processed.
+string; it is not topological. Recursive import loading resolves both the
+`titan.net`/`titan.os` to `titan.string` to `titan.peg` chains while those
+facades are processed.
 
 The paired `titan.so`/`titan.a` therefore contains nine logical protocols and
 nine archive metadata keys. The DSO exposes ten Lua openers: bare
@@ -112,6 +119,15 @@ The shared normalizers implement Lua 5.5's two endpoint rules without negating
 `byte` deliberately defaults its ending position from the raw initial
 argument before either endpoint is normalized. Its result helper emits a
 flexible integer tail and checks the 200-element bound before recursion.
+
+Literal `find` uses the initial-position normalizer, then scans the bounded
+`(pointer, length)` window with a first-byte check and `memcmp`. It returns
+one-based inclusive bounds, including `first, first - 1` for an empty needle,
+or the fixed pair `nil, nil` on failure. The fixed option pair exposes the
+actual two-slot protocol without an unnecessarily open result tail; ordinary
+call adjustment discards the second slot when a caller requests only the
+first. The scan never treats NUL as a terminator and does not allocate while
+either raw pointer is live.
 
 `lower` and `upper` convert each source byte to C `unsigned char` before
 calling `tolower`/`toupper`. This avoids undefined behavior for a negative
@@ -210,9 +226,10 @@ narrow signed value. Float loads use `memcpy` into an aligned automatic C
 scalar rather than dereferencing an unaligned pointer.
 
 Decoded values accumulate in a traced `{value}` array. The final one-based
-position is appended, then a bounded helper projects the array into Titan's
-flexible result. At most 199 data values are accepted because the position is
-the 200th result.
+position is appended, then a bounded helper projects the nonempty array into
+the fixed `value` prefix and flexible tail. At most 199 data values are
+accepted because the position is the 200th total result. `unpack` is therefore
+never a zero-result operation.
 
 ## Regex parser and compiler
 
@@ -242,7 +259,7 @@ Before construction, the compiler:
 * validates each single-digit backreference against a previously closed group;
 * projects the resulting PEG tree size, including continuation and capture
   wrappers, against `SHRT_MAX - 10`;
-* limits the expression to 198 capture groups.
+* limits the expression to the string API's 200-value projection bound.
 
 A private sentinel named capture is installed for every group. A participating
 group overwrites it on the current successful path; a backreference callback
@@ -261,12 +278,14 @@ participated.
 
 Match operations preserve byte offsets while callbacks may run and rederive
 raw pointers afterward. Public span accessors construct fresh records so a
-caller cannot mutate cached match state.
-
-The top-level `find` projects success to first/inclusive-last/capture values
-and failure to exactly one nil. `match` projects groups or the whole match.
-The typed `gmatch` iterator returns a non-nil `RegexMatch`, avoiding a nil
-first capture becoming generic-for termination.
+caller cannot mutate cached match state. Both compiled `Regex:match` and the
+cached source-expression `match` return `RegexMatch?`; capture projection is
+explicit through `RegexMatch:values`. This keeps the public signatures typed
+and allows all 200 groups. `RegexMatch:values` likewise has a fixed optional
+string prefix because it returns either the whole match or at least the first
+capture before its genuinely variable tail. The typed `gmatch` iterator
+likewise returns a non-nil `RegexMatch`, avoiding a nil first capture becoming
+generic-for termination.
 
 Initial positions are normalized separately from the underlying PEG engine:
 zero and negative overshoot become 1, positive overshoot is immediate

@@ -90,12 +90,12 @@ local function byte_results(subject: string, current: integer,
   return octet, byte_results(subject, current + 1, last)
 end
 
-function len(subject: string): integer
+local function _string_len(subject: string): integer
   return #subject
 end
 
-function sub(subject: string, first: integer,
-             last: integer?): string
+local function _string_sub(subject: string, first: integer,
+                           last: integer?): string
   local length = #subject
   local normalized_first = initial_position(first, length)
   local raw_last = -1
@@ -106,7 +106,7 @@ function sub(subject: string, first: integer,
                        normalized_last - normalized_first + 1)
 end
 
-function reverse(subject: string): string
+local function _string_reverse(subject: string): string
   local length = #subject
   if length == 0 then return "" end
   local output = allocate_string_bytes(length)
@@ -119,7 +119,7 @@ function reverse(subject: string): string
   return finish_string(output)
 end
 
-function lower(subject: string): string
+local function _string_lower(subject: string): string
   local length = #subject
   if length == 0 then return "" end
   local output = allocate_string_bytes(length)
@@ -134,7 +134,7 @@ function lower(subject: string): string
   return finish_string(output)
 end
 
-function upper(subject: string): string
+local function _string_upper(subject: string): string
   local length = #subject
   if length == 0 then return "" end
   local output = allocate_string_bytes(length)
@@ -149,8 +149,8 @@ function upper(subject: string): string
   return finish_string(output)
 end
 
-function rep(subject: string, count: integer,
-             separator: string?): string
+local function _string_rep(subject: string, count: integer,
+                           separator: string?): string
   if count <= 0 then return "" end
 
   local actual_separator = ""
@@ -195,8 +195,8 @@ function rep(subject: string, count: integer,
   return finish_string(output)
 end
 
-function byte(subject: string, first: integer?,
-              last: integer?): (...: integer)
+local function _string_byte(subject: string, first: integer?,
+                            last: integer?): (...: integer)
   local length = #subject
   local raw_first = 1
   if first then raw_first = first end
@@ -211,7 +211,7 @@ function byte(subject: string, first: integer?,
   return byte_results(subject, normalized_first, normalized_last)
 end
 
-function char(...: integer): string
+local function _string_char(...: integer): string
   local length = #...
   if length == 0 then return "" end
   local output = allocate_string_bytes(length)
@@ -228,7 +228,7 @@ function char(...: integer): string
   return finish_string(output)
 end
 
-function tostring(candidate: value): string
+local function _string_tostring(candidate: value): string
   local top = lua.lua_gettop(L)
   local result: value = nil
   do
@@ -239,4 +239,38 @@ function tostring(candidate: value): string
     lua.lua_settop(L, top)
   end
   return result
+end
+
+-- Search for a literal byte sequence and return one-based inclusive bounds.
+-- This is deliberately length-aware: embedded zero bytes are ordinary data.
+local function _string_find(subject: string, needle: string,
+                            init: integer?): (integer?, integer?)
+  local raw_init = 1
+  if init then raw_init = init end
+  local subject_length = #subject
+  local needle_length = #needle
+  local first = initial_position(raw_init, subject_length)
+  if first > subject_length + 1 then return nil, nil end
+  if needle_length == 0 then return first, first - 1 end
+  if first > subject_length or
+      needle_length > subject_length - first + 1 then
+    return nil, nil
+  end
+
+  local subject_bytes =
+    subject as const *ffi.titan_ffi_char
+  local needle_bytes =
+    needle as const *ffi.titan_ffi_char
+  local offset = first - 1
+  local limit = subject_length - needle_length
+  while offset <= limit do
+    if subject_bytes[offset] == needle_bytes[0] and
+        cstring.memcmp(
+          subject_bytes + offset, needle_bytes,
+          needle_length as cstring.size_t) == 0 then
+      return offset + 1, offset + needle_length
+    end
+    offset = offset + 1
+  end
+  return nil, nil
 end
