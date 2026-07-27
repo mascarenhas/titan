@@ -1,0 +1,9 @@
+local lua = foreign import "lua.h"
+local lual = foreign import "lauxlib.h"
+local ffi = foreign import "titan/ffi.h"
+local cstring = foreign import "string.h"
+local cctype = foreign import "ctype.h"
+
+-- The canonical folder main owns the foreign namespaces shared by the
+-- byte-oriented contributors. Regex support is added by a later contributor;
+-- this core deliberately has no dependency on titan.peg.

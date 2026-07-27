@@ -1,0 +1,332 @@
+-- Derived from ta-regex's pegex.lua at commit
+-- 857e48682791ba55c98a7dd99c5fc7d71c02597d.
+-- Copyright (c) 2014 Chris Emerson; MIT licensed. See
+-- LICENSES/ta-regex-LICENSE.
+--
+-- The continuation-based regex-to-PEG translation follows Marcelo Oikawa,
+-- Roberto Ierusalimschy, and Ana Lucia de Moura, "Converting regexes to
+-- Parsing Expression Grammars" (PUC-Rio, 2010), as adapted by that pinned
+-- pegex.lua.
+
+local REGEX_PATTERN_LIMIT = 32757
+
+local record RegexCompileState
+  local rules: {integer: peg.Rule}
+  local next_rule: integer
+end
+
+local function regex_group_key(index: integer): string
+  return "\0titan.regex.group." .. index
+end
+
+local function regex_group_start_key(index: integer): string
+  return "\0titan.regex.group-start." .. index
+end
+
+local function regex_saturating_add(first: integer,
+                                    second: integer): integer
+  if first > REGEX_PATTERN_LIMIT or second > REGEX_PATTERN_LIMIT or
+      first > REGEX_PATTERN_LIMIT - second then
+    return REGEX_PATTERN_LIMIT + 1
+  end
+  return first + second
+end
+
+local function regex_saturating_multiply(first: integer,
+                                         second: integer): integer
+  if first == 0 or second == 0 then return 0 end
+  if first > REGEX_PATTERN_LIMIT or second > REGEX_PATTERN_LIMIT or
+      first > REGEX_PATTERN_LIMIT // second then
+    return REGEX_PATTERN_LIMIT + 1
+  end
+  return first * second
+end
+
+local function regex_projected_size(node: RegexNode):
+                                    (integer, integer)
+  if node.kind == REGEX_EMPTY then
+    return 1, 0
+  elseif node.kind == REGEX_LITERAL then
+    return 3, 0
+  elseif node.kind == REGEX_ANY or node.kind == REGEX_CLASS then
+    return 5, 0
+  elseif node.kind == REGEX_WORD_START or node.kind == REGEX_WORD_END or
+         node.kind == REGEX_BACKREFERENCE then
+    return 8, 0
+  elseif node.kind == REGEX_GROUP then
+    local child_size, overflow =
+      regex_projected_size(node.children[1])
+    if overflow ~= 0 then return child_size, overflow end
+    local size = regex_saturating_add(child_size, 8)
+    if size > REGEX_PATTERN_LIMIT then
+      return size, node.position
+    end
+    return size, 0
+  elseif node.kind == REGEX_SEQUENCE or node.kind == REGEX_CHOICE then
+    local size = 1
+    local index = 1
+    while index <= #node.children do
+      local child = node.children[index]
+      local child_size, overflow = regex_projected_size(child)
+      if overflow ~= 0 then return child_size, overflow end
+      size = regex_saturating_add(
+        size, regex_saturating_add(child_size, 1))
+      if size > REGEX_PATTERN_LIMIT then
+        return size, child.position
+      end
+      index = index + 1
+    end
+    return size, 0
+  elseif node.kind == REGEX_REPEAT then
+    local child_size, overflow =
+      regex_projected_size(node.children[1])
+    if overflow ~= 0 then return child_size, overflow end
+    local unit = regex_saturating_add(
+      child_size, 4)
+    local size = 0
+    if node.maximum < 0 then
+      size = regex_saturating_add(
+        regex_saturating_multiply(
+          unit, regex_saturating_add(node.minimum, 1)), 8)
+    else
+      local optional = node.maximum - node.minimum
+      local optional_overhead = REGEX_PATTERN_LIMIT + 1
+      if optional <= REGEX_PATTERN_LIMIT then
+        optional_overhead = optional + 1
+      end
+      size = regex_saturating_add(
+        regex_saturating_multiply(unit, node.maximum),
+        optional_overhead)
+    end
+    if size > REGEX_PATTERN_LIMIT then
+      return size, node.position
+    end
+    return size, 0
+  end
+  return REGEX_PATTERN_LIMIT + 1, node.position
+end
+
+local function regex_word_start_capture(
+    subject: string, position: integer,
+    _whole: string): (...: value)
+  if position > #subject then return false end
+  local current = regex_byte(subject, position)
+  if not regex_is_word_byte(current) then return false end
+  if position > 1 and
+      regex_is_word_byte(regex_byte(subject, position - 1)) then
+    return false
+  end
+  return position
+end
+
+local function regex_word_end_capture(
+    subject: string, position: integer,
+    _whole: string): (...: value)
+  if position <= 1 or
+      not regex_is_word_byte(regex_byte(subject, position - 1)) then
+    return false
+  end
+  if position <= #subject and
+      regex_is_word_byte(regex_byte(subject, position)) then
+    return false
+  end
+  return position
+end
+
+local function regex_backreference_capture(
+    subject: string, position: integer,
+    first: value, ...: value): (...: value)
+  regex_initialize_state()
+  if first == _regex_group_sentinel then return false end
+  if #... ~= 1 then return false end
+  local group_first = first as integer
+  local group_after = ...[1] as integer
+  local length = group_after - group_first
+  if length < 0 or length > #subject - position + 1 then return false end
+  if length > 0 then
+    local bytes = subject as const *ffi.titan_ffi_char
+    if cstring.memcmp(
+        bytes + position - 1, bytes + group_first - 1,
+        length as cstring.size_t) ~= 0 then
+      return false
+    end
+  end
+  return position + length
+end
+
+local function regex_group_result(
+    first: value, ...: value): (...: value)
+  regex_initialize_state()
+  if first == _regex_group_sentinel then
+    return GroupSpan.new(nil)
+  end
+  if #... ~= 1 then
+    raise "internal regular-expression group capture is invalid"
+  end
+  local group_first = first as integer
+  local group_after = ...[1] as integer
+  return GroupSpan.new(Span.new(group_first, group_after - 1))
+end
+
+local function regex_compile_node(node: RegexNode,
+                                  continuation: peg.Pattern,
+                                  state: RegexCompileState?): peg.Pattern
+  if node.kind == REGEX_EMPTY then
+    return continuation
+  elseif node.kind == REGEX_LITERAL then
+    return peg.sequence(peg.literal(node.text), continuation)
+  elseif node.kind == REGEX_ANY then
+    return peg.sequence(
+      peg.difference(peg.any(), peg.literal("\n")), continuation)
+  elseif node.kind == REGEX_CLASS then
+    return peg.sequence(peg.set(node.text), continuation)
+  elseif node.kind == REGEX_WORD_START then
+    return peg.sequence(
+      peg.runtime(regex_word_start_capture), continuation)
+  elseif node.kind == REGEX_WORD_END then
+    return peg.sequence(
+      peg.runtime(regex_word_end_capture), continuation)
+  elseif node.kind == REGEX_BACKREFERENCE then
+    local captured = peg.back_capture(regex_group_key(node.number))
+    return peg.sequence(
+      peg.match_time(captured, regex_backreference_capture),
+      continuation)
+  elseif node.kind == REGEX_SEQUENCE then
+    local result = continuation
+    local index = #node.children
+    while index >= 1 do
+      result = regex_compile_node(
+        node.children[index], result, state)
+      index = index - 1
+    end
+    return result
+  elseif node.kind == REGEX_CHOICE then
+    local result = regex_compile_node(
+      node.children[1], continuation, state)
+    local index = 2
+    while index <= #node.children do
+      result = peg.choice(
+        result,
+        regex_compile_node(
+          node.children[index], continuation, state))
+      index = index + 1
+    end
+    return result
+  elseif node.kind == REGEX_GROUP then
+    -- Keep group markers as siblings rather than wrapping the whole child in
+    -- one named capture. LPeg scopes captures nested inside a named group;
+    -- sibling markers leave nested numbered groups visible to the final Cb
+    -- projection and to later backreferences.
+    local start = peg.group(
+      peg.position(), regex_group_start_key(node.number))
+    local finish = peg.group(
+      peg.sequence(
+        peg.back_capture(regex_group_start_key(node.number)),
+        peg.position()),
+      regex_group_key(node.number))
+    local body = regex_compile_node(
+      node.children[1], peg.sequence(finish, continuation), state)
+    return peg.sequence(start, body)
+  elseif node.kind == REGEX_REPEAT then
+    local atom = node.children[1]
+    local result = continuation
+    if node.maximum < 0 then
+      local active: RegexCompileState? = state
+      local owns_scope = false
+      if not active then
+        local rules: {integer: peg.Rule} = {}
+        active = RegexCompileState.new(rules, 0)
+        owns_scope = true
+      end
+      local shared = active as RegexCompileState
+      shared.next_rule = shared.next_rule + 1
+      local rule_name =
+        "\0titan.regex.repeat." .. shared.next_rule
+      local recursive = peg.variable(rule_name)
+      local body = peg.choice(
+        regex_compile_node(atom, recursive, shared), continuation)
+      shared.rules[#shared.rules + 1] =
+        peg.rule(rule_name, body)
+      if owns_scope then
+        result = peg.grammar(rule_name, shared.rules)
+      else
+        result = recursive
+      end
+    else
+      local optional_count = node.maximum - node.minimum
+      local index = 1
+      while index <= optional_count do
+        result = peg.choice(
+          regex_compile_node(atom, result, state), result)
+        index = index + 1
+      end
+    end
+    local index = 1
+    while index <= node.minimum do
+      result = regex_compile_node(atom, result, state)
+      index = index + 1
+    end
+    return result
+  end
+  raise "internal regular-expression AST node is invalid"
+  return continuation
+end
+
+local function regex_build_pattern(parsed: ParsedRegex): peg.Pattern
+  regex_initialize_state()
+  local tail = peg.position()
+  local index = 1
+  while index <= parsed.capture_count do
+    tail = peg.sequence(
+      tail,
+      peg.function_capture(
+        peg.back_capture(regex_group_key(index)),
+        regex_group_result))
+    index = index + 1
+  end
+  if parsed.anchored_end then
+    tail = peg.sequence(peg.negative(peg.any()), tail)
+  end
+  local body = regex_compile_node(parsed.root, tail, nil)
+  local complete = peg.sequence(peg.position(), body)
+
+  index = parsed.capture_count
+  while index >= 1 do
+    complete = peg.sequence(
+      peg.group(
+        peg.constant(_regex_group_sentinel),
+        regex_group_key(index)),
+      complete)
+    index = index - 1
+  end
+  return peg.table_capture(complete)
+end
+
+function compile_regex(expression: string): Regex
+  local parsed = parse_regex(expression)
+  local projected, overflow_position =
+    regex_projected_size(parsed.root)
+  projected = regex_saturating_add(
+    projected, parsed.capture_count * 14 + 12)
+  if projected > REGEX_PATTERN_LIMIT then
+    if overflow_position == 0 then
+      overflow_position = parsed.root.position
+    end
+    raise_regex_diagnostic(
+      "pattern_too_large",
+      "compiled regular expression exceeds the pattern-size limit",
+      expression, overflow_position)
+  end
+
+  local pattern: peg.Pattern? = nil
+  do
+    pattern = regex_build_pattern(parsed)
+  catch
+    raise_regex_diagnostic(
+      "pattern_too_large",
+      "compiled regular expression exceeds the pattern-size limit",
+      expression, parsed.root.position)
+  end
+  return Regex.new(
+    expression, parsed.capture_count, pattern as peg.Pattern)
+end

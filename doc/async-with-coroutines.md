@@ -641,7 +641,7 @@ carries the canonical proxy Udata rather than the private backing Table. ABI
 to use backing `Table *`. See
 [Dense Arrays](implementation/dense-arrays.md#exact-and-generic-call-paths).
 
-The rockspec and Makefile make `luarocks make` and `make test` build all seven
+The rockspec and Makefile make `luarocks make` and `make test` build all nine
 logical standard modules in paired `titan.so`/`titan.a` providers plus
 generated shims, together with the shared runtime archive containing the
 coroutine helper C object and vendored minicoro implementation. A final native

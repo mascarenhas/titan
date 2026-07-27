@@ -75,11 +75,11 @@ LIBUV_BUILD_CFLAGS ?=
 HOST_OS   := $(shell uname -s)
 HOST_ARCH := $(shell uname -m)
 
-# These are the complete inputs consumed by the later standard-library rule.
-# In bundled mode libuv's archive joins titanlib.o in the compiler's -X payload
-# so both canonical provider forms carry the same native closure. In system
-# mode pkg-config's ordered linker output stays a final-link input and no
-# system archive is copied into Titan's static provider.
+# These are the complete libuv inputs consumed by the later standard-library
+# rule. In bundled mode libuv's archive joins the compiler's ordered -X
+# payload so both canonical provider forms carry the same native closure. In
+# system mode pkg-config's ordered linker output stays a final-link input and
+# no system archive is copied into Titan's static provider.
 ifeq ($(LIBUV_MODE),bundled)
   LIBUV_LIB           := $(LIBUV_BUNDLED_LIB)
   LIBUV_INCLUDE_DIR   := $(LIBUV_SRC_DIR)/include
@@ -165,6 +165,31 @@ TITAN_SDK_ROOT_HEADERS := titan-runtime/minicoro.h titan-runtime/titan.h \
 	titan-runtime/titan_longjmp.h
 TITAN_SDK_NAMESPACED_HEADERS := titan-runtime/titan/ffi.h \
 	titan-runtime/titan/coro.h titan-runtime/titan/uv.h
+
+# Titan's public PEG module embeds one audited LPegLabel engine instead of
+# depending on the compiler-owned lpeglabel.so at run time. Keep this native
+# payload separate from libtitan.a and the installed SDK: it is a private
+# standard-library -X input. These definitions precede STDLIB_EXTRA_OBJECTS so
+# that its simply-expanded payload can place the archive explicitly.
+LPEGLABEL_VERSION := 1.6.2-1
+LPEGLABEL_COMMIT := 912b0b9e8641074408ffc2259e069b188e0c717b
+LPEGLABEL_VENDOR_DIR ?= vendor/lpeglabel
+LPEGLABEL_BUILD_DIR ?= lpeglabel-build
+LPEGLABEL_SOURCE_NAMES := lplcap.c lplcode.c lplprint.c lpltree.c lplvm.c
+LPEGLABEL_HEADER_NAMES := lplcap.h lplcode.h lplprint.h lpltree.h \
+	lpltypes.h lplvm.h titan_lpeglabel_namespace.h titan_lpeglabel.h
+LPEGLABEL_SOURCES := $(addprefix $(LPEGLABEL_VENDOR_DIR)/,$(LPEGLABEL_SOURCE_NAMES))
+LPEGLABEL_HEADERS := $(addprefix $(LPEGLABEL_VENDOR_DIR)/,$(LPEGLABEL_HEADER_NAMES))
+LPEGLABEL_OBJECTS := $(addprefix $(LPEGLABEL_BUILD_DIR)/,\
+	$(LPEGLABEL_SOURCE_NAMES:.c=.o))
+LPEGLABEL_ARCHIVE := $(LPEGLABEL_BUILD_DIR)/libtitan-lpeglabel.a
+LPEGLABEL_BUILD_CONFIG := $(LPEGLABEL_BUILD_DIR)/.titan-lpeglabel-build-config
+LPEGLABEL_ARCHIVE_CONFIG := $(LPEGLABEL_BUILD_DIR)/.titan-lpeglabel-archive-config
+LPEGLABEL_CPPFLAGS := -I$(abspath $(LPEGLABEL_VENDOR_DIR))
+LPEGLABEL_CFLAGS := -std=c99 -fPIC -fvisibility=hidden
+LPEGLABEL_LUA_HEADERS = $(ROCK_LUA_INCDIR)/lua.h \
+	$(ROCK_LUA_INCDIR)/luaconf.h $(ROCK_LUA_INCDIR)/lauxlib.h
+
 UV_TITAN_SOURCES := \
 	titan/uv/uv.titan \
 	titan/uv/file.titan \
@@ -174,20 +199,34 @@ UV_TITAN_SOURCES := \
 	titan/uv/task.titan \
 	titan/uv/tcp.titan
 UV_CONFIG_STAMP := titan-runtime/.titan-uv-build-config
-STDLIB_MODULES := coroutine uv async timer fs net os
+STDLIB_MODULES := coroutine uv async timer fs net os peg string
 STDLIB_SOS     := $(addsuffix .so,$(STDLIB_MODULES))
 STDLIB_QUALIFIED_SOS := $(addprefix titan/,$(STDLIB_SOS))
 STDLIB_ROOTS := titan.coroutine titan.uv titan.async titan.timer \
-	titan.fs titan.net titan.os
+	titan.fs titan.net titan.os titan.peg titan.string
 STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/async.titan titan/timer.titan titan/fs.titan titan/net.titan \
-	titan/os.titan
+	titan/os.titan \
+	titan/peg/peg.titan titan/peg/captures.titan \
+	titan/peg/combinators.titan titan/peg/native.titan \
+	titan/peg/relabel.titan titan/peg/relabel_parser.titan \
+	titan/string/string.titan titan/string/bytes.titan \
+	titan/string/format.titan titan/string/pack.titan \
+	titan/string/regex_api.titan titan/string/regex_compile.titan \
+	titan/string/regex_parser.titan
 STDLIB_SHIMS := titan/coroutine.lua titan/uv.lua titan/async.lua \
-	titan/timer.lua titan/fs.lua titan/net.lua titan/os.lua
+	titan/timer.lua titan/fs.lua titan/net.lua titan/os.lua \
+	titan/peg.lua titan/string.lua
 STDLIB_CONTAINER := titan.so
 STDLIB_STATIC_ARCHIVE := titan.a
 STDLIB_PROVIDER_OUTPUTS := $(STDLIB_CONTAINER) $(STDLIB_STATIC_ARCHIVE)
-STDLIB_EXTRA_OBJECTS := $(TITANLIB_O) $(LIBUV_EXTRA_OBJECTS)
+STDLIB_EXTRA_OBJECTS := $(TITANLIB_O) $(LPEGLABEL_ARCHIVE) \
+	$(LIBUV_EXTRA_OBJECTS)
+STDLIB_NATIVE_IDENTITY_PREREQS := $(LPEGLABEL_ARCHIVE)
+STDLIB_LPEGLABEL_CPPFLAGS := $(LPEGLABEL_CPPFLAGS)
+STDLIB_LICENSES := LICENSES/libuv-LICENSE \
+	LICENSES/lpeglabel-LICENSE LICENSES/lpeg-LICENSE \
+	LICENSES/ta-regex-LICENSE LICENSES/lua-LICENSE
 STDLIB_EMBEDDED_FORMAT_INPUTS := titan-compiler/staticmetadata.lua \
 	titan-compiler/coder.lua
 TITAN_BOOTSTRAP_SO := titan-runtime/bootstrap/titan.so
@@ -243,7 +282,7 @@ TITANLIB_BUILD_CONFIG := titan-runtime/.titan-titanlib-build-config
 STDLIB_CONFIG_STAMP := titan-runtime/.titan-stdlib-build-config
 STDLIB_COMPLETION_STAMP := titan-runtime/.titan-stdlib-complete
 
-.PHONY: all help lua luarocks libbacktrace libuv libuv-config \
+.PHONY: all help lua luarocks libbacktrace libuv libuv-config lpeglabel \
 	check-libuv-tools check-system-libuv invalid-libuv-mode runtime titan \
 	stage-titan-bootstrap install-titan-sdk stdlib install-stdlib \
 	publish-stdlib \
@@ -652,6 +691,126 @@ libuv-config: libuv ## Print the effective libuv compiler and linker inputs
 	@echo "LIBUV_LDFLAGS=$(LIBUV_LDFLAGS)"
 	@echo "LIBUV_PROVIDER_LDFLAGS=$(LIBUV_PROVIDER_LDFLAGS)"
 
+lpeglabel: $(LPEGLABEL_ARCHIVE) ## Build/validate the private LPegLabel archive
+
+# Hash every source/header and the exact public Lua configuration on every
+# invocation. The stamp's mtime changes only when content or a target-affecting
+# input changes, so warm builds remain true no-ops while same-mtime source
+# rewrites still invalidate every private object.
+$(LPEGLABEL_BUILD_CONFIG): FORCE $(LPEGLABEL_SOURCES) $(LPEGLABEL_HEADERS) \
+		$(LUA_INSTALL_STAMP)
+	@mkdir -p "$(@D)"
+	@tmp="$@.tmp"; \
+	{ printf '%s\n' \
+		$(call make_shell_quote,LPEGLABEL_VERSION=$(LPEGLABEL_VERSION)) \
+		$(call make_shell_quote,LPEGLABEL_COMMIT=$(LPEGLABEL_COMMIT)) \
+		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
+		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
+		$(call make_shell_quote,CC=$(CC)) \
+		$(call make_shell_quote,AR=$(AR)) \
+		$(call make_shell_quote,RANLIB=$(RANLIB)) \
+		$(call make_shell_quote,ROCK_LUA_INCDIR=$(ROCK_LUA_INCDIR)) \
+		$(call make_shell_quote,ROCK_CFLAGS=$(ROCK_CFLAGS)) \
+		$(call make_shell_quote,TITAN_EXTRA_CPPFLAGS=$(TITAN_EXTRA_CPPFLAGS)) \
+		$(call make_shell_quote,TITAN_EXTRA_CFLAGS=$(TITAN_EXTRA_CFLAGS)) \
+		$(call make_shell_quote,LPEGLABEL_CPPFLAGS=$(LPEGLABEL_CPPFLAGS)) \
+		$(call make_shell_quote,LPEGLABEL_CFLAGS=$(LPEGLABEL_CFLAGS)) \
+		$(call make_shell_quote,SOURCES=$(LPEGLABEL_SOURCES)) \
+		$(call make_shell_quote,HEADERS=$(LPEGLABEL_HEADERS)) \
+		$(call make_shell_quote,LUA_HEADERS=$(LPEGLABEL_LUA_HEADERS)); \
+	  for input in $(LPEGLABEL_SOURCES) $(LPEGLABEL_HEADERS) \
+			$(LPEGLABEL_LUA_HEADERS); do \
+	    cksum "$$input"; \
+	  done; } > "$$tmp"; \
+	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
+	  rm -f "$$tmp"; \
+	else \
+	  mv -f "$$tmp" "$@"; \
+	fi
+
+$(LPEGLABEL_BUILD_DIR)/%.o: $(LPEGLABEL_VENDOR_DIR)/%.c \
+		$(LPEGLABEL_BUILD_CONFIG)
+	@mkdir -p "$(@D)"
+	$(CC) $(TITAN_EXTRA_CPPFLAGS) $(LPEGLABEL_CPPFLAGS) \
+		-I"$(ROCK_LUA_INCDIR)" $(ROCK_CFLAGS) $(LPEGLABEL_CFLAGS) \
+		$(TITAN_EXTRA_CFLAGS) -c "$<" -o "$@"
+
+# Probe the configured archive commands rather than assuming GNU flags. Use
+# deterministic qD/-D only when both tools support that pair; otherwise verify
+# the portable q/ordinary-ranlib pair. The selected mode is a stamped input to
+# archive construction.
+$(LPEGLABEL_ARCHIVE_CONFIG): FORCE $(firstword $(LPEGLABEL_OBJECTS))
+	@mkdir -p "$(@D)"
+	@set -e; \
+	probe="$(@D)/.titan-lpeglabel-tool-probe.a"; \
+	tmp="$@.tmp"; \
+	rm -f "$$probe" "$$tmp"; \
+	if $(AR) qD "$$probe" "$(firstword $(LPEGLABEL_OBJECTS))" \
+			>/dev/null 2>&1 && \
+	   $(RANLIB) -D "$$probe" >/dev/null 2>&1; then \
+	  ar_mode=qD; ranlib_mode=-D; deterministic=yes; \
+	else \
+	  rm -f "$$probe"; \
+	  if ! $(AR) q "$$probe" "$(firstword $(LPEGLABEL_OBJECTS))" \
+			>/dev/null 2>&1; then \
+	    echo "ERROR: configured AR supports neither qD nor q" >&2; \
+	    exit 1; \
+	  fi; \
+	  if ! $(RANLIB) "$$probe" >/dev/null 2>&1; then \
+	    echo "ERROR: configured RANLIB supports neither -D nor ordinary mode" >&2; \
+	    exit 1; \
+	  fi; \
+	  ar_mode=q; ranlib_mode=ordinary; deterministic=no; \
+	fi; \
+	rm -f "$$probe"; \
+	{ printf '%s\n' \
+		$(call make_shell_quote,AR=$(AR)) \
+		$(call make_shell_quote,RANLIB=$(RANLIB)) \
+		$(call make_shell_quote,MEMBERS=$(notdir $(LPEGLABEL_OBJECTS))) \
+		"AR_MODE=$$ar_mode" "RANLIB_MODE=$$ranlib_mode" \
+		"DETERMINISTIC=$$deterministic"; } > "$$tmp"; \
+	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
+	  rm -f "$$tmp"; \
+	else \
+	  mv -f "$$tmp" "$@"; \
+	fi
+
+# FORCE makes exact ordered membership a warm-build invariant. Rebuild only
+# when an input/configuration is newer or the regular archive's manifest is
+# missing or wrong; successful validation leaves the archive mtime untouched.
+$(LPEGLABEL_ARCHIVE): FORCE $(LPEGLABEL_OBJECTS) \
+		$(LPEGLABEL_ARCHIVE_CONFIG)
+	@set -e; \
+	expected="$$(printf '%s\n' $(notdir $(LPEGLABEL_OBJECTS)))"; \
+	actual=""; \
+	if test -f "$@" && test ! -L "$@"; then \
+	  actual="$$( $(AR) t "$@" 2>/dev/null | \
+	    awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
+	fi; \
+	newer=$(call make_shell_quote,$(filter-out FORCE,$?)); \
+	if test -n "$$newer" || test "$$actual" != "$$expected"; then \
+	  tmp="$@.tmp"; \
+	  rm -f "$$tmp"; \
+	  ar_mode="$$(sed -n 's/^AR_MODE=//p' \
+	    "$(LPEGLABEL_ARCHIVE_CONFIG)")"; \
+	  ranlib_mode="$$(sed -n 's/^RANLIB_MODE=//p' \
+	    "$(LPEGLABEL_ARCHIVE_CONFIG)")"; \
+	  $(AR) "$$ar_mode" "$$tmp" $(LPEGLABEL_OBJECTS); \
+	  if test "$$ranlib_mode" = -D; then \
+	    $(RANLIB) -D "$$tmp"; \
+	  else \
+	    $(RANLIB) "$$tmp"; \
+	  fi; \
+	  actual="$$( $(AR) t "$$tmp" 2>/dev/null | \
+	    awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
+	  if test "$$actual" != "$$expected"; then \
+	    rm -f "$$tmp"; \
+	    echo "ERROR: private LPegLabel archive has wrong member order" >&2; \
+	    exit 1; \
+	  fi; \
+	  mv -f "$$tmp" "$@"; \
+	fi
+
 runtime: libuv $(TITAN_RUNTIME_LIB) ## Build the Titan C runtime archive used by every compiler mode
 
 # titan.o and titan_coro.o share one compile configuration.  As with the libuv
@@ -898,7 +1057,8 @@ install-titan-sdk: $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) $(LUA_LIB) \
 # consumes the installed Titan runtime archive rather than smuggling source-tree
 # runtime objects into standard modules. System libuv remains an ordered final
 # link input; bundled mode gets headers from the staged SDK and gives the private
-# archive to titanc through the same -X payload as titanlib.o.
+# archive to titanc through the same -X payload as titanlib.o and the private
+# LPegLabel archive.
 ifeq ($(STDLIB_USE_INSTALLED_RUNTIME),1)
   STDLIB_PLATFORM_PREREQS :=
   STDLIB_NATIVE_PREREQS := $(STDLIB_EXTRA_OBJECTS)
@@ -918,7 +1078,7 @@ else
   # itself order-only so its exact-membership repair runs before the compiler
   # without turning a no-op archive validation into a relink.
   STDLIB_NATIVE_PREREQS := $(TITAN_RUNTIME_OBJECTS) \
-	$(LIBUV_EXTRA_OBJECTS) $(TITANLIB_O)
+	$(STDLIB_EXTRA_OBJECTS)
   STDLIB_RUNTIME_ARCHIVE_PREREQ := $(TITAN_RUNTIME_LIB)
   # A standalone PREFIX is prepared with `make lua` before stdlib. Depending
   # on its prefix-local stamp keeps native source builds ordered without
@@ -945,8 +1105,9 @@ $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_SHIMS): $(STDLIB_COMPLETION_STAMP)
 # forms. When content changes, explicitly invalidate the completion stamp so
 # rebuild correctness does not depend on filesystem timestamp granularity or
 # Make's prerequisite re-stat behavior.
-$(STDLIB_CONFIG_STAMP): FORCE
-	@tmp="$@.tmp"; \
+$(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
+	@set -e; \
+	tmp="$@.tmp"; \
 	{ printf '%s\n' \
 		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
 		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
@@ -964,7 +1125,15 @@ $(STDLIB_CONFIG_STAMP): FORCE
 		$(call make_shell_quote,STDLIB_STATIC_ARCHIVE=$(STDLIB_STATIC_ARCHIVE)) \
 		$(call make_shell_quote,STDLIB_PROVIDER_OUTPUTS=$(STDLIB_PROVIDER_OUTPUTS)) \
 		$(call make_shell_quote,STDLIB_EXTRA_OBJECTS=$(STDLIB_EXTRA_OBJECTS)) \
+		$(call make_shell_quote,STDLIB_LPEGLABEL_CPPFLAGS=$(STDLIB_LPEGLABEL_CPPFLAGS)) \
 		$(call make_shell_quote,STDLIB_EMBEDDED_FORMAT_INPUTS=$(STDLIB_EMBEDDED_FORMAT_INPUTS)) \
+		$(call make_shell_quote,LPEGLABEL_VERSION=$(LPEGLABEL_VERSION)) \
+		$(call make_shell_quote,LPEGLABEL_COMMIT=$(LPEGLABEL_COMMIT)) \
+		$(call make_shell_quote,LPEGLABEL_SOURCES=$(LPEGLABEL_SOURCES)) \
+		$(call make_shell_quote,LPEGLABEL_HEADERS=$(LPEGLABEL_HEADERS)) \
+		$(call make_shell_quote,LPEGLABEL_ARCHIVE=$(LPEGLABEL_ARCHIVE)) \
+		$(call make_shell_quote,LPEGLABEL_BUILD_CONFIG=$(LPEGLABEL_BUILD_CONFIG)) \
+		$(call make_shell_quote,LPEGLABEL_ARCHIVE_CONFIG=$(LPEGLABEL_ARCHIVE_CONFIG)) \
 		$(call make_shell_quote,TITAN_EXTRA_CPPFLAGS=$(TITAN_EXTRA_CPPFLAGS)) \
 		$(call make_shell_quote,TITAN_EXTRA_CFLAGS=$(TITAN_EXTRA_CFLAGS)) \
 		$(call make_shell_quote,TITAN_EXTRA_LDFLAGS=$(TITAN_EXTRA_LDFLAGS)) \
@@ -972,7 +1141,12 @@ $(STDLIB_CONFIG_STAMP): FORCE
 		$(call make_shell_quote,LIBUV_VERSION=$(LIBUV_VERSION)) \
 		$(call make_shell_quote,STDLIB_UV_CPPFLAGS=$(STDLIB_UV_CPPFLAGS)) \
 		$(call make_shell_quote,STDLIB_UV_CFLAGS=$(STDLIB_UV_CFLAGS)) \
-		$(call make_shell_quote,STDLIB_UV_LDFLAGS=$(STDLIB_UV_LDFLAGS)); } \
+		$(call make_shell_quote,STDLIB_UV_LDFLAGS=$(STDLIB_UV_LDFLAGS)); \
+	  for input in $(LPEGLABEL_SOURCES) $(LPEGLABEL_HEADERS) \
+			$(LPEGLABEL_BUILD_CONFIG) \
+			$(LPEGLABEL_ARCHIVE_CONFIG) $(LPEGLABEL_ARCHIVE); do \
+	    cksum "$$input"; \
+	  done; } \
 		> "$$tmp"; \
 	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
 		rm -f "$$tmp"; \
@@ -983,7 +1157,7 @@ $(STDLIB_CONFIG_STAMP): FORCE
 
 # FORCE runs the inexpensive completeness check on every invocation. The
 # compiler itself runs only when an input is newer, configuration changed, or
-# one public output is absent. All seven roots are explicit source roots in one
+# one public output is absent. All nine roots are explicit source roots in one
 # process, so their internal imports are linked into the paired titan.so/titan.a
 # provider. The warm check rescans the archive without rewriting either output.
 $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES) titanc \
@@ -1025,7 +1199,7 @@ $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES) titanc \
 	    TITAN_PATH_0_18=$(call make_shell_quote,$(CURDIR)) TITAN_PATH= \
 	    TITAN_ROCKS_ROOT=$(call make_shell_quote,$(TITAN_ROCKS_ROOT)) \
 	    TITAN_RUNTIME_PREBUILT=1 \
-	    TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))) \
+	    TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_LPEGLABEL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))) \
 	    TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CFLAGS) $(STDLIB_UV_CFLAGS))) \
 	    TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_LDFLAGS) $(STDLIB_UV_LDFLAGS))) \
 	    $(TITANC) $(STDLIB_ROOTS) -X $(STDLIB_EXTRA_OBJECTS); \
@@ -1055,8 +1229,8 @@ install-stdlib publish-stdlib: scripts/stdlib_installer.lua
 	mkdir -p "$(TITAN_INSTALL_TREE)" "$(TITAN_SHARE_DIR)/LICENSES"; \
 	install -m 0644 THIRD_PARTY_NOTICES.md \
 	  "$(TITAN_SHARE_DIR)/THIRD_PARTY_NOTICES.md"; \
-	install -m 0644 LICENSES/libuv-LICENSE \
-	  "$(TITAN_SHARE_DIR)/LICENSES/libuv-LICENSE"; \
+	install -m 0644 $(STDLIB_LICENSES) \
+	  "$(TITAN_SHARE_DIR)/LICENSES/"; \
 	root=$$(CDPATH= cd "$(TITAN_INSTALL_TREE)" && pwd -P); \
 	stage=$(call make_shell_quote,$(STDLIB_INSTALL_STAGE)); \
 	( unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
@@ -1074,14 +1248,14 @@ install-stdlib publish-stdlib: scripts/stdlib_installer.lua
 	    "$$stage" "$$root" )
 
 # The post-install compiler runs in a private destination-filesystem directory,
-# so every -X input is absolute. System mode has only titanlib.o; bundled mode
-# adds the private pinned libuv archive to the same payload.
+# so every -X input is absolute. System mode carries titanlib.o followed by the
+# private LPegLabel archive; bundled mode appends the pinned libuv archive.
 STDLIB_STAGED_EXTRA_OBJECTS = $(foreach object,$(STDLIB_EXTRA_OBJECTS),$(abspath $(object)))
 
 # LuaRocks invokes this only after deploying titanc and its Lua compiler
-# modules. Build all seven source roots once in a private directory on the
+# modules. Build all nine source roots once in a private directory on the
 # destination filesystem. The Lua publisher validates the complete protocol,
-# commits seven shims, the archive, and the one macOS dSYM before renaming
+# commits nine shims, the archive, and the one macOS dSYM before renaming
 # titan.so last; any caught failure restores the prior pair, the legacy
 # DSO-only installation, or the first-install bootstrap.
 rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS)
@@ -1098,6 +1272,11 @@ rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS)
 	mkdir -p "$(ROCKS_TREE)/lib/titan/$(TITAN_ABI_VERSION)"; \
 	rocks_tree=$$(CDPATH= cd "$(ROCKS_TREE)" && pwd -P); \
 	abi_dir="$$rocks_tree/lib/titan/$(TITAN_ABI_VERSION)"; \
+	share_dir="$$rocks_tree/share/titan"; \
+	mkdir -p "$$share_dir/LICENSES"; \
+	install -m 0644 THIRD_PARTY_NOTICES.md \
+	  "$$share_dir/THIRD_PARTY_NOTICES.md"; \
+	install -m 0644 $(STDLIB_LICENSES) "$$share_dir/LICENSES/"; \
 	stage=$$(mktemp -d "$$abi_dir/.titan-stdlib-stage.XXXXXX"); \
 	trap 'rm -rf "$$stage"' EXIT HUP INT TERM; \
 	echo "==> Building paired Titan stdlib providers with $(ROCK_TITANC)"; \
@@ -1110,7 +1289,7 @@ rock-post-install: scripts/stdlib_installer.lua $(STDLIB_EXTRA_OBJECTS)
 	  export CC=$(call make_shell_quote,$(CC)); \
 	  export AR=$(call make_shell_quote,$(AR)); \
 	  export RANLIB=$(call make_shell_quote,$(RANLIB)); \
-	  export TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))); \
+	  export TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CPPFLAGS) $(STDLIB_LPEGLABEL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS))); \
 	  export TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_CFLAGS) $(STDLIB_UV_CFLAGS))); \
 	  export TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_EXTRA_LDFLAGS) $(STDLIB_UV_LDFLAGS))); \
 	  $(call make_shell_quote,$(ROCK_TITANC)) --tree \
@@ -1138,6 +1317,9 @@ examples: lua ## Compile the example Titan modules (SDL examples need SDL2 heade
 
 clean: ## Remove generated build/test artifacts (keeps the Lua tree)
 	rm -f $(RUNTIME_O) titan-runtime/*.o $(TITAN_RUNTIME_LIB)
+	rm -f $(LPEGLABEL_OBJECTS) $(LPEGLABEL_ARCHIVE) \
+		$(LPEGLABEL_BUILD_CONFIG) $(LPEGLABEL_ARCHIVE_CONFIG)
+	rmdir "$(LPEGLABEL_BUILD_DIR)" 2>/dev/null || true
 	rm -f $(RUNTIME_BUILD_CONFIG) $(RUNTIME_ARCHIVE_CONFIG) \
 		$(TITANLIB_BUILD_CONFIG) $(UV_CONFIG_STAMP) \
 		$(STDLIB_CONFIG_STAMP) $(STDLIB_COMPLETION_STAMP)
@@ -1146,6 +1328,8 @@ clean: ## Remove generated build/test artifacts (keeps the Lua tree)
 	rmdir titan-runtime/bootstrap 2>/dev/null || true
 	rm -f titan/*.c titan/*.o
 	rm -f titan/uv/*.c titan/uv/*.o
+	rm -f titan/peg/peg.c titan/peg/peg.o
+	rm -f titan/string/string.c titan/string/string.o
 	rm -f $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_QUALIFIED_SOS) $(STDLIB_SOS)
 	rm -f $(STDLIB_SHIMS)
 	rm -rf $(STDLIB_CONTAINER).dSYM

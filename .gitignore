@@ -18,6 +18,9 @@
 /libuv-build/
 /libuv-v*.tar.gz
 
+# private vendored LPegLabel objects, archive, and configuration stamps
+/lpeglabel-build/
+
 # LuaRocks source release used by `make luarocks`
 /luarocks-*/
 /luarocks-*.tar.gz
@@ -29,6 +32,8 @@
 
 /titan/*.c
 /titan/uv/*.c
+/titan/peg/peg.c
+/titan/string/string.c
 
 # Generated logical-module shims for the combined standard-library image
 /titan/coroutine.lua
@@ -38,6 +43,8 @@
 /titan/fs.lua
 /titan/net.lua
 /titan/os.lua
+/titan/peg.lua
+/titan/string.lua
 
 # Native runtime command-line configuration stamps
 /titan-runtime/.titan-*-build-config

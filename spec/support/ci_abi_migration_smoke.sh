@@ -126,7 +126,7 @@ if [[ $phase == prepare ]]; then
     if clean_lua "$PREFIX/bin/luarocks" show titan >/dev/null 2>&1; then
         clean_lua "$PREFIX/bin/luarocks" remove titan --force
     fi
-    for module in coroutine uv async timer fs net os; do
+    for module in coroutine uv async timer fs net os peg string; do
         rm -f "$PREFIX/share/lua/5.5/titan/$module.lua"
     done
     rm -f "$PREFIX/share/lua/5.5/titan.lua" \
@@ -179,6 +179,7 @@ return open()
 ]=]
 for _, module in ipairs({
     "coroutine", "uv", "async", "timer", "fs", "net", "os",
+    "peg", "string",
 }) do
     local file = assert(io.open(root .. "/" .. module .. ".lua", "wb"))
     assert(file:write(template:format("luaopen_titan_" .. module)))

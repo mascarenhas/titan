@@ -18,6 +18,9 @@ description = {
 }
 dependencies = {
    "lua ~> 5.5",
+   -- The compiler's parser still uses the separately installed Lua module.
+   -- titan.peg embeds its own private, namespaced LPegLabel engine in the
+   -- combined standard-library provider and does not load this C module.
    "lpeglabel >= 1.5.0",
    "inspect >= 3.1.0",
    "argparse >= 0.5.0",

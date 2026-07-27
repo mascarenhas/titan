@@ -8,14 +8,21 @@ local PKG_CONFIG = "sh spec/fixtures/libuv/fake-pkg-config.sh"
 local UV_MAIN_SOURCE = "titan/uv/uv.titan"
 local STDLIB_TYPES_BASELINE =
     "spec/fixtures/stdlib/titan_stdlib_types.lua"
-local STDLIB_ROOTS = {
+local PRE_BUNDLE_UNCHANGED_STDLIB_ROOTS = {
     "titan.coroutine", "titan.uv", "titan.async", "titan.timer",
     "titan.fs", "titan.net", "titan.os",
+}
+local STDLIB_ROOTS = {
+    "titan.coroutine", "titan.uv", "titan.async", "titan.timer",
+    "titan.fs", "titan.net", "titan.os", "titan.peg", "titan.string",
 }
 local STDLIB_SHIMS = {
     "titan/coroutine.lua", "titan/uv.lua", "titan/async.lua",
     "titan/timer.lua", "titan/fs.lua", "titan/net.lua", "titan/os.lua",
+    "titan/peg.lua", "titan/string.lua",
 }
+local LPEGLABEL_INCLUDE =
+    "-I" .. lfs.currentdir() .. "/vendor/lpeglabel"
 local STDLIB_CONTAINER = "titan.so"
 local STDLIB_STATIC_ARCHIVE = "titan.a"
 local PHASE8_CALLBACKS = {
@@ -359,6 +366,7 @@ local function run_stdlib_dry_make(argv)
         "STDLIB_NATIVE_PREREQS",
         "STDLIB_RUNTIME_ARCHIVE_PREREQ",
         "STDLIB_BOOTSTRAP_PREREQ",
+        "STDLIB_NATIVE_IDENTITY_PREREQS",
     }) do
         table.insert(argv, variable .. "=" .. prepared)
     end
@@ -683,10 +691,15 @@ describe("libuv Makefile configuration", function()
        function()
         local generated = prepared_uv_c()
         local process_source = read_file("titan/uv/process.titan")
+        local runtime_source = read_file("titan/uv/runtime.titan")
         local process_lifecycle_line = source_line_number(process_source,
             "process_control.lifecycle = PROCESS_SPAWNED")
         local spawn_status_line = source_line_number(process_source,
             "local spawn_status = status")
+        local text_terminator_line = source_line_number(runtime_source,
+            "bytes.data[length] = 0")
+        local stream_length_line = source_line_number(runtime_source,
+            "local length = size")
 
         local sigpipe = generated_function(
             generated, "titan_uv_ignore_sigpipe_if_default_titan")
@@ -732,6 +745,7 @@ describe("libuv Makefile configuration", function()
         local slice =
             generated_function(generated, "titan_uv__bytes_slice_titan")
         assert_ordered(slice,
+            "byte slice is out of range",
             "if((_param_length>0))",
             "getstr(_param_data)",
             "memcpy(")
@@ -741,14 +755,16 @@ describe("libuv Makefile configuration", function()
         assert_ordered(copy_text,
             "if((_local_length_1>0))",
             "memcpy(",
-            '#line 283 "./titan/uv/runtime.titan"',
+            ('#line %d "./titan/uv/runtime.titan"'):format(
+                text_terminator_line),
             "_tmp_19[_tmp_20] = _tmp_21;")
 
         local stream = generated_function(
             generated, "titan_uv_allocate_stream_bytes_titan")
         assert_ordered(stream,
             "UINT_MAX",
-            '#line 338 "./titan/uv/runtime.titan"',
+            ('#line %d "./titan/uv/runtime.titan"'):format(
+                stream_length_line),
             "((lua_Integer)_local_length_1)")
 
         local usable =
@@ -884,6 +900,19 @@ describe("libuv Makefile configuration", function()
        function()
         assert.same(STDLIB_ROOTS, makefile_words("STDLIB_ROOTS"))
         assert.same(STDLIB_SHIMS, makefile_words("STDLIB_SHIMS"))
+        assert.same({
+            "$(TITANLIB_O)", "$(LPEGLABEL_ARCHIVE)",
+            "$(LIBUV_EXTRA_OBJECTS)",
+        }, makefile_words("STDLIB_EXTRA_OBJECTS"))
+        assert.same({ "$(LPEGLABEL_ARCHIVE)" },
+            makefile_words("STDLIB_NATIVE_IDENTITY_PREREQS"))
+        assert.same({ "$(LPEGLABEL_CPPFLAGS)" },
+            makefile_words("STDLIB_LPEGLABEL_CPPFLAGS"))
+        assert.same({
+            "LICENSES/libuv-LICENSE",
+            "LICENSES/lpeglabel-LICENSE", "LICENSES/lpeg-LICENSE",
+            "LICENSES/ta-regex-LICENSE", "LICENSES/lua-LICENSE",
+        }, makefile_words("STDLIB_LICENSES"))
         assert.same({ STDLIB_CONTAINER },
             makefile_words("STDLIB_CONTAINER"))
 
@@ -905,18 +934,26 @@ describe("libuv Makefile configuration", function()
             "titan/uv/runtime.titan", "titan/uv/task.titan",
             "titan/uv/tcp.titan", "titan/async.titan",
             "titan/timer.titan", "titan/fs.titan", "titan/net.titan",
-            "titan/os.titan",
+            "titan/os.titan", "titan/peg/peg.titan",
+            "titan/peg/captures.titan", "titan/peg/combinators.titan",
+            "titan/peg/native.titan", "titan/peg/relabel.titan",
+            "titan/peg/relabel_parser.titan",
+            "titan/string/string.titan",
+            "titan/string/bytes.titan", "titan/string/format.titan",
+            "titan/string/pack.titan", "titan/string/regex_api.titan",
+            "titan/string/regex_compile.titan",
+            "titan/string/regex_parser.titan",
         }, expanded)
     end)
 
-    it("preserves all seven pre-bundle interfaces inside the combined image",
+    it("preserves all seven pre-feature interfaces in the container",
        function()
         local expected = assert(loadfile(STDLIB_TYPES_BASELINE))()
         assert.equal(7875, #expected.uv)
 
         local support = require "titan"
         local container = installed_stdlib_container()
-        for _, root in ipairs(STDLIB_ROOTS) do
+        for _, root in ipairs(PRE_BUNDLE_UNCHANGED_STDLIB_ROOTS) do
             local name = assert(root:match("^titan%.(.+)$"))
             local types_function, load_error = support._loadlib(
                 container, "titan_" .. name .. "_types")
@@ -1085,7 +1122,7 @@ describe("libuv Makefile configuration", function()
             "MEMBERS=$(notdir $(TITAN_RUNTIME_OBJECTS))",
             "UV_CONFIG_STAMP := titan-runtime/.titan-uv-build-config",
             "STDLIB_NATIVE_PREREQS := $(TITAN_RUNTIME_OBJECTS)",
-            "$(LIBUV_EXTRA_OBJECTS) $(TITANLIB_O)",
+            "$(STDLIB_EXTRA_OBJECTS)",
             "STDLIB_RUNTIME_ARCHIVE_PREREQ := $(TITAN_RUNTIME_LIB)",
             "STDLIB_CONFIG_STAMP := " ..
                 "titan-runtime/.titan-stdlib-build-config",
@@ -1130,7 +1167,7 @@ describe("libuv Makefile configuration", function()
             1, true), rule)
         for _, forbidden in ipairs({
             "$(TITAN_RUNTIME_LIB)", "$(LIBBT_LIB)", "$(RUNTIME_O)",
-            "$(CORO_O)", "$(UV_O)",
+            "$(CORO_O)", "$(UV_O)", "$(LPEGLABEL_ARCHIVE)",
         }) do
             assert.falsy(rule:find(forbidden, 1, true),
                 forbidden .. " in:\n" .. rule)
@@ -1400,14 +1437,18 @@ exit 64
             "./titanc " .. table.concat(STDLIB_ROOTS, " "), 1, true),
             command)
         assert.equal(1, count_plain(command,
-            "-X titan-runtime/titanlib.o libuv-build/libuv.a"), command)
+            "-X titan-runtime/titanlib.o " ..
+                "lpeglabel-build/libtitan-lpeglabel.a " ..
+                "libuv-build/libuv.a"), command)
         assert.falsy(command:find("titan_uv.o", 1, true), command)
         assert.truthy(command:find([[CC='ccache cc']], 1, true), command)
         assert.truthy(command:find([[AR='review-ar']], 1, true), command)
         assert.truthy(command:find([[RANLIB='review-ranlib']], 1, true),
             command)
         assert.truthy(command:find(
-            [[TITAN_EXTRA_CPPFLAGS='-DUSER_CPP=1 -Ilibuv-v1.52.1/include -D_GNU_SOURCE']],
+            "TITAN_EXTRA_CPPFLAGS='-DUSER_CPP=1 " ..
+                LPEGLABEL_INCLUDE ..
+                " -Ilibuv-v1.52.1/include -D_GNU_SOURCE'",
             1, true), command)
         assert.truthy(command:find(
             [[TITAN_EXTRA_CFLAGS='-DUSER_C=1 -fno-strict-aliasing']],
@@ -1425,11 +1466,14 @@ exit 64
             "./titanc " .. table.concat(STDLIB_ROOTS, " "), 1, true),
             command)
         assert.equal(1, count_plain(command,
-            "-X titan-runtime/titanlib.o"), command)
+            "-X titan-runtime/titanlib.o " ..
+                "lpeglabel-build/libtitan-lpeglabel.a"), command)
         assert.falsy(command:find("titan_uv.o", 1, true), command)
         assert.falsy(command:find("libuv-build/libuv.a", 1, true), command)
         assert.truthy(command:find(
-            [[TITAN_EXTRA_CPPFLAGS='-DUSER_CPP=1 -I/opt/libuv/include -DUV_FAKE_PKG=1 -D_GNU_SOURCE']],
+            "TITAN_EXTRA_CPPFLAGS='-DUSER_CPP=1 " ..
+                LPEGLABEL_INCLUDE ..
+                " -I/opt/libuv/include -DUV_FAKE_PKG=1 -D_GNU_SOURCE'",
             1, true), command)
         local system_flags =
             [[TITAN_EXTRA_LDFLAGS='-Wl,user-link -L/opt/libuv/lib -luv -pthread -ldl -lrt']]
@@ -1441,7 +1485,9 @@ exit 64
             tostring(code) .. ")")
         command = stdlib_command(output)
         assert.equal(1, count_plain(command,
-            [[-X titan-runtime/titanlib.o libuv-build/libuv.a]]),
+            "-X titan-runtime/titanlib.o " ..
+                "lpeglabel-build/libtitan-lpeglabel.a " ..
+                "libuv-build/libuv.a"),
             command)
         assert.equal(1, count_plain(command,
             [[TITAN_EXTRA_LDFLAGS='-Wl,user-link -lpthread']]),
@@ -1453,7 +1499,15 @@ exit 64
         local sources = {
             "titan/coroutine.titan", "titan/async.titan",
             "titan/timer.titan", "titan/fs.titan", "titan/net.titan",
-            "titan/os.titan",
+            "titan/os.titan", "titan/peg/peg.titan",
+            "titan/peg/captures.titan", "titan/peg/combinators.titan",
+            "titan/peg/native.titan", "titan/peg/relabel.titan",
+            "titan/peg/relabel_parser.titan",
+            "titan/string/string.titan",
+            "titan/string/bytes.titan", "titan/string/format.titan",
+            "titan/string/pack.titan", "titan/string/regex_api.titan",
+            "titan/string/regex_compile.titan",
+            "titan/string/regex_parser.titan",
         }
         for _, source in ipairs(makefile_words("UV_TITAN_SOURCES")) do
             sources[#sources + 1] = source
@@ -1467,7 +1521,9 @@ exit 64
             assert.equal(1, count_plain(command,
                 "./titanc " .. table.concat(STDLIB_ROOTS, " ")), command)
             assert.truthy(command:find(
-                "-X titan-runtime/titanlib.o libuv-build/libuv.a",
+                "-X titan-runtime/titanlib.o " ..
+                    "lpeglabel-build/libtitan-lpeglabel.a " ..
+                    "libuv-build/libuv.a",
                 1, true), command)
             assert.falsy(normalized:find("titan/coroutine.so:", 1, true),
                 source .. ": " .. normalized)
@@ -1556,6 +1612,7 @@ printf 'build\n' >> %s
                 "STDLIB_CONFIG_STAMP=" .. config,
                 "STDLIB_COMPLETION_STAMP=" .. completion,
                 "STDLIB_EXTRA_OBJECTS=",
+                "STDLIB_NATIVE_IDENTITY_PREREQS=",
                 "STDLIB_SOS=",
                 "STDLIB_QUALIFIED_SOS=",
                 "TITAN_COMPILER_LUA=",
@@ -1685,7 +1742,8 @@ fi
             "STDLIB_PROVIDER_OUTPUTS := $(STDLIB_CONTAINER) " ..
                 "$(STDLIB_STATIC_ARCHIVE)",
             "STDLIB_EXTRA_OBJECTS := $(TITANLIB_O) " ..
-                "$(LIBUV_EXTRA_OBJECTS)",
+                "$(LPEGLABEL_ARCHIVE)",
+            "STDLIB_NATIVE_IDENTITY_PREREQS := $(LPEGLABEL_ARCHIVE)",
             "TITAN_COMPILER_LUA := " ..
                 "$(wildcard titan-compiler/*.lua c-parser/*.lua)",
             "$(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_TITAN_SOURCES)",
@@ -1707,10 +1765,12 @@ fi
                 "scripts/stdlib_installer.lua",
             "stage=$(call make_shell_quote,$(STDLIB_INSTALL_STAGE))",
             "install -m 0644 THIRD_PARTY_NOTICES.md",
-            "install -m 0644 LICENSES/libuv-LICENSE",
+            "install -m 0644 $(STDLIB_LICENSES)",
             '"$(TITAN_LUA)" -E "$(CURDIR)/scripts/stdlib_installer.lua"',
             "rm -f $(STDLIB_PROVIDER_OUTPUTS)",
             "rm -f $(STDLIB_SHIMS)",
+            "rm -f titan/peg/peg.c titan/peg/peg.o",
+            "rm -f titan/string/string.c titan/string/string.o",
             "rm -rf $(STDLIB_CONTAINER).dSYM",
             "examples/utils.a examples/artisanal.a examples/sdl_quit.a",
             "testfiles/selection_sort.a testfiles/sieve.a",
@@ -1742,6 +1802,7 @@ fi
             'rm -f "$static_archive"',
             'write_manifest "$manifest" "${artifacts[@]}"',
             'cmp -s "$manifest" "$restored_manifest"',
+            '"$shim_dir/peg.lua" "$shim_dir/string.lua"',
         }) do
             assert.truthy(snapshot:find(contract, 1, true), contract)
         end
@@ -1754,6 +1815,12 @@ fi
             'local fs = import "fs"',
             'local net = import "net"',
             'local system = import "os"',
+            'local peg = import "titan.peg"',
+            'local strings = import "titan.string"',
+            '#peg.version() > 0',
+            'strings.len("static\\0string") == 13',
+            'strings.match("static42", "([0-9]+)") == "42"',
+            'strings.match("regex42", "([0-9]+)") == "42"',
             "local peer = async.run(",
             "timer.sleep(0)",
             "fs.write_file(marker,",
@@ -1769,6 +1836,9 @@ fi
             "build_static_system_provider_image",
             'if ! defines_uv_version "$static_provider"',
             'if defines_uv_version "$STATIC_ARCHIVE"',
+            "has_public_lpeglabel_symbol",
+            "has_unprefixed_lpeglabel_definition",
+            "require_no_lpeglabel_dependency",
             "build_and_run_static_titan system-static",
             '"$executable" "$marker" "$TITAN_PROCESS_SMOKE_CHILD"',
             'if ! defines_uv_version "$executable"',
@@ -1782,6 +1852,21 @@ fi
             'static_archive="${provider%.so}.a"', 1, true), workflow)
         assert.truthy(workflow:find(
             "ci_libuv_mode_smoke.sh system", 1, true), workflow)
+        assert.truthy(workflow:find(
+            "ci_test_groups.sh library-peg-string", 1, true), workflow)
+        assert.truthy(workflow:find(
+            "for module in coroutine uv async timer fs net os peg string",
+            1, true), workflow)
+        assert.truthy(workflow:find(
+            "--name='titan.peg GC roots patterns and callbacks across " ..
+                "repeated collections'", 1, true), workflow)
+        assert.truthy(workflow:find(
+            "--name='titan.string regex keeps compiled backreferences, " ..
+                "iterators, and replacement callbacks rooted across repeated " ..
+                "full and generational GC'", 1, true), workflow)
+        assert.truthy(workflow:find(
+            "bash spec/support/ci_peg_string_sanitizer_smoke.sh",
+            1, true), workflow)
         assert.equal(2, select(2, workflow:gsub(
             'TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE=' ..
             '"%$GITHUB_WORKSPACE/libuv%-build/libuv[.]a"', "")))

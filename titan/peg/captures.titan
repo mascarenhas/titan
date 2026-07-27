@@ -1,0 +1,99 @@
+-- The complete public capture surface of the pinned engine.
+
+function capture(pattern: Pattern): Pattern
+  return _pattern(
+    _C(pattern.raw), _checked_unary(pattern, 1))
+end
+
+function constant(...: value): Pattern
+  local count = #...
+  local size = 1
+  if count == 1 then
+    size = 2
+  elseif count > 1 then
+    size = 3 * count
+  end
+  if size > MAX_PATTERN_SIZE then raise "PEG pattern is too large" end
+  return _pattern(_Cc(...), size)
+end
+
+function match_time(
+    pattern: Pattern,
+    callback: (string, integer, value, ...: value) ->
+      (...: value)): Pattern
+  _require_raw_function(callback, "match-time")
+  return _pattern(
+    _Cmt(pattern.raw, callback), _checked_unary(pattern, 1))
+end
+
+function back_capture(key: value): Pattern
+  if key == nil then raise "PEG back-capture key must be non-nil" end
+  return _pattern(_Cb(key), 2)
+end
+
+function argument(index: integer): Pattern
+  if index < 1 or index > MAX_SHORT then
+    raise "PEG argument index is out of range"
+  end
+  return _pattern(_Carg(index), 2)
+end
+
+function position(): Pattern
+  return _pattern(_Cp(), 2)
+end
+
+function substitution(pattern: Pattern): Pattern
+  return _pattern(
+    _Cs(pattern.raw), _checked_unary(pattern, 1))
+end
+
+function table_capture(pattern: Pattern): Pattern
+  return _pattern(
+    _Ct(pattern.raw), _checked_unary(pattern, 1))
+end
+
+function fold_capture(
+    pattern: Pattern,
+    callback: (value, ...: value) -> value): Pattern
+  _require_raw_function(callback, "fold-capture")
+  return _pattern(
+    _Cf(pattern.raw, callback), _checked_unary(pattern, 1))
+end
+
+function group(pattern: Pattern, key: value): Pattern
+  return _pattern(
+    _Cg(pattern.raw, key), _checked_unary(pattern, 1))
+end
+
+function select_capture(pattern: Pattern,
+                        index: integer): Pattern
+  if index < 0 or index > MAX_SHORT then
+    raise "PEG capture index is out of range"
+  end
+  return _pattern(
+    _capture_replace(pattern.raw, index),
+    _checked_unary(pattern, 1))
+end
+
+function template_capture(pattern: Pattern,
+                          template: string): Pattern
+  return _pattern(
+    _capture_replace(pattern.raw, template),
+    _checked_unary(pattern, 1))
+end
+
+function query_capture(pattern: Pattern,
+                       lookup: {value: value}): Pattern
+  return _pattern(
+    _capture_replace(pattern.raw, lookup),
+    _checked_unary(pattern, 1))
+end
+
+function function_capture(
+    pattern: Pattern,
+    callback: (value, ...: value) -> (...: value)): Pattern
+  _require_raw_function(callback, "function-capture")
+  return _pattern(
+    _capture_replace(pattern.raw, callback),
+    _checked_unary(pattern, 1))
+end

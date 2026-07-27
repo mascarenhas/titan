@@ -1452,7 +1452,10 @@ end
 
     it("desugars standard-library short imports to qualified modules",
        function()
-        local names = { "coroutine", "uv", "async", "timer", "fs", "net", "os" }
+        local names = {
+            "coroutine", "uv", "async", "timer", "fs", "net", "os",
+            "peg", "string",
+        }
         for _, name in ipairs(names) do
             assert_program_ast(
                 'local library = import "' .. name .. '"', {

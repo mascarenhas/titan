@@ -1,0 +1,677 @@
+-- Pack/unpack parsing and semantics translated and adapted from src/lstrlib.c
+-- in the immutable Lua 5.5.0 release:
+-- https://www.lua.org/ftp/lua-5.5.0.tar.gz
+-- Copyright (C) 1994-2025 Lua.org, PUC-Rio. MIT terms are reproduced in
+-- LICENSES/lua-LICENSE.
+
+local PACK_INT = 1
+local PACK_UINT = 2
+local PACK_FLOAT = 3
+local PACK_NUMBER = 4
+local PACK_DOUBLE = 5
+local PACK_CHAR = 6
+local PACK_STRING = 7
+local PACK_ZSTRING = 8
+local PACK_PADDING = 9
+local PACK_ALIGN = 10
+local PACK_NONE = 11
+
+local record PackState
+  local format_string: string
+  local cursor: integer
+  local little_endian: boolean
+  local native_little_endian: boolean
+  local maximum_alignment: integer
+end
+
+local record PackOption
+  local kind: integer
+  local size: integer
+  local padding: integer
+end
+
+local function host_is_little_endian(): boolean
+  local probe: ffi.titan_ffi_unsigned_int =
+    1 as ffi.titan_ffi_unsigned_int
+  local bytes = allocate_string_bytes(
+    ffi.titan_ffi_unsigned_int.sizeof as integer)
+  cstring.memcpy(
+    bytes.data, probe,
+    ffi.titan_ffi_unsigned_int.sizeof as cstring.size_t)
+  local octets = bytes.data as *ffi.titan_ffi_unsigned_char
+  return octets[0] == (1 as ffi.titan_ffi_unsigned_char)
+end
+
+local function native_maximum_alignment(): integer
+  local alignment = lua.lua_Number.alignof as integer
+  if ffi.titan_ffi_double.alignof > alignment then
+    alignment = ffi.titan_ffi_double.alignof as integer
+  end
+  if ffi.titan_ffi_void_ptr.alignof > alignment then
+    alignment = ffi.titan_ffi_void_ptr.alignof as integer
+  end
+  if lua.lua_Integer.alignof > alignment then
+    alignment = lua.lua_Integer.alignof as integer
+  end
+  if ffi.titan_ffi_long.alignof > alignment then
+    alignment = ffi.titan_ffi_long.alignof as integer
+  end
+  return alignment
+end
+
+local function new_pack_state(format_string: string): PackState
+  local native_little = host_is_little_endian()
+  return PackState.new(
+    format_string, 1, native_little, native_little, 1)
+end
+
+local function pack_format_at_end(state: PackState): boolean
+  return state.cursor > #state.format_string or
+         format_byte(state.format_string, state.cursor) == 0
+end
+
+local function pack_format_digit(state: PackState): boolean
+  if pack_format_at_end(state) then return false end
+  return is_ascii_digit(
+    format_byte(state.format_string, state.cursor))
+end
+
+local function read_pack_number(state: PackState,
+                                default: integer): integer
+  if not pack_format_digit(state) then return default end
+  local result = 0
+  local maximum = maximum_string_bytes()
+  while pack_format_digit(state) do
+    local digit =
+      format_byte(state.format_string, state.cursor) - 48
+    if result > (maximum - digit) // 10 then
+      raise "format size is too large"
+    end
+    result = result * 10 + digit
+    state.cursor = state.cursor + 1
+  end
+  return result
+end
+
+local function checked_pack_integer_size(size: integer): integer
+  if size < 1 or size > 16 then
+    raise "integral size out of limits [1,16]"
+  end
+  return size
+end
+
+local function read_pack_option(state: PackState): PackOption
+  if pack_format_at_end(state) then
+    raise "invalid format option"
+  end
+  local option =
+    format_byte(state.format_string, state.cursor)
+  state.cursor = state.cursor + 1
+
+  if option == 98 then
+    return PackOption.new(PACK_INT, 1, 0)
+  elseif option == 66 then
+    return PackOption.new(PACK_UINT, 1, 0)
+  elseif option == 104 then
+    return PackOption.new(
+      PACK_INT, ffi.titan_ffi_short.sizeof as integer, 0)
+  elseif option == 72 then
+    return PackOption.new(
+      PACK_UINT, ffi.titan_ffi_short.sizeof as integer, 0)
+  elseif option == 108 then
+    return PackOption.new(
+      PACK_INT, ffi.titan_ffi_long.sizeof as integer, 0)
+  elseif option == 76 then
+    return PackOption.new(
+      PACK_UINT, ffi.titan_ffi_long.sizeof as integer, 0)
+  elseif option == 106 then
+    return PackOption.new(
+      PACK_INT, lua.lua_Integer.sizeof as integer, 0)
+  elseif option == 74 then
+    return PackOption.new(
+      PACK_UINT, lua.lua_Integer.sizeof as integer, 0)
+  elseif option == 84 then
+    return PackOption.new(
+      PACK_UINT, cstring.size_t.sizeof as integer, 0)
+  elseif option == 102 then
+    return PackOption.new(
+      PACK_FLOAT, ffi.titan_ffi_float.sizeof as integer, 0)
+  elseif option == 110 then
+    return PackOption.new(
+      PACK_NUMBER, lua.lua_Number.sizeof as integer, 0)
+  elseif option == 100 then
+    return PackOption.new(
+      PACK_DOUBLE, ffi.titan_ffi_double.sizeof as integer, 0)
+  elseif option == 105 then
+    return PackOption.new(
+      PACK_INT,
+      checked_pack_integer_size(
+        read_pack_number(
+          state, ffi.titan_ffi_int.sizeof as integer)),
+      0)
+  elseif option == 73 then
+    return PackOption.new(
+      PACK_UINT,
+      checked_pack_integer_size(
+        read_pack_number(
+          state, ffi.titan_ffi_int.sizeof as integer)),
+      0)
+  elseif option == 115 then
+    return PackOption.new(
+      PACK_STRING,
+      checked_pack_integer_size(
+        read_pack_number(
+          state, cstring.size_t.sizeof as integer)),
+      0)
+  elseif option == 99 then
+    local size = read_pack_number(state, -1)
+    if size < 0 then
+      raise "missing size for format option 'c'"
+    end
+    return PackOption.new(PACK_CHAR, size, 0)
+  elseif option == 122 then
+    return PackOption.new(PACK_ZSTRING, 0, 0)
+  elseif option == 120 then
+    return PackOption.new(PACK_PADDING, 1, 0)
+  elseif option == 88 then
+    return PackOption.new(PACK_ALIGN, 0, 0)
+  elseif option == 32 then
+    return PackOption.new(PACK_NONE, 0, 0)
+  elseif option == 60 then
+    state.little_endian = true
+    return PackOption.new(PACK_NONE, 0, 0)
+  elseif option == 62 then
+    state.little_endian = false
+    return PackOption.new(PACK_NONE, 0, 0)
+  elseif option == 61 then
+    state.little_endian = state.native_little_endian
+    return PackOption.new(PACK_NONE, 0, 0)
+  elseif option == 33 then
+    state.maximum_alignment =
+      checked_pack_integer_size(
+        read_pack_number(state, native_maximum_alignment()))
+    return PackOption.new(PACK_NONE, 0, 0)
+  else
+    raise "invalid format option"
+  end
+end
+
+local function power_of_two(candidate: integer): boolean
+  return candidate > 0 and
+         (candidate & (candidate - 1)) == 0
+end
+
+local function read_pack_details(state: PackState,
+                                 total_size: integer): PackOption
+  local option = read_pack_option(state)
+  local alignment = option.size
+  if option.kind == PACK_ALIGN then
+    if pack_format_at_end(state) then
+      raise "invalid next option for option 'X'"
+    end
+    local following = read_pack_option(state)
+    alignment = following.size
+    if following.kind == PACK_CHAR or alignment == 0 then
+      raise "invalid next option for option 'X'"
+    end
+  end
+
+  if alignment <= 1 or option.kind == PACK_CHAR then
+    option.padding = 0
+  else
+    if alignment > state.maximum_alignment then
+      alignment = state.maximum_alignment
+    end
+    if not power_of_two(alignment) then
+      raise "format asks for alignment not power of 2"
+    end
+    local remainder = total_size % alignment
+    option.padding =
+      (alignment - remainder) % alignment
+  end
+  return option
+end
+
+local function checked_pack_growth(total_size: integer,
+                                   addition: integer)
+  local maximum = maximum_string_bytes()
+  if addition < 0 or addition > maximum - total_size then
+    raise "result too long"
+  end
+end
+
+local function pack_integer_bytes(number: lua.lua_Integer,
+                                  size: integer,
+                                  little_endian: boolean,
+                                  negative: boolean): string
+  local output = allocate_string_bytes(size)
+  local remaining = number as lua.lua_Unsigned
+  local index = 0
+  while index < size do
+    local destination = size - index - 1
+    if little_endian then destination = index end
+    local octet: ffi.titan_ffi_unsigned_char =
+      0 as ffi.titan_ffi_unsigned_char
+    if index >= lua.lua_Integer.sizeof and negative then
+      octet = 255 as ffi.titan_ffi_unsigned_char
+    else
+      octet =
+        (remaining & (255 as lua.lua_Unsigned))
+          as ffi.titan_ffi_unsigned_char
+      remaining =
+        remaining >> (8 as ffi.titan_ffi_int)
+    end
+    output.data[destination] = octet as ffi.titan_ffi_char
+    index = index + 1
+  end
+  return finish_string(output)
+end
+
+local function check_signed_pack_range(number: lua.lua_Integer,
+                                       size: integer)
+  if size < lua.lua_Integer.sizeof then
+    local shift = size * 8 - 1
+    local limit = 1 << shift
+    if number < (-limit as lua.lua_Integer) or
+        number >= (limit as lua.lua_Integer) then
+      raise "integer overflow"
+    end
+  end
+end
+
+local function check_unsigned_pack_range(number: lua.lua_Integer,
+                                         size: integer)
+  if size < lua.lua_Integer.sizeof then
+    local shift = size * 8
+    local limit =
+      (1 as lua.lua_Unsigned) <<
+      (shift as ffi.titan_ffi_int)
+    if (number as lua.lua_Unsigned) >= limit then
+      raise "unsigned overflow"
+    end
+  end
+end
+
+local function ordered_native_bytes(bytes: string,
+                                    little_endian: boolean,
+                                    native_little_endian: boolean): string
+  if little_endian == native_little_endian then return bytes end
+  return reverse(bytes)
+end
+
+local function pack_float_bytes(number: lua.lua_Number,
+                                little_endian: boolean,
+                                native_little_endian: boolean): string
+  local converted = number as ffi.titan_ffi_float
+  local output = allocate_string_bytes(
+    ffi.titan_ffi_float.sizeof as integer)
+  cstring.memcpy(
+    output.data, converted,
+    ffi.titan_ffi_float.sizeof as cstring.size_t)
+  return ordered_native_bytes(
+    finish_string(output), little_endian, native_little_endian)
+end
+
+local function pack_number_bytes(number: lua.lua_Number,
+                                 little_endian: boolean,
+                                 native_little_endian: boolean): string
+  local output = allocate_string_bytes(
+    lua.lua_Number.sizeof as integer)
+  cstring.memcpy(
+    output.data, number,
+    lua.lua_Number.sizeof as cstring.size_t)
+  return ordered_native_bytes(
+    finish_string(output), little_endian, native_little_endian)
+end
+
+local function pack_double_bytes(number: lua.lua_Number,
+                                 little_endian: boolean,
+                                 native_little_endian: boolean): string
+  local converted = number as ffi.titan_ffi_double
+  local output = allocate_string_bytes(
+    ffi.titan_ffi_double.sizeof as integer)
+  cstring.memcpy(
+    output.data, converted,
+    ffi.titan_ffi_double.sizeof as cstring.size_t)
+  return ordered_native_bytes(
+    finish_string(output), little_endian, native_little_endian)
+end
+
+local function next_pack_argument(arguments: {value},
+                                  index: integer): value
+  if index > #arguments then return nil end
+  return arguments[index]
+end
+
+function pack(format_string: string, ...: value): string
+  local state = new_pack_state(format_string)
+  local builder = new_string_builder()
+  local arguments: {value} = {...}
+  local argument = 0
+
+  while not pack_format_at_end(state) do
+    local option = read_pack_details(state, builder.length)
+    checked_pack_growth(builder.length, option.padding)
+    checked_pack_growth(
+      builder.length + option.padding, option.size)
+    if option.padding > 0 then
+      builder_append(builder, zero_bytes(option.padding))
+    end
+
+    if option.kind == PACK_INT then
+      argument = argument + 1
+      local number =
+        checked_integer(next_pack_argument(arguments, argument))
+      check_signed_pack_range(number, option.size)
+      builder_append(
+        builder,
+        pack_integer_bytes(
+          number, option.size, state.little_endian, number < 0))
+    elseif option.kind == PACK_UINT then
+      argument = argument + 1
+      local number =
+        checked_integer(next_pack_argument(arguments, argument))
+      check_unsigned_pack_range(number, option.size)
+      builder_append(
+        builder,
+        pack_integer_bytes(
+          number, option.size, state.little_endian, false))
+    elseif option.kind == PACK_FLOAT then
+      argument = argument + 1
+      builder_append(
+        builder,
+        pack_float_bytes(
+          checked_number(next_pack_argument(arguments, argument)),
+          state.little_endian, state.native_little_endian))
+    elseif option.kind == PACK_NUMBER then
+      argument = argument + 1
+      builder_append(
+        builder,
+        pack_number_bytes(
+          checked_number(next_pack_argument(arguments, argument)),
+          state.little_endian, state.native_little_endian))
+    elseif option.kind == PACK_DOUBLE then
+      argument = argument + 1
+      builder_append(
+        builder,
+        pack_double_bytes(
+          checked_number(next_pack_argument(arguments, argument)),
+          state.little_endian, state.native_little_endian))
+    elseif option.kind == PACK_CHAR then
+      argument = argument + 1
+      local text =
+        checked_string(next_pack_argument(arguments, argument))
+      if #text > option.size then
+        raise "string longer than given size"
+      end
+      builder_append(builder, text)
+      if #text < option.size then
+        builder_append(
+          builder, zero_bytes(option.size - #text))
+      end
+    elseif option.kind == PACK_STRING then
+      argument = argument + 1
+      local text =
+        checked_string(next_pack_argument(arguments, argument))
+      check_unsigned_pack_range(
+        #text as lua.lua_Integer, option.size)
+      builder_append(
+        builder,
+        pack_integer_bytes(
+          #text as lua.lua_Integer, option.size,
+          state.little_endian, false))
+      checked_pack_growth(builder.length, #text)
+      builder_append(builder, text)
+    elseif option.kind == PACK_ZSTRING then
+      argument = argument + 1
+      local text =
+        checked_string(next_pack_argument(arguments, argument))
+      if contains_byte(text, 0) then
+        raise "string contains zeros"
+      end
+      checked_pack_growth(builder.length, #text)
+      builder_append(builder, text)
+      checked_pack_growth(builder.length, 1)
+      builder_append(builder, zero_bytes(1))
+    elseif option.kind == PACK_PADDING then
+      builder_append(builder, zero_bytes(1))
+    end
+  end
+
+  return builder_finish(builder)
+end
+
+function packsize(format_string: string): integer
+  local state = new_pack_state(format_string)
+  local total_size = 0
+  while not pack_format_at_end(state) do
+    local option = read_pack_details(state, total_size)
+    if option.kind == PACK_STRING or
+        option.kind == PACK_ZSTRING then
+      raise "variable-length format"
+    end
+    checked_pack_growth(total_size, option.padding)
+    total_size = total_size + option.padding
+    checked_pack_growth(total_size, option.size)
+    total_size = total_size + option.size
+  end
+  return total_size
+end
+
+local function unpack_integer_bytes(data: string, position: integer,
+                                    size: integer,
+                                    little_endian: boolean,
+                                    signed: boolean): lua.lua_Integer
+  local bytes = data as const *ffi.titan_ffi_unsigned_char
+  local limit = size
+  if limit > lua.lua_Integer.sizeof then
+    limit = lua.lua_Integer.sizeof as integer
+  end
+  local result: lua.lua_Unsigned = 0 as lua.lua_Unsigned
+  local index = limit - 1
+  while index >= 0 do
+    result =
+      result << (8 as ffi.titan_ffi_int)
+    local source_index = size - index - 1
+    if little_endian then source_index = index end
+    result = result |
+      (bytes[position + source_index] as lua.lua_Unsigned)
+    index = index - 1
+  end
+
+  if size < lua.lua_Integer.sizeof and signed then
+    local mask =
+      (1 as lua.lua_Unsigned) <<
+      ((size * 8 - 1) as ffi.titan_ffi_int)
+    result = (result ~ mask) - mask
+  elseif size > lua.lua_Integer.sizeof then
+    local extension = 0
+    if signed and (result as lua.lua_Integer) < 0 then
+      extension = 255
+    end
+    index = limit
+    while index < size do
+      local source_index = size - index - 1
+      if little_endian then source_index = index end
+      if (bytes[position + source_index] as integer) ~=
+          extension then
+        raise "integer does not fit into Lua Integer"
+      end
+      index = index + 1
+    end
+  end
+  return result as lua.lua_Integer
+end
+
+local function native_ordered_slice(data: string, position: integer,
+                                    size: integer,
+                                    little_endian: boolean,
+                                    native_little_endian: boolean): string
+  local bytes = copy_interval(data, position + 1, size)
+  if little_endian == native_little_endian then return bytes end
+  return reverse(bytes)
+end
+
+local function unpack_float_bytes(data: string, position: integer,
+                                  little_endian: boolean,
+                                  native_little_endian: boolean):
+                                  lua.lua_Number
+  local bytes = native_ordered_slice(
+    data, position, ffi.titan_ffi_float.sizeof as integer,
+    little_endian, native_little_endian)
+  local source = bytes as const *ffi.titan_ffi_char
+  local converted: ffi.titan_ffi_float =
+    0.0 as ffi.titan_ffi_float
+  cstring.memcpy(
+    converted, source,
+    ffi.titan_ffi_float.sizeof as cstring.size_t)
+  return converted as lua.lua_Number
+end
+
+local function unpack_number_bytes(data: string, position: integer,
+                                   little_endian: boolean,
+                                   native_little_endian: boolean):
+                                   lua.lua_Number
+  local bytes = native_ordered_slice(
+    data, position, lua.lua_Number.sizeof as integer,
+    little_endian, native_little_endian)
+  local source = bytes as const *ffi.titan_ffi_char
+  local converted: lua.lua_Number = 0.0 as lua.lua_Number
+  cstring.memcpy(
+    converted, source,
+    lua.lua_Number.sizeof as cstring.size_t)
+  return converted
+end
+
+local function unpack_double_bytes(data: string, position: integer,
+                                   little_endian: boolean,
+                                   native_little_endian: boolean):
+                                   lua.lua_Number
+  local bytes = native_ordered_slice(
+    data, position, ffi.titan_ffi_double.sizeof as integer,
+    little_endian, native_little_endian)
+  local source = bytes as const *ffi.titan_ffi_char
+  local converted: ffi.titan_ffi_double =
+    0.0 as ffi.titan_ffi_double
+  cstring.memcpy(
+    converted, source,
+    ffi.titan_ffi_double.sizeof as cstring.size_t)
+  return converted as lua.lua_Number
+end
+
+local function flexible_values(results: {value},
+                               index: integer): (...: value)
+  if index > #results then return end
+  if index == #results then return results[index] end
+  return results[index], flexible_values(results, index + 1)
+end
+
+function unpack(format_string: string, data: string,
+                initial: integer?): (...: value)
+  local raw_initial = 1
+  if initial then raw_initial = initial end
+  local position =
+    initial_position(raw_initial, #data) - 1
+  if position > #data then
+    raise "initial position out of string"
+  end
+
+  local state = new_pack_state(format_string)
+  local results: {value} = {}
+  while not pack_format_at_end(state) do
+    local option = read_pack_details(state, position)
+    if option.padding > #data - position or
+        option.size > #data - position - option.padding then
+      raise "data string too short"
+    end
+    position = position + option.padding
+
+    if option.kind == PACK_INT or option.kind == PACK_UINT then
+      if #results >= 199 then
+        raise "too many flexible return values (max 200)"
+      end
+      results[#results + 1] =
+        unpack_integer_bytes(
+          data, position, option.size, state.little_endian,
+          option.kind == PACK_INT)
+    elseif option.kind == PACK_FLOAT then
+      if #results >= 199 then
+        raise "too many flexible return values (max 200)"
+      end
+      results[#results + 1] =
+        unpack_float_bytes(
+          data, position, state.little_endian,
+          state.native_little_endian)
+    elseif option.kind == PACK_NUMBER then
+      if #results >= 199 then
+        raise "too many flexible return values (max 200)"
+      end
+      results[#results + 1] =
+        unpack_number_bytes(
+          data, position, state.little_endian,
+          state.native_little_endian)
+    elseif option.kind == PACK_DOUBLE then
+      if #results >= 199 then
+        raise "too many flexible return values (max 200)"
+      end
+      results[#results + 1] =
+        unpack_double_bytes(
+          data, position, state.little_endian,
+          state.native_little_endian)
+    elseif option.kind == PACK_CHAR then
+      if #results >= 199 then
+        raise "too many flexible return values (max 200)"
+      end
+      if option.size == 0 then
+        results[#results + 1] = ""
+      else
+        results[#results + 1] =
+          copy_interval(data, position + 1, option.size)
+      end
+    elseif option.kind == PACK_STRING then
+      if #results >= 199 then
+        raise "too many flexible return values (max 200)"
+      end
+      local packed_length =
+        unpack_integer_bytes(
+          data, position, option.size,
+          state.little_endian, false) as lua.lua_Unsigned
+      if packed_length >
+          (maximum_string_bytes() as lua.lua_Unsigned) then
+        raise "data string too short"
+      end
+      local length = packed_length as integer
+      if length > #data - position - option.size then
+        raise "data string too short"
+      end
+      if length == 0 then
+        results[#results + 1] = ""
+      else
+        results[#results + 1] =
+          copy_interval(
+            data, position + option.size + 1, length)
+      end
+      position = position + length
+    elseif option.kind == PACK_ZSTRING then
+      if #results >= 199 then
+        raise "too many flexible return values (max 200)"
+      end
+      local bytes =
+        data as const *ffi.titan_ffi_unsigned_char
+      local ending = position
+      while ending < #data and bytes[ending] ~= 0 do
+        ending = ending + 1
+      end
+      if ending >= #data then
+        raise "unfinished string for format 'z'"
+      end
+      results[#results + 1] =
+        copy_interval(data, position + 1, ending - position)
+      position = ending + 1
+    end
+    position = position + option.size
+  end
+
+  results[#results + 1] = position + 1
+  return flexible_values(results, 1)
+end

@@ -1,4 +1,5 @@
 local uv = import "uv"
+local str = import "string"
 
 -- Portable operating-system helpers. The low-level uv module owns every C
 -- type and libuv call; this facade exposes only ordinary Titan values.
@@ -125,16 +126,15 @@ local function read_output_until(process: Process, state: ReadState,
           local result_end = match_end
           if chop then result_end = result_end - #delimiter end
           local all = join_chunks(chunks, 1, count)
-          local selected = uv._bytes_slice(all, 0, result_end)
-          local remaining = uv._bytes_slice(all, match_end,
-                                            #all - match_end)
+          local selected = str.sub(all, 1, result_end)
+          local remaining = str.sub(all, match_end + 1)
           result = selected
           state.excess = remaining .. state.excess
           finished = true
         else
           local keep = #delimiter - 1
           if keep > #boundary then keep = #boundary end
-          tail = uv._bytes_slice(boundary, #boundary - keep, keep)
+          tail = str.sub(boundary, #boundary - keep + 1)
         end
       end
     end

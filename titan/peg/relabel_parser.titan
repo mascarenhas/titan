@@ -1,0 +1,76 @@
+-- Part of Titan's translation of LPegLabel relabel.lua from release
+-- v1.6.2-1, commit 912b0b9e8641074408ffc2259e069b188e0c717b.
+-- Copyright (c) 2014-2022 Sérgio Medeiros. MIT terms are reproduced in
+-- LICENSES/lpeglabel-LICENSE.
+--
+-- The lexical and semantic callbacks live in relabel.titan; this contributor
+-- owns the recursive public titan.peg grammar that joins them into the pinned
+-- relabel language.
+
+local function _relabel_build_parser(): Pattern
+  local lex = _relabel_build_lexical()
+  local suffix_operation =
+    _relabel_build_suffix_operation(lex)
+  local primary = _relabel_build_primary(lex)
+  local suffix = function_capture(
+    sequence(
+      primary, zero_or_more(suffix_operation)),
+    _relabel_apply_suffixes)
+  local positive = function_capture(
+    sequence(
+      literal("&"),
+      _relabel_expect(
+        sequence(lex.spacing, variable("Prefix")),
+        "ExpPatt2")),
+    _relabel_lookahead_capture)
+  local negative_prefix = function_capture(
+    sequence(
+      literal("!"),
+      _relabel_expect(
+        sequence(lex.spacing, variable("Prefix")),
+        "ExpPatt3")),
+    _relabel_negative_capture)
+  local prefix = choice(positive, negative_prefix, suffix)
+  local sequence_expression = function_capture(
+    sequence(
+      constant(succeed()), prefix,
+      zero_or_more(sequence(lex.spacing, prefix))),
+    _relabel_sequence_capture)
+  local choice_tail = sequence(
+    lex.spacing, literal("/"),
+    _relabel_expect(
+      sequence(lex.spacing, variable("Seq")),
+      "ExpPatt1"))
+  local choice_expression = function_capture(
+    sequence(
+      sequence_expression, zero_or_more(choice_tail)),
+    _relabel_choice_capture)
+  local parsed_definition = function_capture(
+    sequence(
+      lex.name, lex.arrow,
+      _relabel_expect(variable("Exp"), "ExpPatt8")),
+    _relabel_parsed_rule)
+  local target_grammar = function_capture(
+    sequence(
+      group(constant(true), "G"),
+      parsed_definition,
+      zero_or_more(sequence(
+        lex.spacing, parsed_definition))),
+    _relabel_target_grammar)
+  local meta = grammar("Exp", {
+    rule("Exp", sequence(
+      lex.spacing,
+      choice(variable("Grammar"), choice_expression))),
+    rule("Seq", sequence_expression),
+    rule("Prefix", prefix),
+    rule("Suffix", suffix),
+    rule("Primary", primary),
+    rule("Label", lex.label),
+    rule("Definition", parsed_definition),
+    rule("Grammar", target_grammar),
+  })
+  return sequence(
+    lex.spacing, group(constant(false), "G"),
+    _relabel_expect(meta, "NoPatt"), lex.spacing,
+    _relabel_expect(negative(any()), "ExtraChars"))
+end

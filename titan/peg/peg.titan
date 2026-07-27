@@ -1,0 +1,78 @@
+local lua = foreign import "lua.h"
+local ffi = foreign import "titan/ffi.h"
+local private_lpeg = foreign import "titan_lpeglabel.h"
+
+-- LPegLabel 1.6.2-1 uses 16-bit tree offsets and keeps ten slots in
+-- reserve.  Titan enforces this consistently before entering the native
+-- constructors.
+local MAX_PATTERN_SIZE = 32757
+local MAX_BEHIND = 255
+local MAX_RULES = 1000
+local MAX_SHORT = 32767
+local MAX_STACK = 21474836
+local PATTERN_REGISTRY_KEY =
+  "titan.peg.lpeglabel.912b0b9e.pattern"
+
+-- The engine table and all callables are per-state GC roots owned by this
+-- module.  They are deliberately values: these are ordinary private Lua C
+-- closures, not Titan functions carrying a Titan function-type tag.
+local _engine: value = nil
+local _version_text = ""
+
+local _P: value = nil
+local _S: value = nil
+local _R: value = nil
+local _utfR: value = nil
+local _V: value = nil
+local _B: value = nil
+local _T: value = nil
+local _C: value = nil
+local _Cc: value = nil
+local _Cmt: value = nil
+local _Cb: value = nil
+local _Carg: value = nil
+local _Cp: value = nil
+local _Cs: value = nil
+local _Ct: value = nil
+local _Cf: value = nil
+local _Cg: value = nil
+local _match: value = nil
+local _locale: value = nil
+local _setmaxstack: value = nil
+
+local _sequence: value = nil
+local _choice: value = nil
+local _difference: value = nil
+local _lookahead: value = nil
+local _negative: value = nil
+local _repeat: value = nil
+local _capture_replace: value = nil
+local _match_success_sentinel: value = nil
+
+record Pattern
+  local raw: value
+  local tree_size: integer
+end
+
+record Rule
+  local encoded_name: string
+  local pattern: Pattern
+end
+
+record Locale
+  alnum: Pattern
+  alpha: Pattern
+  cntrl: Pattern
+  digit: Pattern
+  graph: Pattern
+  lower: Pattern
+  print: Pattern
+  punct: Pattern
+  space: Pattern
+  upper: Pattern
+  xdigit: Pattern
+end
+
+do
+  _initialize_native()
+end

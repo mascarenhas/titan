@@ -1,0 +1,393 @@
+-- Private LPegLabel state and raw-Lua boundary.
+
+local function _field(table_value: value, name: string): value
+  local top = lua.lua_gettop(L)
+  local result: value = nil
+  do
+    ffi.lua_pushtvalue(L, table_value)
+    lua.lua_getfield(L, -1, name)
+    result = ffi.lua_totvalue(L, -1)
+  finally
+    lua.lua_settop(L, top)
+  end
+  return result
+end
+
+local function _require_function(table_value: value,
+                                 name: string): value
+  local top = lua.lua_gettop(L)
+  local result: value = nil
+  do
+    ffi.lua_pushtvalue(L, table_value)
+    lua.lua_getfield(L, -1, name)
+    if lua.lua_type(L, -1) ~= lua.LUA_TFUNCTION then
+      raise "embedded LPegLabel is missing function '" .. name .. "'"
+    end
+    result = ffi.lua_totvalue(L, -1)
+  finally
+    lua.lua_settop(L, top)
+  end
+  return result
+end
+
+local function _initialize_native()
+  local top = lua.lua_gettop(L)
+  do
+    if private_lpeg.titan_lpeglabel_open(L) ~= 1 or
+        lua.lua_type(L, -1) ~= lua.LUA_TTABLE then
+      raise "embedded LPegLabel opener did not return its module table"
+    end
+    _engine = ffi.lua_totvalue(L, -1)
+
+    _P = _require_function(_engine, "P")
+    _S = _require_function(_engine, "S")
+    _R = _require_function(_engine, "R")
+    _utfR = _require_function(_engine, "utfR")
+    _V = _require_function(_engine, "V")
+    _B = _require_function(_engine, "B")
+    _T = _require_function(_engine, "T")
+    _C = _require_function(_engine, "C")
+    _Cc = _require_function(_engine, "Cc")
+    _Cmt = _require_function(_engine, "Cmt")
+    _Cb = _require_function(_engine, "Cb")
+    _Carg = _require_function(_engine, "Carg")
+    _Cp = _require_function(_engine, "Cp")
+    _Cs = _require_function(_engine, "Cs")
+    _Ct = _require_function(_engine, "Ct")
+    _Cf = _require_function(_engine, "Cf")
+    _Cg = _require_function(_engine, "Cg")
+    _match = _require_function(_engine, "match")
+    _locale = _require_function(_engine, "locale")
+    _setmaxstack = _require_function(_engine, "setmaxstack")
+    _version_text = _field(_engine, "version") as string
+
+    lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, PATTERN_REGISTRY_KEY)
+    if lua.lua_type(L, -1) ~= lua.LUA_TTABLE then
+      raise "embedded LPegLabel did not install its private pattern metatable"
+    end
+    local metatable: value = ffi.lua_totvalue(L, -1)
+    _sequence = _require_function(metatable, "__mul")
+    _choice = _require_function(metatable, "__add")
+    _difference = _require_function(metatable, "__sub")
+    _lookahead = _require_function(metatable, "__len")
+    _negative = _require_function(metatable, "__unm")
+    _repeat = _require_function(metatable, "__pow")
+    _capture_replace = _require_function(metatable, "__div")
+
+    -- Matching is wrapped with an identity sentinel and a final position
+    -- capture.  The sentinel makes a native failure triple unambiguous even
+    -- when successful user captures begin with nil, "fail", and an integer.
+    -- The wrapper is stripped on the raw Lua stack before its results cross
+    -- Titan's 200-value flexible-result boundary.
+    lua.lua_createtable(L, 0, 0)
+    _match_success_sentinel = ffi.lua_totvalue(L, -1)
+  finally
+    lua.lua_settop(L, top)
+  end
+end
+
+local function _pattern(raw: value, tree_size: integer): Pattern
+  return Pattern.new(raw, tree_size)
+end
+
+local function _checked_sum(first: integer, second: integer,
+                            overhead: integer): integer
+  if first < 0 or second < 0 or overhead < 0 or
+      first > MAX_PATTERN_SIZE - overhead or
+      second > MAX_PATTERN_SIZE - overhead - first then
+    raise "PEG pattern is too large"
+  end
+  return first + second + overhead
+end
+
+local function _checked_unary(pattern: Pattern,
+                              overhead: integer): integer
+  return _checked_sum(pattern.tree_size, 0, overhead)
+end
+
+local function _raw_type(item: value): integer
+  local top = lua.lua_gettop(L)
+  local kind = 0
+  do
+    ffi.lua_pushtvalue(L, item)
+    kind = lua.lua_type(L, -1)
+  finally
+    lua.lua_settop(L, top)
+  end
+  return kind
+end
+
+local function _require_raw_function(item: value, operation: string)
+  if _raw_type(item) ~= lua.LUA_TFUNCTION then
+    raise "PEG " .. operation .. " callback must be a raw function"
+  end
+end
+
+local function _is_integer_value(item: value): boolean
+  local top = lua.lua_gettop(L)
+  local result = false
+  do
+    ffi.lua_pushtvalue(L, item)
+    result = lua.lua_isinteger(L, -1) ~= 0
+  finally
+    lua.lua_settop(L, top)
+  end
+  return result
+end
+
+local function _encoded_name(name: value): string
+  local kind = _raw_type(name)
+  if kind == lua.LUA_TSTRING then
+    return "\0s" .. (name as string)
+  elseif kind == lua.LUA_TNUMBER and _is_integer_value(name) then
+    return "\0i" .. (name as integer)
+  end
+  raise "PEG names and labels must be strings or integers"
+end
+
+local function _string_from(source: string, offset: integer): string
+  local top = lua.lua_gettop(L)
+  local result = ""
+  do
+    local data = source as const *ffi.titan_ffi_char
+    lua.lua_pushlstring(
+      L, data + offset, (#source - offset) as lua.size_t)
+    local stack_value: value = ffi.lua_totvalue(L, -1)
+    result = stack_value as string
+  finally
+    lua.lua_settop(L, top)
+  end
+  return result
+end
+
+local function _decoded_label(label: value): value
+  if _raw_type(label) ~= lua.LUA_TSTRING then return label end
+  local encoded = label as string
+  if #encoded < 2 then return label end
+  local bytes = encoded as const *ffi.titan_ffi_unsigned_char
+  if bytes[0] ~= 0 then return label end
+  if bytes[1] == 115 then
+    return _string_from(encoded, 2)
+  elseif bytes[1] == 105 then
+    local body = _string_from(encoded, 2)
+    local top = lua.lua_gettop(L)
+    local converted: lua.lua_Integer = 0
+    local valid: ffi.titan_ffi_int = 0
+    do
+      ffi.lua_pushtvalue(L, body)
+      converted = lua.lua_tointegerx(L, -1, valid)
+      if valid == 0 then raise "invalid private PEG integer label" end
+    finally
+      lua.lua_settop(L, top)
+    end
+    return converted as integer
+  end
+  return label
+end
+
+local function _normalized_init(subject: string,
+                                supplied: integer?): integer
+  if not supplied then return 1 end
+  local init = supplied as integer
+  local length = #subject
+  if init > 0 then
+    if init > length + 1 then return length + 1 end
+    return init
+  elseif init == 0 then
+    return length + 1
+  elseif init < -length then
+    return 1
+  else
+    return length + init + 1
+  end
+end
+
+local function _raw_table_item(items: value,
+                               index: integer): value
+  local top = lua.lua_gettop(L)
+  local result: value = nil
+  do
+    ffi.lua_pushtvalue(L, items)
+    lua.lua_rawgeti(L, -1, index)
+    result = ffi.lua_totvalue(L, -1)
+  finally
+    lua.lua_settop(L, top)
+  end
+  return result
+end
+
+local function _unpack_results(items: value, index: integer,
+                               limit: integer): (...: value)
+  if index > limit then return end
+  return _raw_table_item(items, index),
+    _unpack_results(items, index + 1, limit)
+end
+
+function Pattern:match(subject: string, init: integer?,
+                       ...: value): (...: value)
+  local start = _normalized_init(subject, init)
+  local raw = _sequence(
+    _sequence(_Cc(_match_success_sentinel), self.raw), _Cp())
+  local top = lua.lua_gettop(L)
+  local had_error = false
+  local error_value: value = nil
+  local matched = false
+  local success_position = 0
+  local result_count = 0
+  local result_table: value = nil
+  local failure_label: value = nil
+  local failure_position = 0
+  do
+    ffi.lua_pushtvalue(L, _match)
+    ffi.lua_pushtvalue(L, raw)
+    ffi.lua_pushtvalue(L, subject)
+    ffi.lua_pushtvalue(L, start)
+    local index = 1
+    while index <= #... do
+      ffi.lua_pushtvalue(L, ...[index])
+      index = index + 1
+    end
+
+    local status = lua.lua_pcallk(
+      L, (3 + #...) as ffi.titan_ffi_int, lua.LUA_MULTRET,
+      0, 0, nil)
+    if status ~= lua.LUA_OK then
+      had_error = true
+      error_value = ffi.lua_totvalue(L, -1)
+    else
+      local native_count = lua.lua_gettop(L) - top
+      local first_result: value = nil
+      if native_count > 0 then
+        first_result = ffi.lua_totvalue(
+          L, (top + 1) as ffi.titan_ffi_int)
+      end
+      if native_count >= 2 and
+          first_result == _match_success_sentinel then
+        matched = true
+        local raw_position: value = ffi.lua_totvalue(
+          L, (top + native_count) as ffi.titan_ffi_int)
+        success_position = raw_position as integer
+        result_count = native_count - 2
+        if result_count > 200 then
+          raise "too many flexible return values (max 200)"
+        end
+        if result_count > 0 then
+          lua.lua_createtable(
+            L, result_count as ffi.titan_ffi_int, 0)
+          local table_index = lua.lua_gettop(L)
+          index = 1
+          while index <= result_count do
+            lua.lua_pushvalue(
+              L, (top + index + 1) as ffi.titan_ffi_int)
+            lua.lua_rawseti(L, table_index, index)
+            index = index + 1
+          end
+          result_table = ffi.lua_totvalue(L, table_index)
+        end
+      elseif native_count == 3 then
+        failure_label = ffi.lua_totvalue(
+          L, (top + 2) as ffi.titan_ffi_int)
+        local raw_position: value = ffi.lua_totvalue(
+          L, (top + 3) as ffi.titan_ffi_int)
+        failure_position = (raw_position as integer) + start - 1
+      else
+        raise "embedded LPegLabel returned an invalid match result"
+      end
+    end
+  finally
+    lua.lua_settop(L, top)
+  end
+
+  if had_error then raise error_value end
+  if matched then
+    if result_count == 0 then return success_position end
+    return _unpack_results(result_table, 1, result_count)
+  end
+  return nil, _decoded_label(failure_label), failure_position
+end
+
+function rule(name: value, pattern: Pattern): Rule
+  return Rule.new(_encoded_name(name), pattern)
+end
+
+function grammar(start: value, rules: {integer: Rule}): Pattern
+  local top = lua.lua_gettop(L)
+  local count = 0
+  local maximum = 0
+  local total_size = 2
+  local seen: {string: boolean} = {}
+  local encoded_start = _encoded_name(start)
+  local native: value = nil
+  do
+    lua.lua_createtable(L, 1, 0)
+    local grammar_index = lua.lua_gettop(L)
+    ffi.lua_pushtvalue(L, encoded_start)
+    lua.lua_rawseti(L, grammar_index, 1)
+
+    ffi.lua_pushtvalue(L, rules)
+    local rules_index = lua.lua_gettop(L)
+    lua.lua_pushnil(L)
+    while lua.lua_next(L, rules_index) ~= 0 do
+      if lua.lua_isinteger(L, -2) == 0 then
+        raise "PEG grammar rule indices must be integers"
+      end
+      local raw_index: value = ffi.lua_totvalue(L, -2)
+      local index = raw_index as integer
+      if index < 1 then
+        raise "PEG grammar rule indices must be positive"
+      end
+      local raw_item: value = ffi.lua_totvalue(L, -1)
+      local item = raw_item as Rule
+      count = count + 1
+      if count > MAX_RULES then raise "PEG grammar has too many rules" end
+      if index > maximum then maximum = index end
+      if seen[item.encoded_name] then
+        raise "duplicate PEG grammar rule name"
+      end
+      seen[item.encoded_name] = true
+      total_size = _checked_sum(
+        total_size, item.pattern.tree_size, 2)
+
+      ffi.lua_pushtvalue(L, item.encoded_name)
+      ffi.lua_pushtvalue(L, item.pattern.raw)
+      lua.lua_rawset(L, grammar_index)
+      lua.lua_settop(
+        L, (lua.lua_gettop(L) - 1) as ffi.titan_ffi_int)
+    end
+    if count ~= maximum then raise "PEG grammar rules must be dense" end
+    if not seen[encoded_start] then
+      raise "PEG grammar has no start rule"
+    end
+    native = _P(ffi.lua_totvalue(L, grammar_index))
+  finally
+    lua.lua_settop(L, top)
+  end
+  return _pattern(native, total_size)
+end
+
+function locale(): Locale
+  local native = _locale()
+  return Locale.new(
+    _pattern(_field(native, "alnum"), 5),
+    _pattern(_field(native, "alpha"), 5),
+    _pattern(_field(native, "cntrl"), 5),
+    _pattern(_field(native, "digit"), 5),
+    _pattern(_field(native, "graph"), 5),
+    _pattern(_field(native, "lower"), 5),
+    _pattern(_field(native, "print"), 5),
+    _pattern(_field(native, "punct"), 5),
+    _pattern(_field(native, "space"), 5),
+    _pattern(_field(native, "upper"), 5),
+    _pattern(_field(native, "xdigit"), 5))
+end
+
+function set_max_stack(maximum: integer)
+  if maximum < 1 or maximum > MAX_STACK then
+    raise "PEG maximum stack is out of range"
+  end
+  _setmaxstack(maximum)
+end
+
+function version(): string
+  return _version_text
+end

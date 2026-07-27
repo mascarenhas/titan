@@ -11,22 +11,24 @@ titan.so
   |                         |--> titan.timer
   |                         |--> titan.fs
   |                         |--> titan.net
-  |                         `--> titan.os
+  |                         `--> titan.os <-- titan.string <-- titan.peg
   `-- luaopen_titan (native support)
 ```
 
-All seven logical standard modules are explicit source roots in one compiler
+All nine logical standard modules are explicit source roots in one compiler
 invocation. Their imports are source/static, so each keeps an independent
 module state and ABI/types/init/Lua protocol while inter-module calls become
 direct `extern` calls in both provider forms. The build selects `titan_uv.o`
 from `libtitan.a`, includes `titanlib.o` once, and supplies the selected libuv
-policy once. Bundled mode carries the private archive's objects into both
-`titan.so` and `titan.a`; the libuv archive itself is not installed in the
-SDK. System mode keeps the pkg-config-selected dependency as a final-link
-setting and does not copy it into `titan.a`.
+policy once. The private namespaced LPegLabel archive follows `titanlib.o` as
+metadata-free payload for `titan.peg`/`titan.string`. Bundled mode then carries
+the private libuv archive's objects into both `titan.so` and `titan.a`; neither
+native archive is installed in the SDK. System mode keeps the
+pkg-config-selected libuv dependency as a final-link setting and does not copy
+it into `titan.a`.
 
 Installation publishes `<root>/lib/titan/0.18/titan.so` and
-`<root>/lib/titan/0.18/titan.a`, plus seven generated shims below
+`<root>/lib/titan/0.18/titan.a`, plus nine generated shims below
 `<root>/share/lua/5.5/titan/`. Titan prefix lookup
 claims `titan.uv` through the image's `titan_uv_abi`/`titan_uv_types`; Lua
 `require "titan.uv"` reaches `titan/uv.lua`, which selects provider `titan`,

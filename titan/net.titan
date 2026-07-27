@@ -1,9 +1,9 @@
 local uv = import "uv"
 
--- Stream payloads are binary strings. Titan does not yet expose string
--- indexing/slicing, so the uv middle layer supplies length-aware binary find
--- and slice helpers. Their offsets are zero-based and never use NUL
--- termination.
+-- Stream payloads are binary strings. The uv middle layer supplies
+-- zero-based, length-aware literal-byte search and slicing. Keeping both
+-- helpers there also preserves the deliberately narrow exact titan.net/uv
+-- image used by the delayed-DNS callback tests.
 
 record Connection
   local handle: uv.uv_tcp_t

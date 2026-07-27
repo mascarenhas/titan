@@ -42,6 +42,7 @@ artifacts=(
     "$shim_dir/coroutine.lua" "$shim_dir/uv.lua"
     "$shim_dir/async.lua" "$shim_dir/timer.lua"
     "$shim_dir/fs.lua" "$shim_dir/net.lua" "$shim_dir/os.lua"
+    "$shim_dir/peg.lua" "$shim_dir/string.lua"
 )
 
 if [[ $(uname -s) == Darwin ]]; then artifacts+=("$provider.dSYM"); fi
@@ -106,7 +107,8 @@ remove_installed_artifacts() {
     rm -f "$static_archive"
     rm -f "$shim_dir/coroutine.lua" "$shim_dir/uv.lua" \
         "$shim_dir/async.lua" "$shim_dir/timer.lua" \
-        "$shim_dir/fs.lua" "$shim_dir/net.lua" "$shim_dir/os.lua"
+        "$shim_dir/fs.lua" "$shim_dir/net.lua" "$shim_dir/os.lua" \
+        "$shim_dir/peg.lua" "$shim_dir/string.lua"
 }
 
 case "$mode" in

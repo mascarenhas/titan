@@ -1,0 +1,574 @@
+-- Format parsing and semantics translated and adapted from src/lstrlib.c in
+-- the immutable Lua 5.5.0 release:
+-- https://www.lua.org/ftp/lua-5.5.0.tar.gz
+-- Copyright (C) 1994-2025 Lua.org, PUC-Rio. MIT terms are reproduced in
+-- LICENSES/lua-LICENSE.
+
+local stdio = foreign import "stdio.h"
+local clocale = foreign import "locale.h"
+
+local record CoreStringBuilder
+  local chunks: {string}
+  local length: integer
+end
+
+local function new_string_builder(): CoreStringBuilder
+  local chunks: {string} = {}
+  return CoreStringBuilder.new(chunks, 0)
+end
+
+local function builder_append(builder: CoreStringBuilder, text: string)
+  local length = #text
+  if length == 0 then return end
+  local maximum = maximum_string_bytes()
+  if length > maximum - builder.length then
+    raise "resulting string is too large"
+  end
+  builder.chunks[#builder.chunks + 1] = text
+  builder.length = builder.length + length
+end
+
+local function builder_finish(builder: CoreStringBuilder): string
+  if builder.length == 0 then return "" end
+  local output = allocate_string_bytes(builder.length)
+  local offset = 0
+  local index = 1
+  while index <= #builder.chunks do
+    local chunk = builder.chunks[index] as string
+    local length = #chunk
+    local source = chunk as const *ffi.titan_ffi_char
+    cstring.memcpy(output.data + offset, source,
+                   length as cstring.size_t)
+    offset = offset + length
+    index = index + 1
+  end
+  return finish_string(output)
+end
+
+local function zero_bytes(length: integer): string
+  if length == 0 then return "" end
+  local output = allocate_string_bytes(length)
+  cstring.memset(output.data, 0, length as cstring.size_t)
+  return finish_string(output)
+end
+
+local function checked_integer(candidate: value): lua.lua_Integer
+  local top = lua.lua_gettop(L)
+  local result: lua.lua_Integer = 0 as lua.lua_Integer
+  do
+    ffi.lua_pushtvalue(L, candidate)
+    result = lual.luaL_checkinteger(L, -1)
+  finally
+    lua.lua_settop(L, top)
+  end
+  return result
+end
+
+local function checked_number(candidate: value): lua.lua_Number
+  local top = lua.lua_gettop(L)
+  local result: lua.lua_Number = 0 as lua.lua_Number
+  do
+    ffi.lua_pushtvalue(L, candidate)
+    result = lual.luaL_checknumber(L, -1)
+  finally
+    lua.lua_settop(L, top)
+  end
+  return result
+end
+
+local function checked_string(candidate: value): string
+  local top = lua.lua_gettop(L)
+  local result: value = nil
+  do
+    ffi.lua_pushtvalue(L, candidate)
+    lual.luaL_checklstring(L, -1, nil)
+    result = ffi.lua_totvalue(L, -1)
+  finally
+    lua.lua_settop(L, top)
+  end
+  return result
+end
+
+local function raw_value_type(candidate: value): integer
+  local top = lua.lua_gettop(L)
+  ffi.lua_pushtvalue(L, candidate)
+  local result = lua.lua_type(L, -1)
+  lua.lua_settop(L, top)
+  return result
+end
+
+local function value_is_integer(candidate: value): boolean
+  local top = lua.lua_gettop(L)
+  ffi.lua_pushtvalue(L, candidate)
+  local result = lua.lua_isinteger(L, -1) ~= 0
+  lua.lua_settop(L, top)
+  return result
+end
+
+local function checked_boolean(candidate: value): boolean
+  local top = lua.lua_gettop(L)
+  ffi.lua_pushtvalue(L, candidate)
+  local result = lua.lua_toboolean(L, -1) ~= 0
+  lua.lua_settop(L, top)
+  return result
+end
+
+local function prepare_snprintf(required: integer): StringBytes
+  if required < 0 then raise "string formatting failed" end
+  if required >= maximum_string_bytes() then
+    raise "resulting string is too large"
+  end
+  return allocate_string_bytes(required + 1)
+end
+
+local function finish_snprintf(output: StringBytes, required: integer,
+                               actual: integer): string
+  if actual ~= required then raise "string formatting failed" end
+  output.length = required
+  return finish_string(output)
+end
+
+local function integer_length_modifier(): string
+  if lua.lua_Integer.sizeof <= ffi.titan_ffi_int.sizeof then
+    return ""
+  elseif lua.lua_Integer.sizeof <= ffi.titan_ffi_long.sizeof then
+    return "l"
+  else
+    return "ll"
+  end
+end
+
+local function add_integer_length(form: string): string
+  return copy_interval(form, 1, #form - 1) ..
+         integer_length_modifier() ..
+         copy_interval(form, #form, 1)
+end
+
+local function render_signed(form: string,
+                             number: lua.lua_Integer): string
+  if lua.lua_Integer.sizeof <= ffi.titan_ffi_int.sizeof then
+    local converted = number as ffi.titan_ffi_int
+    local required = stdio.snprintf(nil, 0, form, converted)
+    local output = prepare_snprintf(required)
+    local actual = stdio.snprintf(
+        output.data, (required + 1) as cstring.size_t,
+        form, converted)
+    return finish_snprintf(output, required, actual)
+  elseif lua.lua_Integer.sizeof <= ffi.titan_ffi_long.sizeof then
+    local converted = number as ffi.titan_ffi_long
+    local required = stdio.snprintf(nil, 0, form, converted)
+    local output = prepare_snprintf(required)
+    local actual = stdio.snprintf(
+        output.data, (required + 1) as cstring.size_t,
+        form, converted)
+    return finish_snprintf(output, required, actual)
+  else
+    local converted = number as ffi.titan_ffi_long_long
+    local required = stdio.snprintf(nil, 0, form, converted)
+    local output = prepare_snprintf(required)
+    local actual = stdio.snprintf(
+        output.data, (required + 1) as cstring.size_t,
+        form, converted)
+    return finish_snprintf(output, required, actual)
+  end
+end
+
+local function render_unsigned(form: string,
+                               number: lua.lua_Integer): string
+  if lua.lua_Integer.sizeof <= ffi.titan_ffi_int.sizeof then
+    local converted = number as ffi.titan_ffi_unsigned_int
+    local required = stdio.snprintf(nil, 0, form, converted)
+    local output = prepare_snprintf(required)
+    local actual = stdio.snprintf(
+        output.data, (required + 1) as cstring.size_t,
+        form, converted)
+    return finish_snprintf(output, required, actual)
+  elseif lua.lua_Integer.sizeof <= ffi.titan_ffi_long.sizeof then
+    local converted = number as ffi.titan_ffi_unsigned_long
+    local required = stdio.snprintf(nil, 0, form, converted)
+    local output = prepare_snprintf(required)
+    local actual = stdio.snprintf(
+        output.data, (required + 1) as cstring.size_t,
+        form, converted)
+    return finish_snprintf(output, required, actual)
+  else
+    local converted = number as ffi.titan_ffi_unsigned_long_long
+    local required = stdio.snprintf(nil, 0, form, converted)
+    local output = prepare_snprintf(required)
+    local actual = stdio.snprintf(
+        output.data, (required + 1) as cstring.size_t,
+        form, converted)
+    return finish_snprintf(output, required, actual)
+  end
+end
+
+local function render_character(form: string,
+                                number: lua.lua_Integer): string
+  local converted = number as ffi.titan_ffi_int
+  local required = stdio.snprintf(nil, 0, form, converted)
+  local output = prepare_snprintf(required)
+  local actual = stdio.snprintf(
+      output.data, (required + 1) as cstring.size_t,
+      form, converted)
+  return finish_snprintf(output, required, actual)
+end
+
+local function render_number(form: string,
+                             number: lua.lua_Number): string
+  local converted = number as ffi.titan_ffi_double
+  local required = stdio.snprintf(nil, 0, form, converted)
+  local output = prepare_snprintf(required)
+  local actual = stdio.snprintf(
+      output.data, (required + 1) as cstring.size_t,
+      form, converted)
+  return finish_snprintf(output, required, actual)
+end
+
+local function render_c_string(form: string, text: string): string
+  local required = stdio.snprintf(nil, 0, form, text)
+  local output = prepare_snprintf(required)
+  local actual = stdio.snprintf(
+      output.data, (required + 1) as cstring.size_t,
+      form, text)
+  return finish_snprintf(output, required, actual)
+end
+
+local function render_pointer(form: string, candidate: value): string
+  local top = lua.lua_gettop(L)
+  local result = ""
+  do
+    ffi.lua_pushtvalue(L, candidate)
+    local pointer = lua.lua_topointer(L, -1)
+    if not pointer then
+      local string_form =
+        copy_interval(form, 1, #form - 1) .. "s"
+      result = render_c_string(string_form, "(null)")
+    else
+      local required = stdio.snprintf(nil, 0, form, pointer)
+      local output = prepare_snprintf(required)
+      local actual = stdio.snprintf(
+          output.data, (required + 1) as cstring.size_t,
+          form, pointer)
+      result = finish_snprintf(output, required, actual)
+    end
+  finally
+    lua.lua_settop(L, top)
+  end
+  return result
+end
+
+local function byte_in_set(octet: integer, accepted: string): boolean
+  local bytes = accepted as const *ffi.titan_ffi_unsigned_char
+  local index = 0
+  while index < #accepted do
+    if bytes[index] == octet then return true end
+    index = index + 1
+  end
+  return false
+end
+
+local function is_ascii_digit(octet: integer): boolean
+  return octet >= 48 and octet <= 57
+end
+
+local function format_byte(text: string, index: integer): integer
+  if index < 1 or index > #text then return 0 end
+  local bytes = text as const *ffi.titan_ffi_unsigned_char
+  return bytes[index - 1] as integer
+end
+
+local function check_format(form: string, flags: string,
+                            precision: boolean)
+  local cursor = 2
+  local last = #form
+  while cursor < last and
+      byte_in_set(format_byte(form, cursor), flags) do
+    cursor = cursor + 1
+  end
+  if format_byte(form, cursor) ~= 48 then
+    local digits = 0
+    while cursor < last and digits < 2 and
+        is_ascii_digit(format_byte(form, cursor)) do
+      cursor = cursor + 1
+      digits = digits + 1
+    end
+    if cursor < last and format_byte(form, cursor) == 46 and
+        precision then
+      cursor = cursor + 1
+      digits = 0
+      while cursor < last and digits < 2 and
+          is_ascii_digit(format_byte(form, cursor)) do
+        cursor = cursor + 1
+        digits = digits + 1
+      end
+    end
+  end
+  local specifier = format_byte(form, cursor)
+  if cursor ~= last or
+      cctype.isalpha(specifier as ffi.titan_ffi_int) == 0 then
+    raise "invalid conversion specification"
+  end
+end
+
+local function format_span_byte(octet: integer): boolean
+  return byte_in_set(octet, "-+ #0123456789.")
+end
+
+local function read_format(formats: string, start: integer):
+                           (string, integer, integer)
+  local length = #formats
+  local cursor = start
+  while cursor <= length and
+      format_span_byte(format_byte(formats, cursor)) do
+    cursor = cursor + 1
+  end
+  local span = cursor - start
+  if span + 1 >= 22 then raise "invalid format (too long)" end
+  if cursor > length then
+    return "%" .. copy_interval(formats, start, span), 0, cursor
+  end
+  return "%" .. copy_interval(formats, start, span + 1),
+         format_byte(formats, cursor), cursor + 1
+end
+
+local function contains_byte(text: string, octet: integer): boolean
+  if #text == 0 then return false end
+  local bytes = text as const *ffi.titan_ffi_unsigned_char
+  local index = 0
+  while index < #text do
+    if bytes[index] == octet then return true end
+    index = index + 1
+  end
+  return false
+end
+
+local function decimal_escape(octet: integer,
+                              padded: boolean): string
+  local length = 1
+  if padded or octet >= 100 then
+    length = 3
+  elseif octet >= 10 then
+    length = 2
+  end
+  local output = allocate_string_bytes(length)
+  local remaining = octet
+  local index = length - 1
+  while index >= 0 do
+    output.data[index] =
+      (48 + remaining % 10) as ffi.titan_ffi_char
+    remaining = remaining // 10
+    index = index - 1
+  end
+  return finish_string(output)
+end
+
+local function locale_neutral_hex(number: lua.lua_Number): string
+  local rendered = render_number("%a", number)
+  local locale = clocale.localeconv()
+  local decimal = locale.decimal_point[0]
+  local decimal_octet =
+    (decimal as ffi.titan_ffi_unsigned_char) as integer
+  if decimal == (46 as ffi.titan_ffi_char) or
+      not contains_byte(rendered, decimal_octet) then
+    return rendered
+  end
+  local output = allocate_string_bytes(#rendered)
+  local source = rendered as const *ffi.titan_ffi_char
+  local index = 0
+  while index < #rendered do
+    if source[index] == decimal then
+      output.data[index] = 46 as ffi.titan_ffi_char
+    else
+      output.data[index] = source[index]
+    end
+    index = index + 1
+  end
+  return finish_string(output)
+end
+
+local function append_quoted(builder: CoreStringBuilder, text: string)
+  builder_append(builder, "\"")
+  local run = 1
+  local index = 1
+  while index <= #text do
+    local octet = format_byte(text, index)
+    local special = octet == 34 or octet == 92 or octet == 10
+    local control =
+      cctype.iscntrl(octet as ffi.titan_ffi_int) ~= 0
+    if special or control then
+      if index > run then
+        builder_append(
+            builder, copy_interval(text, run, index - run))
+      end
+      if special then
+        builder_append(builder, "\\")
+        builder_append(builder, copy_interval(text, index, 1))
+      else
+        local next_is_digit = index < #text and
+          cctype.isdigit(
+            format_byte(text, index + 1)
+              as ffi.titan_ffi_int) ~= 0
+        builder_append(builder, "\\")
+        builder_append(
+            builder, decimal_escape(octet, next_is_digit))
+      end
+      run = index + 1
+    end
+    index = index + 1
+  end
+  if run <= #text then
+    builder_append(
+        builder, copy_interval(text, run, #text - run + 1))
+  end
+  builder_append(builder, "\"")
+end
+
+local function append_literal(builder: CoreStringBuilder,
+                              candidate: value)
+  local kind = raw_value_type(candidate)
+  if kind == lua.LUA_TSTRING then
+    append_quoted(builder, checked_string(candidate))
+  elseif kind == lua.LUA_TNUMBER then
+    if value_is_integer(candidate) then
+      local number = checked_integer(candidate)
+      if number == lua.LUA_MININTEGER then
+        builder_append(builder, "0x")
+        builder_append(
+            builder,
+            render_unsigned(
+              add_integer_length("%x"), number))
+      else
+        builder_append(
+            builder,
+            render_signed(
+              add_integer_length("%d"), number))
+      end
+    else
+      local number = checked_number(candidate)
+      if number > 0 and number + number == number then
+        builder_append(builder, "1e9999")
+      elseif number < 0 and number + number == number then
+        builder_append(builder, "-1e9999")
+      elseif number ~= number then
+        builder_append(builder, "(0/0)")
+      else
+        builder_append(builder, locale_neutral_hex(number))
+      end
+    end
+  elseif kind == lua.LUA_TNIL then
+    builder_append(builder, "nil")
+  elseif kind == lua.LUA_TBOOLEAN then
+    if checked_boolean(candidate) then
+      builder_append(builder, "true")
+    else
+      builder_append(builder, "false")
+    end
+  else
+    raise "value has no literal form"
+  end
+end
+
+function format(format_string: string, ...: value): string
+  local builder = new_string_builder()
+  local length = #format_string
+  local cursor = 1
+  local run = 1
+  local argument = 0
+  while cursor <= length do
+    if format_byte(format_string, cursor) ~= 37 then
+      cursor = cursor + 1
+    else
+      if cursor > run then
+        builder_append(
+            builder,
+            copy_interval(format_string, run, cursor - run))
+      end
+      cursor = cursor + 1
+      if cursor <= length and
+          format_byte(format_string, cursor) == 37 then
+        builder_append(builder, "%")
+        cursor = cursor + 1
+      else
+        local form, specifier, next_cursor =
+          read_format(format_string, cursor)
+        cursor = next_cursor
+        argument = argument + 1
+        if argument > #... then
+          raise "no value for format conversion"
+        end
+        local candidate = ...[argument]
+
+        if specifier == 99 then
+          check_format(form, "-", false)
+          builder_append(
+              builder,
+              render_character(form, checked_integer(candidate)))
+        elseif specifier == 100 or specifier == 105 then
+          check_format(form, "-+0 ", true)
+          builder_append(
+              builder,
+              render_signed(
+                add_integer_length(form),
+                checked_integer(candidate)))
+        elseif specifier == 117 then
+          check_format(form, "-0", true)
+          builder_append(
+              builder,
+              render_unsigned(
+                add_integer_length(form),
+                checked_integer(candidate)))
+        elseif specifier == 111 or specifier == 120 or
+            specifier == 88 then
+          check_format(form, "-#0", true)
+          builder_append(
+              builder,
+              render_unsigned(
+                add_integer_length(form),
+                checked_integer(candidate)))
+        elseif specifier == 97 or specifier == 65 or
+            specifier == 101 or specifier == 69 or
+            specifier == 102 or specifier == 103 or
+            specifier == 71 then
+          check_format(form, "-+#0 ", true)
+          builder_append(
+              builder,
+              render_number(form, checked_number(candidate)))
+        elseif specifier == 112 then
+          check_format(form, "-", false)
+          builder_append(builder, render_pointer(form, candidate))
+        elseif specifier == 113 then
+          if #form ~= 2 then
+            raise "specifier '%q' cannot have modifiers"
+          end
+          append_literal(builder, candidate)
+        elseif specifier == 115 then
+          local converted = tostring(candidate)
+          if #form == 2 then
+            builder_append(builder, converted)
+          else
+            if contains_byte(converted, 0) then
+              raise "string contains zeros"
+            end
+            check_format(form, "-", true)
+            if not contains_byte(form, 46) and
+                #converted >= 100 then
+              builder_append(builder, converted)
+            else
+              builder_append(
+                  builder, render_c_string(form, converted))
+            end
+          end
+        else
+          raise "invalid conversion to 'format'"
+        end
+      end
+      run = cursor
+    end
+  end
+  if run <= length then
+    builder_append(
+        builder,
+        copy_interval(format_string, run, length - run + 1))
+  end
+  return builder_finish(builder)
+end

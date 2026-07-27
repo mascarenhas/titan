@@ -4,6 +4,7 @@ local lfs = require "lfs"
 
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "fs", "net", "os",
+    "peg", "string",
 }
 local LUA_CPATH_SUFFIX = "/lib/lua/5.5/?.so"
 
@@ -237,6 +238,31 @@ describe("standalone-prefix source installation", function()
         end
         assert_absent(LUA_LIBDIR .. "/titan.so")
         assert_absent(LUA_SHAREDIR .. "/titan.lua")
+        assert_absent(LUA_SHAREDIR .. "/peg.lua")
+        assert_absent(LUA_SHAREDIR .. "/string.lua")
+        assert_absent(PREFIX .. "/lib/libtitan-lpeglabel.a")
+        assert_absent(TITAN_LIBDIR .. "/libtitan-lpeglabel.a")
+        assert_absent(PREFIX .. "/include/titan_lpeglabel.h")
+        assert_absent(PREFIX .. "/include/titan_lpeglabel_namespace.h")
+        assert_absent(PREFIX .. "/share/lua/5.5/lpeglabel-build")
+        assert_file(PREFIX .. "/share/titan/THIRD_PARTY_NOTICES.md")
+        for _, license in ipairs({
+            "libuv-LICENSE", "lpeglabel-LICENSE", "lpeg-LICENSE",
+            "ta-regex-LICENSE", "lua-LICENSE",
+        }) do
+            assert_file(PREFIX .. "/share/titan/LICENSES/" .. license)
+        end
+        local notices =
+            read_file(PREFIX .. "/share/titan/THIRD_PARTY_NOTICES.md")
+        for _, notice in ipairs({
+            "912b0b9e8641074408ffc2259e069b188e0c717b",
+            "857e48682791ba55c98a7dd99c5fc7d71c02597d",
+            "Converting regexes to Parsing Expression Grammars",
+            "Marcelo Oikawa", "Ana Lucia de Moura",
+            "lstrlib.c", "Lua 5.5.0",
+        }) do
+            assert.truthy(notices:find(notice, 1, true), notice)
+        end
         local host_ok, host_output = run({ "uname", "-s" })
         assert.truthy(host_ok, host_output)
         if host_output:match("^%s*Darwin%s*$") then
@@ -328,6 +354,8 @@ describe("standalone-prefix source installation", function()
         assert.falsy(manifest:find("titan.so", 1, true), manifest)
         assert.falsy(manifest:find('["titan.a"]', 1, true), manifest)
         assert.falsy(manifest:find("stdlib_installer.lua", 1, true), manifest)
+        assert.falsy(manifest:find("vendor/lpeglabel", 1, true), manifest)
+        assert.falsy(manifest:find("libtitan-lpeglabel", 1, true), manifest)
         assert.truthy(manifest:find(
             '["staticmetadata.lua"]', 1, true), manifest)
         for _, module in ipairs({
@@ -341,6 +369,142 @@ describe("standalone-prefix source installation", function()
             assert.falsy(manifest:find(module .. ".so", 1, true), manifest)
             assert.falsy(manifest:find(
                 '["' .. module .. '.lua"]', 1, true), manifest)
+        end
+    end)
+
+    it("packs and unpacks every vendored and standard-library source",
+    function()
+        workspace = temporary_directory("source-rock-inventory")
+        local source_repository = workspace .. "/source"
+        local unpack_root = workspace .. "/unpacked"
+        make_directory(source_repository)
+        make_directory(unpack_root)
+
+        local ok, output, why, code = run({
+            "git", "ls-files", "--cached", "--others",
+            "--exclude-standard", "-z",
+        })
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        local copied = 0
+        for path in (output .. "\0"):gmatch("(.-)%z") do
+            if path ~= "" then
+                copy_tree(path, source_repository .. "/" .. path)
+                copied = copied + 1
+            end
+        end
+        assert.truthy(copied > 0)
+
+        for _, argv in ipairs({
+            { "git", "init", "-q", source_repository },
+            { "git", "-C", source_repository, "add", "-f", "." },
+            {
+                "git", "-C", source_repository,
+                "-c", "user.name=Titan source-rock test",
+                "-c", "user.email=titan-source-rock@example.invalid",
+                "commit", "-qm", "source inventory",
+            },
+        }) do
+            ok, output, why, code = run(argv)
+            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+                tostring(code) .. ")")
+        end
+
+        local rockspec = read_file("titan-dev-1.rockspec")
+        local replacement_count
+        rockspec, replacement_count = rockspec:gsub(
+            'url = "git%+https://github%.com/titan%-lang/titan"',
+            'url = "git+file://' .. source_repository .. '"')
+        assert.equal(1, replacement_count)
+        local packed_rockspec = workspace .. "/titan-dev-1.rockspec"
+        write_file(packed_rockspec, rockspec)
+
+        ok, output, why, code = run(clean_environment({
+            LUAROCKS, "pack", packed_rockspec,
+        }), workspace)
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        local source_rock = workspace .. "/titan-dev-1.src.rock"
+        assert_file(source_rock)
+
+        ok, output, why, code = run(clean_environment({
+            LUAROCKS, "unpack", "--force", source_rock,
+        }), unpack_root)
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+
+        local unpacked_files = {}
+        local function collect(path, relative)
+            for entry in lfs.dir(path) do
+                if entry ~= "." and entry ~= ".." then
+                    local child = path .. "/" .. entry
+                    local child_relative =
+                        relative == "" and entry or relative .. "/" .. entry
+                    local mode = assert(lfs.symlinkattributes(child, "mode"))
+                    if mode == "directory" then
+                        collect(child, child_relative)
+                    elseif mode == "file" then
+                        unpacked_files[child_relative] = true
+                    end
+                end
+            end
+        end
+        collect(unpack_root, "")
+
+        local function contains_suffix(suffix)
+            for path in pairs(unpacked_files) do
+                if path == suffix or
+                   path:sub(-#suffix - 1) == "/" .. suffix then
+                    return true
+                end
+            end
+            return false
+        end
+        for _, expected in ipairs({
+            "vendor/lpeglabel/lplcap.c",
+            "vendor/lpeglabel/lplcap.h",
+            "vendor/lpeglabel/lplcode.c",
+            "vendor/lpeglabel/lplcode.h",
+            "vendor/lpeglabel/lplprint.c",
+            "vendor/lpeglabel/lplprint.h",
+            "vendor/lpeglabel/lpltree.c",
+            "vendor/lpeglabel/lpltree.h",
+            "vendor/lpeglabel/lpltypes.h",
+            "vendor/lpeglabel/lplvm.c",
+            "vendor/lpeglabel/lplvm.h",
+            "vendor/lpeglabel/titan_lpeglabel_namespace.h",
+            "vendor/lpeglabel/titan_lpeglabel.h",
+            "vendor/lpeglabel/relabel.lua",
+            "vendor/lpeglabel/test.lua",
+            "vendor/lpeglabel/testlabel.lua",
+            "vendor/lpeglabel/testrelabelparser.lua",
+            "vendor/lpeglabel/LICENSE",
+            "vendor/lpeglabel/UPSTREAM.md",
+            "titan/peg/peg.titan",
+            "titan/peg/captures.titan",
+            "titan/peg/combinators.titan",
+            "titan/peg/native.titan",
+            "titan/peg/relabel.titan",
+            "titan/peg/relabel_parser.titan",
+            "titan/string/string.titan",
+            "titan/string/bytes.titan",
+            "titan/string/format.titan",
+            "titan/string/pack.titan",
+            "titan/string/regex_api.titan",
+            "titan/string/regex_compile.titan",
+            "titan/string/regex_parser.titan",
+            "LICENSES/lpeglabel-LICENSE",
+            "LICENSES/lpeg-LICENSE",
+            "LICENSES/ta-regex-LICENSE",
+            "LICENSES/lua-LICENSE",
+            "THIRD_PARTY_NOTICES.md",
+        }) do
+            assert.truthy(contains_suffix(expected), expected)
+        end
+        for path in pairs(unpacked_files) do
+            assert.falsy(path:find("/lpeglabel-build/", 1, true), path)
+            assert.falsy(path:match("/libtitan%-lpeglabel[.]a$"), path)
+            assert.falsy(path:match("/vendor/lpeglabel/.*[.]o$"), path)
         end
     end)
 
@@ -538,6 +702,9 @@ assert(support._loadlib(%q, "titan_uv_abi"))
             local coroutine = require "titan.coroutine"
             local async = require "titan.async"
             local timer = require "titan.timer"
+            local peg = require "titan.peg"
+            local titan_string = require "titan.string"
+            local builtin_string = require "string"
             -- Requiring only the public facade must initialize uv globally.
             -- The returned uv-owned Task resolves its methods transitively;
             -- consumers do not import or require uv just to call them.
@@ -567,6 +734,11 @@ assert(support._loadlib(%q, "titan_uv_abi"))
             assert(type(fs) == "userdata")
             assert(type(net) == "userdata")
             assert(type(system) == "userdata")
+            assert(type(peg) == "userdata")
+            assert(type(titan_string) == "userdata")
+            assert(peg.literal("installed"):match("installed") == 10)
+            assert(titan_string.len("installed\0string") == 16)
+            assert(builtin_string == string)
             for name, module in pairs({
                 coroutine = coroutine,
                 uv = uv,
@@ -575,6 +747,8 @@ assert(support._loadlib(%q, "titan_uv_abi"))
                 fs = fs,
                 net = net,
                 os = system,
+                peg = peg,
+                string = titan_string,
             }) do
                 local symbol = "luaopen_titan_" .. name
                 assert(package.searchpath("titan." .. name, package.path) ==

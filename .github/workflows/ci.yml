@@ -9,12 +9,13 @@ on:
 
 jobs:
   # Build and install the regular Linux tree once per workflow. Keep the
-  # compiler core and net/OS groups on this warm 1-core runner. The uv/fs
+  # compiler core, net/OS, and PEG/string groups on this warm 1-core runner.
+  # The uv/fs
   # consumer restores the pristine tree and runs the broad end-to-end,
   # measured C-FFI, and isolated static-provider coverage instead of rebuilding
   # dependencies.
   prepare-linux:
-    name: regular (ubuntu-slim, build+compiler-core+net-os)
+    name: regular (ubuntu-slim, build+compiler-core+net-os+peg-string)
     if: github.event_name == 'push'
     runs-on: ubuntu-slim
     permissions:
@@ -119,7 +120,7 @@ jobs:
       # reuses the warm compiler/filesystem state. Run the library groups first
       # so legacy compiler cleanup cannot make the serial packaging gate rebuild
       # the complete standard library again.
-      - name: Run serial and net/OS library tests without coverage
+      - name: Run serial, net/OS, and PEG/string library tests without coverage
         # These tests compile disposable fixtures and alternate images. The
         # installed bundled provider packed above remains the optimized
         # production image, and macOS repeats the complete suite at -O2.
@@ -129,6 +130,7 @@ jobs:
         run: |
           bash spec/support/ci_test_groups.sh library-serial
           bash spec/support/ci_test_groups.sh library-net-os
+          bash spec/support/ci_test_groups.sh library-peg-string
 
       # Restore the exact prepared checkout runtime plus canonical installed
       # standard container and shims after compiler-only groups and before the
@@ -453,7 +455,7 @@ jobs:
           static_archive="${provider%.so}.a"
           test -f "$provider" && test ! -L "$provider"
           test -f "$static_archive" && test ! -L "$static_archive"
-          for module in coroutine uv async timer fs net os; do
+          for module in coroutine uv async timer fs net os peg string; do
             test -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
           readelf -Ws .lua/bin/lua | grep __asan_
@@ -503,6 +505,19 @@ jobs:
           .lua/bin/busted -o gtest -v \
             spec/stdlib/coroutine_spec.lua \
             --name='coroutine standard module roots fresh terminal result and error transfers through pop-side GC'
+
+      - name: Run PEG/regex native sanitizer gate
+        env:
+          TITAN_TEST_EXTRA_CFLAGS: ${{ env.SANITIZER_FLAGS }}
+          TITAN_TEST_EXTRA_LDFLAGS: ${{ env.SANITIZER_FLAGS }}
+        run: |
+          .lua/bin/busted -o gtest -v \
+            spec/stdlib/peg_spec.lua \
+            --name='titan.peg GC roots patterns and callbacks across repeated collections'
+          .lua/bin/busted -o gtest -v \
+            spec/stdlib/string_regex_spec.lua \
+            --name='titan.string regex keeps compiled backreferences, iterators, and replacement callbacks rooted across repeated full and generational GC'
+          bash spec/support/ci_peg_string_sanitizer_smoke.sh
 
       - name: Build sanitizer child-process smoke fixture
         env:

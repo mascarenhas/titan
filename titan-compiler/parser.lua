@@ -49,6 +49,8 @@ local standard_imports = {
     fs = "titan.fs",
     net = "titan.net",
     os = "titan.os",
+    peg = "titan.peg",
+    string = "titan.string",
 }
 
 function defs.importdecl(loc, localname, modname)

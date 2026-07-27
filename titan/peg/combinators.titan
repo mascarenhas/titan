@@ -1,0 +1,183 @@
+-- Constructors and the named equivalents of LPeg's pattern operators.
+
+function literal(text: string): Pattern
+  local length = #text
+  local size = 1
+  if length > 0 then
+    if length > (MAX_PATTERN_SIZE + 1) // 2 then
+      raise "PEG pattern is too large"
+    end
+    size = 2 * length - 1
+  end
+  return _pattern(_P(text), size)
+end
+
+function any(count: integer?): Pattern
+  local amount = 1
+  if count then amount = count as integer end
+  local size = 1
+  if amount > 0 then
+    if amount > (MAX_PATTERN_SIZE + 1) // 2 then
+      raise "PEG pattern is too large"
+    end
+    size = 2 * amount - 1
+  elseif amount < 0 then
+    if amount < -(MAX_PATTERN_SIZE // 2) then
+      raise "PEG pattern is too large"
+    end
+    size = -2 * amount
+  end
+  return _pattern(_P(amount), size)
+end
+
+function succeed(): Pattern
+  return _pattern(_P(true), 1)
+end
+
+function fail(): Pattern
+  return _pattern(_P(false), 1)
+end
+
+function runtime(
+    callback: (string, integer, string) -> (...: value)): Pattern
+  _require_raw_function(callback, "runtime")
+  return _pattern(_P(callback), 2)
+end
+
+function set(bytes: string): Pattern
+  return _pattern(_S(bytes), 5)
+end
+
+function ranges(...: string): Pattern
+  local index = 1
+  while index <= #... do
+    if #(...[index]) ~= 2 then
+      raise "each PEG range must contain exactly two bytes"
+    end
+    index = index + 1
+  end
+  return _pattern(_R(...), 5)
+end
+
+function utf_range(first: integer, last: integer): Pattern
+  if first < 0 or last < first or last > 0x10ffff then
+    raise "invalid UTF-8 code-point range"
+  end
+  local size = 2
+  if last <= 0x7f then size = 5 end
+  return _pattern(_utfR(first, last), size)
+end
+
+function variable(name: value): Pattern
+  return _pattern(_V(_encoded_name(name)), 1)
+end
+
+function behind(pattern: Pattern): Pattern
+  -- The engine remains authoritative for fixed-length/capture-free checks.
+  -- Its numeric bound is validated there after Titan's tree-size projection.
+  local size = _checked_unary(pattern, 1)
+  return _pattern(_B(pattern.raw), size)
+end
+
+function throw(label: value): Pattern
+  return _pattern(_T(_encoded_name(label)), 1)
+end
+
+function sequence(...: Pattern): Pattern
+  if #... == 0 then return succeed() end
+  local result = ...[1]
+  local index = 2
+  while index <= #... do
+    local next_pattern = ...[index]
+    local size = _checked_sum(
+      result.tree_size, next_pattern.tree_size, 1)
+    result = _pattern(
+      _sequence(result.raw, next_pattern.raw), size)
+    index = index + 1
+  end
+  return result
+end
+
+function choice(...: Pattern): Pattern
+  if #... == 0 then return fail() end
+  local result = ...[1]
+  local index = 2
+  while index <= #... do
+    local next_pattern = ...[index]
+    local size = _checked_sum(
+      result.tree_size, next_pattern.tree_size, 1)
+    result = _pattern(
+      _choice(result.raw, next_pattern.raw), size)
+    index = index + 1
+  end
+  return result
+end
+
+function difference(first: Pattern, ...: Pattern): Pattern
+  local result = first
+  local index = 1
+  while index <= #... do
+    local next_pattern = ...[index]
+    local size = _checked_sum(
+      result.tree_size, next_pattern.tree_size, 2)
+    result = _pattern(
+      _difference(result.raw, next_pattern.raw), size)
+    index = index + 1
+  end
+  return result
+end
+
+function lookahead(pattern: Pattern): Pattern
+  return _pattern(
+    _lookahead(pattern.raw), _checked_unary(pattern, 1))
+end
+
+function negative(pattern: Pattern): Pattern
+  return _pattern(
+    _negative(pattern.raw), _checked_unary(pattern, 1))
+end
+
+local function _at_least_size(pattern: Pattern,
+                              count: integer): integer
+  -- Native formula: (count + 1) * (tree_size + 1).
+  local unit = pattern.tree_size + 1
+  if count > MAX_PATTERN_SIZE // unit - 1 then
+    raise "PEG pattern is too large"
+  end
+  return (count + 1) * unit
+end
+
+local function _at_most_size(pattern: Pattern,
+                             count: integer): integer
+  -- Native formula: count * (tree_size + 3) - 1.
+  local unit = pattern.tree_size + 3
+  if count > (MAX_PATTERN_SIZE + 1) // unit then
+    raise "PEG pattern is too large"
+  end
+  return count * unit - 1
+end
+
+function at_least(pattern: Pattern, count: integer): Pattern
+  if count < 0 then raise "PEG repetition count must be nonnegative" end
+  local size = _at_least_size(pattern, count)
+  return _pattern(_repeat(pattern.raw, count), size)
+end
+
+function at_most(pattern: Pattern, count: integer): Pattern
+  if count < 0 then raise "PEG repetition count must be nonnegative" end
+  if count == 0 then return succeed() end
+  local size = _at_most_size(pattern, count)
+  return _pattern(_repeat(pattern.raw, -count), size)
+end
+
+function zero_or_more(pattern: Pattern): Pattern
+  return at_least(pattern, 0)
+end
+
+function one_or_more(pattern: Pattern): Pattern
+  return at_least(pattern, 1)
+end
+
+function optional(pattern: Pattern): Pattern
+  return at_most(pattern, 1)
+end

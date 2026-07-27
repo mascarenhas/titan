@@ -92,8 +92,9 @@ function schedule_ipv4_core(first_port: integer): async.Task
 
     local peer = async.run(function (): value
       local connection = server:accept()
-      check(connection:read_until("\r\n") ==
-            "alpha\0beta\r\n", "read_until changed binary data")
+      check(connection:read_until("\0beta\r\n") ==
+            "alpha\0beta\r\n",
+            "read_until changed a NUL-containing delimiter or binary data")
       check(read_all(connection) == "EXCESS",
             "read_until did not retain excess bytes")
       check(not connection:read(),

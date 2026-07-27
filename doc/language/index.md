@@ -70,6 +70,8 @@ Start with the [design philosophy](philosophy.md) if you want to know
 | [Filesystem standard library](standard-library-fs.md) | Binary file reads and writes, per-File FIFO ordering and close, whole-file helpers, metadata, and path operations. |
 | [TCP networking standard library](standard-library-net.md) | Asynchronous DNS and TCP clients/servers, binary stream reads and FIFO writes, shutdown, close, and cancellation. |
 | [Operating-system standard library](standard-library-os.md) | Portable environment, directory, identity, executable-path, one-shot signals, child processes with binary stdio, and deadlock-free `communicate`. |
+| [PEG standard library](standard-library-peg.md) | Typed parsing-expression constructors and combinators, labeled failure/recovery, captures and callback timing, anchored matching, locale controls, and relabel source notation. |
+| [String standard library](standard-library-string.md) | Binary byte operations, Lua-compatible formatting and packing, fixed-call `tostring`, and compiled byte-regex matching, iteration, and substitution. |
 | [The C FFI](ffi.md) | `foreign import`: binding C headers, supported types, calling C functions, limitations. |
 | [C FFI declarations and expressions](c-ffi-expressions.md) | Named C tags, host-validated pointer conversions, zero-initialized automatic aggregates and fixed arrays, typed object-macro values, macro-projected fields, and target-correct C operators. |
 | [Grammar](grammar.md) | The complete lexical and syntactic grammar. |
@@ -155,10 +157,10 @@ with a clean error; each links to the chapter that documents it in full.
   previous one ([error handling](error-handling.md)).
 * **Only a small standard library so far.** Titan includes stackful
   `coroutine`, the libuv-backed `async` Task facade, `timer`, asynchronous `fs`
-  and `net`, and portable `os` helpers with one-shot signal waits, direct child
-  processes, binary stdio pipes, and concurrent `communicate`. Qualified Lua
-  names such as `titan.coroutine`, `titan.async`, `titan.timer`, `titan.fs`,
-  `titan.net`, and `titan.os` leave Lua's standard modules unchanged.
+  and `net`, portable `os` helpers, typed PEG construction, and byte-oriented
+  string/regex operations. Qualified Lua names such as `titan.coroutine`,
+  `titan.async`, `titan.peg`, and `titan.string` leave Lua's standard modules
+  unchanged.
 
 The [README roadmap](../../README.md) lists where the language is headed;
 the [philosophy chapter](philosophy.md) explains the principles that order

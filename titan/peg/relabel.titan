@@ -1,0 +1,1158 @@
+-- Titan translation of LPegLabel's relabel.lua from release v1.6.2-1,
+-- commit 912b0b9e8641074408ffc2259e069b188e0c717b.
+-- Copyright (c) 2014-2022 Sérgio Medeiros. MIT terms are reproduced in
+-- LICENSES/lpeglabel-LICENSE.
+--
+-- This contributor owns definitions, lexical and semantic callbacks,
+-- diagnostics, and caches. relabel_parser.titan assembles the expression
+-- grammar exclusively from titan.peg's public named operations. Neither
+-- contributor depends on titan.string or on the installed Lua relabel module.
+
+record Definition
+  local name: string
+  local raw: value
+  local tree_size: integer
+end
+
+local record RelabelSuffix
+  local kind: integer
+  local operand: value
+end
+
+local record RelabelParsedRule
+  local name: string
+  local pattern: Pattern
+end
+
+local RELABEL_SUFFIX_AT_LEAST = 1
+local RELABEL_SUFFIX_AT_MOST = 2
+local RELABEL_SUFFIX_LABEL = 3
+local RELABEL_SUFFIX_REPLACE = 4
+local RELABEL_SUFFIX_MATCH_TIME = 5
+local RELABEL_SUFFIX_FOLD = 6
+local RELABEL_SUFFIX_EXACT = 7
+local RELABEL_SUFFIX_TABLE = 8
+
+local _relabel_predefined: {string: Pattern?} = {}
+local _relabel_parser: Pattern? = nil
+local _relabel_pattern_anchor: value = nil
+local _relabel_match_cache: value = nil
+local _relabel_find_cache: value = nil
+local _relabel_gsub_cache: value = nil
+
+local function _relabel_new_table(): value
+  local top = lua.lua_gettop(L)
+  local result: value = nil
+  do
+    lua.lua_createtable(L, 0, 0)
+    result = ffi.lua_totvalue(L, -1)
+  finally
+    lua.lua_settop(L, top)
+  end
+  return result
+end
+
+local function _relabel_new_weak_values(): value
+  local top = lua.lua_gettop(L)
+  local result: value = nil
+  do
+    lua.lua_createtable(L, 0, 0)
+    lua.lua_createtable(L, 0, 1)
+    ffi.lua_pushtvalue(L, "__mode")
+    ffi.lua_pushtvalue(L, "v")
+    lua.lua_rawset(L, -3)
+    lua.lua_setmetatable(L, -2)
+    result = ffi.lua_totvalue(L, -1)
+  finally
+    lua.lua_settop(L, top)
+  end
+  return result
+end
+
+local function _relabel_raw_get(table_value: value,
+                                key: value): value
+  local top = lua.lua_gettop(L)
+  local result: value = nil
+  do
+    ffi.lua_pushtvalue(L, table_value)
+    ffi.lua_pushtvalue(L, key)
+    lua.lua_rawget(L, -2)
+    result = ffi.lua_totvalue(L, -1)
+  finally
+    lua.lua_settop(L, top)
+  end
+  return result
+end
+
+local function _relabel_raw_set(table_value: value, key: value,
+                                item: value)
+  local top = lua.lua_gettop(L)
+  do
+    ffi.lua_pushtvalue(L, table_value)
+    ffi.lua_pushtvalue(L, key)
+    ffi.lua_pushtvalue(L, item)
+    lua.lua_rawset(L, -3)
+  finally
+    lua.lua_settop(L, top)
+  end
+end
+
+local function _relabel_same_metatable(first: value,
+                                       second: value): boolean
+  local top = lua.lua_gettop(L)
+  local result = false
+  do
+    ffi.lua_pushtvalue(L, first)
+    if lua.lua_getmetatable(L, -1) == 0 then return false end
+    local first_metatable = lua.lua_gettop(L)
+    ffi.lua_pushtvalue(L, second)
+    if lua.lua_getmetatable(L, -1) == 0 then return false end
+    result = lua.lua_rawequal(L, first_metatable, -1) ~= 0
+  finally
+    lua.lua_settop(L, top)
+  end
+  return result
+end
+
+local function _relabel_is_pattern(candidate: value): boolean
+  if candidate == nil or _relabel_pattern_anchor == nil then
+    return false
+  end
+  return _relabel_same_metatable(
+    candidate, _relabel_pattern_anchor)
+end
+
+local function _relabel_byte(source: string,
+                             position: integer): integer
+  local bytes =
+    source as const *ffi.titan_ffi_unsigned_char
+  return bytes[position - 1] as integer
+end
+
+local function _relabel_slice(source: string, first: integer,
+                             after: integer): string
+  if after <= first then return "" end
+  local top = lua.lua_gettop(L)
+  local result: value = nil
+  do
+    local bytes = source as const *ffi.titan_ffi_char
+    lua.lua_pushlstring(
+      L, bytes + first - 1, (after - first) as lua.size_t)
+    result = ffi.lua_totvalue(L, -1)
+  finally
+    lua.lua_settop(L, top)
+  end
+  return result as string
+end
+
+function line_column(subject: string,
+                     position: integer): (integer, integer)
+  if position < 1 or position > #subject + 1 then
+    raise "PEG source position is out of range"
+  end
+  local line = 1
+  local line_start = 1
+  local cursor = 1
+  while cursor < position do
+    local byte = _relabel_byte(subject, cursor)
+    if byte == 13 and cursor < #subject and
+        _relabel_byte(subject, cursor + 1) == 10 then
+      if cursor + 1 >= position then break end
+      line = line + 1
+      cursor = cursor + 2
+      line_start = cursor
+    elseif byte == 10 or byte == 13 then
+      line = line + 1
+      cursor = cursor + 1
+      line_start = cursor
+    else
+      cursor = cursor + 1
+    end
+  end
+  return line, position - line_start + 1
+end
+
+local function _relabel_source_line(subject: string,
+                                    position: integer): string
+  local start = position
+  while start > 1 do
+    local previous = _relabel_byte(subject, start - 1)
+    if previous == 10 or previous == 13 then break end
+    start = start - 1
+  end
+  local after = position
+  while after <= #subject do
+    local current = _relabel_byte(subject, after)
+    if current == 10 or current == 13 then break end
+    after = after + 1
+  end
+  return _relabel_slice(subject, start, after)
+end
+
+local function _relabel_spaces(count: integer): string
+  if count <= 0 then return "" end
+  local top = lua.lua_gettop(L)
+  local result: value = nil
+  do
+    local buffer = lua.lua_newuserdatauv(
+      L, count as lua.size_t, 0)
+    local bytes = buffer as *ffi.titan_ffi_char
+    local index = 0
+    while index < count do
+      bytes[index] = 32 as ffi.titan_ffi_char
+      index = index + 1
+    end
+    lua.lua_pushlstring(L, bytes, count as lua.size_t)
+    result = ffi.lua_totvalue(L, -1)
+  finally
+    lua.lua_settop(L, top)
+  end
+  return result as string
+end
+
+local function _relabel_error_message(label: string): string
+  if label == "NoPatt" then return "no pattern found"
+  elseif label == "ExtraChars" then
+    return "unexpected characters after the pattern"
+  elseif label == "ExpPatt1" then
+    return "expected a pattern after '/'"
+  elseif label == "ExpPatt2" then
+    return "expected a pattern after '&'"
+  elseif label == "ExpPatt3" then
+    return "expected a pattern after '!'"
+  elseif label == "ExpPatt4" then
+    return "expected a pattern after '('"
+  elseif label == "ExpPatt5" then
+    return "expected a pattern after ':'"
+  elseif label == "ExpPatt6" then
+    return "expected a pattern after '{~'"
+  elseif label == "ExpPatt7" then
+    return "expected a pattern after '{|'"
+  elseif label == "ExpPatt8" then
+    return "expected a pattern after '<-'"
+  elseif label == "ExpPattOrClose" then
+    return "expected a pattern or closing '}' after '{'"
+  elseif label == "ExpNumName" then
+    return "expected a number, '+', '-' or a name (no space) after '^'"
+  elseif label == "ExpCap" then
+    return "expected a string, number, '{}' or name after '->'"
+  elseif label == "ExpName1" then
+    return "expected the name of a rule after '=>'"
+  elseif label == "ExpName2" then
+    return "expected the name of a rule after '=' (no space)"
+  elseif label == "ExpName3" then
+    return "expected the name of a rule after '<' (no space)"
+  elseif label == "ExpLab1" then
+    return "expected a label after '{'"
+  elseif label == "ExpNameOrLab" then
+    return "expected a name or label after '%' (no space)"
+  elseif label == "MisClose1" then return "missing closing ')'"
+  elseif label == "MisClose2" then return "missing closing ':}'"
+  elseif label == "MisClose3" then return "missing closing '~}'"
+  elseif label == "MisClose4" then return "missing closing '|}'"
+  elseif label == "MisClose5" then return "missing closing '}'"
+  elseif label == "MisClose6" then return "missing closing '>'"
+  elseif label == "MisClose7" then return "missing closing '}'"
+  elseif label == "MisClose8" then
+    return "missing closing ']' or empty char class"
+  elseif label == "MisTerm1" then
+    return "missing terminating single quote"
+  elseif label == "MisTerm2" then
+    return "missing terminating double quote"
+  end
+  return "invalid PEG expression"
+end
+
+local function _relabel_raise_syntax(source: string, label: value,
+                                     position: integer)
+  local name = label as string
+  if position < 1 then position = 1 end
+  if position > #source + 1 then position = #source + 1 end
+  local line, column = line_column(source, position)
+  raise "PEG syntax error [" .. name .. "] at L" .. line ..
+    ":C" .. column .. " (byte " .. position .. "): " ..
+    _relabel_error_message(name) .. "\n" ..
+    _relabel_source_line(source, position) .. "\n" ..
+    _relabel_spaces(column - 1) .. "^"
+end
+
+local function _relabel_valid_name(name: string): boolean
+  if #name == 0 then return false end
+  local first = _relabel_byte(name, 1)
+  local valid = false
+  if first >= 65 and first <= 90 then valid = true
+  elseif first >= 97 and first <= 122 then valid = true
+  elseif first == 95 then valid = true
+  end
+  if not valid then
+    return false
+  end
+  local index = 2
+  while index <= #name do
+    local byte = _relabel_byte(name, index)
+    valid = false
+    if byte >= 65 and byte <= 90 then valid = true
+    elseif byte >= 97 and byte <= 122 then valid = true
+    elseif byte >= 48 and byte <= 57 then valid = true
+    elseif byte == 95 then valid = true
+    end
+    if not valid then
+      return false
+    end
+    index = index + 1
+  end
+  return true
+end
+
+function define(name: string, pattern: Pattern): Definition
+  if not _relabel_valid_name(name) then
+    raise "invalid PEG definition name"
+  end
+  return Definition.new(
+    name, pattern.raw, pattern.tree_size)
+end
+
+function define_value(name: string, candidate: value): Definition
+  if not _relabel_valid_name(name) then
+    raise "invalid PEG definition name"
+  end
+  if candidate == nil or
+      (_raw_type(candidate) == lua.LUA_TBOOLEAN and
+       not (candidate as boolean)) then
+    raise "PEG definition value must be truthy"
+  end
+  return Definition.new(name, candidate, -1)
+end
+
+local function _relabel_definition_table(
+    definitions: {integer: Definition}?):
+      (value, {string: integer?})
+  local top = lua.lua_gettop(L)
+  local result: value = nil
+  local sizes: {string: integer?} = {}
+  local count = 0
+  local maximum = 0
+  local seen: {string: boolean} = {}
+  do
+    lua.lua_createtable(L, 0, 0)
+    local native_index = lua.lua_gettop(L)
+    if definitions then
+      ffi.lua_pushtvalue(L, definitions)
+      local definitions_index = lua.lua_gettop(L)
+      lua.lua_pushnil(L)
+      while lua.lua_next(L, definitions_index) ~= 0 do
+        if lua.lua_isinteger(L, -2) == 0 then
+          raise "PEG definition indices must be integers"
+        end
+        local raw_index: value = ffi.lua_totvalue(L, -2)
+        local index = raw_index as integer
+        if index < 1 then
+          raise "PEG definition indices must be positive"
+        end
+        local raw_definition: value = ffi.lua_totvalue(L, -1)
+        local item = raw_definition as Definition
+        count = count + 1
+        if index > maximum then maximum = index end
+        if seen[item.name] then
+          raise "duplicate PEG definition name '" .. item.name .. "'"
+        end
+        seen[item.name] = true
+        ffi.lua_pushtvalue(L, item.name)
+        ffi.lua_pushtvalue(L, item.raw)
+        lua.lua_rawset(L, native_index)
+        if item.tree_size >= 0 then
+          sizes[item.name] = item.tree_size
+        end
+        lua.lua_settop(
+          L, (lua.lua_gettop(L) - 1) as ffi.titan_ffi_int)
+      end
+      if count ~= maximum then
+        raise "PEG definitions must be dense"
+      end
+    end
+    result = ffi.lua_totvalue(L, native_index)
+  finally
+    lua.lua_settop(L, top)
+  end
+  return result, sizes
+end
+
+local function _relabel_decimal(text: string): integer
+  local result = 0
+  local index = 1
+  while index <= #text do
+    local digit = _relabel_byte(text, index) - 48
+    if digit < 0 or digit > 9 then
+      raise "invalid decimal PEG repetition"
+    end
+    if result > (lua.LUA_MAXINTEGER as integer - digit) // 10 then
+      raise "PEG repetition count is too large"
+    end
+    result = result * 10 + digit
+    index = index + 1
+  end
+  return result
+end
+
+local function _relabel_expect(pattern: Pattern,
+                               label: string): Pattern
+  return choice(pattern, throw(label))
+end
+
+local function _relabel_literal_capture(
+    first: value, ...: value): (...: value)
+  return literal(first as string)
+end
+
+local function _relabel_range_capture(
+    first: value, ...: value): (...: value)
+  local last = ...[1] as string
+  return ranges((first as string) .. last)
+end
+
+local function _relabel_choice_fold(
+    accumulator: value, ...: value): value
+  return choice(accumulator as Pattern, ...[1] as Pattern)
+end
+
+local function _relabel_class_capture(
+    first: value, ...: value): (...: value)
+  local complement = first as string
+  local pattern = ...[1] as Pattern
+  if complement == "^" then
+    return difference(any(), pattern)
+  end
+  return pattern
+end
+
+local function _relabel_resolve_pattern(
+    first: value, ...: value): (...: value)
+  local name = first as string
+  local definitions = ...[1]
+  local sizes = ...[2] as {string: integer?}
+  local candidate =
+    _relabel_raw_get(definitions, name)
+  if candidate == nil then
+    local predefined: Pattern? =
+      _relabel_predefined[name]
+    if predefined then return predefined end
+    raise "name '" .. name .. "' undefined"
+  end
+  local size: integer? = sizes[name]
+  if not size then
+    raise "PEG definition '" .. name .. "' is not a pattern"
+  end
+  return _pattern(candidate, size as integer)
+end
+
+local function _relabel_resolve_value(
+    first: value, ...: value): (...: value)
+  local name = first as string
+  local definitions = ...[1]
+  local candidate =
+    _relabel_raw_get(definitions, name)
+  if candidate == nil then
+    raise "undefined name: " .. name
+  end
+  return candidate
+end
+
+local function _relabel_named_replace_suffix(
+    first: value, ...: value): (...: value)
+  local candidate = _relabel_resolve_value(first, ...[1])
+  return RelabelSuffix.new(
+    RELABEL_SUFFIX_REPLACE, candidate)
+end
+
+local function _relabel_named_match_time_suffix(
+    first: value, ...: value): (...: value)
+  local candidate = _relabel_resolve_value(first, ...[1])
+  return RelabelSuffix.new(
+    RELABEL_SUFFIX_MATCH_TIME, candidate)
+end
+
+local function _relabel_named_fold_suffix(
+    first: value, ...: value): (...: value)
+  local candidate = _relabel_resolve_value(first, ...[1])
+  return RelabelSuffix.new(
+    RELABEL_SUFFIX_FOLD, candidate)
+end
+
+local function _relabel_number_value(
+    first: value, ...: value): (...: value)
+  return _relabel_decimal(first as string)
+end
+
+local function _relabel_number_suffix(
+    first: value, ...: value): (...: value)
+  return RelabelSuffix.new(
+    RELABEL_SUFFIX_REPLACE,
+    _relabel_decimal(first as string))
+end
+
+local function _relabel_string_suffix(
+    first: value, ...: value): (...: value)
+  return RelabelSuffix.new(
+    RELABEL_SUFFIX_REPLACE, first as string)
+end
+
+local function _relabel_exact_suffix(
+    first: value, ...: value): (...: value)
+  return RelabelSuffix.new(
+    RELABEL_SUFFIX_EXACT,
+    _relabel_decimal(first as string))
+end
+
+local function _relabel_signed_suffix(
+    first: value, ...: value): (...: value)
+  local text = first as string
+  local amount = _relabel_decimal(
+    _relabel_slice(text, 2, #text + 1))
+  if _relabel_byte(text, 1) == 43 then
+    return RelabelSuffix.new(
+      RELABEL_SUFFIX_AT_LEAST, amount)
+  end
+  return RelabelSuffix.new(
+    RELABEL_SUFFIX_AT_MOST, amount)
+end
+
+local function _relabel_label_suffix(
+    first: value, ...: value): (...: value)
+  return RelabelSuffix.new(
+    RELABEL_SUFFIX_LABEL, first)
+end
+
+local function _relabel_exact(pattern: Pattern,
+                              count: integer): Pattern
+  local result = succeed()
+  local factor = pattern
+  local amount = count
+  while amount >= 1 do
+    if amount % 2 == 1 then
+      result = sequence(result, factor)
+    end
+    amount = amount // 2
+    if amount >= 1 then factor = sequence(factor, factor) end
+  end
+  return result
+end
+
+local function _relabel_dynamic_function_capture(
+    pattern: Pattern, dynamic: value): Pattern
+  _require_raw_function(dynamic, "relabel replacement")
+  local callback:
+      (value, ...: value) -> (...: value) =
+    function(first: value, ...: value): (...: value)
+      return dynamic(first, ...)
+    end
+  return function_capture(pattern, callback)
+end
+
+local function _relabel_dynamic_match_time(
+    pattern: Pattern, dynamic: value): Pattern
+  _require_raw_function(dynamic, "relabel match-time")
+  local callback:
+      (string, integer, value, ...: value) ->
+        (...: value) =
+    function(subject: string, position: integer,
+             first: value, ...: value): (...: value)
+      return dynamic(subject, position, first, ...)
+    end
+  return match_time(pattern, callback)
+end
+
+local function _relabel_dynamic_fold(
+    pattern: Pattern, dynamic: value): Pattern
+  _require_raw_function(dynamic, "relabel fold")
+  local callback:
+      (value, ...: value) -> value =
+    function(accumulator: value, ...: value): value
+      local next: value = dynamic(accumulator, ...)
+      return next
+    end
+  return fold_capture(pattern, callback)
+end
+
+local function _relabel_replace(pattern: Pattern,
+                                 replacement: value): Pattern
+  local kind = _raw_type(replacement)
+  if kind == lua.LUA_TSTRING then
+    return template_capture(pattern, replacement as string)
+  elseif kind == lua.LUA_TNUMBER and
+      _is_integer_value(replacement) then
+    return select_capture(pattern, replacement as integer)
+  elseif kind == lua.LUA_TTABLE and
+      not _relabel_is_pattern(replacement) then
+    return query_capture(
+      pattern, replacement as {value: value})
+  elseif kind == lua.LUA_TFUNCTION then
+    return _relabel_dynamic_function_capture(
+      pattern, replacement)
+  end
+  raise "invalid PEG replacement value"
+end
+
+local function _relabel_apply_suffixes(
+    first: value, ...: value): (...: value)
+  local pattern = first as Pattern
+  local index = 1
+  while index <= #... do
+    local suffix = ...[index] as RelabelSuffix
+    if suffix.kind == RELABEL_SUFFIX_AT_LEAST then
+      pattern = at_least(
+        pattern, suffix.operand as integer)
+    elseif suffix.kind == RELABEL_SUFFIX_AT_MOST then
+      pattern = at_most(
+        pattern, suffix.operand as integer)
+    elseif suffix.kind == RELABEL_SUFFIX_EXACT then
+      pattern = _relabel_exact(
+        pattern, suffix.operand as integer)
+    elseif suffix.kind == RELABEL_SUFFIX_LABEL then
+      pattern = choice(pattern, throw(suffix.operand))
+    elseif suffix.kind == RELABEL_SUFFIX_REPLACE then
+      pattern = _relabel_replace(pattern, suffix.operand)
+    elseif suffix.kind == RELABEL_SUFFIX_MATCH_TIME then
+      pattern = _relabel_dynamic_match_time(
+        pattern, suffix.operand)
+    elseif suffix.kind == RELABEL_SUFFIX_FOLD then
+      pattern = _relabel_dynamic_fold(
+        pattern, suffix.operand)
+    elseif suffix.kind == RELABEL_SUFFIX_TABLE then
+      pattern = table_capture(pattern)
+    else
+      raise "invalid private PEG suffix"
+    end
+    index = index + 1
+  end
+  return pattern
+end
+
+local function _relabel_sequence_capture(
+    first: value, ...: value): (...: value)
+  local result = first as Pattern
+  local index = 1
+  while index <= #... do
+    result = sequence(result, ...[index] as Pattern)
+    index = index + 1
+  end
+  return result
+end
+
+local function _relabel_choice_capture(
+    first: value, ...: value): (...: value)
+  local result = first as Pattern
+  local index = 1
+  while index <= #... do
+    result = choice(result, ...[index] as Pattern)
+    index = index + 1
+  end
+  return result
+end
+
+local function _relabel_lookahead_capture(
+    first: value, ...: value): (...: value)
+  return lookahead(first as Pattern)
+end
+
+local function _relabel_negative_capture(
+    first: value, ...: value): (...: value)
+  return negative(first as Pattern)
+end
+
+local function _relabel_throw_capture(
+    first: value, ...: value): (...: value)
+  return throw(first)
+end
+
+local function _relabel_group_capture(
+    first: value, ...: value): (...: value)
+  return group(...[1] as Pattern, first)
+end
+
+local function _relabel_back_reference_callback(
+    subject: string, position: integer,
+    first: value, ...: value): (...: value)
+  if _raw_type(first) ~= lua.LUA_TSTRING then return nil end
+  local captured = first as string
+  if #captured > #subject - position + 1 then return nil end
+  local index = 1
+  while index <= #captured do
+    if _relabel_byte(captured, index) ~=
+        _relabel_byte(subject, position + index - 1) then
+      return nil
+    end
+    index = index + 1
+  end
+  return position + #captured
+end
+
+local function _relabel_back_reference(
+    first: value, ...: value): (...: value)
+  return match_time(
+    back_capture(first),
+    _relabel_back_reference_callback)
+end
+
+local function _relabel_substitution_capture(
+    first: value, ...: value): (...: value)
+  return substitution(first as Pattern)
+end
+
+local function _relabel_table_capture_callback(
+    first: value, ...: value): (...: value)
+  return table_capture(first as Pattern)
+end
+
+local function _relabel_simple_capture(
+    first: value, ...: value): (...: value)
+  return capture(first as Pattern)
+end
+
+local function _relabel_nonterminal(
+    first: value, ...: value): (...: value)
+  local name = first as string
+  local in_grammar = ...[1] as boolean
+  if not in_grammar then
+    raise "rule '" .. name .. "' used outside a grammar"
+  end
+  return variable(name)
+end
+
+local function _relabel_parsed_rule(
+    first: value, ...: value): (...: value)
+  return RelabelParsedRule.new(
+    first as string, ...[1] as Pattern)
+end
+
+local function _relabel_target_grammar(
+    first: value, ...: value): (...: value)
+  local initial = first as RelabelParsedRule
+  local seen: {string: boolean} = {
+    [initial.name] = true,
+  }
+  local rules: {integer: Rule} = {
+    rule(initial.name, initial.pattern),
+  }
+  local index = 1
+  while index <= #... do
+    local parsed = ...[index] as RelabelParsedRule
+    if seen[parsed.name] then
+      raise "'" .. parsed.name ..
+        "' already defined as a rule"
+    end
+    seen[parsed.name] = true
+    rules[#rules + 1] =
+      rule(parsed.name, parsed.pattern)
+    index = index + 1
+  end
+  return grammar(initial.name, rules)
+end
+
+local record RelabelLexical
+  local one: Pattern
+  local spacing: Pattern
+  local name: Pattern
+  local digits: Pattern
+  local number: Pattern
+  local arrow: Pattern
+  local defined: Pattern
+  local quoted: Pattern
+  local class_pattern: Pattern
+  local label: Pattern
+end
+
+local function _relabel_build_lexical(): RelabelLexical
+  local one = any()
+  local spaces = _relabel_predefined["space"] as Pattern
+  local comment = sequence(
+    literal("--"),
+    zero_or_more(difference(one, literal("\n"))))
+  local spacing = zero_or_more(choice(spaces, comment))
+  local name_start = ranges("AZ", "az", "__")
+  local name_rest = ranges("AZ", "az", "__", "09")
+  local name = capture(sequence(
+    name_start, zero_or_more(name_rest)))
+  local digits = one_or_more(ranges("09"))
+  local number = function_capture(
+    sequence(capture(digits), spacing),
+    _relabel_number_value)
+  local arrow = sequence(spacing, literal("<-"))
+  local definition_pattern = sequence(
+    name, argument(1), argument(2))
+  local defined = function_capture(
+    sequence(literal("%"), definition_pattern),
+    _relabel_resolve_pattern)
+  local single_string = sequence(
+    literal("'"),
+    capture(zero_or_more(
+      difference(one, literal("'")))),
+    _relabel_expect(literal("'"), "MisTerm1"))
+  local double_string = sequence(
+    literal("\""),
+    capture(zero_or_more(
+      difference(one, literal("\"")))),
+    _relabel_expect(literal("\""), "MisTerm2"))
+  local quoted = choice(single_string, double_string)
+  local range_item = function_capture(
+    sequence(
+      capture(one), literal("-"),
+      capture(difference(one, literal("]")))),
+    _relabel_range_capture)
+  local literal_item = function_capture(
+    capture(one), _relabel_literal_capture)
+  local class_item = choice(
+    defined, range_item, literal_item)
+  local folded_class = fold_capture(
+    sequence(
+      class_item,
+      zero_or_more(
+        difference(class_item, literal("]")))),
+    _relabel_choice_fold)
+  local class_pattern = function_capture(
+    sequence(
+      literal("["),
+      capture(optional(literal("^"))),
+      folded_class,
+      _relabel_expect(literal("]"), "MisClose8")),
+    _relabel_class_capture)
+  return RelabelLexical.new(
+    one, spacing, name, digits, number, arrow,
+    defined, quoted, class_pattern,
+    choice(number, name))
+end
+
+local function _relabel_build_suffix_operation(
+    lex: RelabelLexical): Pattern
+  local suffix_plus = constant(
+    RelabelSuffix.new(RELABEL_SUFFIX_AT_LEAST, 1))
+  local suffix_star = constant(
+    RelabelSuffix.new(RELABEL_SUFFIX_AT_LEAST, 0))
+  local suffix_optional = constant(
+    RelabelSuffix.new(RELABEL_SUFFIX_AT_MOST, 1))
+  local exact_suffix = function_capture(
+    capture(lex.digits), _relabel_exact_suffix)
+  local signed_suffix = function_capture(
+    capture(sequence(set("+-"), lex.digits)),
+    _relabel_signed_suffix)
+  local label_suffix = function_capture(
+    lex.name, _relabel_label_suffix)
+  local replace_string = function_capture(
+    lex.quoted, _relabel_string_suffix)
+  local replace_number = function_capture(
+    capture(lex.digits), _relabel_number_suffix)
+  local replace_table = sequence(
+    literal("{}"),
+    constant(RelabelSuffix.new(
+      RELABEL_SUFFIX_TABLE, nil)))
+  local replace_named = function_capture(
+    sequence(lex.name, argument(1)),
+    _relabel_named_replace_suffix)
+  local match_time_named = function_capture(
+    sequence(lex.name, argument(1)),
+    _relabel_named_match_time_suffix)
+  local fold_named = function_capture(
+    sequence(lex.name, argument(1)),
+    _relabel_named_fold_suffix)
+  local repetition = sequence(
+    literal("^"),
+    _relabel_expect(
+      choice(exact_suffix, signed_suffix, label_suffix),
+      "ExpNumName"))
+  local replacement = sequence(
+    literal("->"),
+    _relabel_expect(
+      sequence(
+        lex.spacing,
+        choice(replace_string, replace_number,
+               replace_table, replace_named)),
+      "ExpCap"))
+  local match_time_suffix = sequence(
+    literal("=>"),
+    _relabel_expect(
+      sequence(lex.spacing, match_time_named),
+      "ExpName1"))
+  local fold_suffix = sequence(
+    literal("~>"), lex.spacing, fold_named)
+  return sequence(
+    lex.spacing,
+    choice(
+      sequence(literal("+"), suffix_plus),
+      sequence(literal("*"), suffix_star),
+      sequence(literal("?"), suffix_optional),
+      repetition, replacement,
+      match_time_suffix, fold_suffix))
+end
+
+local function _relabel_build_primary(
+    lex: RelabelLexical): Pattern
+  local grouped = sequence(
+    literal("("),
+    _relabel_expect(variable("Exp"), "ExpPatt4"),
+    _relabel_expect(
+      sequence(lex.spacing, literal(")")), "MisClose1"))
+  local quoted = function_capture(
+    lex.quoted, _relabel_literal_capture)
+  local thrown = function_capture(
+    sequence(
+      literal("%"),
+      _relabel_expect(literal("{"), "ExpNameOrLab"),
+      _relabel_expect(
+        sequence(lex.spacing, variable("Label")),
+        "ExpLab1"),
+      _relabel_expect(
+        sequence(lex.spacing, literal("}")), "MisClose7")),
+    _relabel_throw_capture)
+  local grouped_capture = function_capture(
+    sequence(
+      literal("{:"),
+      choice(
+        sequence(lex.name, literal(":")),
+        constant(nil)),
+      _relabel_expect(variable("Exp"), "ExpPatt5"),
+      _relabel_expect(
+        sequence(lex.spacing, literal(":}")), "MisClose2")),
+    _relabel_group_capture)
+  local back = function_capture(
+    sequence(
+      literal("="),
+      _relabel_expect(lex.name, "ExpName2")),
+    _relabel_back_reference)
+  local substitute = function_capture(
+    sequence(
+      literal("{~"),
+      _relabel_expect(variable("Exp"), "ExpPatt6"),
+      _relabel_expect(
+        sequence(lex.spacing, literal("~}")), "MisClose3")),
+    _relabel_substitution_capture)
+  local table_result = function_capture(
+    sequence(
+      literal("{|"),
+      _relabel_expect(variable("Exp"), "ExpPatt7"),
+      _relabel_expect(
+        sequence(lex.spacing, literal("|}")), "MisClose4")),
+    _relabel_table_capture_callback)
+  local simple_capture = function_capture(
+    sequence(
+      literal("{"),
+      _relabel_expect(
+        variable("Exp"), "ExpPattOrClose"),
+      _relabel_expect(
+        sequence(lex.spacing, literal("}")), "MisClose5")),
+    _relabel_simple_capture)
+  local angle_name = sequence(
+    literal("<"),
+    _relabel_expect(lex.name, "ExpName3"),
+    _relabel_expect(literal(">"), "MisClose6"))
+  local bare_name = sequence(
+    lex.name, negative(lex.arrow))
+  local nonterminal = function_capture(
+    sequence(
+      choice(bare_name, angle_name),
+      back_capture("G")),
+    _relabel_nonterminal)
+  return choice(
+    grouped, quoted, lex.class_pattern, lex.defined,
+    thrown, grouped_capture, back,
+    sequence(literal("{}"), constant(position())),
+    substitute, table_result, simple_capture,
+    sequence(literal("."), constant(any())),
+    nonterminal)
+end
+
+local function _relabel_compile_source(
+    source: string,
+    definitions: {integer: Definition}?): Pattern
+  local native_definitions, sizes =
+    _relabel_definition_table(definitions)
+  local parser = _relabel_parser as Pattern
+  local compiled: value, label: value, position: value =
+    parser:match(
+      source .. " ", 1, native_definitions, sizes)
+  if compiled == nil then
+    _relabel_raise_syntax(
+      source, label, position as integer)
+  end
+  if not _relabel_is_pattern(compiled) then
+    raise "PEG expression did not compile to a pattern"
+  end
+  return compiled as Pattern
+end
+
+local function _relabel_cached_source(
+    source: string, cache: value): Pattern
+  local cached = _relabel_raw_get(cache, source)
+  if cached ~= nil then return cached as Pattern end
+  local compiled = _relabel_compile_source(source, nil)
+  _relabel_raw_set(cache, source, compiled)
+  return compiled
+end
+
+function compile(candidate: value,
+                 definitions: {integer: Definition}?): Pattern
+  _relabel_ensure_initialized()
+  if _relabel_is_pattern(candidate) then
+    return candidate as Pattern
+  end
+  if _raw_type(candidate) ~= lua.LUA_TSTRING then
+    raise "PEG expression must be a string or Pattern"
+  end
+  local source = candidate as string
+  if not definitions then
+    return _relabel_cached_source(
+      source, _relabel_match_cache)
+  end
+  return _relabel_compile_source(source, definitions)
+end
+
+function match(subject: string, candidate: value,
+               init: integer?): (...: value)
+  _relabel_ensure_initialized()
+  local compiled: Pattern = succeed()
+  if _relabel_is_pattern(candidate) then
+    compiled = candidate as Pattern
+  elseif _raw_type(candidate) == lua.LUA_TSTRING then
+    compiled = _relabel_cached_source(
+      candidate as string, _relabel_match_cache)
+  else
+    raise "PEG expression must be a string or Pattern"
+  end
+  return compiled:match(subject, init)
+end
+
+local function _relabel_find_pattern(
+    pattern: Pattern): Pattern
+  local discarded = select_capture(pattern, 0)
+  return grammar("__find", {
+    rule("__find", choice(
+      sequence(position(), discarded, position()),
+      sequence(any(), variable("__find")))),
+  })
+end
+
+function find(subject: string, candidate: value,
+              init: integer?): (...: integer?)
+  _relabel_ensure_initialized()
+  local search: Pattern = succeed()
+  if _relabel_is_pattern(candidate) then
+    search = _relabel_find_pattern(candidate as Pattern)
+  elseif _raw_type(candidate) == lua.LUA_TSTRING then
+    local source = candidate as string
+    local cached = _relabel_raw_get(
+      _relabel_find_cache, source)
+    if cached ~= nil then
+      search = cached as Pattern
+    else
+      search = _relabel_find_pattern(
+        _relabel_compile_source(source, nil))
+      _relabel_raw_set(
+        _relabel_find_cache, source, search)
+    end
+  else
+    raise "PEG expression must be a string or Pattern"
+  end
+  local first: value, after: value = search:match(subject, init)
+  if first == nil then return nil end
+  return first as integer, (after as integer) - 1
+end
+
+function gsub(subject: string, candidate: value,
+              replacement: value): string
+  _relabel_ensure_initialized()
+  local substitution_pattern: Pattern = succeed()
+  if _relabel_is_pattern(candidate) then
+    local replaced = _relabel_replace(
+      candidate as Pattern, replacement)
+    substitution_pattern = substitution(
+      zero_or_more(choice(replaced, any())))
+  elseif _raw_type(candidate) == lua.LUA_TSTRING then
+    local source = candidate as string
+    -- Keep the weak outer value strongly rooted for this call.  Its inner
+    -- replacement keys are intentionally strong; once the call returns the
+    -- weak outer entry permits the complete source/replacement group to die.
+    local group = _relabel_raw_get(
+      _relabel_gsub_cache, source)
+    if group == nil then
+      group = _relabel_new_table()
+      _relabel_raw_set(_relabel_gsub_cache, source, group)
+    end
+    local cached = _relabel_raw_get(group, replacement)
+    if cached ~= nil then
+      substitution_pattern = cached as Pattern
+    else
+      local compiled = _relabel_compile_source(source, nil)
+      local replaced =
+        _relabel_replace(compiled, replacement)
+      substitution_pattern = substitution(
+        zero_or_more(choice(replaced, any())))
+      _relabel_raw_set(
+        group, replacement, substitution_pattern)
+    end
+  else
+    raise "PEG expression must be a string or Pattern"
+  end
+  local result: value = substitution_pattern:match(subject)
+  return result as string
+end
+
+local function _relabel_refresh_locale()
+  local current = locale()
+  local any_byte = any()
+  local predefined: {string: Pattern?} = {
+    ["nl"] = literal("\n"),
+    ["alnum"] = current.alnum,
+    ["alpha"] = current.alpha,
+    ["cntrl"] = current.cntrl,
+    ["digit"] = current.digit,
+    ["graph"] = current.graph,
+    ["lower"] = current.lower,
+    ["print"] = current.print,
+    ["punct"] = current.punct,
+    ["space"] = current.space,
+    ["upper"] = current.upper,
+    ["xdigit"] = current.xdigit,
+  }
+  predefined["a"] = current.alpha
+  predefined["c"] = current.cntrl
+  predefined["d"] = current.digit
+  predefined["g"] = current.graph
+  predefined["l"] = current.lower
+  predefined["p"] = current.punct
+  predefined["s"] = current.space
+  predefined["u"] = current.upper
+  predefined["w"] = current.alnum
+  predefined["x"] = current.xdigit
+  predefined["A"] = difference(any_byte, current.alpha)
+  predefined["C"] = difference(any_byte, current.cntrl)
+  predefined["D"] = difference(any_byte, current.digit)
+  predefined["G"] = difference(any_byte, current.graph)
+  predefined["L"] = difference(any_byte, current.lower)
+  predefined["P"] = difference(any_byte, current.punct)
+  predefined["S"] = difference(any_byte, current.space)
+  predefined["U"] = difference(any_byte, current.upper)
+  predefined["W"] = difference(any_byte, current.alnum)
+  predefined["X"] = difference(any_byte, current.xdigit)
+  _relabel_predefined = predefined
+  _relabel_match_cache = _relabel_new_weak_values()
+  _relabel_find_cache = _relabel_new_weak_values()
+  _relabel_gsub_cache = _relabel_new_weak_values()
+  _relabel_parser = _relabel_build_parser()
+end
+
+function update_locale()
+  if _relabel_parser then
+    _relabel_refresh_locale()
+  else
+    _relabel_initialize()
+  end
+end
+
+local function _relabel_initialize()
+  _relabel_pattern_anchor = succeed()
+  _relabel_refresh_locale()
+end
+
+local function _relabel_ensure_initialized()
+  if not _relabel_parser then
+    _relabel_initialize()
+  end
+end
