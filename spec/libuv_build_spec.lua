@@ -1002,8 +1002,8 @@ describe("libuv Makefile configuration", function()
     it("centralizes every peg and string export in the folder main",
        function()
         assert.same({
-            "Pattern", "Rule", "Locale", "Locale.new", "Definition",
-            "Pattern:match", "rule", "grammar", "locale",
+            "Pattern", "Match", "Rule", "Locale", "Locale.new", "Definition",
+            "Pattern:match", "Match:values", "rule", "grammar", "locale",
             "set_max_stack", "version", "literal", "any", "succeed",
             "fail", "runtime", "set", "ranges", "utf_range",
             "variable", "behind", "throw", "sequence", "choice",
@@ -1014,7 +1014,7 @@ describe("libuv Makefile configuration", function()
             "fold_capture", "group", "select_capture",
             "template_capture", "query_capture", "function_capture",
             "line_column", "define", "define_value", "compile",
-            "match", "find", "gsub", "update_locale",
+            "match", "gsub", "update_locale",
         }, public_declarations("titan/peg/peg.titan"))
         for _, contributor in ipairs({
             "combinators", "native",
