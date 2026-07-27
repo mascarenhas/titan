@@ -873,6 +873,7 @@ local grammar = re.compile([[
 
 
     castexp         <- (P  unopexp AS type^CastMissingType)      -> ExpCast
+                     / (P  unopexp IS type^IsMissingType)        -> ExpIs
                      / unopexp                                   -- produces Exp
 
     simpleexp       <- (P  NIL)                                  -> nil_exp
@@ -987,6 +988,7 @@ local grammar = re.compile([[
     WHILE           <- %WHILE SKIP*
     IMPORT          <- %IMPORT SKIP*
     AS              <- %AS SKIP*
+    IS              <- %IS SKIP*
     FOREIGN         <- %FOREIGN SKIP*
     CATCH           <- %CATCH SKIP*
     FINALLY         <- %FINALLY SKIP*

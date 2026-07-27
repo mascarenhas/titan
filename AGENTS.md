@@ -788,6 +788,27 @@ substitution, recursive; error on missing keys). Key facts:
   dispatch, so an exact-type adapter closure can still be worthwhile when a
   Titan typed call site will invoke it repeatedly; weigh that one-time wrapper
   against the hot-path savings rather than removing adapters mechanically.
+  All public standard-library `gsub` operations use the same exact
+  `(found: string) -> string` replacement contract and pass the whole matched
+  byte string independently of captures. Keep template, capture-index, table,
+  and other dynamic replacement forms inside an expression language such as
+  relabel syntax; do not overload a public substitution parameter through
+  `value` dispatch.
+  In `titan.peg`, module-level `match` is the leftmost-search API and returns a
+  `Match?` carrying inclusive `first`/`last` plus the genuinely flexible
+  capture projection from `Match:values()`; `Pattern:match` remains the
+  anchored low-level operation. Do not recreate a position-only `peg.find`.
+- **Use `is` when the question is whether a written cast would succeed.**
+  `exp is T` is the nonraising predicate twin of `exp as T`: the checker admits
+  exactly the same source/target relation, the operand is evaluated exactly
+  once, the result is boolean, and the test does not narrow either branch.
+  Prefer it to a raw Lua type probe when cast success is the intended question;
+  do not widen the written-cast relation to admit a test. Because a
+  function-typed cast from `value` defers callability checking until
+  invocation, `value is <function type>` is always true and a noncallable value
+  still fails when called. Retain exact raw-subtype probes such as
+  `lua_isinteger` only when identity or representation tag, rather than cast
+  success, is semantically significant.
 - **Treat ABI bumps as clean-start prototype boundaries.** Titan is still a
   prototype, so users are expected to remove stale compiled providers and
   rebuild or start from a fresh installation when the ABI changes. Do not add

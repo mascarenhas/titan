@@ -4006,6 +4006,54 @@ local function check_c_binary_operator(node, st, errors)
     end, {node.lhs, node.rhs})
 end
 
+-- Check the source/target relation shared by a written `as` cast and its
+-- non-raising `is` predicate. Both constructs contextualize and check the
+-- operand exactly once, admit the same explicit C conversions, and carry the
+-- same pointer-conversion annotation into code generation. Their result types
+-- differ in the expression visitor below.
+local function check_explicit_cast_relation(node, st, errors)
+    node.target = typefromnode(node.target, st, errors)
+    report_incomplete_c_object(node.target, st,
+        "by-value C cast target", node.loc, errors)
+    checkexp(node.exp, st, errors, node.target)
+    local source = node.exp._type
+    local target = node.target
+    local ok
+    if types.equals(source, target) then
+        ok = true
+    elseif source._tag == "Type.Option"
+       and types.equals(source.base, target) then
+        -- Explicit unwrap of an option to its base type. `as` raises on nil;
+        -- `is` observes the same check and returns false.
+        ok = true
+    elseif is_mutable_c_address_source(node.exp)
+       and types.c_mutable_address_coerceable(source, target)
+       and not types.c_address_coerceable(source, target) then
+        mark_mutable_c_address_source(node.exp)
+        ok = true
+    else
+        local conversion = checker._unsafe_c_pointer_conversion(
+            node.exp, target, errors, "explicit C cast")
+        if conversion then
+            node._c_conversion = conversion
+            ok = true
+        elseif conversion == false then
+            -- The conversion helper already emitted the more precise
+            -- category/qualifier/probe diagnostic.
+            ok = true
+        else
+            ok = types.explicitly_coerceable(source, target) or
+                 (types.coerceable(source, target) and
+                  types.compatible(source, target))
+        end
+    end
+    if not ok then
+        checker.typeerror(errors, node.loc, "cannot cast '%s' to '%s'",
+            types.tostring(source), types.tostring(target))
+    end
+    return target
+end
+
 -- Typechecks an expression
 --   node: Exp_* AST node
 --   st: symbol table
@@ -4790,45 +4838,12 @@ checkexp = util.make_visitor({
     end,
 
     ["Ast.ExpCast"] = function(node, st, errors, _)
-        node.target = typefromnode(node.target, st, errors)
-        report_incomplete_c_object(node.target, st,
-            "by-value C cast target", node.loc, errors)
-        checkexp(node.exp, st, errors, node.target)
-        local source = node.exp._type
-        local target = node.target
-        local ok
-        if types.equals(source, target) then
-            ok = true
-        elseif source._tag == "Type.Option" and types.equals(source.base, target) then
-            -- explicit unwrap of an option to its base type; the cast codegen
-            -- emits a runtime nil-check that raises if the value is nil
-            ok = true
-        elseif is_mutable_c_address_source(node.exp)
-           and types.c_mutable_address_coerceable(source, target)
-           and not types.c_address_coerceable(source, target) then
-            mark_mutable_c_address_source(node.exp)
-            ok = true
-        else
-            local conversion = checker._unsafe_c_pointer_conversion(
-                node.exp, target, errors, "explicit C cast")
-            if conversion then
-                node._c_conversion = conversion
-                ok = true
-            elseif conversion == false then
-                -- The conversion helper already emitted the more precise
-                -- category/qualifier/probe diagnostic.
-                ok = true
-            else
-                ok = types.explicitly_coerceable(source, target) or
-                     (types.coerceable(source, target) and
-                      types.compatible(source, target))
-            end
-        end
-        if not ok then
-            checker.typeerror(errors, node.loc, "cannot cast '%s' to '%s'",
-                types.tostring(source), types.tostring(target))
-        end
-        node._type = node.target
+        node._type = check_explicit_cast_relation(node, st, errors)
+    end,
+
+    ["Ast.ExpIs"] = function(node, st, errors, _)
+        check_explicit_cast_relation(node, st, errors)
+        node._type = types.Boolean()
     end,
 
     ["Ast.ExpAdjust"] = function(node, st, errors, context)
@@ -5308,7 +5323,7 @@ local function isconst(node)
     elseif tag == "Ast.ExpBinop" then
         return isconst(node.lhs) and isconst(node.rhs)
 
-    elseif tag == "Ast.ExpCast" then
+    elseif tag == "Ast.ExpCast" or tag == "Ast.ExpIs" then
         return isconst(node.exp)
 
     elseif tag == "Ast.ExpAdjust" then

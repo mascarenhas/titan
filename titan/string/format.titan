@@ -7,6 +7,11 @@
 local stdio = foreign import "stdio.h"
 local clocale = foreign import "locale.h"
 
+local type FormatPartial = (value) -> string
+local type FormatFactory = (string, string) -> FormatPartial
+
+local MAXIMUM_FORMAT_SPECIFICATION_BYTES = 22
+
 local record CoreStringBuilder
   local chunks: {string}
   local length: integer
@@ -92,26 +97,10 @@ local function checked_string(candidate: value): string
   return result
 end
 
-local function raw_value_type(candidate: value): integer
-  local top = lua.lua_gettop(L)
-  ffi.lua_pushtvalue(L, candidate)
-  local result = lua.lua_type(L, -1)
-  lua.lua_settop(L, top)
-  return result
-end
-
 local function value_is_integer(candidate: value): boolean
   local top = lua.lua_gettop(L)
   ffi.lua_pushtvalue(L, candidate)
   local result = lua.lua_isinteger(L, -1) ~= 0
-  lua.lua_settop(L, top)
-  return result
-end
-
-local function checked_boolean(candidate: value): boolean
-  local top = lua.lua_gettop(L)
-  ffi.lua_pushtvalue(L, candidate)
-  local result = lua.lua_toboolean(L, -1) ~= 0
   lua.lua_settop(L, top)
   return result
 end
@@ -280,16 +269,6 @@ local function render_pointer(form: string, candidate: value): string
   return result
 end
 
-local function byte_in_set(octet: integer, accepted: string): boolean
-  local bytes = accepted as const *ffi.titan_ffi_unsigned_char
-  local index = 0
-  while index < #accepted do
-    if bytes[index] == octet then return true end
-    index = index + 1
-  end
-  return false
-end
-
 local function is_ascii_digit(octet: integer): boolean
   return octet >= 48 and octet <= 57
 end
@@ -298,60 +277,6 @@ local function format_byte(text: string, index: integer): integer
   if index < 1 or index > #text then return 0 end
   local bytes = text as const *ffi.titan_ffi_unsigned_char
   return bytes[index - 1] as integer
-end
-
-local function check_format(form: string, flags: string,
-                            precision: boolean)
-  local cursor = 2
-  local last = #form
-  while cursor < last and
-      byte_in_set(format_byte(form, cursor), flags) do
-    cursor = cursor + 1
-  end
-  if format_byte(form, cursor) ~= 48 then
-    local digits = 0
-    while cursor < last and digits < 2 and
-        is_ascii_digit(format_byte(form, cursor)) do
-      cursor = cursor + 1
-      digits = digits + 1
-    end
-    if cursor < last and format_byte(form, cursor) == 46 and
-        precision then
-      cursor = cursor + 1
-      digits = 0
-      while cursor < last and digits < 2 and
-          is_ascii_digit(format_byte(form, cursor)) do
-        cursor = cursor + 1
-        digits = digits + 1
-      end
-    end
-  end
-  local specifier = format_byte(form, cursor)
-  if cursor ~= last or
-      cctype.isalpha(specifier as ffi.titan_ffi_int) == 0 then
-    raise "invalid conversion specification"
-  end
-end
-
-local function format_span_byte(octet: integer): boolean
-  return byte_in_set(octet, "-+ #0123456789.")
-end
-
-local function read_format(formats: string, start: integer):
-                           (string, integer, integer)
-  local length = #formats
-  local cursor = start
-  while cursor <= length and
-      format_span_byte(format_byte(formats, cursor)) do
-    cursor = cursor + 1
-  end
-  local span = cursor - start
-  if span + 1 >= 22 then raise "invalid format (too long)" end
-  if cursor > length then
-    return "%" .. copy_interval(formats, start, span), 0, cursor
-  end
-  return "%" .. copy_interval(formats, start, span + 1),
-         format_byte(formats, cursor), cursor + 1
 end
 
 local function contains_byte(text: string, octet: integer): boolean
@@ -448,12 +373,17 @@ local function append_quoted(builder: CoreStringBuilder, text: string)
   builder_append(builder, "\"")
 end
 
-local function append_literal(builder: CoreStringBuilder,
-                              candidate: value)
-  local kind = raw_value_type(candidate)
-  if kind == lua.LUA_TSTRING then
-    append_quoted(builder, checked_string(candidate))
-  elseif kind == lua.LUA_TNUMBER then
+local function render_literal(candidate: value): string
+  local builder = new_string_builder()
+  if candidate is string then
+    append_quoted(builder, candidate as string)
+  elseif candidate == nil then
+    builder_append(builder, "nil")
+  elseif candidate == true then
+    builder_append(builder, "true")
+  elseif candidate == false then
+    builder_append(builder, "false")
+  elseif candidate is float then
     if value_is_integer(candidate) then
       local number = checked_integer(candidate)
       if number == lua.LUA_MININTEGER then
@@ -480,15 +410,236 @@ local function append_literal(builder: CoreStringBuilder,
         builder_append(builder, locale_neutral_hex(number))
       end
     end
-  elseif kind == lua.LUA_TNIL then
-    builder_append(builder, "nil")
-  elseif kind == lua.LUA_TBOOLEAN then
-    if checked_boolean(candidate) then
-      builder_append(builder, "true")
-    else
-      builder_append(builder, "false")
-    end
   else
     raise "value has no literal form"
   end
+  return builder_finish(builder)
+end
+
+local function character_format_partial(
+    prefix: string, form: string): FormatPartial
+  return function(candidate: value): string
+    return prefix ..
+      render_character(form, checked_integer(candidate))
+  end
+end
+
+local function signed_format_partial(
+    prefix: string, form: string): FormatPartial
+  local integer_form = add_integer_length(form)
+  return function(candidate: value): string
+    return prefix ..
+      render_signed(integer_form, checked_integer(candidate))
+  end
+end
+
+local function unsigned_format_partial(
+    prefix: string, form: string): FormatPartial
+  local integer_form = add_integer_length(form)
+  return function(candidate: value): string
+    return prefix ..
+      render_unsigned(integer_form, checked_integer(candidate))
+  end
+end
+
+local function number_format_partial(
+    prefix: string, form: string): FormatPartial
+  return function(candidate: value): string
+    return prefix .. render_number(form, checked_number(candidate))
+  end
+end
+
+local function pointer_format_partial(
+    prefix: string, form: string): FormatPartial
+  return function(candidate: value): string
+    return prefix .. render_pointer(form, candidate)
+  end
+end
+
+local function literal_format_partial(
+    prefix: string, _form: string): FormatPartial
+  return function(candidate: value): string
+    return prefix .. render_literal(candidate)
+  end
+end
+
+local function string_format_partial(
+    prefix: string, form: string): FormatPartial
+  return function(candidate: value): string
+    local converted = tostring(candidate)
+    if #form == 2 then return prefix .. converted end
+    if contains_byte(converted, 0) then
+      raise "string contains zeros"
+    end
+    if not contains_byte(form, 46) and #converted >= 100 then
+      return prefix .. converted
+    end
+    return prefix .. render_c_string(form, converted)
+  end
+end
+
+local function invalid_specification_partial(
+    _prefix: string, _form: string): FormatPartial
+  return function(_candidate: value): string
+    raise "invalid conversion specification"
+    return ""
+  end
+end
+
+local function invalid_conversion_partial(
+    _prefix: string, _form: string): FormatPartial
+  return function(_candidate: value): string
+    raise "invalid conversion to 'format'"
+    return ""
+  end
+end
+
+local function invalid_literal_modifiers_partial(
+    _prefix: string, _form: string): FormatPartial
+  return function(_candidate: value): string
+    raise "specifier '%q' cannot have modifiers"
+    return ""
+  end
+end
+
+local function overlong_format_partial(
+    _prefix: string, _form: string): FormatPartial
+  return function(_candidate: value): string
+    raise "invalid format (too long)"
+    return ""
+  end
+end
+
+local function build_format_partial(fields_value: value): FormatPartial
+  local fields = fields_value as {integer: value}
+  if #fields ~= 4 then
+    raise "internal format parser capture is invalid"
+  end
+  local prefix = fields[1] as string
+  local form = fields[2] as string
+  local factory = fields[3] as FormatFactory
+  local maximum = fields[4] as integer
+  if #form > maximum then
+    return overlong_format_partial(prefix, form)
+  end
+  return factory(prefix, form)
+end
+
+local record FormatPlan
+  local partials: {FormatPartial}
+  local trailer: string
+end
+
+local function build_format_plan(items_value: value): FormatPlan
+  local items = items_value as {integer: value}
+  local count = #items
+  if count < 1 then
+    raise "internal format parser result is empty"
+  end
+  local partials: {FormatPartial} = {}
+  local index = 1
+  while index < count do
+    partials[index] = items[index] as FormatPartial
+    index = index + 1
+  end
+  return FormatPlan.new(partials, items[count] as string)
+end
+
+local function format_specification(
+    flags: string, zero_is_flag: boolean,
+    precision: boolean,
+    specifiers: string): peg.Pattern
+  local digits = peg.ranges("09")
+  local width = peg.at_most(digits, 2)
+  if not zero_is_flag then
+    width = peg.optional(peg.sequence(
+      peg.ranges("19"), peg.optional(digits)))
+  end
+  local modifiers = peg.sequence(
+    peg.zero_or_more(peg.set(flags)),
+    width)
+  if precision then
+    modifiers = peg.sequence(
+      modifiers,
+      peg.optional(peg.sequence(
+        peg.literal("."), peg.at_most(digits, 2))))
+  end
+  return peg.capture(peg.sequence(
+    peg.literal("%"), modifiers, peg.set(specifiers)))
+end
+
+local function format_conversion(
+    form: peg.Pattern, factory: FormatFactory,
+    maximum: integer): peg.Pattern
+  return peg.sequence(
+    form, peg.constant(factory), peg.constant(maximum))
+end
+
+local function build_format_pattern(): peg.Pattern
+  local escaped_percent =
+    peg.template_capture(peg.literal("%%"), "%%")
+  local ordinary_byte =
+    peg.difference(peg.any(), peg.literal("%"))
+  local literal_run = peg.substitution(peg.zero_or_more(
+    peg.choice(escaped_percent, ordinary_byte)))
+
+  local modifier_bytes = peg.set("-+ #0123456789.")
+  local all_modifiers = peg.zero_or_more(modifier_bytes)
+  local valid_specifiers = "cdiuoxXaAeEfgGps"
+  local conversion = peg.choice(
+    format_conversion(
+      format_specification("-", false, false, "c"),
+      character_format_partial, MAXIMUM_FORMAT_SPECIFICATION_BYTES),
+    format_conversion(
+      format_specification("-+0 ", true, true, "di"),
+      signed_format_partial, MAXIMUM_FORMAT_SPECIFICATION_BYTES),
+    format_conversion(
+      format_specification("-0", true, true, "u"),
+      unsigned_format_partial, MAXIMUM_FORMAT_SPECIFICATION_BYTES),
+    format_conversion(
+      format_specification("-#0", true, true, "oxX"),
+      unsigned_format_partial, MAXIMUM_FORMAT_SPECIFICATION_BYTES),
+    format_conversion(
+      format_specification("-+#0 ", true, true, "aAeEfgG"),
+      number_format_partial, MAXIMUM_FORMAT_SPECIFICATION_BYTES),
+    format_conversion(
+      format_specification("-", false, false, "p"),
+      pointer_format_partial, MAXIMUM_FORMAT_SPECIFICATION_BYTES),
+    format_conversion(
+      peg.capture(peg.literal("%q")),
+      literal_format_partial, MAXIMUM_FORMAT_SPECIFICATION_BYTES),
+    format_conversion(
+      format_specification("-", false, true, "s"),
+      string_format_partial, MAXIMUM_FORMAT_SPECIFICATION_BYTES),
+    format_conversion(
+      peg.capture(peg.sequence(
+        peg.literal("%"), peg.one_or_more(modifier_bytes),
+        peg.literal("q"))),
+      invalid_literal_modifiers_partial,
+      MAXIMUM_FORMAT_SPECIFICATION_BYTES),
+    format_conversion(
+      peg.capture(peg.sequence(
+        peg.literal("%"), all_modifiers,
+        peg.set(valid_specifiers))),
+      invalid_specification_partial,
+      MAXIMUM_FORMAT_SPECIFICATION_BYTES),
+    format_conversion(
+      peg.capture(peg.sequence(
+        peg.literal("%"), all_modifiers, peg.any())),
+      invalid_conversion_partial,
+      MAXIMUM_FORMAT_SPECIFICATION_BYTES),
+    format_conversion(
+      peg.capture(peg.sequence(
+        peg.literal("%"), all_modifiers)),
+      invalid_conversion_partial,
+      MAXIMUM_FORMAT_SPECIFICATION_BYTES - 1))
+
+  local partial = peg.function_capture(
+    peg.table_capture(peg.sequence(literal_run, conversion)),
+    build_format_partial)
+  return peg.function_capture(
+    peg.table_capture(peg.sequence(
+      peg.zero_or_more(partial), literal_run,
+      peg.negative(peg.any()))),
+    build_format_plan)
 end

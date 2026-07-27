@@ -105,24 +105,6 @@ local function _checked_unary(pattern: Pattern,
   return _checked_sum(pattern.tree_size, 0, overhead)
 end
 
-local function _raw_type(item: value): integer
-  local top = lua.lua_gettop(L)
-  local kind = 0
-  do
-    ffi.lua_pushtvalue(L, item)
-    kind = lua.lua_type(L, -1)
-  finally
-    lua.lua_settop(L, top)
-  end
-  return kind
-end
-
-local function _require_raw_function(item: value, operation: string)
-  if _raw_type(item) ~= lua.LUA_TFUNCTION then
-    raise "PEG " .. operation .. " callback must be a raw function"
-  end
-end
-
 local function _is_integer_value(item: value): boolean
   local top = lua.lua_gettop(L)
   local result = false
@@ -136,10 +118,9 @@ local function _is_integer_value(item: value): boolean
 end
 
 local function _encoded_name(name: value): string
-  local kind = _raw_type(name)
-  if kind == lua.LUA_TSTRING then
+  if name is string then
     return "\0s" .. (name as string)
-  elseif kind == lua.LUA_TNUMBER and _is_integer_value(name) then
+  elseif _is_integer_value(name) then
     return "\0i" .. (name as integer)
   end
   raise "PEG names and labels must be strings or integers"
@@ -161,7 +142,7 @@ local function _string_from(source: string, offset: integer): string
 end
 
 local function _decoded_label(label: value): value
-  if _raw_type(label) ~= lua.LUA_TSTRING then return label end
+  if not (label is string) then return label end
   local encoded = label as string
   if #encoded < 2 then return label end
   local bytes = encoded as const *ffi.titan_ffi_unsigned_char

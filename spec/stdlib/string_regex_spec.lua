@@ -23,6 +23,23 @@ local prefix = os.getenv("PREFIX")
 local LUA = prefix and exists(prefix .. "/bin/lua")
     and prefix .. "/bin/lua" or "lua"
 
+local PROBE_SOURCE = [[
+local str = import "string"
+
+local function bracket(found: string): string
+  return "[" .. found .. "]"
+end
+
+function replace(subject: string): (string, integer)
+  return str.gsub(subject, "(a+)", bracket)
+end
+
+function replace_compiled(subject: string): (string, integer)
+  local regex = str.compile_regex("(a+)")
+  return regex:gsub(subject, bracket)
+end
+]]
+
 describe("titan.string regex", function()
     local workspace
     local layout
@@ -61,6 +78,13 @@ describe("titan.string regex", function()
             cppflags = "",
         })
         async_stdlib.register_exact_provider(layout, "titan.string")
+
+        async_stdlib.write_source(
+            workspace, "string_regex_probe", PROBE_SOURCE)
+        async_stdlib.compile(workspace, "string_regex_probe", {
+            layout = layout,
+            cppflags = "",
+        })
     end)
 
     teardown(function()
@@ -458,62 +482,85 @@ describe("titan.string regex", function()
                 for index = 1, #values do
                     assert(values[index] == case[2][index])
                 end
+                local replaced = {}
                 local output, count =
-                    str.gsub(case[1], "a*", "X")
+                    str.gsub(case[1], "a*", function(found)
+                        replaced[#replaced + 1] = found
+                        return "X"
+                    end)
                 assert(output == case[3] and count == case[4])
+                assert(#replaced == #case[2])
+                for index = 1, #replaced do
+                    assert(replaced[index] == case[2][index])
+                end
             end
         ]=])
     end)
 
-    it("implements every replacement form, nil slot, and maximum",
+    it("uses exact whole-match replacement callbacks and maximum",
     function()
         run([=[
             local str = require "titan.string"
-            local output, count =
-                str.gsub("ab a", "(a)(b)?", "<%0:%1:%2:%%>")
-            assert(output == "<ab:a:b:%> <a:a::%>" and count == 2)
-            output, count = str.gsub("a a", "a", 42)
-            assert(output == "42 42" and count == 2)
-
             local calls = {}
-            output, count = str.gsub("b ab", "(a)?b",
-                function(...)
-                    calls[#calls + 1] = table.pack(...)
-                    if select(1, ...) == nil then return false end
-                    return "[" .. select(1, ...) .. "]"
+            local output, count = str.gsub("b ab", "(a)?b",
+                function(found, ...)
+                    assert(select("#", ...) == 0)
+                    calls[#calls + 1] = found
+                    return "[" .. found .. "]"
                 end)
-            assert(output == "b [a]" and count == 2)
-            assert(calls[1].n == 1 and calls[1][1] == nil)
+            assert(output == "[b] [ab]" and count == 2)
+            assert(#calls == 2 and calls[1] == "b" and calls[2] == "ab")
 
-            local lookup = setmetatable({a = "A"}, {
-                __index = function(_, key)
-                    assert(key == nil or key == "b")
-                    return key and "B" or false
-                end,
-                __call = function() error("must not call table") end,
-            })
-            output, count = str.gsub("a b", "(a)|(b)", lookup)
-            assert(output == "A b" and count == 2)
-
-            output, count = str.gsub("aaaa", "a", "X", 2)
+            output, count = str.gsub("aaaa", "a",
+                function() return "X" end, 2)
             assert(output == "XXaa" and count == 2)
-            output, count = str.gsub("aaaa", "a", "X", 0)
+            local zero_calls = 0
+            output, count = str.gsub("aaaa", "a", function(found)
+                zero_calls = zero_calls + 1
+                return found
+            end, 0)
             assert(output == "aaaa" and count == 0)
-            output, count = str.gsub("a", "a", function() return nil end)
-            assert(output == "a" and count == 1)
+            assert(zero_calls == 0)
 
-            assert(not pcall(str.gsub, "a", "a", "%"))
-            assert(not pcall(str.gsub, "a", "a", "%1"))
-            assert(not pcall(str.gsub, "a", "a", true))
-            assert(not pcall(str.gsub, "a", "a", true, 0))
-            assert(not pcall(str.gsub, "a", "a", io.stdout))
-            assert(not pcall(str.gsub, "a", "a",
-                function() return {} end))
-            assert(not pcall(str.gsub, "a", "a",
-                setmetatable({}, {
-                    __index = function() error("lookup exploded") end,
-                })))
-            assert(str.gsub("a", "a", "ok") == "ok")
+            output, count = str.gsub("a-b", "[ab]", function(found)
+                if found == "a" then return found end
+                return ""
+            end)
+            assert(output == "a-" and count == 2)
+            assert(str.gsub("a", "a", function() return "%1" end) == "%1")
+
+            local regex = str.compile_regex("a+")
+            output, count = regex:gsub("xaaayaa", function(found)
+                return "<" .. found .. ">"
+            end, 1)
+            assert(output == "x<aaa>yaa" and count == 1)
+
+            local probe = require "string_regex_probe"
+            output, count = probe.replace("baaacaa")
+            assert(output == "b[aaa]c[aa]" and count == 2)
+            output, count = probe.replace_compiled("baaacaa")
+            assert(output == "b[aaa]c[aa]" and count == 2)
+
+            for _, replacement in ipairs({"X", 42, true, {}, io.stdout}) do
+                assert(not pcall(str.gsub, "a", "a", replacement))
+            end
+            for _, replacement in ipairs({
+                function() return nil end,
+                function() return false end,
+                function() return 42 end,
+                function() return {} end,
+            }) do
+                assert(not pcall(str.gsub, "a", "a", replacement))
+            end
+            local ok, err = pcall(str.gsub, "a", "a", function()
+                error("replacement exploded")
+            end)
+            assert(not ok)
+            assert(tostring(err):find(
+                "replacement exploded", 1, true), tostring(err))
+            assert(str.gsub("a", "a", function(found)
+                return "[" .. found .. "]"
+            end) == "[a]")
         ]=])
     end)
 
@@ -545,13 +592,13 @@ describe("titan.string regex", function()
             local callback_calls = 0
             local output, count = str.gsub(
                 "ab-ab b-b", "((a|b)+)-\\1",
-                function(first, second)
+                function(found)
                     callback_calls = callback_calls + 1
                     collectgarbage("collect")
-                    assert(first and second)
-                    return "<" .. first .. ">"
+                    assert(found == "ab-ab" or found == "b-b")
+                    return "<" .. found .. ">"
                 end)
-            assert(output == "<ab> <b>" and count == 2)
+            assert(output == "<ab-ab> <b-b>" and count == 2)
             assert(callback_calls == 2)
 
             collectgarbage("incremental")

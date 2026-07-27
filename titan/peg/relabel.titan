@@ -21,6 +21,13 @@ local record RelabelParsedRule
   local pattern: Pattern
 end
 
+local type RelabelReplacementCallback =
+  (value, ...: value) -> (...: value)
+local type RelabelMatchTimeCallback =
+  (string, integer, value, ...: value) -> (...: value)
+local type RelabelFoldCallback =
+  (value, ...: value) -> value
+
 local RELABEL_SUFFIX_AT_LEAST = 1
 local RELABEL_SUFFIX_AT_MOST = 2
 local RELABEL_SUFFIX_LABEL = 3
@@ -32,22 +39,7 @@ local RELABEL_SUFFIX_TABLE = 8
 
 local _relabel_predefined: {string: Pattern?} = {}
 local _relabel_parser: Pattern? = nil
-local _relabel_pattern_anchor: value = nil
 local _relabel_match_cache: value = nil
-local _relabel_find_cache: value = nil
-local _relabel_gsub_cache: value = nil
-
-local function _relabel_new_table(): value
-  local top = lua.lua_gettop(L)
-  local result: value = nil
-  do
-    lua.lua_createtable(L, 0, 0)
-    result = ffi.lua_totvalue(L, -1)
-  finally
-    lua.lua_settop(L, top)
-  end
-  return result
-end
 
 local function _relabel_new_weak_values(): value
   local top = lua.lua_gettop(L)
@@ -92,31 +84,6 @@ local function _relabel_raw_set(table_value: value, key: value,
   finally
     lua.lua_settop(L, top)
   end
-end
-
-local function _relabel_same_metatable(first: value,
-                                       second: value): boolean
-  local top = lua.lua_gettop(L)
-  local result = false
-  do
-    ffi.lua_pushtvalue(L, first)
-    if lua.lua_getmetatable(L, -1) == 0 then return false end
-    local first_metatable = lua.lua_gettop(L)
-    ffi.lua_pushtvalue(L, second)
-    if lua.lua_getmetatable(L, -1) == 0 then return false end
-    result = lua.lua_rawequal(L, first_metatable, -1) ~= 0
-  finally
-    lua.lua_settop(L, top)
-  end
-  return result
-end
-
-local function _relabel_is_pattern(candidate: value): boolean
-  if candidate == nil or _relabel_pattern_anchor == nil then
-    return false
-  end
-  return _relabel_same_metatable(
-    candidate, _relabel_pattern_anchor)
 end
 
 local function _relabel_byte(source: string,
@@ -486,59 +453,18 @@ local function _relabel_exact(pattern: Pattern,
   return result
 end
 
-local function _relabel_dynamic_function_capture(
-    pattern: Pattern, dynamic: value): Pattern
-  _require_raw_function(dynamic, "relabel replacement")
-  local callback:
-      (value, ...: value) -> (...: value) =
-    function(first: value, ...: value): (...: value)
-      return dynamic(first, ...)
-    end
-  return function_capture(pattern, callback)
-end
-
-local function _relabel_dynamic_match_time(
-    pattern: Pattern, dynamic: value): Pattern
-  _require_raw_function(dynamic, "relabel match-time")
-  local callback:
-      (string, integer, value, ...: value) ->
-        (...: value) =
-    function(subject: string, position: integer,
-             first: value, ...: value): (...: value)
-      return dynamic(subject, position, first, ...)
-    end
-  return match_time(pattern, callback)
-end
-
-local function _relabel_dynamic_fold(
-    pattern: Pattern, dynamic: value): Pattern
-  _require_raw_function(dynamic, "relabel fold")
-  local callback:
-      (value, ...: value) -> value =
-    function(accumulator: value, ...: value): value
-      local next: value = dynamic(accumulator, ...)
-      return next
-    end
-  return fold_capture(pattern, callback)
-end
-
 local function _relabel_replace(pattern: Pattern,
                                  replacement: value): Pattern
-  local kind = _raw_type(replacement)
-  if kind == lua.LUA_TSTRING then
+  if replacement is string then
     return template_capture(pattern, replacement as string)
-  elseif kind == lua.LUA_TNUMBER and
-      _is_integer_value(replacement) then
+  elseif _is_integer_value(replacement) then
     return select_capture(pattern, replacement as integer)
-  elseif kind == lua.LUA_TTABLE and
-      not _relabel_is_pattern(replacement) then
+  elseif replacement is {value: value} then
     return query_capture(
       pattern, replacement as {value: value})
-  elseif kind == lua.LUA_TFUNCTION then
-    return _relabel_dynamic_function_capture(
-      pattern, replacement)
   end
-  raise "invalid PEG replacement value"
+  return function_capture(
+    pattern, replacement as RelabelReplacementCallback)
 end
 
 local function _relabel_apply_suffixes(
@@ -561,11 +487,12 @@ local function _relabel_apply_suffixes(
     elseif suffix.kind == RELABEL_SUFFIX_REPLACE then
       pattern = _relabel_replace(pattern, suffix.operand)
     elseif suffix.kind == RELABEL_SUFFIX_MATCH_TIME then
-      pattern = _relabel_dynamic_match_time(
-        pattern, suffix.operand)
+      pattern = match_time(
+        pattern,
+        suffix.operand as RelabelMatchTimeCallback)
     elseif suffix.kind == RELABEL_SUFFIX_FOLD then
-      pattern = _relabel_dynamic_fold(
-        pattern, suffix.operand)
+      pattern = fold_capture(
+        pattern, suffix.operand as RelabelFoldCallback)
     elseif suffix.kind == RELABEL_SUFFIX_TABLE then
       pattern = table_capture(pattern)
     else
@@ -621,7 +548,7 @@ end
 local function _relabel_back_reference_callback(
     subject: string, position: integer,
     first: value): integer?
-  if _raw_type(first) ~= lua.LUA_TSTRING then return nil end
+  if not (first is string) then return nil end
   local captured = first as string
   if #captured > #subject - position + 1 then return nil end
   local index = 1
@@ -921,7 +848,7 @@ local function _relabel_compile_source(
     _relabel_raise_syntax(
       source, label, position as integer)
   end
-  if not _relabel_is_pattern(compiled) then
+  if not (compiled is Pattern) then
     raise "PEG expression did not compile to a pattern"
   end
   return compiled as Pattern
@@ -934,16 +861,6 @@ local function _relabel_cached_source(
   local compiled = _relabel_compile_source(source, nil)
   _relabel_raw_set(cache, source, compiled)
   return compiled
-end
-
-local function _relabel_find_pattern(
-    pattern: Pattern): Pattern
-  local discarded = select_capture(pattern, 0)
-  return grammar("__find", {
-    rule("__find", choice(
-      sequence(position(), discarded, position()),
-      sequence(any(), variable("__find")))),
-  })
 end
 
 local function _relabel_refresh_locale()
@@ -985,18 +902,11 @@ local function _relabel_refresh_locale()
   predefined["X"] = difference(any_byte, current.xdigit)
   _relabel_predefined = predefined
   _relabel_match_cache = _relabel_new_weak_values()
-  _relabel_find_cache = _relabel_new_weak_values()
-  _relabel_gsub_cache = _relabel_new_weak_values()
   _relabel_parser = _relabel_build_parser()
-end
-
-local function _relabel_initialize()
-  _relabel_pattern_anchor = succeed()
-  _relabel_refresh_locale()
 end
 
 local function _relabel_ensure_initialized()
   if not _relabel_parser then
-    _relabel_initialize()
+    _relabel_refresh_locale()
   end
 end

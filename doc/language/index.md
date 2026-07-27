@@ -48,7 +48,7 @@ Start with the [design philosophy](philosophy.md) if you want to know
 | [The type system](types.md) | All Titan types; type equality, compatibility and implicit coercions; type inference; the dynamic `value` type. |
 | [Type aliases](type-aliases.md) | Transparent compile-time type names, type-only namespaces, visibility, record re-exports, and alias cycles. |
 | [Option types](option-types.md) | `T?`: nil-tolerant types — syntax, semantics, defaulting with `or`, and how `nil` flows through arrays, maps, and the Lua boundary. |
-| [Expressions](expressions.md) | Literals and escapes, operators and precedence, Lua-faithful arithmetic, concatenation, `and`/`or`, explicit casts with `as`, constructors, calls. |
+| [Expressions](expressions.md) | Literals and escapes, operators and precedence, Lua-faithful arithmetic, concatenation, `and`/`or`, explicit casts with `as`, non-raising type tests with `is`, constructors, calls. |
 | [Statements](statements.md) | Declarations and inference, assignment and multiple assignment, control flow, the numeric `for`, `defer`, `return`. |
 | [Defer](defer.md) | `defer <statement>` cleanup, its block transformation model, scoping, LIFO order, and interaction with return, break, raise, catch, and finally. |
 | [Functions](functions.md) | Declarations, argument adjustment, multiple return values, visibility, functions as values, and the `main` convention for standalone programs. |

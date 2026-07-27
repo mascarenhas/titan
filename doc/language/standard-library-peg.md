@@ -259,11 +259,15 @@ A fold callback receives the accumulator followed by all values from the next
 capture operation and returns exactly one accumulator.
 
 These APIs use their declared function types; callbacks are not hidden behind
-an unqualified `value`. The embedded engine also requires a raw Lua or Titan
-function at run time. A callable table or userdata is not silently promoted
-to a function. Query tables remain tables even if they also have `__call`.
-Callback execution is non-yieldable; attempting to yield raises an ordinary
-Lua boundary error.
+an unqualified `value`. Supplying a callback follows Titan's ordinary
+function-value rules: an exact Titan function can use the exact call path,
+while Lua functions, C functions, and values with `__call` use the generic
+callable path. Construction does not eagerly reject a value merely because it
+is not a raw Lua function. A genuinely noncallable value raises only if
+matching or capture evaluation actually invokes it. Query tables remain
+tables even if they also have `__call`, because `query_capture` has the
+distinct `{value: value}` parameter type. Callback execution is non-yieldable;
+attempting to yield raises an ordinary Lua boundary error.
 
 The pinned engine does not implement LPeg 1.1 accumulator `%` captures.
 Upstream calls the delayed `/ function` form a function capture. Its C
@@ -391,6 +395,11 @@ The relabel API compiles a textual pattern notation into the same opaque
 function define(name: string, pattern: Pattern): Definition
 function define_value(name: string, candidate: value): Definition
 
+record Match
+  first: integer
+  last: integer
+end
+
 function compile(
   candidate: value,
   definitions: {integer: Definition}?
@@ -399,16 +408,12 @@ function match(
   subject: string,
   candidate: value,
   init: integer?
-): (value, ...: value)
-function find(
-  subject: string,
-  candidate: value,
-  init: integer?
-): (integer?, integer?)
+): Match?
+function Match:values(): (...: value)
 function gsub(
   subject: string,
   candidate: value,
-  replacement: value
+  replacement: (string) -> string
 ): string
 function update_locale()
 function line_column(
@@ -429,18 +434,28 @@ Nil and false definition values are rejected because the pinned notation
 treats them as absent; a particular suffix may impose a narrower native
 requirement when it consumes the value.
 
-`match` has the same anchored capture/failure results and initial-position
-normalization as `Pattern:match`. `find` searches forward from that normalized
-position and returns the fixed pair of one-based start and inclusive end on
-success, or `nil, nil` on failure. A caller interested only in success may
-consume the first result. An empty match has `last == first - 1`. `gsub`
-returns only the transformed string, unlike Lua's `string.gsub`, which also
-returns a count. Its replacement uses the native string, integer-selector,
-table-query, or raw-function capture-replacement forms.
+Module-level `match` performs a leftmost search at or after the same normalized
+initial position used by `Pattern:match`. It returns nil on no match, or a
+`Match` containing the one-based inclusive range. An empty match has
+`last == first - 1`. `Match:values()` returns exactly the candidate pattern's
+captures, preserving nil and trailing-nil slots; it returns zero values when
+the candidate has no captures. Thus the match record is a strict superset of
+the old position-only search result. Use `Pattern:match` when matching must be
+anchored at the initial position or when the native failure label and position
+are required. Search bookkeeping consumes no capture slots, so `values()` can
+project the complete 200-value Titan capture limit.
 
-Definition-free source strings are held in private weak caches for `match`,
-`find`, and `gsub`. `update_locale()` rebuilds the predefined classes from the
-current C locale and clears all three caches.
+`gsub` returns only the transformed string, unlike Lua's `string.gsub`, which
+also returns a count. Its replacement is always a `(string) -> string` function.
+The function receives the whole matched byte string exactly once for each
+accepted replacement, independent of captures inside the candidate, and its
+string result is inserted literally. Template, capture-index, and table
+replacement forms remain available inside the relabel expression language;
+they are not overloaded onto the public `gsub` parameter.
+
+Definition-free source strings are held in one private weak compilation cache
+shared by `compile`, `match`, and `gsub`. `update_locale()` rebuilds the
+predefined classes from the current C locale and clears the cache.
 
 ### Expression language
 

@@ -565,7 +565,7 @@ describe("titan.peg", function()
         ]])
     end)
 
-    it("preserves callback timing, errors, and tight Titan types", function()
+    it("preserves callback timing, errors, and deferred callability", function()
         run([[
             local peg = require "titan.peg"
             local probe = require "peg_core_probe"
@@ -629,11 +629,49 @@ describe("titan.peg", function()
             assert(peg.literal("a"):match("a") == 2)
 
             local callable = setmetatable({}, {
-                __call = function() return true end,
+                __call = function() return true, "callable" end,
             })
-            assert(not pcall(peg.runtime, callable))
-            assert(not pcall(
-                peg.function_capture, peg.literal("a"), callable))
+            assert(peg.runtime(callable):match("") == "callable")
+            assert(peg.match_time(
+                peg.succeed(), callable):match("") == "callable")
+            assert(peg.fold_capture(peg.sequence(
+                peg.constant("first"),
+                peg.constant("second")), callable):match("") == true)
+            packed = table.pack(peg.function_capture(
+                peg.literal("a"), callable):match("a"))
+            assert(packed.n == 2 and packed[1] == true and
+                   packed[2] == "callable")
+
+            local noncallable = {}
+            local bad_runtime = peg.runtime(noncallable)
+            local bad_match_time =
+                peg.match_time(peg.literal("a"), noncallable)
+            local bad_fold = peg.fold_capture(peg.sequence(
+                peg.constant("first"),
+                peg.constant("second")), noncallable)
+            local bad_function =
+                peg.function_capture(peg.literal("a"), noncallable)
+
+            assert(peg.sequence(
+                peg.literal("a"), bad_runtime):match("b") == nil)
+            assert(bad_match_time:match("b") == nil)
+            assert(peg.sequence(
+                peg.literal("a"), bad_fold):match("b") == nil)
+            assert(bad_function:match("b") == nil)
+
+            for _, case in ipairs({
+                { bad_runtime, "" },
+                { bad_match_time, "a" },
+                { bad_fold, "" },
+                { bad_function, "a" },
+            }) do
+                ok, err = pcall(function()
+                    return case[1]:match(case[2])
+                end)
+                assert(not ok)
+                assert(tostring(err):find(
+                    "call", 1, true), tostring(err))
+            end
 
             local yielding = peg.function_capture(
                 peg.literal("a"), function() coroutine.yield() end)

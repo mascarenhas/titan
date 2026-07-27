@@ -1669,7 +1669,7 @@ end
                             name = "a" } } } } } } } })
     end)
 
-    it("can parse cast expressions", function()
+    it("can parse cast and type-test expressions", function()
         assert_expression_ast([[ foo as integer ]],
             { _tag = "Ast.ExpCast", exp = { _tag = "Ast.ExpVar" }, target = { _tag = "Ast.TypeInteger" } })
         assert_expression_ast([[ a.b[1].c as integer ]],
@@ -1683,6 +1683,47 @@ end
                 exp = { _tag = "Ast.ExpUnop", op = "#",
                     exp = { _tag = "Ast.ExpDots" } },
                 target = { _tag = "Ast.TypeValue" } })
+
+        assert_expression_ast([[ foo is integer ]],
+            { _tag = "Ast.ExpIs", exp = { _tag = "Ast.ExpVar" },
+                target = { _tag = "Ast.TypeInteger" } })
+        assert_expression_ast([[ foo is (integer) -> integer ]],
+            { _tag = "Ast.ExpIs", target = {
+                _tag = "Ast.TypeFunction",
+                argtypes = { { _tag = "Ast.TypeInteger" } },
+                rettypes = { { _tag = "Ast.TypeInteger" } } } })
+        assert_expression_ast([[ 2 + foo is integer ]],
+            { _tag = "Ast.ExpBinop",
+                rhs = { _tag = "Ast.ExpIs",
+                    exp = { _tag = "Ast.ExpVar" },
+                    target = { _tag = "Ast.TypeInteger" } } })
+        assert_expression_ast([[ -foo is integer ]],
+            { _tag = "Ast.ExpIs",
+                exp = { _tag = "Ast.ExpUnop", op = "-",
+                    exp = { _tag = "Ast.ExpVar" } },
+                target = { _tag = "Ast.TypeInteger" } })
+        assert_expression_ast([[ foo ^ 2 is integer ]],
+            { _tag = "Ast.ExpBinop", op = "^",
+                rhs = { _tag = "Ast.ExpIs",
+                    exp = { _tag = "Ast.ExpInteger", value = 2 },
+                    target = { _tag = "Ast.TypeInteger" } } })
+        assert_expression_ast([[ (foo ^ 2) is integer ]],
+            { _tag = "Ast.ExpIs",
+                exp = { _tag = "Ast.ExpBinop", op = "^" },
+                target = { _tag = "Ast.TypeInteger" } })
+        assert_expression_ast([[ foo ^ 2 as integer ]],
+            { _tag = "Ast.ExpBinop", op = "^",
+                rhs = { _tag = "Ast.ExpCast",
+                    exp = { _tag = "Ast.ExpInteger", value = 2 },
+                    target = { _tag = "Ast.TypeInteger" } } })
+        assert_expression_ast([[ (foo as value) is integer ]],
+            { _tag = "Ast.ExpIs",
+                exp = { _tag = "Ast.ExpCast",
+                    target = { _tag = "Ast.TypeValue" } },
+                target = { _tag = "Ast.TypeInteger" } })
+        assert_expression_syntax_error([[ foo is ]], "IsMissingType")
+        assert_expression_syntax_error(
+            [[ foo is integer ^ 2 ]], "EndFunc")
     end)
 
     it("does not allow parentheses in the LHS of an assignment", function()

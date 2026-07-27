@@ -236,6 +236,7 @@ to use it as an expression.
 | `ExpBinop` | `lhs`, `op`, `rhs` | `op` is the literal operator string (`"+"`, `"=="`, `"and"`, ...) |
 | `ExpConcat` | `exps` | `..` is flattened to one n-ary node at parse time; all-literal operands are constant-folded into an `ExpString` |
 | `ExpCast` | `exp`, `target` | written `as` casts **and** every checker-materialized implicit coercion |
+| `ExpIs` | `exp`, `target` | written `is` type test; the checker resolves `target` and gives the expression type `boolean` |
 | `ExpAdjust` | `exp` | synthesized by the parser only: a parenthesized *call*, truncated to its first value |
 | `ExpExtra` | `exp`, `index`, `_type` | synthesized by the checker only: the index-th (> 1) value of a multi-return call |
 | `ExpFunction` | `params`, `rettypes`, `flexrettype`, `block` | anonymous function; an absent return annotation may copy both result components from context |
@@ -270,6 +271,11 @@ the same node for every legal implicit coercion. The code generator
 emits conversions **only** from `ExpCast` nodes — see
 [the type checker](checker.md). Casts synthesized by `trycoerce` additionally
 carry `_implicit_coercion = true`; written `as` casts do not.
+
+`ExpIs` is always written source. Its source/target relation is checked by the
+same helper as a written `ExpCast`, but its own `_type` is `Type.Boolean` and
+it never carries `_implicit_coercion`. It also does not rewrite or narrow its
+operand's `_type`.
 
 ### Call arguments and constructor fields
 

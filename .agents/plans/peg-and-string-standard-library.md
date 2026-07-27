@@ -11,7 +11,7 @@ This plan expands the informal `peg`/`string` standard-library brief into a
 source-grounded design for the current Titan compiler, runtime, combined
 standard-library provider, source-rock installer, and CI layout.
 
-The feature has three inseparable deliverables:
+The feature and its API-cleanup follow-up have four inseparable deliverables:
 
 1. A self-contained `titan.peg` binding to a privately embedded LPegLabel
    engine, plus a Titan port of `relabel.lua`.
@@ -21,6 +21,9 @@ The feature has three inseparable deliverables:
 3. The rest of the practical Lua 5.5 string surface implemented in Titan, with
    C99 and the Lua C API used through the existing FFI where they are the
    appropriate primitive boundary.
+4. A general `exp is T` expression that reports whether the corresponding
+   written cast would succeed, used to remove cast-success raw-type probes from
+   the PEG and string implementations without widening Titan's cast relation.
 
 The two new logical modules join the existing seven roots in the one canonical
 `titan.so`/`titan.a` provider. Programs using either module must not depend on
@@ -28,10 +31,11 @@ an installed `lpeglabel.so` or `relabel.lua`.
 
 ## 1. Executive decisions
 
-The design is feasible without a new Titan language or compiler feature. The
-current language already has the required opaque records, first-class
+The standard-library design uses Titan's existing opaque records, first-class
 functions, `value` calls, closures, variadic inputs, flexible results, folder
-modules, generic iterators, module initializers, and Lua C FFI.
+modules, generic iterators, module initializers, and Lua C FFI. The follow-up
+cleanup also adds one general language feature: `exp is T`, the nonraising
+predicate twin of the written `exp as T` cast.
 
 Use these decisions:
 
@@ -92,11 +96,23 @@ Use these decisions:
 - Do not implement `string.dump` in this feature. Titan functions are native C
   closures rather than dumpable Lua bytecode, and delegating only Lua
   functions would create a misleading partial API.
-- Implement Lua-compatible dynamic `gsub` replacements, classified by raw Lua
-  type in Lua's order: strings/numbers are templates, tables (including
-  callable tables) are lookups, and only raw functions are callbacks. A false
-  or nil lookup/callback result keeps the original match; a string or number
-  replaces it; callable userdata and other values raise.
+- Give regex `gsub` an exact `(string) -> string` replacement callback. Call it
+  once per accepted match with the whole match only, independent of captures,
+  and require an exact string result. Retaining or deleting a match is explicit
+  by returning the supplied string or `""`; regex `gsub` has no dynamic
+  template/table replacement surface. The `titan.peg` relabel `gsub` uses the
+  same exact whole-match callback contract; relabel's dynamic template,
+  capture-index, table, and function forms remain syntax inside compiled
+  expressions rather than overloads of the public function parameter.
+- Add `exp is T` without widening Titan's explicit-cast relation. The checker
+  accepts exactly the source/target pairs accepted for a written `exp as T`;
+  the operand is evaluated exactly once, a cast mismatch returns `false`
+  instead of raising, and the test performs no branch narrowing. Total casts
+  test true, including `value is <function type>` because function-typed casts
+  defer callability validation until invocation. Use `is` in the formatter and
+  PEG relabel dispatch where cast success is the question, while retaining an
+  exact integer-tag probe where relabel requires integer identity rather than
+  integer castability.
 - Implement `tostring` with `luaL_tolstring` through the FFI, not by looking up
   mutable `_G.tostring`. This preserves built-in Lua 5.5 conversion and
   `__tostring` semantics. `format`'s `%s` conversion shares that helper and is
@@ -117,7 +133,7 @@ review.
 | Question | Recommended contract used below | Alternative |
 | --- | --- | --- |
 | `string` breadth | All practical Lua 5.5 functions plus `tostring`; omit only `dump` | A smaller initial subset |
-| `gsub` replacement forms | String/number, raw table, and raw function through `value` | String-only or separately named typed overloads |
+| Regex and PEG `gsub` replacement | Exact `(string) -> string` callback receiving the whole match | Dynamic Lua template/table/function replacement through `value` |
 | `peg` breadth | Practical full LPegLabel/relabel binding; omit only debug printers | Regex-only subset |
 | `gmatch` result | Iterate non-nil `RegexMatch` records; obtain whole/captures from methods | Lua-style capture tuple, which cannot safely represent an unmatched first capture as generic-for control |
 | Embedded pattern identity | Private and deliberately incompatible with external LPegLabel userdata | Shared registry/metatable identity |
@@ -145,9 +161,13 @@ review.
   progress, group spans, and replacement rules.
 - The practical Lua 5.5 non-pattern string functions and requested
   `tostring`, implemented without calling Lua's string library.
+- The `exp is T` language expression, using exactly the written-`as` cast
+  relation, single evaluation, a boolean result, no mismatch exception, and no
+  flow-sensitive narrowing.
 - Dynamic and static-provider operation, clean source-rock installation,
   current-layout publication/rollback, licensing, docs, tests, CI grouping,
-  and macOS verification.
+  and exact-head Linux/sanitizer/Codecov evidence. The maintainer has waived
+  the manual macOS run for this feature.
 
 ### 2.2 Out of scope
 
@@ -168,6 +188,8 @@ review.
 - Lua-pattern compatibility, a `plain` flag on `find`, or an option that
   switches between regex and Lua patterns.
 - `string.dump`.
+- General flow-sensitive type narrowing, a broader type-test relation than
+  written `as`, or eager callability validation for function-typed casts.
 - A binary-rock ownership model. Direct standard-library artifacts remain
   source-published outside the rock manifest.
 - Windows support in this iteration.
@@ -185,6 +207,10 @@ review.
 - Titan functions and Lua/C functions can be called through `value`, and
   variadic inputs/flexible outputs can represent LPeg's heterogeneous dynamic
   captures.
+- Written `as` already centralizes the admissible explicit-cast relation and
+  all of its run-time checks. `is` must reuse that relation and mirror whether
+  the written cast would raise, without changing `types.compatible`, adding
+  narrowing, or eagerly validating a function-typed value.
 - Module variables may be declared as constant placeholders and filled by the
   final root initializer once per Lua state. `titan/coroutine.titan` and
   `titan/uv/uv.titan` already use this pattern.
@@ -536,7 +562,7 @@ Use descriptive names in place of LPeg's overloaded `P`:
 | `any(count: integer?): Pattern` | `P(integer)` | Nil/omitted means 1; `count >= 0`: exactly that many bytes; negative: succeeds only when fewer than `-count` bytes remain; checked against the construction-size policy before native integer narrowing |
 | `succeed(): Pattern` | `P(true)` | Empty success |
 | `fail(): Pattern` | `P(false)` | Ordinary failure |
-| `runtime(callback: (string, integer, string) -> (...: value)): Pattern` | `P(function)` | Raw Lua/Titan callback receiving subject, current absolute position, and the empty whole-match string |
+| `runtime(callback: (string, integer, string) -> (...: value)): Pattern` | `P(function)` | Callback receiving subject, current absolute position, and the empty whole-match string through an internal native adapter |
 | `set(bytes: string): Pattern` | `S(string)` | One byte from the set |
 | `ranges(...: string): Pattern` | `R(...)` | Each argument is exactly two bytes; zero ranges is failure |
 | `utf_range(first: integer, last: integer): Pattern` | `utfR` | Byte encodings for the inclusive code-point range `0..0x10ffff`; matching native `utfR`, this includes surrogate code points and is not Unicode-scalar validation |
@@ -610,7 +636,7 @@ Expose the pinned LPegLabel capture surface:
 | `select_capture(pattern: Pattern, index: integer): Pattern` | `/` number |
 | `template_capture(pattern: Pattern, template: string): Pattern` | `/` string |
 | `query_capture(pattern: Pattern, lookup: {value: value}): Pattern` | `/` raw table |
-| `function_capture(pattern: Pattern, callback: (value, ...: value) -> (...: value)): Pattern` | `/` raw function |
+| `function_capture(pattern: Pattern, callback: (value, ...: value) -> (...: value)): Pattern` | `/` function through a native adapter |
 
 The public manual must document native timing precisely:
 
@@ -618,9 +644,11 @@ The public manual must document native timing precisely:
   not rely on side effects;
 - runtime patterns and match-time captures run immediately and can affect
   matching; function captures are delayed until capture evaluation;
-- `runtime`, `match_time`, `fold_capture`, and `function_capture` require raw
-  Lua/Titan functions; callable tables or userdata are not silently promoted
-  to functions;
+- `runtime`, `match_time`, `fold_capture`, and `function_capture` keep their
+  declared function types, but do not eagerly raw-tag-check the supplied
+  value: exact Titan functions use the exact call path, while Lua functions,
+  C functions, and `__call` objects use Titan's generic callable path; a
+  genuinely noncallable value fails only when the engine invokes it;
 - a match-time callback receives subject, absolute position after its nested
   match, and at least one capture-side value: all nested captures, or the
   whole matched substring when there are none;
@@ -653,8 +681,8 @@ anonymous form. `back_capture` requires a non-nil key.
   raises the documented native error when no such group exists.
 - `table_capture` appends anonymous values at integer keys and stores a named
   group's first nested value at its name. `fold_capture` requires an initial
-  capture value and folds each later capture left-to-right through the raw
-  function. If the first nested capture produces multiple values, only its
+  capture value and folds each later capture left-to-right through the
+  callback. If the first nested capture produces multiple values, only its
   first value initializes the accumulator.
 - `substitution` replaces captured spans and copies unmatched bytes.
   `select_capture(p, 0)` discards captures; index `n` in `1..SHRT_MAX`
@@ -676,7 +704,7 @@ has no nested captures:
 | anonymous `group(p)` | the whole substring |
 | named `group(p, key)` then `back_capture(key)` | no direct group value, then the whole substring |
 | `query_capture(p, table)` | lookup by the whole substring |
-| `function_capture(p, raw_function)` | call with the whole substring |
+| `function_capture(p, callback)` | call with the whole substring |
 | `select_capture(p, 1)` | the whole substring (`select_capture(p, 0)` still discards) |
 | `template_capture(p, "%0")` | the whole substring; `%1` is invalid |
 | `table_capture(p)` | an empty table |
@@ -689,13 +717,17 @@ argument in this case, after its fixed subject/position arguments.
 Lua table object: arbitrary keys/values, metatable identity, and `__index`
 behavior are preserved when the native engine performs the lookup. It does
 not need an unqualified `value` merely because the table contents are
-heterogeneous. `function_capture` likewise has a callable type; the wrapper
-still validates the native requirement that the value be a raw Lua function.
-A callable table remains a query capture only when passed to
-`query_capture`; callable userdata is rejected. `select_capture` uses an
-`integer`, so Titan's normal boundary accepts representable integral floats
-and rejects fractional/out-of-range values before the pinned C code narrows
-them; its native range is `0..SHRT_MAX`.
+heterogeneous. `function_capture` likewise has a callable type. Its wrapper
+installs an exact internal closure for the native callback slot, captures the
+supplied value, and invokes that value through ordinary Titan function-call
+semantics. There is no `_raw_type` or eager raw-function check: callable
+tables and userdata use the generic `__call` path, and a genuinely noncallable
+value raises only if capture evaluation reaches it. A callable table remains
+a query capture when passed to `query_capture`, because that parameter is
+statically a Map rather than a function. `select_capture` uses an `integer`,
+so Titan's normal boundary accepts representable integral floats and rejects
+fractional/out-of-range values before the pinned C code narrows them; its
+native range is `0..SHRT_MAX`.
 
 Internal relabel and regex callbacks use fixed parameters when their
 constructed capture shape is fixed. The public callback slots remain
@@ -823,17 +855,20 @@ Keep relabel in `titan.peg`, not a third `titan.peg.re` logical module:
 function define(name: string, pattern: Pattern): Definition
 function define_value(name: string, candidate: value): Definition
 
+record Match
+  first: integer
+  last: integer
+end
+
 function compile(candidate: value,
                  definitions: {integer: Definition}?): Pattern
 function match(subject: string,
                candidate: value,
-               init: integer?): (value, ...: value)
-function find(subject: string,
-              candidate: value,
-              init: integer?): (integer?, integer?)
+               init: integer?): Match?
+function Match:values(): (...: value)
 function gsub(subject: string,
               candidate: value,
-              replacement: value): string
+              replacement: (string) -> string): string
 function update_locale()
 function line_column(subject: string,
                      position: integer): (integer, integer)
@@ -845,15 +880,41 @@ numbers used by replacement and match-time suffixes. The two constructors
 make that distinction explicit.
 
 `candidate` must be a source string or this private engine's `Pattern`.
-`compile` is identity for a pattern, matching pinned relabel; `match`, `find`,
-and `gsub` likewise accept either form. They weakly cache only
+`compile` is identity for a pattern, matching pinned relabel; `match` and
+`gsub` likewise accept either form. They weakly cache only
 definition-free source strings. `gsub` returns only the transformed string,
 matching relabel rather than `string.gsub`.
 
-Relabel `find` uses a fixed option pair: success returns start and inclusive
-end, including `last == first - 1` for an empty match, while miss returns
-`nil, nil`. A caller that consumes only the first result discards the second
-through ordinary call adjustment.
+Module `match` searches leftmost at or after the normalized initial position
+and returns nil or a `Match` whose public `first`/`last` are one-based and
+inclusive. Empty success has `last == first - 1`. `Match:values()` returns
+exactly the candidate captures—including nil and trailing-nil slots—and zero
+values when there are no captures. This record is the position-and-capture
+superset that replaces relabel `find`; anchored matching and native failure
+triples remain on `Pattern:match`.
+
+Implement the search over a private single-attempt result that retains the
+after-position, exact capture count, and raw capture table. Reuse that result
+both for `Pattern:match` projection and for module search. Do not wrap the
+candidate with position captures or match twice: either would consume capture
+capacity or repeat match-time side effects. A normal failure advances one byte
+through `#subject + 1`; an uncaught labeled failure commits the search.
+
+Public `gsub` takes only an exact `(string) -> string` replacement. It discards
+candidate captures, calls the function with the whole matched byte string, and
+inserts the returned string literally. Source candidates reuse the ordinary
+weak compiled-pattern cache; callback-specific substitution wrappers are
+short-lived per call.
+
+Relabel expression `->` suffixes retain the source language's dynamic
+definition values. Classify those suffix operands exactly once and in this
+order: string, exact Lua-integer tag, Map, then unconditional function
+fallback. The exact-integer probe deliberately does not classify an integral
+Lua float as a selector. The Map test precedes the fallback so a table with
+`__call` still has query semantics. Do not use `_raw_type` or another eager
+callability test for the fallback: its adapter captures the dynamic definition
+value and lets Titan's ordinary generic callable path reject it only if
+capture evaluation actually invokes it.
 
 As upstream does, `compile(pattern, definitions)` returns the pattern and
 ignores the definition collection; definitions participate only while parsing
@@ -864,8 +925,8 @@ Nil/omitted `definitions` means an empty definition set, and nil/omitted
 and ordinary call adjustment; these declarations do not introduce
 source-level default-argument syntax.
 
-Relabel `match`/`find` use section 6.5's LPeg initial-position table (including
-zero meaning end and oversized positives clamping to end), not section 9's
+Module `match` uses section 6.5's LPeg initial-position table (including zero
+meaning end and oversized positives clamping to end), not section 9's
 Lua-string-style regex table.
 
 Definitions use dense integer keys `1..N` with no extras, so both Titan Maps
@@ -875,6 +936,11 @@ relabel's truthy definition lookup treats them as absent; other values are
 retained exactly. Invalid names and duplicates are rejected before building
 the native definition table. Use the same raw key-scan/count/max validation as
 `grammar`, never a table-border length.
+
+Dynamic definition values consumed by runtime, match-time, fold, or function
+suffixes use the same adapter discipline: the native engine receives an exact
+closure for its protocol, while callability of the captured value is deferred
+until that closure is invoked.
 
 ### 7.2 Expression language
 
@@ -903,15 +969,15 @@ the wrapper to native metamethods from relabel code. This dogfoods the binding.
 
 ### 7.3 Caches and locale
 
-Recreate relabel's three weak-value caches for source `match`, `find`, and
-`gsub`, but keep them private per Lua state:
+Use one weak-value cache for definition-free source compilations shared by
+`compile`, module `match`, and `gsub`, private per Lua state:
 
 - create ordinary Lua tables with `__mode = "v"` through the Lua C API;
 - root the tables in `titan.peg` module state;
-- never hold unbounded strong references to compiled expressions,
-  replacements, callbacks, or subject strings;
+- never hold unbounded strong references to compiled expressions, callbacks,
+  or subject strings;
 - keep a temporary strong local while a cache entry is in use;
-- clear all three caches when `update_locale` rebuilds predefined classes.
+- clear the cache when `update_locale` rebuilds predefined classes.
 
 The relabel parser has its own private byte/string helpers and does not import
 `titan.string`.
@@ -1054,9 +1120,10 @@ deliberately ignores later replacement of `_G.tostring`.
 run user `__tostring` code and propagate its error. This is the only additional
 ordinary string function that needs Lua's conversion primitive.
 
-`gsub` may invoke a caller-supplied replacement function or table metamethod,
-and `peg` captures may invoke caller callbacks; those are explicit dynamic
-APIs, not dependencies on Lua's string or base-library implementations.
+Regex and PEG `gsub` may invoke their exact whole-match replacement functions,
+while relabel expression suffixes and `peg` captures may invoke dynamic
+definition callbacks or table metamethods. Those are explicit callback APIs,
+not dependencies on Lua's string or base-library implementations.
 
 ### 8.4 Byte functions
 
@@ -1074,7 +1141,8 @@ length; never rely on NUL termination.
 
 ### 8.5 `format`
 
-Port Lua 5.5's format-language parser and validation into Titan. Support:
+Port Lua 5.5's format-language grammar and validation into a `titan.peg`
+pattern built once by the string module initializer. Support:
 
 ```text
 %%  %c  %d  %i  %u  %o  %x  %X
@@ -1086,16 +1154,29 @@ Preserve Lua's accepted flags, width, precision, length-modifier insertion,
 invalid-format diagnostics, `%q` literal rules, embedded-NUL checks, and
 argument counting.
 
-Titan cannot forward its `...` run directly to a C variadic call. The
-implementation instead:
+Matching a format string produces a local `FormatPlan`: a dense Array of
+exact `(value) -> string` `FormatPartial` closures plus one final literal
+trailer. The PEG grammar collapses `%%` into literal runs and captures the
+literal prefix, conversion form, exact factory, and specification-size bound
+for each conversion. Ordered fallback alternatives construct error partials
+for invalid specifications, invalid conversions, modified `%q`, and overlong
+forms instead of rejecting the complete parse. `format` can therefore check
+the corresponding argument before executing that partial and preserve
+conversion-slot error order.
 
-1. parses one conversion;
-2. pushes the corresponding `value` and applies Lua 5.5's exact
+Titan cannot forward its `...` run directly to a C variadic call. Each exact
+partial instead:
+
+1. receives the corresponding `value` and applies Lua 5.5's exact
    `luaL_checkinteger`, `luaL_checknumber`, `luaL_checklstring`,
    `lua_topointer`, or tostring rule for that conversion;
-3. calls `snprintf` with one statically explicit C variadic argument of that
+2. calls `snprintf` with one statically explicit C variadic argument of that
    known type;
-4. appends the exact returned byte count to a checked builder.
+3. returns its captured literal prefix plus the exact rendered bytes.
+
+`format` appends those returned chunks in argument order, appends the plan's
+final trailer, and lets the checked builder allocate once and concatenate the
+complete result in an allocation-free copy window.
 
 Use two-pass `snprintf` sizing when required. `%s` first uses the shared
 `luaL_tolstring` helper; `%p` obtains Lua's pointer identity through
@@ -1200,7 +1281,7 @@ function Regex:match(subject: string,
 function Regex:gmatch(subject: string,
                       init: integer?): () -> RegexMatch?
 function Regex:gsub(subject: string,
-                    replacement: value,
+                    replacement: (string) -> string,
                     maximum: integer?): (string, integer)
 ```
 
@@ -1215,7 +1296,7 @@ function gmatch(subject: string,
                 init: integer?): () -> RegexMatch?
 function gsub(subject: string,
               expression: string,
-              replacement: value,
+              replacement: (string) -> string,
               maximum: integer?): (string, integer)
 ```
 
@@ -1445,7 +1526,8 @@ rather than leaking an internal missing-back-capture error.
 - an anchored expression is attempted only at its anchored position.
 
 This is Lua 5.5's “not another empty match at the previous match end” rule,
-not merely “advance after every empty match.” With replacement `"X"`:
+not merely “advance after every empty match.” With a replacement callback
+that returns `"X"`:
 
 | Subject for `a*` | `gmatch` values | `gsub` result/count |
 | --- | --- | --- |
@@ -1456,35 +1538,22 @@ not merely “advance after every empty match.” With replacement `"X"`:
 
 ### 9.7 `gsub` replacement contract
 
-Accepted replacements:
+Regex `gsub` accepts exactly one replacement of type `(string) -> string`.
+Call it once per accepted match with the whole matched string as its sole
+argument. Captures do not change callback arity or values, including when a
+syntactically present group did not participate. Capture projection remains
+explicit through `RegexMatch` returned by `match` and `gmatch`.
 
-- string or number: treat its string form as a replacement template;
-- raw table/Map: key by the first capture, or the whole match when there are no
-  captures; ordinary `__index` lookup is honored, and `__call` does not turn
-  the table into a callback;
-- raw Lua/Titan function: pass captures, or the whole match when there are no
-  captures, and use its first result.
+The callback's exact string result replaces the match. Returning its supplied
+argument retains the original text, while returning `""` deletes it. Percent
+bytes in the result are literal: regex `gsub` has no replacement-template
+language. A callback error propagates through the ordinary Titan callable
+path, and a Lua callback returning nil, false, a number, or another non-string
+observes the ordinary typed-result error.
 
-Classify by raw Lua type before considering metamethods. Callable userdata and
-all other replacement types are invalid. Perform table replacement through
-the Lua C API's ordinary indexed lookup, not a statically typed Titan Map
-index, because Map operations deliberately bypass `__index`.
-
-Replacement templates support:
-
-- `%0` for the whole match;
-- `%1` through `%9` for the corresponding capture;
-- `%%` for a literal percent sign.
-
-Invalid capture references and malformed `%` escapes raise. A dynamic nil or
-false result keeps the original match. A returned string or number replaces
-it; any other result raises `invalid replacement value`. The substitution
-count counts matched occurrences even when the original text is retained.
-
-For a group that exists syntactically but did not participate, `%n` contributes
-the empty string to a template, while a lookup key or function argument is
-nil. Preserve the nil slot in Lua-facing callback arity; no native missing-back-
-capture error may escape.
+An accepted zero-width match invokes the callback with `""`; a candidate
+suppressed by the previous-end rule does not invoke it. The substitution count
+counts accepted occurrences even when the callback returns the original text.
 
 `maximum == nil` means at most `#subject + 1` substitutions, permitting the
 end-of-string empty match. A nonpositive maximum performs none.
@@ -1497,11 +1566,13 @@ The implementation must make these boundaries explicit:
   locale patterns, relabel parser, regex parser, and weak cache tables are
   rooted in their owning module userdata once per Lua state.
 - Every `Pattern.raw` is a traced `value`. Native LPeg pattern uservalue tables
-  continue to root constant captures, grammar tables, replacement tables, and
-  callbacks.
+  continue to root constant captures, grammar tables, relabel replacement
+  tables, and PEG callbacks.
 - `Regex` holds its compiled `peg.Pattern` in a local traced field. Regex
-  iterators and replacement closures root the subject, regex, current
-  position, and replacement for their complete lifetime.
+  iterators root the subject, regex, and current position for their complete
+  lifetime. A synchronous regex `gsub` frame roots the subject, regex,
+  replacement function, whole-match argument, and returned string across each
+  callback.
 - Callback calls may allocate, trigger full/generational GC, or raise. The
   Titan wrapper retains only rooted objects and byte offsets across them, then
   rederives subject/result pointers afterward. LPegLabel's own VM may retain
@@ -1510,14 +1581,17 @@ The implementation must make these boundaries explicit:
   and pattern userdata according to its native protocol.
 - Lua-stack helpers save and restore the exact top. Where a Lua C API call can
   raise, use Titan's existing error/defer model so temporary roots do not leave
-  stale stack entries on a caught error.
-- Match-time/runtime captures, function-capture and replacement functions,
-  lookup metamethods, and `__tostring` run through non-yieldable native
-  frames. A yield attempt raises the ordinary Lua boundary error, and every
-  caught callback/metamethod error restores the exact pre-call stack top
-  before propagating.
-- Capture callbacks and replacement functions run serially on the current Lua
-  thread. No process-global mutable pattern state is added.
+  stale stack entries on a caught error. Regex `gsub` itself uses the ordinary
+  generated typed-call/result path, not a manual `lua_pcallk` replacement
+  wrapper.
+- Match-time/runtime captures, function captures, relabel replacement
+  functions/lookup metamethods, typed regex replacement callbacks, and
+  `__tostring` run through their documented non-yieldable boundaries. A yield
+  attempt raises the ordinary Lua boundary error, and caught dynamic
+  callback/metamethod errors restore the exact pre-call stack top before
+  propagating.
+- Capture and replacement callbacks run serially on the current Lua thread.
+  No process-global mutable pattern state is added.
 - `set_max_stack` is per private engine/per Lua state. Regex compilation does
   not silently mutate it.
 - C allocation, integer, format, and pointer failures become ordinary Titan/Lua
@@ -1662,7 +1736,11 @@ source revision at the top of each derivative.
   licenses, exact cleanup.
 - `.gitignore`: exact private build paths, generated folder-main C/object
   paths, and `titan/{peg,string}.lua`; no broad globs.
-- `titan-compiler/parser.lua`: short import aliases.
+- `titan-compiler/{ast,lexer,parser,syntax_errors}.lua`: short import aliases
+  plus the `ExpIs` syntax and diagnostics.
+- `titan-compiler/{checker,coder}.lua`: reuse the exact written-cast relation
+  for nonraising, single-evaluation `is` predicates; do not alter
+  `types.compatible` or widen `as`.
 - `scripts/stdlib_installer.lua`: nine-module validation using the existing
   publication/rollback model; no historical migration layer.
 - `titan-dev-1.rockspec`: source-package/comment/license coverage while
@@ -1677,7 +1755,12 @@ source revision at the top of each derivative.
 
 - `doc/language/index.md`: link both new language chapters and list the two
   standard modules.
+- `doc/language/{expressions,grammar,types}.md`: specify `exp is T`, its
+  precedence, exact relationship to written `as`, total function/value cases,
+  and absence of narrowing.
 - `doc/implementation/index.md`: link both new implementation chapters.
+- `doc/implementation/{ast-typedecl,lexer-parser,checker,codegen-constructs}.md`:
+  document `ExpIs`, shared cast admissibility, and predicate code generation.
 - `doc/language/modules.md`, `lua-interop.md`, and
   `multi-module-libraries.md`: aliases, qualified Lua names, nine shims/keys.
 - `doc/implementation/driver.md`, `folder-modules.md`,
@@ -1694,7 +1777,12 @@ source revision at the top of each derivative.
 ### Tests and CI support
 
 - `spec/parser_spec.lua`: short import desugaring and qualified-name
-  noncollision.
+  noncollision, plus `is` precedence, target parsing, and diagnostics.
+- `spec/checker/type_tests_spec.lua`: exact parity with the written-cast
+  relation and no narrowing.
+- `spec/coder/type_tests_spec.lua`: single evaluation, false-on-mismatch,
+  total casts, exact integer/range checks, option and C boundaries, record/Array
+  identity, and deferred function callability.
 - `spec/stdlib/peg_spec.lua`: core binding.
 - `spec/stdlib/peg_relabel_spec.lua`: translated relabel.
 - `spec/stdlib/string_spec.lua`: non-regex functions.
@@ -1762,6 +1850,11 @@ independently of the Titan wrapper. Then cover the public binding:
   string, match-time/function-capture implicit whole-match value, fold's
   required accumulator and possibly empty variadic tail, and flexible callback
   result counts;
+- deferred callback callability: plain Lua and C functions plus callable
+  tables/userdata use the generic path, while constructing a pattern with a
+  genuinely noncallable function-typed value succeeds and raises only if the
+  matching path actually invokes it; an abandoned alternative or otherwise
+  uninvoked callback must not raise;
 - default and changed stack limit;
 - binary subjects and embedded NUL;
 - 200-value boundary errors;
@@ -1771,26 +1864,42 @@ independently of the Titan wrapper. Then cover the public binding:
 Run patterns and callbacks through repeated full and generational GC windows,
 including after their construction locals have gone out of scope.
 
+The compiler-focused `is` suites separately prove that PEG's use of the
+operator rests on the language contract rather than a library-only raw tag
+shortcut: parser precedence/diagnostics, the exact written-`as` admissibility
+relation, once-only evaluation, false-on-mismatch checks, total-cast truth,
+absence of narrowing, and always-true `value is <function type>` with failure
+deferred to invocation.
+
 ### 13.2 Relabel
 
 Port every pinned expression-language behavior case and every
 `testrelabelparser.lua` diagnostic snapshot:
 
 - expression and multi-rule grammars;
-- source and already-compiled pattern inputs to `compile`, `match`, `find`, and
+- source and already-compiled pattern inputs to `compile`, `match`, and
   `gsub`;
 - definitions of patterns, functions, tables, strings, and numbers;
   nil/false rejection; duplicate/invalid names; dense definitions from Titan
   Maps and ordinary Lua tables;
 - all capture/replacement suffixes, including anonymous `{: p :}`;
+- ordered replacement dispatch: string before exact Lua integer before Map
+  before unconditional function fallback, including an integral float that is
+  not an integer selector, a callable Map that remains a query, callable
+  non-Map values, deferred failure for an invoked noncallable fallback, and no
+  failure when that fallback is never invoked;
+- dynamic callback-suffix adapters with the same deferred callability
+  behavior;
 - comments, whitespace, locale classes, `%w == locale alnum`, and update
   invalidation;
 - `%{identifier}`, `%{decimal}`, identifier-only/no-space `p^label`, decimal
   repetition after `^`, and recovery;
 - weak cache reuse followed by collection;
-- `match`, leftmost `find`, empty inclusive ranges, and relabel `gsub`;
-- Lua `select('#', ...)` proving relabel `find` returns its fixed pair on
-  success and miss;
+- leftmost `match` records, normalized starts, empty inclusive ranges,
+  preserved zero/one/many/nil capture runs, labeled-failure commitment, and
+  relabel `gsub`;
+- a 200-capture module match proving the record path does not consume public
+  capture capacity;
 - exact labeled position/line/column/source/caret messages at EOF,
   CRLF, and multiline errors, with an explicit snapshot for Titan's corrected
   `line_column` divergence.
@@ -1859,13 +1968,15 @@ Port all 89 upstream assertions, then add:
 - generic-for over a match whose group 1 is unmatched, proving the non-nil
   `RegexMatch` iterator control value;
 - empty-match progress at start, between bytes, and end, with exact `gmatch`
-  and `gsub` parity for `a*` over `"a"`, `"ba"`, `"ab"`, and `""`;
-- every raw-type `gsub` replacement form, callable-table lookup ordering,
-  callable-userdata rejection, `%` template rule, unmatched `%n` as empty,
-  unmatched lookup/callback argument as nil, unchanged replacement, maximum
-  count, callback/table error, and GC during replacement;
+  and callback-only `gsub` parity for `a*` over `"a"`, `"ba"`, `"ab"`, and
+  `""`, including the exact whole-match callback arguments;
+- regex `gsub` with captures and unmatched captures still passing exactly one
+  whole-match string; explicit retain/delete results; literal `%` result
+  bytes; maximum count; compiled/cached parity; rejection of nonfunction
+  replacements and non-string callback results; callback error propagation,
+  recovery, and GC during replacement;
 - non-yieldability and exact stack restoration after capture, lookup,
-  replacement, and iterator errors;
+  relabel replacement, regex replacement-callback, and iterator errors;
 - cached and compiled APIs returning identical results;
 - callback/iterator/regex survival under full and generational GC.
 
@@ -1936,32 +2047,49 @@ Exit: maintainer accepts the specification or records edits in this file.
 Exit: private five-member archive builds/no-ops/rebuilds correctly on Linux;
 namespace tests pass; no runtime archive or SDK install changes.
 
-### Phase 2 — implement `titan.peg`
+### Phase 2 — add nonraising type tests
+
+1. Add the `is` keyword and `ExpIs` parser/AST form at the same precedence and
+   non-chaining level as written `as`.
+2. Share the written-cast admissibility helper in the checker without widening
+   it or changing `types.compatible`; produce `boolean` and add no narrowing.
+3. Generate once-only predicates that mirror every potentially failing cast,
+   and constant true for admitted total casts, including
+   `value is <function type>`.
+4. Update both manuals and add focused parser, checker, and coder suites.
+
+Exit: every admitted `exp is T` returns whether the corresponding written
+`exp as T` would succeed, without raising for a mismatch, evaluating `exp`
+twice, or changing branch types.
+
+### Phase 3 — implement `titan.peg`
 
 1. Add folder module, private opener import, module initializer, and rooted
    engine/metamethod cache.
 2. Implement opaque patterns, constructors, grammar conversion, folds,
    checked construction sizes, predicates, repetitions, tagged labels,
-   delayed captures, absolute failure correction, locale, stack limit, and
-   version.
+   delayed captures, exact native callback adapters with deferred Titan
+   callability, absolute failure correction, locale, stack limit, and version;
+   remove `_raw_type` and every eager raw-function check.
 3. Add short import and parser test.
 4. Add core behavior, Lua interop, coexistence, and GC tests.
 
 Exit: explicit source compilation and a temporary combined provider exercise
 the complete core binding without external runtime LPegLabel.
 
-### Phase 3 — port relabel
+### Phase 4 — port relabel
 
 1. Translate the parser using public `peg` operations.
 2. Add Lua-table-compatible definition wrappers, compiled-pattern inputs,
-   labeled diagnostics, weak caches, locale invalidation, and convenience
-   functions.
+   labeled diagnostics, the shared weak compilation cache, locale invalidation,
+   leftmost `Match` records, exact whole-match `gsub`, deferred callback-suffix
+   adapters, and ordered dynamic expression-suffix replacement dispatch.
 3. Port upstream parser/behavior tests and confirm cache collection.
 
 Exit: relabel test corpus and diagnostic snapshots pass; `peg` still has no
 dependency on `titan.string`.
 
-### Phase 4 — make regex the first `titan.string` client
+### Phase 5 — make regex the first `titan.string` client
 
 1. Add the string folder-module skeleton and binary-safe
    allocation/index/slicing helpers needed by regex.
@@ -1971,18 +2099,21 @@ dependency on `titan.string`.
 4. Correct backreference continuation, unmatched-path sentinel handling,
    nullable-reference analysis, and syntactic group accounting.
 5. Implement `Regex`, weak compile cache, top-level matching APIs, iterator,
-   replacement engine, and empty-match progress.
+   exact whole-match replacement callbacks, and empty-match progress.
 6. Port upstream assertions and add the complete defect/diagnostic matrix.
 
 Exit: regex is the first production client of `titan.peg`;
 documented/tested pinned behavior is preserved, every confirmed defect has a
 regression, and no raw LPegLabel error escapes.
 
-### Phase 5 — complete the non-regex `titan.string` surface
+### Phase 6 — complete the non-regex `titan.string` surface
 
 1. Implement byte operations, case transforms, repeat, and `tostring`.
-2. Port format and pack languages through C99 FFI with exact per-slot Lua C
-   conversions and explicit typed C variadic calls.
+2. Port the format language into one initializer-built PEG that produces
+   exact `FormatPlan`/`FormatPartial` closures, using `is` for `%q`'s dynamic
+   cast-success dispatch so `raw_value_type` is unnecessary; port the pack
+   language, and use C99 FFI with exact per-slot Lua C conversions and explicit
+   typed C variadic calls.
 3. Add Lua 5.5 differential and GC/error tests.
 4. Audit existing standard-library byte/string helpers. Use
    `titan.string.find` and `titan.string.sub` in both `titan.net` and
@@ -1995,7 +2126,7 @@ the documented typed input domain and within Titan's 200-value boundary, and
 the standard-library reuse audit preserves module ownership rather than
 introducing fixture-only dependency machinery.
 
-### Phase 6 — integrate the nine-module provider
+### Phase 7 — integrate the nine-module provider
 
 1. Add both folder roots/sources/shims and private native archive to all Make
    paths and stamps.
@@ -2011,7 +2142,7 @@ Exit: a clean isolated source-rock install publishes one valid nine-key pair,
 a current nine-module reinstall works, and both failpoints restore that current
 layout.
 
-### Phase 7 — docs, CI, and release evidence
+### Phase 8 — docs, CI, and release evidence
 
 1. Finish both language chapters and both implementation chapters; link both
    manuals.
@@ -2030,6 +2161,8 @@ Focused development gates:
 
 ```sh
 busted spec/parser_spec.lua
+busted spec/checker/type_tests_spec.lua
+busted spec/coder/type_tests_spec.lua
 busted spec/lpeglabel_build_spec.lua
 busted spec/libuv_build_spec.lua
 busted spec/stdlib/peg_spec.lua
@@ -2076,6 +2209,7 @@ acceptance is:
 
 | Informal requirement | Planned proof |
 | --- | --- |
+| Add nonraising `exp is T` as the exact predicate twin of written `as` | Sections 1-3 and Phase 2; parser plus `checker/coder/type_tests_spec.lua`, with exact cast-relation, once-only, no-narrowing, and deferred-function-callability cases |
 | Add lpeglabel/relabel bindings as `peg` | Sections 5-7; `peg_spec` and `peg_relabel_spec` |
 | Replace operators with functions | Section 6.3 mapping table |
 | `+`, `-`, `*` are variadic left folds | Exact arity/identity/association in section 6.3 and fold tests |
@@ -2083,6 +2217,8 @@ acceptance is:
 | Port linked `pegex.lua` | Exact commit, dialect, upstream assertions, attribution |
 | Better invalid-regex errors using labels | Structured labels and diagnostic matrix in sections 9.5 and 13.4 |
 | Typed regex `match`/`gmatch`/`gsub` plus literal `find` | Exact public signatures/results in sections 8.2 and 9.1 |
+| Remove regex replacement raw-type dispatch | Exact whole-match `(string) -> string` callback in sections 1, 9.1, 9.7, and regex tests |
+| Replace PEG/string raw cast-success probes | `is`-based relabel ordering with an exact-integer exception in sections 6-7, and PEG-built `FormatPlan` `%q` dispatch in section 8.5 |
 | Rest of string library in Titan/C99, no shim | Sections 8.2-8.6; only `dump` is an explicit review exclusion |
 | Add `tostring` and identify other Lua conversion use | Section 8.3: only `format %s` shares `luaL_tolstring` |
 | No installed lpeglabel/relabel runtime dependency | Private archive, clean search-path, static/dynamic isolation proofs |
@@ -2093,16 +2229,25 @@ acceptance is:
 
 ## 17. Post-implementation API and implementation cleanup
 
-Status: implementation, audit, and local validation complete on
-`agent/peg-string-standard-library`; all changes remain unstaged.
+Status: the original implementation, allocation audit, and local validation
+are complete on `agent/peg-string-standard-library`. The `is`/format/gsub/PEG
+follow-up is in implementation and validation; after adversarial review it
+will be committed and pushed to PR #40. The maintainer explicitly waived a
+manual macOS run.
 
 This section is the durable continuation record for the maintainer's API
 spot-checks and the repository-wide pattern audit they imply. Preserve all
-pre-existing unstaged work; do not stage, commit, push, or update the PR unless
-the maintainer asks.
+pre-existing work while completing the authorized validation, commit, push,
+PR refresh, and exact-head Linux CI follow-through.
 
 ### 17.1 Required design rules
 
+- `exp is T` is the nonraising predicate twin of the written `exp as T` cast:
+  preserve the exact cast relation, evaluate once, return a boolean, and do not
+  narrow. Prefer it over raw Lua type helpers when cast success is the
+  question. `value is <function type>` is always true because callability is
+  deferred until invocation; retain raw subtype probes only for required tag
+  identity such as relabel's exact Lua-integer branch.
 - The canonical `titan/string/string.titan` and `titan/peg/peg.titan` mains own
   both the public declarations and their implementations. A contributor may
   retain module-local records, state, and helpers shared by multiple public
@@ -2168,22 +2313,30 @@ The direct allocation pass is settled and independently reviewed.
   implementation manuals, reconciled overlapping edits, and ran the final
   validation matrix.
 
-No agent staged or committed any file.
+At that prior audit stage, no agent staged or committed any file. This is
+historical context only; the maintainer has since requested publication of the
+completed follow-up.
 
-### 17.4 Completed implementation and documentation work
+### 17.4 Current implementation and documentation work
 
-1. Finished the direct-owned-array string allocation pass and inspected every
+1. Added `exp is T` across parser, checker, and coder using the existing
+   written-cast relation, with both-manual and focused compiler coverage.
+2. Replaced formatter and PEG raw cast-success probes with `is`; retained
+   relabel's exact integer-tag probe, its Map-before-function ordering, and its
+   unconditional deferred-callability fallback. Regex `gsub` now has only the
+   exact whole-match callback surface, so it has no raw replacement dispatch.
+3. Finished the direct-owned-array string allocation pass and inspected every
    pointer/count use for zero-length, terminator, overflow, and logical-length
    correctness.
-2. Triaged the cross-stdlib audit, applied only structurally equivalent fixes,
+4. Triaged the cross-stdlib audit, applied only structurally equivalent fixes,
    and documented why records or adapters with extra semantic work remain.
-3. Updated `AGENTS.md` with the rules in section 17.1.
-4. Corrected `doc/implementation/string-library.md` and
+5. Updated `AGENTS.md` with the rules in section 17.1.
+6. Corrected `doc/implementation/string-library.md` and
    `doc/implementation/lpeglabel-embedding.md`: contributor files expose only
    module-local declarations and shared implementation machinery, while the
    canonical mains contain public implementations. Removed stale references to
    thin forwarding wrappers and `captures.titan`.
-5. Searched source, specs, docs, Make inputs, and plans for removed
+7. Searched source, specs, docs, Make inputs, and plans for removed
    declarations, `_impl` names, `captures.titan`, and claims that contributor
    files own the public implementations.
 
@@ -2211,9 +2364,9 @@ Required gates:
    shared compiler fixtures are affected.
 
 The final handoff must distinguish tests run after the last shared-file edit
-from earlier green runs, list intentional retained adapters/records, and call
-out that all changes remain unstaged unless the maintainer requests
-publication.
+from earlier green runs, list intentional retained adapters/records, identify
+the published commit, and report exact-head Linux CI. Do not dispatch the
+waived manual macOS workflow.
 
 ### 17.6 Cross-standard-library audit classification
 

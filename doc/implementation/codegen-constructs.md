@@ -652,6 +652,39 @@ complete inventory of conversions:
     conversions can remain a plain `(($CTYPE)($CEXP))` cast
     ([FFI internals](ffi-internals.md)).
 
+## Type tests: `ExpIs`
+
+`codeexp` lowers an `Ast.ExpIs` through `coder._codeis`. It first
+`materialize`s the operand, which both evaluates it exactly once and keeps a
+GC value rooted while a metatable or Array-proxy predicate runs. It then emits
+the non-raising predicate corresponding to the admitted written `ExpCast`:
+
+By-value C struct and union operands use the existing aggregate temporary
+path instead of the generic scalar temporary path. This preserves exact-once
+evaluation without generating an invalid scalar initializer for a C
+aggregate.
+
+* A boxed `value` target mirrors `checkandget`: integer tests accept an integer
+  tag or an exact integral float that passes `lua_numbertointeger`; float tests
+  accept either numeric tag; primitive/Map tests use `ttis*`; Array, nominal
+  record, and owned-C tests compare the same exact metatable; C pointer targets
+  distinguish ordinary lightuserdata from the Lua-internal `Udata *`
+  full-userdata case.
+* A target `Option(T)` first accepts nil, then mirrors `checkandset(T, ...)`.
+  This distinction matters for boolean: direct `value as boolean` uses
+  truthiness and therefore `value is boolean` is total, while
+  `value as boolean?` requires nil or an actual boolean and
+  `value is boolean?` uses that strict tag predicate. Function slots remain
+  deliberately unchecked.
+* Exact `T? is T` is `!ttisnil`, and C `char *`/`void * is string` is a
+  non-NULL test.
+* Identity and every other total admitted cast emit true after consuming the
+  materialized operand.
+
+No target value is constructed and no cast-mismatch `luaL_error` path is
+emitted. Errors from evaluating the operand are outside the predicate and
+therefore still propagate.
+
 `Ast.ExpAdjust` (truncating a multi-value expression to one value, the
 `(f())` form) is a pass-through to the inner expression.
 

@@ -44,6 +44,10 @@ local function decimal(candidate: value): integer
   return 0
 end
 
+local function bracket(found: string): string
+  return "[" .. found .. "]"
+end
+
 function letters(): peg.Pattern
   local definitions: {integer: peg.Definition} = {
     peg.define("letter", peg.ranges("az")),
@@ -60,6 +64,10 @@ function folded(): peg.Pattern
     S <- (number (%s+ number)*) ~> add
     number <- {%d+} -> decimal
   ]], definitions)
+end
+
+function substituted(subject: string): string
+  return peg.gsub(subject, "'a'", bracket)
 end
 ]=]
 
@@ -123,6 +131,11 @@ describe("titan.peg relabel", function()
     function()
         run([=[
             local peg = require "titan.peg"
+            local probe = require "peg_relabel_probe"
+            assert(probe.substituted("aba") == "[a]b[a]")
+            local function anchored(subject, candidate, init)
+                return peg.compile(candidate):match(subject, init)
+            end
             local cases = {
                 { "a", ".", 2 },
                 { "a", "''", 1 },
@@ -140,23 +153,23 @@ describe("titan.peg relabel", function()
                 { "aaaaaaaa", "'a'^-5", 6 },
             }
             for index, case in ipairs(cases) do
-                assert(peg.match(case[1], case[2]) == case[3], index)
+                assert(anchored(case[1], case[2]) == case[3], index)
             end
-            assert(select(1, peg.match("a", " ! . ")) == nil)
-            assert(peg.match(
+            assert(select(1, anchored("a", " ! . ")) == nil)
+            assert(anchored(
                 "01234567890123456789", "[0-9]^3+") == 19)
 
             local balanced =
                 "balanced <- '(' ([^()] / balanced)* ')'"
-            assert(peg.match("(a(b)((c) (d)))", balanced))
-            assert(not peg.match("(a(b ((c) (d)))", balanced))
+            assert(anchored("(a(b)((c) (d)))", balanced))
+            assert(not anchored("(a(b ((c) (d)))", balanced))
 
             local grammar = [[
               S <- "0" B / "1" A / ""
               A <- "0" S / "1" A A
               B <- "1" S / "0" B B
             ]]
-            assert(peg.match("00011011", grammar) == 9)
+            assert(anchored("00011011", grammar) == 9)
 
             local comments = peg.compile([[
               A <- _B   -- punctuation in comments: .<> <- -> --
@@ -164,7 +177,7 @@ describe("titan.peg relabel", function()
             ]])
             assert(comments:match("xy") == 2)
 
-            local _, label, position = peg.match("", "%{0}")
+            local _, label, position = anchored("", "%{0}")
             assert(label == 0 and position == 1)
             local recovered = peg.compile([[
               S <- ('a'^recover) 'b'
@@ -194,6 +207,9 @@ describe("titan.peg relabel", function()
 
             local lookup = setmetatable({}, {
                 __index = function(_, key) return "<" .. key .. ">" end,
+                __call = function()
+                    error("map replacement was called")
+                end,
             })
             local queried = peg.compile("{%a+} -> lookup", {
                 peg.define_value("lookup", lookup),
@@ -239,36 +255,39 @@ describe("titan.peg relabel", function()
     it("implements all capture and replacement suffix families", function()
         run([=[
             local peg = require "titan.peg"
-            assert(peg.match(
+            local function anchored(subject, candidate, init)
+                return peg.compile(candidate):match(subject, init)
+            end
+            assert(anchored(
                 "01234567890123456789",
                 "({....}{...}) -> '%2%1'") == "4560123")
 
-            local values = peg.match("0123456789", "{| {.}* |}")
+            local values = anchored("0123456789", "{| {.}* |}")
             assert(#values == 10)
             for index = 1, 10 do
                 assert(values[index] == tostring((index - 1) % 10))
             end
-            assert(peg.match(
+            assert(anchored(
                 "abcdef", "( {.} {.} {.} {.} {.} ) -> 3") == "c")
-            assert(peg.match(
+            assert(anchored(
                 "abcdef",
                 "( {:x: . :} {.} {.} {.} {.} ) -> 3") == "d")
-            assert(peg.match(
+            assert(anchored(
                 "abcdef",
                 "( {:x: . :} {.} {.} {.} {.} ) -> 0") == 6)
-            assert(peg.match("abc", "{: . . :}") == "ab")
-            assert(peg.match("abc", "{}") == 1)
-            assert(peg.match(
+            assert(anchored("abc", "{: . . :}") == "ab")
+            assert(anchored("abc", "{}") == 1)
+            assert(anchored(
                 "abc", "{~ ({.} -> '[%1]')* ~}") ==
                 "[a][b][c]")
             local captured_table =
-                peg.match("abc", "({.}{.}) -> {}")
+                anchored("abc", "({.}{.}) -> {}")
             assert(captured_table[1] == "a" and
                    captured_table[2] == "b")
 
-            assert(not peg.match(
+            assert(not anchored(
                 "abcdef", "{:x: ({.} {.} {.}) -> 2 :} =x"))
-            assert(peg.match(
+            assert(anchored(
                 "abcbef", "{:x: ({.} {.} {.}) -> 2 :} =x"))
 
             local function add(accumulator, ...)
@@ -305,43 +324,170 @@ describe("titan.peg relabel", function()
         ]=])
     end)
 
-    it("preserves convenience result shape, positions, and caching",
+    it("defers dynamic suffix callability until callbacks are reached",
+    function()
+        run([=[
+            local peg = require "titan.peg"
+
+            local match_time_callable = setmetatable({}, {
+                __call = function(_, subject, position, whole)
+                    assert(subject == "a" and position == 2)
+                    assert(whole == "a")
+                    return true, "match-time"
+                end,
+            })
+            local callable_match_time = peg.compile(
+                "'a' => callback", {
+                    peg.define_value(
+                        "callback", match_time_callable),
+                })
+            assert(callable_match_time:match("a") == "match-time")
+
+            local fold_callable = setmetatable({}, {
+                __call = function(_, accumulator, next_value)
+                    return accumulator .. next_value
+                end,
+            })
+            local callable_fold = peg.compile(
+                "({.}{.}) ~> callback", {
+                    peg.define_value("callback", fold_callable),
+                })
+            assert(callable_fold:match("ab") == "ab")
+
+            local definitions = {
+                peg.define_value("callback", true),
+            }
+            local bad_replacement = peg.compile(
+                "'x' ({.} -> callback)", definitions)
+            local bad_match_time = peg.compile(
+                "'x' => callback", definitions)
+            local bad_fold = peg.compile(
+                "({.}{.}) ~> callback", definitions)
+
+            assert(bad_replacement:match("a") == nil)
+            assert(bad_match_time:match("a") == nil)
+            assert(bad_fold:match("a") == nil)
+
+            for _, case in ipairs({
+                { bad_replacement, "xa" },
+                { bad_match_time, "x" },
+                { bad_fold, "ab" },
+            }) do
+                local ok, message = pcall(function()
+                    return case[1]:match(case[2])
+                end)
+                assert(not ok)
+                assert(tostring(message):find(
+                    "call", 1, true), tostring(message))
+            end
+
+            local float_selector = peg.compile(
+                "({.}{.}) -> selector", {
+                    peg.define_value("selector", 2.0),
+                })
+            local ok, message = pcall(function()
+                return float_selector:match("ab")
+            end)
+            assert(not ok)
+            assert(tostring(message):find(
+                "call", 1, true), tostring(message))
+        ]=])
+    end)
+
+    it("searches with structured spans and exact capture values",
     function()
         run([=[
             local peg = require "titan.peg"
             local source = "{:x:..:} =x"
-            assert(peg.find("hi alalo", source) == 4)
-            assert(peg.find("hi alalo", source, 4) == 4)
-            assert(peg.find("hi alalo", source, 5) == nil)
-            assert(peg.find("hi alalo", "{'al'}", 5) == 6)
-            assert(peg.find("", "!.") == 1)
-            assert(peg.find("alo", "!.") == 4)
+            local found = assert(peg.match("hi alalo", source))
+            assert(found.first == 4 and found.last == 7)
+            assert(select("#", found:values()) == 0)
+            assert(peg.match("hi alalo", source, 4).first == 4)
+            assert(peg.match("hi alalo", source, 5) == nil)
 
-            local first, last, surplus =
-                peg.find("alo", "{.}{'o'}")
-            assert(first == 2 and last == 3 and surplus == nil)
-            local missing_first, missing_last =
-                peg.find("alo", "'z'")
-            assert(select("#", peg.find("alo", "'z'")) == 2)
-            assert(missing_first == nil and missing_last == nil)
-            assert(select("#", peg.find("alo", "'a'")) == 2)
-            local empty_first, empty_last = peg.find("", "''")
-            assert(empty_first == 1 and empty_last == 0)
+            found = assert(peg.match("hi alalo", "{'al'}", 5))
+            assert(found.first == 6 and found.last == 7)
+            assert(found:values() == "al")
 
-            assert(peg.find("abc", "'c'", 0) == nil)
-            assert(peg.find("abc", "'c'", -1) == 3)
-            assert(peg.find("abc", "'c'", -99) == 3)
-            assert(peg.find("abc", "'c'", 99) == nil)
+            found = assert(peg.match("", "!."))
+            assert(found.first == 1 and found.last == 0)
+            found = assert(peg.match("alo", "!."))
+            assert(found.first == 4 and found.last == 3)
 
-            assert(peg.gsub("alo alo", "[abc]", "x") == "xlo xlo")
-            assert(peg.gsub("alo alo", "%w+", ".") == ". .")
+            found = assert(peg.match("alo", "{.}{'o'}"))
+            assert(found.first == 2 and found.last == 3)
+            local first_value, second_value, surplus = found:values()
+            assert(first_value == "l" and second_value == "o" and
+                   surplus == nil)
+            assert(select("#", found:values()) == 2)
+            assert(peg.match("alo", "'z'") == nil)
+
+            found = assert(peg.match("", "''"))
+            assert(found.first == 1 and found.last == 0)
+            assert(select("#", found:values()) == 0)
+
+            assert(peg.match("abc", "'c'", 0) == nil)
+            assert(peg.match("abc", "'c'", -1).first == 3)
+            assert(peg.match("abc", "'c'", -99).first == 3)
+            assert(peg.match("abc", "'c'", 99) == nil)
+
+            local nil_pattern = peg.function_capture(
+                peg.capture(peg.literal("a")),
+                function()
+                    return nil, "middle", nil
+                end)
+            found = assert(peg.match("za", nil_pattern))
+            assert(found.first == 2 and found.last == 2)
+            local leading, middle, trailing = found:values()
+            assert(leading == nil and middle == "middle" and
+                   trailing == nil)
+            assert(select("#", found:values()) == 3)
+
+            local positions = assert(peg.match(
+                "", ("{}"):rep(200)))
+            assert(select("#", positions:values()) == 200)
+
+            -- An ordinary failure advances the search. An uncaught label
+            -- commits it, including a user label spelled "fail".
+            assert(peg.match("ab", "'b'").first == 2)
+            assert(peg.match("ab", "%{stop} / 'b'") == nil)
+            assert(peg.match("ab", "%{fail} / 'b'") == nil)
+
+            local attempts = 0
+            local inspected = peg.match_time(
+                peg.capture(peg.any()),
+                function(_, _, byte)
+                    attempts = attempts + 1
+                    return byte == "b"
+                end)
+            found = assert(peg.match("ab", inspected))
+            assert(found.first == 2 and found.last == 2)
+            assert(attempts == 2)
+
+            local function x() return "x" end
+            local function dot() return "." end
+            assert(peg.gsub("alo alo", "[abc]", x) == "xlo xlo")
+            assert(peg.gsub("alo alo", "%w+", dot) == ". .")
             local function upper(text) return text:upper() end
             assert(peg.gsub(
                 "hi, how are you", "[aeiou]", upper) ==
                 "hI, hOw ArE yOU")
-            assert(peg.gsub("abc", peg.literal("b"), "X") == "aXc")
-            assert(peg.match("abc", peg.literal("a")) == 2)
-            assert(peg.find("abc", peg.literal("b")) == 2)
+            local function capital_x() return "X" end
+            assert(peg.gsub(
+                "abc", peg.literal("b"), capital_x) == "aXc")
+
+            local seen = ""
+            local function bracket_whole(text)
+                seen = text
+                return "[" .. text .. "]"
+            end
+            assert(peg.gsub(
+                "ab", "{.}{.}", bracket_whole) == "[ab]")
+            assert(seen == "ab")
+            found = assert(peg.match("abc", peg.literal("a")))
+            assert(found.first == 1 and found.last == 1)
+            found = assert(peg.match("abc", peg.literal("b")))
+            assert(found.first == 2 and found.last == 2)
 
             local first_compile = peg.compile("'cached'")
             local second_compile = peg.compile("'cached'")
@@ -440,11 +586,14 @@ describe("titan.peg relabel", function()
         run([=[
             assert(os.setlocale("C", "ctype"))
             local peg = require "titan.peg"
-            assert(peg.match("A9", "%w+") == 3)
-            assert(peg.match("!", "%W") == 2)
-            assert(peg.match("\n", "%nl") == 2)
-            assert(peg.match("7", "[_%w]") == 2)
-            assert(peg.match("!", "[^%w]") == 2)
+            local function anchored(subject, candidate)
+                return peg.compile(candidate):match(subject)
+            end
+            assert(anchored("A9", "%w+") == 3)
+            assert(anchored("!", "%W") == 2)
+            assert(anchored("\n", "%nl") == 2)
+            assert(anchored("7", "[_%w]") == 2)
+            assert(anchored("!", "[^%w]") == 2)
 
             local before = peg.compile("%a+")
             peg.update_locale()

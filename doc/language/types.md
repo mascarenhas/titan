@@ -523,3 +523,13 @@ and raising if the pointer is `NULL`). Lua-internal `Udata *` crosses the
 pointer. There is no separate FFI cast form.
 Full details and examples are in [Expressions](expressions.md) and
 [The C FFI](ffi.md).
+
+The related expression `e is t` is admitted for exactly the same static
+source/target pairs. It evaluates `e` once and returns whether `e as t` would
+finish without a cast error, rather than performing the conversion or raising
+on a mismatch. It is only a predicate: it does not narrow `e`'s static type in
+the true branch. Total casts always test true, including the deliberately
+unchecked `value`-to-`boolean` and `value`-to-function conversions; a
+function-typed value may still fail when it is later called. See
+[Explicit casts and type tests](expressions.md#explicit-casts-and-type-tests-as-and-is)
+for the run-time predicates.

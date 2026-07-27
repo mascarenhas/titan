@@ -151,7 +151,8 @@ The wrapper keeps public types tighter than the native Lua API:
 
 * patterns do not use LPeg's implicit string/number coercion;
 * runtime, match-time, fold, and function captures use callable Titan types
-  and separately validate the engine's raw-function requirement;
+  and reach the engine through internal adapter closures with the exact raw
+  callback protocol it requires;
 * query capture uses `{value: value}`, preserving ordinary Lua table identity
   and `__index`;
 * grammar collections use `{integer: Rule}` and are raw-scanned for exact
@@ -166,11 +167,16 @@ or flexible outputs only where the native callback protocol is genuinely
 open. Parser- and regex-specific callbacks whose construction guarantees a
 fixed number of capture slots keep fixed parameter lists; directional callable
 compatibility admits those extra `value` slots because adjustment can nil-fill
-them and they accept the generic capture tail. LPegLabel invokes the stored
-closure through its raw Lua callback path, so adding another exact-type Titan
-adapter around these fixed helpers would add a call rather than unlock a
-typed-call fast path. The relabel adapters for raw dynamic definition values
-remain genuinely variadic/flexible.
+them and they accept the generic capture tail. LPegLabel always stores the
+internal exact adapter closure required by its raw callback protocol. The
+adapter captures the user-supplied function-typed value and invokes it through
+Titan's ordinary callable machinery: exact Titan functions can use the exact
+fast path, while Lua functions, C functions, and `__call` objects use the
+generic path. There is no `_raw_type` probe or eager raw-function validation
+of that captured value; a noncallable value fails only if the engine actually
+invokes the adapter. The relabel adapters for dynamic definition values remain
+genuinely variadic/flexible because their capture arity and result count are
+open.
 
 ## Construction accounting and typed labels
 
@@ -205,12 +211,8 @@ recovery rule matches only an exactly equal public name.
 
 ## Match adapter and failure positions
 
-The native `match` result is dynamically shaped but never empty: successful
-capture evaluation produces at least one capture or the final position, and
-failure produces its fixed leading nil. Titan therefore exposes a fixed
-`value` prefix plus a flexible `value` tail while preserving successful
-leading nil captures. The wrapper constructs this private pattern around the
-user's pattern:
+The native `match` result is dynamically shaped. The shared single-attempt
+adapter constructs this private pattern around the user's pattern:
 
 ```text
 constant(success_sentinel) * pattern * position_capture()
@@ -218,15 +220,26 @@ constant(success_sentinel) * pattern * position_capture()
 
 It then calls the cached native `match` through `lua_pcallk` with
 `LUA_MULTRET`. A sentinel result identifies success independently of user
-capture contents. The final position capture is removed from the public
-capture run; when there are no user captures it becomes the sole success
-result. The adapter caps the complete public projection at 200 values, so the
-fixed first result leaves at most 199 values in the flexible tail.
+capture contents. The final position capture is removed from the user capture
+run and retained separately as `after`. The private attempt result also keeps
+the exact capture count/table and distinguishes ordinary failure from an
+uncaught labeled failure.
 
 Before restoring the Lua stack, a nonempty capture run is copied to a fresh
 ordinary table and that table is captured as a traced Titan `value`. A bounded
-helper then projects its exact `1..N` slots, including nils, into Titan's
-flexible output. More than 200 public values raises at the Titan boundary.
+helper projects its exact `1..N` slots, including nils. `Pattern:match`
+preserves the established anchored API: captures become its fixed `value`
+prefix and flexible tail, while a capture-free success returns `after`.
+
+Module-level `match` reuses the same attempt result while trying successive
+byte positions through `#subject + 1`. It never matches a successful candidate
+twice, so match-time effects are not repeated. Ordinary failure advances one
+byte; a labeled failure commits the search. Success produces a `Match` with
+inclusive `first`/`last` and the untouched capture table/count.
+`Match:values()` projects exactly those captures and produces zero values for
+a capture-free candidate. Because search bookkeeping is not represented by
+native captures, all 200 user capture slots remain available; a larger run
+raises at the Titan boundary.
 
 LPegLabel reports ordinary failure as a triple containing a position relative
 to the normalized initial pointer. The adapter adds `start - 1`, producing
@@ -267,8 +280,10 @@ Runtime patterns and match-time captures execute while matching. Fold and
 function captures execute while delayed captures are evaluated. They can
 allocate, run collection, and raise. The native call has no yielding
 continuation, so a callback's attempt to yield becomes a normal Lua boundary
-error. Calls are serial on the current Lua thread; there is no process-global
-matching state.
+error. A noncallable function-typed value raises at the same point, not while
+the pattern is constructed; if matching never reaches that callback, it does
+not raise. Calls are serial on the current Lua thread; there is no
+process-global matching state.
 
 ## Relabel translation
 
@@ -282,6 +297,22 @@ must enter the native definition table, from a retained dynamic value used by
 replacement and callback suffixes. Definition arrays and grammar arrays share
 the same raw Lua key scan: every key must be a positive integer, count must
 equal the maximum key, and names must be unique.
+
+The relabel expression language's `->` suffix preserves its dynamic
+definition-value behavior and performs one ordered classification: string,
+exact Lua integer, Map, then function fallback for every remaining value. The
+integer probe uses Lua's integer tag, so an integral float does not select this
+branch. Testing Map before the fallback preserves table-query behavior for a
+table that also has `__call`. The fallback always builds the native adapter
+and does not use `_raw_type` to preflight its captured replacement; Titan's
+generic callable path reports a noncallable value only if capture evaluation
+invokes it. Dynamic callback suffixes use the same deferred adapter rule.
+
+The public `gsub` API is deliberately narrower. Its replacement has exact type
+`(string) -> string`; `%0` first reduces any candidate captures to the whole
+matched substring, and an exact native-protocol adapter calls the replacement.
+Source candidates reuse the ordinary weak compiled-pattern cache, while each
+call constructs the small replacement wrapper needed to retain its callback.
 
 The parser retains byte offsets in its internal syntax diagnostics. A labeled
 parse failure is turned into the public:
@@ -297,12 +328,12 @@ and accepts positions through `#subject + 1`. This intentionally repairs the
 pinned Lua helper's inconsistent newline/EOF offsets while the private native
 harness continues to test the unmodified upstream fixture.
 
-Three per-state weak-value caches hold definition-free source compilations
-used by `match`, `find`, and `gsub`. The cache table itself is rooted in
-module state, but its compiled values remain collectable; a traced temporary
-keeps the selected entry alive during use. `update_locale` rebuilds the
-predefined character classes from a new `locale()` snapshot and clears all
-three caches.
+One per-state weak-value cache holds definition-free source compilations
+shared by `compile`, module-level `match`, and `gsub`. The cache table itself
+is rooted in module state, but its compiled values remain collectable; a
+traced temporary keeps the selected entry alive during use. `update_locale`
+rebuilds the predefined character classes from a new `locale()` snapshot and
+clears that cache.
 
 ## Build and provider integration
 

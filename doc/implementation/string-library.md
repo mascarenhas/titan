@@ -177,19 +177,35 @@ safely. The complete discipline and scope are recorded in
 
 ## Format translation
 
-The formatter ports the Lua 5.5 conversion parser and validation tables into
-Titan. A checked builder stores rooted string chunks and a running byte count.
-When complete, it allocates the exact final destination and copies each chunk
-in an allocation-free window.
+The formatter ports the Lua 5.5 conversion grammar and validation tables into
+a `titan.peg` pattern built once by the module initializer. Matching a format
+string produces one local `FormatPlan`: a dense Array of exact
+`FormatPartial` closures of type `(value) -> string`, followed by one literal
+trailer. A `FormatFactory` constructs each partial from the literal prefix,
+the captured conversion form, and its conversion family. Integer factories
+also insert and retain the target-correct C length modifier once while
+building the plan.
 
-For each conversion the parser:
+The PEG grammar folds `%%` into the literal runs surrounding conversions.
+Valid conversion captures select the character, signed, unsigned, number,
+pointer, literal, or string factory. Ordered fallback captures select partial
+closures that raise the stable invalid-specification, invalid-conversion,
+modified-`%q`, or overlong-format error when that argument position is
+executed. Keeping errors as partials, rather than failing the complete PEG
+match, preserves conversion-slot argument checking and error order.
 
-1. copies and validates one bounded conversion specification;
-2. obtains the dynamic operand with the exact Lua C conversion;
-3. inserts a target-correct C integer length modifier where needed;
-4. calls C99 `snprintf` once to obtain the length and again with an exactly
-   sized rooted buffer;
-5. appends exactly the reported byte count.
+`format` matches once, then walks the plan in argument order. For every
+partial it first checks that the corresponding variadic operand exists, calls
+the exact closure with that `value`, and appends the returned
+literal-prefix-plus-rendering chunk. It finally appends the plan's trailer.
+Surplus operands are not visited. The checked builder retains all returned
+chunks and their running byte count; at completion it allocates the exact
+final destination and concatenates the chunks in one allocation-free copy
+window.
+
+Each rendering closure obtains its operand with the exact Lua C conversion,
+then calls C99 `snprintf` once to obtain the length and again with an exactly
+sized rooted buffer where that conversion uses C formatting.
 
 The C variadic call is statically explicit for that conversion. Titan does not
 attempt to forward a heterogeneous Titan `...` descriptor to C.
@@ -310,27 +326,33 @@ end-of-subject, the next attempt advances one byte, and `gsub` copies that byte
 to the output. This is Lua 5.5's previous-end rule, not an unconditional
 advance after every empty match.
 
-Replacement dispatch inspects the raw Lua type:
+Replacement has no raw-Lua dispatch or template parser. Both public `gsub`
+forms require an exact `(string) -> string` function. For each accepted match,
+the implementation materializes `RegexMatch:whole()`, calls the replacement
+through Titan's ordinary typed callable path with that one string, and appends
+the returned string. Captures never change callback arity, and `%` bytes in
+the result have no special meaning. Returning the supplied string retains the
+match; returning `""` deletes it.
 
-* strings/numbers are converted to a template;
-* tables use ordinary Lua indexed lookup so `__index` is honored;
-* raw functions are called through the non-yieldable callable path.
-
-It does not use a typed Map index because Titan Map indexing deliberately
-bypasses `__index`. Callback/table results preserve nil capture slots.
-Nil/false retains the original text; string/number replaces it; another type
-raises.
+An accepted zero-width match therefore calls the replacement with `""`; a
+zero-width candidate suppressed by the previous-end rule never calls it.
+Callback errors and wrong Lua return types propagate through the ordinary call
+and result-conversion machinery.
 
 ## Roots, callbacks, and errors
 
-The regex cache is weak-valued. A live regex roots its PEG pattern; a live
-iterator/replacement closure roots the regex, subject, current position, and
-replacement. The PEG pattern's native uservalue graph roots constant
-captures, grammars, tables, and callbacks.
+The regex cache is weak-valued. A live regex roots its PEG pattern, and a live
+iterator roots the regex, subject, and current position. During synchronous
+`gsub`, the generated frame roots the regex, subject, replacement function,
+whole-match argument, and returned string across each callback. The PEG
+pattern's native uservalue graph roots constant captures, grammars, tables,
+and callbacks.
 
-Runtime/match-time/function captures, replacement functions, lookup
-metamethods, and `__tostring` run through non-yieldable native frames. They may
-allocate, collect, or raise, but wrappers retain only traced objects and
-checked offsets across the call and restore their exact Lua stack top when an
-error is caught. Callback execution is serial on the current Lua thread; no
-process-global mutable matching state is introduced.
+Runtime/match-time/function captures and `gsub` replacement functions run
+through non-yieldable callable paths. They may allocate, collect, or raise,
+but only traced objects and checked offsets remain live across the call.
+`gsub` uses the ordinary generated function-call and return-conversion path
+rather than a manual Lua-stack `pcall`/type-dispatch wrapper. Callback
+execution is serial on the current Lua thread; no process-global mutable
+matching state is introduced. The separate stack-balanced `%s` conversion
+path continues to propagate `__tostring` errors as described above.

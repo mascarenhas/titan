@@ -1349,6 +1349,7 @@ collect_reads_exp = function(node, out)
             collect_reads_exp(arg, out)
         end
     elseif tag == "Ast.ExpUnop" or tag == "Ast.ExpCast"
+            or tag == "Ast.ExpIs"
             or tag == "Ast.ExpAdjust" or tag == "Ast.ExpDotsIndex" then
         collect_reads_exp(node.exp, out)
     elseif tag == "Ast.ExpBinop" then
@@ -1394,6 +1395,7 @@ function coder._collect_writes_exp(node, out)
             coder._collect_writes_exp(arg, out)
         end
     elseif tag == "Ast.ExpUnop" or tag == "Ast.ExpCast"
+            or tag == "Ast.ExpIs"
             or tag == "Ast.ExpAdjust" or tag == "Ast.ExpDotsIndex"
             or tag == "Ast.ExpExtra" or tag == "Ast.ExpMethodRef" then
         coder._collect_writes_exp(node.exp, out)
@@ -1935,6 +1937,173 @@ local function materialize(ctx, node)
     return materialize_code(ctx, node._type, stats, exp)
 end
 
+function coder._resolve_cast_type(typ)
+    -- `Type.Typedef` is the legacy scalar typedef representation retained by
+    -- a few compiler paths; current C imports use `Type.CTypedef`.
+    while typ and typ._tag == "Type.Typedef" do typ = typ._type end
+    return types.resolve_c_typedef(typ)
+end
+
+-- Predicate twin of checkandget's value->integer/C-integer conversion.
+function coder._code_boxed_is_integer(ctx, source)
+    local cresult, result = newtmp(ctx, types.Boolean())
+    local cvalue, value = newtmp(ctx, types.Float())
+    local cfloor, floor = newtmp(ctx, types.Float())
+    local cinteger, integer = newtmp(ctx, types.Integer())
+    return render([[
+        $CRESULT
+        $CVALUE
+        $CFLOOR
+        $CINTEGER
+        $RESULT = 0;
+        if (ttisinteger($SOURCE)) {
+            $RESULT = 1;
+        } else if (ttisfloat($SOURCE)) {
+            $VALUE = fltvalue($SOURCE);
+            $FLOOR = l_floor($VALUE);
+            $RESULT = ($VALUE == $FLOOR
+                && lua_numbertointeger($FLOOR, &$INTEGER));
+        }
+    ]], {
+        CRESULT = cresult,
+        RESULT = result,
+        CVALUE = cvalue,
+        VALUE = value,
+        CFLOOR = cfloor,
+        FLOOR = floor,
+        CINTEGER = cinteger,
+        INTEGER = integer,
+        SOURCE = source,
+    }), result
+end
+
+-- Return setup statements and a C boolean expression saying whether a boxed
+-- `value` would pass the cast boundary for `target`. A direct target mirrors
+-- checkandget; an Option base mirrors checkandset because that is the path
+-- checkandget uses after accepting nil. In particular direct Boolean and all
+-- Function targets are intentionally unchecked, Arrays use their canonical
+-- proxy identity, and nominal/owned values compare exact metatables.
+function coder._code_boxed_cast_predicate(ctx, target, source, slot_check)
+    local resolved = coder._resolve_cast_type(target)
+    local tag = resolved._tag
+
+    if tag == "Type.Integer" or tag == "Type.CInteger" then
+        return coder._code_boxed_is_integer(ctx, source)
+    elseif tag == "Type.Float" or tag == "Type.CFloat" then
+        return "", render("(ttisfloat($SOURCE) || ttisinteger($SOURCE))", {
+            SOURCE = source,
+        })
+    elseif tag == "Type.Boolean" and slot_check then
+        return "", render("ttisboolean($SOURCE)", { SOURCE = source })
+    elseif tag == "Type.Boolean" or tag == "Type.Value"
+           or tag == "Type.Function" or types.is_c_tvalue(resolved) then
+        return "", "1"
+    elseif types.is_c_udata_pointer(resolved) then
+        return "", render(
+            "(ttisfulluserdata($SOURCE) || ttisnil($SOURCE))",
+            { SOURCE = source })
+    elseif tag == "Type.CPointer" then
+        return "", render(
+            "(ttislightuserdata($SOURCE) || ttisnil($SOURCE))",
+            { SOURCE = source })
+    elseif tag == "Type.COwned" then
+        return "", render([[
+            (ttisfulluserdata($SOURCE)
+                && uvalue($SOURCE)->metatable ==
+                    hvalue(&_mod->uv[$META].uv))
+        ]], {
+            SOURCE = source,
+            META = c_integer_literal(owned_c_metatable(ctx, resolved)),
+        })
+    elseif tag == "Type.Array" then
+        return "", render(
+            "(titan_array_try_backing($SOURCE, $META) != NULL)", {
+                SOURCE = source,
+                META = array_metatable(ctx),
+            })
+    elseif tag == "Type.Nil" then
+        return "", render("ttisnil($SOURCE)", { SOURCE = source })
+    elseif tag == "Type.String" then
+        return "", render("ttisstring($SOURCE)", { SOURCE = source })
+    elseif tag == "Type.Map" then
+        return "", render("ttistable($SOURCE)", { SOURCE = source })
+    elseif tag == "Type.Nominal" then
+        return "", render([[
+            (ttisfulluserdata($SOURCE)
+                && uvalue($SOURCE)->metatable == $META)
+        ]], {
+            SOURCE = source,
+            META = render("hvalue(&_mod->uv[$INDEX].uv)", {
+                INDEX = c_integer_literal(type2metatable(ctx, resolved)),
+            }),
+        })
+    elseif tag == "Type.Option" then
+        local basestats, baseexp =
+            coder._code_boxed_cast_predicate(
+                ctx, resolved.base, source, true)
+        local cresult, result = newtmp(ctx, types.Boolean())
+        return render([[
+            $CRESULT
+            if (ttisnil($SOURCE)) {
+                $RESULT = 1;
+            } else {
+                $BASESTATS
+                $RESULT = $BASEEXP;
+            }
+        ]], {
+            CRESULT = cresult,
+            RESULT = result,
+            SOURCE = source,
+            BASESTATS = basestats,
+            BASEEXP = baseexp,
+        }), result
+    end
+
+    error("invalid target type for boxed cast predicate: "
+        .. types.tostring(target))
+end
+
+function coder._codeis(ctx, node)
+    -- Freeze the operand before inspecting it. This both enforces exactly-once
+    -- evaluation and roots GC values while metatable/Array checks run.
+    local original_source_type = node.exp._type
+    local source_type = coder._resolve_cast_type(node.exp._type)
+    local target_type = coder._resolve_cast_type(node.target)
+    local stats, source
+    if source_type._tag == "Type.CStruct"
+       or source_type._tag == "Type.CUnion" then
+        -- Generic temporaries use scalar initialization, which is not valid
+        -- for a by-value C aggregate. Preserve the ordinary assignment-based
+        -- aggregate materialization used by other expression consumers.
+        stats, source = coder._materialize_c_aggregate(ctx, node.exp)
+    else
+        stats, source = materialize(ctx, node.exp)
+    end
+    local predicate_stats, predicate
+
+    if source_type._tag == "Type.Value" then
+        predicate_stats, predicate =
+            coder._code_boxed_cast_predicate(
+                ctx, node.target, "&" .. source)
+    elseif original_source_type._tag == "Type.Option"
+           and types.equals(original_source_type.base, node.target) then
+        predicate = render("!ttisnil(&$SOURCE)", { SOURCE = source })
+        predicate_stats = ""
+    elseif (source_type._tag == "Type.CPointer"
+            or source_type._tag == "Type.Pointer")
+           and target_type._tag == "Type.String" then
+        predicate = render("($SOURCE != NULL)", { SOURCE = source })
+        predicate_stats = ""
+    else
+        -- Identity, boxing, truthiness, numeric widening, C numeric/pointer
+        -- conversions, and every other admitted explicit cast are total.
+        predicate_stats = render("(void)($SOURCE);", { SOURCE = source })
+        predicate = "1"
+    end
+
+    return stats .. "\n" .. predicate_stats, predicate
+end
+
 -- Generate call arguments in source order. A pure trailing suffix can remain as
 -- direct C expressions: with no intervening statements, reordering those reads
 -- is unobservable. Every argument at or before an effectful argument is frozen
@@ -1945,7 +2114,8 @@ local function expression_contains_call(node)
     local tag = node._tag
     if tag == "Ast.ExpCall" then
         return true
-    elseif tag == "Ast.ExpCast" or tag == "Ast.ExpUnop"
+    elseif tag == "Ast.ExpCast" or tag == "Ast.ExpIs"
+           or tag == "Ast.ExpUnop"
            or tag == "Ast.ExpAdjust" then
         return expression_contains_call(node.exp)
     elseif tag == "Ast.ExpBinop" then
@@ -8112,6 +8282,8 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
         return codecall(ctx, node, target)
     elseif tag == "Ast.ExpExtra" then
         return "", node.exp._extras[node.index]
+    elseif tag == "Ast.ExpIs" then
+        return coder._codeis(ctx, node)
     elseif tag == "Ast.ExpCast" and types.equals(node.exp._type, node._type) then
         return codeexp(ctx, node.exp, iscondition, target)
     elseif tag == "Ast.ExpCast"

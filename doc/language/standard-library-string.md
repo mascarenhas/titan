@@ -242,7 +242,7 @@ function Regex:match(subject: string,
 function Regex:gmatch(subject: string,
                       init: integer?): () -> RegexMatch?
 function Regex:gsub(subject: string,
-                    replacement: value,
+                    replacement: (string) -> string,
                     maximum: integer?): (string, integer)
 
 function RegexMatch:span(): Span
@@ -286,7 +286,7 @@ function gmatch(subject: string,
                 init: integer?): () -> RegexMatch?
 function gsub(subject: string,
               expression: string,
-              replacement: value,
+              replacement: (string) -> string,
               maximum: integer?): (string, integer)
 ```
 
@@ -375,25 +375,24 @@ at the end of the previous accepted match is suppressed, and searching then
 makes byte progress. This prevents an iterator or substitution from looping
 forever without discarding bytes.
 
-`gsub` accepts:
+`gsub` accepts exactly one replacement function of type
+`(string) -> string`. It calls the function once for each accepted match and
+passes the whole matched string as its sole argument, whether or not the
+regular expression contains captures. Capture groups remain available through
+the `RegexMatch` operations returned by `match` and `gmatch`; `gsub` does not
+project them into callback arguments.
 
-* a string or number replacement template;
-* a raw Lua table/Map, indexed by the first capture or by the whole match when
-  there are no captures; ordinary `__index` lookup is honored;
-* a raw Lua or Titan function, called with captures or the whole match.
+The callback's returned string replaces the match. Return the supplied
+whole-match argument to retain the original text, or `""` to delete it.
+Percent signs in the returned string are ordinary bytes; `gsub` has no
+replacement-template language. A callback error propagates, and a Lua
+callback that returns a non-string observes the ordinary typed-return error.
 
-Callable userdata is not a function replacement. A callable table remains a
-table replacement.
-
-Templates support `%0` for the whole match, `%1` through `%9` for groups, and
-`%%` for a percent sign. A syntactically present but unmatched group expands
-to `""` in a template and is passed as nil to a table/function replacement.
-
-A dynamic nil or false replacement keeps the original match. A returned
-string or number replaces it; another result type raises. The count is the
-number of matched occurrences, including occurrences whose original text was
-kept. Omitted or nil `maximum` allows at most `#subject + 1` substitutions; a
-nonpositive maximum performs none.
+An accepted empty match passes `""` to the callback. An empty candidate
+suppressed by the progress rule does not call it. The count is the number of
+accepted matched occurrences, including occurrences for which the callback
+returns the original text. Omitted or nil `maximum` allows at most
+`#subject + 1` substitutions; a nonpositive maximum performs none.
 
 ### Regex diagnostics and limits
 

@@ -45,6 +45,13 @@ function surplus(candidate: value): (string, string)
     str.tostring(candidate, mark("left"), mark("right"))
   return converted, observed
 end
+
+function format_accounting(): (string, string)
+  observed = ""
+  local rendered =
+    str.format("%%:%s", mark("used"), mark("extra"))
+  return rendered, observed
+end
 ]]
 
 describe("titan.string", function()
@@ -392,6 +399,105 @@ describe("titan.string", function()
                     ("format case %d differs"):format(index))
             end
 
+            local binary_format =
+                "\0A%%B%+05d\0C%%%#06x\0D%%E%.2f\0F%s\0tail%%\0"
+            local binary_actual =
+                str.format(binary_format, 12, 255, 1 / 3, "x\0y")
+            assert(binary_actual ==
+                   native.format(
+                       binary_format, 12, 255, 1 / 3, "x\0y"))
+            assert(binary_actual ==
+                   "\0A%B+0012\0C%0x00ff\0D%E0.33\0Fx\0y\0tail%\0")
+
+            local qualified =
+                "%+05d|%-6i|%#08x|%#6o|%.3f|%8.2e|%-7.3s"
+            assert(str.format(
+                       qualified, 12, 13, 255, 10,
+                       1 / 3, 1 / 3, "abcdef") ==
+                   native.format(
+                       qualified, 12, 13, 255, 10,
+                       1 / 3, 1 / 3, "abcdef"))
+
+            local modifier_samples = {
+                "", "-", "--", "0", "00", "+", " ", "#",
+                "-0", "+0", " #0", "1", "01", "09", "10", "99",
+                ".", ".0", ".00", ".01", ".99",
+                "-.", "-1", "-1.", "-1.2", "-99.99",
+                "+05.2", "#08.3", "100", ".100", "-100.100",
+            }
+            local conversion_samples = {
+                {"c", 65},
+                {"d", -42}, {"i", -42}, {"u", -42},
+                {"o", 42}, {"x", 42}, {"X", 42},
+                {"a", 1 / 3}, {"A", 1 / 3},
+                {"e", 1 / 3}, {"E", 1 / 3},
+                {"f", 1 / 3}, {"g", 1 / 3}, {"G", 1 / 3},
+                {"p", {}}, {"q", "a\0b"}, {"s", "abcdef"},
+            }
+            for _, conversion in ipairs(conversion_samples) do
+                for _, modifiers in ipairs(modifier_samples) do
+                    local form = "%" .. modifiers .. conversion[1]
+                    local native_ok, native_result =
+                        pcall(native.format, form, conversion[2])
+                    local titan_ok, titan_result =
+                        pcall(str.format, form, conversion[2])
+                    assert(titan_ok == native_ok, form)
+                    if native_ok then
+                        assert(titan_result == native_result, form)
+                    end
+                end
+            end
+
+            for _, case in ipairs({
+                table.pack("%99d", 7),
+                table.pack("%.99s", "abc"),
+                table.pack("%99.99f", 1 / 3),
+                table.pack("%-99.99s", "abc"),
+                table.pack("%" .. native.rep("-", 20) .. "d", 1),
+            }) do
+                assert(str.format(
+                           case[1], table.unpack(case, 2, case.n)) ==
+                       native.format(
+                           case[1], table.unpack(case, 2, case.n)))
+            end
+
+            assert(str.format("%%:%d:%%:%s:%%", 7, "x", "surplus") ==
+                   "%:7:%:x:%")
+            local probe = require "string_core_probe"
+            local rendered, observed = probe.format_accounting()
+            assert(rendered == "%:used")
+            assert(observed == "usedextra")
+            local missing_ok, missing_err =
+                pcall(str.format, "%%:%d:%%:%s:%%", 7)
+            assert(not missing_ok)
+            assert(tostring(missing_err):find(
+                "no value for format conversion", 1, true),
+                tostring(missing_err))
+
+            local malformed = {
+                {"%+s", "invalid conversion specification"},
+                {"%10q", "specifier '%q' cannot have modifiers"},
+                {"%y", "invalid conversion to 'format'"},
+                {"%" .. native.rep("-", 21) .. "d",
+                 "invalid format (too long)"},
+                {"%" .. native.rep("-", 21),
+                 "invalid format (too long)"},
+            }
+            for _, case in ipairs(malformed) do
+                local absent_ok, absent_err =
+                    pcall(str.format, case[1])
+                assert(not absent_ok)
+                assert(tostring(absent_err):find(
+                    "no value for format conversion", 1, true),
+                    tostring(absent_err))
+
+                local present_ok, present_err =
+                    pcall(str.format, case[1], nil)
+                assert(not present_ok)
+                assert(tostring(present_err):find(
+                    case[2], 1, true), tostring(present_err))
+            end
+
             local object = setmetatable({}, {
                 __tostring = function() return "custom\0text" end,
             })
@@ -405,6 +511,10 @@ describe("titan.string", function()
             assert(not ok)
             assert(tostring(err):find(
                 "format conversion failed", 1, true), tostring(err))
+            ok, err = pcall(str.format, "%s%+s", bad, "unused")
+            assert(not ok)
+            assert(tostring(err):find(
+                "format conversion failed", 1, true), tostring(err))
             for index = 1, 100 do
                 assert(str.format("%d:%q", index, "x") ==
                        native.format("%d:%q", index, "x"))
@@ -415,10 +525,16 @@ describe("titan.string", function()
                 table.pack("%q", {}),
                 table.pack("%10q", "x"),
                 table.pack("%100d", 1),
+                table.pack("%.100f", 1),
+                table.pack("%+s", "x"),
+                table.pack("%#d", 1),
+                table.pack("%0c", 65),
+                table.pack("%1.2c", 65),
+                table.pack("%" .. native.rep("-", 21) .. "d", 1),
                 table.pack("%y", 1),
                 table.pack("%5s", "a\0b"),
             }
-            for _, case in ipairs(invalid) do
+            for index, case in ipairs(invalid) do
                 local native_ok = pcall(
                     native.format, case[1],
                     table.unpack(case, 2, case.n))
@@ -426,6 +542,8 @@ describe("titan.string", function()
                     str.format, case[1],
                     table.unpack(case, 2, case.n))
                 assert(titan_ok == native_ok)
+                assert(str.format("recover:%02d:%%", index) ==
+                       native.format("recover:%02d:%%", index))
             end
         ]])
     end)
@@ -572,7 +690,8 @@ describe("titan.string", function()
 
             local octets = {}
             for index = 1, 201 do octets[index] = index % 256 end
-            local format200 = native.rep("%d", 200)
+            local format200 =
+                native.rep("%d", 200) .. "\0%%tail"
             assert(str.format(
                 format200, table.unpack(octets, 1, 200)) ==
                 native.format(

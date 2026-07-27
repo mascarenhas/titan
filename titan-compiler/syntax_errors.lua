@@ -213,6 +213,8 @@ local errors = {
 
     CastMissingType = "Expected a type for the cast expression.",
 
+    IsMissingType = "Expected a type for the type-test expression.",
+
     QualName = "Expected a qualified type name.",
 
     NameMethod = "Expected a method name after the colon.",

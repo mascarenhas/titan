@@ -193,8 +193,8 @@ expression. The allowed forms are:
 * calls to a record's `new` constructor with constant arguments;
 * calls to an imported C type's `.new()` or `.new_array(count)` pseudo-
   constructor, with a constant `count`;
-* concatenations, unary operators, binary operators, and `as` casts
-  applied to constant operands.
+* concatenations, unary operators, binary operators, `as` casts, and `is`
+  type tests applied to constant operands.
 
 Anything else — in particular any variable reference and any other
 function call — is rejected with the compile-time error

@@ -82,6 +82,7 @@ describe("Titan lexer", function()
 
     it("can lex some keywords", function()
         assert_lex("and", {"AND"}, {})
+        assert_lex("is", {"IS"}, {})
     end)
 
     it("can lex keywords that contain other keywords", function()
@@ -108,6 +109,7 @@ describe("Titan lexer", function()
         assert_lex("return17", {"NAME"}, {"return17"})
         assert_lex("deferred", {"NAME"}, {"deferred"})
         assert_lex("andy",     {"NAME"}, {"andy"})
+        assert_lex("island",   {"NAME"}, {"island"})
         assert_lex("_end",     {"NAME"}, {"_end"})
     end)
 

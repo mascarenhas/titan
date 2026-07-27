@@ -735,12 +735,15 @@ with `_type = node._type`, the surrounding context applies its usual
   any type is a legal condition, and truthiness is the coder's problem.
   `repeat`'s condition is checked inside the body's scope, so it can see the
   body's locals.
-* **`as` casts.** A user-written `Ast.ExpCast` errors (`cannot cast '%s' to
-  '%s'`) unless the pair is `explicitly_coerceable` or `coerceable`, *and*
-  `compatible`. Because `coerceable` is irreflexive, an identity cast is
-  rejected by this path — `x as integer` when `x` is already an integer
-  errors `cannot cast 'integer' to 'integer'` (verified); no spec asserts
-  that this is intended.
+* **Written `as` casts and `is` tests.** Both visitors call
+  `check_explicit_cast_relation`: it resolves the target, checks the operand
+  under that target context, accepts identity and exact option unwraps, and
+  otherwise applies the same explicit-C or `coerceable`-plus-`compatible`
+  relation. It records the same unsafe C-pointer conversion annotation for
+  either node. `ExpCast._type` is the target; `ExpIs._type` is always
+  `Type.Boolean`. `is` does not alter the operand or symbol-table type, so
+  there is no flow narrowing. A rejected test deliberately uses the existing
+  `cannot cast '%s' to '%s'` diagnostic.
 
 ## The "always returns" analysis
 

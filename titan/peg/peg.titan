@@ -54,6 +54,23 @@ record Pattern
   local tree_size: integer
 end
 
+record Match
+  first: integer
+  last: integer
+  local capture_count: integer
+  local captures: value
+end
+
+local record PatternMatchAttempt
+  local matched: boolean
+  local after: integer
+  local capture_count: integer
+  local captures: value
+  local ordinary_failure: boolean
+  local failure_label: value
+  local failure_position: integer
+end
+
 record Rule
   local encoded_name: string
   local pattern: Pattern
@@ -81,11 +98,11 @@ end
 
 -- Matching and grammar construction.
 
-function Pattern:match(subject: string, init: integer?,
-                       ...: value): (value, ...: value)
-  local start = _normalized_init(subject, init)
+local function pattern_match_attempt(
+    pattern: Pattern, subject: string, start: integer,
+    ...: value): PatternMatchAttempt
   local raw = _sequence(
-    _sequence(_Cc(_match_success_sentinel), self.raw), _Cp())
+    _sequence(_Cc(_match_success_sentinel), pattern.raw), _Cp())
   local top = lua.lua_gettop(L)
   local had_error = false
   local error_value: value = nil
@@ -157,11 +174,27 @@ function Pattern:match(subject: string, init: integer?,
   end
 
   if had_error then raise error_value end
-  if matched then
-    if result_count == 0 then return success_position end
-    return _unpack_results(result_table, 1, result_count)
+  return PatternMatchAttempt.new(
+    matched, success_position, result_count, result_table,
+    failure_label == "fail", failure_label, failure_position)
+end
+
+function Pattern:match(subject: string, init: integer?,
+                       ...: value): (value, ...: value)
+  local attempt = pattern_match_attempt(
+    self, subject, _normalized_init(subject, init), ...)
+  if attempt.matched then
+    if attempt.capture_count == 0 then return attempt.after end
+    return _unpack_results(
+      attempt.captures, 1, attempt.capture_count)
   end
-  return nil, _decoded_label(failure_label), failure_position
+  return nil, _decoded_label(attempt.failure_label),
+    attempt.failure_position
+end
+
+function Match:values(): (...: value)
+  if self.capture_count == 0 then return end
+  return _unpack_results(self.captures, 1, self.capture_count)
 end
 
 function rule(name: value, pattern: Pattern): Rule
@@ -294,8 +327,13 @@ end
 function runtime(
     callback: (string, integer, string) ->
       (...: value)): Pattern
-  _require_raw_function(callback, "runtime")
-  return _pattern(_P(callback), 2)
+  local adapter:
+      (string, integer, string) -> (...: value) =
+    function(subject: string, position: integer,
+             whole: string): (...: value)
+      return callback(subject, position, whole)
+    end
+  return _pattern(_P(adapter), 2)
 end
 
 function set(bytes: string): Pattern
@@ -443,9 +481,15 @@ function match_time(
     pattern: Pattern,
     callback: (string, integer, value, ...: value) ->
       (...: value)): Pattern
-  _require_raw_function(callback, "match-time")
+  local adapter:
+      (string, integer, value, ...: value) ->
+        (...: value) =
+    function(subject: string, position: integer,
+             first: value, ...: value): (...: value)
+      return callback(subject, position, first, ...)
+    end
   return _pattern(
-    _Cmt(pattern.raw, callback), _checked_unary(pattern, 1))
+    _Cmt(pattern.raw, adapter), _checked_unary(pattern, 1))
 end
 
 function back_capture(key: value): Pattern
@@ -477,9 +521,13 @@ end
 function fold_capture(
     pattern: Pattern,
     callback: (value, ...: value) -> value): Pattern
-  _require_raw_function(callback, "fold-capture")
+  local adapter:
+      (value, ...: value) -> value =
+    function(accumulator: value, ...: value): value
+      return callback(accumulator, ...)
+    end
   return _pattern(
-    _Cf(pattern.raw, callback), _checked_unary(pattern, 1))
+    _Cf(pattern.raw, adapter), _checked_unary(pattern, 1))
 end
 
 function group(pattern: Pattern, key: value): Pattern
@@ -515,9 +563,13 @@ function function_capture(
     pattern: Pattern,
     callback: (value, ...: value) ->
       (...: value)): Pattern
-  _require_raw_function(callback, "function-capture")
+  local adapter:
+      (value, ...: value) -> (...: value) =
+    function(first: value, ...: value): (...: value)
+      return callback(first, ...)
+    end
   return _pattern(
-    _capture_replace(pattern.raw, callback),
+    _capture_replace(pattern.raw, adapter),
     _checked_unary(pattern, 1))
 end
 
@@ -564,9 +616,7 @@ function define_value(name: string,
   if not _relabel_valid_name(name) then
     raise "invalid PEG definition name"
   end
-  if candidate == nil or
-      (_raw_type(candidate) == lua.LUA_TBOOLEAN and
-       not (candidate as boolean)) then
+  if candidate == nil or candidate == false then
     raise "PEG definition value must be truthy"
   end
   return Definition.new(name, candidate, -1)
@@ -576,10 +626,10 @@ function compile(
     candidate: value,
     definitions: {integer: Definition}?): Pattern
   _relabel_ensure_initialized()
-  if _relabel_is_pattern(candidate) then
+  if candidate is Pattern then
     return candidate as Pattern
   end
-  if _raw_type(candidate) ~= lua.LUA_TSTRING then
+  if not (candidate is string) then
     raise "PEG expression must be a string or Pattern"
   end
   local source = candidate as string
@@ -591,91 +641,63 @@ function compile(
 end
 
 function match(subject: string, candidate: value,
-               init: integer?): (value, ...: value)
+               init: integer?): Match?
   _relabel_ensure_initialized()
   local compiled: Pattern = succeed()
-  if _relabel_is_pattern(candidate) then
+  if candidate is Pattern then
     compiled = candidate as Pattern
-  elseif _raw_type(candidate) == lua.LUA_TSTRING then
+  elseif candidate is string then
     compiled = _relabel_cached_source(
       candidate as string, _relabel_match_cache)
   else
     raise "PEG expression must be a string or Pattern"
   end
-  return compiled:match(subject, init)
-end
 
-function find(subject: string, candidate: value,
-              init: integer?): (integer?, integer?)
-  _relabel_ensure_initialized()
-  local search: Pattern = succeed()
-  if _relabel_is_pattern(candidate) then
-    search = _relabel_find_pattern(candidate as Pattern)
-  elseif _raw_type(candidate) == lua.LUA_TSTRING then
-    local source = candidate as string
-    local cached = _relabel_raw_get(
-      _relabel_find_cache, source)
-    if cached ~= nil then
-      search = cached as Pattern
-    else
-      search = _relabel_find_pattern(
-        _relabel_compile_source(source, nil))
-      _relabel_raw_set(
-        _relabel_find_cache, source, search)
+  local start = _normalized_init(subject, init)
+  while start <= #subject + 1 do
+    local attempt = pattern_match_attempt(
+      compiled, subject, start)
+    if attempt.matched then
+      return Match.new(
+        start, attempt.after - 1,
+        attempt.capture_count, attempt.captures)
     end
-  else
-    raise "PEG expression must be a string or Pattern"
+    if not attempt.ordinary_failure then return nil end
+    start = start + 1
   end
-  local first: value, after: value = search:match(subject, init)
-  if first == nil then return nil, nil end
-  return first as integer, (after as integer) - 1
+  return nil
 end
 
 function gsub(subject: string, candidate: value,
-              replacement: value): string
+              replacement: (string) -> string): string
   _relabel_ensure_initialized()
-  local substitution_pattern: Pattern = succeed()
-  if _relabel_is_pattern(candidate) then
-    local replaced = _relabel_replace(
-      candidate as Pattern, replacement)
-    substitution_pattern = substitution(
-      zero_or_more(choice(replaced, any())))
-  elseif _raw_type(candidate) == lua.LUA_TSTRING then
-    local source = candidate as string
-    -- Keep the weak outer value strongly rooted for this call.  Its inner
-    -- replacement keys are intentionally strong; once the call returns the
-    -- weak outer entry permits the complete source/replacement group to die.
-    local group = _relabel_raw_get(
-      _relabel_gsub_cache, source)
-    if group == nil then
-      group = _relabel_new_table()
-      _relabel_raw_set(_relabel_gsub_cache, source, group)
-    end
-    local cached = _relabel_raw_get(group, replacement)
-    if cached ~= nil then
-      substitution_pattern = cached as Pattern
-    else
-      local compiled = _relabel_compile_source(source, nil)
-      local replaced =
-        _relabel_replace(compiled, replacement)
-      substitution_pattern = substitution(
-        zero_or_more(choice(replaced, any())))
-      _relabel_raw_set(
-        group, replacement, substitution_pattern)
-    end
+  local compiled: Pattern = succeed()
+  if candidate is Pattern then
+    compiled = candidate as Pattern
+  elseif candidate is string then
+    compiled = _relabel_cached_source(
+      candidate as string, _relabel_match_cache)
   else
     raise "PEG expression must be a string or Pattern"
   end
+
+  local adapter:
+      (value, ...: value) -> (...: value) =
+    function(found: value, ...: value): (...: value)
+      return replacement(found as string)
+    end
+  -- `%0` discards any captures inside the candidate and supplies the exact
+  -- whole match as the callback's sole value.
+  local replaced = function_capture(
+    template_capture(compiled, "%0"), adapter)
+  local substitution_pattern = substitution(
+    zero_or_more(choice(replaced, any())))
   local result: value = substitution_pattern:match(subject)
   return result as string
 end
 
 function update_locale()
-  if _relabel_parser then
-    _relabel_refresh_locale()
-  else
-    _relabel_initialize()
-  end
+  _relabel_refresh_locale()
 end
 
 do
