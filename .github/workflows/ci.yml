@@ -9,14 +9,16 @@ on:
 
 jobs:
   # Build and install the regular Linux tree once per workflow. Keep the
-  # compiler core, net/OS, and PEG/string groups on this warm 1-core runner.
+  # compiler core, net/OS, and PEG/string groups on this warm standard runner.
   # Two consumers restore the pristine tree instead of rebuilding dependencies:
   # one runs uv/timer/fs behavior, while the other runs the broad end-to-end,
-  # measured C-FFI, and isolated static-provider coverage.
+  # measured C-FFI, and isolated static-provider coverage. Both runner labels
+  # remain x86_64 Ubuntu 24.04, so the native artifact does not cross targets.
   prepare-linux:
-    name: regular (ubuntu-slim, build+compiler-core+net-os+peg-string)
+    name: regular (ubuntu-24.04, build+compiler-core+net-os+peg-string)
     if: github.event_name == 'push'
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read
       id-token: write
@@ -48,9 +50,9 @@ jobs:
             .lua/lib/lua/5.5
             .lua/lib/luarocks
             .lua/share/lua/5.5
-          key: ubuntu-slim-${{ runner.arch }}-prefix-system-tree-v2-rocks-3.13.0-${{ hashFiles('titan-dev-1.rockspec') }}
+          key: ubuntu-24.04-${{ runner.arch }}-prefix-system-tree-v2-rocks-3.13.0-${{ hashFiles('titan-dev-1.rockspec') }}
           restore-keys: |
-            ubuntu-slim-${{ runner.arch }}-prefix-system-tree-v2-rocks-3.13.0-
+            ubuntu-24.04-${{ runner.arch }}-prefix-system-tree-v2-rocks-3.13.0-
 
       - name: Cache bundled libuv source and static build
         uses: actions/cache@v5
@@ -59,9 +61,9 @@ jobs:
             libuv-v${{ env.LIBUV_VERSION }}
             libuv-v${{ env.LIBUV_VERSION }}.tar.gz
             libuv-build
-          key: ubuntu-slim-${{ runner.arch }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}
+          key: ubuntu-24.04-${{ runner.arch }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}
           restore-keys: |
-            ubuntu-slim-${{ runner.arch }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-
+            ubuntu-24.04-${{ runner.arch }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-
 
       - name: Install regular build dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake curl libreadline-dev libuv1-dev pkg-config
@@ -114,11 +116,11 @@ jobs:
             --exclude='./libbacktrace/.git' \
             -czf "$RUNNER_TEMP/titan-linux-prepared.tar.gz" .
 
-      # These groups plus preparation remain comfortably below ubuntu-slim's
-      # 15-minute cap. Keeping them here avoids two separately rounded jobs and
-      # reuses the warm compiler/filesystem state. Run the library groups first
-      # so legacy compiler cleanup cannot make the serial packaging gate rebuild
-      # the complete standard library again.
+      # Keeping these groups here avoids two separately rounded jobs and reuses
+      # the warm compiler/filesystem state. The standard runner's explicit
+      # 30-minute timeout leaves room for host-load variance. Run the library
+      # groups first so legacy compiler cleanup cannot make the serial packaging
+      # gate rebuild the complete standard library again.
       - name: Run serial, net/OS, and PEG/string library tests without coverage
         # These tests compile disposable fixtures and alternate images. The
         # installed bundled provider packed above remains the optimized
@@ -134,7 +136,7 @@ jobs:
       # Restore the exact prepared checkout runtime plus canonical installed
       # standard container and shims after compiler-only groups and before the
       # production smoke. Keep disposable generated-C fixtures optimized, but
-      # use O1 so their compilation does not consume the producer's margin;
+      # use O1 so their compilation does not consume the producer's job budget;
       # the packed provider and bundled smoke remain at O2.
       - name: Run core compiler and language tests with coverage
         env:
@@ -419,20 +421,21 @@ jobs:
           TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE="$GITHUB_WORKSPACE/libuv-build/libuv.a" \
             bash spec/support/ci_libuv_mode_smoke.sh
 
-  # Keep the focused native-memory release gate on one warm 1-core runner.
+  # Keep the focused native-memory release gate on one warm standard runner.
   # Full library behavior suites belong to regular Linux: recompiling them
-  # under sanitizers exhausts the runner limit without adding a distinct
+  # under sanitizers consumes the runner budget without adding a distinct
   # lifetime boundary beyond these owner/callback tests and production smokes.
   sanitizer:
-    name: sanitizer (ubuntu-slim, focused-native)
+    name: sanitizer (ubuntu-24.04, focused-native)
     if: github.event_name == 'push'
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       PREFIX: ${{ github.workspace }}/.lua
       # Generated Titan translation units are large enough that combining
-      # optimization with sanitizer instrumentation can exhaust this 1-core
-      # runner's budget. O0 retains the complete ASan/UBSan instrumentation;
+      # optimization with sanitizer instrumentation can exhaust this job's
+      # budget. O0 retains the complete ASan/UBSan instrumentation;
       # Lua, libbacktrace, and libuv remain at O1 below.
       SANITIZER_FLAGS: "-O0 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       # Make's content stamps deliberately revisit native dependencies from

@@ -1983,10 +1983,18 @@ fi
             end
             assert_codecov_job(prepare_job, "compiler-core")
             assert_codecov_job(heavy_job, "compiler-heavy")
+            assert.equal(1, count_literal(prepare_job,
+                "runs-on: ubuntu-24.04"), prepare_job)
+            assert.equal(1, count_literal(prepare_job,
+                "timeout-minutes: 30"), prepare_job)
             assert.equal(1, count_literal(library_job,
                 "needs: prepare-linux"), library_job)
             assert.equal(1, count_literal(heavy_job,
                 "needs: prepare-linux"), heavy_job)
+            assert.equal(1, count_literal(library_job,
+                "runs-on: ubuntu-slim"), library_job)
+            assert.equal(1, count_literal(heavy_job,
+                "runs-on: ubuntu-slim"), heavy_job)
             assert.equal(1, count_literal(library_job,
                 "contents: read"), library_job)
             assert.equal(1, count_literal(library_job,
@@ -2026,6 +2034,10 @@ fi
             assert.equal(1, count_literal(sanitizer_job,
                 'LUA_MYCFLAGS: "-fPIC -O1 -g ' ..
                 '-fsanitize=address,undefined'), sanitizer_job)
+            assert.equal(1, count_literal(sanitizer_job,
+                "runs-on: ubuntu-24.04"), sanitizer_job)
+            assert.equal(1, count_literal(sanitizer_job,
+                "timeout-minutes: 30"), sanitizer_job)
             assert.falsy(workflow:find("CODECOV_TOKEN", 1, true), workflow)
         end)
 end)

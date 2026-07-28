@@ -60,17 +60,21 @@ not add epicycles around what may be a misunderstood simpler design.
 - **CI runs Linux on every push and the complete macOS suite only on manual
   dispatch.** Use `workflow_dispatch` as the **pre-merge check** with
   `gh workflow run ci.yml --ref <branch>`. Linux jobs are push-only and are not
-  repeated by that macOS dispatch. The regular Linux flow
-  uses three 1-core `ubuntu-slim` jobs designed to remain below that runner's
-  hard 15-minute limit. The regular build job runs the core compiler/language
-  shard plus serial, net/OS, and PEG/string tests on its warm tree, and uploads
-  a same-run, full-tree tar artifact for two parallel consumers. One consumer
-  runs the uv/timer/fs library group without coverage. The other runs the heavy
-  coverage shard: `coder_spec.lua`,
+  repeated by that macOS dispatch. The regular Linux flow uses one standard
+  `ubuntu-24.04` producer with an explicit 30-minute timeout plus two 1-core
+  `ubuntu-slim` consumers subject to that runner's hard 15-minute limit. The
+  producer runs the core compiler/language shard plus serial, net/OS, and
+  PEG/string tests on its warm tree, and uploads a same-run, full-tree tar
+  artifact for the two parallel consumers. One consumer runs the uv/timer/fs
+  library group without coverage. The other runs the heavy coverage shard:
+  `coder_spec.lua`,
   `flexible_returns_spec.lua`, `cdriver_spec.lua`, every checker/coder
   `c_ffi*_spec.lua`, and the static-provider specs that require isolated Busted
   processes for direct coverage. The complete local `compiler` group remains
-  the union of both coverage shards. Each shard uploads its explicit report
+  the union of both coverage shards. Both Linux runner labels remain x86_64
+  Ubuntu 24.04, so the prepared native tree crosses only the runner
+  size/container boundary, never an OS, architecture, or object target. Each
+  shard uploads its explicit report
   through Codecov's GitHub OIDC flow with job-local `id-token: write`; upload
   errors fail the job so coverage publication cannot be silently skipped. The
   Linux core invocation keeps Busted's per-file environments but uses
@@ -95,9 +99,10 @@ not add epicycles around what may be a misunderstood simpler design.
   `make lua`/`make luarocks` path and proves bare `require "titan"` after the
   first 0.18 rock install. This is regression coverage for that specific
   transition, not a general migration promise for future ABI bumps. The
-  sanitizer job keeps its build
-  and focused native-memory gate on one warm runner: representative timer/fs
-  suites, core owner/callback proofs, and production net/OS smokes. Its Lua,
+  sanitizer job keeps its build and focused native-memory gate on one warm
+  standard `ubuntu-24.04` runner with an explicit 30-minute timeout:
+  representative timer/fs suites, core owner/callback proofs, and production
+  net/OS smokes. Its Lua,
   libbacktrace, and libuv dependencies compile with sanitizer instrumentation
   at `-O1`, while the much larger generated Titan images and disposable test
   fixtures use the same instrumentation at `-O0`; optimizing those generated
@@ -115,7 +120,7 @@ not add epicycles around what may be a misunderstood simpler design.
   reinstall, rerun only the mode-dependent SDK-layout and external-DSO
   promotion cases from `rockspec_spec.lua`; the complete bundled packaging
   gate has already run, and repeating it would consume the producer's
-  remaining 15-minute budget without adding system-policy coverage. The full
+  remaining job budget without adding system-policy coverage. The full
   system production smoke still follows those focused assertions. Pack the
   regular artifact before the mode smoke replaces the bundled
   `titan.so`/`titan.a` pair, but upload it only after both modes pass; repacking
