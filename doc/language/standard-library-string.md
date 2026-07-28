@@ -430,7 +430,8 @@ nested. Exceeding the nesting limit raises `group_nesting_too_deep`;
 `peg.set_max_stack` does not control which group depths compile. It still
 controls LPegLabel's execution stack when a compiled regex is matched.
 
-Regex compilation exposes no raw PEG-engine error; in particular, its syntax
-pre-pass cannot leak a depth-dependent backtrack-stack overflow. During
-matching, a backreference to a group which did not participate is ordinary
-mismatch rather than a missing-back-capture error.
+Regex compilation exposes no raw PEG-engine error. The relabel grammar builds
+its AST through constant-depth match-time actions, so parsing cannot leak a
+depth-dependent backtrack-stack overflow and remains independent of
+`peg.set_max_stack`. During matching, a backreference to a group which did not
+participate is ordinary mismatch rather than a missing-back-capture error.

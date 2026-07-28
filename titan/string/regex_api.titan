@@ -39,8 +39,7 @@ local function regex_normalized_init(subject: string,
 end
 
 local function regex_is_start_anchored(regex: Regex): boolean
-  return #regex.expression > 0 and
-         regex_byte(regex.expression, 1) == 94
+  return regex.anchored_start
 end
 
 local function regex_attempt(regex: Regex, subject: string,

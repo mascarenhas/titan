@@ -277,19 +277,41 @@ never a zero-result operation.
 
 ## Regex parser and compiler
 
-A nonrecursive `titan.peg` pre-pass scans character classes, escapes, and group
-prefixes and uses labeled throws for their lexical failures. Grouping,
-alternation, anchors, quantifier placement, and the private byte-oriented AST
-belong to the following recursive descent, whose nodes retain source byte
-offsets. Keeping structural recursion out of the PEG pre-pass means its stack
-use no longer scales with group depth or LPegLabel's mutable backtrack-stack
-setting. The recursive descent allows 512 nested capturing or noncapturing
-groups before raising the stable `group_nesting_too_deep` diagnostic; this
-protects the C stack while preserving all 200 nested captures. Syntax failures
-and later semantic checks use the same diagnostic record and are formatted
+The source parser is one `titan.peg` relabel grammar compiled during
+`titan.string`'s module initializer. Its definitions combine named lexical
+patterns from `peg.define` with tightly typed AST and match-time callbacks from
+`peg.define_value`; a grammar construction error is therefore an initialization
+regression and is not caught or translated into a source diagnostic.
+
+The grammar recognizes complete atoms, escapes, classes, quantifiers, group
+delimiters, alternation, and anchors. Syntax punctuation is written as
+characters in the grammar or in named byte-set patterns rather than compared
+through numeric character codes. At the beginning of that same PEG match, a
+constant-depth lexical branch validates the complete source before ordinary
+failure rewinds to the AST productions. Labeled failures escape that branch,
+preserving the established precedence of class, escape, and group-prefix
+diagnostics without a second parser. Successful atom and delimiter productions
+then run deterministic match-time actions that receive a per-match state
+through `peg.argument(1)`. Those actions append AST nodes to explicit group
+frames, finish sequences and choices at `|` and `)`, assign capture numbers at
+opening parentheses, and validate backreferences against groups already closed
+in source order. Counted-quantifier productions capture typed minimum and
+maximum bounds directly rather than reparsing the matched source. The final
+action returns one `ParsedRegex` capture directly; no recursive-descent wrapper
+or post-PEG syntax pass follows the match.
+
+This explicit frame stack is also the reason the grammar is structurally
+constant-depth. It can enforce 512 active capturing or noncapturing groups
+while preserving all 200 nested captures even after `peg.set_max_stack(1)`;
+group depth does not consume LPegLabel backtrack-stack entries. Token actions
+run after a complete atom or closed group and its first quantifier. The only
+following guard either succeeds or raises the labeled second-quantifier
+diagnostic, so there is no ordinary backtracking path after mutation; the
+possessive token repetition likewise never revisits an accepted action. Syntax
+failures and semantic checks use the same diagnostic record and are formatted
 into the public label/line/column/source/caret message before raising.
-LPegLabel's max-stack setting still governs execution of a compiled pattern;
-the parser change removes only the accidental compilation-depth dependency.
+LPegLabel's max-stack setting continues to govern execution of the PEG produced
+by the regex compiler, not construction of the regex AST.
 
 Compilation is continuation-based. Each AST node is converted with the
 pattern that must follow it, which gives greedy repetition its required
@@ -308,7 +330,7 @@ Before construction, the compiler:
 * rejects a maximum smaller than its minimum;
 * computes nullability and rejects an unbounded nullable repetition;
 * numbers captures once in left-to-right opening order;
-* bounds recursive group nesting at 512;
+* bounds active group nesting at 512;
 * validates each single-digit backreference against a previously closed group;
 * projects the resulting PEG tree size, including continuation and capture
   wrappers, against `SHRT_MAX - 10`;
@@ -322,12 +344,13 @@ capture/backtracking order retain the latest participating value.
 
 ## Match records and result projection
 
-A compiled `Regex` stores the expression, capture count, and traced
-`peg.Pattern`. A `RegexMatch` stores the exact subject, its whole-match span,
-and a dense array of local `GroupSpan` wrappers. The wrapper is necessary
-because trailing nil elements do not contribute to a Titan Array's length.
-Each group slot therefore exists independently of whether that group
-participated.
+A compiled `Regex` stores the expression, capture count, traced `peg.Pattern`,
+and the parser's start-anchor bit. Search operations use that bit instead of
+reinterpreting the source expression. A `RegexMatch` stores the exact subject,
+its whole-match span, and a dense array of local `GroupSpan` wrappers. The
+wrapper is necessary because trailing nil elements do not contribute to a
+Titan Array's length. Each group slot therefore exists independently of
+whether that group participated.
 
 Match operations preserve byte offsets while callbacks may run and rederive
 raw pointers afterward. Public span accessors construct fresh records so a

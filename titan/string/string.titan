@@ -13,6 +13,8 @@ local INTEGER_LENGTH_MODIFIER = ""
 local HOST_IS_LITTLE_ENDIAN = false
 local NATIVE_MAXIMUM_ALIGNMENT = 0
 local FORMAT_PATTERN: peg.Pattern? = nil
+local REGEX_ALL_BYTES = ""
+local REGEX_PARSER: peg.Pattern? = nil
 
 record Span
   first: integer
@@ -29,6 +31,7 @@ record Regex
   local expression: string
   local capture_count: integer
   local pattern: peg.Pattern
+  local anchored_start: boolean
 end
 
 function len(subject: string): integer
@@ -487,7 +490,8 @@ function compile_regex(expression: string): Regex
       expression, parsed.root.position)
   end
   return Regex.new(
-    expression, parsed.capture_count, pattern as peg.Pattern)
+    expression, parsed.capture_count, pattern as peg.Pattern,
+    parsed.anchored_start)
 end
 
 function Regex:source(): string
@@ -660,6 +664,9 @@ do
   HOST_IS_LITTLE_ENDIAN = host_is_little_endian()
   NATIVE_MAXIMUM_ALIGNMENT = native_maximum_alignment()
   FORMAT_PATTERN = build_format_pattern()
+  REGEX_WORD_BYTE_FLAGS = regex_byte_flags(REGEX_WORD_BYTES)
+  REGEX_ALL_BYTES = regex_all_bytes()
+  REGEX_PARSER = build_regex_parser()
   local weak_values: {string: string} = {
     ["__mode"] = "v",
   }

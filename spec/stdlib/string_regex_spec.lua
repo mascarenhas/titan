@@ -279,6 +279,9 @@ describe("titan.string regex", function()
             local nested = str.compile_regex("(ab*)+"):match("xxabbbab!")
             assert(nested and nested:whole() == "abbbab")
             assert(nested:group(1) == "ab")
+            nested = str.compile_regex("((a)b)"):match("ab")
+            assert(nested and nested:group(1) == "ab")
+            assert(nested:group(2) == "a")
             nested = str.compile_regex("(a+b+)*"):match("aaabbabx")
             assert(nested and nested:whole() == "aaabbab")
             assert(nested:group(1) == "ab")
@@ -294,6 +297,9 @@ describe("titan.string regex", function()
             end
             assert(str.compile_regex("(a)?\\1"):match("") == nil)
             assert(str.compile_regex("(a?)\\1"):match(""):whole() == "")
+            assert(not pcall(str.compile_regex, "\\1|(a)"))
+            assert(str.compile_regex("(a)|\\1"):group_count() == 1)
+            assert(str.compile_regex("(a)|\\1"):match("a"):whole() == "a")
 
             assert(whole("\0\xff", "[\0\xff]+") == "\0\xff")
             assert(whole("\r", ".") == "\r")
@@ -304,8 +310,14 @@ describe("titan.string regex", function()
             assert(whole(" foo", "\\<foo") == "foo")
             assert(whole("foo!", "foo\\>") == "foo")
             assert(whole("-ac", "[-a-c]+") == "-ac")
+            assert(whole("-az", "[--a]+") == "-a")
+            assert(whole("-", "[---]+") == "-")
             assert(whole("c-", "[a-c-]+") == "c-")
             assert(whole("a-c", "[a\\-c]+") == "a-c")
+            assert(whole("\t\n\r\f\27\7",
+                "[\\t\\n\\r\\f\\e\\a]+") == "\t\n\r\f\27\7")
+            assert(whole("^-[]{}", "[\\^\\-\\[\\]\\{\\}]+") ==
+                   "^-[]{}")
         ]=])
     end)
 
@@ -349,8 +361,16 @@ describe("titan.string regex", function()
                 "invalid regular expression [unsupported_escape] " ..
                 "at L2:C1 (byte 4): unsupported escape\n\n^")
             diagnostic("\\10", "unsupported_escape")
+            diagnostic("\\0", "unsupported_escape")
+            diagnostic("\\b", "unsupported_escape")
+            diagnostic("$\\v", "unsupported_escape")
+            diagnostic("*\\v", "unsupported_escape")
+            diagnostic("\\1\\", "dangling_escape")
+            diagnostic("[z-a]\\v", "unsupported_escape")
             diagnostic("\\1", "invalid_backreference")
             diagnostic("(\\1a)", "invalid_backreference")
+            diagnostic("(?x)", "expected_atom")
+            diagnostic("(?", "expected_atom")
             local malformed =
                 diagnostic("a{,2}", "bad_quantifier")
             assert(malformed:find("(byte 3)", 1, true), malformed)
@@ -360,20 +380,40 @@ describe("titan.string regex", function()
             assert(malformed:find("(byte 5)", 1, true), malformed)
             assert(malformed:find(
                 ": malformed counted quantifier\n", 1, true), malformed)
+            malformed =
+                diagnostic("a{2,1", "bad_quantifier_bounds")
+            assert(malformed:find("(byte 6)", 1, true), malformed)
+            malformed =
+                diagnostic("a{2,1x}", "bad_quantifier_bounds")
+            assert(malformed:find("(byte 6)", 1, true), malformed)
             malformed = diagnostic("a**", "bad_quantifier")
             assert(malformed:find(
                 ": malformed counted quantifier\n", 1, true), malformed)
+            assert(str.compile_regex("a{0002}"):match("aa"):whole() == "aa")
+            diagnostic(
+                "a{999999999999999999999999999999999999}",
+                "bad_quantifier")
             local trailing = diagnostic(")", "trailing_input")
             assert(trailing:find(
                 ": unexpected trailing input\n", 1, true), trailing)
             trailing = diagnostic("]", "trailing_input")
             assert(trailing:find(
                 ": unexpected trailing input\n", 1, true), trailing)
+            trailing = diagnostic("a){", "trailing_input")
+            assert(trailing:find("(byte 2)", 1, true), trailing)
             diagnostic("(a?)*", "nullable_repetition")
             diagnostic("(a?)\\1*", "nullable_repetition")
-            diagnostic("a$b", "misplaced_anchor")
+            diagnostic("(|a)+", "nullable_repetition")
+            diagnostic("\\<*", "nullable_repetition")
+            diagnostic("()*+", "nullable_repetition")
+            diagnostic("(a?)*+", "nullable_repetition")
+            diagnostic("\\<*{", "nullable_repetition")
+            assert(str.compile_regex("(|a){2}"):match(""):whole() == "")
+            local anchored = diagnostic("a$b", "misplaced_anchor")
+            assert(anchored:find("(byte 3)", 1, true), anchored)
             diagnostic("a^b", "misplaced_anchor")
-            diagnostic("($)", "misplaced_anchor")
+            anchored = diagnostic("($)", "misplaced_anchor")
+            assert(anchored:find("(byte 2)", 1, true), anchored)
             diagnostic("(a$)", "misplaced_anchor")
             diagnostic("a{10000}", "pattern_too_large")
             local after_prefix =
@@ -391,6 +431,9 @@ describe("titan.string regex", function()
             local found = regex:match("")
             assert(found and select("#", found:values()) == 200)
             diagnostic(string.rep("()", 201), "too_many_captures")
+            diagnostic(
+                string.rep("(?:", 312) .. string.rep("(", 201),
+                "group_nesting_too_deep")
         ]=])
     end)
 
@@ -414,6 +457,11 @@ describe("titan.string regex", function()
             assert(siblings:group_count() == 0)
             assert(siblings:match(string.rep("a", 513)):whole() ==
                    string.rep("a", 513))
+
+            local flat = string.rep("a", 1000)
+            assert(str.compile_regex(flat):match(flat):whole() == flat)
+            local wide_class = "[" .. string.rep("a", 1000) .. "]"
+            assert(str.compile_regex(wide_class):match("a"):whole() == "a")
 
             local capturing =
                 string.rep("(", 200) .. "a" .. string.rep(")", 200)

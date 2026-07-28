@@ -110,10 +110,8 @@ local function regex_word_start_capture(
     subject: string, position: integer,
     _whole: string): value
   if position > #subject then return false end
-  local current = regex_byte(subject, position)
-  if not regex_is_word_byte(current) then return false end
-  if position > 1 and
-      regex_is_word_byte(regex_byte(subject, position - 1)) then
+  if not regex_is_word_at(subject, position) then return false end
+  if regex_is_word_at(subject, position - 1) then
     return false
   end
   return position
@@ -122,12 +120,10 @@ end
 local function regex_word_end_capture(
     subject: string, position: integer,
     _whole: string): value
-  if position <= 1 or
-      not regex_is_word_byte(regex_byte(subject, position - 1)) then
+  if not regex_is_word_at(subject, position - 1) then
     return false
   end
-  if position <= #subject and
-      regex_is_word_byte(regex_byte(subject, position)) then
+  if regex_is_word_at(subject, position) then
     return false
   end
   return position
@@ -297,4 +293,29 @@ local function regex_build_pattern(parsed: ParsedRegex): peg.Pattern
     index = index - 1
   end
   return peg.table_capture(complete)
+end
+
+local function parse_regex(expression: string): ParsedRegex
+  local pieces: {RegexNode} = {}
+  local alternatives: {RegexNode} = {}
+  local root_frame = RegexParseFrame.new(
+    0, 0, false, 1, 1, pieces, alternatives)
+  local frames: {RegexParseFrame} = {root_frame}
+  local closed: {integer: boolean} = {}
+  local nullable: {integer: boolean} = {}
+  local state = RegexParseState.new(
+    expression, frames, 1, 0, closed, nullable, false, false)
+
+  local result, raw_label, failure_position =
+    (REGEX_PARSER as peg.Pattern):match(expression, nil, state)
+  if result == nil then
+    local label = "expected_atom"
+    if raw_label ~= nil and raw_label ~= "fail" then
+      label = raw_label as string
+    end
+    raise_regex_diagnostic(
+      label, regex_syntax_message(label),
+      expression, failure_position as integer)
+  end
+  return result as ParsedRegex
 end
