@@ -335,6 +335,7 @@ local function allocate_process_owner(runtime: Runtime):
                                       (uv_process_t,
                                        ffi.titan_ffi_void_ptr)
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   local memory = lua.lua_newuserdatauv(L, libuv.uv_process_t.sizeof, 0)
   local storage = ffi.lua_totvalue(L, -1)
   local control = new_process_control(runtime)
@@ -352,7 +353,6 @@ local function allocate_process_owner(runtime: Runtime):
   local pointer = ffi.lua_togco(L, -1)
   control.owner = owner
   link_process_control(runtime, control)
-  lua.lua_settop(L, top)
   return owner, pointer
 end
 
@@ -387,6 +387,7 @@ local function allocate_pipe_owner(process: ProcessControl,
                                    (uv_pipe_t,
                                     ffi.titan_ffi_void_ptr)
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   local memory = lua.lua_newuserdatauv(L, libuv.uv_pipe_t.sizeof, 0)
   local storage = ffi.lua_totvalue(L, -1)
   local control = new_pipe_control(process, kind)
@@ -408,7 +409,6 @@ local function allocate_pipe_owner(process: ProcessControl,
   else
     process.stderr_pipe = owner
   end
-  lua.lua_settop(L, top)
   return owner, pointer
 end
 
@@ -478,6 +478,7 @@ local function allocate_pipe_write_owner(runtime: Runtime,
                                          (uv_pipe_write_t,
                                           ffi.titan_ffi_void_ptr)
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   local memory = lua.lua_newuserdatauv(L, libuv.uv_write_t.sizeof, 0)
   local storage = ffi.lua_totvalue(L, -1)
   local control = new_process_request_control(runtime, operation)
@@ -493,7 +494,6 @@ local function allocate_pipe_write_owner(runtime: Runtime,
   local pointer = ffi.lua_togco(L, -1)
   control.owner = owner
   link_process_request(control)
-  lua.lua_settop(L, top)
   return owner, pointer
 end
 
@@ -520,6 +520,7 @@ local function allocate_process_grace(control: ProcessControl):
                                        ffi.titan_ffi_void_ptr)
   local runtime = control.runtime
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   local memory = lua.lua_newuserdatauv(L, libuv.uv_timer_t.sizeof, 0)
   local storage = ffi.lua_totvalue(L, -1)
   local owner: uv_process_grace_t = {
@@ -533,7 +534,6 @@ local function allocate_process_grace(control: ProcessControl):
   ffi.lua_pushtvalue(L, owner)
   local pointer = ffi.lua_togco(L, -1)
   control.grace_owner = owner
-  lua.lua_settop(L, top)
   return owner, pointer
 end
 

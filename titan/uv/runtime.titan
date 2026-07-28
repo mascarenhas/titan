@@ -187,11 +187,11 @@ end
 
 local function pop_trace_for_append(): string?
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_APPEND_KEY)
   local trace: value = ffi.lua_totvalue(L, -1)
   lua.lua_pushnil(L)
   lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_APPEND_KEY)
-  lua.lua_settop(L, top)
   return trace
 end
 
@@ -217,26 +217,26 @@ end
 
 local function main_thread_value(): value
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   lua.lua_rawgeti(L, lua.LUA_REGISTRYINDEX,
                   lua.LUA_RIDX_MAINTHREAD as lua.lua_Integer)
   local thread = ffi.lua_totvalue(L, -1)
-  lua.lua_settop(L, top)
   return thread
 end
 
 local function on_main_thread(): boolean
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   local is_main = lua.lua_pushthread(L)
-  lua.lua_settop(L, top)
   return is_main ~= 0
 end
 
 local function allocate_bytes(length: integer): Bytes
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   local memory = lua.lua_newuserdatauv(L, length, 0)
   local storage = ffi.lua_totvalue(L, -1)
   local bytes = Bytes.new(memory as *ffi.titan_ffi_char, storage, length)
-  lua.lua_settop(L, top)
   return bytes
 end
 
@@ -274,6 +274,7 @@ end
 local function make_buffer(bytes: Bytes, offset: integer,
                            length: integer): Buffer
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   local memory = lua.lua_newuserdatauv(L, libuv.uv_buf_t.sizeof, 0)
   local storage = ffi.lua_totvalue(L, -1)
   local base = bytes.data
@@ -282,7 +283,6 @@ local function make_buffer(bytes: Bytes, offset: integer,
   end
   initialize_buffer(memory, base, length as libuv.size_t)
   local buffer = Buffer.new(memory as *libuv.uv_buf_t, storage, bytes)
-  lua.lua_settop(L, top)
   return buffer
 end
 
@@ -292,9 +292,9 @@ end
 
 local function bytes_string(bytes: Bytes, length: integer): string
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   lua.lua_pushlstring(L, bytes.data, length as libuv.size_t)
   local result: value = ffi.lua_totvalue(L, -1)
-  lua.lua_settop(L, top)
   return result
 end
 
@@ -336,9 +336,9 @@ end
 local function bytes_to_string(bytes: *ffi.titan_ffi_char,
                                length: libuv.size_t): string
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   lua.lua_pushlstring(L, bytes, length)
   local result: value = ffi.lua_totvalue(L, -1)
-  lua.lua_settop(L, top)
   return result
 end
 
@@ -375,10 +375,10 @@ end
 
 local function allocate_loop(): Loop
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   local memory = lua.lua_newuserdatauv(L, libuv.uv_loop_t.sizeof, 0)
   local storage = ffi.lua_totvalue(L, -1)
   local loop = Loop.new(memory as *libuv.uv_loop_t, storage)
-  lua.lua_settop(L, top)
   return loop
 end
 

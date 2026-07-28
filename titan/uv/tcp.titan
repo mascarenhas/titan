@@ -499,6 +499,7 @@ local function allocate_dns_owner(runtime: Runtime,
                                   (uv_getaddrinfo_t,
                                    ffi.titan_ffi_void_ptr)
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   local memory = lua.lua_newuserdatauv(L, libuv.uv_getaddrinfo_t.sizeof, 0)
   local storage = ffi.lua_totvalue(L, -1)
   local control = new_net_control(runtime, NET_OWNER_DNS, operation)
@@ -517,7 +518,6 @@ local function allocate_dns_owner(runtime: Runtime,
   local pointer = ffi.lua_togco(L, -1)
   control.owner = owner
   link_net_control(runtime, control)
-  lua.lua_settop(L, top)
   return owner, pointer
 end
 
@@ -526,6 +526,7 @@ local function allocate_connect_owner(runtime: Runtime,
                                       (uv_connect_t,
                                        ffi.titan_ffi_void_ptr)
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   local memory = lua.lua_newuserdatauv(L, libuv.uv_connect_t.sizeof, 0)
   local storage = ffi.lua_totvalue(L, -1)
   local control = new_net_control(runtime, NET_OWNER_CONNECT, operation)
@@ -541,7 +542,6 @@ local function allocate_connect_owner(runtime: Runtime,
   local pointer = ffi.lua_togco(L, -1)
   control.owner = owner
   link_net_control(runtime, control)
-  lua.lua_settop(L, top)
   return owner, pointer
 end
 
@@ -550,6 +550,7 @@ local function allocate_write_owner(runtime: Runtime,
                                     (uv_write_t,
                                      ffi.titan_ffi_void_ptr)
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   local memory = lua.lua_newuserdatauv(L, libuv.uv_write_t.sizeof, 0)
   local storage = ffi.lua_totvalue(L, -1)
   local control = new_net_control(runtime, NET_OWNER_WRITE, operation)
@@ -565,7 +566,6 @@ local function allocate_write_owner(runtime: Runtime,
   local pointer = ffi.lua_togco(L, -1)
   control.owner = owner
   link_net_control(runtime, control)
-  lua.lua_settop(L, top)
   return owner, pointer
 end
 
@@ -574,6 +574,7 @@ local function allocate_shutdown_owner(runtime: Runtime,
                                        (uv_shutdown_t,
                                         ffi.titan_ffi_void_ptr)
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   local memory = lua.lua_newuserdatauv(L, libuv.uv_shutdown_t.sizeof, 0)
   local storage = ffi.lua_totvalue(L, -1)
   local control = new_net_control(runtime, NET_OWNER_SHUTDOWN, operation)
@@ -589,13 +590,13 @@ local function allocate_shutdown_owner(runtime: Runtime,
   local pointer = ffi.lua_togco(L, -1)
   control.owner = owner
   link_net_control(runtime, control)
-  lua.lua_settop(L, top)
   return owner, pointer
 end
 
 local function allocate_tcp_owner(runtime: Runtime):
                                   (uv_tcp_t, ffi.titan_ffi_void_ptr)
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   local memory = lua.lua_newuserdatauv(L, libuv.uv_tcp_t.sizeof, 0)
   local storage = ffi.lua_totvalue(L, -1)
   local control: TcpControl = {
@@ -644,7 +645,6 @@ local function allocate_tcp_owner(runtime: Runtime):
   local pointer = ffi.lua_togco(L, -1)
   control.owner = owner
   link_tcp_control(runtime, control)
-  lua.lua_settop(L, top)
   return owner, pointer
 end
 

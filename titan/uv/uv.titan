@@ -147,9 +147,9 @@ end
 -- publish libuv's possibly replaced argv pointer back to the entrypoint.
 local function setup_program_args(): boolean
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGC_KEY)
   if lua.lua_type(L, -1) == lua.LUA_TNIL then
-    lua.lua_settop(L, top)
     return false
   end
   local argc = lua.lua_tointegerx(L, -1, nil) as ffi.titan_ffi_int
@@ -159,7 +159,6 @@ local function setup_program_args(): boolean
   lua.lua_pushlightuserdata(
       L, configured as ffi.titan_ffi_void_ptr)
   lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGV_KEY)
-  lua.lua_settop(L, top)
   return true
 end
 

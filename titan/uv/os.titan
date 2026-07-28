@@ -195,6 +195,7 @@ local function allocate_signal_owner(runtime: Runtime, task: Task,
                                      (uv_signal_t,
                                       ffi.titan_ffi_void_ptr)
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   local memory = lua.lua_newuserdatauv(L, libuv.uv_signal_t.sizeof, 0)
   local storage = ffi.lua_totvalue(L, -1)
   local metadata: SignalControl = {
@@ -217,7 +218,6 @@ local function allocate_signal_owner(runtime: Runtime, task: Task,
   ffi.lua_pushtvalue(L, owner)
   local pointer = ffi.lua_togco(L, -1)
   link_signal_owner(runtime, owner)
-  lua.lua_settop(L, top)
   return owner, pointer
 end
 

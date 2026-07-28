@@ -43,47 +43,34 @@ local _relabel_match_cache: value = nil
 
 local function _relabel_new_weak_values(): value
   local top = lua.lua_gettop(L)
-  local result: value = nil
-  do
-    lua.lua_createtable(L, 0, 0)
-    lua.lua_createtable(L, 0, 1)
-    ffi.lua_pushtvalue(L, "__mode")
-    ffi.lua_pushtvalue(L, "v")
-    lua.lua_rawset(L, -3)
-    lua.lua_setmetatable(L, -2)
-    result = ffi.lua_totvalue(L, -1)
-  finally
-    lua.lua_settop(L, top)
-  end
-  return result
+  defer lua.lua_settop(L, top)
+  lua.lua_createtable(L, 0, 0)
+  lua.lua_createtable(L, 0, 1)
+  ffi.lua_pushtvalue(L, "__mode")
+  ffi.lua_pushtvalue(L, "v")
+  lua.lua_rawset(L, -3)
+  lua.lua_setmetatable(L, -2)
+  return ffi.lua_totvalue(L, -1)
 end
 
 local function _relabel_raw_get(table_value: value,
                                 key: value): value
   local top = lua.lua_gettop(L)
-  local result: value = nil
-  do
-    ffi.lua_pushtvalue(L, table_value)
-    ffi.lua_pushtvalue(L, key)
-    lua.lua_rawget(L, -2)
-    result = ffi.lua_totvalue(L, -1)
-  finally
-    lua.lua_settop(L, top)
-  end
-  return result
+  defer lua.lua_settop(L, top)
+  ffi.lua_pushtvalue(L, table_value)
+  ffi.lua_pushtvalue(L, key)
+  lua.lua_rawget(L, -2)
+  return ffi.lua_totvalue(L, -1)
 end
 
 local function _relabel_raw_set(table_value: value, key: value,
                                 item: value)
   local top = lua.lua_gettop(L)
-  do
-    ffi.lua_pushtvalue(L, table_value)
-    ffi.lua_pushtvalue(L, key)
-    ffi.lua_pushtvalue(L, item)
-    lua.lua_rawset(L, -3)
-  finally
-    lua.lua_settop(L, top)
-  end
+  defer lua.lua_settop(L, top)
+  ffi.lua_pushtvalue(L, table_value)
+  ffi.lua_pushtvalue(L, key)
+  ffi.lua_pushtvalue(L, item)
+  lua.lua_rawset(L, -3)
 end
 
 local function _relabel_byte(source: string,
@@ -97,16 +84,11 @@ local function _relabel_slice(source: string, first: integer,
                              after: integer): string
   if after <= first then return "" end
   local top = lua.lua_gettop(L)
-  local result: value = nil
-  do
-    local bytes = source as const *ffi.titan_ffi_char
-    lua.lua_pushlstring(
-      L, bytes + first - 1, (after - first) as lua.size_t)
-    result = ffi.lua_totvalue(L, -1)
-  finally
-    lua.lua_settop(L, top)
-  end
-  return result as string
+  defer lua.lua_settop(L, top)
+  local bytes = source as const *ffi.titan_ffi_char
+  lua.lua_pushlstring(
+    L, bytes + first - 1, (after - first) as lua.size_t)
+  return ffi.lua_totvalue(L, -1) as value
 end
 
 local function _relabel_source_line(subject: string,
@@ -129,22 +111,17 @@ end
 local function _relabel_spaces(count: integer): string
   if count <= 0 then return "" end
   local top = lua.lua_gettop(L)
-  local result: value = nil
-  do
-    local buffer = lua.lua_newuserdatauv(
-      L, count as lua.size_t, 0)
-    local bytes = buffer as *ffi.titan_ffi_char
-    local index = 0
-    while index < count do
-      bytes[index] = 32 as ffi.titan_ffi_char
-      index = index + 1
-    end
-    lua.lua_pushlstring(L, bytes, count as lua.size_t)
-    result = ffi.lua_totvalue(L, -1)
-  finally
-    lua.lua_settop(L, top)
+  defer lua.lua_settop(L, top)
+  local buffer = lua.lua_newuserdatauv(
+    L, count as lua.size_t, 0)
+  local bytes = buffer as *ffi.titan_ffi_char
+  local index = 0
+  while index < count do
+    bytes[index] = 32 as ffi.titan_ffi_char
+    index = index + 1
   end
-  return result as string
+  lua.lua_pushlstring(L, bytes, count as lua.size_t)
+  return ffi.lua_totvalue(L, -1) as value
 end
 
 local function _relabel_error_message(label: string): string
@@ -245,52 +222,49 @@ local function _relabel_definition_table(
     definitions: {integer: Definition}?):
       (value, {string: integer?})
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   local result: value = nil
   local sizes: {string: integer?} = {}
   local count = 0
   local maximum = 0
   local seen: {string: boolean} = {}
-  do
-    lua.lua_createtable(L, 0, 0)
-    local native_index = lua.lua_gettop(L)
-    if definitions then
-      ffi.lua_pushtvalue(L, definitions)
-      local definitions_index = lua.lua_gettop(L)
-      lua.lua_pushnil(L)
-      while lua.lua_next(L, definitions_index) ~= 0 do
-        if lua.lua_isinteger(L, -2) == 0 then
-          raise "PEG definition indices must be integers"
-        end
-        local raw_index: value = ffi.lua_totvalue(L, -2)
-        local index = raw_index as integer
-        if index < 1 then
-          raise "PEG definition indices must be positive"
-        end
-        local raw_definition: value = ffi.lua_totvalue(L, -1)
-        local item = raw_definition as Definition
-        count = count + 1
-        if index > maximum then maximum = index end
-        if seen[item.name] then
-          raise "duplicate PEG definition name '" .. item.name .. "'"
-        end
-        seen[item.name] = true
-        ffi.lua_pushtvalue(L, item.name)
-        ffi.lua_pushtvalue(L, item.raw)
-        lua.lua_rawset(L, native_index)
-        if item.tree_size >= 0 then
-          sizes[item.name] = item.tree_size
-        end
-        lua.lua_settop(
-          L, (lua.lua_gettop(L) - 1) as ffi.titan_ffi_int)
+  lua.lua_createtable(L, 0, 0)
+  local native_index = lua.lua_gettop(L)
+  if definitions then
+    ffi.lua_pushtvalue(L, definitions)
+    local definitions_index = lua.lua_gettop(L)
+    lua.lua_pushnil(L)
+    while lua.lua_next(L, definitions_index) ~= 0 do
+      if lua.lua_isinteger(L, -2) == 0 then
+        raise "PEG definition indices must be integers"
       end
-      if count ~= maximum then
-        raise "PEG definitions must be dense"
+      local raw_index: value = ffi.lua_totvalue(L, -2)
+      local index = raw_index as integer
+      if index < 1 then
+        raise "PEG definition indices must be positive"
       end
+      local raw_definition: value = ffi.lua_totvalue(L, -1)
+      local item = raw_definition as Definition
+      count = count + 1
+      if index > maximum then maximum = index end
+      if seen[item.name] then
+        raise "duplicate PEG definition name '" .. item.name .. "'"
+      end
+      seen[item.name] = true
+      ffi.lua_pushtvalue(L, item.name)
+      ffi.lua_pushtvalue(L, item.raw)
+      lua.lua_rawset(L, native_index)
+      if item.tree_size >= 0 then
+        sizes[item.name] = item.tree_size
+      end
+      lua.lua_settop(
+        L, (lua.lua_gettop(L) - 1) as ffi.titan_ffi_int)
     end
-    result = ffi.lua_totvalue(L, native_index)
-  finally
-    lua.lua_settop(L, top)
+    if count ~= maximum then
+      raise "PEG definitions must be dense"
+    end
   end
+  result = ffi.lua_totvalue(L, native_index)
   return result, sizes
 end
 

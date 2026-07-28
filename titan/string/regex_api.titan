@@ -18,34 +18,28 @@ local _regex_group_sentinel: value = nil
 local function regex_initialize_state()
   if _regex_cache ~= nil then return end
   local top = lua.lua_gettop(L)
-  do
-    lua.lua_createtable(L, 0, 0)
-    local cache_index = lua.lua_gettop(L)
-    lua.lua_createtable(L, 0, 1)
-    lua.lua_pushstring(L, "v")
-    lua.lua_setfield(L, -2, "__mode")
-    lua.lua_setmetatable(L, cache_index)
-    _regex_cache = ffi.lua_totvalue(L, cache_index)
+  defer lua.lua_settop(L, top)
 
-    lua.lua_createtable(L, 0, 0)
-    _regex_group_sentinel = ffi.lua_totvalue(L, -1)
-  finally
-    lua.lua_settop(L, top)
-  end
+  lua.lua_createtable(L, 0, 0)
+  local cache_index = lua.lua_gettop(L)
+  lua.lua_createtable(L, 0, 1)
+  lua.lua_pushstring(L, "v")
+  lua.lua_setfield(L, -2, "__mode")
+  lua.lua_setmetatable(L, cache_index)
+  _regex_cache = ffi.lua_totvalue(L, cache_index)
+
+  lua.lua_createtable(L, 0, 0)
+  _regex_group_sentinel = ffi.lua_totvalue(L, -1)
 end
 
 local function regex_cache_get(expression: string): Regex?
   regex_initialize_state()
   local top = lua.lua_gettop(L)
-  local raw: value = nil
-  do
-    ffi.lua_pushtvalue(L, _regex_cache)
-    ffi.lua_pushtvalue(L, expression)
-    lua.lua_rawget(L, -2)
-    raw = ffi.lua_totvalue(L, -1)
-  finally
-    lua.lua_settop(L, top)
-  end
+  defer lua.lua_settop(L, top)
+  ffi.lua_pushtvalue(L, _regex_cache)
+  ffi.lua_pushtvalue(L, expression)
+  lua.lua_rawget(L, -2)
+  local raw: value = ffi.lua_totvalue(L, -1)
   if raw == nil then return nil end
   return raw as Regex
 end
@@ -53,14 +47,11 @@ end
 local function regex_cache_put(expression: string, compiled: Regex)
   regex_initialize_state()
   local top = lua.lua_gettop(L)
-  do
-    ffi.lua_pushtvalue(L, _regex_cache)
-    ffi.lua_pushtvalue(L, expression)
-    ffi.lua_pushtvalue(L, compiled)
-    lua.lua_rawset(L, -3)
-  finally
-    lua.lua_settop(L, top)
-  end
+  defer lua.lua_settop(L, top)
+  ffi.lua_pushtvalue(L, _regex_cache)
+  ffi.lua_pushtvalue(L, expression)
+  ffi.lua_pushtvalue(L, compiled)
+  lua.lua_rawset(L, -3)
 end
 
 local function cached_regex(expression: string): Regex
@@ -94,15 +85,10 @@ end
 local function regex_raw_table_item(items: value,
                                     index: integer): value
   local top = lua.lua_gettop(L)
-  local result: value = nil
-  do
-    ffi.lua_pushtvalue(L, items)
-    lua.lua_rawgeti(L, -1, index)
-    result = ffi.lua_totvalue(L, -1)
-  finally
-    lua.lua_settop(L, top)
-  end
-  return result
+  defer lua.lua_settop(L, top)
+  ffi.lua_pushtvalue(L, items)
+  lua.lua_rawgeti(L, -1, index)
+  return ffi.lua_totvalue(L, -1)
 end
 
 local function regex_attempt(regex: Regex, subject: string,

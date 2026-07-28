@@ -311,6 +311,7 @@ end
 local function allocate_fs_owner(runtime: Runtime,
                                  operation: FsOperation): uv_fs_t
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   local memory = lua.lua_newuserdatauv(L, libuv.uv_fs_t.sizeof, 0)
   local storage = ffi.lua_totvalue(L, -1)
   local metadata: FsControl = {
@@ -336,7 +337,6 @@ local function allocate_fs_owner(runtime: Runtime,
   local pointer = ffi.lua_togco(L, -1)
   link_fs_owner(runtime, owner)
   libuv.uv_req_set_data(owner.handle, pointer)
-  lua.lua_settop(L, top)
   return owner
 end
 

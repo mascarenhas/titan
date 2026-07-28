@@ -18,9 +18,9 @@ local function finish_string(bytes: *ffi.titan_ffi_char,
                              length: integer): string
   if length == 0 then return "" end
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   lua.lua_pushlstring(L, bytes, length as lua.size_t)
   local result: value = ffi.lua_totvalue(L, -1)
-  lua.lua_settop(L, top)
   return result
 end
 

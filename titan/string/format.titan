@@ -62,47 +62,31 @@ end
 
 local function checked_integer(candidate: value): lua.lua_Integer
   local top = lua.lua_gettop(L)
-  local result: lua.lua_Integer = 0 as lua.lua_Integer
-  do
-    ffi.lua_pushtvalue(L, candidate)
-    result = lual.luaL_checkinteger(L, -1)
-  finally
-    lua.lua_settop(L, top)
-  end
-  return result
+  defer lua.lua_settop(L, top)
+  ffi.lua_pushtvalue(L, candidate)
+  return lual.luaL_checkinteger(L, -1)
 end
 
 local function checked_number(candidate: value): lua.lua_Number
   local top = lua.lua_gettop(L)
-  local result: lua.lua_Number = 0 as lua.lua_Number
-  do
-    ffi.lua_pushtvalue(L, candidate)
-    result = lual.luaL_checknumber(L, -1)
-  finally
-    lua.lua_settop(L, top)
-  end
-  return result
+  defer lua.lua_settop(L, top)
+  ffi.lua_pushtvalue(L, candidate)
+  return lual.luaL_checknumber(L, -1)
 end
 
 local function checked_string(candidate: value): string
   local top = lua.lua_gettop(L)
-  local result: value = nil
-  do
-    ffi.lua_pushtvalue(L, candidate)
-    lual.luaL_checklstring(L, -1, nil)
-    result = ffi.lua_totvalue(L, -1)
-  finally
-    lua.lua_settop(L, top)
-  end
-  return result
+  defer lua.lua_settop(L, top)
+  ffi.lua_pushtvalue(L, candidate)
+  lual.luaL_checklstring(L, -1, nil)
+  return ffi.lua_totvalue(L, -1) as value
 end
 
 local function value_is_integer(candidate: value): boolean
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   ffi.lua_pushtvalue(L, candidate)
-  local result = lua.lua_isinteger(L, -1) ~= 0
-  lua.lua_settop(L, top)
-  return result
+  return lua.lua_isinteger(L, -1) ~= 0
 end
 
 local function snprintf_allocation_length(required: integer): integer
@@ -245,28 +229,23 @@ end
 
 local function render_pointer(form: string, candidate: value): string
   local top = lua.lua_gettop(L)
-  local result = ""
-  do
-    ffi.lua_pushtvalue(L, candidate)
-    local pointer = lua.lua_topointer(L, -1)
-    if not pointer then
-      local string_form =
-        copy_interval(form, 1, #form - 1) .. "s"
-      result = render_c_string(string_form, "(null)")
-    else
-      local required = stdio.snprintf(nil, 0, form, pointer)
-      local owned = ffi.titan_ffi_char.new_array(
-        snprintf_allocation_length(required))
-      local output = owned as *ffi.titan_ffi_char
-      local actual = stdio.snprintf(
-          output, #owned as cstring.size_t,
-          form, pointer)
-      result = finish_snprintf(output, required, actual)
-    end
-  finally
-    lua.lua_settop(L, top)
+  defer lua.lua_settop(L, top)
+  ffi.lua_pushtvalue(L, candidate)
+  local pointer = lua.lua_topointer(L, -1)
+  if not pointer then
+    local string_form =
+      copy_interval(form, 1, #form - 1) .. "s"
+    return render_c_string(string_form, "(null)")
+  else
+    local required = stdio.snprintf(nil, 0, form, pointer)
+    local owned = ffi.titan_ffi_char.new_array(
+      snprintf_allocation_length(required))
+    local output = owned as *ffi.titan_ffi_char
+    local actual = stdio.snprintf(
+        output, #owned as cstring.size_t,
+        form, pointer)
+    return finish_snprintf(output, required, actual)
   end
-  return result
 end
 
 local function is_ascii_digit(octet: integer): boolean

@@ -258,6 +258,7 @@ local function allocate_owner(runtime: Runtime, kind: integer, task: Task?,
                               peer: value, epoch: integer):
                               (uv_timer_t, ffi.titan_ffi_void_ptr)
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   local memory = lua.lua_newuserdatauv(L, libuv.uv_timer_t.sizeof, 0)
   local storage = ffi.lua_totvalue(L, -1)
   local metadata = TimerControl.new {
@@ -281,7 +282,6 @@ local function allocate_owner(runtime: Runtime, kind: integer, task: Task?,
   ffi.lua_pushtvalue(L, owner)
   local pointer = ffi.lua_togco(L, -1)
   link_owner(runtime, owner)
-  lua.lua_settop(L, top)
   return owner, pointer
 end
 
