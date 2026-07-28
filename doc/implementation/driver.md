@@ -831,10 +831,13 @@ be tested before reinstalling.
 * **`titan_setbvalue(obj, x)`** — sets a boolean `TValue` from a C
   `int`. Exists because Lua 5.5 removed `setbvalue`: booleans carry no
   payload, truth lives in the type tag (`setbtvalue`/`setbfvalue`).
-* **`titan_cast_func(t, p)`** — `void*`-to-function-pointer cast for
-  `dlsym` results (undefined by ISO C, assumed by POSIX); named to
-  avoid colliding with Lua 5.5's own single-argument `cast_func` in
-  `llimits.h`.
+* **`titan_cast_func(t, p)`** — toolchain-supported conversion in either
+  direction between function pointers and object/`void *` pointers. Dynamic
+  loading uses `void *` to function pointer for `dlsym` results; explicit FFI
+  erasure uses function pointer to `void *`. ISO C does not make these
+  conversions portable, while POSIX and the supported toolchains provide the
+  required contract. The Titan name avoids colliding with Lua 5.5's own
+  single-argument `cast_func` in `llimits.h`.
 * **`_integer2str(L, i)` / `_float2str(L, f)`** — inline helpers
   returning a fresh `TString*`. They call `lua_integer2str` and
   `luaO_tostringbuff` — the same conversion routines the Lua core uses

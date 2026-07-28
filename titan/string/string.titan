@@ -50,47 +50,44 @@ end
 function reverse(subject: string): string
   local length = #subject
   if length == 0 then return "" end
-  local owned = ffi.titan_ffi_char.new_array(length)
+  local storage = ffi.titan_ffi_char.new_array(length)
   local source = subject as const *ffi.titan_ffi_char
   local index = 0
   while index < length do
-    owned[index] = source[length - index - 1]
+    storage[index] = source[length - index - 1]
     index = index + 1
   end
-  return finish_string(
-    owned as *ffi.titan_ffi_char, #owned)
+  return storage as string
 end
 
 function lower(subject: string): string
   local length = #subject
   if length == 0 then return "" end
-  local owned = ffi.titan_ffi_char.new_array(length)
+  local storage = ffi.titan_ffi_char.new_array(length)
   local source = subject as const *ffi.titan_ffi_char
   local index = 0
   while index < length do
     local octet = source[index] as ffi.titan_ffi_unsigned_char
-    owned[index] =
+    storage[index] =
       cctype.tolower(octet as ffi.titan_ffi_int) as ffi.titan_ffi_char
     index = index + 1
   end
-  return finish_string(
-    owned as *ffi.titan_ffi_char, #owned)
+  return storage as string
 end
 
 function upper(subject: string): string
   local length = #subject
   if length == 0 then return "" end
-  local owned = ffi.titan_ffi_char.new_array(length)
+  local storage = ffi.titan_ffi_char.new_array(length)
   local source = subject as const *ffi.titan_ffi_char
   local index = 0
   while index < length do
     local octet = source[index] as ffi.titan_ffi_unsigned_char
-    owned[index] =
+    storage[index] =
       cctype.toupper(octet as ffi.titan_ffi_int) as ffi.titan_ffi_char
     index = index + 1
   end
-  return finish_string(
-    owned as *ffi.titan_ffi_char, #owned)
+  return storage as string
 end
 
 function rep(subject: string, count: integer,
@@ -113,8 +110,8 @@ function rep(subject: string, count: integer,
   local total_length = unit_length * count - separator_length
   if total_length == 0 then return "" end
 
-  local owned = ffi.titan_ffi_char.new_array(total_length)
-  local output = owned as *ffi.titan_ffi_char
+  local storage = ffi.titan_ffi_char.new_array(total_length)
+  local output = storage as *ffi.titan_ffi_char
   local subject_bytes = subject as const *ffi.titan_ffi_char
   local separator_bytes =
     actual_separator as const *ffi.titan_ffi_char
@@ -137,7 +134,7 @@ function rep(subject: string, count: integer,
     cstring.memcpy(output + offset, subject_bytes,
                    subject_length as cstring.size_t)
   end
-  return finish_string(output, #owned)
+  return storage as string
 end
 
 function byte(subject: string, first: integer?,
@@ -159,7 +156,7 @@ end
 function char(...: integer): string
   local length = #...
   if length == 0 then return "" end
-  local owned = ffi.titan_ffi_char.new_array(length)
+  local storage = ffi.titan_ffi_char.new_array(length)
   local index = 1
   while index <= length do
     local octet = ...[index]
@@ -167,11 +164,10 @@ function char(...: integer): string
       raise "character value out of range"
     end
     local byte = octet as ffi.titan_ffi_unsigned_char
-    owned[index - 1] = byte as ffi.titan_ffi_char
+    storage[index - 1] = byte as ffi.titan_ffi_char
     index = index + 1
   end
-  return finish_string(
-    owned as *ffi.titan_ffi_char, #owned)
+  return storage as string
 end
 
 function tostring(candidate: value): string
@@ -253,7 +249,8 @@ function pack(format_string: string, ...: value): string
     if option.kind == PACK_INT then
       argument = argument + 1
       local number =
-        checked_integer(next_pack_argument(arguments, argument))
+        (next_pack_argument(arguments, argument) as integer)
+          as lua.lua_Integer
       check_signed_pack_range(number, option.size)
       builder_append(
         builder,
@@ -262,7 +259,8 @@ function pack(format_string: string, ...: value): string
     elseif option.kind == PACK_UINT then
       argument = argument + 1
       local number =
-        checked_integer(next_pack_argument(arguments, argument))
+        (next_pack_argument(arguments, argument) as integer)
+          as lua.lua_Integer
       check_unsigned_pack_range(number, option.size)
       builder_append(
         builder,
@@ -273,26 +271,29 @@ function pack(format_string: string, ...: value): string
       builder_append(
         builder,
         pack_float_bytes(
-          checked_number(next_pack_argument(arguments, argument)),
+          (next_pack_argument(arguments, argument) as float)
+            as lua.lua_Number,
           state.little_endian, state.native_little_endian))
     elseif option.kind == PACK_NUMBER then
       argument = argument + 1
       builder_append(
         builder,
         pack_number_bytes(
-          checked_number(next_pack_argument(arguments, argument)),
+          (next_pack_argument(arguments, argument) as float)
+            as lua.lua_Number,
           state.little_endian, state.native_little_endian))
     elseif option.kind == PACK_DOUBLE then
       argument = argument + 1
       builder_append(
         builder,
         pack_double_bytes(
-          checked_number(next_pack_argument(arguments, argument)),
+          (next_pack_argument(arguments, argument) as float)
+            as lua.lua_Number,
           state.little_endian, state.native_little_endian))
     elseif option.kind == PACK_CHAR then
       argument = argument + 1
       local text =
-        checked_string(next_pack_argument(arguments, argument))
+        next_pack_argument(arguments, argument) as string
       if #text > option.size then
         raise "string longer than given size"
       end
@@ -304,7 +305,7 @@ function pack(format_string: string, ...: value): string
     elseif option.kind == PACK_STRING then
       argument = argument + 1
       local text =
-        checked_string(next_pack_argument(arguments, argument))
+        next_pack_argument(arguments, argument) as string
       check_unsigned_pack_range(
         #text as lua.lua_Integer, option.size)
       builder_append(
@@ -317,7 +318,7 @@ function pack(format_string: string, ...: value): string
     elseif option.kind == PACK_ZSTRING then
       argument = argument + 1
       local text =
-        checked_string(next_pack_argument(arguments, argument))
+        next_pack_argument(arguments, argument) as string
       if contains_byte(text, 0) then
         raise "string contains zeros"
       end
@@ -659,4 +660,12 @@ do
   HOST_IS_LITTLE_ENDIAN = host_is_little_endian()
   NATIVE_MAXIMUM_ALIGNMENT = native_maximum_alignment()
   FORMAT_PATTERN = build_format_pattern()
+  local weak_values: {string: string} = {
+    ["__mode"] = "v",
+  }
+  local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
+  ffi.lua_pushtvalue(L, _regex_cache)
+  ffi.lua_pushtvalue(L, weak_values)
+  lua.lua_setmetatable(L, -2)
 end

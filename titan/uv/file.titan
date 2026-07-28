@@ -75,12 +75,11 @@ local record FsControl
   local acquired_file: libuv.uv_file
 end
 
--- Filesystem requests stay private to uv.  The fixed six fields have the
+-- Filesystem requests stay private to uv.  The fixed five fields have the
 -- same native callback layout as uv_timer_t while retaining their exact Titan
 -- types and GC roots.
 local record uv_fs_t
-  local handle: *libuv.uv_fs_t
-  local storage: value
+  local handle?: owned *libuv.uv_fs_t
   local main_thread: value
   local dispatcher: (uv_fs_t, integer, integer, libuv.size_t,
                      ffi.titan_ffi_void_ptr) -> ()
@@ -195,8 +194,10 @@ end
 local function extract_fs_list(owner: uv_fs_t): {string}
   local names: {string} = {}
   local entry = libuv.uv_dirent_t.new()
+  local handle =
+    owner.handle as owned *libuv.uv_fs_t
   while true do
-    local status = libuv.uv_fs_scandir_next(owner.handle, entry)
+    local status = libuv.uv_fs_scandir_next(handle, entry)
     if status == libuv.UV_EOF then break end
     if status < 0 then
       raise make_error(status, "fs.list.next",
@@ -310,10 +311,7 @@ end
 
 local function allocate_fs_owner(runtime: Runtime,
                                  operation: FsOperation): uv_fs_t
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  local memory = lua.lua_newuserdatauv(L, libuv.uv_fs_t.sizeof, 0)
-  local storage = ffi.lua_totvalue(L, -1)
+  local handle = libuv.uv_fs_t.new()
   local metadata: FsControl = {
     runtime = runtime,
     lifecycle = FS_OWNER_ALLOCATED,
@@ -324,8 +322,7 @@ local function allocate_fs_owner(runtime: Runtime,
     acquired_file = -1 as libuv.uv_file,
   }
   local owner: uv_fs_t = {
-    handle = memory as *libuv.uv_fs_t,
-    storage = storage,
+    handle = handle,
     main_thread = main_thread,
     dispatcher = fs_dispatch,
     metadata = metadata,
@@ -333,16 +330,18 @@ local function allocate_fs_owner(runtime: Runtime,
   }
   -- No allocating Titan helper may run after this owner is linked and before
   -- libuv accepts (or synchronously rejects) its request.
-  ffi.lua_pushtvalue(L, owner)
-  local pointer = ffi.lua_togco(L, -1)
+  local pointer = owner as ffi.titan_ffi_void_ptr
   link_fs_owner(runtime, owner)
-  libuv.uv_req_set_data(owner.handle, pointer)
+  local request_handle: *libuv.uv_fs_t = handle
+  libuv.uv_req_set_data(
+      request_handle as *libuv.uv_req_t, pointer)
   return owner
 end
 
 local function clean_fs_owner(owner: uv_fs_t)
   if owner.metadata.lifecycle ~= FS_OWNER_CLEANED then
-    libuv.uv_fs_req_cleanup(owner.handle)
+    libuv.uv_fs_req_cleanup(
+        owner.handle as owned *libuv.uv_fs_t)
   end
   owner.metadata.lifecycle = FS_OWNER_CLEANED
 end
@@ -423,7 +422,7 @@ local function submit_fs_operation(operation: FsOperation):
       operation.write_bytes = copy_bytes(operation.data)
     end
     local bytes = operation.write_bytes
-    local write_length = bytes.length - operation.write_offset
+    local write_length = #bytes - operation.write_offset
     operation.prepared_buffer =
         make_buffer(bytes, operation.write_offset, write_length)
   end
@@ -432,17 +431,18 @@ local function submit_fs_operation(operation: FsOperation):
   -- allocate, but its invariant-failure path raises; after publication that
   -- could otherwise strand a request that libuv has never seen.
   local kind = operation.kind
-  local loop_handle: *libuv.uv_loop_t = runtime.loop.handle
+  local loop_handle =
+    runtime.loop.handle as owned *libuv.uv_loop_t
   local path_data: *ffi.titan_ffi_char = nil
   local second_path_data: *ffi.titan_ffi_char = nil
   local file_handle: libuv.uv_file = -1 as libuv.uv_file
   local buffer_handle: *libuv.uv_buf_t = nil
   if kind == FS.stat or kind == FS.open or kind == FS.mkdir or
      kind == FS.unlink or kind == FS.rmdir or kind == FS.list then
-    path_data = operation.path.bytes.data
+    path_data = operation.path.bytes
   elseif kind == FS.rename then
-    path_data = operation.path.bytes.data
-    second_path_data = operation.second_path.bytes.data
+    path_data = operation.path.bytes
+    second_path_data = operation.second_path.bytes
   elseif kind == FS.read or kind == FS.write then
     file_handle = operation.file.handle
     buffer_handle = operation.prepared_buffer.handle
@@ -453,6 +453,8 @@ local function submit_fs_operation(operation: FsOperation):
     raise "cannot submit unsupported filesystem operation"
   end
   local owner = allocate_fs_owner(runtime, operation)
+  local owner_handle =
+    owner.handle as owned *libuv.uv_fs_t
   if operation.prepared_buffer then
     owner.buffer = operation.prepared_buffer
     operation.prepared_buffer = nil
@@ -461,12 +463,12 @@ local function submit_fs_operation(operation: FsOperation):
   operation.owner = owner
   local status: ffi.titan_ffi_int = 0 as ffi.titan_ffi_int
   if kind == FS.stat then
-    status = libuv.uv_fs_stat(loop_handle, owner.handle, path_data,
+    status = libuv.uv_fs_stat(loop_handle, owner_handle, path_data,
                              shim.titan_uvshim_fs_cb)
   elseif kind == FS.open then
     status = libuv.uv_fs_open {
       loop = loop_handle,
-      req = owner.handle,
+      req = owner_handle,
       path = path_data,
       flags = open_flags as ffi.titan_ffi_int,
       mode = 438 as ffi.titan_ffi_int,
@@ -475,7 +477,7 @@ local function submit_fs_operation(operation: FsOperation):
   elseif kind == FS.read then
     status = libuv.uv_fs_read {
       loop = loop_handle,
-      req = owner.handle,
+      req = owner_handle,
       file = file_handle,
       bufs = buffer_handle,
       nbufs = 1,
@@ -485,7 +487,7 @@ local function submit_fs_operation(operation: FsOperation):
   elseif kind == FS.write then
     status = libuv.uv_fs_write {
       loop = loop_handle,
-      req = owner.handle,
+      req = owner_handle,
       file = file_handle,
       bufs = buffer_handle,
       nbufs = 1,
@@ -493,32 +495,32 @@ local function submit_fs_operation(operation: FsOperation):
       cb = shim.titan_uvshim_fs_cb,
     }
   elseif kind == FS.flush then
-    status = libuv.uv_fs_fsync(loop_handle, owner.handle, file_handle,
+    status = libuv.uv_fs_fsync(loop_handle, owner_handle, file_handle,
                               shim.titan_uvshim_fs_cb)
   elseif kind == FS.close or kind == FS.internal_close then
-    status = libuv.uv_fs_close(loop_handle, owner.handle, file_handle,
+    status = libuv.uv_fs_close(loop_handle, owner_handle, file_handle,
                               shim.titan_uvshim_fs_cb)
   elseif kind == FS.mkdir then
     status = libuv.uv_fs_mkdir {
       loop = loop_handle,
-      req = owner.handle,
+      req = owner_handle,
       path = path_data,
       mode = 511 as ffi.titan_ffi_int,
       cb = shim.titan_uvshim_fs_cb,
     }
   elseif kind == FS.unlink then
-    status = libuv.uv_fs_unlink(loop_handle, owner.handle, path_data,
+    status = libuv.uv_fs_unlink(loop_handle, owner_handle, path_data,
                                shim.titan_uvshim_fs_cb)
   elseif kind == FS.rmdir then
-    status = libuv.uv_fs_rmdir(loop_handle, owner.handle, path_data,
+    status = libuv.uv_fs_rmdir(loop_handle, owner_handle, path_data,
                               shim.titan_uvshim_fs_cb)
   elseif kind == FS.rename then
-    status = libuv.uv_fs_rename(loop_handle, owner.handle, path_data,
+    status = libuv.uv_fs_rename(loop_handle, owner_handle, path_data,
         second_path_data, shim.titan_uvshim_fs_cb)
   else
     status = libuv.uv_fs_scandir {
       loop = loop_handle,
-      req = owner.handle,
+      req = owner_handle,
       path = path_data,
       flags = 0,
       cb = shim.titan_uvshim_fs_cb,
@@ -597,7 +599,6 @@ end
 
 local function retire_fs_owner_now(owner: uv_fs_t)
   owner.handle = nil
-  owner.storage = nil
   owner.buffer = nil
   if owner.metadata.operation.owner == owner then
     owner.metadata.operation.owner = nil
@@ -721,7 +722,8 @@ local function wake_close_waiters(file: uv_file, failure: Error?)
 end
 
 local function extract_fs_stat(owner: uv_fs_t): FsStatResult
-  local statbuf = libuv.uv_fs_get_statbuf(owner.handle)
+  local statbuf = libuv.uv_fs_get_statbuf(
+      owner.handle as owned *libuv.uv_fs_t)
   local mode = statbuf.st_mode
   local file_type = mode & cstat.S_IFMT
   local kind = "other"
@@ -860,7 +862,8 @@ local function fs_dispatch(owner: uv_fs_t, _event_kind: integer,
 catch
   owner.metadata.callback_aborted = true
   if owner.metadata.lifecycle ~= FS_OWNER_CLEANED then
-    libuv.uv_fs_req_cleanup(owner.handle)
+    libuv.uv_fs_req_cleanup(
+        owner.handle as owned *libuv.uv_fs_t)
   end
   owner.metadata.lifecycle = FS_OWNER_CLEANED
   if not owner.metadata.runtime.fatal then
@@ -869,7 +872,8 @@ catch
     owner.metadata.runtime.fatal_error = error
     owner.metadata.runtime.fatal_traceback = traceback
   end
-  libuv.uv_stop(owner.metadata.runtime.loop.handle)
+  libuv.uv_stop(owner.metadata.runtime.loop.handle
+                as owned *libuv.uv_loop_t)
   return
 end
 

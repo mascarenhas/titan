@@ -112,7 +112,7 @@ record Pattern
 end
 
 record Rule
-  local encoded_name: string
+  local name: string
   local pattern: Pattern
 end
 
@@ -155,10 +155,14 @@ The wrapper keeps public types tighter than the native Lua API:
   callback protocol it requires;
 * query capture uses `{value: value}`, preserving ordinary Lua table identity
   and `__index`;
-* grammar collections use `{integer: Rule}` and are raw-scanned for exact
-  density rather than trusting a table border;
-* public rule names and labels are values only because their accepted dynamic
-  union is string-or-integer.
+* grammar collections use `{Rule}` and are traversed as Titan Arrays;
+* public rule names and labels are strings, including empty,
+  numeric-looking, and binary strings.
+
+An Array's canonical Lua representation is its userdata proxy, so an ordinary
+Lua table cannot cross the grammar or definition-collection boundary. This is
+the same nominal container distinction used by other Titan APIs, rather than a
+module-specific raw-table scan.
 
 Ordinary Titan call adjustment remains authoritative. Nil fills omitted fixed
 slots and evaluated surplus arguments are discarded. A function is variadic
@@ -178,7 +182,7 @@ invokes the adapter. The relabel adapters for dynamic definition values remain
 genuinely variadic/flexible because their capture arity and result count are
 open.
 
-## Construction accounting and typed labels
+## Construction accounting and string labels
 
 Pinned LPegLabel defines `MAXPATTSIZE` as `SHRT_MAX - 10` but does not enforce
 that limit consistently before narrowing sizes. Titan treats 32757 tree slots
@@ -197,76 +201,98 @@ look-behind is capture-free, fixed-length, and at most 255 bytes; grammar
 count is at most 1000; argument and capture selectors fit signed short; and
 max-stack values fit `1..INT_MAX/100`.
 
-Native LPegLabel coerces some numeric-looking labels through strings. Titan
-preserves public type identity by encoding labels and grammar names as:
+Titan's public rule names and labels are strings. It passes their exact bytes
+to the engine without a private prefix or integer encoding. Empty strings,
+numeric-looking strings, and embedded NUL therefore remain distinct.
 
-```text
-"\0s" followed by the string name
-"\0i" followed by the decimal integer name
-```
+Upstream `lpltree.c` converted an integer-looking label back to an integer
+without remembering whether the caller originally supplied a string. The
+vendored patch instead preserves the supplied Lua type. This lets Titan pass
+`"0"` or `"01"` and receive those exact strings, while the unmodified upstream
+integer-label behavior remains available to the private native compatibility
+harness. Titan's public boundary rejects integer labels before reaching the
+engine. The same patch makes grammar collection recognize only the integer
+key `1` as the positional start slot; upstream's numeric coercion would
+otherwise skip a distinct recovery rule named `"1"`.
 
-The encoded string is private to the engine. Uncaught failure labels are
-decoded before returning to Titan, so `"1"` and `1` remain distinct and a
-recovery rule matches only an exactly equal public name.
+The label `"fail"` is the engine's ordinary-failure marker. The public
+`throw("fail")` constructor therefore returns the same pattern as `fail()`
+instead of constructing a labeled throw. Choice, repetition, grammar recovery,
+the returned failure triple, and module-level leftmost search all consequently
+treat it as ordinary failure.
 
 ## Match adapter and failure positions
 
-The native `match` result is dynamically shaped. The shared single-attempt
-adapter constructs this private pattern around the user's pattern:
+The shared single-attempt adapter constructs this private pattern around the
+user's pattern:
 
 ```text
 constant(success_sentinel) * pattern * position_capture()
 ```
 
-It then calls the cached native `match` through `lua_pcallk` with
-`LUA_MULTRET`. A sentinel result identifies success independently of user
-capture contents. The final position capture is removed from the user capture
-run and retained separately as `after`. The private attempt result also keeps
-the exact capture count/table and distinguishes ordinary failure from an
-uncaught labeled failure.
+The cached native callable has the precise internal type:
 
-Before restoring the Lua stack, a nonempty capture run is copied to a fresh
-ordinary table and that table is captured as a traced Titan `value`. A bounded
-helper projects its exact `1..N` slots, including nils. `Pattern:match`
-preserves the established anchored API: captures become its fixed `value`
+```titan
+(value, string, integer, ...: value) ->
+  (value, value, ...: value)
+```
+
+It is a Lua C closure, so Titan's generic callable path invokes it directly
+and propagates its ordinary error. The two fixed result slots are deliberate.
+A capture-free success returns the sentinel and final position; a failure
+returns `nil`, a label, and a position. On a success with captures, the second
+fixed slot holds the first user capture and the flexible tail holds the
+remaining captures followed by the final position. Thus a successful
+200-capture match uses the second fixed slot for capture 1 and exactly 200
+flexible results for captures 2 through 200 plus the position; it does not
+exceed Titan's flexible-tail bound.
+
+The call is captured directly into a traced `{value}` Array. Its final
+position makes trailing nil user captures observable in the Array's indexed
+run, while leading and interior nils retain their exact slots. A sentinel
+result identifies success independently of those contents. The adapter removes
+the final position from the public capture run and retains it separately as
+`after`; a bounded helper then projects the exact capture slots.
+`Pattern:match` preserves the anchored API: captures become its fixed `value`
 prefix and flexible tail, while a capture-free success returns `after`.
 
 Module-level `match` reuses the same attempt result while trying successive
 byte positions through `#subject + 1`. It never matches a successful candidate
 twice, so match-time effects are not repeated. Ordinary failure advances one
 byte; a labeled failure commits the search. Success produces a `Match` with
-inclusive `first`/`last` and the untouched capture table/count.
+inclusive `first`/`last` and the untouched capture Array/count.
 `Match:values()` projects exactly those captures and produces zero values for
 a capture-free candidate. Because search bookkeeping is not represented by
 native captures, all 200 user capture slots remain available; a larger run
 raises at the Titan boundary.
 
-LPegLabel reports ordinary failure as a triple containing a position relative
+LPegLabel reports failure as a triple containing a position relative
 to the normalized initial pointer. The adapter adds `start - 1`, producing
 the documented absolute farthest-failure or throw position. Initial positions
 are normalized in checked Titan arithmetic before the native call, avoiding
 negation of Titan's minimum integer.
 
-An error object from the protected native call is copied into a traced
-`value`; the exact pre-call stack top is restored; only then is the error
-raised through Titan.
-
 ## Stack, roots, callbacks, and errors
 
-Every helper that uses the raw Lua C API follows the trusted standard-library
-discipline described in
-[Lua C API FFI follow-up](ffi-lua-api-followup.md):
+Raw Lua C API use is confined to opening and validating the private engine,
+reading its registry metatable, and installing a weak-value metatable on the
+fresh `{string: Pattern}` Titan relabel cache Map created by each locale
+refresh. `lua_setmetatable` mutates that Map in place, after which the refresh
+assigns it directly to module state; no placeholder Map or `value` cast is
+involved. Replacing the cache is what prevents locale-dependent compiled
+sources from surviving `update_locale`. Each such helper snapshots `lua_gettop(L)`,
+transfers any surviving collectable to a traced Titan value, and restores the
+exact saved top with `defer`. The complete narrow allowlist is recorded in
+[Lua C API FFI follow-up](ffi-lua-api-followup.md).
 
-1. snapshot `lua_gettop(L)`;
-2. push only rooted Titan values or immediate arguments;
-3. perform the operation or protected call;
-4. transfer every surviving collectable result to a traced Titan value;
-5. restore the exact saved top in `finally`;
-6. propagate a saved error only after restoration.
+Pattern construction, matching, and callbacks do not manually manipulate the
+Lua stack. They call precisely typed cached Lua callables through Titan's
+generated generic callable path, which supplies its own roots, result
+adjustment, and error propagation.
 
-The private engine table, cached native functions, locale patterns, relabel
-parser, weak cache tables, record-pattern identity anchor, and success
-sentinel are module-state roots. Every `Pattern.raw` is traced. LPegLabel's
+The private engine Map, cached native functions, locale patterns, relabel
+parser, weak cache table, and success sentinel are module-state roots. Every
+`Pattern.raw` is traced. LPegLabel's
 pattern userdata uservalue table in turn roots constant captures, grammar
 tables, query tables, and callback functions.
 
@@ -294,19 +320,26 @@ logical module.
 
 `Definition` distinguishes a pattern definition, whose private raw pattern
 must enter the native definition table, from a retained dynamic value used by
-replacement and callback suffixes. Definition arrays and grammar arrays share
-the same raw Lua key scan: every key must be a positive integer, count must
-equal the maximum key, and names must be unique.
+replacement and callback suffixes. Definition and grammar collections are
+Titan Arrays traversed from 1 through their Array length. Duplicate names are
+rejected. Definition names otherwise remain arbitrary strings; a name that
+the relabel notation cannot spell is accepted but inert.
 
 The relabel expression language's `->` suffix preserves its dynamic
 definition-value behavior and performs one ordered classification: string,
-exact Lua integer, Map, then function fallback for every remaining value. The
-integer probe uses Lua's integer tag, so an integral float does not select this
+value satisfying `is integer`, Map, then function fallback for every remaining
+value. `is integer` asks whether the corresponding checked `as integer` cast
+would succeed, so a representable integral float selects the capture-index
 branch. Testing Map before the fallback preserves table-query behavior for a
 table that also has `__call`. The fallback always builds the native adapter
 and does not use `_raw_type` to preflight its captured replacement; Titan's
 generic callable path reports a noncallable value only if capture evaluation
 invokes it. Dynamic callback suffixes use the same deferred adapter rule.
+
+The parser captures both identifier and decimal throw labels as strings and
+passes those bytes directly to `throw`; it performs no numeric decoding.
+Consequently `%{01}` reports `"01"`, while `%{fail}` takes the same ordinary
+failure path as a directly constructed `throw("fail")`.
 
 The public `gsub` API is deliberately narrower. Its replacement has exact type
 `(string) -> string`; `%0` first reduces any candidate captures to the whole

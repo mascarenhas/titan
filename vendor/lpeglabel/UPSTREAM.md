@@ -49,8 +49,14 @@ copyright headers from which they derive.
   The public upstream opener is renamed to the private
   `titan_lpeglabel_open`.
 - `lpltypes.h` includes that namespace header and replaces the two registry
-  strings with revisioned Titan-private keys. Those are the only edits to an
-  imported upstream file.
+  strings with revisioned Titan-private keys.
+- `lpltree.c` preserves whether a throw label was supplied as an integer or a
+  string, leaves that value in its original Lua type when returning a labeled
+  failure, and recognizes only the integer key `1` as the grammar's positional
+  start slot. Titan's public PEG layer admits string labels only, so
+  numeric-looking strings preserve their bytes and a recovery rule named
+  `"1"` is not mistaken for that positional slot; the upstream integer-label
+  tests retain their original behavior.
 - `titan_lpeglabel.h` declares the hidden private opener used by Titan's
   standard-library wrapper and the test-only host.
 
@@ -77,8 +83,8 @@ b10cf150bfef74dd180e1112c54a71d4c427d4c695b643fdb2404870019d7a78  testrelabelpar
 b57029e58122ab2f6051fc34b992fba68cb18f430809948a3e015f6ae7de9f2a  LICENSE
 ```
 
-The listed `lpltypes.h` digest is the pristine upstream digest, before the
-documented namespace include and registry-key edits.
+The listed `lpltypes.h` and `lpltree.c` digests are the pristine upstream
+digests, before the documented local edits.
 
 ## Verification
 

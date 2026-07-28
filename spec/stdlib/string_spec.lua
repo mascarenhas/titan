@@ -387,7 +387,6 @@ describe("titan.string", function()
                 table.pack("%s|%10s|%.2s|%s",
                            true, "abc", "abcd",
                            native.rep("long", 40)),
-                table.pack("%d %s %q", "42", 123.5, "x"),
             }
 
             for index, case in ipairs(cases) do
@@ -408,6 +407,22 @@ describe("titan.string", function()
                        binary_format, 12, 255, 1 / 3, "x\0y"))
             assert(binary_actual ==
                    "\0A%B+0012\0C%0x00ff\0D%E0.33\0Fx\0y\0tail%\0")
+            assert(str.format("%c", 0) == "\0")
+
+            -- Dynamic numeric operands use Titan casts, rather than Lua's
+            -- string-to-number coercions. Integral floats remain valid
+            -- integers, including the integer branch of %q.
+            assert(str.format("%d|%x", 42.0, 255.0) ==
+                   native.format("%d|%x", 42, 255))
+            assert(str.format("%q", 42.0) == "42")
+            for _, attempt in ipairs({
+                function() return str.format("%c", "65") end,
+                function() return str.format("%d", "42") end,
+                function() return str.format("%f", "1.5") end,
+                function() return str.format("%d", 1.5) end,
+            }) do
+                assert(not pcall(attempt))
+            end
 
             local qualified =
                 "%+05d|%-6i|%#08x|%#6o|%.3f|%8.2e|%-7.3s"
@@ -595,6 +610,26 @@ describe("titan.string", function()
                 same_results(
                     table.pack(str.unpack(case[1], actual)),
                     table.pack(native.unpack(case[1], expected)))
+            end
+            assert(str.pack("i4I2", 42.0, 255.0) ==
+                   native.pack("i4I2", 42, 255))
+            assert(str.pack("fd", 1, 2) ==
+                   native.pack("fd", 1, 2))
+            assert(str.pack("c3s1z", "a\0", "\0", "x") ==
+                   native.pack("c3s1z", "a\0", "\0", "x"))
+
+            -- Pack operands are checked by Titan casts. Numeric strings do
+            -- not enter number branches, and C-string options require an
+            -- actual string rather than Lua's number-to-string conversion.
+            for _, attempt in ipairs({
+                function() return str.pack("i4", "42") end,
+                function() return str.pack("f", "1.5") end,
+                function() return str.pack("c3", 42) end,
+                function() return str.pack("s1", 42) end,
+                function() return str.pack("z", 42) end,
+                function() return str.pack("i4", 1.5) end,
+            }) do
+                assert(not pcall(attempt))
             end
             local empty_unpack = table.pack(str.unpack("", ""))
             assert(empty_unpack.n == 1 and empty_unpack[1] == 1)

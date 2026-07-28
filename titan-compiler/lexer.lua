@@ -172,6 +172,7 @@ local keywords = {
     "function", "goto", "if", "in", "local", "nil", "not", "or",
     "repeat", "return", "then", "true", "until", "while", "import",
     "record", "type", "as", "is", "foreign", "catch", "finally", "raise", "const",
+    "owned",
 
     "boolean", "integer", "float", "string", "value"
 }

@@ -244,6 +244,17 @@ function types.is_c(t)
     return types.first_c_type(t) ~= nil
 end
 
+-- `is_c` follows C provenance through ordinary storage shapes such as
+-- Option/Array/Map, but deliberately stops at boxed callable signatures.
+-- Full interface/export validation uses `first_c_ffi_type`; representation and
+-- expression lowering instead need `is_direct_c`, which asks whether the value
+-- itself has a direct C representation. An Option/Array/Map/function
+-- containing an owned C value remains an ordinary boxed Titan value.
+function types.is_direct_c(t)
+    t = types.resolve_c_typedef(t)
+    return t and is_c_tag(t._tag) or false
+end
+
 function types.is_c_tvalue(t)
     if not t then
         return false
@@ -411,6 +422,10 @@ local function is_c_function_pointer(t)
         and resolved_c(t.pointee)._tag == "Type.CFunction"
 end
 
+function types.is_c_function_pointer_void_cast(source, target)
+    return is_c_function_pointer(source) and is_c_void_pointer(target)
+end
+
 local function c_pointer_category(t)
     t = resolved_c(t)
     if not (t and t._tag == "Type.CPointer") then return nil end
@@ -563,16 +578,11 @@ local function c_pointer_compatible(source, target)
         return c_pointer_compatible(decayed, target)
             or c_object_to_void_pointer_compatible(decayed, target)
     elseif source._tag == "Type.COwned" then
-        return c_assignable_equal(source.pointee, target.pointee)
-            or resolved_c(target.pointee)._tag == "Type.CVoid"
+        local adjusted = types.CPointer(source.pointee, {})
+        return c_pointer_compatible(adjusted, target)
+            or c_object_to_void_pointer_compatible(adjusted, target)
     end
     return false
-end
-
-local function is_c_function_pointer(t)
-    t = resolved_c(t)
-    return t and t._tag == "Type.CPointer"
-        and resolved_c(t.pointee)._tag == "Type.CFunction"
 end
 
 function types.c_address_coerceable(source, target)
@@ -652,6 +662,41 @@ local function is_c_char_pointer(t)
              or pointee.spelling == "unsigned char")
 end
 
+function types.is_counted_c_character_owner(t)
+    t = resolved_c(t)
+    if not (t and t._tag == "Type.COwned" and t.count) then
+        return false
+    end
+    local pointee = resolved_c(t.pointee)
+    return pointee and pointee._tag == "Type.CInteger"
+        and (pointee.spelling == "char"
+             or pointee.spelling == "signed char"
+             or pointee.spelling == "unsigned char")
+end
+
+local function resolve_value_typedef(t)
+    local seen = {}
+    while t and t._tag == "Type.Typedef" and not seen[t] do
+        seen[t] = true
+        t = t._type
+    end
+    return resolved_c(t)
+end
+
+-- A written cast of one of these statically GC-backed Titan values to C
+-- `void *` exposes the address of its native representation object, not a
+-- payload buffer. Function values are TValue-backed and therefore need a
+-- runtime collectability check in the coder; arbitrary `value` is excluded.
+function types.is_gc_identity_void_pointer_cast(source, target)
+    source = resolve_value_typedef(source)
+    return is_c_void_pointer(target)
+        and source
+        and (source._tag == "Type.Array"
+            or source._tag == "Type.Map"
+            or source._tag == "Type.Nominal"
+            or source._tag == "Type.Function")
+end
+
 local function c_value_compatible(t)
     t = resolved_c(t)
     return t and (t._tag == "Type.CInteger"
@@ -660,6 +705,42 @@ local function c_value_compatible(t)
             and resolved_c(t.pointee)._tag ~= "Type.CFunction")
         or t._tag == "Type.COwned"
         or types.is_c_tvalue(t))
+end
+
+-- Whether a source value of `t` can be stored in and recovered from a TValue.
+-- This is deliberately a representation predicate, not the structural
+-- `is_c`: ordinary Titan containers and callables remain boxed values even
+-- when one of their component types contains C FFI data. Conversely, direct C
+-- aggregates and functions have no scalar TValue representation.
+function types.has_tvalue_representation(t)
+    if not t then return false end
+    if t._tag == "Type.Typedef" then
+        return types.has_tvalue_representation(t._type)
+    elseif types.is_direct_c(t) then
+        return c_value_compatible(t)
+    end
+
+    local tag = t._tag
+    return tag == "Type.Invalid"
+        or tag == "Type.Integer"
+        or tag == "Type.Float"
+        or tag == "Type.Boolean"
+        or tag == "Type.Nil"
+        or tag == "Type.String"
+        or tag == "Type.Array"
+        or tag == "Type.Map"
+        or tag == "Type.Value"
+        or tag == "Type.Nominal"
+        or tag == "Type.Function"
+        or (tag == "Type.Option"
+            and types.has_tvalue_representation(t.base))
+end
+
+local function optional_owner_to_pointer(source, target)
+    source = resolved_c(source)
+    target = resolved_c(target)
+    return source and source._tag == "Type.COwned"
+        and target and target._tag == "Type.CPointer"
 end
 
 -- Returns true if type always holds truthy values
@@ -680,6 +761,11 @@ function types.explicitly_coerceable(source, target)
     return (is_void_pointer(source) and target._tag == "Type.String")
         or (is_c_void_pointer(source) and target._tag == "Type.String")
         or (is_c_char_pointer(source) and target._tag == "Type.String")
+        or types.is_gc_identity_void_pointer_cast(source, target)
+        or (source._tag == "Type.Pointer" and is_c_void_pointer(target))
+        or types.is_c_function_pointer_void_cast(source, target)
+        or (types.is_counted_c_character_owner(source)
+            and target._tag == "Type.String")
         or ((is_c_integer(source) or is_c_float(source))
             and (is_c_integer(target) or is_c_float(target)))
         or c_object_to_void_pointer_compatible(source, target)
@@ -698,6 +784,12 @@ function types.coerceable(source, target)
     elseif source._tag == "Type.Float" and is_c_float(target) then
         return true
     elseif source._tag == "Type.Integer" and is_c_float(target) then
+        return true
+    elseif source._tag == "Type.COwned"
+       and target._tag == "Type.Boolean" then
+        -- An owner is a GC object, not a nullable C pointer. A definite owner
+        -- is therefore always truthy, while Option(COwned) reaches this same
+        -- base relation and lowers its presence test through the boxed option.
         return true
     elseif is_c_pointer(source) and target._tag == "Type.Boolean" then
         return true
@@ -720,9 +812,36 @@ function types.coerceable(source, target)
         return true
     elseif c_value_compatible(source) and types.is_c_tvalue(target) then
         return true
-    elseif types.is_c_tvalue(target) and not types.is_c(source) then
+    elseif types.is_c_tvalue(target) and not types.is_direct_c(source) then
         return true
-    elseif types.is_c(source) or types.is_c(target) then
+    elseif target._tag == "Type.Option" then
+        if not types.has_tvalue_representation(target.base) then
+            return false
+        end
+        if source._tag == "Type.Nil" then
+            return true
+        elseif source._tag == "Type.Option" then
+            if not types.has_tvalue_representation(source.base)
+               or optional_owner_to_pointer(source.base, target.base) then
+                return false
+            end
+            return types.equals(source.base, target.base)
+                or types.coerceable(source.base, target.base)
+        end
+        return types.equals(source, target.base)
+            or types.coerceable(source, target.base)
+    elseif source._tag == "Type.Option" then
+        if not types.has_tvalue_representation(source.base) then
+            return false
+        elseif optional_owner_to_pointer(source.base, target) then
+            -- Borrowing a pointer from an owner must keep a definite owner
+            -- live. Unwrap an optional owner to COwned first; do not combine
+            -- the potentially-raising option conversion with pointer decay.
+            return false
+        end
+        return types.equals(target, source.base)
+            or types.coerceable(source.base, target)
+    elseif types.is_direct_c(source) or types.is_direct_c(target) then
         return false
     end
 
@@ -742,31 +861,7 @@ function types.coerceable(source, target)
             source._tag ~= "Type.Value") or
 
            (source._tag == "Type.Value" and
-            target._tag ~= "Type.Value") or
-
-           (target._tag == "Type.Option" and
-            types.equals(source, target.base)) or
-
-           (source._tag == "Type.Option" and
-            types.equals(target, source.base)) or
-
-           (target._tag == "Type.Option" and
-            source._tag == "Type.Nil") or
-
-           -- t1? -> t2? whenever t1 is coerceable to t2: the conversion
-           -- propagates nil and converts/re-wraps a present value (see the
-           -- option-to-option case in trycoerce and the coder's ExpCast).
-           (target._tag == "Type.Option" and
-            source._tag == "Type.Option" and
-            types.coerceable(source.base, target.base)) or
-
-           (target._tag == "Type.Option" and
-            source._tag ~= "Type.Option" and
-            types.coerceable(source, target.base)) or
-
-           (source._tag == "Type.Option" and
-            target._tag ~= "Type.Option" and
-            types.coerceable(source.base, target))
+            target._tag ~= "Type.Value")
 
 end
 
@@ -917,7 +1012,7 @@ function types.compatible(t1, t2)
         return true
     elseif c_value_compatible(t1) and types.is_c_tvalue(t2) then
         return true
-    elseif types.is_c_tvalue(t2) and not types.is_c(t1) then
+    elseif types.is_c_tvalue(t2) and not types.is_direct_c(t1) then
         return true
     elseif t1._tag == "Type.Typedef" then
         return types.compatible(t1._type, t2)
@@ -927,7 +1022,7 @@ function types.compatible(t1, t2)
         return true
     elseif t1._tag == "Type.Nil" and t2._tag == "Type.CPointer" then
         return true
-    elseif types.is_c(t1) or types.is_c(t2) then
+    elseif types.is_direct_c(t1) or types.is_direct_c(t2) then
         return false
     elseif t1._tag == "Type.Pointer" and t2._tag == "Type.Nil" then
         return true -- nullable pointer
@@ -1492,7 +1587,10 @@ function types.tostring(t)
     elseif tag == "Type.CTypedef" then
         return t.name
     elseif tag == "Type.COwned" then
-        return "owned " .. types.tostring(t.pointee)
+        if t.count then
+            return "owned " .. types.tostring(t.pointee) .. "[]"
+        end
+        return "owned *" .. types.tostring(t.pointee)
     elseif tag == "Type.CModule" then
         return "C module " .. t.name
     elseif tag == "Struct" then

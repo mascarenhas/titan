@@ -11,7 +11,7 @@
 local REGEX_PATTERN_LIMIT = 32757
 
 local record RegexCompileState
-  local rules: {integer: peg.Rule}
+  local rules: {peg.Rule}
   local next_rule: integer
 end
 
@@ -136,7 +136,6 @@ end
 local function regex_backreference_capture(
     subject: string, position: integer,
     first: value, group_after_value: value): value
-  regex_initialize_state()
   if first == _regex_group_sentinel then return false end
   if group_after_value == nil then return false end
   local group_first = first as integer
@@ -156,7 +155,6 @@ end
 
 local function regex_group_result(
     first: value, group_after_value: value): GroupSpan
-  regex_initialize_state()
   if first == _regex_group_sentinel then
     return GroupSpan.new(nil)
   end
@@ -234,7 +232,7 @@ local function regex_compile_node(node: RegexNode,
       local active: RegexCompileState? = state
       local owns_scope = false
       if not active then
-        local rules: {integer: peg.Rule} = {}
+        local rules: {peg.Rule} = {}
         active = RegexCompileState.new(rules, 0)
         owns_scope = true
       end
@@ -273,7 +271,6 @@ local function regex_compile_node(node: RegexNode,
 end
 
 local function regex_build_pattern(parsed: ParsedRegex): peg.Pattern
-  regex_initialize_state()
   local tail = peg.position()
   local index = 1
   while index <= parsed.capture_count do

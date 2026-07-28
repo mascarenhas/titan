@@ -71,12 +71,14 @@ while IFS= read -r test_file; do
         spec/cdriver_spec.lua | \
         spec/checker/c_ffi_declaration_compatibility_spec.lua | \
         spec/checker/c_ffi_operators_spec.lua | \
+        spec/checker/c_ffi_owned_types_spec.lua | \
         spec/checker/c_ffi_pointer_conversions_spec.lua | \
         spec/checker/c_ffi_spec.lua | \
         spec/checker/c_ffi_stack_objects_spec.lua | \
         spec/checker/c_ffi_tag_names_spec.lua | \
         spec/checker/c_ffi_target_profile_spec.lua | \
         spec/coder/c_ffi_operators_spec.lua | \
+        spec/coder/c_ffi_owned_types_spec.lua | \
         spec/coder/c_ffi_pointer_conversions_spec.lua | \
         spec/coder/c_ffi_spec.lua | \
         spec/coder/c_ffi_stack_objects_spec.lua | \

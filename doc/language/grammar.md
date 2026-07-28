@@ -29,7 +29,7 @@ is not a reserved word. Tokenization is longest-match, so `andy`,
 and     as      boolean  break     catch   const   defer  do      else
 elseif  end     false    finally   float   for     foreign function
 goto    if      import   in        integer is      local   nil     not
-or      raise   record   repeat    return  string  then    true
+or      owned   raise    record    repeat   return  string  then    true
 type    until   value   while
 ```
 
@@ -152,7 +152,7 @@ tlfunc   ::= [local] function Name '(' [parlist] ')' [':' rettype] block end
 tlvar    ::= [local] decl '=' exp
 tlrecord ::= [local] record Name {recordfield} end
 tltype   ::= [local] type Name '=' type
-recordfield     ::= [local] Name ':' type [';']
+recordfield     ::= [local] Name ['?'] ':' type [';']
 tlimport        ::= local Name '=' import importname
 tlforeignimport ::= local Name '=' foreign import importname
 moduleinit     ::= do block end
@@ -219,9 +219,18 @@ basictype  ::= nil | boolean | integer | float | string | value
             |  Name '.' Name
             |  '*' simpletype
             |  const '*' simpletype
+            |  ownedtype
             |  Name
             |  '{' type ':' type '}'
             |  '{' type '}'
+ownedtype  ::= owned '*' cownedpayload
+            |  owned cownedpayload '[' ']'
+cownedpayload ::= nil | boolean | integer | float | string | value
+            |  Name '.' Name
+            |  '*' cownedpayload
+            |  const '*' cownedpayload
+            |  Name
+            |  ownedtype
 funargtypes::= '(' [type {',' type} [',' varargtype] | varargtype] ')'
 varargtype ::= '...' ':' type
 resulttypes::= '(' [type {',' type} [',' flexrettype] | flexrettype] ')'
@@ -247,7 +256,8 @@ visible variable of a generic `for`
 (`for i: integer = 1, 10 do ... end` and
 `for k: integer, v: string in step do ... end` are valid). Function
 *parameters* (`param`) must be annotated and admit no `?` shorthand —
-write `p: T?`.
+write `p: T?`. Record fields admit the annotated shorthand `x?: T`, which is
+equivalent to `x: T?`.
 
 In types: `Name` is a record type and `mod.Name` one from an imported
 module; `{T}` is an array, `{K: V}` a map, `T?` an option type, and
@@ -258,7 +268,20 @@ are independent. When a fixed result prefix is present, a comma is required
 before the tail: `(integer, ...: string)` is valid, while
 `(integer ...: string)` is not. `->` is right-associative (`a -> b -> c` is
 `a -> (b -> c)`) and binds tighter than the commas of an enclosing
-parenthesized result list. A bare `resulttypes` form is valid only in
+parenthesized result list.
+
+`owned *mod.T` is the scalar GC-owner spelling and `owned mod.T[]` is
+the dynamically counted owner spelling. The first `*` of the scalar form is
+the ownership marker, so another pointer layer belongs to the payload:
+`owned **mod.T` owns one `mod.T *`, while `owned *mod.T[]` owns an array of
+`mod.T *`. `cownedpayload` is optionless so the one trailing `?` accepted by
+`simpletype` wraps the complete owner. The parser accepts the shared payload
+shape above; the checker then requires a complete, allocatable imported C
+object type and rejects Titan, `void`, function, incomplete, fixed-array
+typedef, flexible-array-member, and nested-owner payloads. A numeral between
+the brackets is not owner syntax.
+
+A bare `resulttypes` form is valid only in
 `rettype` position — a function's return annotation or the right side
 of `->` — which is how multiple and flexible return types are written:
 

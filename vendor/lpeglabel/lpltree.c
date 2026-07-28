@@ -55,6 +55,10 @@ static const char *val2str (lua_State *L, int idx) {
 static void fixonecall (lua_State *L, int postable, TTree *g, TTree *t, byte tag) { /* labeled failure */
   int n;
   lua_rawgeti(L, -1, t->key);  /* get rule's name */
+  if (tag == TThrow && lua_istable(L, -1)) {
+    lua_rawgeti(L, -1, 1);  /* get legacy numeric label's rule name */
+    lua_remove(L, -2);  /* remove label wrapper */
+  }
   lua_gettable(L, postable);  /* query name in position table */
   n = lua_tonumber(L, -1);  /* get (absolute) position */
   lua_pop(L, 1);  /* remove position */
@@ -766,9 +770,25 @@ static int lp_behind (lua_State *L) {
 */
 static int lp_throw (lua_State *L) {
 	TTree * tree;
-  luaL_checkstring(L, -1); 
+  int labelidx = 1;
+  if (lua_type(L, 1) == LUA_TNUMBER) {
+    int isinteger;
+    lua_Integer label = lua_tointegerx(L, 1, &isinteger);
+    luaL_checkstring(L, 1);
+    lua_createtable(L, 2, 0);
+    lua_pushvalue(L, 1);
+    lua_rawseti(L, -2, 1);
+    if (isinteger)
+      lua_pushinteger(L, label);
+    else
+      lua_pushvalue(L, 1);
+    lua_rawseti(L, -2, 2);
+    labelidx = lua_gettop(L);
+  }
+  else
+    luaL_checktype(L, 1, LUA_TSTRING);
   tree = newthrowleaf(L);
-  tree->key = addtonewktable(L, 0, 1);
+  tree->key = addtonewktable(L, 0, labelidx);
 	return 1;
 }
 /* labeled failure end */
@@ -993,7 +1013,7 @@ static int collectrules (lua_State *L, int arg, int *totalsize) {
   size = 3 + getsize(L, postab + 2);  /* TGrammar + TRule + TXInfo + rule */
   lua_pushnil(L);  /* prepare to traverse grammar table */
   while (lua_next(L, arg) != 0) {
-    if (lua_tonumber(L, -2) == 1 ||
+    if ((lua_isinteger(L, -2) && lua_tointeger(L, -2) == 1) ||
         lp_equal(L, -2, postab + 1)) {  /* initial rule? */
       lua_pop(L, 1);  /* remove value (keep key for lua_next) */
       continue;
@@ -1260,12 +1280,10 @@ static int lp_match (lua_State *L) {
   if (r == NULL) { /* labeled failure begin */
     lua_pushnil(L);
     if (labelf) {
-      lua_Integer luaInt;
       lua_rawgeti(L, ktableidx(ptop), labelf);
-      luaInt = lua_tointeger(L, -1);
-      if (luaInt) {
-        lua_pop(L, 1);
-        lua_pushinteger(L, luaInt);
+      if (lua_istable(L, -1)) {
+        lua_rawgeti(L, -1, 2);
+        lua_remove(L, -2);
       }
     }
     else 

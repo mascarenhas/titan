@@ -552,7 +552,10 @@ describe("Titan types", function()
             assert.same("x: int", types.tostring(
                 types.CField(false, "x", int, false, false)))
             assert.same("size_t", types.tostring(types.CTypedef("size_t", int)))
-            assert.same("owned int", types.tostring(types.COwned(int, false)))
+            assert.same("owned *int",
+                types.tostring(types.COwned(int, false)))
+            assert.same("owned int[]",
+                types.tostring(types.COwned(int, true)))
         end)
 
         it("uses CModule as the public foreign module type", function()
@@ -738,6 +741,77 @@ describe("Titan types", function()
             assert.falsy(types.compatible(types.Nil(), owned))
         end)
 
+        it("uses ordinary option wrapping and unwrapping for owned C values",
+        function()
+            local owner = types.COwned(cint(), false)
+            local optional = types.Option(owner)
+
+            assert.truthy(types.coerceable(owner, optional))
+            assert.truthy(types.coerceable(optional, owner))
+            assert.truthy(types.coerceable(types.Nil(), optional))
+        end)
+
+        it("distinguishes structural C provenance from direct C values",
+        function()
+            local owner = types.COwned(cint(), false)
+            local owners = types.Array(owner)
+            local by_name = types.Map(types.String(), owner)
+            local callback = types.Function(
+                { owner }, { owner }, false, false, false)
+
+            assert.truthy(types.is_c(owners))
+            assert.truthy(types.is_c(by_name))
+            assert.falsy(types.is_c(callback))
+            assert.truthy(types.first_c_ffi_type(callback))
+            assert.falsy(types.is_direct_c(owners))
+            assert.falsy(types.is_direct_c(by_name))
+            assert.falsy(types.is_direct_c(callback))
+
+            for _, boxed in ipairs({ owners, by_name, callback }) do
+                assert.truthy(types.coerceable(boxed, types.Value()))
+                assert.truthy(types.coerceable(types.Value(), boxed))
+                assert.truthy(types.compatible(boxed, types.Value()))
+                assert.truthy(types.compatible(types.Value(), boxed))
+            end
+        end)
+
+        it("allows options only for types with a TValue representation",
+        function()
+            local int = cint()
+            local owner = types.COwned(int, false)
+            local object_pointer = types.CPointer(int, {})
+            local aggregate = types.CStruct(
+                "struct point", "point", false, {}, true, false)
+            local direct_function = types.CFunction(
+                { int }, int, false, "cdecl")
+            local function_pointer =
+                types.CPointer(direct_function, {})
+
+            assert.truthy(types.has_tvalue_representation(owner))
+            assert.truthy(types.has_tvalue_representation(object_pointer))
+            assert.truthy(types.has_tvalue_representation(
+                types.Array(owner)))
+            assert.truthy(types.has_tvalue_representation(
+                types.Option(owner)))
+            assert.falsy(types.has_tvalue_representation(aggregate))
+            assert.falsy(types.has_tvalue_representation(direct_function))
+            assert.falsy(types.has_tvalue_representation(function_pointer))
+        end)
+
+        it("does not decay an optional owner into an optional pointer",
+        function()
+            local int = cint()
+            local optional_owner =
+                types.Option(types.COwned(int, false))
+            local optional_pointer =
+                types.Option(types.CPointer(int, {}))
+
+            assert.falsy(types.coerceable(
+                optional_owner, optional_pointer))
+            assert.falsy(types.compatible(
+                optional_pointer, optional_owner))
+        end)
+
         it("allows only boxable C representations to cross through value", function()
             local int = cint()
             local ptr = types.CPointer(int, {})
@@ -757,6 +831,28 @@ describe("Titan types", function()
             assert.falsy(types.compatible(types.Value(), aggregate))
         end)
 
+        it("recognizes only counted owned character arrays as binary strings",
+        function()
+            local char =
+                types.CInteger("char", true, 1, 8)
+            local signed =
+                types.CInteger("signed char", true, 1, 8)
+            local unsigned =
+                types.CInteger("unsigned char", false, 1, 8)
+            local alias = types.CTypedef("ffi_byte", unsigned)
+
+            assert.is_true(types.is_counted_c_character_owner(
+                types.COwned(char, true)))
+            assert.is_true(types.is_counted_c_character_owner(
+                types.COwned(signed, true)))
+            assert.is_true(types.is_counted_c_character_owner(
+                types.COwned(alias, true)))
+            assert.is_false(types.is_counted_c_character_owner(
+                types.COwned(char, false)))
+            assert.is_false(types.is_counted_c_character_owner(
+                types.COwned(cint(), true)))
+        end)
+
         it("uses C-compatible pointer conversions", function()
             local int = cint()
             local alias = types.CTypedef("ffi_int", int)
@@ -774,6 +870,8 @@ describe("Titan types", function()
                 types.CTypedef("ffi_const_int", int, {"const"})
             local const_alias_array =
                 types.CArray(const_alias, 4)
+            local owner = types.COwned(alias, false)
+            local const_owner = types.COwned(const_alias, false)
 
             assert.truthy(types.compatible(vptr, iptr))
             assert.truthy(types.coerceable(iptr, vptr))
@@ -795,8 +893,69 @@ describe("Titan types", function()
                 const_alias_array, const_iptr))
             assert.falsy(types.coerceable(
                 types.CPointer(const_alias, {}), iptr))
+            assert.truthy(types.coerceable(owner, iptr))
+            assert.truthy(types.coerceable(owner, const_iptr))
+            assert.truthy(types.coerceable(owner, vptr))
+            assert.truthy(types.coerceable(owner, const_vptr))
+            assert.falsy(types.coerceable(const_owner, iptr))
+            assert.falsy(types.coerceable(const_owner, vptr))
+            assert.truthy(types.coerceable(const_owner, const_iptr))
+            assert.truthy(types.coerceable(const_owner, const_vptr))
             assert.same({"const"},
                 types.c_local_address_pointer(const_array).quals)
+        end)
+
+        it("allows explicit stable GC identities and pointer kinds as C void pointers",
+        function()
+            local record = types.Nominal("test.Owner")
+            local array = types.Array(record)
+            local map = types.Map(types.String(), record)
+            local callback =
+                types.Function({}, {}, false, false, false)
+            local void_pointer =
+                types.CPointer(types.CVoid(), {})
+            local object_pointer =
+                types.CPointer(cint(), {})
+            local function_pointer = types.CPointer(
+                types.CFunction({cint()}, cint(), false, "cdecl"), {})
+            local legacy_pointer = {
+                _tag = "Type.Pointer",
+                type = types.Nil(),
+            }
+
+            for _, gc_type in ipairs({
+                record,
+                array,
+                map,
+                callback,
+            }) do
+                assert.truthy(types.explicitly_coerceable(
+                    gc_type, void_pointer))
+                assert.falsy(types.coerceable(gc_type, void_pointer))
+                assert.falsy(types.explicitly_coerceable(
+                    gc_type, object_pointer))
+            end
+
+            assert.truthy(types.explicitly_coerceable(
+                function_pointer, void_pointer))
+            assert.falsy(types.coerceable(
+                function_pointer, void_pointer))
+            assert.truthy(types.explicitly_coerceable(
+                legacy_pointer, void_pointer))
+            assert.falsy(types.coerceable(
+                legacy_pointer, void_pointer))
+
+            -- String keeps its established implicit byte-buffer conversion,
+            -- rather than participating in the GC-identity conversion.
+            assert.truthy(types.coerceable(
+                types.String(), void_pointer))
+            assert.falsy(types.is_gc_identity_void_pointer_cast(
+                types.String(), void_pointer))
+
+            assert.falsy(types.explicitly_coerceable(
+                types.Value(), void_pointer))
+            assert.falsy(types.explicitly_coerceable(
+                types.Option(record), void_pointer))
         end)
 
         it("detects C types nested inside type trees", function()

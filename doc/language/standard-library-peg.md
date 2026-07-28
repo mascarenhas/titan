@@ -67,11 +67,11 @@ function set(bytes: string): Pattern
 function ranges(...: string): Pattern
 function utf_range(first: integer, last: integer): Pattern
 
-function variable(name: value): Pattern
-function rule(name: value, pattern: Pattern): Rule
-function grammar(start: value, rules: {integer: Rule}): Pattern
+function variable(name: string): Pattern
+function rule(name: string, pattern: Pattern): Rule
+function grammar(start: string, rules: {Rule}): Pattern
 function behind(pattern: Pattern): Pattern
-function throw(label: value): Pattern
+function throw(label: string): Pattern
 ```
 
 The basic constructors have these meanings:
@@ -88,7 +88,7 @@ The basic constructors have these meanings:
 | `utf_range(first, last)` | Match a UTF-8 encoding for a code point in the inclusive range. Bounds must satisfy `0 <= first <= last <= 0x10ffff`. |
 | `variable(name)` | Construct an open grammar reference. |
 | `rule(name, pattern)` | Construct one named or recovery rule. |
-| `grammar(start, rules)` | Close a dense collection of rules into a grammar with the named start rule. |
+| `grammar(start, rules)` | Close an Array of rules into a grammar with the named start rule. |
 | `behind(pattern)` | Match `pattern` immediately behind the current position without consuming input. The pattern must be capture-free and have fixed length at most 255 bytes. |
 | `throw(label)` | Commit an uncaught labeled failure at the current position. |
 
@@ -96,12 +96,16 @@ The basic constructors have these meanings:
 surrogate code points. It validates code-point range encodings, not Unicode
 scalar values, and does not put other patterns into a Unicode mode.
 
-Grammar names and throw labels must be strings or integers at run time.
-Their types are significant: `"1"`, `"01"`, `1`, and `0` are four distinct
-names. A `Rule` collection must have exactly the integer keys `1..N`, with no
-holes or extra keys, no duplicate rule names, no more than 1000 rules, and a
-rule whose name equals `start`. A Titan Map and an ordinary Lua table are
-both accepted when they satisfy those rules.
+Grammar names and throw labels are strings. Their bytes are significant:
+`""`, `"1"`, `"01"`, and strings containing NUL are all distinct. Integer
+names and labels are rejected at the Titan/Lua boundary.
+
+The `rules` value is a Titan Array, not a Map. Every position from 1 through
+its length must hold a `Rule`; names must be unique, there may be no more than
+1000 rules, and one rule must have a name equal to `start`. An ordinary Lua
+table does not implicitly become an Array. Lua code that constructs grammars
+must receive the canonical Array proxy from Titan code, for example from an
+application-specific exported helper that returns `{Rule}`.
 
 `runtime` receives the subject, the current absolute one-based position, and
 the empty whole-match string `""`. Its first result controls the match:
@@ -156,6 +160,12 @@ past remaining choices and repetitions. Inside a positive or negative
 predicate, a throw becomes predicate failure instead of escaping. A grammar
 rule whose name equals the label is a recovery rule: it starts at the throw
 position, and a successful recovery resumes the original match.
+
+The string `"fail"` is reserved for ordinary failure:
+`throw("fail")` is exactly equivalent to `fail()`. It therefore falls through
+ordered choice, terminates a repetition normally, cannot enter a grammar
+recovery rule named `"fail"`, and reports the ordinary
+`nil, "fail", position` triple.
 
 ## Captures
 
@@ -317,9 +327,9 @@ An uncaught labeled failure returns:
 nil, label, absolute_throw_position
 ```
 
-Failure positions remain absolute when matching begins after byte 1. String
-and integer labels retain their original types. The values after `init` are
-available to `argument(n)`.
+Failure positions remain absolute when matching begins after byte 1. Labeled
+failures preserve the exact label string, including empty, numeric-looking,
+and binary strings. The values after `init` are available to `argument(n)`.
 
 Extra match arguments follow Titan's 200-element variadic limit. The PEG
 adapter caps the complete public result list at 200 values; its fixed first
@@ -402,7 +412,7 @@ end
 
 function compile(
   candidate: value,
-  definitions: {integer: Definition}?
+  definitions: {Definition}?
 ): Pattern
 function match(
   subject: string,
@@ -426,13 +436,16 @@ A pattern `candidate` must be a source string or a `Pattern` from this module.
 `compile(pattern, definitions)` returns the same pattern and ignores
 `definitions`. Definitions are used only while parsing a source string.
 
-`definitions`, when present, must have exactly the dense keys `1..N`, with no
-extras or duplicate names. Names use the identifier syntax
-`[A-Za-z_][A-Za-z0-9_]*`. `define` stores a pattern definition;
-`define_value` retains any other supplied value for use by a capture suffix.
-Nil and false definition values are rejected because the pinned notation
-treats them as absent; a particular suffix may impose a narrower native
-requirement when it consumes the value.
+`definitions`, when present, is a Titan Array whose positions all hold
+`Definition` values. An ordinary Lua table is not accepted; a Lua caller must
+obtain an Array proxy from Titan code. Definition names must be unique, but
+are otherwise arbitrary strings. A name that cannot be written by the source
+notation (including an empty, punctuated, numeric-only, or binary name) is
+accepted and simply remains unreachable from that source. `define` stores a
+pattern definition; `define_value` retains any other supplied value for use
+by a capture suffix. Nil and false definition values are rejected because the
+pinned notation treats them as absent; a particular suffix may impose a
+narrower native requirement when it consumes the value.
 
 Module-level `match` performs a leftmost search at or after the same normalized
 initial position used by `Pattern:match`. It returns nil on no match, or a
@@ -444,6 +457,10 @@ the old position-only search result. Use `Pattern:match` when matching must be
 anchored at the initial position or when the native failure label and position
 are required. Search bookkeeping consumes no capture slots, so `values()` can
 project the complete 200-value Titan capture limit.
+
+`match` is the module's sole search operation. PEG matching has no useful
+literal-versus-pattern distinction analogous to `string.find`, so the module
+does not export `find`.
 
 `gsub` returns only the transformed string, unlike Lua's `string.gsub`, which
 also returns a count. Its replacement is always a `(string) -> string` function.
@@ -476,7 +493,8 @@ Relabel accepts:
 * named back captures `=name`;
 * `-> string`, `-> number`, `-> {}`, and `-> name` capture suffixes;
 * match-time `=> name` and fold `~> name` suffixes;
-* `%{label}` throws, where the label is an identifier or decimal integer;
+* `%{label}` throws, where an identifier or decimal token supplies its exact
+  string bytes as the label;
 * whitespace and Lua-style `--` line comments.
 
 A quoted literal ends at the next matching quote; this notation has no
@@ -487,6 +505,9 @@ complements the class.
 
 After `^`, an identifier with no intervening space is a failure label:
 `p^label` means `choice(p, throw("label"))`. A decimal operand is repetition.
+The reserved label `fail`, whether written `%{fail}` or as `p^fail`, is
+ordinary failure. A decimal throw such as `%{01}` has the string label
+`"01"`; it is not converted to an integer.
 
 The predefined locale names are `alnum`, `alpha`, `cntrl`, `digit`, `graph`,
 `lower`, `print`, `punct`, `space`, `upper`, and `xdigit`, plus short names

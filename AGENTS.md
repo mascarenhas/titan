@@ -757,8 +757,16 @@ substitution, recursive; error on missing keys). Key facts:
   directly as a `value`, query it with `#`, and cast it to `T *` without a
   duplicate storage alias or wrapper record. Retain a record when it carries
   distinct logical length, offset/borrowed pointer, asynchronous lifetime or
-  type erasure, or related state. A maintainer spot-check of any one of these
-  patterns requires the same call-graph audit across the standard library.
+  type erasure, or related state. Likewise, construct ordinary internal tables
+  as typed Titan Arrays or Maps rather than calling `lua_createtable` and
+  recovering the result through `value`. If only a Lua metatable operation is
+  missing from Titan, declare the table at its actual semantic Array/Map type,
+  create its typed metatable in Titan, push those same values through
+  `ffi.lua_pushtvalue`, and use only that narrow Lua API operation.
+  `lua_setmetatable` mutates the existing table; do not manufacture a
+  placeholder Map type, round-trip it through `value`, or recast it afterward.
+  A maintainer spot-check of any one of these patterns requires the same
+  call-graph audit across the standard library.
 - **Apply Titan's existing call adjustment before widening an API.** A
   fixed call fills each missing parameter position with nil and discards the
   values of surplus arguments, including through Lua entry wrappers and
@@ -798,6 +806,15 @@ substitution, recursive; error on missing keys). Key facts:
   `Match?` carrying inclusive `first`/`last` plus the genuinely flexible
   capture projection from `Match:values()`; `Pattern:match` remains the
   anchored low-level operation. Do not recreate a position-only `peg.find`.
+  Public grammar rules and relabel definitions are dense Titan Arrays, not raw
+  Lua tables. PEG labels are exact strings all the way through the native
+  engine: empty, numeric-looking, and embedded-NUL labels are not integer
+  encodings or sentinel namespaces. The one reserved spelling,
+  `throw("fail")`, constructs ordinary PEG failure itself; it must be
+  indistinguishable from `fail()` inside choice, repetition, grammar recovery,
+  and the final match result. Numeric recovery labels produced by the vendored
+  LPegLabel C API remain an internal compatibility detail and must not leak
+  into Titan's string-label surface.
 - **Use `is` when the question is whether a written cast would succeed.**
   `exp is T` is the nonraising predicate twin of `exp as T`: the checker admits
   exactly the same source/target relation, the operand is evaluated exactly
@@ -966,7 +983,54 @@ earlier import belong behind one umbrella header imported once.
 
 `foreigntypes.convert` maps C declarations to the `Type.C*` family (`CVoid`, `CInteger`, `CFloat`, `CPointer`, `CArray`, `CStruct`, `CUnion`, `CFunction`, `CTypedef`, `CModule`, and owned storage wrappers). C imports are namespaces, not first-class values: the checker represents them as `Type.CModule` (renamed from the prototype's foreign-module type), typedef-qualified names such as `c.T` may be used in local annotations, and `types.serialize` rejects any exported function/method/variable type that mentions a C FFI type. An eligible named file-scope tag-only `struct T` or `union T` is published as the base-name Titan type `c.T`, but remains its canonical `CStruct`/`CUnion` and generates exact tag spelling; do not invent a `CTypedef`, header alias, or ordinary C identifier. A real same-name typedef always wins. C aggregate fields, C array indexing, `#` on static arrays and counted owned buffers, and explicit C vararg calls are implemented; C array indexing is 0-based, bounds-checked for `CArray` and counted `COwned`, and null-checked but otherwise unchecked for raw `CPointer`. Object-pointer conversions, C arithmetic, relational/equality, bitwise, and shift operators, C promotions, and mixed Titan/C operands follow the target profile plus the contextual probe policy; they do not reuse Titan's Lua-semantics operator helpers. Titan's `and`/`or`/`not` remain excluded from C-mode operators.
 
-Owned C objects are Titan-owned Lua userdata payloads allocated by the generated `.new()` and `.new_array(count)` pseudo-functions on C types. They are zeroed, anchored on the Lua stack during initialization, stamped with a per-owned-C-type metatable for `value` cast checks, and need no finalizer because the Lua GC owns the payload; dynamic array counts are reconstructed from `Udata.len`. Function-local complete non-pointer C structs, unions, and fixed arrays may also be declared without a right-hand side as zero-initialized automatic objects. Their lifetime is the generated C block, no escape analysis is attempted, and aggregate values are spilled through volatile byte storage around catchable Titan calls so normal-return mutation commits while a caught longjmp reloads the last Titan-visible state. Owned allocation rejects `void`, incomplete aggregates, C array typedefs, and structs/unions with flexible array members. Automatic storage accepts complete fixed arrays, including imported array-typedef and nested-array shapes, but rejects void, incomplete, flexible-array-member, and GC-bearing objects. Imported/static C functions can be converted to compatible C function pointers and called through them; adapting a Titan function to a C callback ABI remains a parked follow-up alongside `CAdopted` lifetimes and stronger Lua C API coverage. `c-parser/typed.lua` (used only by c-parser) is a runtime signature-checking DSL that ships **disabled** — `typed.off()` is the last line; flip to `typed.on()` to debug c-parser type confusion.
+Owned C objects are Titan-owned Lua userdata payloads allocated by the generated
+`.new()` and `.new_array(count)` pseudo-functions on C types. Their source
+spellings are `owned *T` for one object and `owned T[]` for a dynamically
+counted array; aliases and a whole-type trailing `?` are allowed locally, but
+any public surface containing an owned C type is rejected just like every
+other C-bearing type. They are zeroed, anchored on the Lua stack during
+initialization, stamped with a per-owned-C-type metatable for `value` cast
+checks, and need no finalizer because the Lua GC owns the payload; dynamic
+array counts are reconstructed from `Udata.len`. An owner implicitly converts
+to its corresponding raw object pointer where C code borrows it. Casting an
+`owned char[]`, `owned signed char[]`, or `owned unsigned char[]` directly to
+`string` copies exactly the counted payload, including embedded NULs; a raw
+character pointer cast retains NUL-terminated C-string semantics. Do not
+manufacture an intermediate Lua stack value, parallel `value` storage field,
+or duplicate length record for capabilities already carried by an owner.
+Function-local complete non-pointer C structs, unions, and fixed arrays may
+also be declared without a right-hand side as zero-initialized automatic
+objects. Their lifetime is the generated C block, no escape analysis is
+attempted, and aggregate values are spilled through volatile byte storage
+around catchable Titan calls so normal-return mutation commits while a caught
+longjmp reloads the last Titan-visible state. Owned allocation rejects `void`,
+incomplete aggregates, C array typedefs, and structs/unions with flexible array
+members. Automatic storage accepts complete fixed arrays, including imported
+array-typedef and nested-array shapes, but rejects void, incomplete,
+flexible-array-member, and GC-bearing objects. Imported/static C functions can
+be converted to compatible C function pointers and called through them;
+adapting a Titan function to a C callback ABI remains a parked follow-up
+alongside `CAdopted` lifetimes and stronger Lua C API coverage. Generated
+run-time type tags for C-bearing callable types are module-scoped because
+foreign C type identity is compilation-unit-local; never coalesce those
+registry keys globally by rendered spelling. `c-parser/typed.lua` (used only
+by c-parser) is a runtime signature-checking DSL that ships **disabled** —
+`typed.off()` is the last line; flip to `typed.on()` to debug c-parser type
+confusion.
+
+Use the explicit C-`void *` cast instead of Lua-stack round trips when native
+code needs a Titan GC object's identity. Arrays and Maps expose their backing
+`Table *`, nominal records expose their `Udata *`, and function values expose
+the collectable object carried by their boxed `TValue`; a noncollectable
+function-typed value makes `is` false and `as` raise. Strings deliberately
+remain byte pointers, `COwned` remains its payload pointer, and arbitrary
+`value` does not acquire a GC-identity interpretation. C pointer shapes,
+including function pointers, may be explicitly erased to `void *` (the
+function-pointer case must use `titan_cast_func`). Materialize each GC source
+exactly once and anchor it through later argument setup, but remember that the
+result is borrowed: retaining the C pointer does not keep the Titan object
+alive. Do not add `lua_pushtvalue`/`lua_togco` helpers or parallel storage just
+to recover an identity already represented by this cast.
 
 The 0.18 `titan.uv` sources import `UV_E*` enumerators directly and call public
 libuv operations directly, including process, stat, DNS traversal/release,
@@ -981,6 +1045,14 @@ libuv wrappers, including the old DNS/address helpers, must not return.
 Archive-backed generated modules now have direct undefined references to those
 external callbacks and no references to the retired helpers, which is why this
 boundary requires compiled-module ABI 0.18 rather than 0.17.
+Ordinary libuv handles, requests, buffers, and copied byte arrays are owned
+directly by source-level `owned *T`/`owned T[]` fields. The native dispatcher
+therefore uses exactly five userdata owner slots: owner, main thread,
+dispatcher, metadata, and buffer. The minicoro object remains the sole
+intentional custom `lua_newuserdatauv` allocation in the standard library.
+Records remain only where they add logical length, borrowed offsets, or
+asynchronous lifetime state; capacity-sized or NUL-terminated backing arrays
+must not be cast wholesale to strings when only a logical prefix is valid.
 
 ## Test suite notes
 

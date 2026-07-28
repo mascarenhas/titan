@@ -132,6 +132,8 @@ Supported C type families:
 | `struct S`, `union U` | C aggregate type with fields when the header exposes them; named file-scope tags are source-nameable through the foreign module |
 | `typedef T name` | C typedef that resolves through its target |
 | exact by-value `TValue` | distinct C `TValue`, with FFI coercions to/from Titan `value` |
+| `owned *c.T` | one GC-owned C `T` object |
+| `owned c.T[]` | a dynamically counted GC-owned array of C `T` |
 
 Imported C types can appear in **local** type annotations:
 
@@ -149,7 +151,19 @@ return type, a public variable, or a public record member that mentions a C FFI
 type is rejected. This version deliberately does not serialize C types into
 compiled Titan module interfaces, because another Titan module would also need
 the right C header included in its generated C. A local record field may mention
-a C type because it remains private to the defining module.
+a C type because it remains private to the defining module. Source-written
+owned types have the same boundary: they may be used in local aliases,
+variables, local record fields, local callable parameters and results, options,
+Arrays, and Maps, but any public type containing one is rejected.
+
+An option stores its present value in a Lua `TValue`. A direct C type may
+therefore be used as an option base only when it has that boxed
+representation: C integers, C floats, non-function object pointers, exact
+`TValue`, and owned C storage are supported. By-value C aggregates and arrays,
+direct C functions, and C function pointers are not valid option bases.
+This restriction does not make an ordinary Titan container foreign: an Array,
+Map, or local callable containing owned C values remains a boxed Titan value
+and may itself cross through `value`.
 
 Pointer types can also be written directly from an imported C type:
 
@@ -223,6 +237,9 @@ Allowed conversions include:
   null pointer;
 * C arrays and counted owned C arrays to compatible C pointers;
 * any non-function C pointer to `void *`;
+* a C function pointer to C `void *` with a written cast;
+* a Titan Array, Map, record, or function value to C `void *` with a written
+  identity cast;
 * non-pointer by-value C object expressions to compatible `const *T` pointers,
   materialized as the address of the C expression for the duration of the
   foreign call;
@@ -230,6 +247,8 @@ Allowed conversions include:
   pointer parameters, for C out-parameters;
 * Titan `string` to `char *` or `void *` for calls;
 * C `char *` or `void *` to Titan `string` with an explicit `as string`;
+* a counted owned array of C `char`, `signed char`, or `unsigned char` to
+  Titan `string`, copying its exact allocated byte length;
 * a foreign C function name to a compatible C function pointer type;
 * C integers, C floats, non-function C pointers, and owned C userdata to/from
   `value`, with the same run-time checks used at the Lua boundary.
@@ -241,7 +260,40 @@ Allowed conversions include:
 
 By-value C structs and unions cannot cross through `value` in v1. C function
 pointers are callable and nullable, but they are not C object pointers: they
-cannot cross through `value` or through `void *`.
+cannot cross through `value`. A written `as` cast may erase a C function
+pointer to `void *`; Titan uses its toolchain portability cast rather than
+pretending that this is an ordinary C object-pointer coercion. The reverse
+`void *`-to-function-pointer cast is not part of this rule.
+
+The explicit GC-identity cast exposes the native object address:
+
+* Arrays and Maps expose their backing `Table *`;
+* records expose their full-userdata `Udata *`;
+* a function exposes the GC object carried by its boxed function value.
+
+The function case has a dynamic precondition because function-typed values
+defer callability checks until call time. With
+`local ffi = foreign import "titan/ffi.h"`,
+`f is ffi.titan_ffi_void_ptr` is false when the boxed value is not
+collectable, and `f as ffi.titan_ffi_void_ptr` raises in that case. The operand
+is evaluated exactly once.
+
+This identity rule is explicit only: it does not make any of these Titan types
+implicitly compatible with C `void *`, and it does not unwrap an option.
+Arbitrary `value` also gains no GC-identity conversion; its existing checked
+conversion to a C pointer still accepts only the ordinary lightuserdata/nil
+representation. Titan strings retain their established pointer conversion to
+the first string byte, and owned C objects retain their payload-pointer
+conversion. Neither exposes the enclosing GC object's identity.
+
+Every pointer produced by these conversions is borrowed. Titan keeps the
+source GC object rooted while the cast is evaluated and while later arguments
+for the same call are prepared, but storing or returning the C pointer does
+not extend the object's lifetime. Keep the original Titan value reachable for
+as long as C retains the pointer. The Array, Map, record, and function
+addresses are Lua/Titan runtime representations, not public payload layouts;
+code must not dereference, mutate, free, or reallocate them unless it is
+deliberately using the matching internal runtime contract.
 
 Mutable address coercions are intentionally limited to local variables and
 formal parameters that have C types, because C may write through the pointer:
@@ -535,22 +587,52 @@ receiver.
 
 ## Owned C Objects
 
-Any supported C object type has two pseudo-functions on its type namespace:
+Owned C storage has source-written types as well as allocation
+pseudo-functions:
 
 ```lua
 local ffi = foreign import "titan/ffi.h"
 
 function make(): integer
-    local one = ffi.titan_ffi_int.new()
-    local many = ffi.titan_ffi_int.new_array(16)
+    local one: owned *ffi.titan_ffi_int =
+        ffi.titan_ffi_int.new()
+    local many: owned ffi.titan_ffi_int[] =
+        ffi.titan_ffi_int.new_array(16)
     return #many
 end
 ```
 
-`T.new()` allocates one zeroed C object. `T.new_array(count)` allocates `count`
-zeroed adjacent objects and records the count through the userdata payload size.
-The returned value is an owned C userdata whose lifetime belongs to Titan's Lua
-GC. No finalizer is installed.
+`owned *T` means one GC-owned object whose C payload type is `T`.
+`owned T[]` means a dynamically counted GC-owned array whose element type is
+`T`. The first `*` in the scalar spelling marks ownership; it is not a pointer
+layer in the payload. Consequently, `owned **T` owns one `T *` object, while
+`owned *T[]` owns an array of `T *` elements.
+
+The payload must be an imported, complete, allocatable C object type. Titan
+rejects `void`, direct C function types, incomplete structs and unions, C array
+typedefs, structs with flexible array members, Titan types, and nested owned
+storage. Fixed extents such as `owned T[4]` are not part of the owner syntax;
+use `owned T[]` and supply the count when allocating.
+
+`T.new()` allocates one zeroed C object and returns `owned *T`.
+`T.new_array(count)` allocates `count` zeroed adjacent objects and returns
+`owned T[]`. The inferred and written shapes remain distinct even when the
+array count is one. Both are full userdata whose lifetime belongs to Titan's
+Lua GC. No finalizer is installed.
+
+A trailing option marker wraps the complete owner:
+
+```lua
+local type Handle = owned *ffi.titan_ffi_int
+
+local record State
+    local handle?: Handle
+end
+```
+
+Here `Handle?` and the field shorthand `handle?: Handle` mean that the owner
+may be absent. The C payload itself is never an option, and an optional owner
+must be explicitly unwrapped before it adjusts to a C pointer.
 
 These pseudo-constructor calls are also valid module-variable initializers when
 their arguments are constant:
@@ -566,23 +648,45 @@ Each module instance performs the allocation once and keeps the owned userdata
 in its GC-traced module state. A `new_array` count that reads another module
 variable is not a constant initializer and is rejected.
 
-Passing an owned C object or owned C array to a C function expecting `T *`
-passes a pointer to the userdata payload:
+Passing a mutable owner to a C function expecting `T *`, `const T *`, or a
+permitted `void *` passes a pointer to the userdata payload. A counted owner
+adjusts to its element pointer. Qualifiers may be added but not discarded, so
+an owner of typedef-qualified `const T` cannot become `T *` or mutable
+`void *`:
 
 ```lua
 local ffi = foreign import "titan/ffi.h"
 local stdio = foreign import "stdio.h"
 
 function formatted_len(s: string): integer
-    local buf = ffi.titan_ffi_char.new_array(32)
+    local buf: owned ffi.titan_ffi_char[] =
+        ffi.titan_ffi_char.new_array(32)
     return stdio.snprintf(buf, 32, "%s", s)
 end
 ```
 
-Allocation is intentionally limited in v1. Titan rejects owned allocation of
-`void`, incomplete struct/union types, C array typedefs, and structs with a
-flexible array member. Flexible array members need a dedicated design for
-passing the member length, storing it, and bounds-checking the member.
+Counted owned character arrays have one additional explicit conversion:
+
+```lua
+local bytes: owned ffi.titan_ffi_char[] =
+    ffi.titan_ffi_char.new_array(4)
+bytes[0] = 65 as ffi.titan_ffi_char
+bytes[1] = 0 as ffi.titan_ffi_char
+bytes[2] = 66 as ffi.titan_ffi_char
+bytes[3] = 0 as ffi.titan_ffi_char
+local binary = bytes as string       -- four bytes: "A\0B\0"
+```
+
+The conversion is binary-safe: it copies exactly the owned array's byte
+length, including embedded and trailing NUL bytes. It is available for arrays
+of `char`, `signed char`, and `unsigned char`, including typedef chains and
+legal qualifiers. A scalar character owner and a non-character array do not
+have this cast. Casting the same owner to `*char` first retains the older C
+pointer conversion: `(bytes as *ffi.titan_ffi_char) as string` scans to the
+first NUL.
+
+Indexing a counted owner is 0-based and bounds-checked, and `#owner` returns
+its element count. Scalar owners have neither a length nor array indexing.
 
 ## Linking And Platform Requirements
 

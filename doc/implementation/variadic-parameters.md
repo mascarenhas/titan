@@ -338,11 +338,13 @@ typedef struct { lu_byte n_args; Udata      **args; } TitanVargNominal;
 
 Scalars are unboxed; collectable elements are raw pointers (`TString*`,
 `Table*`); `value`/option/function elements are tagged 16-byte `TValue`s; a
-record (`Type.Nominal`) gets its own `Udata*` struct with **no boxing**. The
-coder picks the struct with `varg_struct_name(elemtype)`, keyed on the
+record (`Type.Nominal`) and an owned C value (`Type.COwned`) use the
+`Udata*`/`TitanVargNominal` family with **no extra boxing**. The coder normally
+picks the struct with `varg_struct_name(elemtype)`, keyed on the
 `ctype(elemtype)` string via `varg_struct_by_ctype` (the Lua-side mirror of the
-seven typedefs); a Pointer element has no entry and would `error`, but the
-checker bans it first. Because the structs live in `titan.h` (which every
+seven typedefs). `COwned` is selected semantically rather than from rendered C
+declarator whitespace. A Pointer element has no entry and would `error`, but
+the checker bans it first. Because the structs live in `titan.h` (which every
 generated unit `#include`s), the coder emits no struct definitions.
 The same family serves flexible *output* runs. Ownership distinguishes the
 directions: an input descriptor is a borrowed view of caller arguments, while
@@ -509,10 +511,13 @@ parameter:
 ### First-class value calls: dispatch by tag
 
 A variadic function is an ordinary first-class value; `codevaluecall` dispatches
-it exactly like a non-variadic value. The runtime function-type tag (a
-`static const void *` published/recovered through the Lua registry, keyed by
-`types.tostring(ftype)` so two modules agree) **folds in the vararg element**,
-because `function_type_tag` keys on the full type string and `equals`
+it exactly like a non-variadic value. The runtime function-type tag is a
+`static const void *` published/recovered through the Lua registry. C-free
+callable shapes use the full `types.tostring(ftype)` key so different modules
+agree. A C-bearing shape uses that diagnostic spelling in the defining module's
+private tag namespace, and the module-local cache separately marks C-bearing
+keys so a C typedef whose spelling resembles a Titan type cannot alias it. The
+tag **folds in the vararg element** because the full callable shape
 distinguishes `...: integer` from `...: value`. So:
 
 * **Tag matches the static type** → the **native fast path**: build the struct

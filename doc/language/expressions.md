@@ -318,7 +318,8 @@ arrays, maps, records — is a compile-time error
 (`cannot concatenate with boolean value`, etc.), as is concatenating a
 `value` directly (`cannot concatenate with value of type 'value'` —
 cast it to `string` first). Option operands are implicitly unwrapped,
-with a run-time error if they are nil.
+with a run-time error if they are nil. A concatenation whose total length
+cannot fit in a Titan/Lua string raises `string length overflow`.
 
 ## Length: `#`
 
@@ -364,6 +365,10 @@ checker accepts are deliberately few:
 | C numeric type | another C numeric type | no |
 | C `char *` or `void *` (FFI) | `string` | yes — raises on `NULL` |
 | `string` | C `char *` or `void *` (FFI) | no |
+| non-function C pointer | C `void *` | no |
+| C function pointer | C `void *` | no — requires a written cast |
+| Array, Map, or record | C `void *` | no — exposes the native GC identity |
+| function | C `void *` | yes — raises if its boxed value is not collectable |
 | C integer, C float, ordinary C pointer, or owned C userdata | `value` | never — ordinary pointers become lightuserdata; owned objects stay full userdata |
 | `value` | C integer, C float, ordinary C pointer, or owned C userdata | yes — checked |
 | Lua-internal `Udata *` | `value` | never — non-NULL becomes that same full userdata; NULL becomes nil |
@@ -405,6 +410,8 @@ For the admitted casts that can fail, the test uses the same checks as `as`:
 * `o is T` for `o: T?` is false only when `o` is nil.
 * A C `char *` or `void *` tested as `string` is false only when the pointer
   is `NULL`.
+* A function value tested as C `void *` is true only when its boxed value
+  carries a collectable GC object.
 
 Every total admitted cast produces `true`. Two deliberately loose boundary
 casts are worth spelling out: `value as boolean` uses truthiness, and
@@ -415,6 +422,11 @@ when it is invoked. The same always-true rule applies to `value is value` and
 `value is C-TValue`. An option target uses the option-slot conversion instead:
 `value is boolean?` accepts only nil or an actual boolean, while
 `value is <function type>?` remains unchecked.
+
+GC-identity pointers are borrowed internal addresses. The cast roots its
+operand during evaluation and later argument setup, but retaining the pointer
+does not retain the Array, Map, record, or function. See
+[the FFI lifetime rules](ffi.md#casts-and-coercions).
 
 ```lua
 function unbox(v: value): integer

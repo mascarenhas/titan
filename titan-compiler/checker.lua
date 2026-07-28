@@ -262,7 +262,7 @@ end
 --   loc: location of the term that is being compared
 local function checkmatch(term, expected, found, errors, loc)
     local ok
-    if types.is_c(expected) or types.is_c(found) then
+    if types.is_direct_c(expected) or types.is_direct_c(found) then
         ok = types.equals(types.resolve_c_typedef(expected),
             types.resolve_c_typedef(found))
     else
@@ -317,9 +317,10 @@ local function has_varg_representation(t)
         or tag == "Type.Function" or tag == "Type.COwned" then
         return true
     elseif tag == "Type.Option" then
-        -- Option values use the TValue descriptor, unless their tree contains
-        -- a C FFI type that `ctype` would route through foreign C lowering.
-        return not types.is_c(t)
+        -- Every supported Option uses the TValue descriptor. Check the base
+        -- here as a defensive mirror of TypeOption validation so programmatic
+        -- types cannot reach the coder with an unboxable C aggregate/function.
+        return types.has_tvalue_representation(t.base)
     elseif tag == "Type.Typedef" then
         return has_varg_representation(t._type)
     end
@@ -1099,12 +1100,12 @@ local function c_aggregate_storage_expression(exp)
             return true
         elseif var._decl and var._decl._tag == "Type.CField"
                and var.exp and var.exp._type
-               and types.is_c(var.exp._type) then
+               and types.is_direct_c(var.exp._type) then
             return c_assignment_base_has_storage(var.exp)
         end
     elseif var._tag == "Ast.VarBracket"
            and var.exp1 and var.exp1._type
-           and types.is_c(var.exp1._type) then
+           and types.is_direct_c(var.exp1._type) then
         return c_assignment_base_has_storage(var.exp1)
     end
 
@@ -1131,7 +1132,7 @@ local function check_c_assignment_storage(var, errors)
        and var._decl._tag == "Type.CField" then
         base = var.exp
     elseif var._tag == "Ast.VarBracket" and var.exp1
-           and var.exp1._type and types.is_c(var.exp1._type) then
+           and var.exp1._type and types.is_direct_c(var.exp1._type) then
         base = var.exp1
     else
         return
@@ -1156,11 +1157,27 @@ end
 
 local function c_allocation_error(typ, st)
     local rtyp = c_resolve(typ)
+    if not rtyp or rtyp._tag == "Type.Invalid" then
+        return nil
+    elseif rtyp._tag == "Type.CModule" or not types.is_direct_c(typ) then
+        return string.format(
+            "C allocation requires a C FFI object type, not '%s'",
+            types.tostring(typ))
+    elseif rtyp._tag == "Type.COwned" then
+        return string.format(
+            "cannot nest owned C storage inside owned C storage ('%s')",
+            types.tostring(typ))
+    elseif rtyp._tag == "Type.CVoid" then
+        return "cannot allocate C void type in this FFI version"
+    elseif rtyp._tag == "Type.CFunction" then
+        return string.format(
+            "cannot allocate C function type '%s' in this FFI version",
+            types.tostring(typ))
+    end
+
     local layout_error = incomplete_c_object_error(
         rtyp, st, "C allocation")
-    if rtyp._tag == "Type.CVoid" then
-        return "cannot allocate C void type in this FFI version"
-    elseif layout_error then
+    if layout_error then
         if rtyp._tag == "Type.CStruct"
            or rtyp._tag == "Type.CUnion" then
             return string.format(
@@ -1298,7 +1315,9 @@ typefromnode = util.make_visitor({
 
     ["Ast.TypeCPointer"] = function(node, st, errors)
         local pointee = typefromnode(node.subtype, st, errors)
-        if not types.is_c(pointee) then
+        local resolved = c_resolve(pointee)
+        if not types.is_direct_c(pointee)
+           or (resolved and resolved._tag == "Type.COwned") then
             return invalid(errors, node.loc,
                 "C pointer type can only point to a C FFI type, not '%s'",
                 types.tostring(pointee))
@@ -1308,13 +1327,27 @@ typefromnode = util.make_visitor({
 
     ["Ast.TypeCArray"] = function(node, st, errors)
         local elem = typefromnode(node.base, st, errors)
-        if not types.is_c(elem) then
+        local resolved = c_resolve(elem)
+        if not types.is_direct_c(elem)
+           or (resolved and resolved._tag == "Type.COwned") then
             elem = invalid(errors, node.base.loc or node.loc,
                 "fixed C array element type must be a C FFI type, not '%s'",
                 types.tostring(elem))
         end
         local len = node.length and node.length.value
         return types.CArray(elem, len)
+    end,
+
+    ["Ast.TypeCOwned"] = function(node, st, errors)
+        local payload = typefromnode(node.subtype, st, errors)
+        if payload._tag == "Type.Invalid" then
+            return payload
+        end
+        local alloc_err = c_allocation_error(payload, st)
+        if alloc_err then
+            return invalid(errors, node.loc, alloc_err)
+        end
+        return types.COwned(payload, node.count and true or false)
     end,
 
     ["Ast.TypeArray"] = function(node, st, errors)
@@ -1358,7 +1391,14 @@ typefromnode = util.make_visitor({
     end,
 
     ["Ast.TypeOption"] = function(node, st, errors)
-        return optionize(typefromnode(node.basetype, st, errors))
+        local typ = optionize(typefromnode(node.basetype, st, errors))
+        if typ._tag == "Type.Option"
+           and not types.has_tvalue_representation(typ.base) then
+            return invalid(errors, node.loc,
+                "option type cannot contain '%s' because it has no TValue representation",
+                types.tostring(typ.base))
+        end
+        return typ
     end
 })
 
@@ -1373,7 +1413,7 @@ local function is_mutable_c_address_source(source)
     local decl = source.var._decl
     return decl and decl._tag == "Ast.Decl"
         and not decl._captured
-        and types.is_c(source._type)
+        and types.is_direct_c(source._type)
 end
 
 local function mark_mutable_c_address_source(source)
@@ -3318,7 +3358,7 @@ checkvar = util.make_visitor({
                     node.exp.var.name, node.name,
                     node.exp.var.exp._type.name, node.exp.var.name)
             end
-        elseif types.is_c(ltype) or is_c_type_namespace(node.exp) then
+        elseif types.is_direct_c(ltype) or is_c_type_namespace(node.exp) then
             if is_c_type_namespace(node.exp) then
                 local pseudo_error
                 node._decl, pseudo_error =
@@ -4030,6 +4070,11 @@ local function check_explicit_cast_relation(node, st, errors)
        and types.c_mutable_address_coerceable(source, target)
        and not types.c_address_coerceable(source, target) then
         mark_mutable_c_address_source(node.exp)
+        ok = true
+    elseif types.is_c_function_pointer_void_cast(source, target) then
+        -- This one written conversion deliberately crosses C's function- and
+        -- object-pointer categories. Code generation uses titan_cast_func;
+        -- keep the contextual/implicit category rejection unchanged.
         ok = true
     else
         local conversion = checker._unsafe_c_pointer_conversion(

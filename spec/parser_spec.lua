@@ -777,6 +777,106 @@ end
         assert_type_ast("foo.bar", { _tag = "Ast.TypeQualName", module = "foo", name = "bar" } )
     end)
 
+    it("can parse scalar and counted owned C types", function()
+        assert_type_ast("owned *ffi.Item", {
+            _tag = "Ast.TypeCOwned",
+            subtype = {
+                _tag = "Ast.TypeQualName",
+                module = "ffi",
+                name = "Item",
+            },
+            count = false,
+        })
+        assert_type_ast("owned ffi.Item[]", {
+            _tag = "Ast.TypeCOwned",
+            subtype = {
+                _tag = "Ast.TypeQualName",
+                module = "ffi",
+                name = "Item",
+            },
+            count = true,
+        })
+        assert_type_ast("owned **ffi.Item", {
+            _tag = "Ast.TypeCOwned",
+            subtype = {
+                _tag = "Ast.TypeCPointer",
+                subtype = {
+                    _tag = "Ast.TypeQualName",
+                    module = "ffi",
+                    name = "Item",
+                },
+                const = false,
+            },
+            count = false,
+        })
+        assert_type_ast("owned *ffi.Item[]", {
+            _tag = "Ast.TypeCOwned",
+            subtype = {
+                _tag = "Ast.TypeCPointer",
+                subtype = {
+                    _tag = "Ast.TypeQualName",
+                    module = "ffi",
+                    name = "Item",
+                },
+                const = false,
+            },
+            count = true,
+        })
+    end)
+
+    it("applies the option suffix to the complete owned C type", function()
+        assert_type_ast("owned *ffi.Item?", {
+            _tag = "Ast.TypeOption",
+            basetype = {
+                _tag = "Ast.TypeCOwned",
+                subtype = {
+                    _tag = "Ast.TypeQualName",
+                    module = "ffi",
+                    name = "Item",
+                },
+                count = false,
+            },
+        })
+        assert_type_ast("owned ffi.Item[]?", {
+            _tag = "Ast.TypeOption",
+            basetype = {
+                _tag = "Ast.TypeCOwned",
+                subtype = {
+                    _tag = "Ast.TypeQualName",
+                    module = "ffi",
+                    name = "Item",
+                },
+                count = true,
+            },
+        })
+    end)
+
+    it("reports malformed owned C type shapes at the owned production",
+    function()
+        assert_type_syntax_error("owned ffi.Item", "COwnedShape")
+        assert_type_syntax_error("owned *", "OwnedPayload")
+        assert_type_syntax_error("owned ffi.Item[", "RBracketCOwned")
+        assert_type_syntax_error("owned ffi.Item[4]", "RBracketCOwned")
+    end)
+
+    it("retains owned type source locations", function()
+        local source =
+            "local x: owned ffi.Item[]? = nil"
+        local program = assert(parser.parse("owners.titan", source))
+        local option = program[1].decl.type
+        local owner = option.basetype
+        assert.same({
+            filename = "owners.titan",
+            line = 1,
+            col = 10,
+        }, owner.loc)
+        assert.same({
+            filename = "owners.titan",
+            line = 1,
+            col = 16,
+        }, owner.subtype.loc)
+    end)
+
     it("can parse array types", function()
         assert_type_ast("{int}",
             { _tag = "Ast.TypeArray", subtype =
@@ -1564,6 +1664,31 @@ end
                   type = { _tag = "Ast.TypeInteger" } },
                 { name = "visible",
                   type = { _tag = "Ast.TypeInteger" } } } },
+        })
+
+        assert_program_ast([[
+            record Owners
+                handle?: owned *ffi.Handle
+                local bytes?: owned ffi.Byte[]
+            end
+        ]], {
+            { _tag = "Ast.TopLevelRecord",
+              name = "Owners",
+              fields = {
+                { name = "handle", type = {
+                    _tag = "Ast.TypeOption",
+                    basetype = {
+                        _tag = "Ast.TypeCOwned",
+                        count = false,
+                    },
+                } },
+                { name = "bytes", islocal = true, type = {
+                    _tag = "Ast.TypeOption",
+                    basetype = {
+                        _tag = "Ast.TypeCOwned",
+                        count = true,
+                    },
+                } } } },
         })
     end)
 

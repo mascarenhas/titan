@@ -12,6 +12,7 @@ return typedecl("Ast", {
         TypeName        = {"loc", "name"},
         TypeCPointer    = {"loc", "subtype", "const"},
         TypeCArray      = {"loc", "base", "length"},
+        TypeCOwned      = {"loc", "subtype", "count"},
         TypeArray       = {"loc", "subtype"},
         TypeMap         = {"loc", "keystype", "valuestype"},
         TypeFunction    = {"loc", "argtypes", "rettypes", "varargtype", "flexrettype"},

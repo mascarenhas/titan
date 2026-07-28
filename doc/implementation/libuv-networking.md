@@ -5,22 +5,25 @@ library](../language/standard-library-net.md).
 
 The `net` facade contains no C FFI types. Each `Connection` or `Server` holds
 one local `uv.uv_tcp_t` record; the `uv` module alone can unwrap its local
-`*uv_tcp_t` field. Repeated calls therefore read the native pointer directly
-without allocating pointer-boxing userdata.
+`owned *uv_tcp_t` field. Repeated calls therefore adjust the native owner
+directly to a pointer without allocating pointer-boxing userdata.
 
 ## Ownership graph
 
 An active Runtime adds a pending networking-owner list and a TCP resource list
 to its existing task, timer, and filesystem graph. Request and handle storage
-is allocated as Lua userdata using the imported libuv type's `.sizeof`, then
-kept alive by one exact Titan owner record. Libuv `data` points to that owner
-record, never to the separate storage userdata.
+is allocated as an owned FFI value with the complete imported libuv type's
+`.new()`, then kept alive directly by one exact Titan owner record. Libuv
+`data` points to that Titan owner record, not to the native allocation's
+owner userdata.
 
 Persistent `uv_tcp_t` owners and private DNS, connect, write, and shutdown
-owners keep the fixed callback layout used by `titan_uv.c`. Native callbacks
-recover the module-cached main thread and fixed dispatcher closure, obtain the
-module Udata from that closure, and call the dispatcher's Titan-native entry.
-They do not use a generated Lua entry or a second protected-call layer.
+owners keep the fixed five-slot callback layout used by `titan_uv.c`: owned
+native handle/request, main thread, dispatcher, metadata, and family buffer.
+Native callbacks recover the module-cached main thread and fixed dispatcher
+closure, obtain the module Udata from that closure, and call the dispatcher's
+Titan-native entry. They do not use a generated Lua entry or a second
+protected-call layer.
 
 ## DNS extraction
 
@@ -35,10 +38,12 @@ The result walker uses the complete named `addrinfo`, `sockaddr`, and
 `sockaddr_storage` tags imported from the host `uv.h` closure. It accepts only
 IPv4/IPv6 entries with a non-null address whose length fits the host's exact
 `sockaddr_storage`, then copies them in resolver order into a typed, zeroed,
-GC-owned array of opaque `titan_uvshim_address` cells. The operation roots that
-owned array before the borrowed chain is released. Static assertions in the
-native runtime guarantee that each opaque cell is large and aligned enough;
-Titan never interprets its bytes.
+GC-owned array of opaque `titan_uvshim_address` cells. `AddressList` is a local
+alias of `owned shim.titan_uvshim_address[]`, so the operation roots that
+counted owner before the borrowed chain is released and uses `#addresses` as
+the number of usable cells. Static assertions in the native runtime guarantee
+that each opaque cell is large and aligned enough; Titan never interprets its
+bytes.
 
 The C callback passes libuv's borrowed `addrinfo` pointer directly to the
 trusted Titan dispatcher. The dispatcher first copies usable addresses, then
@@ -67,7 +72,7 @@ Once initialized, the read watcher remains active with or without a waiter.
 
 The C allocation callback is a thin native-Titan dispatch. It initializes
 libuv's supplied `uv_buf_t` to `{ NULL, 0 }`, then the Titan dispatcher creates
-a fresh `ffi.titan_ffi_char.new_array(suggested_size)`, roots that full userdata
+a fresh `ffi.titan_ffi_char.new_array(suggested_size)`, roots that owner
 as the Connection's current allocation, and writes its raw pointer and size to
 the descriptor. The descriptor belongs to libuv; it is not the bytes' owner.
 On supported Unix libuv pairs each allocation with its read callback before
@@ -75,15 +80,16 @@ requesting another for that stream, although one watcher dispatch can repeat
 that pair. A POLLHUP-only EOF callback can have no preceding allocation, so
 terminal handling accepts an empty current-allocation slot.
 
-Without a waiter, a positive read callback moves the current userdata into the
-Connection's `{Bytes}` queue; `Bytes.storage` is the GC edge for its raw pointer
-and queued buffers are not reused. With a waiter, the callback instead converts
-the current allocation directly to one binary string. It snapshots and clears
-the waiter and epoch before `drive_task`, clears the current root only after the
-bytes are queued or converted, and passes the string directly to the yielded
-read. The resumed Task may install a replacement waiter before the callback
-returns. A zero-length callback clears the current allocation and delivers
-nothing.
+`Bytes` is the counted character-owner type itself. Without a waiter, a
+positive read callback pairs the current owner with `nread` in a `ByteChunk`
+and moves that chunk into the Connection's queue; queued allocations are not
+reused. With a waiter, the callback instead converts exactly that logical
+prefix to one binary string, without including unused capacity. It snapshots
+and clears the waiter and epoch before `drive_task`, clears the current root
+only after the bytes are queued or converted, and passes the string directly
+to the yielded read. The resumed Task may install a replacement waiter before
+the callback returns. A zero-length callback clears the current allocation and
+delivers nothing.
 
 EOF and non-EOF read errors clear any current allocation, stop reading, and
 record a sticky terminal before driving arbitrary code. EOF directly resumes a

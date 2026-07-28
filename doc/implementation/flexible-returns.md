@@ -112,8 +112,9 @@ passes it through the role-aware `check_varg_elem(..., "return")` validator.
 The output descriptor families are the same seven representation families as
 input varargs, so `nil`, foreign pointers, and any type without a supported
 descriptor representation are rejected with return-specific diagnostics.
-`value` is retained as `Type.Value`; finite option projection never constructs
-an artificial `value?`.
+`COwned` uses the `Udata **` nominal family; `value` is retained as
+`Type.Value`; finite option projection never constructs an artificial
+`value?`.
 
 An unannotated lambda in an expected function context copies both the fixed
 `rettypes` and `flexrettype`. An explicit `: ()` keeps an empty fixed list and

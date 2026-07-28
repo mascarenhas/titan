@@ -88,11 +88,24 @@ local output = owned as *ffi.titan_ffi_char
 `new_array` creates the Lua full userdata, records its element count, and
 leaves `owned` as the traced GC root. C calls and pointer arithmetic use the
 cast pointer while `#owned` recovers the allocation length. The raw pointer is
-valid only while `owned` is live. Finalization pushes the exact logical length
-with `lua_pushlstring` and converts that stack value back to a Titan string.
-Usually that length is `#owned`; `snprintf` destinations are the exception,
-because they allocate `required + 1` bytes for the terminating zero but finish
-only the `required` result bytes.
+valid only while `owned` is live. Casting the complete owned array to `string`
+creates an immutable Lua string with exactly that recorded length, including
+embedded and trailing zero bytes; no intermediate `StringBytes` record,
+untyped storage cast, or userdata constructor is needed.
+
+`snprintf` destinations are the sole prefix-length exception. They allocate
+`required + 1` bytes for C's terminating zero but return only the first
+`required` bytes. After verifying the second `snprintf` result, their small
+finishing helper copies that prefix into an exact-length owned array and casts
+the array directly to `string`. This preserves embedded zero bytes, makes the
+zero-length case ordinary Titan code, and avoids manipulating the Lua stack.
+Every other exact-size builder casts its complete owned array directly without
+the prefix copy.
+
+The target maximum string length is likewise invariant for one loaded module.
+The initializer calls `maximum_string_bytes()` once and stores the result in
+`MAXIMUM_STRING_BYTES`; hot allocation and growth paths read that module
+value.
 
 All size arithmetic remains in a checked Titan integer until it is known to
 fit both `lua_Integer` and target `size_t`. Multiplication and addition use
@@ -159,20 +172,22 @@ The conversion helper:
 2. pushes the `TValue` carried by `value`;
 3. calls `luaL_tolstring`;
 4. captures the exact resulting Lua string;
-5. restores the saved top in `finally`.
+5. restores the saved top with `defer`.
 
 This bypasses `_G.tostring` while preserving the native number,
 boolean/nil, and `__tostring` behavior. `format`'s `%s` path calls the same
 helper.
 
-The format/pack dynamic operands have their own stack-balanced helpers for
-`luaL_checkinteger`, `luaL_checknumber`, and `luaL_checklstring`. Each helper
-saves/restores the exact top around one pushed `value`. A caught conversion or
-metamethod error therefore cannot accumulate stale roots.
+Format and pack do not push dynamic operands through
+`luaL_checkinteger`, `luaL_checknumber`, or `luaL_checklstring`. Their
+format-selected branches use ordinary checked Titan casts: `as integer`,
+`as float`, or `as string`. That removes the raw stack helpers and deliberately
+rejects Lua's numeric-string and number-to-string coercions. The integer cast
+still admits an exactly integral representable float.
 
-These calls are a trusted standard-library-internal use of the raw Lua C API,
-not a general promise that arbitrary Titan FFI code can manipulate `L`
-safely. The complete discipline and scope are recorded in
+The `tostring` helper is a trusted standard-library-internal use of the raw
+Lua C API, not a general promise that arbitrary Titan FFI code can manipulate
+`L` safely. The complete discipline and scope are recorded in
 [Lua C API FFI follow-up](ffi-lua-api-followup.md).
 
 ## Format translation
@@ -203,9 +218,11 @@ chunks and their running byte count; at completion it allocates the exact
 final destination and concatenates the chunks in one allocation-free copy
 window.
 
-Each rendering closure obtains its operand with the exact Lua C conversion,
-then calls C99 `snprintf` once to obtain the length and again with an exactly
-sized rooted buffer where that conversion uses C formatting.
+Each rendering closure casts its operand to the Titan type selected by the
+conversion. Integer families use `as integer`, number families use `as float`,
+and `%s` calls the module's explicit `tostring`. C-formatted conversions then
+call C99 `snprintf` once to obtain the length and again with a rooted
+`required + 1` destination.
 
 The C variadic call is statically explicit for that conversion. Titan does not
 attempt to forward a heterogeneous Titan `...` descriptor to C.
@@ -216,6 +233,10 @@ Titan, including decimal control-byte escapes, Lua-readable minimum-integer,
 infinity, NaN, and locale-neutral hexadecimal float forms. Modified `%s`
 checks for embedded NUL before entering C formatting; an unmodified `%s`
 appends the complete converted string.
+
+`%q` performs its type dispatch with `is`. For numbers, `is integer` has the
+same success condition as the checked `as integer` cast, so an integral float
+uses the integer literal branch rather than the hexadecimal-float branch.
 
 ## Pack translation
 
@@ -236,6 +257,11 @@ unsigned operands are checked before conversion. Sizes up to 16 bytes use
 explicit zero or sign extension. Floating values are first converted to the
 target C scalar, copied with `memcpy`, and reversed when requested byte order
 differs from native order.
+
+The public pack loop obtains integer, floating, and string payloads with
+`as integer`, `as float`, and `as string` respectively. Numeric strings and
+non-string `c`/`s`/`z` operands fail at that ordinary typed boundary; integral
+floats continue through integer options.
 
 `unpack` mirrors this path. It checks padding and fixed width against the
 remaining byte count before pointer arithmetic, reconstructs the low
@@ -341,12 +367,17 @@ and result-conversion machinery.
 
 ## Roots, callbacks, and errors
 
-The regex cache is weak-valued. A live regex roots its PEG pattern, and a live
-iterator roots the regex, subject, and current position. During synchronous
-`gsub`, the generated frame roots the regex, subject, replacement function,
-whole-match argument, and returned string across each callback. The PEG
-pattern's native uservalue graph roots constant captures, grammars, tables,
-and callbacks.
+The regex cache has typed Map shape `{string: Regex}`; ordinary Map lookup
+produces `Regex?` for an absent key. Module state creates the cache directly
+at that type. Its initializer creates a typed `__mode = "v"` metatable, pushes
+those two existing Maps, and installs the metatable on the cache in place; it
+does not route the cache through `value` or recast it. Ordinary cache reads and
+writes remain typed Map operations. A live regex roots its PEG pattern,
+and a live iterator roots the regex, subject, and current position. During
+synchronous `gsub`, the generated frame roots the regex, subject, replacement
+function, whole-match argument, and returned string across each callback. The
+PEG pattern's native uservalue graph roots constant captures, grammars,
+tables, and callbacks.
 
 Runtime/match-time/function captures and `gsub` replacement functions run
 through non-yieldable callable paths. They may allocate, collect, or raise,

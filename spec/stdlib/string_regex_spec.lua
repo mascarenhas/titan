@@ -608,4 +608,28 @@ describe("titan.string regex", function()
             assert(found:group(1) == "aa")
         ]=])
     end)
+
+    it("keeps the source cache weak and binary matches exact across GC",
+    function()
+        run([=[
+            local str = require "titan.string"
+            collectgarbage("generational")
+
+            -- No Regex value escapes these source-expression calls, so a
+            -- full collection may discard each weak cache entry. The next
+            -- call must transparently compile it again.
+            for index = 1, 12 do
+                local subject = "\0\xffA\0\xff"
+                local found = str.match(subject, "[\0\xff]+")
+                assert(found and found:whole() == "\0\xff")
+                local output, count = str.gsub(
+                    subject, "[\0\xff]+", function(whole)
+                        assert(whole == "\0\xff")
+                        return "\xff\0"
+                    end)
+                assert(output == "\xff\0A\xff\0" and count == 2)
+                collectgarbage("collect")
+            end
+        ]=])
+    end)
 end)

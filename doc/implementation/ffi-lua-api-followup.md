@@ -54,9 +54,9 @@ Lua C API:
   return, or substitute the pointer;
 * snapshot `lua_gettop(L)` before a helper's first push and restore that exact
   top with `lua_settop(L, saved)` on every exit;
-* put restoration in `finally`, so a caught Lua error cannot bypass it;
-* keep an explicit stack-effect ledger for every path, including loop
-  exhaustion, protected-call failures, and zero-result cases;
+* put restoration in `defer`, so a caught Lua error cannot bypass it;
+* keep an explicit stack-effect ledger for every path, including optional
+  lookup results and zero-result cases;
 * copy a result that must outlive restoration into a traced Titan `value` (or
   another traced Titan owner) before resetting the stack;
 * never retain a pointer into a Lua string, userdata, or stack slot across an
@@ -66,9 +66,8 @@ Lua C API:
 * call user functions and metamethods only through a non-yieldable path. A
   yield attempt is a normal Lua error at this native/Titan boundary, not a
   suspended continuation;
-* use a protected boundary when an error from user code must be classified or
-  translated. Restore the helper's stack first, then raise the Titan-facing
-  error; a Lua longjmp must not cross an unrelated generated frame.
+* let ordinary errors from typed Lua callables use Titan's generated generic
+  call boundary. The current trusted code has no manual `lua_pcallk` adapter.
 
 The current allowlist has the following accounting rules. “Pushes one” means
 the pushed slot is also a temporary GC root until the saved top is restored.
@@ -76,24 +75,13 @@ the pushed slot is also a temporary GC root until the saved top is restored.
 | Operation | Stack effect and obligation |
 | --- | --- |
 | `lua_gettop` | Net zero; snapshots the current stack height. |
-| `ffi.lua_pushtvalue`, `lua_pushnil`, `lua_pushvalue` | Push one value. |
-| `lua_pushstring`, `lua_pushlstring` | Push one string. They can allocate or raise; any returned pointer is borrowed. |
-| `lua_createtable`, `lua_newuserdatauv` | Push one new collectable value and can allocate or raise. |
-| `lua_getfield` | Push one fetched value. It can invoke `__index`, allocate, call user code, or raise. |
-| `lua_gettable` | Pop the key and push the fetched value (net zero). It has the same metamethod, allocation, callback, and error obligations as `lua_getfield`. |
-| `lua_rawget` | Pop the key and push the fetched value (net zero), without invoking a metamethod. |
-| `lua_rawgeti` | Push one fetched value, without invoking a metamethod. |
-| `lua_getmetatable` | Push the metatable when present and otherwise push nothing. It does not invoke `__index`; callers must account for both result counts. |
-| `lua_setfield` | Pop the value. It can invoke `__newindex`, allocate, call user code, or raise. |
-| `lua_setmetatable` | Pop the table or nil being installed as the metatable. |
-| `lua_rawset` | Pop the key and value. |
-| `lua_rawseti` | Pop the value. |
-| `lua_next` | On success, replace the incoming key with the next key and value (net +1); on exhaustion, pop the key (net -1). |
-| `luaL_tolstring` | Push one string result. It may invoke `__tostring`, allocate, or raise, so any returned pointer is borrowed only until the next unsafe operation or stack restoration. |
-| `luaL_checkinteger`, `luaL_checknumber`, `luaL_checklstring` | Net zero, but may convert or raise. The pointer from `luaL_checklstring` is borrowed under the same rule. |
-| `lua_type`, `lua_isinteger`, `lua_toboolean`, `lua_tointegerx`, `lua_topointer`, `lua_rawequal` | Net zero. A pointer from `lua_topointer` is identity-only and must not be dereferenced. |
+| `ffi.lua_pushtvalue` | Push one traced Titan value. Each weak-value cache is declared at its actual semantic Map type and its metatable is an ordinary typed Titan Map; the FFI bridge pushes those existing Maps only long enough to install the metatable, without a placeholder type or `value` cast. |
+| `lua_getfield` | Push one fetched value and may invoke `__index`, allocate, call user code, or raise. PEG uses it only for the private registry metatable lookup. |
+| `lua_setmetatable` | Pop the typed Titan metatable being installed on a typed Titan cache Map. It is used only to make the two internal caches weak-valued; table construction and `__mode` assignment remain ordinary Titan code. |
+| `luaL_tolstring` | Push one string result. It may invoke `__tostring`, allocate, or raise, so the result is copied to a traced Titan value before restoration. |
+| `lua_type`, `lua_topointer` | Net zero. `lua_type` validates private opener/registry results. A pointer from `lua_topointer` is identity-only and must not be dereferenced. |
 | `ffi.lua_totvalue` | Net zero; copies the selected slot into Titan's traced `value` representation before cleanup. |
-| `lua_pcallk` | Consume the function and arguments and leave the requested results, or one error object. Snapshot the top before preparing the call, request/count the exact result shape, copy any surviving results into traced Titan values, and normalize back to the snapshot on both success and failure. |
+| `titan_lpeglabel_open` | Push the private engine table and report one result. PEG validates both facts, copies the table to a traced Map, and restores the entry top. |
 | `lua_settop(L, saved)` | The authoritative cleanup operation. Do not try to balance an exceptional path with a guessed series of pops. |
 
 Stack slots created by pushing Titan values are real roots, but only while they

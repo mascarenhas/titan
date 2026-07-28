@@ -423,6 +423,8 @@ the result is an ordinary Lua table.
   a [C FFI](ffi.md) pointer is a compile-time error `a variadic parameter
   cannot have a foreign pointer type`, and `...` cannot be passed into a
   foreign function — the C FFI has its own, disjoint notion of variadic.
+  A source-written owned C type is different: it is GC-managed userdata and
+  is a supported variadic element type.
 * **At most 200 variadic arguments.** A variadic run is capped at 200
   elements (`TITAN_VARARG_MAX`). A statically written call can never reach
   it (the parser caps an argument list well below that), but a long chain of

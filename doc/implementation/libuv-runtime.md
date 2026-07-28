@@ -83,9 +83,9 @@ The ABI-0.18 native/Titan boundary is correspondingly explicit:
 | --- | --- |
 | `UV_E*`, socket, resolver, signal, mode, and `UINT_MAX` constants | Titan imports the host headers directly under the production target flags |
 | byte/text operations, stat extraction, process options/stdio/spawn, DNS hints/traversal/copy/release, and bind/connect submission | Titan calls the public C/libuv APIs directly |
-| fixed six-slot owner recovery and dispatch | native runtime |
+| fixed five-slot owner recovery and dispatch | native runtime |
 | timer, close, filesystem, DNS, connect, write, shutdown, allocation, read, connection, signal, and process-exit callback trampolines | native runtime |
-| fixed six-slot owner protocol and opaque normalized-address storage | shared header declarations consumed by Titan and the native callbacks |
+| fixed five-slot owner protocol and opaque normalized-address storage | shared header declarations consumed by Titan and the native callbacks |
 | conditional inherited `SIGPIPE` handling | Titan calls the host `sigaction`/`sigemptyset` APIs directly through the C FFI and translates failures with public libuv |
 
 No operational libuv wrapper sits between the generated module and those
@@ -145,33 +145,40 @@ sources.
 Every loop, timer, one-shot signal, filesystem/network/process request, TCP or
 pipe handle, process handle, private process-grace timer, Titan-owned I/O
 buffer or `uv_buf_t`, opaque address cell, argv cell, and scandir entry used by
-the runtime is allocated in Lua full-userdata payload bytes. The `uv_buf_t`
-passed to a stream allocation callback is the exception: libuv owns that
-descriptor, while Titan owns and roots only the byte storage to which it
-points. Native handle and request wrappers use the imported foreign type's
-`<module>.<type>.sizeof` and `.alignof`, capture the storage userdata once,
-and store the resulting pointer in a local field of an opaque record:
+the runtime is an owned FFI value backed by Lua full-userdata payload bytes.
+The `uv_buf_t` passed to a stream allocation callback is the exception: libuv
+owns that descriptor, while Titan owns and roots only the byte storage to
+which it points. Native handle and request wrappers allocate the complete
+imported foreign type with `.new()` and store that owner directly in a local
+field of an opaque record:
 
 ```titan
 record uv_timer_t
-  local handle: *uv.uv_timer_t
-  local storage: value
-  -- four more local owner fields
+  local handle?: owned *libuv.uv_timer_t
+  local main_thread: value
+  local dispatcher: (...)
+  local metadata: TimerControl
+  local buffer: nil
 end
 ```
 
-The native pointer is never converted through `value`. The wrapper is allocated
-once, Titan's nominal/local-field rules prevent external forgery, and later
-calls read the exact pointer field without pointer-boxing allocations. The
-Runtime roots a timer wrapper through its close callback and an `uv_fs_t`
-wrapper through completion and `uv_fs_req_cleanup`; each wrapper roots its
-storage userdata. An initialized handle is never released by a GC finalizer
-before its close callback.
+The owner adjusts directly to the corresponding C pointer when passed to
+libuv; it is never converted through `value`. The wrapper is allocated once,
+Titan's nominal/local-field rules prevent external forgery, and later calls
+read the exact owner field without pointer-boxing allocations. The Runtime
+roots a timer wrapper through its close callback and an `uv_fs_t` wrapper
+through completion and `uv_fs_req_cleanup`. Owners whose storage becomes
+reclaimable at those terminal points use an optional field and clear it only
+after native cleanup or close; an initialized handle is never released before
+its terminal callback.
 
-Callback-owned typed arrays instead use `new_array`; their `Bytes` or
-`AddressList` record retains the owner together with the exact pointer and the
-logical length or element count required after type erasure and across
-callbacks.
+Callback-owned typed arrays use `new_array`. `Bytes` and `AddressList` are
+direct local aliases of their counted owner types: the owner itself supplies
+the pointer, GC root, and allocation count. Exact allocations use that count
+directly. `Text` separately retains the original source because its owned copy
+has a trailing NUL, while `ByteChunk` pairs `Bytes` with `nread` for queued
+stream reads whose completed logical prefix can be shorter than the allocation
+capacity.
 
 Short-lived synchronous scratch objects do not need that extra record layer.
 The OS text helpers allocate a counted
@@ -187,15 +194,16 @@ in its own single local field. Neither layer boxes the descriptor as `value`,
 and neither constructor is available outside its declaring module.
 
 The process boundary uses the same pattern twice. The exported
-`uv.uv_process_t` has an exact `*uv_process_t` local field and is wrapped by
-`os.Process`, whose native-handle field is itself local and which also owns
+`uv.uv_process_t` has an exact `owned *uv_process_t` local field and is wrapped
+by `os.Process`, whose native-handle field is itself local and which also owns
 private stdout/stderr reader-state records. Private `uv_pipe_t`, `uv_write_t`,
-and grace-timer records likewise retain exact native pointers.
+and grace-timer records likewise retain exact native owners.
 Homogeneous ownership links use their exact record type, with `T?` only where
 the link may be absent. `value` is reserved for opaque Lua roots, arbitrary
 task/error payloads, and genuinely heterogeneous owner slots. Native handles
-never use `value`; a process or pipe therefore pays for its record and storage
-once, not for repeated pointer-to-`value` coercions on every operation.
+never use `value`; a process or pipe therefore pays for its record and owned
+allocation once, not for repeated pointer-to-`value` coercions on every
+operation.
 
 This distinction also matters for the continuation graph. Recovering a record
 from `value` must validate its record metatable at run time. Unwrapping `T?`
@@ -204,18 +212,17 @@ type. Runtime lists, FIFO links, waiters, operation-specific roots, and helper
 references therefore keep their record identity in the static type instead of
 revalidating it at every traversal.
 
-Each callback owner has six stable record/uservalue slots: native pointer,
-storage, the module-cached main Lua thread, dispatcher closure, operation
-metadata, and family-specific native I/O storage. The C shim uses the
+Each callback owner has five stable record/uservalue slots: owned native
+handle/request, the module-cached main Lua thread, dispatcher closure,
+operation metadata, and family-specific native I/O storage. The C shim uses the
 corresponding zero-based indices and recovers the module Udata from the
 dispatcher closure's first upvalue. Metadata already roots each Task, resource,
 or operation graph, so owners carry no duplicate root slot. Timer, signal,
 process, process-grace, DNS, connect, shutdown, Pipe, and TCP owners type the
 final slot as `nil`. Filesystem and write-request owners retain their submitted
 `Buffer?` there. A Pipe or TCP control instead roots its current stream-read
-allocation as a `Bytes?`; on a positive callback that same record moves into a
-GC-traced `{Bytes}` queue, retaining the raw pointer, full-userdata root, and
-completed length until the queue is drained.
+allocation as a `Bytes?`; on a positive callback the owner and the callback's
+logical length move into a GC-traced `{ByteChunk}` queue until it is drained.
 
 ## Runtime and continuation graph
 
@@ -256,7 +263,7 @@ binary.
 
 For reads and writes, `submit_fs_operation` finishes every allocating buffer
 copy/descriptor preparation and roots it through the logical operation before
-it allocates and publishes a six-field `uv_fs_t` owner. It also validates
+it allocates and publishes a five-field `uv_fs_t` owner. It also validates
 the private operation kind and caches the exact loop, path, descriptor, and
 buffer arguments first. After publication, no Titan record cast or error path
 can run before the public `uv_fs_*` call. Thus an OOM, buffer-validation error,
@@ -398,11 +405,12 @@ new output immediately. Anonymous pipes do not support socket-style
 `uv_close` on the write pipe and wakes the closer from the handle close
 callback. Stdout and stderr independently allow one reader; EOF and read
 failure are persistent terminal states. Each output pipe keeps reading into a
-GC-owned `{Bytes}` queue even with no waiter, with no high-water mark. A plain
-read drains its facade excess or the entire native queue, while a delimiter
-read retains bytes beyond its first delimiter. Both methods share that pipe's
-reader lock; stdout and stderr have independent locks. Cancellation clears only
-the matching waiter and leaves physical reading active. EOF stops and may close
+GC-owned `{ByteChunk}` queue even with no waiter, with no high-water mark. A
+plain read drains its facade excess or the entire native queue, while a
+delimiter read retains bytes beyond its first delimiter. Both methods share
+that pipe's reader lock; stdout and stderr have independent locks.
+Cancellation clears only the matching waiter and leaves physical reading
+active. EOF stops and may close
 the output pipe while remaining sticky `nil`; another read failure initiates
 close, but queued bytes and the sticky error remain logically readable in
 order. Process exit does not synthesize pipe EOF, so output continues to drain

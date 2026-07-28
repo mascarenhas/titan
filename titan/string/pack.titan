@@ -33,11 +33,11 @@ end
 local function host_is_little_endian(): boolean
   local probe: ffi.titan_ffi_unsigned_int =
     1 as ffi.titan_ffi_unsigned_int
-  local owned = ffi.titan_ffi_char.new_array(
+  local storage = ffi.titan_ffi_char.new_array(
     ffi.titan_ffi_unsigned_int.sizeof as integer)
-  local bytes = owned as *ffi.titan_ffi_char
+  local bytes = storage as *ffi.titan_ffi_char
   cstring.memcpy(
-    bytes, probe, #owned as cstring.size_t)
+    bytes, probe, #storage as cstring.size_t)
   local octets = bytes as *ffi.titan_ffi_unsigned_char
   return octets[0] == (1 as ffi.titan_ffi_unsigned_char)
 end
@@ -244,7 +244,7 @@ local function pack_integer_bytes(number: lua.lua_Integer,
                                   size: integer,
                                   little_endian: boolean,
                                   negative: boolean): string
-  local owned = ffi.titan_ffi_char.new_array(size)
+  local storage = ffi.titan_ffi_char.new_array(size)
   local remaining = number as lua.lua_Unsigned
   local index = 0
   while index < size do
@@ -261,11 +261,10 @@ local function pack_integer_bytes(number: lua.lua_Integer,
       remaining =
         remaining >> (8 as ffi.titan_ffi_int)
     end
-    owned[destination] = octet as ffi.titan_ffi_char
+    storage[destination] = octet as ffi.titan_ffi_char
     index = index + 1
   end
-  return finish_string(
-    owned as *ffi.titan_ffi_char, #owned)
+  return storage as string
 end
 
 local function check_signed_pack_range(number: lua.lua_Integer,
@@ -304,26 +303,26 @@ local function pack_float_bytes(number: lua.lua_Number,
                                 little_endian: boolean,
                                 native_little_endian: boolean): string
   local converted = number as ffi.titan_ffi_float
-  local owned = ffi.titan_ffi_char.new_array(
+  local storage = ffi.titan_ffi_char.new_array(
     ffi.titan_ffi_float.sizeof as integer)
-  local output = owned as *ffi.titan_ffi_char
+  local output = storage as *ffi.titan_ffi_char
   cstring.memcpy(
-    output, converted, #owned as cstring.size_t)
+    output, converted, #storage as cstring.size_t)
   return ordered_native_bytes(
-    finish_string(output, #owned),
+    storage as string,
     little_endian, native_little_endian)
 end
 
 local function pack_number_bytes(number: lua.lua_Number,
                                  little_endian: boolean,
                                  native_little_endian: boolean): string
-  local owned = ffi.titan_ffi_char.new_array(
+  local storage = ffi.titan_ffi_char.new_array(
     lua.lua_Number.sizeof as integer)
-  local output = owned as *ffi.titan_ffi_char
+  local output = storage as *ffi.titan_ffi_char
   cstring.memcpy(
-    output, number, #owned as cstring.size_t)
+    output, number, #storage as cstring.size_t)
   return ordered_native_bytes(
-    finish_string(output, #owned),
+    storage as string,
     little_endian, native_little_endian)
 end
 
@@ -331,13 +330,13 @@ local function pack_double_bytes(number: lua.lua_Number,
                                  little_endian: boolean,
                                  native_little_endian: boolean): string
   local converted = number as ffi.titan_ffi_double
-  local owned = ffi.titan_ffi_char.new_array(
+  local storage = ffi.titan_ffi_char.new_array(
     ffi.titan_ffi_double.sizeof as integer)
-  local output = owned as *ffi.titan_ffi_char
+  local output = storage as *ffi.titan_ffi_char
   cstring.memcpy(
-    output, converted, #owned as cstring.size_t)
+    output, converted, #storage as cstring.size_t)
   return ordered_native_bytes(
-    finish_string(output, #owned),
+    storage as string,
     little_endian, native_little_endian)
 end
 

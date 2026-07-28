@@ -12,53 +12,14 @@ local record RegexDiagnostic
   source_line: string
 end
 
-local _regex_cache: value = nil
-local _regex_group_sentinel: value = nil
-
-local function regex_initialize_state()
-  if _regex_cache ~= nil then return end
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-
-  lua.lua_createtable(L, 0, 0)
-  local cache_index = lua.lua_gettop(L)
-  lua.lua_createtable(L, 0, 1)
-  lua.lua_pushstring(L, "v")
-  lua.lua_setfield(L, -2, "__mode")
-  lua.lua_setmetatable(L, cache_index)
-  _regex_cache = ffi.lua_totvalue(L, cache_index)
-
-  lua.lua_createtable(L, 0, 0)
-  _regex_group_sentinel = ffi.lua_totvalue(L, -1)
-end
-
-local function regex_cache_get(expression: string): Regex?
-  regex_initialize_state()
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  ffi.lua_pushtvalue(L, _regex_cache)
-  ffi.lua_pushtvalue(L, expression)
-  lua.lua_rawget(L, -2)
-  local raw: value = ffi.lua_totvalue(L, -1)
-  if raw == nil then return nil end
-  return raw as Regex
-end
-
-local function regex_cache_put(expression: string, compiled: Regex)
-  regex_initialize_state()
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  ffi.lua_pushtvalue(L, _regex_cache)
-  ffi.lua_pushtvalue(L, expression)
-  ffi.lua_pushtvalue(L, compiled)
-  lua.lua_rawset(L, -3)
-end
+local _regex_cache: {string: Regex} = {}
+local _regex_group_sentinel: {value: value} = {}
 
 local function cached_regex(expression: string): Regex
-  local found: Regex? = regex_cache_get(expression)
+  local found: Regex? = _regex_cache[expression]
   if found then return found as Regex end
   local compiled = compile_regex(expression)
-  regex_cache_put(expression, compiled)
+  _regex_cache[expression] = compiled
   return compiled
 end
 
@@ -82,26 +43,17 @@ local function regex_is_start_anchored(regex: Regex): boolean
          regex_byte(regex.expression, 1) == 94
 end
 
-local function regex_raw_table_item(items: value,
-                                    index: integer): value
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  ffi.lua_pushtvalue(L, items)
-  lua.lua_rawgeti(L, -1, index)
-  return ffi.lua_totvalue(L, -1)
-end
-
 local function regex_attempt(regex: Regex, subject: string,
                              position: integer): RegexMatch?
-  local captured: value = regex.pattern:match(subject, position)
-  if captured == nil then return nil end
-  local first = regex_raw_table_item(captured, 1) as integer
-  local after = regex_raw_table_item(captured, 2) as integer
+  local raw: value = regex.pattern:match(subject, position)
+  if raw == nil then return nil end
+  local captured = raw as {integer: value}
+  local first = captured[1] as integer
+  local after = captured[2] as integer
   local groups: {GroupSpan} = {}
   local index = 1
   while index <= regex.capture_count do
-    groups[index] =
-      regex_raw_table_item(captured, index + 2) as GroupSpan
+    groups[index] = captured[index + 2] as GroupSpan
     index = index + 1
   end
   return RegexMatch.new(

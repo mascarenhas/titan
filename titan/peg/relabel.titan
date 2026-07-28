@@ -37,41 +37,9 @@ local RELABEL_SUFFIX_FOLD = 6
 local RELABEL_SUFFIX_EXACT = 7
 local RELABEL_SUFFIX_TABLE = 8
 
-local _relabel_predefined: {string: Pattern?} = {}
+local _relabel_predefined: {string: Pattern} = {}
 local _relabel_parser: Pattern? = nil
-local _relabel_match_cache: value = nil
-
-local function _relabel_new_weak_values(): value
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  lua.lua_createtable(L, 0, 0)
-  lua.lua_createtable(L, 0, 1)
-  ffi.lua_pushtvalue(L, "__mode")
-  ffi.lua_pushtvalue(L, "v")
-  lua.lua_rawset(L, -3)
-  lua.lua_setmetatable(L, -2)
-  return ffi.lua_totvalue(L, -1)
-end
-
-local function _relabel_raw_get(table_value: value,
-                                key: value): value
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  ffi.lua_pushtvalue(L, table_value)
-  ffi.lua_pushtvalue(L, key)
-  lua.lua_rawget(L, -2)
-  return ffi.lua_totvalue(L, -1)
-end
-
-local function _relabel_raw_set(table_value: value, key: value,
-                                item: value)
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  ffi.lua_pushtvalue(L, table_value)
-  ffi.lua_pushtvalue(L, key)
-  ffi.lua_pushtvalue(L, item)
-  lua.lua_rawset(L, -3)
-end
+local _relabel_match_cache: {string: Pattern} = {}
 
 local function _relabel_byte(source: string,
                              position: integer): integer
@@ -83,12 +51,14 @@ end
 local function _relabel_slice(source: string, first: integer,
                              after: integer): string
   if after <= first then return "" end
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  local bytes = source as const *ffi.titan_ffi_char
-  lua.lua_pushlstring(
-    L, bytes + first - 1, (after - first) as lua.size_t)
-  return ffi.lua_totvalue(L, -1) as value
+  local length = after - first
+  local result = ffi.titan_ffi_char.new_array(length)
+  local source_bytes = source as const *ffi.titan_ffi_char
+  local result_bytes = result as *ffi.titan_ffi_char
+  cstring.memcpy(
+    result_bytes, source_bytes + first - 1,
+    length as cstring.size_t)
+  return result as string
 end
 
 local function _relabel_source_line(subject: string,
@@ -110,18 +80,14 @@ end
 
 local function _relabel_spaces(count: integer): string
   if count <= 0 then return "" end
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  local buffer = lua.lua_newuserdatauv(
-    L, count as lua.size_t, 0)
+  local buffer = ffi.titan_ffi_char.new_array(count)
   local bytes = buffer as *ffi.titan_ffi_char
   local index = 0
   while index < count do
     bytes[index] = 32 as ffi.titan_ffi_char
     index = index + 1
   end
-  lua.lua_pushlstring(L, bytes, count as lua.size_t)
-  return ffi.lua_totvalue(L, -1) as value
+  return buffer as string
 end
 
 local function _relabel_error_message(label: string): string
@@ -190,82 +156,30 @@ local function _relabel_raise_syntax(source: string, label: value,
     _relabel_spaces(column - 1) .. "^"
 end
 
-local function _relabel_valid_name(name: string): boolean
-  if #name == 0 then return false end
-  local first = _relabel_byte(name, 1)
-  local valid = false
-  if first >= 65 and first <= 90 then valid = true
-  elseif first >= 97 and first <= 122 then valid = true
-  elseif first == 95 then valid = true
-  end
-  if not valid then
-    return false
-  end
-  local index = 2
-  while index <= #name do
-    local byte = _relabel_byte(name, index)
-    valid = false
-    if byte >= 65 and byte <= 90 then valid = true
-    elseif byte >= 97 and byte <= 122 then valid = true
-    elseif byte >= 48 and byte <= 57 then valid = true
-    elseif byte == 95 then valid = true
-    end
-    if not valid then
-      return false
-    end
-    index = index + 1
-  end
-  return true
-end
-
 local function _relabel_definition_table(
-    definitions: {integer: Definition}?):
-      (value, {string: integer?})
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  local result: value = nil
+    definitions: {Definition}?):
+      ({string: value}, {string: integer?})
+  local native: {string: value} = {}
   local sizes: {string: integer?} = {}
-  local count = 0
-  local maximum = 0
   local seen: {string: boolean} = {}
-  lua.lua_createtable(L, 0, 0)
-  local native_index = lua.lua_gettop(L)
   if definitions then
-    ffi.lua_pushtvalue(L, definitions)
-    local definitions_index = lua.lua_gettop(L)
-    lua.lua_pushnil(L)
-    while lua.lua_next(L, definitions_index) ~= 0 do
-      if lua.lua_isinteger(L, -2) == 0 then
-        raise "PEG definition indices must be integers"
-      end
-      local raw_index: value = ffi.lua_totvalue(L, -2)
-      local index = raw_index as integer
-      if index < 1 then
-        raise "PEG definition indices must be positive"
-      end
-      local raw_definition: value = ffi.lua_totvalue(L, -1)
-      local item = raw_definition as Definition
-      count = count + 1
-      if index > maximum then maximum = index end
+    local index = 1
+    while index <= #definitions do
+      local item = definitions[index]
       if seen[item.name] then
         raise "duplicate PEG definition name '" .. item.name .. "'"
       end
       seen[item.name] = true
-      ffi.lua_pushtvalue(L, item.name)
-      ffi.lua_pushtvalue(L, item.raw)
-      lua.lua_rawset(L, native_index)
+      native[item.name] = item.raw
       if item.tree_size >= 0 then
         sizes[item.name] = item.tree_size
+      else
+        sizes[item.name] = nil
       end
-      lua.lua_settop(
-        L, (lua.lua_gettop(L) - 1) as ffi.titan_ffi_int)
-    end
-    if count ~= maximum then
-      raise "PEG definitions must be dense"
+      index = index + 1
     end
   end
-  result = ffi.lua_totvalue(L, native_index)
-  return result, sizes
+  return native, sizes
 end
 
 local function _relabel_decimal(text: string): integer
@@ -320,9 +234,9 @@ local function _relabel_resolve_pattern(
     raw_sizes: value): Pattern
   local name = first as string
   local definitions = raw_definitions
+    as {string: value}
   local sizes = raw_sizes as {string: integer?}
-  local candidate =
-    _relabel_raw_get(definitions, name)
+  local candidate = definitions[name]
   if candidate == nil then
     local predefined: Pattern? =
       _relabel_predefined[name]
@@ -339,8 +253,8 @@ end
 local function _relabel_resolve_value(
     first: value, definitions: value): value
   local name = first as string
-  local candidate =
-    _relabel_raw_get(definitions, name)
+  local native = definitions as {string: value}
+  local candidate = native[name]
   if candidate == nil then
     raise "undefined name: " .. name
   end
@@ -431,7 +345,7 @@ local function _relabel_replace(pattern: Pattern,
                                  replacement: value): Pattern
   if replacement is string then
     return template_capture(pattern, replacement as string)
-  elseif _is_integer_value(replacement) then
+  elseif replacement is integer then
     return select_capture(pattern, replacement as integer)
   elseif replacement is {value: value} then
     return query_capture(
@@ -457,7 +371,8 @@ local function _relabel_apply_suffixes(
       pattern = _relabel_exact(
         pattern, suffix.operand as integer)
     elseif suffix.kind == RELABEL_SUFFIX_LABEL then
-      pattern = choice(pattern, throw(suffix.operand))
+      pattern = choice(
+        pattern, throw(suffix.operand as string))
     elseif suffix.kind == RELABEL_SUFFIX_REPLACE then
       pattern = _relabel_replace(pattern, suffix.operand)
     elseif suffix.kind == RELABEL_SUFFIX_MATCH_TIME then
@@ -511,7 +426,7 @@ end
 
 local function _relabel_throw_capture(
     first: value): Pattern
-  return throw(first)
+  return throw(first as string)
 end
 
 local function _relabel_group_capture(
@@ -580,7 +495,7 @@ local function _relabel_target_grammar(
   local seen: {string: boolean} = {
     [initial.name] = true,
   }
-  local rules: {integer: Rule} = {
+  local rules: {Rule} = {
     rule(initial.name, initial.pattern),
   }
   local index = 1
@@ -668,7 +583,7 @@ local function _relabel_build_lexical(): RelabelLexical
   return RelabelLexical.new(
     one, spacing, name, digits, number, arrow,
     defined, quoted, class_pattern,
-    choice(number, name))
+    choice(sequence(capture(digits), spacing), name))
 end
 
 local function _relabel_build_suffix_operation(
@@ -811,7 +726,7 @@ end
 
 local function _relabel_compile_source(
     source: string,
-    definitions: {integer: Definition}?): Pattern
+    definitions: {Definition}?): Pattern
   local native_definitions, sizes =
     _relabel_definition_table(definitions)
   local parser = _relabel_parser as Pattern
@@ -829,18 +744,19 @@ local function _relabel_compile_source(
 end
 
 local function _relabel_cached_source(
-    source: string, cache: value): Pattern
-  local cached = _relabel_raw_get(cache, source)
-  if cached ~= nil then return cached as Pattern end
+    source: string,
+    cache: {string: Pattern}): Pattern
+  local cached: Pattern? = cache[source]
+  if cached then return cached as Pattern end
   local compiled = _relabel_compile_source(source, nil)
-  _relabel_raw_set(cache, source, compiled)
+  cache[source] = compiled
   return compiled
 end
 
 local function _relabel_refresh_locale()
   local current = locale()
   local any_byte = any()
-  local predefined: {string: Pattern?} = {
+  local predefined: {string: Pattern} = {
     ["nl"] = literal("\n"),
     ["alnum"] = current.alnum,
     ["alpha"] = current.alpha,
@@ -875,7 +791,16 @@ local function _relabel_refresh_locale()
   predefined["W"] = difference(any_byte, current.alnum)
   predefined["X"] = difference(any_byte, current.xdigit)
   _relabel_predefined = predefined
-  _relabel_match_cache = _relabel_new_weak_values()
+  local cache: {string: Pattern} = {}
+  local weak_values: {string: string} = {
+    ["__mode"] = "v",
+  }
+  local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
+  ffi.lua_pushtvalue(L, cache)
+  ffi.lua_pushtvalue(L, weak_values)
+  lua.lua_setmetatable(L, -2)
+  _relabel_match_cache = cache
   _relabel_parser = _relabel_build_parser()
 end
 

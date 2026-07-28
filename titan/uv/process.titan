@@ -41,7 +41,7 @@ local record PipeControl
   local read_waiter: Task?
   local read_epoch: integer
   local read_bytes: Bytes?
-  local read_queue: {Bytes}
+  local read_queue: {ByteChunk}
   local output_head: ProcessOperation?
   local output_tail: ProcessOperation?
   local output_current: ProcessOperation?
@@ -101,8 +101,7 @@ local record HelperGroup
 end
 
 local record uv_pipe_t
-  local handle: *libuv.uv_pipe_t
-  local storage: value
+  local handle?: owned *libuv.uv_pipe_t
   local main_thread: value
   local dispatcher: (uv_pipe_t, integer, integer, libuv.size_t,
                      ffi.titan_ffi_void_ptr) -> ()
@@ -111,8 +110,7 @@ local record uv_pipe_t
 end
 
 local record uv_pipe_write_t
-  local handle: *libuv.uv_write_t
-  local storage: value
+  local handle?: owned *libuv.uv_write_t
   local main_thread: value
   local dispatcher: (uv_pipe_write_t, integer, integer, libuv.size_t,
                      ffi.titan_ffi_void_ptr) -> ()
@@ -123,8 +121,7 @@ end
 -- The process grace timer is intentionally not a generic Runtime timer.  It
 -- is owned by one ProcessControl and is drained only by process shutdown.
 local record uv_process_grace_t
-  local handle: *libuv.uv_timer_t
-  local storage: value
+  local handle?: owned *libuv.uv_timer_t
   local main_thread: value
   local dispatcher: (uv_process_grace_t, integer, integer, libuv.size_t,
                      ffi.titan_ffi_void_ptr) -> ()
@@ -133,11 +130,10 @@ local record uv_process_grace_t
 end
 
 -- Persistent process handles are the only process resource that crosses the
--- private os/uv bridge.  All native callback owners keep the same exact six
+-- private os/uv bridge.  All native callback owners keep the same exact five
 -- slots consumed by titan_uv.c.
 record uv_process_t
-  local handle: *libuv.uv_process_t
-  local storage: value
+  local handle?: owned *libuv.uv_process_t
   local main_thread: value
   local dispatcher: (uv_process_t, integer, integer, libuv.size_t,
                      ffi.titan_ffi_void_ptr) -> ()
@@ -170,7 +166,8 @@ function _os_process_kill(process: uv_process_t, signal: string)
   if signum <= 0 then
     raise "unsupported process signal name '" .. signal .. "'"
   end
-  local status = libuv.uv_process_kill(process.handle, signum)
+  local status = libuv.uv_process_kill(
+      process.handle as owned *libuv.uv_process_t, signum)
   if status < 0 and
       status ~= libuv.UV_ESRCH then
     raise make_error(status, "process.kill", signal)
@@ -334,23 +331,18 @@ end
 local function allocate_process_owner(runtime: Runtime):
                                       (uv_process_t,
                                        ffi.titan_ffi_void_ptr)
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  local memory = lua.lua_newuserdatauv(L, libuv.uv_process_t.sizeof, 0)
-  local storage = ffi.lua_totvalue(L, -1)
+  local handle = libuv.uv_process_t.new()
   local control = new_process_control(runtime)
   local owner: uv_process_t = {
-    handle = memory as *libuv.uv_process_t,
-    storage = storage,
+    handle = handle,
     main_thread = main_thread,
     dispatcher = process_dispatch,
     metadata = control,
     buffer = nil,
   }
-  -- The wrapper is rooted on the Lua stack until its ProcessControl has been
-  -- published in the Runtime list and the callback navigation pointer exists.
-  ffi.lua_pushtvalue(L, owner)
-  local pointer = ffi.lua_togco(L, -1)
+  -- The explicit cast anchors the wrapper while deriving its callback
+  -- navigation pointer, before ProcessControl publishes the owner.
+  local pointer = owner as ffi.titan_ffi_void_ptr
   control.owner = owner
   link_process_control(runtime, control)
   return owner, pointer
@@ -386,21 +378,16 @@ local function allocate_pipe_owner(process: ProcessControl,
                                    kind: integer):
                                    (uv_pipe_t,
                                     ffi.titan_ffi_void_ptr)
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  local memory = lua.lua_newuserdatauv(L, libuv.uv_pipe_t.sizeof, 0)
-  local storage = ffi.lua_totvalue(L, -1)
+  local handle = libuv.uv_pipe_t.new()
   local control = new_pipe_control(process, kind)
   local owner: uv_pipe_t = {
-    handle = memory as *libuv.uv_pipe_t,
-    storage = storage,
+    handle = handle,
     main_thread = main_thread,
     dispatcher = pipe_dispatch,
     metadata = control,
     buffer = nil,
   }
-  ffi.lua_pushtvalue(L, owner)
-  local pointer = ffi.lua_togco(L, -1)
+  local pointer = owner as ffi.titan_ffi_void_ptr
   control.owner = owner
   if kind == PIPE_STDIN then
     process.stdin_pipe = owner
@@ -417,7 +404,6 @@ local function discard_pipe_storage(pipe: uv_pipe_t)
   if control.lifecycle == PIPE_CLOSED then return end
   control.lifecycle = PIPE_CLOSED
   pipe.handle = nil
-  pipe.storage = nil
   control.owner = nil
 end
 
@@ -425,8 +411,11 @@ local function start_pipe_close(pipe: uv_pipe_t)
   local control = pipe.metadata
   if control.lifecycle == PIPE_CLOSED or
       control.lifecycle == PIPE_CLOSING then return end
+  local handle =
+    pipe.handle as owned *libuv.uv_pipe_t
+  local pipe_handle: *libuv.uv_pipe_t = handle
   if control.read_active then
-    libuv.uv_read_stop(pipe.handle)
+    libuv.uv_read_stop(pipe_handle as *libuv.uv_stream_t)
     control.read_active = false
   end
   control.read_bytes = nil
@@ -435,7 +424,8 @@ local function start_pipe_close(pipe: uv_pipe_t)
     return
   end
   control.lifecycle = PIPE_CLOSING
-  libuv.uv_close(pipe.handle, shim.titan_uvshim_close_cb)
+  libuv.uv_close(pipe_handle as *libuv.uv_handle_t,
+                 shim.titan_uvshim_close_cb)
 end
 
 local function discard_process_storage(process: uv_process_t)
@@ -443,7 +433,6 @@ local function discard_process_storage(process: uv_process_t)
   if control.lifecycle == PROCESS_CLOSED then return end
   control.lifecycle = PROCESS_CLOSED
   process.handle = nil
-  process.storage = nil
   control.owner = nil
 end
 
@@ -456,7 +445,11 @@ local function start_process_close(process: uv_process_t)
     return
   end
   control.lifecycle = PROCESS_CLOSING
-  libuv.uv_close(process.handle, shim.titan_uvshim_close_cb)
+  local handle =
+    process.handle as owned *libuv.uv_process_t
+  local process_handle: *libuv.uv_process_t = handle
+  libuv.uv_close(process_handle as *libuv.uv_handle_t,
+                 shim.titan_uvshim_close_cb)
 end
 
 local function new_process_request_control(runtime: Runtime,
@@ -477,21 +470,16 @@ local function allocate_pipe_write_owner(runtime: Runtime,
                                          operation: ProcessOperation):
                                          (uv_pipe_write_t,
                                           ffi.titan_ffi_void_ptr)
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  local memory = lua.lua_newuserdatauv(L, libuv.uv_write_t.sizeof, 0)
-  local storage = ffi.lua_totvalue(L, -1)
+  local handle = libuv.uv_write_t.new()
   local control = new_process_request_control(runtime, operation)
   local owner: uv_pipe_write_t = {
-    handle = memory as *libuv.uv_write_t,
-    storage = storage,
+    handle = handle,
     main_thread = main_thread,
     dispatcher = pipe_write_dispatch,
     metadata = control,
     buffer = operation.prepared_buffer,
   }
-  ffi.lua_pushtvalue(L, owner)
-  local pointer = ffi.lua_togco(L, -1)
+  local pointer = owner as ffi.titan_ffi_void_ptr
   control.owner = owner
   link_process_request(control)
   return owner, pointer
@@ -507,7 +495,6 @@ local function retire_process_request(control: ProcessRequestControl)
     local owner = owner
     unlink_process_request(control)
     owner.handle = nil
-    owner.storage = nil
     owner.buffer = nil
   end
   if operation.owner == owner then operation.owner = nil end
@@ -519,20 +506,15 @@ local function allocate_process_grace(control: ProcessControl):
                                       (uv_process_grace_t,
                                        ffi.titan_ffi_void_ptr)
   local runtime = control.runtime
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  local memory = lua.lua_newuserdatauv(L, libuv.uv_timer_t.sizeof, 0)
-  local storage = ffi.lua_totvalue(L, -1)
+  local handle = libuv.uv_timer_t.new()
   local owner: uv_process_grace_t = {
-    handle = memory as *libuv.uv_timer_t,
-    storage = storage,
+    handle = handle,
     main_thread = main_thread,
     dispatcher = process_grace_dispatch,
     metadata = control,
     buffer = nil,
   }
-  ffi.lua_pushtvalue(L, owner)
-  local pointer = ffi.lua_togco(L, -1)
+  local pointer = owner as ffi.titan_ffi_void_ptr
   control.grace_owner = owner
   return owner, pointer
 end
@@ -540,33 +522,45 @@ end
 local function close_process_grace(control: ProcessControl)
   if not control.grace_owner then return end
   local owner = control.grace_owner
-  if owner.handle == nil then return end
-  if libuv.uv_is_closing(owner.handle) == 0 then
-    libuv.uv_timer_stop(owner.handle)
-    libuv.uv_close(owner.handle, shim.titan_uvshim_close_cb)
+  if not owner.handle then return end
+  local handle =
+    owner.handle as owned *libuv.uv_timer_t
+  local timer_handle: *libuv.uv_timer_t = handle
+  if libuv.uv_is_closing(
+      timer_handle as const *libuv.uv_handle_t) == 0 then
+    libuv.uv_timer_stop(handle)
+    libuv.uv_close(
+        timer_handle as *libuv.uv_handle_t,
+        shim.titan_uvshim_close_cb)
   end
 end
 
 local function start_process_grace(control: ProcessControl): integer
   if control.grace_owner then return 0 end
   local owner, pointer = allocate_process_grace(control)
-  local status = libuv.uv_timer_init(control.runtime.loop.handle,
-                                    owner.handle)
+  local handle =
+    owner.handle as owned *libuv.uv_timer_t
+  local status = libuv.uv_timer_init(
+      control.runtime.loop.handle as owned *libuv.uv_loop_t,
+      handle)
   if status < 0 then
     control.grace_owner = nil
     owner.handle = nil
-    owner.storage = nil
     return status
   end
-  libuv.uv_handle_set_data(owner.handle, pointer)
+  local timer_handle: *libuv.uv_timer_t = handle
+  libuv.uv_handle_set_data(
+      timer_handle as *libuv.uv_handle_t, pointer)
   status = libuv.uv_timer_start {
-    handle = owner.handle,
+    handle = handle,
     cb = shim.titan_uvshim_timer_cb,
     timeout = PROCESS_GRACE_MILLISECONDS,
     repeat = 0,
   }
   if status < 0 then
-    libuv.uv_close(owner.handle, shim.titan_uvshim_close_cb)
+    libuv.uv_close(
+        timer_handle as *libuv.uv_handle_t,
+        shim.titan_uvshim_close_cb)
   end
   return status
 end
@@ -720,7 +714,7 @@ end
 local function process_all_native_closed(control: ProcessControl): boolean
   local process_retired = control.lifecycle == PROCESS_CLOSED
   if process_retired and control.owner then
-    process_retired = control.owner.handle == nil
+    process_retired = not control.owner.handle
   end
   return process_retired and
          process_pipe_closed(control.stdin_pipe) and
@@ -748,12 +742,14 @@ local function begin_one_process_shutdown(control: ProcessControl): integer
   process_close_all_pipes(control)
   local process = control.owner
   local term = csignal.SIGTERM
-  local kill_status = libuv.uv_process_kill(process.handle, term)
+  local kill_status = libuv.uv_process_kill(
+      process.handle as owned *libuv.uv_process_t, term)
   local grace_status = start_process_grace(control)
   if grace_status < 0 and not control.exit_seen then
     control.kill_sent = true
     local kill = csignal.SIGKILL
-    local emergency_status = libuv.uv_process_kill(process.handle, kill)
+    local emergency_status = libuv.uv_process_kill(
+        process.handle as owned *libuv.uv_process_t, kill)
     if emergency_status < 0 and
         emergency_status ~= libuv.UV_ESRCH
     then
@@ -799,17 +795,21 @@ local function advance_pipe_output(pipe: uv_pipe_t,
     if operation.kind == PROCESS_WRITE_STDIN then
       if not operation.prepared_buffer then
         local bytes = operation.copied_bytes
-        operation.prepared_buffer = make_buffer(bytes, 0, bytes.length)
+        operation.prepared_buffer = make_buffer(bytes, 0, #bytes)
       end
       local buffer = operation.prepared_buffer
       local owner, pointer = allocate_pipe_write_owner(control.runtime,
                                                        operation)
+      local owner_handle: *libuv.uv_write_t =
+        owner.handle as owned *libuv.uv_write_t
+      local pipe_handle: *libuv.uv_pipe_t =
+        pipe.handle as owned *libuv.uv_pipe_t
       operation.owner = owner
       control.output_current = operation
-      libuv.uv_req_set_data(owner.handle, pointer)
+      libuv.uv_req_set_data(owner_handle, pointer)
       status = libuv.uv_write {
-        req = owner.handle,
-        handle = pipe.handle,
+        req = owner_handle,
+        handle = pipe_handle,
         bufs = buffer.handle,
         nbufs = 1,
         cb = shim.titan_uvshim_write_cb,
@@ -873,44 +873,54 @@ local function arm_process_spawn(task: Task,
       process_control, PIPE_STDOUT)
   local stderr_pipe, stderr_pointer = allocate_pipe_owner(
       process_control, PIPE_STDERR)
+  local loop_handle: *libuv.uv_loop_t =
+    runtime.loop.handle as owned *libuv.uv_loop_t
+  local process_handle: *libuv.uv_process_t =
+    process.handle as owned *libuv.uv_process_t
+  local stdin_handle: *libuv.uv_pipe_t =
+    stdin_pipe.handle as owned *libuv.uv_pipe_t
+  local stdout_handle: *libuv.uv_pipe_t =
+    stdout_pipe.handle as owned *libuv.uv_pipe_t
+  local stderr_handle: *libuv.uv_pipe_t =
+    stderr_pipe.handle as owned *libuv.uv_pipe_t
   local argv = shim.titan_uvshim_char_ptr.new_array(argument_count + 1)
-  argv[0] = file.bytes.data
+  argv[0] = file.bytes
   for index = 1, #arguments do
-    argv[index] = arguments[index].bytes.data
+    argv[index] = arguments[index].bytes
   end
   argv[argument_count] = nil
 
   local status = libuv.uv_pipe_init(
-      runtime.loop.handle, stdin_pipe.handle, 0)
+      loop_handle, stdin_handle, 0)
   local failed_operation = "process.stdin.init"
   if status >= 0 then
-    libuv.uv_handle_set_data(stdin_pipe.handle, stdin_pointer)
+    libuv.uv_handle_set_data(stdin_handle, stdin_pointer)
     stdin_pipe.metadata.lifecycle = PIPE_INITIALIZED
     status = libuv.uv_pipe_init(
-        runtime.loop.handle, stdout_pipe.handle, 0)
+        loop_handle, stdout_handle, 0)
     failed_operation = "process.stdout.init"
   end
   if status >= 0 then
-    libuv.uv_handle_set_data(stdout_pipe.handle, stdout_pointer)
+    libuv.uv_handle_set_data(stdout_handle, stdout_pointer)
     stdout_pipe.metadata.lifecycle = PIPE_INITIALIZED
     status = libuv.uv_pipe_init(
-        runtime.loop.handle, stderr_pipe.handle, 0)
+        loop_handle, stderr_handle, 0)
     failed_operation = "process.stderr.init"
   end
   if status >= 0 then
-    libuv.uv_handle_set_data(stderr_pipe.handle, stderr_pointer)
+    libuv.uv_handle_set_data(stderr_handle, stderr_pointer)
     stderr_pipe.metadata.lifecycle = PIPE_INITIALIZED
     local options: libuv.uv_process_options_t
     local stdio: libuv.uv_stdio_container_t[3]
     stdio[0].flags = libuv.UV_CREATE_PIPE | libuv.UV_READABLE_PIPE
     stdio[0].data.stream =
-      stdin_pipe.handle as *libuv.uv_stream_t
+      stdin_handle as *libuv.uv_stream_t
     stdio[1].flags = libuv.UV_CREATE_PIPE | libuv.UV_WRITABLE_PIPE
     stdio[1].data.stream =
-      stdout_pipe.handle as *libuv.uv_stream_t
+      stdout_handle as *libuv.uv_stream_t
     stdio[2].flags = libuv.UV_CREATE_PIPE | libuv.UV_WRITABLE_PIPE
     stdio[2].data.stream =
-      stderr_pipe.handle as *libuv.uv_stream_t
+      stderr_handle as *libuv.uv_stream_t
     options.exit_cb = shim.titan_uvshim_process_exit_cb
     options.file = argv[0]
     options.args = argv
@@ -919,8 +929,8 @@ local function arm_process_spawn(task: Task,
     options.stdio_count = 3 as ffi.titan_ffi_int
     options.stdio = stdio
     failed_operation = "process.spawn"
-    status = libuv.uv_spawn(runtime.loop.handle, process.handle, options)
-    libuv.uv_handle_set_data(process.handle, process_pointer)
+    status = libuv.uv_spawn(loop_handle, process_handle, options)
+    libuv.uv_handle_set_data(process_handle, process_pointer)
     process_control.lifecycle = PROCESS_SPAWNED
   end
 
@@ -1051,8 +1061,12 @@ local function arm_helper_request(task: Task,
 end
 
 local function start_pipe_read(pipe: uv_pipe_t): integer
+  local handle =
+    pipe.handle as owned *libuv.uv_pipe_t
+  local pipe_handle: *libuv.uv_pipe_t = handle
   local status = libuv.uv_read_start(
-      pipe.handle, shim.titan_uvshim_alloc_cb, shim.titan_uvshim_read_cb)
+      pipe_handle as *libuv.uv_stream_t,
+      shim.titan_uvshim_alloc_cb, shim.titan_uvshim_read_cb)
   if status >= 0 then pipe.metadata.read_active = true end
   return status
 end
@@ -1135,7 +1149,6 @@ local function process_dispatch_body(owner: uv_process_t,
     return
   elseif event_kind == shim.TITAN_UV_EVENT_HANDLE_CLOSE then
     owner.handle = nil
-    owner.storage = nil
     control.owner = owner
     deliver_process_waiter(control)
     control.callback_aborted = false
@@ -1168,7 +1181,8 @@ catch
     owner.metadata.runtime.fatal_error = error
     owner.metadata.runtime.fatal_traceback = traceback
   end
-  libuv.uv_stop(owner.metadata.runtime.loop.handle)
+  libuv.uv_stop(owner.metadata.runtime.loop.handle
+                as owned *libuv.uv_loop_t)
   return
 end
 
@@ -1180,7 +1194,7 @@ local function pipe_alloc_dispatch(pipe: uv_pipe_t, size: libuv.size_t,
   end
   local bytes = allocate_stream_bytes(size)
   control.read_bytes = bytes
-  initialize_buffer(pointer, bytes.data, size)
+  initialize_buffer(pointer, bytes, size)
 end
 
 local function pipe_read_dispatch(pipe: uv_pipe_t, result: integer)
@@ -1194,7 +1208,10 @@ local function pipe_read_dispatch(pipe: uv_pipe_t, result: integer)
   local bytes? = control.read_bytes
   if result < 0 then
     if control.read_active then
-      libuv.uv_read_stop(pipe.handle)
+      local handle =
+        pipe.handle as owned *libuv.uv_pipe_t
+      local pipe_handle: *libuv.uv_pipe_t = handle
+      libuv.uv_read_stop(pipe_handle as *libuv.uv_stream_t)
       control.read_active = false
     end
     control.read_bytes = nil
@@ -1246,8 +1263,8 @@ local function pipe_read_dispatch(pipe: uv_pipe_t, result: integer)
   end
   control.read_waiter = nil
   control.read_epoch = 0
-  bytes.length = result
-  control.read_queue[#control.read_queue + 1] = bytes
+  control.read_queue[#control.read_queue + 1] =
+    ByteChunk.new(bytes, result)
   control.read_bytes = nil
 end
 
@@ -1268,7 +1285,6 @@ local function finish_pipe_close(pipe: uv_pipe_t)
     end
   end
   pipe.handle = nil
-  pipe.storage = nil
   control.owner = nil
   control.callback_aborted = false
   finish_process_control(control.process)
@@ -1306,8 +1322,11 @@ catch
   -- Preserve read_cb after an alloc failure so libuv can report UV_ENOBUFS
   -- for the shim's NULL/zero descriptor before the read side is stopped.
   if event_kind ~= shim.TITAN_UV_EVENT_STREAM_ALLOC and
-      owner.metadata.read_active and owner.handle ~= nil then
-    libuv.uv_read_stop(owner.handle)
+      owner.metadata.read_active and owner.handle then
+    local handle =
+      owner.handle as owned *libuv.uv_pipe_t
+    local pipe_handle: *libuv.uv_pipe_t = handle
+    libuv.uv_read_stop(pipe_handle as *libuv.uv_stream_t)
     owner.metadata.read_active = false
   end
   owner.metadata.read_bytes = nil
@@ -1317,7 +1336,8 @@ catch
     owner.metadata.runtime.fatal_error = error
     owner.metadata.runtime.fatal_traceback = traceback
   end
-  libuv.uv_stop(owner.metadata.runtime.loop.handle)
+  libuv.uv_stop(owner.metadata.runtime.loop.handle
+                as owned *libuv.uv_loop_t)
   return
 end
 
@@ -1356,7 +1376,8 @@ catch
     owner.metadata.runtime.fatal_error = error
     owner.metadata.runtime.fatal_traceback = traceback
   end
-  libuv.uv_stop(owner.metadata.runtime.loop.handle)
+  libuv.uv_stop(owner.metadata.runtime.loop.handle
+                as owned *libuv.uv_loop_t)
   return
 end
 
@@ -1371,47 +1392,58 @@ local function process_grace_dispatch(owner: uv_process_grace_t,
     control.grace_fired = true
   end
   if event_kind == shim.TITAN_UV_EVENT_TIMER then
-    libuv.uv_timer_stop(owner.handle)
+    local handle =
+      owner.handle as owned *libuv.uv_timer_t
+    local timer_handle: *libuv.uv_timer_t = handle
+    libuv.uv_timer_stop(handle)
     if not control.exit_seen and not control.kill_sent then
       local process = control.owner
       local kill = csignal.SIGKILL
-      local status = libuv.uv_process_kill(process.handle, kill)
+      local status = libuv.uv_process_kill(
+          process.handle as owned *libuv.uv_process_t, kill)
       if status < 0 and
           status ~= libuv.UV_ESRCH then
         raise make_error(status, "process.kill", "kill")
       end
       control.kill_sent = true
     end
-    libuv.uv_close(owner.handle, shim.titan_uvshim_close_cb)
+    libuv.uv_close(
+        timer_handle as *libuv.uv_handle_t,
+        shim.titan_uvshim_close_cb)
   elseif event_kind == shim.TITAN_UV_EVENT_HANDLE_CLOSE then
     control.grace_owner = nil
     control.grace_callback_aborted = false
     owner.handle = nil
-    owner.storage = nil
     finish_process_control(control)
     maybe_finish_session(runtime)
   end
 catch
   owner.metadata.grace_callback_aborted = true
   if event_kind == shim.TITAN_UV_EVENT_TIMER then
-    libuv.uv_timer_stop(owner.handle)
+    local handle =
+      owner.handle as owned *libuv.uv_timer_t
+    local timer_handle: *libuv.uv_timer_t = handle
+    libuv.uv_timer_stop(handle)
     if not owner.metadata.exit_seen and not owner.metadata.kill_sent and
         owner.metadata.owner then
       local process = owner.metadata.owner
       local kill = csignal.SIGKILL
-      local status = libuv.uv_process_kill(process.handle, kill)
+      local status = libuv.uv_process_kill(
+          process.handle as owned *libuv.uv_process_t, kill)
       if status >= 0 or
           status == libuv.UV_ESRCH then
         owner.metadata.kill_sent = true
       end
     end
-    if libuv.uv_is_closing(owner.handle) == 0 then
-      libuv.uv_close(owner.handle, shim.titan_uvshim_close_cb)
+    if libuv.uv_is_closing(
+        timer_handle as const *libuv.uv_handle_t) == 0 then
+      libuv.uv_close(
+          timer_handle as *libuv.uv_handle_t,
+          shim.titan_uvshim_close_cb)
     end
   elseif event_kind == shim.TITAN_UV_EVENT_HANDLE_CLOSE then
     owner.metadata.grace_owner = nil
     owner.handle = nil
-    owner.storage = nil
   end
   if not owner.metadata.runtime.fatal then
     owner.metadata.runtime.fatal = true
@@ -1419,7 +1451,8 @@ catch
     owner.metadata.runtime.fatal_error = error
     owner.metadata.runtime.fatal_traceback = traceback
   end
-  libuv.uv_stop(owner.metadata.runtime.loop.handle)
+  libuv.uv_stop(owner.metadata.runtime.loop.handle
+                as owned *libuv.uv_loop_t)
   return
 end
 
@@ -1735,24 +1768,32 @@ local function repair_aborted_grace(control: ProcessControl)
   if not control.grace_callback_aborted or
       not control.grace_owner then return end
   local owner = control.grace_owner
-  if owner.handle == nil then
+  if not owner.handle then
     control.grace_owner = nil
     control.grace_callback_aborted = false
     return
   end
   if control.grace_fired then
-    libuv.uv_timer_stop(owner.handle)
+    local handle =
+      owner.handle as owned *libuv.uv_timer_t
+    local timer_handle: *libuv.uv_timer_t = handle
+    libuv.uv_timer_stop(handle)
     if not control.exit_seen and not control.kill_sent and
         control.owner then
       local kill = csignal.SIGKILL
-      local status = libuv.uv_process_kill(control.owner.handle, kill)
+      local status = libuv.uv_process_kill(
+          control.owner.handle as owned *libuv.uv_process_t,
+          kill)
       if status >= 0 or
           status == libuv.UV_ESRCH then
         control.kill_sent = true
       end
     end
-    if libuv.uv_is_closing(owner.handle) == 0 then
-      libuv.uv_close(owner.handle, shim.titan_uvshim_close_cb)
+    if libuv.uv_is_closing(
+        timer_handle as const *libuv.uv_handle_t) == 0 then
+      libuv.uv_close(
+          timer_handle as *libuv.uv_handle_t,
+          shim.titan_uvshim_close_cb)
     end
   end
 end

@@ -1,5 +1,6 @@
 local lua = foreign import "lua.h"
 local ffi = foreign import "titan/ffi.h"
+local cstring = foreign import "string.h"
 local private_lpeg = foreign import "titan_lpeglabel.h"
 
 -- LPegLabel 1.6.2-1 uses 16-bit tree offsets and keeps ten slots in
@@ -14,40 +15,52 @@ local PATTERN_REGISTRY_KEY =
   "titan.peg.lpeglabel.912b0b9e.pattern"
 
 -- The engine table and all callables are per-state GC roots owned by this
--- module.  They are deliberately values: these are ordinary private Lua C
--- closures, not Titan functions carrying a Titan function-type tag.
-local _engine: value = nil
+-- module.  The functions are ordinary private Lua C closures, so calls use
+-- Titan's generic callable path despite their precise static types.
+local type NativeUnary = (value) -> value
+local type NativeBinary = (value, value) -> value
+local type NativeRange = (...: string) -> value
+local type NativeUtfRange = (integer, integer) -> value
+local type NativeConstant = (...: value) -> value
+local type NativePosition = () -> value
+local type NativeMatch =
+  (value, string, integer, ...: value) ->
+    (value, value, ...: value)
+local type NativeLocale = () -> {string: value}
+local type NativeSetMaxStack = (integer) -> ()
+
+local _engine: {string: value} = {}
 local _version_text = ""
 
-local _P: value = nil
-local _S: value = nil
-local _R: value = nil
-local _utfR: value = nil
-local _V: value = nil
-local _B: value = nil
-local _T: value = nil
-local _C: value = nil
-local _Cc: value = nil
-local _Cmt: value = nil
-local _Cb: value = nil
-local _Carg: value = nil
-local _Cp: value = nil
-local _Cs: value = nil
-local _Ct: value = nil
-local _Cf: value = nil
-local _Cg: value = nil
-local _match: value = nil
-local _locale: value = nil
-local _setmaxstack: value = nil
+local _P: NativeUnary = nil as value
+local _S: (string) -> value = nil as value
+local _R: NativeRange = nil as value
+local _utfR: NativeUtfRange = nil as value
+local _V: (string) -> value = nil as value
+local _B: NativeUnary = nil as value
+local _T: (string) -> value = nil as value
+local _C: NativeUnary = nil as value
+local _Cc: NativeConstant = nil as value
+local _Cmt: NativeBinary = nil as value
+local _Cb: NativeUnary = nil as value
+local _Carg: (integer) -> value = nil as value
+local _Cp: NativePosition = nil as value
+local _Cs: NativeUnary = nil as value
+local _Ct: NativeUnary = nil as value
+local _Cf: NativeBinary = nil as value
+local _Cg: NativeBinary = nil as value
+local _match: NativeMatch = nil as value
+local _locale: NativeLocale = nil as value
+local _setmaxstack: NativeSetMaxStack = nil as value
 
-local _sequence: value = nil
-local _choice: value = nil
-local _difference: value = nil
-local _lookahead: value = nil
-local _negative: value = nil
-local _repeat: value = nil
-local _capture_replace: value = nil
-local _match_success_sentinel: value = nil
+local _sequence: NativeBinary = nil as value
+local _choice: NativeBinary = nil as value
+local _difference: NativeBinary = nil as value
+local _lookahead: NativeUnary = nil as value
+local _negative: NativeUnary = nil as value
+local _repeat: (value, integer) -> value = nil as value
+local _capture_replace: NativeBinary = nil as value
+local _match_success_sentinel: {value: value} = {}
 
 record Pattern
   local raw: value
@@ -58,21 +71,21 @@ record Match
   first: integer
   last: integer
   local capture_count: integer
-  local captures: value
+  local captures: {value}
 end
 
 local record PatternMatchAttempt
   local matched: boolean
   local after: integer
   local capture_count: integer
-  local captures: value
+  local captures: {value}
   local ordinary_failure: boolean
-  local failure_label: value
+  local failure_label: string
   local failure_position: integer
 end
 
 record Rule
-  local encoded_name: string
+  local name: string
   local pattern: Pattern
 end
 
@@ -103,77 +116,26 @@ local function pattern_match_attempt(
     ...: value): PatternMatchAttempt
   local raw = _sequence(
     _sequence(_Cc(_match_success_sentinel), pattern.raw), _Cp())
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  local had_error = false
-  local error_value: value = nil
-  local matched = false
-  local success_position = 0
-  local result_count = 0
-  local result_table: value = nil
-  local failure_label: value = nil
-  local failure_position = 0
-  ffi.lua_pushtvalue(L, _match)
-  ffi.lua_pushtvalue(L, raw)
-  ffi.lua_pushtvalue(L, subject)
-  ffi.lua_pushtvalue(L, start)
-  local index = 1
-  while index <= #... do
-    ffi.lua_pushtvalue(L, ...[index])
-    index = index + 1
-  end
-
-  local status = lua.lua_pcallk(
-    L, (3 + #...) as ffi.titan_ffi_int, lua.LUA_MULTRET,
-    0, 0, nil)
-  if status ~= lua.LUA_OK then
-    had_error = true
-    error_value = ffi.lua_totvalue(L, -1)
-  else
-    local native_count = lua.lua_gettop(L) - top
-    local first_result: value = nil
-    if native_count > 0 then
-      first_result = ffi.lua_totvalue(
-        L, (top + 1) as ffi.titan_ffi_int)
+  local results: {value} = {
+    _match(raw, subject, start, ...)
+  }
+  local native_count = #results
+  if native_count >= 2 and
+      results[1] == _match_success_sentinel then
+    local capture_count = native_count - 2
+    if capture_count > 200 then
+      raise "too many flexible return values (max 200)"
     end
-    if native_count >= 2 and
-        first_result == _match_success_sentinel then
-      matched = true
-      local raw_position: value = ffi.lua_totvalue(
-        L, (top + native_count) as ffi.titan_ffi_int)
-      success_position = raw_position as integer
-      result_count = native_count - 2
-      if result_count > 200 then
-        raise "too many flexible return values (max 200)"
-      end
-      if result_count > 0 then
-        lua.lua_createtable(
-          L, result_count as ffi.titan_ffi_int, 0)
-        local table_index = lua.lua_gettop(L)
-        index = 1
-        while index <= result_count do
-          lua.lua_pushvalue(
-            L, (top + index + 1) as ffi.titan_ffi_int)
-          lua.lua_rawseti(L, table_index, index)
-          index = index + 1
-        end
-        result_table = ffi.lua_totvalue(L, table_index)
-      end
-    elseif native_count == 3 then
-      failure_label = ffi.lua_totvalue(
-        L, (top + 2) as ffi.titan_ffi_int)
-      local raw_position: value = ffi.lua_totvalue(
-        L, (top + 3) as ffi.titan_ffi_int)
-      failure_position = (raw_position as integer) + start - 1
-    else
-      raise "embedded LPegLabel returned an invalid match result"
-    end
+    return PatternMatchAttempt.new(
+      true, results[native_count] as integer,
+      capture_count, results, false, "", 0)
+  elseif native_count == 3 then
+    local label = results[2] as string
+    return PatternMatchAttempt.new(
+      false, 0, 0, results, label == "fail", label,
+      (results[3] as integer) + start - 1)
   end
-
-  if had_error then raise error_value end
-  return PatternMatchAttempt.new(
-    matched, success_position, result_count, result_table,
-    failure_label == "fail", failure_label, failure_position)
+  raise "embedded LPegLabel returned an invalid match result"
 end
 
 function Pattern:match(subject: string, init: integer?,
@@ -183,86 +145,60 @@ function Pattern:match(subject: string, init: integer?,
   if attempt.matched then
     if attempt.capture_count == 0 then return attempt.after end
     return _unpack_results(
-      attempt.captures, 1, attempt.capture_count)
+      attempt.captures, 2, attempt.capture_count + 1)
   end
-  return nil, _decoded_label(attempt.failure_label),
-    attempt.failure_position
+  return nil, attempt.failure_label, attempt.failure_position
 end
 
 function Match:values(): (...: value)
   if self.capture_count == 0 then return end
-  return _unpack_results(self.captures, 1, self.capture_count)
+  return _unpack_results(
+    self.captures, 2, self.capture_count + 1)
 end
 
-function rule(name: value, pattern: Pattern): Rule
-  return Rule.new(_encoded_name(name), pattern)
+function rule(name: string, pattern: Pattern): Rule
+  return Rule.new(name, pattern)
 end
 
-function grammar(start: value,
-                 rules: {integer: Rule}): Pattern
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  local count = 0
-  local maximum = 0
+function grammar(start: string,
+                 rules: {Rule}): Pattern
   local total_size = 2
   local seen: {string: boolean} = {}
-  local encoded_start = _encoded_name(start)
-  lua.lua_createtable(L, 1, 0)
-  local grammar_index = lua.lua_gettop(L)
-  ffi.lua_pushtvalue(L, encoded_start)
-  lua.lua_rawseti(L, grammar_index, 1)
-
-  ffi.lua_pushtvalue(L, rules)
-  local rules_index = lua.lua_gettop(L)
-  lua.lua_pushnil(L)
-  while lua.lua_next(L, rules_index) ~= 0 do
-    if lua.lua_isinteger(L, -2) == 0 then
-      raise "PEG grammar rule indices must be integers"
-    end
-    local raw_index: value = ffi.lua_totvalue(L, -2)
-    local index = raw_index as integer
-    if index < 1 then
-      raise "PEG grammar rule indices must be positive"
-    end
-    local raw_item: value = ffi.lua_totvalue(L, -1)
-    local item = raw_item as Rule
-    count = count + 1
-    if count > MAX_RULES then raise "PEG grammar has too many rules" end
-    if index > maximum then maximum = index end
-    if seen[item.encoded_name] then
+  local native: {value: value} = {}
+  native[1] = start
+  local index = 1
+  while index <= #rules do
+    if index > MAX_RULES then raise "PEG grammar has too many rules" end
+    local item = rules[index]
+    if seen[item.name] then
       raise "duplicate PEG grammar rule name"
     end
-    seen[item.encoded_name] = true
+    seen[item.name] = true
     total_size = _checked_sum(
       total_size, item.pattern.tree_size, 2)
-
-    ffi.lua_pushtvalue(L, item.encoded_name)
-    ffi.lua_pushtvalue(L, item.pattern.raw)
-    lua.lua_rawset(L, grammar_index)
-    lua.lua_settop(
-      L, (lua.lua_gettop(L) - 1) as ffi.titan_ffi_int)
+    native[item.name] = item.pattern.raw
+    index = index + 1
   end
-  if count ~= maximum then raise "PEG grammar rules must be dense" end
-  if not seen[encoded_start] then
+  if not seen[start] then
     raise "PEG grammar has no start rule"
   end
-  return _pattern(_P(ffi.lua_totvalue(L, grammar_index)), total_size)
+  return _pattern(_P(native), total_size)
 end
 
 function locale(): Locale
   local native = _locale()
   return Locale.new(
-    _pattern(_field(native, "alnum"), 5),
-    _pattern(_field(native, "alpha"), 5),
-    _pattern(_field(native, "cntrl"), 5),
-    _pattern(_field(native, "digit"), 5),
-    _pattern(_field(native, "graph"), 5),
-    _pattern(_field(native, "lower"), 5),
-    _pattern(_field(native, "print"), 5),
-    _pattern(_field(native, "punct"), 5),
-    _pattern(_field(native, "space"), 5),
-    _pattern(_field(native, "upper"), 5),
-    _pattern(_field(native, "xdigit"), 5))
+    _pattern(native["alnum"], 5),
+    _pattern(native["alpha"], 5),
+    _pattern(native["cntrl"], 5),
+    _pattern(native["digit"], 5),
+    _pattern(native["graph"], 5),
+    _pattern(native["lower"], 5),
+    _pattern(native["print"], 5),
+    _pattern(native["punct"], 5),
+    _pattern(native["space"], 5),
+    _pattern(native["upper"], 5),
+    _pattern(native["xdigit"], 5))
 end
 
 function set_max_stack(maximum: integer)
@@ -353,8 +289,8 @@ function utf_range(first: integer,
   return _pattern(_utfR(first, last), size)
 end
 
-function variable(name: value): Pattern
-  return _pattern(_V(_encoded_name(name)), 1)
+function variable(name: string): Pattern
+  return _pattern(_V(name), 1)
 end
 
 function behind(pattern: Pattern): Pattern
@@ -364,8 +300,9 @@ function behind(pattern: Pattern): Pattern
   return _pattern(_B(pattern.raw), size)
 end
 
-function throw(label: value): Pattern
-  return _pattern(_T(_encoded_name(label)), 1)
+function throw(label: string): Pattern
+  if label == "fail" then return fail() end
+  return _pattern(_T(label), 1)
 end
 
 function sequence(...: Pattern): Pattern
@@ -596,18 +533,12 @@ end
 
 function define(name: string,
                 pattern: Pattern): Definition
-  if not _relabel_valid_name(name) then
-    raise "invalid PEG definition name"
-  end
   return Definition.new(
     name, pattern.raw, pattern.tree_size)
 end
 
 function define_value(name: string,
                       candidate: value): Definition
-  if not _relabel_valid_name(name) then
-    raise "invalid PEG definition name"
-  end
   if candidate == nil or candidate == false then
     raise "PEG definition value must be truthy"
   end
@@ -616,7 +547,7 @@ end
 
 function compile(
     candidate: value,
-    definitions: {integer: Definition}?): Pattern
+    definitions: {Definition}?): Pattern
   _relabel_ensure_initialized()
   if candidate is Pattern then
     return candidate as Pattern
@@ -673,9 +604,8 @@ function gsub(subject: string, candidate: value,
     raise "PEG expression must be a string or Pattern"
   end
 
-  local adapter:
-      (value, ...: value) -> (...: value) =
-    function(found: value, ...: value): (...: value)
+  local adapter: (value) -> string =
+    function(found: value): string
       return replacement(found as string)
     end
   -- `%0` discards any captures inside the candidate and supplies the exact

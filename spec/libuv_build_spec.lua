@@ -484,8 +484,11 @@ local function generated_function(source, name)
     while position <= #source do
         local newline = source:find("\n", position, true) or (#source + 1)
         local line = source:sub(position, newline - 1)
-        local definition = not line:match("^%s") and
-            line:find("_titan(", 1, true) and line:match("{%s*$")
+        -- Folder-module rendering can indent later top-level definitions as a
+        -- formatting consequence of concatenating contributor bodies. Leading
+        -- whitespace is therefore not a reliable declaration boundary.
+        local definition = line:find("_titan(", 1, true) and
+            line:match("{%s*$")
         if definition then
             if first then
                 next_definition = position
@@ -600,26 +603,36 @@ describe("libuv Makefile configuration", function()
 
             assert_ordered(sources["titan/uv/os.titan"],
                 "local status = libuv.uv_signal_init",
-                "libuv.uv_handle_set_data(owner.handle, pointer)",
+                "local signal_handle: *libuv.uv_signal_t = handle",
+                "libuv.uv_handle_set_data(",
+                "signal_handle as *libuv.uv_handle_t, pointer)",
                 "owner.metadata.lifecycle = OWNER_ACTIVE",
                 "status = libuv.uv_signal_start_oneshot")
             assert_ordered(sources["titan/uv/tcp.titan"],
+                "local tcp_handle: *libuv.uv_tcp_t = handle",
                 "local status = libuv.uv_tcp_init",
-                "libuv.uv_handle_set_data(tcp.handle, pointer)",
+                "libuv.uv_handle_set_data(",
+                "tcp_handle as *libuv.uv_handle_t, pointer)",
                 "tcp.metadata.lifecycle = TCP_INITIALIZED")
             assert_ordered(sources["titan/uv/tcp.titan"],
                 "local owner, pointer = allocate_write_owner",
-                "libuv.uv_req_set_data(owner.handle, pointer)",
+                "local owner_handle: *libuv.uv_write_t =",
+                "libuv.uv_req_set_data(",
+                "owner_handle as *libuv.uv_req_t, pointer)",
                 "status = libuv.uv_write")
             assert_ordered(sources["titan/uv/tcp.titan"],
                 "local owner, pointer = allocate_shutdown_owner",
-                "libuv.uv_req_set_data(owner.handle, pointer)",
+                "local owner_handle: *libuv.uv_shutdown_t =",
+                "libuv.uv_req_set_data(",
+                "owner_handle as *libuv.uv_req_t, pointer)",
                 "status = libuv.uv_shutdown")
             assert_ordered(sources["titan/uv/tcp.titan"],
                 "local service_pointer = format_port(port, service)",
                 "local hints: libuv.addrinfo",
                 "local owner, pointer = allocate_dns_owner",
-                "libuv.uv_req_set_data(owner.handle, pointer)",
+                "local owner_handle: *libuv.uv_getaddrinfo_t =",
+                "libuv.uv_req_set_data(",
+                "owner_handle as *libuv.uv_req_t, pointer)",
                 "local status = libuv.uv_getaddrinfo")
             assert_ordered(sources["titan/uv/tcp.titan"],
                 "local copy_length = entry.ai_addrlen as cstring.size_t",
@@ -628,21 +641,26 @@ describe("libuv Makefile configuration", function()
             assert_ordered(sources["titan/uv/tcp.titan"],
                 "local address =\n          address_cell.bytes as const *libuv.sockaddr",
                 "local owner, pointer = allocate_connect_owner",
-                "libuv.uv_req_set_data(owner.handle, pointer)",
+                "local owner_handle: *libuv.uv_connect_t =",
+                "libuv.uv_req_set_data(",
+                "owner_handle as *libuv.uv_req_t, pointer)",
                 "local status = libuv.uv_tcp_connect")
             assert_ordered(sources["titan/uv/process.titan"],
+                "local stdin_handle: *libuv.uv_pipe_t =",
+                "local stdout_handle: *libuv.uv_pipe_t =",
+                "local stderr_handle: *libuv.uv_pipe_t =",
                 "local status = libuv.uv_pipe_init",
-                "libuv.uv_handle_set_data(stdin_pipe.handle, stdin_pointer)",
+                "libuv.uv_handle_set_data(stdin_handle, stdin_pointer)",
                 "stdin_pipe.metadata.lifecycle = PIPE_INITIALIZED",
                 "status = libuv.uv_pipe_init",
-                "libuv.uv_handle_set_data(stdout_pipe.handle, stdout_pointer)",
+                "libuv.uv_handle_set_data(stdout_handle, stdout_pointer)",
                 "stdout_pipe.metadata.lifecycle = PIPE_INITIALIZED",
                 "status = libuv.uv_pipe_init",
-                "libuv.uv_handle_set_data(stderr_pipe.handle, stderr_pointer)",
+                "libuv.uv_handle_set_data(stderr_handle, stderr_pointer)",
                 "stderr_pipe.metadata.lifecycle = PIPE_INITIALIZED",
                 'failed_operation = "process.spawn"',
                 "status = libuv.uv_spawn",
-                "libuv.uv_handle_set_data(process.handle, process_pointer)",
+                "libuv.uv_handle_set_data(process_handle, process_pointer)",
                 "process_control.lifecycle = PROCESS_SPAWNED")
             assert.truthy(sources["titan/uv/uv.titan"]:find(
                 'foreign import "string.h"', 1, true))
@@ -675,11 +693,14 @@ describe("libuv Makefile configuration", function()
                 1, true))
             assert_ordered(sources["titan/uv/process.titan"],
                 "local owner, pointer = allocate_pipe_write_owner",
-                "libuv.uv_req_set_data(owner.handle, pointer)",
+                "local owner_handle: *libuv.uv_write_t =",
+                "libuv.uv_req_set_data(owner_handle, pointer)",
                 "status = libuv.uv_write")
             assert_ordered(sources["titan/uv/task.titan"],
                 "owner.metadata.lifecycle = OWNER_ACTIVE",
-                "libuv.uv_handle_set_data(owner.handle, pointer)",
+                "local timer_handle: *libuv.uv_timer_t = handle",
+                "libuv.uv_handle_set_data(",
+                "timer_handle as *libuv.uv_handle_t, pointer)",
                 "status = libuv.uv_timer_start")
         end)
 
@@ -693,9 +714,9 @@ describe("libuv Makefile configuration", function()
             local spawn_status_line = source_line_number(process_source,
                 "local spawn_status = status")
             local text_terminator_line = source_line_number(runtime_source,
-                "bytes.data[length] = 0")
-            local stream_length_line = source_line_number(runtime_source,
-                "local length = size")
+                "bytes[length] = 0")
+            local stream_allocation_line = source_line_number(runtime_source,
+                "return ffi.titan_ffi_char.new_array(size as integer)")
             local empty_needle_line = source_line_number(runtime_source,
                 "if needle_length == 0 then return 0 end")
             local long_needle_line = source_line_number(runtime_source,
@@ -750,19 +771,24 @@ describe("libuv Makefile configuration", function()
             local copy_text =
                 generated_function(generated, "titan_uv_copy_text_titan")
             assert_ordered(copy_text,
+                "luaS_newudata(",
+                "memset(getudatamem(",
                 "if((_local_length_1>0))",
                 "memcpy(",
                 ('#line %d "./titan/uv/runtime.titan"'):format(
                     text_terminator_line),
-                "_tmp_19[_tmp_20] = _tmp_21;")
+                "C index %I out of range",
+                "getudatamem(")
 
             local stream = generated_function(
                 generated, "titan_uv_allocate_stream_bytes_titan")
             assert_ordered(stream,
                 "UINT_MAX",
                 ('#line %d "./titan/uv/runtime.titan"'):format(
-                    stream_length_line),
-                "((lua_Integer)_local_length_1)")
+                    stream_allocation_line),
+                "lua_Integer _count = ((lua_Integer)_param_size);",
+                "luaS_newudata(",
+                "memset(getudatamem(")
 
             local usable =
                 generated_function(generated, "titan_uv_usable_address_titan")
@@ -1056,14 +1082,14 @@ describe("libuv Makefile configuration", function()
                 "uv_pipe_t", "uv_pipe_write_t", "uv_process_grace_t",
             }, local_record_declarations("titan/uv/process.titan"))
             assert.same({
-                "Loop", "Runtime", "Bytes", "Text", "Buffer",
+                "Loop", "Runtime", "ByteChunk", "Text", "Buffer",
             }, local_record_declarations("titan/uv/runtime.titan"))
             assert.same({
                 "TimerControl", "DriveControl", "Request", "TickerState",
             }, local_record_declarations("titan/uv/task.titan"))
             assert.same({
-                "AddressList", "NetOperation", "NetRequestControl",
-                "TcpControl", "uv_getaddrinfo_t", "uv_connect_t", "uv_write_t",
+                "NetOperation", "NetRequestControl", "TcpControl",
+                "uv_getaddrinfo_t", "uv_connect_t", "uv_write_t",
                 "uv_shutdown_t",
             }, local_record_declarations("titan/uv/tcp.titan"))
         end)

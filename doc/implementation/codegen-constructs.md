@@ -467,6 +467,9 @@ size_t _len = 0;
 size_t _tl = 0;
 TString *_str1 = _param_a;
 size_t _len1 = tsslen(_str1);
+if (TITAN_UNLIKELY(
+        _len1 >= MAX_SIZE - sizeof(TString) - _len))
+    luaL_error(L, "string length overflow");
 _len += _len1;
 /* ... _str2, _str3 likewise; literal anchored in its own slot ... */
 if(_len <= LUAI_MAXSHORTLEN) {
@@ -482,9 +485,12 @@ if(_len <= LUAI_MAXSHORTLEN) {
 setsvalue(L, _tmp_1_slot, _tmp_1);
 ```
 
-`LUAI_MAXSHORTLEN` is 40 in this Lua build; at or below it the result
-must be interned (`luaS_newlstr`), above it `luaS_createlngstrobj`
-allocates up front so the copy happens exactly once.
+Each operand is checked before adding its length, using Lua's own maximum
+string-object bound. This both prevents `size_t` wraparound and ensures that
+the short-buffer decision is made from the exact total length.
+`LUAI_MAXSHORTLEN` is 40 in this Lua build; at or below it the result must be
+interned (`luaS_newlstr`), above it `luaS_createlngstrobj` allocates up front
+so the copy happens exactly once.
 
 **Number-to-string** coercions call the `inline static` helpers in
 `titan-runtime/titan.h`: `_integer2str(L, i)` (`lua_integer2str` then

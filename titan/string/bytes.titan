@@ -14,16 +14,6 @@ local function maximum_string_bytes(): integer
   return maximum
 end
 
-local function finish_string(bytes: *ffi.titan_ffi_char,
-                             length: integer): string
-  if length == 0 then return "" end
-  local top = lua.lua_gettop(L)
-  defer lua.lua_settop(L, top)
-  lua.lua_pushlstring(L, bytes, length as lua.size_t)
-  local result: value = ffi.lua_totvalue(L, -1)
-  return result
-end
-
 -- Normalize an initial Lua string position. The result is clipped to
 -- [1, +inf), matching Lua 5.5's posrelatI without negating a possibly minimal
 -- integer.
@@ -59,12 +49,12 @@ local function copy_interval(subject: string, first: integer,
                              count: integer): string
   if count == 0 then return "" end
   if count < 0 then raise "resulting string is too large" end
-  local owned = ffi.titan_ffi_char.new_array(count)
-  local output = owned as *ffi.titan_ffi_char
+  local storage = ffi.titan_ffi_char.new_array(count)
+  local output = storage as *ffi.titan_ffi_char
   local source = subject as const *ffi.titan_ffi_char
   cstring.memcpy(output, source + first - 1,
                  count as cstring.size_t)
-  return finish_string(output, #owned)
+  return storage as string
 end
 
 local function byte_results(subject: string, current: integer,

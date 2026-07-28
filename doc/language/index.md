@@ -70,7 +70,7 @@ Start with the [design philosophy](philosophy.md) if you want to know
 | [Filesystem standard library](standard-library-fs.md) | Binary file reads and writes, per-File FIFO ordering and close, whole-file helpers, metadata, and path operations. |
 | [TCP networking standard library](standard-library-net.md) | Asynchronous DNS and TCP clients/servers, binary stream reads and FIFO writes, shutdown, close, and cancellation. |
 | [Operating-system standard library](standard-library-os.md) | Portable environment, directory, identity, executable-path, one-shot signals, child processes with binary stdio, and deadlock-free `communicate`. |
-| [PEG standard library](standard-library-peg.md) | Typed parsing-expression constructors and combinators, labeled failure/recovery, captures and callback timing, anchored matching, locale controls, and relabel source notation. |
+| [PEG standard library](standard-library-peg.md) | Typed parsing-expression constructors and combinators, labeled failure/recovery, captures and callback timing, anchored pattern matching and leftmost search, locale controls, and relabel source notation. |
 | [String standard library](standard-library-string.md) | Binary byte operations, Lua-compatible formatting and packing, fixed-call `tostring`, and compiled byte-regex matching, iteration, and substitution. |
 | [The C FFI](ffi.md) | `foreign import`: binding C headers, supported types, calling C functions, limitations. |
 | [C FFI declarations and expressions](c-ffi-expressions.md) | Named C tags, host-validated pointer conversions, zero-initialized automatic aggregates and fixed arrays, typed object-macro values, macro-projected fields, and target-correct C operators. |

@@ -59,7 +59,8 @@ function missing_type(): (...)                 -- needs : type
 As with an input variadic run, the element type must have a supported Titan
 value representation. `...: nil` and flexible runs of foreign C pointers are
 rejected. `...: value` is valid, as are option element types when nil is an
-intended element.
+intended element and source-written owned C types (which use GC-managed
+userdata rather than borrowed pointer storage).
 
 The fixed prefix keeps the ordinary return rules. A function declared as
 `(boolean, ...: integer)` must still produce its fixed `boolean`; only the

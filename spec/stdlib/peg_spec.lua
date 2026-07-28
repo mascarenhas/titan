@@ -55,12 +55,28 @@ local function first_only(first: value): value
 end
 
 function recursive(): peg.Pattern
-  local rules: {integer: peg.Rule} = {
+  local rules: {peg.Rule} = {
     peg.rule("S", peg.sequence(
       peg.literal("a"),
       peg.optional(peg.variable("S")))),
   }
   return peg.grammar("S", rules)
+end
+
+function rule_array(...: peg.Rule): {peg.Rule}
+  return {...}
+end
+
+function grammar_with_rule_count(count: integer): peg.Pattern
+  local rules: {peg.Rule} = {}
+  local index = 1
+  while index <= count do
+    rules[index] = peg.rule(
+      "rule" .. index,
+      index == 1 and peg.succeed() or peg.fail())
+    index = index + 1
+  end
+  return peg.grammar("rule1", rules)
 end
 
 function runtime_pattern(): peg.Pattern
@@ -299,42 +315,49 @@ describe("titan.peg", function()
         ]])
     end)
 
-    it("builds dense grammars and preserves typed label identity", function()
+    it("builds Array grammars and preserves exact string labels", function()
         run([[
             local peg = require "titan.peg"
             local probe = require "peg_core_probe"
+            local function rules(...)
+                return probe.rule_array(...)
+            end
             assert(probe.recursive():match("aaaa") == 5)
 
-            local recursive = peg.grammar("S", {
+            local recursive = peg.grammar("S", rules(
                 peg.rule("S", peg.sequence(
                     peg.literal("a"),
-                    peg.optional(peg.variable("S")))),
-            })
+                    peg.optional(peg.variable("S"))))
+            ))
             assert(recursive:match("aaa") == 4)
 
-            local recovered = peg.grammar("S", {
+            local recovered = peg.grammar("S", rules(
                 peg.rule("S", peg.sequence(
-                    peg.throw(1), peg.literal("z"))),
-                peg.rule(1, peg.literal("a")),
-            })
-            assert(recovered:match("az") == 3)
+                    peg.throw("1"), peg.literal("z"))),
+                peg.rule("1", peg.literal("a"))
+            ))
+            local recovered_result, recovered_label, recovered_position =
+                recovered:match("az")
+            assert(recovered_result == 3,
+                ("result=%s label=%s position=%s"):format(
+                    tostring(recovered_result), tostring(recovered_label),
+                    tostring(recovered_position)))
 
-            local not_recovered = peg.grammar("S", {
-                peg.rule("S", peg.throw(1)),
-                peg.rule("1", peg.literal("a")),
-            })
-            local _, label = not_recovered:match("a")
-            assert(type(label) == "number" and label == 1)
+            local not_recovered = peg.grammar("S", rules(
+                peg.rule("S", peg.throw("01")),
+                peg.rule("1", peg.literal("a"))
+            ))
+            local result, label, position =
+                not_recovered:match("a")
+            assert(result == nil and label == "01" and position == 1)
 
-            for _, expected in ipairs({ "1", "01", 1, 0 }) do
+            for _, expected in ipairs({
+                "", "0", "1", "01", "\0", "\0s\0i",
+            }) do
                 local _, actual = peg.throw(expected):match("")
-                assert(type(actual) == type(expected))
+                assert(type(actual) == "string")
                 assert(actual == expected)
             end
-
-            local binary = "\0s\0i"
-            local _, actual = peg.throw(binary):match("")
-            assert(actual == binary)
 
             local function fails(fragment, callback)
                 local ok, err = pcall(callback)
@@ -342,40 +365,74 @@ describe("titan.peg", function()
                 assert(tostring(err):find(fragment, 1, true), tostring(err))
             end
             fails("duplicate PEG grammar rule name", function()
-                peg.grammar("S", {
+                peg.grammar("S", rules(
                     peg.rule("S", peg.succeed()),
-                    peg.rule("S", peg.fail()),
-                })
+                    peg.rule("S", peg.fail())
+                ))
             end)
             fails("has no start rule", function()
-                peg.grammar("missing", {
-                    peg.rule("S", peg.succeed()),
-                })
-            end)
-            fails("must be dense", function()
-                peg.grammar("S", {
-                    [1] = peg.rule("S", peg.succeed()),
-                    [3] = peg.rule("X", peg.fail()),
-                })
-            end)
-            fails("indices must be integers", function()
-                peg.grammar("S", {
-                    [1] = peg.rule("S", peg.succeed()),
-                    extra = peg.rule("X", peg.fail()),
-                })
+                peg.grammar("missing", rules(
+                    peg.rule("S", peg.succeed())
+                ))
             end)
 
-            local rules = {}
-            for index = 1, 1000 do
-                rules[index] = peg.rule(
-                    "rule" .. index,
-                    index == 1 and peg.succeed() or peg.fail())
+            -- Grammar collections are Titan Arrays. Ordinary Lua tables do
+            -- not cross this typed boundary.
+            assert(not pcall(peg.grammar, "S", {
+                peg.rule("S", peg.succeed()),
+            }))
+
+            for _, attempt in ipairs({
+                function() return peg.throw(1) end,
+                function() return peg.variable(1) end,
+                function() return peg.rule(1, peg.succeed()) end,
+                function()
+                    return peg.grammar(1, rules(
+                        peg.rule("1", peg.succeed())))
+                end,
+            }) do
+                assert(not pcall(attempt))
             end
-            assert(peg.grammar("rule1", rules):match("") == 1)
-            rules[1001] = peg.rule("rule1001", peg.fail())
+
+            assert(probe.grammar_with_rule_count(1000):match("") == 1)
             fails("too many rules", function()
-                peg.grammar("rule1", rules)
+                probe.grammar_with_rule_count(1001)
             end)
+        ]])
+    end)
+
+    it("treats the reserved fail label as ordinary failure", function()
+        run([[
+            local peg = require "titan.peg"
+            local probe = require "peg_core_probe"
+            local function rules(...)
+                return probe.rule_array(...)
+            end
+
+            local ordinary = table.pack(peg.fail():match(""))
+            local named = table.pack(peg.throw("fail"):match(""))
+            assert(named.n == ordinary.n)
+            for index = 1, ordinary.n do
+                assert(named[index] == ordinary[index])
+            end
+            assert(named.n == 3 and named[1] == nil and
+                   named[2] == "fail" and named[3] == 1)
+
+            assert(peg.choice(
+                peg.throw("fail"), peg.literal("a")):match("a") == 2)
+            assert(peg.sequence(
+                peg.zero_or_more(peg.throw("fail")),
+                peg.literal("a")):match("a") == 2)
+
+            -- A grammar rule named "fail" is not a recovery rule for this
+            -- reserved label: throw("fail") constructs ordinary failure.
+            local grammar = peg.grammar("S", rules(
+                peg.rule("S", peg.sequence(
+                    peg.throw("fail"), peg.literal("z"))),
+                peg.rule("fail", peg.literal("a"))
+            ))
+            local result, label, position = grammar:match("az")
+            assert(result == nil and label == "fail" and position == 1)
         ]])
     end)
 
@@ -383,7 +440,28 @@ describe("titan.peg", function()
     function()
         run([[
             local peg = require "titan.peg"
-            local packed = table.pack(
+            local packed = table.pack(peg.succeed():match(""))
+            assert(packed.n == 1 and packed[1] == 1)
+
+            packed = table.pack(peg.constant(nil):match(""))
+            assert(packed.n == 1 and packed[1] == nil)
+
+            packed = table.pack(
+                peg.constant(nil, "last"):match(""))
+            assert(packed.n == 2 and packed[1] == nil and
+                   packed[2] == "last")
+
+            packed = table.pack(
+                peg.constant("first", nil, "last"):match(""))
+            assert(packed.n == 3 and packed[1] == "first" and
+                   packed[2] == nil and packed[3] == "last")
+
+            packed = table.pack(
+                peg.constant("first", nil):match(""))
+            assert(packed.n == 2 and packed[1] == "first" and
+                   packed[2] == nil)
+
+            packed = table.pack(
                 peg.constant(nil, "fail", 1):match(""))
             assert(packed.n == 3)
             assert(packed[1] == nil and packed[2] == "fail" and
@@ -688,6 +766,7 @@ describe("titan.peg", function()
         run([[
             assert(os.setlocale("C", "ctype"))
             local peg = require "titan.peg"
+            local probe = require "peg_core_probe"
             local locale = peg.locale()
             assert(locale.alnum:match("A") == 2)
             assert(locale.alpha:match("z") == 2)
@@ -701,12 +780,12 @@ describe("titan.peg", function()
             assert(locale.upper:match("Z") == 2)
             assert(locale.xdigit:match("f") == 2)
 
-            local recursive = peg.grammar("S", {
+            local recursive = peg.grammar("S", probe.rule_array(
                 peg.rule("S", peg.choice(
                     peg.sequence(
                         peg.literal("0"), peg.variable("S")),
-                    peg.literal("0"))),
-            })
+                    peg.literal("0")))
+            ))
             local subject = string.rep("0", 500)
             peg.set_max_stack(500)
             local ok, message = pcall(
@@ -789,6 +868,7 @@ describe("titan.peg", function()
                 local private_has_larger_stack = false
             ]]
             run(prefix .. [[
+                local probe = require "peg_core_probe"
                 local private_pattern = peg.literal("a")
                 local external_pattern = external.P("a")
                 assert(private_pattern:match("a") == 2)
@@ -797,12 +877,13 @@ describe("titan.peg", function()
                 assert(not pcall(
                     external.match, private_pattern, "a"))
 
-                local private_recursive = peg.grammar("S", {
+                local private_recursive = peg.grammar(
+                    "S", probe.rule_array(
                     peg.rule("S", peg.choice(
                         peg.sequence(
                             peg.literal("0"), peg.variable("S")),
-                        peg.literal("0"))),
-                })
+                        peg.literal("0")))
+                ))
                 local external_recursive = external.P({
                     "0" * external.V(1) + "0",
                 })

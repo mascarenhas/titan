@@ -49,14 +49,14 @@ local function bracket(found: string): string
 end
 
 function letters(): peg.Pattern
-  local definitions: {integer: peg.Definition} = {
+  local definitions: {peg.Definition} = {
     peg.define("letter", peg.ranges("az")),
   }
   return peg.compile("%letter+", definitions)
 end
 
 function folded(): peg.Pattern
-  local definitions: {integer: peg.Definition} = {
+  local definitions: {peg.Definition} = {
     peg.define_value("decimal", decimal),
     peg.define_value("add", add),
   }
@@ -68,6 +68,11 @@ end
 
 function substituted(subject: string): string
   return peg.gsub(subject, "'a'", bracket)
+end
+
+function definition_array(
+    ...: peg.Definition): {peg.Definition}
+  return {...}
 end
 ]=]
 
@@ -178,7 +183,8 @@ describe("titan.peg relabel", function()
             assert(comments:match("xy") == 2)
 
             local _, label, position = anchored("", "%{0}")
-            assert(label == 0 and position == 1)
+            assert(type(label) == "string" and
+                   label == "0" and position == 1)
             local recovered = peg.compile([[
               S <- ('a'^recover) 'b'
               recover <- 'x'
@@ -187,22 +193,26 @@ describe("titan.peg relabel", function()
         ]=])
     end)
 
-    it("uses public definitions from Lua tables and Titan Maps", function()
+    it("uses Titan Definition Arrays and dynamic Map values", function()
         run([=[
             local peg = require "titan.peg"
-            local definitions = {
+            local probe = require "peg_relabel_probe"
+            local function definitions(...)
+                return probe.definition_array(...)
+            end
+            local supplied = definitions(
                 peg.define("letters", peg.ranges("az")),
-                peg.define("digits", peg.ranges("09")),
-            }
+                peg.define("digits", peg.ranges("09"))
+            )
             local pattern = peg.compile(
-                "%letters (%letters / %digits)*", definitions)
+                "%letters (%letters / %digits)*", supplied)
             assert(pattern:match("x123") == 5)
 
             local function tonumber10(text) return tonumber(text) end
             local converted = peg.compile(
-                "{[0-9]+'.'?[0-9]*} -> tonumber10", {
-                    peg.define_value("tonumber10", tonumber10),
-                })
+                "{[0-9]+'.'?[0-9]*} -> tonumber10",
+                definitions(
+                    peg.define_value("tonumber10", tonumber10)))
             assert(converted:match("2.34") == 2.34)
 
             local lookup = setmetatable({}, {
@@ -211,41 +221,47 @@ describe("titan.peg relabel", function()
                     error("map replacement was called")
                 end,
             })
-            local queried = peg.compile("{%a+} -> lookup", {
-                peg.define_value("lookup", lookup),
-            })
+            local queried = peg.compile(
+                "{%a+} -> lookup",
+                definitions(peg.define_value("lookup", lookup)))
             assert(queried:match("word") == "<word>")
-            local templated = peg.compile("({.}{.}) -> swap", {
-                peg.define_value("swap", "%2%1"),
-            })
+            local templated = peg.compile(
+                "({.}{.}) -> swap",
+                definitions(peg.define_value("swap", "%2%1")))
             assert(templated:match("ab") == "ba")
-            local selected = peg.compile("({.}{.}) -> second", {
-                peg.define_value("second", 2),
-            })
+            local selected = peg.compile(
+                "({.}{.}) -> second",
+                definitions(peg.define_value("second", 2)))
             assert(selected:match("ab") == "b")
 
-            local probe = require "peg_relabel_probe"
             assert(probe.letters():match("abc") == 4)
             assert(probe.folded():match("3 401 50") == 454)
 
             local already = peg.literal("x")
-            assert(rawequal(peg.compile(already, {
-                peg.define_value("ignored", "ignored"),
-            }), already))
+            assert(rawequal(peg.compile(
+                already,
+                definitions(
+                    peg.define_value("ignored", "ignored"))), already))
 
-            assert(not pcall(peg.define, "not-valid!", already))
+            -- Definition names are opaque strings. Names that cannot be
+            -- written in the relabel source syntax are accepted and inert.
+            local inert = definitions(
+                peg.define("not-valid!", already),
+                peg.define("", already),
+                peg.define("1", already),
+                peg.define("binary\0name", already))
+            assert(peg.compile("'x'", inert):match("x") == 2)
             assert(not pcall(peg.define_value, "x", nil))
             assert(not pcall(peg.define_value, "x", false))
+
+            -- Ordinary Lua tables are not Titan Arrays.
             assert(not pcall(peg.compile, "%x", {
-                [2] = peg.define("x", already),
-            }))
-            assert(not pcall(peg.compile, "%x", {
-                bad = peg.define("x", already),
-            }))
-            local ok, message = pcall(peg.compile, "%x", {
                 peg.define("x", already),
-                peg.define("x", already),
-            })
+            }))
+            local ok, message = pcall(
+                peg.compile, "%x", definitions(
+                    peg.define("x", already),
+                    peg.define("x", already)))
             assert(not ok)
             assert(tostring(message):find(
                 "duplicate PEG definition name 'x'", 1, true), message)
@@ -255,6 +271,10 @@ describe("titan.peg relabel", function()
     it("implements all capture and replacement suffix families", function()
         run([=[
             local peg = require "titan.peg"
+            local probe = require "peg_relabel_probe"
+            local function definitions(...)
+                return probe.definition_array(...)
+            end
             local function anchored(subject, candidate, init)
                 return peg.compile(candidate):match(subject, init)
             end
@@ -301,10 +321,10 @@ describe("titan.peg relabel", function()
             local folded = peg.compile([[
               S <- (number (%s+ number)*) ~> add
               number <- {%d+} -> number
-            ]], {
+            ]], definitions(
                 peg.define_value("add", add),
-                peg.define_value("number", number),
-            })
+                peg.define_value("number", number)
+            ))
             assert(folded:match("3 401 50") == 454)
 
             local function tag(subject, position, table_value, tag_name)
@@ -316,7 +336,7 @@ describe("titan.peg relabel", function()
               block <- (start {| (block / { [^<]+ })* |} end?) => tag
               start <- '<' {:tag: [a-z]+ :} '>'
               end <- '</' { =tag } '>'
-            ]], { peg.define_value("tag", tag) })
+            ]], definitions(peg.define_value("tag", tag)))
             local tree = document:match(
                 "<x>hi<b>hello</b>but<b>totheend</x>")
             assert(tree.tag == "x" and tree[1] == "hi")
@@ -328,6 +348,10 @@ describe("titan.peg relabel", function()
     function()
         run([=[
             local peg = require "titan.peg"
+            local probe = require "peg_relabel_probe"
+            local function definitions(...)
+                return probe.definition_array(...)
+            end
 
             local match_time_callable = setmetatable({}, {
                 __call = function(_, subject, position, whole)
@@ -337,10 +361,10 @@ describe("titan.peg relabel", function()
                 end,
             })
             local callable_match_time = peg.compile(
-                "'a' => callback", {
+                "'a' => callback", definitions(
                     peg.define_value(
-                        "callback", match_time_callable),
-                })
+                        "callback", match_time_callable)
+                ))
             assert(callable_match_time:match("a") == "match-time")
 
             local fold_callable = setmetatable({}, {
@@ -349,20 +373,19 @@ describe("titan.peg relabel", function()
                 end,
             })
             local callable_fold = peg.compile(
-                "({.}{.}) ~> callback", {
-                    peg.define_value("callback", fold_callable),
-                })
+                "({.}{.}) ~> callback",
+                definitions(
+                    peg.define_value("callback", fold_callable)))
             assert(callable_fold:match("ab") == "ab")
 
-            local definitions = {
-                peg.define_value("callback", true),
-            }
+            local bad_definitions =
+                definitions(peg.define_value("callback", true))
             local bad_replacement = peg.compile(
-                "'x' ({.} -> callback)", definitions)
+                "'x' ({.} -> callback)", bad_definitions)
             local bad_match_time = peg.compile(
-                "'x' => callback", definitions)
+                "'x' => callback", bad_definitions)
             local bad_fold = peg.compile(
-                "({.}{.}) ~> callback", definitions)
+                "({.}{.}) ~> callback", bad_definitions)
 
             assert(bad_replacement:match("a") == nil)
             assert(bad_match_time:match("a") == nil)
@@ -382,15 +405,9 @@ describe("titan.peg relabel", function()
             end
 
             local float_selector = peg.compile(
-                "({.}{.}) -> selector", {
-                    peg.define_value("selector", 2.0),
-                })
-            local ok, message = pcall(function()
-                return float_selector:match("ab")
-            end)
-            assert(not ok)
-            assert(tostring(message):find(
-                "call", 1, true), tostring(message))
+                "({.}{.}) -> selector",
+                definitions(peg.define_value("selector", 2.0)))
+            assert(float_selector:match("ab") == "b")
         ]=])
     end)
 
@@ -398,6 +415,7 @@ describe("titan.peg relabel", function()
     function()
         run([=[
             local peg = require "titan.peg"
+            assert(not pcall(function() return peg.find end))
             local source = "{:x:..:} =x"
             local found = assert(peg.match("hi alalo", source))
             assert(found.first == 4 and found.last == 7)
@@ -447,11 +465,11 @@ describe("titan.peg relabel", function()
                 "", ("{}"):rep(200)))
             assert(select("#", positions:values()) == 200)
 
-            -- An ordinary failure advances the search. An uncaught label
-            -- commits it, including a user label spelled "fail".
+            -- An ordinary failure advances the search. Other uncaught
+            -- labels commit it; the reserved "fail" label is ordinary.
             assert(peg.match("ab", "'b'").first == 2)
             assert(peg.match("ab", "%{stop} / 'b'") == nil)
-            assert(peg.match("ab", "%{fail} / 'b'") == nil)
+            assert(peg.match("ab", "%{fail} / 'b'").first == 2)
 
             local attempts = 0
             local inspected = peg.match_time(
@@ -494,6 +512,17 @@ describe("titan.peg relabel", function()
             assert(rawequal(first_compile, second_compile))
 
             local weak = setmetatable({}, { __mode = "v" })
+            do
+                local ephemeral = peg.compile("'weakly cached'")
+                weak.pattern = ephemeral
+                assert(ephemeral:match("weakly cached") == 14)
+            end
+            collectgarbage("collect")
+            collectgarbage("collect")
+            assert(weak.pattern == nil)
+            assert(peg.compile("'weakly cached'"):match(
+                "weakly cached") == 14)
+
             do
                 local callback = function(text) return "[" .. text .. "]" end
                 weak.callback = callback

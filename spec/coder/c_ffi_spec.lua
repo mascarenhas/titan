@@ -370,14 +370,14 @@ describe("C FFI code generation", function()
                 local c = foreign import "]] .. header .. [["
 
                 function sum(): integer
-                    local owned = c.ffi_int.new_array(3)
+                    local owner = c.ffi_int.new_array(3)
                     c.ffi_values[2] = 12
-                    owned[1] = 5
+                    owner[1] = 5
                     return (c.ffi_values[2] as integer)
                         + (c.ffi_ptr[3] as integer)
-                        + (owned[1] as integer)
+                        + (owner[1] as integer)
                         + #c.ffi_values
-                        + #owned
+                        + #owner
                 end
             ]], [[
                 assert(test.sum() == 64)
@@ -441,7 +441,7 @@ describe("C FFI code generation", function()
                 local c = foreign import "]] .. header .. [["
 
                 seen: integer = 0
-                local owned = c.ffi_int.new_array(2)
+                local owner_array = c.ffi_int.new_array(2)
                 local nested_owner = c.ffi_owner.new()
 
                 local function static_index(): integer
@@ -527,7 +527,7 @@ describe("C FFI code generation", function()
                 function run_mixed(): integer
                     seen = 0
                     c.ffi_values[static_index()], point(true).x,
-                        owned[owned_index()] =
+                        owner_array[owned_index()] =
                         rhs1(101), rhs2(202), rhs3(303)
                     return seen
                 end
@@ -535,7 +535,7 @@ describe("C FFI code generation", function()
                 function fail_mixed(): nil
                     seen = 0
                     c.ffi_values[static_index()], point(false).x,
-                        owned[owned_index()] =
+                        owner_array[owned_index()] =
                         rhs1(404), rhs2(505), rhs3(606)
                     return nil
                 end
@@ -543,7 +543,7 @@ describe("C FFI code generation", function()
                 function fail_final_bounds(): nil
                     seen = 0
                     c.ffi_values[static_index()], point(true).x,
-                        owned[owned_bad_index()] =
+                        owner_array[owned_bad_index()] =
                         rhs1(414), rhs2(515), rhs3(616)
                     return nil
                 end
@@ -557,7 +557,7 @@ describe("C FFI code generation", function()
                 end
 
                 function owned_value(): integer
-                    return owned[0] as integer
+                    return owner_array[0] as integer
                 end
 
                 function observed(): integer

@@ -43,10 +43,12 @@ fixed `integer` parameter accepts a Lua integer or an exactly integral,
 representable Lua float at the Lua boundary. Fractional and out-of-range
 numbers are rejected.
 
-The dynamic `value` operands of `format` and `pack` are deliberately different:
-their format strings select Lua's integer, number, or string conversion for
-each operand. In particular, the `c[n]`, `s[n]`, and `z` packing options accept
-Lua numbers through Lua's number-to-string conversion.
+The dynamic `value` operands of `format` and `pack` are checked with Titan
+casts selected by the format. Integer branches use `as integer`, floating
+branches use `as float`, and binary-string packing branches use `as string`.
+Consequently, an exactly integral representable Lua float is accepted by an
+integer branch, but numeric strings are not converted to numbers and numbers
+are not converted to strings for `c[n]`, `s[n]`, or `z`.
 
 Titan variadic and flexible-result tails contain at most 200 elements. This
 module additionally caps each projected result list at 200 total values, even
@@ -164,6 +166,12 @@ floating conversions use the configured target Lua/C widths. `%p` uses the
 Lua identity pointer for the value. `%q` writes a Lua-readable literal for a
 string, number, boolean, or nil and rejects other values.
 
+`%c`, `%d`, `%i`, `%u`, `%o`, `%x`, and `%X` cast their operand to `integer`;
+the floating conversions cast it to `float`. Numeric strings are rejected.
+Because the `%q` type dispatch uses the same checked relation as `as`, an
+integral float takes `%q`'s integer branch and is written as an integer
+literal; a fractional float takes the hexadecimal-float branch.
+
 `%s` first applies the same conversion as this module's `tostring`. It can
 therefore call `__tostring` and propagate its error. An unmodified `%s`
 preserves the complete converted byte string. A modified `%s` is a C-style
@@ -207,6 +215,12 @@ Widths, alignments, endianness, and floating representations come from the
 exact target C compiler and Lua configuration. Signed and unsigned overflow,
 integer sign/zero extension, result sizes, alignment, and short input are
 checked.
+
+Integer options cast their dynamic operand to `integer`, and floating options
+cast it to `float`; integral floats therefore work in integer options while
+numeric strings do not. The `c[n]`, `s[n]`, and `z` options cast to `string`
+and reject every non-string operand instead of applying Lua's number-to-string
+conversion.
 
 `packsize` returns the size of a fixed-width format and rejects the
 variable-length `s[n]` and `z` options.
