@@ -1948,7 +1948,9 @@ fi
                 "libuv calls lazily for Titan and explicitly for Lua'",
                 1, true), workflow)
             local prepare_job = assert(workflow:match(
-                "\n  prepare%-linux:(.-)\n  test%-linux:"))
+                "\n  prepare%-linux:(.-)\n  test%-linux%-library:"))
+            local library_job = assert(workflow:match(
+                "\n  test%-linux%-library:(.-)\n  test%-linux:"))
             local heavy_job = assert(workflow:match(
                 "\n  test%-linux:(.-)\n  test%-macos:"))
             local macos_job = assert(workflow:match(
@@ -1981,6 +1983,26 @@ fi
             end
             assert_codecov_job(prepare_job, "compiler-core")
             assert_codecov_job(heavy_job, "compiler-heavy")
+            assert.equal(1, count_literal(library_job,
+                "needs: prepare-linux"), library_job)
+            assert.equal(1, count_literal(heavy_job,
+                "needs: prepare-linux"), heavy_job)
+            assert.equal(1, count_literal(library_job,
+                "contents: read"), library_job)
+            assert.equal(1, count_literal(library_job,
+                "ci_test_groups.sh library-uv-fs"), library_job)
+            assert.equal(1, count_literal(library_job,
+                "actions/download-artifact@v8"), library_job)
+            assert.equal(1, count_literal(heavy_job,
+                "actions/download-artifact@v8"), heavy_job)
+            assert.falsy(library_job:find("id-token: write", 1, true),
+                library_job)
+            assert.falsy(library_job:find(
+                "codecov/codecov-action", 1, true), library_job)
+            assert.falsy(library_job:find(
+                "ci_test_groups.sh compiler-heavy", 1, true), library_job)
+            assert.falsy(heavy_job:find(
+                "ci_test_groups.sh library-uv-fs", 1, true), heavy_job)
             assert.equal(1, count_literal(prepare_job,
                 'TITAN_EXTRA_CFLAGS: "-O1"'), prepare_job)
             assert.equal(1, count_literal(heavy_job,

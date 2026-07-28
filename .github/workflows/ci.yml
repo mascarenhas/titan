@@ -10,10 +10,9 @@ on:
 jobs:
   # Build and install the regular Linux tree once per workflow. Keep the
   # compiler core, net/OS, and PEG/string groups on this warm 1-core runner.
-  # The uv/fs
-  # consumer restores the pristine tree and runs the broad end-to-end,
-  # measured C-FFI, and isolated static-provider coverage instead of rebuilding
-  # dependencies.
+  # Two consumers restore the pristine tree instead of rebuilding dependencies:
+  # one runs uv/timer/fs behavior, while the other runs the broad end-to-end,
+  # measured C-FFI, and isolated static-provider coverage.
   prepare-linux:
     name: regular (ubuntu-slim, build+compiler-core+net-os+peg-string)
     if: github.event_name == 'push'
@@ -175,11 +174,11 @@ jobs:
 
       # The prepared artifact was packed before the source-mode smoke, so this
       # can mutate the producer's live prefix without changing the bundled tree
-      # restored by test-linux. Exercise only the installed system-mode boundary
-      # here; the complete library and packaging suites already ran against the
-      # bundled image. The two focused rockspec cases own the mode-dependent
-      # SDK layout and external-DSO promotion boundaries; the production smoke
-      # owns the complete installed runtime behavior.
+      # restored by the Linux consumers. Exercise only the installed system-mode
+      # boundary here; the complete library and packaging suites already ran
+      # against the bundled image. The two focused rockspec cases own the
+      # mode-dependent SDK layout and external-DSO promotion boundaries; the
+      # production smoke owns the complete installed runtime behavior.
       - name: Canary source-rock installation with system libuv
         run: |
           LIBUV_MODE=system TITAN_EXTRA_CFLAGS=-O0 luarocks make --force
@@ -200,8 +199,41 @@ jobs:
           retention-days: 1
           overwrite: true
 
+  test-linux-library:
+    name: test (ubuntu-slim, library-uv-fs)
+    needs: prepare-linux
+    if: github.event_name == 'push'
+    runs-on: ubuntu-slim
+    permissions:
+      contents: read
+
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download prepared Linux tree
+        uses: actions/download-artifact@v8
+        with:
+          name: titan-linux-prepared.tar.gz
+          path: ${{ runner.temp }}
+
+      - name: Restore prepared Linux tree and environment
+        run: |
+          tar -xzf "$RUNNER_TEMP/titan-linux-prepared.tar.gz" \
+            -C "$GITHUB_WORKSPACE"
+          test "$(cat .ci-prepared-workspace)" = "$GITHUB_WORKSPACE"
+          echo "$PWD/.lua/bin" >> "$GITHUB_PATH"
+          .lua/bin/lua -v
+
+      # Library suites run in full outside LuaCov because it cannot measure
+      # Titan/C library implementations.
+      - name: Run uv/timer/fs library tests without coverage
+        run: bash spec/support/ci_test_groups.sh library-uv-fs
+
   test-linux:
-    name: test (ubuntu-slim, library-uv-fs+compiler-heavy)
+    name: test (ubuntu-slim, compiler-heavy)
     needs: prepare-linux
     if: github.event_name == 'push'
     runs-on: ubuntu-slim
@@ -229,19 +261,14 @@ jobs:
           echo "$PWD/.lua/bin" >> "$GITHUB_PATH"
           .lua/bin/lua -v
 
-      # Library suites run in full outside LuaCov because it cannot measure
-      # Titan/C library implementations.
-      - name: Run uv/timer/fs library tests without coverage
-        run: bash spec/support/ci_test_groups.sh library-uv-fs
-
       # Run the broad end-to-end specs, topical C-FFI cohort, and isolated
-      # static-provider coverage after the library suite: legacy compiler
+      # static-provider coverage on its own restored tree. Legacy compiler
       # cleanup may mutate root artifacts, but no production image is consumed
-      # after this point. Codecov merges this same-commit report with the
-      # producer's core report. These tests compile disposable native fixtures,
-      # so avoid spending the 1-core runner budget optimizing them. The
-      # prepared production provider remains at -O2, and macOS repeats the
-      # complete suite at -O2.
+      # afterward. Codecov merges this same-commit report with the producer's
+      # core report. These tests compile disposable native fixtures, so avoid
+      # spending the 1-core runner budget optimizing them. The prepared
+      # production provider remains at -O2, and macOS repeats the complete
+      # suite at -O2.
       - name: Run heavy compiler and language tests with coverage
         env:
           TITAN_EXTRA_CFLAGS: "-O0"

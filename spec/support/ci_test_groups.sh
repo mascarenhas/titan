@@ -45,7 +45,7 @@ while IFS= read -r test_file; do
         spec/minicoro_spec.lua | \
         spec/rockspec_spec.lua)
             # Keep serial native/runtime proofs and suites that mutate or
-            # inspect shared root artifacts out of the two workers below.
+            # inspect shared root artifacts out of the parallel workers below.
             library_serial_tests+=("$test_file")
             ;;
         spec/stdlib/uv*_spec.lua | \

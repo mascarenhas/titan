@@ -61,11 +61,12 @@ not add epicycles around what may be a misunderstood simpler design.
   dispatch.** Use `workflow_dispatch` as the **pre-merge check** with
   `gh workflow run ci.yml --ref <branch>`. Linux jobs are push-only and are not
   repeated by that macOS dispatch. The regular Linux flow
-  uses two 1-core `ubuntu-slim` jobs designed to remain below that runner's
-  15-minute limit. The regular build job runs the core compiler/language shard
-  plus serial, net/OS, and PEG/string tests on its warm tree, and uploads a
-  same-run, full-tree tar artifact for one consumer. That consumer runs uv/timer/fs
-  first, then the heavy coverage shard: `coder_spec.lua`,
+  uses three 1-core `ubuntu-slim` jobs designed to remain below that runner's
+  hard 15-minute limit. The regular build job runs the core compiler/language
+  shard plus serial, net/OS, and PEG/string tests on its warm tree, and uploads
+  a same-run, full-tree tar artifact for two parallel consumers. One consumer
+  runs the uv/timer/fs library group without coverage. The other runs the heavy
+  coverage shard: `coder_spec.lua`,
   `flexible_returns_spec.lua`, `cdriver_spec.lua`, every checker/coder
   `c_ffi*_spec.lua`, and the static-provider specs that require isolated Busted
   processes for direct coverage. The complete local `compiler` group remains
@@ -81,11 +82,11 @@ not add epicycles around what may be a misunderstood simpler design.
   harnesses retain their explicit flags. Generated native fixtures in the
   producer's core compiler group compile at `-O1`, retaining optimized
   generated-C coverage
-  without spending the full `-O2` compile cost. Fixtures in the consumer's
-  heavy compiler group compile at `-O0` so optimization of disposable code
-  does not consume its 1-core runner budget. The Linux system-mode source-install
-  canary builds its installed provider at `-O0`, then its focused tests and
-  production smoke use optimized consumers against that provider. The core
+  without spending the full `-O2` compile cost. Fixtures in the heavy compiler
+  consumer compile at `-O0` so optimization of disposable code does not consume
+  its 1-core runner budget. The Linux system-mode source-install canary builds
+  its installed provider at `-O0`, then its focused tests and production smoke
+  use optimized consumers against that provider. The core
   Linux compiler group, the canonical bundled provider packed before those
   tests, its bundled production smoke, and the complete macOS run (including
   both libuv modes) remain optimized. The
@@ -140,9 +141,10 @@ not add epicycles around what may be a misunderstood simpler design.
   runtime artifacts, canonical installed `titan.so` and `titan.a`, conditional
   dSYM, and all nine generated shims around the producer's compiler-only
   group so root output cleanup cannot stale or remove the production image
-  before the mode smoke. The consumer deliberately runs its compiler shard
-  after its final library group, so no later production image needs restoring.
-  Compiler and language specs must not
+  before the mode smoke. The two consumers use independent restored trees, and
+  the compiler consumer has no later production-image dependency, so it need
+  not snapshot and restore the standard image around its shard. Compiler and
+  language specs must not
   delete the shared checkout runtime archive merely to force recompilation;
   Make owns that dependency state. The serial coroutine suite is the isolated
   exception described below.
