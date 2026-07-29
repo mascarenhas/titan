@@ -1,0 +1,67 @@
+-- Lua caps string lengths at the smaller of size_t and lua_Integer. Compute
+-- that target limit without first converting an unrepresentable SIZE_MAX to
+-- a Titan integer.
+local function maximum_string_bytes(): integer
+  if cstring.size_t.sizeof >= lua.lua_Integer.sizeof then
+    return lua.LUA_MAXINTEGER as integer
+  end
+  local maximum = 0
+  local byte = 0
+  while byte < cstring.size_t.sizeof do
+    maximum = maximum * 256 + 255
+    byte = byte + 1
+  end
+  return maximum
+end
+
+-- Normalize an initial Lua string position. The result is clipped to
+-- [1, +inf), matching Lua 5.5's posrelatI without negating a possibly minimal
+-- integer.
+local function initial_position(position: integer,
+                                length: integer): integer
+  if position > 0 then
+    return position
+  elseif position == 0 then
+    return 1
+  elseif position < -length then
+    return 1
+  else
+    return length + position + 1
+  end
+end
+
+-- Normalize an ending Lua string position. The result is clipped to
+-- [0, length].
+local function ending_position(position: integer,
+                               length: integer): integer
+  if position > length then
+    return length
+  elseif position >= 0 then
+    return position
+  elseif position < -length then
+    return 0
+  else
+    return length + position + 1
+  end
+end
+
+local function copy_interval(subject: string, first: integer,
+                             count: integer): string
+  if count == 0 then return "" end
+  if count < 0 then raise "resulting string is too large" end
+  local storage = ffi.titan_ffi_char.new_array(count)
+  local output = storage as *ffi.titan_ffi_char
+  local source = subject as const *ffi.titan_ffi_char
+  cstring.memcpy(output, source + first - 1,
+                 count as cstring.size_t)
+  return storage as string
+end
+
+local function byte_results(subject: string, current: integer,
+                            last: integer): (...: integer)
+  if current > last then return end
+  local source = subject as const *ffi.titan_ffi_unsigned_char
+  local octet = source[current - 1] as integer
+  if current == last then return octet end
+  return octet, byte_results(subject, current + 1, last)
+end

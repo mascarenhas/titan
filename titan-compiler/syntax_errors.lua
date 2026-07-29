@@ -95,6 +95,12 @@ local errors = {
 
     CArrayOnlyAutomatic = "Source-written fixed C array syntax requires a qualified type on a single initializer-less automatic local.",
 
+    COwnedShape = "Expected '*' for one owned C object or '[]' for a counted owned C array after 'owned'.",
+
+    OwnedPayload = "Expected a C object type after the owned storage marker.",
+
+    RBracketCOwned = "Expected ']' to close a counted owned C array type.",
+
     TypeType = "Expected a type name after '{'.",
 
     RCurlyType = "Expected '}' to close type specification.",
@@ -212,6 +218,8 @@ local errors = {
     AssignNotLValue = "Expected a valid lvalue in the left side of assignment but found a regular expression.",
 
     CastMissingType = "Expected a type for the cast expression.",
+
+    IsMissingType = "Expected a type for the type-test expression.",
 
     QualName = "Expected a qualified type name.",
 

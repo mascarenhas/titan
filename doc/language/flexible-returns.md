@@ -59,7 +59,8 @@ function missing_type(): (...)                 -- needs : type
 As with an input variadic run, the element type must have a supported Titan
 value representation. `...: nil` and flexible runs of foreign C pointers are
 rejected. `...: value` is valid, as are option element types when nil is an
-intended element.
+intended element and source-written owned C types (which use GC-managed
+userdata rather than borrowed pointer storage).
 
 The fixed prefix keeps the ordinary return rules. A function declared as
 `(boolean, ...: integer)` must still produce its fixed `boolean`; only the
@@ -332,8 +333,13 @@ For inputs:
 * An actual function may have fewer fixed parameters than the expected type;
   it ignores the additional arguments that callers of the expected type may
   supply.
-* An actual function may not have additional fixed parameters hidden from the
-  expected type.
+* An actual function may have additional fixed parameters only when each
+  additional parameter accepts nil. Ordinary call adjustment fills those
+  positions with nil when the expected type supplies no value. If the expected
+  type has an input-variadic tail, each additional parameter must also accept
+  that tail's element type because a caller may supply the position instead.
+  A non-nilable additional parameter remains an incompatible hidden
+  requirement.
 * An expected input-variadic tail may flow to a non-variadic actual function,
   which ignores it. If the actual function has an input tail, every expected
   argument that reaches it must be accepted by its element type.
@@ -347,6 +353,14 @@ end
 
 local wider_call: (integer, string) -> integer = first -- accepted
 -- wider_call(7, "ignored") calls first(7)
+
+function second(first: value, following: value): value
+    return following
+end
+
+local adjusted: (value, ...: value) -> value = second -- accepted
+-- adjusted("a") supplies nil to second's second parameter
+-- adjusted("a", "b", "ignored") returns "b"
 ```
 
 For results:

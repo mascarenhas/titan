@@ -2,6 +2,10 @@ local lfs = require "lfs"
 local async_stdlib = require "spec.support.async_stdlib"
 local LATE_FS_CASES =
     require "spec.support.uv_late_fs_callback_cases"
+local REPO = async_stdlib.repo
+local LPEGLABEL_ARCHIVE =
+    REPO .. "/lpeglabel-build/libtitan-lpeglabel.a"
+local LPEGLABEL_CPPFLAGS = "-I" .. REPO .. "/vendor/lpeglabel"
 
 local fs_only_setting = os.getenv("TITAN_TEST_UV_LATE_FS_ONLY")
 assert(fs_only_setting == nil or fs_only_setting == "" or
@@ -331,8 +335,44 @@ end
 
     describe_dns("DNS cases", function()
         setup(function()
+            -- Net now uses the complete string API, whose regex surface uses
+            -- the complete PEG API. The sanitizer's FS-only mode skips this
+            -- describe and therefore avoids this exact dependency closure.
+            assert.truthy(lfs.attributes(LPEGLABEL_ARCHIVE, "mode"),
+                "run make lpeglabel before delayed-DNS callback specs")
+            for _, name in ipairs({
+                "peg", "native", "combinators",
+                "relabel", "relabel_parser",
+            }) do
+                async_stdlib.write_source(
+                    workspace, "titan.peg." .. name,
+                    async_stdlib.read(
+                        "titan/peg/" .. name .. ".titan"))
+            end
+            async_stdlib.compile(workspace, "titan.peg", {
+                layout = layout,
+                cppflags = LPEGLABEL_CPPFLAGS,
+                extra_objects = { LPEGLABEL_ARCHIVE },
+            })
+            async_stdlib.register_exact_provider(layout, "titan.peg")
+
+            for _, name in ipairs({
+                "string", "bytes", "format", "pack",
+                "regex_api", "regex_compile", "regex_parser",
+            }) do
+                async_stdlib.write_source(
+                    workspace, "titan.string." .. name,
+                    async_stdlib.read(
+                        "titan/string/" .. name .. ".titan"))
+            end
+            async_stdlib.compile(workspace, "titan.string", {
+                layout = layout,
+                cppflags = "",
+            })
+            async_stdlib.register_exact_provider(
+                layout, "titan.string")
+
             -- These convenience facades are needed only by the DNS cases.
-            -- The sanitizer's FS-only mode skips this describe and its builds.
             for _, modname in ipairs({ "titan.async", "titan.timer" }) do
                 async_stdlib.compile(workspace, modname, {
                     layout = layout,

@@ -28,8 +28,8 @@ is not a reserved word. Tokenization is longest-match, so `andy`,
 ```
 and     as      boolean  break     catch   const   defer  do      else
 elseif  end     false    finally   float   for     foreign function
-goto    if      import   in        integer local   nil     not
-or      raise   record   repeat    return  string  then    true
+goto    if      import   in        integer is      local   nil     not
+or      owned   raise    record    repeat   return  string  then    true
 type    until   value   while
 ```
 
@@ -152,7 +152,7 @@ tlfunc   ::= [local] function Name '(' [parlist] ')' [':' rettype] block end
 tlvar    ::= [local] decl '=' exp
 tlrecord ::= [local] record Name {recordfield} end
 tltype   ::= [local] type Name '=' type
-recordfield     ::= [local] Name ':' type [';']
+recordfield     ::= [local] Name ['?'] ':' type [';']
 tlimport        ::= local Name '=' import importname
 tlforeignimport ::= local Name '=' foreign import importname
 moduleinit     ::= do block end
@@ -219,9 +219,18 @@ basictype  ::= nil | boolean | integer | float | string | value
             |  Name '.' Name
             |  '*' simpletype
             |  const '*' simpletype
+            |  ownedtype
             |  Name
             |  '{' type ':' type '}'
             |  '{' type '}'
+ownedtype  ::= owned '*' cownedpayload
+            |  owned cownedpayload '[' ']'
+cownedpayload ::= nil | boolean | integer | float | string | value
+            |  Name '.' Name
+            |  '*' cownedpayload
+            |  const '*' cownedpayload
+            |  Name
+            |  ownedtype
 funargtypes::= '(' [type {',' type} [',' varargtype] | varargtype] ')'
 varargtype ::= '...' ':' type
 resulttypes::= '(' [type {',' type} [',' flexrettype] | flexrettype] ')'
@@ -247,7 +256,8 @@ visible variable of a generic `for`
 (`for i: integer = 1, 10 do ... end` and
 `for k: integer, v: string in step do ... end` are valid). Function
 *parameters* (`param`) must be annotated and admit no `?` shorthand —
-write `p: T?`.
+write `p: T?`. Record fields admit the annotated shorthand `x?: T`, which is
+equivalent to `x: T?`.
 
 In types: `Name` is a record type and `mod.Name` one from an imported
 module; `{T}` is an array, `{K: V}` a map, `T?` an option type, and
@@ -258,7 +268,20 @@ are independent. When a fixed result prefix is present, a comma is required
 before the tail: `(integer, ...: string)` is valid, while
 `(integer ...: string)` is not. `->` is right-associative (`a -> b -> c` is
 `a -> (b -> c)`) and binds tighter than the commas of an enclosing
-parenthesized result list. A bare `resulttypes` form is valid only in
+parenthesized result list.
+
+`owned *mod.T` is the scalar GC-owner spelling and `owned mod.T[]` is
+the dynamically counted owner spelling. The first `*` of the scalar form is
+the ownership marker, so another pointer layer belongs to the payload:
+`owned **mod.T` owns one `mod.T *`, while `owned *mod.T[]` owns an array of
+`mod.T *`. `cownedpayload` is optionless so the one trailing `?` accepted by
+`simpletype` wraps the complete owner. The parser accepts the shared payload
+shape above; the checker then requires a complete, allocatable imported C
+object type and rejects Titan, `void`, function, incomplete, fixed-array
+typedef, flexible-array-member, and nested-owner payloads. A numeral between
+the brackets is not owner syntax.
+
+A bare `resulttypes` form is valid only in
 `rettype` position — a function's return annotation or the right side
 of `->` — which is how multiple and flexible return types are written:
 
@@ -367,9 +390,10 @@ e7          ::= e8 {('<<' | '>>') e8}
 e8          ::= e9 ['..' e8]
 e9          ::= e10 {('+' | '-') e10}
 e10         ::= e11 {('*' | '/' | '//' | '%') e11}
-e11         ::= {unop} e12
-e12         ::= castexp ['^' e11]
-castexp     ::= simpleexp [as type]
+e11         ::= castexp
+castexp     ::= unopexp [(as | is) type]
+unopexp     ::= {unop} e12
+e12         ::= simpleexp ['^' e11]
 unop        ::= not | '#' | '-' | '~'
 simpleexp   ::= nil | false | true | Numeral | LiteralString
              |  '...'
@@ -452,16 +476,24 @@ From lowest to highest precedence:
 | `..` | **right** |
 | `+` `-` (binary) | left |
 | `*` `/` `//` `%` | left |
+| `as` `is` | postfix on one unary expression; non-associative |
 | `not` `#` `-` `~` (unary) | prefix |
 | `^` | **right** |
-| `as` | non-associative (does not chain) |
 
-This is Lua's table with `as` added at the tightest level. As in Lua,
+This is Lua's table with a non-chaining `as`/`is` level between
+multiplication and unary expressions. As in Lua,
 `^` binds tighter than the unary operators on its *left*, while its
 right operand may carry them: `-1 ^ -2 ^ 3 * 4` parses as
-`(-(1 ^ (-(2 ^ 3)))) * 4`. `as` binds tighter than every operator:
-`2 + v as integer` is `2 + (v as integer)`, and `v as integer ^ 2` is
-`(v as integer) ^ 2`. The comparison operators chain *grammatically* —
+`(-(1 ^ (-(2 ^ 3)))) * 4`. `as` and `is` bind tighter than the
+multiplicative and looser binary operators: `2 + v as integer` is
+`2 + (v as integer)`, and `2 + v is integer` is
+`2 + (v is integer)`. They wrap unary expressions (`-v is integer` is
+`(-v) is integer`). Since `^` recurses through the `e11` level on its right,
+`v ^ 2 as integer` is `v ^ (2 as integer)`; write
+`(v as integer) ^ 2` when the cast is the left operand, and
+`(v ^ 2) is integer` when the whole power is the test operand.
+`v is integer ^ 2` is a syntax error. The comparison
+operators chain *grammatically* —
 `a < b < c` parses as `(a < b) < c` — and are then rejected by the type
 checker (compile-time error: `left hand side of relational expression
 is a boolean instead of a number`).
@@ -490,9 +522,9 @@ confused rule is not syntax at all:
    `defer defer cleanup()` is a syntax error. Use two separate defers for
    last-in-first-out cleanup, or `defer do ... end` for multiple cleanup
    statements.
-5. **`as` does not chain.** `x as integer as float` is a syntax error;
-   the cast operand is a `simpleexp`, so chaining grammatically
-   requires parentheses (`(x as integer) as value`). Which casts are
+5. **`as` and `is` do not chain.** `x as integer is float` is a syntax
+   error; their operand is an `unopexp`, so chaining grammatically
+   requires parentheses (`(x as integer) is value`). Which casts/tests are
    then *accepted* is a typing matter ([Expressions](expressions.md)) —
    the checker rejects `(x as integer) as float`, for instance, with
    `cannot cast 'integer' to 'float'`.

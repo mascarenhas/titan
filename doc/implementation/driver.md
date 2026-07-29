@@ -81,15 +81,16 @@ This is root discovery, not the previous policy of adding every
 find that exact suffix becomes `driver.INSTALLATION_ERROR` and stops
 compiler/toolchain use instead of silently mixing installations.
 
-The standard library consists of seven ordinary qualified logical modules:
+The standard library consists of nine ordinary qualified logical modules:
 `titan.coroutine`, `titan.uv`, `titan.async`, `titan.timer`, `titan.fs`,
-`titan.net`, and `titan.os`. Most checkout sources are
-`titan/<name>.titan`; `titan.uv` is the folder ensemble rooted at
-`titan/uv/uv.titan`. One `titanc` invocation links their independent objects
-and `titanlib.o` into the physical checkout provider pair
-`titan.so`/`titan.a`; bundled mode also supplies the private libuv archive as
-shared native payload. Installation publishes both forms below
-`<root>/lib/titan/0.18/` and seven generated logical-module shims below
+`titan.net`, `titan.os`, `titan.peg`, and `titan.string`. Most checkout sources
+are `titan/<name>.titan`; `titan.uv`, `titan.peg`, and `titan.string` are folder
+ensembles. One `titanc` invocation links their independent objects and
+`titanlib.o` into the physical checkout provider pair `titan.so`/`titan.a`.
+The private namespaced LPegLabel archive follows `titanlib.o` as metadata-free
+payload; bundled mode then supplies the private libuv archive. Installation
+publishes both forms below `<root>/lib/titan/0.18/` and nine generated
+logical-module shims below
 `<root>/share/lua/5.5/titan/`. Titan imports discover each module through the
 preferred compiled-format pass; Lua requires use a generated shim and the DSO
 form.
@@ -100,11 +101,12 @@ aliases of uv-owned record types. The timer/fs/net/os modules also import uv
 directly for their low-level plumbing, so all five consumers share one Runtime
 and one canonical libuv provider image.
 
-For source convenience, the parser desugars the seven short standard-library
+For source convenience, the parser desugars the nine short standard-library
 imports before module resolution: `import "async"`, for example, places
 `titan.async` in the import AST exactly as `import "titan.async"` would. The same
-mapping applies to `coroutine`, `uv`, `timer`, `fs`, `net`, and `os`; every other
-name is left unchanged. The driver, checker, code generator, and runtime thus
+mapping applies to `coroutine`, `uv`, `timer`, `fs`, `net`, `os`, `peg`, and
+`string`; every other name is left unchanged. The driver, checker, code
+generator, and runtime thus
 see only the qualified module name. Each qualified name naturally produces its
 matching native symbols and Lua entry point (`titan_async_*` and
 `luaopen_titan_async`, for example), so no separate Lua alias is required and
@@ -135,7 +137,7 @@ as `options.source_roots`; each such module tries source first, even if a
 binary for it was cached by an earlier import in the same compiler process.
 If its source is absent, compilation fails rather than treating an existing
 binary as an empty build root. Imports reached from that root remain binary
-first. This is why one standard-library invocation can force all seven roots
+first. This is why one standard-library invocation can force all nine roots
 through source even when a bootstrap or prior combined provider pair is
 visible.
 Their internal imports resolve to the already selected source cache entries
@@ -626,30 +628,33 @@ libraries](multi-module-libraries.md) documents logical grouping and DSO
 loading; [Static compiled modules](static-compiled-modules.md) documents the
 archive resolver, binding constraints, composition, and paired publication.
 
-The standard library uses the same generic path with all seven qualified roots
+The standard library uses the same generic path with all nine qualified roots
 in one command:
 
 ```sh
 titanc titan.coroutine titan.uv titan.async titan.timer titan.fs titan.net titan.os \
-  -X titan-runtime/titanlib.o libuv-build/libuv.a  # bundled mode
+  titan.peg titan.string \
+  -X titan-runtime/titanlib.o lpeglabel-build/libtitan-lpeglabel.a \
+     libuv-build/libuv.a  # bundled mode
 ```
 
 The provider prefix is `titan`, so checkout output is `titan.so`, `titan.a`,
-and seven generated `titan/*.lua` shims. Each logical module retains its own
+and nine generated `titan/*.lua` shims. Each logical module retains its own
 `luaopen_titan_*`, `_init`, `_abi`, `_types`, registry module state, and
-initializer; `titanlib.o` supplies the eighth entry, `luaopen_titan`, and the
+initializer; `titanlib.o` supplies the tenth entry, `luaopen_titan`, and the
 support table without adding an archive metadata key. The `titan.uv` folder
-still generates only `titan/uv/uv.c`/`.o`, and no contributor shim. Bundled
-mode puts the private libuv archive in the shared `-X` payload so its objects
-enter both providers. System mode keeps the pkg-config-selected setting as a
-repeated final-link input, never copies it into `titan.a`, and omits
-`libuv-build/libuv.a` from the command.
+still generates only `titan/uv/uv.c`/`.o`, and no contributor shim. The
+five-member LPegLabel archive is force-carried into both providers after
+`titanlib.o` but contributes no logical metadata. Bundled mode puts the private
+libuv archive after it in the shared `-X` payload. System mode keeps the
+pkg-config-selected setting as a repeated final-link input, never copies it
+into `titan.a`, and omits `libuv-build/libuv.a` from the command.
 
 Make tracks every standard source explicitly, the compiler/runtime/support and
 embedded-format inputs, effective `CC`/`AR`/`RANLIB`, extra flags, and libuv
 configuration in a completion/config stamp. A missing `titan.so`, `titan.a`,
 generated shim, or Darwin dSYM invalidates the stamp. A warm invocation also
-rescans `titan.a` for the exact seven logical keys without changing pair
+rescans `titan.a` for the exact nine logical keys without changing pair
 mtimes. Exact child DSOs are removed as stale production outputs; the isolated
 delayed-callback and coroutine tests are the only supported exact-image
 variants.
@@ -665,9 +670,9 @@ deploys the compiler script/Lua modules but does not own a `titan` C module.
 The source-only post-install hook invokes the just-deployed `titanc` once in a
 private staging directory on the destination filesystem under the same
 effective native toolchain, extra flags, rocks root, runtime mode, and libuv
-policy. The publisher validates the eight Lua entries, seven logical
-protocols, exact seven-key archive metadata, three-way embedded/DSO/
-archive-backed ABI/types equality, seven shims, and Darwin dSYM. It backs up
+policy. The publisher validates the ten Lua entries, nine logical protocols,
+exact nine-key archive metadata, three-way embedded/DSO/archive-backed
+ABI/types equality, nine shims, and Darwin dSYM. It backs up
 the active-0.18 public set and stale active-layout copies, commits shims/dSYM,
 then `titan.a`, and renames the validated DSO last. A caught or injected
 failure restores the prior complete pair, a legacy complete DSO/shim
@@ -790,8 +795,10 @@ contains exactly the dynamic loader/error runtime `titan.o`, coroutine shim
 `titan_coro.o`, and libuv callback shim `titan_uv.o`. Static-archive selection
 pulls in only referenced objects. Vendored `libbacktrace.a` is a separate link
 input. `titanlib.o` is also separate: it is the only input to the private
-support bootstrap and is passed once as shared native payload when the seven
+support bootstrap and is passed once as shared native payload when the nine
 standard logical modules are published in the full `titan.so`/`titan.a` pair.
+The private five-member LPegLabel archive follows it only in the standard
+provider payload and is not part of the runtime SDK.
 The staged non-Lua SDK headers under `<root>/include` are `minicoro.h`,
 `titan.h`, `titan_longjmp.h`, and `titan/{ffi,coro,uv}.h`. Checkout developer
 mode selects the corresponding local archive and headers so runtime edits can
@@ -824,10 +831,13 @@ be tested before reinstalling.
 * **`titan_setbvalue(obj, x)`** — sets a boolean `TValue` from a C
   `int`. Exists because Lua 5.5 removed `setbvalue`: booleans carry no
   payload, truth lives in the type tag (`setbtvalue`/`setbfvalue`).
-* **`titan_cast_func(t, p)`** — `void*`-to-function-pointer cast for
-  `dlsym` results (undefined by ISO C, assumed by POSIX); named to
-  avoid colliding with Lua 5.5's own single-argument `cast_func` in
-  `llimits.h`.
+* **`titan_cast_func(t, p)`** — toolchain-supported conversion in either
+  direction between function pointers and object/`void *` pointers. Dynamic
+  loading uses `void *` to function pointer for `dlsym` results; explicit FFI
+  erasure uses function pointer to `void *`. ISO C does not make these
+  conversions portable, while POSIX and the supported toolchains provide the
+  required contract. The Titan name avoids colliding with Lua 5.5's own
+  single-argument `cast_func` in `llimits.h`.
 * **`_integer2str(L, i)` / `_float2str(L, f)`** — inline helpers
   returning a fresh `TString*`. They call `lua_integer2str` and
   `luaO_tostringbuff` — the same conversion routines the Lua core uses

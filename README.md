@@ -82,9 +82,9 @@ The installed files used to compile Titan code include:
 | `$ROCKS_TREE/lib/libbacktrace.a` | The separate vendored native unwinder/symbolizer archive |
 | `$ROCKS_TREE/include/minicoro.h`, `titan.h`, `titan_longjmp.h` | Non-Lua top-level SDK headers |
 | `$ROCKS_TREE/include/titan/{ffi,coro,uv}.h` | Namespaced portable FFI, coroutine, and libuv shim headers |
-| `$ROCKS_TREE/lib/titan/0.18/titan.so` | The dynamic standard-library provider: native `require "titan"` support plus the independent `coroutine`, `uv`, `async`, `timer`, `fs`, `net`, and `os` logical modules |
-| `$ROCKS_TREE/lib/titan/0.18/titan.a` | The self-describing static form of the same seven logical standard modules, plus native support and bundled-libuv payload when that mode is selected |
-| `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,fs,net,os}.lua` | Generated logical-module loader shims that map the canonical provider globally and invoke their exact `luaopen_titan_*` entries |
+| `$ROCKS_TREE/lib/titan/0.18/titan.so` | The dynamic standard-library provider: native `require "titan"` support plus the independent `coroutine`, `uv`, `async`, `timer`, `fs`, `net`, `os`, `peg`, and `string` logical modules |
+| `$ROCKS_TREE/lib/titan/0.18/titan.a` | The self-describing static form of the same nine logical standard modules, plus native support, private LPegLabel payload, and bundled-libuv payload when that mode is selected |
+| `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,fs,net,os,peg,string}.lua` | Generated logical-module loader shims that map the canonical provider globally and invoke their exact `luaopen_titan_*` entries |
 
 Bundled-libuv installs also contain `$ROCKS_TREE/include/uv.h` and
 `$ROCKS_TREE/include/uv/`. The bundled `libuv.a` is a private build artifact:
@@ -95,6 +95,12 @@ standard logical modules have independent state and entries inside both
 provider forms; installation does not create child DSO aliases, symbolic
 links, hard links, or copied DSOs. The combined `titan.so` supplies the
 dynamic process's one complete libuv provider.
+
+The standard provider also embeds a pinned, privately namespaced LPegLabel
+engine for `titan.peg` and `titan.string`. Its exact five-object archive is a
+source-build input carried into `titan.so` and `titan.a`; the archive and its
+headers are not installed in the SDK, and applications do not need a separate
+LPeg/LPegLabel runtime module.
 
 ## Libuv setup
 
@@ -209,7 +215,7 @@ The Titan-owned Lua's configured default `package.cpath` contains
 `$PREFIX/lib/titan/0.18/?.so` before `$PREFIX/lib/lua/5.5/?.so`. The first
 template lets the generated `titan.*` loaders find the canonical provider; the
 second remains the root-discovery anchor. The default `package.path` finds all
-seven loaders under `$PREFIX/share/lua/5.5/titan/`. In the currently supported
+nine loaders under `$PREFIX/share/lua/5.5/titan/`. In the currently supported
 layout
 `ROCKS_TREE == PREFIX`, so `titanc` can use the first entry ending in
 `/lib/lua/5.5/?.so` to recover its Titan SDK/rocks root.
@@ -260,7 +266,8 @@ absent, the build atomically stages that bootstrap at
 `$ROCKS_TREE/lib/titan/0.18/titan.so` so the just-installed compiler can load
 its native support table; a repeated install preserves an already valid full
 image. After LuaRocks deploys the compiler, the source-only `post_install` hook
-invokes that `titanc` once for all seven standard roots, stages the paired
+invokes that `titanc` once for all nine standard roots, with private LPegLabel
+payload between `titanlib.o` and any bundled libuv payload, stages the paired
 providers and generated loaders privately, validates them, and publishes them
 with rollback, committing `titan.a` before `titan.so` and using the DSO rename
 as the final commit point. There is no separate Make install pass
@@ -320,7 +327,8 @@ precedence, interface/member and module-slot ordering, module-variable
 initialization, and code generation.
 
 The standard-library short names (`coroutine`, `uv`, `async`, `timer`, `fs`,
-`net`, and `os`) are parser sugar for the corresponding `titan.*` module
+`net`, `os`, `peg`, and `string`) are parser sugar for the corresponding
+`titan.*` module
 names. Module resolution checks binary dependencies before source, so an
 ordinary `./titan/uv/uv.titan` folder cannot displace the installed compiled
 provider;
@@ -330,17 +338,21 @@ command line must come from source and use the folder-before-flat rule. Titan co
 short imports, while Lua uses the
 qualified names `require "titan.coroutine"`, `require "titan.async"`,
 `require "titan.timer"`, `require "titan.fs"`, `require "titan.net"`, and
-`require "titan.os"`. The private `titan.uv` logical module remains available
+`require "titan.os"`, plus `require "titan.peg"` and
+`require "titan.string"`. The private `titan.uv` logical module remains available
 for runtime plumbing and direct-libuv extensions. Lua's own `coroutine` and
 `os` modules remain unchanged.
 
 The logical async chain remains `titan.coroutine -> titan.uv -> titan.async`,
 with `titan.timer`, `titan.fs`, `titan.net`, and `titan.os` built on the same
-private plumbing. Production builds pass all seven roots to one `titanc`
+private plumbing. `titan.peg` owns the typed parsing-expression surface and
+`titan.string` builds byte operations, formatting/packing, and regexes on it.
+Production builds pass all nine roots to one `titanc`
 invocation, so their source imports are statically resolved inside the paired
 `titan.so` and `titan.a` providers. Bundled mode carries libuv's objects into
 both forms; system mode keeps the pkg-config-selected library as a repeated
-final-link input. Seven generated Lua loaders expose the qualified logical
+final-link input. The private LPegLabel objects enter both forms in either
+libuv mode. Nine generated Lua loaders expose the qualified logical
 entries.
 Its source is the reviewed folder ensemble rooted at `titan/uv/uv.titan`, with
 `file.titan`, `os.titan`, `process.titan`, `runtime.titan`, `task.titan`, and
@@ -427,6 +439,11 @@ There is no extra protected callback wrapper or implicit ready queue;
 environment, directory, identity, executable-path, one-shot signal,
 argv-based child-process, binary stdio, and concurrent `communicate` helpers are
 documented in the [OS standard library](doc/language/standard-library-os.md).
+The `peg` module provides typed parsing-expression constructors and captures;
+the `string` module provides binary byte operations, Lua-compatible
+formatting/packing and `tostring`, plus compiled byte regular expressions.
+See the [PEG](doc/language/standard-library-peg.md) and
+[string](doc/language/standard-library-string.md) standard-library chapters.
 
 If everything is all right with your modules, you will get the result of
 your compilation as a native binary:
@@ -535,7 +552,8 @@ need the SDL2 development headers installed.
 
 `make clean` removes generated build and test artifacts (object files, generated
 C, compiled modules, coverage data), including nested `titan/uv/uv.c` and
-`titan/uv/uv.o` plus the seven known generated standard-library loaders, while
+`titan/uv/uv.o`, the `titan/peg` and `titan/string` folder-main outputs, and
+the nine known generated standard-library loaders, while
 keeping source files and downloaded dependency trees.
 `make distclean` additionally removes the downloaded Lua, LuaRocks,
 libbacktrace, and libuv source/build trees and release tarballs. Neither target
@@ -609,11 +627,14 @@ they are in the roadmap:
   TCP,
   portable OS helpers, one-shot signal waits, direct child processes with
   binary stdio, and concurrent `communicate`
+* typed PEG construction/captures and a byte-oriented string library with
+  Lua-compatible formatting/packing, `tostring`, and compiled regular
+  expressions
 
 ## Next
 
-* minimal standard library, continued (string library including tostring, math
-  library including tonumber, and a Lua library to load/run Lua code)
+* minimal standard library, continued (math library including tonumber, and a
+  Lua library to load/run Lua code)
 * FFI with C, continued (Titan-function adapters for C callback ABIs,
   adopted-pointer lifetimes, and owned structs with flexible array members)
 * tagged variants (unions of records with some syntax for switch/case on the record tag)

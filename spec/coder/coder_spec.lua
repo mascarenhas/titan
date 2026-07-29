@@ -1324,6 +1324,29 @@ describe("Titan code generator", function()
         assert.truthy(ok, err)
     end)
 
+    it("guards string concatenation length accumulation against overflow", function()
+        local csrc = compile_and_read_c([[
+            function concat(a: string, b: string): string
+                return a .. b
+            end
+        ]])
+        local first_length = assert(csrc:find(
+            "size_t _len1 = tsslen(_str1);", 1, true))
+        local first_guard = assert(csrc:find(
+            "_len1%s*>=%s*MAX_SIZE %- sizeof%(TString%) %- _len"))
+        local first_add = assert(csrc:find("_len += _len1;", 1, true))
+        local second_length = assert(csrc:find(
+            "size_t _len2 = tsslen(_str2);", 1, true))
+        local second_guard = assert(csrc:find(
+            "_len2%s*>=%s*MAX_SIZE %- sizeof%(TString%) %- _len"))
+        local second_add = assert(csrc:find("_len += _len2;", 1, true))
+        assert.is_true(first_length < first_guard and
+            first_guard < first_add and first_add < second_length and
+            second_length < second_guard and second_guard < second_add)
+        assert.equal(2, select(2, csrc:gsub(
+            'luaL_error%(L, "string length overflow"%)', "")))
+    end)
+
     it("generates code for string coercion from integer", function()
         local code = [[
             function concat(a: string): string

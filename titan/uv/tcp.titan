@@ -1,8 +1,4 @@
-local record AddressList
-  local data: *shim.titan_uvshim_address
-  local storage: value
-  local count: integer
-end
+local type AddressList = owned shim.titan_uvshim_address[]
 
 local record NetOperation
   local kind: integer
@@ -53,7 +49,7 @@ local record TcpControl
   local read_waiter: Task?
   local read_epoch: integer
   local read_bytes: Bytes?
-  local read_queue: {Bytes}
+  local read_queue: {ByteChunk}
   local output_head: NetOperation?
   local output_tail: NetOperation?
   local output_current: NetOperation?
@@ -70,11 +66,10 @@ local record TcpControl
   local setup_operation: NetOperation?
 end
 
--- DNS and stream request owners share the native trampoline's fixed six
+-- DNS and stream request owners share the native trampoline's fixed five
 -- slots, but retain exact request-pointer and dispatcher types.
 local record uv_getaddrinfo_t
-  local handle: *libuv.uv_getaddrinfo_t
-  local storage: value
+  local handle?: owned *libuv.uv_getaddrinfo_t
   local main_thread: value
   local dispatcher: (uv_getaddrinfo_t, integer, integer, libuv.size_t,
                      ffi.titan_ffi_void_ptr) -> ()
@@ -83,8 +78,7 @@ local record uv_getaddrinfo_t
 end
 
 local record uv_connect_t
-  local handle: *libuv.uv_connect_t
-  local storage: value
+  local handle?: owned *libuv.uv_connect_t
   local main_thread: value
   local dispatcher: (uv_connect_t, integer, integer, libuv.size_t,
                      ffi.titan_ffi_void_ptr) -> ()
@@ -93,8 +87,7 @@ local record uv_connect_t
 end
 
 local record uv_write_t
-  local handle: *libuv.uv_write_t
-  local storage: value
+  local handle?: owned *libuv.uv_write_t
   local main_thread: value
   local dispatcher: (uv_write_t, integer, integer, libuv.size_t,
                      ffi.titan_ffi_void_ptr) -> ()
@@ -103,8 +96,7 @@ local record uv_write_t
 end
 
 local record uv_shutdown_t
-  local handle: *libuv.uv_shutdown_t
-  local storage: value
+  local handle?: owned *libuv.uv_shutdown_t
   local main_thread: value
   local dispatcher: (uv_shutdown_t, integer, integer, libuv.size_t,
                      ffi.titan_ffi_void_ptr) -> ()
@@ -116,8 +108,7 @@ end
 -- Native callbacks recover this record directly; the pointer never travels
 -- through value and repeated middle-layer calls allocate no pointer box.
 record uv_tcp_t
-  local handle: *libuv.uv_tcp_t
-  local storage: value
+  local handle?: owned *libuv.uv_tcp_t
   local main_thread: value
   local dispatcher: (uv_tcp_t, integer, integer, libuv.size_t,
                      ffi.titan_ffi_void_ptr) -> ()
@@ -325,9 +316,8 @@ local function copy_addresses(pointer: *libuv.addrinfo,
     entry = entry.ai_next
   end
 
-  local owned = shim.titan_uvshim_address.new_array(count)
-  local storage: value = owned
-  local data = owned as *shim.titan_uvshim_address
+  local addresses = shim.titan_uvshim_address.new_array(count)
+  local data = addresses as *shim.titan_uvshim_address
   local copied = 0
   entry = pointer
   while entry ~= nil do
@@ -339,7 +329,7 @@ local function copy_addresses(pointer: *libuv.addrinfo,
     end
     entry = entry.ai_next
   end
-  return AddressList.new(data, storage, count)
+  return addresses
 end
 
 local function validate_tcp_identity(tcp: uv_tcp_t, operation: string,
@@ -499,26 +489,21 @@ local function allocate_dns_owner(runtime: Runtime,
                                   operation: NetOperation):
                                   (uv_getaddrinfo_t,
                                    ffi.titan_ffi_void_ptr)
-  local top = lua.lua_gettop(L)
-  local memory = lua.lua_newuserdatauv(L, libuv.uv_getaddrinfo_t.sizeof, 0)
-  local storage = ffi.lua_totvalue(L, -1)
+  local handle = libuv.uv_getaddrinfo_t.new()
   local control = new_net_control(runtime, NET_OWNER_DNS, operation)
   local owner: uv_getaddrinfo_t = {
-    handle = memory as *libuv.uv_getaddrinfo_t,
-    storage = storage,
+    handle = handle,
     main_thread = main_thread,
     dispatcher = dns_dispatch,
     metadata = control,
     buffer = nil,
   }
-  -- Root and derive the raw callback navigation pointer before publishing the
-  -- request control.  No allocating Titan helper runs between publication and
-  -- the one libuv submit call.
-  ffi.lua_pushtvalue(L, owner)
-  local pointer = ffi.lua_togco(L, -1)
+  -- The explicit cast anchors the wrapper while deriving its raw callback
+  -- navigation pointer. No allocating Titan helper runs between publication
+  -- and the one libuv submit call.
+  local pointer = owner as ffi.titan_ffi_void_ptr
   control.owner = owner
   link_net_control(runtime, control)
-  lua.lua_settop(L, top)
   return owner, pointer
 end
 
@@ -526,23 +511,18 @@ local function allocate_connect_owner(runtime: Runtime,
                                       operation: NetOperation):
                                       (uv_connect_t,
                                        ffi.titan_ffi_void_ptr)
-  local top = lua.lua_gettop(L)
-  local memory = lua.lua_newuserdatauv(L, libuv.uv_connect_t.sizeof, 0)
-  local storage = ffi.lua_totvalue(L, -1)
+  local handle = libuv.uv_connect_t.new()
   local control = new_net_control(runtime, NET_OWNER_CONNECT, operation)
   local owner: uv_connect_t = {
-    handle = memory as *libuv.uv_connect_t,
-    storage = storage,
+    handle = handle,
     main_thread = main_thread,
     dispatcher = connect_dispatch,
     metadata = control,
     buffer = nil,
   }
-  ffi.lua_pushtvalue(L, owner)
-  local pointer = ffi.lua_togco(L, -1)
+  local pointer = owner as ffi.titan_ffi_void_ptr
   control.owner = owner
   link_net_control(runtime, control)
-  lua.lua_settop(L, top)
   return owner, pointer
 end
 
@@ -550,23 +530,18 @@ local function allocate_write_owner(runtime: Runtime,
                                     operation: NetOperation):
                                     (uv_write_t,
                                      ffi.titan_ffi_void_ptr)
-  local top = lua.lua_gettop(L)
-  local memory = lua.lua_newuserdatauv(L, libuv.uv_write_t.sizeof, 0)
-  local storage = ffi.lua_totvalue(L, -1)
+  local handle = libuv.uv_write_t.new()
   local control = new_net_control(runtime, NET_OWNER_WRITE, operation)
   local owner: uv_write_t = {
-    handle = memory as *libuv.uv_write_t,
-    storage = storage,
+    handle = handle,
     main_thread = main_thread,
     dispatcher = write_dispatch,
     metadata = control,
     buffer = operation.prepared_buffer,
   }
-  ffi.lua_pushtvalue(L, owner)
-  local pointer = ffi.lua_togco(L, -1)
+  local pointer = owner as ffi.titan_ffi_void_ptr
   control.owner = owner
   link_net_control(runtime, control)
-  lua.lua_settop(L, top)
   return owner, pointer
 end
 
@@ -574,31 +549,24 @@ local function allocate_shutdown_owner(runtime: Runtime,
                                        operation: NetOperation):
                                        (uv_shutdown_t,
                                         ffi.titan_ffi_void_ptr)
-  local top = lua.lua_gettop(L)
-  local memory = lua.lua_newuserdatauv(L, libuv.uv_shutdown_t.sizeof, 0)
-  local storage = ffi.lua_totvalue(L, -1)
+  local handle = libuv.uv_shutdown_t.new()
   local control = new_net_control(runtime, NET_OWNER_SHUTDOWN, operation)
   local owner: uv_shutdown_t = {
-    handle = memory as *libuv.uv_shutdown_t,
-    storage = storage,
+    handle = handle,
     main_thread = main_thread,
     dispatcher = shutdown_dispatch,
     metadata = control,
     buffer = nil,
   }
-  ffi.lua_pushtvalue(L, owner)
-  local pointer = ffi.lua_togco(L, -1)
+  local pointer = owner as ffi.titan_ffi_void_ptr
   control.owner = owner
   link_net_control(runtime, control)
-  lua.lua_settop(L, top)
   return owner, pointer
 end
 
 local function allocate_tcp_owner(runtime: Runtime):
                                   (uv_tcp_t, ffi.titan_ffi_void_ptr)
-  local top = lua.lua_gettop(L)
-  local memory = lua.lua_newuserdatauv(L, libuv.uv_tcp_t.sizeof, 0)
-  local storage = ffi.lua_totvalue(L, -1)
+  local handle = libuv.uv_tcp_t.new()
   local control: TcpControl = {
     runtime = runtime,
     generation = runtime.generation,
@@ -634,18 +602,15 @@ local function allocate_tcp_owner(runtime: Runtime):
     setup_operation = nil,
   }
   local owner: uv_tcp_t = {
-    handle = memory as *libuv.uv_tcp_t,
-    storage = storage,
+    handle = handle,
     main_thread = main_thread,
     dispatcher = tcp_dispatch,
     metadata = control,
     buffer = nil,
   }
-  ffi.lua_pushtvalue(L, owner)
-  local pointer = ffi.lua_togco(L, -1)
+  local pointer = owner as ffi.titan_ffi_void_ptr
   control.owner = owner
   link_tcp_control(runtime, control)
-  lua.lua_settop(L, top)
   return owner, pointer
 end
 
@@ -656,14 +621,17 @@ local function discard_tcp_storage(tcp: uv_tcp_t)
   -- only non-raising field clears remain in this frame.
   unlink_tcp_control(control)
   tcp.handle = nil
-  tcp.storage = nil
   control.lifecycle = TCP_CLOSED
   control.owner = nil
 end
 
 local function initialize_tcp(runtime: Runtime): (uv_tcp_t, integer)
   local tcp, pointer = allocate_tcp_owner(runtime)
-  local status = libuv.uv_tcp_init(runtime.loop.handle, tcp.handle)
+  local handle =
+    tcp.handle as owned *libuv.uv_tcp_t
+  local tcp_handle: *libuv.uv_tcp_t = handle
+  local status = libuv.uv_tcp_init(
+      runtime.loop.handle as owned *libuv.uv_loop_t, handle)
   if status < 0 then
     -- The handle was never accepted by libuv.  Inline terminal unlink so an
     -- emergency longjmp cannot strand an owner for which no callback is owed.
@@ -681,12 +649,12 @@ local function initialize_tcp(runtime: Runtime): (uv_tcp_t, integer)
     control.previous_control = nil
     control.next_control = nil
     tcp.handle = nil
-    tcp.storage = nil
     control.lifecycle = TCP_CLOSED
     control.owner = nil
     return tcp, status
   end
-  libuv.uv_handle_set_data(tcp.handle, pointer)
+  libuv.uv_handle_set_data(
+      tcp_handle as *libuv.uv_handle_t, pointer)
   tcp.metadata.lifecycle = TCP_INITIALIZED
   return tcp, 0
 end
@@ -700,13 +668,17 @@ local function start_tcp_close(tcp: uv_tcp_t)
     discard_tcp_storage(tcp)
     return
   end
+  local handle =
+    tcp.handle as owned *libuv.uv_tcp_t
+  local tcp_handle: *libuv.uv_tcp_t = handle
   if control.read_active then
-    libuv.uv_read_stop(tcp.handle)
+    libuv.uv_read_stop(tcp_handle as *libuv.uv_stream_t)
     control.read_active = false
   end
   control.read_bytes = nil
   control.lifecycle = TCP_CLOSING
-  libuv.uv_close(tcp.handle, shim.titan_uvshim_close_cb)
+  libuv.uv_close(tcp_handle as *libuv.uv_handle_t,
+                 shim.titan_uvshim_close_cb)
 end
 
 local function free_dns_result(control: NetRequestControl)
@@ -727,23 +699,19 @@ local function retire_net_control(control: NetRequestControl)
     local owner: uv_getaddrinfo_t = owner
     unlink_net_control(control)
     owner.handle = nil
-    owner.storage = nil
   elseif control.kind == NET_OWNER_CONNECT then
     local owner: uv_connect_t = owner
     unlink_net_control(control)
     owner.handle = nil
-    owner.storage = nil
   elseif control.kind == NET_OWNER_WRITE then
     local owner: uv_write_t = owner
     unlink_net_control(control)
     owner.handle = nil
-    owner.storage = nil
     owner.buffer = nil
   else
     local owner: uv_shutdown_t = owner
     unlink_net_control(control)
     owner.handle = nil
-    owner.storage = nil
   end
   if operation.owner == owner then operation.owner = nil end
   control.owner = nil
@@ -840,8 +808,9 @@ local function start_dns(operation: NetOperation):
   local task = operation.task
   local runtime = task.runtime
   local host = operation.host
-  local loop_handle = runtime.loop.handle
-  local node = host.bytes.data
+  local loop_handle =
+    runtime.loop.handle as owned *libuv.uv_loop_t
+  local node: *ffi.titan_ffi_char = host.bytes
   local port = operation.port as ffi.titan_ffi_int
   local service: ffi.titan_ffi_char[6]
   local service_pointer = format_port(port, service)
@@ -853,11 +822,14 @@ local function start_dns(operation: NetOperation):
   hints.ai_flags = libuv.AI_NUMERICSERV
 
   local owner, pointer = allocate_dns_owner(runtime, operation)
+  local owner_handle: *libuv.uv_getaddrinfo_t =
+    owner.handle as owned *libuv.uv_getaddrinfo_t
   operation.owner = owner
-  libuv.uv_req_set_data(owner.handle, pointer)
+  libuv.uv_req_set_data(
+      owner_handle as *libuv.uv_req_t, pointer)
   local status = libuv.uv_getaddrinfo {
     loop = loop_handle,
-    req = owner.handle,
+    req = owner_handle,
     getaddrinfo_cb = shim.titan_uvshim_getaddrinfo_cb,
     node = node,
     service = service_pointer,
@@ -895,8 +867,9 @@ local function continue_net_setup(operation: NetOperation)
     operation.addresses = nil
     return
   end
-  local addresses = operation.addresses
-  while operation.address_index < addresses.count do
+  local addresses = operation.addresses as AddressList
+  local address_data: *shim.titan_uvshim_address = addresses
+  while operation.address_index < #addresses do
     operation.address_index = operation.address_index + 1
     local task = operation.task
     local runtime = task.runtime
@@ -907,21 +880,25 @@ local function continue_net_setup(operation: NetOperation)
     else
       operation.tcp = tcp
       tcp.metadata.setup_operation = operation
+      local tcp_handle: *libuv.uv_tcp_t =
+        tcp.handle as owned *libuv.uv_tcp_t
       if operation.kind == NET_CONNECT then
         -- Cache every borrowed native argument before the request owner is
         -- linked.  From allocation through submit, only field stores and the
         -- non-raising C calls are allowed.
-        local tcp_handle = tcp.handle
         local address_index = operation.address_index - 1
-        local address_cell = addresses.data + address_index
+        local address_cell = address_data + address_index
         local address =
           address_cell.bytes as const *libuv.sockaddr
         local owner, pointer = allocate_connect_owner(runtime, operation)
+        local owner_handle: *libuv.uv_connect_t =
+          owner.handle as owned *libuv.uv_connect_t
         operation.owner = owner
         tcp.metadata.connect_pending = true
-        libuv.uv_req_set_data(owner.handle, pointer)
+        libuv.uv_req_set_data(
+            owner_handle as *libuv.uv_req_t, pointer)
         local status = libuv.uv_tcp_connect {
-          req = owner.handle,
+          req = owner_handle,
           handle = tcp_handle,
           addr = address,
           cb = shim.titan_uvshim_connect_cb,
@@ -938,13 +915,13 @@ local function continue_net_setup(operation: NetOperation)
         return
       else
         local address_cell =
-          addresses.data + operation.address_index - 1
+          address_data + operation.address_index - 1
         local address =
           address_cell.bytes as const *libuv.sockaddr
-        local status = libuv.uv_tcp_bind(tcp.handle, address, 0)
+        local status = libuv.uv_tcp_bind(tcp_handle, address, 0)
         if status >= 0 then
           status = libuv.uv_listen(
-              tcp.handle,
+              tcp_handle,
               operation.backlog as ffi.titan_ffi_int,
               shim.titan_uvshim_connection_cb)
         end
@@ -989,18 +966,22 @@ local function advance_tcp_output(tcp: uv_tcp_t,
       -- an ordinary queued operation that shutdown can still repair.
       if not operation.prepared_buffer then
         local bytes = copy_bytes(operation.data)
-        operation.prepared_buffer = make_buffer(bytes, 0, bytes.length)
+        operation.prepared_buffer = make_buffer(bytes, 0, #bytes)
       end
       local buffer = operation.prepared_buffer
       local buffer_handle = buffer.handle
-      local tcp_handle = tcp.handle
+      local tcp_handle: *libuv.uv_tcp_t =
+        tcp.handle as owned *libuv.uv_tcp_t
       local owner, pointer = allocate_write_owner(control.runtime, operation)
+      local owner_handle: *libuv.uv_write_t =
+        owner.handle as owned *libuv.uv_write_t
       operation.owner = owner
       control.output_current = operation
-      libuv.uv_req_set_data(owner.handle, pointer)
+      libuv.uv_req_set_data(
+          owner_handle as *libuv.uv_req_t, pointer)
       status = libuv.uv_write {
-        req = owner.handle,
-        handle = tcp_handle,
+        req = owner_handle,
+        handle = tcp_handle as *libuv.uv_stream_t,
         bufs = buffer_handle,
         nbufs = 1,
         cb = shim.titan_uvshim_write_cb,
@@ -1012,14 +993,19 @@ local function advance_tcp_output(tcp: uv_tcp_t,
       end
       retire_net_control(owner.metadata)
     else
-      local tcp_handle = tcp.handle
+      local tcp_handle: *libuv.uv_tcp_t =
+        tcp.handle as owned *libuv.uv_tcp_t
       local owner, pointer = allocate_shutdown_owner(control.runtime,
                                                      operation)
+      local owner_handle: *libuv.uv_shutdown_t =
+        owner.handle as owned *libuv.uv_shutdown_t
       operation.owner = owner
       control.output_current = operation
-      libuv.uv_req_set_data(owner.handle, pointer)
+      libuv.uv_req_set_data(
+          owner_handle as *libuv.uv_req_t, pointer)
       status = libuv.uv_shutdown(
-          owner.handle, tcp_handle, shim.titan_uvshim_shutdown_cb)
+          owner_handle, tcp_handle as *libuv.uv_stream_t,
+          shim.titan_uvshim_shutdown_cb)
       if status >= 0 then
         owner.metadata.lifecycle = NET_OWNER_SUBMITTED
         return nil
@@ -1057,8 +1043,12 @@ local function advance_tcp_output(tcp: uv_tcp_t,
 end
 
 local function start_tcp_read(tcp: uv_tcp_t): integer
+  local handle =
+    tcp.handle as owned *libuv.uv_tcp_t
+  local tcp_handle: *libuv.uv_tcp_t = handle
   local status = libuv.uv_read_start(
-      tcp.handle, shim.titan_uvshim_alloc_cb, shim.titan_uvshim_read_cb)
+      tcp_handle as *libuv.uv_stream_t,
+      shim.titan_uvshim_alloc_cb, shim.titan_uvshim_read_cb)
   if status >= 0 then tcp.metadata.read_active = true end
   return status
 end
@@ -1066,7 +1056,10 @@ end
 local function stop_tcp_read(tcp: uv_tcp_t, discard_queue: boolean)
   local control = tcp.metadata
   if control.read_active then
-    libuv.uv_read_stop(tcp.handle)
+    local handle =
+      tcp.handle as owned *libuv.uv_tcp_t
+    local tcp_handle: *libuv.uv_tcp_t = handle
+    libuv.uv_read_stop(tcp_handle as *libuv.uv_stream_t)
     control.read_active = false
   end
   control.read_bytes = nil
@@ -1226,7 +1219,7 @@ local function dns_dispatch_body(owner: uv_getaddrinfo_t, result: integer,
     -- helper or releasing the borrowed addrinfo chain.
     operation.addresses = addresses
     free_dns_result(control)
-    if addresses.count == 0 then
+    if #addresses == 0 then
       failure = make_error(libuv.UV_EADDRNOTAVAIL,
                            "net.resolve", net_operation_subject(operation))
     end
@@ -1265,7 +1258,8 @@ catch
     owner.metadata.runtime.fatal_error = error
     owner.metadata.runtime.fatal_traceback = traceback
   end
-  libuv.uv_stop(owner.metadata.runtime.loop.handle)
+  libuv.uv_stop(owner.metadata.runtime.loop.handle
+                as owned *libuv.uv_loop_t)
   return
 end
 
@@ -1279,7 +1273,8 @@ local function connect_dispatch_body(owner: uv_connect_t, result: integer)
     if read_status < 0 then
       operation.last_error = make_error(
           read_status, "net.read.start", net_operation_subject(operation))
-      operation.address_index = operation.addresses.count
+      operation.address_index =
+        #(operation.addresses as AddressList)
       start_tcp_close(tcp)
       retire_net_control(control)
       return
@@ -1317,7 +1312,8 @@ catch
     owner.metadata.runtime.fatal_error = error
     owner.metadata.runtime.fatal_traceback = traceback
   end
-  libuv.uv_stop(owner.metadata.runtime.loop.handle)
+  libuv.uv_stop(owner.metadata.runtime.loop.handle
+                as owned *libuv.uv_loop_t)
   return
 end
 
@@ -1363,7 +1359,8 @@ catch
     owner.metadata.runtime.fatal_error = error
     owner.metadata.runtime.fatal_traceback = traceback
   end
-  libuv.uv_stop(owner.metadata.runtime.loop.handle)
+  libuv.uv_stop(owner.metadata.runtime.loop.handle
+                as owned *libuv.uv_loop_t)
   return
 end
 
@@ -1383,7 +1380,8 @@ catch
     owner.metadata.runtime.fatal_error = error
     owner.metadata.runtime.fatal_traceback = traceback
   end
-  libuv.uv_stop(owner.metadata.runtime.loop.handle)
+  libuv.uv_stop(owner.metadata.runtime.loop.handle
+                as owned *libuv.uv_loop_t)
   return
 end
 
@@ -1393,7 +1391,7 @@ local function tcp_alloc_dispatch(tcp: uv_tcp_t, size: libuv.size_t,
   if control.read_bytes then raise internal_error("net.read.alloc.pending") end
   local bytes = allocate_stream_bytes(size)
   control.read_bytes = bytes
-  initialize_buffer(pointer, bytes.data, size)
+  initialize_buffer(pointer, bytes, size)
 end
 
 local function tcp_read_dispatch(tcp: uv_tcp_t, result: integer)
@@ -1407,7 +1405,10 @@ local function tcp_read_dispatch(tcp: uv_tcp_t, result: integer)
   local bytes? = control.read_bytes
   if result < 0 then
     if control.read_active then
-      libuv.uv_read_stop(tcp.handle)
+      local handle =
+        tcp.handle as owned *libuv.uv_tcp_t
+      local tcp_handle: *libuv.uv_tcp_t = handle
+      libuv.uv_read_stop(tcp_handle as *libuv.uv_stream_t)
       control.read_active = false
     end
     control.read_bytes = nil
@@ -1454,8 +1455,8 @@ local function tcp_read_dispatch(tcp: uv_tcp_t, result: integer)
   end
   control.read_waiter = nil
   control.read_epoch = 0
-  bytes.length = result
-  control.read_queue[#control.read_queue + 1] = bytes
+  control.read_queue[#control.read_queue + 1] =
+    ByteChunk.new(bytes, result)
   control.read_bytes = nil
 end
 
@@ -1490,7 +1491,15 @@ local function tcp_connection_dispatch(server: uv_tcp_t, result: integer)
         make_error(init_status, "net.accept.init", "server"))
     return
   end
-  local status = libuv.uv_accept(server.handle, client.handle)
+  local server_owner =
+    server.handle as owned *libuv.uv_tcp_t
+  local client_owner =
+    client.handle as owned *libuv.uv_tcp_t
+  local server_handle: *libuv.uv_tcp_t = server_owner
+  local client_handle: *libuv.uv_tcp_t = client_owner
+  local status = libuv.uv_accept(
+      server_handle as *libuv.uv_stream_t,
+      client_handle as *libuv.uv_stream_t)
   if status < 0 then
     start_tcp_close(client)
     server_callback_failure(server,
@@ -1567,8 +1576,11 @@ catch
   -- Unix stream path must then issue UV_ENOBUFS through read_cb; stopping here
   -- would clear that callback before libuv calls it.
   if event_kind ~= shim.TITAN_UV_EVENT_STREAM_ALLOC and
-      owner.metadata.read_active and owner.handle ~= nil then
-    libuv.uv_read_stop(owner.handle)
+      owner.metadata.read_active and owner.handle then
+    local handle =
+      owner.handle as owned *libuv.uv_tcp_t
+    local tcp_handle: *libuv.uv_tcp_t = handle
+    libuv.uv_read_stop(tcp_handle as *libuv.uv_stream_t)
     owner.metadata.read_active = false
   end
   owner.metadata.read_bytes = nil
@@ -1578,7 +1590,8 @@ catch
     owner.metadata.runtime.fatal_error = error
     owner.metadata.runtime.fatal_traceback = traceback
   end
-  libuv.uv_stop(owner.metadata.runtime.loop.handle)
+  libuv.uv_stop(owner.metadata.runtime.loop.handle
+                as owned *libuv.uv_loop_t)
   return
 end
 

@@ -46,8 +46,8 @@ local function root_transfer(co: *mco.mco_coro, payload: value)
   local owner: *ffi.Udata =
     mco.mco_get_user_data(co) as *ffi.Udata
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   if lua.lua_checkstack(L, 2) == 0 then
-    lua.lua_settop(L, top)
     raise "cannot reserve Lua stack for coroutine transfer root"
   end
   ffi.lua_pushtvalue(L, owner)
@@ -55,10 +55,8 @@ local function root_transfer(co: *mco.mco_coro, payload: value)
   local set = lua.lua_setiuservalue(
     L, -2, TITAN_CORO_OWNER_USERVALUES)
   if set == 0 then
-    lua.lua_settop(L, top)
     raise "cannot set coroutine transfer root"
   end
-  lua.lua_settop(L, top)
 end
 
 local function clear_transfer(co: *mco.mco_coro)
@@ -106,11 +104,11 @@ end
 
 local function pop_trace_for_append(): value
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_APPEND_KEY)
   local trace = ffi.lua_totvalue(L, -1)
   lua.lua_pushnil(L)
   lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_APPEND_KEY)
-  lua.lua_settop(L, top)
   return trace
 end
 

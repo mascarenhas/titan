@@ -212,6 +212,18 @@ function schedule_delimiter_reads(child: string): async.Task
           not framed:read_stderr(), "empty stderr EOF was not sticky")
     check_normal(framed:wait(), "framed echo did not exit normally")
 
+    local binary = os.spawn(child, { "echo" })
+    binary:write_stdin("alpha\0betaEXCESS")
+    binary:close_stdin()
+    check(binary:read_stdout_until("\0beta") == "alpha\0beta",
+          "stdout changed a NUL-containing delimiter or binary data")
+    check(binary:read_stdout() == "EXCESS",
+          "NUL-delimited stdout did not retain excess bytes")
+    check(not binary:read_stdout_until("\0beta") and
+          not binary:read_stdout(), "binary stdout EOF was not sticky")
+    check(not binary:read_stderr(), "binary echo wrote unexpected stderr")
+    check_normal(binary:wait(), "binary echo did not exit normally")
+
     local independent = os.spawn(child, { "early-output-exit" })
     independent:close_stdin()
     local stdout_reader = async.run(function (): value

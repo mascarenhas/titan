@@ -63,7 +63,7 @@ their longest common sequence of complete components:
 | `foo.left foo.right` | `foo` | `foo.so`, `foo.a` |
 | `foo.bar.left foo.bar.right` | `foo.bar` | `foo/bar.so`, `foo/bar.a` |
 | `foo foo.bar` | `foo` | `foo.so`, `foo.a` |
-| all seven `titan.*` standard roots | `titan` | `titan.so`, `titan.a` |
+| all nine `titan.*` standard roots | `titan` | `titan.so`, `titan.a` |
 
 The comparison is component-based: `foo.bar` and `foo.baz` share `foo`, but
 `foo` and `foobar` share no module component. Unrelated roots are therefore an
@@ -255,7 +255,8 @@ $ROCKS_TREE/lib/titan/0.18/titan.a
 
 contains the native support entry plus the independent logical modules
 `titan.coroutine`, `titan.uv`, `titan.async`, `titan.timer`, `titan.fs`,
-`titan.net`, and `titan.os`. Their generated logical loaders live at:
+`titan.net`, `titan.os`, `titan.peg`, and `titan.string`. Their generated
+logical loaders live at:
 
 ```text
 $ROCKS_TREE/share/lua/5.5/titan/coroutine.lua
@@ -265,10 +266,15 @@ $ROCKS_TREE/share/lua/5.5/titan/timer.lua
 $ROCKS_TREE/share/lua/5.5/titan/fs.lua
 $ROCKS_TREE/share/lua/5.5/titan/net.lua
 $ROCKS_TREE/share/lua/5.5/titan/os.lua
+$ROCKS_TREE/share/lua/5.5/titan/peg.lua
+$ROCKS_TREE/share/lua/5.5/titan/string.lua
 ```
 
 The DSO is also the installation's one complete dynamic libuv provider; in
-bundled mode the archive carries the same private libuv object payload. There are
+bundled mode the archive carries the same private libuv object payload. Both
+forms also carry the private, metadata-free LPegLabel objects used by
+`titan.peg` and `titan.string`; that native archive is not an installed SDK
+library. There are
 no production child DSOs, aliases, symbolic links, hard links, or Lua-facing
 copies. `require "titan.async"` and `import "async"` still select the same
 logical module and state; only their physical provider has been combined.

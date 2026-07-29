@@ -1,0 +1,82 @@
+local record GroupSpan
+  local span: Span?
+end
+
+local record RegexDiagnostic
+  label: string
+  message: string
+  source: string
+  position: integer
+  line: integer
+  column: integer
+  source_line: string
+end
+
+local _regex_cache: {string: Regex} = {}
+local _regex_group_sentinel: {value: value} = {}
+
+local function cached_regex(expression: string): Regex
+  local found: Regex? = _regex_cache[expression]
+  if found then return found as Regex end
+  local compiled = compile_regex(expression)
+  _regex_cache[expression] = compiled
+  return compiled
+end
+
+local function regex_normalized_init(subject: string,
+                                     supplied: integer?):
+                                     (integer, boolean)
+  if not supplied then return 1, false end
+  local position = supplied as integer
+  local length = #subject
+  if position > 0 then
+    if position > length + 1 then return position, true end
+    return position, false
+  elseif position == 0 or position < -length then
+    return 1, false
+  end
+  return length + position + 1, false
+end
+
+local function regex_is_start_anchored(regex: Regex): boolean
+  return regex.anchored_start
+end
+
+local function regex_attempt(regex: Regex, subject: string,
+                             position: integer): RegexMatch?
+  local raw: value = regex.pattern:match(subject, position)
+  if raw == nil then return nil end
+  local captured = raw as {integer: value}
+  local first = captured[1] as integer
+  local after = captured[2] as integer
+  local groups: {GroupSpan} = {}
+  local index = 1
+  while index <= regex.capture_count do
+    groups[index] = captured[index + 2] as GroupSpan
+    index = index + 1
+  end
+  return RegexMatch.new(
+    subject, Span.new(first, after - 1), groups)
+end
+
+local function regex_find_from(regex: Regex, subject: string,
+                               position: integer): RegexMatch?
+  if regex_is_start_anchored(regex) then
+    return regex_attempt(regex, subject, position)
+  end
+  local current = position
+  while current <= #subject + 1 do
+    local found: RegexMatch? =
+      regex_attempt(regex, subject, current)
+    if found then return found end
+    current = current + 1
+  end
+  return nil
+end
+
+local function regex_group_values(found: RegexMatch,
+                                  index: integer): (...: string?)
+  if index > #found.groups then return end
+  if index == #found.groups then return found:group(index) end
+  return found:group(index), regex_group_values(found, index + 1)
+end

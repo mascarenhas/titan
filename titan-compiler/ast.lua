@@ -12,6 +12,7 @@ return typedecl("Ast", {
         TypeName        = {"loc", "name"},
         TypeCPointer    = {"loc", "subtype", "const"},
         TypeCArray      = {"loc", "base", "length"},
+        TypeCOwned      = {"loc", "subtype", "count"},
         TypeArray       = {"loc", "subtype"},
         TypeMap         = {"loc", "keystype", "valuestype"},
         TypeFunction    = {"loc", "argtypes", "rettypes", "varargtype", "flexrettype"},
@@ -72,6 +73,7 @@ return typedecl("Ast", {
         ExpConcat       = {"loc", "exps"},
         ExpBinop        = {"loc", "lhs", "op", "rhs"},
         ExpCast         = {"loc", "exp", "target"},
+        ExpIs           = {"loc", "exp", "target"},
         ExpAdjust       = {"loc", "exp"},                   -- adjust call to just first value
         ExpExtra        = {"loc", "exp", "index", "_type"}, -- index-th (>1) value of call
         ExpFunction     = {"loc", "params", "rettypes", "flexrettype", "block"}, -- anonymous function expression

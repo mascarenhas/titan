@@ -1,9 +1,8 @@
 local uv = import "uv"
+local str = import "string"
 
--- Stream payloads are binary strings. Titan does not yet expose string
--- indexing/slicing, so the uv middle layer supplies length-aware binary find
--- and slice helpers. Their offsets are zero-based and never use NUL
--- termination.
+-- Stream payloads are binary strings, so delimiter handling uses the string
+-- library's length-aware literal search and slicing operations.
 
 record Connection
   local handle: uv.uv_tcp_t
@@ -131,26 +130,23 @@ function Connection:read_until(delimiter: string,
         count = count + 1
         chunks[count] = chunk
         local boundary = tail .. chunk
-        local match = uv._bytes_find {
-          haystack = boundary,
-          needle = delimiter,
-        }
+        local match: integer? = str.find(boundary, delimiter)
         total = total + #chunk
-        if match >= 0 then
-          local match_end = total - #boundary + match + #delimiter
+        if match then
+          local match_end =
+            total - #boundary + (match as integer) - 1 + #delimiter
           local result_end = match_end
           if chop then result_end = result_end - #delimiter end
           local all = join_chunks(chunks, 1, count)
-          local selected = uv._bytes_slice(all, 0, result_end)
-          local remaining = uv._bytes_slice(all, match_end,
-                                            #all - match_end)
+          local selected = str.sub(all, 1, result_end)
+          local remaining = str.sub(all, match_end + 1)
           result = selected
           self.excess = remaining .. self.excess
           finished = true
         else
           local keep = #delimiter - 1
           if keep > #boundary then keep = #boundary end
-          tail = uv._bytes_slice(boundary, #boundary - keep, keep)
+          tail = str.sub(boundary, #boundary - keep + 1)
         end
       end
     end

@@ -218,9 +218,9 @@ its literal string (`ADD -> '+'`); note `op10`'s `MOD -> '%%'` — `%` is the
 | `e4`–`e7` | `\|`, `~`, `&`, `<<` `>>` | left fold |
 | `e8` | `..` | **right recursion**, flattened by `binop_concat` |
 | `e9`, `e10` | `+` `-`, `*` `%` `/` `//` | left fold |
-| `e11` | unary `not` `#` `-` `~` | `{\| unop* \|} e12`, `fold_unops` innermost-first |
-| `e12` | `^` | **right**: `castexp (op12 e11)?` via `binop_right` |
-| `castexp` | `as` | `simpleexp AS type -> ExpCast / simpleexp` |
+| `e11` / `castexp` | `as`, `is` | `unopexp (AS type -> ExpCast / IS type -> ExpIs) / unopexp` |
+| `unopexp` | unary `not` `#` `-` `~` | `{\| unop* \|} e12`, `fold_unops` innermost-first |
+| `e12` | `^` | **right**: `simpleexp (op12 e11)?` via `binop_right` |
 
 The two right-associative operators do not use the list shape:
 
@@ -234,14 +234,21 @@ The two right-associative operators do not use the list shape:
   The parser is not a pure syntax mapper; the source comment itself asks
   "Should this go on a separate constant propagation pass?".
 
-* `e12` makes `^` right-associative, and its asymmetric operands (`castexp`
+* `e12` makes `^` right-associative, and its asymmetric operands (`simpleexp`
   left, `e11` right) reproduce Lua's quirk that `^` binds tighter than unary
   operators on its left while its right operand may carry them:
   `-1 ^ -2 ^ 3 * 4` parses as `(-(1 ^ (-(2 ^ 3)))) * 4`.
 
-`as` casts sit below the ladder in `castexp`: the subject is a `simpleexp`
-(so `2 + foo as integer` is `2 + (foo as integer)`) and casts do not chain —
-`y as integer as float` is a syntax error.
+`as` casts and `is` type tests sit below the ladder in `castexp`: the subject
+is one `unopexp` (so `2 + foo is integer` is
+`2 + (foo is integer)`) and the two forms do not chain —
+`y as integer is float` is a syntax error. Their keywords have distinct
+`AS`/`IS` tokens, and a labeled missing target reports `CastMissingType` or
+`IsMissingType` respectively.
+
+The `e11` right operand of `^` may itself contain either form, so
+`x ^ 2 is integer` builds `ExpBinop("^", x, ExpIs(2, integer))`. Testing the
+whole power requires `(x ^ 2) is integer`; `x is integer ^ 2` does not parse.
 
 ### Expression suffixes as closures
 

@@ -2,10 +2,11 @@
 
 # Exercise both installed standard-library provider forms under the bundled
 # and system libuv policies. Besides the ordinary Lua/API smokes, this proves
-# that titan.a matches titan.so and can run async/timer/fs/net/os behavior in a
-# compiled Titan application while the dynamic provider and generated shims
-# are out of search reach. System mode additionally exercises both the host's
-# ordinary pkg-config setting and an explicit static archive selection.
+# that titan.a matches titan.so and can run async/timer/fs/net/os plus
+# PEG/string behavior in a compiled Titan application while the dynamic
+# provider and generated shims are out of search reach. System mode
+# additionally exercises both the host's ordinary pkg-config setting and an
+# explicit static archive selection.
 
 set -euo pipefail
 
@@ -94,7 +95,7 @@ check_canonical_container() {
         test -f "$PROVIDER.dSYM/Contents/Resources/DWARF/titan.so"
     fi
 
-    for module in coroutine uv async timer fs net os; do
+    for module in coroutine uv async timer fs net os peg string; do
         local shim="$SHIM_ROOT/titan/$module.lua"
         test -f "$shim"
         test ! -L "$shim"
@@ -129,6 +130,8 @@ local expected = {
     ["titan.fs"] = true,
     ["titan.net"] = true,
     ["titan.os"] = true,
+    ["titan.peg"] = true,
+    ["titan.string"] = true,
 }
 local scanned, scan_error = metadata.scan_archive(archive, {
     expected_abi = driver.TITAN_VER,
@@ -192,9 +195,56 @@ has_libuv_dependency() {
     inspect_dependencies "$1" | grep -qi libuv
 }
 
+has_lpeglabel_dependency() {
+    inspect_dependencies "$1" | grep -qi lpeglabel
+}
+
+dynamic_symbols() {
+    if [[ $platform == macos ]]; then
+        nm -gU "$1"
+    else
+        nm -D -g "$1"
+    fi
+}
+
+has_public_lpeglabel_symbol() {
+    dynamic_symbols "$1" | awk '
+        {
+            symbol = $NF
+            sub(/^_/, "", symbol)
+            if (symbol == "luaopen_lpeglabel" ||
+                    symbol ~ /^titan_lpeglabel_/) found = 1
+        }
+        END { exit(found ? 0 : 1) }
+    '
+}
+
+has_unprefixed_lpeglabel_definition() {
+    nm -g "$1" | awk '
+        {
+            if (NF < 2) next
+            symbol = $NF
+            type = $(NF - 1)
+            sub(/^_/, "", symbol)
+            if (type == "U" || type == "u") next
+            if (symbol ~ /^(finddyncap|getcaptures|runtimecap|checkaux|compile|fixedlen|hascaptures|realloccode|sizei|tocharset|lp_gc|numsiblings|match|printcaplist|printcharset|printinst|printktable|printpatt|printtree|luaopen_lpeglabel)$/) {
+                found = 1
+            }
+        }
+        END { exit(found ? 0 : 1) }
+    '
+}
+
 require_no_titan_dependency() {
     if inspect_dependencies "$1" | grep -qi 'titan[.]so'; then
         echo "static Titan executable unexpectedly depends on titan.so" >&2
+        exit 1
+    fi
+}
+
+require_no_lpeglabel_dependency() {
+    if has_lpeglabel_dependency "$1"; then
+        echo "Titan image unexpectedly depends on an LPegLabel DSO" >&2
         exit 1
     fi
 }
@@ -330,6 +380,11 @@ end
 LUA
 
     compare_archive_and_dso_metadata "$STATIC_ARCHIVE" "$static_provider"
+    if has_public_lpeglabel_symbol "$static_provider"; then
+        echo "static system-libuv provider exports a private LPegLabel symbol" >&2
+        exit 1
+    fi
+    require_no_lpeglabel_dependency "$static_provider"
     if has_libuv_dependency "$static_provider"; then
         echo "static system-libuv provider depends on a libuv DSO" >&2
         exit 1
@@ -347,19 +402,19 @@ LUA
 run_mode_smoke() {
     local mode=$1
     local titan_path="$ABI_ROOT"
-    local lua_path="$SHIM_ROOT/?.lua;$SHIM_ROOT/?/init.lua;;"
-    local lua_cpath="$ABI_ROOT/?.so;$PREFIX/lib/lua/5.5/?.so;;"
+    local lua_path="$SHIM_ROOT/?.lua;$SHIM_ROOT/?/init.lua"
+    local lua_cpath="$ABI_ROOT/?.so"
 
     if [[ $mode == system ]]; then
         env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
             TITAN_PATH_0_18="$titan_path" LUA_PATH="$lua_path" \
             LUA_CPATH="$lua_cpath" \
-            "$LUA" -e 'local uv = require "titan.uv"; local async = require "titan.async"; local timer = require "titan.timer"; local fs = require "titan.fs"; local net = require "titan.net"; local path = os.tmpname(); os.remove(path); local task = async.run(function() timer.sleep(0); fs.write_file(path, "system\0uv"); assert(fs.read_file(path) == "system\0uv"); fs.unlink(path); return true end); async.loop(); assert(task:join()); assert(type(async.version()) == "string"); assert(type(uv) == "userdata"); assert(type(net) == "userdata")'
+            "$LUA" -e 'local uv = require "titan.uv"; local async = require "titan.async"; local timer = require "titan.timer"; local fs = require "titan.fs"; local net = require "titan.net"; local peg = require "titan.peg"; local strings = require "titan.string"; local builtin_string = require "string"; local path = os.tmpname(); os.remove(path); local task = async.run(function() timer.sleep(0); fs.write_file(path, "system\0uv"); assert(fs.read_file(path) == "system\0uv"); fs.unlink(path); return true end); async.loop(); assert(task:join()); assert(peg.literal("peg"):match("peg") == 4); assert(strings.len("a\0b") == 3); local found = strings.match("regex42", "([0-9]+)"); assert(found and found:whole() == "42" and found:group(1) == "42"); assert(strings.find("a\0b", "\0b") == 2); assert(builtin_string == string); assert(type(async.version()) == "string"); assert(type(uv) == "userdata"); assert(type(net) == "userdata")'
     else
         env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
             TITAN_PATH_0_18="$titan_path" LUA_PATH="$lua_path" \
             LUA_CPATH="$lua_cpath" \
-            "$LUA" -e 'local uv = require "titan.uv"; local async = require "titan.async"; local timer = require "titan.timer"; local fs = require "titan.fs"; local net = require "titan.net"; local path = os.tmpname(); os.remove(path); local task = async.run(function() timer.yield(); fs.write_file(path, "bundled"); local data = fs.read_file(path); fs.unlink(path); return data end); async.loop(); assert(task:join() == "bundled"); assert(type(uv) == "userdata"); assert(type(net) == "userdata")'
+            "$LUA" -e 'local uv = require "titan.uv"; local async = require "titan.async"; local timer = require "titan.timer"; local fs = require "titan.fs"; local net = require "titan.net"; local peg = require "titan.peg"; local strings = require "titan.string"; local builtin_string = require "string"; local path = os.tmpname(); os.remove(path); local task = async.run(function() timer.yield(); fs.write_file(path, "bundled"); local data = fs.read_file(path); fs.unlink(path); return data end); async.loop(); assert(task:join() == "bundled"); assert(peg.literal("peg"):match("peg") == 4); assert(strings.len("a\0b") == 3); local found = strings.match("regex42", "([0-9]+)"); assert(found and found:whole() == "42" and found:group(1) == "42"); assert(strings.find("a\0b", "\0b") == 2); assert(builtin_string == string); assert(type(uv) == "userdata"); assert(type(net) == "userdata")'
     fi
 
     env -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
@@ -386,6 +441,8 @@ local timer = import "timer"
 local fs = import "fs"
 local net = import "net"
 local system = import "os"
+local peg = import "titan.peg"
+local strings = import "titan.string"
 
 local function check(condition: boolean, message: string)
   if not condition then raise message end
@@ -420,6 +477,18 @@ function main(args: {string}): integer
     check(system.pid() > 0 and #system.cwd() > 0 and
           #system.exepath() > 0,
           "static os identity behavior failed")
+    check(#peg.version() > 0,
+          "static PEG native engine initialization failed")
+    check(strings.len("static\0string") == 13,
+          "static string byte behavior failed")
+    local found = strings.match("static42", "([0-9]+)")
+    check(found and
+          (found as strings.RegexMatch):group(1) == "42",
+          "static regex provider behavior failed")
+    local literal_first, literal_last =
+      strings.find("static\0string", "\0str")
+    check(literal_first == 7 and literal_last == 10,
+          "static literal string search failed")
 
     local server, port = listen_available()
     local peer = async.run(function (): value
@@ -501,11 +570,17 @@ TITAN
 
     mv "$PROVIDER" "$PROVIDER_HIDDEN"
     mv "$SHIM_ROOT/titan" "$SHIMS_HIDDEN"
-    "$executable" "$marker" "$TITAN_PROCESS_SMOKE_CHILD"
+    env \
+        LUA_PATH="$mode_dir/no-lua/?.lua" \
+        LUA_CPATH="$mode_dir/no-lua/?.so" \
+        LUA_PATH_5_5="$mode_dir/no-lua/?.lua" \
+        LUA_CPATH_5_5="$mode_dir/no-lua/?.so" \
+        "$executable" "$marker" "$TITAN_PROCESS_SMOKE_CHILD"
     restore_hidden_provider
     test ! -e "$marker"
 
     require_no_titan_dependency "$executable"
+    require_no_lpeglabel_dependency "$executable"
     if [[ $mode == bundled ]]; then
         if has_libuv_dependency "$executable"; then
             echo "bundled static Titan executable depends on a libuv DSO" >&2
@@ -535,6 +610,15 @@ TITAN
 check_bundled_mode() {
     check_canonical_container
     compare_archive_and_dso_metadata
+    if has_public_lpeglabel_symbol "$PROVIDER"; then
+        echo "bundled titan.so exports a private LPegLabel symbol" >&2
+        exit 1
+    fi
+    if has_unprefixed_lpeglabel_definition "$STATIC_ARCHIVE"; then
+        echo "bundled titan.a contains an unprefixed LPegLabel definition" >&2
+        exit 1
+    fi
+    require_no_lpeglabel_dependency "$PROVIDER"
     if has_libuv_dependency "$PROVIDER"; then
         echo "bundled titan.so unexpectedly has a dynamic libuv dependency" >&2
         exit 1
@@ -549,6 +633,15 @@ check_bundled_mode() {
 check_system_mode() {
     check_canonical_container
     compare_archive_and_dso_metadata
+    if has_public_lpeglabel_symbol "$PROVIDER"; then
+        echo "system titan.so exports a private LPegLabel symbol" >&2
+        exit 1
+    fi
+    if has_unprefixed_lpeglabel_definition "$STATIC_ARCHIVE"; then
+        echo "system titan.a contains an unprefixed LPegLabel definition" >&2
+        exit 1
+    fi
+    require_no_lpeglabel_dependency "$PROVIDER"
     if defines_uv_version "$STATIC_ARCHIVE"; then
         echo "system libuv was copied into installed titan.a" >&2
         exit 1

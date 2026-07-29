@@ -216,8 +216,9 @@ comparisons, and as the precondition of explicit `as` casts. The rules:
    future calls: parameter positions are checked in the reverse direction,
    result positions in the forward direction, and safe arity/tail adjustment
    is allowed. An actual function may ignore inputs or results hidden by the
-   expected type, but it may not require an input or omit a fixed result that
-   callers of the expected type rely on.
+   expected type. Additional nil-accepting actual parameters may be filled by
+   adjustment, but an actual function may not require a non-nil input or omit a
+   fixed result that callers of the expected type rely on.
 4. Record types are compatible only with themselves. The recursion of
    rule 3 does **not** look inside records: `PointV` above, whose fields
    are `value`, is still incompatible with `PointF`. Nominal means
@@ -296,7 +297,7 @@ the value does not conform.
 | C pointer | `boolean` | no — null is false, non-null is true |
 | `nil` | C pointer | no — becomes `NULL` |
 | C array or counted owned C array | compatible C pointer | no |
-| C pointer | `void *` | no |
+| non-function C pointer | `void *` | no |
 | non-pointer C object expression | compatible `const *T` or `const void *` | no (FFI calls; materializes the address for the call) |
 | mutable non-pointer C local or formal | compatible `*T` or `void *` | no (FFI calls; C may write through the pointer) |
 | `string` | C `char *` or `void *` | no (FFI only) |
@@ -519,6 +520,23 @@ can cross through `value`, C `TValue` can cross to/from Titan `value`, and C
 `char *` / `void *` can be cast to `string` (copying bytes up to the first `\0`
 and raising if the pointer is `NULL`). Lua-internal `Udata *` crosses the
 `value` boundary as full userdata rather than an ordinary lightuserdata
-pointer. There is no separate FFI cast form.
+pointer. A written cast can also erase a C function pointer to C `void *`, or
+expose the native GC identity of an Array, Map, record, or function value as C
+`void *`. The function identity cast raises when its boxed value is not
+collectable; the other GC-identity cases are total. These are borrowed
+internal addresses, not ownership transfers. There is no separate FFI cast
+form.
 Full details and examples are in [Expressions](expressions.md) and
 [The C FFI](ffi.md).
+
+The related expression `e is t` is admitted for exactly the same static
+source/target pairs. It evaluates `e` once and returns whether `e as t` would
+finish without a cast error, rather than performing the conversion or raising
+on a mismatch. It is only a predicate: it does not narrow `e`'s static type in
+the true branch. Total casts always test true, including the deliberately
+unchecked `value`-to-`boolean` and `value`-to-function conversions; a
+function-typed value may still fail when it is later called. Testing that
+function value as C `void *` is the separate collectability check described
+above, so it may return false. See
+[Explicit casts and type tests](expressions.md#explicit-casts-and-type-tests-as-and-is)
+for the run-time predicates.

@@ -206,9 +206,14 @@ $ROCKS_TREE/lib/titan/0.18/titan.so
 $ROCKS_TREE/lib/titan/0.18/titan.a
 ```
 
-Both contain the seven `titan.*` logical standard modules. The DSO also
+Both contain the nine `titan.*` logical standard modules. The DSO also
 contains bare native `require "titan"` support, and the archive carries that
 support object without inventing a logical module named `titan`.
+
+The private namespaced LPegLabel archive is another metadata-free provider
+payload. Its five objects are carried into both forms for `titan.peg` and
+`titan.string`, but the archive and headers are not installed in the SDK and
+it does not advertise a Titan logical metadata key.
 
 In bundled-libuv mode, the pinned libuv archive is native provider payload. Its
 objects are carried into both `titan.so` and `titan.a`, so a `--static`

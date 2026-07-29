@@ -371,7 +371,7 @@ end
 
 local function owned_c_metatable_key(typ)
     assert(typ._tag == "Type.COwned")
-    return types.tostring(typ.pointee) .. (typ.count and "[]" or "")
+    return types.tostring(typ)
 end
 
 local function owned_c_metatable(ctx, typ)
@@ -390,18 +390,40 @@ end
 
 -- Get the C identifier of the `static const void *` holding the type tag for a
 -- function type, allocating one (numbered per module) on first use. Tags are
--- keyed by the verbatim canonical type string and shared across all modules
--- through the Lua registry (publish-or-recover, emitted in _init), so two
--- modules that mention `(integer) -> integer` agree on the same tag pointer and
--- the fast path can recognise each other's function values.
+-- keyed by the canonical type string and shared across all modules through the
+-- Lua registry (publish-or-recover, emitted in _init). C-bearing function types
+-- additionally include their defining Titan module in the registry key because
+-- imported C typedef identity is module-local; C-free types retain the shared
+-- key so `(integer) -> integer` values keep their cross-module exact fast path.
+function coder._function_type_tag_cache_key(ftype)
+    local key = types.tostring(ftype)
+    local c_bearing = types.first_c_ffi_type(ftype) ~= nil
+    return (c_bearing and "C\0" or "Titan\0") .. key
+end
+
 local function function_type_tag(tlcontext, ftype --[[:table]])
     local key = types.tostring(ftype)
-    local entry = tlcontext.functags[key]
+    local c_bearing = types.first_c_ffi_type(ftype) ~= nil
+    -- The display spelling is not a structural identity: a C typedef named
+    -- `integer`, for example, deliberately renders like Titan `integer`.
+    -- Keep the two runtime ABI families in distinct local-cache buckets so a
+    -- C-bearing callable can never reuse the native tag of a C-free callable
+    -- merely because their diagnostics have the same text.
+    local cache_key = coder._function_type_tag_cache_key(ftype)
+    local entry = tlcontext.functags[cache_key]
     if not entry then
         local n = tlcontext.functag_count
         tlcontext.functag_count = n + 1
-        entry = { id = tlcontext.prefix .. "functag_" .. n, key = key }
-        tlcontext.functags[key] = entry
+        local registry_key = key
+        if c_bearing then
+            registry_key = tlcontext.module .. " " .. key
+        end
+        entry = {
+            id = tlcontext.prefix .. "functag_" .. n,
+            key = key,
+            registry_key = registry_key,
+        }
+        tlcontext.functags[cache_key] = entry
         table.insert(tlcontext.functag_list, entry)
     end
     return entry.id
@@ -754,6 +776,18 @@ function checkandset(ctx, typ --[[:table]], dst --[[:string]], src --[[:string]]
             LINE = c_integer_literal(loc.line),
             COL = c_integer_literal(loc.col),
             THROW = codethrow(loc, "%s:%d:%d: type error, expected float but found %s", { "$FILE", "$LINE", "$COL", "lua_typename(L, ttype($SRC))" })
+        })
+    elseif typ._tag == "Type.COwned" then
+        return render([[
+            {
+                Udata *_titan_owner = NULL;
+                $CHECKANDGET
+                setuvalue(L, $DST, _titan_owner);
+            }
+        ]], {
+            CHECKANDGET =
+                checkandget(ctx, typ, "_titan_owner", src, loc),
+            DST = dst,
         })
     elseif typ._tag == "Type.Array" then
         return render([[
@@ -1144,7 +1178,7 @@ local function ctype(typ --[[:table]])
         return cdeclarator.render_type_name(typ)
     elseif typ._tag == "Type.COwned" then
         return cdeclarator.render_type_name(typ)
-    elseif types.is_c(typ) then
+    elseif types.is_direct_c(typ) then
         return cdeclarator.render_type_name(
             cdeclarator.adjust_parameter_type(typ))
     elseif typ._tag == "Type.Option" then return "TValue"
@@ -1169,14 +1203,14 @@ end
 -- values are protected by explicit spill/reload slots below, keeping the source
 -- local/param C autos ordinary (and avoiding volatile in the function ABI).
 local function cvardecl(ctx, typ, name)
-    if types.is_c(typ) or typ._tag == "Type.Pointer" then
+    if types.is_direct_c(typ) or typ._tag == "Type.Pointer" then
         return cdeclarator.render_declaration(typ, name)
     end
     return ctype(typ) .. " " .. name
 end
 
 local function cpointerdecl(typ, name)
-    if types.is_c(typ) or typ._tag == "Type.Pointer" then
+    if types.is_direct_c(typ) or typ._tag == "Type.Pointer" then
         return cdeclarator.render_declaration(
             types.CPointer(typ, {}), name)
     end
@@ -1184,7 +1218,7 @@ local function cpointerdecl(typ, name)
 end
 
 local function cpointertype(typ)
-    if types.is_c(typ) or typ._tag == "Type.Pointer" then
+    if types.is_direct_c(typ) or typ._tag == "Type.Pointer" then
         return cdeclarator.render_type_name(types.CPointer(typ, {}))
     end
     return ctype(typ) .. "*"
@@ -1194,7 +1228,8 @@ local function cfunctiondecl(rettype, name, params, is_pointer)
     local declarator = is_pointer and "(*" .. name .. ")" or name
     declarator = declarator .. "(" .. params .. ")"
     if rettype
-       and (types.is_c(rettype) or rettype._tag == "Type.Pointer") then
+       and (types.is_direct_c(rettype)
+            or rettype._tag == "Type.Pointer") then
         return cdeclarator.render_declaration(rettype, declarator)
     end
     return (rettype and ctype(rettype) or "void") .. " " .. declarator
@@ -1349,6 +1384,7 @@ collect_reads_exp = function(node, out)
             collect_reads_exp(arg, out)
         end
     elseif tag == "Ast.ExpUnop" or tag == "Ast.ExpCast"
+            or tag == "Ast.ExpIs"
             or tag == "Ast.ExpAdjust" or tag == "Ast.ExpDotsIndex" then
         collect_reads_exp(node.exp, out)
     elseif tag == "Ast.ExpBinop" then
@@ -1394,6 +1430,7 @@ function coder._collect_writes_exp(node, out)
             coder._collect_writes_exp(arg, out)
         end
     elseif tag == "Ast.ExpUnop" or tag == "Ast.ExpCast"
+            or tag == "Ast.ExpIs"
             or tag == "Ast.ExpAdjust" or tag == "Ast.ExpDotsIndex"
             or tag == "Ast.ExpExtra" or tag == "Ast.ExpMethodRef" then
         coder._collect_writes_exp(node.exp, out)
@@ -1632,6 +1669,14 @@ local varg_struct_by_ctype = {
     ["Udata*"]      = "TitanVargNominal",
 }
 local function varg_struct_name(elemtype --[[:table]])
+    -- An owned C value is represented by its owning full Udata, just like a
+    -- Titan nominal value. Select this semantically: C declarator rendering
+    -- spells the owner as `Udata *`, while the ordinary nominal ctype is
+    -- `Udata*`, and ABI selection must not depend on whitespace.
+    local resolved = types.resolve_c_typedef(elemtype)
+    if resolved and resolved._tag == "Type.COwned" then
+        return "TitanVargNominal"
+    end
     local ct = ctype(elemtype)
     local name = varg_struct_by_ctype[ct]
     if not name then
@@ -1889,7 +1934,7 @@ local function newtmp(ctx --[[:table]], typ --[[:table]], isgc --[[:boolean]])
     -- A temporary freezes an expression value, so a C array/function uses its
     -- adjusted pointer representation. Direct array declarators are reserved
     -- for actual object storage (locals/fields), never assignment-based temps.
-    local tmptype = (types.is_c(typ) and
+    local tmptype = (types.is_direct_c(typ) and
         cdeclarator.adjust_parameter_type(typ)) or typ
     if isgc then
         local slot = newslot(ctx)
@@ -1935,6 +1980,182 @@ local function materialize(ctx, node)
     return materialize_code(ctx, node._type, stats, exp)
 end
 
+function coder._resolve_cast_type(typ)
+    -- `Type.Typedef` is the legacy scalar typedef representation retained by
+    -- a few compiler paths; current C imports use `Type.CTypedef`.
+    while typ and typ._tag == "Type.Typedef" do typ = typ._type end
+    return types.resolve_c_typedef(typ)
+end
+
+-- Predicate twin of checkandget's value->integer/C-integer conversion.
+function coder._code_boxed_is_integer(ctx, source)
+    local cresult, result = newtmp(ctx, types.Boolean())
+    local cvalue, value = newtmp(ctx, types.Float())
+    local cfloor, floor = newtmp(ctx, types.Float())
+    local cinteger, integer = newtmp(ctx, types.Integer())
+    return render([[
+        $CRESULT
+        $CVALUE
+        $CFLOOR
+        $CINTEGER
+        $RESULT = 0;
+        if (ttisinteger($SOURCE)) {
+            $RESULT = 1;
+        } else if (ttisfloat($SOURCE)) {
+            $VALUE = fltvalue($SOURCE);
+            $FLOOR = l_floor($VALUE);
+            $RESULT = ($VALUE == $FLOOR
+                && lua_numbertointeger($FLOOR, &$INTEGER));
+        }
+    ]], {
+        CRESULT = cresult,
+        RESULT = result,
+        CVALUE = cvalue,
+        VALUE = value,
+        CFLOOR = cfloor,
+        FLOOR = floor,
+        CINTEGER = cinteger,
+        INTEGER = integer,
+        SOURCE = source,
+    }), result
+end
+
+-- Return setup statements and a C boolean expression saying whether a boxed
+-- `value` would pass the cast boundary for `target`. A direct target mirrors
+-- checkandget; an Option base mirrors checkandset because that is the path
+-- checkandget uses after accepting nil. In particular direct Boolean and all
+-- Function targets are intentionally unchecked, Arrays use their canonical
+-- proxy identity, and nominal/owned values compare exact metatables.
+function coder._code_boxed_cast_predicate(ctx, target, source, slot_check)
+    local resolved = coder._resolve_cast_type(target)
+    local tag = resolved._tag
+
+    if tag == "Type.Integer" or tag == "Type.CInteger" then
+        return coder._code_boxed_is_integer(ctx, source)
+    elseif tag == "Type.Float" or tag == "Type.CFloat" then
+        return "", render("(ttisfloat($SOURCE) || ttisinteger($SOURCE))", {
+            SOURCE = source,
+        })
+    elseif tag == "Type.Boolean" and slot_check then
+        return "", render("ttisboolean($SOURCE)", { SOURCE = source })
+    elseif tag == "Type.Boolean" or tag == "Type.Value"
+           or tag == "Type.Function" or types.is_c_tvalue(resolved) then
+        return "", "1"
+    elseif types.is_c_udata_pointer(resolved) then
+        return "", render(
+            "(ttisfulluserdata($SOURCE) || ttisnil($SOURCE))",
+            { SOURCE = source })
+    elseif tag == "Type.CPointer" then
+        return "", render(
+            "(ttislightuserdata($SOURCE) || ttisnil($SOURCE))",
+            { SOURCE = source })
+    elseif tag == "Type.COwned" then
+        return "", render([[
+            (ttisfulluserdata($SOURCE)
+                && uvalue($SOURCE)->metatable ==
+                    hvalue(&_mod->uv[$META].uv))
+        ]], {
+            SOURCE = source,
+            META = c_integer_literal(owned_c_metatable(ctx, resolved)),
+        })
+    elseif tag == "Type.Array" then
+        return "", render(
+            "(titan_array_try_backing($SOURCE, $META) != NULL)", {
+                SOURCE = source,
+                META = array_metatable(ctx),
+            })
+    elseif tag == "Type.Nil" then
+        return "", render("ttisnil($SOURCE)", { SOURCE = source })
+    elseif tag == "Type.String" then
+        return "", render("ttisstring($SOURCE)", { SOURCE = source })
+    elseif tag == "Type.Map" then
+        return "", render("ttistable($SOURCE)", { SOURCE = source })
+    elseif tag == "Type.Nominal" then
+        return "", render([[
+            (ttisfulluserdata($SOURCE)
+                && uvalue($SOURCE)->metatable == $META)
+        ]], {
+            SOURCE = source,
+            META = render("hvalue(&_mod->uv[$INDEX].uv)", {
+                INDEX = c_integer_literal(type2metatable(ctx, resolved)),
+            }),
+        })
+    elseif tag == "Type.Option" then
+        local basestats, baseexp =
+            coder._code_boxed_cast_predicate(
+                ctx, resolved.base, source, true)
+        local cresult, result = newtmp(ctx, types.Boolean())
+        return render([[
+            $CRESULT
+            if (ttisnil($SOURCE)) {
+                $RESULT = 1;
+            } else {
+                $BASESTATS
+                $RESULT = $BASEEXP;
+            }
+        ]], {
+            CRESULT = cresult,
+            RESULT = result,
+            SOURCE = source,
+            BASESTATS = basestats,
+            BASEEXP = baseexp,
+        }), result
+    end
+
+    error("invalid target type for boxed cast predicate: "
+        .. types.tostring(target))
+end
+
+function coder._codeis(ctx, node)
+    -- Freeze the operand before inspecting it. This both enforces exactly-once
+    -- evaluation and roots GC values while metatable/Array checks run.
+    local original_source_type = node.exp._type
+    local source_type = coder._resolve_cast_type(node.exp._type)
+    local target_type = coder._resolve_cast_type(node.target)
+    local stats, source
+    if source_type._tag == "Type.CStruct"
+       or source_type._tag == "Type.CUnion" then
+        -- Generic temporaries use scalar initialization, which is not valid
+        -- for a by-value C aggregate. Preserve the ordinary assignment-based
+        -- aggregate materialization used by other expression consumers.
+        stats, source = coder._materialize_c_aggregate(ctx, node.exp)
+    else
+        stats, source = materialize(ctx, node.exp)
+    end
+    local predicate_stats, predicate
+
+    if source_type._tag == "Type.Value" then
+        predicate_stats, predicate =
+            coder._code_boxed_cast_predicate(
+                ctx, node.target, "&" .. source)
+    elseif original_source_type._tag == "Type.Option"
+           and types.equals(original_source_type.base, node.target) then
+        predicate = render("!ttisnil(&$SOURCE)", { SOURCE = source })
+        predicate_stats = ""
+    elseif types.is_gc_identity_void_pointer_cast(
+               original_source_type, node.target)
+           and source_type._tag == "Type.Function" then
+        -- Function values deliberately defer callability checks until call
+        -- time, so their boxed TValue is not necessarily collectable.  The
+        -- explicit void-pointer cast can expose an identity only when there is
+        -- an underlying GC object.
+        predicate = render("iscollectable(&$SOURCE)", { SOURCE = source })
+        predicate_stats = ""
+    elseif (source_type._tag == "Type.CPointer"
+            or source_type._tag == "Type.Pointer")
+           and target_type._tag == "Type.String" then
+        predicate = render("($SOURCE != NULL)", { SOURCE = source })
+        predicate_stats = ""
+    else
+        -- Identity, boxing, truthiness, numeric widening, C numeric/pointer
+        -- conversions, and every other admitted explicit cast are total.
+        predicate_stats = render("(void)($SOURCE);", { SOURCE = source })
+        predicate = "1"
+    end
+
+    return stats .. "\n" .. predicate_stats, predicate
+end
+
 -- Generate call arguments in source order. A pure trailing suffix can remain as
 -- direct C expressions: with no intervening statements, reordering those reads
 -- is unobservable. Every argument at or before an effectful argument is frozen
@@ -1945,7 +2166,8 @@ local function expression_contains_call(node)
     local tag = node._tag
     if tag == "Ast.ExpCall" then
         return true
-    elseif tag == "Ast.ExpCast" or tag == "Ast.ExpUnop"
+    elseif tag == "Ast.ExpCast" or tag == "Ast.ExpIs"
+           or tag == "Ast.ExpUnop"
            or tag == "Ast.ExpAdjust" then
         return expression_contains_call(node.exp)
     elseif tag == "Ast.ExpBinop" then
@@ -2035,7 +2257,7 @@ local function newforeigntmp(ctx --[[:table]], typ --[[:table]])
     if typ._tag == "Type.String" then
         fdecl = "char* " .. tmpname
         finit = " = NULL"
-    elseif typ._tag == "Type.Pointer" or types.is_c(typ) then
+    elseif typ._tag == "Type.Pointer" or types.is_direct_c(typ) then
         fdecl = cdeclarator.render_declaration(typ, tmpname)
         if typ._tag == "Type.Pointer" or typ._tag == "Type.COwned"
            or rtyp._tag == "Type.CPointer" then
@@ -2683,9 +2905,9 @@ function coder._is_nested_c_storage(exp)
     local var = exp.var
     if var._tag == "Ast.VarDot" then
         return var._decl and var._decl._tag == "Type.CField"
-            and types.is_c(var.exp._type)
+            and types.is_direct_c(var.exp._type)
     elseif var._tag == "Ast.VarBracket" then
-        return types.is_c(var.exp1._type)
+        return types.is_direct_c(var.exp1._type)
     end
     return false
 end
@@ -2775,7 +2997,7 @@ function coder._prepare_c_storage(ctx, exp, allow_temporary)
     if var._tag == "Ast.VarDot"
        and var._decl
        and var._decl._tag == "Type.CField"
-       and types.is_c(var.exp._type) then
+       and types.is_direct_c(var.exp._type) then
         local stats, base =
             coder._prepare_c_base(ctx, var.exp, allow_temporary)
         local check = base.type._tag == "Type.CPointer"
@@ -2788,7 +3010,7 @@ function coder._prepare_c_storage(ctx, exp, allow_temporary)
             CHECK = check,
         }), coder._prepared_c_field(base, var.name)
     elseif var._tag == "Ast.VarBracket"
-           and types.is_c(var.exp1._type) then
+           and types.is_direct_c(var.exp1._type) then
         local stats, base =
             coder._prepare_c_base(ctx, var.exp1, allow_temporary)
         local indexstats, index = materialize(ctx, var.exp2)
@@ -3068,7 +3290,7 @@ local function codeassignment(ctx, var, cexp, etype, lvalue)
                 BARRIER = types.is_gc(map._type.values)
                           and "luaC_barrierback(L, obj2gco(_t), &_vv);" or ""
             })
-        elseif types.is_c(var.exp1._type) then
+        elseif types.is_direct_c(var.exp1._type) then
             local spill = spill_update(coder._lvalue_root_decl(var))
             local parts, indexprep
             if lvalue then
@@ -3218,7 +3440,7 @@ function coder._materialize_assignment_lvalue(ctx, var)
             map = mapname,
             keyslot = keyslot,
         }
-    elseif types.is_c(basetype) then
+    elseif types.is_direct_c(basetype) then
         local basestats, base =
             coder._prepare_c_base(ctx, var.exp1)
         local indexstats, indexname = materialize(ctx, var.exp2)
@@ -3251,7 +3473,8 @@ function coder._codeadjustedfixed(ctx, node)
         local i = fixed_index[exp]
         if i then
             local mstats, name
-            if types.is_c(exp._type) and not types.is_gc(exp._type) then
+            if types.is_direct_c(exp._type)
+               and not types.is_gc(exp._type) then
                 -- C structs/unions cannot be initialized from scalar zero;
                 -- use the foreign declaration helper, which intentionally
                 -- leaves aggregate temporaries uninitialized until assignment.
@@ -3412,8 +3635,8 @@ local function mutable_out_anchor(ctx, exp, target)
 end
 
 local function nativetoforeignexp(ctx, exp, cexp, target)
-    local stype = types.resolve_c_typedef(exp._type)
-    local ttype = target and types.resolve_c_typedef(target) or nil
+    local stype = coder._resolve_cast_type(exp._type)
+    local ttype = target and coder._resolve_cast_type(target) or nil
 
     if target and types.c_mutable_address_coerceable(exp._type, target)
        and exp._tag == "Ast.ExpVar"
@@ -3429,6 +3652,53 @@ local function nativetoforeignexp(ctx, exp, cexp, target)
         return "", render("(&($CEXP))", { CEXP = cexp })
     elseif target and types.c_address_coerceable(exp._type, target) then
         return materialize_address_tmp(ctx, exp, cexp)
+    end
+
+    if target and types.is_c_function_pointer_void_cast(
+            exp._type, target) then
+        return "", render("titan_cast_func($TARGET, $SOURCE)", {
+            TARGET = cdeclarator.render_type_name(target),
+            SOURCE = cexp,
+        })
+    end
+
+    if target and types.is_gc_identity_void_pointer_cast(
+            exp._type, target) then
+        -- Freeze and anchor the native representation before any later call
+        -- argument can collect it. Array/Map/record expressions already
+        -- evaluate to their Table*/Udata* identity.
+        local rootstats, source =
+            materialize_code(ctx, exp._type, "", cexp)
+        if stype._tag ~= "Type.Function" then
+            return rootstats, source
+        end
+
+        -- Function values are boxed and may be immediate because callability
+        -- is deliberately checked only when they are called.
+        local cpointer, pointer = newtmp(ctx, target)
+        return render([[
+            $ROOTSTATS
+            $CPOINTER
+            if (TITAN_UNLIKELY(!iscollectable(&$SOURCE))) {
+                $THROW
+            }
+            $POINTER = $CAST;
+        ]], {
+            ROOTSTATS = rootstats,
+            CPOINTER = cpointer,
+            SOURCE = source,
+            POINTER = pointer,
+            CAST = foreigncast(
+                render("gcvalue(&$SOURCE)", { SOURCE = source }),
+                target),
+            FILE = c_string_literal(exp.loc.filename),
+            LINE = c_integer_literal(exp.loc.line),
+            COL = c_integer_literal(exp.loc.col),
+            THROW = codethrow(
+                exp.loc,
+                "%s:%d:%d: type error, function value has no GC identity",
+                { "$FILE", "$LINE", "$COL" }),
+        }), pointer
     end
 
     if target and types.is_c_tvalue(target) then
@@ -3457,7 +3727,7 @@ local function nativetoforeignexp(ctx, exp, cexp, target)
         return "", render("getudatamem($EXP)", { EXP = cexp })
     end
 
-    if types.is_c(exp._type) then
+    if types.is_direct_c(exp._type) then
         return "", cexp
     end
 
@@ -8064,7 +8334,7 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
             return codeindexarray(ctx, node)
         elseif node.exp1._type._tag == "Type.Map" then
             return codeindexmap(ctx, node)
-        elseif types.is_c(node.exp1._type) then
+        elseif types.is_direct_c(node.exp1._type) then
             return codeindexc(ctx, node)
         end
         error("impossible var bracket")
@@ -8112,6 +8382,8 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
         return codecall(ctx, node, target)
     elseif tag == "Ast.ExpExtra" then
         return "", node.exp._extras[node.index]
+    elseif tag == "Ast.ExpIs" then
+        return coder._codeis(ctx, node)
     elseif tag == "Ast.ExpCast" and types.equals(node.exp._type, node._type) then
         return codeexp(ctx, node.exp, iscondition, target)
     elseif tag == "Ast.ExpCast"
@@ -8163,26 +8435,42 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
         local cstats, cexp = codeexp(ctx, node.exp)
         local address = render("(&($CEXP))", { CEXP = cexp })
         return cstats, foreigncast(address, node._type)
-    elseif tag == "Ast.ExpCast" and types.is_c(node._type) then
+    elseif tag == "Ast.ExpCast"
+           and types.is_direct_c(node._type)
+           and node.exp._type._tag ~= "Type.Option" then
         local cstats, cexp = codeexp(ctx, node.exp)
         local fstats, fexp = nativetoforeignexp(ctx, node.exp, cexp, node._type)
         if types.is_c_tvalue(node._type) then
             return cstats .. fstats, fexp
         end
         return cstats .. fstats, foreigncast(fexp, node._type)
-    elseif tag == "Ast.ExpCast" and types.is_c(node.exp._type)
+    elseif tag == "Ast.ExpCast" and types.is_direct_c(node.exp._type)
            and node._type._tag == "Type.Integer" then
         local cstats, cexp = codeexp(ctx, node.exp)
         return cstats, "((lua_Integer)" .. cexp .. ")"
-    elseif tag == "Ast.ExpCast" and types.is_c(node.exp._type)
+    elseif tag == "Ast.ExpCast" and types.is_direct_c(node.exp._type)
            and node._type._tag == "Type.Float" then
         local cstats, cexp = codeexp(ctx, node.exp)
         return cstats, "((lua_Number)" .. cexp .. ")"
-    elseif tag == "Ast.ExpCast" and types.is_c(node.exp._type)
+    elseif tag == "Ast.ExpCast" and types.is_direct_c(node.exp._type)
            and node._type._tag == "Type.Boolean" then
         local cstats, cexp = codeexp(ctx, node.exp)
         return cstats, toboolean(types.resolve_c_typedef(node.exp._type), cexp)
-    elseif tag == "Ast.ExpCast" and types.is_c(node.exp._type)
+    elseif tag == "Ast.ExpCast"
+           and types.is_counted_c_character_owner(node.exp._type)
+           and node._type._tag == "Type.String" then
+        local cstats, cexp = codeexp(ctx, node.exp)
+        local ownerstats, owner =
+            materialize_code(ctx, node.exp._type, cstats, cexp)
+        local mkstats, mkexp = makestring(
+            ctx,
+            render("((const char *)getudatamem($OWNER))", {
+                OWNER = owner,
+            }),
+            target,
+            render("$OWNER->len", { OWNER = owner }))
+        return ownerstats .. "\n" .. mkstats, mkexp
+    elseif tag == "Ast.ExpCast" and types.is_direct_c(node.exp._type)
            and node._type._tag == "Type.String" then
         local cstats, cexp = codeexp(ctx, node.exp)
         local ctmp, tmpname = newforeigntmp(ctx, node.exp._type)
@@ -8430,6 +8718,10 @@ local function codeexp_dispatch(ctx, node, iscondition, target)
                 $CSTAT
                 TString *$STRVAR = $CEXP;
                 size_t $LENVAR = tsslen($STRVAR);
+                if (TITAN_UNLIKELY($LENVAR >=
+                        MAX_SIZE - sizeof(TString) - _len)) {
+                    luaL_error(L, "string length overflow");
+                }
                 _len += $LENVAR;
             ]], {
                 CSTAT = cstat,
@@ -8542,7 +8834,9 @@ function codeforeignexp(ctx, node, target)
         local cstats, cexp = codeexp(ctx, node.exp)
         local address = render("(&($CEXP))", { CEXP = cexp })
         return cstats, foreigncast(address, node._type)
-    elseif tag == "Ast.ExpCast" and types.is_c(node._type) then
+    elseif tag == "Ast.ExpCast"
+           and types.is_direct_c(node._type)
+           and node.exp._type._tag ~= "Type.Option" then
         local cstats, cexp = codeexp(ctx, node.exp)
         local fstats, fexp = nativetoforeignexp(ctx, node.exp, cexp, node._type)
         if types.is_c_tvalue(node._type) then
@@ -10073,7 +10367,10 @@ function coder.generate(modname, ast, static_deps, abi)
         owned_c_metatables = {},
         functions = {},
         modules = {},
-        functags = {},       -- canonical function-type string -> { id, key }
+        -- ABI-family-prefixed diagnostic spelling -> { id, key, registry_key }.
+        -- The prefix distinguishes C-bearing from C-free callable shapes whose
+        -- human-readable type strings happen to collide.
+        functags = {},
         functag_list = {},   -- same entries, in allocation order (for emission)
         functag_count = 0,
         bound_luas = {},     -- mangled bound-Lua-trampoline name -> { module }
@@ -10470,8 +10767,9 @@ function coder.generate(modname, ast, static_deps, abi)
 
     -- Function-type tags: a per-library `static const void*` each, declared up
     -- front (in $SIGS, ahead of any function body that references it) and set up
-    -- in _init by publish-or-recover through the Lua registry so unrelated
-    -- modules that mention the same function type agree on one tag pointer.
+    -- in _init by publish-or-recover through the Lua registry. C-free function
+    -- types share registry keys across modules; C-bearing types are scoped to
+    -- the defining module because imported C type identity is module-local.
     local initfunctags = {}
     for _, entry in ipairs(tlcontext.functag_list) do
         table.insert(sigs, "static const void *" .. entry.id .. ";")
@@ -10488,7 +10786,8 @@ function coder.generate(modname, ast, static_deps, abi)
             }
         ]], {
             ID = entry.id,
-            KEYSTR = c_string_literal("Titan function type " .. entry.key .. " tag"),
+            KEYSTR = c_string_literal(
+                "Titan function type " .. entry.registry_key .. " tag"),
         }))
     end
 

@@ -292,9 +292,10 @@ static l_inline int titan_eq_intfloat(lua_Integer i, lua_Number f) {
 }
 
 /*
-** Macro to convert pointer-to-void* to pointer-to-function. This cast
-** is undefined according to ISO C, but POSIX assumes that it works.
-** (The '__extension__' in gnu compilers is only to avoid warnings.)
+** Macro to convert between function pointers and object/void pointers.
+** These casts are not portable ISO C, but the supported toolchains and
+** POSIX dynamic-symbol contract provide them. (The '__extension__' in GNU
+** compilers is only to avoid warnings.)
 ** Named titan_cast_func because Lua 5.5's llimits.h defines its own
 ** single-argument cast_func.
 */

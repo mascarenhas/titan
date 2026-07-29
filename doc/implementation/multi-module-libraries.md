@@ -283,15 +283,18 @@ Lua process and requires exactly one support table exposing `_loadlib` and
 proof.
 
 The production standard library is the canonical example. One compiler
-invocation names all seven logical roots and publishes root `titan.so` and
+invocation names all nine logical roots and publishes root `titan.so` and
 `titan.a`. Internal standard imports are direct. `titanlib.o` is shared `-X`
 payload and supplies bare `luaopen_titan` without adding a logical metadata
-key. Bundled mode puts the private libuv archive in that same payload, so its
-objects are force-carried into the DSO and flattened into the archive. System
-mode keeps the pkg-config-selected libuv setting at final link and never
-copies it into `titan.a`. The DSO exports eight Lua entries
-(`luaopen_titan` plus the seven logical entries); both forms define the seven
-logical protocols, and the archive advertises exactly seven metadata keys.
+key. The private namespaced five-member LPegLabel archive follows it as
+metadata-free payload. Bundled mode puts the private libuv archive after that,
+so both native archives are force-carried into the DSO and flattened into the
+archive. System mode keeps the pkg-config-selected libuv setting at final link
+and never copies it into `titan.a`. The DSO exports ten Lua entries
+(`luaopen_titan` plus the nine logical entries); both forms define the nine
+logical protocols, and the archive advertises exactly nine metadata keys.
+The private LPegLabel archive and its headers remain source-build inputs; they
+are not installed in the compiler/runtime SDK.
 
 `make titan` builds a distinct private bootstrap at
 `titan-runtime/bootstrap/titan.so`, linked only from `titanlib.o`. During a
@@ -306,9 +309,9 @@ a private directory on the destination filesystem under the same effective
 the installer. It then executes the source-only
 `scripts/stdlib_installer.lua` directly with the installed Lua; the publisher
 is not an installed compiler module. The script rescans `titan.a`, requires
-the exact seven-key set, compares embedded metadata with the staged DSO and a
+the exact nine-key set, compares embedded metadata with the staged DSO and a
 fresh-process archive-backed validation image, validates bare
-`luaopen_titan`, the seven exact shims, and the macOS dSYM, then publishes the
+`luaopen_titan`, the nine exact shims, and the macOS dSYM, then publishes the
 paired bundle with the DSO last. It recognizes bootstrap-only, legacy complete
 ABI-0.18 DSO/shims-without-archive, and complete-pair predecessors. Injected
 failures restore the exact predecessor, including leaving `titan.a` absent
@@ -317,13 +320,13 @@ is best effort and cannot turn the coherent install into a reported hook
 failure. Separately versioned 0.17 artifacts are not purged.
 
 The canonical installed files are the provider pair (plus the DSO's macOS
-dSYM) and seven Lua shims:
+dSYM) and nine Lua shims:
 
 ```text
 <root>/lib/titan/0.18/titan.so
 <root>/lib/titan/0.18/titan.a
 <root>/lib/titan/0.18/titan.so.dSYM          # macOS only
-<root>/share/lua/5.5/titan/{coroutine,uv,async,timer,fs,net,os}.lua
+<root>/share/lua/5.5/titan/{coroutine,uv,async,timer,fs,net,os,peg,string}.lua
 ```
 
 These remain direct Titan artifacts outside the source-rock manifest. The
@@ -331,10 +334,10 @@ manifest owns the compiler Lua/script files; `luarocks remove` does not claim
 to remove Titan library-package artifacts.
 
 The checkout Make graph has one provider-pair completion/configuration stamp.
-All seven flat/folder source sets, native inputs, effective `CC`/`AR`/`RANLIB`,
+All nine flat/folder source sets, native inputs, effective `CC`/`AR`/`RANLIB`,
 embedded-format inputs, libuv mode, and extra flags are prerequisites. The
 DSO, archive, conditional dSYM, and every shim must exist; every warm
-invocation rescans `titan.a` for the exact seven-key set without changing pair
+invocation rescans `titan.a` for the exact nine-key set without changing pair
 mtimes. `make clean` removes only exact known generated outputs. Production
 library tests treat the combined set as read-only. CI snapshots and restores
 the checkout runtime archive plus the installed DSO/archive/dSYM/shims around

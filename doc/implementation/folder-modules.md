@@ -267,34 +267,47 @@ and declares no record. The Makefile
 declares this set explicitly as `UV_TITAN_SOURCES`; it does not use a
 wildcard, so adding a production source changes the reviewed build graph.
 Every listed source is a prerequisite of the one combined standard-library
-completion target. The production compiler invocation names all seven logical
+completion target. The production compiler invocation names all nine logical
 roots:
 
 ```sh
 titanc titan.coroutine titan.uv titan.async titan.timer titan.fs titan.net titan.os \
-  -X titan-runtime/titanlib.o libuv-build/libuv.a  # bundled mode
+  titan.peg titan.string \
+  -X titan-runtime/titanlib.o lpeglabel-build/libtitan-lpeglabel.a \
+     libuv-build/libuv.a  # bundled mode
 ```
 
 Generated `titan/uv/uv.c` and `titan/uv/uv.o` are build artifacts and are
 removed by `make clean`. No contributor DSO, archive, or contributor shim is
 built or installed. The one logical `titan.uv` object, its one generated
-`titan/uv.lua` shim, and the other six logical standard modules reside in the
-physical `titan.so`/`titan.a` pair. Bundled mode supplies the private libuv
-archive as shared `-X` payload, so its members enter both provider forms;
+`titan/uv.lua` shim, and the other eight logical standard modules reside in
+the physical `titan.so`/`titan.a` pair. The private five-member LPegLabel
+archive is shared metadata-free payload for the `titan.peg`/`titan.string`
+folder modules. Bundled mode then supplies the private libuv archive, so its
+members enter both provider forms;
 system mode repeats the configured final-link setting for the DSO and does not
 copy it into `titan.a` (and omits `libuv-build/libuv.a` from the command).
 That setting may itself select a shared or static system library. Higher
 `async`/`timer`/`fs`/`net`/`os` modules still import
 the independent logical `titan.uv` protocol, but their calls are direct
-because all seven source roots are linked together.
+because all nine source roots are linked together.
 
-The late-filesystem-callback test variant reuses the production folder-source
-ensemble but deliberately not its provider layout. Its support code copies the
-complete ensemble to an isolated workspace, patches the owning contributors by
-unique per-file anchors, and compiles an exact `titan.uv` provider. Its private
-root intentionally has no shallow `titan.so`, so prefix lookup reaches
-`titan/uv.so`. It does not reconstruct or concatenate a monolithic source and
-is not a production layout.
+`titan.peg` and `titan.string` apply the same folder-module rules: each has one
+canonical main, immediate contributors sharing module-private scope, one
+generated C/object pair, and one logical shim. Unlike `titan.uv`, both mains
+own their complete public API and every contributor has only module-local
+top-level declarations. Their contributor filenames do not become modules or
+archive metadata keys.
+
+The late-callback test variant reuses the production folder-source ensembles
+but deliberately not their provider layout. Its support code copies the
+complete uv ensemble to an isolated workspace, patches the owning contributors
+by unique per-file anchors, and compiles an exact `titan.uv` provider. DNS
+cases additionally build complete exact PEG and string providers before the
+exact net facade; filesystem-only sanitizer cases omit that dependency closure.
+The private root intentionally has no shallow `titan.so`, so prefix lookup
+reaches exact providers such as `titan/uv.so`. It does not reconstruct or
+concatenate a monolithic source and is not a production layout.
 
 See [Driver and toolchain](driver.md) for the complete search/build flow,
 [Lexer and parser](lexer-parser.md) for locations and non-reentrancy,

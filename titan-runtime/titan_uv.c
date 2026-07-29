@@ -17,8 +17,9 @@ typedef void (*titan_uv_dispatch_func)(lua_State *L, Udata *_mod, CClosure *_fn,
 
 /*
  * The Runtime-owned owner/resource graph strongly roots owner while libuv can
- * call us.  These fixed fields are therefore trusted in exactly the same way
- * as the four fixed coroutine-owner fields read by titan_coro_entry.
+ * call us.  Its fixed five-slot layout places the main thread and dispatcher
+ * at the indices below; those fields are trusted in exactly the same way as
+ * the fixed coroutine-owner fields read by titan_coro_entry.
  */
 static void titan_uvshim_dispatch(Udata *owner, lua_Integer event_kind,
                                   lua_Integer result, size_t size,

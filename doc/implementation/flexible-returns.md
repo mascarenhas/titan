@@ -112,8 +112,9 @@ passes it through the role-aware `check_varg_elem(..., "return")` validator.
 The output descriptor families are the same seven representation families as
 input varargs, so `nil`, foreign pointers, and any type without a supported
 descriptor representation are rejected with return-specific diagnostics.
-`value` is retained as `Type.Value`; finite option projection never constructs
-an artificial `value?`.
+`COwned` uses the `Udata **` nominal family; `value` is retained as
+`Type.Value`; finite option projection never constructs an artificial
+`value?`.
 
 An unannotated lambda in an expected function context copies both the fixed
 `rettypes` and `flexrettype`. An explicit `: ()` keeps an empty fixed list and
@@ -290,8 +291,13 @@ implicit source-to-target coercion, with these rules:
 
 * The actual callable may have fewer fixed parameters than the expected type;
   the actual ignores the expected suffix.
-* The actual may not have more fixed parameters, because those positions would
-  be hidden requirements that callers of the expected type need not supply.
+* When the actual has more fixed parameters, every additional position is
+  checked against nil through `slot_compatible`: callers may omit the expected
+  tail, and ordinary adjustment must be able to nil-fill the position without
+  failing. If the expected type has an input tail, the same actual parameter
+  must also accept the expected tail element because a caller may provide that
+  position. This admits additional option, `value`, nil, and other
+  nil-compatible slots while rejecting hidden non-nilable requirements.
 * Shared fixed parameters reverse the recursive relation: the actual parameter
   must accept values admitted by the expected parameter.
 * If a shorter actual callable has an input vararg, every expected fixed value

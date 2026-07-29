@@ -369,10 +369,13 @@ and converts each variadic argument at the boundary.
 **compatible** (gradually, through `value`). Compatibility with fixed-only
 function types is directional. A fixed actual function may inhabit a slot
 whose type has a variadic tail and ignore that tail. A variadic actual may
-inhabit a compatible fixed-only slot when callers of that slot expose no
-hidden required parameters; it simply receives whatever fixed arguments the
-slot promises. The reverse direction is rejected whenever it would hide a
-required fixed parameter or feed an incompatible value to an observed tail.
+inhabit a compatible fixed-only slot and simply receives whatever fixed
+arguments the slot promises. An actual function may also have additional
+fixed parameters when each accepts nil from an omitted expected tail; if the
+expected type is variadic, those parameters must additionally accept its tail
+element. The reverse direction is rejected whenever adjustment would force nil
+into a non-nilable parameter or feed an incompatible value to an observed
+tail.
 See [Flexible returns](flexible-returns.md#function-compatibility-is-directional)
 for the combined input/output compatibility rules.
 
@@ -420,6 +423,8 @@ the result is an ordinary Lua table.
   a [C FFI](ffi.md) pointer is a compile-time error `a variadic parameter
   cannot have a foreign pointer type`, and `...` cannot be passed into a
   foreign function — the C FFI has its own, disjoint notion of variadic.
+  A source-written owned C type is different: it is GC-managed userdata and
+  is a supported variadic element type.
 * **At most 200 variadic arguments.** A variadic run is capped at 200
   elements (`TITAN_VARARG_MAX`). A statically written call can never reach
   it (the parser caps an argument list well below that), but a long chain of

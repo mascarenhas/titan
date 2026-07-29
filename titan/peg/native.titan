@@ -1,0 +1,98 @@
+-- Module-local LPegLabel state and raw-Lua bootstrap used by peg.titan.
+
+local function _initialize_native()
+  local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
+  if private_lpeg.titan_lpeglabel_open(L) ~= 1 or
+      lua.lua_type(L, -1) ~= lua.LUA_TTABLE then
+    raise "embedded LPegLabel opener did not return its module table"
+  end
+  local raw_engine: value = ffi.lua_totvalue(L, -1)
+  _engine = raw_engine as {string: value}
+
+  _P = _engine["P"] as NativeUnary
+  _S = _engine["S"] as (string) -> value
+  _R = _engine["R"] as NativeRange
+  _utfR = _engine["utfR"] as NativeUtfRange
+  _V = _engine["V"] as (string) -> value
+  _B = _engine["B"] as NativeUnary
+  _T = _engine["T"] as (string) -> value
+  _C = _engine["C"] as NativeUnary
+  _Cc = _engine["Cc"] as NativeConstant
+  _Cmt = _engine["Cmt"] as NativeBinary
+  _Cb = _engine["Cb"] as NativeUnary
+  _Carg = _engine["Carg"] as (integer) -> value
+  _Cp = _engine["Cp"] as NativePosition
+  _Cs = _engine["Cs"] as NativeUnary
+  _Ct = _engine["Ct"] as NativeUnary
+  _Cf = _engine["Cf"] as NativeBinary
+  _Cg = _engine["Cg"] as NativeBinary
+  _match = _engine["match"] as NativeMatch
+  _locale = _engine["locale"] as NativeLocale
+  _setmaxstack = _engine["setmaxstack"] as NativeSetMaxStack
+  _version_text = _engine["version"] as string
+
+  lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, PATTERN_REGISTRY_KEY)
+  if lua.lua_type(L, -1) ~= lua.LUA_TTABLE then
+    raise "embedded LPegLabel did not install its private pattern metatable"
+  end
+  local raw_metatable: value = ffi.lua_totvalue(L, -1)
+  local metatable = raw_metatable as {string: value}
+  _sequence = metatable["__mul"] as NativeBinary
+  _choice = metatable["__add"] as NativeBinary
+  _difference = metatable["__sub"] as NativeBinary
+  _lookahead = metatable["__len"] as NativeUnary
+  _negative = metatable["__unm"] as NativeUnary
+  _repeat = metatable["__pow"] as (value, integer) -> value
+  _capture_replace =
+    metatable["__div"] as NativeBinary
+
+  -- Matching is wrapped with an identity sentinel and a final position
+  -- capture.  The sentinel makes a native failure triple unambiguous even
+  -- when successful user captures begin with nil, "fail", and an integer.
+  -- The complete result tuple is captured in a Titan Array so trailing nil
+  -- captures remain measurable through the final non-nil position.
+end
+
+local function _pattern(raw: value, tree_size: integer): Pattern
+  return Pattern.new(raw, tree_size)
+end
+
+local function _checked_sum(first: integer, second: integer,
+                            overhead: integer): integer
+  if first < 0 or second < 0 or overhead < 0 or
+      first > MAX_PATTERN_SIZE - overhead or
+      second > MAX_PATTERN_SIZE - overhead - first then
+    raise "PEG pattern is too large"
+  end
+  return first + second + overhead
+end
+
+local function _checked_unary(pattern: Pattern,
+                              overhead: integer): integer
+  return _checked_sum(pattern.tree_size, 0, overhead)
+end
+
+local function _normalized_init(subject: string,
+                                supplied: integer?): integer
+  if not supplied then return 1 end
+  local init = supplied as integer
+  local length = #subject
+  if init > 0 then
+    if init > length + 1 then return length + 1 end
+    return init
+  elseif init == 0 then
+    return length + 1
+  elseif init < -length then
+    return 1
+  else
+    return length + init + 1
+  end
+end
+
+local function _unpack_results(items: {value}, index: integer,
+                               limit: integer): (...: value)
+  if index > limit then return end
+  return items[index],
+    _unpack_results(items, index + 1, limit)
+end

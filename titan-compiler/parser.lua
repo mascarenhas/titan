@@ -49,6 +49,8 @@ local standard_imports = {
     fs = "titan.fs",
     net = "titan.net",
     os = "titan.os",
+    peg = "titan.peg",
+    string = "titan.string",
 }
 
 function defs.importdecl(loc, localname, modname)
@@ -210,6 +212,14 @@ end
 
 function defs.constcptrtype(pos, subtype)
     return ast.TypeCPointer(pos, subtype, true)
+end
+
+function defs.cownedscalartype(pos, subtype)
+    return ast.TypeCOwned(pos, subtype, false)
+end
+
+function defs.cownedarraytype(pos, subtype)
+    return ast.TypeCOwned(pos, subtype, true)
 end
 
 local function carraylength(loc, n)
@@ -447,6 +457,16 @@ function defs.localrecordfielddecl(pos, name, type)
     return decl
 end
 
+function defs.optionrecordfielddecl(pos, name, type)
+    return ast.Decl(pos, name, ast.TypeOption(type.loc, type), false)
+end
+
+function defs.localoptionrecordfielddecl(pos, name, type)
+    local decl = defs.optionrecordfielddecl(pos, name, type)
+    decl.islocal = true
+    return decl
+end
+
 function defs.typeddecl(pos, name, type)
     return ast.Decl(pos, name, type, false)
 end
@@ -673,12 +693,39 @@ local grammar = re.compile([[
                     <- (P  NAME COLON
                             automaticlocaltype)                  -> typeddecl
 
+    -- An owned payload is deliberately optionless: the sole trailing `?` in
+    -- `simpletype` wraps the complete owner. The array alternative is selected
+    -- with lookahead before the scalar ownership marker is considered, so
+    -- `owned *c.Item[]` is an array of C pointers while `owned *c.Item` owns
+    -- one C Item object.
+    cownedpayload   <- (P  NIL)                                  -> TypeNil
+                     / (P  BOOLEAN)                              -> TypeBoolean
+                     / (P  INTEGER)                              -> TypeInteger
+                     / (P  FLOAT)                                -> TypeFloat
+                     / (P  STRING)                               -> TypeString
+                     / (P  VALUE)                                -> TypeValue
+                     / (P  CONST MUL
+                           cownedpayload^OwnedPayload)           -> constcptrtype
+                     / (P  MUL
+                           cownedpayload^OwnedPayload)           -> cptrtype
+                     / qualifiedtype
+                     / (P  NAME)                                 -> TypeName
+                     / ownedtype
+
+    ownedtype       <- (P  OWNED &(cownedpayload LBRACKET)
+                           cownedpayload LBRACKET
+                           RBRACKET^RBracketCOwned)              -> cownedarraytype
+                     / (P  OWNED MUL
+                           cownedpayload^OwnedPayload)           -> cownedscalartype
+                     / (P  OWNED %{COwnedShape})
+
     simpletype      <- ((((P  NIL)                               -> TypeNil
                      / (P  BOOLEAN)                              -> TypeBoolean
                      / (P  INTEGER)                              -> TypeInteger
                      / (P  FLOAT)                                -> TypeFloat
                      / (P  STRING)                               -> TypeString
                      / (P  VALUE)                                -> TypeValue
+                     / ownedtype
                      / (P  CONST MUL simpletype^TypeType)        -> constcptrtype
                      / (P  MUL simpletype^TypeType)              -> cptrtype
                      / qualifiedtype
@@ -747,8 +794,12 @@ local grammar = re.compile([[
 
     recordfields    <- {| recordfield* |}                        -- produces {Decl}
 
-    recordfield     <- (P  LOCAL NAME COLON^ColonRecordField
+    recordfield     <- (P  LOCAL NAME OPT COLON^ColonRecordField
+                           type^TypeRecordField SEMICOLON?)      -> localoptionrecordfielddecl
+                     / (P  LOCAL NAME COLON^ColonRecordField
                            type^TypeRecordField SEMICOLON?)      -> localrecordfielddecl
+                     / (P  NAME OPT COLON^ColonRecordField
+                           type^TypeRecordField SEMICOLON?)      -> optionrecordfielddecl
                      / (P  NAME COLON^ColonRecordField
                            type^TypeRecordField SEMICOLON?)      -> recordfielddecl
 
@@ -871,6 +922,7 @@ local grammar = re.compile([[
 
 
     castexp         <- (P  unopexp AS type^CastMissingType)      -> ExpCast
+                     / (P  unopexp IS type^IsMissingType)        -> ExpIs
                      / unopexp                                   -- produces Exp
 
     simpleexp       <- (P  NIL)                                  -> nil_exp
@@ -985,11 +1037,13 @@ local grammar = re.compile([[
     WHILE           <- %WHILE SKIP*
     IMPORT          <- %IMPORT SKIP*
     AS              <- %AS SKIP*
+    IS              <- %IS SKIP*
     FOREIGN         <- %FOREIGN SKIP*
     CATCH           <- %CATCH SKIP*
     FINALLY         <- %FINALLY SKIP*
     RAISE           <- %RAISE SKIP*
     CONST           <- %CONST SKIP*
+    OWNED           <- %OWNED SKIP*
 
     BOOLEAN         <- %BOOLEAN SKIP*
     INTEGER         <- %INTEGER SKIP*

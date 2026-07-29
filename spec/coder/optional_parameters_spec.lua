@@ -73,6 +73,26 @@ describe("optional function parameter code generation", function()
         ]])
     end)
 
+    it("adjusts nil-compatible hidden parameters on generic function values",
+    function()
+        run_coder([[
+            function second(first: value, following: value): value
+                return following
+            end
+
+            function exercise(): boolean
+                local fixed: (value) -> value = second
+                local tailed: (value, ...: value) -> value = second
+                return fixed("a") == nil and
+                    tailed("a") == nil and
+                    tailed("a", "b") == "b" and
+                    tailed("a", "b", "ignored") == "b"
+            end
+        ]], [[
+            assert(test.exercise())
+        ]])
+    end)
+
     it("nil-fills a short trailing variadic spread in call arguments", function()
         run_coder([[
             function target(a: integer?, b: boolean): integer

@@ -193,8 +193,8 @@ expression. The allowed forms are:
 * calls to a record's `new` constructor with constant arguments;
 * calls to an imported C type's `.new()` or `.new_array(count)` pseudo-
   constructor, with a constant `count`;
-* concatenations, unary operators, binary operators, and `as` casts
-  applied to constant operands.
+* concatenations, unary operators, binary operators, `as` casts, and `is`
+  type tests applied to constant operands.
 
 Anything else — in particular any variable reference and any other
 function call — is rejected with the compile-time error
@@ -456,12 +456,13 @@ driver can discover the Titan root from Lua's `package.cpath`; the names do not
 have inherently identical ownership.
 
 The standard-library names `coroutine`, `uv`, `async`, `timer`, `fs`, `net`,
-and `os` are parser sugar for the qualified module names `titan.coroutine`,
-`titan.uv`, `titan.async`, `titan.timer`, `titan.fs`, `titan.net`, and
-`titan.os`. The qualified names then
+`os`, `peg`, and `string` are parser sugar for the qualified module names
+`titan.coroutine`, `titan.uv`, `titan.async`, `titan.timer`, `titan.fs`,
+`titan.net`, `titan.os`, `titan.peg`, and `titan.string`. The qualified names then
 follow the ordinary module lookup rules. Thus `local os = import "os"` means
 Titan's `titan.os` module without colliding with Lua's own `os` library, which
-is not importable as a Titan module.
+is not importable as a Titan module. Likewise, `import "string"` selects
+Titan's module without replacing Lua's `string` table.
 
 Application scheduling uses `import "async"` (or Lua's
 `require "titan.async"`). `titan.uv` is the private Runtime/libuv plumbing

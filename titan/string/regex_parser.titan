@@ -1,0 +1,895 @@
+-- Derived from ta-regex's pegex.lua at commit
+-- 857e48682791ba55c98a7dd99c5fc7d71c02597d.
+-- Copyright (c) 2014 Chris Emerson; MIT licensed. See
+-- LICENSES/ta-regex-LICENSE.
+--
+-- Byte-oriented regular-expression parser.
+--
+-- The parser is one relabel grammar. A constant-depth lexical branch preserves
+-- whole-source diagnostic precedence, then ordinary failure rewinds the same
+-- match before deterministic token actions build the AST directly.
+-- Group frames live in the per-match state passed through peg.argument(1), so
+-- arbitrary token counts and the documented group nesting limit do not depend
+-- on LPegLabel's mutable backtrack-stack setting. There is no recursive
+-- descent pass after the PEG match.
+
+local REGEX_EMPTY = 1
+local REGEX_LITERAL = 2
+local REGEX_ANY = 3
+local REGEX_CLASS = 4
+local REGEX_SEQUENCE = 5
+local REGEX_CHOICE = 6
+local REGEX_GROUP = 7
+local REGEX_REPEAT = 8
+local REGEX_BACKREFERENCE = 9
+local REGEX_WORD_START = 10
+local REGEX_WORD_END = 11
+
+local REGEX_MAX_CAPTURES = 200
+local REGEX_MAX_NESTING = 512
+
+local REGEX_DIGIT_BYTES = "0123456789"
+local REGEX_WORD_BYTES =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
+local REGEX_SPACE_BYTES = " \t\v\n\r"
+local REGEX_BELL_BYTE = "\7"
+local REGEX_ESCAPE_BYTE = "\27"
+local REGEX_WORD_BYTE_FLAGS: {integer: boolean} = {}
+
+local record RegexNode
+  local kind: integer
+  local position: integer
+  local text: string
+  local number: integer
+  local minimum: integer
+  local maximum: integer
+  local children: {RegexNode}
+end
+
+local record ParsedRegex
+  local root: RegexNode
+  local capture_count: integer
+  local anchored_start: boolean
+  local anchored_end: boolean
+end
+
+local record RegexQuantifier
+  local position: integer
+  local minimum: integer
+  local maximum: integer
+end
+
+local record RegexClassItem
+  local position: integer
+  local bytes: string
+  local single: boolean
+  local escaped: boolean
+end
+
+local record RegexParseFrame
+  local group_position: integer
+  local group_index: integer
+  local capturing: boolean
+  local alternation_position: integer
+  local branch_position: integer
+  local pieces: {RegexNode}
+  local alternatives: {RegexNode}
+end
+
+local record RegexParseState
+  local source: string
+  local frames: {RegexParseFrame}
+  local depth: integer
+  local capture_count: integer
+  local closed_groups: {integer: boolean}
+  local nullable_groups: {integer: boolean}
+  local anchored_start: boolean
+  local anchored_end: boolean
+end
+
+local function regex_node(kind: integer, position: integer): RegexNode
+  local children: {RegexNode} = {}
+  return RegexNode.new(kind, position, "", 0, 0, 0, children)
+end
+
+local function regex_empty(position: integer): RegexNode
+  return regex_node(REGEX_EMPTY, position)
+end
+
+local function regex_literal(position: integer, text: string): RegexNode
+  local node = regex_node(REGEX_LITERAL, position)
+  node.text = text
+  return node
+end
+
+local function regex_sequence(position: integer,
+                              children: {RegexNode}): RegexNode
+  if #children == 0 then return regex_empty(position) end
+  if #children == 1 then return children[1] end
+  local node = regex_node(REGEX_SEQUENCE, position)
+  node.children = children
+  return node
+end
+
+local function regex_choice(position: integer,
+                            children: {RegexNode}): RegexNode
+  if #children == 1 then return children[1] end
+  local node = regex_node(REGEX_CHOICE, position)
+  node.children = children
+  return node
+end
+
+local function regex_nullable(node: RegexNode): boolean
+  if node.kind == REGEX_EMPTY then
+    return true
+  elseif node.kind == REGEX_LITERAL or node.kind == REGEX_ANY or
+         node.kind == REGEX_CLASS then
+    return false
+  elseif node.kind == REGEX_WORD_START or
+         node.kind == REGEX_WORD_END then
+    return true
+  elseif node.kind == REGEX_BACKREFERENCE then
+    return node.minimum ~= 0
+  elseif node.kind == REGEX_SEQUENCE then
+    local index = 1
+    while index <= #node.children do
+      if not regex_nullable(node.children[index]) then return false end
+      index = index + 1
+    end
+    return true
+  elseif node.kind == REGEX_CHOICE then
+    local index = 1
+    while index <= #node.children do
+      if regex_nullable(node.children[index]) then return true end
+      index = index + 1
+    end
+    return false
+  elseif node.kind == REGEX_GROUP then
+    return regex_nullable(node.children[1])
+  elseif node.kind == REGEX_REPEAT then
+    return node.minimum == 0 or regex_nullable(node.children[1])
+  end
+  return false
+end
+
+local function regex_character(source: string,
+                               position: integer): string
+  return copy_interval(source, position, 1)
+end
+
+local function regex_byte(source: string,
+                          position: integer): integer
+  local bytes =
+    source as const *ffi.titan_ffi_unsigned_char
+  return bytes[position - 1] as integer
+end
+
+local function regex_byte_flags(bytes: string):
+                                {integer: boolean}
+  local flags: {integer: boolean} = {}
+  local position = 1
+  while position <= #bytes do
+    flags[regex_byte(bytes, position)] = true
+    position = position + 1
+  end
+  return flags
+end
+
+local function regex_line_details(source: string, position: integer):
+                                  (integer, integer, string)
+  local line = 1
+  local line_start = 1
+  local cursor = 1
+  while cursor < position and cursor <= #source do
+    local character = regex_character(source, cursor)
+    if character == "\r" then
+      -- CRLF is one line ending, but do not skip the LF when that exact byte
+      -- is the diagnostic position: it is column one of the following line.
+      if cursor < #source and cursor + 1 < position and
+          regex_character(source, cursor + 1) == "\n" then
+        cursor = cursor + 1
+      end
+      line = line + 1
+      line_start = cursor + 1
+    elseif character == "\n" then
+      line = line + 1
+      line_start = cursor + 1
+    end
+    cursor = cursor + 1
+  end
+
+  local line_end = line_start
+  while line_end <= #source do
+    local character = regex_character(source, line_end)
+    if character == "\n" or character == "\r" then break end
+    line_end = line_end + 1
+  end
+  return line, position - line_start + 1,
+    copy_interval(source, line_start, line_end - line_start)
+end
+
+local function raise_regex_diagnostic(label: string, message: string,
+                                      source: string, position: integer)
+  local actual = position
+  if actual < 1 then actual = 1 end
+  if actual > #source + 1 then actual = #source + 1 end
+  local line, column, source_line =
+    regex_line_details(source, actual)
+  local diagnostic = RegexDiagnostic.new(
+    label, message, source, actual, line, column, source_line)
+  raise "invalid regular expression [" .. diagnostic.label ..
+        "] at L" .. diagnostic.line ..
+        ":C" .. diagnostic.column ..
+        " (byte " .. diagnostic.position .. "): " ..
+        diagnostic.message .. "\n" ..
+        diagnostic.source_line .. "\n" ..
+        rep(" ", diagnostic.column - 1) .. "^"
+end
+
+local function regex_syntax_message(label: string): string
+  if label == "expected_atom" then
+    return "expected regular-expression atom"
+  elseif label == "expected_group_close" then
+    return "expected ')'"
+  elseif label == "expected_class_close" then
+    return "expected ']'"
+  elseif label == "empty_class" then
+    return "character class must not be empty"
+  elseif label == "bad_quantifier" then
+    return "malformed counted quantifier"
+  elseif label == "dangling_escape" then
+    return "escape has no following byte"
+  elseif label == "unsupported_escape" then
+    return "unsupported escape"
+  elseif label == "misplaced_anchor" then
+    return "anchor is only valid around the whole expression"
+  elseif label == "misplaced_quantifier" then
+    return "quantifier has no preceding atom"
+  elseif label == "trailing_input" then
+    return "unexpected trailing input"
+  end
+  return "invalid regular-expression syntax"
+end
+
+local function regex_all_bytes(): string
+  local result = ""
+  local byte = 0
+  while byte <= 255 do
+    result = result .. char(byte)
+    byte = byte + 1
+  end
+  return result
+end
+
+local function regex_byte_set_contains(bytes: string,
+                                       candidate: string): boolean
+  local first: integer? = find(bytes, candidate, 1)
+  if first then return true end
+  return false
+end
+
+local function regex_is_word_at(subject: string,
+                                position: integer): boolean
+  if position < 1 or position > #subject then return false end
+  return REGEX_WORD_BYTE_FLAGS[regex_byte(subject, position)] == true
+end
+
+local function regex_complement_bytes(bytes: string): string
+  local result = ""
+  local position = 1
+  while position <= #REGEX_ALL_BYTES do
+    local candidate = regex_character(REGEX_ALL_BYTES, position)
+    if not regex_byte_set_contains(bytes, candidate) then
+      result = result .. candidate
+    end
+    position = position + 1
+  end
+  return result
+end
+
+local function regex_builtin_bytes(code: string): string
+  local bytes = REGEX_SPACE_BYTES
+  if code == "w" or code == "W" then
+    bytes = REGEX_WORD_BYTES
+  elseif code == "d" or code == "D" then
+    bytes = REGEX_DIGIT_BYTES
+  end
+  if code == "W" or code == "D" or code == "S" then
+    return regex_complement_bytes(bytes)
+  end
+  return bytes
+end
+
+local function regex_control_byte(code: string): string
+  if code == "t" then return "\t"
+  elseif code == "n" then return "\n"
+  elseif code == "r" then return "\r"
+  elseif code == "f" then return "\f"
+  elseif code == "e" then return REGEX_ESCAPE_BYTE
+  end
+  return REGEX_BELL_BYTE
+end
+
+local function regex_class_plain(position: integer,
+                                 text: string): RegexClassItem
+  return RegexClassItem.new(position, text, true, false)
+end
+
+local function regex_class_escape(position: integer,
+                                  code: string): RegexClassItem
+  if regex_byte_set_contains("tnrfea", code) then
+    return RegexClassItem.new(
+      position, regex_control_byte(code), true, true)
+  end
+  return RegexClassItem.new(position, code, true, true)
+end
+
+local function regex_class_builtin(position: integer,
+                                   code: string): RegexClassItem
+  return RegexClassItem.new(
+    position, regex_builtin_bytes(code), false, true)
+end
+
+local function regex_class_add(
+    included: {string: boolean}, bytes: string)
+  local position = 1
+  while position <= #bytes do
+    included[regex_character(bytes, position)] = true
+    position = position + 1
+  end
+end
+
+local function regex_class_add_range(
+    included: {string: boolean}, first: RegexClassItem,
+    last: RegexClassItem, position: integer,
+    state: RegexParseState)
+  local first_index: integer? =
+    find(REGEX_ALL_BYTES, first.bytes, 1)
+  local last_index: integer? =
+    find(REGEX_ALL_BYTES, last.bytes, 1)
+  if not first_index or not last_index or
+      (last_index as integer) < (first_index as integer) then
+    raise_regex_diagnostic(
+      "bad_range", "invalid or reversed character range",
+      state.source, position)
+  end
+  regex_class_add(included, copy_interval(
+    REGEX_ALL_BYTES, first_index as integer,
+    (last_index as integer) - (first_index as integer) + 1))
+end
+
+local function regex_class_node(
+    position: integer, complement: string,
+    items: {integer: RegexClassItem},
+    state: RegexParseState): RegexNode
+  local included: {string: boolean} = {}
+  local index = 1
+  local have_item = false
+  while index <= #items do
+    local first = items[index]
+    if first.single and first.bytes == "-" and
+        not first.escaped and have_item and index < #items then
+      raise_regex_diagnostic(
+        "bad_range",
+        "unescaped '-' is only literal first or last in a character class",
+        state.source, first.position)
+    end
+
+    local has_range =
+      index + 2 <= #items and
+      items[index + 1].single and
+      items[index + 1].bytes == "-" and
+      not items[index + 1].escaped
+    if not first.single and has_range then
+      local separator = items[index + 1]
+      raise_regex_diagnostic(
+        "bad_range", "character-class ranges require byte endpoints",
+        state.source, separator.position)
+    elseif has_range then
+      local separator = items[index + 1]
+      local last = items[index + 2]
+      if not last.single then
+        raise_regex_diagnostic(
+          "bad_range", "invalid or reversed character range",
+          state.source, separator.position)
+      end
+      regex_class_add_range(
+        included, first, last, separator.position, state)
+      index = index + 3
+    else
+      regex_class_add(included, first.bytes)
+      index = index + 1
+    end
+    have_item = true
+  end
+
+  local bytes = ""
+  local all_position = 1
+  while all_position <= #REGEX_ALL_BYTES do
+    local candidate =
+      regex_character(REGEX_ALL_BYTES, all_position)
+    local admitted = included[candidate] == true
+    if complement == "^" then admitted = not admitted end
+    if admitted then bytes = bytes .. candidate end
+    all_position = all_position + 1
+  end
+  local node = regex_node(REGEX_CLASS, position)
+  node.text = bytes
+  return node
+end
+
+local function regex_any_node(position: integer): RegexNode
+  return regex_node(REGEX_ANY, position)
+end
+
+local function regex_builtin_node(position: integer,
+                                  code: string): RegexNode
+  local node = regex_node(REGEX_CLASS, position)
+  node.text = regex_builtin_bytes(code)
+  return node
+end
+
+local function regex_boundary_node(position: integer,
+                                   code: string): RegexNode
+  if code == "<" then
+    return regex_node(REGEX_WORD_START, position)
+  end
+  return regex_node(REGEX_WORD_END, position)
+end
+
+local function regex_control_node(position: integer,
+                                  code: string): RegexNode
+  return regex_literal(position, regex_control_byte(code))
+end
+
+local function regex_backreference_node(position: integer,
+                                        digit: string): RegexNode
+  local digit_position: integer? =
+    find(REGEX_DIGIT_BYTES, digit, 1)
+  local node = regex_node(REGEX_BACKREFERENCE, position)
+  node.number = (digit_position as integer) - 1
+  return node
+end
+
+local function regex_decimal(source: string, expression: string,
+                             position: integer): integer
+  local result = 0
+  local index = 1
+  while index <= #source do
+    local digit_text = regex_character(source, index)
+    local digit_position: integer? =
+      find(REGEX_DIGIT_BYTES, digit_text, 1)
+    if not digit_position then
+      raise "internal regular-expression decimal is invalid"
+    end
+    local digit = (digit_position as integer) - 1
+    local maximum = lua.LUA_MAXINTEGER as integer
+    if result > (maximum - digit) // 10 then
+      raise_regex_diagnostic(
+        "bad_quantifier", "repeat bound is too large",
+        expression, position)
+    end
+    result = result * 10 + digit
+    index = index + 1
+  end
+  return result
+end
+
+local function regex_simple_quantifier(
+    position: integer, symbol: string): RegexQuantifier
+  local minimum = 0
+  local maximum = -1
+  if symbol == "+" then
+    minimum = 1
+  elseif symbol == "?" then
+    maximum = 1
+  end
+  return RegexQuantifier.new(position, minimum, maximum)
+end
+
+local function regex_counted_quantifier(
+    _subject: string, after: integer,
+    position: integer, minimum_text: string,
+    maximum_text: string, comma: string,
+    state: RegexParseState): (boolean, RegexQuantifier)
+  local minimum =
+    regex_decimal(minimum_text, state.source, position)
+  local maximum = minimum
+  if comma == "," then
+    maximum = -1
+    if #maximum_text > 0 then
+      maximum =
+        regex_decimal(maximum_text, state.source, position)
+      if maximum < minimum then
+        raise_regex_diagnostic(
+          "bad_quantifier_bounds",
+          "maximum repeat is smaller than minimum",
+          state.source, after)
+      end
+    end
+  end
+  return true, RegexQuantifier.new(position, minimum, maximum)
+end
+
+local function regex_apply_quantifier(
+    node: RegexNode, quantifier: RegexQuantifier,
+    state: RegexParseState): RegexNode
+  if quantifier.position == 0 then return node end
+
+  if quantifier.maximum < 0 and regex_nullable(node) then
+    raise_regex_diagnostic(
+      "nullable_repetition",
+      "unbounded repetition operand may match the empty string",
+      state.source, quantifier.position)
+  end
+  local repeated = regex_node(REGEX_REPEAT, quantifier.position)
+  repeated.minimum = quantifier.minimum
+  repeated.maximum = quantifier.maximum
+  repeated.children[1] = node
+  return repeated
+end
+
+local function regex_current_frame(
+    state: RegexParseState): RegexParseFrame
+  return state.frames[state.depth]
+end
+
+local function regex_append_node(state: RegexParseState,
+                                 node: RegexNode)
+  local frame = regex_current_frame(state)
+  frame.pieces[#frame.pieces + 1] = node
+end
+
+local function regex_finish_branch(frame: RegexParseFrame)
+  frame.alternatives[#frame.alternatives + 1] =
+    regex_sequence(frame.branch_position, frame.pieces)
+end
+
+local function regex_finish_frame(frame: RegexParseFrame): RegexNode
+  regex_finish_branch(frame)
+  return regex_choice(
+    frame.alternation_position, frame.alternatives)
+end
+
+local function regex_parse_start(
+    _subject: string, after: integer,
+    state: RegexParseState): boolean
+  state.anchored_start = true
+  local frame = regex_current_frame(state)
+  frame.alternation_position = after
+  frame.branch_position = after
+  return true
+end
+
+local function regex_parse_open_group(
+    _subject: string, after: integer,
+    position: integer, marker: string,
+    state: RegexParseState): boolean
+  local capturing = marker == "c"
+  local group_index = 0
+
+  state.depth = state.depth + 1
+  if state.depth - 1 > REGEX_MAX_NESTING then
+    raise_regex_diagnostic(
+      "group_nesting_too_deep",
+      "regular expression has more than 512 nested groups",
+      state.source, position)
+  end
+
+  if capturing then
+    state.capture_count = state.capture_count + 1
+    if state.capture_count > REGEX_MAX_CAPTURES then
+      raise_regex_diagnostic(
+        "too_many_captures",
+        "regular expression has more than 200 capture groups",
+        state.source, position)
+    end
+    group_index = state.capture_count
+  end
+
+  local pieces: {RegexNode} = {}
+  local alternatives: {RegexNode} = {}
+  state.frames[state.depth] = RegexParseFrame.new(
+    position, group_index, capturing,
+    after, after, pieces, alternatives)
+  return true
+end
+
+local function regex_parse_alternative(
+    _subject: string, after: integer,
+    state: RegexParseState): boolean
+  local frame = regex_current_frame(state)
+  regex_finish_branch(frame)
+  local pieces: {RegexNode} = {}
+  frame.pieces = pieces
+  frame.branch_position = after
+  return true
+end
+
+local function regex_validate_backreference(
+    node: RegexNode, state: RegexParseState)
+  if node.kind ~= REGEX_BACKREFERENCE then return end
+  if not state.closed_groups[node.number] then
+    raise_regex_diagnostic(
+      "invalid_backreference",
+      "backreference must name a previously closed group",
+      state.source, node.position)
+  end
+  if state.nullable_groups[node.number] then node.minimum = 1 end
+end
+
+local function regex_parse_atom_marker(
+    _subject: string, _after: integer,
+    node: RegexNode, state: RegexParseState):
+    (boolean, RegexNode)
+  regex_validate_backreference(node, state)
+  return true, node
+end
+
+local function regex_parse_atom(
+    _subject: string, _after: integer,
+    node: RegexNode, quantifier: RegexQuantifier,
+    state: RegexParseState): boolean
+  regex_append_node(
+    state, regex_apply_quantifier(node, quantifier, state))
+  return true
+end
+
+local function regex_parse_close_marker(
+    _subject: string, _after: integer,
+    position: integer, state: RegexParseState):
+    (boolean, integer)
+  if state.depth == 1 then
+    raise_regex_diagnostic(
+      "trailing_input", regex_syntax_message("trailing_input"),
+      state.source, position)
+  end
+  return true, position
+end
+
+local function regex_parse_close_group(
+    _subject: string, _after: integer,
+    position: integer, quantifier: RegexQuantifier,
+    state: RegexParseState): boolean
+  local frame = regex_current_frame(state)
+  local child = regex_finish_frame(frame)
+  state.depth = state.depth - 1
+  local node = child
+  if frame.capturing then
+    state.closed_groups[frame.group_index] = true
+    state.nullable_groups[frame.group_index] =
+      regex_nullable(child)
+    node = regex_node(REGEX_GROUP, frame.group_position)
+    node.number = frame.group_index
+    node.children[1] = child
+  end
+  regex_append_node(
+    state, regex_apply_quantifier(node, quantifier, state))
+  return true
+end
+
+local function regex_parse_end(
+    _subject: string, after: integer,
+    state: RegexParseState): boolean
+  if state.depth ~= 1 then
+    raise_regex_diagnostic(
+      "misplaced_anchor",
+      "anchor is only valid around the whole expression",
+      state.source, after - 1)
+  end
+  state.anchored_end = true
+  return true
+end
+
+local function regex_parse_tail(
+    _subject: string, after: integer,
+    character: string, state: RegexParseState): boolean
+  if character == "$" then
+    local position = after
+    if state.depth ~= 1 then position = after - 1 end
+    raise_regex_diagnostic(
+      "misplaced_anchor",
+      "anchor is only valid around the whole expression",
+      state.source, position)
+  elseif character ~= "]" and character ~= "}" and
+      state.depth ~= 1 then
+    raise_regex_diagnostic(
+      "expected_group_close", "expected ')'",
+      state.source, after - 1)
+  end
+  raise_regex_diagnostic(
+    "trailing_input", regex_syntax_message("trailing_input"),
+    state.source, after - 1)
+  return false
+end
+
+local function regex_parse_finish(
+    _subject: string, position: integer,
+    state: RegexParseState): (boolean, ParsedRegex)
+  if state.depth ~= 1 then
+    raise_regex_diagnostic(
+      "expected_group_close", "expected ')'",
+      state.source, position)
+  end
+  local root = regex_finish_frame(state.frames[1])
+  return true, ParsedRegex.new(
+    root, state.capture_count,
+    state.anchored_start, state.anchored_end)
+end
+
+local function build_regex_parser(): peg.Pattern
+  local any = peg.any()
+  local no_quantifier =
+    RegexQuantifier.new(0, 0, 0)
+  local definitions: {peg.Definition} = {
+    peg.define("state", peg.argument(1)),
+    peg.define("capturing", peg.constant("c")),
+    peg.define("noncapturing", peg.constant("n")),
+    peg.define("class_complement", peg.constant("^")),
+    peg.define("class_ordinary", peg.constant("")),
+    peg.define("digit", peg.ranges("09")),
+    peg.define("backreference_digit", peg.ranges("19")),
+    peg.define("quantifier_start", peg.set("*+?{")),
+    peg.define("simple_quantifier", peg.set("*+?")),
+    peg.define("supported_escape",
+      peg.set("wWdDsStnrfea<>()[]{}\\?*+|.^$")),
+    peg.define("class_supported_escape",
+      peg.set("wWdDsStnrfea]-\\[{}^")),
+    peg.define("literal_byte", peg.difference(
+      any, peg.set("()[]{}\\?*+|.^$"))),
+    peg.define("escaped_literal",
+      peg.set("()[]{}\\?*+|.^$")),
+    peg.define("builtin_escape", peg.set("wWdDsS")),
+    peg.define("control_escape", peg.set("tnrfea")),
+    peg.define("boundary_escape", peg.set("<>")),
+    peg.define("class_plain",
+      peg.difference(any, peg.set("]\\"))),
+    peg.define("class_escaped",
+      peg.set("tnrfea]-\\[{}^")),
+    peg.define("comma", peg.constant(",")),
+    peg.define("no_comma", peg.constant("")),
+    peg.define("empty_text", peg.constant("")),
+    peg.define("no_quantifier", peg.constant(no_quantifier)),
+
+    peg.define_value("class_plain_item", regex_class_plain),
+    peg.define_value("class_escape", regex_class_escape),
+    peg.define_value("class_builtin", regex_class_builtin),
+    peg.define_value("class_node", regex_class_node),
+    peg.define_value("any_node", regex_any_node),
+    peg.define_value("literal_node", regex_literal),
+    peg.define_value("builtin_node", regex_builtin_node),
+    peg.define_value("boundary_node", regex_boundary_node),
+    peg.define_value("control_node", regex_control_node),
+    peg.define_value("backreference_node",
+                     regex_backreference_node),
+    peg.define_value("simple_quantifier_value",
+                     regex_simple_quantifier),
+    peg.define_value("counted_quantifier_value",
+                     regex_counted_quantifier),
+    peg.define_value("parse_start", regex_parse_start),
+    peg.define_value("parse_open_group",
+                     regex_parse_open_group),
+    peg.define_value("parse_alternative",
+                     regex_parse_alternative),
+    peg.define_value("parse_atom_marker",
+                     regex_parse_atom_marker),
+    peg.define_value("parse_atom", regex_parse_atom),
+    peg.define_value("parse_close_marker",
+                     regex_parse_close_marker),
+    peg.define_value("parse_close_group",
+                     regex_parse_close_group),
+    peg.define_value("parse_end", regex_parse_end),
+    peg.define_value("parse_tail", regex_parse_tail),
+    peg.define_value("parse_finish", regex_parse_finish),
+  }
+
+  return peg.compile([[
+    Regex <- (Lexical !'' / '')
+             Start? Token* (End / Tail)? !.
+             (%state => parse_finish)
+
+    Lexical <- LexicalToken* !.
+    LexicalToken <- LexicalClass
+                  / LexicalEscape
+                  / LexicalGroupOpen
+                  / .
+    LexicalGroupOpen <- '(?:'
+                      / '(' (&'?' %{expected_atom} / '')
+    LexicalEscape <- '\'
+                     (%backreference_digit
+                        (&%digit %{unsupported_escape} / '')
+                      / %supported_escape
+                      / !. %{dangling_escape}
+                      / . %{unsupported_escape})
+    LexicalClass <- '[' '^'?
+                    (&']' %{empty_class}
+                     / LexicalClassItem*
+                       (']' / %{expected_class_close}))
+    LexicalClassItem <- '\'
+                        (%class_supported_escape
+                         / !. %{dangling_escape}
+                         / . %{unsupported_escape})
+                      / %class_plain
+
+    Start <- ('^' %state) => parse_start
+    End <- ('$' !. %state) => parse_end
+    Tail <- ({.} %state) => parse_tail
+
+    Token <- GroupOpen
+           / GroupClose
+           / Alternative
+           / AtomToken
+           / &'^' %{misplaced_anchor}
+           / &%quantifier_start %{misplaced_quantifier}
+
+    GroupOpen <- ({} '('
+                   ('?:' %noncapturing
+                    / !'?' %capturing
+                    / %{expected_atom})
+                   %state) => parse_open_group
+
+    GroupClose <- ((({} ')' %state) => parse_close_marker)
+                   QuantifierOrNone %state)
+                  => parse_close_group
+                  (!%quantifier_start / %{bad_quantifier})
+
+    Alternative <- ('|' %state) => parse_alternative
+
+    AtomToken <- (((Atom %state) => parse_atom_marker)
+                  QuantifierOrNone %state) => parse_atom
+                 (!%quantifier_start / %{bad_quantifier})
+
+    QuantifierOrNone <- Quantifier / %no_quantifier
+    Quantifier <- SimpleQuantifier / CountedQuantifier
+    SimpleQuantifier <- ({} {%simple_quantifier})
+                        -> simple_quantifier_value
+    CountedQuantifier <- (({}
+                           '{'
+                           ({%digit+} / %{bad_quantifier})
+                           (',' {%digit*} %comma
+                            / %empty_text %no_comma)
+                           %state)
+                          => counted_quantifier_value)
+                         ('}' / %{bad_quantifier})
+
+    Atom <- Any
+          / Class
+          / Escape
+          / Literal
+
+    Any <- ({} '.') -> any_node
+    Literal <- ({} {%literal_byte}) -> literal_node
+
+    Escape <- Backreference
+            / BuiltinEscape
+            / BoundaryEscape
+            / ControlEscape
+            / EscapedLiteral
+            / '\' !. %{dangling_escape}
+            / '\' . %{unsupported_escape}
+
+    Backreference <- ({} '\' {%backreference_digit} !%digit)
+                     -> backreference_node
+    BuiltinEscape <- ({} '\' {%builtin_escape}) -> builtin_node
+    BoundaryEscape <- ({} '\' {%boundary_escape}) -> boundary_node
+    ControlEscape <- ({} '\' {%control_escape}) -> control_node
+    EscapedLiteral <- ({} '\' {%escaped_literal}) -> literal_node
+
+    Class <- ({} '['
+              ('^' %class_complement / %class_ordinary)
+              (&']' %{empty_class}
+               / {| ClassItem* |})
+              (']' / %{expected_class_close})
+              %state) -> class_node
+
+    ClassItem <- ClassBuiltin
+               / ClassEscaped
+               / ClassPlain
+               / '\' !. %{dangling_escape}
+               / '\' . %{unsupported_escape}
+
+    ClassPlain <- ({} {%class_plain}) -> class_plain_item
+    ClassEscaped <- ({} '\' {%class_escaped}) -> class_escape
+    ClassBuiltin <- ({} '\' {%builtin_escape}) -> class_builtin
+  ]], definitions)
+end

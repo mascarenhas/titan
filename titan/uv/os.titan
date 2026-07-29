@@ -16,8 +16,7 @@ end
 -- One-shot signal watchers are private fixed-layout native callback owners.
 -- They remain rooted in their Runtime list through stop + close callback.
 local record uv_signal_t
-  local handle: *libuv.uv_signal_t
-  local storage: value
+  local handle?: owned *libuv.uv_signal_t
   local main_thread: value
   local dispatcher: (uv_signal_t, integer, integer, libuv.size_t,
                      ffi.titan_ffi_void_ptr) -> ()
@@ -51,7 +50,7 @@ function _os_getenv(name: string): string?
   local copied = copy_text(name, "os.getenv", name)
   local getenv_buffer = function (bytes: *ffi.titan_ffi_char,
                                   sizes: *libuv.size_t): ffi.titan_ffi_int
-    return libuv.uv_os_getenv(copied.bytes.data, bytes, sizes)
+    return libuv.uv_os_getenv(copied.bytes, bytes, sizes)
   end
   return os_sized_buffer(getenv_buffer,
       OS_BUFFER_INITIAL as libuv.size_t,
@@ -62,8 +61,8 @@ function _os_setenv(name: string, contents: string)
   local copied_name = copy_text(name, "os.setenv", name)
   -- Never retain or echo the environment value in an Error subject.
   local copied_value = copy_text(contents, "os.setenv", name)
-  local status = libuv.uv_os_setenv(copied_name.bytes.data,
-                                    copied_value.bytes.data)
+  local status = libuv.uv_os_setenv(copied_name.bytes,
+                                    copied_value.bytes)
   if status < 0 then
     raise make_error(status, "os.setenv", name)
   end
@@ -71,7 +70,7 @@ end
 
 function _os_unsetenv(name: string)
   local copied = copy_text(name, "os.unsetenv", name)
-  local status = libuv.uv_os_unsetenv(copied.bytes.data)
+  local status = libuv.uv_os_unsetenv(copied.bytes)
   if status < 0 then
     raise make_error(status, "os.unsetenv", name)
   end
@@ -85,7 +84,7 @@ end
 
 function _os_chdir(path: string)
   local copied = copy_text(path, "os.chdir", path)
-  local status = libuv.uv_chdir(copied.bytes.data)
+  local status = libuv.uv_chdir(copied.bytes)
   if status < 0 then
     raise make_error(status, "os.chdir", path)
   end
@@ -149,12 +148,23 @@ local function os_sized_buffer(
                     ffi.titan_ffi_int,
     capacity: libuv.size_t,
     error_from_status: (ffi.titan_ffi_int) -> Error): string?
+  -- new_array takes a Titan integer count. A size_t at least as wide as
+  -- lua_Integer can carry values that do not fit, so reject those before
+  -- converting the allocation count.
+  if libuv.size_t.sizeof >= lua.lua_Integer.sizeof and
+      capacity > lua.LUA_MAXINTEGER as libuv.size_t then
+    raise "OS buffer size is too large"
+  end
   local sizes = libuv.size_t.new_array(1)
-  local bytes = allocate_sized_bytes(capacity)
+  local byte_owner =
+    ffi.titan_ffi_char.new_array(capacity as integer)
+  local bytes = byte_owner as *ffi.titan_ffi_char
   sizes[0] = capacity
-  local status = uv_buffer_func(bytes.data, sizes)
+  local status = uv_buffer_func(bytes, sizes)
   if status >= 0 then
-    return bytes_to_string(bytes.data, sizes[0])
+    -- sizes[0], rather than the allocation count, is the successful logical
+    -- result length reported by libuv.
+    return bytes_string(bytes, sizes[0])
   elseif status == libuv.UV_ENOBUFS then
     return os_sized_buffer(uv_buffer_func, sizes[0], error_from_status)
   elseif status == libuv.UV_ENOENT then
@@ -166,9 +176,14 @@ end
 
 local function close_signal_owner(owner: uv_signal_t)
   if owner.metadata.lifecycle == OWNER_ACTIVE then
-    libuv.uv_signal_stop(owner.handle)
+    local handle =
+      owner.handle as owned *libuv.uv_signal_t
+    local signal_handle: *libuv.uv_signal_t = handle
+    libuv.uv_signal_stop(handle)
     owner.metadata.lifecycle = OWNER_CLOSING
-    libuv.uv_close(owner.handle, shim.titan_uvshim_close_cb)
+    libuv.uv_close(
+        signal_handle as *libuv.uv_handle_t,
+        shim.titan_uvshim_close_cb)
   end
 end
 
@@ -184,9 +199,7 @@ local function allocate_signal_owner(runtime: Runtime, task: Task,
                                      spec: SignalSpec, epoch: integer):
                                      (uv_signal_t,
                                       ffi.titan_ffi_void_ptr)
-  local top = lua.lua_gettop(L)
-  local memory = lua.lua_newuserdatauv(L, libuv.uv_signal_t.sizeof, 0)
-  local storage = ffi.lua_totvalue(L, -1)
+  local handle = libuv.uv_signal_t.new()
   local metadata: SignalControl = {
     runtime = runtime,
     lifecycle = OWNER_ALLOCATED,
@@ -197,17 +210,14 @@ local function allocate_signal_owner(runtime: Runtime, task: Task,
     previous_owner = nil,
   }
   local owner: uv_signal_t = {
-    handle = memory as *libuv.uv_signal_t,
-    storage = storage,
+    handle = handle,
     main_thread = main_thread,
     dispatcher = signal_dispatch,
     metadata = metadata,
     buffer = nil,
   }
-  ffi.lua_pushtvalue(L, owner)
-  local pointer = ffi.lua_togco(L, -1)
+  local pointer = owner as ffi.titan_ffi_void_ptr
   link_signal_owner(runtime, owner)
-  lua.lua_settop(L, top)
   return owner, pointer
 end
 
@@ -215,7 +225,10 @@ local function start_signal_owner(runtime: Runtime, task: Task,
                                   spec: SignalSpec, epoch: integer):
                                   (uv_signal_t, integer)
   local owner, pointer = allocate_signal_owner(runtime, task, spec, epoch)
-  local status = libuv.uv_signal_init(runtime.loop.handle, owner.handle)
+  local handle =
+    owner.handle as owned *libuv.uv_signal_t
+  local status = libuv.uv_signal_init(
+      runtime.loop.handle as owned *libuv.uv_loop_t, handle)
   if status < 0 then
     -- This is the same callback-less init-failure boundary as timer init.
     -- Unlink inline in the already-reserved frame; do not enter a fresh Titan
@@ -234,18 +247,21 @@ local function start_signal_owner(runtime: Runtime, task: Task,
     owner.metadata.next_owner = nil
     owner.metadata.lifecycle = OWNER_CLOSED
     owner.handle = nil
-    owner.storage = nil
     return owner, status
   end
-  libuv.uv_handle_set_data(owner.handle, pointer)
+  local signal_handle: *libuv.uv_signal_t = handle
+  libuv.uv_handle_set_data(
+      signal_handle as *libuv.uv_handle_t, pointer)
   owner.metadata.lifecycle = OWNER_ACTIVE
   status = libuv.uv_signal_start_oneshot(
-      owner.handle, shim.titan_uvshim_signal_cb,
+      handle, shim.titan_uvshim_signal_cb,
       spec.signum as ffi.titan_ffi_int)
   if status < 0 then
-    libuv.uv_signal_stop(owner.handle)
+    libuv.uv_signal_stop(handle)
     owner.metadata.lifecycle = OWNER_CLOSING
-    libuv.uv_close(owner.handle, shim.titan_uvshim_close_cb)
+    libuv.uv_close(
+        signal_handle as *libuv.uv_handle_t,
+        shim.titan_uvshim_close_cb)
   end
   return owner, status
 end
@@ -262,7 +278,6 @@ local function signal_dispatch(owner: uv_signal_t, event_kind: integer,
     owner.metadata.lifecycle = OWNER_CLOSED
     maybe_finish_session(runtime)
     owner.handle = nil
-    owner.storage = nil
     unlink_signal_owner(owner)
     return
   end
@@ -288,7 +303,8 @@ catch
     owner.metadata.runtime.fatal_error = error
     owner.metadata.runtime.fatal_traceback = traceback
   end
-  libuv.uv_stop(owner.metadata.runtime.loop.handle)
+  libuv.uv_stop(owner.metadata.runtime.loop.handle
+                as owned *libuv.uv_loop_t)
   return
 end
 
@@ -345,7 +361,6 @@ local function retire_closed_signal_owners(runtime: Runtime)
     owner = to_retire.metadata.next_owner
     if to_retire.metadata.lifecycle == OWNER_CLOSED then
       to_retire.handle = nil
-      to_retire.storage = nil
       unlink_signal_owner(to_retire)
     end
   end

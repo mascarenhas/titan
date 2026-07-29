@@ -7,8 +7,7 @@ record Error
 end
 
 local record Loop
-  local handle: *libuv.uv_loop_t
-  local storage: value
+  local handle?: owned *libuv.uv_loop_t
 end
 
 -- Values are used only for opaque Lua roots and genuinely heterogeneous
@@ -35,17 +34,11 @@ local record Runtime
   local pending_observations: integer
 end
 
-local record Bytes
-  local data: *ffi.titan_ffi_char
-  local storage: value
-  local length: integer
-end
+local type Bytes = owned ffi.titan_ffi_char[]
 
--- Synchronous libuv helpers report lengths as size_t. Keep that type until
--- lua_pushlstring consumes it instead of narrowing through Titan integer.
-local record SizedBytes
-  local data: *ffi.titan_ffi_char
-  local storage: value
+local record ByteChunk
+  local bytes: Bytes
+  local length: integer
 end
 
 local record Text
@@ -54,12 +47,12 @@ local record Text
 end
 
 local record Buffer
-  local handle: *libuv.uv_buf_t
-  local storage: value
+  local handle: owned *libuv.uv_buf_t
   local bytes: Bytes
 end
 
-function _bytes_find(haystack: string, needle: string): integer
+local function _bytes_find(haystack: string,
+                           needle: string): integer
   local haystack_length = #haystack
   local needle_length = #needle
   if needle_length == 0 then return 0 end
@@ -83,21 +76,6 @@ function _bytes_find(haystack: string, needle: string): integer
   return -1
 end
 
-function _bytes_slice(data: string, offset: integer,
-                      length: integer): string
-  if offset < 0 or length < 0 or offset > #data or
-      length > #data - offset then
-    raise "byte slice is out of range"
-  end
-  local bytes = allocate_bytes(length)
-  if length > 0 then
-    local source = data as const *ffi.titan_ffi_char
-    cstring.memcpy(bytes.data, source + offset,
-                   length as cstring.size_t)
-  end
-  return bytes_string(bytes, length)
-end
-
 function _loop()
   if not on_main_thread() or coroutine.is_yieldable(UV_TAG) then
     raise "async.loop must be driven from the Lua main thread"
@@ -109,14 +87,16 @@ function _loop()
     raise "cannot reserve stack for libuv native callbacks"
   end
   local runtime = active_runtime
-  if runtime.loop.handle == nil then
+  if not runtime.loop.handle then
     raise_saved(runtime.fatal_error, runtime.fatal_traceback)
   end
+  local loop_handle =
+    runtime.loop.handle as owned *libuv.uv_loop_t
   if runtime.in_loop then
     raise "async.loop is already active"
   end
   runtime.in_loop = true
-  libuv.uv_run(runtime.loop.handle, libuv.UV_RUN_DEFAULT)
+  libuv.uv_run(loop_handle, libuv.UV_RUN_DEFAULT)
   runtime.in_loop = false
   retire_closed_owners(runtime)
   retire_closed_signal_owners(runtime)
@@ -139,7 +119,7 @@ function _loop()
     advance_process_shutdown(runtime)
     drive_cancel_fallbacks(runtime)
     while runtime.task_head do
-      if libuv.uv_loop_alive(runtime.loop.handle) == 0 then
+      if libuv.uv_loop_alive(loop_handle) == 0 then
         -- No callback can make progress.  The only legal callback-less
         -- cancellation delivery is this outer-driver fallback.
         local task? = runtime.task_head
@@ -151,7 +131,7 @@ function _loop()
         end
         drive_cancel_fallbacks(runtime)
         if runtime.task_head and
-            libuv.uv_loop_alive(runtime.loop.handle) == 0 then
+            libuv.uv_loop_alive(loop_handle) == 0 then
           -- A shielded Task without any live cleanup owner is an internal
           -- deadlock, not a reason to return with a suspended root retained.
           -- The first Runtime fatal remains authoritative; terminalize these
@@ -166,7 +146,7 @@ function _loop()
           end
         end
       else
-        libuv.uv_run(runtime.loop.handle, libuv.UV_RUN_DEFAULT)
+        libuv.uv_run(loop_handle, libuv.UV_RUN_DEFAULT)
         retire_closed_owners(runtime)
         retire_closed_signal_owners(runtime)
         retire_fs_owners(runtime)
@@ -208,11 +188,11 @@ end
 
 local function pop_trace_for_append(): string?
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_APPEND_KEY)
   local trace: value = ffi.lua_totvalue(L, -1)
   lua.lua_pushnil(L)
   lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_APPEND_KEY)
-  lua.lua_settop(L, top)
   return trace
 end
 
@@ -238,36 +218,18 @@ end
 
 local function main_thread_value(): value
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   lua.lua_rawgeti(L, lua.LUA_REGISTRYINDEX,
                   lua.LUA_RIDX_MAINTHREAD as lua.lua_Integer)
   local thread = ffi.lua_totvalue(L, -1)
-  lua.lua_settop(L, top)
   return thread
 end
 
 local function on_main_thread(): boolean
   local top = lua.lua_gettop(L)
+  defer lua.lua_settop(L, top)
   local is_main = lua.lua_pushthread(L)
-  lua.lua_settop(L, top)
   return is_main ~= 0
-end
-
-local function allocate_bytes(length: integer): Bytes
-  local top = lua.lua_gettop(L)
-  local memory = lua.lua_newuserdatauv(L, length, 0)
-  local storage = ffi.lua_totvalue(L, -1)
-  local bytes = Bytes.new(memory as *ffi.titan_ffi_char, storage, length)
-  lua.lua_settop(L, top)
-  return bytes
-end
-
-local function allocate_sized_bytes(length: libuv.size_t): SizedBytes
-  local top = lua.lua_gettop(L)
-  local memory = lua.lua_newuserdatauv(L, length, 0)
-  local storage = ffi.lua_totvalue(L, -1)
-  local bytes = SizedBytes.new(memory as *ffi.titan_ffi_char, storage)
-  lua.lua_settop(L, top)
-  return bytes
 end
 
 local function copy_text(source: string, operation: string,
@@ -276,19 +238,19 @@ local function copy_text(source: string, operation: string,
   if _bytes_find(source, "\0") >= 0 then
     raise make_error(libuv.UV_EINVAL, operation, subject)
   end
-  local bytes = allocate_bytes(length + 1)
+  local bytes = ffi.titan_ffi_char.new_array(length + 1)
   if length > 0 then
-    cstring.memcpy(bytes.data, source, length as cstring.size_t)
+    cstring.memcpy(bytes, source, length as cstring.size_t)
   end
-  bytes.data[length] = 0 as ffi.titan_ffi_char
+  bytes[length] = 0 as ffi.titan_ffi_char
   return Text.new(bytes, source)
 end
 
 local function copy_bytes(source: string): Bytes
   local length = #source
-  local bytes = allocate_bytes(length)
+  local bytes = ffi.titan_ffi_char.new_array(length)
   if length > 0 then
-    cstring.memcpy(bytes.data, source, length as cstring.size_t)
+    cstring.memcpy(bytes, source, length as cstring.size_t)
   end
   return bytes
 end
@@ -303,49 +265,44 @@ end
 
 local function make_buffer(bytes: Bytes, offset: integer,
                            length: integer): Buffer
-  local top = lua.lua_gettop(L)
-  local memory = lua.lua_newuserdatauv(L, libuv.uv_buf_t.sizeof, 0)
-  local storage = ffi.lua_totvalue(L, -1)
-  local base = bytes.data
+  local handle = libuv.uv_buf_t.new()
+  local base: *ffi.titan_ffi_char = bytes
   if offset > 0 then
     base = base + offset
   end
-  initialize_buffer(memory, base, length as libuv.size_t)
-  local buffer = Buffer.new(memory as *libuv.uv_buf_t, storage, bytes)
-  lua.lua_settop(L, top)
+  initialize_buffer(handle, base, length as libuv.size_t)
+  local buffer = Buffer.new(handle, bytes)
   return buffer
 end
 
 local function allocate_read_buffer(length: integer): Buffer
-  return make_buffer(allocate_bytes(length), 0, length)
+  return make_buffer(ffi.titan_ffi_char.new_array(length), 0, length)
 end
 
-local function bytes_string(bytes: Bytes, length: integer): string
+local function bytes_string(bytes: *ffi.titan_ffi_char,
+                            length: libuv.size_t): string
   local top = lua.lua_gettop(L)
-  lua.lua_pushlstring(L, bytes.data, length as libuv.size_t)
+  defer lua.lua_settop(L, top)
+  lua.lua_pushlstring(L, bytes, length)
   local result: value = ffi.lua_totvalue(L, -1)
-  lua.lua_settop(L, top)
   return result
 end
 
 -- libuv supplies the size for stream allocations. The Titan FFI array is a
--- full userdata when stored in value, so Bytes.storage is the only GC edge
--- needed to keep its raw pointer valid.
+-- GC-owned counted array, so retaining Bytes itself keeps its pointer valid.
 local function allocate_stream_bytes(size: libuv.size_t): Bytes
   if size == 0 or size > climits.UINT_MAX then
     raise internal_error("stream.alloc.size")
   end
-  local length = size
-  local owned = ffi.titan_ffi_char.new_array(length)
-  local storage: value = owned
-  return Bytes.new(owned as *ffi.titan_ffi_char, storage, length)
+  return ffi.titan_ffi_char.new_array(size as integer)
 end
 
-local function queued_bytes_string(queue: {Bytes}): string
+local function queued_bytes_string(queue: {ByteChunk}): string
   local chunks: {string} = {}
   for index = 1, #queue do
-    local bytes = queue[index]
-    chunks[index] = bytes_string(bytes, bytes.length)
+    local chunk = queue[index]
+    chunks[index] =
+      bytes_string(chunk.bytes, chunk.length as libuv.size_t)
   end
   while #chunks > 1 do
     local joined: {string} = {}
@@ -362,15 +319,6 @@ local function queued_bytes_string(queue: {Bytes}): string
   end
   if #chunks == 0 then raise internal_error("stream.queue.empty") end
   return chunks[1]
-end
-
-local function bytes_to_string(bytes: *ffi.titan_ffi_char,
-                               length: libuv.size_t): string
-  local top = lua.lua_gettop(L)
-  lua.lua_pushlstring(L, bytes, length)
-  local result: value = ffi.lua_totvalue(L, -1)
-  lua.lua_settop(L, top)
-  return result
 end
 
 local function make_error(status: integer, operation: string,
@@ -405,21 +353,16 @@ local function check_alignment()
 end
 
 local function allocate_loop(): Loop
-  local top = lua.lua_gettop(L)
-  local memory = lua.lua_newuserdatauv(L, libuv.uv_loop_t.sizeof, 0)
-  local storage = ffi.lua_totvalue(L, -1)
-  local loop = Loop.new(memory as *libuv.uv_loop_t, storage)
-  lua.lua_settop(L, top)
-  return loop
+  return Loop.new(libuv.uv_loop_t.new())
 end
 
 local function new_runtime(): Runtime
   generation = generation + 1
   local loop = allocate_loop()
-  local status = libuv.uv_loop_init(loop.handle)
+  local status =
+    libuv.uv_loop_init(loop.handle as owned *libuv.uv_loop_t)
   if status < 0 then
     loop.handle = nil
-    loop.storage = nil
     raise make_error(status, "loop.init", nil)
   end
   local runtime: Runtime = {

@@ -12,21 +12,26 @@ titan.so
   |                         |--> titan.fs
   |                         |--> titan.net
   |                         `--> titan.os
+  |-- titan.peg --> titan.string
+  |                  |--> titan.net
+  |                  `--> titan.os
   `-- luaopen_titan (native support)
 ```
 
-All seven logical standard modules are explicit source roots in one compiler
+All nine logical standard modules are explicit source roots in one compiler
 invocation. Their imports are source/static, so each keeps an independent
 module state and ABI/types/init/Lua protocol while inter-module calls become
 direct `extern` calls in both provider forms. The build selects `titan_uv.o`
 from `libtitan.a`, includes `titanlib.o` once, and supplies the selected libuv
-policy once. Bundled mode carries the private archive's objects into both
-`titan.so` and `titan.a`; the libuv archive itself is not installed in the
-SDK. System mode keeps the pkg-config-selected dependency as a final-link
-setting and does not copy it into `titan.a`.
+policy once. The private namespaced LPegLabel archive follows `titanlib.o` as
+metadata-free payload for `titan.peg`/`titan.string`. Bundled mode then carries
+the private libuv archive's objects into both `titan.so` and `titan.a`; neither
+native archive is installed in the SDK. System mode keeps the
+pkg-config-selected libuv dependency as a final-link setting and does not copy
+it into `titan.a`.
 
 Installation publishes `<root>/lib/titan/0.18/titan.so` and
-`<root>/lib/titan/0.18/titan.a`, plus seven generated shims below
+`<root>/lib/titan/0.18/titan.a`, plus nine generated shims below
 `<root>/share/lua/5.5/titan/`. Titan prefix lookup
 claims `titan.uv` through the image's `titan_uv_abi`/`titan_uv_types`; Lua
 `require "titan.uv"` reaches `titan/uv.lua`, which selects provider `titan`,
@@ -68,7 +73,7 @@ one module state inside the combined DSO:
 | `file.titan` | public `uv_file` and `_fs_*` API plus private FS constants, operations, controls, requests, File FIFO/ownership, callbacks, dispatch, and shutdown repair |
 | `os.titan` | public non-process `_os_*` API plus private signal specifications/controls/owners, one-shot callback retirement, and portable OS helpers |
 | `process.titan` | public `uv_process_t`, `_os_process_*`, and `_os_communicate` API plus private process/pipe controls, operations, requests, helper groups, child stdio callbacks, and forced shutdown |
-| `runtime.titan` | public `Error`, `_bytes_*`, `_loop`, and `_version` API plus private loop/Runtime and byte/text/buffer records, trace preservation, allocation, and ownership helpers |
+| `runtime.titan` | public `Error`, `_loop`, and `_version` API plus private loop/Runtime and byte/text/buffer records, literal NUL scanning, trace preservation, allocation, and ownership helpers |
 | `task.titan` | public `Cancelled`, `uv_timer_t`, `Task`, Task methods, `_run`/`_sleep`/`_yield`, and ticker API plus private timer/drive/request/ticker records and coroutine driving |
 | `tcp.titan` | public `uv_tcp_t`, `_net_*`, and `_net_eof_error` API plus private address/operation/request/control/owner records, DNS/TCP queues, callbacks, and network teardown |
 
@@ -78,9 +83,9 @@ The ABI-0.18 native/Titan boundary is correspondingly explicit:
 | --- | --- |
 | `UV_E*`, socket, resolver, signal, mode, and `UINT_MAX` constants | Titan imports the host headers directly under the production target flags |
 | byte/text operations, stat extraction, process options/stdio/spawn, DNS hints/traversal/copy/release, and bind/connect submission | Titan calls the public C/libuv APIs directly |
-| fixed six-slot owner recovery and dispatch | native runtime |
+| fixed five-slot owner recovery and dispatch | native runtime |
 | timer, close, filesystem, DNS, connect, write, shutdown, allocation, read, connection, signal, and process-exit callback trampolines | native runtime |
-| fixed six-slot owner protocol and opaque normalized-address storage | shared header declarations consumed by Titan and the native callbacks |
+| fixed five-slot owner protocol and opaque normalized-address storage | shared header declarations consumed by Titan and the native callbacks |
 | conditional inherited `SIGPIPE` handling | Titan calls the host `sigaction`/`sigemptyset` APIs directly through the C FFI and translates failures with public libuv |
 
 No operational libuv wrapper sits between the generated module and those
@@ -99,31 +104,33 @@ The production all-roots invocation emits `titan/uv/uv.c` and
 shim; no source basename enters a symbol, registry key, metadata key, or
 artifact name.
 
-The exported declarations established the deterministic ABI 0.15
-interface when the folder split was introduced. The follow-up relocates the
-remaining private records and moves the private `FS` constants instance beside
+The exported declarations established the deterministic ABI 0.15 interface
+when the folder split was introduced. The follow-up relocates the remaining
+private records and moves the private `FS` constants instance beside
 `FsConstants` in `file.titan`. That changes private slot/initialization order,
 but not `titan_uv_types`, importer-visible variable slots, canonical
-exported-function closure slots, or native signatures, so the exact interface
-fixture remained unchanged. ABI 0.16 later changes only physical provider
-discovery and the standard-library layout; the `titan_uv_types` shape and
-native entries stay unchanged.
+exported-function closure slots, or native signatures. ABI 0.16 later changes
+only physical provider discovery and the standard-library layout, and ABI
+0.17 likewise leaves the logical interface unchanged.
 
-ABI 0.17 likewise leaves `titan_uv_types` unchanged, but every standard
-module is rebuilt because generated module state now includes the Array
+Every ABI 0.17 standard module is nevertheless rebuilt because generated
+module state now includes the Array
 metatable cache and Lua-visible Array values use proxy Udata rather than raw
 Tables. Native exact Array paths and `TitanVargArrayOrMap` retain backing
 `Table *` / `Table **`; callback-owned roots must preserve whichever internal
 or boxed domain their typed slot specifies. See
 [Dense Arrays](dense-arrays.md#internal-and-boxed-representations).
 
-ABI 0.18 preserves that logical interface and Array contract while changing
-the archive-backed native boundary. Generated standard-library objects now
-refer directly to callback trampolines promoted from `titan_uv.o`'s private
-implementation into the runtime's external symbol contract, and retired
-libuv/coroutine helper symbols are no longer part of that contract. A 0.18
-provider and runtime must be built and distributed together; a 0.17 static
-provider cannot be paired with the 0.18 runtime in either direction.
+ABI 0.18 preserves the Array contract while changing the archive-backed native
+boundary. Generated standard-library objects now refer directly to callback
+trampolines promoted from `titan_uv.o`'s private implementation into the
+runtime's external symbol contract, and retired libuv/coroutine helper symbols
+are no longer part of that contract. The current prototype also retires the
+transient public `_bytes_find` and `_bytes_slice` helpers after `titan.net` and
+`titan.os` move to `titan.string`; the exact interface fixture records this
+intentional logical API change. No migration is provided: a 0.18 provider and
+runtime must be built and distributed together, and users of a changed
+prototype image must clean and rebuild from source.
 
 The Makefile's explicit `UV_TITAN_SOURCES` list names all seven files inside
 the reviewed `STDLIB_TITAN_SOURCES` prerequisite set. It intentionally does
@@ -138,29 +145,47 @@ sources.
 Every loop, timer, one-shot signal, filesystem/network/process request, TCP or
 pipe handle, process handle, private process-grace timer, Titan-owned I/O
 buffer or `uv_buf_t`, opaque address cell, argv cell, and scandir entry used by
-the runtime is allocated in Lua full-userdata payload bytes. The `uv_buf_t`
-passed to a stream allocation callback is the exception: libuv owns that
-descriptor, while Titan owns and roots only the byte storage to which it
-points. The Titan source uses
-the imported foreign type's `<module>.<type>.sizeof` and `.alignof`, captures
-the storage userdata once, and stores the resulting pointer in a local field
-of an opaque record:
+the runtime is an owned FFI value backed by Lua full-userdata payload bytes.
+The `uv_buf_t` passed to a stream allocation callback is the exception: libuv
+owns that descriptor, while Titan owns and roots only the byte storage to
+which it points. Native handle and request wrappers allocate the complete
+imported foreign type with `.new()` and store that owner directly in a local
+field of an opaque record:
 
 ```titan
 record uv_timer_t
-  local handle: *uv.uv_timer_t
-  local storage: value
-  -- four more local owner fields
+  local handle?: owned *libuv.uv_timer_t
+  local main_thread: value
+  local dispatcher: (...)
+  local metadata: TimerControl
+  local buffer: nil
 end
 ```
 
-The native pointer is never converted through `value`. The wrapper is allocated
-once, Titan's nominal/local-field rules prevent external forgery, and later
-calls read the exact pointer field without pointer-boxing allocations. The
-Runtime roots a timer wrapper through its close callback and an `uv_fs_t`
-wrapper through completion and `uv_fs_req_cleanup`; each wrapper roots its
-storage userdata. An initialized handle is never released by a GC finalizer
-before its close callback.
+The owner adjusts directly to the corresponding C pointer when passed to
+libuv; it is never converted through `value`. The wrapper is allocated once,
+Titan's nominal/local-field rules prevent external forgery, and later calls
+read the exact owner field without pointer-boxing allocations. The Runtime
+roots a timer wrapper through its close callback and an `uv_fs_t` wrapper
+through completion and `uv_fs_req_cleanup`. Owners whose storage becomes
+reclaimable at those terminal points use an optional field and clear it only
+after native cleanup or close; an initialized handle is never released before
+its terminal callback.
+
+Callback-owned typed arrays use `new_array`. `Bytes` and `AddressList` are
+direct local aliases of their counted owner types: the owner itself supplies
+the pointer, GC root, and allocation count. Exact allocations use that count
+directly. `Text` separately retains the original source because its owned copy
+has a trailing NUL, while `ByteChunk` pairs `Bytes` with `nread` for queued
+stream reads whose completed logical prefix can be shorter than the allocation
+capacity.
+
+Short-lived synchronous scratch objects do not need that extra record layer.
+The OS text helpers allocate a counted
+`ffi.titan_ffi_char.new_array(capacity)`, and filesystem directory extraction
+uses `uv_dirent_t.new()` directly. Those owned FFI values are themselves the
+GC roots, coerce to pointers for the libuv calls, and expose their fields or
+allocation count without separately storing a pointer and `value` root.
 
 Persistent file descriptors use a separate exported `uv_file` wrapper. Its
 first local field has the exact scalar C type `uv_file`, followed by local
@@ -169,15 +194,16 @@ in its own single local field. Neither layer boxes the descriptor as `value`,
 and neither constructor is available outside its declaring module.
 
 The process boundary uses the same pattern twice. The exported
-`uv.uv_process_t` has an exact `*uv_process_t` local field and is wrapped by
-`os.Process`, whose native-handle field is itself local and which also owns
+`uv.uv_process_t` has an exact `owned *uv_process_t` local field and is wrapped
+by `os.Process`, whose native-handle field is itself local and which also owns
 private stdout/stderr reader-state records. Private `uv_pipe_t`, `uv_write_t`,
-and grace-timer records likewise retain exact native pointers.
+and grace-timer records likewise retain exact native owners.
 Homogeneous ownership links use their exact record type, with `T?` only where
 the link may be absent. `value` is reserved for opaque Lua roots, arbitrary
 task/error payloads, and genuinely heterogeneous owner slots. Native handles
-never use `value`; a process or pipe therefore pays for its record and storage
-once, not for repeated pointer-to-`value` coercions on every operation.
+never use `value`; a process or pipe therefore pays for its record and owned
+allocation once, not for repeated pointer-to-`value` coercions on every
+operation.
 
 This distinction also matters for the continuation graph. Recovering a record
 from `value` must validate its record metatable at run time. Unwrapping `T?`
@@ -186,18 +212,17 @@ type. Runtime lists, FIFO links, waiters, operation-specific roots, and helper
 references therefore keep their record identity in the static type instead of
 revalidating it at every traversal.
 
-Each callback owner has six stable record/uservalue slots: native pointer,
-storage, the module-cached main Lua thread, dispatcher closure, operation
-metadata, and family-specific native I/O storage. The C shim uses the
+Each callback owner has five stable record/uservalue slots: owned native
+handle/request, the module-cached main Lua thread, dispatcher closure,
+operation metadata, and family-specific native I/O storage. The C shim uses the
 corresponding zero-based indices and recovers the module Udata from the
 dispatcher closure's first upvalue. Metadata already roots each Task, resource,
 or operation graph, so owners carry no duplicate root slot. Timer, signal,
 process, process-grace, DNS, connect, shutdown, Pipe, and TCP owners type the
 final slot as `nil`. Filesystem and write-request owners retain their submitted
 `Buffer?` there. A Pipe or TCP control instead roots its current stream-read
-allocation as a `Bytes?`; on a positive callback that same record moves into a
-GC-traced `{Bytes}` queue, retaining the raw pointer, full-userdata root, and
-completed length until the queue is drained.
+allocation as a `Bytes?`; on a positive callback the owner and the callback's
+logical length move into a GC-traced `{ByteChunk}` queue until it is drained.
 
 ## Runtime and continuation graph
 
@@ -238,7 +263,7 @@ binary.
 
 For reads and writes, `submit_fs_operation` finishes every allocating buffer
 copy/descriptor preparation and roots it through the logical operation before
-it allocates and publishes a six-field `uv_fs_t` owner. It also validates
+it allocates and publishes a five-field `uv_fs_t` owner. It also validates
 the private operation kind and caches the exact loop, path, descriptor, and
 buffer arguments first. After publication, no Titan record cast or error path
 can run before the public `uv_fs_*` call. Thus an OOM, buffer-validation error,
@@ -297,11 +322,14 @@ combined standard image), which invokes public `uv_os_*`, `uv_cwd`/`uv_chdir`,
 and `uv_exepath` APIs. Variable-size text results use
 Titan-owned byte storage. A generic helper accepts the libuv buffer function
 and an error-construction closure, keeps both the capacity and returned length
-as `size_t`, and starts with a 256-byte GC-owned buffer. `UV_ENOBUFS` recurses
-with the exact capacity reported through libuv's size pointer; success passes
-that `size_t` directly to `lua_pushlstring`. `uv_os_getenv` additionally maps
-`UV_ENOENT` to `nil`. Other failures become uv-owned `Error` values, exported
-to users through the transparent `async.Error` alias; there
+as `size_t`, and starts with a 256-byte counted owned FFI array. Before the
+capacity becomes the `new_array` count, the helper rejects a `size_t` value
+that cannot fit a Titan integer. `UV_ENOBUFS` recurses with the exact capacity
+reported through libuv's size pointer; success uses that reported `size_t` as
+the logical result length, independently of the allocation count, and passes
+it directly to `lua_pushlstring`. `uv_os_getenv` additionally maps `UV_ENOENT`
+to `nil`. Other failures become uv-owned `Error` values, exported to users
+through the transparent `async.Error` alias; there
 is no hidden POSIX fallback or private checked-growth policy.
 
 The supported Linux and macOS `uv_exepath` implementations signal truncation
@@ -377,11 +405,12 @@ new output immediately. Anonymous pipes do not support socket-style
 `uv_close` on the write pipe and wakes the closer from the handle close
 callback. Stdout and stderr independently allow one reader; EOF and read
 failure are persistent terminal states. Each output pipe keeps reading into a
-GC-owned `{Bytes}` queue even with no waiter, with no high-water mark. A plain
-read drains its facade excess or the entire native queue, while a delimiter
-read retains bytes beyond its first delimiter. Both methods share that pipe's
-reader lock; stdout and stderr have independent locks. Cancellation clears only
-the matching waiter and leaves physical reading active. EOF stops and may close
+GC-owned `{ByteChunk}` queue even with no waiter, with no high-water mark. A
+plain read drains its facade excess or the entire native queue, while a
+delimiter read retains bytes beyond its first delimiter. Both methods share
+that pipe's reader lock; stdout and stderr have independent locks.
+Cancellation clears only the matching waiter and leaves physical reading
+active. EOF stops and may close
 the output pipe while remaining sticky `nil`; another read failure initiates
 close, but queued bytes and the sticky error remain logically readable in
 order. Process exit does not synthesize pipe EOF, so output continues to drain

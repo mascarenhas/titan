@@ -108,7 +108,7 @@ local function restore_root_artifacts()
     local backup = assert(artifact_backup)
     for _, entry in ipairs(backup.entries) do
         if entry.mode == "directory" or
-                lfs.symlinkattributes(entry.path, "mode") == "directory" then
+            lfs.symlinkattributes(entry.path, "mode") == "directory" then
             assert.truthy(exec_ok("rm -rf " .. entry.path))
         else
             os.remove(entry.path)
@@ -233,7 +233,7 @@ local function build_checkstack_coroutine()
     helper, top_replacements = helper:gsub(
         "lua%.lua_settop%(L, top%)",
         "coro_test.titan_coro_test_lua_settop(L, top)")
-    assert.same(3, top_replacements,
+    assert.same(1, top_replacements,
         "transfer-root helper must restore the top on both failures and success")
     source = source:sub(1, helper_start - 1) .. helper ..
         source:sub(helper_end + 5)
@@ -763,11 +763,10 @@ describe("coroutine standard module", function()
             restores[#restores + 1] = restore
             position = restore + 1
         end
-        assert.same(3, #restores)
+        assert.same(1, #restores)
         assert.is_true(checkstack < restores[1])
-        assert.is_true(restores[1] < owner_push)
-        assert.is_true(setter_check < restores[2])
-        assert.is_true(restores[2] < restores[3])
+        assert.is_true(owner_push < restores[1])
+        assert.is_true(setter_check < restores[1])
 
         assert.not_match("ud->uv", body, 1, true)
         assert.not_match("luaC_barrierback", body, 1, true)
@@ -775,11 +774,11 @@ describe("coroutine standard module", function()
 
     it("restores the exact top and pushes nothing on checkstack failure",
         function()
-        -- Build this second transformed provider only for the one fault-
-        -- injection case that consumes it. Filtered sanitizer runs exercise
-        -- the ordinary transfer-root variant without paying for this DSO.
-        build_checkstack_coroutine()
-        local out = run_lua_in_env([==[
+            -- Build this second transformed provider only for the one fault-
+            -- injection case that consumes it. Filtered sanitizer runs exercise
+            -- the ordinary transfer-root variant without paying for this DSO.
+            build_checkstack_coroutine()
+            local out = run_lua_in_env([==[
             local coroutine = require "titan.coroutine"
             local co = coroutine.create(function(arg)
                 return arg
@@ -800,8 +799,8 @@ describe("coroutine standard module", function()
             assert(co:status() == "dead")
             print("OK")
         ]==], CHECKSTACK_TEST_ENV)
-        assert.match("OK", out)
-    end)
+            assert.match("OK", out)
+        end)
 
     it("keeps titan_coro.o as one exact runtime archive member", function()
         local ar = os.getenv("AR") or "ar"
@@ -812,9 +811,9 @@ describe("coroutine standard module", function()
         local members = {}
         for member in output:gmatch("[^\r\n]+") do
             if member ~= "__.SYMDEF" and
-               member ~= "__.SYMDEF SORTED" and
-               member ~= "__.SYMDEF_64" and
-               member ~= "__.SYMDEF_64 SORTED" then
+                member ~= "__.SYMDEF SORTED" and
+                member ~= "__.SYMDEF_64" and
+                member ~= "__.SYMDEF_64 SORTED" then
                 members[#members + 1] = member
             end
         end

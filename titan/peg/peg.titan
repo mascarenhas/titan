@@ -1,0 +1,627 @@
+local lua = foreign import "lua.h"
+local ffi = foreign import "titan/ffi.h"
+local cstring = foreign import "string.h"
+local private_lpeg = foreign import "titan_lpeglabel.h"
+
+-- LPegLabel 1.6.2-1 uses 16-bit tree offsets and keeps ten slots in
+-- reserve.  Titan enforces this consistently before entering the native
+-- constructors.
+local MAX_PATTERN_SIZE = 32757
+local MAX_BEHIND = 255
+local MAX_RULES = 1000
+local MAX_SHORT = 32767
+local MAX_STACK = 21474836
+local PATTERN_REGISTRY_KEY =
+  "titan.peg.lpeglabel.912b0b9e.pattern"
+
+-- The engine table and all callables are per-state GC roots owned by this
+-- module.  The functions are ordinary private Lua C closures, so calls use
+-- Titan's generic callable path despite their precise static types.
+local type NativeUnary = (value) -> value
+local type NativeBinary = (value, value) -> value
+local type NativeRange = (...: string) -> value
+local type NativeUtfRange = (integer, integer) -> value
+local type NativeConstant = (...: value) -> value
+local type NativePosition = () -> value
+local type NativeMatch =
+  (value, string, integer, ...: value) ->
+    (value, value, ...: value)
+local type NativeLocale = () -> {string: value}
+local type NativeSetMaxStack = (integer) -> ()
+
+local _engine: {string: value} = {}
+local _version_text = ""
+
+local _P: NativeUnary = nil as value
+local _S: (string) -> value = nil as value
+local _R: NativeRange = nil as value
+local _utfR: NativeUtfRange = nil as value
+local _V: (string) -> value = nil as value
+local _B: NativeUnary = nil as value
+local _T: (string) -> value = nil as value
+local _C: NativeUnary = nil as value
+local _Cc: NativeConstant = nil as value
+local _Cmt: NativeBinary = nil as value
+local _Cb: NativeUnary = nil as value
+local _Carg: (integer) -> value = nil as value
+local _Cp: NativePosition = nil as value
+local _Cs: NativeUnary = nil as value
+local _Ct: NativeUnary = nil as value
+local _Cf: NativeBinary = nil as value
+local _Cg: NativeBinary = nil as value
+local _match: NativeMatch = nil as value
+local _locale: NativeLocale = nil as value
+local _setmaxstack: NativeSetMaxStack = nil as value
+
+local _sequence: NativeBinary = nil as value
+local _choice: NativeBinary = nil as value
+local _difference: NativeBinary = nil as value
+local _lookahead: NativeUnary = nil as value
+local _negative: NativeUnary = nil as value
+local _repeat: (value, integer) -> value = nil as value
+local _capture_replace: NativeBinary = nil as value
+local _match_success_sentinel: {value: value} = {}
+
+record Pattern
+  local raw: value
+  local tree_size: integer
+end
+
+record Match
+  first: integer
+  last: integer
+  local capture_count: integer
+  local captures: {value}
+end
+
+local record PatternMatchAttempt
+  local matched: boolean
+  local after: integer
+  local capture_count: integer
+  local captures: {value}
+  local ordinary_failure: boolean
+  local failure_label: string
+  local failure_position: integer
+end
+
+record Rule
+  local name: string
+  local pattern: Pattern
+end
+
+record Locale
+  alnum: Pattern
+  alpha: Pattern
+  cntrl: Pattern
+  digit: Pattern
+  graph: Pattern
+  lower: Pattern
+  print: Pattern
+  punct: Pattern
+  space: Pattern
+  upper: Pattern
+  xdigit: Pattern
+end
+
+record Definition
+  local name: string
+  local raw: value
+  local tree_size: integer
+end
+
+-- Matching and grammar construction.
+
+local function pattern_match_attempt(
+    pattern: Pattern, subject: string, start: integer,
+    ...: value): PatternMatchAttempt
+  local raw = _sequence(
+    _sequence(_Cc(_match_success_sentinel), pattern.raw), _Cp())
+  local results: {value} = {
+    _match(raw, subject, start, ...)
+  }
+  local native_count = #results
+  if native_count >= 2 and
+      results[1] == _match_success_sentinel then
+    local capture_count = native_count - 2
+    if capture_count > 200 then
+      raise "too many flexible return values (max 200)"
+    end
+    return PatternMatchAttempt.new(
+      true, results[native_count] as integer,
+      capture_count, results, false, "", 0)
+  elseif native_count == 3 then
+    local label = results[2] as string
+    return PatternMatchAttempt.new(
+      false, 0, 0, results, label == "fail", label,
+      (results[3] as integer) + start - 1)
+  end
+  raise "embedded LPegLabel returned an invalid match result"
+end
+
+function Pattern:match(subject: string, init: integer?,
+                       ...: value): (value, ...: value)
+  local attempt = pattern_match_attempt(
+    self, subject, _normalized_init(subject, init), ...)
+  if attempt.matched then
+    if attempt.capture_count == 0 then return attempt.after end
+    return _unpack_results(
+      attempt.captures, 2, attempt.capture_count + 1)
+  end
+  return nil, attempt.failure_label, attempt.failure_position
+end
+
+function Match:values(): (...: value)
+  if self.capture_count == 0 then return end
+  return _unpack_results(
+    self.captures, 2, self.capture_count + 1)
+end
+
+function rule(name: string, pattern: Pattern): Rule
+  return Rule.new(name, pattern)
+end
+
+function grammar(start: string,
+                 rules: {Rule}): Pattern
+  local total_size = 2
+  local seen: {string: boolean} = {}
+  local native: {value: value} = {}
+  native[1] = start
+  local index = 1
+  while index <= #rules do
+    if index > MAX_RULES then raise "PEG grammar has too many rules" end
+    local item = rules[index]
+    if seen[item.name] then
+      raise "duplicate PEG grammar rule name"
+    end
+    seen[item.name] = true
+    total_size = _checked_sum(
+      total_size, item.pattern.tree_size, 2)
+    native[item.name] = item.pattern.raw
+    index = index + 1
+  end
+  if not seen[start] then
+    raise "PEG grammar has no start rule"
+  end
+  return _pattern(_P(native), total_size)
+end
+
+function locale(): Locale
+  local native = _locale()
+  return Locale.new(
+    _pattern(native["alnum"], 5),
+    _pattern(native["alpha"], 5),
+    _pattern(native["cntrl"], 5),
+    _pattern(native["digit"], 5),
+    _pattern(native["graph"], 5),
+    _pattern(native["lower"], 5),
+    _pattern(native["print"], 5),
+    _pattern(native["punct"], 5),
+    _pattern(native["space"], 5),
+    _pattern(native["upper"], 5),
+    _pattern(native["xdigit"], 5))
+end
+
+function set_max_stack(maximum: integer)
+  if maximum < 1 or maximum > MAX_STACK then
+    raise "PEG maximum stack is out of range"
+  end
+  _setmaxstack(maximum)
+end
+
+function version(): string
+  return _version_text
+end
+
+-- Constructors and combinators.
+
+function literal(text: string): Pattern
+  local length = #text
+  local size = 1
+  if length > 0 then
+    if length > (MAX_PATTERN_SIZE + 1) // 2 then
+      raise "PEG pattern is too large"
+    end
+    size = 2 * length - 1
+  end
+  return _pattern(_P(text), size)
+end
+
+function any(count: integer?): Pattern
+  local amount = 1
+  if count then amount = count as integer end
+  local size = 1
+  if amount > 0 then
+    if amount > (MAX_PATTERN_SIZE + 1) // 2 then
+      raise "PEG pattern is too large"
+    end
+    size = 2 * amount - 1
+  elseif amount < 0 then
+    if amount < -(MAX_PATTERN_SIZE // 2) then
+      raise "PEG pattern is too large"
+    end
+    size = -2 * amount
+  end
+  return _pattern(_P(amount), size)
+end
+
+function succeed(): Pattern
+  return _pattern(_P(true), 1)
+end
+
+function fail(): Pattern
+  return _pattern(_P(false), 1)
+end
+
+function runtime(
+    callback: (string, integer, string) ->
+      (...: value)): Pattern
+  local adapter:
+      (string, integer, string) -> (...: value) =
+    function(subject: string, position: integer,
+             whole: string): (...: value)
+      return callback(subject, position, whole)
+    end
+  return _pattern(_P(adapter), 2)
+end
+
+function set(bytes: string): Pattern
+  return _pattern(_S(bytes), 5)
+end
+
+function ranges(...: string): Pattern
+  local index = 1
+  while index <= #... do
+    if #(...[index]) ~= 2 then
+      raise "each PEG range must contain exactly two bytes"
+    end
+    index = index + 1
+  end
+  return _pattern(_R(...), 5)
+end
+
+function utf_range(first: integer,
+                   last: integer): Pattern
+  if first < 0 or last < first or last > 0x10ffff then
+    raise "invalid UTF-8 code-point range"
+  end
+  local size = 2
+  if last <= 0x7f then size = 5 end
+  return _pattern(_utfR(first, last), size)
+end
+
+function variable(name: string): Pattern
+  return _pattern(_V(name), 1)
+end
+
+function behind(pattern: Pattern): Pattern
+  -- The engine remains authoritative for fixed-length/capture-free checks.
+  -- Its numeric bound is validated there after Titan's tree-size projection.
+  local size = _checked_unary(pattern, 1)
+  return _pattern(_B(pattern.raw), size)
+end
+
+function throw(label: string): Pattern
+  if label == "fail" then return fail() end
+  return _pattern(_T(label), 1)
+end
+
+function sequence(...: Pattern): Pattern
+  if #... == 0 then return succeed() end
+  local result = ...[1]
+  local index = 2
+  while index <= #... do
+    local next_pattern = ...[index]
+    local size = _checked_sum(
+      result.tree_size, next_pattern.tree_size, 1)
+    result = _pattern(
+      _sequence(result.raw, next_pattern.raw), size)
+    index = index + 1
+  end
+  return result
+end
+
+function choice(...: Pattern): Pattern
+  if #... == 0 then return fail() end
+  local result = ...[1]
+  local index = 2
+  while index <= #... do
+    local next_pattern = ...[index]
+    local size = _checked_sum(
+      result.tree_size, next_pattern.tree_size, 1)
+    result = _pattern(
+      _choice(result.raw, next_pattern.raw), size)
+    index = index + 1
+  end
+  return result
+end
+
+function difference(first: Pattern,
+                    ...: Pattern): Pattern
+  local result = first
+  local index = 1
+  while index <= #... do
+    local next_pattern = ...[index]
+    local size = _checked_sum(
+      result.tree_size, next_pattern.tree_size, 2)
+    result = _pattern(
+      _difference(result.raw, next_pattern.raw), size)
+    index = index + 1
+  end
+  return result
+end
+
+function lookahead(pattern: Pattern): Pattern
+  return _pattern(
+    _lookahead(pattern.raw), _checked_unary(pattern, 1))
+end
+
+function negative(pattern: Pattern): Pattern
+  return _pattern(
+    _negative(pattern.raw), _checked_unary(pattern, 1))
+end
+
+function at_least(pattern: Pattern,
+                  count: integer): Pattern
+  if count < 0 then raise "PEG repetition count must be nonnegative" end
+  local size = _at_least_size(pattern, count)
+  return _pattern(_repeat(pattern.raw, count), size)
+end
+
+function at_most(pattern: Pattern,
+                 count: integer): Pattern
+  if count < 0 then raise "PEG repetition count must be nonnegative" end
+  if count == 0 then return succeed() end
+  local size = _at_most_size(pattern, count)
+  return _pattern(_repeat(pattern.raw, -count), size)
+end
+
+function zero_or_more(pattern: Pattern): Pattern
+  return at_least(pattern, 0)
+end
+
+function one_or_more(pattern: Pattern): Pattern
+  return at_least(pattern, 1)
+end
+
+function optional(pattern: Pattern): Pattern
+  return at_most(pattern, 1)
+end
+
+-- Captures.
+
+function capture(pattern: Pattern): Pattern
+  return _pattern(
+    _C(pattern.raw), _checked_unary(pattern, 1))
+end
+
+function constant(...: value): Pattern
+  local count = #...
+  local size = 1
+  if count == 1 then
+    size = 2
+  elseif count > 1 then
+    size = 3 * count
+  end
+  if size > MAX_PATTERN_SIZE then raise "PEG pattern is too large" end
+  return _pattern(_Cc(...), size)
+end
+
+function match_time(
+    pattern: Pattern,
+    callback: (string, integer, value, ...: value) ->
+      (...: value)): Pattern
+  local adapter:
+      (string, integer, value, ...: value) ->
+        (...: value) =
+    function(subject: string, position: integer,
+             first: value, ...: value): (...: value)
+      return callback(subject, position, first, ...)
+    end
+  return _pattern(
+    _Cmt(pattern.raw, adapter), _checked_unary(pattern, 1))
+end
+
+function back_capture(key: value): Pattern
+  if key == nil then raise "PEG back-capture key must be non-nil" end
+  return _pattern(_Cb(key), 2)
+end
+
+function argument(index: integer): Pattern
+  if index < 1 or index > MAX_SHORT then
+    raise "PEG argument index is out of range"
+  end
+  return _pattern(_Carg(index), 2)
+end
+
+function position(): Pattern
+  return _pattern(_Cp(), 2)
+end
+
+function substitution(pattern: Pattern): Pattern
+  return _pattern(
+    _Cs(pattern.raw), _checked_unary(pattern, 1))
+end
+
+function table_capture(pattern: Pattern): Pattern
+  return _pattern(
+    _Ct(pattern.raw), _checked_unary(pattern, 1))
+end
+
+function fold_capture(
+    pattern: Pattern,
+    callback: (value, ...: value) -> value): Pattern
+  local adapter:
+      (value, ...: value) -> value =
+    function(accumulator: value, ...: value): value
+      return callback(accumulator, ...)
+    end
+  return _pattern(
+    _Cf(pattern.raw, adapter), _checked_unary(pattern, 1))
+end
+
+function group(pattern: Pattern, key: value): Pattern
+  return _pattern(
+    _Cg(pattern.raw, key), _checked_unary(pattern, 1))
+end
+
+function select_capture(pattern: Pattern,
+                        index: integer): Pattern
+  if index < 0 or index > MAX_SHORT then
+    raise "PEG capture index is out of range"
+  end
+  return _pattern(
+    _capture_replace(pattern.raw, index),
+    _checked_unary(pattern, 1))
+end
+
+function template_capture(pattern: Pattern,
+                          template: string): Pattern
+  return _pattern(
+    _capture_replace(pattern.raw, template),
+    _checked_unary(pattern, 1))
+end
+
+function query_capture(pattern: Pattern,
+                       lookup: {value: value}): Pattern
+  return _pattern(
+    _capture_replace(pattern.raw, lookup),
+    _checked_unary(pattern, 1))
+end
+
+function function_capture(
+    pattern: Pattern,
+    callback: (value, ...: value) ->
+      (...: value)): Pattern
+  local adapter:
+      (value, ...: value) -> (...: value) =
+    function(first: value, ...: value): (...: value)
+      return callback(first, ...)
+    end
+  return _pattern(
+    _capture_replace(pattern.raw, adapter),
+    _checked_unary(pattern, 1))
+end
+
+-- Relabel expressions and convenience operations.
+
+function line_column(subject: string,
+                     position: integer): (integer, integer)
+  if position < 1 or position > #subject + 1 then
+    raise "PEG source position is out of range"
+  end
+  local line = 1
+  local line_start = 1
+  local cursor = 1
+  while cursor < position do
+    local byte = _relabel_byte(subject, cursor)
+    if byte == 13 and cursor < #subject and
+        _relabel_byte(subject, cursor + 1) == 10 then
+      if cursor + 1 >= position then break end
+      line = line + 1
+      cursor = cursor + 2
+      line_start = cursor
+    elseif byte == 10 or byte == 13 then
+      line = line + 1
+      cursor = cursor + 1
+      line_start = cursor
+    else
+      cursor = cursor + 1
+    end
+  end
+  return line, position - line_start + 1
+end
+
+function define(name: string,
+                pattern: Pattern): Definition
+  return Definition.new(
+    name, pattern.raw, pattern.tree_size)
+end
+
+function define_value(name: string,
+                      candidate: value): Definition
+  if candidate == nil or candidate == false then
+    raise "PEG definition value must be truthy"
+  end
+  return Definition.new(name, candidate, -1)
+end
+
+function compile(
+    candidate: value,
+    definitions: {Definition}?): Pattern
+  _relabel_ensure_initialized()
+  if candidate is Pattern then
+    return candidate as Pattern
+  end
+  if not (candidate is string) then
+    raise "PEG expression must be a string or Pattern"
+  end
+  local source = candidate as string
+  if not definitions then
+    return _relabel_cached_source(
+      source, _relabel_match_cache)
+  end
+  return _relabel_compile_source(source, definitions)
+end
+
+function match(subject: string, candidate: value,
+               init: integer?): Match?
+  _relabel_ensure_initialized()
+  local compiled: Pattern = succeed()
+  if candidate is Pattern then
+    compiled = candidate as Pattern
+  elseif candidate is string then
+    compiled = _relabel_cached_source(
+      candidate as string, _relabel_match_cache)
+  else
+    raise "PEG expression must be a string or Pattern"
+  end
+
+  local start = _normalized_init(subject, init)
+  while start <= #subject + 1 do
+    local attempt = pattern_match_attempt(
+      compiled, subject, start)
+    if attempt.matched then
+      return Match.new(
+        start, attempt.after - 1,
+        attempt.capture_count, attempt.captures)
+    end
+    if not attempt.ordinary_failure then return nil end
+    start = start + 1
+  end
+  return nil
+end
+
+function gsub(subject: string, candidate: value,
+              replacement: (string) -> string): string
+  _relabel_ensure_initialized()
+  local compiled: Pattern = succeed()
+  if candidate is Pattern then
+    compiled = candidate as Pattern
+  elseif candidate is string then
+    compiled = _relabel_cached_source(
+      candidate as string, _relabel_match_cache)
+  else
+    raise "PEG expression must be a string or Pattern"
+  end
+
+  local adapter: (value) -> string =
+    function(found: value): string
+      return replacement(found as string)
+    end
+  -- `%0` discards any captures inside the candidate and supplies the exact
+  -- whole match as the callback's sole value.
+  local replaced = function_capture(
+    template_capture(compiled, "%0"), adapter)
+  local substitution_pattern = substitution(
+    zero_or_more(choice(replaced, any())))
+  local result: value = substitution_pattern:match(subject)
+  return result as string
+end
+
+function update_locale()
+  _relabel_refresh_locale()
+end
+
+do
+  _initialize_native()
+end

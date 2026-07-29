@@ -125,9 +125,8 @@ local test_dns_retry_gc_count = 0
 -- Keep the zeroed typed allocation as the sole address-storage owner. The
 -- variant can reserve cell zero without reading or writing sockaddr fields.
 patch("tcp.titan", [==[
-  local owned = shim.titan_uvshim_address.new_array(count)
-  local storage: value = owned
-  local data = owned as *shim.titan_uvshim_address
+  local addresses = shim.titan_uvshim_address.new_array(count)
+  local data = addresses as *shim.titan_uvshim_address
   local copied = 0
 ]==], [==[
   local leading = 0
@@ -136,9 +135,9 @@ patch("tcp.titan", [==[
     test_dns_invalid_connect_pending = true
     leading = 1
   end
-  local owned = shim.titan_uvshim_address.new_array(count + leading)
-  local storage: value = owned
-  local data = owned as *shim.titan_uvshim_address
+  local addresses =
+    shim.titan_uvshim_address.new_array(count + leading)
+  local data = addresses as *shim.titan_uvshim_address
   local copied = leading
 ]==], "optional leading zeroed address cell")
 
@@ -153,12 +152,6 @@ patch("tcp.titan", [==[
       end
       copied = copied + 1
 ]==], "copy-longjmp injection")
-
-patch("tcp.titan", [==[
-  return AddressList.new(data, storage, count)
-]==], [==[
-  return AddressList.new(data, storage, count + leading)
-]==], "variant address count")
 
 -- Count each physical release immediately after its direct non-raising C call.
 -- There is deliberately no helper call or allocation between the call and the
@@ -371,7 +364,7 @@ function __test_format_dns_port(port: integer): (string, integer)
   local service: ffi.titan_ffi_char[6]
   local pointer = format_port(port as ffi.titan_ffi_int, service)
   local length = cstring.strlen(pointer) as libuv.size_t
-  return bytes_to_string(pointer, length), service[5] as integer
+  return bytes_string(pointer, length), service[5] as integer
 end
 ]==]
 
@@ -396,10 +389,11 @@ require_once("tcp.titan",
     "shim.titan_uvshim_address.new_array(count + leading)",
     "typed zeroed address allocation")
 require_once("tcp.titan",
-    "libuv.uv_req_set_data(owner.handle, pointer)\n" ..
+    "libuv.uv_req_set_data(\n" ..
+    "      owner_handle as *libuv.uv_req_t, pointer)\n" ..
     "  local status = libuv.uv_getaddrinfo {",
     "DNS request data installation and direct submission")
-require_once("tcp.titan", "libuv.uv_tcp_bind(tcp.handle, address, 0)",
+require_once("tcp.titan", "libuv.uv_tcp_bind(tcp_handle, address, 0)",
     "direct TCP bind")
 require_once("tcp.titan", "local status = libuv.uv_tcp_connect {",
     "direct TCP connect")
@@ -411,7 +405,9 @@ require_once("tcp.titan",
     "libuv.uv_freeaddrinfo(owner.metadata.result_pointer)\n" ..
     "    test_dns_release_count = test_dns_release_count + 1",
     "emergency direct addrinfo release and adjacent counter")
-require_once("task.titan", "libuv.uv_cancel(dns.handle)",
+require_once("task.titan",
+    "dns.handle as owned *libuv.uv_getaddrinfo_t\n" ..
+    "        libuv.uv_cancel(handle as *libuv.uv_req_t)",
     "submitted DNS cancellation")
 
 for _, retired in ipairs({

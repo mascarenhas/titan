@@ -200,9 +200,32 @@ CModule      = {"name", "members", "type_members"}
 types remain structural; declaration spellings stay on raw CTypes until a
 direct foreign member is built.
 
-`types.resolve_c_typedef` unwraps `CTypedef` chains. `types.is_c` detects C
-value/type shapes but deliberately excludes `CModule`, since a C module is only
-a namespace.
+`types.resolve_c_typedef` unwraps `CTypedef` chains. The type predicates keep
+three different questions separate:
+
+* `types.is_c` detects a direct C value or one nested through ordinary
+  Array/Map/Option storage, but deliberately excludes `CModule`, since a C
+  module is only a namespace;
+* `types.first_c_ffi_type` performs the full recursive interface/export scan,
+  including boxed callable signatures;
+* `types.is_direct_c` asks whether the value itself has a C representation,
+  while `types.has_tvalue_representation` asks whether that representation can
+  round-trip through a Lua `TValue`.
+
+The checker and coder use the direct/boxability predicates for lowering.
+Structural C provenance remains relevant to interface validation; it must not
+send an ordinary Titan Array, Map, option, or callable down a direct-C path
+merely because one component contains `COwned`.
+
+The source parser represents both written owner shapes as
+`Ast.TypeCOwned(loc, subtype, count)`. `count = false` is the scalar
+`owned *T` form; `count = true` is the dynamically counted `owned T[]` form.
+The parser keeps the payload optionless and applies a trailing `?` outside this
+node, so optionality is the ordinary `Type.Option(COwned(...))` shape.
+The record-field shorthand `name?: T` constructs that same outer option.
+`typefromnode` resolves the payload in the current foreign namespace, applies
+the same allocation-eligibility check used by `.new()`/`.new_array()`, and
+constructs the existing `Type.COwned` representation.
 
 Exact value-type equality compares primitive spelling, qualifiers, array
 length, aggregate identity/shape, and the other representation fields.
@@ -217,7 +240,12 @@ Titan boundary conversions:
 * C float -> Titan `float`, and Titan `integer`/`float` -> C float;
 * C pointer, including C function pointer -> `boolean`, `nil` -> C pointer;
 * C array / counted `COwned` -> compatible pointer;
+* scalar `COwned` -> its payload object pointer;
 * any non-function C pointer -> `void *`;
+* a written C function pointer -> `void *` cast, outside ordinary
+  object-pointer compatibility;
+* a written Titan Array, Map, nominal record, or function -> C `void *`
+  identity cast;
 * non-pointer by-value C object expressions -> compatible `const *T` pointers
   by address;
 * mutable non-pointer local/formal C variables -> compatible mutable `*T` or
@@ -225,7 +253,23 @@ Titan boundary conversions:
 * Titan `string` -> C `char *` or `void *`;
 * C `TValue` -> Titan `value`, and Titan `value` -> C `TValue`;
 * C integers, C floats, non-function C pointers, and `COwned` <-> `value`;
+* counted `COwned` arrays of typedef-resolved `char`, `signed char`, or
+  `unsigned char` -> Titan `string`;
 * Lua-internal `Udata *` <-> full-userdata `value`, with NULL <-> nil.
+
+Owner-to-pointer adjustment constructs the same qualified pointer view used by
+ordinary pointer/array compatibility. It may add qualification and perform
+legal object-pointer-to-`void *` adjustment, but it never discards
+typedef-carried `const` or `volatile`.
+
+`types.is_gc_identity_void_pointer_cast` is a deliberately narrower
+representation relation. It resolves Titan aliases and the C target typedef,
+requires a C `void *` target, and admits only `Array`, `Map`, `Nominal`, and
+`Function`. It excludes `Value`, `Option`, and `String`: `Value` keeps its
+checked lightuserdata/nil C-pointer conversion, options must be unwrapped,
+and strings keep their byte-buffer pointer. `COwned` also stays on its existing
+payload-pointer path. `types.is_c_function_pointer_void_cast` identifies the
+separate written C function-pointer erasure.
 
 C `TValue` and typedef-resolved pointers to Lua's internal `Udata` are treated
 as GC-bearing C types by the code generator. A local, temporary, or parameter
@@ -287,7 +331,17 @@ The checker has FFI-specific handling in a few narrow places:
   later `foreign import`; while checking a module variable,
   `symtab.find_symbol` masks a later C-module alias by `initializer_order`.
 * `Ast.TypeCPointer` accepts `*c.T` and `const *c.T`, producing `CPointer`
-  values over imported C pointees and rejecting non-C pointees.
+  values over direct imported C pointees and rejecting non-C pointees and
+  `COwned` wrappers.
+* `Ast.TypeCOwned` accepts the source `owned *c.T` and `owned c.T[]`
+  forms. It shares `c_allocation_error` with the allocation
+  pseudo-constructors, rejecting non-C and nested owners, `void`, direct C
+  functions, incomplete aggregates, C array typedefs, and
+  flexible-array-member structs before any generated `sizeof` can be formed.
+* `Ast.TypeOption` requires its base to satisfy
+  `types.has_tvalue_representation`. This admits `COwned` and other boxable C
+  scalars while rejecting by-value C aggregates/arrays, direct C functions,
+  and C function pointers before `getslot`/`setslot` code generation.
 * `Ast.VarDot` on a `CModule` consults ordinary `members` first. If no value
   has that name, a `type_members` entry yields a `Type.CTypeNamespace`
   pseudo-declaration so `.new`, `.new_array`, `.sizeof`, and `.alignof` can be
@@ -317,10 +371,10 @@ The checker has FFI-specific handling in a few narrow places:
   Extracting a pointer value from such a temporary is accepted because the
   pointer's pointee, not the temporary aggregate, is the mutation target.
 * `#exp` accepts C arrays with known static length and counted owned C arrays.
-* `Ast.ExpCall` validates C allocation pseudo-functions, rejecting `void`,
-  incomplete aggregates, C array typedefs, and structs with flexible array
-  members. A struct/union completed only by a later foreign import is treated
-  as incomplete while checking an earlier module variable.
+* `Ast.ExpCall` validates C allocation pseudo-functions through that same
+  helper, including the direct-C-function rejection. A struct/union completed
+  only by a later foreign import is treated as incomplete while checking an
+  earlier module variable.
 * Top-level initializer validation recognizes `Type.CPseudoNew` as a sound
   constructor. `T.new()` and `T.new_array(count)` are accepted when their
   actual argument list is constant; a count that reads module state is
@@ -422,7 +476,10 @@ to exact C spellings. A `CTypedef` renders as its typedef name, preserving
 headers' preferred spelling for calls and allocation. Declarators are built
 recursively for locals and temporaries, because `int (*cb)(int)` cannot be
 produced by concatenating a type spelling and a name. `COwned` renders as
-`Udata *`; its payload is reached through `getudatamem`.
+`Udata *`; its payload is reached through `getudatamem`. The Titan diagnostic
+renderer preserves its logical shape as `owned *T` or `owned T[]`. The hidden
+owned-metatable key uses that same canonical renderer, so scalar and counted
+owners cannot acquire inconsistent hand-built spellings.
 
 The general `ctype` function routes C values through `cdeclarator`, applying C
 parameter adjustment where appropriate. `COwned` remains a Lua full-userdata
@@ -495,12 +552,46 @@ decides quote-vs-angle based on actual resolution.
   parameters are materialized as `&(local)`, enabling C out-parameters;
 * other `value` to C conversions use the runtime `checkandget` path.
 
+`nativetoforeignexp` recognizes explicit GC-identity casts before its ordinary
+direct-C pass-through. It materializes the source exactly once and anchors it
+in a scanned temporary. Array and Map values then expose that temporary's
+native `Table *`; a nominal record exposes its `Udata *`. Function values are
+native `TValue`s, so the lowering first tests `iscollectable(&temporary)`,
+raises for an immediate value, and otherwise converts
+`gcvalue(&temporary)` to the requested C `void *` spelling. `_codeis` uses the
+same materialization but returns the collectability predicate instead of
+raising. This matters because conversion from `value` to a function type
+deliberately does not prove callability at cast time.
+
+The checker accepts the written C-function-pointer-to-`void *` case before
+`_unsafe_c_pointer_conversion` diagnoses cross-category object/function
+reinterpretations. Implicit and contextual function/object pointer
+conversions remain rejected. The coder emits
+`titan_cast_func(target_type, source)` for this explicit erasure, preserving
+the compiler-specific portability handling already used by dynamic symbol
+loading.
+
+Materializing a GC-identity source protects it through subsequent expression
+and call-argument setup, but the resulting raw pointer carries no ownership.
+Once the containing generated frame stops anchoring the source, only another
+reachable reference keeps it alive. The `Table *`, `Udata *`, and general
+`GCObject *` identities are internal runtime addresses, not stable public
+layouts or independently managed allocations.
+
 `foreigntonativeexp` handles C-to-Titan conversion for call results and foreign
 variables. C `TValue` results become Titan `value`s directly. C
 integers/floats cast to Lua numeric C types when a Titan numeric target needs
 them; C pointers/arrays/aggregates remain C values; C `char *` / `void *` to
 `string` is implemented by an explicit cast arm with a NULL guard and
 `luaS_new` copy.
+
+A written cast from a counted character owner takes a separate length-aware
+path. The coder materializes the `Udata *` in a scanned slot, then calls
+`luaS_newlstr(L, (const char *)getudatamem(owner), owner->len)`. The explicit
+payload length preserves embedded and trailing NUL bytes, while the scanned
+slot keeps even a temporary owner rooted across the string allocation.
+Scalar character owners and non-character arrays never enter this arm; a cast
+through `char *` retains the NUL-terminated pointer behavior above.
 
 `getslot` and `setslot` know how to box C scalars, non-function pointers, owned
 userdata, and by-value C `TValue`s for `value` conversions and for Lua-facing
@@ -510,8 +601,16 @@ boxing emits the full-userdata tag for that same object (or nil for NULL), and
 unboxing accepts full userdata or nil rather than lightuserdata. C arrays are
 not accepted through `value` because there is no array unboxing path. C
 function pointers are not object pointers in portable C and cannot cross
-through `value` or the object-pointer address coercions. By-value C
+through `value` or the object-pointer address coercions; only the explicit
+`titan_cast_func`-lowered erasure to `void *` crosses that category. By-value C
 structs/unions are deliberately not boxable in v1.
+
+An option uses one `TValue` slot and delegates its present arm to these same
+helpers, which is why `TypeOption` validates the base eagerly. Owner-to-pointer
+coercion also stops at an outer option: `Option(COwned(T))` cannot coerce
+directly to either `CPointer(T)` or `Option(CPointer(T))`. The source must first
+be explicitly unwrapped, keeping a definite owner live while its borrowed
+payload pointer is used.
 
 ### C Arrays And Fields
 
@@ -592,8 +691,10 @@ evaluated right-hand side.
 
 ### Owned C Objects
 
-The `.new()` and `.new_array(count)` pseudo-functions are checker-only
-declarations (`Type.CPseudoNew`) generated when a type namespace is accessed.
+Source-written `owned *T` and `owned T[]` lower to the same
+`COwned(T, false)` and `COwned(T, true)` values already inferred from `.new()`
+and `.new_array(count)`. The pseudo-functions remain checker-only declarations
+(`Type.CPseudoNew`) generated when a type namespace is accessed.
 `codecpseudonew` allocates Lua userdata directly:
 
 ```c
@@ -619,6 +720,20 @@ a metatable. New allocations stamp that metatable onto the `Udata`, and
 `value` casts back to `COwned` compare the metatable before accepting the
 userdata. This prevents unrelated full userdata, including Titan records, from
 being reinterpreted as C payload memory.
+
+Making C-bearing Titan function types source-nameable exposes a separate
+registry-identity issue. Canonical C type spellings are meaningful only within
+the module that imported their headers, so two modules may render unrelated
+local owner/function types identically. Function-type registry keys therefore
+remain globally shared for C-free function types, preserving their
+cross-module exact-call fast path, but include the defining Titan module name
+when `types.first_c_ffi_type` finds any C type in the callable shape. A
+separate C-bearing marker in the module-local tag cache prevents a C typedef
+whose diagnostic spelling matches a Titan type from reusing that Titan
+callable's entry before either registry key is emitted. A
+same-spelled C-bearing function crossing through `value` in another module
+then takes the generic checked path, where the owned metatable mismatch is
+reported instead of entering a native function with the wrong payload layout.
 
 This is deliberately different from adopted/borrowed C pointers. Borrowed
 pointers are raw C pointer values and are not GC-managed; adopted pointers are

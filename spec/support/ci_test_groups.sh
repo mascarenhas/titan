@@ -24,6 +24,7 @@ compiler_isolated_coverage_tests=()
 library_serial_tests=()
 library_uv_fs_tests=()
 library_net_os_tests=()
+library_peg_string_tests=()
 
 while IFS= read -r test_file; do
     case "$test_file" in
@@ -39,11 +40,12 @@ while IFS= read -r test_file; do
         spec/stdlib/coroutine_spec.lua | \
         spec/stdlib/loadlibglobal_spec.lua | \
         spec/stdlib_installer_spec.lua | \
+        spec/lpeglabel_build_spec.lua | \
         spec/libuv_build_spec.lua | \
         spec/minicoro_spec.lua | \
         spec/rockspec_spec.lua)
             # Keep serial native/runtime proofs and suites that mutate or
-            # inspect shared root artifacts out of the two workers below.
+            # inspect shared root artifacts out of the parallel workers below.
             library_serial_tests+=("$test_file")
             ;;
         spec/stdlib/uv*_spec.lua | \
@@ -55,6 +57,10 @@ while IFS= read -r test_file; do
         spec/stdlib/os*_spec.lua)
             library_net_os_tests+=("$test_file")
             ;;
+        spec/stdlib/peg*_spec.lua | \
+        spec/stdlib/string*_spec.lua)
+            library_peg_string_tests+=("$test_file")
+            ;;
         spec/coder/coder_spec.lua | \
         spec/coder/flexible_returns_spec.lua)
             # These broad end-to-end files remain on the heavy worker with the
@@ -65,12 +71,14 @@ while IFS= read -r test_file; do
         spec/cdriver_spec.lua | \
         spec/checker/c_ffi_declaration_compatibility_spec.lua | \
         spec/checker/c_ffi_operators_spec.lua | \
+        spec/checker/c_ffi_owned_types_spec.lua | \
         spec/checker/c_ffi_pointer_conversions_spec.lua | \
         spec/checker/c_ffi_spec.lua | \
         spec/checker/c_ffi_stack_objects_spec.lua | \
         spec/checker/c_ffi_tag_names_spec.lua | \
         spec/checker/c_ffi_target_profile_spec.lua | \
         spec/coder/c_ffi_operators_spec.lua | \
+        spec/coder/c_ffi_owned_types_spec.lua | \
         spec/coder/c_ffi_pointer_conversions_spec.lua | \
         spec/coder/c_ffi_spec.lua | \
         spec/coder/c_ffi_stack_objects_spec.lua | \
@@ -194,9 +202,15 @@ case "$group" in
             "without LuaCov"
         "$BUSTED" -o gtest -v "${library_net_os_tests[@]}"
         ;;
+    library-peg-string)
+        echo "Running ${#library_peg_string_tests[@]} PEG/string spec files" \
+            "without LuaCov"
+        "$BUSTED" -o gtest -v "${library_peg_string_tests[@]}"
+        ;;
     libraries)
         library_count=$((${#library_serial_tests[@]} +
-            ${#library_uv_fs_tests[@]} + ${#library_net_os_tests[@]}))
+            ${#library_uv_fs_tests[@]} + ${#library_net_os_tests[@]} +
+            ${#library_peg_string_tests[@]}))
         echo "Running $library_count native/runtime and library spec files" \
             "without LuaCov"
 
@@ -207,6 +221,7 @@ case "$group" in
         log_dir=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
         uv_fs_log="$log_dir/titan-library-uv-fs.$$.log"
         net_os_log="$log_dir/titan-library-net-os.$$.log"
+        peg_string_log="$log_dir/titan-library-peg-string.$$.log"
 
         "$BUSTED" -o gtest -v "${library_uv_fs_tests[@]}" \
             >"$uv_fs_log" 2>&1 &
@@ -214,11 +229,16 @@ case "$group" in
         "$BUSTED" -o gtest -v "${library_net_os_tests[@]}" \
             >"$net_os_log" 2>&1 &
         net_os_pid=$!
+        "$BUSTED" -o gtest -v "${library_peg_string_tests[@]}" \
+            >"$peg_string_log" 2>&1 &
+        peg_string_pid=$!
 
         uv_fs_status=0
         wait "$uv_fs_pid" || uv_fs_status=$?
         net_os_status=0
         wait "$net_os_pid" || net_os_status=$?
+        peg_string_status=0
+        wait "$peg_string_pid" || peg_string_status=$?
 
         if [[ ${GITHUB_ACTIONS:-} == true ]]; then
             echo "::group::Library uv/timer/fs worker"
@@ -234,18 +254,26 @@ case "$group" in
         fi
         cat "$net_os_log"
         if [[ ${GITHUB_ACTIONS:-} == true ]]; then echo "::endgroup::"; fi
+        if [[ ${GITHUB_ACTIONS:-} == true ]]; then
+            echo "::group::Library PEG/string worker"
+        else
+            echo "Library PEG/string worker"
+        fi
+        cat "$peg_string_log"
+        if [[ ${GITHUB_ACTIONS:-} == true ]]; then echo "::endgroup::"; fi
 
         if (( serial_status != 0 || uv_fs_status != 0 ||
-                net_os_status != 0 )); then
+                net_os_status != 0 || peg_string_status != 0 )); then
             echo "library test status: serial=$serial_status " \
-                "uv_fs=$uv_fs_status net_os=$net_os_status" >&2
+                "uv_fs=$uv_fs_status net_os=$net_os_status " \
+                "peg_string=$peg_string_status" >&2
             exit 1
         fi
         ;;
     *)
         echo "usage: $0 {compiler|compiler-core|compiler-heavy|" \
             "compiler-uncovered|libraries|library-serial|library-uv-fs|" \
-            "library-net-os}" >&2
+            "library-net-os|library-peg-string}" >&2
         exit 2
         ;;
 esac

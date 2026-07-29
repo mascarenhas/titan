@@ -777,6 +777,106 @@ end
         assert_type_ast("foo.bar", { _tag = "Ast.TypeQualName", module = "foo", name = "bar" } )
     end)
 
+    it("can parse scalar and counted owned C types", function()
+        assert_type_ast("owned *ffi.Item", {
+            _tag = "Ast.TypeCOwned",
+            subtype = {
+                _tag = "Ast.TypeQualName",
+                module = "ffi",
+                name = "Item",
+            },
+            count = false,
+        })
+        assert_type_ast("owned ffi.Item[]", {
+            _tag = "Ast.TypeCOwned",
+            subtype = {
+                _tag = "Ast.TypeQualName",
+                module = "ffi",
+                name = "Item",
+            },
+            count = true,
+        })
+        assert_type_ast("owned **ffi.Item", {
+            _tag = "Ast.TypeCOwned",
+            subtype = {
+                _tag = "Ast.TypeCPointer",
+                subtype = {
+                    _tag = "Ast.TypeQualName",
+                    module = "ffi",
+                    name = "Item",
+                },
+                const = false,
+            },
+            count = false,
+        })
+        assert_type_ast("owned *ffi.Item[]", {
+            _tag = "Ast.TypeCOwned",
+            subtype = {
+                _tag = "Ast.TypeCPointer",
+                subtype = {
+                    _tag = "Ast.TypeQualName",
+                    module = "ffi",
+                    name = "Item",
+                },
+                const = false,
+            },
+            count = true,
+        })
+    end)
+
+    it("applies the option suffix to the complete owned C type", function()
+        assert_type_ast("owned *ffi.Item?", {
+            _tag = "Ast.TypeOption",
+            basetype = {
+                _tag = "Ast.TypeCOwned",
+                subtype = {
+                    _tag = "Ast.TypeQualName",
+                    module = "ffi",
+                    name = "Item",
+                },
+                count = false,
+            },
+        })
+        assert_type_ast("owned ffi.Item[]?", {
+            _tag = "Ast.TypeOption",
+            basetype = {
+                _tag = "Ast.TypeCOwned",
+                subtype = {
+                    _tag = "Ast.TypeQualName",
+                    module = "ffi",
+                    name = "Item",
+                },
+                count = true,
+            },
+        })
+    end)
+
+    it("reports malformed owned C type shapes at the owned production",
+    function()
+        assert_type_syntax_error("owned ffi.Item", "COwnedShape")
+        assert_type_syntax_error("owned *", "OwnedPayload")
+        assert_type_syntax_error("owned ffi.Item[", "RBracketCOwned")
+        assert_type_syntax_error("owned ffi.Item[4]", "RBracketCOwned")
+    end)
+
+    it("retains owned type source locations", function()
+        local source =
+            "local x: owned ffi.Item[]? = nil"
+        local program = assert(parser.parse("owners.titan", source))
+        local option = program[1].decl.type
+        local owner = option.basetype
+        assert.same({
+            filename = "owners.titan",
+            line = 1,
+            col = 10,
+        }, owner.loc)
+        assert.same({
+            filename = "owners.titan",
+            line = 1,
+            col = 16,
+        }, owner.subtype.loc)
+    end)
+
     it("can parse array types", function()
         assert_type_ast("{int}",
             { _tag = "Ast.TypeArray", subtype =
@@ -1452,7 +1552,10 @@ end
 
     it("desugars standard-library short imports to qualified modules",
        function()
-        local names = { "coroutine", "uv", "async", "timer", "fs", "net", "os" }
+        local names = {
+            "coroutine", "uv", "async", "timer", "fs", "net", "os",
+            "peg", "string",
+        }
         for _, name in ipairs(names) do
             assert_program_ast(
                 'local library = import "' .. name .. '"', {
@@ -1562,6 +1665,31 @@ end
                 { name = "visible",
                   type = { _tag = "Ast.TypeInteger" } } } },
         })
+
+        assert_program_ast([[
+            record Owners
+                handle?: owned *ffi.Handle
+                local bytes?: owned ffi.Byte[]
+            end
+        ]], {
+            { _tag = "Ast.TopLevelRecord",
+              name = "Owners",
+              fields = {
+                { name = "handle", type = {
+                    _tag = "Ast.TypeOption",
+                    basetype = {
+                        _tag = "Ast.TypeCOwned",
+                        count = false,
+                    },
+                } },
+                { name = "bytes", islocal = true, type = {
+                    _tag = "Ast.TypeOption",
+                    basetype = {
+                        _tag = "Ast.TypeCOwned",
+                        count = true,
+                    },
+                } } } },
+        })
     end)
 
     it("can parse public and local type aliases", function()
@@ -1666,7 +1794,7 @@ end
                             name = "a" } } } } } } } })
     end)
 
-    it("can parse cast expressions", function()
+    it("can parse cast and type-test expressions", function()
         assert_expression_ast([[ foo as integer ]],
             { _tag = "Ast.ExpCast", exp = { _tag = "Ast.ExpVar" }, target = { _tag = "Ast.TypeInteger" } })
         assert_expression_ast([[ a.b[1].c as integer ]],
@@ -1680,6 +1808,47 @@ end
                 exp = { _tag = "Ast.ExpUnop", op = "#",
                     exp = { _tag = "Ast.ExpDots" } },
                 target = { _tag = "Ast.TypeValue" } })
+
+        assert_expression_ast([[ foo is integer ]],
+            { _tag = "Ast.ExpIs", exp = { _tag = "Ast.ExpVar" },
+                target = { _tag = "Ast.TypeInteger" } })
+        assert_expression_ast([[ foo is (integer) -> integer ]],
+            { _tag = "Ast.ExpIs", target = {
+                _tag = "Ast.TypeFunction",
+                argtypes = { { _tag = "Ast.TypeInteger" } },
+                rettypes = { { _tag = "Ast.TypeInteger" } } } })
+        assert_expression_ast([[ 2 + foo is integer ]],
+            { _tag = "Ast.ExpBinop",
+                rhs = { _tag = "Ast.ExpIs",
+                    exp = { _tag = "Ast.ExpVar" },
+                    target = { _tag = "Ast.TypeInteger" } } })
+        assert_expression_ast([[ -foo is integer ]],
+            { _tag = "Ast.ExpIs",
+                exp = { _tag = "Ast.ExpUnop", op = "-",
+                    exp = { _tag = "Ast.ExpVar" } },
+                target = { _tag = "Ast.TypeInteger" } })
+        assert_expression_ast([[ foo ^ 2 is integer ]],
+            { _tag = "Ast.ExpBinop", op = "^",
+                rhs = { _tag = "Ast.ExpIs",
+                    exp = { _tag = "Ast.ExpInteger", value = 2 },
+                    target = { _tag = "Ast.TypeInteger" } } })
+        assert_expression_ast([[ (foo ^ 2) is integer ]],
+            { _tag = "Ast.ExpIs",
+                exp = { _tag = "Ast.ExpBinop", op = "^" },
+                target = { _tag = "Ast.TypeInteger" } })
+        assert_expression_ast([[ foo ^ 2 as integer ]],
+            { _tag = "Ast.ExpBinop", op = "^",
+                rhs = { _tag = "Ast.ExpCast",
+                    exp = { _tag = "Ast.ExpInteger", value = 2 },
+                    target = { _tag = "Ast.TypeInteger" } } })
+        assert_expression_ast([[ (foo as value) is integer ]],
+            { _tag = "Ast.ExpIs",
+                exp = { _tag = "Ast.ExpCast",
+                    target = { _tag = "Ast.TypeValue" } },
+                target = { _tag = "Ast.TypeInteger" } })
+        assert_expression_syntax_error([[ foo is ]], "IsMissingType")
+        assert_expression_syntax_error(
+            [[ foo is integer ^ 2 ]], "EndFunc")
     end)
 
     it("does not allow parentheses in the LHS of an assignment", function()

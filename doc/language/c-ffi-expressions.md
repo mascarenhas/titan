@@ -137,7 +137,9 @@ is reported as a probe failure, not as an incompatible conversion.
 Guardrails apply before the compiler probe:
 
 * both sides must be C object pointers after array decay;
-* object pointers never convert to function pointers, or conversely;
+* object pointers never convert directly to function pointers, or conversely
+  (the separate written function-pointer-to-`void *` erasure is not an unsafe
+  object-pointer reinterpretation);
 * reachable `const` or `volatile` qualification may be added but not discarded;
 * qualifiers carried by typedefs and array element types remain effective;
 * the conversion is directional and does not change the global
@@ -146,6 +148,50 @@ Guardrails apply before the compiler probe:
 Fixed C arrays decay to their element pointer before this rule is considered.
 An automatic or imported array is therefore passed as the array expression,
 not as `&array`.
+
+Source-written owned C storage participates in the same destination-directed
+pointer adjustment:
+
+```lua
+local c = foreign import "geometry.h"
+
+local function use_owned()
+    local point: owned *c.Point = c.Point.new()
+    local points: owned c.Point[] = c.Point.new_array(8)
+    local mutable: *c.Point = point
+    local immutable: const *c.Point = points
+    c.read_point(point)
+    c.read_point(points)
+end
+```
+
+A scalar owner supplies a pointer to its one payload object; a counted owner
+supplies a pointer to its first element. The owner remains the GC root while
+the adjusted pointer is live for the C call. Qualification follows the same
+inclusion rule as array decay and ordinary pointer conversion: mutable storage
+may become `T *`, `const T *`, or a permitted `void *`, but qualification on
+the owned payload may not be discarded. An optional owner must be unwrapped
+before adjustment. Making the destination pointer optional does not combine
+the two operations: `owned *T?` does not implicitly become `*T?`.
+
+One separate written conversion erases stable native identities to C
+`void *`. Every non-function C pointer keeps the ordinary C object-pointer
+conversion, while a C function pointer uses Titan's toolchain portability
+cast. A Titan Array or Map exposes its backing `Table *`, a record exposes its
+full-userdata `Udata *`, and a function exposes the collectable GC object
+carried by its boxed `TValue`. A noncollectable function-typed value makes
+`is C-void-pointer` false and makes `as C-void-pointer` raise. Strings remain
+byte pointers and owned C objects remain payload pointers; neither switches to
+its enclosing GC object's identity. An arbitrary `value` likewise does not
+gain an identity interpretation.
+
+All of these pointers are borrowed. The compiler evaluates a GC source once
+and roots it while the cast and later arguments of the same call are prepared,
+but retaining or returning the pointer does not retain the source object.
+Code that lets C keep such a pointer must keep the original Titan value
+reachable. `Table *`, `Udata *`, and function GC-object addresses are internal
+runtime representations, so ordinary FFI code must not dereference, mutate,
+free, or reallocate them.
 
 An existing address coercion still handles a by-value C object passed to a
 pointer parameter. A mutable local or parameter may supply a mutable out
@@ -229,9 +275,13 @@ no escape analysis: returning, storing, or capturing a pointer to automatic
 storage can leave a dangling pointer after the block or function returns. The
 programmer owns that lifetime contract.
 
-The older `T.new()` and `T.new_array(count)` forms still allocate GC-owned C
-storage. They are different from automatic objects and keep their existing
-allocation and ownership rules.
+The `T.new()` and `T.new_array(count)` forms allocate GC-owned C storage. Their
+result types can be written as `owned *T` and `owned T[]`, respectively. These
+owners differ from automatic objects: they may be stored in local aliases,
+record fields, options, local callables, Arrays, and Maps, and their storage
+lives as long as the owner remains reachable. They still cannot appear in a
+public module interface, because their C payload type belongs to the importing
+module.
 
 ## A callback-options example
 

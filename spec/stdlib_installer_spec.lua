@@ -363,6 +363,18 @@ describe("recoverable paired standard-library publication", function()
     local root
     local old_failpoint
 
+    it("owns the exact current nine-module public layout", function()
+        assert.same({
+            "coroutine", "uv", "async", "timer", "fs", "net", "os",
+            "peg", "string",
+        }, installer.MODULES)
+        assert.same({
+            "titan.coroutine", "titan.uv", "titan.async", "titan.timer",
+            "titan.fs", "titan.net", "titan.os", "titan.peg",
+            "titan.string",
+        }, installer.MODULE_NAMES)
+    end)
+
     before_each(function()
         workspace = os.tmpname()
         assert.truthy(os.remove(workspace))

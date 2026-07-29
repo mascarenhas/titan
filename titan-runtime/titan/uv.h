@@ -44,27 +44,25 @@ struct uv_write_s;
  * fields are numbered from one at the Lua API/source level and live at the
  * corresponding zero-based Udata.uv index in the native trampoline.
  *
- * All callback owners use the same six fields. The final slot is
+ * All callback owners use the same five fields. The final slot is
  * family-specific native I/O storage; families that need no such root use nil.
  */
 enum titan_uvshim_owner_lua_slot {
   TITAN_UV_OWNER_NATIVE_LUA_SLOT = 1,
-  TITAN_UV_OWNER_STORAGE_LUA_SLOT = 2,
-  TITAN_UV_OWNER_MAIN_THREAD_LUA_SLOT = 3,
-  TITAN_UV_OWNER_DISPATCHER_LUA_SLOT = 4,
-  TITAN_UV_OWNER_METADATA_LUA_SLOT = 5,
-  TITAN_UV_OWNER_BUFFER_LUA_SLOT = 6,
-  TITAN_UV_OWNER_LUA_SLOT_COUNT = 6
+  TITAN_UV_OWNER_MAIN_THREAD_LUA_SLOT = 2,
+  TITAN_UV_OWNER_DISPATCHER_LUA_SLOT = 3,
+  TITAN_UV_OWNER_METADATA_LUA_SLOT = 4,
+  TITAN_UV_OWNER_BUFFER_LUA_SLOT = 5,
+  TITAN_UV_OWNER_LUA_SLOT_COUNT = 5
 };
 
 enum titan_uvshim_owner_c_index {
   TITAN_UV_OWNER_NATIVE_C_INDEX = 0,
-  TITAN_UV_OWNER_STORAGE_C_INDEX = 1,
-  TITAN_UV_OWNER_MAIN_THREAD_C_INDEX = 2,
-  TITAN_UV_OWNER_DISPATCHER_C_INDEX = 3,
-  TITAN_UV_OWNER_METADATA_C_INDEX = 4,
-  TITAN_UV_OWNER_BUFFER_C_INDEX = 5,
-  TITAN_UV_OWNER_C_INDEX_COUNT = 6
+  TITAN_UV_OWNER_MAIN_THREAD_C_INDEX = 1,
+  TITAN_UV_OWNER_DISPATCHER_C_INDEX = 2,
+  TITAN_UV_OWNER_METADATA_C_INDEX = 3,
+  TITAN_UV_OWNER_BUFFER_C_INDEX = 4,
+  TITAN_UV_OWNER_C_INDEX_COUNT = 5
 };
 
 enum titan_uvshim_event_kind {
@@ -84,7 +82,7 @@ enum titan_uvshim_event_kind {
 
 /*
  * Plain-C callback trampolines passed directly from Titan to public libuv
- * APIs. They are private to titan.uv's fixed six-slot owner protocol, not a
+ * APIs. They are private to titan.uv's fixed five-slot owner protocol, not a
  * general callback API for user programs.
  */
 void titan_uvshim_signal_cb(struct uv_signal_s *signal, int signum);

@@ -425,10 +425,10 @@ describe("C FFI type checking", function()
                 local c = foreign import "]] .. header .. [["
 
                 function f(i: integer): integer
-                    local owned = c.ffi_int.new_array(3)
+                    local owner = c.ffi_int.new_array(3)
                     return (c.ffi_values[i] as integer)
                         + (c.ffi_ptr[0] as integer)
-                        + (owned[1] as integer)
+                        + (owner[1] as integer)
                 end
             ]])
             assert.truthy(ok, err)
@@ -444,8 +444,8 @@ describe("C FFI type checking", function()
                 local c = foreign import "]] .. header .. [["
 
                 function f(): integer
-                    local owned = c.ffi_int.new_array(3)
-                    return #c.ffi_values + #owned
+                    local owner = c.ffi_int.new_array(3)
+                    return #c.ffi_values + #owner
                 end
             ]])
             assert.truthy(ok, err)
@@ -497,8 +497,8 @@ describe("C FFI type checking", function()
                 local c = foreign import "]] .. header .. [["
 
                 function f(): integer
-                    local owned = c.ffi_int.new()
-                    return #owned
+                    local owner = c.ffi_int.new()
+                    return #owner
                 end
             ]])
             assert.falsy(ok)
@@ -608,7 +608,7 @@ describe("C FFI type checking", function()
 
                 local function update(): integer
                     local aggregate: c.ffi_outer = c.ffi_make_outer()
-                    local owned = c.ffi_outer.new()
+                    local owner = c.ffi_outer.new()
 
                     c.ffi_global.inner.x = 1
                     c.ffi_global.values[0] = 2
@@ -617,8 +617,8 @@ describe("C FFI type checking", function()
                     c.ffi_pointer.inner.x = 5
                     c.ffi_pointer.values[0] = 6
                     c.ffi_make_pointer().inner.x = 7
-                    owned.inner.x = 8
-                    owned.values[0] = 9
+                    owner.inner.x = 8
+                    owner.values[0] = 9
                     aggregate.inner.x = 10
                     aggregate.values[0] = 11
                     c.ffi_outer.new().inner.x = 12
@@ -1226,7 +1226,7 @@ describe("C FFI type checking", function()
                 ]]
 
                 local ok, err = run_checker(prefix .. [[
-                    local owned = forward.ffi_split.new()
+                    local owner = forward.ffi_split.new()
                 ]] .. definition)
                 assert.falsy(ok)
                 assert.match("cannot allocate incomplete C struct", err)
@@ -1240,14 +1240,14 @@ describe("C FFI type checking", function()
                 assert.match("field 'x' not found in C type", err)
 
                 ok, err = run_checker(prefix .. definition .. [[
-                    local owned = forward.ffi_split.new()
+                    local owner = forward.ffi_split.new()
                 ]])
                 assert.truthy(ok, err)
 
                 ok, err = run_checker(prefix .. [[
                     function read(): integer
-                        local owned = forward.ffi_split.new()
-                        return owned.x as integer
+                        local owner = forward.ffi_split.new()
+                        return owner.x as integer
                     end
                 ]] .. definition)
                 assert.truthy(ok, err)
@@ -1410,7 +1410,7 @@ describe("C FFI type checking", function()
         end)
     end)
 
-    it("does not treat C function pointers as C object pointers", function()
+    it("keeps C function pointers boxed out of value but permits explicit void casts", function()
         with_header([[
             typedef int (*ffi_callback)(int);
             typedef void *ffi_vptr;
@@ -1432,8 +1432,17 @@ describe("C FFI type checking", function()
                     return cb as c.ffi_vptr
                 end
             ]])
+            assert.truthy(ok, err)
+
+            ok, err = run_checker([[
+                local c = foreign import "]] .. header .. [["
+
+                local function f(cb: c.ffi_callback): c.ffi_vptr
+                    return cb
+                end
+            ]])
             assert.falsy(ok)
-            assert.match("cannot cast 'ffi_callback' to 'ffi_vptr'", err)
+            assert.match("types in return do not match", err)
         end)
     end)
 

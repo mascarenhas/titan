@@ -146,10 +146,12 @@ do
 -- ownership boundary. These unique checks fail before generating a stale
 -- test-only copy if request publication or cancellation moves contributors.
 require_once("file.titan",
-    "libuv.uv_req_set_data(owner.handle, pointer)",
+    "libuv.uv_req_set_data(\n" ..
+    "      request_handle as *libuv.uv_req_t, pointer)",
     "FS owner data installation")
 require_once("task.titan",
-    "libuv.uv_cancel(fs_owner.handle)",
+    "fs_owner.handle as owned *libuv.uv_fs_t\n" ..
+    "      libuv.uv_cancel(handle as *libuv.uv_req_t)",
     "submitted FS cancellation")
 
 for _, filename in ipairs(filenames) do

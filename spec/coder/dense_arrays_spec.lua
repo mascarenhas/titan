@@ -885,7 +885,7 @@ describe("dense Array code generation and boundaries", function()
                 return s .. "!"
             end
 
-            function owned(): (
+            function retained(): (
                 {string},
                 {{string: integer}},
                 {Owned},
@@ -907,7 +907,7 @@ describe("dense Array code generation and boundaries", function()
             for _, mode in ipairs({ "incremental", "generational" }) do
                 collectgarbage(mode)
                 local strings, maps, records, arrays, closures, values =
-                    test.owned()
+                    test.retained()
 
                 -- Observe the collectable elements weakly. Their outer Array
                 -- remains the only strong root once the call frame is gone.
