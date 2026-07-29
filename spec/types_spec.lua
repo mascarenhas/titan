@@ -542,6 +542,8 @@ describe("Titan types", function()
 
         local rebuilt = assert(load(
             "return " .. types.serialize(union), "t", "t", types))()
+        local rebuilt_again = assert(load(
+            "return " .. types.serialize(union), "t", "t", types))()
 
         assert.equal(3, rebuilt.nvariants)
         assert.equal(2, #rebuilt.variants)
@@ -556,6 +558,12 @@ describe("Titan types", function()
         assert.is_false(rebuilt.functions.write.paramnames)
         assert.truthy(types.equals(types.String(),
             rebuilt.variants.write.payload))
+        assert.truthy(types.equals(rebuilt, rebuilt_again))
+        rebuilt_again.nvariants = 4
+        assert.falsy(types.equals(rebuilt, rebuilt_again))
+        assert.equal(fqtn, types.tostring(rebuilt))
+        assert.equal(
+            fqtn .. ".write", types.tostring(rebuilt.variants.write))
     end)
 
     it("distinguishes an empty union variant from a nil payload", function()
@@ -587,6 +595,90 @@ describe("Titan types", function()
         assert.falsy(types.explicitly_coerceable(first, value))
         assert.falsy(types.explicitly_coerceable(value, first))
         assert.falsy(types.has_tvalue_representation(first))
+    end)
+
+    it("rejects malformed source-union projections", function()
+        local invalid, invalid_error =
+            types.validate_union_source_projection(types.Integer())
+        assert.falsy(invalid)
+        assert.match("descriptor is not a union", invalid_error)
+
+        local function source_union(payload)
+            local fqtn = "sample.Source"
+            local variant = types.Variant(
+                fqtn, "only", payload, 0)
+            local constructor = types.StaticMethod(
+                fqtn, "only",
+                payload == false and {} or {payload},
+                {types.Nominal(fqtn)}, false, false, false)
+            return types.Union(
+                fqtn, {variant}, {only = constructor}, {}, 1),
+                variant, constructor
+        end
+
+        local cases = {
+            {
+                pattern = "variant 'only' has no matching constructor",
+                mutate = function(union)
+                    union.functions.only = nil
+                end,
+            },
+            {
+                pattern = "empty variant 'only' has a payload constructor",
+                mutate = function(_, _, constructor)
+                    constructor.params = {types.Integer()}
+                end,
+            },
+            {
+                payload = types.String(),
+                pattern = "payload variant 'only' has a mismatched "
+                    .. "constructor",
+                mutate = function(_, _, constructor)
+                    constructor.params = {types.Integer()}
+                end,
+            },
+            {
+                pattern = "variant 'only' was not projected with its "
+                    .. "constructor",
+                mutate = function(union, _, constructor)
+                    union.islocal = true
+                    constructor.islocal = true
+                end,
+            },
+            {
+                pattern = "local union publishes function 'inspect'",
+                mutate = function(union, variant, constructor)
+                    union.islocal = true
+                    variant.islocal = true
+                    constructor.islocal = true
+                    union.functions.inspect = types.StaticMethod(
+                        union.name, "inspect", {}, {},
+                        false, false, false)
+                end,
+            },
+            {
+                pattern = "local union publishes method 'inspect'",
+                mutate = function(union, variant, constructor)
+                    union.islocal = true
+                    variant.islocal = true
+                    constructor.islocal = true
+                    union.methods.inspect = types.Method(
+                        union.name, "inspect", {}, {},
+                        false, false, false)
+                end,
+            },
+        }
+
+        for _, case in ipairs(cases) do
+            local union, variant, constructor =
+                source_union(case.payload or false)
+            case.mutate(union, variant, constructor)
+            invalid, invalid_error =
+                types.validate_union_source_projection(union)
+            assert.falsy(invalid,
+                case.pattern .. ": " .. tostring(invalid_error))
+            assert.match(case.pattern, invalid_error)
+        end
     end)
 
     it("round-trips record method and static flexible return tails", function()

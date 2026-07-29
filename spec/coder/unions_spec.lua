@@ -1,4 +1,5 @@
 local h = require "spec.support.helpers"
+local coder = require "titan-compiler.coder"
 
 local generated_modules = {
     "test",
@@ -22,6 +23,31 @@ end
 
 describe("unions (end-to-end)", function()
     after_each(clean_generated_modules)
+
+    it("describes public constructor symbols from source and interfaces",
+    function()
+        local ok, err, ast, modtype = h.run_checker([[
+            union Message
+                some: integer
+            end
+        ]])
+        assert.truthy(ok, err)
+
+        local expected = {
+            symbol = "test_Message_some_titanstatic",
+            owner = "union function 'test.Message.some'",
+        }
+        local source_symbols = coder.external_symbols("test", ast)
+        local interface_symbols =
+            coder.interface_external_symbols("test", modtype)
+        local function find_symbol(symbols)
+            for _, entry in ipairs(symbols) do
+                if entry.symbol == expected.symbol then return entry end
+            end
+        end
+        assert.same(expected, find_symbol(source_symbols))
+        assert.same(expected, find_symbol(interface_symbols))
+    end)
 
     it("constructs empty and payload variants and dispatches without fallthrough",
     function()
@@ -1120,10 +1146,26 @@ describe("unions (end-to-end)", function()
                     end
                 end
             end
+
+            function protected_case_scrutinee(input: integer): integer
+                local observed = 0
+                do
+                    case Choice.left(input)
+                    when left: n then
+                        observed = n
+                    else
+                        observed = -1
+                    end
+                    raise "observe case spill"
+                catch
+                    return observed
+                end
+            end
         ]], [[
             collectgarbage("generational")
             local left = test.arm_closure(test.Choice.left(1))
             local right = test.arm_closure(test.Choice.right(2))
+            assert(test.protected_case_scrutinee(42) == 42)
             collectgarbage("collect")
             collectgarbage("collect")
             assert(left() == 12)

@@ -191,6 +191,124 @@ describe("union module interfaces", function()
         ok, err = driver.validate_module_interface(module, "sample")
         assert.falsy(ok)
         assert.match("nominal function and method maps collide", err)
+
+        module, union = canonical_module()
+        union.functions.quit = nil
+        union.methods.quit = types.Method(
+            union.name, "quit", {}, {}, false, false, false)
+        ok, err = driver.validate_module_interface(module, "sample")
+        assert.falsy(ok)
+        assert.match("union variant and method maps collide", err)
+    end)
+
+    it("rejects malformed nominal and variant maps", function()
+        local cases = {
+            {
+                pattern = "nominal member maps have an invalid schema",
+                mutate = function(union)
+                    union.functions = false
+                end,
+            },
+            {
+                pattern = "nominal function map has an invalid entry",
+                mutate = function(union)
+                    union.functions.alias = union.functions.quit
+                end,
+            },
+            {
+                pattern = "nominal method map has an invalid entry",
+                mutate = function(union)
+                    union.methods.alias = types.Method(
+                        union.name, "different", {}, {},
+                        false, false, false)
+                end,
+            },
+            {
+                pattern = "union variant map has an invalid entry",
+                mutate = function(union)
+                    union.variants.alias = union.variants.quit
+                end,
+            },
+            {
+                pattern = "union variant table has an invalid key",
+                mutate = function(union)
+                    union.variants[true] = union.variants.quit
+                end,
+            },
+            {
+                pattern = "type graph contains an invalid descriptor",
+                mutate = function(union)
+                    union.variants.write.payload = {}
+                end,
+            },
+        }
+
+        for _, case in ipairs(cases) do
+            local module, union = canonical_module()
+            case.mutate(union)
+            local ok, err =
+                driver.validate_module_interface(module, "sample")
+            assert.falsy(ok, case.pattern .. ": " .. tostring(err))
+            assert.match(case.pattern, err)
+        end
+    end)
+
+    it("validates nested value graphs and module metadata", function()
+        local map = types.Map(
+            types.String(), types.Option(types.Integer()))
+        local module = types.Module("sample", {
+            types.ModuleMember("sample", "lookup", map, false),
+        })
+        local ok, err =
+            driver.validate_module_interface(module, "sample")
+        assert.truthy(ok, err)
+
+        map.keys = {}
+        ok, err = driver.validate_module_interface(module, "sample")
+        assert.falsy(ok)
+        assert.match("type graph contains an invalid descriptor", err)
+
+        local cases = {
+            {
+                pattern = "function type has an invalid schema",
+                member = types.ModuleMember(
+                    "sample", "bad_function",
+                    types.Function({}, {}, "not boolean", false, false),
+                    false),
+            },
+            {
+                pattern = "module function 'bad_names' has invalid "
+                    .. "parameter%-name metadata",
+                member = types.ModuleMember(
+                    "sample", "bad_names",
+                    types.Function(
+                        {types.Integer()}, {}, false, false, false),
+                    {"value", "extra"}),
+            },
+            {
+                pattern = "non%-function module member 'bad_names' has "
+                    .. "parameter%-name metadata",
+                member = types.ModuleMember(
+                    "sample", "bad_names", types.Integer(), {"value"}),
+            },
+        }
+        for _, case in ipairs(cases) do
+            module = types.Module("sample", {case.member})
+            ok, err = driver.validate_module_interface(module, "sample")
+            assert.falsy(ok, case.pattern .. ": " .. tostring(err))
+            assert.match(case.pattern, err)
+        end
+
+        module = types.Module("sample", {}, {
+            Bad = types.Field(
+                "sample.Bad", "value", types.Integer(), 0),
+        })
+        ok, err = driver.validate_module_interface(module, "sample")
+        assert.falsy(ok)
+        assert.match(
+            "module type member 'Bad' has an invalid type graph", err)
+        assert.match(
+            "Type%.Field is not valid in a value%-facing type graph", err)
     end)
 
     it("rejects private decorations on recovered public descriptors",
@@ -315,6 +433,13 @@ describe("union module interfaces", function()
         ok, err = driver.validate_module_interface(module, "sample")
         assert.falsy(ok)
         assert.match("all%-public record is missing its constructor", err)
+
+        module, record = canonical_record_module()
+        record.functions.new.rettypes[1] =
+            types.Nominal("sample.Other")
+        ok, err = driver.validate_module_interface(module, "sample")
+        assert.falsy(ok)
+        assert.match("record constructor does not match its owner", err)
 
         module, record = canonical_record_module()
         record.functions.new.paramnames = {"second", "first"}

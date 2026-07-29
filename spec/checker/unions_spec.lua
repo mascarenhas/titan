@@ -1,4 +1,5 @@
 local h = require "spec.support.helpers"
+local checker = require "titan-compiler.checker"
 local types = require "titan-compiler.types"
 
 local run_checker = h.run_checker
@@ -187,7 +188,8 @@ describe("unions (typechecker)", function()
                 function inspect(message: Message)
                     case message
                     when quit: payload then
-                    when missing then
+                    when missing: missing_payload then
+                        local recovered = missing_payload
                     when write then
                     when write then
                     end
@@ -195,6 +197,8 @@ describe("unions (typechecker)", function()
             ]])
         assert.match("variant 'missing' not found in union 'test%.Message'", err)
         assert.match("duplicate case arm for variant 'write'", err)
+        assert.is_nil(err:match(
+            "variable 'missing_payload' not declared"))
 
         assert_error(
             "union member 'Message%.write' is not a type; use union type "
@@ -219,6 +223,21 @@ describe("unions (typechecker)", function()
                     return x is Message.write
                 end
             ]])
+
+        assert_error(
+            "union member 'Message%.inspect' is not a type; use union type "
+                .. "'Message' or a case statement", [[
+                union Message
+                    quit
+                end
+
+                function Message:inspect()
+                end
+
+                function bad(x: value): boolean
+                    return x is Message.inspect
+                end
+            ]])
     end)
 
     it("rejects non-unions, union field access, and record initialization",
@@ -232,6 +251,28 @@ describe("unions (typechecker)", function()
         ]])
 
         assert_error(
+            "case expression must have a union type, but found 'test%.Box'", [[
+                record Box
+                    item: integer
+                end
+
+                function inspect(box: Box)
+                    case box
+                    when item then
+                    end
+                end
+            ]])
+
+        assert_error(
+            "union type 'test%.Missing' in case expression does not exist", [[
+                function inspect(item: Missing)
+                    case item
+                    when missing then
+                    end
+                end
+            ]])
+
+        assert_error(
             "union value of type 'test%.Message' has no fields; "
                 .. "use a case statement", [[
             union Message
@@ -243,7 +284,7 @@ describe("unions (typechecker)", function()
             end
         ]])
 
-        assert_error(
+        local err = assert_error(
             "union type 'test%.Message' cannot be constructed with a record "
                 .. "initializer", [[
                 union Message
@@ -251,8 +292,19 @@ describe("unions (typechecker)", function()
                 end
 
                 function make(): Message
-                    return {}
+                    return { unexpected = missing }
                 end
+            ]])
+        assert.match("variable 'missing' not declared", err)
+
+        assert_error(
+            "trying to access union type 'test%.Message' as a first%-class "
+                .. "value", [[
+                union Message
+                    quit
+                end
+
+                local invalid = Message
             ]])
     end)
 
@@ -279,6 +331,18 @@ describe("unions (typechecker)", function()
             end
 
             local bad = Message.fake()
+        ]])
+
+        assert_error("top level variable initialization must be constant", [[
+            record Box
+                item: integer
+            end
+
+            function Box.fake(n: integer): Box
+                return Box.new(n)
+            end
+
+            local bad = Box.fake(1)
         ]])
 
         assert_check([[
@@ -331,6 +395,45 @@ describe("unions (typechecker)", function()
         assert.match(
             "cannot declare method 'Message:write' as union function "
                 .. "'Message%.write' exists in union 'Message'", err)
+
+        assert_error(
+            "cannot declare union function 'Message%.inspect' as method "
+                .. "'Message:inspect' exists in union 'Message'", [[
+                union Message
+                    quit
+                end
+
+                function Message:inspect()
+                end
+
+                function Message.inspect(): Message
+                    return Message.quit()
+                end
+            ]])
+
+        assert_error(
+            "cannot declare record function 'Box%.item' as field 'item' "
+                .. "exists in record 'Box'", [[
+                record Box
+                    item: integer
+                end
+
+                function Box.item(): integer
+                    return 0
+                end
+            ]])
+    end)
+
+    it("rejects duplicate variants without publishing both constructors",
+    function()
+        local err = assert_error(
+            "redeclaration of variant 'write' in union 'Message'", [[
+                union Message
+                    write
+                    write: string
+                end
+            ]])
+        assert.match("redeclaration of union function 'Message%.write'", err)
     end)
 
     it("rehydrates public variants and hides local variants", function()
@@ -433,6 +536,57 @@ describe("unions (typechecker)", function()
             ]],
         }, "consumer")
         assert.truthy(ok, err)
+    end)
+
+    it("requests nominal owners nested in imported map payloads", function()
+        h.reset(true)
+
+        local box_module_name = "union_map_box"
+        local box_name = box_module_name .. ".Box"
+        local box_nominal = types.Nominal(box_name)
+        local field = types.Field(
+            box_name, "item", types.Integer(), 0)
+        local box_constructor = types.StaticMethod(
+            box_name, "new", {types.Integer()}, {box_nominal},
+            false, false, {"item"})
+        local box = types.Record(
+            box_name, {field}, {new = box_constructor}, {}, 1)
+        local box_module = types.Module(box_module_name, {
+            types.ModuleMember(box_module_name, "Box", box, false),
+        })
+
+        local provider_name = "union_map_provider"
+        local union_name = provider_name .. ".Payload"
+        local payload = types.Map(types.String(), box_nominal)
+        local variant = types.Variant(
+            union_name, "values", payload, 0)
+        local constructor = types.StaticMethod(
+            union_name, "values", {payload}, {types.Nominal(union_name)},
+            false, false, false)
+        local union = types.Union(
+            union_name, {variant}, {values = constructor}, {}, 1)
+        local provider = types.Module(provider_name, {
+            types.ModuleMember(provider_name, "Payload", union, false),
+        })
+
+        local requested_box_owner = false
+        local function loader(modname, request)
+            if modname == provider_name then
+                return true, provider, {}
+            elseif modname == box_module_name then
+                if request and request.kind == "nominal-owner"
+                   and request.exposer == provider_name then
+                    requested_box_owner = true
+                end
+                return true, box_module, {}
+            end
+            return false, "unexpected module '" .. modname .. "'"
+        end
+
+        local imported, errors = checker.checkimport(provider_name, loader)
+        assert.equal(provider, imported)
+        assert.same({}, errors)
+        assert.truthy(requested_box_owner)
     end)
 
     it("makes a local union's complete namespace private", function()
